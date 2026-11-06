@@ -1,5 +1,5 @@
 import { BRAND_ROWS, COORDINATOR_SOURCE, isActiveBrandRow, NAFDAC_SOURCE } from './brand-names';
-import { BRAND_NAMES, editDistance, LOOKALIKE_DISTANCE, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS,
+import { BRAND_NAMES, drugLookalike, editDistance, LOOKALIKE_DISTANCE, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS,
   MIN_SIMILARITY, NEML_GENERICS, normaliseDrugName, SYNONYMS, UNLISTED_LOOKALIKES } from './drug-list';
 
 describe('drug list (hard pages only)', () => {
@@ -49,6 +49,18 @@ describe('drug list (hard pages only)', () => {
     expect(matchDrugName('Flagyi')).toBeNull();
     expect([MIN_FUZZY_LETTERS, MAX_EDIT_DISTANCE, MIN_SIMILARITY, LOOKALIKE_DISTANCE]).toEqual([6, 1, 0.85, 2]);
     expect(editDistance('kitten', 'sitting')).toBe(3);
+  });
+
+  it('gives the listed medicine a look-alike would have been respelled into, for showing both (never picking one)', () => {
+    // "Arteether" is one letter from the listed artemether: shown "Arteether? (or Artemether?)" on a hard page.
+    expect(drugLookalike('Arteether')).toMatchObject({ generic: 'artemether', display: 'Artemether?' });
+    // A listed name, a name too far from any listed one, and a name with no letter shapes: nothing to offer.
+    for (const name of ['Artemether', 'Pefloxacin', 'Fictionalmab', '[?]', '[sign?]']) {
+      expect([name, drugLookalike(name)]).toEqual([name, null]);
+    }
+    // No unlisted look-alike near: the strict match itself decides, and drugLookalike offers nothing.
+    expect(matchDrugName('Metronidazol')?.generic).toBe('metronidazole');
+    expect(drugLookalike('Metronidazol')).toBeNull();
   });
 
   it('never respells a real medicine that is not on the list into a listed one', () => {

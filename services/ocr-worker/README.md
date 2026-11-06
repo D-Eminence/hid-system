@@ -183,11 +183,12 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-7` (version 3 for this routing, 4 since picture
+   is `hid-paper-reading-prompt-8` (version 3 for this routing, 4 since picture
    items on hard lines whose scanned text is nonsense are kept, 5 since hard
    pages get two best-guess readings, 6 since hard pages use the brand,
    diagnosis and lab test lists and read handwritten signs, 7 since those
-   reads may zoom, below; the text prompt and request bodies are unchanged
+   reads may zoom, 8 since hard pages are read in the clean style of
+   2026-11-06, below; the text prompt and request bodies are unchanged
    from version 2, and the label is only recorded), so `ocr-api` never reuses
    a reading made under older rules.
 
@@ -328,6 +329,102 @@ Each claimed job runs, in order:
    (3) zoom deferred, a documented seam only, since replaced by zoom in our
    reader (below).
 
+   **Clean reading** (owner decision of 2026-11-06, about 10:13 UTC, relayed
+   by the coordinator: "i want the output clean ... doctor no get time"; the
+   owner had compared our output with Opus in claude.ai chat reading the same
+   fictional handwritten page, which gave rows like "IV Flagyl? 500mg?
+   8hrly?", "Transfer to the ward", "Switch to IV Ceftriaxone 1g"). Hard pages
+   only; every other path, the text-only request (body-hash test) and the
+   ordinary image re-read are unchanged. `PROMPT_VERSION` 8; hard-page prompt
+   `hid-paper-reading-hard-page-prompt-6` with zoom and `-5` without (the same
+   text without rule J, pinned by hash). What changed against #196 and #197:
+   - *Read like chat.* A best guess for every word and number, "?" straight
+     after each uncertain one ("IV Ceftriaxone? 1g? 8hrly?"); a word read with
+     certainty has none. The two max-effort reads and zoom stay.
+   - *Tokens.* `[?]`: writing is there but no letter or digit shapes can be
+     made out (it replaces `[unreadable]`; the model is no longer asked for
+     `[unreadable]`, and code turns one it still writes into `[?]`).
+     `(? on paper)`: a question mark written on the paper itself (a clinical
+     query, "?TB"); it was `[?]` under #196, so `[?]` is now kept for the
+     owner's "no letter shapes" and the paper's own "?" gets words that cannot
+     be mistaken for a mark of the reading: it is still a status cue
+     (`status_cue_on_line`), never taken off for checking, and a list key
+     ignores it (`(? on paper) TB? (Tuberculosis)`); `[?]` is not a status cue
+     and no list matches a name holding it. `A? (or B?)`: the two reads
+     differ. `(crossed out: X?)`: writing struck through on the paper.
+     Payloads written before keep their old tokens.
+   - *Disagreement.* Where the two reads differ, read A's guess is shown with
+     "?" and read B's after it: `Cefuroxime? (or Ceftriaxone?)`,
+     `500mg? (or 250mg?)`, `tds? (or bd?)`, for names, numbers, units, routes,
+     frequencies, any text, and word by word in `asWritten`. Nothing becomes
+     `[?]` because the reads disagree. Read A is chosen field by field: the
+     read whose basis for that field is `letters` where the other's is not,
+     else the first read, so a guess from what is usual is only ever the
+     second option (`Pyrimethamine? (or Paracetamol?)`, with
+     `field_from_context`). The reason stays `readings_disagree`. The same
+     listed medicine under two spellings respelled by the list is shown once
+     with "?" (still `readings_disagree`).
+   - *Lists only correct spelling.* The drug, brand, diagnosis and lab lists
+     keep their strict matching and add the generic or title in brackets as
+     before (`Flagyl? (metronidazole)`, `HTN? (Hypertensive diseases)`). A
+     listed drug shows "?" only where it is a guess (the model marked it,
+     basis `context`, or the list respelled it): `Flagyl (metronidazole)`
+     read with certainty. **A drug name not on the list is no longer hidden**:
+     it is shown as read with "?" after every word (`Fictionalmab?`), a
+     deliberate owner decision; safety rests on every hard-page item being
+     `check_carefully`, so a person must Keep or Change it. A deny-listed
+     look-alike is never resolved silently either way: a name the strict
+     match would have respelled but for `UNLISTED_LOOKALIKES`,
+     `UNLISTED_DIAGNOSIS_LOOKALIKES` or `UNLISTED_LAB_LOOKALIKES` is shown with
+     both options, `Arteether? (or Artemether?)`, `Nephritic? syndrome? (or
+     Nephrotic? syndrome?)`. Ambiguous abbreviations (`UNGROUNDED_ABBREVIATIONS`,
+     the lab guards PT, BG, GT, CS, HCV, `od`) are still never expanded. A
+     non-code frequency and a non-numeric dose are kept as read (before:
+     `[unreadable]`); `od` is still never put in words. The strength is shown
+     as written on a prescription, `500mg?` (before: `500? mg`).
+   - *The item's text is the reading.* The check screen shows an item's
+     `plain` as its main text. On a hard page `plain` is now always built in
+     code from the final fields, never the model's own wording: a medicine as
+     route, drug, strength, how often, how long, after any instruction words
+     written before it ("Switch to IV Ceftriaxone 1g"); a diagnosis as its
+     name; a lab result as test, value, unit and flag; a note as its text; an
+     allergy or a vital as its `asWritten`. Descriptive text such as "Handwritten
+     treatment entry that cannot be read; check the paper" came from the
+     model's `plain` (system prompt rule 4 asks for a plain-English reading,
+     and #196 kept the model's `plain` for every kind but a medicine, and an
+     empty one for a disagreeing pair). The hard-page prompt now says every
+     field is the reading itself, never a description, and to leave `plain`
+     empty; and `isDescription` (hard-page.ts) catches a description the
+     model still writes: an `asWritten` that describes the writing makes the
+     item a `[?]` note, a field that does becomes `[?]`, with the reason
+     `description_replaced`. Free-text instructions ("Transfer to the ward",
+     "Review in 2 days") are asked for as `note` items.
+   - *Crossed out.* Writing struck through on the paper is never an item of
+     its own or part of a field: the model writes it as `(crossed out: X)`
+     in `asWritten` and X in a new hard-page answer field `crossedOut`; code
+     shows it on the same item, `IV Flagyl (metronidazole) 500mg 8hrly
+     (every 8 hours) (crossed out: 400mg?)`, with the reason `crossed_out`; an
+     item crossed out as a whole becomes a note (never an active medicine);
+     checks take crossed-out writing off (`forMatching`), so a struck dose is
+     never held to be the dose. Two reads that see different crossed-out
+     writing are `readings_disagree`.
+   - *Reasons stay codes.* `checkReasons` are codes, as before; `checkReason`
+     stays the one sentence derived from them, so the payload contract
+     (`hid-paper-reading-v2`, schema 2) is unchanged and neither `ocr-api` nor
+     `@hid/api-client` changes. Two codes are added (`crossed_out`,
+     `description_replaced`); the contract allows any code. The website shows
+     the reasons behind "Why?" (not this change).
+   - *Every "?" goes to a person.* Every hard-page item is `check_carefully`
+     (a test sweeps all hard-page outputs of the fixture, alone, paired,
+     swapped and merged with a first pass).
+   - *Fixture.* `src/reading/clean-reading-fixtures.ts` holds fictional rows
+     in the target style and the model answers that produce them;
+     `clean-reading.spec.ts` runs each through prepare, the checks, the
+     two-read merge, the lists and grounding. It awaits the owner's two full
+     chat transcripts (to be relayed by the coordinator), whose rows are to be
+     added there.
+   - *Logs.* Unchanged: codes and counts only, never item text.
+
    - *Which pages.* A hard page is a page the first pass flagged
      `handwriting` or `low_confidence` whose re-read goes with its picture
      (`OCR_AI_HARD_PAGE_READS`, `on` or `off`, default `on` when
@@ -341,9 +438,10 @@ Each claimed job runs, in order:
      thinking, `inference_geo: "us"`, fixed endpoint and the same cached system
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `max`, which Claude Opus 5.5
      accepts: `low` to `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-4` when
-     the reads are offered zoom, else the unchanged
-     `hid-paper-reading-hard-page-prompt-3` text; recorded in provenance as
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-6` when
+     the reads are offered zoom, else `hid-paper-reading-hard-page-prompt-5`,
+     the same text without rule J; until 2026-11-06 `-4` and `-3`; the rules
+     below are as of `-4`, with the clean-reading changes above; recorded in provenance as
      `hardPagePromptVersion` when used): read the
      page line by line; give a best reading of every field with "?" after each
      uncertain word; a word not readable even as a guess is `[unreadable]`;
@@ -366,7 +464,8 @@ Each claimed job runs, in order:
      the strength rebuilt as dose and unit (`400? mg`), and the drug name
      checked against the drug list (below): a listed name is shown in its
      list spelling with "?" (`Metronidazole?`), a brand as `Flagyl?
-     (metronidazole)`, an unlisted one as `[unreadable]`. `asWritten` keeps
+     (metronidazole)`, an unlisted one as `[unreadable]` (until 2026-11-06;
+     now as read with "?", see *Clean reading*). `asWritten` keeps
      what the model read, "?" marks included: it is the transcription the
      clinician compares with the paper, while the drug name field is what may
      be taken into the record, so only the field is held to the list. Every
@@ -385,7 +484,8 @@ Each claimed job runs, in order:
      after a word or number taken off (`forMatching` in `grounding.ts`), so
      `Sulfa?` is still found in "No sulfa allergy" and `Hb?` still labels
      its value. A question mark written on the paper itself (a clinical
-     query, "?TB" or "TB?") is transcribed `[?]` by the hard-page prompt and
+     query, "?TB" or "TB?") is transcribed `[?]` (since 2026-11-06
+     `(? on paper)`) by the hard-page prompt and
      never taken off, so it still counts as a status cue
      (`status_cue_on_line`: a queried diagnosis is never shown as confirmed
      without it), while the reading's own "?" never looks like a query. The
@@ -403,7 +503,9 @@ Each claimed job runs, in order:
      two `single_reading_only` items. That is a safe duplicate: merging them
      would turn every field only one half fills into `[unreadable]`, and a
      lone name beside a full order would swallow that order. For each pair every field is
-     compared after normalisation ("?" marks, case, spacing aside): agreeing
+     compared after normalisation ("?" marks, case, spacing aside; since
+     2026-11-06 a disagreement is shown "A? (or B?)", see *Clean reading*,
+     replacing what this item says of `[unreadable]` and `A? / B?`): agreeing
      fields keep the best guess, with "?" where either reading was unsure and
      basis `context` where either said so; a disagreeing drug name becomes
      `A? / B?` when both names are on the list and both were read from the
@@ -459,8 +561,9 @@ Each claimed job runs, in order:
      names (frusemide, lignocaine, co-amoxiclav), and the brand table below.
      Applied only on hard pages. The list never creates a drug: it only
      checks, and respells, a name the model proposed. A medicine not on the
-     list (a newer or non-essential drug, an unlisted brand) is always shown as
-     `[unreadable]` on a hard page.
+     list (a newer or non-essential drug, an unlisted brand) was shown as
+     `[unreadable]` on a hard page until 2026-11-06; it is now shown as read
+     with "?" (*Clean reading*).
    - *Strict matching* (`src/reading/list-match.ts`, shared by the drug,
      diagnosis and lab test lists). Exact first (each list normalises case,
      spacing, the reading's "?" marks and punctuation; the drug list also
@@ -554,12 +657,14 @@ Each claimed job runs, in order:
      to its test as written), a diagnosis name and a lab test name are
      grounded: a listed one that the list changes is shown as read with the
      listed name after it, `HTN? (Hypertensive diseases)`, `FBC? (full blood
-     count)`, `[?]TB? (Tuberculosis)` (a query on the paper stays); a name that
+     count)`, `(? on paper) TB? (Tuberculosis)` (a query on the paper stays); a name that
      is the listed name as written is left as read; an unlisted one is left
-     as read (unlike a drug name, it is not made `[unreadable]`). `asWritten`
+     as read. `asWritten`
      is never changed. Two readings giving different names for one diagnosis
-     ("HTN" and "Hypertension") disagree, and the name is `[unreadable]`, as
-     before. Every hard-page item is `check_carefully`.
+     ("HTN" and "Hypertension") disagree: since 2026-11-06 both are shown,
+     each grounded, the title said once where both stand for it (`HTN? (or
+     Hypertension?) (Hypertensive diseases)`; before, `[unreadable]`). Every
+     hard-page item is `check_carefully`.
    - *Handwritten signs* (`src/reading/signs.ts`; rule I of the hard-page
      prompt). Doctors write signs that stand for words. A sign from the table
      is written as its meaning followed by "(sign)", in `asWritten` and in the
@@ -571,7 +676,7 @@ Each claimed job runs, in order:
      after `field_from_context` and `single_reading_only`, so an item only one
      reading found says so first); no list
      matches a name holding either; `forMatching` keeps `[sign?]` (like
-     `[?]`), its "?" is not a status cue, and the marks never anchor an item
+     `[?]` and `(? on paper)`), its "?" is not a status cue, and the marks never anchor an item
      to a line (the word "sign" is not on the paper). No picture of a sign is
      kept anywhere; each is described in words. The table:
 
@@ -601,7 +706,7 @@ Each claimed job runs, in order:
      gated download), so neither is cited. `mane` is now one of the hard-page
      frequencies. Dose shorthand is put in words only in a hard-page
      medicine's `plain`, and only where the read is certain (no "?",
-     `[unreadable]` or `[sign?]` in the field): `tds (three times a day)`,
+     `[?]` or `[sign?]` in the field): `tds (three times a day)`,
      `5/7 (5 days)`; otherwise it is kept as written. `od` is always kept as
      written, never put in words: on eye drops it is the right eye, and the
      code is lower-cased before this step. Signs are in the

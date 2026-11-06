@@ -77,8 +77,9 @@ export function fuzzyListMatch<T>(candidates: readonly string[], entries: readon
 }
 
 /**
- * A handwritten sign the hard-page prompt could not read with confidence ("[sign?]"), an unreadable stretch, or a
- * sign the model read and wrote as its meaning ("alternate (sign)"): a list never matches a name holding one, so a
- * sign is never turned into a listed name.
+ * A handwritten sign the hard-page prompt could not read with confidence ("[sign?]"), an unreadable stretch (the old
+ * "[unreadable]", or "[?]", writing with no letter shapes), or a sign the model read and wrote as its meaning
+ * ("alternate (sign)"): a list never matches a name holding one, so a sign or a gap is never turned into a listed
+ * name.
  */
-export const NOT_FOR_LISTS = /\[unreadable\]|\[sign\?\]|\(sign\)/i;
+export const NOT_FOR_LISTS = /\[unreadable\]|\[\?\]|\[sign\?\]|\(sign\)/i;

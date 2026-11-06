@@ -349,7 +349,7 @@ describe('extraction reuse follows the paper-reading contract and prompt version
     expect(sql).toMatch(/extraction\.structured_payload ->> 'contract' = \$7/);
     expect(sql).toMatch(/extraction\.provenance #>> '\{reading,promptVersion\}' = \$8/);
     expect(sql).toMatch(/coalesce\(extraction\.provenance #>> '\{reading,status\}', ''\) = any\(\$9::text\[\]\)/);
-    expect(params.slice(5)).toEqual(['hid-textract-v2', 'hid-paper-reading-v2', 'hid-paper-reading-prompt-7', []]);
+    expect(params.slice(5)).toEqual(['hid-textract-v2', 'hid-paper-reading-v2', 'hid-paper-reading-prompt-8', []]);
   });
 
   it('never reuses an ai_off or ai_failed reading while AI reading is on', async () => {

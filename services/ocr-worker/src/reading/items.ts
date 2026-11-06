@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem, VITAL_MEASURES } from './contract';
 import {
   ambiguousDate, combinedStrengths, compact, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
-  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, withoutSignMarks,
+  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, withoutReadingMarks,
   wordsIn,
 } from './grounding';
 import { withoutPlaceholders, type Masker } from './masking';
@@ -20,8 +20,12 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['value_mismatch', 'reading_number_mismatch', 'plain_mismatch'], "A number on the paper doesn't match what was read."],
   [['number_not_in_text_read'], "A number read from the picture isn't in the text read from the page; check it against the paper."],
   // A hard page read twice from its picture: the two readings disagreed on part of this item (that part is shown
-  // as "[unreadable]", or for a drug name both listed names).
+  // as "A? (or B?)", hard-page prompt 5/6).
   [['readings_disagree'], 'Two readings of the picture disagree on part of this; check it against the paper.'],
+  // A hard-page item with writing crossed out on the paper, shown "(crossed out: X)" on the item.
+  [['crossed_out'], 'Part of this is crossed out on the paper; check it against the paper.'],
+  // The model described the writing instead of reading it; the description was replaced by "[?]".
+  [['description_replaced'], 'This writing could not be read at all, shown "[?]"; check it against the paper.'],
   // After the dose and number disagreements, before the text-match ones (an item read from the picture is
   // expected to differ from the text the service read).
   // A hard page's best guesses (owner decision 2026-11-05 about 18:40 UTC): below the real disagreements above, and
@@ -170,13 +174,14 @@ function onLine(box: Box, line: Box): boolean {
  * Whether the item read from the picture shares anything with the text read of its lines: a word of three letters
  * or more, or a number. It need not match the text (the service may have misread it), but an item with nothing in
  * common with its lines (a box copied from the prompt around a made-up item) is not kept. The hard-page sign marks
- * ("(sign)", "[sign?]") are not words of the item (withoutSignMarks).
+ * ("(sign)", "[sign?]") and the other reading marks ("(? on paper)", "[?]", the "crossed out" label) are not words
+ * of the item (withoutReadingMarks).
  */
 function anchored(asWritten: string, source: string): boolean {
   const text = withoutPlaceholders(source);
   const words = new Set(wordsIn(text).filter((word) => word.length >= 3));
   const numbers = new Set(numbersIn(text));
-  const own = withoutSignMarks(withoutPlaceholders(asWritten));
+  const own = withoutReadingMarks(withoutPlaceholders(asWritten));
   return wordsIn(own).some((word) => words.has(word)) || numbersIn(own).some((number) => numbers.has(number));
 }
 

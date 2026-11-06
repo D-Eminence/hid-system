@@ -1,10 +1,11 @@
 import type { Box, FlagReason, PaperItem } from './contract';
-import { matchDiagnosisName } from './diagnosis-list';
-import { matchDrugName, normaliseDrugName } from './drug-list';
+import { diagnosisLookalike, matchDiagnosisName, type ListMatch } from './diagnosis-list';
+import { drugLookalike, matchDrugName, normaliseDrugName, type DrugMatch } from './drug-list';
+import { withoutCrossedOut } from './grounding';
 import { checkReasonSentence, itemId, mergeIdentity, unionBox, uniqueItemIds, type PageCheck } from './items';
-import { matchLabTestName } from './lab-list';
-import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type FieldBasis, type HardItemExtras, type ModelItem,
-  type ModelPage } from './prompt';
+import { labTestLookalike, matchLabTestName } from './lab-list';
+import { ALTERNATIVE_OPEN, BASIS_FIELDS, CROSSED_OUT_OPEN, HARD_PAGE_FREQUENCIES, NO_LETTERS, type BasisField,
+  type FieldBasis, type HardItemExtras, type ModelItem, type ModelPage } from './prompt';
 import { hasSign } from './signs';
 
 /**
@@ -12,21 +13,38 @@ import { hasSign } from './signs';
  * to the image re-read is read twice, with the same best-guess request (prompt.ts hardPageMessage), and the two
  * readings are compared here. Everything here is codes, counts and the page's own readings: nothing is logged.
  *
- * 1. prepareHardAnswer, on each answer before it is held to the page: frequency only from HARD_PAGE_FREQUENCIES
- *    (else "[unreadable]"), dose a number (else "[unreadable]"), strength rebuilt from dose and unit, and the drug
- *    name checked against the drug list (drug-list.ts): a listed name is shown in its list spelling with "?" (a brand
- *    as "Brand? (generic)"); an unlisted one becomes "[unreadable]". asWritten keeps what the model read, "?" marks
- *    and all: it is the transcription the clinician compares with the paper, while the drug name field is what may
- *    be taken into the record, so only the field is held to the list. Every filled text field whose basis is
- *    "context" gets "?" in the field itself (markGuess, GUESSABLE_TEXT_FIELDS), whatever the item's kind.
+ * Clean reading (owner decision of 2026-11-06, about 10:13 UTC, relayed by the coordinator: "i want the output clean
+ * ... doctor no get time", after comparing with a chat reading of the same fictional page that gave rows like
+ * "IV Flagyl? 500mg? 8hrly?", "Transfer to the ward", "Switch to IV Ceftriaxone 1g"): a best guess for every word,
+ * "?" straight after each uncertain one, and the item's plain reading (what the check screen shows as the item) is
+ * the reading itself, never a sentence about it. The tokens (prompt.ts): "[?]" (NO_LETTERS) only for writing with no
+ * letter shapes at all; "(? on paper)" (PAPER_QUERY) for a question mark written on the paper; "A? (or B?)" where the
+ * two readings differ; "(crossed out: X?)" for struck-out writing on its item. Nothing becomes "[?]" because the
+ * readings disagree, and a drug name not on the list is shown as read with "?" (before, "[unreadable]"): safety
+ * rests on every hard-page item being check_carefully, so a person keeps or changes each one.
+ *
+ * 1. prepareHardAnswer, on each answer before it is held to the page: the old "[unreadable]" becomes "[?]"; an
+ *    item whose asWritten is a description of the writing ("handwritten entry that cannot be read"; isDescription)
+ *    becomes a "[?]" note, and such a field becomes "[?]" (description_replaced); an item that is crossed out as a
+ *    whole becomes a note (never an active medicine); the model's plain is dropped (built in finish). Frequency is
+ *    one of HARD_PAGE_FREQUENCIES where it is one ("?" kept), else as read; dose a number where it is one, else as
+ *    read; strength rebuilt from dose and unit ("500mg?"). The drug name is checked against the
+ *    drug list (drug-list.ts): a listed name is shown in its list spelling (a brand as "Brand (generic)"), with "?"
+ *    where the model was unsure, the name came from context or the list respelled it; a name near a real unlisted
+ *    look-alike is shown as read with the listed one as the other option, "Arteether? (or Artemether?)"; any other
+ *    name is shown as read, every word with "?". asWritten keeps what the model read, marks and all. Every filled
+ *    text field whose basis is "context" gets "?" in the field itself (markGuess, GUESSABLE_TEXT_FIELDS).
  * 2. Each answer is held to the page by checkPage (items.ts), unchanged: #194's placement rules apply to every item.
- * 3. mergeHardReadings pairs the kept items of the two readings and keeps what they agree on (see there).
+ *    Every check is made with the "?" marks and crossed-out writing taken off (grounding.ts forMatching).
+ * 3. mergeHardReadings pairs the kept items of the two readings and keeps what they agree on; where they differ,
+ *    read A's guess is shown with read B's after it, "A? (or B?)" (see pair).
  * 4. Each kept item (finish): a diagnosis name and a lab test name are grounded to their lists (diagnosis-list.ts:
  *    ICD-11 titles and our own synonyms; lab-list.ts: our own test names): a listed one is shown as read with the
- *    listed name after it ("HTN? (Hypertensive diseases)"), or as read where it is the listed name; an unlisted one
- *    is left as read. This comes after the checks and the comparison of the two readings, so both are made on the
- *    names as read (a lab value is still bound to its test as written), and only the shown field changes. An item
- *    holding a handwritten sign mark gets sign_read.
+ *    listed name after it ("HTN? (Hypertensive diseases)"), or as read where it is the listed name; one near an
+ *    unlisted look-alike as "As read? (or Listed?)"; any other is left as read. This comes after the checks and the
+ *    comparison of the two readings, so both are made on the names as read. The plain reading is built from the
+ *    final fields (hardPlain). An item holding a handwritten sign mark gets sign_read; one with crossed-out writing
+ *    crossed_out.
  * The result is then merged with the first pass by mergeReread, unchanged, so no first-pass item is lost.
  */
 
@@ -37,39 +55,146 @@ export const SINGLE_READING = 'single_reading_only';
 export const READINGS_DISAGREE = 'readings_disagree';
 /** A handwritten sign read as its meaning ("(sign)") or not read ("[sign?]") anywhere in the item (signs.ts). */
 export const SIGN_READ = 'sign_read';
+/** Writing crossed out on the paper, shown "(crossed out: X)" on the item. */
+export const CROSSED_OUT = 'crossed_out';
+/** The model described the writing instead of reading it; replaced by "[?]". */
+export const DESCRIPTION_REPLACED = 'description_replaced';
 
 const ALLOWED_FREQUENCIES = new Set<string>(HARD_PAGE_FREQUENCIES);
-/** "[?]" is a question mark written on the paper (a query), not the reading's own uncertainty. */
-const PAPER_QUERY = /\[\?\]/g;
-const guessMarks = (text: string) => text.replace(PAPER_QUERY, ' ').match(/\?/g)?.length ?? 0;
+/** Marks holding a "?" that is not the reading's uncertainty: a query on the paper, no letter shapes, a sign not read. */
+const NOT_GUESS_MARKS = /\(\? on paper\)|\[\?\]|\[sign\?\]/g;
+const guessMarks = (text: string) => text.replace(NOT_GUESS_MARKS, ' ').match(/\?/g)?.length ?? 0;
 const unsure = (text: string) => guessMarks(text) > 0;
+/** Whether a text has a letter or digit outside the reading marks (else it is only "[?]", "[sign?]" or the like). */
+const hasLetters = (text: string) => /[\p{L}\p{N}]/u.test(text.replace(NOT_GUESS_MARKS, ' ').replace(/\(sign\)/g, ' '));
 /** A reading's text without its "?" marks, normalised (case, spacing, "5 mg" = "5mg"), for comparing two readings. */
 export const bare = (text: string | null | undefined) => (text ?? '').replace(/\?/g, ' ').replace(/\s+/g, ' ').trim()
   .toLowerCase().replace(/(\d)\s+(?=\p{L})/gu, '$1');
+/** The old "[unreadable]" (hard-page prompt 2 to 4) as the clean token "[?]". */
+const cleanTokens = (text: string) => text.replace(/\[unreadable\]/gi, NO_LETTERS);
 
-/** How often, only as one of HARD_PAGE_FREQUENCIES ("?" kept), "" where none is given, else "[unreadable]". */
+/**
+ * A text split into words, a bracketed group ("(metronidazole)", "(? on paper)", "(crossed out: 400mg?)", "[?]",
+ * "[sign?]") counting as one word even with spaces inside.
+ */
+function words(text: string): string[] {
+  const out: string[] = [];
+  let index = 0;
+  while (index < text.length) {
+    if (/\s/.test(text[index]!)) { index += 1; continue; }
+    let end = index;
+    if (text[index] === '(' || text[index] === '[') {
+      let depth = 0;
+      for (; end < text.length; end += 1) {
+        if (text[end] === '(' || text[end] === '[') depth += 1;
+        else if (text[end] === ')' || text[end] === ']') { depth -= 1; if (depth === 0) { end += 1; break; } }
+      }
+    } else {
+      while (end < text.length && !/\s/.test(text[end]!)) end += 1;
+    }
+    out.push(text.slice(index, end));
+    index = end;
+  }
+  return out;
+}
+
+/**
+ * Every word of the text marked a guess: "?" after each word or number that has none yet ("Ceftriaxone 1g" is
+ * "Ceftriaxone? 1g?"), before any trailing punctuation. A bracketed group (a listed generic, a reading mark) and a
+ * word already holding a "?" are left as they are.
+ */
+export function markWords(text: string): string {
+  return words(text).map((word) => /^[([]/.test(word) || word.includes('?') || !/[\p{L}\p{N}]/u.test(word) ? word
+    : word.replace(/([.,;:]*)$/, '?$1')).join(' ');
+}
+
+/**
+ * Two readings of one field: "A? (or B?)", every word of both marked a guess; the one with letter shapes first where
+ * the other has none; one alone (marked) where the other is blank. The rendering of a disagreement (pair).
+ */
+export function alternatives(first: string | null, second: string | null): string {
+  if (isBlank(second)) return isBlank(first) ? (first ?? '') : markWords(first!);
+  if (isBlank(first)) return markWords(second!);
+  const [a, b] = !hasLetters(first!) && hasLetters(second!) ? [second!, first!] : [first!, second!];
+  return `${markWords(a)} ${ALTERNATIVE_OPEN}${markWords(b)})`;
+}
+
+/** "A (or B)" split into A and B where the text ends with an alternative (alternatives), else null. */
+export function splitAlternative(text: string): [string, string] | null {
+  if (!text.endsWith(')')) return null;
+  let depth = 0;
+  for (let index = text.length - 1; index >= 0; index -= 1) {
+    if (text[index] === ')') depth += 1;
+    else if (text[index] === '(') {
+      depth -= 1;
+      if (depth === 0) {
+        if (index === 0 || !text.startsWith(ALTERNATIVE_OPEN, index)) return null;
+        return [text.slice(0, index).trim(), text.slice(index + ALTERNATIVE_OPEN.length, -1).trim()];
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether a text describes the writing instead of reading it ("Handwritten treatment entry that cannot be read; check
+ * the paper", "illegible", "appears to say ..."): never shown as a reading (owner decision of 2026-11-06). Run after
+ * "[unreadable]" became "[?]". Deliberately narrow: words a clinician writes on a page ("unclear diagnosis", "faint
+ * line" on a test) do not match.
+ */
+const DESCRIPTION_PATTERNS: readonly RegExp[] = [
+  /\b(?:cannot|can ?not|can't|could ?not|couldn't|unable to)\s+(?:be\s+)?(?:read|made out|make out|deciphered|decipher|interpreted)\b/i,
+  /\b(?:illegible|indecipherable|undecipherable|unintelligible|unreadable)\b/i,
+  /\bcheck\s+(?:it\s+|this\s+)?(?:against\s+)?the\s+(?:paper|original|chart)\b/i,
+  /\b(?:handwritten|illegible|scribbled)\s+(?:\p{L}+\s+)?(?:entry|text|writing|scribble|item)\b/iu,
+  /\b(?:entry|writing|text)\s+(?:is|was)\s+(?:not\s+)?(?:legible|readable)\b/i,
+  /\b(?:appears|seems)\s+to\s+(?:be|say|read)\b/i,
+  /\bnot\s+(?:legible|readable)\b/i,
+];
+export function isDescription(text: string): boolean {
+  return DESCRIPTION_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * How often: one of HARD_PAGE_FREQUENCIES where it is one ("?" kept), "" where none is given, else as read, with the
+ * model's own "?" marks ("alternate (sign) days", "x5/7"); "[unreadable]" is "[?]".
+ */
 export function normaliseFrequency(text: string): string {
-  const compacted = text.toLowerCase().replace(/[\s.\-]/g, '').replace('hourly', 'hrly');
+  const written = cleanTokens(text).trim();
+  if (written === '') return '';
+  const compacted = written.toLowerCase().replace(/[\s.\-]/g, '').replace('hourly', 'hrly');
   const base = compacted.replace(/\?/g, '');
-  if (base === '') return '';
-  return ALLOWED_FREQUENCIES.has(base) ? `${base}${unsure(compacted) ? '?' : ''}` : UNREADABLE;
+  return ALLOWED_FREQUENCIES.has(base) ? `${base}${unsure(compacted) ? '?' : ''}` : written;
 }
 
-/** A dose is a number only ("400", "0.5"; "?" kept), "" where none is given, else "[unreadable]". */
+/** A dose: a number where it is one ("400", "0.5"; "?" kept), "" where none is given, else as read ("1/2", "[?]"). */
 export function normaliseDose(text: string): string {
-  const compacted = text.replace(/\s/g, '');
+  const written = cleanTokens(text).trim();
+  const compacted = written.replace(/\s/g, '');
   const base = compacted.replace(/\?/g, '');
   if (base === '') return '';
-  return /^\d+(?:\.\d+)?$/.test(base) ? `${base}${unsure(compacted) ? '?' : ''}` : UNREADABLE;
+  return /^\d+(?:\.\d+)?$/.test(base) ? `${base}${unsure(compacted) ? '?' : ''}` : written;
 }
 
-/** The strength shown: dose and unit as read ("400? mg"); "" where neither is given. */
+/** Units written straight after the number in the strength shown ("500mg", "1g"). */
+const JOINED_UNITS = /^(?:mg|mcg|µg|ug|g|kg|ml|l|iu|u|%)$/i;
+
+/**
+ * The strength shown: dose and unit as read, a number and a metric unit written together with one "?" where either
+ * is unsure ("500mg?", "1g"); "[?] mg" where a unit is read without its dose; "" where neither is given.
+ */
 export function strengthOf(dose: string, unit: string): string {
   const doseText = dose.trim();
   const unitText = unit.trim();
   if (!doseText && !unitText) return '';
-  if (!doseText) return `${UNREADABLE} ${unitText}`;
-  return unitText ? `${doseText} ${unitText}` : doseText;
+  if (!doseText) return `${NO_LETTERS} ${unitText}`;
+  if (!unitText) return doseText;
+  const doseBare = doseText.replace(/\?+$/, '');
+  const unitBare = unitText.replace(/\?+$/, '');
+  if (/^\d+(?:\.\d+)?$/.test(doseBare) && JOINED_UNITS.test(unitBare)) {
+    return `${doseBare}${unitBare}${doseBare !== doseText || unitBare !== unitText ? '?' : ''}`;
+  }
+  return `${doseText} ${unitText}`;
 }
 
 /**
@@ -77,7 +202,7 @@ export function strengthOf(dose: string, unit: string): string {
  * the guess shows where it is shown, whichever reason sentence the item gets.
  */
 export function markGuess(value: string, basis: FieldBasis | undefined): string {
-  if (basis !== 'context' || isBlank(value) || value === UNREADABLE || unsure(value)) return value;
+  if (basis !== 'context' || isBlank(value) || !hasLetters(value) || unsure(value)) return value;
   return `${value.trimEnd()}?`;
 }
 
@@ -91,26 +216,80 @@ export function markGuess(value: string, basis: FieldBasis | undefined): string 
  */
 export const GUESSABLE_TEXT_FIELDS = ['name', 'form', 'route', 'frequency', 'duration', 'substance', 'reaction',
   'test', 'value', 'unit', 'referenceRange', 'flag'] as const;
+/** Every free-text field of an answer item that a description or the old "[unreadable]" may be written in. */
+const TEXT_FIELDS = [...GUESSABLE_TEXT_FIELDS, 'strength', 'noteText', 'dateAsWritten', 'prescriberAsWritten',
+  'prescriptionDate'] as const;
+
+const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+/** A listed drug as shown: "Generic" or "Brand (generic)", with "?" after the name where it is a guess. */
+function drugDisplay(match: DrugMatch, guess: boolean): string {
+  const mark = guess ? '?' : '';
+  return match.brand === null ? `${capitalise(match.generic)}${mark}` : `${capitalise(match.brand)}${mark} (${match.generic})`;
+}
+
+/** The answer item replaced by a "[?]" note: the model described the writing instead of reading it. */
+function describedNote(item: ModelItem): ModelItem {
+  const empty = Object.fromEntries(TEXT_FIELDS.map((field) => [field, ''])) as Record<(typeof TEXT_FIELDS)[number], string>;
+  return { ...item, ...empty, kind: 'note', asWritten: NO_LETTERS, noteText: NO_LETTERS, plain: '', unsure: true,
+    status: 'none', severity: 'none', measure: 'none', noKnownAllergies: false,
+    hard: { dose: '', doseUnit: '', crossedOut: '', described: true,
+      basis: Object.fromEntries(BASIS_FIELDS.map((key) => [key, key === 'other' ? 'letters' : 'empty'])) as
+        Record<BasisField, FieldBasis> } };
+}
+
+/** An item whose writing is all crossed out (rule G): a note holding the crossed-out writing, never an active item. */
+function crossedOutNote(item: ModelItem): ModelItem {
+  const empty = Object.fromEntries(TEXT_FIELDS.map((field) => [field, ''])) as Record<(typeof TEXT_FIELDS)[number], string>;
+  return { ...item, ...empty, kind: 'note', noteText: item.asWritten, status: 'none', severity: 'none', measure: 'none',
+    noKnownAllergies: false, dateAsWritten: item.dateAsWritten,
+    hard: { ...item.hard!, dose: '', doseUnit: '' } };
+}
 
 /** Step 1 (see the header). Items without hard-page extras are left as they are. */
 export function prepareHardAnswer(answer: ModelPage): ModelPage {
-  return { ...answer, items: answer.items.map((item): ModelItem => {
-    if (!item.hard) return item;
-    const { basis } = item.hard;
+  return { ...answer, items: answer.items.map((original): ModelItem => {
+    if (!original.hard) return original;
+    let item: ModelItem = { ...original, asWritten: cleanTokens(original.asWritten), plain: '',
+      hard: { ...original.hard, dose: cleanTokens(original.hard.dose), doseUnit: cleanTokens(original.hard.doseUnit),
+        crossedOut: cleanTokens(original.hard.crossedOut ?? '').trim() } };
+    if (isDescription(item.asWritten)) return describedNote(item);
+    let described = false;
+    for (const field of TEXT_FIELDS) {
+      const value = cleanTokens(item[field]);
+      if (isDescription(value)) {
+        described = true;
+        item[field] = field === 'noteText' ? '' : NO_LETTERS;
+      } else item[field] = value;
+    }
+    if (isDescription(item.hard!.dose)) { described = true; item.hard!.dose = NO_LETTERS; }
+    if (isDescription(item.hard!.doseUnit)) { described = true; item.hard!.doseUnit = NO_LETTERS; }
+    if (isDescription(item.hard!.crossedOut ?? '')) { described = true; item.hard!.crossedOut = NO_LETTERS; }
+    if (described) item.hard = { ...item.hard!, described: true };
+    // Crossed out as a whole: never an active item, whatever kind the model gave it.
+    if (item.kind !== 'note' && item.asWritten.includes(CROSSED_OUT_OPEN) && !hasLetters(withoutCrossedOut(item.asWritten))) {
+      item = crossedOutNote(item);
+    }
+    const { basis } = item.hard!;
     const proposed = item.name.trim();
     const match = item.kind === 'medicine' && proposed ? matchDrugName(proposed) : null;
     const prepared: ModelItem = { ...item, frequency: normaliseFrequency(item.frequency) };
-    // A medicine's name is the drug list's (already "?" when listed; markGuess leaves a marked name as it is).
-    if (item.kind === 'medicine') prepared.name = proposed ? match?.display ?? UNREADABLE : '';
+    if (item.kind === 'medicine') {
+      if (!proposed) prepared.name = '';
+      else if (match) prepared.name = drugDisplay(match, unsure(proposed) || !match.exact || basis.name === 'context');
+      else {
+        const other = drugLookalike(proposed);
+        prepared.name = other ? alternatives(proposed, other.display) : hasLetters(proposed) ? markWords(proposed) : proposed;
+      }
+    }
     for (const field of GUESSABLE_TEXT_FIELDS) {
       if (item.kind === 'medicine' && field === 'unit') continue;
       prepared[field] = markGuess(prepared[field], basis[basisKey(item.kind, field)]);
     }
     if (item.kind !== 'medicine') return prepared;
-    const dose = markGuess(normaliseDose(item.hard.dose), basis.dose);
-    const doseUnit = markGuess(item.hard.doseUnit.trim(), basis.unit);
+    const dose = markGuess(normaliseDose(item.hard!.dose), basis.dose);
+    const doseUnit = markGuess(item.hard!.doseUnit.trim(), basis.unit);
     return { ...prepared, strength: strengthOf(dose, doseUnit),
-      hard: { ...item.hard, dose, doseUnit, generic: match?.generic ?? null, nameExact: match?.exact ?? false,
+      hard: { ...item.hard!, dose, doseUnit, generic: match?.generic ?? null, nameExact: match?.exact ?? false,
         proposedName: normaliseDrugName(proposed) } };
   }) };
 }
@@ -154,7 +333,8 @@ function keepUnsure(a: string | null, b: string | null): string | null {
 
 /**
  * asWritten from two readings: the words both read the same (in order, "?" kept where either was unsure), with each
- * stretch where they differ written once as "[unreadable]", so two readings of a dose are never shown side by side.
+ * stretch where they differ written as the first reading's words, marked, then the second's: "IV Flagyl? 500mg?
+ * (or 250mg?) 8hrly" (a stretch only the second has is "(or B?)" on its own). Nothing is dropped for disagreeing.
  */
 export function mergeAsWritten(a: string, b: string): string {
   const left = a.split(/\s+/).filter(Boolean);
@@ -170,17 +350,25 @@ export function mergeAsWritten(a: string, b: string): string {
   const out: string[] = [];
   let i = 0;
   let j = 0;
-  let gap = false;
-  const closeGap = () => { if (gap) { out.push(UNREADABLE); gap = false; } };
+  let fromLeft: string[] = [];
+  let fromRight: string[] = [];
+  const closeGap = () => {
+    if (fromLeft.length > 0 || fromRight.length > 0) {
+      const shown = alternatives(fromLeft.join(' '), fromRight.join(' '));
+      out.push(fromLeft.length === 0 ? `${ALTERNATIVE_OPEN}${shown})` : shown);
+    }
+    fromLeft = [];
+    fromRight = [];
+  };
   while (i < left.length || j < right.length) {
     if (i < left.length && j < right.length && key(left[i]!) === key(right[j]!)) {
       closeGap();
       out.push(keepUnsure(left[i]!, right[j]!)!);
       i += 1; j += 1;
     } else if (j >= right.length || (i < left.length && table[i + 1]![j]! >= table[i]![j + 1]!)) {
-      gap = true; i += 1;
+      fromLeft.push(left[i]!); i += 1;
     } else {
-      gap = true; j += 1;
+      fromRight.push(right[j]!); j += 1;
     }
   }
   closeGap();
@@ -233,7 +421,7 @@ export const FREQUENCY_WORDS: Readonly<Partial<Record<(typeof HARD_PAGE_FREQUENC
 const DURATION_UNITS: Readonly<Record<string, string>> = { 7: 'days', 52: 'weeks', 12: 'months' };
 
 /**
- * Dose shorthand in words, only where the read is certain (the field carries no "?" and no "[unreadable]" or
+ * Dose shorthand in words, only where the read is certain (the field carries no "?" and no "[?]" or
  * "[sign?]"): a frequency code as "tds (three times a day)" ("od" kept as written: see FREQUENCY_WORDS), a duration written "5/7" as "5/7 (5 days)" ("/52"
  * weeks, "/12" months). Anything else is kept as written.
  */
@@ -252,27 +440,87 @@ export function shorthandInWords(field: 'frequency' | 'duration', value: string)
 }
 
 /**
- * The plain reading of a hard-page medicine, built only from its final fields (never the model's own guesses), with
- * a certain frequency or duration shorthand in words (shorthandInWords).
+ * The plain reading of a hard-page medicine, built only from its final fields (never the model's own wording), in the
+ * order a prescription is written: route, drug, strength, how often, how long ("IV Flagyl? (metronidazole) 500mg?
+ * 8hrly?"), with a certain frequency or duration shorthand in words (shorthandInWords).
  */
 function medicinePlain(fields: Record<string, unknown>): string {
-  return ['name', 'strength', 'route', 'frequency', 'duration'].map((key) => {
+  return ['route', 'name', 'strength', 'frequency', 'duration'].map((key) => {
     const value = fields[key];
     if (typeof value !== 'string' || value.trim() === '') return null;
     return key === 'frequency' || key === 'duration' ? shorthandInWords(key, value) : value;
   }).filter((value): value is string => value !== null).join(' ');
 }
 
+const firstWordKey = (text: string) => (words(text)[0] ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+
 /**
- * A hard-page item's fields with a diagnosis name or a lab test name grounded to its list (step 4 of the header):
- * "As read? (listed name)" where listed and changed, as read otherwise. "[unreadable]" and sign marks never match.
+ * The words written before a medicine's route or drug name, as read, where they are an instruction in words ("Switch
+ * to" in "Switch to IV Ceftriaxone 1g"): one to four words, none a number. "" otherwise.
  */
+export function leadIn(asWritten: string, anchors: readonly (string | null | undefined)[]): string {
+  const keys = anchors.filter((anchor): anchor is string => !isBlank(anchor)).map(firstWordKey).filter(Boolean);
+  const written = withoutCrossedOut(asWritten).split(/\s+/).filter(Boolean);
+  const index = written.findIndex((word) => keys.includes(firstWordKey(word)));
+  if (index <= 0 || index > 4) return '';
+  const lead = written.slice(0, index);
+  return lead.some((word) => /\d/.test(word)) || !lead.some((word) => /\p{L}/u.test(word)) ? '' : lead.join(' ');
+}
+
+/** The crossed-out writing an item shows: the reading's crossedOut, else what asWritten writes as "(crossed out: X)". */
+function crossedOutOf(asWritten: string, given: string | undefined): string {
+  if (!isBlank(given)) return given!.trim();
+  return words(asWritten).filter((word) => word.startsWith(CROSSED_OUT_OPEN))
+    .map((word) => word.slice(CROSSED_OUT_OPEN.length, -1).trim()).filter(Boolean).join('; ');
+}
+
+/**
+ * The item's plain reading on a hard page: what the check screen shows as the item, the reading itself as on the
+ * paper, never a sentence about it. A medicine: the lead-in words, then route, drug, strength, how often, how long; a
+ * diagnosis: its (grounded) name; a lab result: test, value, unit and flag; a note: its text; an allergy or a vital:
+ * its asWritten. asWritten where that is empty. Crossed-out writing is added as "(crossed out: X)" where not shown.
+ */
+export function hardPlain(item: PaperItem, fields: PaperItem['fields'], crossed: string, lead: string): string {
+  const values = fields as Record<string, unknown>;
+  const join = (keys: readonly string[]) => keys.map((key) => values[key]).filter((value): value is string =>
+    typeof value === 'string' && value.trim() !== '').join(' ');
+  let text = item.kind === 'medicine' ? [lead, medicinePlain(values)].filter(Boolean).join(' ')
+    : item.kind === 'diagnosis' ? join(['name'])
+      : item.kind === 'lab_result' ? join(['test', 'value', 'unit', 'flag'])
+        : item.kind === 'note' ? join(['text']) : item.asWritten;
+  if (!text.trim()) text = item.asWritten;
+  if (!isBlank(crossed) && !text.includes(CROSSED_OUT_OPEN)) text = `${text} ${CROSSED_OUT_OPEN}${crossed})`;
+  return text.trim();
+}
+
+/**
+ * A name grounded to its list (step 4 of the header): "As read? (listed name)" where listed and changed, as read
+ * where it is the listed name, "As read? (or Listed?)" where a real unlisted look-alike is as near, as read
+ * otherwise. Each side of "A (or B)" is grounded on its own; both standing for one listed name, it is said once after
+ * them. "[?]", "[sign?]" and "(sign)" never match.
+ */
+function groundName(text: string, match: (name: string) => ListMatch | null, lookalike: (name: string) => string | null): string {
+  const split = splitAlternative(text);
+  if (split) {
+    const [x, y] = split;
+    const mx = match(x);
+    const my = match(y);
+    if (mx && my && mx.title === my.title) return `${x} ${ALTERNATIVE_OPEN}${y}) (${mx.title})`;
+    return `${groundName(x, match, lookalike)} ${ALTERNATIVE_OPEN}${groundName(y, match, lookalike)})`;
+  }
+  const found = match(text);
+  if (found) return found.display;
+  const other = lookalike(text);
+  return other ? alternatives(text, other) : text;
+}
+
+/** A hard-page item's fields with a diagnosis name or a lab test name grounded to its list (groundName). */
 function groundedFields(item: PaperItem): PaperItem['fields'] {
   if (item.kind === 'diagnosis' && item.fields.name) {
-    return { ...item.fields, name: matchDiagnosisName(item.fields.name)?.display ?? item.fields.name };
+    return { ...item.fields, name: groundName(item.fields.name, matchDiagnosisName, diagnosisLookalike) };
   }
   if (item.kind === 'lab_result' && item.fields.test) {
-    return { ...item.fields, test: matchLabTestName(item.fields.test)?.display ?? item.fields.test };
+    return { ...item.fields, test: groundName(item.fields.test, matchLabTestName, labTestLookalike) };
   }
   return item.fields;
 }
@@ -283,48 +531,78 @@ function holdsSign(item: PaperItem): boolean {
     .some((value) => typeof value === 'string' && hasSign(value));
 }
 
-function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: string): PaperItem {
+/** Whether any text of the item (plain, asWritten, a field, a date or prescriber) holds a "?" of any kind. */
+export function hasQuestionMark(item: PaperItem): boolean {
+  const texts = [item.plain, item.asWritten, item.dateAsWritten, item.prescription?.prescriberAsWritten,
+    item.prescription?.dateAsWritten, ...Object.values(item.fields as Record<string, unknown>)];
+  return texts.some((value) => typeof value === 'string' && value.includes('?'));
+}
+
+/** What finish shows besides the fields: the crossed-out writing and the lead-in words of a medicine. */
+interface Shown { crossed: string; lead: string; described: boolean }
+
+function shownOf(side: Side): Shown {
+  const fields = side.item.fields as Record<string, unknown>;
+  return { crossed: crossedOutOf(side.item.asWritten, side.extras?.crossedOut),
+    lead: side.item.kind === 'medicine' ? leadIn(side.item.asWritten, [fields.route as string | null,
+      side.extras?.proposedName, fields.name as string | null]) : '',
+    described: side.extras?.described === true };
+}
+
+function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: string, shown: Shown): PaperItem {
   const checkReasons = [...item.checkReasons];
   const signs = holdsSign(item) ? [SIGN_READ] : [];
+  const crossed = !isBlank(shown.crossed) || item.asWritten.includes(CROSSED_OUT_OPEN) ? [CROSSED_OUT] : [];
+  const described = shown.described ? [DESCRIPTION_REPLACED] : [];
   const fields = groundedFields(item);
-  for (const code of [...codes, ...signs, BEST_GUESS, 'read_from_image']) {
+  for (const code of [...codes, ...described, ...crossed, ...signs, BEST_GUESS, 'read_from_image']) {
     if (!checkReasons.includes(code)) checkReasons.push(code);
   }
-  return { ...item, fields, id: itemId(sourceSha256Hex, item.kind, item.lineIds, item.asWritten), readBy: 'reread',
+  // Every hard-page item, and so every item showing a "?", goes to a person to keep or change (owner decision of
+  // 2026-11-06): check_carefully, whatever the reasons.
+  return { ...item, fields, plain: hardPlain(item, fields, shown.crossed, shown.lead),
+    id: itemId(sourceSha256Hex, item.kind, item.lineIds, item.asWritten), readBy: 'reread',
     confidence: 'check_carefully', checkReasons, checkReason: checkReasonSentence(checkReasons) } as PaperItem;
 }
 
 /** An item only one reading found (it passed every placement rule in its own reading). */
 function single(side: Side, sourceSha256Hex: string): PaperItem {
   const item = { ...side.item, fields: { ...side.item.fields } } as PaperItem;
-  if (item.kind === 'medicine') item.plain = medicinePlain(item.fields as Record<string, unknown>);
-  return finish(item, [SINGLE_READING, ...(anyFromContext(side) ? [FROM_CONTEXT] : [])], sourceSha256Hex);
+  return finish(item, [SINGLE_READING, ...(anyFromContext(side) ? [FROM_CONTEXT] : [])], sourceSha256Hex, shownOf(side));
 }
 
 /**
  * Two readings of one item, field by field after normalisation (bare: "?" marks, case and spacing aside):
  * - agreeing: the best guess, keeping "?" where either reading was unsure, and basis "context" where either said so;
- * - a disagreeing medicine name: "A? / B?" when both names are on the drug list and both were read from the letters,
- *   else "[unreadable]" (a name filled from what is usual is never offered as an alternative: on an unusual
- *   prescription that is exactly the guess that would be wrong);
- * - any other disagreeing field (a number, unit, route, frequency, or any text): "[unreadable]", so two doses are
- *   never shown; a disagreeing medicine status becomes 'unknown', an allergy severity none (null), and a diagnosis
- *   keeps the first reading's status with readings_disagree.
- * The dose and unit of a medicine are compared apart (each counts as a field) and the strength is rebuilt from the two.
+ * - disagreeing (any text field: a drug name, a number, unit, route, frequency, any text): read A's guess, then read
+ *   B's, "A? (or B?)", every word of both marked (alternatives); nothing becomes "[?]" for disagreeing. Read A is,
+ *   field by field, the reading whose basis for that field is "letters" where the other's is not (so a guess from
+ *   what is usual is only ever the second option), else the first reading. A field only one reading filled is that
+ *   reading's, marked. The same listed medicine under two spellings respelled by the list is that medicine, marked
+ *   "?", and still readings_disagree;
+ * - a disagreeing medicine status becomes 'unknown', an allergy severity none (null), and a diagnosis keeps the
+ *   first reading's status with readings_disagree.
+ * The dose and unit of a medicine are compared apart (each counts as a field); the strength is rebuilt from the two
+ * where they agree, else shown as each reading's strength, "500mg? (or 250mg?)". asWritten is merged word by word
+ * (mergeAsWritten); crossed-out writing is kept from either reading ("A (or B)" where they differ; not tallied).
  */
 function pair(a: Side, b: Side, sourceSha256Hex: string, tally: HardPageAgreement): PaperItem {
   let disagree = false;
   let context = false;
   const compare = (equal: boolean) => { tally.fieldsCompared += 1; if (equal) tally.fieldsAgreed += 1; else disagree = true; };
-  const textField = (field: string, x: string | null, y: string | null, allowAlternatives: boolean): string | null => {
+  /** Whether read B is read A for this field: its basis is "letters" where the first reading's is not. */
+  const bLeads = (field: string) => {
+    const key = basisKey(a.item.kind, field);
+    return b.extras?.basis[key] === 'letters' && a.extras?.basis[key] !== 'letters';
+  };
+  const shownApart = (field: string, x: string | null, y: string | null) => bLeads(field) ? alternatives(y, x)
+    : alternatives(x, y);
+  const textField = (field: string, x: string | null, y: string | null): string | null => {
     if (fromContext(a, field, x) || fromContext(b, field, y)) context = true;
     if (isBlank(x) && isBlank(y)) { compare(true); return x; }
     const equal = bare(x) === bare(y);
     compare(equal);
-    if (equal) return keepUnsure(x, y);
-    if (allowAlternatives && x !== UNREADABLE && y !== UNREADABLE && !isBlank(x) && !isBlank(y)
-      && !fromContext(a, field, x) && !fromContext(b, field, y)) return `${x} / ${y}`;
-    return UNREADABLE;
+    return equal ? keepUnsure(x, y) : shownApart(field, x, y);
   };
   const fieldsA = a.item.fields as Record<string, unknown>;
   const fieldsB = b.item.fields as Record<string, unknown>;
@@ -335,21 +613,20 @@ function pair(a: Side, b: Side, sourceSha256Hex: string, tally: HardPageAgreemen
     if (a.item.kind === 'medicine' && field === 'name') {
       // The same listed medicine under two spellings (a brand and its generic) is agreement when each reading wrote
       // a listed name as such, or both proposed the same spelling. Two different spellings of which one was respelled
-      // by the fuzzy match may be two different medicines (one unlisted): that is disagreement, and unreadable.
+      // by the fuzzy match: the readings disagree on the letters, but both stand for that one listed medicine, so it
+      // is shown once, marked a guess (a real unlisted look-alike never matches: drug-list.ts UNLISTED_LOOKALIKES).
       const listedA = a.extras?.generic ?? null;
       const listedB = b.extras?.generic ?? null;
       const sameWriting = (a.extras?.nameExact === true && b.extras?.nameExact === true)
         || (a.extras?.proposedName !== undefined && a.extras.proposedName === b.extras?.proposedName);
-      if (listedA !== null && listedA === listedB && !sameWriting) {
-        compare(false);
+      if (listedA !== null && listedA === listedB) {
+        compare(sameWriting);
         if (fromContext(a, field, x) || fromContext(b, field, y)) context = true;
-        fields[field] = UNREADABLE;
-      } else if (listedA !== null && listedA === listedB) {
-        compare(true);
-        if (fromContext(a, field, x) || fromContext(b, field, y)) context = true;
-        fields[field] = keepUnsure(x as string | null, y as string | null);
+        const kept = keepUnsure(x as string | null, y as string | null);
+        fields[field] = sameWriting ? kept : bare(x as string) === bare(y as string) ? markWords(kept ?? '')
+          : shownApart(field, x as string | null, y as string | null);
       } else {
-        fields[field] = textField(field, x as string | null, y as string | null, listedA !== null && listedB !== null);
+        fields[field] = textField(field, x as string | null, y as string | null);
       }
       continue;
     }
@@ -361,18 +638,27 @@ function pair(a: Side, b: Side, sourceSha256Hex: string, tally: HardPageAgreemen
         : field === 'severity' ? null : x;
       continue;
     }
-    fields[field] = textField(field, x as string | null, y as string | null, false);
+    fields[field] = textField(field, x as string | null, y as string | null);
   }
   if (a.item.kind === 'medicine') {
-    const dose = textField('strength', a.extras?.dose ?? '', b.extras?.dose ?? '', false) ?? '';
-    // The unit's basis is "unit"; textField reads the basis of 'unit'.
-    const unit = textField('unit', a.extras?.doseUnit ?? '', b.extras?.doseUnit ?? '', false) ?? '';
-    fields.strength = strengthOf(dose, unit) || null;
+    const doseA = a.extras?.dose ?? '';
+    const doseB = b.extras?.dose ?? '';
+    const unitA = a.extras?.doseUnit ?? '';
+    const unitB = b.extras?.doseUnit ?? '';
+    if (fromContext(a, 'strength', doseA) || fromContext(b, 'strength', doseB)
+      || fromContext(a, 'unit', unitA) || fromContext(b, 'unit', unitB)) context = true;
+    const doseAgrees = bare(doseA) === bare(doseB);
+    const unitAgrees = bare(unitA) === bare(unitB);
+    compare(doseAgrees);
+    compare(unitAgrees);
+    fields.strength = (doseAgrees && unitAgrees
+      ? strengthOf(keepUnsure(doseA, doseB) ?? '', keepUnsure(unitA, unitB) ?? '')
+      : shownApart('strength', strengthOf(doseA, unitA), strengthOf(doseB, unitB))) || null;
   }
   // A date or prescriber either reading filled from context is said by field_from_context (it carries no "?").
   if (anyFromContextOutside(a) || anyFromContextOutside(b)) context = true;
   const mergeText = (x: string | null, y: string | null) => isBlank(x) && isBlank(y) ? x
-    : bare(x) === bare(y) ? keepUnsure(x, y) : UNREADABLE;
+    : bare(x) === bare(y) ? keepUnsure(x, y) : alternatives(x, y);
   const prescriptionA = a.item.prescription;
   const prescriptionB = b.item.prescription;
   const prescription = prescriptionA === null && prescriptionB === null ? null : {
@@ -380,15 +666,21 @@ function pair(a: Side, b: Side, sourceSha256Hex: string, tally: HardPageAgreemen
     dateAsWritten: mergeText(prescriptionA?.dateAsWritten ?? null, prescriptionB?.dateAsWritten ?? null) };
   const asWritten = bare(a.item.asWritten) === bare(b.item.asWritten) ? keepUnsure(a.item.asWritten, b.item.asWritten)!
     : mergeAsWritten(a.item.asWritten, b.item.asWritten);
+  const shownA = shownOf(a);
+  const shownB = shownOf(b);
+  const crossed = isBlank(shownA.crossed) && isBlank(shownB.crossed) ? ''
+    : bare(shownA.crossed) === bare(shownB.crossed) ? keepUnsure(shownA.crossed, shownB.crossed) ?? ''
+      : alternatives(shownA.crossed, shownB.crossed);
+  if (bare(shownA.crossed) !== bare(shownB.crossed)) disagree = true;
   const lineIds = [...new Set([...a.item.lineIds, ...b.item.lineIds])].sort((x, y) => lineNumber(x) - lineNumber(y));
   const reasons = [...a.item.checkReasons, ...b.item.checkReasons.filter((code) => !a.item.checkReasons.includes(code))];
   const merged = { ...a.item, asWritten, lineIds, box: unionBox([a.item.box, b.item.box]) ?? a.item.box,
     dateAsWritten: mergeText(a.item.dateAsWritten, b.item.dateAsWritten), fields,
     prescription: a.item.kind === 'medicine' ? prescription : null, checkReasons: reasons } as PaperItem;
-  merged.plain = merged.kind === 'medicine' ? medicinePlain(fields)
-    : disagree ? '' : a.item.plain;
+  const lead = merged.kind === 'medicine' ? shownA.lead || shownB.lead : '';
   tally.itemsPaired += 1;
-  return finish(merged, [...(disagree ? [READINGS_DISAGREE] : []), ...(context ? [FROM_CONTEXT] : [])], sourceSha256Hex);
+  return finish(merged, [...(disagree ? [READINGS_DISAGREE] : []), ...(context ? [FROM_CONTEXT] : [])], sourceSha256Hex,
+    { crossed, lead, described: shownA.described || shownB.described });
 }
 
 /** Whether two items of the two readings may be the same writing: same kind, same place, nothing that rules it out. */
@@ -413,8 +705,8 @@ const BOX_EPSILON = 1e-9;
  * line apart or their boxes share part of their height. The smaller the gap the better; null when not neighbours.
  * Nothing pairs across columns or along one row: the same medicine at one height in two columns is two orders, and
  * two halves of one written line ("Metronidazole" | "400 mg tds"), each found by one reading, stay two
- * single_reading_only items (a safe duplicate: merging them would make every field the other half fills
- * "[unreadable]", and a lone name beside a full order would swallow that order).
+ * single_reading_only items (a safe duplicate: merging them would show every field the other half fills as a
+ * disagreement, and a lone name beside a full order would swallow that order).
  */
 function neighbourGap(a: Side, b: Side): number | null {
   if (a.item.kind !== 'medicine' || b.item.kind !== 'medicine') return null;

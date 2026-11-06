@@ -27,9 +27,16 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * reads may zoom into the picture (zoom.ts; owner decision of 2026-11-05 about
  * 18:45 UTC; HARD_PAGE_PROMPT_VERSION 4), so a reading made before cannot be
  * reused; the text-only request and the ordinary image re-read request are
- * unchanged.
+ * unchanged. Version 8: hard pages are read in the clean, chat-like style the
+ * owner asked for on 2026-11-06 (about 10:13 UTC: "i want the output clean ...
+ * doctor no get time"; HARD_PAGE_PROMPT_VERSION 6, or 5 without zoom): a best
+ * guess for every word with "?" after each uncertain one, "[?]" only where no
+ * letter shapes can be made out, two disagreeing reads shown "A? (or B?)",
+ * unlisted drug names kept as read, crossed-out writing on its item, and the
+ * plain reading built from the fields (hard-page.ts). The text-only request and
+ * the ordinary image re-read request are byte for byte unchanged.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-7';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-8';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -48,15 +55,19 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * Version 3: rule I, handwritten signs (signs.ts: a sign read is written as its meaning and "(sign)", any other
  * "[sign?]"), and "mane" among the frequencies (owner decision of 2026-11-05, about 21:00 UTC). Version 4: with zoom
  * on (OCR_AI_HARD_PAGE_ZOOM, the default), the message adds rule J, which offers the zoom tool (zoom.ts); with zoom
- * off it is the version 3 text.
+ * off it is the version 3 text. Version 6 (zoom offered) and 5 (no zoom; the same text without rule J): the clean
+ * reading of 2026-11-06 (see PROMPT_VERSION 8): best guess for every word with "?", "[?]" only for writing with no
+ * letter shapes, a question mark on the paper as "(? on paper)", fields that are the reading and never a description
+ * of it, instructions in words as notes, crossed-out writing as "(crossed out: X)" on its item ("crossedOut" in the
+ * schema), a free-text frequency, and "plain" left empty (built in code).
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-4';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-6';
 /**
  * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
  * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
- * calls is the version 3 text, byte for byte.
+ * calls, which is the version 6 text without rule J (pinned by hash in hard-page.spec.ts).
  */
-export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-3';
+export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-5';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -295,27 +306,45 @@ ${JSON.stringify(lines.map((line) => ({
 }
 
 /**
- * How often, on a hard page: the only frequencies a best-guess medicine may carry. Anything else is left
- * "[unreadable]" (its words stay in asWritten). A "?" after one marks it uncertain.
+ * How often, on a hard page: the codes a best-guess frequency is normalised to ("8 hourly" is "8hrly"). Since
+ * hard-page prompt version 5/6 a frequency written otherwise is kept as read, with "?" (hard-page.ts
+ * normaliseFrequency). A "?" after one marks it uncertain.
  */
 export const HARD_PAGE_FREQUENCIES = ['od', 'bd', 'tds', 'qds', '6hrly', '8hrly', '12hrly', 'nocte', 'mane', 'stat',
   'prn'] as const;
+/**
+ * The old hard-page token for a word that could not be read even as a guess (hard-page prompt versions 2 to 4).
+ * The model is no longer asked for it; where it still writes it, hard-page.ts turns it into NO_LETTERS.
+ */
 export const UNREADABLE = '[unreadable]';
+/**
+ * Clean hard-page reading tokens (owner decision of 2026-11-06, about 10:13 UTC). The reading's own uncertainty is
+ * a "?" straight after a word or number ("Ceftriaxone? 1g? 8hrly?").
+ * - NO_LETTERS "[?]": writing is there but no letter or digit shapes can be made out (the only token that stands
+ *   for a word not guessed). Under hard-page prompt versions 2 to 4 "[?]" was a question mark written on the paper.
+ * - PAPER_QUERY "(? on paper)": a question mark written on the paper itself (a clinical query, "?TB").
+ * - "(or B?)" after a field: a second reading read B there (ALTERNATIVE_OPEN).
+ * - "(crossed out: X?)": writing struck through on the paper (CROSSED_OUT_OPEN).
+ */
+export const NO_LETTERS = '[?]';
+export const PAPER_QUERY = '(? on paper)';
+export const ALTERNATIVE_OPEN = '(or ';
+export const CROSSED_OUT_OPEN = '(crossed out: ';
 /** Where a field of a hard-page item came from: the letter shapes, what is usual on such a sheet, or nothing. */
 export const FIELD_BASES = ['letters', 'context', 'empty'] as const;
 /** The fields of a hard-page item that carry a basis; "other" covers every remaining field of the item. */
 export const BASIS_FIELDS = ['name', 'dose', 'unit', 'route', 'frequency', 'duration', 'value', 'other'] as const;
 export type FieldBasis = (typeof FIELD_BASES)[number];
 export type BasisField = (typeof BASIS_FIELDS)[number];
-const hardFrequency = ['', UNREADABLE, ...HARD_PAGE_FREQUENCIES, ...HARD_PAGE_FREQUENCIES.map((value) => `${value}?`)];
 const imageItemJsonSchema = (MODEL_OUTPUT_IMAGE_JSON_SCHEMA.properties as { items: { items: {
   required: readonly string[]; properties: Record<string, unknown> } } }).items.items;
 
 /**
  * The hard-page answer: the image schema with, per item, the medicine dose as a number ("dose") and its unit
- * ("doseUnit"), frequency restricted to HARD_PAGE_FREQUENCIES (or "[unreadable]" or ""), and "basis": for each of
- * BASIS_FIELDS whether it was read from the letters, filled from context, or left empty. Used only for hard-page
- * requests; the text-only and the image request schemas are unchanged.
+ * ("doseUnit"), the writing crossed out on the item ("crossedOut", "" where none), and "basis": for each of
+ * BASIS_FIELDS whether it was read from the letters, filled from context, or left empty. The frequency is free text
+ * (hard-page.ts normalises the usual codes). Used only for hard-page requests; the text-only and the image request
+ * schemas are unchanged.
  */
 export const MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
   ...MODEL_OUTPUT_IMAGE_JSON_SCHEMA,
@@ -325,10 +354,9 @@ export const MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA: Readonly<Record<string, unknown
       type: 'array',
       items: {
         ...imageItemJsonSchema,
-        required: [...imageItemJsonSchema.required, 'dose', 'doseUnit', 'basis'],
+        required: [...imageItemJsonSchema.required, 'dose', 'doseUnit', 'crossedOut', 'basis'],
         properties: { ...imageItemJsonSchema.properties,
-          frequency: { type: 'string', enum: hardFrequency },
-          dose: text, doseUnit: text,
+          dose: text, doseUnit: text, crossedOut: text,
           basis: { type: 'object', additionalProperties: false, required: [...BASIS_FIELDS],
             properties: Object.fromEntries(BASIS_FIELDS.map((key) => [key, { type: 'string', enum: [...FIELD_BASES] }])) } },
       },
@@ -340,13 +368,16 @@ const basisOf = z.enum(FIELD_BASES);
 const basisSchema = z.strictObject({ name: basisOf, dose: basisOf, unit: basisOf, route: basisOf, frequency: basisOf,
   duration: basisOf, value: basisOf, other: basisOf });
 export const modelHardItemSchema = modelImageItemSchema.extend({
-  frequency: z.string().refine((value) => hardFrequency.includes(value)),
-  dose: field, doseUnit: field, basis: basisSchema,
+  dose: field, doseUnit: field, crossedOut: field, basis: basisSchema,
 });
 export const modelHardPageSchema = modelPageSchema.extend({ items: z.array(modelHardItemSchema).max(300) });
 /** What a hard-page answer adds to an item, kept beside it (never stored as such; see reader.ts). */
 export interface HardItemExtras {
   dose: string; doseUnit: string; basis: Record<BasisField, FieldBasis>;
+  /** The writing crossed out on the item, as read ("" where none; absent in answers made before it). */
+  crossedOut?: string;
+  /** The model wrote a description of the writing instead of reading it; replaced by NO_LETTERS (hard-page.ts). */
+  described?: boolean;
   /** For a medicine, after the drug list (hard-page.ts): the listed generic its name matched, or null. */
   generic?: string | null;
   /** For a medicine matched to the list: whether the name was a listed name as written (not respelled). */
@@ -372,41 +403,50 @@ ${ABBREVIATION_TABLE.map(([written, meaning]) => `${written} ${meaning}`).join('
 
 /**
  * The user turn's text for a HARD page re-read with its picture (flagged handwriting or low_confidence): the owner
- * decision of 2026-11-05 (about 18:40 UTC) allows tentative best-guess readings here only. The same request is sent
+ * decision of 2026-11-05 (about 18:40 UTC) allows tentative best-guess readings here only, and that of 2026-11-06
+ * (about 10:13 UTC) asks for them clean, as a chat reading: every word guessed, "?" after each uncertain one. The same request is sent
  * twice and the two answers are compared in code (hard-page.ts), so this asks for the single best reading, not
  * for alternatives. Rule 1 (never fill a gap from what is usual) is relaxed only where a field is marked basis
  * "context"; never inventing an item, citing lines and giving the box stay. Nothing here varies but the page.
  *
  * Zoom (owner decision of 2026-11-05, about 18:45 UTC): with `zoomCalls` over 0 the message adds rule J, which
- * offers the zoom tool (zoom.ts) for at most that many calls; without it the message is the version 3 text.
+ * offers the zoom tool (zoom.ts) for at most that many calls; without it the message is the version 5 text (rule J
+ * is the only difference between versions 5 and 6).
  */
 export function hardPageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
   handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number },
   zoomCalls = 0): string {
   return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
 ${size.height} pixels high. It is hard to read: hard handwriting or writing the text service could not read with \
-confidence. A clinician will check every word you give against the paper. For this page only, give your best \
-reading, marked as a guess, instead of leaving hard words out. Rules 2 and 3 change for this page as follows, and \
-rule 1 changes only where rule F says so; every other rule stays.
+confidence. A busy doctor will check every item against the paper, so give a clean reading of what is written, as \
+you would read it out to a colleague: your best guess for every word, marked where you are not sure. Rules 2, 3 and \
+4 change for this page as follows, and rule 1 changes only where rule F says so; every other rule stays.
 
-A. Read the page line by line from the picture, top to bottom, and list every item written on it. Read each item \
+A. Read the page line by line from the picture, top to bottom, and list every item written on it, including \
+instructions and plans written in words (such as "Transfer to the ward", "Review in 2 days" or "Switch to IV \
+Ceftriaxone 1g"): an order for a medicine is a "medicine", any other instruction or plan is a "note". Read each item \
 from the picture itself, not from the line text below: on hard handwriting that text may be wrong or nonsense.
 
-B. "asWritten" is the item as you read it in the picture, letter for letter, with its spelling and abbreviations. \
-After every word or number you are not sure of, put "?" (for example "Metronidazole? 400? mg tds"). Where a word \
-cannot be read at all, even as a guess, write "[unreadable]" in its place. A question mark written on the paper \
-itself (a clinical query, such as "?TB" or "TB?" for a suspected diagnosis) is written "[?]" in "asWritten" and in \
-the field (for example "Dx [?]TB" or "TB[?]"); a plain "?" is only ever your own uncertainty, never the paper's.
+B. "asWritten" is the item as you read it in the picture, word for word in the order written, with its spelling \
+and abbreviations. Give your best guess for every word and number, and put "?" straight after each one you are not \
+sure of (for example "IV Flagyl? 500mg? 8hrly?"); a word you are sure of has no "?". Write "${NO_LETTERS}" only where \
+there is writing but no letter or digit shapes you can make out at all; never leave out writing because it is hard \
+to read. A question mark written on the paper itself (a clinical query, such as "?TB" or "TB?" for a suspected \
+diagnosis) is written "${PAPER_QUERY}" where it stands, in "asWritten" and in the field (for example \
+"Dx ${PAPER_QUERY} TB"); a "?" straight after a word is only ever your own uncertainty, never the paper's.
 
-C. Give a best reading of every field of the item, with "?" after each uncertain word or number. Use "" only for a \
-field the item does not have, and "[unreadable]" for one it has but you cannot read even as a guess.
+C. Every field is the reading itself, never a description of it. Give your best reading of every field of the \
+item, with "?" after each uncertain word or number; use "" only for a field the item does not have, and \
+"${NO_LETTERS}" for one it has that shows no letter shapes. Never write a sentence about the writing (such as \
+"handwritten entry that cannot be read", "illegible" or "check the paper") in "asWritten" or in any field. Leave \
+"plain" as "": the plain reading is built from your fields.
 
 D. A medicine is read as: route (such as po, iv, im, pr, sc, or "" where none is written), drug name, dose, unit, \
-how often. "dose" is the number only (such as "400" or "0.5"); "doseUnit" is its unit (such as mg, g, mcg, ml, iu, \
-tab); "strength" is the dose and unit together as written. "frequency" is one of: od, bd, tds, qds, 6hrly, 8hrly, \
-12hrly, nocte, mane, stat, prn, with "?" after it if you are not sure. If what is written for how often is anything \
-else, set "frequency" to "[unreadable]" and keep its words in "asWritten". For any item that is not a medicine, \
-"dose", "doseUnit" and "frequency" are "".
+how often. "dose" is the number only (such as "500" or "0.5"); "doseUnit" is its unit (such as mg, g, mcg, ml, iu, \
+tab); "strength" is the dose and unit together as written. "frequency" is how often, as one of: od, bd, tds, qds, \
+6hrly, 8hrly, 12hrly, nocte, mane, stat, prn where it is one of these, else as you read it, with "?" after it if you \
+are not sure. Read the drug name from its letters as written, a brand as the brand. For any item that is not a \
+medicine, "dose", "doseUnit" and "frequency" are "".
 
 E. For every item, "basis" says where each field came from: "letters" where you read it from the shapes of the \
 letters or digits on the page, "context" where you inferred it from what is usual on such a sheet rather than \
@@ -418,7 +458,11 @@ F. You may fill a field from context only when its basis says "context". Never i
 on the page: every item is writing you can see. A common medicine is not more likely just because it is common; \
 if the letters point to a rarer medicine, read the letters.
 
-G. Ignore writing that shows through from the back of the sheet, and text cut off at the edges of the picture.
+G. Ignore writing that shows through from the back of the sheet, and text cut off at the edges of the picture. \
+Writing crossed out on the paper (struck through) is never an item of its own and never part of a field: write it \
+in "asWritten" where it stands as "(crossed out: X)", X read as in rule B (for example "IV Flagyl 500mg (crossed \
+out: 400mg?) 8hrly"), and put X, with its "?" marks, in "crossedOut" ("" where nothing on the item is crossed \
+out). An item crossed out as a whole is a "note" whose "asWritten" is "(crossed out: X)".
 
 H. Cite in "lineIds" the ids of the lines below that the item sits on in the picture: every line whose box your \
 item's box covers, including small fragments of the same row that the service split off. Cite only ids from this \

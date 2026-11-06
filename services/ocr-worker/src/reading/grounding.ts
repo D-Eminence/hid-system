@@ -30,17 +30,17 @@ export const ITEM_HINTS = new RegExp(`${DOSE.source}|${FREQUENCY.source}|${CONDI
 export const ITEM_LABELS = new RegExp('^a ?:|(?<![\\p{L}\\p{N}_])(?:dx|ddx|imp|impression|diagnos\\p{L}*|assessment|pmh|hx'
   + '|treated for|history of|rx|tabs?|tablets?|caps?|capsules?|inj|syr|syrup|susp|inh|inhaler|cream|oint\\p{L}*|nebs?'
   + '|supp|bp|temp|pulse|spo2|wt|weight|allerg\\p{L}*|nkda)(?![\\p{L}\\p{N}_])', 'u');
-/** Words on an item's own line that put an active status in doubt (also a plain "no", "negative" or "stop"). */
 /**
  * Words on a line that may change an item's status. A "?" is a query ("?TB", "TB?": suspected); on a hard page a
- * question mark written on the paper is transcribed "[?]" (prompt.ts hardPageMessage), which this counts too, while
- * the reading's own "?" marks are taken off before (forMatching), so they never look like a query. The "?" of
- * "[sign?]" (a handwritten sign the hard-page reading could not read, signs.ts) is not a query and is not counted.
+ * question mark written on the paper is transcribed "(? on paper)" (prompt.ts PAPER_QUERY, hard-page prompt 5/6),
+ * which this counts too, while the reading's own "?" marks are taken off before (forMatching), so they never look
+ * like a query. The "?" of "[sign?]" (a handwritten sign the hard-page reading could not read, signs.ts) and of "[?]"
+ * (writing with no letter shapes, prompt.ts NO_LETTERS) is not a query and is not counted.
  */
 export const STATUS_CUES = new RegExp('(?<![\\p{L}\\p{N}_])(?:no evidence of|negative for|ruled? out|r/o|query|possible'
   + '|suspected|fhx|family history|stopped|discontinued|d/c|allerg(?:y|ies)|allergic to|h/o|history of|pmh'
   + '|past history|no|not|non|nil|negative|neg|stop|withheld|withhold|held|hold|omit(?:ted)?|denies|denied)'
-  + '(?![\\p{L}\\p{N}_])|-ve(?![\\p{L}\\p{N}_])|(?<!\\[sign)\\?', 'gu');
+  + '(?![\\p{L}\\p{N}_])|-ve(?![\\p{L}\\p{N}_])|(?<!\\[sign)(?<!\\[)\\?', 'gu');
 
 const ROUTE_WORDS: Readonly<Record<string, string>> = {
   intravenous: 'iv|i\\.v\\.?|intravenous(?:ly)?',
@@ -63,14 +63,36 @@ const ROUTES = Object.entries(ROUTE_WORDS)
 /**
  * Text for matching against the page, with its guess marks taken off: a "?" straight after a word or number
  * ("Sulfa?", "400?", "Flagyl? (metronidazole)") is how a reading says it is unsure (the model's own marks, and
- * those hard-page.ts markGuess adds), not writing on the paper, so the field "Sulfa?" is held to the page as
- * "Sulfa". A "?" that starts a word ("?TB", a query on the paper) is kept, and so is "[?]", a question mark the
- * hard-page prompt has the model transcribe from the paper (a clinical query, counted by STATUS_CUES), and so is
- * "[sign?]", a handwritten sign the hard-page reading could not read (signs.ts), which is never a word. Only for
- * comparing: the stored and shown field keeps its marks.
+ * those hard-page.ts adds), not writing on the paper, so the field "Sulfa?" is held to the page as "Sulfa". A "?"
+ * that starts a word ("?TB", a query on the paper) is kept, and so is "(? on paper)", a question mark the hard-page
+ * prompt has the model transcribe from the paper (a clinical query, counted by STATUS_CUES), "[?]", writing with no
+ * letter shapes, and "[sign?]", a handwritten sign the hard-page reading could not read (signs.ts), which is never a
+ * word. Writing crossed out on the paper, "(crossed out: X)" (hard-page prompt rule G), is taken out: it is not what
+ * the item says, so a struck-out dose is never held to be the item's dose. Only for comparing: the stored and shown
+ * field keeps its marks.
  */
 export function forMatching(text: string): string {
-  return text.replace(/(?<=[^\s?[])(?<!\[sign)\?+/gu, '');
+  return withoutCrossedOut(text).replace(/(?<=[^\s?[(])(?<!\[sign)\?+/gu, '');
+}
+
+/** Text without its "(crossed out: X)" parts (hard-page prompt rule G); nested brackets inside X are allowed. */
+export function withoutCrossedOut(text: string): string {
+  if (!text.includes('(crossed out:')) return text;
+  let out = '';
+  let index = 0;
+  while (index < text.length) {
+    const start = text.indexOf('(crossed out:', index);
+    if (start < 0) { out += text.slice(index); break; }
+    out += text.slice(index, start);
+    let depth = 0;
+    let end = start;
+    for (; end < text.length; end += 1) {
+      if (text[end] === '(') depth += 1;
+      else if (text[end] === ')') { depth -= 1; if (depth === 0) break; }
+    }
+    index = end + 1;
+  }
+  return out.replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -80,6 +102,14 @@ export function forMatching(text: string): string {
  */
 export function withoutSignMarks(text: string): string {
   return text.replace(/\(sign\)|\[sign\?\]/g, ' ');
+}
+
+/**
+ * Text without any mark a hard-page reading adds that is not writing on the paper: the sign marks, "(? on paper)",
+ * "[?]" and the label of "(crossed out: X)" (X itself is writing on the paper and stays). For the anchor rule.
+ */
+export function withoutReadingMarks(text: string): string {
+  return withoutSignMarks(text).replace(/\(\? on paper\)|\[\?\]/g, ' ').replace(/\(crossed out:/g, ' (');
 }
 
 export function norm(text: string): string {
