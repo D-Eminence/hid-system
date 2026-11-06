@@ -4,6 +4,7 @@ import { AuditInterceptor } from './audit/audit.interceptor';
 import { AuditModule } from './audit/audit.module';
 import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
+import { CardLinksModule } from './card-links/card-links.module';
 import { SecurityGuard } from './auth/security.guard';
 import { CorrelationMiddleware } from './common/correlation.middleware';
 import { CommercialModule } from './commercial/commercial.module';
@@ -18,7 +19,7 @@ import { WebPushModule } from './web-push/web-push.module';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule,
-    PatientSafetyModule, PatientProfileModule, WebPushModule],
+    PatientSafetyModule, PatientProfileModule, WebPushModule, CardLinksModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

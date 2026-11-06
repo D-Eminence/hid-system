@@ -1,4 +1,9 @@
 limit_req_zone $binary_remote_addr zone=hid_chat:1m rate=6r/m;
+# Card links (0118): the receiver's public routes, per client address. A flood
+# guard only: carrier NAT shares addresses, so the per-link limits in the
+# database are the real control.
+limit_req_zone $binary_remote_addr zone=hid_card_code:1m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=hid_card_view:1m rate=30r/m;
 # The access log keeps the path, never the query string: $request (the stock
 # "main" format's request line) would keep a patient's Health ID or a search a
 # browser sent in a GET query (CODEX §26). This file is included in the http
@@ -90,6 +95,42 @@ server {
     proxy_read_timeout 45s;
     include /etc/nginx/hid-proxy-headers.conf;
     proxy_pass $hid_ehr_upstream;
+  }
+  # Card links (0118): every receiver route sits under /api/v1/card-share/,
+  # the view cookie's Path. The link's token travels only in a POST body and
+  # the code request's in a POST body too; nothing secret is in a path.
+  location = /api/v1/card-share/code {
+    limit_except POST { deny all; }
+    limit_req zone=hid_card_code burst=3 nodelay;
+    limit_req_status 429;
+    client_max_body_size 1k;
+    include /etc/nginx/hid-proxy-headers.conf;
+    proxy_pass $hid_identity_upstream;
+  }
+  location = /api/v1/card-share/verify {
+    limit_except POST { deny all; }
+    limit_req zone=hid_card_code burst=3 nodelay;
+    limit_req_status 429;
+    client_max_body_size 1k;
+    include /etc/nginx/hid-proxy-headers.conf;
+    proxy_pass $hid_identity_upstream;
+  }
+  location = /api/v1/card-share/records {
+    limit_except GET { deny all; }
+    limit_req zone=hid_card_view burst=10 nodelay;
+    limit_req_status 429;
+    include /etc/nginx/hid-proxy-headers.conf;
+    proxy_pass $hid_ehr_upstream;
+  }
+  location ^~ /api/v1/card-share/ {
+    # Express also accepts mixed case and a trailing slash; the exact
+    # locations above win, so refuse their aliases before the limit below.
+    if ($uri ~* "^/api/v1/card-share/(code|verify|records)/?$") { return 404; }
+    limit_req zone=hid_card_view burst=10 nodelay;
+    limit_req_status 429;
+    client_max_body_size 1k;
+    include /etc/nginx/hid-proxy-headers.conf;
+    proxy_pass $hid_identity_upstream;
   }
   location = /api/v1/ehr { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
   location ^~ /api/v1/ehr/ {

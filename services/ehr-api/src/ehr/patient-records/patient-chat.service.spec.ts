@@ -1,9 +1,16 @@
+import {readFileSync} from 'node:fs';
+import {resolve} from 'node:path';
 import type {PoolClient} from 'pg';
 import {withPatientLines} from './patient-chat-safety';
 import {PatientChatService} from './patient-chat.service';
-import {evidence,binding,type Evidence} from './patient-evidence.types';
+import {evidence,binding,chunks,type Evidence} from './patient-evidence.types';
 import {patientEvidence} from './patient-evidence.policy';
+import {withdrawnPatientEntryChunksSql} from '../patient-entries/patient-entries.query';
 jest.mock('../../config/environment',()=>({getEnvironment:()=>({AI_ENABLED:true,AI_EMBEDDING_MODEL_ID:'amazon.titan-embed-text-v2:0'})}));
+// PATIENT_ENTRIES_ENABLED (0116), off unless a test turns it on.
+let mockEntriesEnabled=false;
+jest.mock('../patient-entries/patient-entries.flag',()=>({patientEntriesEnabled:()=>mockEntriesEnabled}));
+afterEach(()=>{mockEntriesEnabled=false;});
 const patientId='11111111-1111-4111-8111-111111111111';
 const auth={patientId,subject:'subject-a',accountId:'account-a',sessionId:'session-a',expiresAt:new Date(Date.now()+30000).toISOString()};
 const request={actor:{kind:'patient',patientId},correlationId:'synthetic-chat'} as never;
@@ -110,6 +117,14 @@ describe('Patient evidence chat',()=>{
   // The saved reply keeps the labels for history; it still carries no hash.
   expect(s.save.mock.calls[0][3].sources[0]).toHaveProperty('originLabel');
  });
+ it('labels a record the patient added as theirs: "You added this" to the patient',async()=>{
+  const records=[item('patient_entry',5,{type:'medicine',place:null,date:'2026-10-01',notes:'Twice a day'}),item('prescription',6)];
+  const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'history'});
+  s.answer.mockResolvedValue('Recorded facts [1] [2].');
+  const reply=await s.service.answer(request,'Summarise my history');
+  const added=reply.sources.find(source=>(source as {kind:string}).kind==='patient_entry');
+  expect(added).toMatchObject({id:records[0]!.id,origin:'patient',originLabel:'You added this'});
+ });
 });
 
 describe('Shared engine with explicit staff access',()=>{
@@ -128,6 +143,20 @@ describe('Shared engine with explicit staff access',()=>{
   expect(s.answer.mock.calls[0][5]).toBe('staff');
   expect(s.authorizeSelf).not.toHaveBeenCalled();expect(s.snapshot).not.toHaveBeenCalled();expect(transaction).toHaveBeenCalled();
  });
+ it('labels a record the patient added "Added by the patient" to staff',async()=>{
+  const s=setup([]);
+  const added=item('patient_entry',7,{type:'test',place:'Lagoon Lab',date:'2026-10-01',notes:null});
+  const staffSnapshot=jest.fn().mockResolvedValue({records:[added],coverage:{complete:true,recordCount:1,selectedCount:0,pendingDocuments:0,unavailable:[]}});
+  const access={audience:'staff',authorize:jest.fn().mockResolvedValue({...auth,subject:'staff-a',accountId:'staff-account'}),
+    transaction:jest.fn(async(_auth:unknown,_correlation:string,work:(client:unknown)=>Promise<unknown>)=>work({query:jest.fn()})),
+    admissionKey:'staff:staff-account:facility-b',chunksTable:'ehr.staff_evidence_chunks',
+    audit:{actorType:'staff',facilityId:'facility-a',actorMembershipId:'member-a',purposeOfUse:'direct-care'},
+    evidence:{snapshot:staffSnapshot,assertCurrent:jest.fn(),prepareDocuments:jest.fn().mockResolvedValue([])},
+    history:{start:jest.fn().mockResolvedValue('staff-generation'),context:s.context,save:s.save}} as never;
+  s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'history'});s.answer.mockResolvedValue('Recorded fact [1].');
+  const reply=await s.service.answer(request,'Summarise this patient',access);
+  expect(reply.sources[0]).toMatchObject({id:added.id,kind:'patient_entry',origin:'patient',originLabel:'Added by the patient'});
+ });
  it('shares the per-clinician admission key across different selected patients',async()=>{
   const s=setup();let finish!:(value:unknown)=>void;s.plan.mockImplementation(()=>new Promise(resolve=>{finish=resolve}));
   const access={audience:'staff',audit:{actorType:'staff'},authorize:async()=>auth,admissionKey:'staff:staff-a:facility-a',history:{start:async()=> 'generation',context:s.context,save:s.save}} as never;
@@ -135,6 +164,64 @@ describe('Shared engine with explicit staff access',()=>{
   while(!finish)await Promise.resolve();
   await expect(s.service.answer(request,'Other patient',access)).rejects.toMatchObject({code:'PATIENT_CHAT_RATE_LIMITED'});
   finish({intent:'conversation',answer:'I can summarize authorized records.'});await first;
+ });
+});
+
+describe('Vectors of a record the patient removed (0116)',()=>{
+ // Every current source already indexed: nothing new is embedded, so nothing else is refreshed.
+ const indexed=(records:Evidence[])=>async(sql:string)=>({rows:sql.includes('order by embedding<=>')?[]:
+  sql.includes('select source_kind,source_id,source_version,source_hash,chunk_no')?records.flatMap(r=>chunks(r).map((_,chunk_no)=>
+   ({source_kind:r.kind,source_id:r.id,source_version:r.version,source_hash:r.hash,chunk_no}))):[]});
+ it('are deleted from the patient chat\'s vectors at its next search, even when nothing else is refreshed',async()=>{
+  mockEntriesEnabled=true;
+  const records=[item('patient_entry',3,{type:'medicine',place:null,date:'2026-10-01',notes:'Twice a day'})];
+  const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'Twice a day'});
+  s.query.mockImplementation(indexed(records));
+  await s.service.answer(request,'How often do I take it?');
+  expect(s.embed).toHaveBeenCalledTimes(1);
+  const calls=(s.query.mock.calls as unknown as Array<[string,unknown[]]>).map(([sql,args])=>[sql.trim(),args] as const);
+  const cleanup=calls.findIndex(([sql])=>sql===withdrawnPatientEntryChunksSql('ehr.patient_evidence_chunks'));
+  expect(cleanup).toBeGreaterThanOrEqual(0);
+  expect(calls[cleanup]![1]).toEqual([patientId]);
+  // The only statement that names the removed records' table; the patient chat's own purge (#167) runs too,
+  // and counts patient_entry among the local kinds it may purge in full.
+  expect(calls.filter(([sql])=>sql.includes('ehr.patient_entries')).length).toBe(1);
+  const purge=calls.find(([sql])=>sql.startsWith('delete from')&&!sql.includes('ehr.patient_entries'));
+  expect(purge?.[1][2]).toContain('patient_entry');
+  expect(cleanup).toBeLessThan(calls.findIndex(([sql])=>sql.includes('order by embedding<=>')));
+ });
+ it('are deleted from the staff chat\'s vectors at its next search, for the patient in scope',async()=>{
+  mockEntriesEnabled=true;
+  const records=[item('patient_entry',4,{type:'test',place:'Lagoon Lab',date:'2026-10-01',notes:null})];
+  const s=setup([]);
+  const query=jest.fn(indexed(records));
+  const access={audience:'staff',authorize:jest.fn().mockResolvedValue({...auth,subject:'staff-a',accountId:'staff-account'}),
+    transaction:jest.fn(async(_auth:unknown,_correlation:string,work:(client:unknown)=>Promise<unknown>)=>work({query})),
+    admissionKey:'staff:staff-account:facility-a',chunksTable:'ehr.staff_evidence_chunks',
+    audit:{actorType:'staff',facilityId:'facility-a',actorMembershipId:'member-a',purposeOfUse:'direct-care'},
+    evidence:{snapshot:jest.fn().mockResolvedValue({records,coverage:{complete:true,recordCount:1,selectedCount:0,pendingDocuments:0,unavailable:[]}}),
+     assertCurrent:jest.fn(),prepareDocuments:jest.fn().mockResolvedValue([])},
+    history:{start:jest.fn().mockResolvedValue('staff-generation'),context:s.context,save:s.save}} as never;
+  s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'Lagoon'});s.answer.mockResolvedValue('Recorded fact [1].');
+  await s.service.answer(request,'Lagoon results?',access);
+  const cleanup=(query.mock.calls as unknown as Array<[string,unknown[]]>).filter(([sql])=>sql.trim()===withdrawnPatientEntryChunksSql('ehr.staff_evidence_chunks'));
+  expect(cleanup).toEqual([[withdrawnPatientEntryChunksSql('ehr.staff_evidence_chunks'),[patientId]]]);
+ });
+ it('are left alone, and the records patients add are never named, while the setting is off',async()=>{
+  const records=[item('note',1)];
+  const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'Synthetic history'});
+  s.query.mockImplementation(indexed(records));
+  await s.service.answer(request,'What does this history mean?');
+  const sqls=(s.query.mock.calls as unknown as Array<[string]>).map(([sql])=>sql.trim());
+  expect(sqls.some(sql=>sql.includes('ehr.patient_entries'))).toBe(false);
+  expect(sqls).not.toContain(withdrawnPatientEntryChunksSql('ehr.patient_evidence_chunks'));
+ });
+ it('are deleted by the statement the database suite proves under row-level security, for both chats',()=>{
+  const suite=readFileSync(resolve(__dirname,'../../../test/database/patient-entries.integration.sql'),'utf8');
+  for(const table of ['ehr.patient_evidence_chunks','ehr.staff_evidence_chunks']) {
+   expect(withdrawnPatientEntryChunksSql(table)).toBe(`delete from ${table} chunk where chunk.patient_id = $1 and chunk.source_kind = 'patient_entry' and not exists (select 1 from ehr.patient_entries entry where entry.id = chunk.source_id and entry.patient_id = chunk.patient_id)`);
+   expect(suite).toContain(withdrawnPatientEntryChunksSql(table));
+  }
  });
 });
 

@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { PatientChatService } from './patient-chat.service';
 import { PatientEvidenceService } from './patient-evidence.service';
-import { PATIENT_EVIDENCE_QUERY } from './patient-evidence.query';
+import { PATIENT_EVIDENCE_QUERY, evidenceQuery } from './patient-evidence.query';
 import { evidence, type Evidence } from './patient-evidence.types';
 jest.mock('../../config/environment', () => ({ getEnvironment: () => ({ AI_ENABLED: true, AI_EMBEDDING_MODEL_ID: 'amazon.titan-embed-text-v2:0' }) }));
 
@@ -49,6 +49,10 @@ const ROWS = [
     signedAt: '2026-09-02T10:00:00Z', revisionRecordedAt: '2026-09-02T10:00:00Z' }),
   row('note', 'Fever today', { _encounterStatus: 'in_progress', noteType: 'consultation', text: 'Synthetic open-visit note', signedAt: null }),
   row('vital', 'Vital measurements', { recorded_at: '2026-09-02T10:00:00Z', systolic_mmhg: 138, diastolic_mmhg: 86, source: 'manual', created_by: 'synthetic-account' }),
+  // Records the patient added themselves (0116): cleaned like any other, and a sensitive one left out.
+  row('patient_entry', 'Malaria test', { type: 'test', place: 'Okafor family pharmacy', date: '2026-09-06',
+    notes: 'Done for Adaeze Okafor, call 0803 123 4567.', _internal: 'created_by' }),
+  row('patient_entry', 'HIV self-test', { type: 'test', place: null, date: '2026-09-07', notes: null }),
 ];
 const PROFILE = { patientId, version: 5, firstName: 'Adaeze', lastName: 'Okafor', fullName: 'Adaeze Okafor', dateOfBirth: '1994-03-12', gender: 'female',
   country: 'NG', state: 'Lagos' };
@@ -67,7 +71,8 @@ const DOCUMENT = evidence({ kind: 'document', id: '44444444-4444-4444-8444-00000
 const FORBIDDEN = /Adaeze|Okafor|Chinedu|1994|0803|example\.test|referral_letter|Synthetic (refuted|differential|provisional|unconfirmed|confirmed|sensitive) note|Synthetic request reason|Synthetic instruction text|Synthetic open-visit note|Synthetic correction reason|Synthetic sensitive result|99\.9|HIV|Hepatitis|Tenofovir|Lipid profile|Urinalysis|Ciprofloxacin|Metformin|Lisinopril|Artemether|diabetes|kidney|Asthma|Gout|created_by|Lagos/i;
 
 function setup() {
-  const query = jest.fn(async (sql: string) => ({ rows: sql === PATIENT_EVIDENCE_QUERY ? ROWS : [] }));
+  // PATIENT_ENTRIES_ENABLED is on by default (0116), so the chat reads with the records patients add; both queries get every row.
+  const query = jest.fn(async (sql: string) => ({ rows: sql === PATIENT_EVIDENCE_QUERY || sql === evidenceQuery('patient', true) ? ROWS : [] }));
   const database = { withPatientTransaction: async (_a: unknown, _c: string, work: (c: PoolClient) => Promise<unknown>) => work({ query } as unknown as PoolClient) };
   const records = { authorizeSelf: jest.fn().mockResolvedValue(auth) };
   const lab = { patientReleasedResults: jest.fn().mockResolvedValue({ records: LAB, nextCursor: null }) };
@@ -116,7 +121,9 @@ describe('The patient chat still answers normally with what the policy leaves', 
     const titles = sources.map(source => `${source.kind}:${source.title}`).sort();
     expect(titles).toEqual(['diagnosis:Essential hypertension', 'document:Clinical document', 'investigation:Full blood count',
       'lab_result:Fasting blood sugar', 'lab_result:Haemoglobin', 'note:Blood pressure review', 'prescription:Amlodipine 5 mg tablets',
-      'profile:Age and sex', 'vital:Vital measurements'].sort());
+      'patient_entry:Malaria test', 'profile:Age and sex', 'vital:Vital measurements'].sort());
+    expect(sources.find(source => source.kind === 'patient_entry')!.fields).toEqual({ type: 'test', place: '[name removed] family pharmacy',
+      date: '2026-09-06', notes: 'Done for the patient, call [phone removed].' });
     expect(sources.find(source => source.kind === 'note')!.fields.text)
       .toBe('Blood pressure reviewed with the patient. Emergency contact: [name removed], [phone removed].');
     expect(sources.find(source => source.kind === 'lab_result' && source.title === 'Fasting blood sugar')!.fields)

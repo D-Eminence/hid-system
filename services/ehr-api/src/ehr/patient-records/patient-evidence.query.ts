@@ -66,6 +66,19 @@ function replaceOnce(text: string, from: string, to: string): string {
 }
 const SELECT = 'select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint from sources';
 const SELECT_WITH_PATIENT = 'select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint,patient_id from sources';
+// The records the patient added themselves (0116), as one more branch, only
+// while PATIENT_ENTRIES_ENABLED is on: while off the query is exactly what it
+// was before 0116 and never names ehr.patient_entries, so this image also runs
+// before 0116. Active entries only (0116's read policy says the same); a
+// withdrawn one leaves the evidence, so saved answers citing it stop showing
+// and its vectors are never ranked. Both audiences read the same fields; the
+// staff permission filter ($4) and the patient-chat policy apply to it as to
+// every other kind.
+const PATIENT_ENTRY_SOURCES = `
+ union all select 'patient_entry',pe.id,pe.patient_id,pe.row_version::text,pe.title,pe.created_at,(pe.occurred_on::timestamp at time zone 'UTC'),
+ 'Record added by the patient, not checked by a health worker','patient reported',
+ jsonb_build_object('type',pe.kind,'place',pe.facility_name,'date',pe.occurred_on,'notes',pe.notes),null
+ from ehr.patient_entries pe where pe.status='active'`;
 const completedEncounter = (alias: string) =>
   `join ehr.encounters e on e.id=${alias}.encounter_id and e.patient_id=${alias}.patient_id and e.facility_id=${alias}.facility_id and e.status='completed'`;
 const VITAL_FIELDS_SQL = "jsonb_build_object('recorded_at',v.recorded_at,'height_cm',v.height_cm,'weight_kg',v.weight_kg,"
@@ -87,8 +100,9 @@ const VITAL_FIELDS_SQL = "jsonb_build_object('recorded_at',v.recorded_at,'height
  * on-hold or completed test requests without the clinical reason or priority,
  * and never a sensitive test; vitals as an explicit list of measures.
  */
-export function evidenceQuery(audience: EvidenceAudience): string {
+export function evidenceQuery(audience: EvidenceAudience, includePatientEntries = false): string {
   let q = BASE_EVIDENCE_QUERY;
+  if (includePatientEntries) q = replaceOnce(q, `\n)\n${SELECT}`, `${PATIENT_ENTRY_SOURCES}\n)\n${SELECT}`);
   if (audience === 'staff') {
     q = replaceOnce(q, 'where patient_id=$1 and (kind', 'where patient_id=$1 and kind=any($4::text[]) and (kind');
     q = replaceOnce(q, "from ehr.diagnoses d where d.verification_status<>'entered_in_error'", "from ehr.diagnoses d where d.verification_status<>'entered_in_error' and exists(select 1 from ehr.encounters e where e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed')");
@@ -116,7 +130,7 @@ export function evidenceQuery(audience: EvidenceAudience): string {
   q = replaceOnce(q, "(to_jsonb(v)-array['id','encounter_id','patient_id','facility_id','created_by','created_by_membership_id','created_at','updated_at','row_version','current_correction_no'])", VITAL_FIELDS_SQL);
   return replaceOnce(q, SELECT, SELECT_WITH_PATIENT);
 }
-/** Params $1 patient id, $2/$3 keyset cursor. */
+/** Params $1 patient id, $2/$3 keyset cursor. Without the records the patient added (0116). */
 export const PATIENT_EVIDENCE_QUERY = evidenceQuery('patient');
 /** Params $1 patient id, $2/$3 keyset cursor, $4 the source kinds the staff member may read. */
 export const STAFF_EVIDENCE_QUERY = evidenceQuery('staff');

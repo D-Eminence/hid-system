@@ -5,6 +5,10 @@ import { attachmentTextQuery } from './patient-attachment-text.service';
 import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scope.service';
 import { binding, type SourceKind } from './patient-evidence.types';
 import { DomainProblem } from '../../common/problem';
+// PATIENT_ENTRIES_ENABLED (0116), off unless a test turns it on.
+let mockEntriesEnabled=false;
+jest.mock('../patient-entries/patient-entries.flag',()=>({patientEntriesEnabled:()=>mockEntriesEnabled}));
+afterEach(()=>{mockEntriesEnabled=false;});
 const patientId='11111111-1111-4111-8111-111111111111',sourceId='22222222-2222-4222-8222-222222222222';
 function setup() {
   const row={kind:'note',id:sourceId,version:'1',title:'Synthetic note',recorded_at:new Date(),effective_at:null,
@@ -68,6 +72,37 @@ it('reads each row\'s origin and answers a source with where it came from, in st
     originLabel:'From a scanned paper record'});
   await expect(s.service.source(s.scope,s.request,'note',sourceId)).resolves.toMatchObject({originLabel:'Recorded by a health worker'});
   await expect(s.service.source(s.scope,s.request,'import','22222222-2222-4222-8222-222222222298')).resolves.toMatchObject({originLabel:'Added by the patient'});
+});
+it('leaves the records patients add out of the kinds and the coverage while the setting is off, and reads them as the patient\'s while it is on',async()=>{
+  const every=[...new Set(Object.values(STAFF_SOURCE_PERMISSIONS).flat())];
+  expect(STAFF_SOURCE_PERMISSIONS.patient_entry).toEqual(['ehr.note.read']);
+  const off=setup();off.permissions.push(...every);
+  const offSnapshot=await off.service.bind(off.scope).snapshot(off.request);
+  expect(off.query.mock.calls[0]![0]).not.toContain('patient_entries');
+  expect(off.query.mock.calls[0]![1][3]).not.toContain('patient_entry');
+  expect(offSnapshot.coverage.unavailable).not.toContain('Some record categories are outside your current read permissions.');
+  mockEntriesEnabled=true;
+  const on=setup();on.permissions.push(...every);
+  on.query.mockResolvedValue({rows:[{...on.row,kind:'patient_entry',id:'22222222-2222-4222-8222-222222222297',origin_hint:null,
+    fields:{type:'medicine',place:null,date:'2026-10-01',notes:null}}]});
+  const onSnapshot=await on.service.bind(on.scope).snapshot(on.request);
+  expect(on.query.mock.calls[0]![0]).toContain("from ehr.patient_entries pe where pe.status='active'");
+  expect(on.query.mock.calls[0]![1][3]).toContain('patient_entry');
+  expect(onSnapshot.coverage.unavailable).not.toContain('Some record categories are outside your current read permissions.');
+  expect(onSnapshot.records.find(r=>r.kind==='patient_entry')).toMatchObject({origin:'patient'});
+  await expect(on.service.source(on.scope,on.request,'patient_entry','22222222-2222-4222-8222-222222222297'))
+    .resolves.toMatchObject({origin:'patient',originLabel:'Added by the patient'});
+  // Without ehr.note.read the kind is outside the permissions, and the coverage says so.
+  const narrow=setup();narrow.permissions.splice(0,narrow.permissions.length,'ehr.document.read');
+  mockEntriesEnabled=true;
+  const narrowSnapshot=await narrow.service.bind(narrow.scope).snapshot(narrow.request);
+  expect(narrow.query.mock.calls[0]![1][3]).not.toContain('patient_entry');
+  expect(narrowSnapshot.coverage.unavailable).toContain('Some record categories are outside your current read permissions.');
+  // One patient per chat: a record the patient added for anyone else refuses the read, as any row does.
+  const foreign=setup();foreign.permissions.push(...every);mockEntriesEnabled=true;
+  foreign.query.mockResolvedValue({rows:[foreign.row,{...foreign.row,kind:'patient_entry',id:'22222222-2222-4222-8222-222222222296',origin_hint:null,
+    patient_id:'99999999-9999-4999-8999-999999999999',fields:{type:'visit',place:null,date:'2026-10-01',notes:null}}]});
+  await expect(foreign.service.bind(foreign.scope).snapshot(foreign.request)).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
 });
 
 const sha=(text:string)=>createHash('sha256').update(text).digest('hex');

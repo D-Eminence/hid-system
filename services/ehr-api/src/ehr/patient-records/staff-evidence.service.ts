@@ -5,7 +5,8 @@ import type { HidRequest } from '../../common/request-context';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { AuditService } from '../../audit/audit.service';
-import { STAFF_EVIDENCE_QUERY } from './patient-evidence.query';
+import { STAFF_EVIDENCE_QUERY, evidenceQuery } from './patient-evidence.query';
+import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
 import { PatientAttachmentTextService, attachmentTextQuery } from './patient-attachment-text.service';
 import { evidence, evidenceKey, originLabel, type Evidence, type EvidenceBinding, type EvidenceSnapshot, type SourceKind } from './patient-evidence.types';
 import type { AttachmentAccess } from './chat-access';
@@ -16,8 +17,10 @@ import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scop
 // operation. The staff chat gets no patient-chat policy: it keeps refuted
 // diagnoses with their notes, request reasons, the correction reason, cancelled
 // items (labelled by their status), restricted documents, file names, and the
-// patient's name and date of birth.
+// patient's name and date of birth. The records the patient added (0116) are
+// read only while PATIENT_ENTRIES_ENABLED is on (staffEvidenceQuery(true)).
 export { STAFF_EVIDENCE_QUERY };
+export const staffEvidenceQuery = (includePatientEntries: boolean) => evidenceQuery('staff', includePatientEntries);
 /** The staff document query: staff extraction tables, completed visits, every classification. */
 export const STAFF_ATTACHMENT_TEXT_QUERY = attachmentTextQuery('staff');
 
@@ -95,12 +98,17 @@ export class StaffEvidenceService {
   private async snapshot(scope: StaffChatScope, request: HidRequest, signal?: AbortSignal, ids?: readonly string[]): Promise<EvidenceSnapshot> {
     const auth = await scope.authorize(request);
     if (auth.patientId !== scope.patientId) denyOtherPatient();
-    const allowed = (Object.keys(STAFF_SOURCE_PERMISSIONS) as SourceKind[]).filter(kind => scope.allows(kind));
+    // While the setting is off the records the patient added are not a kind
+    // at all, so they never make the coverage incomplete.
+    const withEntries = patientEntriesEnabled();
+    const kinds = (Object.keys(STAFF_SOURCE_PERMISSIONS) as SourceKind[]).filter(kind => withEntries || kind !== 'patient_entry');
+    const allowed = kinds.filter(kind => scope.allows(kind));
+    const query = staffEvidenceQuery(withEntries);
     const local = await scope.transaction(auth, request.correlationId, async client => {
       const records: Evidence[] = []; let kind = '', id = '', complete = false;
       for (let page = 0; page < 10; page++) {
         signal?.throwIfAborted();
-        const rows = (await client.query(STAFF_EVIDENCE_QUERY, [scope.patientId, kind, id, allowed])).rows;
+        const rows = (await client.query(query, [scope.patientId, kind, id, allowed])).rows;
         // Defence behind RLS and the $1 filter: a row for any other patient refuses the read.
         assertOnePatient(rows, scope.patientId);
         for (const r of rows.slice(0, 200)) records.push(evidence({ kind: r.kind, id: r.id, version: r.version,
@@ -116,7 +124,7 @@ export class StaffEvidenceService {
       return { records, complete };
     });
     const unavailable: string[] = [];
-    if (allowed.length < Object.keys(STAFF_SOURCE_PERMISSIONS).length) unavailable.push('Some record categories are outside your current read permissions.');
+    if (allowed.length < kinds.length) unavailable.push('Some record categories are outside your current read permissions.');
     if(scope.allows('profile')) {
       const profile=await this.identity.staffPatientProfile(scope.patientId,scope.context);
       if(profile.patientId!==scope.patientId)throw new DomainProblem(403,'CHAT_ACCESS_DENIED','Patient profile authorization changed');

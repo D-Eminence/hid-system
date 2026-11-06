@@ -10,7 +10,8 @@ export type TurnstileAction = LoginAction | 'patient-reset-start' | 'staff-reset
   | 'organization-completion'
   | 'patient-enrollment'
   | 'provider-enrollment'
-  | 'staff-invitation';
+  | 'staff-invitation'
+  | 'card-share-code';
 
 interface SiteverifyResponse {
   success?: unknown;
@@ -45,6 +46,8 @@ export const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Re
     'app.healthidentitydirectory.com': [
       'patient-login', 'patient-reset-start', 'staff-reset', 'legacy-recovery', 'patient-enrollment',
       'provider-enrollment', 'staff-invitation',
+      // Card links (0118): "Email me a code" on the receiver's page, /card on the patient site.
+      'card-share-code',
     ],
     'healthidentitydirectory.com': ['book-demo', 'organization-application', 'organization-completion'],
     'www.healthidentitydirectory.com': [
@@ -72,6 +75,7 @@ export const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Re
       'patient-enrollment',
       'provider-enrollment',
       'staff-invitation',
+      'card-share-code',
     ],
     'ehr.staging.healthidentitydirectory.com': ['ehr-login', 'staff-login', ...STAFF_SITE_ACTIONS],
     'lab.staging.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE_ACTIONS],

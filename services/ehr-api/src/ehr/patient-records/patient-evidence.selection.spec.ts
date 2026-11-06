@@ -22,3 +22,13 @@ it('chunks/truncates long histories with an explicit partial-coverage flag rathe
  const selected=selectEvidence([record('note','long','2026-01-01',{text:'x'.repeat(80000)})],'summary','history');
  expect(selected.sources).toHaveLength(1);expect(selected.partial).toBe(true);expect(selected.sources[0]!.content).toContain('truncated');
 });
+it('selects a record the patient added as a medicine for medicine questions, and a test for result questions',()=>{
+ const entry=(id:string,type:string)=>evidence({kind:'patient_entry',id,version:'1',title:'Synthetic '+id,recordedAt:'2026-10-01',
+  effectiveAt:'2026-10-01T00:00:00.000Z',provenance:'Record added by the patient, not checked by a health worker',quality:'patient reported',
+  fields:{type,place:null,date:'2026-10-01',notes:null}});
+ const records=[entry('medicine','medicine'),entry('test','test'),entry('visit','visit')];
+ expect(selectEvidence(records,'medications','my medicines').sources.map(s=>s.id)).toEqual(['medicine']);
+ expect(selectEvidence(records,'labs','my results').sources.map(s=>s.id)).toEqual(['test']);
+ expect(selectEvidence(records,'summary','history').sources).toHaveLength(3);
+ expect(records.every(r=>r.origin==='patient')).toBe(true);
+});

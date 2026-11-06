@@ -46,7 +46,7 @@ export function givesResult(source: Cited): boolean {
   if (source.kind === 'lab_result') return !isCorrectionPending(source);
   if (source.kind === 'health_profile' && Object.entries(source.fields ?? {})
     .some(([key, value]) => RESULT_FIELDS.test(key) && value !== null && value !== undefined && String(value).trim() !== '')) return true;
-  if (['import','import_version','document','attachment','note','health_profile'].includes(source.kind)) {
+  if (['import','import_version','document','attachment','note','health_profile','patient_entry'].includes(source.kind)) {
     return RESULT_TEXT.test(source.content ?? JSON.stringify(source.fields ?? {}));
   }
   return false;
@@ -56,7 +56,8 @@ export function patientLines(cited: readonly Cited[]): string[] {
   const lines = new Set<string>();
   if (cited.some(isCorrectionPending)) lines.add(CORRECTING_LINE);
   if (cited.some(givesResult)) lines.add(RESULT_LINE);
-  if (cited.some(source => source.kind === 'diagnosis')) lines.add(DIAGNOSIS_LINE);
+  // A diagnosis the patient added themselves (0116) owes the same line.
+  if (cited.some(source => source.kind === 'diagnosis' || (source.kind === 'patient_entry' && source.fields?.type === 'diagnosis'))) lines.add(DIAGNOSIS_LINE);
   return PATIENT_LINES.filter(line => lines.has(line));
 }
 /**
@@ -146,7 +147,7 @@ export const KIND_LABELS: Record<SourceKind,string> = {
   note: 'Clinic note', encounter: 'Visit', diagnosis: 'Diagnosis', prescription: 'Prescription',
   investigation: 'Test request', lab_result: 'Lab result', vital: 'Vital signs', document: 'Clinical document',
   attachment: 'Imported document', import: 'Imported history', import_version: 'Earlier version of imported history',
-  health_profile: 'Imported health profile', profile: 'Age and sex',
+  health_profile: 'Imported health profile', profile: 'Age and sex', patient_entry: 'Record you added',
 };
 const FIELD_LABELS: Record<string,string> = {
   noteType: 'Note type', text: 'Text', signedAt: 'Signed', type: 'Type', startedAt: 'Started', endedAt: 'Ended',
