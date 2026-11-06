@@ -846,7 +846,8 @@ describe('PaperReadingService', () => {
         ['hard_page_read', 2]]);
       const medicine = payload.items.find((item) => item.kind === 'medicine')!;
       expect(medicine).toMatchObject({ readBy: 'reread', confidence: 'check_carefully',
-        fields: { name: 'Pyrimethamine', strength: '25mg', frequency: 'od' }, plain: 'Pyrimethamine 25mg od' });
+        // asWritten "Pyrimethamine? 25 mg od": the model's "?" on the name is carried into the name, and so shown.
+        fields: { name: 'Pyrimethamine?', strength: '25mg', frequency: 'od' }, plain: 'Pyrimethamine? 25mg od' });
       expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'read_from_image']));
       // mergeReread keeps the first pass's items the hard reading did not carry.
       expect(payload.items.filter((item) => item.readBy === 'first_pass').map((item) => item.asWritten))

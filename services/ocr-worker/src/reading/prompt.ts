@@ -384,6 +384,11 @@ export interface HardItemExtras {
   nameExact?: boolean;
   /** For a medicine: the name the model proposed, normalised (drug-list.ts normaliseDrugName), for comparing readings. */
   proposedName?: string;
+  /**
+   * The words asWritten marks a guess ("?") that no field carries (hard-page.ts carryMarks), as word keys: finish
+   * checks each is shown with its "?", else marks every shown field a guess.
+   */
+  uncarriedGuesses?: string[];
 }
 
 /**

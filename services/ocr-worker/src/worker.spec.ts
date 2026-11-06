@@ -489,8 +489,9 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     const payload = result.structuredPayload as PaperReadingPayload;
     expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
     const medicine = payload.items.find((item) => item.kind === 'medicine')!;
-    expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine', strength: '437mg' });
-    expect(medicine.plain).toBe('Pyrimethamine 437mg od?');
+    // asWritten "Pyrimethamine? 437 mg od": the model's "?" on the name is shown; the frequency came from context.
+    expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '437mg' });
+    expect(medicine.plain).toBe('Pyrimethamine? 437mg od?');
     expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
       // Zoom off: the reads sent the version 5 hard-page text (version 6 without rule J), and provenance says so.

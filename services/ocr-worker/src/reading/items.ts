@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem, VITAL_MEASURES } from './contract';
 import {
   ambiguousDate, combinedStrengths, compact, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
-  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, withoutReadingMarks,
-  wordsIn,
+  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutCrossedOut, withoutNumberedUnit,
+  withoutReadingMarks, wordsIn,
 } from './grounding';
 import { withoutPlaceholders, type Masker } from './masking';
-import type { ModelItem, ModelPage } from './prompt';
+import { CROSSED_OUT_OPEN, type ModelItem, type ModelPage } from './prompt';
 import type { ReadLine } from '../types';
 
 /** OCR confidence below this goes to a person (0.80, as in the design draft's REVIEW_BELOW 80). */
@@ -510,6 +510,9 @@ function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, plac
  * 'not_in_picture_reading' (image) or 'not_in_second_reading' (text); where it has a best match among the
  * second-reading items (bestMatch: same kind, shared line, the same name, substance, test or measure, or for a note
  * the most shared words), that one pair gets 'differs_from_second_reading' so the person checking compares them.
+ * A kept first-pass item on a line where the second reading has a note holding only crossed-out writing (a hard-page
+ * item crossed out as a whole) also gets 'crossed_out', and a medicine's status becomes 'unknown' (sharesLine never
+ * pairs it with that note, whose kind differs).
  * Items are in reading order (page, first cited line; second-reading items first on the same line) and their ids
  * are made unique again. Identity is merged field by field (mergeIdentity); a field the two readings give
  * differently keeps the first pass's value and flags the page ai_unsure. possible_missed_item is worked out again
@@ -537,8 +540,18 @@ export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly
   }
   const missing = from === 'image' ? 'not_in_picture_reading' : 'not_in_second_reading';
   const kept = earlier.filter((item) => !removed.has(item));
+  // A first-pass order on a line the hard-page reading found wholly crossed out (a note holding only crossed-out
+  // writing, hard-page.ts): never shown as active beside that note.
+  const struckLines = new Set(read.filter((item) => item.kind === 'note' && item.asWritten.includes(CROSSED_OUT_OPEN)
+    && !/[\p{L}\p{N}]/u.test(withoutCrossedOut(item.asWritten))).flatMap((item) => item.lineIds));
   for (const item of kept) {
     addReason(item, missing);
+    if (item.kind !== 'note' && item.lineIds.some((id) => struckLines.has(id))) {
+      addReason(item, 'crossed_out');
+      if (item.kind === 'medicine' && item.fields.status !== 'stopped' && item.fields.status !== 'past') {
+        item.fields = { ...item.fields, status: 'unknown' };
+      }
+    }
     const best = bestMatch(item, read.filter((candidate) => sharesLine(candidate, item)), matched);
     if (best) {
       addReason(item, 'differs_from_second_reading');
