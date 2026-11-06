@@ -1,12 +1,15 @@
-import type { Box, FlagReason, PaperItem } from './contract';
+import type { FlagReason, PaperItem } from './contract';
 import { diagnosisLookalike, matchDiagnosisName, type ListMatch } from './diagnosis-list';
 import { drugLookalike, matchDrugName, normaliseDrugName, type DrugMatch } from './drug-list';
 import { crossedOutParts, withoutCrossedOut } from './grounding';
-import { checkReasonSentence, itemId, mergeIdentity, unionBox, uniqueItemIds, type PageCheck } from './items';
+import { checkReasonSentence, crossedOutOnPlace, itemId, markCrossedOut, mergeIdentity, overlapShare, PAIR_BOX_OVERLAP,
+  unionBox, uniqueItemIds, type PageCheck } from './items';
 import { labTestLookalike, matchLabTestName } from './lab-list';
-import { ALTERNATIVE_OPEN, BASIS_FIELDS, CROSSED_OUT_OPEN, FIELD_UNREAD, HARD_PAGE_FREQUENCIES, NO_LETTERS, PAPER_QUERY,
+import { ALTERNATIVE_OPEN, CROSSED_OUT_OPEN, FIELD_UNREAD, HARD_PAGE_FREQUENCIES, NO_LETTERS, PAPER_QUERY,
   PARTIAL_WORD, type BasisField, type FieldBasis, type HardItemExtras, type ModelItem, type ModelPage } from './prompt';
 import { hasSign, SIGN_READ_MARK } from './signs';
+
+export { PAIR_BOX_OVERLAP };
 
 /**
  * Hard pages (owner decision of 2026-11-05, about 18:40 UTC): a page flagged handwriting or low_confidence that goes
@@ -34,11 +37,12 @@ import { hasSign, SIGN_READ_MARK } from './signs';
  * two readings differ on what to do with it, has status unknown.
  *
  * 1. prepareHardAnswer, on each answer before it is held to the page: the old "[unreadable]" becomes "[?]"; an
- *    item whose asWritten is a description of the writing ("handwritten entry that cannot be read"; isDescription)
- *    becomes a "[?]" note, and such a field becomes "[?]" (description_replaced); an item that is crossed out as a
- *    whole (asWritten says so, or its crossedOut holds the whole reading: wholeCrossedOut) becomes a note (never an
- *    active medicine), and a medicine whose drug name is crossed out has status unknown; the model's plain is
- *    dropped (built in finish). Each word asWritten marks "?" is marked in the fields that hold it (carryMarks, whole
+ *    item with text that looks like a description of the writing ("handwritten entry that cannot be read";
+ *    isDescription, a few obvious reader phrases) is flagged description_suspected, its text kept exactly as read
+ *    (review of 2026-11-06: replacing it lost clinicians' notes about handwriting); an item crossed out as a whole
+ *    (nothing live outside its crossed-out writing, its crossedOut holding the whole reading, or no live drug name
+ *    outside it: wholeCrossedOut) becomes a note (never an active medicine); the model's plain is dropped (built in
+ *    finish). Each word asWritten marks "?" is marked in the fields that hold it (carryMarks, whole
  *    words only), so the payload's fields keep every guess. Frequency is one of HARD_PAGE_FREQUENCIES where it is
  *    one ("?" kept), else as read with every word marked; dose a number where it is one, else as read (marked where
  *    written in words); strength rebuilt from dose and unit ("500mg?"), with the model's own strength as the other
@@ -60,8 +64,11 @@ import { hasSign, SIGN_READ_MARK } from './signs';
  *    comparison of the two readings, so both are made on the names as read. The plain reading is asWritten
  *    annotated in place (displayOf). An item holding a handwritten sign mark gets sign_read; one with crossed-out
  *    writing crossed_out; one with a "?" from the letters unsure_from_letters (kept apart from the code
- *    field_from_context); an item one reading found where the other found that writing wholly crossed out is joined
- *    to it (struckByOther).
+ *    field_from_context).
+ * 5. Crossed out, line by line (markStruckLines; review of 2026-11-06: matching struck names to orders kept missing
+ *    cases): any crossed-out writing either reading shows makes every medicine on that line or over that place status
+ *    unknown and crossed_out, with readings_disagree where only the other reading shows it. No name is matched.
+ *    mergeReread (items.ts) applies the same rule with the first pass.
  * The result is then merged with the first pass by mergeReread, unchanged, so no first-pass item is lost.
  */
 
@@ -74,8 +81,11 @@ export const READINGS_DISAGREE = 'readings_disagree';
 export const SIGN_READ = 'sign_read';
 /** Writing crossed out on the paper, shown "(crossed out: X)" on the item. */
 export const CROSSED_OUT = 'crossed_out';
-/** The model described the writing instead of reading it; replaced by "[?]". */
-export const DESCRIPTION_REPLACED = 'description_replaced';
+/**
+ * Some text of the item looks like a sentence about the writing instead of a reading of it (isDescription): flagged
+ * only, the text is shown exactly as read.
+ */
+export const DESCRIPTION_SUSPECTED = 'description_suspected';
 /**
  * Some of the item is marked uncertain from the shapes of its letters: a word with "?" that no field filled from
  * context holds, a word cut short ("Am…"), "[?]" or a field placeholder ("[dose?]"). Kept apart from
@@ -201,61 +211,21 @@ export function splitAlternative(text: string): [string, string] | null {
 }
 
 /**
- * Whether a text describes the writing instead of reading it ("Handwritten treatment entry that cannot be read; check
- * the paper", "illegible", "appears to say ..."): never shown as a reading (owner decision of 2026-11-06). Run after
- * "[unreadable]" became "[?]". Deliberately narrow: words a clinician writes on a page ("unclear diagnosis", "faint
- * line" on a test) do not match.
+ * Whether a text looks like the reader describing the writing instead of reading it ("Handwritten treatment entry
+ * that cannot be read; check the paper"). Non-destructive (review of 2026-11-06): it only adds description_suspected
+ * and check_carefully, and the text is shown exactly as read, so a miss costs only a flag and a clinician's note that
+ * matches ("Dysgraphia: handwriting that cannot be read") is never changed. Only obvious reader phrases match: "cannot
+ * be read" with no subject or the writing as its subject, "illegible handwriting" and the like as the whole text, a
+ * "handwritten ... entry", "check the paper" closing the text, and the writing as the subject of "appears to say".
  */
-/** What a description is about: the writing itself, never a person or a finding. */
-const WRITING = '(?:hand)?writing|entry|text|words?|letters|scribble|item';
-/** The writing itself, never something a patient sees: no "text", "words" or "letters" (those may be a symptom). */
-const WRITTEN = '(?:hand)?writing|entry|scribble';
-/** The writing as shown, for the whole-text patterns: also "text" and one "word" (never "words" or "letters"). */
-const WRITTEN_SHOWN = '(?:hand)?writing|entry|scribble|text|word|item';
-/** A description's own subject for the narrow whole-text patterns: the writing, never "words" or "letters" (speech, sight). */
-const WRITING_ONE = '(?:hand)?writing|entry|word|scribble';
-const CANNOT = "(?:cannot|can ?not|can't|could ?not|couldn't)";
 const DESCRIPTION_PATTERNS: readonly RegExp[] = [
-  // "cannot be read" with no subject, or "it"/"this" ("Could not be read; check the paper"); with the writing as
-  // subject below. Any other subject is a clinician's note ("Mantoux cannot be read until 72 hours", "ECG could not be
-  // interpreted", "Patient cannot be read to"), and "can't read" with a person as subject ("Pt unable to read") too.
-  new RegExp(`^\\s*(?:(?:it|this)\\s+)?${CANNOT}\\s+be\\s+(?:read|made out|deciphered)\\b`, 'i'),
-  new RegExp(`\\b(?:${WRITING})\\s+(?:that\\s+|which\\s+)?(?:is\\s+|was\\s+)?(?:cannot|can ?not|can't|could ?not|couldn't|unable to)\\s+(?:be\\s+)?(?:read|made out|deciphered|interpreted)\\b`, 'i'),
-  // "Illegible" alone or about the writing; "Script illegible, called prescriber" or "Label not readable, query
-  // pharmacy" is a clinician's note about something else.
-  /^\s*(?:illegible|indecipherable|undecipherable|unintelligible|unreadable)\s*[.;:]?\s*$/i,
-  new RegExp(`\\b(?:illegible|indecipherable|undecipherable|unintelligible|unreadable)\\s+(?:\\p{L}+\\s+)?(?:${WRITING}|note)\\b`, 'iu'),
-  new RegExp(`\\b(?:${WRITING})\\s+(?:is\\s+|was\\s+)?(?:illegible|indecipherable|undecipherable|unintelligible|unreadable)\\b`, 'i'),
-  // "check the paper" closing the text (or alone); "Check the paper chart" or "check the original letter" is an order.
-  /(?:^|[;,.:–-]\s*)check\s+(?:it\s+|this\s+)?(?:against\s+)?the\s+paper\s*[.;:]?\s*$/i,
-  /\b(?:handwritten|illegible|scribbled)\s+(?:\p{L}+\s+)?(?:entry|text|writing|scribble|item|word)\b/iu,
-  // "Handwritten note" or "Scribbled word" as the whole text; "Handwritten note given to patient" is a reading.
-  /^\s*(?:handwritten|scribbled|illegible)\s+(?:\p{L}+\s+)?(?:note|words?|letters)\s*[.;:]?\s*$/iu,
-  // Inside a longer text only where the subject can only be the writing ("smudged entry, check the paper"); words,
-  // letters or text that look blurred or faint may be what a patient sees ("C/o blurred letters when reading").
-  new RegExp(`\\b(?:unclear|smudged|faded|obscured)\\s+(?:${WRITTEN})\\b`, 'i'),
-  new RegExp(`\\b(?:${WRITTEN})\\s+(?:is\\s+|was\\s+)?(?:obscured|smudged|faded)\\b`, 'i'),
-  // As the whole text: "Blurred text", "Faint writing", "Text blurred." (never "Blurred vision"); never "words" or
-  // "letters", which may be speech or sight ("Words unclear", "Letters faint").
-  new RegExp(`^\\s*(?:unclear|smudged|faded|faint|obscured|blurred|blurry|indistinct)\\s+(?:${WRITTEN_SHOWN})\\s*[.;:]?\\s*$`, 'i'),
-  new RegExp(`^\\s*(?:${WRITTEN_SHOWN})\\s+(?:is\\s+|was\\s+)?(?:unclear|obscured|smudged|faded|faint|blurred|blurry)`
-    + '\\s*[.;:]?\\s*$', 'i'),
-  // The writing as the first word, then how it looks, with more words after ("Writing is unclear here", "Writing too
-  // faint", "Word not clear").
-  new RegExp(`^\\s*(?:the\\s+)?(?:${WRITING_ONE})\\s+(?:is\\s+|was\\s+)?(?:too\\s+)?(?:faint|unclear|not\\s+clear|indistinct|smudged|faded|obscured)\\b`, 'i'),
-  // "Hard to read", "Difficult to read", "Unable to decipher", "Unable to read this entry" as the whole text (a bare
-  // "Unable to read" may be a note about the patient).
-  /^\s*(?:(?:hard|difficult|impossible)\s+to\s+(?:read|decipher|make\s+out)|unable\s+to\s+(?:decipher|make\s+out))(?:\s+(?:this|the)\s+(?:entry|writing|handwriting|word))?\s*[.;:]?\s*$/i,
-  /^\s*unable\s+to\s+(?:read|decipher|make\s+out)\s+(?:this|the)\s+(?:entry|writing|handwriting|word)\s*[.;:]?\s*$/i,
-  /\b(?:partly|partially|barely|hardly)\s+(?:legible|readable)\b/i,
-  // "Appears to say amoxicillin" with the writing as subject; with no subject only before a quoted or capitalised
-  // word ("Appears to read Flagyl"), so "Appears to read and write" or "Seems to read well" (findings) never match.
-  /^\s*(?:it|this|the\s+(?:hand)?writing|the\s+(?:text|word|entry))\s+(?:appears|seems)\s+to\s+(?:say|read)\b/i,
-  /^\s*(?:[Aa]ppears|[Ss]eems)\s+to\s+(?:say|read)\s*:?\s*(?:["'\u201c\u2018]|\p{Lu})/u,
-  /^\s*(?:[Aa]ppears|[Ss]eems)\s+to\s+say\s+(?!(?:he|she|they|that|so|yes|no|something|nothing|words?|it)\b)\p{L}/u,
-  // "Not legible" alone or about the writing ("text is not legible"); "Label not readable, query pharmacy" is a note.
-  /^\s*not\s+(?:legible|readable)\s*[.;:]?\s*$/i,
-  new RegExp(`\\b(?:${WRITING})\\s+(?:is\\s+|was\\s+)?not\\s+(?:legible|readable)\\b`, 'i'),
+  /^\s*(?:(?:it|this)\s+)?(?:cannot|can ?not|can't|could ?not|couldn't)\s+be\s+(?:read|made out|deciphered)\b/i,
+  /\b(?:handwriting|writing|entry|text)\s+(?:that|which)\s+(?:cannot|can ?not|can't|could ?not|couldn't)\s+be\s+(?:read|made out|deciphered)\b/i,
+  /^\s*(?:illegible|unreadable|indecipherable)(?:\s+(?:handwriting|writing|entry|scribble))?\s*[.;:]?\s*$/i,
+  /^\s*(?:handwriting|writing|entry)\s+(?:is\s+)?(?:illegible|unreadable|indecipherable)\s*[.;:]?\s*$/i,
+  /\bhandwritten\s+(?:\p{L}+\s+){0,2}entry\b/iu,
+  /(?:^|[;,.:]\s*)check\s+(?:it\s+)?(?:against\s+)?the\s+paper\s*[.;:]?\s*$/i,
+  /^\s*(?:the\s+)?(?:hand)?writing\s+(?:appears|seems)\s+to\s+(?:say|read)\b/i,
 ];
 export function isDescription(text: string): boolean {
   return DESCRIPTION_PATTERNS.some((pattern) => pattern.test(text));
@@ -344,16 +314,6 @@ function drugDisplay(match: DrugMatch, guess: boolean): string {
   return match.brand === null ? `${capitalise(match.generic)}${mark}` : `${capitalise(match.brand)}${mark} (${match.generic})`;
 }
 
-/** The answer item replaced by a "[?]" note: the model described the writing instead of reading it. */
-function describedNote(item: ModelItem): ModelItem {
-  const empty = Object.fromEntries(TEXT_FIELDS.map((field) => [field, ''])) as Record<(typeof TEXT_FIELDS)[number], string>;
-  return { ...item, ...empty, kind: 'note', asWritten: NO_LETTERS, noteText: NO_LETTERS, plain: '', unsure: true,
-    status: 'none', severity: 'none', measure: 'none', noKnownAllergies: false,
-    hard: { dose: '', doseUnit: '', crossedOut: '', described: true,
-      basis: Object.fromEntries(BASIS_FIELDS.map((key) => [key, key === 'other' ? 'letters' : 'empty'])) as
-        Record<BasisField, FieldBasis> } };
-}
-
 /** An item whose writing is all crossed out (rule G): a note holding the crossed-out writing, never an active item. */
 function crossedOutNote(item: ModelItem): ModelItem {
   const empty = Object.fromEntries(TEXT_FIELDS.map((field) => [field, ''])) as Record<(typeof TEXT_FIELDS)[number], string>;
@@ -401,17 +361,18 @@ export function carryMarks(value: string, keys: readonly string[], carried: Set<
 }
 
 /**
- * Whether an item's crossed-out writing is the whole item (rule G), even where asWritten does not say
- * "(crossed out: X)": the crossed-out writing holds all of asWritten, or (a medicine) its name and every filled
- * dose and frequency.
+ * Whether an item is crossed out as a whole (rule G): nothing is written outside its crossed-out writing; or its
+ * crossedOut holds all of asWritten where asWritten does not say "(crossed out: X)"; or (a medicine) its drug name is
+ * written only in the crossed-out writing, so no live drug name stands outside it ("IV (crossed out: Flagyl 500mg
+ * tds)"). Only the item's own writing is looked at.
  */
 function wholeCrossedOut(item: ModelItem): boolean {
-  const crossed = bare(allCrossedOut(item.asWritten, item.hard?.crossedOut));
-  if (!crossed || !hasLetters(crossed)) return false;
-  const live = bare(withoutCrossedOut(item.asWritten));
-  if (live && crossed.includes(live)) return true;
-  if (item.kind !== 'medicine' || isBlank(item.name)) return false;
-  return [item.name, item.hard?.dose, item.frequency].every((value) => isBlank(value) || crossed.includes(bare(value)));
+  const crossed = allCrossedOut(item.asWritten, item.hard?.crossedOut);
+  if (!hasLetters(crossed)) return false;
+  const live = withoutCrossedOut(item.asWritten);
+  if (!hasLetters(live)) return true;
+  if (!item.asWritten.includes(CROSSED_OUT_OPEN) && bare(crossed).includes(bare(live))) return true;
+  return item.kind === 'medicine' && nameCrossedOut(item.name, crossed) && !nameCrossedOut(item.name, live);
 }
 
 /** Step 1 (see the header). Items without hard-page extras are left as they are. */
@@ -421,32 +382,22 @@ export function prepareHardAnswer(answer: ModelPage): ModelPage {
     let item: ModelItem = { ...original, asWritten: markPartialGuesses(cleanTokens(original.asWritten)), plain: '',
       hard: { ...original.hard, dose: cleanTokens(original.hard.dose), doseUnit: cleanTokens(original.hard.doseUnit),
         crossedOut: cleanTokens(original.hard.crossedOut ?? '').trim() } };
-    if (isDescription(item.asWritten)) return describedNote(item);
-    let described = false;
+    // A text that looks like a description of the writing is flagged, never changed or dropped (isDescription).
+    let described = isDescription(item.asWritten);
     for (const field of TEXT_FIELDS) {
-      const value = cleanTokens(item[field]);
-      if (isDescription(value)) {
-        described = true;
-        item[field] = field === 'noteText' ? '' : NO_LETTERS;
-      } else item[field] = value;
+      item[field] = cleanTokens(item[field]);
+      if (isDescription(item[field])) described = true;
     }
-    if (isDescription(item.hard!.dose)) { described = true; item.hard!.dose = NO_LETTERS; }
-    if (isDescription(item.hard!.doseUnit)) { described = true; item.hard!.doseUnit = NO_LETTERS; }
-    if (isDescription(item.hard!.crossedOut ?? '')) { described = true; item.hard!.crossedOut = NO_LETTERS; }
+    if ([item.hard!.dose, item.hard!.doseUnit, item.hard!.crossedOut ?? ''].some(isDescription)) described = true;
     if (described) item.hard = { ...item.hard!, described: true };
     // Crossed out as a whole: never an active item, whatever kind the model gave it. Where asWritten does not say
-    // so, the crossed-out writing becomes the item's asWritten, so the item shows only as crossed out.
-    if (item.kind !== 'note' && item.asWritten.includes(CROSSED_OUT_OPEN) && !hasLetters(withoutCrossedOut(item.asWritten))) {
-      item = crossedOutNote(item);
-    } else if (item.kind !== 'note' && wholeCrossedOut(item)) {
+    // so, the crossed-out writing becomes the item's asWritten, so the item shows only as crossed out. Any other
+    // crossed-out writing makes the medicines on its line unknown (mergeHardReadings, crossedOutOnPlace).
+    if (item.kind !== 'note' && wholeCrossedOut(item)) {
       // asWritten already showing the crossed-out writing ("IV (crossed out: Flagyl 500mg tds)") is kept, every word.
       item = crossedOutNote(item.asWritten.includes(CROSSED_OUT_OPEN) ? item
         : { ...item, asWritten: `${CROSSED_OUT_OPEN}${item.hard!.crossedOut})` });
     }
-    // The drug name is crossed out but other writing is not (a rewritten order): whether it is active is unknown. The
-    // crossed-out writing is the reading's crossedOut and what asWritten shows crossed out, whichever the model filled.
-    if (item.kind === 'medicine' && (item.status === 'new' || item.status === 'current') && !isBlank(item.name)
-      && nameCrossedOut(item.name, allCrossedOut(item.asWritten, item.hard!.crossedOut))) item.status = 'unknown';
     const { basis } = item.hard!;
     // Each word asWritten marks a guess is marked in the fields that hold it (the shown text is built from them).
     const keys = guessKeys(item.asWritten);
@@ -520,16 +471,8 @@ export interface HardReading { check: PageCheck; answer: ModelPage }
 export interface HardPageAgreement { fieldsCompared: number; fieldsAgreed: number; itemsPaired: number; itemsSingle: number }
 export const noAgreement = (): HardPageAgreement => ({ fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 0 });
 
-/** Two items are on the same place when they share a cited line or their boxes overlap by half the smaller box. */
-export const PAIR_BOX_OVERLAP = 0.5;
-
 const span = (aStart: number, aSize: number, bStart: number, bSize: number) =>
   Math.max(0, Math.min(aStart + aSize, bStart + bSize) - Math.max(aStart, bStart));
-function overlapShare(a: Box, b: Box): number {
-  const smaller = Math.min(a.width * a.height, b.width * b.height);
-  if (!(smaller > 0)) return 0;
-  return span(a.left, a.width, b.left, b.width) * span(a.top, a.height, b.top, b.height) / smaller;
-}
 
 /** Which basis field a contract field's value comes under. */
 function basisKey(kind: PaperItem['kind'], field: string): BasisField {
@@ -917,9 +860,12 @@ export function displayOf(asWritten: string, notes: readonly DisplayNote[], cros
     // A name written only in crossed-out writing ("IV (crossed out: Flagyl) 500mg") is shown there, struck: never
     // added again at the end as if it were live.
     const struck = crossedOutParts(text).join(' ');
+    const struckWords = words(struck.replace(/[;()]/g, ' '));
     for (const note of missed) {
       const shown = note.replace ?? note.asRead;
       if ([note.asRead, note.replace].some((value) => value !== undefined && nameCrossedOut(value, struck))) continue;
+      // A listed drug struck under its other name (the generic struck, the brand read, or the other way round).
+      if (note.generic && struckWords.some((word) => matchDrugName(word)?.generic === note.generic)) continue;
       if (!hasLetters(shown)) { if (!text.includes(shown.trim())) text = `${text} ${shown.trim()}`; continue; }
       text = `${text} ${markWords(shown)}${note.after ? ` ${note.after}` : ''}`;
     }
@@ -1065,7 +1011,7 @@ function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: stri
   const checkReasons = [...item.checkReasons];
   const signs = holdsSign(item) ? [SIGN_READ] : [];
   const crossed = !isBlank(shown.crossed) || item.asWritten.includes(CROSSED_OUT_OPEN) ? [CROSSED_OUT] : [];
-  const described = shown.described ? [DESCRIPTION_REPLACED] : [];
+  const described = shown.described ? [DESCRIPTION_SUSPECTED] : [];
   let fields = groundedFields(item);
   const plain = displayOf(item.asWritten, displayNotes(item, fields, shown.names), shown.crossed,
     fieldsText(item.kind, fields));
@@ -1109,27 +1055,6 @@ function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: stri
 function single(side: Side, sourceSha256Hex: string): PaperItem {
   const item = { ...side.item, fields: { ...side.item.fields } } as PaperItem;
   return finish(item, [SINGLE_READING, ...(anyFromContext(side) ? [FROM_CONTEXT] : [])], sourceSha256Hex, shownOf(side));
-}
-
-/** An item wholly crossed out: a note whose asWritten is only "(crossed out: X)". */
-const wholeCrossedNote = (item: PaperItem) => item.kind === 'note' && item.asWritten.trim().startsWith(CROSSED_OUT_OPEN)
-  && !hasLetters(withoutCrossedOut(item.asWritten));
-
-/**
- * An item one reading found where the other found that writing wholly crossed out (a note "(crossed out: X)" on the
- * same line): one item, the live reading first and the crossed-out one as the other option ("IV? Flagyl? 500mg? (or
- * (crossed out: Flagyl 500mg))"), crossed_out and readings_disagree, and a medicine's status unknown.
- */
-function struckByOther(live: Side, struck: Side, sourceSha256Hex: string): PaperItem {
-  const asWritten = `${markWords(live.item.asWritten)} ${ALTERNATIVE_OPEN}${struck.item.asWritten.trim()})`;
-  const lineIds = [...new Set([...live.item.lineIds, ...struck.item.lineIds])].sort((x, y) => lineNumber(x) - lineNumber(y));
-  const fields = live.item.kind === 'medicine' && live.item.fields.status !== 'stopped' && live.item.fields.status !== 'past'
-    ? { ...live.item.fields, status: 'unknown' } : { ...live.item.fields };
-  const item = { ...live.item, asWritten, lineIds, box: unionBox([live.item.box, struck.item.box]) ?? live.item.box,
-    fields } as PaperItem;
-  const shown = shownOf(live);
-  return finish(item, [READINGS_DISAGREE, CROSSED_OUT, ...(anyFromContext(live) ? [FROM_CONTEXT] : [])], sourceSha256Hex,
-    { ...shown, crossed: crossedOutOf(struck.item.asWritten, struck.extras?.crossedOut) });
 }
 
 /**
@@ -1248,13 +1173,8 @@ function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPag
   if (bare(shownA.crossed) !== bare(shownB.crossed)) disagree = true;
   // The two readings differ on what to do with the order ("Start" against "Stop", "Continue" against nothing).
   const said = (side: Side) => [...new Set(instructionWords(side.item.asWritten, isInstructionWord))].sort().join(' ');
-  // Or one reading has the drug crossed out that the other reads as live ("(crossed out: Flagyl) Ceftriaxone" against
-  // "Flagyl"): whether that order is active is not known.
-  const struckIn = (side: Side) => allCrossedOut(side.item.asWritten, side.extras?.crossedOut);
-  const liveNames = (side: Side) => [side.extras?.writtenName, side.item.kind === 'medicine' ? side.item.fields.name : null];
-  const struckByOne = a.item.kind === 'medicine' && [[a, b], [b, a]].some(([x, y]) =>
-    [...liveNames(y!), (fields as { name?: string | null }).name].some((name) => nameCrossedOut(name, struckIn(x!))));
-  const statusDiffers = a.item.kind === 'medicine' && (said(a) !== said(b) || struckByOne);
+  // Crossed-out writing on the line is the line rule's (mergeHardReadings), not matched by name here.
+  const statusDiffers = a.item.kind === 'medicine' && said(a) !== said(b);
   const lineIds = [...new Set([...a.item.lineIds, ...b.item.lineIds])].sort((x, y) => lineNumber(x) - lineNumber(y));
   const reasons = [...a.item.checkReasons, ...b.item.checkReasons.filter((code) => !a.item.checkReasons.includes(code))];
   const merged = { ...a.item, asWritten, lineIds, box: unionBox([a.item.box, b.item.box]) ?? a.item.box,
@@ -1310,6 +1230,28 @@ function neighbourGap(a: Side, b: Side): number | null {
 }
 
 /**
+ * Crossed out, line by line (no name matching, any kind of item): any crossed-out writing a reading shows (a
+ * "(crossed out: X)" group in its asWritten, or its crossedOut) makes every medicine kept on one of its lines or over
+ * its box (crossedOutOnPlace) status unknown (unless stopped or past) and crossed_out, whatever was read there; where
+ * only the other reading shows it (one reading read the line live, the other struck), readings_disagree too. `from`
+ * says which readings each item came from.
+ */
+function markStruckLines(items: PaperItem[], from: ReadonlyArray<ReadonlySet<'left' | 'right'>>,
+  sides: ReadonlyArray<{ side: Side; read: 'left' | 'right' }>): void {
+  const marks = sides.filter(({ side }) => !isBlank(crossedOutOf(side.item.asWritten, side.extras?.crossedOut)))
+    .map(({ side, read }) => ({ lineIds: side.item.lineIds, box: side.item.box, read }));
+  items.forEach((item, index) => {
+    const hits = item.kind === 'medicine' ? marks.filter((mark) => crossedOutOnPlace(item, mark)) : [];
+    if (hits.length === 0) return;
+    markCrossedOut(item);
+    if (hits.every((mark) => !from[index]!.has(mark.read)) && !item.checkReasons.includes(READINGS_DISAGREE)) {
+      item.checkReasons.push(READINGS_DISAGREE);
+      item.checkReason = checkReasonSentence(item.checkReasons);
+    }
+  });
+}
+
+/**
  * The hard page's reading from its two readings (or from one, when the other failed or was declined: every item
  * then single_reading_only). Items are paired one to one by kind and place (a shared cited line, or boxes
  * overlapping by PAIR_BOX_OVERLAP of the smaller), best pairs first, then the same listed medicine on neighbouring
@@ -1326,7 +1268,9 @@ export function mergeHardReadings(readings: readonly HardReading[], sourceSha256
   const [first, second] = readings;
   if (!first) throw new Error('mergeHardReadings needs a reading');
   if (!second) {
-    const items = sidesOf(first).map((side) => single(side, sourceSha256Hex));
+    const sides = sidesOf(first);
+    const items = sides.map((side) => single(side, sourceSha256Hex));
+    markStruckLines(items, items.map(() => new Set(['left'] as const)), sides.map((side) => ({ side, read: 'left' })));
     tally.itemsSingle += items.length;
     return { check: { ...first.check, items: uniqueItemIds(items), rawIndexes: undefined }, agreement: tally };
   }
@@ -1359,35 +1303,19 @@ export function mergeHardReadings(readings: readonly HardReading[], sourceSha256
     usedLeft.set(i, j);
     usedRight.add(j);
   }
-  // Then an item one reading found where the other found that writing wholly crossed out (a "(crossed out: X)"
-  // note on the same line, or over half its box): one item, crossed_out and readings_disagree (struckByOther).
-  const struck = new Map<string, { live: Side; crossed: Side }>();
-  const usedStruck = new Set<string>();
-  const unpaired = [...left.map((side, i) => ({ side, from: 'left', at: i, used: usedLeft.has(i) })),
-    ...right.map((side, j) => ({ side, from: 'right', at: j, used: usedRight.has(j) }))].filter((entry) => !entry.used);
-  for (const live of unpaired) {
-    if (live.side.item.kind === 'note' && wholeCrossedNote(live.side.item)) continue;
-    const other = unpaired.find((entry) => entry.from !== live.from && !usedStruck.has(`${entry.from}${entry.at}`)
-      && wholeCrossedNote(entry.side.item)
-      && (entry.side.item.lineIds.some((id) => live.side.item.lineIds.includes(id))
-        || overlapShare(entry.side.item.box, live.side.item.box) >= PAIR_BOX_OVERLAP));
-    if (!other || struck.has(`${live.from}${live.at}`)) continue;
-    struck.set(`${live.from}${live.at}`, { live: live.side, crossed: other.side });
-    usedStruck.add(`${other.from}${other.at}`);
-  }
   const items: PaperItem[] = [];
-  const unpairedItem = (side: Side, key: string) => {
-    if (usedStruck.has(key)) return;
-    const found = struck.get(key);
-    if (found) { tally.itemsPaired += 1; items.push(struckByOther(found.live, found.crossed, sourceSha256Hex)); }
-    else items.push(single(side, sourceSha256Hex));
-  };
+  /** Which readings each kept item came from, for the crossed-out rule. */
+  const from: Array<ReadonlySet<'left' | 'right'>> = [];
   left.forEach((a, i) => {
     const j = usedLeft.get(i);
-    if (j === undefined) unpairedItem(a, `left${i}`);
-    else items.push(pair(a, right[j]!, sourceSha256Hex, tally));
+    if (j === undefined) { items.push(single(a, sourceSha256Hex)); from.push(new Set(['left'])); }
+    else { items.push(pair(a, right[j]!, sourceSha256Hex, tally)); from.push(new Set(['left', 'right'])); }
   });
-  right.forEach((b, j) => { if (!usedRight.has(j)) unpairedItem(b, `right${j}`); });
+  right.forEach((b, j) => {
+    if (!usedRight.has(j)) { items.push(single(b, sourceSha256Hex)); from.push(new Set(['right'])); }
+  });
+  markStruckLines(items, from, [...left.map((side) => ({ side, read: 'left' as const })),
+    ...right.map((side) => ({ side, read: 'right' as const }))]);
   tally.itemsSingle += items.length - tally.itemsPaired;
   const firstLine = (item: PaperItem) => Math.min(...item.lineIds.map(lineNumber));
   const ordered = items.map((item, index) => ({ item, index }))

@@ -420,14 +420,19 @@ Each claimed job runs, in order:
      and #196 kept the model's `plain` for every kind but a medicine, and an
      empty one for a disagreeing pair). The hard-page prompt now says every
      field is the reading itself, never a description, and to leave `plain`
-     empty; and `isDescription` (hard-page.ts) catches a description the
-     model still writes: an `asWritten` that describes the writing makes the
-     item a `[?]` note, a field that does becomes `[?]`, with the reason
-     `description_replaced`. The detector no longer takes a symptom for a
-     description: "Blurred vision", "C/o blurred letters when reading",
-     "Words blurry on reading" and "Pt appears to read well" are readings;
-     blurred, blurry or faint writing, text, words or letters count only as
-     the whole text ("Blurred text", "Faint writing"). Free-text instructions
+     empty. `isDescription` (hard-page.ts) is non-destructive: it never
+     replaces or drops text. An item with text that looks like a description
+     of the writing gets the reason `description_suspected` (and is
+     `check_carefully`, as every hard-page item is); the text is shown
+     exactly as read. Replacing it with `[?]` had kept removing clinicians'
+     notes about handwriting (dysgraphia, micrographia, "Writing unclear
+     since stroke", "Script illegible, called prescriber"), so the patterns
+     are now only obvious reader phrases: "cannot be read" with no subject or
+     the writing as subject ("entry that cannot be read"), "Illegible" or
+     "Illegible handwriting" as the whole text, a "handwritten ... entry",
+     "check the paper" closing the text, and "the writing appears to say".
+     A miss costs only the flag. Tests keep the clinical notes byte for byte
+     whether flagged or not. Free-text instructions
      ("Transfer to the ward", "Review in 2 days") are asked for as `note`
      items.
    - *Status from the words shown.* A medicine whose shown text has a word
@@ -470,20 +475,32 @@ Each claimed job runs, in order:
      500mg (crossed out: 400mg?) 8hrly (every 8 hours)` (a struck drug before
      its replacement: `IV? (crossed out: Ceftriaxone?) Cefuroxime? [dose?]
      8hrly?`), with the reason `crossed_out`; an
-     item crossed out as a whole becomes a note (never an active medicine);
-     checks take crossed-out writing off (`forMatching`), so a struck dose is
-     never held to be the dose. Two reads that see different crossed-out
-     writing are `readings_disagree`. Where one read finds an item and the
-     other finds that line wholly crossed out (a `(crossed out: X)` note on
-     the same line, or over half its box), the two become one item, the live
-     read first: `Amoxil? (amoxicillin) 500mg? tds? (or (crossed out: Amoxil
-     500mg tds))`, `crossed_out` and `readings_disagree`, a medicine's status
-     `unknown`.
+     item crossed out as a whole (nothing live outside the struck writing, or
+     no live drug name outside it: `IV (crossed out: Flagyl 500mg tds)`)
+     becomes a note (never an active medicine); checks take crossed-out
+     writing off (`forMatching`), so a struck dose is never held to be the
+     dose. Two reads that see different crossed-out writing are
+     `readings_disagree`.
+   - *Crossed out, line by line.* Matching struck drug names to orders
+     (brand against generic, a name only in the struck group, one read live
+     and the other struck) kept missing cases, so it is replaced by one rule
+     with no name matching: if any read (either hard read, or the first
+     pass where its item shows a `(crossed out: X)` group) shows crossed-out
+     writing on a line, every medicine from any read citing that line, or
+     whose box overlaps the struck item's box by half the smaller box (the
+     pairing overlap), has status `unknown` (unless `stopped` or `past`) and
+     `crossed_out`, and `readings_disagree` where only the other read shows
+     the strike. So a struck dose (`500mg (crossed out: 400mg?)`) or a struck
+     drug before its replacement makes the order `unknown`. One read's live
+     order and the other's wholly struck note are kept as a pair (both
+     shown, the order `unknown`, `crossed_out`, `readings_disagree`), no
+     longer joined into one item. The struck text stays shown in place as
+     `(crossed out: X?)`.
    - *Reasons stay codes.* `checkReasons` are codes, as before; `checkReason`
      stays the one sentence derived from them, so the payload contract
      (`hid-paper-reading-v2`, schema 2) is unchanged and neither `ocr-api` nor
      `@hid/api-client` changes. Two codes are added (`crossed_out`,
-     `description_replaced`); the contract allows any code. The website shows
+     `description_suspected`); the contract allows any code. The website shows
      the reasons behind "Why?" (not this change). `unsure_from_letters` is a
      third code (above).
    - *Every "?" goes to a person.* Every hard-page item is `check_carefully`

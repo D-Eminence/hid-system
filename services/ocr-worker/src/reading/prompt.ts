@@ -392,7 +392,7 @@ export interface HardItemExtras {
   dose: string; doseUnit: string; basis: Record<BasisField, FieldBasis>;
   /** The writing crossed out on the item, as read ("" where none; absent in answers made before it). */
   crossedOut?: string;
-  /** The model wrote a description of the writing instead of reading it; replaced by NO_LETTERS (hard-page.ts). */
+  /** Some text looks like a description of the writing (hard-page.ts isDescription): flagged, never changed. */
   described?: boolean;
   /** For a medicine, after the drug list (hard-page.ts): the listed generic its name matched, or null. */
   generic?: string | null;

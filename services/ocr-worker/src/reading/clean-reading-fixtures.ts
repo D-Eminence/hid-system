@@ -51,7 +51,7 @@ const note = (asWritten: string, noteText = asWritten): Partial<ModelItem> => ({
 /**
  * The target style, row by row. Rows 1 to 3 are the coordinator's examples from the owner's chat reading; the others
  * cover the rules that come with them (disagreement, crossing-out, no letter shapes, a query on the paper, a
- * description from the model).
+ * description from the model, flagged and shown as read).
  */
 export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
   {
@@ -91,7 +91,9 @@ export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
     readA: { item: medicine('IV Flagyl 500mg (crossed out: 400mg?) 8hrly', { route: 'IV', name: 'Flagyl', strength: '500mg',
       frequency: '8hrly' }), dose: '500', doseUnit: 'mg', crossedOut: '400mg?' },
     plain: 'IV Flagyl (metronidazole) 500mg (crossed out: 400mg?) 8hrly (every 8 hours)',
+    // Any crossed-out writing on the line: whether the order is active is not known (the line rule).
     reasons: ['crossed_out'],
+    status: 'unknown',
   },
   {
     name: 'a word with no letter shapes, "[?]"',
@@ -154,6 +156,7 @@ export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
       frequency: '8hrly?' }), dose: '[dose?]', crossedOut: 'Ceftriaxone?', basis: { name: 'context', frequency: 'context' } },
     plain: 'IV? (crossed out: Ceftriaxone?) Cefuroxime? [dose?] 8hrly?',
     reasons: ['crossed_out', 'field_from_context'],
+    status: 'unknown',
   },
   {
     name: 'a partial drug name with the model\'s whole-word guess in brackets, never expanded by the list (transcript B "Pl…/Ph… (Plasil?)")',
@@ -199,12 +202,12 @@ export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
     status: 'unknown',
   },
   {
-    name: 'a description from the model, replaced by "[?]"',
+    name: 'a description from the model, flagged and shown exactly as read',
     lineText: 'xx~~ ~~',
     readA: { item: medicine('Handwritten treatment entry that cannot be read; check the paper',
       { plain: 'Handwritten treatment entry that cannot be read; check the paper' }) },
-    plain: '[?]',
-    reasons: ['description_replaced'],
+    plain: 'Handwritten treatment entry that cannot be read; check the paper',
+    reasons: ['description_suspected'],
   },
 ];
 
