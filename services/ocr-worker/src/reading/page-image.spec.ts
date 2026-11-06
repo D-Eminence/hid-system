@@ -1,6 +1,7 @@
 import { base64Length, HIGH_RESOLUTION_TIER, IMAGE_MAX_BASE64_LENGTH, imageTierOf, imageTokens, jpegDimensions,
   jpegOrientation, pageImageFor, pngDimensions, resizedSize, STANDARD_TIER } from './page-image';
-import { fixtureExifSegment, fixtureJpeg, fixturePng } from './test-fixtures';
+import { FIXTURE_PNG_OVERHEAD, fixtureExifSegment, fixtureJpeg, fixturePng, pngChunk, pngFromChunks,
+  pngIhdr } from './test-fixtures';
 
 describe('page picture for the image re-read', () => {
   it('reads the size from a PNG IHDR and a JPEG frame header, and nothing from other bytes', () => {
@@ -12,6 +13,34 @@ describe('page picture for the image re-read', () => {
     expect(jpegDimensions(new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0, 2]))).toBeNull();
     // A segment length that runs off the end never reads past the bytes.
     expect(jpegDimensions(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xff]))).toBeNull();
+  });
+
+  it('reads a PNG size only from a PNG whose chunks walk cleanly, so the picture sent has one header', () => {
+    const idat = pngChunk('IDAT', [1, 2, 3]);
+    const iend = pngChunk('IEND');
+    expect(pngDimensions(pngFromChunks(pngIhdr(100, 80), idat, iend))).toEqual({ width: 100, height: 80 });
+    // A second IHDR (pngjs would take it as the size), anywhere: no size, so the picture is not sent.
+    const twoHeaders = pngFromChunks(pngIhdr(100, 100), pngIhdr(4_000, 3_000, 8, 6), idat, iend);
+    expect(pngDimensions(twoHeaders)).toBeNull();
+    expect(pageImageFor({ mediaType: 'image/png', bytes: twoHeaders }, 1, 1))
+      .toEqual({ kind: 'skip', reason: 'image_size_unknown' });
+    expect(pngDimensions(pngFromChunks(pngIhdr(100, 100), idat, pngIhdr(4_000, 3_000), iend))).toBeNull();
+    // IHDR not first, not 13 bytes, a bad CRC, a chunk cut short, no IEND, bytes after IEND, a non-letter type.
+    expect(pngDimensions(pngFromChunks(pngChunk('tEXt', [0x61, 0, 0x62]), pngIhdr(100, 100), idat, iend))).toBeNull();
+    expect(pngDimensions(pngFromChunks(pngChunk('IHDR', new Uint8Array(14)), idat, iend))).toBeNull();
+    const badCrc = Buffer.from(pngIhdr(100, 100));
+    badCrc[badCrc.length - 1]! ^= 1;
+    expect(pngDimensions(pngFromChunks(badCrc, idat, iend))).toBeNull();
+    const whole = pngFromChunks(pngIhdr(100, 100), idat, iend);
+    expect(pngDimensions(whole.subarray(0, whole.length - 13))).toBeNull();
+    expect(pngDimensions(pngFromChunks(pngIhdr(100, 100), idat))).toBeNull();
+    expect(pngDimensions(pngFromChunks(pngIhdr(100, 100), idat, iend, Buffer.from([0])))).toBeNull();
+    expect(pngDimensions(pngFromChunks(pngIhdr(100, 100), pngChunk('ID1T', [1]), iend))).toBeNull();
+    // A length past the end of the bytes, and a zero size.
+    const longIdat = Buffer.from(idat);
+    longIdat.writeUInt32BE(0xffffffff, 0);
+    expect(pngDimensions(pngFromChunks(pngIhdr(100, 100), longIdat, iend))).toBeNull();
+    expect(pngDimensions(pngFromChunks(pngIhdr(0, 100), idat, iend))).toBeNull();
   });
 
   it('reads the EXIF orientation of a JPEG in both byte orders, and none where there is no EXIF', () => {
@@ -70,9 +99,9 @@ describe('page picture for the image re-read', () => {
     expect(base64Length(4)).toBe(8);
     const limitBytes = IMAGE_MAX_BASE64_LENGTH / 4 * 3;
     expect(base64Length(limitBytes)).toBe(IMAGE_MAX_BASE64_LENGTH);
-    expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(1000, 1000, limitBytes - 33) }, 1, 1))
+    expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(1000, 1000, limitBytes - FIXTURE_PNG_OVERHEAD) }, 1, 1))
       .toMatchObject({ kind: 'image' });
-    expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(1000, 1000, limitBytes - 32) }, 1, 1))
+    expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(1000, 1000, limitBytes - FIXTURE_PNG_OVERHEAD + 1) }, 1, 1))
       .toEqual({ kind: 'skip', reason: 'image_too_large' });
   });
 

@@ -89,6 +89,13 @@ const schema = z.object({
   // it answers (an OCR_AI_MAX_TOKENS answer can take over ten). 15 minutes by default; the job's lease is renewed
   // meanwhile.
   OCR_AI_HARD_PAGE_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(1_800_000).default(900_000),
+  // Zoom in the hard-page reads (owner decision 2026-11-05 about 18:45 UTC, "Zoom in our reader"): the model may ask
+  // the worker for enlarged crops of the page picture (reading/zoom.ts). 'on' or 'off'; unset or empty means 'on'
+  // when the hard-page reads are on and 'off' otherwise. Any other value fails startup. With hard-page reads off it
+  // does nothing. The hard-page timeout then holds for each read's whole tool loop.
+  OCR_AI_HARD_PAGE_ZOOM: z.preprocess(emptyToUndefined, z.enum(['on', 'off']).optional()),
+  // Zoom calls per hard-page read (each of the two reads has its own): 0 to 8, 8 by default; 0 declares no tool.
+  OCR_AI_ZOOM_MAX_CALLS: z.preprocess(emptyToUndefined, z.coerce.number().int().min(0).max(8).default(8)),
   OCR_AI_MAX_RETRIES: z.coerce.number().int().min(0).max(8).default(4),
   OCR_AI_MAX_REREAD_PAGES: z.coerce.number().int().min(0).max(20).default(20),
   // Claude API requests in flight at once for the whole process (every claim loop shares the one limit).
@@ -142,10 +149,13 @@ const schema = z.object({
         message: 'AI reading requires approved US processing on the Claude API (inference_geo "us")' });
     }
   }
-}).transform((env) => ({ ...env,
-  OCR_AI_IMAGE_REREAD: env.OCR_AI_IMAGE_REREAD ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const),
-  OCR_AI_HARD_PAGE_READS: env.OCR_AI_HARD_PAGE_READS
-    ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const) }));
+}).transform((env) => {
+  const hardPageReads = env.OCR_AI_HARD_PAGE_READS ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const);
+  return { ...env,
+    OCR_AI_IMAGE_REREAD: env.OCR_AI_IMAGE_REREAD ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const),
+    OCR_AI_HARD_PAGE_READS: hardPageReads,
+    OCR_AI_HARD_PAGE_ZOOM: env.OCR_AI_HARD_PAGE_ZOOM ?? hardPageReads };
+});
 
 export type OcrWorkerConfig = z.infer<typeof schema>;
 

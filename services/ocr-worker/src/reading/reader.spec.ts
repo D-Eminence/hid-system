@@ -1,9 +1,12 @@
 import { AiInterruptedError, AiRejectedError, AiTransientError, type PageAnswer, type PageModelClient } from './claude.client';
 import { paperReadingPayloadSchema } from './contract';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingConfig } from './reader';
-import { CLINIC_PAGE, fixtureExifSegment, fixtureJpeg, fixturePng, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
+import { CLINIC_PAGE, fixtureExifSegment, fixtureJpeg, fixturePng, modelItem, modelPage, readPage, SOURCE_SHA,
+  pngChunk, pngFromChunks, pngIhdr, syntheticJpeg, syntheticPng, withRepeatedScan } from './test-fixtures';
 import { IMAGE_MAX_BASE64_LENGTH } from './page-image';
 import type { ModelPage } from './prompt';
+import { ZOOM_JPEG_MAX_SCANS } from './zoom';
+import { liveZoomWorkers } from './zoom-jobs';
 
 const FACILITY = '11111111-2222-4333-8444-555555555555';
 const config: ReadingConfig = { OCR_AI_MODE: 'claude', OCR_AI_FACILITY_IDS: undefined,
@@ -41,7 +44,7 @@ describe('PaperReadingService', () => {
     expect(calls.map((call) => call.model)).toEqual(['claude-sonnet-5-5']);
     expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
     expect(payload.reading).toMatchObject({ status: 'read', firstPassModel: 'claude-sonnet-5-5', rereadModel: null,
-      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-6' });
+      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-7' });
     expect(payload.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', folderNumberAsWritten: 'TEST-0001' });
     expect(payload.items[0]).toMatchObject({ kind: 'diagnosis', readBy: 'first_pass', confidence: 'clear' });
     expect(summary).toMatchObject({ requests: 1, inferenceGeo: 'us', servedInferenceGeo: 'us' });
@@ -849,7 +852,7 @@ describe('PaperReadingService', () => {
       expect(payload.items.filter((item) => item.readBy === 'first_pass').map((item) => item.asWritten))
         .toEqual(['Pyrmthmn 25 rng od', 'Hypertension']);
       expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
-      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-6');
+      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-7');
       // The configured effort is used when given; a printed page below REVIEW_BELOW (low_confidence) is hard too.
       const faint = readPage(1, [['Pyrmthmn 25 rng od', { confidence: 0.5 }], 'Dx: Hypertension']);
       const xhigh = hardClient(() => ok(best('Pyrimethamine')));
@@ -945,6 +948,103 @@ describe('PaperReadingService', () => {
       const stored = JSON.stringify([payload, summary]);
       for (let index = 0; index + 24 < base64.length; index += 64) expect(stored).not.toContain(base64.slice(index, index + 24));
       expect(payload.pages[0]!.lines[1]!.text).toBe('Dx: Hypertension tel 08030000000');
+    });
+
+    describe('zoom in the hard-page reads (owner decision 2026-11-05, about 18:45 UTC)', () => {
+      const zoomConfig: ReadingConfig = { ...hardConfig, OCR_AI_HARD_PAGE_ZOOM: 'on' };
+      // Every zoom decode and crop runs in a worker thread of its own, ended with its job: none outlives a reading.
+      afterEach(() => { expect(liveZoomWorkers()).toBe(0); });
+      // A real, decodable, synthetic picture (no page of anyone's): the zoom decodes and crops it.
+      const synthetic = { mediaType: 'image/png', bytes: syntheticPng(400, 560) };
+      const zoomCall = (id: string) => ({ id, name: 'zoom', input: { page: 1, box: { x: 10, y: 10, w: 40, h: 20 }, scale: 2 } });
+      /** A client whose hard reads each zoom `calls` times through the session they are given, then answer. */
+      function zoomingClient(calls: number) {
+        const seen: Array<{ hardPage: boolean; image: boolean; zoom: boolean; maxCalls: number | null }> = [];
+        const crops: string[] = [];
+        const client: PageModelClient = { readPage: jest.fn(async (request) => {
+          seen.push({ hardPage: request.hardPage === true, image: request.image !== undefined,
+            zoom: request.zoom !== undefined, maxCalls: request.zoom?.maxCalls ?? null });
+          if (request.model === 'claude-sonnet-5-5') return ok(firstPass);
+          if (request.zoom) {
+            for (let index = 0; index < calls; index += 1) {
+              const result = await request.zoom.answer(zoomCall(`toolu_${index}`));
+              const image = Array.isArray(result.content) ? result.content.find((block) => block.type === 'image') : undefined;
+              if (image && image.type === 'image' && image.source.type === 'base64') crops.push(image.source.data);
+            }
+          }
+          return ok(best('Pyrimethamine'));
+        }) };
+        return { client, seen, crops };
+      }
+
+      it('gives both reads of a hard page the zoom, decoded once, and counts the crops per pass and in the summary', async () => {
+        const { client, seen, crops } = zoomingClient(3);
+        const { payload, summary } = await read({ ...zoomConfig, OCR_AI_ZOOM_MAX_CALLS: 2 }, client, [hardPage], synthetic);
+        expect(seen).toEqual([{ hardPage: false, image: false, zoom: false, maxCalls: null },
+          { hardPage: true, image: true, zoom: true, maxCalls: 2 }, { hardPage: true, image: true, zoom: true, maxCalls: 2 }]);
+        // Two crops per read; the third call of each read is over the limit.
+        expect(crops).toHaveLength(4);
+        expect(summary).toMatchObject({ zoomCalls: 4, zoomLimited: 2, zoomFailed: 0, hardPages: [1], hardPageZoomPages: [1] });
+        expect(summary.passUsage.map((entry) => [entry.pass, entry.zoomCalls])).toEqual([['first_pass', undefined],
+          ['hard_page_read', 4]]);
+        // No crop anywhere in what is kept or logged.
+        const kept = JSON.stringify([payload, summary]);
+        for (const crop of crops) expect(kept).not.toContain(crop.slice(40, 80));
+      });
+
+      it('answers "zoom unavailable" for a picture that cannot be decoded, and the reading goes on', async () => {
+        const { client, crops } = zoomingClient(2);
+        const { summary, payload } = await read(zoomConfig, client);
+        expect(crops).toHaveLength(0);
+        expect(summary).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 4, hardPages: [1], imageRereadPages: [1] });
+        expect(payload.items.some((item) => item.kind === 'medicine')).toBe(true);
+      });
+
+      it('offers no zoom (no tool, no rule J) for a picture that fails the header checks, and reads it as before', async () => {
+        const jpegPage = syntheticJpeg(400, 560);
+        const refused = [
+          // More scans than zoom lets jpeg-js decode (a small file that would stall the decoder).
+          { mediaType: 'image/jpeg', bytes: withRepeatedScan(jpegPage, ZOOM_JPEG_MAX_SCANS + 1) },
+          // Over the JPEG pixel limit by its header (the picture itself is still sent).
+          { mediaType: 'image/jpeg', bytes: fixtureJpeg(4_000, 3_200) },
+          // A 16-bit PNG (its chunks walk cleanly, so the picture is still sent).
+          { mediaType: 'image/png', bytes: pngFromChunks(pngIhdr(40, 56, 16, 2), pngChunk('IDAT', [0]), pngChunk('IEND')) },
+          // A PNG with a chunk zoom does not know (sent whole: only zoom checks the chunk types).
+          { mediaType: 'image/png', bytes: pngFromChunks(pngIhdr(40, 56), pngChunk('prVt', [1]), pngChunk('IDAT', [0]),
+            pngChunk('IEND')) },
+        ];
+        for (const picture of refused) {
+          const { client, seen, crops } = zoomingClient(1);
+          const { summary } = await read(zoomConfig, client, [hardPage], picture);
+          expect(seen.filter((call) => call.hardPage)).toEqual([{ hardPage: true, image: true, zoom: false, maxCalls: null },
+            { hardPage: true, image: true, zoom: false, maxCalls: null }]);
+          expect(crops).toHaveLength(0);
+          expect(summary).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPages: [1], hardPageZoomPages: [] });
+        }
+        // The same JPEG at the scan limit is offered the tool and zoomed.
+        const { client, seen, crops } = zoomingClient(1);
+        const { summary } = await read(zoomConfig, client, [hardPage],
+          { mediaType: 'image/jpeg', bytes: withRepeatedScan(jpegPage, ZOOM_JPEG_MAX_SCANS) });
+        expect(seen.filter((call) => call.zoom)).toHaveLength(2);
+        expect(crops).toHaveLength(2);
+        expect(summary).toMatchObject({ zoomCalls: 2, hardPageZoomPages: [1] });
+      });
+
+      it('gives no zoom when it is off, at 0 calls, or to a page that is not a hard page', async () => {
+        for (const reading of [hardConfig, { ...zoomConfig, OCR_AI_HARD_PAGE_ZOOM: 'off' as const },
+          { ...zoomConfig, OCR_AI_ZOOM_MAX_CALLS: 0 }]) {
+          const { client, seen } = zoomingClient(1);
+          const { summary } = await read(reading, client, [hardPage], synthetic);
+          expect(seen.every((call) => !call.zoom)).toBe(true);
+          expect(summary).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPages: [1], hardPageZoomPages: [] });
+        }
+        // Flagged, but not handwriting or low_confidence (possible_missed_item): the ordinary image re-read, no zoom.
+        const missed = readPage(1, ['Dx: Hypertension', 'Amlodipine 5mg od']);
+        const { client, seen } = zoomingClient(1);
+        await read(zoomConfig, client, [missed], synthetic);
+        expect(seen.filter((call) => call.image)).toHaveLength(1);
+        expect(seen.filter((call) => call.image).every((call) => !call.zoom && !call.hardPage)).toBe(true);
+      });
     });
   });
 });

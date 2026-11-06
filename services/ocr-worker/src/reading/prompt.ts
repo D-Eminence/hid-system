@@ -23,10 +23,13 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * our own lab test names), uses the NAFDAC-sourced brand table, and reads
  * handwritten signs (HARD_PAGE_PROMPT_VERSION 3; owner decision of
  * 2026-11-05 about 21:00 UTC). SYSTEM_PROMPT, the text-only request and the
- * image request are byte for byte unchanged. (A parallel change, the zoom
- * tool, also takes version 6; whichever merges second renumbers.)
+ * image request are byte for byte unchanged. Version 7: hard pages' best-guess
+ * reads may zoom into the picture (zoom.ts; owner decision of 2026-11-05 about
+ * 18:45 UTC; HARD_PAGE_PROMPT_VERSION 4), so a reading made before cannot be
+ * reused; the text-only request and the ordinary image re-read request are
+ * unchanged.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-6';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-7';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -43,9 +46,17 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * The hard-page prompt (hardPageMessage) and its output schema (MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA): best-guess
  * readings for a hard page only (owner decision of 2026-11-05, about 18:40 UTC). Recorded in provenance when used.
  * Version 3: rule I, handwritten signs (signs.ts: a sign read is written as its meaning and "(sign)", any other
- * "[sign?]"), and "mane" among the frequencies (owner decision of 2026-11-05, about 21:00 UTC).
+ * "[sign?]"), and "mane" among the frequencies (owner decision of 2026-11-05, about 21:00 UTC). Version 4: with zoom
+ * on (OCR_AI_HARD_PAGE_ZOOM, the default), the message adds rule J, which offers the zoom tool (zoom.ts); with zoom
+ * off it is the version 3 text.
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-3';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-4';
+/**
+ * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
+ * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
+ * calls is the version 3 text, byte for byte.
+ */
+export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-3';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -366,11 +377,12 @@ ${ABBREVIATION_TABLE.map(([written, meaning]) => `${written} ${meaning}`).join('
  * for alternatives. Rule 1 (never fill a gap from what is usual) is relaxed only where a field is marked basis
  * "context"; never inventing an item, citing lines and giving the box stay. Nothing here varies but the page.
  *
- * Zoom (deferred, owner decision 3): a later step could let the model ask for a closer crop of a box before it
- * answers; see zoom.ts for the seam. This message does not offer it.
+ * Zoom (owner decision of 2026-11-05, about 18:45 UTC): with `zoomCalls` over 0 the message adds rule J, which
+ * offers the zoom tool (zoom.ts) for at most that many calls; without it the message is the version 3 text.
  */
 export function hardPageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
-  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number }): string {
+  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number },
+  zoomCalls = 0): string {
   return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
 ${size.height} pixels high. It is hard to read: hard handwriting or writing the text service could not read with \
 confidence. A clinician will check every word you give against the paper. For this page only, give your best \
@@ -416,7 +428,13 @@ around the writing of this item only. Leave out writing that is not on one of th
 
 ${SIGNS_RULE}
 
-The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
+${zoomCalls > 0 ? `J. You can use the zoom tool to look closer at hard-to-read writing before you answer: give page ${page}, a box \
+around the writing in this picture's pixels (the same pixels as the line boxes and the boxes in your answer) and a \
+scale from 1 to 4. It returns that part of the picture enlarged. You may zoom at most ${zoomCalls} times for this \
+page; use it where a closer look can settle a word or number, not for every line. Every box in your answer stays \
+in the full picture's pixels.
+
+` : ''}The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
 ${JSON.stringify(lines.map((line) => ({
     id: line.id, text: line.text,
     box: line.box ? toPixelBox(line.box, size) : null,

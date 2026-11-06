@@ -1,3 +1,4 @@
+import { crc32 } from 'node:zlib';
 import type { ImageRereadSkipReason } from './contract';
 
 /**
@@ -29,16 +30,58 @@ export function base64Length(byteLength: number): number {
 }
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+/** The most chunks pngChunks walks in one PNG (encoders write a few dozen; 10 MB of 8 KB IDATs is about 1,300). */
+export const PNG_MAX_CHUNKS = 65_536;
 
-/** Width and height from a PNG's IHDR chunk, or null where the bytes are not a PNG that starts with one. */
-export function pngDimensions(bytes: Uint8Array): { width: number; height: number } | null {
-  if (bytes.length < 24 || PNG_SIGNATURE.some((byte, index) => bytes[index] !== byte)) return null;
-  // The first chunk: a 4-byte length (13), then the type "IHDR", then width and height (big-endian).
-  if (bytes[12] !== 0x49 || bytes[13] !== 0x48 || bytes[14] !== 0x44 || bytes[15] !== 0x52) return null;
+/** One PNG chunk: its type (four ASCII letters) and where its data lies in the bytes. */
+export interface PngChunk { readonly type: string; readonly start: number; readonly length: number }
+
+/**
+ * A PNG's chunks from the signature to IEND, without inflating or decoding anything, or null where the bytes are
+ * not a PNG every decoder reads the same way:
+ * - the signature, then chunks whose length (at most 2^31 - 1) and CRC fit inside the bytes; each type four ASCII
+ *   letters and each CRC (over type and data) correct, as pngjs and libpng both check;
+ * - exactly one IHDR, first, 13 bytes long: a later IHDR is refused (pngjs 7.0.0 takes a second IHDR as the new
+ *   size, depth and interlacing, so a reader of the first would see another picture; a reviewer's 249 KB file with a
+ *   100 x 100 first IHDR and a large second one reached about 1 GB RSS in zoom's decode);
+ * - IEND last, empty, and nothing after it; at most PNG_MAX_CHUNKS chunks.
+ * Both the size the picture is sent at (pngDimensions) and zoom's stricter checks (zoom-raster.ts pngStructure)
+ * read from this walk, so they cannot see different headers.
+ */
+export function pngChunks(bytes: Uint8Array): PngChunk[] | null {
+  if (bytes.length < 8 || PNG_SIGNATURE.some((byte, index) => bytes[index] !== byte)) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const width = view.getUint32(16);
-  const height = view.getUint32(20);
-  return width > 0 && height > 0 ? { width, height } : null;
+  const chunks: PngChunk[] = [];
+  let at = 8;
+  for (;;) {
+    if (at + 12 > bytes.length || chunks.length >= PNG_MAX_CHUNKS) return null;
+    const length = view.getUint32(at);
+    if (length > 0x7fffffff || at + 12 + length > bytes.length) return null;
+    let type = '';
+    for (let index = 4; index < 8; index += 1) {
+      const code = bytes[at + index]!;
+      if (!((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a))) return null;
+      type += String.fromCharCode(code);
+    }
+    if (crc32(bytes.subarray(at + 4, at + 8 + length)) !== view.getUint32(at + 8 + length)) return null;
+    if ((chunks.length === 0) !== (type === 'IHDR') || (type === 'IHDR' && length !== 13)) return null;
+    chunks.push({ type, start: at + 8, length });
+    at += 12 + length;
+    if (type === 'IEND') return length === 0 && at === bytes.length ? chunks : null;
+  }
+}
+
+/**
+ * Width and height from a PNG's one IHDR chunk, or null where the bytes are not a PNG whose chunks walk cleanly
+ * (pngChunks: one IHDR, first; CRCs; IEND last) or whose size is 0.
+ */
+export function pngDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  const chunks = pngChunks(bytes);
+  if (chunks === null) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(chunks[0]!.start);
+  const height = view.getUint32(chunks[0]!.start + 4);
+  return width > 0 && height > 0 && width <= 0x7fffffff && height <= 0x7fffffff ? { width, height } : null;
 }
 
 /**

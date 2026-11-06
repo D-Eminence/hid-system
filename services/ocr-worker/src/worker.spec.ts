@@ -2,7 +2,8 @@ import type { OcrWorkerConfig } from './config';
 import { AiInterruptedError, AiTransientError, type PageModelClient } from './reading/claude.client';
 import { paperReadingPayloadSchema, type PaperReadingPayload } from './reading/contract';
 import { PaperReadingService, type ReadingConfig } from './reading/reader';
-import { fixturePng, modelItem, modelPage, readPage } from './reading/test-fixtures';
+import { fixturePng, modelItem, modelPage, readPage, syntheticJpeg, withRepeatedScan } from './reading/test-fixtures';
+import { ZOOM_JPEG_MAX_SCANS } from './reading/zoom';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
 import { Semaphore } from './semaphore';
@@ -99,7 +100,7 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-6', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-7', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
@@ -491,12 +492,16 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '437 mg' });
     expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-3', imagePromptVersion: null,
-      promptVersion: 'hid-paper-reading-prompt-6' });
+      // Zoom off: the reads sent the version 3 hard-page text, and provenance says so.
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-3', hardPageZoomPages: [], imagePromptVersion: null,
+      promptVersion: 'hid-paper-reading-prompt-7' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
     expect(usageLines.map((line) => [line.pass, line.requests])).toEqual([['first_pass', 1], ['hard_page_read', 2]]);
+    // Zoom off here: the hard-page usage line still says how many crops were made (none), the first pass's does not.
+    expect(usageLines.map((line) => line.zoomCalls)).toEqual([undefined, 0]);
     const done = lines.find((line) => line.event === 'ocr.job.completed')!;
+    expect(done).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0 });
     expect(done).toMatchObject({ hardPages: 1, hardPageReads: 2,
       hardPageAgreement: { itemsPaired: 1, itemsSingle: 0, fieldsCompared: expect.any(Number), fieldsAgreed: expect.any(Number) } });
     expect(Object.values(done.hardPageAgreement as Record<string, unknown>).every((value) => typeof value === 'number')).toBe(true);
@@ -504,6 +509,67 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     for (const secret of ['Pyrimethamine', 'Fictionalmab', 'Ultramarine', 'rng']) expect(logs).not.toContain(secret);
     const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');
     for (const chunk of chunks) expect(everything).not.toContain(chunk);
+  });
+
+  it('records the no-zoom hard-page prompt version when the picture fails zoom\'s header checks', async () => {
+    // A synthetic JPEG with more scans than zoom decodes: the hard page is read, but never offered the tool.
+    const synthetic = withRepeatedScan(syntheticJpeg(480, 640), ZOOM_JPEG_MAX_SCANS + 1);
+    const offered: boolean[] = [];
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        offered.push(request.zoom !== undefined);
+        return { kind: 'answer' as const, answer: bestGuess, attempts: 1, servedInferenceGeo: 'us', usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const { repository, reader, provider } = mocks(client);
+    reader.readExact.mockResolvedValue({ ...document, mediaType: 'image/jpeg', bytes: synthetic });
+    provider.extract.mockResolvedValue(hardText);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on',
+      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 8 }, client);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(offered).toEqual([false, false]);
+    expect(completed(repository).provenance.reading).toMatchObject({ hardPages: [1],
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-3', hardPageZoomPages: [] });
+  });
+
+  it('zooms in a hard page and logs only the counts: no crop in a log, the payload, provenance or the usage records', async () => {
+    // A real, decodable, synthetic JPEG (no page of anyone's), so the zoom decodes and crops it.
+    const synthetic = syntheticJpeg(480, 640);
+    const crops: string[] = [];
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        for (const id of ['toolu_a', 'toolu_b', 'toolu_bad']) {
+          const result = await request.zoom!.answer({ id, name: 'zoom', input: id === 'toolu_bad' ? { page: 1 }
+            : { page: 1, box: { x: 20, y: 30, w: 120, h: 40 }, scale: 3 } });
+          if (Array.isArray(result.content)) {
+            for (const block of result.content) if (block.type === 'image' && block.source.type === 'base64') crops.push(block.source.data);
+          }
+        }
+        return { kind: 'answer' as const, answer: bestGuess, attempts: 2, servedInferenceGeo: 'us', usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const { repository, reader, provider } = mocks(client);
+    reader.readExact.mockResolvedValue({ ...document, mediaType: 'image/jpeg', bytes: synthetic });
+    provider.extract.mockResolvedValue(hardText);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on',
+      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 8 }, client);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(crops).toHaveLength(4);
+    const result = completed(repository);
+    expect(result.provenance.reading).toMatchObject({ hardPages: [1],
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-4', hardPageZoomPages: [1] });
+    const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    const hardUsage = lines.find((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read')!;
+    expect(hardUsage).toMatchObject({ requests: 4, zoomCalls: 4 });
+    const done = lines.find((line) => line.event === 'ocr.job.completed')!;
+    expect(done).toMatchObject({ zoomCalls: 4, zoomLimited: 0, zoomFailed: 2 });
+    const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');
+    const pictureBase64 = Buffer.from(synthetic).toString('base64');
+    for (const crop of [...crops, pictureBase64]) {
+      for (let at = 0; at + 24 <= Math.min(crop.length, 4_000); at += 200) expect(everything).not.toContain(crop.slice(at, at + 24));
+    }
   });
 
   it('keeps the picture out of logs and what is stored when the re-read with it fails', async () => {
