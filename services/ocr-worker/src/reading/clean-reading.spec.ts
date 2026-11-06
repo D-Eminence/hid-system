@@ -691,7 +691,10 @@ describe('crossed out, line by line (third review): no name matching, never acti
 
   it('reads a crossed-out group in any case or spacing as crossed out, in the hard reads and after the re-read merge', () => {
     for (const asWritten of ['(Crossed out: Flagyl) Ceftriaxone 1g bd', '(crossed out:Flagyl) Ceftriaxone 1g bd',
-      '( CROSSED OUT : Flagyl) Ceftriaxone 1g bd']) {
+      '( CROSSED OUT : Flagyl) Ceftriaxone 1g bd', '(crossed-out: Flagyl) Ceftriaxone 1g bd',
+      '(crossed out Flagyl) Ceftriaxone 1g bd', '(Crossed Out - Flagyl) Ceftriaxone 1g bd',
+      '(struck out: Flagyl) Ceftriaxone 1g bd', '(struck through Flagyl) Ceftriaxone 1g bd',
+      '(Scratched out \u2013 Flagyl) Ceftriaxone 1g bd']) {
       const hard = mergeHardReadings([read([order(asWritten, { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g')])],
         SOURCE_SHA).check;
       const [item] = hard.items;
@@ -707,6 +710,15 @@ describe('crossed out, line by line (third review): no name matching, never acti
         expect(one.checkReasons).toContain('crossed_out');
       }
     }
+  });
+
+  it('does not take a clinical bracket such as "(struck by a car)" as a crossed-out group', () => {
+    const asWritten = 'Ceftriaxone 1g bd (struck by a car)';
+    const hard = mergeHardReadings([read([order(asWritten, { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g')])],
+      SOURCE_SHA).check;
+    const [item] = hard.items;
+    expect(item!.asWritten).toBe(asWritten);
+    expect(item!.checkReasons).not.toContain('crossed_out');
   });
 
   it('says the readings disagree where only one of a paired order\'s readings shows its line struck', () => {

@@ -86,11 +86,14 @@ export const FIELD_UNREAD = { route: '[route?]', name: '[drug?]', dose: '[dose?]
 export const FIELD_UNREAD_MARKS = /\[(?:route|drug|dose|freq)\?\]/g;
 
 /**
- * The start of a "(crossed out: X)" group, in any case and spacing ("(Crossed out: X)", "(crossed out:X)"): the model
- * does not always write the label exactly, and a group missed here is a struck line left active (review of
- * 2026-11-06). prepareHardAnswer also rewrites every form to CROSSED_OUT_OPEN.
+ * The start of a "(crossed out: X)" group, in any case, spacing and common spelling: "(Crossed out: X)",
+ * "(crossed out:X)", "(crossed-out: X)", "(crossed out X)", "(Crossed Out - X)", "(struck out: X)", "(struck through
+ * X)", "(scratched out: X)". The model does not always write the label exactly, and a group missed here is a struck
+ * line left active (reviews of 2026-11-06). "out", "through" or "off" is required after the verb, so a clinical note
+ * such as "(struck by a car)" is not taken as a crossed-out group. prepareHardAnswer rewrites every form to
+ * CROSSED_OUT_OPEN.
  */
-export const CROSSED_OUT_START = /\(\s*crossed\s*out\s*:/gi;
+export const CROSSED_OUT_START = /\(\s*(?:crossed|struck|scratched)[\s-]*(?:out|through|off)\b\s*[:\-\u2013\u2014]?/gi;
 
 /** Each "(crossed out: X)" group of a text: where it starts and ends (its closing bracket), and X as written. */
 function crossedOutGroups(text: string): Array<{ start: number; end: number; inside: string }> {
