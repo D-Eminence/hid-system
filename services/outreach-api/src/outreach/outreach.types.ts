@@ -15,6 +15,18 @@ export interface OutreachRegistrationCase {
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
+  // Only while OUTREACH_VISITS_ENABLED is on (0115).
+  createdBy?: { name: string } | null;
+  campaignName?: string | null;
+  nextFollowUpOn?: string | null;
+  visitCount?: number;
+}
+
+export interface CaseExtras {
+  createdBy: { name: string } | null;
+  campaignName: string | null;
+  nextFollowUpOn: string | null;
+  visitCount: number;
 }
 
 export interface RegistrationRow {
@@ -36,7 +48,7 @@ export interface RegistrationRow {
   updated_at: Date | string;
 }
 
-export function registrationCase(row: RegistrationRow): OutreachRegistrationCase {
+export function registrationCase(row: RegistrationRow, extras?: CaseExtras): OutreachRegistrationCase {
   return {
     id: row.id,
     facilityId: row.facility_id,
@@ -54,5 +66,6 @@ export function registrationCase(row: RegistrationRow): OutreachRegistrationCase
     rowVersion: Number(row.row_version),
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
+    ...(extras ?? {}),
   };
 }

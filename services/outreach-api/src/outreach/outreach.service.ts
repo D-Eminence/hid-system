@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
@@ -12,7 +12,9 @@ import type { CreateCampaignDto } from './dto/create-campaign.dto';
 import type { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import type { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import type { OutreachCampaign, CampaignMember } from './campaign.types';
-import { registrationCase, type OutreachRegistrationCase, type RegistrationRow } from './outreach.types';
+import { registrationCase, type CaseExtras, type OutreachRegistrationCase, type RegistrationRow } from './outreach.types';
+import { OutreachFeatures } from './outreach-features';
+import { reserveHealthIdCheck } from './link-preview-attempts';
 
 interface IdempotencyRow { request_sha256: string; registration_case_id: string }
 
@@ -22,7 +24,11 @@ export class OutreachService {
     private readonly database: DatabaseService,
     private readonly audit: AuditService,
     private readonly identity: IdentityService,
+    // Absent (as in older unit tests) means every 0115 switch is off.
+    @Optional() private readonly features?: OutreachFeatures,
   ) {}
+
+  private get visitsEnabled(): boolean { return this.features?.visitsEnabled === true; }
 
   async create(input: CreateRegistrationCaseDto, idempotencyKey: string,
     context: DataAccessContext): Promise<OutreachRegistrationCase> {
@@ -56,7 +62,7 @@ export class OutreachService {
           { registrationCaseId: row.id, temporaryPatientId: row.temporary_patient_id,
             campaignId: row.campaign_id, status: 'identity_resolution_pending' });
         await this.audit.recordWithClient(client, context, 'outreach.registration-case.received', row.id);
-        return registrationCase(row);
+        return (await this.present(client, context, [row]))[0]!;
       }, { isolationLevel: 'SERIALIZABLE' });
     } catch (error) {
       // Outside the transaction: a duplicate of a concurrent identical request
@@ -73,13 +79,13 @@ export class OutreachService {
         where facility_id=$1 and outreach.registration_campaign_member(campaign_id, facility_id)
         order by created_at desc,id desc limit 100`, [context.facilityId]);
       await this.audit.recordWithClient(client, context, 'outreach.registration-case.list', context.facilityId);
-      return result.rows.map(registrationCase);
+      return this.present(client, context, result.rows);
     });
   }
 
   async get(id: string, context: DataAccessContext): Promise<OutreachRegistrationCase> {
     return this.database.withTransaction(context, async (client) => {
-      const value = await this.find(client, id);
+      const value = await this.find(client, id, context);
       await this.audit.recordWithClient(client, context, 'outreach.registration-case.read', id,
         value.resolvedPatientId ?? undefined);
       return value;
@@ -88,9 +94,28 @@ export class OutreachService {
 
   async linkExisting(id: string, input: LinkExistingPatientDto, idempotencyKey: string,
     context: DataAccessContext): Promise<OutreachRegistrationCase> {
-    await this.identity.authorizeExistingPatient(input.canonicalPatientId, context);
-    const normalized = { ...input, reason: input.reason.trim() };
-    const digest = requestDigest('outreach.registration-case.link-existing', { id, ...normalized });
+    const reason = input.reason.trim();
+    let canonicalPatientId: string;
+    let digest: string;
+    if (input.healthId !== undefined) {
+      if (!this.visitsEnabled) throw new DomainProblem(400, 'VALIDATION_FAILED',
+        'One or more request fields are invalid.', [{ field: 'healthId',
+          messages: ['property healthId should not exist'] }]);
+      digest = requestDigest('outreach.registration-case.link-existing', { id, healthId: input.healthId,
+        expectedVersion: input.expectedVersion, reason });
+      const resolved = await this.resolveHealthIdForLink(id, input.healthId, input.expectedVersion,
+        idempotencyKey, digest, context);
+      if ('replayed' in resolved) return resolved.replayed;
+      canonicalPatientId = resolved.patientId;
+    } else {
+      canonicalPatientId = input.canonicalPatientId!;
+      // Exactly today's digest for this form: the same four fields, whatever
+      // else the DTO declares (a retry across the deploy still replays).
+      digest = requestDigest('outreach.registration-case.link-existing', { id, canonicalPatientId,
+        expectedVersion: input.expectedVersion, reason });
+    }
+    await this.identity.authorizeExistingPatient(canonicalPatientId, context);
+    const normalized = { canonicalPatientId, expectedVersion: input.expectedVersion, reason };
     try {
       return await this.database.withTransaction(context, async (client) => {
         const replay = await this.replay(client, context, 'registration_case_link_existing',
@@ -139,7 +164,7 @@ export class OutreachService {
             resolutionKind: 'linked_existing' });
         await this.audit.recordWithClient(client, context, 'outreach.patient.linked-existing', id,
           normalized.canonicalPatientId);
-        return registrationCase(row);
+        return (await this.present(client, context, [row]))[0]!;
       }, { isolationLevel: 'SERIALIZABLE' });
     } catch (error) {
       this.translateConflict(error, 'OUTREACH_RESOLUTION_CONFLICT',
@@ -219,7 +244,18 @@ export class OutreachService {
       if (!exists.rowCount) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
       const result = await client.query(`select id,campaign_id as "campaignId",membership_id as "membershipId",role,created_at as "createdAt"
         from outreach.campaign_members where campaign_id=$1 and facility_id=$2 order by created_at,id`, [id, context.facilityId]);
-      return result.rows.map((row) => ({ ...row, createdAt: new Date(row.createdAt).toISOString() }));
+      const members: CampaignMember[] = result.rows.map((row) => ({ ...row, createdAt: new Date(row.createdAt).toISOString() }));
+      if (!this.visitsEnabled) return members;
+      // Names only for members of a campaign the caller is also in (0115).
+      const names = new Map<string, string>();
+      const membershipIds = [...new Set(members.map((member) => member.membershipId))];
+      for (let start = 0; start < membershipIds.length; start += 200) {
+        const named = await client.query<{ membership_id: string; display_name: string }>(
+          'select membership_id,display_name from outreach.member_display_names($1::uuid[])',
+          [membershipIds.slice(start, start + 200)]);
+        for (const row of named.rows) names.set(row.membership_id, row.display_name);
+      }
+      return members.map((member) => ({ ...member, displayName: names.get(member.membershipId) ?? null }));
     }, { readOnly: true });
   }
 
@@ -259,7 +295,66 @@ export class OutreachService {
     if (!replay) return null;
     if (replay.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
       'The Idempotency-Key belongs to a different Outreach request');
-    return this.find(client, replay.registration_case_id);
+    return this.find(client, replay.registration_case_id, context);
+  }
+
+  /**
+   * The healthId form of linkExisting: Identity resolves the Health ID again
+   * with the caller's own authorization (nothing from a preview is trusted).
+   * A retry of a link already made replays without asking Identity. Otherwise,
+   * before Identity is called and in one SERIALIZABLE transaction, the case
+   * must be visible, pending and at expectedVersion and the member within the
+   * hourly Health ID budget, and the check is counted. Every Health ID link
+   * counts, found or not, so parallel requests cannot exceed the budget.
+   */
+  private async resolveHealthIdForLink(id: string, healthId: string, expectedVersion: number,
+    idempotencyKey: string, digest: string, context: DataAccessContext,
+  ): Promise<{ replayed: OutreachRegistrationCase } | { patientId: string }> {
+    const replayed = await this.database.withTransaction(context, async (client) => {
+      const replay = await this.replay(client, context, 'registration_case_link_existing', idempotencyKey, digest);
+      if (replay) return replay;
+      await reserveHealthIdCheck(client, id, context, expectedVersion);
+      return null;
+    }, { isolationLevel: 'SERIALIZABLE' });
+    if (replayed) return { replayed };
+    return { patientId: (await this.identity.lookupByHealthId(healthId, context)).patientId };
+  }
+
+  /**
+   * Case answers. While OUTREACH_VISITS_ENABLED is on, each case also gets
+   * createdBy, campaignName, nextFollowUpOn and visitCount, read in the same
+   * transaction (at most 100 cases, so one batch); while off, no query runs.
+   */
+  private async present(client: PoolClient, context: DataAccessContext,
+    rows: readonly RegistrationRow[]): Promise<OutreachRegistrationCase[]> {
+    if (!this.visitsEnabled || rows.length === 0) return rows.map((row) => registrationCase(row));
+    const ids = rows.map((row) => row.id);
+    const campaignIds = [...new Set(rows.map((row) => row.campaign_id).filter((value): value is string => !!value))];
+    const registrars = await client.query<{ registration_case_id: string; display_name: string }>(
+      'select registration_case_id,display_name from outreach.case_registrar_names($1::uuid[])', [ids]);
+    const campaigns = campaignIds.length === 0 ? { rows: [] as { id: string; name: string }[] }
+      : await client.query<{ id: string; name: string }>(
+        'select id,name from outreach.campaigns where facility_id=$1 and id=any($2::uuid[])',
+        [context.facilityId, campaignIds]);
+    const visits = await client.query<{ registration_case_id: string; visit_count: number;
+      next_follow_up_on: string | null }>(`select registration_case_id,count(*)::int as visit_count,
+        (array_agg(follow_up_on::text order by occurred_on desc,created_at desc,id desc))[1] as next_follow_up_on
+        from outreach.registration_case_visits where facility_id=$1 and registration_case_id=any($2::uuid[])
+        group by registration_case_id`, [context.facilityId, ids]);
+    const names = new Map(registrars.rows.map((row) => [row.registration_case_id, row.display_name]));
+    const campaignNames = new Map(campaigns.rows.map((row) => [row.id, row.name]));
+    const visitSummary = new Map(visits.rows.map((row) => [row.registration_case_id, row]));
+    return rows.map((row) => {
+      const name = names.get(row.id);
+      const summary = visitSummary.get(row.id);
+      const extras: CaseExtras = {
+        createdBy: name ? { name } : null,
+        campaignName: row.campaign_id ? campaignNames.get(row.campaign_id) ?? null : null,
+        nextFollowUpOn: summary?.next_follow_up_on ?? null,
+        visitCount: summary ? Number(summary.visit_count) : 0,
+      };
+      return registrationCase(row, extras);
+    });
   }
 
   /**
@@ -296,13 +391,13 @@ export class OutreachService {
     }
   }
 
-  private async find(client: PoolClient, id: string): Promise<OutreachRegistrationCase> {
+  private async find(client: PoolClient, id: string, context: DataAccessContext): Promise<OutreachRegistrationCase> {
     const result = await client.query<RegistrationRow>(
       'select * from outreach.registration_cases where id=$1', [id]);
     const row = result.rows[0];
     if (!row) throw new DomainProblem(404, 'OUTREACH_REGISTRATION_NOT_FOUND',
       'The Outreach registration case was not found');
-    return registrationCase(row);
+    return (await this.present(client, context, [row]))[0]!;
   }
 
   private outbox(client: PoolClient, eventType: string, id: string, version: number,
