@@ -1448,6 +1448,12 @@ revoke all on function ocr.facility_page_allowance_state(uuid),
   ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text),
   ocr.facility_ocr_usage(uuid,date) from public;
 revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public;
+-- Outreach campaign registration (0120): outreach.validate_registration_
+-- campaign_write, the SECURITY DEFINER trigger function 0120 replaces (owner
+-- and ACL kept), is granted to no role; a trigger needs no EXECUTE to fire.
+-- No grant changes: the Outreach runtime still has no UPDATE on
+-- outreach.campaign_members, so it can neither update nor lock a membership.
+revoke all on function outreach.validate_registration_campaign_write() from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
