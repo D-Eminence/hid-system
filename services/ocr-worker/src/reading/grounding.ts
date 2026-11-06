@@ -105,6 +105,24 @@ export function withoutCrossedOut(text: string): string {
   return out.replace(/\s+/g, ' ').trim();
 }
 
+/** The "(crossed out: X)" parts of a text, each X as written (nested brackets inside X kept). */
+export function crossedOutParts(text: string): string[] {
+  const parts: string[] = [];
+  let index = text.indexOf('(crossed out:');
+  while (index >= 0) {
+    let depth = 0;
+    let end = index;
+    for (; end < text.length; end += 1) {
+      if (text[end] === '(') depth += 1;
+      else if (text[end] === ')') { depth -= 1; if (depth === 0) break; }
+    }
+    const inside = text.slice(index + '(crossed out:'.length, end).trim();
+    if (inside) parts.push(inside);
+    index = text.indexOf('(crossed out:', end + 1);
+  }
+  return parts;
+}
+
 /**
  * Text without the hard-page sign marks (signs.ts): "(sign)" after a sign read as its meaning, and "[sign?]" for one
  * not read. For holding a picture reading to the scanned text by its words (the anchor rule, items.ts): the word

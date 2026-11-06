@@ -494,7 +494,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(medicine.plain).toBe('Pyrimethamine? 437 mg od?');
     expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
-      // Zoom off: the reads sent the version 5 hard-page text (version 6 without rule J), and provenance says so.
+      // Zoom off: the reads sent the version 7 hard-page text (version 8 without rule J), and provenance says so.
       hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-7', hardPageZoomPages: [], imagePromptVersion: null,
       promptVersion: 'hid-paper-reading-prompt-8' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);

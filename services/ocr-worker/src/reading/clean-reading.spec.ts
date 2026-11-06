@@ -451,10 +451,10 @@ describe('the shown text is the reading itself (re-review of the clean reading)'
   it('describes vision as a finding, never as a description of the writing', () => {
     for (const text of ['Blurred vision', 'Blurry vision x 2/7', 'Faint vision?', 'C/o blurred letters when reading',
       'Words blurry on reading', 'Letters faint and blurred - refer eye clinic', 'Text appears blurred to patient',
-      'Pt appears to read well', 'Sees faded text']) {
+      'Pt appears to read well', 'Sees faded text', 'Words faint', 'Words unclear', 'Letters unclear']) {
       expect([text, isDescription(text)]).toEqual([text, false]);
     }
-    for (const text of ['Blurred text', 'Faint writing', 'Text blurred.', 'Smudged entry, check the paper', 'Words faint',
+    for (const text of ['Blurred text', 'Faint writing', 'Text blurred.', 'Smudged entry, check the paper', 'Word faint',
       'The writing appears to say Flagyl']) {
       expect([text, isDescription(text)]).toEqual([text, true]);
     }
@@ -483,5 +483,114 @@ describe('the clean hard-page prompt (version 7, and 8 with zoom)', () => {
       properties: Record<string, { enum?: unknown }> } } }).items.items;
     expect(items.required).toContain('crossedOut');
     expect(items.properties.frequency!.enum).toBeUndefined();
+  });
+});
+
+describe('second review of the clean reading: nothing struck shown live, no option swallowed', () => {
+  const hand = (text: string) => readPage(1, [[text, { handwritten: true, confidence: 0.4 }]]);
+  const page = hand('IV Cftrxn 1g bd');
+  const one = (answer: CleanReadingAnswer) =>
+    mergeHardReadings([held(modelPage([answerItem(answer, 1)]), page)], SOURCE_SHA).check.items;
+  const two = (a: CleanReadingAnswer, b: CleanReadingAnswer) =>
+    mergeHardReadings([held(modelPage([answerItem(a, 1)]), page), held(modelPage([answerItem(b, 1)]), page)],
+      SOURCE_SHA).check.items;
+  const order = (asWritten: string, fields: Partial<ModelItem>, dose = '', doseUnit = '',
+    extra: Partial<CleanReadingAnswer> = {}): CleanReadingAnswer =>
+    ({ item: { kind: 'medicine', asWritten, status: 'new', ...fields }, dose, doseUnit, ...extra });
+
+  it('never lets a field\'s two options take the place of an "(or …)" that holds other words', () => {
+    // Another drug only in the other reading's option.
+    const [drug] = two(order('Ceftriaxone 1g bd', { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g'),
+      order('Ceftriaxone 2g Flagyl bd', { name: 'Ceftriaxone', frequency: 'bd' }, '2', 'g'));
+    expect(drug!.plain).toBe('Ceftriaxone 1g? (or 2g? Flagyl?) bd (twice a day)');
+    // Two drugs in different places: both shown, no number said twice.
+    const [swapped] = two(order('IV Flagyl 500mg tds', { route: 'IV', name: 'Flagyl', frequency: 'tds' }, '500', 'mg'),
+      order('IV 1g Ceftriaxone tds', { route: 'IV', name: 'Ceftriaxone', frequency: 'tds' }, '1', 'g'));
+    expect(swapped!.plain).toContain('Ceftriaxone?');
+    expect(swapped!.plain.match(/1g/g)).toHaveLength(1);
+    // The model's own "(or ✓?)" (the owner's margin mark) kept, the other reading's route said once.
+    const [tick] = two(order('IV? (or ✓?) Ceftriaxone 1g bd', { route: 'IV?', name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g'),
+      order('IM Ceftriaxone 1g bd', { route: 'IM', name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g'));
+    expect(tick!.plain).toBe('IV? (or ✓?) (or IM?) Ceftriaxone 1g bd (twice a day)');
+    // A frequency only one reading has stays in that reading's option.
+    const [frequency] = two(order('Flagyl 500mg', { name: 'Flagyl' }, '500', 'mg'),
+      order('Flagyl 400mg 8hrly', { name: 'Flagyl', frequency: '8hrly' }, '400', 'mg'));
+    expect(frequency!.plain).toBe(frequency!.asWritten.replace('Flagyl', 'Flagyl (metronidazole)'));
+    // The unit written after the two numbers still takes the field's two options ("500? (or 250?) mg").
+    expect(displayOf('Metronidazole 500? (or 250?) mg', [{ asRead: '500mg? (or 250mg?)', guess: true }], ''))
+      .toBe('Metronidazole 500mg? (or 250mg?)');
+  });
+
+  it('never shows a drug written only crossed out as live, and makes its order\'s status unknown', () => {
+    const [name] = one(order('IV (crossed out: Flagyl) 500mg tds', { route: 'IV', name: 'Flagyl', frequency: 'tds' },
+      '500', 'mg'));
+    expect(name).toMatchObject({ kind: 'medicine', plain: 'IV (crossed out: Flagyl) 500mg tds (three times a day)',
+      fields: { status: 'unknown' } });
+    expect(name!.checkReasons).toContain('crossed_out');
+    const [marked] = one(order('IV (crossed out: Flagyl) 500mg tds', { route: 'IV', name: 'Flagyl', frequency: 'tds' },
+      '500', 'mg', { crossedOut: 'Flagyl?' }));
+    expect(marked).toMatchObject({ plain: 'IV (crossed out: Flagyl) 500mg tds (three times a day)',
+      fields: { status: 'unknown' } });
+    // The whole order crossed out in asWritten, crossedOut left empty: a note, every word kept.
+    const [whole] = one(order('IV (crossed out: Flagyl 500mg tds)', { route: 'IV', name: 'Flagyl', frequency: 'tds' },
+      '500', 'mg'));
+    expect(whole).toMatchObject({ kind: 'note', plain: 'IV (crossed out: Flagyl 500mg tds)' });
+  });
+
+  it('makes the status unknown where one reading has the drug crossed out that the other reads live', () => {
+    const live = order('IV Flagyl 500mg tds', { route: 'IV', name: 'Flagyl', frequency: 'tds' }, '500', 'mg');
+    const struck = order('IV (crossed out: Flagyl) Ceftriaxone 1g tds', { route: 'IV', name: 'Ceftriaxone',
+      frequency: 'tds' }, '1', 'g', { crossedOut: 'Flagyl' });
+    for (const [item] of [two(live, struck), two(struck, live)]) {
+      expect(item!.fields).toMatchObject({ status: 'unknown' });
+      expect(item!.checkReasons).toEqual(expect.arrayContaining(['status_cue_on_line', 'readings_disagree', 'crossed_out']));
+      expect(item!.plain).toContain('(crossed out: Flagyl)');
+      expect(item!.plain).toContain('Ceftriaxone?');
+    }
+  });
+
+  it('turns a first-pass order into unknown status when the picture reading shows its drug struck before another', () => {
+    const line = hand('IV Flgyl 500mg Cftrxn 1g tds');
+    const first = checkPage({ page: 1, lines: line.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'first_pass',
+      masker: createMasker(), answer: modelPage([modelItem({ kind: 'medicine', asWritten: 'IV Flgyl 500mg Cftrxn 1g tds',
+        lineIds: ['p1-l1'], name: 'Flagyl', strength: '500mg', frequency: 'tds', status: 'new' })]) });
+    const hard = mergeHardReadings([held(modelPage([answerItem(order('IV (crossed out: Flagyl 500mg) Ceftriaxone 1g tds',
+      { route: 'IV', name: 'Ceftriaxone', frequency: 'tds' }, '1', 'g', { crossedOut: 'Flagyl 500mg' }), 1)]), line)],
+    SOURCE_SHA).check;
+    const merged = mergeReread(first, hard, line.lines, 'image').items;
+    const kept = merged.find((item) => item.readBy === 'first_pass')!;
+    expect(kept).toMatchObject({ kind: 'medicine', fields: { name: 'Flagyl', status: 'unknown' } });
+    expect(kept.checkReasons).toEqual(expect.arrayContaining(['not_in_picture_reading', 'crossed_out']));
+    // The replacement read from the picture stays as it is.
+    expect(merged.find((item) => item.readBy === 'reread')!.fields).toMatchObject({ name: 'Ceftriaxone', status: 'new' });
+  });
+
+  it('makes the status unknown for more stop words and their clear abbreviations', () => {
+    for (const word of ['Cancel', 'Cancelled', 'Stopping', 'Off', 'Discont.', 'Withdraw', 'Halt', 'Stp?', 'Canx']) {
+      const [item] = one(order(`${word} IV Flagyl 500mg tds`, { route: 'IV', name: 'Flagyl', frequency: 'tds' }, '500', 'mg'));
+      expect([word, item!.fields]).toEqual([word, expect.objectContaining({ status: 'unknown' })]);
+      expect(item!.checkReasons).toContain('status_cue_on_line');
+    }
+    const [plain] = one(order('IV Flagyl 500mg tds', { route: 'IV', name: 'Flagyl', frequency: 'tds' }, '500', 'mg'));
+    expect(plain!.fields).toMatchObject({ status: 'new' });
+  });
+
+  it('keeps clinical sentences that mention reading, and catches more descriptions of the writing', () => {
+    for (const text of ['Mantoux cannot be read until 72 hours', 'ECG could not be interpreted', 'Appears to read and write',
+      'Seems to read well', 'Check the original referral letter', 'Check the paper chart', 'Script illegible, called prescriber',
+      'Label not readable, query pharmacy', 'Words unclear', 'Letters unclear', 'Patient cannot be read to',
+      'Looks like cellulitis', 'Possibly malaria', 'Unable to read']) {
+      expect([text, isDescription(text)]).toEqual([text, false]);
+    }
+    for (const text of ['Hard to read', 'Difficult to read', 'Unable to read this entry', 'Unable to decipher',
+      'Writing is unclear here', 'Indistinct writing', 'Writing too faint', 'Word not clear',
+      'A handwritten word, possibly Flagyl', 'Could not be read; check the paper', 'Illegible.', 'Not legible']) {
+      expect([text, isDescription(text)]).toEqual([text, true]);
+    }
+  });
+
+  it('reads a word cut short with ASCII dots as a partial word', () => {
+    const [item] = one(order('Amox... 500mg tds', { name: 'Amox...', frequency: 'tds' }, '500', 'mg'));
+    expect(item).toMatchObject({ plain: 'Amox… 500mg tds (three times a day)', fields: { name: 'Amox…' } });
   });
 });

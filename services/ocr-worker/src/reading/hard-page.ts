@@ -1,7 +1,7 @@
 import type { Box, FlagReason, PaperItem } from './contract';
 import { diagnosisLookalike, matchDiagnosisName, type ListMatch } from './diagnosis-list';
 import { drugLookalike, matchDrugName, normaliseDrugName, type DrugMatch } from './drug-list';
-import { withoutCrossedOut } from './grounding';
+import { crossedOutParts, withoutCrossedOut } from './grounding';
 import { checkReasonSentence, itemId, mergeIdentity, unionBox, uniqueItemIds, type PageCheck } from './items';
 import { labTestLookalike, matchLabTestName } from './lab-list';
 import { ALTERNATIVE_OPEN, BASIS_FIELDS, CROSSED_OUT_OPEN, FIELD_UNREAD, HARD_PAGE_FREQUENCIES, NO_LETTERS, PAPER_QUERY,
@@ -82,9 +82,14 @@ export const DESCRIPTION_REPLACED = 'description_replaced';
  * field_from_context (a field guessed from where it sits or what is usual), though the website shows both as "?".
  */
 export const UNSURE_LETTERS = 'unsure_from_letters';
-/** Words that say an order is stopped, held or changed: a medicine showing one has status unknown (finish). */
-export const STATUS_WORDS = new RegExp('^(?:stop|stopped|hold|held|withhold|withheld|omit|omitted|discontinue'
-  + '|discontinued|d/c|dc|cease|ceased|suspend|suspended|switch|switched|change|changed|convert|converted)$');
+/**
+ * Words that say an order is stopped, held or changed: a medicine showing one has status unknown (finish). Matched on
+ * the word with its "?" and punctuation off, lower case; a clear abbreviation counts too ("Stp?", "Discont.", "Canx").
+ */
+export const STATUS_WORDS = new RegExp('^(?:stops?|stopped|stopping|stp|hold|holding|held|withhold|withholding|withheld'
+  + '|omit|omitted|discont\\p{L}*|disc|d/c|dc|cease|ceased|ceasing|suspend|suspended|cancel|cancels|cancell?ed'
+  + '|cancell?ing|canx|withdraw|withdrawn|withdrawing|withdrew|off|halt|halted|switch|switched|change|changed'
+  + '|convert|converted)$', 'u');
 /**
  * Other words that say what to do with an order: two readings differing on one (or on a STATUS_WORDS word) make its
  * status unknown.
@@ -102,9 +107,14 @@ const hasLetters = (text: string) => /[\p{L}\p{N}]/u.test(text.replace(NOT_GUESS
 /** A reading's text without its "?" marks, normalised (case, spacing, "5 mg" = "5mg"), for comparing two readings. */
 export const bare = (text: string | null | undefined) => (text ?? '').replace(/\?/g, ' ').replace(/\s+/g, ' ')
   .replace(/\s+([)\]])/g, '$1').trim().toLowerCase().replace(/(\d)\s+(?=\p{L})/gu, '$1');
-/** The old "[unreadable]" (hard-page prompt 2 to 4) as the clean token "[?]"; "[frequency?]" as "[freq?]". */
+/**
+ * The old "[unreadable]" (hard-page prompt 2 to 4) as the clean token "[?]"; "[frequency?]" as "[freq?]"; a word cut
+ * short written with ASCII dots ("Amox...", "Amox..") as the partial-word mark ("Amox…"), so it is never marked
+ * "Amox?..." or matched to a list.
+ */
 const cleanTokens = (text: string) => text.replace(/\[unreadable\]/gi, NO_LETTERS)
-  .replace(/\[frequency\?\]/gi, FIELD_UNREAD.frequency);
+  .replace(/\[frequency\?\]/gi, FIELD_UNREAD.frequency)
+  .replace(/(\p{L})\.{2,3}(?=[\s)\]]|$)/gu, `$1${PARTIAL_WORD}`);
 /** A reading mark that is one word on its own: "[?]", "[sign?]", "(? on paper)", "(sign)" or a field placeholder. */
 const isMarkToken = (word: string) => word === SIGN_READ_MARK || word === PAPER_QUERY
   || /^\[(?:\?|sign\?|route\?|drug\?|dose\?|freq\?)\]$/.test(word);
@@ -200,28 +210,52 @@ export function splitAlternative(text: string): [string, string] | null {
 const WRITING = '(?:hand)?writing|entry|text|words?|letters|scribble|item';
 /** The writing itself, never something a patient sees: no "text", "words" or "letters" (those may be a symptom). */
 const WRITTEN = '(?:hand)?writing|entry|scribble';
+/** The writing as shown, for the whole-text patterns: also "text" and one "word" (never "words" or "letters"). */
+const WRITTEN_SHOWN = '(?:hand)?writing|entry|scribble|text|word|item';
+/** A description's own subject for the narrow whole-text patterns: the writing, never "words" or "letters" (speech, sight). */
+const WRITING_ONE = '(?:hand)?writing|entry|word|scribble';
+const CANNOT = "(?:cannot|can ?not|can't|could ?not|couldn't)";
 const DESCRIPTION_PATTERNS: readonly RegExp[] = [
-  // "cannot be read": passive, so it is about the writing; "can't read" with a person as subject ("Pt unable to read",
-  // "Patient cannot read") is a clinician's note and does not match.
-  /\b(?:cannot|can ?not|can't|could ?not|couldn't)\s+be\s+(?:read|made out|deciphered|interpreted)\b/i,
+  // "cannot be read" with no subject, or "it"/"this" ("Could not be read; check the paper"); with the writing as
+  // subject below. Any other subject is a clinician's note ("Mantoux cannot be read until 72 hours", "ECG could not be
+  // interpreted", "Patient cannot be read to"), and "can't read" with a person as subject ("Pt unable to read") too.
+  new RegExp(`^\\s*(?:(?:it|this)\\s+)?${CANNOT}\\s+be\\s+(?:read|made out|deciphered)\\b`, 'i'),
   new RegExp(`\\b(?:${WRITING})\\s+(?:that\\s+|which\\s+)?(?:is\\s+|was\\s+)?(?:cannot|can ?not|can't|could ?not|couldn't|unable to)\\s+(?:be\\s+)?(?:read|made out|deciphered|interpreted)\\b`, 'i'),
-  /\b(?:illegible|indecipherable|undecipherable|unintelligible|unreadable)\b/i,
-  /\bcheck\s+(?:it\s+|this\s+)?(?:against\s+)?the\s+(?:paper|original)\b/i,
-  /\b(?:handwritten|illegible|scribbled)\s+(?:\p{L}+\s+)?(?:entry|text|writing|scribble|item)\b/iu,
+  // "Illegible" alone or about the writing; "Script illegible, called prescriber" or "Label not readable, query
+  // pharmacy" is a clinician's note about something else.
+  /^\s*(?:illegible|indecipherable|undecipherable|unintelligible|unreadable)\s*[.;:]?\s*$/i,
+  new RegExp(`\\b(?:illegible|indecipherable|undecipherable|unintelligible|unreadable)\\s+(?:\\p{L}+\\s+)?(?:${WRITING}|note)\\b`, 'iu'),
+  new RegExp(`\\b(?:${WRITING})\\s+(?:is\\s+|was\\s+)?(?:illegible|indecipherable|undecipherable|unintelligible|unreadable)\\b`, 'i'),
+  // "check the paper" closing the text (or alone); "Check the paper chart" or "check the original letter" is an order.
+  /(?:^|[;,.:–-]\s*)check\s+(?:it\s+|this\s+)?(?:against\s+)?the\s+paper\s*[.;:]?\s*$/i,
+  /\b(?:handwritten|illegible|scribbled)\s+(?:\p{L}+\s+)?(?:entry|text|writing|scribble|item|word)\b/iu,
   // "Handwritten note" or "Scribbled word" as the whole text; "Handwritten note given to patient" is a reading.
   /^\s*(?:handwritten|scribbled|illegible)\s+(?:\p{L}+\s+)?(?:note|words?|letters)\s*[.;:]?\s*$/iu,
   // Inside a longer text only where the subject can only be the writing ("smudged entry, check the paper"); words,
   // letters or text that look blurred or faint may be what a patient sees ("C/o blurred letters when reading").
   new RegExp(`\\b(?:unclear|smudged|faded|obscured)\\s+(?:${WRITTEN})\\b`, 'i'),
   new RegExp(`\\b(?:${WRITTEN})\\s+(?:is\\s+|was\\s+)?(?:obscured|smudged|faded)\\b`, 'i'),
-  // As the whole text, any of them: "Blurred text", "Faint writing", "Text blurred." (never "Blurred vision").
-  new RegExp(`^\\s*(?:unclear|smudged|faded|faint|obscured|blurred|blurry)\\s+(?:${WRITING})\\s*[.;:]?\\s*$`, 'i'),
-  new RegExp(`^\\s*(?:${WRITING})\\s+(?:is\\s+|was\\s+)?(?:unclear|obscured|smudged|faded|faint|blurred|blurry)`
+  // As the whole text: "Blurred text", "Faint writing", "Text blurred." (never "Blurred vision"); never "words" or
+  // "letters", which may be speech or sight ("Words unclear", "Letters faint").
+  new RegExp(`^\\s*(?:unclear|smudged|faded|faint|obscured|blurred|blurry|indistinct)\\s+(?:${WRITTEN_SHOWN})\\s*[.;:]?\\s*$`, 'i'),
+  new RegExp(`^\\s*(?:${WRITTEN_SHOWN})\\s+(?:is\\s+|was\\s+)?(?:unclear|obscured|smudged|faded|faint|blurred|blurry)`
     + '\\s*[.;:]?\\s*$', 'i'),
+  // The writing as the first word, then how it looks, with more words after ("Writing is unclear here", "Writing too
+  // faint", "Word not clear").
+  new RegExp(`^\\s*(?:the\\s+)?(?:${WRITING_ONE})\\s+(?:is\\s+|was\\s+)?(?:too\\s+)?(?:faint|unclear|not\\s+clear|indistinct|smudged|faded|obscured)\\b`, 'i'),
+  // "Hard to read", "Difficult to read", "Unable to decipher", "Unable to read this entry" as the whole text (a bare
+  // "Unable to read" may be a note about the patient).
+  /^\s*(?:(?:hard|difficult|impossible)\s+to\s+(?:read|decipher|make\s+out)|unable\s+to\s+(?:decipher|make\s+out))(?:\s+(?:this|the)\s+(?:entry|writing|handwriting|word))?\s*[.;:]?\s*$/i,
+  /^\s*unable\s+to\s+(?:read|decipher|make\s+out)\s+(?:this|the)\s+(?:entry|writing|handwriting|word)\s*[.;:]?\s*$/i,
   /\b(?:partly|partially|barely|hardly)\s+(?:legible|readable)\b/i,
-  // "Appears to say amoxicillin" with the writing (or nothing) as subject; "Pt appears to read well" is a finding.
-  /^\s*(?:(?:it|this|the\s+(?:hand)?writing|the\s+(?:text|word|entry))\s+)?(?:appears|seems)\s+to\s+(?:say|read)\b/i,
-  /\bnot\s+(?:legible|readable)\b/i,
+  // "Appears to say amoxicillin" with the writing as subject; with no subject only before a quoted or capitalised
+  // word ("Appears to read Flagyl"), so "Appears to read and write" or "Seems to read well" (findings) never match.
+  /^\s*(?:it|this|the\s+(?:hand)?writing|the\s+(?:text|word|entry))\s+(?:appears|seems)\s+to\s+(?:say|read)\b/i,
+  /^\s*(?:[Aa]ppears|[Ss]eems)\s+to\s+(?:say|read)\s*:?\s*(?:["'\u201c\u2018]|\p{Lu})/u,
+  /^\s*(?:[Aa]ppears|[Ss]eems)\s+to\s+say\s+(?!(?:he|she|they|that|so|yes|no|something|nothing|words?|it)\b)\p{L}/u,
+  // "Not legible" alone or about the writing ("text is not legible"); "Label not readable, query pharmacy" is a note.
+  /^\s*not\s+(?:legible|readable)\s*[.;:]?\s*$/i,
+  new RegExp(`\\b(?:${WRITING})\\s+(?:is\\s+|was\\s+)?not\\s+(?:legible|readable)\\b`, 'i'),
 ];
 export function isDescription(text: string): boolean {
   return DESCRIPTION_PATTERNS.some((pattern) => pattern.test(text));
@@ -372,7 +406,7 @@ export function carryMarks(value: string, keys: readonly string[], carried: Set<
  * dose and frequency.
  */
 function wholeCrossedOut(item: ModelItem): boolean {
-  const crossed = bare(item.hard?.crossedOut);
+  const crossed = bare(allCrossedOut(item.asWritten, item.hard?.crossedOut));
   if (!crossed || !hasLetters(crossed)) return false;
   const live = bare(withoutCrossedOut(item.asWritten));
   if (live && crossed.includes(live)) return true;
@@ -405,11 +439,14 @@ export function prepareHardAnswer(answer: ModelPage): ModelPage {
     if (item.kind !== 'note' && item.asWritten.includes(CROSSED_OUT_OPEN) && !hasLetters(withoutCrossedOut(item.asWritten))) {
       item = crossedOutNote(item);
     } else if (item.kind !== 'note' && wholeCrossedOut(item)) {
-      item = crossedOutNote({ ...item, asWritten: `${CROSSED_OUT_OPEN}${item.hard!.crossedOut})` });
+      // asWritten already showing the crossed-out writing ("IV (crossed out: Flagyl 500mg tds)") is kept, every word.
+      item = crossedOutNote(item.asWritten.includes(CROSSED_OUT_OPEN) ? item
+        : { ...item, asWritten: `${CROSSED_OUT_OPEN}${item.hard!.crossedOut})` });
     }
-    // The drug name is crossed out but other writing is not (a rewritten order): whether it is active is unknown.
-    if (item.kind === 'medicine' && (item.status === 'new' || item.status === 'current')
-      && !isBlank(item.name) && bare(item.hard!.crossedOut).includes(bare(item.name))) item.status = 'unknown';
+    // The drug name is crossed out but other writing is not (a rewritten order): whether it is active is unknown. The
+    // crossed-out writing is the reading's crossedOut and what asWritten shows crossed out, whichever the model filled.
+    if (item.kind === 'medicine' && (item.status === 'new' || item.status === 'current') && !isBlank(item.name)
+      && nameCrossedOut(item.name, allCrossedOut(item.asWritten, item.hard!.crossedOut))) item.status = 'unknown';
     const { basis } = item.hard!;
     // Each word asWritten marks a guess is marked in the fields that hold it (the shown text is built from them).
     const keys = guessKeys(item.asWritten);
@@ -649,6 +686,25 @@ function fieldsText(kind: PaperItem['kind'], fields: PaperItem['fields']): strin
     .join(' ');
 }
 
+/** All the crossed-out writing of a reading: its crossedOut and each "(crossed out: X)" in asWritten, joined by "; ". */
+function allCrossedOut(asWritten: string, given: string | undefined): string {
+  const parts = [...(isBlank(given) ? [] : [given!.trim()]), ...crossedOutParts(asWritten)];
+  return [...new Set(parts)].join('; ');
+}
+
+/**
+ * Whether a drug name (its letters, "?" marks, a listed generic in brackets and other options aside) is written in
+ * the crossed-out writing: every word of the name, as whole words.
+ */
+function nameCrossedOut(name: string | null | undefined, crossed: string): boolean {
+  if (isBlank(name) || isBlank(crossed)) return false;
+  const split = splitAlternative(name!);
+  if (split) return split.some((option) => nameCrossedOut(option, crossed));
+  const keys = words(name!).filter((word) => !isGroup(word)).map(wordKey).filter(Boolean);
+  const struck = words(crossed.replace(/[;()]/g, ' ')).map(wordKey).filter(Boolean);
+  return keys.length > 0 && keys.every((key) => struck.some((other) => sameKey(other, key)));
+}
+
 /** The crossed-out writing an item shows: the reading's crossedOut, else what asWritten writes as "(crossed out: X)". */
 function crossedOutOf(asWritten: string, given: string | undefined): string {
   if (!isBlank(given)) return given!.trim();
@@ -721,11 +777,17 @@ function locate(ws: readonly string[], taken: readonly boolean[], note: DisplayN
     if (byList) return byList;
   }
   // A field the two readings gave differently ("500mg? (or 250mg?)") written as "500? (or 250?) mg": the first
-  // option's words with the other reading's in between.
+  // option's words with the other reading's in between. Only where every "(or …)" in the run is that other option:
+  // render shows the field's own two options in place of the run, so a group holding more ("(or 2g? Flagyl?)", "(or
+  // ✓?)") would lose its other words; such a field is found by its options one by one instead (displayOf).
   const split = splitAlternative(note.replace ?? note.asRead);
   const firstKey = split ? runKey(words(split[0])) : '';
   if (firstKey) {
+    const secondKey = runKey(words(split![1]));
+    // That option written without its unit ("(or 250?)" for "250mg?") counts as it.
+    const isOption = (word: string) => sameKey(runKey(words(word.slice(ALTERNATIVE_OPEN.length, -1))), secondKey);
     return findRun(ws, taken, (run) => run.some((word) => word.startsWith(ALTERNATIVE_OPEN))
+      && run.filter((word) => word.startsWith(ALTERNATIVE_OPEN)).every(isOption)
       && runKey(run.filter((word) => !word.startsWith(ALTERNATIVE_OPEN))) === firstKey);
   }
   return null;
@@ -852,8 +914,12 @@ export function displayOf(asWritten: string, notes: readonly DisplayNote[], cros
     // A guess, a respelling or a listed name whose words are not in asWritten: added at the end, marked.
     const missed = unique.filter((note, index) => pending[index] && (note.guess || note.replace !== undefined
       || note.after !== undefined));
+    // A name written only in crossed-out writing ("IV (crossed out: Flagyl) 500mg") is shown there, struck: never
+    // added again at the end as if it were live.
+    const struck = crossedOutParts(text).join(' ');
     for (const note of missed) {
       const shown = note.replace ?? note.asRead;
+      if ([note.asRead, note.replace].some((value) => value !== undefined && nameCrossedOut(value, struck))) continue;
       if (!hasLetters(shown)) { if (!text.includes(shown.trim())) text = `${text} ${shown.trim()}`; continue; }
       text = `${text} ${markWords(shown)}${note.after ? ` ${note.after}` : ''}`;
     }
@@ -1182,7 +1248,13 @@ function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPag
   if (bare(shownA.crossed) !== bare(shownB.crossed)) disagree = true;
   // The two readings differ on what to do with the order ("Start" against "Stop", "Continue" against nothing).
   const said = (side: Side) => [...new Set(instructionWords(side.item.asWritten, isInstructionWord))].sort().join(' ');
-  const statusDiffers = a.item.kind === 'medicine' && said(a) !== said(b);
+  // Or one reading has the drug crossed out that the other reads as live ("(crossed out: Flagyl) Ceftriaxone" against
+  // "Flagyl"): whether that order is active is not known.
+  const struckIn = (side: Side) => allCrossedOut(side.item.asWritten, side.extras?.crossedOut);
+  const liveNames = (side: Side) => [side.extras?.writtenName, side.item.kind === 'medicine' ? side.item.fields.name : null];
+  const struckByOne = a.item.kind === 'medicine' && [[a, b], [b, a]].some(([x, y]) =>
+    [...liveNames(y!), (fields as { name?: string | null }).name].some((name) => nameCrossedOut(name, struckIn(x!))));
+  const statusDiffers = a.item.kind === 'medicine' && (said(a) !== said(b) || struckByOne);
   const lineIds = [...new Set([...a.item.lineIds, ...b.item.lineIds])].sort((x, y) => lineNumber(x) - lineNumber(y));
   const reasons = [...a.item.checkReasons, ...b.item.checkReasons.filter((code) => !a.item.checkReasons.includes(code))];
   const merged = { ...a.item, asWritten, lineIds, box: unionBox([a.item.box, b.item.box]) ?? a.item.box,

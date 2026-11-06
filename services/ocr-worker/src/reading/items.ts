@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem, VITAL_MEASURES } from './contract';
 import {
-  ambiguousDate, combinedStrengths, compact, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
+  ambiguousDate, combinedStrengths, compact, crossedOutParts, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
   sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutCrossedOut, withoutNumberedUnit,
   withoutReadingMarks, wordsIn,
 } from './grounding';
@@ -515,7 +515,8 @@ function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, plac
  * the most shared words), that one pair gets 'differs_from_second_reading' so the person checking compares them.
  * A kept first-pass item on a line where the second reading has a note holding only crossed-out writing (a hard-page
  * item crossed out as a whole) also gets 'crossed_out', and a medicine's status becomes 'unknown' (sharesLine never
- * pairs it with that note, whose kind differs).
+ * pairs it with that note, whose kind differs), and so does one whose name a second-reading item on a shared line
+ * shows crossed out ("IV (crossed out: Flagyl 500mg) Ceftriaxone 1g", a struck drug before its replacement).
  * Items are in reading order (page, first cited line; second-reading items first on the same line) and their ids
  * are made unique again. Identity is merged field by field (mergeIdentity); a field the two readings give
  * differently keeps the first pass's value and flags the page ai_unsure. possible_missed_item is worked out again
@@ -547,9 +548,18 @@ export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly
   // writing, hard-page.ts): never shown as active beside that note.
   const struckLines = new Set(read.filter((item) => item.kind === 'note' && item.asWritten.includes(CROSSED_OUT_OPEN)
     && !/[\p{L}\p{N}]/u.test(withoutCrossedOut(item.asWritten))).flatMap((item) => item.lineIds));
+  // Or where a second-reading item on a shared line, of any kind, shows this item's name crossed out (the owner's
+  // pattern "IV? (crossed out: Ceftriaxone?) Cefuroxime?": a struck drug before its replacement).
+  const struckName = (item: PaperItem) => {
+    const name = keptName(item);
+    if (name === '') return false;
+    return read.some((other) => other.lineIds.some((id) => item.lineIds.includes(id))
+      && [other.asWritten, other.plain].some((text) => crossedOutParts(text)
+        .some((part) => containsWords(comparable(part), name))));
+  };
   for (const item of kept) {
     addReason(item, missing);
-    if (item.kind !== 'note' && item.lineIds.some((id) => struckLines.has(id))) {
+    if (item.kind !== 'note' && (item.lineIds.some((id) => struckLines.has(id)) || struckName(item))) {
       addReason(item, 'crossed_out');
       if (item.kind === 'medicine' && item.fields.status !== 'stopped' && item.fields.status !== 'past') {
         item.fields = { ...item.fields, status: 'unknown' };
@@ -570,6 +580,20 @@ export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly
     && !(conflict && reason === 'ai_unsure')), ...(conflict ? ['ai_unsure' as const] : []),
   ...(missed ? ['possible_missed_item' as const] : [])];
   return { ...second, items: merged, identity, flagReasons };
+}
+
+/** A kept first-pass item's name, for finding it crossed out: a medicine's or diagnosis's name, a substance, a test. */
+function keptName(item: PaperItem): string {
+  const name = item.kind === 'medicine' || item.kind === 'diagnosis' ? item.fields.name
+    : item.kind === 'allergy' ? item.fields.substance : item.kind === 'lab_result' ? item.fields.test : null;
+  return name === null ? '' : comparable(name);
+}
+
+/** Whether every word of `name` (three letters or more of it) is a whole word of `text` (both comparable). */
+function containsWords(text: string, name: string): boolean {
+  const own = name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const struck = new Set(text.split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+  return own.join('').length >= 3 && own.every((word) => struck.has(word));
 }
 
 /** Add a check reason once; the item goes to a person, with the sentence of its first reason. */
