@@ -14,7 +14,9 @@
     "https://github.com/gcc-mirror/gcc/commit/59d235ffa5a69231eb42e5290d52dc8c90d28b7a",
     "https://github.com/gcc-mirror/gcc/commit/aaa8351f4d2e636f9680a1f0a8ebc2f0a60611e6",
     "https://security-tracker.debian.org/tracker/CVE-2026-84243",
-    "https://sourceware.org/bugzilla/show_bug.cgi?id=17142"
+    "https://sourceware.org/bugzilla/show_bug.cgi?id=17142",
+    "https://security-tracker.debian.org/tracker/CVE-2026-76844",
+    "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148"
   ],
   "findings": [
     {
@@ -94,10 +96,21 @@
       },
       "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
       "rationale": "Exploitation needs attacker control of LANGUAGE across a trust boundary without AT_SECURE, a selected LC_MESSAGES locale other than C, C.<encoding> or POSIX, and a planted .mo catalog. No process in these images leaves the C locale, whatever its environment: the only glibc programs are node and the Argon2 addon, both held to the exact ELF inventory; node's only setlocale call is ICU's query setlocale(LC_MESSAGES, NULL), and neither imports newlocale, uselocale or a named std::locale constructor. That includes tasks started with RunTask environment overrides and the node child process that the identity-promotion task starts. gettext therefore ignores LANGUAGE. The images also ship no locale data or message catalogs, and neither the base image config (PATH, SSL_CERT_FILE) nor any Terraform task definition sets LANG, LANGUAGE or LC_*."
+    },
+    {
+      "id": "CVE-2026-76844",
+      "packages": [
+        "zlib1g"
+      ],
+      "versions": {
+        "zlib1g": "1:1.3.dfsg+really1.3.1-1+b1"
+      },
+      "justification": "vulnerable_code_not_in_execute_path",
+      "rationale": "The affected gz_write() stale next_in path exists in this zlib 1.3.1 but is reached only through the gzFile write API (gzopen/gzdopen, then gzwrite, gzfwrite, gzputs, gzputc, gzprintf or gzflush, plus gzclearerr before 1.3.1.2). No final ELF imports any gz* function and the gate rejects any that does. node does not link libz.so.1; the only ELF that does is the system libcrypto.so.3, which no inventoried ELF needs and which imports only compress/deflate/inflate functions. All native binaries are bound by exact hashes."
     }
   ],
   "schema": "hid.production-runtime-assessment-policy/v1",
-  "assessed_at": "2026-10-31T00:00:00+00:00",
+  "assessed_at": "2026-11-06T00:00:00+00:00",
   "expires_at": "2026-11-28T00:00:00+00:00",
   "elf_inventory": {
     "identity-api": {
@@ -3553,30 +3566,5 @@
     "node-22.23.4-runtime-evidence.json": "64fd6c7ad36a60fd1597b8bbe1973630473677f5e81a37e630a8ce9ba2fa5fcc"
   },
   "admission": "Expected previously reviewed native bytes only. Every current image must independently match this complete inventory; a changed or extra ELF fails closed. Original raw reports retained. No exploitable-risk waiver.",
-  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment the only changed ELF is nodejs/bin/node. Its review (byte-identical to bin/node in the signed Node 22.23.4 linux-arm64 release; no affected glibc import, aligned new or PBDS content) and the base's non-ELF package changes are checksum-bound in node-22.23.4-runtime-evidence.json. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI. Rechecked 2026-10-31: CVE-2026-84243 (glibc gettext accepts LANGUAGE paths; glibc bug 17142, GLIBC-SA-2026-0025) is new and the native bytes are unchanged. The base image has no .mo catalogs or locale data, its config sets only PATH and SSL_CERT_FILE, and Terraform task definitions set no LANG, LANGUAGE or LC_*. libstdc++ and three unloaded glibc helper libraries import gettext functions, so the import list is not the basis; the basis is that node and the Argon2 addon never select a locale (node's only setlocale call is a NULL query), so LC_MESSAGES stays C and LANGUAGE is never read.",
-  "proposed_findings": {
-    "status": "PROPOSED, PENDING OWNER APPROVAL. Not admitted: the gate reads only \"findings\", so CVE-2026-76844 still blocks every backend image until the owner approves and the entry is moved into \"findings\" (with its sources added to upstream_sources and a dated note in review_basis). As with existing entries, owner approval is recorded in the commit message that moves the entry, not in this file.",
-    "proposed_at": "2026-11-06",
-    "trigger": "Production backend candidates run 42200301408 (ocr-api, ocr-worker): the only High match with no policy entry is CVE-2026-76844 in zlib1g 1:1.3.dfsg+really1.3.1-1+b1 (Debian: trixie vulnerable, fixed only in sid 1:1.3.dfsg+really1.3.2-4). The other twelve High matches equal existing entries at the exact versions.",
-    "base_image_check": "Checked 2026-11-06: gcr.io/distroless/nodejs22-debian13:latest is sha256:8ad697a6d7880bda8248a86a1df5b54e4993479931148f863e8a57ab66c95d24 (pushed 2026-10-31; ARM64 manifest sha256:5ca284b097bd6f7cb0cda8b683f8f7efa1ef3bb73e35090bf94364b266a2d7d0). Versus the pinned ARM64 manifest sha256:d9e2b473b36e61248531d7b6d3ead4645e2b7ddef2ac1c2a352b74a0a0d35338, only layers 2 and 3 differ: tzdata and tzdata-legacy 2026e-0+deb13u1 to 2026f-0+deb13u1. zlib1g, libc6 and the GCC 14 runtime packages are byte-identical, so no newer digest fixes any finding and the pin is unchanged.",
-    "evidence": "Every layer of the pinned ARM64 manifest was fetched by digest and checked; all 283 ELFs of the ocr-api inventory hash-match the extracted base. nodejs/bin/node DT_NEEDED: libdl, libstdc++, libm, libgcc_s, libpthread, libc, ld-linux (no libz, no libcrypto; OpenSSL 3.5.9 and zlib are built in). The only ELF that needs libz.so.1 is the system libcrypto.so.3, which no inventoried ELF needs and which node loads only through an OpenSSL engine or config (no setEngine, OPENSSL_CONF or OPENSSL_ENGINES in services, Dockerfiles, workflows or infra); libcrypto imports only compress, uncompress, deflate*, inflate* from libz, no gz* function. No ELF in the image (argon2 0.44.0 prebuild 8f88266a... included, verified against the npm tarball integrity) imports any gz* symbol. The scripts/assess-staging-runtime.py gate now fails closed if any ELF imports a zlib gzFile open or write function.",
-    "residual": "node bundles its own zlib 1.3.1 (deps/zlib, includes gzwrite.c) and exports gz* symbols; Grype does not report it under zlib1g. The checksum-verified Node 22.23.4 source (7b9adc82...) has no gz* call outside deps/zlib, and the node:zlib module uses deflate/inflate streams only. Any future native addon calling gzopen/gzwrite would reach the bundled code, and the gate import check would block it.",
-    "sources": [
-      "https://security-tracker.debian.org/tracker/CVE-2026-76844",
-      "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148"
-    ],
-    "findings": [
-      {
-        "id": "CVE-2026-76844",
-        "packages": [
-          "zlib1g"
-        ],
-        "versions": {
-          "zlib1g": "1:1.3.dfsg+really1.3.1-1+b1"
-        },
-        "justification": "vulnerable_code_not_in_execute_path",
-        "rationale": "The affected gz_write() stale next_in path exists in this zlib 1.3.1 but is reached only through the gzFile write API (gzopen/gzdopen, then gzwrite, gzfwrite, gzputs, gzputc, gzprintf or gzflush, plus gzclearerr before 1.3.1.2). No final ELF imports any gz* function and the gate rejects any that does. node does not link libz.so.1; the only ELF that does is the system libcrypto.so.3, which no inventoried ELF needs and which imports only compress/deflate/inflate functions. All native binaries are bound by exact hashes."
-      }
-    ]
-  }
+  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment the only changed ELF is nodejs/bin/node. Its review (byte-identical to bin/node in the signed Node 22.23.4 linux-arm64 release; no affected glibc import, aligned new or PBDS content) and the base's non-ELF package changes are checksum-bound in node-22.23.4-runtime-evidence.json. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI. Rechecked 2026-10-31: CVE-2026-84243 (glibc gettext accepts LANGUAGE paths; glibc bug 17142, GLIBC-SA-2026-0025) is new and the native bytes are unchanged. The base image has no .mo catalogs or locale data, its config sets only PATH and SSL_CERT_FILE, and Terraform task definitions set no LANG, LANGUAGE or LC_*. libstdc++ and three unloaded glibc helper libraries import gettext functions, so the import list is not the basis; the basis is that node and the Argon2 addon never select a locale (node's only setlocale call is a NULL query), so LC_MESSAGES stays C and LANGUAGE is never read. Rechecked 2026-11-06: CVE-2026-76844 (zlib gz_write stale next_in, reached only through the gzFile write API) is new and the native bytes are unchanged. No newer distroless nodejs22-debian13 digest changes zlib1g, libc6 or the GCC runtime (latest 8ad697a6..., pushed 2026-10-31, differs only in tzdata). node does not link libz.so.1; the only ELF that does is the system libcrypto.so.3, which no inventoried ELF needs and which imports no gz* function; no ELF imports any gz* symbol, and the gate now rejects any ELF that does. Node's bundled zlib also contains gzwrite.c but the checksum-verified Node 22.23.4 source has no gz* call outside deps/zlib."
 }

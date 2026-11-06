@@ -47,9 +47,9 @@ The pinned base was then updated within the same Node 22/Debian 13 image family 
 `sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8`.
 Scanning that exact ARM64 base removed all Critical findings and the High findings
 with available Debian fixes. Seven unique High advisory IDs remain (thirteen
-package matches), with no packaged fix reported. One of them, CVE-2026-76844, is
-still unassessed: its assessment is a proposal pending owner approval, so it
-still blocks publication:
+package matches), with no packaged fix reported. Each has a runtime assessment
+in `security/production-runtime-assessment.json`; CVE-2026-76844 was added on
+2026-11-06 after owner approval:
 
 | Advisory | Package(s) | Current scan result |
 |---|---|---|
@@ -59,7 +59,7 @@ still blocks publication:
 | CVE-2026-95619 | GCC runtime packages including libstdc++6 | not-fixed |
 | CVE-2026-102010 | GCC runtime packages including libstdc++6 | not-fixed |
 | CVE-2026-84243 | libc6 | not-fixed; gettext accepts LANGUAGE paths (added 2026-10-31) |
-| CVE-2026-76844 | zlib1g | not-fixed; gz_write() stale pointer (2026-11-06). Assessment proposed in `proposed_findings`, pending owner approval; still blocks |
+| CVE-2026-76844 | zlib1g | not-fixed; gz_write() stale pointer (added 2026-11-06); assessed not in execute path (no gz* import; the gate rejects one) |
 
 Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 [glibc deprecated functions](https://security-tracker.debian.org/tracker/CVE-2026-5435),
