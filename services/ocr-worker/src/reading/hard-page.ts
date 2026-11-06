@@ -119,12 +119,14 @@ export const bare = (text: string | null | undefined) => (text ?? '').replace(/\
   .replace(/\s+([)\]])/g, '$1').trim().toLowerCase().replace(/(\d)\s+(?=\p{L})/gu, '$1');
 /**
  * The old "[unreadable]" (hard-page prompt 2 to 4) as the clean token "[?]"; a crossed-out group in any case or
- * spacing ("(Crossed out:X)") as CROSSED_OUT_OPEN, so every check sees one form; "[frequency?]" as "[freq?]"; a word cut
+ * spacing ("(Crossed out:X)") as CROSSED_OUT_OPEN, so every check sees one form, and one with nothing inside as
+ * "(crossed out: [?])"; "[frequency?]" as "[freq?]"; a word cut
  * short written with ASCII dots ("Amox...", "Amox..") as the partial-word mark ("Amox…"), so it is never marked
  * "Amox?..." or matched to a list.
  */
 const cleanTokens = (text: string) => text.replace(/\[unreadable\]/gi, NO_LETTERS)
   .replace(new RegExp(`${CROSSED_OUT_START.source}\\s*`, 'gi'), CROSSED_OUT_OPEN)
+  .replace(/\(crossed out: \s*\)/g, `${CROSSED_OUT_OPEN}${NO_LETTERS})`)
   .replace(/\[frequency\?\]/gi, FIELD_UNREAD.frequency)
   .replace(/(\p{L})\.{2,3}(?=[\s)\]]|$)/gu, `$1${PARTIAL_WORD}`);
 /** A reading mark that is one word on its own: "[?]", "[sign?]", "(? on paper)", "(sign)" or a field placeholder. */
@@ -1026,7 +1028,9 @@ function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: stri
   if (item.kind === 'medicine') {
     const status = (fields as { status: string }).status;
     const cue = instructionWords(plain, isStatusWord).length > 0;
-    if ((cue || statusDiffers) && status !== 'stopped' && status !== 'past') {
+    // Crossed-out writing on the item itself: not known to be current either (the line rule does the same for the
+    // other items on its line).
+    if ((cue || statusDiffers || crossed.length > 0) && status !== 'stopped' && status !== 'past') {
       fields = { ...fields, status: 'unknown' } as PaperItem['fields'];
     }
     if (cue || statusDiffers) statusCodes.push('status_cue_on_line');

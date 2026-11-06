@@ -693,7 +693,7 @@ describe('crossed out, line by line (third review): no name matching, never acti
     for (const asWritten of ['(Crossed out: Flagyl) Ceftriaxone 1g bd', '(crossed out:Flagyl) Ceftriaxone 1g bd',
       '( CROSSED OUT : Flagyl) Ceftriaxone 1g bd', '(crossed-out: Flagyl) Ceftriaxone 1g bd',
       '(crossed out Flagyl) Ceftriaxone 1g bd', '(Crossed Out - Flagyl) Ceftriaxone 1g bd',
-      '(struck out: Flagyl) Ceftriaxone 1g bd', '(struck through Flagyl) Ceftriaxone 1g bd',
+      '(struck out: Flagyl) Ceftriaxone 1g bd', '(struck through - Flagyl) Ceftriaxone 1g bd',
       '(Scratched out \u2013 Flagyl) Ceftriaxone 1g bd']) {
       const hard = mergeHardReadings([read([order(asWritten, { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g')])],
         SOURCE_SHA).check;
@@ -712,13 +712,37 @@ describe('crossed out, line by line (third review): no name matching, never acti
     }
   });
 
-  it('does not take a clinical bracket such as "(struck by a car)" as a crossed-out group', () => {
-    const asWritten = 'Ceftriaxone 1g bd (struck by a car)';
-    const hard = mergeHardReadings([read([order(asWritten, { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g')])],
-      SOURCE_SHA).check;
-    const [item] = hard.items;
-    expect(item!.asWritten).toBe(asWritten);
-    expect(item!.checkReasons).not.toContain('crossed_out');
+  it('leaves clinical brackets such as "(struck by a car)" or "(scratched off scab)" as written, not crossed out', () => {
+    for (const asWritten of ['Ceftriaxone 1g bd (struck by a car)', 'Ceftriaxone 1g bd (struck out at staff)',
+      'Ceftriaxone 1g bd (scratched off scab)', 'Ceftriaxone 1g bd (crossed outside)']) {
+      const hard = mergeHardReadings([read([order(asWritten, { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g')])],
+        SOURCE_SHA).check;
+      const [item] = hard.items;
+      expect([asWritten, item!.asWritten]).toEqual([asWritten, asWritten]);
+      expect(item!.checkReasons).not.toContain('crossed_out');
+    }
+  });
+
+  it('makes every order on a line unknown where a crossed-out label has nothing inside, or says crossed off', () => {
+    for (const label of ['(crossed out)', '(crossed out:)', '(Crossed Out -)', '(struck through:)']) {
+      const hard = mergeHardReadings([read([
+        order(`Flagyl 500mg tds ${label}`, { name: 'Flagyl', frequency: 'tds' }, '500', 'mg'),
+        order('Ceftriaxone 1g bd', { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g'),
+      ])], SOURCE_SHA).check;
+      const medicines = hard.items.filter((one) => one.kind === 'medicine');
+      expect([label, medicines.length]).toEqual([label, 2]);
+      for (const one of medicines) {
+        expect([label, one.fields]).toEqual([label, expect.objectContaining({ status: 'unknown' })]);
+        expect(one.checkReasons).toContain('crossed_out');
+      }
+      expect(medicines[0]!.asWritten).toBe('Flagyl 500mg tds (crossed out: [?])');
+    }
+    // "(crossed off)" is not a crossed-out label: it stays as written, and "off" makes the order unknown.
+    const off = mergeHardReadings([read([order('Ceftriaxone 1g bd (crossed off)', { name: 'Ceftriaxone',
+      frequency: 'bd' }, '1', 'g')])], SOURCE_SHA).check.items[0]!;
+    expect(off.asWritten).toBe('Ceftriaxone 1g bd (crossed off)');
+    expect(off.fields).toMatchObject({ status: 'unknown' });
+    expect(off.confidence).toBe('check_carefully');
   });
 
   it('says the readings disagree where only one of a paired order\'s readings shows its line struck', () => {

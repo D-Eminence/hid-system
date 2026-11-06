@@ -87,13 +87,16 @@ export const FIELD_UNREAD_MARKS = /\[(?:route|drug|dose|freq)\?\]/g;
 
 /**
  * The start of a "(crossed out: X)" group, in any case, spacing and common spelling: "(Crossed out: X)",
- * "(crossed out:X)", "(crossed-out: X)", "(crossed out X)", "(Crossed Out - X)", "(struck out: X)", "(struck through
- * X)", "(scratched out: X)". The model does not always write the label exactly, and a group missed here is a struck
- * line left active (reviews of 2026-11-06). "out", "through" or "off" is required after the verb, so a clinical note
- * such as "(struck by a car)" is not taken as a crossed-out group. prepareHardAnswer rewrites every form to
+ * "(crossed out:X)", "(crossed-out: X)", "(crossed out X)", "(Crossed Out - X)", and, with a colon or dash only,
+ * "(struck out: X)", "(struck through - X)", "(scratched out: X)". The model does not always write the label exactly,
+ * and a group missed here is a struck line left active (reviews of 2026-11-06). "struck"/"scratched" need the
+ * separator so clinical brackets ("(struck out at staff)", "(scratched off scab)", "(struck by a car)") stay as
+ * written; "off" is not a label (a bracketed "crossed off" stays as written and is a stop word). A label with nothing
+ * inside ("(crossed out)") is crossed-out writing too, read as "[?]". prepareHardAnswer rewrites every form to
  * CROSSED_OUT_OPEN.
  */
-export const CROSSED_OUT_START = /\(\s*(?:crossed|struck|scratched)[\s-]*(?:out|through|off)\b\s*[:\-\u2013\u2014]?/gi;
+export const CROSSED_OUT_START =
+  /\(\s*(?:crossed[\s-]*out\b\s*[:\-\u2013\u2014]?|(?:struck|scratched)[\s-]*(?:out|through)\b\s*[:\-\u2013\u2014])/gi;
 
 /** Each "(crossed out: X)" group of a text: where it starts and ends (its closing bracket), and X as written. */
 function crossedOutGroups(text: string): Array<{ start: number; end: number; inside: string }> {
@@ -130,7 +133,8 @@ export function withoutCrossedOut(text: string): string {
 
 /** The "(crossed out: X)" parts of a text, each X as written (nested brackets inside X kept). */
 export function crossedOutParts(text: string): string[] {
-  return crossedOutGroups(text).map(({ inside }) => inside).filter(Boolean);
+  // A label with nothing inside ("(crossed out)") is still crossed-out writing: its words were not read, "[?]".
+  return crossedOutGroups(text).map(({ inside }) => inside || '[?]');
 }
 
 /**
