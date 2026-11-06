@@ -723,6 +723,13 @@ describe('crossed out, line by line (third review): no name matching, never acti
     }
   });
 
+  it('keeps an unread dose\'s "[?]" shown when the line also has an empty crossed-out label', () => {
+    const item = mergeHardReadings([read([order('IV Flagyl tds (crossed out)', { name: 'Flagyl', frequency: 'tds',
+      route: 'IV', strength: '[?]' }, '[?]', '')])], SOURCE_SHA).check.items.find((one) => one.kind === 'medicine')!;
+    expect(item.plain).toContain('(crossed out: [?])');
+    expect(item.plain.replace('(crossed out: [?])', '')).toContain('[?]');
+  });
+
   it('makes every order on a line unknown where a crossed-out label has nothing inside, or says crossed off', () => {
     for (const label of ['(crossed out)', '(crossed out:)', '(Crossed Out -)', '(struck through:)']) {
       const hard = mergeHardReadings([read([

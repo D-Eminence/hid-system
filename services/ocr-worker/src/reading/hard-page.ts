@@ -873,7 +873,8 @@ export function displayOf(asWritten: string, notes: readonly DisplayNote[], cros
       if ([note.asRead, note.replace].some((value) => value !== undefined && nameCrossedOut(value, struck))) continue;
       // A listed drug struck under its other name (the generic struck, the brand read, or the other way round).
       if (note.generic && struckWords.some((word) => matchDrugName(word)?.generic === note.generic)) continue;
-      if (!hasLetters(shown)) { if (!text.includes(shown.trim())) text = `${text} ${shown.trim()}`; continue; }
+      // (Looked for outside crossed-out writing: a "[?]" struck there is not this field's.)
+      if (!hasLetters(shown)) { if (!withoutCrossedOut(text).includes(shown.trim())) text = `${text} ${shown.trim()}`; continue; }
       text = `${text} ${markWords(shown)}${note.after ? ` ${note.after}` : ''}`;
     }
   }
