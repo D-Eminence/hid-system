@@ -57,13 +57,15 @@ matches), with no packaged fix reported:
 | CVE-2026-95619 | GCC runtime packages including libstdc++6 | not-fixed |
 | CVE-2026-102010 | GCC runtime packages including libstdc++6 | not-fixed |
 | CVE-2026-84243 | libc6 | not-fixed; gettext accepts LANGUAGE paths (added 2026-10-31) |
+| CVE-2026-76844 | zlib1g | not-fixed; gz_write() stale pointer (2026-11-06). Assessment proposed in `proposed_findings`, pending owner approval; still blocks |
 
 Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 [glibc deprecated functions](https://security-tracker.debian.org/tracker/CVE-2026-5435),
 [glibc formatting](https://security-tracker.debian.org/tracker/CVE-2026-19499),
 [GCC allocation](https://security-tracker.debian.org/tracker/CVE-2026-95619),
 [GCC queue](https://security-tracker.debian.org/tracker/CVE-2026-102010),
-[glibc gettext](https://security-tracker.debian.org/tracker/CVE-2026-84243).
+[glibc gettext](https://security-tracker.debian.org/tracker/CVE-2026-84243),
+[zlib gz_write](https://security-tracker.debian.org/tracker/CVE-2026-76844).
 These are scanner findings, not a claim that each is exploitable through HID.
 No blanket ignore, severity downgrade or security exception is applied.
 

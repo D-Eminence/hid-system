@@ -5,7 +5,7 @@ a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 
 class AssessmentGuards(unittest.TestCase):
-    def exercise(self, mutate=lambda policy, scan, metadata: None, changed_binary=False, affected_import=False, production=False):
+    def exercise(self, mutate=lambda policy, scan, metadata: None, changed_binary=False, affected_import=False, production=False, imports=None):
         with tempfile.TemporaryDirectory() as directory:
             root=pathlib.Path(directory); (root/'security').mkdir()
             binary=b'\x7fELF'+b'fixture native binary'
@@ -28,7 +28,7 @@ class AssessmentGuards(unittest.TestCase):
                         member=tarfile.TarInfo('nodejs/bin/node');member.size=len(payload)
                         archive.addfile(member,io.BytesIO(payload))
             with mock.patch.object(a,'ROOT',root),mock.patch.object(a,'run',docker),mock.patch.object(a.subprocess,'run',export),\
-                    mock.patch.object(a,'elf_imports',return_value=['strfmon'] if affected_import else []):
+                    mock.patch.object(a,'elf_imports',return_value=imports if imports is not None else (['strfmon'] if affected_import else [])):
                 a.assess('notification-worker','fixture-image',scan,root/'evidence',
                          policy_file=selected if production else None,
                          author='HID production assessment' if production else 'HID staging runtime assessment')
@@ -49,6 +49,15 @@ class AssessmentGuards(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'inventory changed'):self.exercise(changed_binary=True)
     def test_affected_import_blocks(self):
         with self.assertRaisesRegex(RuntimeError,'execution path'):self.exercise(affected_import=True)
+    def test_zlib_gz_write_import_blocks(self):
+        for name in ('gzwrite','gzprintf','gzdopen','gzclearerr'):
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError,'zlib gzFile'):self.exercise(imports=['deflate',name])
+    def test_zlib_stream_imports_pass(self): self.exercise(imports=['compress','deflate','inflateInit_','uncompress'])
+    def test_proposed_findings_are_not_admitted(self):
+        def propose(p,s,m):
+            p['proposed_findings']={'approved_by':'','findings':[dict(p['findings'][0],id='CVE-PROPOSED')]}
+            s['matches'][0]['vulnerability'].update(id='CVE-PROPOSED')
+        with self.assertRaisesRegex(RuntimeError,'Unassessed'):self.exercise(propose)
     def test_unknown_advisory_blocks(self):
         with self.assertRaisesRegex(RuntimeError,'Unassessed'):self.exercise(lambda p,s,m:s['matches'][0]['vulnerability'].update(id='CVE-NEW'))
     def test_changed_package_version_blocks(self):
