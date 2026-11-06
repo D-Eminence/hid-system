@@ -4,8 +4,11 @@
  * (Claude Opus in claude.ai) of the same fictional handwritten page, which gave rows like "IV Flagyl? 500mg? 8hrly?",
  * "Transfer to the ward" and "Switch to IV Ceftriaxone 1g". Every row here is invented: no patient, no real page.
  *
- * AWAITING: the coordinator will send the owner's two full chat transcripts. Add each of their rows to
- * CLEAN_READING_ROWS (one row per line of the chat reading, with the model answers that should produce it);
+ * The owner's two chat transcripts of a fictional handwritten treatment sheet (relayed by the coordinator on
+ * 2026-11-06, about 10:16 UTC) are the target STYLE, not ground truth (the owner has no typed ground truth): their
+ * rows are below as model answers in our schema with the clean text we show for them (partial words "Am…" and
+ * "Pl… (Plasil?)", field placeholders "[dose?]", "[freq?]", "[route?]", a struck-out drug before its replacement, free
+ * text instructions, an ambiguous margin mark "IV? (or ✓?)", and fields read from context such as "8hrly?").
  * clean-reading.spec.ts runs every row through the hard-page path (prepare, checkPage, the two-reading merge, the
  * lists and grounding) and checks the plain reading shown and that the item goes to a person (check_carefully).
  *
@@ -37,6 +40,8 @@ export interface CleanReadingRow {
   reasons?: readonly string[];
   /** Reason codes the item must not carry. */
   notReasons?: readonly string[];
+  /** A medicine's status after the merge, where the row is about it. */
+  status?: string;
 }
 
 const medicine = (asWritten: string, fields: Partial<ModelItem>): Partial<ModelItem> =>
@@ -85,7 +90,7 @@ export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
     lineText: 'IV Flgyl 500mg 4OOmg 8hrly',
     readA: { item: medicine('IV Flagyl 500mg (crossed out: 400mg?) 8hrly', { route: 'IV', name: 'Flagyl', strength: '500mg',
       frequency: '8hrly' }), dose: '500', doseUnit: 'mg', crossedOut: '400mg?' },
-    plain: 'IV Flagyl (metronidazole) 500mg 8hrly (every 8 hours) (crossed out: 400mg?)',
+    plain: 'IV Flagyl (metronidazole) 500mg (crossed out: 400mg?) 8hrly (every 8 hours)',
     reasons: ['crossed_out'],
   },
   {
@@ -101,6 +106,98 @@ export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
       basis: { name: 'letters' } },
     plain: '(? on paper) Malaria',
   },
+  // The owner's transcripts (style only): transcript A row by row, with transcript B's reading as read B where it
+  // read the line differently.
+  {
+    name: 'a heading, every word a guess (transcript A row 1)',
+    lineText: 'Immdte Mngmnt',
+    readA: { item: note('Immediate? Management?', 'Immediate Management'), basis: { other: 'letters' } },
+    plain: 'Immediate? Management?',
+    notReasons: ['readings_disagree'],
+  },
+  {
+    name: 'a heading one reading was sure of (transcript A row 2, transcript B "TREATMENT SHEET")',
+    lineText: 'Trtmnt Sheet',
+    readA: { item: note('Treatment? Sheet?', 'Treatment Sheet'), basis: { other: 'letters' } },
+    readB: { item: note('TREATMENT SHEET', 'Treatment Sheet'), basis: { other: 'letters' } },
+    plain: 'Treatment? Sheet?',
+    notReasons: ['readings_disagree'],
+  },
+  {
+    name: 'a one-word instruction (transcript A row 3)',
+    lineText: '- Admt',
+    readA: { item: note('— Admit?', 'Admit'), basis: { other: 'letters' } },
+    plain: '— Admit?',
+  },
+  {
+    name: 'a fluid whose volume and rate are written but unreadable, as placeholders (transcript A row 4, B "IVF(?) [illegible] 8-hourly(?)")',
+    lineText: 'IVF Nrml Saline ~~ ~~',
+    readA: { item: medicine('IVF Normal? Saline? [dose?] [freq?]', { route: 'IVF', name: 'Normal? Saline?', frequency: '[freq?]' }),
+      dose: '[dose?]' },
+    readB: { item: medicine('IVF? [drug?] 8hrly?', { route: 'IVF?', name: '[drug?]', frequency: '8hrly?' }),
+      basis: { frequency: 'context' } },
+    plain: 'IVF? Normal? Saline? [dose?] [freq?] (or [drug?] 8hrly?)',
+    reasons: ['readings_disagree', 'field_from_context', 'unsure_from_letters'],
+  },
+  {
+    name: 'a drug name cut short, after a margin mark that may be "IV" or a tick (transcript A row 5, B "IV(?) Am…")',
+    lineText: 'IV Am 500mg 8hly',
+    readA: { item: medicine('IV? (or ✓?) Am… 500mg? 8hrly?', { route: 'IV?', name: 'Am…', frequency: '8hrly?' }),
+      dose: '500?', doseUnit: 'mg', basis: { frequency: 'context' } },
+    plain: 'IV? (or ✓?) Am… 500mg? 8hrly?',
+    reasons: ['field_from_context', 'unsure_from_letters'],
+  },
+  {
+    name: 'a struck-out drug before its replacement, with an unreadable dose (transcript A row 6)',
+    lineText: 'IV Cftrxone Cefrxme 8hly',
+    readA: { item: medicine('IV? (crossed out: Ceftriaxone?) Cefuroxime? [dose?] 8hrly?', { route: 'IV?', name: 'Cefuroxime?',
+      frequency: '8hrly?' }), dose: '[dose?]', crossedOut: 'Ceftriaxone?', basis: { name: 'context', frequency: 'context' } },
+    plain: 'IV? (crossed out: Ceftriaxone?) Cefuroxime? [dose?] 8hrly?',
+    reasons: ['crossed_out', 'field_from_context'],
+  },
+  {
+    name: 'a partial drug name with the model\'s whole-word guess in brackets, never expanded by the list (transcript B "Pl…/Ph… (Plasil?)")',
+    lineText: 'IV Pl 10mg 8hly',
+    readA: { item: medicine('IV? Pl… (or Ph…) (Plasil) 10mg? 8hrly?', { route: 'IV?', name: 'Pl… (Plasil)', frequency: '8hrly?' }),
+      dose: '10?', doseUnit: 'mg', basis: { name: 'context', frequency: 'context' } },
+    plain: 'IV? Pl… (or Ph…) (Plasil?) 10mg? 8hrly?',
+    reasons: ['field_from_context'],
+  },
+  {
+    name: 'an unreadable route and frequency around a readable drug (transcript A row 9, B "PO/SC(?)")',
+    lineText: 'Omeprazle 40mg',
+    readA: { item: medicine('[route?] Omeprazole? 40mg? [freq?]', { route: '[route?]', name: 'Omeprazole?', frequency: '[freq?]' }),
+      dose: '40?', doseUnit: 'mg' },
+    readB: { item: medicine('PO? Omeprazole? 40mg? [freq?]', { route: 'PO?', name: 'Omeprazole?', frequency: '[freq?]' }),
+      dose: '40?', doseUnit: 'mg' },
+    plain: 'PO? (or [route?]) Omeprazole? 40mg? [freq?]',
+    reasons: ['readings_disagree', 'unsure_from_letters'],
+  },
+  {
+    name: 'an instruction with no letter shapes in its first word (transcript A row 11)',
+    lineText: '- ~~ other mgt',
+    readA: { item: note('— [?] other mgt'), basis: { other: 'letters' } },
+    plain: '— [?] other mgt',
+  },
+  {
+    name: 'a switch written as free text, its status unknown (transcript A row 12, B "Switch(ed) to(?) IV Ceftriaxone(?) 1g")',
+    lineText: 'Swtch to IV Ceftriaxone 1g',
+    readA: { item: medicine('Switch? to IV Ceftriaxone 1g [freq?]', { route: 'IV', name: 'Ceftriaxone', strength: '1g',
+      frequency: '[freq?]' }), dose: '1', doseUnit: 'g' },
+    readB: { item: medicine('Switched to? IV Ceftriaxone? 1g [freq?]', { route: 'IV', name: 'Ceftriaxone?', strength: '1g',
+      frequency: '[freq?]' }), dose: '1', doseUnit: 'g' },
+    plain: 'Switch? (or Switched?) to? IV Ceftriaxone? 1g [freq?]',
+    reasons: ['readings_disagree', 'status_cue_on_line'],
+    status: 'unknown',
+  },
+  {
+    name: 'a stop written "DC", or a signature (transcript A row 13)',
+    lineText: 'DC Cefrxme',
+    readA: { item: medicine('DC? (or Dr?) Cefuroxime?', { name: 'Cefuroxime?' }) },
+    plain: 'DC? (or Dr?) Cefuroxime?',
+    reasons: ['status_cue_on_line'],
+    status: 'unknown',
+  },
   {
     name: 'a description from the model, replaced by "[?]"',
     lineText: 'xx~~ ~~',
@@ -111,8 +208,13 @@ export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
   },
 ];
 
-/** The line box of the row on the fixture page (test-fixtures.ts readLine) and an item box on it. */
-export const rowBox = (row: number) => ({ left: 0.12, top: Math.round(5 * row) / 100, width: 0.3, height: 0.02 });
+/**
+ * The line box of a row on the fixture page and an item box on it: rows 0.04 apart from 0.05 (row 1 is where
+ * test-fixtures.ts readLine puts line 1), so the fixture's rows never share a height.
+ */
+const rowTop = (row: number) => Math.round(500 + 400 * (row - 1)) / 10000;
+export const lineBox = (row: number) => ({ left: 0.1, top: rowTop(row), width: 0.5, height: 0.02 });
+export const rowBox = (row: number) => ({ left: 0.12, top: rowTop(row), width: 0.3, height: 0.02 });
 
 const LETTERS: Record<BasisField, FieldBasis> = { name: 'empty', dose: 'empty', unit: 'empty', route: 'empty',
   frequency: 'empty', duration: 'empty', value: 'empty', other: 'empty' };

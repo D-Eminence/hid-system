@@ -491,11 +491,11 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     const medicine = payload.items.find((item) => item.kind === 'medicine')!;
     // asWritten "Pyrimethamine? 437 mg od": the model's "?" on the name is shown; the frequency came from context.
     expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '437mg' });
-    expect(medicine.plain).toBe('Pyrimethamine? 437mg od?');
+    expect(medicine.plain).toBe('Pyrimethamine? 437 mg od?');
     expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
       // Zoom off: the reads sent the version 5 hard-page text (version 6 without rule J), and provenance says so.
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-5', hardPageZoomPages: [], imagePromptVersion: null,
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-7', hardPageZoomPages: [], imagePromptVersion: null,
       promptVersion: 'hid-paper-reading-prompt-8' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
@@ -532,7 +532,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
     expect(offered).toEqual([false, false]);
     expect(completed(repository).provenance.reading).toMatchObject({ hardPages: [1],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-5', hardPageZoomPages: [] });
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-7', hardPageZoomPages: [] });
   });
 
   it('zooms in a hard page and logs only the counts: no crop in a log, the payload, provenance or the usage records', async () => {
@@ -561,7 +561,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(crops).toHaveLength(4);
     const result = completed(repository);
     expect(result.provenance.reading).toMatchObject({ hardPages: [1],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-6', hardPageZoomPages: [1] });
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-8', hardPageZoomPages: [1] });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const hardUsage = lines.find((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read')!;
     expect(hardUsage).toMatchObject({ requests: 4, zoomCalls: 4 });

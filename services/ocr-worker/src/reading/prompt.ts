@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, VITAL_MEASURES } from './contract';
+import { FIELD_UNREAD } from './grounding';
 import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './signs';
 
 /**
@@ -29,11 +30,14 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * reused; the text-only request and the ordinary image re-read request are
  * unchanged. Version 8: hard pages are read in the clean, chat-like style the
  * owner asked for on 2026-11-06 (about 10:13 UTC: "i want the output clean ...
- * doctor no get time"; HARD_PAGE_PROMPT_VERSION 6, or 5 without zoom): a best
+ * doctor no get time"; HARD_PAGE_PROMPT_VERSION 8, or 7 without zoom): a best
  * guess for every word with "?" after each uncertain one, "[?]" only where no
  * letter shapes can be made out, two disagreeing reads shown "A? (or B?)",
- * unlisted drug names kept as read, crossed-out writing on its item, and the
- * plain reading built from the fields (hard-page.ts). The text-only request and
+ * unlisted drug names kept as read, crossed-out writing on its item, partial
+ * words ("Am…") and field placeholders ("[dose?]"), and the plain reading built
+ * from the reading itself, annotated in place (hard-page.ts). Not yet released
+ * when the display and the hard-page prompt were revised the same day, so it
+ * stays 8. The text-only request and
  * the ordinary image re-read request are byte for byte unchanged.
  */
 export const PROMPT_VERSION = 'hid-paper-reading-prompt-8';
@@ -59,15 +63,20 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * reading of 2026-11-06 (see PROMPT_VERSION 8): best guess for every word with "?", "[?]" only for writing with no
  * letter shapes, a question mark on the paper as "(? on paper)", fields that are the reading and never a description
  * of it, instructions in words as notes, crossed-out writing as "(crossed out: X)" on its item ("crossedOut" in the
- * schema), a free-text frequency, and "plain" left empty (built in code).
+ * schema), a free-text frequency, and "plain" left empty (built in code). Version 8 (zoom offered) and 7 (no zoom;
+ * the same text without rule J), the same day after the owner's two chat transcripts: rule B also asks for a word cut
+ * short as the letters seen and "…" ("Am…", with a guess for the whole word only in brackets with "?": "Pl…
+ * (Plasil?)"), a field that is written but cannot be made out as its placeholder ("[route?]", "[drug?]", "[dose?]",
+ * "[freq?]") so the rest of the line is kept, and a mark that may be either of two things as "IV? (or ✓?)"; rule E
+ * names a field read from where it sits or what is typical as basis "context". Versions 5 and 6 were never released.
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-6';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-8';
 /**
  * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
  * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
- * calls, which is the version 6 text without rule J (pinned by hash in hard-page.spec.ts).
+ * calls, which is the version 8 text without rule J (pinned by hash in hard-page.spec.ts).
  */
-export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-5';
+export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-7';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -328,6 +337,13 @@ export const UNREADABLE = '[unreadable]';
  */
 export const NO_LETTERS = '[?]';
 export const PAPER_QUERY = '(? on paper)';
+/**
+ * A word cut short or with only its first letters readable ("Am…"; hard-page prompt 7/8): the letters seen and this
+ * ellipsis. Never matched to a list or completed in code; a guess for the whole word may follow in brackets with "?"
+ * ("Pl… (Plasil?)"), and code marks such a guess "?" where the model left it unmarked.
+ */
+export const PARTIAL_WORD = '…';
+export { FIELD_UNREAD };
 export const ALTERNATIVE_OPEN = '(or ';
 export const CROSSED_OUT_OPEN = '(crossed out: ';
 /** Where a field of a hard-page item came from: the letter shapes, what is usual on such a sheet, or nothing. */
@@ -384,6 +400,13 @@ export interface HardItemExtras {
   nameExact?: boolean;
   /** For a medicine: the name the model proposed, normalised (drug-list.ts normaliseDrugName), for comparing readings. */
   proposedName?: string;
+  /** For a medicine: the name the model proposed as read, with its "?" marks, for finding it in asWritten. */
+  writtenName?: string;
+  /**
+   * For a medicine (hard-page.ts): how its name is shown where it stands in asWritten: `replace` the words read (a
+   * list respelling, a look-alike pair), `after` added straight after them (a listed brand's generic), `guess` marked.
+   */
+  nameShown?: { replace?: string; after?: string; guess: boolean };
   /**
    * The words asWritten marks a guess ("?") that no field carries (hard-page.ts carryMarks), as word keys: finish
    * checks each is shown with its "?", else marks every shown field a guess.
@@ -436,7 +459,15 @@ B. "asWritten" is the item as you read it in the picture, word for word in the o
 and abbreviations. Give your best guess for every word and number, and put "?" straight after each one you are not \
 sure of (for example "IV Flagyl? 500mg? 8hrly?"); a word you are sure of has no "?". Write "${NO_LETTERS}" only where \
 there is writing but no letter or digit shapes you can make out at all; never leave out writing because it is hard \
-to read. A question mark written on the paper itself (a clinical query, such as "?TB" or "TB?" for a suspected \
+to read. Where only the first letters of a word can be made out and the rest trails off, write the letters you see \
+followed by "${PARTIAL_WORD}" (for example "Am${PARTIAL_WORD}"), never a word completed from what is usual (text cut off \
+at the edge of the picture is still left out, rule G); if you have a guess \
+for the whole word, add it in brackets with "?" straight after it (for example "Pl${PARTIAL_WORD} (Plasil?)"). Where \
+one part of an otherwise readable item is written but cannot be made out at all, write "${FIELD_UNREAD.route}", \
+"${FIELD_UNREAD.name}", "${FIELD_UNREAD.dose}" or "${FIELD_UNREAD.frequency}" in its place, in "asWritten" and in \
+that field, so the rest of the item is kept (for example "IV Cefuroxime? ${FIELD_UNREAD.dose} 8hrly?"). Where a mark \
+may be either of two things (such as "IV" or a tick in the margin), write your first reading with "?" and the other \
+after it as "(or X?)" (for example "IV? (or ✓?)"). A question mark written on the paper itself (a clinical query, such as "?TB" or "TB?" for a suspected \
 diagnosis) is written "${PAPER_QUERY}" where it stands, in "asWritten" and in the field (for example \
 "Dx ${PAPER_QUERY} TB"); a "?" straight after a word is only ever your own uncertainty, never the paper's.
 
@@ -444,7 +475,7 @@ C. Every field is the reading itself, never a description of it. Give your best 
 item, with "?" after each uncertain word or number; use "" only for a field the item does not have, and \
 "${NO_LETTERS}" for one it has that shows no letter shapes. Never write a sentence about the writing (such as \
 "handwritten entry that cannot be read", "illegible" or "check the paper") in "asWritten" or in any field. Leave \
-"plain" as "": the plain reading is built from your fields.
+"plain" as "": the plain reading is built from your reading and your fields.
 
 D. A medicine is read as: route (such as po, iv, im, pr, sc, or "" where none is written), drug name, dose, unit, \
 how often. "dose" is the number only (such as "500" or "0.5"); "doseUnit" is its unit (such as mg, g, mcg, ml, iu, \
@@ -455,7 +486,8 @@ medicine, "dose", "doseUnit" and "frequency" are "".
 
 E. For every item, "basis" says where each field came from: "letters" where you read it from the shapes of the \
 letters or digits on the page, "context" where you inferred it from what is usual on such a sheet rather than \
-from the writing, "empty" where the field is "" for this item. "name", "dose", "unit", "route", "frequency", \
+from the writing (such as a frequency read from where a squiggle sits or what is typical, not from its letters), \
+"empty" where the field is "" for this item. "name", "dose", "unit", "route", "frequency", \
 "duration" and "value" are those fields ("unit" is "doseUnit" for a medicine and "unit" otherwise); "other" is \
 the item's remaining fields together ("context" if any of them came from context).
 

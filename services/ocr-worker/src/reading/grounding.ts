@@ -35,12 +35,13 @@ export const ITEM_LABELS = new RegExp('^a ?:|(?<![\\p{L}\\p{N}_])(?:dx|ddx|imp|i
  * question mark written on the paper is transcribed "(? on paper)" (prompt.ts PAPER_QUERY, hard-page prompt 5/6),
  * which this counts too, while the reading's own "?" marks are taken off before (forMatching), so they never look
  * like a query. The "?" of "[sign?]" (a handwritten sign the hard-page reading could not read, signs.ts) and of "[?]"
- * (writing with no letter shapes, prompt.ts NO_LETTERS) is not a query and is not counted.
+ * (writing with no letter shapes, prompt.ts NO_LETTERS), and of a field placeholder ("[dose?]", FIELD_UNREAD), is
+ * not a query and is not counted (no "?" straight before "]" is).
  */
 export const STATUS_CUES = new RegExp('(?<![\\p{L}\\p{N}_])(?:no evidence of|negative for|ruled? out|r/o|query|possible'
   + '|suspected|fhx|family history|stopped|discontinued|d/c|allerg(?:y|ies)|allergic to|h/o|history of|pmh'
   + '|past history|no|not|non|nil|negative|neg|stop|withheld|withhold|held|hold|omit(?:ted)?|denies|denied)'
-  + '(?![\\p{L}\\p{N}_])|-ve(?![\\p{L}\\p{N}_])|(?<!\\[sign)(?<!\\[)\\?', 'gu');
+  + '(?![\\p{L}\\p{N}_])|-ve(?![\\p{L}\\p{N}_])|(?<!\\[sign)(?<!\\[)\\?(?!\\])', 'gu');
 
 const ROUTE_WORDS: Readonly<Record<string, string>> = {
   intravenous: 'iv|i\\.v\\.?|intravenous(?:ly)?',
@@ -72,8 +73,17 @@ const ROUTES = Object.entries(ROUTE_WORDS)
  * field keeps its marks.
  */
 export function forMatching(text: string): string {
-  return withoutCrossedOut(text).replace(/(?<=[^\s?[(])(?<!\[sign)\?+/gu, '');
+  return withoutCrossedOut(text).replace(FIELD_UNREAD_MARKS, '[?]').replace(/(?<=[^\s?[(])(?<!\[sign)\?+/gu, '');
 }
+
+/**
+ * A field of an otherwise readable hard-page item that is written but shows no letter shapes (hard-page prompt 7/8),
+ * by field: like "[?]" (NO_LETTERS), but saying which part of the order it stands for, so the rest of the line is
+ * kept ("IV Cefuroxime? [dose?] 8hrly?"). Not a guess mark, not a query, never a word for a list or the checks:
+ * forMatching reads each as "[?]".
+ */
+export const FIELD_UNREAD = { route: '[route?]', name: '[drug?]', dose: '[dose?]', frequency: '[freq?]' } as const;
+export const FIELD_UNREAD_MARKS = /\[(?:route|drug|dose|freq)\?\]/g;
 
 /** Text without its "(crossed out: X)" parts (hard-page prompt rule G); nested brackets inside X are allowed. */
 export function withoutCrossedOut(text: string): string {
@@ -109,7 +119,7 @@ export function withoutSignMarks(text: string): string {
  * "[?]" and the label of "(crossed out: X)" (X itself is writing on the paper and stays). For the anchor rule.
  */
 export function withoutReadingMarks(text: string): string {
-  return withoutSignMarks(text).replace(/\(\? on paper\)|\[\?\]/g, ' ').replace(/\(crossed out:/g, ' (');
+  return withoutSignMarks(text).replace(FIELD_UNREAD_MARKS, ' ').replace(/\(\? on paper\)|\[\?\]/g, ' ').replace(/\(crossed out:/g, ' (');
 }
 
 export function norm(text: string): string {

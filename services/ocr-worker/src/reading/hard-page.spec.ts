@@ -67,8 +67,9 @@ describe('hard-page answers, before they are held to the page', () => {
       ['Flagyl (metronidazole)', 'tds', 'metronidazole'], ['Flagyl? (metronidazole)', 'tds', 'metronidazole'],
       // From context: a guess.
       ['Ceftriaxone?', 'tds', 'ceftriaxone'],
-      // Not on the list (owner decision 2026-11-06): shown as read, every word marked; no longer "[unreadable]".
-      ['Fictionalmab?', 'three times daily', null], ['Fictional? mab?', 'tds', null]]);
+      // Not on the list (owner decision 2026-11-06): shown as read, every word marked; no longer "[unreadable]". A
+      // frequency that is none of the codes is marked the same way.
+      ['Fictionalmab?', 'three? times? daily?', null], ['Fictional? mab?', 'tds', null]]);
     // asWritten keeps what the model read: the transcription the clinician compares with the paper.
     expect(prepared.items[4]!.asWritten).toBe('Fictionalmab 400 mg three times daily');
   });
@@ -212,11 +213,13 @@ describe('two readings of a hard page', () => {
     expect(check.items).toHaveLength(1);
     const item = check.items[0]!;
     expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole', strength: '400mg?', frequency: 'tds', status: 'new' });
-    expect(item).toMatchObject({ readBy: 'reread', confidence: 'check_carefully', plain: 'Metronidazole 400mg? tds (three times a day)' });
+    expect(item).toMatchObject({ readBy: 'reread', confidence: 'check_carefully', plain: 'Metronidazole 400? mg tds (three times a day)' });
     expect(item.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'read_from_image']));
     expect(item.checkReasons).not.toContain('readings_disagree');
     expect(item.checkReasons).not.toContain('single_reading_only');
-    expect(item.checkReason).toBe('This is a best guess from the picture; check every word against the paper.');
+    // The "?" on the dose is from its letters (unsure_from_letters), said before the general best-guess sentence.
+    expect(item.checkReasons).toContain('unsure_from_letters');
+    expect(item.checkReason).toBe('Words marked "?" were hard to make out; check them against the paper.');
     expect(agreement).toMatchObject({ itemsPaired: 1, itemsSingle: 0 });
     expect(agreement.fieldsCompared).toBeGreaterThan(0);
     expect(agreement.fieldsAgreed).toBe(agreement.fieldsCompared);
@@ -226,7 +229,9 @@ describe('two readings of a hard page', () => {
     const { check } = merge(modelPage([medicine(1, 'Flagyl', '400', 'mg', 'tds')]),
       modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]));
     expect(fieldsOf(check.items[0]!).name).toBe('Flagyl (metronidazole)');
-    expect(check.items[0]!.checkReasons).not.toContain('readings_disagree');
+    // The same medicine, but the readings read different words on the paper: both shown, and said to disagree.
+    expect(check.items[0]!.plain).toBe('Flagyl? (metronidazole) (or Metronidazole?) 400 mg tds (three times a day)');
+    expect(check.items[0]!.checkReasons).toContain('readings_disagree');
   });
 
   it('shows "A? (or B?)" for a drug name the two readings disagree on', () => {
@@ -237,7 +242,7 @@ describe('two readings of a hard page', () => {
     expect(item.checkReasons).toContain('readings_disagree');
     expect(item.checkReason).toBe('Two readings of the picture disagree on part of this; check it against the paper.');
     expect(item.asWritten).toBe('Metronidazole? (or Tinidazole?) 400 mg tds');
-    expect(item.plain).toBe('Metronidazole? (or Tinidazole?) 400mg tds (three times a day)');
+    expect(item.plain).toBe('Metronidazole? (or Tinidazole?) 400 mg tds (three times a day)');
     expect(agreement.fieldsAgreed).toBe(agreement.fieldsCompared - 1);
   });
 
@@ -468,9 +473,10 @@ describe('two readings of a hard page', () => {
   it('merges asWritten word by word, writing each differing stretch as "A? (or B?)"', () => {
     expect(mergeAsWritten('Tab Metronidazole 400 mg tds', 'Tab Metronidazole? 200 mg tds'))
       .toBe('Tab Metronidazole? 400? (or 200?) mg tds');
-    expect(mergeAsWritten('a b c', 'x y z')).toBe('a? b? c? (or x? y? z?)');
+    expect(mergeAsWritten('a b c', 'x y z')).toBe('a? (or x?) b? (or y?) c? (or z?)');
+    expect(mergeAsWritten('a b c', 'x y')).toBe('a? b? c? (or x? y?)');
     expect(mergeAsWritten('IV Flagyl 500mg', 'Flagyl 500mg')).toBe('IV? Flagyl 500mg');
-    expect(mergeAsWritten('Flagyl 500mg', 'IV Flagyl 500mg')).toBe('(or IV?) Flagyl 500mg');
+    expect(mergeAsWritten('Flagyl 500mg', 'IV Flagyl 500mg')).toBe('IV? Flagyl 500mg');
   });
 
   it('builds items that meet the contract', () => {
@@ -500,7 +506,7 @@ describe('diagnosis and lab test names on a hard page, grounded after the readin
     expect(check.items.map((item) => fieldsOf(item).name ?? fieldsOf(item).test))
       .toEqual(['HTN? (Hypertensive diseases)', 'FBC? (full blood count)', 'Fictionalitis']);
     expect(check.items.map((item) => item.plain))
-      .toEqual(['HTN? (Hypertensive diseases)', 'FBC? (full blood count) 11.2', 'Fictionalitis']);
+      .toEqual(['Dx HTN? (Hypertensive diseases)', 'FBC? (full blood count) 11.2', 'Dx Fictionalitis']);
     expect(check.items.every((item) => item.confidence === 'check_carefully')).toBe(true);
     // The checks were made on the names as read: no text_corrected, and the value is still bound to its test.
     for (const item of check.items) expect(item.checkReasons).not.toContain('text_corrected');
@@ -548,12 +554,12 @@ describe('hard-page prompt versions', () => {
     box: { left: 0.1, top: 0.2, width: 0.4, height: 0.05 } }, { id: 'p1-l2', text: 'x', confidence: 0.4, handwritten: true, box: null }];
   const size = { width: 800, height: 1000 };
 
-  it('sends the version 5 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
-    // Pinned from the version 5 prompt (the clean reading of 2026-11-06); a change here needs a new version.
-    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-5');
-    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-6');
+  it('sends the version 7 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
+    // Pinned from the version 7 prompt (the clean reading of 2026-11-06, with partial words and placeholders); a change here needs a new version.
+    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-7');
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-8');
     expect(createHash('sha256').update(hardPageMessage(1, lines, size, 0)).digest('hex'))
-      .toBe('78d67113c7e5afd45fa4e1dbdcbb4d811a4d077efbde626ec3766edd60e5f454');
+      .toBe('7feb2c96cc86bf7d67c5394249ed21269f0bb9803b7fd7f9d5a45f035c77ce07');
     expect(hardPageMessage(1, lines, size)).toBe(hardPageMessage(1, lines, size, 0));
     expect(hardPageMessage(1, lines, size, 0)).not.toContain('zoom');
   });
@@ -664,7 +670,7 @@ describe('handwritten signs on a hard page', () => {
     expect(shorthandInWords('duration', '5?/7')).toBe('5?/7');
     expect(shorthandInWords('duration', '[sign?] 5/7')).toBe('[sign?] 5/7');
     const { check } = merge(modelPage([medicine(1, 'Amoxicillin', '500', 'mg', 'tds?')]));
-    expect(check.items[0]!.plain).toBe('Amoxicillin 500mg tds?');
+    expect(check.items[0]!.plain).toBe('Amoxicillin 500 mg tds?');
   });
 });
 
