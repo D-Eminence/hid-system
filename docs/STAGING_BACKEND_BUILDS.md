@@ -46,8 +46,10 @@ The original Node 22 distroless base had outdated OpenSSL and glibc libraries.
 The pinned base was then updated within the same Node 22/Debian 13 image family to
 `sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8`.
 Scanning that exact ARM64 base removed all Critical findings and the High findings
-with available Debian fixes. Six unique High advisory IDs remain (twelve package
-matches), with no packaged fix reported:
+with available Debian fixes. Seven unique High advisory IDs remain (thirteen
+package matches), with no packaged fix reported. One of them, CVE-2026-76844, is
+still unassessed: its assessment is a proposal pending owner approval, so it
+still blocks publication:
 
 | Advisory | Package(s) | Current scan result |
 |---|---|---|

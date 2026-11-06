@@ -55,7 +55,7 @@ class AssessmentGuards(unittest.TestCase):
     def test_zlib_stream_imports_pass(self): self.exercise(imports=['compress','deflate','inflateInit_','uncompress'])
     def test_proposed_findings_are_not_admitted(self):
         def propose(p,s,m):
-            p['proposed_findings']={'approved_by':'','findings':[dict(p['findings'][0],id='CVE-PROPOSED')]}
+            p['proposed_findings']={'findings':[dict(p['findings'][0],id='CVE-PROPOSED')]}
             s['matches'][0]['vulnerability'].update(id='CVE-PROPOSED')
         with self.assertRaisesRegex(RuntimeError,'Unassessed'):self.exercise(propose)
     def test_unknown_advisory_blocks(self):
