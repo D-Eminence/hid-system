@@ -6,7 +6,8 @@ import type { HidRequest } from '../../common/request-context';
 import { PatientRecordsService } from './patient-records.service';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { AuditService } from '../../audit/audit.service';
-import { PATIENT_EVIDENCE_QUERY } from './patient-evidence.query';
+import { evidenceQuery } from './patient-evidence.query';
+import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
 import { patientEvidence,type PatientProfileInput } from './patient-evidence.policy';
 import { PatientAttachmentTextService } from './patient-attachment-text.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
@@ -29,8 +30,10 @@ export class PatientEvidenceService {
 
   async local(client:PoolClient,patientId:string):Promise<{records:Evidence[];complete:boolean}> {
     const records:Evidence[]=[];let kind='',id='';let complete=false;
+    // The records the patient added (0116) only while PATIENT_ENTRIES_ENABLED is on.
+    const query=evidenceQuery('patient',patientEntriesEnabled());
     for(let page=0;page<10;page++) {
-      const rows=(await client.query(PATIENT_EVIDENCE_QUERY,[patientId,kind,id])).rows;
+      const rows=(await client.query(query,[patientId,kind,id])).rows;
       // Patient-self RLS already limits rows to this patient; a row of anyone else is refused, never shown.
       if(rows.some(r=>r.patient_id!==patientId))throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient evidence authorization changed');
       for(const r of rows.slice(0,200)) records.push(evidence({kind:r.kind as SourceKind,id:r.id,version:r.version,

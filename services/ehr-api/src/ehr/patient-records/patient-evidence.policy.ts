@@ -37,6 +37,8 @@ export const PATIENT_FIELDS: Partial<Record<SourceKind, readonly string[]>> = {
   lab_result: ['test', 'codeSystem', 'code', 'specimen', 'resultType', 'numericValue', 'textValue', 'unit', 'referenceRange',
     'recordedFlag', 'revisionKind', 'collectedAt', 'releasedAt', 'verification', 'correctionPending', 'status'],
   profile: ['ageYears', 'sex'],
+  // A record the patient added themselves (0116): what the evidence query reads, nothing more.
+  patient_entry: ['type', 'place', 'date', 'notes'],
 };
 
 /**
@@ -48,8 +50,9 @@ const FREE_TEXT_FIELDS: Partial<Record<SourceKind, readonly string[]>> = {
   import: ['record', 'notes', 'structuredData', 'transcriptionText'],
   import_version: ['record', 'notes', 'structuredData', 'transcriptionText'],
   health_profile: ['medical_notes', 'medicalNotes'],
+  patient_entry: ['place', 'notes'],
 };
-const FREE_TEXT_TITLES = new Set<SourceKind>(['note', 'import', 'import_version']);
+const FREE_TEXT_TITLES = new Set<SourceKind>(['note', 'import', 'import_version', 'patient_entry']);
 
 /*
  * Sensitive tests, conditions and medicines (S4). Until the clinician
@@ -155,6 +158,9 @@ function sensitive(record: Evidence): boolean {
     case 'diagnosis': return SENSITIVE_CONDITION.test(text(f.condition)) || SENSITIVE_CONDITION.test(record.title)
       || (/icd/i.test(text(f.codeSystem)) && SENSITIVE_ICD10.test(text(f.code)));
     case 'prescription': return SENSITIVE_MEDICINE.test(text(f.medication)) || SENSITIVE_MEDICINE.test(record.title);
+    // A record the patient added (0116) names its test, medicine or condition in its title, whatever
+    // type the patient chose; the same lists apply, so the patient chat treats it as a clinician's.
+    case 'patient_entry': return isSensitiveTest(record.title) || SENSITIVE_CONDITION.test(record.title) || SENSITIVE_MEDICINE.test(record.title);
     default: return false;
   }
 }

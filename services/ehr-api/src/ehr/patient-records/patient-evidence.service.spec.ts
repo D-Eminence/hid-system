@@ -1,6 +1,12 @@
 import type { PoolClient } from 'pg';
 import { PatientEvidenceService } from './patient-evidence.service';
 import { PATIENT_EVIDENCE_QUERY } from './patient-evidence.query';
+import { NOT_CHECKED_LINE, sourceView } from './patient-chat-safety';
+
+// PATIENT_ENTRIES_ENABLED (0116), off unless a test turns it on.
+let mockEntriesEnabled=false;
+jest.mock('../patient-entries/patient-entries.flag',()=>({patientEntriesEnabled:()=>mockEntriesEnabled}));
+afterEach(()=>{mockEntriesEnabled=false;});
 
 const patientId='11111111-1111-4111-8111-111111111111';
 const auth={patientId,subject:'subject-a',accountId:'account-a',sessionId:'session-a',expiresAt:new Date(Date.now()+30000).toISOString()};
@@ -77,5 +83,42 @@ describe('PatientEvidenceService patient policy', () => {
   it('gives the same records and hashes for two snapshots of the same data', async () => {
     const a=await setup(rows,profile).service.snapshot(request),b=await setup(rows,profile).service.snapshot(request);
     expect(a.records.map(r=>[r.kind,r.id,r.version,r.hash])).toEqual(b.records.map(r=>[r.kind,r.id,r.version,r.hash]));
+  });
+
+  it('reads the records the patient added only while the setting is on, labelled "You added this"', async () => {
+    const entry='22222222-2222-4222-8222-000000000005';
+    const off=setup([row('note','22222222-2222-4222-8222-000000000001',null)]);
+    await off.service.snapshot(request);
+    expect(off.query.mock.calls[0]![0]).toBe(PATIENT_EVIDENCE_QUERY);
+    mockEntriesEnabled=true;
+    const on=setup([{...row('patient_entry',entry,null),fields:{type:'test',place:'Lagoon Lab',date:'2026-10-01',notes:null}}]);
+    const snapshot=await on.service.snapshot(request);
+    expect(on.query.mock.calls[0]![0]).toContain("from ehr.patient_entries pe where pe.status='active'");
+    expect(on.query.mock.calls[0]![0]).toContain('origin_hint,patient_id from sources');
+    const record=snapshot.records.find(r=>r.kind==='patient_entry'&&r.id===entry)!;
+    expect(record).toMatchObject({origin:'patient',provenance:'Synthetic provenance',fields:{type:'test',place:'Lagoon Lab',date:'2026-10-01',notes:null}});
+    expect(sourceView(record)).toMatchObject({kindLabel:'Record you added',originLabel:'You added this'});
+    expect(sourceView(record).notices).toContain(NOT_CHECKED_LINE);
+  });
+
+  it('applies the patient-chat policy to the records the patient added: refuses another patient\'s, cleans identifiers, hides sensitive ones', async () => {
+    mockEntriesEnabled=true;
+    const entry=(id:string,title:string,fields:Record<string,unknown>)=>({...row('patient_entry',id,null),title,fields});
+    const other=setup([{...entry('22222222-2222-4222-8222-000000000021','Malaria test',{type:'test'}),patient_id:'99999999-9999-4999-8999-999999999999'}],profile);
+    await expect(other.service.snapshot(request)).rejects.toMatchObject({code:'PATIENT_ACCESS_DENIED',status:403});
+    const s=setup([
+      entry('22222222-2222-4222-8222-000000000022','Clinic visit with Adaeze Okafor',{type:'visit',place:'Okafor family clinic',date:'2026-10-01',
+        notes:'Adaeze Okafor, born 12/03/1994, call 0803 123 4567, HID-AB2CD3EF.',extra:'Synthetic extra field',_internal:'x'}),
+      entry('22222222-2222-4222-8222-000000000023','HIV test',{type:'test',place:null,date:'2026-10-02',notes:null}),
+      entry('22222222-2222-4222-8222-000000000024','Tenofovir',{type:'medicine',place:null,date:'2026-10-02',notes:null}),
+      entry('22222222-2222-4222-8222-000000000025','Breast cancer',{type:'other',place:null,date:'2026-10-02',notes:null}),
+    ],profile);
+    s.lab.patientReleasedResults.mockResolvedValue({records:[],nextCursor:null});
+    const snapshot=await s.service.snapshot(request);
+    const entries=snapshot.records.filter(r=>r.kind==='patient_entry');
+    expect(entries.map(r=>r.id)).toEqual(['22222222-2222-4222-8222-000000000022']);
+    expect(Object.keys(entries[0]!.fields).sort()).toEqual(['date','notes','place','type']);
+    expect(JSON.stringify(entries[0])).not.toMatch(/Adaeze|Okafor|1994|0803|AB2CD3EF|Synthetic extra field/);
+    expect(JSON.stringify(snapshot)).not.toMatch(/HIV|Tenofovir|Breast cancer/);
   });
 });
