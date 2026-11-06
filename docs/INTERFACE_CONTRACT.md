@@ -1453,6 +1453,14 @@ only and cannot be dispensed again. Earlier backends answered the 200 oldest ite
 the member could read whatever their state, so a busy facility stopped seeing
 new work. The answer's shape and audit rows are unchanged.
 
+Each Lab work-list item also carries `openWork` (boolean): true while the work
+item is open by the rule above, false once every test it asks for has a
+released, current result not marked entered in error. It is the value the
+list is ordered by, so a client can show finished work as done. Earlier
+backends do not send it, so clients treat it as optional. Pharmacy sends no
+such field: its items already carry `dispensing` (null while open; a reversed
+dispensing counts as done), which is the same rule.
+
 Known limit of the Lab list (no schema change in this step). Every row the
 list reads from a Lab table pays its own row-level security check, mostly the
 member's consent check, over a millisecond each. The list reads each Lab
@@ -1468,6 +1476,43 @@ work item, kept by the database), which is a separate owner decision.
 `services/ehr-api/scripts/lab-work-list-runtime-checks.mjs` (run by
 `test-patient-evidence-runtime.mjs`) checks 1,050 work items within the
 limit and counts the checks.
+
+### Lab results: check, release and correction
+
+Checking a result (`POST /api/v1/lab/results/{resultId}/verify`) needs
+someone other than the person who entered that version; the database keeps
+the rule. When the person who entered it tries, Lab answers
+`409 LAB_RESULT_VERIFIER_NOT_INDEPENDENT` with the detail "You entered this
+result, so someone else at your lab must check it." Earlier backends
+answered `500`. A check of a version marked entered in error is refused by
+the same database rule and still answers `500`.
+
+Each result revision Lab answers also carries `enteredByYou` (boolean): true
+when the member asking entered that version. That is every revision in the
+execution reads (`GET .../executions/{id}`, `GET .../specimens/{id}/executions`),
+a result's history, the answers to entering, correcting, checking and
+releasing a result, and the released views. Lab works it out from the
+version's author and the session, and never answers anyone's account id. A
+client can use it to offer no check to the person who entered the version.
+Earlier backends do not send it, so clients treat it as optional.
+
+The `reason` of a check, a release (`POST .../results/{resultId}/release`)
+and a correction (`POST .../executions/{executionId}/results/{resultId}/corrections`)
+needs at least 3 characters, not counting spaces at either end, and at most
+500: what Lab keeps. A shorter one is refused `400 VALIDATION_FAILED` with
+the field error `reason must be at least 3 characters`; earlier backends
+passed it to the database and answered `500`.
+
+The released view of a result also carries `correctionPending` (boolean).
+That is each result of
+`GET /api/v1/lab/ehr-orders/{sourceEhrOrderId}/released-results`, which the
+clinician who placed the order reads, and `GET .../results/{resultId}/history`
+for a reader without `lab.execution.read`. It is true while a newer version
+of that released result waits to be checked and released: a correction or
+amendment entered after the release, checked or not, and not marked entered
+in error. Lab answers nothing else of that version (no value, reason or
+version number), and the read's audit row still names only the versions
+returned. Earlier backends do not send it, so clients treat it as optional.
 
 ### Record chat: where each source came from
 
