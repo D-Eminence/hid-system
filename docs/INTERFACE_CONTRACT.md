@@ -3592,3 +3592,61 @@ grant's scope test alone or its `break_glass` test alone (a consent_grants
 CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
+
+## 37. Access PIN: 24 hours, read and write (0121)
+
+Owner decision (10 Nov 2026, relayed by Ola, clinical owner): a patient's
+Access PIN gives the staff member who enters it read AND write access to all
+of that patient's records for up to 24 hours, for the same staff roles as
+today, with no separate "Ask for more access". 0121 is unsigned until the
+owner signs its declaration (`reviewed_by` stays empty). The number is the
+next after every migration on staging and on the open branches (0109-0120);
+the coordinator renumbers it at merge.
+
+Route, unchanged in shape: `POST /identity/standard-access/pin`
+(permission `identity.patient-access-pin.verify`, purpose `direct-care`), body
+`{ hid, pin, durationMinutes? }`, answer
+`{ accessRequestId, consentGrantId, patientId, status, expiresAt, existingGrant }`.
+
+| | Before | From 0121 |
+|---|---|---|
+| `durationMinutes` accepted | 5 to 60 | 5 to 1440 |
+| `durationMinutes` left out | 15 | 1440 (24 hours) |
+| Grant and request scope | `read_records` | `write_records` (also lets the holder read) |
+| A still-valid PIN grant is reused (`existingGrant: true`) | if `read_records` | if `write_records`; an older read grant is not reused, a new write grant is made and the read one runs out by itself |
+| A patient's deny directive stops the PIN | if it covers reading | if it covers reading or writing (or every action) |
+| Audit `identity.patient-access-pin.verify` / `.replay` details | `access_request_id`, `duration_minutes`, `expires_at`, `existing_grant`, `review_required` | the same plus `scope` |
+| `PatientAccessPinVerified` payload | `{ consentGrantId, reviewRequired }` | `{ consentGrantId, reviewRequired, scope }` |
+
+Database: `access_requests_pin_scope_ck` and `consent_grants_pin_scope_ck`
+allow `read_records` or `write_records` for a PIN row (still direct care,
+never break-glass); `identity_outbox_minimum_necessary` accepts the PIN notice
+with or without `scope` (`read_records` or `write_records`); the insert policy
+`identity_outbox_patient_access_pin_insert` admits a PIN grant of either scope
+and requires the payload's `scope`, when present, to be the grant's.
+`identity.access_patient_with_pin` body md5 is now
+`6453e3e4c3906e4e565fa93c2979a865` (0098's was
+`830c1baa4bca3df57cc02b7b002a8831`); its signature, result, owner, SECURITY
+DEFINER, search_path and ACL are unchanged. Every other rule is kept: the
+permission, direct care only, the exact active membership, the failure
+windows and locks (0075), the sealed demo boundary (0098), the denial answers
+(`verified: false`) and their audit rows.
+
+What the patient keeps: each PIN use is in their access list
+(`access_granted`) and raises the PIN notice; they can end the access at any
+time (`revoke_my_consent_grant`, or turning the PIN off, which ends every PIN
+grant); their deny choices still apply. Records processing (section 36)
+already counted a PIN grant of either scope and now lasts its 24 hours.
+
+Order of release: the event dispatcher and the notification worker must run
+the code that accepts the three-key PIN notice before 0121 applies (they also
+accept the two-key one), or a PIN notice raised in between is refused and not
+retried. identity-api can go before or after 0121. The website sends 1440 and
+says "see and add to records for 24 hours" after 0121 is live.
+
+To undo: a follow-up migration that puts back 0098's body (60 minutes,
+`read_records`) and narrows the two PIN constraints again, after every
+`write_records` PIN grant has ended or run out (at most 24 hours); identity-api's
+default and limit go back to 15 and 60.
+
+The suite is `services/ehr-api/database/tests/patient-access-pin.integration.sql`.
