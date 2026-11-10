@@ -1380,9 +1380,11 @@ Each claimed job runs, in order:
      - `ocr.reading.page_read_failed` (warn), one per page whose reading in a
        pass gave nothing usable, for the paths that logged nothing before:
        `page`, `pass` (`first_pass`, `reread`, `image_reread`,
-       `hard_page_read`), `reason` (as above, or `kept_nothing` for an answer
-       none of whose items held to the page while the first pass had some,
-       or `hard_reads_failed`), `code`.
+       `hard_page_read`, `last_resort_read`), `reason` (as above, or
+       `kept_nothing` for an answer none of whose items held to the page while
+       the first pass had some, `hard_reads_failed`, or for the last resort
+       `last_resort_failed`, `last_resort_no_picture`),
+       `code`, and for the last resort `detail` (see "Last resort").
      - `ocr.reading.usage` per hard read gains `failure`, `forcedAnswer`,
        `forcedEffort` (`low` when the answer-only turn was sent, else null;
        `followupEffort` counts only the follow-up turns, never the
@@ -1390,6 +1392,121 @@ Each claimed job runs, in order:
        `ocr.job.completed` gains `hardReadFailures` and
        `hardReadForcedAnswers` (counts per reason), `pageReadFailures` and
        `firstPassItemCount`.
+   - **Last resort** (coordinator decision of 2026-11-10, after staging job
+     566c38bf on the #203 reader). **Evidence**: the owner's fictional
+     handwritten page; the text-only first pass (Claude Opus 5.5, its request
+     byte for byte as since 2026-11-05, hash-pinned) came back almost empty
+     (`outputTokens` 150, `inputTokens` 745, against 483 to 1,036 output tokens
+     on earlier runs of nearly the same page: a model outcome, not a change of
+     ours), so it kept no item on the page; then both hard-page reads failed,
+     and the page ended with `itemCount` 0: the owner got nothing.
+     **The rule**: when a page has no usable reading at all, it gets **one**
+     last-resort image re-read, if it has a picture:
+     - *When.* (a) A hard page whose two reads **both** failed (no hard
+       reading; `hard_reads_failed`) **and** whose first pass kept no item on
+       that page, or a hard read answered but no item of the hard reading
+       held to the page while the first pass kept none either (a
+       `page_read_failed` warn with `pass` `hard_page_read`, `reason`
+       `kept_nothing`).
+       (b) A page whose first pass **failed or was declined** and whose text
+       re-read then gave no answer either (failed, declined, or unavailable
+       after its retries), or answered with no item that held to the page (a
+       `page_read_failed` warn with `pass` `reread`, `reason` `kept_nothing`;
+       if the last resort gives nothing too, the page is failed, `ai_unsure`,
+       not an empty page counted as re-read). Not when the first pass kept
+       items (they stay, `reread_failed`, as before), not when a hard reading
+       kept an item (even if the first pass was empty), not when a hard page's reads
+       were both declined or refused as invalid (the page goes to its text
+       re-read, as before: the picture is the likely cause), and not for a
+       flagged page that is not a hard page.
+     - *What.* The ordinary image re-read request (`imagePageMessage`,
+       `hid-paper-reading-image-prompt-5`, the image answer schema, no zoom, no
+       hard-page text), by `OCR_AI_REREAD_MODEL`, at effort `high`
+       (`LAST_RESORT_EFFORT`), with `max_tokens` 16,000
+       (`LAST_RESORT_MAX_TOKENS`; every other request keeps its own). The
+       text-only request and the ordinary image re-read are byte for byte
+       unchanged (the body-hash test, and a client test that the last resort
+       differs from the ordinary image re-read in `max_tokens` only); no prompt
+       text changed, so `PROMPT_VERSION` stays 11.
+     - *Time.* A window of its own (coordinator decision of 2026-11-10,
+       about 18:58 UTC): `OCR_AI_LAST_RESORT_SECONDS` (default 60; 30 to
+       300, anything else fails startup) from when the last resort is
+       decided, for (a) and (b) alike, never what is left of the hard page's
+       deadline. Before, (a) had only the remainder, and when both hard reads
+       were cut by the deadline (the usual way they fail together) almost
+       nothing was left, so the page was failed with no answer; now it still
+       gets one. The same machinery as a hard read: its own abort signal (the
+       job's and its window's together), so the window's end stops a permit
+       wait, a streamed request or a backoff sleep alike (`detail`
+       `deadline`), and a shutdown still stops the reading. The per-request
+       `OCR_AI_TIMEOUT_MS` still applies inside it.
+       *Bounds.* 30 s is the least worth sending: at the ~100 output tokens
+       per second measured in production it is about 3,000 tokens, a sparse
+       page's answer with little thinking (a 12-item answer is about 3,000 to
+       4,000); with less it would almost surely be cut, its thinking billed
+       for nothing. 300 s is more than the 16,000-token cap
+       (`LAST_RESORT_MAX_TOKENS`) needs at that rate (about 160 s) and keeps a
+       hard page within about 150 s + 300 s. The default 60 s is about 6,000
+       tokens, room for a sparse page's answer and some thinking. The cap only
+       bounds what one attempt can cost (16,000 x $22 per million = $0.35)
+       where `OCR_AI_MAX_TOKENS` would allow 64,000.
+       *Worst case* per hard page, defaults: about 150 s
+       (`OCR_AI_HARD_PAGE_DEADLINE_MS`, both reads) + 60 s (the last resort)
+       = about 210 s, plus the first pass; up to about 450 s at the 300 s
+       maximum. That is past the 3-minute target for a hard page (the
+       deadline's 150 s default exists for it), accepted for this rare case by
+       the coordinator's decision of 2026-11-10. It is inside the website's
+       poll: the 3-minute poll noted above was raised to up to 20 minutes,
+       with a "Check now" button after that (coordinator, 2026-11-10, in the
+       website's own repository, health#191; not visible in this repository).
+       With
+       `OCR_AI_PAGE_CONCURRENCY` 2, two such pages run at once.
+       *No "no time left" case.* Since the window starts fresh and is at
+       least 30 s, the earlier skip (`last_resort_no_time`, `LAST_RESORT_MIN_MS`)
+       could no longer happen and was removed. The worker has no job-level
+       time budget it could exceed: the job's lease is renewed every third of
+       `OCR_WORKER_LEASE_SECONDS` (default 300 s, so every 100 s) for as long
+       as the job runs (`ocr.renew_worker_claim` takes up to an hour ahead per
+       renewal), there is no overall job timeout, and a shutdown aborts the
+       last resort through the job's signal at once.
+     - *Its items.* The normal checks of an image re-read (`checkPage`: the
+       placement rules, `read_from_image`, the fail-safe merge with the first
+       pass, which here has no items), and every kept item also
+       `check_carefully` with `last_resort_read` ("The other readings of this
+       page did not work; this was read from the picture as a last try. Check
+       every word against the paper.", below the item's own disagreements and
+       `not_matched_to_scanned_text`, above the general picture sentence). The
+       page counts in `imageRereadPages` and `rereadPages`, and provenance's
+       `imagePromptVersion` names the image prompt.
+     - *If it fails too* (no answer: cut off, off-schema, declined, the
+       window's end, unavailable or rejected; or an answer of which no item
+       holds to the page, `kept_nothing`): the page is clearly failed: in
+       `imageRereadFailedPages` (payload and provenance), `rereadFailedPages`,
+       flagged `ai_unsure` (and still `ai_declined` where both earlier readings
+       were declined), any first-pass items `reread_failed`; and an
+       `ocr.reading.page_read_failed` warn with `pass` `last_resort_read`,
+       `reason` `last_resort_failed` and `detail` how it ended (`max_tokens`,
+       `parse_error`, `schema_error`, `refusal`, `incomplete`, `deadline`,
+       `api_error`, `api_rejected` with its `code`, or `kept_nothing`).
+     - *Not sent*: a page with no picture that can go (a PDF or TIFF, no
+       document bytes, too large, `OCR_AI_IMAGE_REREAD=off`, a masked number
+       under `text_only`, ...) gives `reason` `last_resort_no_picture` with
+       `detail` the `imageRereadSkipped` code saying why (a hard page always
+       has its picture, so this is case (b) only).
+     - *Contract*: the payload gains **no** field (`ocr-api` parses
+       `reading` strictly, so a new field there would need ocr-api first);
+       the failure shows through the existing optional
+       `imageRereadFailedPages`, and the new item reason fits the existing
+       `checkReasons` pattern. Provenance (stored as an unparsed object; the
+       api-client reads it as `Record<string, unknown>`) gains
+       `lastResortPages` (pages sent the last resort), `lastResortFailedPages`
+       and `lastResortSkipped` (`{page, reason: no_picture, picture?}`; it
+       had `no_time` too until the last resort got its own window): page
+       numbers and codes only.
+     - *Logs*: the last resort's use is its own `ocr.reading.usage` line
+       (`pass: "last_resort_read"`); `ocr.job.completed` gains
+       `lastResortReads`, `lastResortFailed` and `lastResortSkipped` (counts);
+       `ocr.worker.ready` logs `aiLastResortSeconds`, the window in force.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`
    payload (schema `hid-paper-reading-schema-2`: `src/reading/contract.ts`), `raw_text` (every line in
    reading order) and the mean line confidence. Provenance holds models,
@@ -1457,7 +1574,13 @@ a document with no text as `no_text`.
   facility in the Identity API (`GET /admin/facilities/:facilityId/ocr-usage`).
 
 Logs carry only ids, counts, codes, model names, token usage and durations:
-never line text, items, SDK error messages or SDK error objects.
+never line text, items, SDK error messages or SDK error objects. The ids are
+opaque UUIDs: `jobId`, `correlationId` and, on `ocr.job.claimed` and
+`ocr.job.completed`, `documentId` (the document's UUID, so a job's lines can be
+found from the document the owner names; never its storage key, bucket,
+version, file name or patient). This rule allows a document id; the stricter
+rule of `ocr-api`'s refusal log (`ProblemDetailsFilter`: never any identifier,
+since it echoes request input) is about that log only.
 
 `OCR_AI_MODE=claude` requires `ANTHROPIC_API_KEY` (injected at run time, never
 committed) and `OCR_AI_US_PROCESSING_APPROVED=true`, the owner's approval of
@@ -1479,8 +1602,8 @@ list price $4 / $20 per million input / output tokens; US-only x1.1 = $4.40 / $2
 (cache reads $0.22, 5-minute cache writes $5.50). Per page that is more than
 twice the earlier Sonnet first pass at medium effort, since high effort also
 writes more thinking and output. Each job logs `ocr.reading.usage` once per
-model and pass (`pass`: `first_pass`, `reread`, `image_reread` or
-`hard_page_read`, both reads of each hard page; requests and
+model and pass (`pass`: `first_pass`, `reread`, `image_reread`,
+`hard_page_read`, both reads of each hard page, or `last_resort_read`; requests and
 token counts, never text, with `pagesSent`), so the cost per page, and what the
 re-reads and the pictures add, can be seen even though both passes use one model.
 A reading stopped before it finished logs one line per model, without `pass`.

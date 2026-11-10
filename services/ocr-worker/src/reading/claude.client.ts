@@ -49,7 +49,12 @@ export interface PageRequest { model: string; effort: Effort; page: number; line
    * and the answer-only turn is sent instead (README "A hard read always ends with an answer"). Not given: no time
    * reserve (the token reserve and the other rules still apply).
    */
-  answerBy?: { timeLeftMs: () => number; reserveMs: number } }
+  answerBy?: { timeLeftMs: () => number; reserveMs: number };
+  /**
+   * The output-token cap of a request that is not a hard page's read (the last-resort image re-read only, README "Last
+   * resort"). Not given: OCR_AI_MAX_TOKENS, so every other request body is byte for byte as before.
+   */
+  maxTokens?: number }
 
 /**
  * What one hard-page read did, as it went: requests answered (turns), how many of them were follow-up turns (the
@@ -276,7 +281,7 @@ export class ClaudePageClient implements PageModelClient {
     // A hard page's read: OCR_AI_HARD_PAGE_MAX_TOKENS for the whole read (every turn together); any other request
     // keeps OCR_AI_MAX_TOKENS, so its body is byte for byte as before.
     const readCap = hard ? this.config.OCR_AI_HARD_PAGE_MAX_TOKENS ?? this.config.OCR_AI_MAX_TOKENS
-      : this.config.OCR_AI_MAX_TOKENS;
+      : request.maxTokens ?? this.config.OCR_AI_MAX_TOKENS;
     const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: request.model,
       max_tokens: readCap,

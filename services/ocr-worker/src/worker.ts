@@ -30,6 +30,7 @@ export class OcrWorker {
       aiHardPageFollowupEffort: this.config.OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT,
       aiHardPageMaxTokens: this.config.OCR_AI_HARD_PAGE_MAX_TOKENS,
       aiHardPageDeadlineMs: this.config.OCR_AI_HARD_PAGE_DEADLINE_MS, aiZoomMaxCalls: this.config.OCR_AI_ZOOM_MAX_CALLS,
+      aiLastResortSeconds: this.config.OCR_AI_LAST_RESORT_SECONDS,
       textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
     await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
     await this.repository.close();
@@ -84,8 +85,10 @@ export class OcrWorker {
       }
       await this.repository.complete(job, completion);
       const summary = outcome.summary;
-      this.log('info', 'ocr.job.completed', { jobId: job.jobId, correlationId: job.correlationId,
-        provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: text.pageCount,
+      // documentId: the opaque document UUID (never its name, key or content), so a job's lines can be found from the
+      // document the owner names; README "Logs carry only ids, counts, codes ...".
+      this.log('info', 'ocr.job.completed', { jobId: job.jobId, documentId: job.documentId,
+        correlationId: job.correlationId, provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: text.pageCount,
         retryCount: Math.max(0, job.attemptNo - 1), readingStatus: summary.status,
         firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel, aiRequests: summary.requests,
         aiRefusals: summary.refusals, rereadPages: summary.rereadPages.length,
@@ -110,6 +113,10 @@ export class OcrWorker {
         hardReadForcedAnswers: countBy(summary.hardPageReadUsage.map((read) =>
           read.forcedAnswer === null ? null : `forced_answer_${read.forcedAnswer}`)),
         pageReadFailures: summary.pageReadFailures.length, firstPassItemCount: summary.firstPassItemCount,
+        // The last resort (README "Last resort"): pages sent it, those whose answer was not usable, and those that
+        // needed it but were not sent it (no time left, or no picture). Counts only.
+        lastResortReads: summary.lastResortPages.length, lastResortFailed: summary.lastResortFailedPages.length,
+        lastResortSkipped: summary.lastResortSkipped.length,
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
         cacheReadInputTokens: summary.usage.cacheReadInputTokens,
         cacheCreationInputTokens: summary.usage.cacheCreationInputTokens,
@@ -250,7 +257,8 @@ export class OcrWorker {
     for (const failure of summary.pageReadFailures) {
       this.log('warn', 'ocr.reading.page_read_failed', { jobId: job.jobId, correlationId: job.correlationId,
         attempt: job.attemptNo, page: failure.page, pass: failure.pass, reason: failure.reason,
-        ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }) });
+        ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
+        ...(failure.detail === undefined ? {} : { detail: failure.detail }) });
     }
   }
 
@@ -268,7 +276,8 @@ export class OcrWorker {
             });
             return undefined;
           });
-          this.log('info', 'ocr.job.claimed', { jobId: job.jobId, correlationId: job.correlationId,
+          this.log('info', 'ocr.job.claimed', { jobId: job.jobId, documentId: job.documentId,
+            correlationId: job.correlationId,
             provider: this.provider.name, attempt: job.attemptNo, claimedJobs: 1,
             ...(metrics ? { queueDepth: metrics.queueDepth,
               oldestQueueAgeSeconds: metrics.oldestQueueAgeSeconds } : {}) });
@@ -364,8 +373,10 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         imageRereadPages: summary.imageRereadPages,
         imageRereadSkipped: summary.imageRereadSkipped,
         imageRereadFailedPages: summary.imageRereadFailedPages,
-        // The image re-read prompt only where a page read from its picture was not a hard page.
-        imagePromptVersion: summary.imageRereadPages.some((page) => !summary.hardPages.includes(page))
+        // The image re-read prompt only where a page read from its picture was not a hard page, or was read by the
+        // last resort (the ordinary image re-read request).
+        imagePromptVersion: summary.imageRereadPages.some((page) => !summary.hardPages.includes(page)
+          || (summary.lastResortPages.includes(page) && !summary.lastResortFailedPages.includes(page)))
           ? IMAGE_PROMPT_VERSION : null,
         hardPages: summary.hardPages,
         hardPageReads: summary.hardPageReads,
@@ -376,6 +387,11 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         hardPageZoomPages: summary.hardPageZoomPages,
         // Hard pages where the page's deadline cut a read (OCR_AI_HARD_PAGE_DEADLINE_MS); page numbers only.
         hardPageDeadlinePages: summary.hardPageDeadlinePages,
+        // The last resort (README "Last resort"): page numbers and codes only. Its failures are also in
+        // imageRereadFailedPages (a picture was sent and gave nothing usable).
+        lastResortPages: summary.lastResortPages,
+        lastResortFailedPages: summary.lastResortFailedPages,
+        lastResortSkipped: summary.lastResortSkipped,
         droppedUngrounded: summary.droppedUngrounded,
         droppedUngroundedFirstPass: summary.droppedUngroundedFirstPass,
         itemCount: summary.itemCount,

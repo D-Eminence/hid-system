@@ -2,7 +2,9 @@ import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient
   type PageAnswer, type PageModelClient } from './claude.client';
 import { Semaphore } from '../semaphore';
 import { paperReadingPayloadSchema } from './contract';
-import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingConfig } from './reader';
+import { LAST_RESORT_MAX_TOKENS, LAST_RESORT_SECONDS, PaperReadingService, ReadingInterruptedError, ReadingUnavailableError,
+  type ReadingConfig } from './reader';
+import { checkReasonSentence } from './items';
 import { CLINIC_PAGE, fixtureExifSegment, fixtureJpeg, fixturePng, modelItem, modelPage, readPage, SOURCE_SHA,
   pngChunk, pngFromChunks, pngIhdr, syntheticJpeg, syntheticPng, withRepeatedScan } from './test-fixtures';
 import { IMAGE_MAX_BASE64_LENGTH, imageTierOf, resizedSize } from './page-image';
@@ -17,6 +19,9 @@ const config: ReadingConfig = { OCR_AI_MODE: 'claude', OCR_AI_FACILITY_IDS: unde
 const usage = { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
 const ok = (answer: ModelPage): PageAnswer => ({ kind: 'answer', answer, usage, attempts: 1, servedInferenceGeo: 'us' });
 const refused: PageAnswer = { kind: 'refused', usage, attempts: 1 };
+/** The pageReadFailures reason code of an answer that is not one. */
+const answerReason = (answer: PageAnswer) => answer.kind === 'refused' ? 'refusal'
+  : answer.kind === 'failed' ? answer.code ?? answer.reason : 'answer';
 
 const clearPage = modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'],
   name: 'Hypertension', status: 'confirmed', plain: 'High blood pressure' })], { identity: {
@@ -568,7 +573,11 @@ describe('PaperReadingService', () => {
       expect(seen.filter((call) => call.model === 'claude-opus-5-5').map((call) => call.page)).toEqual([3, 4, 1]);
       // Page 1 is flagged, but a page of a many-page document: its text re-read, saying why.
       expect(all.summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'not_single_page' }]);
-      expect(summary.rereadPages).toEqual([3, 4]);
+      // The re-reads of pages 3 and 4 answered but kept nothing (an empty page): no reading of either page, so each is
+      // a failed re-read with a kept_nothing warn (README "Last resort", case b), not an empty page counted as re-read.
+      expect(summary.rereadPages).toEqual([]);
+      expect(summary.pageReadFailures.filter((failure) => failure.reason === 'kept_nothing')).toEqual([
+        { page: 3, pass: 'reread', reason: 'kept_nothing' }, { page: 4, pass: 'reread', reason: 'kept_nothing' }]);
     });
 
     it('sends a page whose text had a masked number as a picture by default (owner decision), and keeps it text-only when set to text_only', async () => {
@@ -818,8 +827,15 @@ describe('PaperReadingService', () => {
     expect(summary.pageReadFailures).toEqual([
       { page: 1, pass: 'first_pass', reason: 'schema_error' },
       { page: 1, pass: 'reread', reason: 'api_error', errorCode: 'AI_HTTP_529' },
+      // No reading of either page at all, and no picture to send (the image re-read is off here): the last resort is
+      // named as not sent, with why.
+      { page: 1, pass: 'last_resort_read', reason: 'last_resort_no_picture', detail: 'image_reread_off' },
       { page: 2, pass: 'first_pass', reason: 'refusal' },
-      { page: 2, pass: 'reread', reason: 'refusal' }]);
+      { page: 2, pass: 'reread', reason: 'refusal' },
+      { page: 2, pass: 'last_resort_read', reason: 'last_resort_no_picture', detail: 'image_reread_off' }]);
+    expect(summary).toMatchObject({ lastResortPages: [], lastResortFailedPages: [], lastResortSkipped: [
+      { page: 1, reason: 'no_picture', picture: 'image_reread_off' },
+      { page: 2, reason: 'no_picture', picture: 'image_reread_off' }] });
     expect(JSON.stringify(summary.pageReadFailures)).not.toMatch(/Hypertension|Asthma/);
   });
 
@@ -1132,6 +1148,9 @@ describe('PaperReadingService', () => {
         expect(summary).toMatchObject({ itemCount: 0, firstPassItemCount: 0, rereadFailedPages: 1, imageRereadFailedPages: [1],
           hardPageAgreement: { fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 0 } });
         expect(summary.hardPageReadUsage.map((entry) => entry.failure)).toEqual(['max_tokens', 'max_tokens']);
+        // Since the last resort (README "Last resort") the page is sent one ordinary image re-read; here it answers
+        // with items that have no box, so it keeps nothing and the page is still clearly failed.
+        expect(summary).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [1] });
         expect(payload.items).toEqual([]);
         expect(payload.pages[0]!.flagReasons).toEqual(expect.arrayContaining(['handwriting', 'ai_unsure']));
         expect(payload.reading).toMatchObject({ status: 'read', itemCount: 0, imageRereadFailedPages: [1] });
@@ -1247,6 +1266,286 @@ describe('PaperReadingService', () => {
         expect(hardPageMessage(1, [], { width: 100, height: 100 }, ZOOM_MAX_CALLS)).toContain('You may zoom at most 4 times');
         expect(liveZoomWorkers()).toBe(0);
       }, 60_000);
+    });
+
+    describe('last resort: one image re-read of a page with no reading at all (coordinator 2026-11-10)', () => {
+      const failedMax: PageAnswer = { kind: 'failed', reason: 'max_tokens', code: 'max_tokens', usage, attempts: 1 };
+      const malformed: PageAnswer = { kind: 'failed', reason: 'malformed', code: 'schema_error', usage, attempts: 1 };
+      // Fictional: what the last resort reads from the picture of the hard line (a box on p1-l1).
+      const lastAnswer = modelPage([modelItem({ kind: 'medicine', asWritten: 'Pyrimethamine 25 mg od', lineIds: ['p1-l1'],
+        name: 'Pyrimethamine', strength: '25mg', frequency: 'od', status: 'new',
+        box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } })]);
+      type Kind = 'first' | 'hard' | 'text' | 'last';
+      type Step = PageAnswer | Error | ((readSignal: AbortSignal) => Promise<PageAnswer>);
+      function lastClient(script: { first: PageAnswer; hard?: Step; text?: Step; last?: Step }) {
+        const calls: Array<{ kind: Kind; effort: string; maxTokens?: number; image: boolean }> = [];
+        const client: PageModelClient = { readPage: jest.fn(async (request, readSignal) => {
+          const kind: Kind = request.model === 'claude-sonnet-5-5' ? 'first' : request.hardPage ? 'hard'
+            : request.image ? 'last' : 'text';
+          calls.push({ kind, effort: request.effort, image: request.image !== undefined,
+            ...(request.maxTokens === undefined ? {} : { maxTokens: request.maxTokens }) });
+          const step: Step = kind === 'first' ? script.first : kind === 'hard' ? script.hard ?? failedMax
+            : kind === 'text' ? script.text ?? failedMax : script.last ?? ok(lastAnswer);
+          const value = typeof step === 'function' ? await step(readSignal) : step;
+          if (value instanceof Error) throw value;
+          return value;
+        }) };
+        return { client, calls };
+      }
+      const emptyFirst = ok(modelPage([]));
+
+      it('both hard reads fail and the first pass kept nothing: one ordinary image re-read at high effort, its items '
+        + 'flagged last_resort_read', async () => {
+        const { client, calls } = lastClient({ first: emptyFirst });
+        const { payload, summary } = await read(hardConfig, client);
+        expect(calls.map((call) => [call.kind, call.effort, call.image, call.maxTokens])).toEqual([
+          ['first', 'medium', false, undefined], ['hard', 'high', true, undefined], ['hard', 'high', true, undefined],
+          ['last', 'high', true, LAST_RESORT_MAX_TOKENS]]);
+        expect(LAST_RESORT_MAX_TOKENS).toBe(16_000);
+        expect(payload.items).toHaveLength(1);
+        const item = payload.items[0]!;
+        expect(item).toMatchObject({ kind: 'medicine', readBy: 'reread', confidence: 'check_carefully' });
+        expect(item.checkReasons).toEqual(expect.arrayContaining(['last_resort_read', 'read_from_image']));
+        expect(item.checkReason).not.toBeNull();
+        expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+        expect(summary).toMatchObject({ itemCount: 1, firstPassItemCount: 0, lastResortPages: [1],
+          lastResortFailedPages: [], lastResortSkipped: [], imageRereadPages: [1], rereadPages: [1],
+          imageRereadFailedPages: [], rereadFailedPages: 0, hardPages: [1] });
+        expect(summary.pageReadFailures).toEqual([{ page: 1, pass: 'hard_page_read', reason: 'hard_reads_failed' }]);
+        expect(summary.passUsage.map((entry) => [entry.pass, entry.requests])).toEqual([['first_pass', 1],
+          ['hard_page_read', 2], ['last_resort_read', 1]]);
+        expect(payload.pages[0]!.flagReasons).not.toContain('ai_unsure');
+        expect(payload.reading).toMatchObject({ status: 'read', itemCount: 1, imageRereadPages: [1],
+          imageRereadFailedPages: [] });
+      });
+
+      it('says in the check sentence that an item was read by the last resort', () => {
+        expect(checkReasonSentence(['last_resort_read', 'read_from_image'])).toBe('The other readings of this page did '
+          + 'not work; this was read from the picture as a last try. Check every word against the paper.');
+      });
+
+      it.each([
+        ['cut off', failedMax, 'max_tokens', undefined],
+        ['declined', refused, 'refusal', undefined],
+        ['no item kept', ok(modelPage([])), 'kept_nothing', undefined],
+        ['unavailable after retries', new AiTransientError('AI_HTTP_529', 2), 'api_error', 'AI_HTTP_529'],
+        ['rejected', new AiRejectedError('AI_BAD_REQUEST', 1), 'api_rejected', 'AI_BAD_REQUEST'],
+      ] as const)('a last resort that fails (%s) leaves the page clearly failed: reread_failed, ai_unsure, named in '
+        + 'imageRereadFailedPages, a last_resort_failed warn', async (_name, last, detail, errorCode) => {
+        const { client, calls } = lastClient({ first: emptyFirst, last });
+        const { payload, summary } = await read(hardConfig, client);
+        expect(calls.filter((call) => call.kind === 'last')).toHaveLength(1);
+        expect(payload.items).toEqual([]);
+        expect(payload.pages[0]!.flagReasons).toEqual(expect.arrayContaining(['handwriting', 'ai_unsure']));
+        expect(payload.reading).toMatchObject({ status: 'read', itemCount: 0, imageRereadFailedPages: [1],
+          imageRereadPages: [] });
+        expect(summary).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [1], rereadFailedPages: 1 });
+        expect(summary.pageReadFailures).toEqual([{ page: 1, pass: 'hard_page_read', reason: 'hard_reads_failed' },
+          { page: 1, pass: 'last_resort_read', reason: 'last_resort_failed', detail,
+            ...(errorCode === undefined ? {} : { errorCode }) }]);
+        expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+      });
+
+      /** A step that never ends on its own: rejected as interrupted when its signal aborts, noting the (fake) time. */
+      const hangUntilAborted = (seen: number[]) => (readSignal: AbortSignal) => new Promise<PageAnswer>((_resolve, reject) => {
+        readSignal.addEventListener('abort', () => {
+          seen.push(Date.now());
+          reject(new AiInterruptedError(readSignal.reason, 1, usage));
+        }, { once: true });
+      });
+
+      it('case (a) after the deadline cut both hard reads: still sent, in a window of its own (60 s by default), '
+        + 'aborted at its end', async () => {
+        expect(LAST_RESORT_SECONDS).toBe(60);
+        jest.useFakeTimers();
+        try {
+          const hardCut: number[] = [];
+          const lastCut: number[] = [];
+          const { client, calls } = lastClient({ first: emptyFirst, hard: hangUntilAborted(hardCut),
+            last: hangUntilAborted(lastCut) });
+          const start = Date.now();
+          const reading = read(hardConfig, client);
+          // The page's deadline (150 s by default) cuts both hard reads; the last resort is then sent.
+          await jest.advanceTimersByTimeAsync(150_000);
+          expect(hardCut.map((at) => at - start)).toEqual([150_000, 150_000]);
+          expect(calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard', 'last']);
+          // Its own 60 s from then, not what is left of the deadline (nothing): still running 1 ms before the end.
+          await jest.advanceTimersByTimeAsync(59_999);
+          expect(lastCut).toEqual([]);
+          await jest.advanceTimersByTimeAsync(1);
+          expect(lastCut.map((at) => at - start)).toEqual([210_000]);
+          const { payload, summary } = await reading;
+          expect(summary).toMatchObject({ hardPageDeadlinePages: [1], lastResortPages: [1], lastResortFailedPages: [1],
+            lastResortSkipped: [], imageRereadFailedPages: [1] });
+          expect(summary.pageReadFailures).toEqual([{ page: 1, pass: 'hard_page_read', reason: 'hard_reads_failed' },
+            { page: 1, pass: 'last_resort_read', reason: 'last_resort_failed', detail: 'deadline' }]);
+          expect(payload.pages[0]!.flagReasons).toContain('ai_unsure');
+        } finally { jest.useRealTimers(); }
+      });
+
+      it('case (a) after the deadline cut both hard reads: an answer inside its window is the page\'s reading', async () => {
+        jest.useFakeTimers();
+        try {
+          const { client, calls } = lastClient({ first: emptyFirst, hard: hangUntilAborted([]),
+            // Answers 50 s into its window (after the page's deadline had passed).
+            last: () => new Promise<PageAnswer>((resolve) => { setTimeout(() => resolve(ok(lastAnswer)), 50_000); }) });
+          const reading = read(hardConfig, client);
+          await jest.advanceTimersByTimeAsync(200_000);
+          const { payload, summary } = await reading;
+          expect(calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard', 'last']);
+          expect(payload.items).toHaveLength(1);
+          expect(payload.items[0]!.checkReasons).toEqual(expect.arrayContaining(['last_resort_read', 'read_from_image']));
+          expect(summary).toMatchObject({ hardPageDeadlinePages: [1], lastResortPages: [1], lastResortFailedPages: [],
+            imageRereadPages: [1], imageRereadFailedPages: [] });
+          expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+        } finally { jest.useRealTimers(); }
+      });
+
+      it.each([
+        ['case (a)', { first: emptyFirst }],
+        ['case (b)', { first: refused, text: refused }],
+      ] as const)('%s: the window is OCR_AI_LAST_RESORT_SECONDS from when the last resort is decided', async (_name, script) => {
+        jest.useFakeTimers();
+        try {
+          const lastCut: number[] = [];
+          let sentAt = 0;
+          const { client } = lastClient({ ...script, last: (readSignal) => {
+            sentAt = Date.now();
+            return hangUntilAborted(lastCut)(readSignal);
+          } });
+          // A 30 s page deadline and a 45 s window: the window, not the deadline, bounds the last resort.
+          const reading = read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 30_000, OCR_AI_LAST_RESORT_SECONDS: 45 },
+            client);
+          await jest.advanceTimersByTimeAsync(100_000);
+          const { summary } = await reading;
+          expect(sentAt).toBeGreaterThan(0);
+          expect(lastCut.map((at) => at - sentAt)).toEqual([45_000]);
+          expect(summary.pageReadFailures).toContainEqual({ page: 1, pass: 'last_resort_read', reason: 'last_resort_failed',
+            detail: 'deadline' });
+        } finally { jest.useRealTimers(); }
+      });
+
+      it('a shutdown during the last resort still stops the reading', async () => {
+        const controller = new AbortController();
+        const reason = new Error('worker shutdown');
+        const { client } = lastClient({ first: emptyFirst, last: (readSignal) => new Promise<PageAnswer>((_resolve, reject) => {
+          readSignal.addEventListener('abort', () => reject(new AiInterruptedError(readSignal.reason, 1, usage)), { once: true });
+          setTimeout(() => controller.abort(reason), 5);
+        }) });
+        const error = await new PaperReadingService(hardConfig, client)
+          .read({ facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages: [hardPage], document: png }, controller.signal)
+          .catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(ReadingInterruptedError);
+        expect((error as ReadingInterruptedError).cause).toBe(reason);
+      });
+
+      it('is not sent when the first pass kept items (they stay, reread_failed) or a hard read answered', async () => {
+        const kept = lastClient({ first: ok(firstPass) });
+        const { payload } = await read(hardConfig, kept.client);
+        expect(kept.calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard']);
+        expect(payload.items.every((item) => item.readBy === 'first_pass' && item.checkReasons.includes('reread_failed')))
+          .toBe(true);
+        expect(payload.items.some((item) => item.checkReasons.includes('last_resort_read'))).toBe(false);
+        // First pass empty, but the hard reads answered: nothing to do.
+        const answered = lastClient({ first: emptyFirst, hard: ok(best('Pyrimethamine')) });
+        const { summary } = await read(hardConfig, answered.client);
+        expect(answered.calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard']);
+        expect(summary).toMatchObject({ lastResortPages: [], lastResortSkipped: [], imageRereadPages: [1] });
+      });
+
+      it.each([
+        ['failed', malformed, failedMax, 'schema_error'],
+        ['was declined', refused, refused, 'refusal'],
+      ] as const)('a page whose first pass %s and whose text re-read gave nothing gets the last resort, with its picture, '
+        + 'in a window of its own', async (_name, first, text, firstReason) => {
+        const { client, calls } = lastClient({ first, text });
+        const { payload, summary } = await read(hardConfig, client);
+        expect(calls.map((call) => [call.kind, call.effort, call.maxTokens])).toEqual([['first', 'medium', undefined],
+          ['text', 'high', undefined], ['last', 'high', LAST_RESORT_MAX_TOKENS]]);
+        expect(payload.reading.status).toBe('read');
+        expect(payload.items).toHaveLength(1);
+        expect(payload.items[0]!.checkReasons).toEqual(expect.arrayContaining(['last_resort_read', 'read_from_image']));
+        expect(payload.pages[0]!.flagReasons).not.toEqual(expect.arrayContaining(['ai_declined']));
+        expect(payload.pages[0]!.flagReasons).not.toContain('ai_unsure');
+        expect(summary).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [], imageRereadPages: [1],
+          hardPages: [] });
+        expect(summary.pageReadFailures.map((failure) => [failure.pass, failure.reason])).toEqual([
+          ['first_pass', firstReason], ['reread', answerReason(text)]]);
+        expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+      });
+
+      it('a declined page whose last resort is declined too stays ai_declined, named as a failed picture re-read', async () => {
+        const { client, calls } = lastClient({ first: refused, text: refused, last: refused });
+        const { payload, summary } = await read(hardConfig, client);
+        expect(calls.map((call) => call.kind)).toEqual(['first', 'text', 'last']);
+        expect(payload.reading).toMatchObject({ status: 'ai_declined', imageRereadFailedPages: [1] });
+        expect(payload.pages[0]!.flagReasons).toContain('ai_declined');
+        expect(summary.pageReadFailures).toContainEqual({ page: 1, pass: 'last_resort_read', reason: 'last_resort_failed',
+          detail: 'refusal' });
+      });
+
+      it('a hard read that answered but kept nothing, on a page whose first pass kept nothing, gets the last resort '
+        + 'in a window of its own', async () => {
+        const { client, calls } = lastClient({ first: emptyFirst, hard: ok(modelPage([])) });
+        const { payload, summary } = await read(hardConfig, client);
+        expect(calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard', 'last']);
+        expect(payload.items).toHaveLength(1);
+        expect(payload.items[0]!.checkReasons).toEqual(expect.arrayContaining(['last_resort_read', 'read_from_image']));
+        expect(summary).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [], imageRereadPages: [1] });
+        expect(summary.pageReadFailures).toEqual([{ page: 1, pass: 'hard_page_read', reason: 'kept_nothing' }]);
+        // The last resort keeps nothing either: the page is clearly failed, with both warn lines.
+        const none = lastClient({ first: emptyFirst, hard: ok(modelPage([])), last: ok(modelPage([])) });
+        const failed = await read(hardConfig, none.client);
+        expect(failed.payload.items).toEqual([]);
+        expect(failed.payload.pages[0]!.flagReasons).toContain('ai_unsure');
+        expect(failed.payload.reading.imageRereadFailedPages).toEqual([1]);
+        expect(failed.summary.pageReadFailures).toEqual([{ page: 1, pass: 'hard_page_read', reason: 'kept_nothing' },
+          { page: 1, pass: 'last_resort_read', reason: 'last_resort_failed', detail: 'kept_nothing' }]);
+      });
+
+      it('a page whose first pass failed and whose text re-read answered but kept nothing gets the last resort',
+        async () => {
+        // Fictional: a note whose words are not on the page, so the checks drop it.
+        const offPage = ok(modelPage([modelItem({ kind: 'note', asWritten: 'Zz qq not on this page', lineIds: ['p1-l1'] })]));
+        const { client, calls } = lastClient({ first: failedMax, text: offPage });
+        const { payload, summary } = await read(hardConfig, client);
+        expect(calls.map((call) => call.kind)).toEqual(['first', 'text', 'last']);
+        expect(payload.items).toHaveLength(1);
+        expect(payload.items[0]!.checkReasons).toContain('last_resort_read');
+        expect(summary).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [], rereadPages: [1] });
+        expect(summary.pageReadFailures.map((failure) => [failure.pass, failure.reason])).toEqual([
+          ['first_pass', 'max_tokens'], ['reread', 'kept_nothing']]);
+        // The last resort fails too: the page ends failed (ai_unsure), not an empty page marked done.
+        const none = lastClient({ first: failedMax, text: offPage, last: failedMax });
+        const failed = await read(hardConfig, none.client);
+        expect(failed.payload.items).toEqual([]);
+        expect(failed.payload.pages[0]!.flagReasons).toContain('ai_unsure');
+        expect(failed.summary).toMatchObject({ rereadPages: [], lastResortFailedPages: [1] });
+        expect(failed.payload.reading.status).toBe('ai_failed');
+      });
+
+      it('a page whose first pass failed and whose text re-read answered gets no last resort', async () => {
+        const { client, calls } = lastClient({ first: malformed, text: ok(firstPass) });
+        const { summary } = await read(hardConfig, client);
+        expect(calls.map((call) => call.kind)).toEqual(['first', 'text']);
+        expect(summary).toMatchObject({ lastResortPages: [], lastResortSkipped: [], rereadPages: [1] });
+      });
+
+      it('without a picture (a PDF, or no document) there is no last resort, only a warn line saying why', async () => {
+        for (const [document, why] of [[{ mediaType: 'application/pdf', bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]) },
+          'image_not_available_pdf'], [undefined, 'image_not_given']] as const) {
+          const { client, calls } = lastClient({ first: malformed, text: failedMax });
+          // read() puts the PNG in for an undefined document; the service is called directly here instead.
+          const { payload, summary } = await new PaperReadingService(hardConfig, client).read({ facilityId: FACILITY,
+            sourceSha256Hex: SOURCE_SHA, pages: [hardPage], ...(document ? { document } : {}) }, signal());
+          expect(calls.map((call) => call.kind)).toEqual(['first', 'text']);
+          expect(summary).toMatchObject({ lastResortPages: [], lastResortFailedPages: [],
+            lastResortSkipped: [{ page: 1, reason: 'no_picture', picture: why }], imageRereadFailedPages: [] });
+          expect(summary.pageReadFailures).toContainEqual({ page: 1, pass: 'last_resort_read',
+            reason: 'last_resort_no_picture', detail: why });
+          expect(payload.reading.status).toBe('ai_failed');
+        }
+      });
     });
 
     describe('zoom in the hard-page reads (owner decision 2026-11-05, about 18:45 UTC)', () => {

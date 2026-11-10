@@ -9,7 +9,8 @@ import {
   type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
 } from './contract';
 import { mergeHardReadings, noAgreement, prepareHardAnswer, type HardPageAgreement } from './hard-page';
-import { blankIdentity, checkPage, mergeReread, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
+import { blankIdentity, checkPage, checkReasonSentence, mergeReread, REVIEW_BELOW, uniqueItemIds,
+  type PageCheck } from './items';
 import { createMasker, type Masker } from './masking';
 import { imageTierOf, pageImageFor, resizedSize, type PageImage, type PageImageDecision,
   type SourceDocument } from './page-image';
@@ -26,11 +27,40 @@ export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILI
   // given, 'high' after a zoom result (OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT), and the page's deadline 150 s when not given.
   & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_READS' | 'OCR_AI_HARD_PAGE_EFFORT'
     | 'OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT' | 'OCR_AI_HARD_PAGE_DEADLINE_MS'>>
+  // The last resort's own window; LAST_RESORT_SECONDS (60) when not given.
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_LAST_RESORT_SECONDS'>>
   // Zoom in the hard-page reads (zoom.ts); off when not given. At most OCR_AI_ZOOM_MAX_CALLS (4 when not given) per read.
   & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_ZOOM' | 'OCR_AI_ZOOM_MAX_CALLS'>>;
 
 /** OCR_AI_HARD_PAGE_DEADLINE_MS when the reading config does not give it (the setting's default). */
 export const HARD_PAGE_DEADLINE_MS = 150_000;
+
+/**
+ * The last-resort image re-read (coordinator decisions 2026-11-10, README "Last resort"): one ordinary image re-read
+ * request (imagePageMessage, IMAGE_PROMPT_VERSION, no zoom, OCR_AI_REREAD_MODEL) of a page that has a picture and no
+ * usable reading at all, in a window of its own: OCR_AI_LAST_RESORT_SECONDS (LAST_RESORT_SECONDS, 60, when not given)
+ * from when it is decided, never what is left of the hard page's deadline (coordinator, about 18:58 UTC: so a page
+ * whose two hard reads were both cut by the deadline still gets an answer; a hard page's worst case is then about
+ * 150 s + 60 s). The setting's minimum of 30 s (config.ts) is about 3,000 output tokens at the ~100 tokens per second
+ * measured in production, the size of a sparse page's answer with little thinking (a 12-item answer is about 3,000
+ * to 4,000); with less, the request would almost surely be cut and its thinking billed for nothing. The window starts
+ * fresh and the worker has no job-level time budget (its lease is renewed for as long as the job runs), so there is
+ * no 'not enough time left' case any more: the request is always sent when the page needs it and has a picture.
+ * Effort 'high' (the owner's choice for hard pages, 2026-11-10); max_tokens LAST_RESORT_MAX_TOKENS: about 160 s of
+ * output at the measured rate, so it only caps the cost of an attempt (16,000 x $22 per million = $0.35) where
+ * OCR_AI_MAX_TOKENS would allow 64,000 on a retry.
+ */
+export const LAST_RESORT_SECONDS = 60;
+export const LAST_RESORT_EFFORT: Effort = 'high';
+export const LAST_RESORT_MAX_TOKENS = 16_000;
+/** The check reason every item of a last-resort reading carries (with read_from_image; always check_carefully). */
+export const LAST_RESORT_REASON = 'last_resort_read';
+
+/**
+ * A page that needed the last resort but was not sent it: 'no_picture' (its picture cannot go; `picture` says why, as
+ * for imageRereadSkipped), the only reason since the last resort has a window of its own. Codes only.
+ */
+export interface LastResortSkip { page: number; reason: 'no_picture'; picture?: ImageRereadSkipReason }
 
 export interface ReadingInput {
   facilityId: string;
@@ -122,6 +152,14 @@ export interface ReadingSummary {
    * (hardPageReadUsage `failure`), and the page one line here when neither answered.
    */
   pageReadFailures: PageReadFailure[];
+  /**
+   * The last resort (README "Last resort"): pages sent the one last-resort image re-read; those of them whose answer
+   * was not usable (no answer, or no item kept); and pages that needed it but were not sent it, and why. Page numbers
+   * and codes only: in provenance, and as counts in the completion log.
+   */
+  lastResortPages: number[];
+  lastResortFailedPages: number[];
+  lastResortSkipped: LastResortSkip[];
 }
 
 /**
@@ -131,7 +169,12 @@ export interface ReadingSummary {
  * answer, but no item of it held to the page while the first pass had some, so the first pass was kept);
  * 'hard_reads_failed' (neither of a hard page's two reads answered).
  */
-export interface PageReadFailure { page: number; pass: ReadingPass; reason: string; errorCode?: string }
+export interface PageReadFailure { page: number; pass: ReadingPass; reason: string; errorCode?: string;
+  /**
+   * For the last resort ('last_resort_read'): how a 'last_resort_failed' request ended (as `reason` above, or
+   * 'deadline'), or, for 'last_resort_no_picture', why the picture could not go (an imageRereadSkipped code).
+   */
+  detail?: string }
 
 /**
  * How one hard-page read ended: its answer; aborted at the page's deadline; cut off at its output-token cap (or the
@@ -184,7 +227,7 @@ export interface HardReadUsage extends AiUsageRecord {
 }
 
 /** 'hard_page_read': both best-guess reads of a hard page (owner decision 2026-11-05), so their cost shows apart. */
-export type ReadingPass = 'first_pass' | 'reread' | 'image_reread' | 'hard_page_read';
+export type ReadingPass = 'first_pass' | 'reread' | 'image_reread' | 'hard_page_read' | 'last_resort_read';
 export interface PassUsageRecord extends AiUsageRecord { pass: ReadingPass;
   /** hard_page_read only: zoom crops returned in this pass (counts only). */
   zoomCalls?: number }
@@ -312,14 +355,17 @@ export class PaperReadingService {
     const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage,
       pass: ReadingPass = image ? 'image_reread' : 'reread', hardPage = false, zoom?: ZoomToolSession,
       hard?: { signal: AbortSignal; followupEffort: Effort; trace: HardReadTrace;
-        answerBy?: { timeLeftMs: () => number; reserveMs: number } }) => {
+        answerBy?: { timeLeftMs: () => number; reserveMs: number } },
+      // The last resort's own abort signal (the job's and its window's) and output-token cap.
+      own?: { signal: AbortSignal; maxTokens: number }) => {
       let answer: PageAnswer;
       try {
         answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
           ...(image ? { image } : {}), ...(hardPage ? { hardPage: true } : {}), ...(zoom ? { zoom } : {}),
           ...(hard ? { followupEffort: hard.followupEffort, trace: hard.trace,
-            ...(hard.answerBy ? { answerBy: hard.answerBy } : {}) } : {}) },
-        hard?.signal ?? signal);
+            ...(hard.answerBy ? { answerBy: hard.answerBy } : {}) } : {}),
+          ...(own ? { maxTokens: own.maxTokens } : {}) },
+        hard?.signal ?? own?.signal ?? signal);
       } catch (error) {
         // A call that ended without an answer still made requests (and may have used tokens): count them.
         // A call stopped before its first request (waiting for a permit) made none and adds nothing.
@@ -386,6 +432,7 @@ export class PaperReadingService {
     const hardEffort: Effort = this.config.OCR_AI_HARD_PAGE_EFFORT ?? 'high';
     const followupEffort: Effort = this.config.OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT ?? 'high';
     const deadlineMs = this.config.OCR_AI_HARD_PAGE_DEADLINE_MS ?? HARD_PAGE_DEADLINE_MS;
+    const lastResortWindowMs = (this.config.OCR_AI_LAST_RESORT_SECONDS ?? LAST_RESORT_SECONDS) * 1_000;
     const deadlinePages: number[] = [];
     const readUsage: HardReadUsage[] = [];
     const hardPages: number[] = [];
@@ -525,8 +572,53 @@ export class PaperReadingService {
       for (const key of Object.keys(agreement) as (keyof HardPageAgreement)[]) agreement[key] += merged.agreement[key];
       return { kind: 'read', check: merged.check };
     };
+    const lastResortPages: number[] = [];
+    const lastResortFailed: number[] = [];
+    const lastResortSkipped: LastResortSkip[] = [];
+    /**
+     * The last resort (coordinator decision 2026-11-10, after staging job 566c38bf gave the owner nothing): one
+     * ordinary image re-read of a page with no usable reading (README "Last resort"), at LAST_RESORT_EFFORT, capped at
+     * LAST_RESORT_MAX_TOKENS, and aborted when its own window (lastResortWindowMs from now) ends, through the same
+     * kind of abort signal as a hard read (the job's and its window's together; a shutdown still stops the reading).
+     * Its items go through checkPage as any image re-read's; one that keeps none is a failure ('kept_nothing'). Never
+     * throws for the API or the window's end: a failed last resort is a warn line.
+     */
+    const lastResort = async (state: PageState, decision: Extract<PageImageDecision, { kind: 'image' }>,
+    ): Promise<{ kind: 'read'; check: PageCheck } | { kind: 'failed' }> => {
+      lastResortPages.push(state.page);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new HardPageDeadlineError()), lastResortWindowMs);
+      let detail: string;
+      let errorCode: string | undefined;
+      try {
+        const answer = await ask(state, rereadModel, LAST_RESORT_EFFORT, pictureOf(decision), 'last_resort_read', false,
+          undefined, undefined, { signal: AbortSignal.any([signal, controller.signal]), maxTokens: LAST_RESORT_MAX_TOKENS });
+        if (answer.kind === 'answer') {
+          const check = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
+            sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage: true });
+          if (check.items.length > 0) return { kind: 'read', check };
+          detail = 'kept_nothing';
+        } else {
+          detail = answerFailure(answer);
+        }
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (error instanceof AiInterruptedError && controller.signal.aborted) detail = 'deadline';
+        else if (error instanceof AiTransientError) { detail = 'api_error'; errorCode = error.code; }
+        else if (error instanceof AiRejectedError) { detail = 'api_rejected'; errorCode = error.code; }
+        else throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+      lastResortFailed.push(state.page);
+      pageFailures.push({ page: state.page, pass: 'last_resort_read', reason: 'last_resort_failed', detail,
+        ...(errorCode === undefined ? {} : { errorCode }) });
+      return { kind: 'failed' };
+    };
     await forEachBounded(candidates, pageConcurrency, async (state) => {
       let answer: PageAnswer | null = null;
+      // The page's reading came from the last resort (its items are marked last_resort_read).
+      let lastResortRead = false;
       let fromImage = false;
       let hardCheck: PageCheck | null = null;
       // Only a flagged page (one the first pass answered) may go with its picture.
@@ -536,13 +628,38 @@ export class PaperReadingService {
       try {
         if (decision?.kind === 'image' && this.isHardPage(state)) {
           const hard = await readHard(state, pictureOf(decision), decision);
-          if (hard.kind === 'read') {
+          if (hard.kind === 'read' && hard.check.items.length === 0 && state.firstCheck!.items.length === 0) {
+            // A hard read answered, but no item of the hard reading held to the page, and the first pass kept
+            // nothing either: still no usable reading, so the last resort as for failed hard reads (README "Last
+            // resort"), in its own window.
+            pageFailures.push({ page: state.page, pass: 'hard_page_read', reason: 'kept_nothing' });
+            const last = await lastResort(state, decision);
+            if (last.kind === 'read') {
+              hardCheck = last.check;
+              fromImage = true;
+              lastResortRead = true;
+            } else {
+              imageFailed.push(state.page);
+            }
+          } else if (hard.kind === 'read') {
             hardCheck = hard.check;
             fromImage = true;
           } else if (hard.kind === 'fallback') {
             skipped.push({ page: state.page, reason: hard.reason });
             answer = await ask(state, rereadModel, rereadEffort);
             if (answer.kind !== 'answer') pageFailures.push({ page: state.page, pass, reason: answerFailure(answer) });
+          } else if (state.firstCheck!.items.length === 0) {
+            // Neither hard read answered and the first pass kept nothing on the page: nothing at all to show, so one
+            // last-resort image re-read in a window of its own, even when the deadline cut both reads (README "Last
+            // resort").
+            const last = await lastResort(state, decision);
+            if (last.kind === 'read') {
+              hardCheck = last.check;
+              fromImage = true;
+              lastResortRead = true;
+            } else {
+              imageFailed.push(state.page);
+            }
           } else {
             imageFailed.push(state.page);
           }
@@ -604,16 +721,45 @@ export class PaperReadingService {
           return;
         }
         state.final = mergeReread(state.firstCheck, read, state.lines, fromImage ? 'image' : 'text');
+        if (lastResortRead) state.final = markLastResort(state.final);
         state.reread = 'done';
         state.fromImage = fromImage;
         return;
       }
-      // A page whose first pass failed or was declined: nothing to merge, the re-read stands.
+      // A page whose first pass failed or was declined: nothing to merge, the re-read stands, if it kept anything.
       if (answer?.kind === 'answer') {
-        state.final = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
+        const check = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
           sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker });
-        state.reread = 'done';
-        return;
+        if (check.items.length > 0) {
+          state.final = check;
+          state.reread = 'done';
+          return;
+        }
+        // The re-read answered but no item held to the page: still no reading of the page at all (README "Last
+        // resort", case b).
+        pageFailures.push({ page: state.page, pass, reason: 'kept_nothing' });
+      }
+      if (state.firstCheck === null) {
+        // The first pass failed or was declined and so did its re-read: no reading of the page at all. The last
+        // resort, with the picture, in a window of its own (as for a hard page); without a picture, a warn
+        // line saying why (README "Last resort").
+        const picture = this.imageDecision(state, input);
+        if (picture.kind === 'image') {
+          const last = await lastResort(state, picture);
+          if (last.kind === 'read') {
+            state.final = markLastResort(last.check);
+            state.reread = 'done';
+            state.fromImage = true;
+            state.declined = false;
+            state.failed = false;
+            return;
+          }
+          imageFailed.push(state.page);
+        } else {
+          lastResortSkipped.push({ page: state.page, reason: 'no_picture', picture: picture.reason });
+          pageFailures.push({ page: state.page, pass: 'last_resort_read', reason: 'last_resort_no_picture',
+            detail: picture.reason });
+        }
       }
       state.reread = 'failed';
       if (state.first?.kind === 'refused') state.declined = answer?.kind === 'refused' || answer === null;
@@ -670,6 +816,9 @@ export class PaperReadingService {
     summary.hardPageReadUsage = readUsage;
     summary.firstPassItemCount = states.reduce((sum, state) => sum + (state.firstCheck?.items.length ?? 0), 0);
     summary.pageReadFailures = [...pageFailures].sort((a, b) => a.page - b.page);
+    summary.lastResortPages = [...lastResortPages].sort((a, b) => a - b);
+    summary.lastResortFailedPages = [...lastResortFailed].sort((a, b) => a - b);
+    summary.lastResortSkipped = [...lastResortSkipped].sort((a, b) => a.page - b.page);
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
 
@@ -720,6 +869,7 @@ export class PaperReadingService {
       modelUsage, passUsage, hardPages: [], hardPageReads: 0, hardPageSingleReadPages: [],
       hardPageAgreement: noAgreement(), zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageZoomPages: [],
       hardPageDeadlinePages: [], hardPageReadUsage: [], firstPassItemCount: 0, pageReadFailures: [],
+      lastResortPages: [], lastResortFailedPages: [], lastResortSkipped: [],
     };
   }
 
@@ -799,6 +949,15 @@ function markRereadFailed(check: PageCheck): PageCheck {
       : [...item.checkReasons, 'reread_failed'];
     return { ...item, confidence: 'check_carefully' as const, checkReasons,
       checkReason: item.checkReason ?? "A second reading of this page didn't work; check it against the paper." };
+  }) };
+}
+
+/** A last-resort reading's items: each goes to a person, with last_resort_read (README "Last resort"). */
+function markLastResort(check: PageCheck): PageCheck {
+  return { ...check, items: check.items.map((item) => {
+    const checkReasons = item.checkReasons.includes(LAST_RESORT_REASON) ? item.checkReasons
+      : [...item.checkReasons, LAST_RESORT_REASON];
+    return { ...item, confidence: 'check_carefully' as const, checkReasons, checkReason: checkReasonSentence(checkReasons) };
   }) };
 }
 
