@@ -34,7 +34,24 @@ export interface PageRequest { model: string; effort: Effort; page: number; line
    * A hard page's zoom tool for this read (with `hardPage` only; zoom.ts): the request declares the zoom tool, the
    * message offers it, and the client runs the tool loop. Without it a hard-page request is exactly as before zoom.
    */
-  zoom?: ZoomToolSession }
+  zoom?: ZoomToolSession;
+  /**
+   * The effort of every turn of the zoom loop after the first (the turns that follow a zoom tool_result); the first
+   * keeps `effort`. Sent as that request's top-level effort (README "Hard-page time and cost bounds"). Not given:
+   * `effort` throughout.
+   */
+  followupEffort?: Effort;
+  /** A hard page's read only: filled in by the client as the read goes, for the per-read usage log (counts only). */
+  trace?: HardReadTrace }
+
+/** What one hard-page read did, as it went: requests answered (turns) and how many of them were follow-up turns. */
+export interface HardReadTrace { turns: number; followupTurns: number }
+
+/**
+ * A turn of a hard-page read is not sent with less than this many output tokens left of the read's
+ * OCR_AI_HARD_PAGE_MAX_TOKENS: it would be cut off before it could answer. The read ends as max_tokens instead.
+ */
+export const HARD_READ_MIN_TURN_TOKENS = 2_048;
 
 export interface TokenUsage {
   inputTokens: number;
@@ -128,7 +145,7 @@ export class ClaudePageClient implements PageModelClient {
 
   constructor(private readonly config: Pick<OcrWorkerConfig, 'ANTHROPIC_API_KEY' | 'OCR_AI_MAX_TOKENS'
     | 'OCR_AI_TIMEOUT_MS' | 'OCR_AI_MAX_RETRIES'> & Partial<Pick<OcrWorkerConfig, 'OCR_AI_MAX_CONCURRENT_REQUESTS'
-    | 'OCR_AI_HARD_PAGE_TIMEOUT_MS'>>,
+    | 'OCR_AI_HARD_PAGE_TIMEOUT_MS' | 'OCR_AI_HARD_PAGE_MAX_TOKENS'>>,
     options: ClaudeClientOptions = {}) {
     if (!config.ANTHROPIC_API_KEY) throw new Error('AI reading requires an API key');
     // apiKey given in code: the SDK reads no other credential from the environment. baseURL is fixed so an
@@ -156,9 +173,13 @@ export class ClaudePageClient implements PageModelClient {
     // A hard page at max effort may think for many minutes: its own (longer) per-request timeout.
     const timeoutMs = hard ? this.config.OCR_AI_HARD_PAGE_TIMEOUT_MS ?? this.config.OCR_AI_TIMEOUT_MS
       : this.config.OCR_AI_TIMEOUT_MS;
+    // A hard page's read: OCR_AI_HARD_PAGE_MAX_TOKENS for the whole read (every turn together); any other request
+    // keeps OCR_AI_MAX_TOKENS, so its body is byte for byte as before.
+    const readCap = hard ? this.config.OCR_AI_HARD_PAGE_MAX_TOKENS ?? this.config.OCR_AI_MAX_TOKENS
+      : this.config.OCR_AI_MAX_TOKENS;
     const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: request.model,
-      max_tokens: this.config.OCR_AI_MAX_TOKENS,
+      max_tokens: readCap,
       inference_geo: INFERENCE_GEO,
       thinking: { type: 'adaptive' },
       output_config: { effort: request.effort, format: { type: 'json_schema',
@@ -183,8 +204,10 @@ export class ClaudePageClient implements PageModelClient {
         cache_control: { type: 'ephemeral' as const } } : {}),
     };
     const state: CallState = { sent: 0, spent: noUsage(), requestMs: 0 };
+    const trace = hard ? request.trace : undefined;
     if (!zoom) {
       const message = await this.send(params, () => timeoutMs, signal, state);
+      if (trace) trace.turns += 1;
       return interpret(message, state.sent, state.spent, seen ?? undefined, hard);
     }
     // The tool loop. Each attempt of each turn gets the hard-page timeout, as a read without zoom does, and the
@@ -194,8 +217,26 @@ export class ClaudePageClient implements PageModelClient {
     const budget = timeoutMs * (this.config.OCR_AI_MAX_RETRIES + 1);
     const remaining = () => Math.min(timeoutMs, budget - state.requestMs);
     const messages: Anthropic.MessageParam[] = [...params.messages];
+    // Bounds (coordinator 2026-11-10): the read's output tokens over all its turns are held to readCap (each turn's
+    // max_tokens is what is left of it, never less than HARD_READ_MIN_TURN_TOKENS), and the turns after a zoom
+    // tool_result run at followupEffort. A different top-level effort from the first turn's is accepted with adaptive
+    // thinking (the earlier thinking blocks stay valid) but is a messages-cache breaker: the first follow-up turn
+    // writes the cache again and the later ones read it. The per-message effort system message
+    // (mid-conversation-output-config-2026-07-01) keeps the cache but cannot be used here: placed after a user turn
+    // of only tool_result blocks, it waits for the next user turn with new input, which a zoom loop never has.
+    const followupEffort = request.followupEffort ?? request.effort;
     for (let turn = 0; ; turn += 1) {
-      const message = await this.send({ ...params, messages }, remaining, signal, state);
+      const left = readCap - state.spent.outputTokens;
+      if (left < HARD_READ_MIN_TURN_TOKENS) {
+        return { kind: 'failed', reason: 'max_tokens', usage: { ...state.spent }, attempts: state.sent };
+      }
+      const effort = turn === 0 ? request.effort : followupEffort;
+      const message = await this.send({ ...params, max_tokens: left,
+        output_config: { ...params.output_config, effort }, messages }, remaining, signal, state);
+      if (trace) {
+        trace.turns += 1;
+        if (turn > 0) trace.followupTurns += 1;
+      }
       if (message.stop_reason !== 'tool_use') return interpret(message, state.sent, state.spent, seen ?? undefined, hard);
       addTokens(state.spent, usageOf(message));
       const calls = message.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');

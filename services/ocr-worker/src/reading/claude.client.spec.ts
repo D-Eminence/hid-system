@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, retryAfterMs } from './claude.client';
+import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, HARD_READ_MIN_TURN_TOKENS,
+  retryAfterMs } from './claude.client';
 import { readOcrWorkerConfig } from '../config';
 import { Semaphore } from '../semaphore';
 import { HIGH_RESOLUTION_TIER, resizedSize, STANDARD_TIER } from './page-image';
@@ -626,6 +627,61 @@ describe('ClaudePageClient', () => {
         expect(error).toMatchObject({ code: 'AI_TIMEOUT', attempts: 4 });
         expect(fetch).toHaveBeenCalledTimes(4);
       } finally { spy.mockRestore(); }
+    });
+
+    describe('hard-page bounds (coordinator 2026-11-10)', () => {
+      type Sent = { max_tokens: number; output_config: { effort: string } };
+      const sent = (fetch: jest.Mock) => fetch.mock.calls.map((call) =>
+        JSON.parse(String((call as [unknown, RequestInit])[1].body)) as Sent);
+      const bounded = (responses: Response[], cap?: number) => {
+        const fetch = jest.fn(async (_url: unknown, _init?: RequestInit) => responses.shift()!);
+        const instance = new ClaudePageClient({ ...config, OCR_AI_MAX_TOKENS: 64_000,
+          ...(cap === undefined ? {} : { OCR_AI_HARD_PAGE_MAX_TOKENS: cap }) },
+        { fetch: fetch as unknown as typeof globalThis.fetch, sleep: jest.fn().mockResolvedValue(undefined) });
+        return { instance, fetch };
+      };
+
+      it('runs the turns after a zoom result at the follow-up effort, the first at the hard-page effort', async () => {
+        const { instance, fetch } = bounded([turn([thinking('sig-1'), zoomCall('toolu_a')], 'tool_use'),
+          turn([thinking('sig-2'), zoomCall('toolu_b')], 'tool_use'), final()], 32_000);
+        const trace = { turns: 0, followupTurns: 0 };
+        await expect(instance.readPage({ ...hardRequest, followupEffort: 'high', trace,
+          zoom: createZoomSession(goodZoom, 1, 4, 0) }, new AbortController().signal))
+          .resolves.toMatchObject({ kind: 'answer', attempts: 3 });
+        expect(sent(fetch).map((body) => body.output_config.effort)).toEqual(['max', 'high', 'high']);
+        expect(trace).toEqual({ turns: 3, followupTurns: 2 });
+        // The thinking blocks of the 'max' turns go back unchanged on the 'high' turns (append-only history).
+        const third = JSON.parse(String((fetch.mock.calls[2] as [unknown, RequestInit])[1].body)) as Body;
+        expect(third.messages[1]!.content).toEqual(expect.arrayContaining([{ type: 'thinking', thinking: '', signature: 'sig-1' }]));
+        expect(third.messages[3]!.content).toEqual(expect.arrayContaining([{ type: 'thinking', thinking: '', signature: 'sig-2' }]));
+        // Not given: one effort for the whole read.
+        const same = bounded([turn([zoomCall('toolu_a')], 'tool_use'), final()], 32_000);
+        await same.instance.readPage({ ...hardRequest, zoom: createZoomSession(goodZoom, 1, 4, 0) }, new AbortController().signal);
+        expect(sent(same.fetch).map((body) => body.output_config.effort)).toEqual(['max', 'max']);
+      });
+
+      it('holds a read\'s output tokens over all its turns to OCR_AI_HARD_PAGE_MAX_TOKENS', async () => {
+        // Each tool turn "writes" 10,000 output tokens: max_tokens is what is left of the read's 32,000.
+        const { instance, fetch } = bounded([turn([zoomCall('toolu_a')], 'tool_use', 5_000, 10_000),
+          turn([zoomCall('toolu_b')], 'tool_use', 5_000, 10_000), turn([zoomCall('toolu_c')], 'tool_use', 5_000, 10_000),
+          final()], 32_000);
+        const result = await instance.readPage({ ...hardRequest, zoom: createZoomSession(goodZoom, 1, 4, 0) },
+          new AbortController().signal);
+        expect(sent(fetch).map((body) => body.max_tokens)).toEqual([32_000, 22_000, 12_000]);
+        // 2,000 left is under HARD_READ_MIN_TURN_TOKENS: no fourth request, the read ends cut off.
+        expect(result).toMatchObject({ kind: 'failed', reason: 'max_tokens', attempts: 3, usage: { outputTokens: 30_000 } });
+        expect(fetch).toHaveBeenCalledTimes(3);
+        expect(HARD_READ_MIN_TURN_TOKENS).toBe(2_048);
+        // A hard page without zoom: one request at the cap. Any other request keeps OCR_AI_MAX_TOKENS.
+        const plain = bounded([sse(JSON.stringify(hardAnswer)), sse(JSON.stringify(answer))], 24_000);
+        await plain.instance.readPage(hardRequest, new AbortController().signal);
+        await plain.instance.readPage({ model: 'claude-opus-5-5', effort: 'high', page: 1, lines }, new AbortController().signal);
+        expect(sent(plain.fetch).map((body) => body.max_tokens)).toEqual([24_000, 64_000]);
+        // Not configured (a client built without it): OCR_AI_MAX_TOKENS, as before.
+        const unset = bounded([sse(JSON.stringify(hardAnswer))]);
+        await unset.instance.readPage(hardRequest, new AbortController().signal);
+        expect(sent(unset.fetch)[0]!.max_tokens).toBe(64_000);
+      });
     });
 
     it('keeps the crops out of errors, and gives no tool to other requests', async () => {

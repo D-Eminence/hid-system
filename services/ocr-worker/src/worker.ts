@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
 import { paperReadingPayloadSchema } from './reading/contract';
 import { HARD_PAGE_PROMPT_VERSION, HARD_PAGE_PROMPT_VERSION_NO_ZOOM, IMAGE_PROMPT_VERSION } from './reading/prompt';
-import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type PassUsageRecord, type ReadingOutcome } from './reading/reader';
+import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type HardReadUsage, type PassUsageRecord,
+  type ReadingOutcome } from './reading/reader';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type VerifiedDocument, type WorkerOcrProvider, type WorkerRepository } from './types';
 
@@ -24,6 +25,11 @@ export class OcrWorker {
       maxInFlightPerFacility: this.config.OCR_WORKER_MAX_INFLIGHT_PER_FACILITY,
       aiMaxConcurrentRequests: this.config.OCR_AI_MAX_CONCURRENT_REQUESTS,
       aiImageReread: this.config.OCR_AI_IMAGE_REREAD, aiImageMaskedPages: this.config.OCR_AI_IMAGE_MASKED_PAGES,
+      // The hard-page bounds in force (settings only), so a staging comparison of efforts can be read from the logs.
+      aiHardPageReads: this.config.OCR_AI_HARD_PAGE_READS, aiHardPageEffort: this.config.OCR_AI_HARD_PAGE_EFFORT,
+      aiHardPageFollowupEffort: this.config.OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT,
+      aiHardPageMaxTokens: this.config.OCR_AI_HARD_PAGE_MAX_TOKENS,
+      aiHardPageDeadlineMs: this.config.OCR_AI_HARD_PAGE_DEADLINE_MS, aiZoomMaxCalls: this.config.OCR_AI_ZOOM_MAX_CALLS,
       textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
     await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
     await this.repository.close();
@@ -65,7 +71,8 @@ export class OcrWorker {
       const after = await this.repository.recordPages(job, Math.max(1, text.pageCount));
       const outcome = await this.readItems(job, text, document);
       // Before completion, so the job is still held; a failure to record never fails the job.
-      await this.recordAiUsage(job, outcome.summary.modelUsage, outcome.summary.pagesSent, outcome.summary.passUsage);
+      await this.recordAiUsage(job, outcome.summary.modelUsage, outcome.summary.pagesSent, outcome.summary.passUsage,
+        outcome.summary.hardPageReadUsage);
       const completion = buildCompletion(text, outcome);
       const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
       if (!checked.success) {
@@ -90,6 +97,8 @@ export class OcrWorker {
         hardPageAgreement: { ...summary.hardPageAgreement },
         // Zoom in the hard-page reads: crops returned, calls refused at the limit, calls failed. Numbers only.
         zoomCalls: summary.zoomCalls, zoomLimited: summary.zoomLimited, zoomFailed: summary.zoomFailed,
+        // Hard pages where OCR_AI_HARD_PAGE_DEADLINE_MS cut a read still running (a count only).
+        hardPageDeadlineHits: summary.hardPageDeadlinePages.length,
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
         cacheReadInputTokens: summary.usage.cacheReadInputTokens,
         cacheCreationInputTokens: summary.usage.cacheCreationInputTokens,
@@ -160,13 +169,28 @@ export class OcrWorker {
   /**
    * One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. The
    * ocr.reading.usage log has one line per model and pass (first_pass, reread, image_reread, hard_page_read) when the reading
-   * gives that split, and one per model otherwise (a reading stopped before it finished).
+   * gives that split, and one per model otherwise (a reading stopped before it finished). Hard-page reads get one line
+   * per read instead of one for their pass (`page`, `read` 1 or 2, time, turns, zoom counts, effort, endedBy), so the
+   * lines still add up to the reading's use.
    */
   private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[], pagesSent?: number,
-    passUsage?: readonly PassUsageRecord[]): Promise<void> {
+    passUsage?: readonly PassUsageRecord[], hardReads: readonly HardReadUsage[] = []): Promise<void> {
     // Counts only, never text: lets the cost per page, and per pass, be seen in the logs.
     const logLines: ReadonlyArray<AiUsageRecord & { pass?: string; zoomCalls?: number }> = passUsage ?? usage;
     for (const entry of logLines) {
+      if (entry.pass === 'hard_page_read' && hardReads.length > 0) {
+        // In the pass's place: one line per read of that model instead (they add up to the pass line they replace).
+        for (const read of hardReads.filter((candidate) => candidate.model === entry.model)) {
+          this.log('info', 'ocr.reading.usage', { jobId: job.jobId, correlationId: job.correlationId,
+            attempt: job.attemptNo, model: read.model, pass: 'hard_page_read', page: read.page, read: read.read,
+            requests: read.requests, turns: read.turns, inputTokens: read.inputTokens, outputTokens: read.outputTokens,
+            cacheReadTokens: read.cacheReadTokens, cacheWriteTokens: read.cacheWriteTokens, durationMs: read.durationMs,
+            zoomCalls: read.zoomCalls, zoomLimited: read.zoomLimited, effort: read.effort,
+            followupEffort: read.followupEffort, endedBy: read.endedBy,
+            ...(pagesSent === undefined ? {} : { pagesSent }) });
+        }
+        continue;
+      }
       if (entry.requests <= 0) continue;
       this.log('info', 'ocr.reading.usage', { jobId: job.jobId, correlationId: job.correlationId,
         attempt: job.attemptNo, model: entry.model, ...(entry.pass === undefined ? {} : { pass: entry.pass }),
@@ -300,6 +324,8 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         hardPagePromptVersion: summary.hardPages.length === 0 ? null
           : summary.hardPageZoomPages.length > 0 ? HARD_PAGE_PROMPT_VERSION : HARD_PAGE_PROMPT_VERSION_NO_ZOOM,
         hardPageZoomPages: summary.hardPageZoomPages,
+        // Hard pages where the page's deadline cut a read (OCR_AI_HARD_PAGE_DEADLINE_MS); page numbers only.
+        hardPageDeadlinePages: summary.hardPageDeadlinePages,
         droppedUngrounded: summary.droppedUngrounded,
         droppedUngroundedFirstPass: summary.droppedUngroundedFirstPass,
         itemCount: summary.itemCount,

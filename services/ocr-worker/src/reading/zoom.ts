@@ -42,8 +42,12 @@ export * from './zoom-raster';
 export const ZOOM_TOOL_NAME = 'zoom';
 export const ZOOM_DEFAULT_SCALE = 2;
 export const ZOOM_MAX_SCALE = 4;
-/** The most zoom calls one read may make (OCR_AI_ZOOM_MAX_CALLS may lower it). */
-export const ZOOM_MAX_CALLS = 8;
+/**
+ * The most zoom calls one read may make (OCR_AI_ZOOM_MAX_CALLS may lower it). 4 since the coordinator's decision of
+ * 2026-11-10 (was 8): every zoom turn re-sends the picture and the crops and makes the model think again, and in
+ * production job 5419047a both reads used all 8 calls in a 13-minute, $3.60 page.
+ */
+export const ZOOM_MAX_CALLS = 4;
 /** The smallest box (after clamping to the picture), in the picture's pixels as the model sees it. */
 export const ZOOM_MIN_BOX_PX = 8;
 /**

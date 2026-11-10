@@ -100,7 +100,7 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-8', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-9', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
@@ -496,14 +496,27 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
       // Zoom off: the reads sent the version 7 hard-page text (version 8 without rule J), and provenance says so.
       hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-7', hardPageZoomPages: [], imagePromptVersion: null,
-      promptVersion: 'hid-paper-reading-prompt-8' });
+      promptVersion: 'hid-paper-reading-prompt-9' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
-    expect(usageLines.map((line) => [line.pass, line.requests])).toEqual([['first_pass', 1], ['hard_page_read', 2]]);
-    // Zoom off here: the hard-page usage line still says how many crops were made (none), the first pass's does not.
-    expect(usageLines.map((line) => line.zoomCalls)).toEqual([undefined, 0]);
+    // One line per hard-page read (read 1 and 2), in the pass's place; together they are the pass's use.
+    expect(usageLines.map((line) => [line.pass, line.read, line.requests])).toEqual([['first_pass', undefined, 1],
+      ['hard_page_read', 1, 1], ['hard_page_read', 2, 1]]);
+    // Zoom off here: the hard-page usage lines still say how many crops were made (none), the first pass's does not.
+    expect(usageLines.map((line) => line.zoomCalls)).toEqual([undefined, 0, 0]);
+    for (const line of usageLines.slice(1)) {
+      expect(line).toMatchObject({ page: 1, model: 'claude-opus-5-5', effort: 'max', followupEffort: null,
+        endedBy: 'answer', turns: 0, zoomLimited: 0, durationMs: expect.any(Number), inputTokens: expect.any(Number),
+        outputTokens: expect.any(Number), cacheReadTokens: expect.any(Number), cacheWriteTokens: expect.any(Number) });
+      // Numbers and codes only.
+      for (const [key, value] of Object.entries(line)) {
+        if (!['event', 'level', 'timestamp', 'jobId', 'correlationId', 'model', 'pass', 'effort', 'followupEffort',
+          'endedBy'].includes(key)) expect(typeof value).toBe('number');
+      }
+    }
     const done = lines.find((line) => line.event === 'ocr.job.completed')!;
-    expect(done).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0 });
+    expect(done).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageDeadlineHits: 0 });
+    expect(result.provenance.reading).toMatchObject({ hardPageDeadlinePages: [] });
     expect(done).toMatchObject({ hardPages: 1, hardPageReads: 2,
       hardPageAgreement: { itemsPaired: 1, itemsSingle: 0, fieldsCompared: expect.any(Number), fieldsAgreed: expect.any(Number) } });
     expect(Object.values(done.hardPageAgreement as Record<string, unknown>).every((value) => typeof value === 'number')).toBe(true);
@@ -528,7 +541,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     reader.readExact.mockResolvedValue({ ...document, mediaType: 'image/jpeg', bytes: synthetic });
     provider.extract.mockResolvedValue(hardText);
     const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on',
-      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 8 }, client);
+      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 4 }, client);
     await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
     expect(offered).toEqual([false, false]);
     expect(completed(repository).provenance.reading).toMatchObject({ hardPages: [1],
@@ -556,15 +569,16 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     reader.readExact.mockResolvedValue({ ...document, mediaType: 'image/jpeg', bytes: synthetic });
     provider.extract.mockResolvedValue(hardText);
     const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on',
-      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 8 }, client);
+      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 4 }, client);
     await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
     expect(crops).toHaveLength(4);
     const result = completed(repository);
     expect(result.provenance.reading).toMatchObject({ hardPages: [1],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-8', hardPageZoomPages: [1] });
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-9', hardPageZoomPages: [1] });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
-    const hardUsage = lines.find((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read')!;
-    expect(hardUsage).toMatchObject({ requests: 4, zoomCalls: 4 });
+    const hardUsage = lines.filter((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read');
+    expect(hardUsage).toEqual([expect.objectContaining({ read: 1, requests: 2, zoomCalls: 2, zoomLimited: 0 }),
+      expect.objectContaining({ read: 2, requests: 2, zoomCalls: 2, zoomLimited: 0 })]);
     const done = lines.find((line) => line.event === 'ocr.job.completed')!;
     expect(done).toMatchObject({ zoomCalls: 4, zoomLimited: 0, zoomFailed: 2 });
     const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');

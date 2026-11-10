@@ -38,9 +38,14 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * from the reading itself, annotated in place (hard-page.ts). Not yet released
  * when the display and the hard-page prompt were revised the same day, so it
  * stays 8. The text-only request and
- * the ordinary image re-read request are byte for byte unchanged.
+ * the ordinary image re-read request are byte for byte unchanged. Version 9: the hard-page bounds of the
+ * coordinator's decision of 2026-11-10 (production job 5419047a: one hard page took 13 minutes and about $3.60): at
+ * most 4 zoom calls per read, so rule J's text says 4 where it said 8 (HARD_PAGE_PROMPT_VERSION 9); turns after a zoom
+ * at OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT; a per-read output-token cap; and a deadline for the page after which a read
+ * still running is dropped. A reading made the older way is not reused. The text-only request and the ordinary image
+ * re-read request are still byte for byte unchanged.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-8';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-9';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -69,12 +74,15 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * (Plasil?)"), a field that is written but cannot be made out as its placeholder ("[route?]", "[drug?]", "[dose?]",
  * "[freq?]") so the rest of the line is kept, and a mark that may be either of two things as "IV? (or ✓?)"; rule E
  * names a field read from where it sits or what is typical as basis "context". Versions 5 and 6 were never released.
+ * Version 9 (zoom offered; the text without rule J is unchanged, still version 7): rule J allows at most 4 zoom calls
+ * where version 8 allowed 8 (OCR_AI_ZOOM_MAX_CALLS now 0 to 4, default 4; coordinator 2026-11-10). The count is part
+ * of the text, so a setting below 4 also changes it, as before.
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-8';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-9';
 /**
  * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
  * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
- * calls, which is the version 8 text without rule J (pinned by hash in hard-page.spec.ts).
+ * calls, which is the version 8 (and 9) text without rule J (pinned by hash in hard-page.spec.ts).
  */
 export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-7';
 

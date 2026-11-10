@@ -100,7 +100,9 @@ Each claimed job runs, in order:
    `hardPages` (hard pages sent for best-guess readings), `hardPageReads`
    (best-guess requests sent, two per page), `hardPageAgreement`
    (`fieldsCompared`, `fieldsAgreed`, `itemsPaired`, `itemsSingle`) and the
-   hard-page zoom counts `zoomCalls`, `zoomLimited` and `zoomFailed`. Every kept item gets check reasons
+   hard-page zoom counts `zoomCalls`, `zoomLimited` and `zoomFailed`, and
+   `hardPageDeadlineHits` (hard pages where `OCR_AI_HARD_PAGE_DEADLINE_MS`
+   cut a read). Every kept item gets check reasons
    (dose, frequency, route, value or unit not as written, corrected wording,
    lines not together, inactive status (`status_not_active`: past, stopped,
    suspected, ruled out, history, family history), a medicine whose status
@@ -183,12 +185,14 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-8` (version 3 for this routing, 4 since picture
+   is `hid-paper-reading-prompt-9` (version 3 for this routing, 4 since picture
    items on hard lines whose scanned text is nonsense are kept, 5 since hard
    pages get two best-guess readings, 6 since hard pages use the brand,
    diagnosis and lab test lists and read handwritten signs, 7 since those
    reads may zoom, 8 since hard pages are read in the clean style of
-   2026-11-06, below; the text prompt and request bodies are unchanged
+   2026-11-06, below, 9 since the hard-page time and cost bounds of
+   2026-11-10 (at most 4 zooms per read, so rule J says 4; see "Hard-page
+   time and cost bounds"); the text prompt and request bodies are unchanged
    from version 2, and the label is only recorded), so `ocr-api` never reuses
    a reading made under older rules.
 
@@ -528,9 +532,10 @@ Each claimed job runs, in order:
      thinking, `inference_geo: "us"`, fixed endpoint and the same cached system
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `max`, which Claude Opus 5.5
      accepts: `low` to `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-8` when
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-9` when
      the reads are offered zoom, else `hid-paper-reading-hard-page-prompt-7`,
-     the same text without rule J; until 2026-11-06 `-4` and `-3`, and `-6`
+     the same text without rule J; `-8` until 2026-11-10, when rule J allowed
+     8 zooms; until 2026-11-06 `-4` and `-3`, and `-6`
      and `-5` were never released; the rules
      below are as of `-4`, with the clean-reading changes above; recorded in provenance as
      `hardPagePromptVersion` when used): read the
@@ -626,13 +631,15 @@ Each claimed job runs, in order:
      re-read as before (`imageRereadFailedPages`, first pass kept with
      `reread_failed`); if both were refused as invalid requests or both
      declined, the page is re-read from its text (`image_rejected`,
-     `image_refused`). The merged hard reading then goes through
+     `image_refused`). A read still running at `OCR_AI_HARD_PAGE_DEADLINE_MS`
+     is aborted and counts as failed here (`hardPageDeadlinePages`; see
+     "Hard-page time and cost bounds"). The merged hard reading then goes through
      `mergeReread` with the first pass unchanged, so no first-pass item is
      lost.
    - *Stored.* No new payload field: the per-field basis is carried only by
      the reason codes, so both contract copies are unchanged. The page is in
      `imageRereadPages`; provenance adds `hardPages`, `hardPageReads`,
-     `hardPageSingleReadPages`, `hardPagePromptVersion` and
+     `hardPageSingleReadPages`, `hardPageDeadlinePages`, `hardPagePromptVersion` and
      `hardPageZoomPages` (the hard pages whose reads were offered zoom;
      `hardPagePromptVersion` is `-4` only when there is one, else `-3`, the
      text those reads were sent) (`imagePromptVersion` is set only when a page
@@ -858,7 +865,8 @@ Each claimed job runs, in order:
        (`OCR_AI_MAX_RETRIES` + 1), what one request with all its retries could
        take. The loop stops on shutdown between turns as within them; every
        request and the usage of every turn is counted.
-     - *Limits.* At most `OCR_AI_ZOOM_MAX_CALLS` (default 8, 0 to 8; 0
+     - *Limits.* At most `OCR_AI_ZOOM_MAX_CALLS` (default 4, 0 to 4, since
+       2026-11-10; was 8; 0
        declares no tool) calls per page per read; every later call gets
        `is_error` "zoom limit reached; finish your answer". Each crop at most
        4,000,000 base64 characters (made smaller until it fits) and all crops
@@ -1002,27 +1010,136 @@ Each claimed job runs, in order:
        the high-resolution tier, about $0.021 at $4.40 per million input
        tokens), and every later turn of the read sends the picture, the
        earlier crops and the turn's thinking again (cached after the first
-       turn, read at $0.22 per million), plus the turn's own output. Eight
+       turn, read at $0.22 per million), plus the turn's own output. (Before
+       2026-11-10, when a read could zoom 8 times:) eight
        zooms in one read can add roughly 40,000 input tokens and a few
        thousand output tokens; the `zoomCalls` and `hard_page_read` usage
        lines give the real figures.
-   - *Cost and time.* Each hard page costs two requests at `max` effort where
-     the earlier image re-read was one at `high`. Estimate per A4 photo page
-     at list price x1.1 for US-only ($4.40 / $22 per million input / output
-     tokens): about 6,000 input tokens (system prompt, lines with boxes and up
-     to about 4,800 picture tokens; the picture is in the user turn, not
-     cached), and about 5,000 output tokens at `high` versus roughly 7,000 to
-     9,000 at `max` (thinking grows most): about $0.14 for the earlier image
-     re-read and about $0.37 to $0.46 for the two hard-page reads, so roughly
-     3x. The `ocr.reading.usage` lines with `pass: "hard_page_read"` give the
-     real figures to check this against. The two reads run at once, so a hard
-     page takes about as long as one read at `max` effort; such a read may
-     think for many minutes, so it has its own timeout,
-     `OCR_AI_HARD_PAGE_TIMEOUT_MS` (default 900,000 ms, 10,000 to 1,800,000;
-     other requests keep `OCR_AI_TIMEOUT_MS`), and `OCR_AI_MAX_TOKENS` now
-     defaults to 64,000 (was 32,000; at most 128,000) so a long answer at `max`
-     is not cut off (a cut-off answer is a failed reading; only tokens
-     generated are billed). The job's lease is renewed meanwhile.
+   - *Cost and time.* Each hard page costs two reads where the earlier image
+     re-read was one request at `high`. The first estimate here (about $0.37
+     to $0.46 for the two reads, from about 7,000 to 9,000 output tokens per
+     read at `max`) was wrong by about 8x in production; the bounds below
+     replace it.
+   - *Hard-page time and cost bounds* (coordinator decision of 2026-11-10,
+     relaying production numbers). **Evidence**: job 5419047a on 2026-11-06,
+     the owner's one fictional handwritten treatment sheet, read with the
+     #200 reader: `durationMs` 788,235 (13 minutes); `hard_page_read` 8
+     requests, 146,246 output tokens, 70,773 cache-write tokens, 16 zoom
+     calls, 1 refused at the limit; 12 items; `droppedByReason`
+     `{rows_not_together: 1}`. About $3.60 for the page against the $0.37 to
+     $0.46 above, and the website polls for 3 minutes only, so the owner
+     never saw the result. **Where it went** (from the code and those
+     counts; the real API was not called): the two reads already ran at once
+     (`Promise.allSettled`; each holds a permit of
+     `OCR_AI_MAX_CONCURRENT_REQUESTS`, default 4, per attempt only; the
+     repository's deployment does not override it). 8 requests for 16 + 1
+     zoom calls is 4 turns per read with no retries (each read: about 3 turns
+     of 2 to 3 zoom calls each, then its answer; both reached the 8-call
+     limit). Output was 88% of the cost: 146,246 x $22 per million = $3.22,
+     cache writes 70,773 x $5.50 per million = $0.39. That is about 18,300
+     output tokens per request, almost all thinking at `max` (12 items of
+     JSON are about 3,000 to 4,000 tokens per answer), and every zoom turn
+     thinks again. About 73,000 output tokens per read in about 700 seconds
+     (the rest of the 788 went to Textract and the first pass) is about 100
+     output tokens per second per stream, so one `max` turn took about 3
+     minutes. Zoom itself is not where the time went: measured on a
+     fictional 12 MP JPEG with the built worker, the page's one decode and
+     its first crop take about 1.7 s, each later crop about 0.2 s, so 16
+     crops (one at a time in the process) add about 5 s.
+     **Bounds** (all fail-closed settings; startup fails on any other value):
+     - `OCR_AI_HARD_PAGE_DEADLINE_MS` (default 150,000; 30,000 to
+       1,800,000): from when a hard page's two reads start. Each read has its
+       own abort signal (the job's and its own together), so the deadline
+       ends a permit wait, a streamed request, a zoom crop or a backoff sleep
+       alike: the whole tool loop with its retries. At the deadline every
+       read still running is aborted. A read that had answered is used alone
+       (`single_reading_only` on its items, as when the other read fails;
+       no new item reason, since what the doctor must do is the same); none
+       answered: the page is a failed image re-read (the first pass kept,
+       every item `reread_failed`). The job never fails for it; a shutdown
+       during the reads still stops the reading as before.
+       `ocr.job.completed` carries `hardPageDeadlineHits` (pages where the
+       deadline cut a read), provenance `hardPageDeadlinePages`, and the cut
+       read's usage line `endedBy: "deadline"`. The per-request
+       `OCR_AI_HARD_PAGE_TIMEOUT_MS` (default 900,000) still applies inside
+       it but no longer bounds the page.
+     - `OCR_AI_ZOOM_MAX_CALLS` default and maximum 4 (was 8), so at most 4
+       crops per read and, with the 3 turns allowed past the limit, at most 7
+       turns; rule J's text says 4 (hard-page prompt 9, `PROMPT_VERSION` 9).
+     - `OCR_AI_HARD_PAGE_MAX_TOKENS` (default 32,000; 4,096 to 128,000):
+       output tokens for one read, all its turns together; each turn's
+       `max_tokens` is what is left (turn 1: 32,000; after a turn of 10,000:
+       22,000), and a turn with less than 2,048 left is not sent (the read
+       ends `max_tokens`, a failed read). Other requests keep
+       `OCR_AI_MAX_TOKENS` (64,000), so the text-only body is byte for byte
+       unchanged. 32,000 is under half of what one read used in production
+       and about 4x the answer plus thinking of a `max` read without zoom.
+     - `OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT` (default `high`): the effort of each
+       turn after a zoom `tool_result`; the first turn keeps
+       `OCR_AI_HARD_PAGE_EFFORT` (default `max`). Checked against the Claude
+       API reference: a different top-level effort between turns of one
+       tool-use conversation is accepted with adaptive thinking, and the
+       earlier thinking blocks (sent back unchanged, signatures and all) stay
+       valid; but it is a messages-cache breaker, so the first follow-up turn
+       writes the cache again (picture, prompt and crops so far: about 10,000
+       to 15,000 tokens, about $0.06 to $0.08 per read at $5.50 per million,
+       where reading it would cost about $0.003) and later turns read it. The
+       cache-keeping alternative, a per-message effort system message (beta
+       `mid-conversation-output-config-2026-07-01`), cannot work here: placed
+       after a user turn of only `tool_result` blocks it waits for the next
+       user turn with new input, which a zoom loop never has. Setting the
+       follow-up effort equal to `OCR_AI_HARD_PAGE_EFFORT` keeps one effort
+       and no cache break.
+     - `OCR_AI_MAX_CONCURRENT_REQUESTS` must be at least 2 when the hard-page
+       reads are on (startup fails otherwise): with one permit the two reads
+       would take turns (a test shows both reads in flight before either
+       answers with 2 permits, and only one with 1).
+     **Cost model** (Claude Opus 5.5 list price $4 / $20 per million input /
+     output tokens, x1.1 for US-only: $4.40 / $22; 5-minute cache writes
+     $5.50, cache reads $0.22):
+     - *Before* (measured, job 5419047a): $3.22 output + $0.39 cache writes
+       + uncached input and cache reads (not in the evidence; a few cents) =
+       about $3.60 to $3.70 per hard page, 13 minutes.
+     - *Worst case now*, both reads to their token cap before the deadline:
+       2 x 32,000 x $22 per million = $1.41 output, plus about $0.10 to
+       $0.20 input: about $1.50 to $1.60. Above the $1 target: only
+       `OCR_AI_HARD_PAGE_MAX_TOKENS` 20,000 or less guarantees it (2 x 20,000
+       x $22 per million = $0.88, plus input).
+     - *Deadline-bound* (what production's rate implies): about 100 output
+       tokens per second per read for 150 s is at most about 15,000 output
+       tokens per read, 30,000 per page: about $0.66 output, plus input,
+       about $0.80 per page, never over 150 s for the reads.
+     - *A page that finishes*: per read, turn 1 at `max` about 9,000 output
+       tokens (the earlier estimate for a whole `max` read without zoom),
+       then 2 follow-up turns at `high` of about 5,000 each: 19,000 per read,
+       38,000 per page = $0.84 output; input per read about 6,000 written on
+       turn 1 ($0.033), about 11,000 written again on the first follow-up
+       turn ($0.06) and a little read: about $0.10, so $0.20 per page; about
+       $1.04 per page. At about 100 tokens per second, 19,000 tokens take
+       about 190 s: longer than the deadline. **Trade-off**: at production's
+       measured rate, a read that starts with a `max` turn (about 18,300
+       output tokens, about 3 minutes, on the owner's page) will usually be
+       cut by the 150 s deadline, and the page will then keep its first
+       reading. A read finishes within 150 s only at about 15,000 output
+       tokens or fewer, which is what 3 turns at `high` (about 5,000 each)
+       give: about $0.66 output plus about $0.15 input (no effort change, so
+       no second cache write) = about $0.80 per page. `max` stays the default
+       only because it was the owner's decision; the measurement below
+       decides.
+     **Measuring `high` against `max` in staging** (no API key or owner
+     photo was available where this was written, so no offline comparison
+     was run): set `OCR_AI_HARD_PAGE_EFFORT` to `max` or `high` (and
+     `OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT`), restart, and read the same
+     fictional page a few times each. `ocr.worker.ready` logs the hard-page
+     settings in force; each read logs one `ocr.reading.usage` line
+     (`pass: "hard_page_read"`, `page`, `read` 1 or 2, `requests`, `turns`,
+     `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`,
+     `durationMs`, `zoomCalls`, `zoomLimited`, `effort`, `followupEffort`,
+     `endedBy`: `answer`, `deadline`, `max_tokens`, `refused` or `error`),
+     in place of the one line for the pass, so the lines still add up to the
+     reading's use; numbers and codes only, no item text. Compare the
+     readings against the owner's two chat transcripts for style (they are
+     not ground truth) and the usage lines for cost and time.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`
    payload (schema `hid-paper-reading-schema-2`: `src/reading/contract.ts`), `raw_text` (every line in
    reading order) and the mean line confidence. Provenance holds models,
