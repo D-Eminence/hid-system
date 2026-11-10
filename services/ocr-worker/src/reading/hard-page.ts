@@ -1,6 +1,7 @@
 import type { FlagReason, PaperItem } from './contract';
 import { diagnosisLookalike, matchDiagnosisName, type ListMatch } from './diagnosis-list';
-import { drugLookalike, matchDrugName, normaliseDrugName, type DrugMatch } from './drug-list';
+import { DRUG_ENTRIES, drugLookalike, editDistance, LOOKALIKE_DISTANCE, matchDrugName, normaliseDrugName,
+  type DrugMatch } from './drug-list';
 import { CROSSED_OUT_START, crossedOutParts, withoutCrossedOut } from './grounding';
 import { checkReasonSentence, crossedOutOnPlace, itemId, markCrossedOut, mergeIdentity, overlapShare, PAIR_BOX_OVERLAP,
   unionBox, uniqueItemIds, type PageCheck } from './items';
@@ -56,7 +57,10 @@ export { PAIR_BOX_OVERLAP };
  * 2. Each answer is held to the page by checkPage (items.ts), unchanged: #194's placement rules apply to every item.
  *    Every check is made with the "?" marks and crossed-out writing taken off (grounding.ts forMatching).
  * 3. mergeHardReadings pairs the kept items of the two readings and keeps what they agree on; where they differ,
- *    read A's guess is shown with read B's after it, "A? (or B?)" (see pair).
+ *    read A's guess is shown with read B's after it, "A? (or B?)" (see pair), at most one other option per field and
+ *    never one inside another (alternatives, mergeAsWritten, limitAlternatives; cleanup of 2026-11-10). Two
+ *    medicines paired by place whose readings name different drugs (sameDrug) are two items, one per reading
+ *    (splitPair). Headings and notes repeating an order are left out later, on every page (tidy.ts).
  * 4. Each kept item (finish): a diagnosis name and a lab test name are grounded to their lists (diagnosis-list.ts:
  *    ICD-11 titles and our own synonyms; lab-list.ts: our own test names): a listed one is shown as read with the
  *    listed name after it ("HTN? (Hypertensive diseases)"), or as read where it is the listed name; one near an
@@ -104,7 +108,7 @@ export const STATUS_WORDS = new RegExp('^(?:stops?|stopped|stopping|stp|hold|hol
  * Other words that say what to do with an order: two readings differing on one (or on a STATUS_WORDS word) make its
  * status unknown.
  */
-const INSTRUCTION_WORDS = new RegExp('^(?:start|started|commence|commenced|continue|continued|cont|restart|restarted'
+export const INSTRUCTION_WORDS = new RegExp('^(?:start|started|commence|commenced|continue|continued|cont|restart|restarted'
   + '|resume|resumed|reduce|reduced|increase|increased|taper|wean|give|given)$');
 
 const ALLOWED_FREQUENCIES = new Set<string>(HARD_PAGE_FREQUENCIES);
@@ -187,14 +191,110 @@ export function markPartialGuesses(text: string): string {
 }
 
 /**
+ * A tally of the other options left out because a field shows at most one (owner/coordinator cleanup of 2026-11-10,
+ * about 20:30 UTC). A count only, for the completion log (HardPageAgreement.alternativesDropped).
+ */
+export interface AlternativeDrops { count: number }
+
+/**
+ * How strong an other option is, for choosing the one a field shows (alternatives): compared element by element,
+ * higher first; ties keep the order the options were offered in.
+ */
+export type AlternativeScore = (candidate: string, source: 'other' | 'own') => readonly number[];
+
+/** A text's own reading and its other option, "A? (or B?)" as A and B (an other option holding one itself: its first). */
+function optionsOf(text: string): [string, string | null] {
+  const split = splitAlternative(text);
+  if (!split) return [text, null];
+  const [main] = optionsOf(split[0]);
+  const [other] = optionsOf(split[1]);
+  return [main, isBlank(other) ? null : other];
+}
+
+/**
+ * The closeness of two texts by their letters and digits, 0 to 1 (1 the same): the "closest by fuzzy" step of the
+ * choice of an other option.
+ */
+export function closeness(x: string, y: string): number {
+  const a = wordKey(bare(x));
+  const b = wordKey(bare(y));
+  if (!a && !b) return 1;
+  return 1 - editDistance(a, b) / Math.max(a.length, b.length);
+}
+
+/**
  * Two readings of one field: "A? (or B?)", every word of both marked a guess; the one with letter shapes first where
  * the other has none; one alone (marked) where the other is blank. The rendering of a disagreement (pair).
+ *
+ * At most ONE other option (cleanup of 2026-11-10): where either reading already holds an other option of its own
+ * ("Arteether? (or Artemether?)", "500mg? (or 400mg?)"), the field shows A's own reading and the strongest option of
+ * the other reading: B's reading or B's own other option, whichever ranks first by `score` (in pair: read from the
+ * letters before from context, on the list or grounded before not, closest to A by its letters; ties in that order);
+ * A's own other option only where B offers nothing different. An other option never holds one itself. Each option
+ * left out is counted in `drops` (the readings_disagree code stays on the item).
  */
-export function alternatives(first: string | null, second: string | null): string {
-  if (isBlank(second)) return isBlank(first) ? (first ?? '') : markWords(first!);
-  if (isBlank(first)) return markWords(second!);
+export function alternatives(first: string | null, second: string | null,
+  options: { score?: AlternativeScore; drops?: AlternativeDrops } = {}): string {
+  if (isBlank(second)) return isBlank(first) ? (first ?? '') : markWords(oneOption(first!, options.drops));
+  if (isBlank(first)) return markWords(oneOption(second!, options.drops));
   const [a, b] = !hasLetters(first!) && hasLetters(second!) ? [second!, first!] : [first!, second!];
-  return `${markWords(a)} ${ALTERNATIVE_OPEN}${markWords(b)})`;
+  const [main, ownOther] = optionsOf(a);
+  const [otherMain, otherOther] = optionsOf(b);
+  const differs = (option: string | null): option is string => option !== null && !isBlank(option)
+    && bare(option) !== bare(main);
+  const fromOther = [otherMain, otherOther].filter(differs);
+  const own = [ownOther].filter(differs);
+  const pool = (fromOther.length > 0 ? fromOther : own).map((candidate) => ({ candidate,
+    source: fromOther.length > 0 ? 'other' as const : 'own' as const }));
+  // Every distinct option offered that is not shown is counted once.
+  const offered = [...new Set([...fromOther, ...own].map(bare))];
+  if (pool.length === 0) return markWords(main);
+  const ranked = pool.map((entry, index) => ({ ...entry, index, rank: options.score?.(entry.candidate, entry.source) ?? [] }))
+    .sort((x, y) => {
+      for (let at = 0; at < Math.max(x.rank.length, y.rank.length); at += 1) {
+        const diff = (y.rank[at] ?? 0) - (x.rank[at] ?? 0);
+        if (diff !== 0) return diff;
+      }
+      return x.index - y.index;
+    });
+  const chosen = ranked[0]!.candidate;
+  if (options.drops) options.drops.count += offered.filter((key) => key !== bare(chosen)).length;
+  return `${markWords(main)} ${ALTERNATIVE_OPEN}${markWords(chosen)})`;
+}
+
+/** A text with at most one other option: "A (or B (or C))" or "A (or B) (or C)" as "A (or B)", the rest counted. */
+function oneOption(text: string, drops?: AlternativeDrops): string {
+  if (!text.includes(ALTERNATIVE_OPEN)) return text;
+  return limitAlternatives(text, drops);
+}
+
+/**
+ * The shown text with at most one other option in a row and none inside another (cleanup of 2026-11-10): a "(or
+ * …)" group straight after another is left out, and a "(or …)" inside one is taken out of it. Each counted in
+ * `drops`. The guard on every shown text; the choice of the option happens before (alternatives, mergeAsWritten).
+ */
+export function limitAlternatives(text: string, drops?: AlternativeDrops): string {
+  const out: string[] = [];
+  for (const word of words(text)) {
+    if (word.startsWith(ALTERNATIVE_OPEN)) {
+      if (out.length > 0 && out[out.length - 1]!.startsWith(ALTERNATIVE_OPEN)) {
+        if (drops) drops.count += 1;
+        continue;
+      }
+      const inner = word.slice(ALTERNATIVE_OPEN.length, -1);
+      if (inner.includes(ALTERNATIVE_OPEN)) {
+        const kept = words(inner).filter((part) => {
+          const nested = part.startsWith(ALTERNATIVE_OPEN);
+          if (nested && drops) drops.count += 1;
+          return !nested;
+        });
+        out.push(`${ALTERNATIVE_OPEN}${limitAlternatives(kept.join(' '), drops)})`);
+        continue;
+      }
+    }
+    out.push(word);
+  }
+  return out.join(' ');
 }
 
 /** "A (or B)" split into A and B where the text ends with an alternative (alternatives), else null. */
@@ -475,9 +575,17 @@ export function prepareHardAnswer(answer: ModelPage): ModelPage {
 /** One reading of a hard page, held to the page: its check and the (prepared) answer the check was made from. */
 export interface HardReading { check: PageCheck; answer: ModelPage }
 
-/** Counts only, for the completion log. */
-export interface HardPageAgreement { fieldsCompared: number; fieldsAgreed: number; itemsPaired: number; itemsSingle: number }
-export const noAgreement = (): HardPageAgreement => ({ fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 0 });
+/**
+ * Counts only, for the completion log. drugSplits: medicines paired by place whose two readings named different drugs,
+ * kept as two items (splitPair); alternativesDropped: other options left out because a field shows at most one
+ * (alternatives, mergeAsWritten, limitAlternatives). Never text.
+ */
+export interface HardPageAgreement {
+  fieldsCompared: number; fieldsAgreed: number; itemsPaired: number; itemsSingle: number; drugSplits: number;
+  alternativesDropped: number;
+}
+export const noAgreement = (): HardPageAgreement => ({ fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 0,
+  drugSplits: 0, alternativesDropped: 0 });
 
 const span = (aStart: number, aSize: number, bStart: number, bSize: number) =>
   Math.max(0, Math.min(aStart + aSize, bStart + bSize) - Math.max(aStart, bStart));
@@ -506,10 +614,18 @@ function keepUnsure(a: string | null, b: string | null): string | null {
  * stretch where they differ written as the first reading's words, marked, then the second's: "IV Flagyl? 500mg?
  * (or 250mg?) 8hrly"; word by word where both stretches have as many words ("Cefuroxime? (or Ceftriaxone?) 750mg?
  * (or 1g?)"); a stretch only one reading has is shown alone, marked ("Stop? IV Ceftriaxone"; the item is
- * readings_disagree). Nothing is dropped for disagreeing.
+ * readings_disagree). Nothing is dropped for disagreeing, except other options past the first (below).
  * Words are split as words() does, so a bracketed group is compared whole and its brackets are never split.
+ *
+ * One other option each (cleanup of 2026-11-10): a reading's own "(or X?)" (the model may write one, rule B) stays
+ * with the word it follows. Where the two readings differ on that word, it shows one other option, chosen as in
+ * alternatives (the other reading's word first, then its own other option, then this reading's); where they differ on
+ * a whole stretch of unequal length, the stretch shows the other reading's words as its one other option and the
+ * readings' own options in it are left out. The other reading's crossed-out writing in a stretch is written after the
+ * option, never inside it, so no group holds an "(or …)" or a stretch of the other reading's groups. Options left out
+ * are counted in `drops`.
  */
-export function mergeAsWritten(a: string, b: string): string {
+export function mergeAsWritten(a: string, b: string, drops?: AlternativeDrops): string {
   // Bracketed groups stay whole ("(crossed out: 400mg)" is one word), so brackets are never split.
   const left = words(a);
   const right = words(b);
@@ -526,19 +642,67 @@ export function mergeAsWritten(a: string, b: string): string {
   let j = 0;
   let fromLeft: string[] = [];
   let fromRight: string[] = [];
+  const isOption = (word: string) => word.startsWith(ALTERNATIVE_OPEN);
+  const isStruck = (word: string) => word.startsWith(CROSSED_OUT_OPEN);
+  const count = (n: number) => { if (drops && n > 0) drops.count += n; };
+  /** An "(or …)" group the stretch starts with belongs to the word before it: kept there unless that has one. */
+  const attachLeading = (part: string[], keep: boolean): string[] => {
+    let at = 0;
+    while (at < part.length && isOption(part[at]!)) {
+      const last = out[out.length - 1];
+      if (keep && last !== undefined && !isOption(last)) out.push(oneOption(part[at]!, drops));
+      else count(1);
+      at += 1;
+    }
+    return part.slice(at);
+  };
+  /** A stretch as words, each with the "(or …)" group straight after it ("IV? (or ✓?)" is one word). */
+  const tokens = (part: readonly string[]): string[] => {
+    const joined: string[] = [];
+    for (const word of part) {
+      const last = joined[joined.length - 1];
+      if (isOption(word) && last !== undefined && !last.includes(ALTERNATIVE_OPEN)) joined[joined.length - 1] = `${last} ${word}`;
+      else if (isOption(word)) count(1);
+      else joined.push(word);
+    }
+    return joined;
+  };
   const closeGap = () => {
     if (fromLeft.length > 0 || fromRight.length > 0) {
-      const crossedOnly = (part: readonly string[]) => part.length === 1 && part[0]!.startsWith(CROSSED_OUT_OPEN);
+      const crossedOnly = (part: readonly string[]) => part.length === 1 && isStruck(part[0]!);
       const inside = (word: string) => word.slice(CROSSED_OUT_OPEN.length, -1).trim();
       if (crossedOnly(fromLeft) && crossedOnly(fromRight)) {
         // Two readings of one crossed-out stretch: one group, "(crossed out: 400mg? (or 200mg?))".
-        out.push(`${CROSSED_OUT_OPEN}${alternatives(inside(fromLeft[0]!), inside(fromRight[0]!))})`);
-      } else if (fromLeft.length === fromRight.length && fromLeft.length > 1) {
-        // As many words each side: word by word, "Cefuroxime? (or Ceftriaxone?) 750mg? (or 1g?)".
-        fromLeft.forEach((word, index) => out.push(alternatives(word, fromRight[index]!)));
+        out.push(`${CROSSED_OUT_OPEN}${alternatives(inside(fromLeft[0]!), inside(fromRight[0]!), { drops })})`);
       } else {
-        // A stretch only one reading has is shown alone, marked ("Stop?"), never as a bare "(or Stop?)".
-        out.push(alternatives(fromLeft.join(' '), fromRight.join(' ')));
+        const leftLeading = fromLeft.length > 0 && isOption(fromLeft[0]!);
+        const ownLeft = attachLeading(fromLeft, true);
+        // The other reading's option for the word before is kept only where this reading has none there.
+        const ownRight = attachLeading(fromRight, !leftLeading);
+        const struckRight = ownRight.filter(isStruck);
+        const restRight = ownLeft.length > 0 ? ownRight.filter((word) => !isStruck(word)) : ownRight;
+        if (ownLeft.length === 0 || restRight.length === 0) {
+          // A stretch only one reading has is shown alone, marked ("Stop?"), never as a bare "(or Stop?)".
+          const alone = ownLeft.length > 0 ? ownLeft : restRight;
+          if (alone.length > 0) out.push(markWords(limitAlternatives(alone.join(' '), drops)));
+        } else {
+          const leftTokens = tokens(ownLeft);
+          const rightTokens = tokens(restRight);
+          if (leftTokens.length === rightTokens.length) {
+            // As many words each side: word by word, "Cefuroxime? (or Ceftriaxone?) 750mg? (or 1g?)".
+            leftTokens.forEach((word, index) => out.push(alternatives(word, rightTokens[index]!, { drops })));
+          } else {
+            // Unequal stretches: the other reading's words as the one option, the readings' own options left out.
+            const mains = (part: readonly string[]) => part.map((token) => {
+              const [main, other] = optionsOf(token);
+              if (other !== null) count(1);
+              return main;
+            }).join(' ');
+            out.push(alternatives(mains(leftTokens), mains(rightTokens), { drops }));
+          }
+        }
+        // The other reading's crossed-out writing: after the option, as its own group.
+        if (ownLeft.length > 0) for (const word of struckRight) out.push(word);
       }
     }
     fromLeft = [];
@@ -556,7 +720,7 @@ export function mergeAsWritten(a: string, b: string): string {
     }
   }
   closeGap();
-  return out.join(' ');
+  return limitAlternatives(out.join(' '), drops);
 }
 
 interface Side { item: PaperItem; extras: HardItemExtras | undefined }
@@ -825,7 +989,7 @@ const noteNeeded = (note: DisplayNote) => note.guess || note.replace !== undefin
  * falls back to the fields (fieldsText).
  */
 export function displayOf(asWritten: string, notes: readonly DisplayNote[], crossed: string,
-  fallback = ''): string {
+  fallback = '', drops?: AlternativeDrops): string {
   const unique = notes.filter((note, index) => !isBlank(note.asRead)
     && notes.findIndex((other) => runKey(words(other.asRead)) === runKey(words(note.asRead))
       && JSON.stringify(other) === JSON.stringify(note)) === index);
@@ -854,8 +1018,10 @@ export function displayOf(asWritten: string, notes: readonly DisplayNote[], cros
         const otherKey = wordKey(other);
         if (otherKey && shownKey.includes(otherKey)) { pending[index] = false; break; }
         const found = ws.slice(run[0], run[1]).join(' ');
-        ws = [...ws.slice(0, run[0]), `${markWords(found)} ${ALTERNATIVE_OPEN}${markWords(other)})`, ...ws.slice(run[1])];
         pending[index] = false;
+        // The words already followed by an other option (the readings' asWritten): one is shown, this one counted.
+        if (ws[run[1]]?.startsWith(ALTERNATIVE_OPEN)) { if (drops) drops.count += 1; break; }
+        ws = [...ws.slice(0, run[0]), `${markWords(found)} ${ALTERNATIVE_OPEN}${markWords(other)})`, ...ws.slice(run[1])];
         break;
       }
     });
@@ -879,7 +1045,8 @@ export function displayOf(asWritten: string, notes: readonly DisplayNote[], cros
     }
   }
   if (!isBlank(crossed) && !text.includes(CROSSED_OUT_OPEN)) text = `${text} ${CROSSED_OUT_OPEN}${crossed})`;
-  return text.replace(/\s+/g, ' ').trim();
+  // At most one other option in a row, none inside another (cleanup of 2026-11-10).
+  return limitAlternatives(text.replace(/\s+/g, ' ').trim(), drops);
 }
 
 /**
@@ -895,7 +1062,9 @@ function groundName(text: string, match: (name: string) => ListMatch | null, loo
     const mx = match(x);
     const my = match(y);
     if (mx && my && mx.title === my.title) return `${x} ${ALTERNATIVE_OPEN}${y}) (${mx.title})`;
-    return `${groundName(x, match, lookalike)} ${ALTERNATIVE_OPEN}${groundName(y, match, lookalike)})`;
+    // Already two options: each grounded to its listed name only, never given a look-alike as a third (at most one
+    // other option, cleanup of 2026-11-10).
+    return `${mx?.display ?? x} ${ALTERNATIVE_OPEN}${my?.display ?? y})`;
   }
   const found = match(text);
   if (found) return found.display;
@@ -1015,14 +1184,14 @@ function unsureFromLetters(display: string, contextKeys: ReadonlySet<string>): b
 }
 
 function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: string, shown: Shown,
-  statusDiffers = false): PaperItem {
+  statusDiffers = false, drops?: AlternativeDrops): PaperItem {
   const checkReasons = [...item.checkReasons];
   const signs = holdsSign(item) ? [SIGN_READ] : [];
   const crossed = !isBlank(shown.crossed) || item.asWritten.includes(CROSSED_OUT_OPEN) ? [CROSSED_OUT] : [];
   const described = shown.described ? [DESCRIPTION_SUSPECTED] : [];
   let fields = groundedFields(item);
   const plain = displayOf(item.asWritten, displayNotes(item, fields, shown.names), shown.crossed,
-    fieldsText(item.kind, fields));
+    fieldsText(item.kind, fields), drops);
   // A medicine whose shown text says it is stopped, held or changed, or whose two readings differ on what to do with
   // it, is not known to be current: status unknown (a status already stopped or past is kept).
   const statusCodes: string[] = [];
@@ -1062,9 +1231,112 @@ function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: stri
 }
 
 /** An item only one reading found (it passed every placement rule in its own reading). */
-function single(side: Side, sourceSha256Hex: string): PaperItem {
+function single(side: Side, sourceSha256Hex: string, drops?: AlternativeDrops): PaperItem {
   const item = { ...side.item, fields: { ...side.item.fields } } as PaperItem;
-  return finish(item, [SINGLE_READING, ...(anyFromContext(side) ? [FROM_CONTEXT] : [])], sourceSha256Hex, shownOf(side));
+  return finish(item, [SINGLE_READING, ...(anyFromContext(side) ? [FROM_CONTEXT] : [])], sourceSha256Hex, shownOf(side),
+    false, drops);
+}
+
+/**
+ * A medicine's drug as one reading names it, for the whole-drug rule (sameDrug): the listed generic; for an unlisted
+ * name its key (normaliseDrugName, letters and digits); for a word cut short ("cr… (Pentazocine?)") the letters
+ * before "…" and the bracketed whole-word guess, if any; null where the name says nothing (blank, "[drug?]", "[?]").
+ * A name with an other option of its own ("Omeprazole? (or Enoxaparin?)") counts as its first reading.
+ */
+type DrugIdentity = { generic: string } | { key: string } | { prefix: string; guess: DrugIdentity | null };
+
+const lettersKey = (text: string) => normaliseDrugName(text).replace(/[^a-z0-9]/g, '');
+
+export function drugIdentityOf(name: string | null | undefined, generic: string | null = null): DrugIdentity | null {
+  if (generic) return { generic };
+  if (isBlank(name)) return null;
+  const [main] = optionsOf(name!.trim());
+  if (main.includes(PARTIAL_WORD)) {
+    const prefix = lettersKey(main.slice(0, main.indexOf(PARTIAL_WORD)).split(/\s+/).pop() ?? '');
+    const group = words(main).find((word) => word.startsWith('(') && !isMarkToken(word) && !word.startsWith(ALTERNATIVE_OPEN));
+    const guess = group ? drugIdentityOf(group.slice(1, -1)) : null;
+    return prefix || guess ? { prefix, guess } : null;
+  }
+  const text = main.replace(NOT_GUESS_MARKS, ' ').replace(/\(sign\)/g, ' ');
+  if (!/\p{L}/u.test(text)) return null;
+  const match = matchDrugName(text);
+  if (match) return { generic: match.generic };
+  const key = lettersKey(text);
+  return key ? { key } : null;
+}
+
+/** The names (letters only) a listed generic goes by on the drug list: the generic, its synonyms and brands. */
+const LISTED_NAMES = new Map<string, string[]>();
+for (const entry of DRUG_ENTRIES) {
+  const names = LISTED_NAMES.get(entry.target) ?? [];
+  names.push(entry.key.replace(/[^a-z0-9]/g, ''));
+  LISTED_NAMES.set(entry.target, names);
+}
+const namesOf = (identity: { generic: string } | { key: string }) =>
+  'generic' in identity ? LISTED_NAMES.get(identity.generic) ?? [lettersKey(identity.generic)] : [identity.key];
+
+/**
+ * Two spellings of one name by their letters: the same, or within LOOKALIKE_DISTANCE edits with at least 0.75 of the
+ * letters in common ("Tramacet" and "Tramaset"). A look-alike pair ("Arteether", "Artemether") counts as one name here
+ * and stays one item, shown with its other option, as before.
+ */
+const SAME_NAME_SIMILARITY = 0.75;
+function sameName(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const distance = editDistance(a, b);
+  return distance <= LOOKALIKE_DISTANCE && 1 - distance / Math.max(a.length, b.length) >= SAME_NAME_SIMILARITY;
+}
+
+/**
+ * Whether two readings name the same drug (whole-drug rule, cleanup of 2026-11-10): two listed names by their generic
+ * (a brand and its generic, or two spellings the list matches, are one drug); a listed name and an unlisted one, or
+ * two unlisted ones, by their letters (sameName, against every name the list gives the listed one); a word cut short
+ * by its guess, or by its letters starting the other name. Where either says nothing (null), the same: only a clear
+ * difference of drug splits an item.
+ */
+export function sameDrug(x: DrugIdentity | null, y: DrugIdentity | null): boolean {
+  if (x === null || y === null) return true;
+  if ('prefix' in x || 'prefix' in y) {
+    const [cut, other] = 'prefix' in x ? [x, y] : [y as { prefix: string; guess: DrugIdentity | null }, x];
+    if (cut.guess !== null && !('prefix' in other) && sameDrug(cut.guess, other)) return true;
+    if ('prefix' in other) {
+      if (cut.guess !== null && other.guess !== null && sameDrug(cut.guess, other.guess)) return true;
+      return cut.prefix !== '' && other.prefix !== '' && (cut.prefix.startsWith(other.prefix) || other.prefix.startsWith(cut.prefix));
+    }
+    return cut.prefix !== '' && namesOf(other).some((name) => name.startsWith(cut.prefix));
+  }
+  if ('generic' in x && 'generic' in y) return x.generic === y.generic;
+  return namesOf(x).some((a) => namesOf(y).some((b) => sameName(a, b)));
+}
+
+const identityOfSide = (side: Side) => drugIdentityOf(side.extras?.writtenName
+  ?? (side.item.fields as { name?: string | null }).name,
+  side.extras?.generic ?? null);
+
+/**
+ * Two medicines paired by place whose readings name different drugs (sameDrug): never one item with mixed fields.
+ * Each reading's item is kept as it read it (its own fields, asWritten and crossed-out writing), both on the lines and
+ * box of the two together, read A's first (the reading with more fields read from the letters, as in pair),
+ * check_carefully and readings_disagree (not single_reading_only: both readings saw an order
+ * here). The drug name of each is marked a guess ("?"), in the field and where it is shown.
+ */
+function splitPair(first: Side, second: Side, sourceSha256Hex: string, drops?: AlternativeDrops):
+  { items: PaperItem[]; swapped: boolean } {
+  // The reading with more fields read from the letters first, as read A of a pair.
+  const swapped = lettersRead(second) > lettersRead(first);
+  const lineIds = [...new Set([...first.item.lineIds, ...second.item.lineIds])].sort((x, y) => lineNumber(x) - lineNumber(y));
+  const box = unionBox([first.item.box, second.item.box]) ?? first.item.box;
+  const items = (swapped ? [second, first] : [first, second]).map((side) => {
+    const fields = { ...side.item.fields } as Record<string, unknown>;
+    // The drug name is the reading the other contradicts: marked a guess in the field and where it is shown.
+    if (typeof fields.name === 'string' && hasLetters(fields.name) && !unsure(fields.name)) fields.name = markWords(fields.name);
+    const item = { ...side.item, lineIds, box, fields } as PaperItem;
+    const shown = shownOf(side);
+    return finish(item, [READINGS_DISAGREE, ...(anyFromContext(side) ? [FROM_CONTEXT] : [])], sourceSha256Hex,
+      { ...shown, names: shown.names.map((note) => ({ ...note, guess: true })) }, false, drops);
+  });
+  return { items, swapped };
 }
 
 /**
@@ -1089,18 +1361,30 @@ function single(side: Side, sourceSha256Hex: string): PaperItem {
 /** How many of a reading's fields it read from the letters (its basis), for choosing read A (pair). */
 const lettersRead = (side: Side) => Object.values(side.extras?.basis ?? {}).filter((basis) => basis === 'letters').length;
 
-function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPageAgreement): PaperItem {
+function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPageAgreement,
+  drops?: AlternativeDrops): PaperItem {
   // Read A is chosen once for the whole item, so the first options of all its fields are one reading's order.
   const [a, b] = lettersRead(second) > lettersRead(first) ? [second, first] : [first, second];
   let disagree = false;
   let context = false;
   const compare = (equal: boolean) => { tally.fieldsCompared += 1; if (equal) tally.fieldsAgreed += 1; else disagree = true; };
+  /**
+   * The one other option a field shows (alternatives): read from the letters before from context (the basis of the
+   * reading it came from), on its list before not (a drug name on the drug list, a diagnosis or test name on its list,
+   * a frequency one of the codes), then closest to read A's reading by its letters.
+   */
+  const scoreFor = (field: string, shownA: string | null): AlternativeScore => (candidate, source) => {
+    const side = source === 'other' ? b : a;
+    const letters = side.extras?.basis[basisKey(side.item.kind, field)] === 'context' ? 0 : 1;
+    return [letters, listed(side.item.kind, field, candidate) ? 1 : 0, closeness(candidate, optionsOf(shownA ?? '')[0])];
+  };
+  const choose = (field: string, x: string | null, y: string | null) => alternatives(x, y, { score: scoreFor(field, x), drops });
   const textField = (field: string, x: string | null, y: string | null): string | null => {
     if (fromContext(a, field, x) || fromContext(b, field, y)) context = true;
     if (isBlank(x) && isBlank(y)) { compare(true); return x; }
     const equal = bare(x) === bare(y);
     compare(equal);
-    return equal ? keepUnsure(x, y) : alternatives(x, y);
+    return equal ? keepUnsure(x, y) : choose(field, x, y);
   };
   const fieldsA = a.item.fields as Record<string, unknown>;
   const fieldsB = b.item.fields as Record<string, unknown>;
@@ -1122,7 +1406,7 @@ function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPag
         if (fromContext(a, field, x) || fromContext(b, field, y)) context = true;
         const kept = keepUnsure(x as string | null, y as string | null);
         fields[field] = sameWriting ? kept : bare(x as string) === bare(y as string) ? markWords(kept ?? '')
-          : alternatives(x as string | null, y as string | null);
+          : choose(field, x as string | null, y as string | null);
       } else {
         fields[field] = textField(field, x as string | null, y as string | null);
       }
@@ -1159,12 +1443,12 @@ function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPag
     const marked = [strengthA, strengthB].some((value) => unsure(value ?? '')) && hasLetters(rebuilt) && !unsure(rebuilt)
       ? markWords(rebuilt) : rebuilt;
     fields.strength = (doseAgrees && unitAgrees ? ownStrength ?? marked
-      : alternatives(strengthOf(doseA, unitA), strengthOf(doseB, unitB))) || null;
+      : choose('strength', strengthOf(doseA, unitA), strengthOf(doseB, unitB))) || null;
   }
   // A date or prescriber either reading filled from context is said by field_from_context (it carries no "?").
   if (anyFromContextOutside(a) || anyFromContextOutside(b)) context = true;
   const mergeText = (x: string | null, y: string | null) => isBlank(x) && isBlank(y) ? x
-    : bare(x) === bare(y) ? keepUnsure(x, y) : alternatives(x, y);
+    : bare(x) === bare(y) ? keepUnsure(x, y) : alternatives(x, y, { drops });
   const prescriptionA = a.item.prescription;
   const prescriptionB = b.item.prescription;
   const prescription = prescriptionA === null && prescriptionB === null ? null : {
@@ -1174,12 +1458,12 @@ function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPag
   const sameWords = bare(a.item.asWritten) === bare(b.item.asWritten);
   if (!sameWords) disagree = true;
   const asWritten = sameWords ? keepUnsure(a.item.asWritten, b.item.asWritten)!
-    : mergeAsWritten(a.item.asWritten, b.item.asWritten);
+    : mergeAsWritten(a.item.asWritten, b.item.asWritten, drops);
   const shownA = shownOf(a);
   const shownB = shownOf(b);
   const crossed = isBlank(shownA.crossed) && isBlank(shownB.crossed) ? ''
     : bare(shownA.crossed) === bare(shownB.crossed) ? keepUnsure(shownA.crossed, shownB.crossed) ?? ''
-      : alternatives(shownA.crossed, shownB.crossed);
+      : alternatives(shownA.crossed, shownB.crossed, { drops });
   if (bare(shownA.crossed) !== bare(shownB.crossed)) disagree = true;
   // The two readings differ on what to do with the order ("Start" against "Stop", "Continue" against nothing).
   const said = (side: Side) => [...new Set(instructionWords(side.item.asWritten, isInstructionWord))].sort().join(' ');
@@ -1194,7 +1478,18 @@ function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPag
   return finish(merged, [...(disagree ? [READINGS_DISAGREE] : []), ...(context ? [FROM_CONTEXT] : [])], sourceSha256Hex,
     { crossed, described: shownA.described || shownB.described, names: [...shownA.names, ...shownB.names],
       uncarried: [...new Set([...shownA.uncarried, ...shownB.uncarried])],
-      contextKeys: new Set([...shownA.contextKeys, ...shownB.contextKeys]) }, statusDiffers);
+      contextKeys: new Set([...shownA.contextKeys, ...shownB.contextKeys]) }, statusDiffers, drops);
+}
+
+/** Whether an other option is on its field's list (the "list-matched/grounded" step of choosing one, pair). */
+function listed(kind: PaperItem['kind'], field: string, candidate: string): boolean {
+  const text = candidate.replace(/\?/g, '').trim();
+  if (!text) return false;
+  if (field === 'name' && kind === 'medicine') return matchDrugName(text) !== null;
+  if (field === 'name' && kind === 'diagnosis') return matchDiagnosisName(text) !== null;
+  if (field === 'test') return matchLabTestName(text) !== null;
+  if (field === 'frequency') return ALLOWED_FREQUENCIES.has(bare(text).replace(/\s/g, ''));
+  return false;
 }
 
 /** Whether two items of the two readings may be the same writing: same kind, same place, nothing that rules it out. */
@@ -1280,11 +1575,13 @@ export function mergeHardReadings(readings: readonly HardReading[], sourceSha256
   const tally = noAgreement();
   const [first, second] = readings;
   if (!first) throw new Error('mergeHardReadings needs a reading');
+  const drops: AlternativeDrops = { count: 0 };
   if (!second) {
     const sides = sidesOf(first);
-    const items = sides.map((side) => single(side, sourceSha256Hex));
+    const items = sides.map((side) => single(side, sourceSha256Hex, drops));
     markStruckLines(items, items.map(() => new Set(['left'] as const)), sides.map((side) => ({ side, read: 'left' })));
     tally.itemsSingle += items.length;
+    tally.alternativesDropped += drops.count;
     return { check: { ...first.check, items: uniqueItemIds(items), rawIndexes: undefined }, agreement: tally };
   }
   const left = sidesOf(first);
@@ -1321,15 +1618,22 @@ export function mergeHardReadings(readings: readonly HardReading[], sourceSha256
   const from: Array<ReadonlySet<'left' | 'right'>> = [];
   left.forEach((a, i) => {
     const j = usedLeft.get(i);
-    if (j === undefined) { items.push(single(a, sourceSha256Hex)); from.push(new Set(['left'])); }
-    else { items.push(pair(a, right[j]!, sourceSha256Hex, tally)); from.push(new Set(['left', 'right'])); }
+    if (j === undefined) { items.push(single(a, sourceSha256Hex, drops)); from.push(new Set(['left'])); }
+    else if (a.item.kind === 'medicine' && !sameDrug(identityOfSide(a), identityOfSide(right[j]!))) {
+      // The two readings name different drugs here: two items, one per reading, never one with mixed fields.
+      const split = splitPair(a, right[j]!, sourceSha256Hex, drops);
+      items.push(...split.items);
+      from.push(new Set([split.swapped ? 'right' : 'left']), new Set([split.swapped ? 'left' : 'right']));
+      tally.drugSplits += 1;
+    } else { items.push(pair(a, right[j]!, sourceSha256Hex, tally, drops)); from.push(new Set(['left', 'right'])); }
   });
   right.forEach((b, j) => {
-    if (!usedRight.has(j)) { items.push(single(b, sourceSha256Hex)); from.push(new Set(['right'])); }
+    if (!usedRight.has(j)) { items.push(single(b, sourceSha256Hex, drops)); from.push(new Set(['right'])); }
   });
   markStruckLines(items, from, [...left.map((side) => ({ side, read: 'left' as const })),
     ...right.map((side) => ({ side, read: 'right' as const }))]);
-  tally.itemsSingle += items.length - tally.itemsPaired;
+  tally.itemsSingle += items.length - tally.itemsPaired - 2 * tally.drugSplits;
+  tally.alternativesDropped += drops.count;
   const firstLine = (item: PaperItem) => Math.min(...item.lineIds.map(lineNumber));
   const ordered = items.map((item, index) => ({ item, index }))
     .sort((x, y) => firstLine(x.item) - firstLine(y.item) || x.index - y.index).map(({ item }) => item);
