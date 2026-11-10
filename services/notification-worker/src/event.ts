@@ -27,9 +27,14 @@ export function parseSqsEvent(body: string | undefined): HidEventEnvelope {
       || typeof event.payload !== 'object' || event.payload === null || Array.isArray(event.payload)) {
     throw new Error('INVALID_EVENT_CONTRACT');
   }
+  // A PIN notice may also name its grant's scope (database 0121); an
+  // emergency notice never does. Both PIN shapes pass.
+  const pinScope = event.type === 'PatientAccessPinVerified' && Object.keys(event.payload).length === 3
+    ? event.payload.scope : undefined;
   if ((event.type === 'EmergencyAccessActivated' || event.type === 'PatientAccessPinVerified')
       && (event.producer !== 'identity' || !UUID.test(String(event.context.facilityId))
-        || Object.keys(event.payload).length !== 2
+        || Object.keys(event.payload).length !== (pinScope === undefined ? 2 : 3)
+        || (pinScope !== undefined && pinScope !== 'read_records' && pinScope !== 'write_records')
         || !UUID.test(String(event.payload.consentGrantId)) || event.payload.reviewRequired !== true)) {
     throw new Error(event.type === 'PatientAccessPinVerified'
       ? 'INVALID_PATIENT_PIN_NOTIFICATION_CONTRACT'
