@@ -25,27 +25,32 @@ describe('the clean hard-page reading (owner decision 2026-11-06): the fictional
   const both = mergeHardReadings([held(readA()), held(readB())], SOURCE_SHA).check;
   const one = mergeHardReadings([held(readA())], SOURCE_SHA).check;
 
-  it('keeps one item per row, from both readings and from one', () => {
-    expect(both.items.map(rowOf)).toEqual(CLEAN_READING_ROWS.map((_row, index) => index + 1));
+  it('keeps one item per row (two where the readings name different drugs), from both readings and from one', () => {
+    expect(both.items.map(rowOf)).toEqual(CLEAN_READING_ROWS.flatMap((row, index) => row.splitPlain ? [index + 1, index + 1]
+      : [index + 1]));
     expect(one.items.map(rowOf)).toEqual(CLEAN_READING_ROWS.map((_row, index) => index + 1));
   });
 
   CLEAN_READING_ROWS.forEach((row, index) => {
     it(`shows ${row.name} as the clean reading, for a person to keep or change`, () => {
-      const item = both.items.find((candidate) => rowOf(candidate) === index + 1)!;
-      expect(item.plain).toBe(row.plain);
-      expect(item.confidence).toBe('check_carefully');
-      expect(item.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'read_from_image',
-        ...(row.reasons ?? [])]));
-      for (const code of row.notReasons ?? []) expect(item.checkReasons).not.toContain(code);
-      if (row.status) expect(item.fields).toMatchObject({ status: row.status });
-      // A sentence about the writing is flagged, never changed; no other row is flagged.
-      const described = isDescription(item.asWritten) || isDescription(item.plain);
-      expect(item.checkReasons.includes('description_suspected')).toBe(described);
-      // The old token is gone from what is shown.
-      expect(JSON.stringify(item)).not.toContain('[unreadable]');
+      const items = both.items.filter((candidate) => rowOf(candidate) === index + 1);
+      expect(items.map((each) => each.plain)).toEqual(row.splitPlain ? [row.plain, row.splitPlain] : [row.plain]);
+      for (const item of items) checkRow(row, item);
     });
   });
+
+  function checkRow(row: (typeof CLEAN_READING_ROWS)[number], item: PaperItem): void {
+    expect(item.confidence).toBe('check_carefully');
+    expect(item.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'read_from_image',
+      ...(row.reasons ?? [])]));
+    for (const code of row.notReasons ?? []) expect(item.checkReasons).not.toContain(code);
+    if (row.status) expect(item.fields).toMatchObject({ status: row.status });
+    // A sentence about the writing is flagged, never changed; no other row is flagged.
+    const described = isDescription(item.asWritten) || isDescription(item.plain);
+    expect(item.checkReasons.includes('description_suspected')).toBe(described);
+    // The old token is gone from what is shown.
+    expect(JSON.stringify(item)).not.toContain('[unreadable]');
+  }
 
   it('shows the same rows from one reading where the readings agree', () => {
     CLEAN_READING_ROWS.forEach((row, index) => {
@@ -304,11 +309,18 @@ describe('nothing read is lost from the shown text (review of the clean reading)
 
   it('chooses which reading comes first once per item, the same in every field and in asWritten', () => {
     const page = hand('Cftrxn 1g');
-    const [item] = two(page, order('Ceftriaxone 1g', { name: 'Ceftriaxone' }, '1', 'g', { basis: { dose: 'context' } }),
-      order('Cefuroxime 2g', { name: 'Cefuroxime' }, '2', 'g'));
+    const [item] = two(page, order('IV Ceftriaxone 1g', { route: 'IV', name: 'Ceftriaxone' }, '1', 'g',
+      { basis: { dose: 'context' } }), order('IM Ceftriaxone 2g', { route: 'IM', name: 'Ceftriaxone' }, '2', 'g'));
     // The second reading read more from the letters: its whole order comes first.
-    expect(item!.plain).toBe('Cefuroxime? (or Ceftriaxone?) 2g? (or 1g?)');
-    expect(item!.asWritten).toBe('Cefuroxime? (or Ceftriaxone?) 2g? (or 1g?)');
+    expect(item!.plain).toBe('IM? (or IV?) Ceftriaxone 2g? (or 1g?)');
+    expect(item!.asWritten).toBe('IM? (or IV?) Ceftriaxone 2g? (or 1g?)');
+    // Two different drugs (cleanup of 2026-11-10): one item per reading, each with its own fields, never mixed.
+    const split = two(page, order('Ceftriaxone 1g', { name: 'Ceftriaxone' }, '1', 'g', { basis: { dose: 'context' } }),
+      order('Cefuroxime 2g', { name: 'Cefuroxime' }, '2', 'g'));
+    // The reading with more read from the letters first, as in a pair.
+    expect(split.map((each) => each.plain)).toEqual(['Cefuroxime? 2g', 'Ceftriaxone? 1g?']);
+    expect(split.map((each) => each.fields)).toEqual([expect.objectContaining({ name: 'Cefuroxime?', strength: '2g' }),
+      expect.objectContaining({ name: 'Ceftriaxone?', strength: '1g?' })]);
   });
 
   it('keeps a crossed-out group whole when merging asWritten', () => {
@@ -522,15 +534,16 @@ describe('second review of the clean reading: nothing struck shown live, no opti
     const [drug] = two(order('Ceftriaxone 1g bd', { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g'),
       order('Ceftriaxone 2g Flagyl bd', { name: 'Ceftriaxone', frequency: 'bd' }, '2', 'g'));
     expect(drug!.plain).toBe('Ceftriaxone 1g? (or 2g? Flagyl?) bd (twice a day)');
-    // Two drugs in different places: both shown, no number said twice.
-    const [swapped] = two(order('IV Flagyl 500mg tds', { route: 'IV', name: 'Flagyl', frequency: 'tds' }, '500', 'mg'),
+    // Two drugs (cleanup of 2026-11-10): one item per reading, both shown, no number said twice.
+    const swapped = two(order('IV Flagyl 500mg tds', { route: 'IV', name: 'Flagyl', frequency: 'tds' }, '500', 'mg'),
       order('IV 1g Ceftriaxone tds', { route: 'IV', name: 'Ceftriaxone', frequency: 'tds' }, '1', 'g'));
-    expect(swapped!.plain).toContain('Ceftriaxone?');
-    expect(swapped!.plain.match(/1g/g)).toHaveLength(1);
-    // The model's own "(or ✓?)" (the owner's margin mark) kept, the other reading's route said once.
+    expect(swapped.map((item) => item.plain)).toEqual(['IV Flagyl? (metronidazole) 500mg tds (three times a day)',
+      'IV 1g Ceftriaxone? tds (three times a day)']);
+    // One other option per field (cleanup of 2026-11-10): the other reading's route is shown, the model's own "(or ✓?)"
+    // is left out (counted), never "IV? (or ✓?) (or IM?)".
     const [tick] = two(order('IV? (or ✓?) Ceftriaxone 1g bd', { route: 'IV?', name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g'),
       order('IM Ceftriaxone 1g bd', { route: 'IM', name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g'));
-    expect(tick!.plain).toBe('IV? (or ✓?) (or IM?) Ceftriaxone 1g bd (twice a day)');
+    expect(tick!.plain).toBe('IV? (or IM?) Ceftriaxone 1g bd (twice a day)');
     // A frequency only one reading has stays in that reading's option.
     const [frequency] = two(order('Flagyl 500mg', { name: 'Flagyl' }, '500', 'mg'),
       order('Flagyl 400mg 8hrly', { name: 'Flagyl', frequency: '8hrly' }, '400', 'mg'));
@@ -559,11 +572,16 @@ describe('second review of the clean reading: nothing struck shown live, no opti
     const live = order('IV Flagyl 500mg tds', { route: 'IV', name: 'Flagyl', frequency: 'tds' }, '500', 'mg');
     const struck = order('IV (crossed out: Flagyl) Ceftriaxone 1g tds', { route: 'IV', name: 'Ceftriaxone',
       frequency: 'tds' }, '1', 'g', { crossedOut: 'Flagyl' });
-    for (const [item] of [two(live, struck), two(struck, live)]) {
-      expect(item!.fields).toMatchObject({ status: 'unknown' });
-      expect(item!.checkReasons).toEqual(expect.arrayContaining(['readings_disagree', 'crossed_out']));
-      expect(item!.plain).toContain('(crossed out: Flagyl)');
-      expect(item!.plain).toContain('Ceftriaxone?');
+    // Two drugs (cleanup of 2026-11-10): one item per reading, both unknown and crossed_out (the line rule).
+    for (const items of [two(live, struck), two(struck, live)]) {
+      expect(items).toHaveLength(2);
+      for (const item of items) {
+        expect(item.fields).toMatchObject({ status: 'unknown' });
+        expect(item.checkReasons).toEqual(expect.arrayContaining(['readings_disagree', 'crossed_out']));
+      }
+      expect(items.map((item) => item.plain)).toEqual(expect.arrayContaining([
+        'IV (crossed out: Flagyl) Ceftriaxone? 1g tds (three times a day)',
+        'IV Flagyl? (metronidazole) 500mg tds (three times a day)']));
     }
   });
 

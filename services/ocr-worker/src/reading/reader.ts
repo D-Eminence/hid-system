@@ -12,6 +12,7 @@ import { mergeHardReadings, noAgreement, prepareHardAnswer, type HardPageAgreeme
 import { blankIdentity, checkPage, checkReasonSentence, mergeReread, REVIEW_BELOW, uniqueItemIds,
   type PageCheck } from './items';
 import { createMasker, type Masker } from './masking';
+import { tidyPage } from './tidy';
 import { imageTierOf, pageImageFor, resizedSize, type PageImage, type PageImageDecision,
   type SourceDocument } from './page-image';
 import { MODEL_SCHEMA_VERSION, PROMPT_VERSION } from './prompt';
@@ -99,8 +100,10 @@ export interface ReadingSummary {
   droppedUngrounded: number;
   droppedUngroundedFirstPass: number;
   /**
-   * droppedUngrounded by reason code (items.ts DROP_REASONS), from the reading each page ended with; and the same
-   * for the first pass. Codes and counts only, for the completion log: never in the payload or provenance.
+   * droppedUngrounded by reason code (items.ts DROP_REASONS), from the reading each page ended with, plus the items
+   * the last step left out (tidy.ts TIDY_DROP_REASONS: heading, duplicate_of_order; not in droppedUngrounded); and
+   * the first pass's drops by reason (before that step). Codes and counts only, for the completion log: never in the
+   * payload or provenance.
    */
   droppedByReason: Record<string, number>;
   droppedByReasonFirstPass: Record<string, number>;
@@ -769,6 +772,9 @@ export class PaperReadingService {
     for (const state of states) {
       if (state.first?.kind === 'refused' && state.final === null) state.declined = true;
       if (state.first?.kind === 'failed' && state.final === null) state.failed = true;
+      // Headings and notes repeating an order are left out of every page's reading, however it was read (tidy.ts;
+      // counted in droppedByReason as heading and duplicate_of_order).
+      if (state.final !== null) state.final = tidyPage(state.final);
     }
 
     // Ids are unique within the whole extraction, not only within a page.

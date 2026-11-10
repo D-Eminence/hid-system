@@ -36,6 +36,11 @@ export interface CleanReadingRow {
   readB?: CleanReadingAnswer;
   /** The plain reading the check screen shows as the item: the target clean style. */
   plain: string;
+  /**
+   * Where the two readings name different drugs (cleanup of 2026-11-10): the plain reading of the second item, read
+   * B's, kept apart from read A's (plain) with its own fields. Both items carry `reasons`.
+   */
+  splitPlain?: string;
   /** Reason codes the item must carry (besides best_guess_from_picture and read_from_image, which every row has). */
   reasons?: readonly string[];
   /** Reason codes the item must not carry. */
@@ -76,14 +81,18 @@ export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
     plain: 'Switch to IV Ceftriaxone 1g',
   },
   {
-    name: 'two readings disagreeing on the drug and the dose, shown "A? (or B?)"',
+    // Before the cleanup of 2026-11-10 one item, "IV Cefuroxime? (or Ceftriaxone?) 750mg? (or 1g?) bd (twice a day)":
+    // two different drugs are now two items, one per reading.
+    name: 'two readings naming different drugs, shown as two items, one per reading',
     lineText: 'IV Cefrxm 750 bd',
     readA: { item: medicine('IV Cefuroxime? 750mg bd', { route: 'IV', name: 'Cefuroxime?', strength: '750mg', frequency: 'bd' }),
       dose: '750', doseUnit: 'mg' },
     readB: { item: medicine('IV Ceftriaxone? 1g bd', { route: 'IV', name: 'Ceftriaxone?', strength: '1g', frequency: 'bd' }),
       dose: '1', doseUnit: 'g' },
-    plain: 'IV Cefuroxime? (or Ceftriaxone?) 750mg? (or 1g?) bd (twice a day)',
+    plain: 'IV Cefuroxime? 750mg bd (twice a day)',
+    splitPlain: 'IV Ceftriaxone? 1g bd (twice a day)',
     reasons: ['readings_disagree'],
+    notReasons: ['single_reading_only'],
   },
   {
     name: 'a crossed-out dose shown on its own item',

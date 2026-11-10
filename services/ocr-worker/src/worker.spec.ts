@@ -114,7 +114,7 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-11', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-12', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
@@ -531,8 +531,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
       // Zoom off: the reads sent the version 7 hard-page text (version 8 without rule J), and provenance says so.
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-11-no-zoom', hardPageZoomPages: [], imagePromptVersion: null,
-      promptVersion: 'hid-paper-reading-prompt-11' });
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-12-no-zoom', hardPageZoomPages: [], imagePromptVersion: null,
+      promptVersion: 'hid-paper-reading-prompt-12' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
     // One line per hard-page read (read 1 and 2), in the pass's place; together they are the pass's use.
@@ -766,7 +766,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
     expect(offered).toEqual([false, false]);
     expect(completed(repository).provenance.reading).toMatchObject({ hardPages: [1],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-11-no-zoom', hardPageZoomPages: [] });
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-12-no-zoom', hardPageZoomPages: [] });
   });
 
   it('zooms in a hard page and logs only the counts: no crop in a log, the payload, provenance or the usage records', async () => {
@@ -795,7 +795,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(crops).toHaveLength(4);
     const result = completed(repository);
     expect(result.provenance.reading).toMatchObject({ hardPages: [1],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-11', hardPageZoomPages: [1] });
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-12', hardPageZoomPages: [1] });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const hardUsage = lines.filter((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read');
     expect(hardUsage).toEqual([expect.objectContaining({ read: 1, requests: 2, zoomCalls: 2, zoomLimited: 0 }),
