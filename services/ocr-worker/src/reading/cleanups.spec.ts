@@ -96,6 +96,13 @@ describe('one other option per field (alternatives, mergeAsWritten, limitAlterna
     expect(alternatives('A? (or B?)', 'C? (or D?)')).toBe('A? (or C?)');
     expect(alternatives('A? (or B?)', 'C? (or D?)', { score: (candidate) => [candidate === 'D?' ? 1 : 0] }))
       .toBe('A? (or D?)');
+    // A's own option stronger than every option of the other read: A's own is shown (review of 2026-11-10).
+    const ownDrops: AlternativeDrops = { count: 0 };
+    expect(alternatives('500mg? (or 400mg?)', '250mg?', { drops: ownDrops,
+      score: (_candidate, source) => (source === 'own' ? [1, 1] : [0, 0]) })).toBe('500mg? (or 400mg?)');
+    expect(ownDrops.count).toBe(1);
+    // Equal scores: the other read's option first.
+    expect(alternatives('500mg? (or 400mg?)', '250mg?', { score: () => [1, 1] })).toBe('500mg? (or 250mg?)');
     // Never an option inside an option.
     expect(alternatives('A? (or B? (or C?))', 'D?')).toBe('A? (or D?)');
     expect(alternatives('A? (or B? (or C?))', '')).toBe('A? (or B?)');
@@ -153,6 +160,9 @@ describe('two readings naming different drugs (whole-drug rule)', () => {
     expect(sameDrug(id('Metronidazole'), id('Tinidazole'))).toBe(false);
     expect(sameDrug(id('Metronidazole'), id('Metrofictional'))).toBe(false);
     expect(sameDrug(id('Fictomycin'), id('Otherzolam'))).toBe(false);
+    // A real unlisted look-alike of a listed name is another drug (review of 2026-11-10).
+    expect(sameDrug(id('Quinine'), id('Quinidine'))).toBe(false);
+    expect(sameDrug(id('Artemether'), id('Arteether'))).toBe(false);
     // A name that says nothing never splits an item.
     for (const name of ['', '[drug?]', '[?]']) expect(sameDrug(id(name), id('Omeprazole'))).toBe(true);
   });
@@ -211,6 +221,19 @@ describe('headings and form labels are not items', () => {
       'Omeprazole chart', 'Malaria']) {
       expect([text, isHeadingNote(kept('note', text, 1))]).toEqual([text, false]);
     }
+    // Plans written alone or after "for" are never headings (review of 2026-11-10).
+    for (const text of ['For theatre', 'For surgery', 'For emergency surgery', 'Emergency surgery', 'Surgery', 'ICU',
+      'For ICU', 'HDU care', 'For admission', 'Observation', 'For observation', 'Intensive care', 'Investigations',
+      'For investigations', 'Fluid input and output chart', 'Vital signs chart', 'Nursing care', 'For ENT',
+      'Medical management', 'For surgical management', 'Plan of care', 'Theatre', 'Observation chart',
+      'For drug chart']) {
+      expect([text, isHeadingNote(kept('note', text, 1))]).toEqual([text, false]);
+    }
+    // Form labels and exact headings still are.
+    for (const text of ['Accident & Emergency', 'Admission notes', 'Plan of management', 'Medication chart',
+      'Continuation sheet', 'ICU notes', 'Surgical unit']) {
+      expect([text, isHeadingNote(kept('note', text, 1))]).toEqual([text, true]);
+    }
     // Never an item of another kind, whatever its words.
     for (const kind of ['medicine', 'diagnosis', 'lab_result', 'allergy', 'vital'] as const) {
       expect(isHeadingNote(kept(kind, 'Treatment sheet', 1))).toBe(false);
@@ -260,6 +283,20 @@ describe('a note repeating a medicine\'s order', () => {
     for (const text of ['DC Gentamicin, start Ceftriaxone', 'DC Gentamicin due to AKI', 'DC Gentamicin day 5',
       'Stop?', 'DC (? on paper) Gentamicin']) {
       expect([text, duplicatesOrder(kept('note', text, 1), stopped)]).toEqual([text, false]);
+    }
+    // A stop word in the medicine's writing is no stop: only its status stopped counts (review of 2026-11-10).
+    for (const [writing, status] of [['Gentamicin 80mg bd (crossed out: stop)', 'current'],
+      ['Gentamicin 80mg bd x5/7 then stop', 'current'], ['Gentamicin 80mg bd stop if rash', 'new'],
+      ['Gentamicin 80mg bd? (or stop?)', 'unknown']] as const) {
+      const medicine = kept('medicine', writing, 1, { name: 'Gentamicin', strength: '80mg', frequency: 'bd', status });
+      expect([writing, duplicatesOrder(kept('note', 'Stop Gentamicin', 1), medicine)]).toEqual([writing, false]);
+    }
+    // A drug name alone, or a start, continue or hold word, is never taken as a repeat.
+    for (const [text, status] of [['Gentamicin', 'new'], ['Gentamicin?', 'unknown'], ['Continue Gentamicin', 'current'],
+      ['Give Gentamicin', 'new'], ['Gentamicin', 'stopped'], ['Hold Gentamicin', 'stopped'],
+      ['Start Gentamicin', 'stopped']] as const) {
+      const medicine = kept('medicine', 'Gentamicin 80mg bd', 1, { name: 'Gentamicin', strength: '80mg', status });
+      expect([text, status, duplicatesOrder(kept('note', text, 1), medicine)]).toEqual([text, status, false]);
     }
     // Another drug.
     expect(duplicatesOrder(kept('note', 'DC Amikacin', 1), stopped)).toBe(false);

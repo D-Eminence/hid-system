@@ -1,7 +1,7 @@
 import type { FlagReason, PaperItem } from './contract';
 import { diagnosisLookalike, matchDiagnosisName, type ListMatch } from './diagnosis-list';
-import { DRUG_ENTRIES, drugLookalike, editDistance, LOOKALIKE_DISTANCE, matchDrugName, normaliseDrugName,
-  type DrugMatch } from './drug-list';
+import { DRUG_ENTRIES, drugLookalike, editDistance, LOOKALIKE_DISTANCE, matchDrugName, MIN_FUZZY_LETTERS,
+  normaliseDrugName, type DrugMatch, UNLISTED_LOOKALIKES } from './drug-list';
 import { CROSSED_OUT_START, crossedOutParts, withoutCrossedOut } from './grounding';
 import { checkReasonSentence, crossedOutOnPlace, itemId, markCrossedOut, mergeIdentity, overlapShare, PAIR_BOX_OVERLAP,
   unionBox, uniqueItemIds, type PageCheck } from './items';
@@ -228,9 +228,11 @@ export function closeness(x: string, y: string): number {
  *
  * At most ONE other option (cleanup of 2026-11-10): where either reading already holds an other option of its own
  * ("Arteether? (or Artemether?)", "500mg? (or 400mg?)"), the field shows A's own reading and the strongest option of
- * the other reading: B's reading or B's own other option, whichever ranks first by `score` (in pair: read from the
- * letters before from context, on the list or grounded before not, closest to A by its letters; ties in that order);
- * A's own other option only where B offers nothing different. An other option never holds one itself. Each option
+ * the other reading: B's reading, B's own other option or A's own other option, whichever ranks first by `score`
+ * (in pair: read from the letters before from context, on the list or grounded before not, then the other read's
+ * before A's own, then closest to A by its letters; ties: the other read's first, in the order offered). So A's own
+ * option is shown only where it is stronger (letters or listed) than every option of the other read, or where the
+ * other read offers nothing different (review of 2026-11-10). An other option never holds one itself. Each option
  * left out is counted in `drops` (the readings_disagree code stays on the item).
  */
 export function alternatives(first: string | null, second: string | null,
@@ -244,8 +246,10 @@ export function alternatives(first: string | null, second: string | null,
     && bare(option) !== bare(main);
   const fromOther = [otherMain, otherOther].filter(differs);
   const own = [ownOther].filter(differs);
-  const pool = (fromOther.length > 0 ? fromOther : own).map((candidate) => ({ candidate,
-    source: fromOther.length > 0 ? 'other' as const : 'own' as const }));
+  // One pool, ranked by `score`; on a tie the other read's options first (in the order offered), then A's own.
+  const pool = [...fromOther.map((candidate) => ({ candidate, source: 'other' as const })),
+    ...own.filter((candidate) => !fromOther.some((other) => bare(other) === bare(candidate)))
+      .map((candidate) => ({ candidate, source: 'own' as const }))];
   // Every distinct option offered that is not shown is counted once.
   const offered = [...new Set([...fromOther, ...own].map(bare))];
   if (pool.length === 0) return markWords(main);
@@ -1277,9 +1281,12 @@ const namesOf = (identity: { generic: string } | { key: string }) =>
 
 /**
  * Two spellings of one name by their letters: the same, or within LOOKALIKE_DISTANCE edits with at least 0.75 of the
- * letters in common ("Tramacet" and "Tramaset"). A look-alike pair ("Arteether", "Artemether") counts as one name here
- * and stays one item, shown with its other option, as before.
+ * letters in common ("Tramacet" and "Tramaset"). A real unlisted look-alike of a listed name ("Arteether" and the
+ * listed artemether, "Quinidine" and the listed quinine) is not reached here: sameDrug keeps those apart.
  */
+const LOOKALIKE_LETTER_KEYS = UNLISTED_LOOKALIKES.map(lettersKey);
+const isUnlistedLookalike = (key: string) => LOOKALIKE_LETTER_KEYS.some((lookalike) => lookalike === key
+  || (lookalike.length >= MIN_FUZZY_LETTERS && editDistance(lookalike, key) <= 1));
 const SAME_NAME_SIMILARITY = 0.75;
 function sameName(a: string, b: string): boolean {
   if (a === b) return true;
@@ -1307,6 +1314,11 @@ export function sameDrug(x: DrugIdentity | null, y: DrugIdentity | null): boolea
     return cut.prefix !== '' && namesOf(other).some((name) => name.startsWith(cut.prefix));
   }
   if ('generic' in x && 'generic' in y) return x.generic === y.generic;
+  // A real unlisted look-alike (drug-list.ts UNLISTED_LOOKALIKES: "Quinidine" beside the listed quinine) is a
+  // different drug from the listed one, never one item (review of 2026-11-10).
+  if (('generic' in x) !== ('generic' in y) && isUnlistedLookalike('key' in x ? x.key : (y as { key: string }).key)) {
+    return false;
+  }
   return namesOf(x).some((a) => namesOf(y).some((b) => sameName(a, b)));
 }
 
@@ -1371,12 +1383,14 @@ function pair(first: Side, second: Side, sourceSha256Hex: string, tally: HardPag
   /**
    * The one other option a field shows (alternatives): read from the letters before from context (the basis of the
    * reading it came from), on its list before not (a drug name on the drug list, a diagnosis or test name on its list,
-   * a frequency one of the codes), then closest to read A's reading by its letters.
+   * a frequency one of the codes), then the other read's before read A's own, then closest to read A's reading by
+   * its letters.
    */
   const scoreFor = (field: string, shownA: string | null): AlternativeScore => (candidate, source) => {
     const side = source === 'other' ? b : a;
     const letters = side.extras?.basis[basisKey(side.item.kind, field)] === 'context' ? 0 : 1;
-    return [letters, listed(side.item.kind, field, candidate) ? 1 : 0, closeness(candidate, optionsOf(shownA ?? '')[0])];
+    return [letters, listed(side.item.kind, field, candidate) ? 1 : 0, source === 'other' ? 1 : 0,
+      closeness(candidate, optionsOf(shownA ?? '')[0])];
   };
   const choose = (field: string, x: string | null, y: string | null) => alternatives(x, y, { score: scoreFor(field, x), drops });
   const textField = (field: string, x: string | null, y: string | null): string | null => {

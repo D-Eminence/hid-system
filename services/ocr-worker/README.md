@@ -536,14 +536,16 @@ Each claimed job runs, in order:
        `mergeAsWritten`, `limitAlternatives`). A field shows at most one
        `(or X?)`, and an option never holds one itself. Read A's own reading
        comes first (read A chosen as before); the option is the strongest of
-       the other read's: its reading or its own option (a look-alike, the
-       model's own strength or `(or X?)`), ranked, in this order, by read
-       from the letters before from context (that read's basis for the
-       field), on its list before not (drug list for a drug name, diagnosis
-       or lab list for those names, the frequency codes), then closest to read
-       A's reading by its letters (edit distance), ties in the order offered
-       (deterministic). Read A's own option is kept only where the other read
-       offers nothing different. In `asWritten` a read's own `(or X?)` stays
+       one pool: the other read's reading, the other read's own option (a
+       look-alike, the model's own strength or `(or X?)`) and read A's own
+       option, ranked, in this order, by read from the letters before from
+       context (that read's basis for the field), on its list before not
+       (drug list for a drug name, diagnosis or lab list for those names, the
+       frequency codes), then the other read's before read A's own, then
+       closest to read A's reading by its letters (edit distance), ties in
+       the order offered (deterministic). So read A's own option is shown
+       only where it is stronger by letters or list than everything the
+       other read offers, or where the other read offers nothing different. In `asWritten` a read's own `(or X?)` stays
        with the word it follows; where the reads differ on that word one
        option is chosen the same way; where they differ on a stretch of
        unequal length the other read's words are the one option and the
@@ -569,8 +571,10 @@ Each claimed job runs, in order:
        generic, two spellings the list matches); a listed and an unlisted
        name, or two unlisted names, within 2 edits with at least 0.75 of the
        letters alike, against every name the list gives the generic
-       ("Fictomycin" / "Fictomicin"; a look-alike pair such as "Arteether" /
-       "Artemether" stays one item with its option, as before); a word cut
+       ("Fictomycin" / "Fictomicin"), except that a real unlisted look-alike
+       of a listed name (`UNLISTED_LOOKALIKES`, or one letter from one:
+       "Quinidine" / "Quinine", "Arteether" / "Artemether") is a different
+       drug and splits; a word cut
        short ("cr… (Pentazocine?)") by its bracketed guess, or by its letters
        starting the other name. A name that says nothing (blank, `[drug?]`,
        `[?]`) never splits. A read's own `(or X?)` on the name does not
@@ -582,31 +586,40 @@ Each claimed job runs, in order:
        prompts are unchanged: they ask only for clinically relevant items and
        have not been seen to give headings, and the text-only request is
        pinned by hash. Then, on every page however it was read, a
-       conservative filter (`tidy.ts` `isHeadingNote`, applied in
+       narrow filter (`tidy.ts` `isHeadingNote`, applied in
        `reader.ts` after each page's reading is final): a `note` only (never
        a medicine, diagnosis, lab result, allergy or vital) whose words, "?"
        and punctuation off, are all heading words (`HEADING_WORDS`: sheet,
        treatment, management, plan, immediate, chart, ward, notes, record,
        form, page, history, department and specialty names such as surgery,
        medicine, trauma, paediatrics, and the like) with only "and", "of",
-       "the", "for" or "&" between them, and with no digit, no bracketed
+       "the" or "&" between them (never "for": "For surgery", "For ICU" are
+       plans), that holds a form-label word (`FORM_LABEL_WORDS`: sheet, form,
+       record, notes, kardex, continuation, department, dept, unit; "chart"
+       only beside drug, medication, prescription or treatment) or is one of
+       `HEADING_PHRASES` ("Plan", "Immediate management", "Plan of
+       management", "Accident and Emergency"), and with no digit, no bracketed
        group or reading mark, no instruction word (`INSTRUCTION_VERBS`:
        transfer, switch, stop, give, admit, discharge, review, continue,
        refer and others, plus every stop or change word of `STATUS_WORDS`),
        and nothing on the drug, diagnosis or lab list. "Transfer to the
-       ward", "Admit?", "Ward round", "Plan: review in 2 days" stay. Counted
+       ward", "Admit?", "Ward round", "Plan: review in 2 days", "Surgery",
+       "ICU", "Observation", "Investigations", "Vital signs chart", "Nursing
+       care", "Medical management" stay (a plan-bearing word alone is never
+       a heading; when in doubt the note is kept). Counted
        as `droppedByReason.heading`.
      - *No repeated order* (`tidy.ts` `duplicatesOrder`). A note that only
-       repeats a medicine's order ("DC? Gentamicin?" beside the medicine "Dc
+       repeats a medicine's stop ("DC? Gentamicin?" beside the medicine "Dc
        Gentamicin", status stopped) is left out and the medicine kept. Only
-       where the note names the drug, every word of it (marks off) is that
-       medicine's drug (its name, its listed generic, or any name the list
-       gives the generic) or a stop, hold, change or other instruction word
-       the medicine itself shows (in its reading, or its status: stopped as a
-       stop, new as a start, current as a continue; "DC", "d/c", "stopped"
-       are one cue), and the two share a cited line or their boxes overlap by
-       half the smaller. Anything more (another drug, a reason, a number, a
-       mark) or a stop the medicine does not show keeps the note. Counted as
+       where the medicine's status is stopped (its status alone: a stop word
+       in its writing, crossed out, conditional or in an "(or stop?)" option,
+       is no stop), the note names the drug (its name, its listed generic, or
+       any name the list gives the generic), holds at least one stop word
+       ("DC", "d/c", "stopped" are one) and nothing else (marks off), and the
+       two share a cited line or their boxes overlap by half the smaller.
+       Anything more (another drug, a reason, a number, a mark, a hold,
+       start, continue or change word) or a drug name alone keeps the note.
+       Counted as
        `droppedByReason.duplicate_of_order`.
      - *Fixture.* Owner transcript rows changed only where these rules
        apply: the two-drug row (`Cefuroxime` / `Ceftriaxone`) is now two
