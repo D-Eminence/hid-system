@@ -550,6 +550,44 @@ describe('ClaudePageClient', () => {
       expect(session.stats).toEqual({ calls: 8, limited: 1, failed: 0 });
     });
 
+    it('answers 5 calls in one turn with the cap of 4: 4 crops and 1 limit error, all in one user turn, then the answer', async () => {
+      const calls = Array.from({ length: 5 }, (_, index) => zoomCall(`toolu_${index}`));
+      const { instance, fetch } = client([turn([thinking('sig-five'), ...calls], 'tool_use'), final()]);
+      const zoom = { available: () => true, crop: jest.fn(goodZoom.crop) };
+      const session = createZoomSession(zoom, 1, 4, image.base64.length);
+      await expect(instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal))
+        .resolves.toMatchObject({ kind: 'answer', attempts: 2 });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(zoom.crop).toHaveBeenCalledTimes(4);
+      const [first, second] = bodies(fetch);
+      expect(String((first!.messages[0]!.content as Array<{ text?: string }>)[1]!.text))
+        .toContain('ask for all of those zooms together in one response');
+      // One assistant turn with the five calls, then one user turn with the five results, in call order.
+      expect(second!.messages).toHaveLength(3);
+      expect((second!.messages[1]!.content as Array<{ type: string }>).filter((block) => block.type === 'tool_use')).toHaveLength(5);
+      const results = second!.messages[2]!.content as Array<Record<string, unknown>>;
+      expect(results.map((entry) => entry.tool_use_id)).toEqual(['toolu_0', 'toolu_1', 'toolu_2', 'toolu_3', 'toolu_4']);
+      expect(results.slice(0, 4).every((entry) => entry.is_error === undefined)).toBe(true);
+      expect(results[4]).toEqual({ type: 'tool_result', tool_use_id: 'toolu_4', is_error: true, content: ZOOM_LIMIT_MESSAGE });
+      expect(session.stats).toEqual({ calls: 4, limited: 1, failed: 0 });
+    });
+
+    it('counts a later turn\'s calls against what is left of the cap (3 calls, then 2: the last is refused)', async () => {
+      const { instance, fetch } = client([turn([zoomCall('toolu_a'), zoomCall('toolu_b'), zoomCall('toolu_c')], 'tool_use'),
+        turn([zoomCall('toolu_d'), zoomCall('toolu_e')], 'tool_use'), final()]);
+      const zoom = { available: () => true, crop: jest.fn(goodZoom.crop) };
+      const session = createZoomSession(zoom, 1, 4, image.base64.length);
+      await expect(instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal))
+        .resolves.toMatchObject({ kind: 'answer', attempts: 3 });
+      expect(zoom.crop).toHaveBeenCalledTimes(4);
+      const third = bodies(fetch)[2]!;
+      expect((third.messages[2]!.content as Array<Record<string, unknown>>).map((entry) => entry.tool_use_id))
+        .toEqual(['toolu_a', 'toolu_b', 'toolu_c']);
+      expect(third.messages[4]!.content).toEqual([expect.objectContaining({ tool_use_id: 'toolu_d' }),
+        { type: 'tool_result', tool_use_id: 'toolu_e', is_error: true, content: ZOOM_LIMIT_MESSAGE }]);
+      expect(session.stats).toEqual({ calls: 4, limited: 1, failed: 0 });
+    });
+
     it('answers a malformed input and a failed zoom with errors, and the read goes on', async () => {
       const { instance, fetch } = client([turn([zoomCall('toolu_bad', '{"page": 1, "box": "Test Patient"}')], 'tool_use'),
         turn([zoomCall('toolu_down')], 'tool_use'), final()]);

@@ -185,14 +185,15 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-9` (version 3 for this routing, 4 since picture
+   is `hid-paper-reading-prompt-10` (version 3 for this routing, 4 since picture
    items on hard lines whose scanned text is nonsense are kept, 5 since hard
    pages get two best-guess readings, 6 since hard pages use the brand,
    diagnosis and lab test lists and read handwritten signs, 7 since those
    reads may zoom, 8 since hard pages are read in the clean style of
    2026-11-06, below, 9 since the hard-page time and cost bounds of
    2026-11-10 (at most 4 zooms per read, so rule J says 4; see "Hard-page
-   time and cost bounds"); the text prompt and request bodies are unchanged
+   time and cost bounds"), 10 since rule J asks for all of a read's zooms
+   in one turn (see "Zooms in one turn"); the text prompt and request bodies are unchanged
    from version 2, and the label is only recorded), so `ocr-api` never reuses
    a reading made under older rules.
 
@@ -533,10 +534,10 @@ Each claimed job runs, in order:
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `high` since the owner's
      decision of 2026-11-10, `max` before; Claude Opus 5.5 accepts `low` to
      `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-9` when
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-10` when
      the reads are offered zoom, else `hid-paper-reading-hard-page-prompt-7`,
-     the same text without rule J; `-8` until 2026-11-10, when rule J allowed
-     8 zooms; until 2026-11-06 `-4` and `-3`, and `-6`
+     the same text without rule J; `-9` until the one-turn zoom wording of
+     2026-11-10, `-8` before that, when rule J allowed 8 zooms; until 2026-11-06 `-4` and `-3`, and `-6`
      and `-5` were never released; the rules
      below are as of `-4`, with the clean-reading changes above; recorded in provenance as
      `hardPagePromptVersion` when used): read the
@@ -1066,7 +1067,36 @@ Each claimed job runs, in order:
        it but no longer bounds the page.
      - `OCR_AI_ZOOM_MAX_CALLS` default and maximum 4 (was 8), so at most 4
        crops per read and, with the 3 turns allowed past the limit, at most 7
-       turns; rule J's text says 4 (hard-page prompt 9, `PROMPT_VERSION` 9).
+       turns; rule J's text says 4 (hard-page prompt 9, `PROMPT_VERSION` 9;
+       still 4 in prompt 10).
+     **Zooms in one turn** (coordinator's decision of 2026-11-10, a
+       follow-up to the bounds above; hard-page prompt 10, `PROMPT_VERSION`
+       10). Production showed about 4 turns per read, one zoom per turn,
+       each turn thinking again over the picture and the crops so far. Rule
+       J now asks the model to decide every place where a closer look would
+       help, request all of those zooms together in one response (several
+       zoom calls at once), answer from what they show, and zoom again only
+       if a crop is still unclear and calls are left. The zoom tool's
+       description says the same (its strict schema is unchanged). The cap
+       of 4 calls per read, the effort, the token cap and the deadline are
+       unchanged; the hard-page text without zoom (`-7`) and the text-only
+       request are byte for byte unchanged. The client already handled
+       several calls in one turn (Claude API parallel tool use: several
+       `tool_use` blocks in one assistant turn, all their `tool_result`
+       blocks in the next user turn, in call order): every call counts
+       against the cap whether answered or not, so 5 calls in one turn with
+       the cap at 4 give 4 crops and 1 `zoom limit reached` error (tested),
+       and a later turn's calls are counted against what is left.
+       *Expected effect*: about 2 turns per read (one turn of zooms, one
+       answer; 3 when one crop is still unclear) instead of about 4, so
+       fewer thinking passes and fewer re-sends of the picture and crops,
+       and more reads finishing inside the 150 s deadline. *How to see it*:
+       the per-read `ocr.reading.usage` line (`pass: "hard_page_read"`)
+       carries `turns` (answered requests of the read) and `zoomCalls`; with
+       this wording a read that zoomed should mostly show `turns` 2 with
+       `zoomCalls` 1 to 4, where before `turns` was about `zoomCalls` + 1.
+       It is an instruction, not a constraint: the model may still zoom one
+       at a time, which the cap and the deadline bound as before.
      - `OCR_AI_HARD_PAGE_MAX_TOKENS` (default 32,000; 4,096 to 128,000):
        output tokens for one read, all its turns together; each turn's
        `max_tokens` is what is left (turn 1: 32,000; after a turn of 10,000:
