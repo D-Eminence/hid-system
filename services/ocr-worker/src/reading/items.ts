@@ -43,6 +43,9 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['best_guess_from_picture'], 'This is a best guess from the picture; check every word against the paper.'],
   // Just before read_from_image (which every picture item has), so it is shown where it applies.
   [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],
+  // The page's last-resort reading from the picture (README "Last resort"): every other reading of the page gave
+  // nothing, so this is the only one there is. Said before the general picture sentence, after the specific ones.
+  [['last_resort_read'], 'The other readings of this page did not work; this was read from the picture as a last try. Check every word against the paper.'],
   [['read_from_image'], 'This was read from the picture of the page; check it against the paper.'],
   [['measure_mismatch'], "What was measured doesn't match the label on the paper."],
   [['plain_contradicts'], "The plain reading says something the paper doesn't."],

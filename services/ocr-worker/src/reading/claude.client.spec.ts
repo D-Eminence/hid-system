@@ -337,6 +337,22 @@ describe('ClaudePageClient', () => {
       expect(textBody.output_config.format.schema).toEqual(MODEL_OUTPUT_JSON_SCHEMA);
     });
 
+    it('sends the last resort as the ordinary image re-read with only max_tokens changed (the reader sets its effort)', async () => {
+      const box = { x1: 124, y1: 175.4, x2: 496, y2: 210.48 };
+      const imageAnswer = { ...answer, items: answer.items.map((item) => ({ ...item, box })) };
+      const ordinary = client([sse(JSON.stringify(imageAnswer))]);
+      await ordinary.instance.readPage({ ...pinned, image }, new AbortController().signal);
+      const last = client([sse(JSON.stringify(imageAnswer))]);
+      await last.instance.readPage({ ...pinned, image, maxTokens: 12_000 }, new AbortController().signal);
+      const ordinaryBody = JSON.parse(bodyOf(ordinary.fetch)) as Record<string, unknown>;
+      const lastBody = JSON.parse(bodyOf(last.fetch)) as Record<string, unknown>;
+      // OCR_AI_MAX_TOKENS is 16,000 in this file's config.
+      expect(ordinaryBody.max_tokens).toBe(16_000);
+      expect(lastBody.max_tokens).toBe(12_000);
+      expect({ ...lastBody, max_tokens: 16_000 }).toEqual(ordinaryBody);
+      expect(lastBody).not.toHaveProperty('tools');
+    });
+
     it('works in the pixels of the picture as the API resizes it, by the model tier', async () => {
       // A4 at 300 dpi: over the high-resolution token budget, so the API reads it smaller (resizedSize).
       const big = { ...image, width: 2480, height: 3508 };
