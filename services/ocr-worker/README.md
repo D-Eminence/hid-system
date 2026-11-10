@@ -571,7 +571,16 @@ Each claimed job runs, in order:
        generic, two spellings the list matches); a listed and an unlisted
        name, or two unlisted names, within 2 edits with at least 0.75 of the
        letters alike, against every name the list gives the generic
-       ("Fictomycin" / "Fictomicin"), except that a real unlisted look-alike
+       ("Fictomycin" / "Fictomicin"), only where both have six letters or
+       more and the same short words (under four letters) and digits, so
+       "Vitamin C" / "Vitamin K", "Vit B1" / "Vit B6" and "Ca gluconate" /
+       "K gluconate" split. Form, route and release words ("Inj", "Tab",
+       "IV", "retard", "SR", "XR") are left out of a name's identity, "Vit"
+       is read as "Vitamin", and two ward abbreviations are read as their
+       listed generic for this rule only ("Vitamin K" as phytomenadione,
+       "PCM" as paracetamol; never shown or respelled), so "Vit K" /
+       "Vitamin K" and "Nifedipine" / "Nifedipine retard" are one item.
+       Except that a real unlisted look-alike
        of a listed name (`UNLISTED_LOOKALIKES`, or one letter from one:
        "Quinidine" / "Quinine", "Arteether" / "Artemether") is a different
        drug and splits; a word cut

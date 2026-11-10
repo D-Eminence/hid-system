@@ -6,6 +6,7 @@ import { CROSSED_OUT_START, crossedOutParts, withoutCrossedOut } from './groundi
 import { checkReasonSentence, crossedOutOnPlace, itemId, markCrossedOut, mergeIdentity, overlapShare, PAIR_BOX_OVERLAP,
   unionBox, uniqueItemIds, type PageCheck } from './items';
 import { labTestLookalike, matchLabTestName } from './lab-list';
+import { SHORT_WORD } from './list-match';
 import { ALTERNATIVE_OPEN, CROSSED_OUT_OPEN, FIELD_UNREAD, HARD_PAGE_FREQUENCIES, NO_LETTERS, PAPER_QUERY,
   PARTIAL_WORD, type BasisField, type FieldBasis, type HardItemExtras, type ModelItem, type ModelPage } from './prompt';
 import { hasSign, SIGN_READ_MARK } from './signs';
@@ -1243,13 +1244,33 @@ function single(side: Side, sourceSha256Hex: string, drops?: AlternativeDrops): 
 
 /**
  * A medicine's drug as one reading names it, for the whole-drug rule (sameDrug): the listed generic; for an unlisted
- * name its key (normaliseDrugName, letters and digits); for a word cut short ("cr… (Pentazocine?)") the letters
+ * name its key (normaliseDrugName, its words: NOT_IDENTITY_WORDS left out, IDENTITY_ALIASES looked up first); for a word cut short ("cr… (Pentazocine?)") the letters
  * before "…" and the bracketed whole-word guess, if any; null where the name says nothing (blank, "[drug?]", "[?]").
  * A name with an other option of its own ("Omeprazole? (or Enoxaparin?)") counts as its first reading.
  */
 type DrugIdentity = { generic: string } | { key: string } | { prefix: string; guess: DrugIdentity | null };
 
 const lettersKey = (text: string) => normaliseDrugName(text).replace(/[^a-z0-9]/g, '');
+
+/**
+ * Words that say how a medicine is given or released, not which medicine it is ("Inj", "Tab", "IV", "retard",
+ * "SR"): left out of a name's identity, so "Nifedipine retard" and "Nifedipine" are one drug (review of 2026-11-10).
+ * Only for the whole-drug rule; the name is still shown as read.
+ */
+const NOT_IDENTITY_WORDS = new Set(['tab', 'tabs', 'tablet', 'tablets', 'cap', 'caps', 'capsule', 'capsules', 'inj',
+  'injection', 'syr', 'syrup', 'susp', 'suspension', 'iv', 'im', 'po', 'sc', 'retard', 'sr', 'xr', 'xl', 'er', 'cr', 'mr',
+  'la']);
+/**
+ * Ward abbreviations for a listed medicine, for the whole-drug rule only (never shown, never a respelling): "vit" is
+ * read as "vitamin" first, so "Vit C" is the listed vitamin c (ascorbic acid). Added here, review of 2026-11-10.
+ */
+const IDENTITY_ALIASES: Readonly<Record<string, string>> = {
+  'vitamin k': 'phytomenadione',
+  'pcm': 'paracetamol',
+};
+const identityWords = (text: string) => normaliseDrugName(text).split(' ')
+  .filter((word) => word.length > 0 && !NOT_IDENTITY_WORDS.has(word))
+  .map((word) => (word === 'vit' ? 'vitamin' : word)).join(' ');
 
 export function drugIdentityOf(name: string | null | undefined, generic: string | null = null): DrugIdentity | null {
   if (generic) return { generic };
@@ -1263,34 +1284,45 @@ export function drugIdentityOf(name: string | null | undefined, generic: string 
   }
   const text = main.replace(NOT_GUESS_MARKS, ' ').replace(/\(sign\)/g, ' ');
   if (!/\p{L}/u.test(text)) return null;
-  const match = matchDrugName(text);
+  const named = identityWords(text);
+  if (IDENTITY_ALIASES[named]) return { generic: IDENTITY_ALIASES[named]! };
+  const match = matchDrugName(text) ?? (named && named !== normaliseDrugName(text) ? matchDrugName(named) : null);
   if (match) return { generic: match.generic };
-  const key = lettersKey(text);
-  return key ? { key } : null;
+  const key = lettersKey(named) ? named : normaliseDrugName(text);
+  return lettersKey(key) ? { key } : null;
 }
 
-/** The names (letters only) a listed generic goes by on the drug list: the generic, its synonyms and brands. */
+/** The names (normalised, words kept) a listed generic goes by on the drug list: the generic, its synonyms and brands. */
 const LISTED_NAMES = new Map<string, string[]>();
 for (const entry of DRUG_ENTRIES) {
   const names = LISTED_NAMES.get(entry.target) ?? [];
-  names.push(entry.key.replace(/[^a-z0-9]/g, ''));
+  names.push(entry.key);
   LISTED_NAMES.set(entry.target, names);
 }
 const namesOf = (identity: { generic: string } | { key: string }) =>
-  'generic' in identity ? LISTED_NAMES.get(identity.generic) ?? [lettersKey(identity.generic)] : [identity.key];
+  'generic' in identity ? LISTED_NAMES.get(identity.generic) ?? [normaliseDrugName(identity.generic)] : [identity.key];
 
 /**
  * Two spellings of one name by their letters: the same, or within LOOKALIKE_DISTANCE edits with at least 0.75 of the
- * letters in common ("Tramacet" and "Tramaset"). A real unlisted look-alike of a listed name ("Arteether" and the
+ * letters in common ("Tramacet" and "Tramaset"), only where both have at least MIN_FUZZY_LETTERS letters and the
+ * same short words (under SHORT_WORD letters) and digits: "Vitamin C" and "Vitamin K", "Vit B1" and "Vit B6", "Ca
+ * gluconate" and "K gluconate" are different drugs, never one item (review of 2026-11-10). A real unlisted look-alike of a listed name ("Arteether" and the
  * listed artemether, "Quinidine" and the listed quinine) is not reached here: sameDrug keeps those apart.
  */
 const LOOKALIKE_LETTER_KEYS = UNLISTED_LOOKALIKES.map(lettersKey);
 const isUnlistedLookalike = (key: string) => LOOKALIKE_LETTER_KEYS.some((lookalike) => lookalike === key
   || (lookalike.length >= MIN_FUZZY_LETTERS && editDistance(lookalike, key) <= 1));
 const SAME_NAME_SIMILARITY = 0.75;
-function sameName(a: string, b: string): boolean {
-  if (a === b) return true;
+const shortWordsOf = (name: string) => name.split(' ').filter((word) => word.length > 0 && word.length < SHORT_WORD)
+  .sort().join(' ');
+const digitsOf = (name: string) => name.replace(/\D/g, '');
+const lettersOf = (name: string) => name.replace(/[^a-z]/g, '');
+function sameName(nameA: string, nameB: string): boolean {
+  const [a, b] = [lettersKey(nameA), lettersKey(nameB)];
+  if (a === b) return a !== '';
   if (!a || !b) return false;
+  if (lettersOf(a).length < MIN_FUZZY_LETTERS || lettersOf(b).length < MIN_FUZZY_LETTERS) return false;
+  if (digitsOf(a) !== digitsOf(b) || shortWordsOf(nameA) !== shortWordsOf(nameB)) return false;
   const distance = editDistance(a, b);
   return distance <= LOOKALIKE_DISTANCE && 1 - distance / Math.max(a.length, b.length) >= SAME_NAME_SIMILARITY;
 }
@@ -1311,12 +1343,12 @@ export function sameDrug(x: DrugIdentity | null, y: DrugIdentity | null): boolea
       if (cut.guess !== null && other.guess !== null && sameDrug(cut.guess, other.guess)) return true;
       return cut.prefix !== '' && other.prefix !== '' && (cut.prefix.startsWith(other.prefix) || other.prefix.startsWith(cut.prefix));
     }
-    return cut.prefix !== '' && namesOf(other).some((name) => name.startsWith(cut.prefix));
+    return cut.prefix !== '' && namesOf(other).some((name) => lettersKey(name).startsWith(cut.prefix));
   }
   if ('generic' in x && 'generic' in y) return x.generic === y.generic;
   // A real unlisted look-alike (drug-list.ts UNLISTED_LOOKALIKES: "Quinidine" beside the listed quinine) is a
   // different drug from the listed one, never one item (review of 2026-11-10).
-  if (('generic' in x) !== ('generic' in y) && isUnlistedLookalike('key' in x ? x.key : (y as { key: string }).key)) {
+  if (('generic' in x) !== ('generic' in y) && isUnlistedLookalike(lettersKey('key' in x ? x.key : (y as { key: string }).key))) {
     return false;
   }
   return namesOf(x).some((a) => namesOf(y).some((b) => sameName(a, b)));

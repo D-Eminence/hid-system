@@ -167,6 +167,52 @@ describe('two readings naming different drugs (whole-drug rule)', () => {
     for (const name of ['', '[drug?]', '[?]']) expect(sameDrug(id(name), id('Omeprazole'))).toBe(true);
   });
 
+  it('never treats names differing in a short word, letter or digit as one drug (review of 2026-11-10)', () => {
+    const id = (name: string) => drugIdentityOf(name);
+    for (const [x, y] of [['Vit C', 'Vit K'], ['Vitamin C', 'Vitamin K'], ['Vit B1', 'Vit B6'], ['Vit A', 'Vit E'],
+      ['Vit A', 'Vit K'], ['Ca gluconate', 'K gluconate'], ['Inj Vit K', 'Inj Vit C'], ['Fictomycin A', 'Fictomycin B'],
+      ['Fictomycin 1', 'Fictomycin 2']]) {
+      expect([x, y, sameDrug(id(x!), id(y!))]).toEqual([x, y, false]);
+    }
+  });
+
+  it('reads a ward abbreviation or a release-form word as the same drug (review of 2026-11-10)', () => {
+    const id = (name: string) => drugIdentityOf(name);
+    for (const [x, y] of [['Vit K', 'Vitamin K'], ['Vit C', 'Vitamin C'], ['Vitamin K', 'Phytomenadione'],
+      ['PCM', 'Paracetamol'], ['Nifedipine', 'Nifedipine retard'], ['Nifedipine SR', 'Nifedipine'],
+      ['Inj Fictomycin', 'Fictomicin'], ['Tab Fictomycin XR', 'Fictomycin']]) {
+      expect([x, y, sameDrug(id(x!), id(y!))]).toEqual([x, y, true]);
+    }
+  });
+
+  it('splits vitamin C and vitamin K, and calcium and potassium gluconate, into two items', () => {
+    const page = hand('IM Vit C 500mg stat');
+    const vitamins = two(page, [order('IM Vitamin C 500mg stat', { route: 'IM', name: 'Vitamin C', frequency: 'stat' }, '500', 'mg')],
+      [order('IV Vitamin K 10mg stat', { route: 'IV', name: 'Vitamin K', frequency: 'stat' }, '10', 'mg')]);
+    expect(vitamins.check.items).toHaveLength(2);
+    expect(vitamins.agreement).toMatchObject({ drugSplits: 1, itemsPaired: 0 });
+    for (const item of vitamins.check.items) {
+      // Each item holds one reading's drug and strength, never the other's.
+      const vitaminC = /\bC\?/.test(item.plain);
+      expect(vitaminC).not.toBe(/\bK\?/.test(item.plain));
+      expect(item.plain).toContain(vitaminC ? '500mg' : '10mg');
+      expect(item.plain).not.toContain(vitaminC ? '10mg' : '500mg');
+      expect(item.plain).not.toContain('(or');
+    }
+    const salts = two(hand('Ca gluconate 10ml'), [order('Ca gluconate 10ml', { name: 'Ca gluconate' }, '10', 'ml')],
+      [order('K gluconate 10ml', { name: 'K gluconate' }, '10', 'ml')]);
+    expect(salts.check.items).toHaveLength(2);
+    expect(salts.agreement).toMatchObject({ drugSplits: 1 });
+  });
+
+  it('keeps "Vit K" and "Vitamin K" as one item', () => {
+    const { check, agreement } = two(hand('IM Vit K 1mg stat'),
+      [order('IM Vit K 1mg stat', { route: 'IM', name: 'Vit K', frequency: 'stat' }, '1', 'mg')],
+      [order('IV Vitamin K 1mg stat', { route: 'IV', name: 'Vitamin K', frequency: 'stat' }, '1', 'mg')]);
+    expect(check.items).toHaveLength(1);
+    expect(agreement).toMatchObject({ drugSplits: 0, itemsPaired: 1 });
+  });
+
   it('keeps a spelling-variant disagreement as one item with one other option', () => {
     const page = hand('Fctmycn 250mg bd');
     const { check, agreement } = two(page, [order('Fictomycin 250mg bd', { name: 'Fictomycin', frequency: 'bd' }, '250', 'mg')],
