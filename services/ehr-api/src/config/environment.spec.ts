@@ -51,4 +51,19 @@ describe('EHR production database transport', () => {
     process.env.AI_ENABLED = 'false'; delete process.env.ANTHROPIC_API_KEY; resetEnvironmentForTests();
     expect(getEnvironment().AI_ENABLED).toBe(false);
   });
+
+  it('keeps the records patients add on unless PATIENT_ENTRIES_ENABLED is exactly false', () => {
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://synthetic:test@localhost/hid',
+      CORS_ORIGINS: 'https://app.example', STORAGE_MODE: 'disabled' });
+    delete process.env.PATIENT_ENTRIES_ENABLED; resetEnvironmentForTests();
+    expect(getEnvironment().PATIENT_ENTRIES_ENABLED).toBe(true);
+    process.env.PATIENT_ENTRIES_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().PATIENT_ENTRIES_ENABLED).toBe(false);
+    process.env.PATIENT_ENTRIES_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().PATIENT_ENTRIES_ENABLED).toBe(true);
+    for (const value of ['yes', '1', 'TRUE']) {
+      process.env.PATIENT_ENTRIES_ENABLED = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow();
+    }
+  });
 });

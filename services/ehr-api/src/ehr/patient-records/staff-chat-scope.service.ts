@@ -15,6 +15,8 @@ export const STAFF_SOURCE_PERMISSIONS: Record<SourceKind, readonly string[]> = {
   import: ['ehr.note.read'], import_version: ['ehr.note.read'], health_profile: ['ehr.note.read'],
   attachment: ['ehr.note.read', 'ehr.document.read'], document: ['ehr.document.read'],
   lab_result: ['lab.result.released.read'], profile: ['identity.patient.read'],
+  // Records the patient added themselves (0116), read as the chart's notes are.
+  patient_entry: ['ehr.note.read'],
 };
 export interface StaffChatScope extends EvidenceAccess {
   patientId: string;
