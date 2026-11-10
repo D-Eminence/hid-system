@@ -1383,7 +1383,7 @@ Each claimed job runs, in order:
        `hard_page_read`, `last_resort_read`), `reason` (as above, or
        `kept_nothing` for an answer none of whose items held to the page while
        the first pass had some, `hard_reads_failed`, or for the last resort
-       `last_resort_failed`, `last_resort_no_time`, `last_resort_no_picture`),
+       `last_resort_failed`, `last_resort_no_picture`),
        `code`, and for the last resort `detail` (see "Last resort").
      - `ocr.reading.usage` per hard read gains `failure`, `forcedAnswer`,
        `forcedEffort` (`low` when the answer-only turn was sent, else null;
@@ -1407,7 +1407,7 @@ Each claimed job runs, in order:
        that page, or a hard read answered but no item of the hard reading
        held to the page while the first pass kept none either (a
        `page_read_failed` warn with `pass` `hard_page_read`, `reason`
-       `kept_nothing`; the last resort then has what is left of the deadline).
+       `kept_nothing`).
        (b) A page whose first pass **failed or was declined** and whose text
        re-read then gave no answer either (failed, declined, or unavailable
        after its retries), or answered with no item that held to the page (a
@@ -1428,21 +1428,40 @@ Each claimed job runs, in order:
        unchanged (the body-hash test, and a client test that the last resort
        differs from the ordinary image re-read in `max_tokens` only); no prompt
        text changed, so `PROMPT_VERSION` stays 11.
-     - *Time.* Within what is left of the hard page's deadline
-       (`OCR_AI_HARD_PAGE_DEADLINE_MS` from when its reads started) for (a), or
-       a whole `OCR_AI_HARD_PAGE_DEADLINE_MS` of its own for (b), where no hard
-       read used any. The same machinery as a hard read: its own abort signal
-       (the job's and its window's together), so the window's end stops a
-       permit wait, a streamed request or a backoff sleep alike, and a shutdown
-       still stops the reading. It is sent only when at least 30 s
-       (`LAST_RESORT_MIN_MS`) is left: at the ~100 output tokens per second
-       measured in production that is about 3,000 tokens, a sparse page's
-       answer with little thinking (a 12-item answer is about 3,000 to 4,000),
-       and the deadline setting's own minimum; with less it would almost
-       surely be cut, its thinking billed for nothing. 16,000 tokens is more
-       than any window lets it write at that rate (150 s is about 15,000), so
-       the cap only bounds what one attempt can cost (16,000 x $22 per million
-       = $0.35) where `OCR_AI_MAX_TOKENS` would allow 64,000.
+     - *Time.* A window of its own (coordinator decision of 2026-11-10,
+       about 18:58 UTC): `OCR_AI_LAST_RESORT_SECONDS` (default 60; 30 to
+       300, anything else fails startup) from when the last resort is
+       decided, for (a) and (b) alike, never what is left of the hard page's
+       deadline. Before, (a) had only the remainder, and when both hard reads
+       were cut by the deadline (the usual way they fail together) almost
+       nothing was left, so the page was failed with no answer; now it still
+       gets one. The same machinery as a hard read: its own abort signal (the
+       job's and its window's together), so the window's end stops a permit
+       wait, a streamed request or a backoff sleep alike (`detail`
+       `deadline`), and a shutdown still stops the reading. The per-request
+       `OCR_AI_TIMEOUT_MS` still applies inside it.
+       *Bounds.* 30 s is the least worth sending: at the ~100 output tokens
+       per second measured in production it is about 3,000 tokens, a sparse
+       page's answer with little thinking (a 12-item answer is about 3,000 to
+       4,000); with less it would almost surely be cut, its thinking billed
+       for nothing. 300 s is more than the 16,000-token cap
+       (`LAST_RESORT_MAX_TOKENS`) needs at that rate (about 160 s) and keeps a
+       hard page within about 150 s + 300 s. The default 60 s is about 6,000
+       tokens, room for a sparse page's answer and some thinking. The cap only
+       bounds what one attempt can cost (16,000 x $22 per million = $0.35)
+       where `OCR_AI_MAX_TOKENS` would allow 64,000.
+       *Worst case* per hard page, defaults: about 150 s
+       (`OCR_AI_HARD_PAGE_DEADLINE_MS`, both reads) + 60 s (the last resort)
+       = about 210 s, well inside the website's 20-minute poll; with
+       `OCR_AI_PAGE_CONCURRENCY` 2, two such pages run at once.
+       *No "no time left" case.* Since the window starts fresh and is at
+       least 30 s, the earlier skip (`last_resort_no_time`, `LAST_RESORT_MIN_MS`)
+       could no longer happen and was removed. The worker has no job-level
+       time budget it could exceed: the job's lease is renewed every third of
+       `OCR_WORKER_LEASE_SECONDS` (default 300 s, so every 100 s) for as long
+       as the job runs (`ocr.renew_worker_claim` takes up to an hour ahead per
+       renewal), there is no overall job timeout, and a shutdown aborts the
+       last resort through the job's signal at once.
      - *Its items.* The normal checks of an image re-read (`checkPage`: the
        placement rules, `read_from_image`, the fail-safe merge with the first
        pass, which here has no items), and every kept item also
@@ -1462,9 +1481,7 @@ Each claimed job runs, in order:
        `reason` `last_resort_failed` and `detail` how it ended (`max_tokens`,
        `parse_error`, `schema_error`, `refusal`, `incomplete`, `deadline`,
        `api_error`, `api_rejected` with its `code`, or `kept_nothing`).
-     - *Not sent*: less than 30 s left gives a `page_read_failed` warn with
-       `reason` `last_resort_no_time` (the page stays failed as above, without
-       the request); a page with no picture that can go (a PDF or TIFF, no
+     - *Not sent*: a page with no picture that can go (a PDF or TIFF, no
        document bytes, too large, `OCR_AI_IMAGE_REREAD=off`, a masked number
        under `text_only`, ...) gives `reason` `last_resort_no_picture` with
        `detail` the `imageRereadSkipped` code saying why (a hard page always
@@ -1476,18 +1493,13 @@ Each claimed job runs, in order:
        `checkReasons` pattern. Provenance (stored as an unparsed object; the
        api-client reads it as `Record<string, unknown>`) gains
        `lastResortPages` (pages sent the last resort), `lastResortFailedPages`
-       and `lastResortSkipped` (`{page, reason: no_time | no_picture,
-       picture?}`): page numbers and codes only.
+       and `lastResortSkipped` (`{page, reason: no_picture, picture?}`; it
+       had `no_time` too until the last resort got its own window): page
+       numbers and codes only.
      - *Logs*: the last resort's use is its own `ocr.reading.usage` line
        (`pass: "last_resort_read"`); `ocr.job.completed` gains
-       `lastResortReads`, `lastResortFailed` and `lastResortSkipped` (counts).
-     - *Trade-off*: when both hard reads were cut by the deadline (the usual
-       way they fail together; see above), almost nothing of the window is
-       left, so the last resort is skipped (`last_resort_no_time`) and the page
-       is failed as before, now with that warn line. Giving the last resort a
-       window of its own in that case would make a hard page's worst case
-       about 150 s + 150 s instead of 150 s; that is a decision for the owner,
-       not taken here.
+       `lastResortReads`, `lastResortFailed` and `lastResortSkipped` (counts);
+       `ocr.worker.ready` logs `aiLastResortSeconds`, the window in force.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`
    payload (schema `hid-paper-reading-schema-2`: `src/reading/contract.ts`), `raw_text` (every line in
    reading order) and the mean line confidence. Provenance holds models,

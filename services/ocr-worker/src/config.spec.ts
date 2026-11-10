@@ -100,6 +100,21 @@ describe('OCR worker configuration', () => {
     }
   });
 
+  it('gives the last resort its own window, OCR_AI_LAST_RESORT_SECONDS: 60 by default, 30 to 300, fail-closed', () => {
+    const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'true' };
+    expect(readOcrWorkerConfig(base).OCR_AI_LAST_RESORT_SECONDS).toBe(60);
+    expect(readOcrWorkerConfig(claude).OCR_AI_LAST_RESORT_SECONDS).toBe(60);
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_LAST_RESORT_SECONDS: ' ' }).OCR_AI_LAST_RESORT_SECONDS).toBe(60);
+    for (const [value, seconds] of [['30', 30], ['90', 90], ['300', 300]] as const) {
+      expect(readOcrWorkerConfig({ ...claude, OCR_AI_LAST_RESORT_SECONDS: value }).OCR_AI_LAST_RESORT_SECONDS).toBe(seconds);
+    }
+    for (const value of ['29', '301', '0', '-60', '60.5', '60s', 'lots', '60000']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_LAST_RESORT_SECONDS: value }))
+        .toThrow(/OCR_AI_LAST_RESORT_SECONDS/);
+    }
+  });
+
   it('bounds the hard-page reads: follow-up effort, per-read output tokens and the page deadline, fail-closed', () => {
     const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
       OCR_AI_US_PROCESSING_APPROVED: 'true' };

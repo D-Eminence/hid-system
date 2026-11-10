@@ -2,7 +2,7 @@ import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient
   type PageAnswer, type PageModelClient } from './claude.client';
 import { Semaphore } from '../semaphore';
 import { paperReadingPayloadSchema } from './contract';
-import { LAST_RESORT_MAX_TOKENS, LAST_RESORT_MIN_MS, PaperReadingService, ReadingInterruptedError, ReadingUnavailableError,
+import { LAST_RESORT_MAX_TOKENS, LAST_RESORT_SECONDS, PaperReadingService, ReadingInterruptedError, ReadingUnavailableError,
   type ReadingConfig } from './reader';
 import { checkReasonSentence } from './items';
 import { CLINIC_PAGE, fixtureExifSegment, fixtureJpeg, fixturePng, modelItem, modelPage, readPage, SOURCE_SHA,
@@ -1346,43 +1346,80 @@ describe('PaperReadingService', () => {
         expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
       });
 
-      it('is not sent with less than 30 s left of the page\'s deadline, and says so; with 30 s it is', async () => {
-        expect(LAST_RESORT_MIN_MS).toBe(30_000);
-        const short = lastClient({ first: emptyFirst });
-        const { payload, summary } = await read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 29_000 }, short.client);
-        expect(short.calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard']);
-        expect(summary).toMatchObject({ lastResortPages: [], lastResortFailedPages: [],
-          lastResortSkipped: [{ page: 1, reason: 'no_time' }], imageRereadFailedPages: [1], rereadFailedPages: 1 });
-        expect(summary.pageReadFailures).toContainEqual({ page: 1, pass: 'last_resort_read', reason: 'last_resort_no_time' });
-        expect(payload.pages[0]!.flagReasons).toContain('ai_unsure');
-        // The reads failed at once, so all but a few milliseconds of a 31 s deadline is left: enough.
-        const enough = lastClient({ first: emptyFirst });
-        await read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 31_000 }, enough.client);
-        expect(enough.calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard', 'last']);
+      /** A step that never ends on its own: rejected as interrupted when its signal aborts, noting the (fake) time. */
+      const hangUntilAborted = (seen: number[]) => (readSignal: AbortSignal) => new Promise<PageAnswer>((_resolve, reject) => {
+        readSignal.addEventListener('abort', () => {
+          seen.push(Date.now());
+          reject(new AiInterruptedError(readSignal.reason, 1, usage));
+        }, { once: true });
       });
 
-      it('runs only in what is left of the page\'s deadline, aborted at its end', async () => {
+      it('case (a) after the deadline cut both hard reads: still sent, in a window of its own (60 s by default), '
+        + 'aborted at its end', async () => {
+        expect(LAST_RESORT_SECONDS).toBe(60);
         jest.useFakeTimers();
         try {
-          let aborted = false;
-          const { client } = lastClient({ first: emptyFirst,
-            // Each hard read takes 20 s of the 60 s deadline, then fails; the last resort then hangs until aborted.
-            hard: () => new Promise<PageAnswer>((resolve) => { setTimeout(() => resolve(failedMax), 20_000); }),
-            last: (readSignal) => new Promise<PageAnswer>((_resolve, reject) => {
-              readSignal.addEventListener('abort', () => {
-                aborted = true;
-                reject(new AiInterruptedError(readSignal.reason, 1, usage));
-              }, { once: true });
-            }) });
-          const reading = read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 60_000 }, client);
-          await jest.advanceTimersByTimeAsync(20_000);
-          // 40 s left: the last resort is sent; still running 1 ms before the page's deadline.
-          await jest.advanceTimersByTimeAsync(39_999);
-          expect(aborted).toBe(false);
+          const hardCut: number[] = [];
+          const lastCut: number[] = [];
+          const { client, calls } = lastClient({ first: emptyFirst, hard: hangUntilAborted(hardCut),
+            last: hangUntilAborted(lastCut) });
+          const start = Date.now();
+          const reading = read(hardConfig, client);
+          // The page's deadline (150 s by default) cuts both hard reads; the last resort is then sent.
+          await jest.advanceTimersByTimeAsync(150_000);
+          expect(hardCut.map((at) => at - start)).toEqual([150_000, 150_000]);
+          expect(calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard', 'last']);
+          // Its own 60 s from then, not what is left of the deadline (nothing): still running 1 ms before the end.
+          await jest.advanceTimersByTimeAsync(59_999);
+          expect(lastCut).toEqual([]);
           await jest.advanceTimersByTimeAsync(1);
-          expect(aborted).toBe(true);
+          expect(lastCut.map((at) => at - start)).toEqual([210_000]);
+          const { payload, summary } = await reading;
+          expect(summary).toMatchObject({ hardPageDeadlinePages: [1], lastResortPages: [1], lastResortFailedPages: [1],
+            lastResortSkipped: [], imageRereadFailedPages: [1] });
+          expect(summary.pageReadFailures).toEqual([{ page: 1, pass: 'hard_page_read', reason: 'hard_reads_failed' },
+            { page: 1, pass: 'last_resort_read', reason: 'last_resort_failed', detail: 'deadline' }]);
+          expect(payload.pages[0]!.flagReasons).toContain('ai_unsure');
+        } finally { jest.useRealTimers(); }
+      });
+
+      it('case (a) after the deadline cut both hard reads: an answer inside its window is the page\'s reading', async () => {
+        jest.useFakeTimers();
+        try {
+          const { client, calls } = lastClient({ first: emptyFirst, hard: hangUntilAborted([]),
+            // Answers 50 s into its window (after the page's deadline had passed).
+            last: () => new Promise<PageAnswer>((resolve) => { setTimeout(() => resolve(ok(lastAnswer)), 50_000); }) });
+          const reading = read(hardConfig, client);
+          await jest.advanceTimersByTimeAsync(200_000);
+          const { payload, summary } = await reading;
+          expect(calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard', 'last']);
+          expect(payload.items).toHaveLength(1);
+          expect(payload.items[0]!.checkReasons).toEqual(expect.arrayContaining(['last_resort_read', 'read_from_image']));
+          expect(summary).toMatchObject({ hardPageDeadlinePages: [1], lastResortPages: [1], lastResortFailedPages: [],
+            imageRereadPages: [1], imageRereadFailedPages: [] });
+          expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+        } finally { jest.useRealTimers(); }
+      });
+
+      it.each([
+        ['case (a)', { first: emptyFirst }],
+        ['case (b)', { first: refused, text: refused }],
+      ] as const)('%s: the window is OCR_AI_LAST_RESORT_SECONDS from when the last resort is decided', async (_name, script) => {
+        jest.useFakeTimers();
+        try {
+          const lastCut: number[] = [];
+          let sentAt = 0;
+          const { client } = lastClient({ ...script, last: (readSignal) => {
+            sentAt = Date.now();
+            return hangUntilAborted(lastCut)(readSignal);
+          } });
+          // A 30 s page deadline and a 45 s window: the window, not the deadline, bounds the last resort.
+          const reading = read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 30_000, OCR_AI_LAST_RESORT_SECONDS: 45 },
+            client);
+          await jest.advanceTimersByTimeAsync(100_000);
           const { summary } = await reading;
-          expect(summary).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [1], imageRereadFailedPages: [1] });
+          expect(sentAt).toBeGreaterThan(0);
+          expect(lastCut.map((at) => at - sentAt)).toEqual([45_000]);
           expect(summary.pageReadFailures).toContainEqual({ page: 1, pass: 'last_resort_read', reason: 'last_resort_failed',
             detail: 'deadline' });
         } finally { jest.useRealTimers(); }
@@ -1420,7 +1457,7 @@ describe('PaperReadingService', () => {
         ['failed', malformed, failedMax, 'schema_error'],
         ['was declined', refused, refused, 'refusal'],
       ] as const)('a page whose first pass %s and whose text re-read gave nothing gets the last resort, with its picture, '
-        + 'in a whole deadline of its own', async (_name, first, text, firstReason) => {
+        + 'in a window of its own', async (_name, first, text, firstReason) => {
         const { client, calls } = lastClient({ first, text });
         const { payload, summary } = await read(hardConfig, client);
         expect(calls.map((call) => [call.kind, call.effort, call.maxTokens])).toEqual([['first', 'medium', undefined],
@@ -1435,11 +1472,6 @@ describe('PaperReadingService', () => {
         expect(summary.pageReadFailures.map((failure) => [failure.pass, failure.reason])).toEqual([
           ['first_pass', firstReason], ['reread', answerReason(text)]]);
         expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
-        // Its own window: a deadline of under 30 s leaves it no time.
-        const short = lastClient({ first, text });
-        const cut = await read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 29_000 }, short.client);
-        expect(short.calls.map((call) => call.kind)).toEqual(['first', 'text']);
-        expect(cut.summary.lastResortSkipped).toEqual([{ page: 1, reason: 'no_time' }]);
       });
 
       it('a declined page whose last resort is declined too stays ai_declined, named as a failed picture re-read', async () => {
@@ -1453,7 +1485,7 @@ describe('PaperReadingService', () => {
       });
 
       it('a hard read that answered but kept nothing, on a page whose first pass kept nothing, gets the last resort '
-        + 'in what is left of the deadline', async () => {
+        + 'in a window of its own', async () => {
         const { client, calls } = lastClient({ first: emptyFirst, hard: ok(modelPage([])) });
         const { payload, summary } = await read(hardConfig, client);
         expect(calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard', 'last']);

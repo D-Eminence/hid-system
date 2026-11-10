@@ -71,6 +71,20 @@ describe('OcrWorker processing', () => {
   afterEach(() => { stdout.mockRestore(); stderr.mockRestore(); });
   const logs = () => [...stdout.mock.calls, ...stderr.mock.calls].map((call) => String(call[0]));
 
+  it('logs the reading settings in force at ready, the last resort\'s own window among them (settings only)', async () => {
+    const { repository, reader, provider, reading } = mocks();
+    repository.claim.mockResolvedValue(null);
+    const worker = new OcrWorker({ ...config, OCR_AI_HARD_PAGE_DEADLINE_MS: 150_000, OCR_AI_LAST_RESORT_SECONDS: 90 },
+      repository, reader, provider, reading);
+    const running = worker.run();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    worker.stop();
+    await running;
+    const ready = logs().map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((line) => line.event === 'ocr.worker.ready')!;
+    expect(ready).toMatchObject({ aiLastResortSeconds: 90, aiHardPageDeadlineMs: 150_000 });
+  });
+
   it('verifies the source, checks the allowance, reads text, records pages, reads items, then completes', async () => {
     const { repository, reader, provider, reading } = mocks();
     const order: string[] = [];

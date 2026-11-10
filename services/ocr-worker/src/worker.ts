@@ -30,6 +30,7 @@ export class OcrWorker {
       aiHardPageFollowupEffort: this.config.OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT,
       aiHardPageMaxTokens: this.config.OCR_AI_HARD_PAGE_MAX_TOKENS,
       aiHardPageDeadlineMs: this.config.OCR_AI_HARD_PAGE_DEADLINE_MS, aiZoomMaxCalls: this.config.OCR_AI_ZOOM_MAX_CALLS,
+      aiLastResortSeconds: this.config.OCR_AI_LAST_RESORT_SECONDS,
       textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
     await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
     await this.repository.close();
