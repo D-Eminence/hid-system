@@ -986,6 +986,21 @@ describe('PaperReadingService', () => {
         if (abort?.aborted) { reject(abort.reason); return; }
         abort?.addEventListener('abort', () => reject(abort.reason), { once: true });
       });
+      /** A hard-page answer that has begun (message_start, then some thinking) and then goes on until aborted. */
+      const begunThenHang = (init?: RequestInit) => {
+        const encoder = new TextEncoder();
+        const event = (name: string, data: unknown) => encoder.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(event('message_start', { type: 'message_start', message: { id: 'msg_cut', type: 'message',
+            role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null,
+            stop_details: null, usage: { input_tokens: 6_000, output_tokens: 1 } } }));
+          controller.enqueue(event('content_block_start', { type: 'content_block_start', index: 0,
+            content_block: { type: 'thinking', thinking: '', signature: '' } }));
+          controller.enqueue(event('content_block_delta', { type: 'content_block_delta', index: 0,
+            delta: { type: 'thinking_delta', thinking: 'x'.repeat(5_000) } }));
+          init?.signal?.addEventListener('abort', () => controller.error(init.signal!.reason), { once: true });
+        } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      };
 
       it('starts both reads before either finishes, through the real client and request limit', async () => {
         for (const permits of [2, 1]) {
@@ -1020,9 +1035,9 @@ describe('PaperReadingService', () => {
         let hardRequests = 0;
         const fetch = jest.fn(async (_url: unknown, init?: RequestInit): Promise<Response> => {
           if (!isHard(init)) return sse(JSON.stringify(firstPass));
-          // The first hard read answers at once; the second never would.
+          // The first hard read answers at once; the second has begun its answer and never ends it.
           hardRequests += 1;
-          return hardRequests === 1 ? sse(rawHard) : hang(init);
+          return hardRequests === 1 ? sse(rawHard) : begunThenHang(init);
         });
         const client = new ClaudePageClient(clientConfig, { fetch: fetch as unknown as typeof globalThis.fetch,
           limiter: new Semaphore(4) });
@@ -1034,6 +1049,9 @@ describe('PaperReadingService', () => {
         expect(summary.hardPageReadUsage.map((entry) => [entry.read, entry.endedBy, entry.requests])).toEqual([
           [1, 'answer', 1], [2, 'deadline', 1]]);
         expect(summary.hardPageReadUsage[1]!.durationMs).toBeGreaterThanOrEqual(150);
+        // The cut read's thinking so far was never reported (1 output token from message_start): marked a lower bound.
+        expect(summary.hardPageReadUsage.map((entry) => [entry.outputTokens, entry.outputTokensIncomplete])).toEqual([
+          [300, false], [1, true]]);
         const medicine = payload.items.find((item) => item.kind === 'medicine')!;
         expect(medicine.checkReasons).toEqual(expect.arrayContaining(['single_reading_only', 'best_guess_from_picture']));
         expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
@@ -1105,8 +1123,8 @@ describe('PaperReadingService', () => {
         const requests = (client.readPage as jest.Mock).mock.calls.map(([request]) => request as { hardPage?: boolean;
           followupEffort?: string; trace?: unknown; effort: string });
         expect(requests.filter((request) => request.hardPage).map((request) => [request.effort, request.followupEffort,
-          request.trace])).toEqual([['max', 'medium', { turns: 0, followupTurns: 0 }],
-          ['max', 'medium', { turns: 0, followupTurns: 0 }]]);
+          request.trace])).toEqual([['max', 'medium', { turns: 0, followupTurns: 0, cutAttempts: 0 }],
+          ['max', 'medium', { turns: 0, followupTurns: 0, cutAttempts: 0 }]]);
         // Not given: 'high' after a zoom result (the setting's default); the first pass gets none of it.
         const { client: defaults } = hardClient(() => ok(best('Pyrimethamine')));
         await read(hardConfig, defaults);
@@ -1118,7 +1136,8 @@ describe('PaperReadingService', () => {
           for (const [key, value] of Object.entries(entry)) {
             if (['model', 'effort', 'followupEffort', 'endedBy'].includes(key)) {
               expect(value === null || /^[a-z0-9_-]+$/.test(String(value))).toBe(true);
-            } else expect(typeof value).toBe('number');
+            } else if (key === 'outputTokensIncomplete') expect(value).toBe(false);
+            else expect(typeof value).toBe('number');
           }
         }
       });

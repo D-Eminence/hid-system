@@ -93,7 +93,9 @@ const schema = z.object({
   // same value as OCR_AI_HARD_PAGE_EFFORT keeps one effort for the whole read. Fail-closed like the others.
   OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT: effort.default('high'),
   // Output tokens (thinking and answer) for ONE hard-page read, all its turns together: each request's max_tokens is
-  // what is left of it (README "Hard-page time and cost bounds"). 32,000 by default: about 4x the answer and thinking
+  // what is left of it (README "Hard-page time and cost bounds"). It counts the output the API reported, so it bounds
+  // each attempt: a retry of a turn gets the same max_tokens, and an attempt cut mid-answer reports about 1 output
+  // token; the read's billed output is bounded by OCR_AI_HARD_PAGE_DEADLINE_MS, not by this. 32,000 by default: about 4x the answer and thinking
   // the earlier estimate gave a read at 'max', and half of what one read used in production (about 73,000). 4,096 to
   // 128,000; anything else fails startup.
   OCR_AI_HARD_PAGE_MAX_TOKENS: z.preprocess(emptyToUndefined,

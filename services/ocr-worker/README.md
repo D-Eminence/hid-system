@@ -1070,7 +1070,13 @@ Each claimed job runs, in order:
        output tokens for one read, all its turns together; each turn's
        `max_tokens` is what is left (turn 1: 32,000; after a turn of 10,000:
        22,000), and a turn with less than 2,048 left is not sent (the read
-       ends `max_tokens`, a failed read). Other requests keep
+       ends `max_tokens`, a failed read). It counts the output the API
+       *reported*, so it bounds each attempt, not the read's billed output:
+       a retry of a turn (`OCR_AI_MAX_RETRIES`) is sent the same
+       `max_tokens`, and an attempt that failed mid-answer counts about 1
+       output token (see `outputTokensIncomplete` below), so up to
+       `OCR_AI_MAX_RETRIES` + 1 attempts of one turn can each use what was
+       left. The bound relied on for a read is the deadline. Other requests keep
        `OCR_AI_MAX_TOKENS` (64,000), so the text-only body is byte for byte
        unchanged. 32,000 is under half of what one read used in production
        and about 4x the answer plus thinking of a `max` read without zoom.
@@ -1100,11 +1106,16 @@ Each claimed job runs, in order:
      - *Before* (measured, job 5419047a): $3.22 output + $0.39 cache writes
        + uncached input and cache reads (not in the evidence; a few cents) =
        about $3.60 to $3.70 per hard page, 13 minutes.
-     - *Worst case now*, both reads to their token cap before the deadline:
-       2 x 32,000 x $22 per million = $1.41 output, plus about $0.10 to
-       $0.20 input: about $1.50 to $1.60. Above the $1 target: only
-       `OCR_AI_HARD_PAGE_MAX_TOKENS` 20,000 or less guarantees it (2 x 20,000
-       x $22 per million = $0.88, plus input).
+     - *Worst case now*, both reads to their token cap before the deadline,
+       no attempt failing mid-answer: 2 x 32,000 x $22 per million = $1.41
+       output, plus about $0.10 to $0.20 input: about $1.50 to $1.60. Above
+       the $1 target: `OCR_AI_HARD_PAGE_MAX_TOKENS` 20,000 or less keeps it
+       under $1 (2 x 20,000 x $22 per million = $0.88, plus input) only while
+       no attempt is retried after failing mid-answer: the cap is per
+       attempt, so a stream that fails late and is retried can add up to
+       another cap's worth. What actually holds the money is time:
+       `OCR_AI_HARD_PAGE_DEADLINE_MS` (next point) at the production rate.
+       Raising the deadline (allowed up to 1,800,000 ms) raises this bound.
      - *Deadline-bound* (what production's rate implies): about 100 output
        tokens per second per read for 150 s is at most about 15,000 output
        tokens per read, 30,000 per page: about $0.66 output, plus input,
@@ -1135,9 +1146,22 @@ Each claimed job runs, in order:
      (`pass: "hard_page_read"`, `page`, `read` 1 or 2, `requests`, `turns`,
      `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`,
      `durationMs`, `zoomCalls`, `zoomLimited`, `effort`, `followupEffort`,
-     `endedBy`: `answer`, `deadline`, `max_tokens`, `refused` or `error`),
-     in place of the one line for the pass, so the lines still add up to the
-     reading's use; numbers and codes only, no item text. Compare the
+     `endedBy`: `answer`, `deadline`, `max_tokens`, `refused` or `error`,
+     `outputTokensIncomplete`), in place of the one line for the pass, so
+     the lines still add up to the reading's use; numbers, codes and that
+     flag only, no item text. **Cut reads are not costed by these lines.**
+     A streamed answer reports its output tokens only in its final event;
+     an attempt cut after the model had begun (a read ended by the
+     deadline mid-turn, which is the usual case for a first turn at `max`,
+     a shutdown, a timeout or a stream failure) counts its input and only
+     about 1 output token, while the thinking it had generated is billed.
+     Such a line has `outputTokensIncomplete: true` and its `outputTokens`
+     is a lower bound; `ocr.job.completed` carries
+     `hardPageReadsOutputIncomplete` (the number of such reads), and the
+     job's `outputTokens` and stored usage under-count by the same amount.
+     The cost of cut reads, and so of a `max`/`high` comparison where
+     reads are cut, must come from the Anthropic usage and cost report for
+     the staging key and time window, not from these lines. Compare the
      readings against the owner's two chat transcripts for style (they are
      not ground truth) and the usage lines for cost and time.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`

@@ -506,16 +506,17 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(usageLines.map((line) => line.zoomCalls)).toEqual([undefined, 0, 0]);
     for (const line of usageLines.slice(1)) {
       expect(line).toMatchObject({ page: 1, model: 'claude-opus-5-5', effort: 'max', followupEffort: null,
-        endedBy: 'answer', turns: 0, zoomLimited: 0, durationMs: expect.any(Number), inputTokens: expect.any(Number),
+        endedBy: 'answer', outputTokensIncomplete: false, turns: 0, zoomLimited: 0, durationMs: expect.any(Number), inputTokens: expect.any(Number),
         outputTokens: expect.any(Number), cacheReadTokens: expect.any(Number), cacheWriteTokens: expect.any(Number) });
       // Numbers and codes only.
       for (const [key, value] of Object.entries(line)) {
         if (!['event', 'level', 'timestamp', 'jobId', 'correlationId', 'model', 'pass', 'effort', 'followupEffort',
-          'endedBy'].includes(key)) expect(typeof value).toBe('number');
+          'endedBy', 'outputTokensIncomplete'].includes(key)) expect(typeof value).toBe('number');
       }
     }
     const done = lines.find((line) => line.event === 'ocr.job.completed')!;
-    expect(done).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageDeadlineHits: 0 });
+    expect(done).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageDeadlineHits: 0,
+      hardPageReadsOutputIncomplete: 0 });
     expect(result.provenance.reading).toMatchObject({ hardPageDeadlinePages: [] });
     expect(done).toMatchObject({ hardPages: 1, hardPageReads: 2,
       hardPageAgreement: { itemsPaired: 1, itemsSingle: 0, fieldsCompared: expect.any(Number), fieldsAgreed: expect.any(Number) } });

@@ -132,6 +132,13 @@ export interface HardReadUsage extends AiUsageRecord {
   effort: Effort;
   followupEffort: Effort | null;
   endedBy: HardReadEnd;
+  /**
+   * True when an attempt of this read was cut after the model had begun its answer (a deadline or shutdown abort, a
+   * timeout or a stream failure; HardReadTrace.cutAttempts): its thinking so far was billed but the stream never
+   * reported it, so outputTokens is a lower bound. The cost of such a read comes from the Anthropic usage and cost
+   * report, not from this line.
+   */
+  outputTokensIncomplete: boolean;
 }
 
 /** 'hard_page_read': both best-guess reads of a hard page (owner decision 2026-11-05), so their cost shows apart. */
@@ -379,7 +386,7 @@ export class PaperReadingService {
       if (zoom) zoomPages.push(state.page);
       const reads = [0, 1].map(() => ({
         session: zoom ? createZoomSession(zoom, state.page, zoomMaxCalls, picture.base64.length) : undefined,
-        controller: new AbortController(), trace: { turns: 0, followupTurns: 0 } as HardReadTrace,
+        controller: new AbortController(), trace: { turns: 0, followupTurns: 0, cutAttempts: 0 } as HardReadTrace,
         done: false, cut: false, durationMs: 0, attempts: 0, usage: zeroUsage(),
       }));
       const started = Date.now();
@@ -427,7 +434,8 @@ export class PaperReadingService {
           durationMs: read.durationMs, turns: read.trace.turns, zoomCalls: read.session?.stats.calls ?? 0,
           zoomLimited: read.session?.stats.limited ?? 0, effort: hardEffort,
           followupEffort: read.trace.followupTurns > 0 ? followupEffort : null,
-          endedBy: endOf(result, read.cut && !signal.aborted) });
+          endedBy: endOf(result, read.cut && !signal.aborted),
+          outputTokensIncomplete: read.trace.cutAttempts > 0 });
       });
       // A read the deadline cut is not an error of the job; a shutdown (or an unexpected error) still is.
       const cutByDeadline = (index: number) => reads[index]!.cut && !signal.aborted

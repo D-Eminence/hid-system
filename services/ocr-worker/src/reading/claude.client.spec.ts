@@ -644,12 +644,12 @@ describe('ClaudePageClient', () => {
       it('runs the turns after a zoom result at the follow-up effort, the first at the hard-page effort', async () => {
         const { instance, fetch } = bounded([turn([thinking('sig-1'), zoomCall('toolu_a')], 'tool_use'),
           turn([thinking('sig-2'), zoomCall('toolu_b')], 'tool_use'), final()], 32_000);
-        const trace = { turns: 0, followupTurns: 0 };
+        const trace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
         await expect(instance.readPage({ ...hardRequest, followupEffort: 'high', trace,
           zoom: createZoomSession(goodZoom, 1, 4, 0) }, new AbortController().signal))
           .resolves.toMatchObject({ kind: 'answer', attempts: 3 });
         expect(sent(fetch).map((body) => body.output_config.effort)).toEqual(['max', 'high', 'high']);
-        expect(trace).toEqual({ turns: 3, followupTurns: 2 });
+        expect(trace).toEqual({ turns: 3, followupTurns: 2, cutAttempts: 0 });
         // The thinking blocks of the 'max' turns go back unchanged on the 'high' turns (append-only history).
         const third = JSON.parse(String((fetch.mock.calls[2] as [unknown, RequestInit])[1].body)) as Body;
         expect(third.messages[1]!.content).toEqual(expect.arrayContaining([{ type: 'thinking', thinking: '', signature: 'sig-1' }]));
@@ -681,6 +681,50 @@ describe('ClaudePageClient', () => {
         const unset = bounded([sse(JSON.stringify(hardAnswer))]);
         await unset.instance.readPage(hardRequest, new AbortController().signal);
         expect(sent(unset.fetch)[0]!.max_tokens).toBe(64_000);
+      });
+
+      /** A turn whose answer has begun (message_start, then 5,000 characters of thinking) and then hangs until aborted. */
+      const begunThenHang = (init?: RequestInit) => {
+        const encoder = new TextEncoder();
+        const event = (name: string, data: unknown) => encoder.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(event('message_start', { type: 'message_start', message: { id: 'msg_cut', type: 'message',
+            role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null,
+            stop_details: null, usage: { input_tokens: 5_000, output_tokens: 1 } } }));
+          controller.enqueue(event('content_block_start', { type: 'content_block_start', index: 0,
+            content_block: { type: 'thinking', thinking: '', signature: '' } }));
+          controller.enqueue(event('content_block_delta', { type: 'content_block_delta', index: 0,
+            delta: { type: 'thinking_delta', thinking: 'x'.repeat(5_000) } }));
+          init?.signal?.addEventListener('abort', () => controller.error(init.signal!.reason), { once: true });
+        } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      };
+
+      it('marks a read cut mid-answer: its reported output tokens are only a lower bound', async () => {
+        const fetch = jest.fn(async (_url: unknown, init?: RequestInit) => begunThenHang(init));
+        const instance = new ClaudePageClient({ ...config, OCR_AI_HARD_PAGE_MAX_TOKENS: 32_000 },
+          { fetch: fetch as unknown as typeof globalThis.fetch });
+        const controller = new AbortController();
+        const trace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+        setTimeout(() => controller.abort(new Error('deadline')), 50);
+        const error = await instance.readPage({ ...hardRequest, trace }, controller.signal).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(AiInterruptedError);
+        // The stream reported only message_start's 1 output token; the thinking already generated is not in it.
+        expect(error).toMatchObject({ attempts: 1, usage: { inputTokens: 5_000, outputTokens: 1 } });
+        expect(trace).toEqual({ turns: 0, followupTurns: 0, cutAttempts: 1 });
+        // An attempt refused before its answer began (an HTTP 529) is not a cut attempt.
+        const refused = bounded([failure(529, 'overloaded_error'), sse(JSON.stringify(hardAnswer))], 32_000);
+        const clean = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+        await refused.instance.readPage({ ...hardRequest, trace: clean }, new AbortController().signal);
+        expect(clean).toEqual({ turns: 1, followupTurns: 0, cutAttempts: 0 });
+      });
+
+      it('sends each retry of a turn the same max_tokens: the token cap bounds an attempt, the deadline the read', async () => {
+        const { instance, fetch } = bounded([brokenStream(), brokenStream(), sse(JSON.stringify(hardAnswer))], 32_000);
+        const trace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+        await expect(instance.readPage({ ...hardRequest, trace, zoom: createZoomSession(goodZoom, 1, 4, 0) },
+          new AbortController().signal)).resolves.toMatchObject({ kind: 'answer', attempts: 3 });
+        expect(sent(fetch).map((body) => body.max_tokens)).toEqual([32_000, 32_000, 32_000]);
+        expect(trace).toEqual({ turns: 1, followupTurns: 0, cutAttempts: 2 });
       });
     });
 

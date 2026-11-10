@@ -99,6 +99,9 @@ export class OcrWorker {
         zoomCalls: summary.zoomCalls, zoomLimited: summary.zoomLimited, zoomFailed: summary.zoomFailed,
         // Hard pages where OCR_AI_HARD_PAGE_DEADLINE_MS cut a read still running (a count only).
         hardPageDeadlineHits: summary.hardPageDeadlinePages.length,
+        // Hard-page reads whose outputTokens is a lower bound (an attempt cut mid-answer): outputTokens below
+        // under-counts by their unreported thinking (README "Hard-page time and cost bounds").
+        hardPageReadsOutputIncomplete: summary.hardPageReadUsage.filter((read) => read.outputTokensIncomplete).length,
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
         cacheReadInputTokens: summary.usage.cacheReadInputTokens,
         cacheCreationInputTokens: summary.usage.cacheCreationInputTokens,
@@ -187,6 +190,7 @@ export class OcrWorker {
             cacheReadTokens: read.cacheReadTokens, cacheWriteTokens: read.cacheWriteTokens, durationMs: read.durationMs,
             zoomCalls: read.zoomCalls, zoomLimited: read.zoomLimited, effort: read.effort,
             followupEffort: read.followupEffort, endedBy: read.endedBy,
+            outputTokensIncomplete: read.outputTokensIncomplete,
             ...(pagesSent === undefined ? {} : { pagesSent }) });
         }
         continue;
