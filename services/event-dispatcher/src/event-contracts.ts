@@ -19,8 +19,7 @@ const EVENT_TYPES: Readonly<Record<EventProducer, ReadonlySet<string>>> = {
 };
 
 const ALLOWED_PAYLOAD_KEYS: Readonly<Record<EventProducer, ReadonlySet<string>>> = {
-  identity: new Set(['source', 'identifierType', 'verified', 'resolution', 'consentGrantId', 'reviewRequired',
-    'scope']),
+  identity: new Set(['source', 'identifierType', 'verified', 'resolution', 'consentGrantId', 'reviewRequired']),
   ocr: new Set(['jobId', 'documentId', 'status', 'patientResolved', 'confirmationId',
     'publicationId', 'validationId', 'targetResourceType', 'targetResourceId',
     'failureCode', 'retryable']),
@@ -61,7 +60,10 @@ export function eventEnvelope(event: ClaimedEvent): HidEventEnvelopeV1 {
     throw new EventContractFailure('EVENT_PAYLOAD_POLICY_REJECTED', 'Event payload violates the delivery size or shape policy');
   }
   for (const key of Object.keys(event.payload)) {
-    if (!ALLOWED_PAYLOAD_KEYS[event.producer].has(key)) {
+    // "scope" is allowed on the PIN notice only (database 0121), not on any
+    // other identity event.
+    if (!ALLOWED_PAYLOAD_KEYS[event.producer].has(key)
+        && !(key === 'scope' && event.eventType === 'PatientAccessPinVerified')) {
       throw new EventContractFailure('EVENT_PAYLOAD_POLICY_REJECTED', 'Event payload contains a field outside its producer contract');
     }
   }
