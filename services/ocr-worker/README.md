@@ -1404,11 +1404,18 @@ Each claimed job runs, in order:
      last-resort image re-read, if it has a picture:
      - *When.* (a) A hard page whose two reads **both** failed (no hard
        reading; `hard_reads_failed`) **and** whose first pass kept no item on
-       that page. (b) A page whose first pass **failed or was declined** and
-       whose text re-read then gave no answer either (failed, declined, or
-       unavailable after its retries). Not when the first pass kept items (they
-       stay, `reread_failed`, as before), not when a hard read answered (even if
-       the first pass was empty: nothing to do), not when a hard page's reads
+       that page, or a hard read answered but no item of the hard reading
+       held to the page while the first pass kept none either (a
+       `page_read_failed` warn with `pass` `hard_page_read`, `reason`
+       `kept_nothing`; the last resort then has what is left of the deadline).
+       (b) A page whose first pass **failed or was declined** and whose text
+       re-read then gave no answer either (failed, declined, or unavailable
+       after its retries), or answered with no item that held to the page (a
+       `page_read_failed` warn with `pass` `reread`, `reason` `kept_nothing`;
+       if the last resort gives nothing too, the page is failed, `ai_unsure`,
+       not an empty page counted as re-read). Not when the first pass kept
+       items (they stay, `reread_failed`, as before), not when a hard reading
+       kept an item (even if the first pass was empty), not when a hard page's reads
        were both declined or refused as invalid (the page goes to its text
        re-read, as before: the picture is the likely cause), and not for a
        flagged page that is not a hard page.

@@ -467,7 +467,7 @@ export class PaperReadingService {
      * pass kept, reread_failed). The job is never failed for it.
      */
     const readHard = async (state: PageState, picture: PageImage,
-      decision: Extract<PageImageDecision, { kind: 'image' }>): Promise<{ kind: 'read'; check: PageCheck }
+      decision: Extract<PageImageDecision, { kind: 'image' }>): Promise<{ kind: 'read'; check: PageCheck; timeLeftMs: number }
       | { kind: 'fallback'; reason: 'image_rejected' | 'image_refused' } | { kind: 'failed'; timeLeftMs: number }> => {
       hardPages.push(state.page);
       hardReads += 2;
@@ -564,7 +564,7 @@ export class PaperReadingService {
       });
       const merged = mergeHardReadings(readings, input.sourceSha256Hex);
       for (const key of Object.keys(agreement) as (keyof HardPageAgreement)[]) agreement[key] += merged.agreement[key];
-      return { kind: 'read', check: merged.check };
+      return { kind: 'read', check: merged.check, timeLeftMs: deadlineMs - (Date.now() - started) };
     };
     const lastResortPages: number[] = [];
     const lastResortFailed: number[] = [];
@@ -627,7 +627,20 @@ export class PaperReadingService {
       try {
         if (decision?.kind === 'image' && this.isHardPage(state)) {
           const hard = await readHard(state, pictureOf(decision), decision);
-          if (hard.kind === 'read') {
+          if (hard.kind === 'read' && hard.check.items.length === 0 && state.firstCheck!.items.length === 0) {
+            // A hard read answered, but no item of the hard reading held to the page, and the first pass kept
+            // nothing either: still no usable reading, so the last resort as for failed hard reads (README "Last
+            // resort").
+            pageFailures.push({ page: state.page, pass: 'hard_page_read', reason: 'kept_nothing' });
+            const last = await lastResort(state, decision, hard.timeLeftMs);
+            if (last.kind === 'read') {
+              hardCheck = last.check;
+              fromImage = true;
+              lastResortRead = true;
+            } else {
+              imageFailed.push(state.page);
+            }
+          } else if (hard.kind === 'read') {
             hardCheck = hard.check;
             fromImage = true;
           } else if (hard.kind === 'fallback') {
@@ -711,12 +724,18 @@ export class PaperReadingService {
         state.fromImage = fromImage;
         return;
       }
-      // A page whose first pass failed or was declined: nothing to merge, the re-read stands.
+      // A page whose first pass failed or was declined: nothing to merge, the re-read stands, if it kept anything.
       if (answer?.kind === 'answer') {
-        state.final = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
+        const check = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
           sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker });
-        state.reread = 'done';
-        return;
+        if (check.items.length > 0) {
+          state.final = check;
+          state.reread = 'done';
+          return;
+        }
+        // The re-read answered but no item held to the page: still no reading of the page at all (README "Last
+        // resort", case b).
+        pageFailures.push({ page: state.page, pass, reason: 'kept_nothing' });
       }
       if (state.firstCheck === null) {
         // The first pass failed or was declined and so did its re-read: no reading of the page at all. The last

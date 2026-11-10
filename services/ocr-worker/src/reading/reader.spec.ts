@@ -573,7 +573,11 @@ describe('PaperReadingService', () => {
       expect(seen.filter((call) => call.model === 'claude-opus-5-5').map((call) => call.page)).toEqual([3, 4, 1]);
       // Page 1 is flagged, but a page of a many-page document: its text re-read, saying why.
       expect(all.summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'not_single_page' }]);
-      expect(summary.rereadPages).toEqual([3, 4]);
+      // The re-reads of pages 3 and 4 answered but kept nothing (an empty page): no reading of either page, so each is
+      // a failed re-read with a kept_nothing warn (README "Last resort", case b), not an empty page counted as re-read.
+      expect(summary.rereadPages).toEqual([]);
+      expect(summary.pageReadFailures.filter((failure) => failure.reason === 'kept_nothing')).toEqual([
+        { page: 3, pass: 'reread', reason: 'kept_nothing' }, { page: 4, pass: 'reread', reason: 'kept_nothing' }]);
     });
 
     it('sends a page whose text had a masked number as a picture by default (owner decision), and keeps it text-only when set to text_only', async () => {
@@ -1446,6 +1450,46 @@ describe('PaperReadingService', () => {
         expect(payload.pages[0]!.flagReasons).toContain('ai_declined');
         expect(summary.pageReadFailures).toContainEqual({ page: 1, pass: 'last_resort_read', reason: 'last_resort_failed',
           detail: 'refusal' });
+      });
+
+      it('a hard read that answered but kept nothing, on a page whose first pass kept nothing, gets the last resort '
+        + 'in what is left of the deadline', async () => {
+        const { client, calls } = lastClient({ first: emptyFirst, hard: ok(modelPage([])) });
+        const { payload, summary } = await read(hardConfig, client);
+        expect(calls.map((call) => call.kind)).toEqual(['first', 'hard', 'hard', 'last']);
+        expect(payload.items).toHaveLength(1);
+        expect(payload.items[0]!.checkReasons).toEqual(expect.arrayContaining(['last_resort_read', 'read_from_image']));
+        expect(summary).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [], imageRereadPages: [1] });
+        expect(summary.pageReadFailures).toEqual([{ page: 1, pass: 'hard_page_read', reason: 'kept_nothing' }]);
+        // The last resort keeps nothing either: the page is clearly failed, with both warn lines.
+        const none = lastClient({ first: emptyFirst, hard: ok(modelPage([])), last: ok(modelPage([])) });
+        const failed = await read(hardConfig, none.client);
+        expect(failed.payload.items).toEqual([]);
+        expect(failed.payload.pages[0]!.flagReasons).toContain('ai_unsure');
+        expect(failed.payload.reading.imageRereadFailedPages).toEqual([1]);
+        expect(failed.summary.pageReadFailures).toEqual([{ page: 1, pass: 'hard_page_read', reason: 'kept_nothing' },
+          { page: 1, pass: 'last_resort_read', reason: 'last_resort_failed', detail: 'kept_nothing' }]);
+      });
+
+      it('a page whose first pass failed and whose text re-read answered but kept nothing gets the last resort',
+        async () => {
+        // Fictional: a note whose words are not on the page, so the checks drop it.
+        const offPage = ok(modelPage([modelItem({ kind: 'note', asWritten: 'Zz qq not on this page', lineIds: ['p1-l1'] })]));
+        const { client, calls } = lastClient({ first: failedMax, text: offPage });
+        const { payload, summary } = await read(hardConfig, client);
+        expect(calls.map((call) => call.kind)).toEqual(['first', 'text', 'last']);
+        expect(payload.items).toHaveLength(1);
+        expect(payload.items[0]!.checkReasons).toContain('last_resort_read');
+        expect(summary).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [], rereadPages: [1] });
+        expect(summary.pageReadFailures.map((failure) => [failure.pass, failure.reason])).toEqual([
+          ['first_pass', 'max_tokens'], ['reread', 'kept_nothing']]);
+        // The last resort fails too: the page ends failed (ai_unsure), not an empty page marked done.
+        const none = lastClient({ first: failedMax, text: offPage, last: failedMax });
+        const failed = await read(hardConfig, none.client);
+        expect(failed.payload.items).toEqual([]);
+        expect(failed.payload.pages[0]!.flagReasons).toContain('ai_unsure');
+        expect(failed.summary).toMatchObject({ rereadPages: [], lastResortFailedPages: [1] });
+        expect(failed.payload.reading.status).toBe('ai_failed');
       });
 
       it('a page whose first pass failed and whose text re-read answered gets no last resort', async () => {
