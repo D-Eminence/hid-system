@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, HARD_READ_MIN_TURN_TOKENS,
-  retryAfterMs } from './claude.client';
+import { AiInterruptedError, AiRejectedError, AiTransientError, answerReserveMs, ClaudePageClient,
+  FORCED_ANSWER_INSTRUCTION, FORCED_ANSWER_INSTRUCTION_NO_ZOOM, HARD_READ_ANSWER_RESERVE_MS, HARD_READ_ANSWER_RESERVE_TOKENS, HARD_READ_MIN_TURN_MS, HARD_READ_MIN_TURN_TOKENS, retryAfterMs,
+  type HardReadTrace } from './claude.client';
 import { readOcrWorkerConfig } from '../config';
 import { Semaphore } from '../semaphore';
 import { HIGH_RESOLUTION_TIER, resizedSize, STANDARD_TIER } from './page-image';
@@ -505,7 +506,8 @@ describe('ClaudePageClient', () => {
     const zoomCall = (id: string, json = JSON.stringify(zoomInput)): Block => ({ type: 'tool_use', id, name: 'zoom', json });
     const thinking = (signature: string): Block => ({ type: 'thinking', thinking: '', signature });
     const final = () => turn([thinking('sig-final'), { type: 'text', text: JSON.stringify(hardAnswer) }], 'end_turn');
-    type Body = { tools?: unknown[]; tool_choice?: unknown; cache_control?: unknown; output_config: { format: unknown };
+    type Body = { tools?: unknown[]; tool_choice?: unknown; cache_control?: unknown; max_tokens: number;
+      output_config: { format: unknown; effort: string };
       messages: Array<{ role: string; content: Array<Record<string, unknown>> | string }> };
     const bodies = (fetch: jest.Mock) => fetch.mock.calls.map((call) => JSON.parse(String((call as [unknown, RequestInit])[1].body)) as Body);
 
@@ -555,15 +557,24 @@ describe('ClaudePageClient', () => {
       const { instance, fetch } = client([turn([thinking('sig-five'), ...calls], 'tool_use'), final()]);
       const zoom = { available: () => true, crop: jest.fn(goodZoom.crop) };
       const session = createZoomSession(zoom, 1, 4, image.base64.length);
-      await expect(instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal))
-        .resolves.toMatchObject({ kind: 'answer', attempts: 2 });
+      const trace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+      await expect(instance.readPage({ ...hardRequest, followupEffort: 'high', trace, zoom: session },
+        new AbortController().signal)).resolves.toMatchObject({ kind: 'answer', attempts: 2 });
       expect(fetch).toHaveBeenCalledTimes(2);
       expect(zoom.crop).toHaveBeenCalledTimes(4);
       const [first, second] = bodies(fetch);
       expect(String((first!.messages[0]!.content as Array<{ text?: string }>)[1]!.text))
         .toContain('ask for all of those zooms together in one response');
-      // One assistant turn with the five calls, then one user turn with the five results, in call order.
+      // One assistant turn with the five calls, then one user turn with the five results, in call order; the cap is
+      // used up, so zoom is no longer offered, but the second turn is an ordinary follow-up turn (prompt rule J's
+      // normal path): the follow-up effort, the budget left less the answer reserve, no answer-only instruction.
       expect(second!.messages).toHaveLength(3);
+      expect(JSON.stringify(second!.messages)).not.toContain(FORCED_ANSWER_INSTRUCTION_NO_ZOOM);
+      expect(second!.tools).toEqual([ZOOM_TOOL]);
+      expect(second!.tool_choice).toEqual({ type: 'none' });
+      expect(second!.output_config.effort).toBe('high');
+      expect(second!.max_tokens).toBe(first!.max_tokens - 700);
+      expect(trace).toEqual({ turns: 2, followupTurns: 1, cutAttempts: 0, zoomClosed: 'zoom_cap' });
       expect((second!.messages[1]!.content as Array<{ type: string }>).filter((block) => block.type === 'tool_use')).toHaveLength(5);
       const results = second!.messages[2]!.content as Array<Record<string, unknown>>;
       expect(results.map((entry) => entry.tool_use_id)).toEqual(['toolu_0', 'toolu_1', 'toolu_2', 'toolu_3', 'toolu_4']);
@@ -605,28 +616,93 @@ describe('ClaudePageClient', () => {
       expect(session.stats).toEqual({ calls: 0, limited: 0, failed: 2 });
     });
 
-    it('never runs a tool from a cut-off or refused turn', async () => {
+    it('never runs a tool from a cut-off or refused turn; a cut-off turn is followed by the answer-only turn', async () => {
       const zoom = { available: () => true, crop: jest.fn(goodZoom.crop) };
-      const { instance } = client([turn([zoomCall('toolu_cut', '{"page": 1, "box": {"x": 1')], 'max_tokens'),
-        turn([zoomCall('toolu_refused')], 'refusal')]);
+      const { instance, fetch } = client([turn([zoomCall('toolu_cut', '{"page": 1, "box": {"x": 1')], 'max_tokens'),
+        final(), turn([zoomCall('toolu_refused')], 'refusal')]);
       const signal = new AbortController().signal;
-      await expect(instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) }, signal))
-        .resolves.toMatchObject({ kind: 'failed', reason: 'max_tokens', attempts: 1 });
+      const trace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+      await expect(instance.readPage({ ...hardRequest, trace, zoom: createZoomSession(zoom, 1, 8, 0) }, signal))
+        .resolves.toMatchObject({ kind: 'answer', attempts: 2, usage: { outputTokens: 1_400 } });
+      // The answer-only turn is not a follow-up turn (it runs at low effort, not the follow-up effort).
+      expect(trace).toEqual({ turns: 2, followupTurns: 0, cutAttempts: 0, forced: 'max_tokens' });
+      // The cut turn is left out (its thinking cannot go back); the instruction follows the first user message.
+      const forced = bodies(fetch)[1]!;
+      expect(forced.messages).toHaveLength(2);
+      expect(forced.messages[1]).toEqual({ role: 'user', content: [{ type: 'text', text: FORCED_ANSWER_INSTRUCTION }] });
+      expect(forced.tool_choice).toEqual({ type: 'none' });
+      // A refusal ends the read at once (the reader may send the page to a text re-read).
       await expect(instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) }, signal))
         .resolves.toMatchObject({ kind: 'refused', attempts: 1 });
+      expect(fetch).toHaveBeenCalledTimes(3);
       expect(zoom.crop).not.toHaveBeenCalled();
     });
 
-    it('ends a read that keeps calling past its limit as incomplete, with every turn counted', async () => {
-      const responses = Array.from({ length: 12 }, (_, index) => turn([zoomCall(`toolu_${index}`)], 'tool_use', 10, 10));
-      const { instance, fetch } = client(responses);
+    it('stops offering zoom once the calls are used up, with an ordinary follow-up turn; then the answer-only turn if that one does not answer', async () => {
+      const { instance, fetch } = client([turn([zoomCall('toolu_0')], 'tool_use', 10, 10),
+        turn([zoomCall('toolu_1')], 'tool_use', 10, 10), final()]);
       const session = createZoomSession(goodZoom, 1, 2, 0);
-      const result = await instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal);
-      // 2 calls + 3 turns past them: 6 requests.
-      expect(result).toMatchObject({ kind: 'failed', reason: 'incomplete', attempts: 6,
-        usage: { inputTokens: 60, outputTokens: 60 } });
-      expect(fetch).toHaveBeenCalledTimes(6);
-      expect(session.stats).toEqual({ calls: 2, limited: 3, failed: 0 });
+      const trace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+      await expect(instance.readPage({ ...hardRequest, followupEffort: 'high', trace, zoom: session },
+        new AbortController().signal)).resolves.toMatchObject({ kind: 'answer', attempts: 3 });
+      expect(trace).toEqual({ turns: 3, followupTurns: 2, cutAttempts: 0, zoomClosed: 'zoom_cap' });
+      expect(bodies(fetch).map((body) => body.tool_choice)).toEqual([{ type: 'auto' }, { type: 'auto' }, { type: 'none' }]);
+      expect(bodies(fetch).map((body) => body.output_config.effort)).toEqual(['max', 'high', 'high']);
+      expect(JSON.stringify(bodies(fetch)[2]!.messages)).not.toContain(FORCED_ANSWER_INSTRUCTION_NO_ZOOM);
+      expect(session.stats).toEqual({ calls: 2, limited: 0, failed: 0 });
+      // That turn stopping at max_tokens: the answer-only turn follows (low effort, its instruction).
+      const cut = client([turn([zoomCall('toolu_0'), zoomCall('toolu_1')], 'tool_use', 10, 10),
+        turn([thinking('sig-long')], 'max_tokens', 10, 10), final()]);
+      const cutTrace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+      await expect(cut.instance.readPage({ ...hardRequest, followupEffort: 'high', trace: cutTrace,
+        zoom: createZoomSession(goodZoom, 1, 2, 0) }, new AbortController().signal))
+        .resolves.toMatchObject({ kind: 'answer', attempts: 3 });
+      expect(cutTrace).toEqual({ turns: 3, followupTurns: 1, cutAttempts: 0, zoomClosed: 'zoom_cap', forced: 'max_tokens' });
+      expect(bodies(cut.fetch).map((body) => body.output_config.effort)).toEqual(['max', 'high', 'low']);
+      expect(bodies(cut.fetch)[2]!.messages[3]).toEqual({ role: 'user',
+        content: [{ type: 'text', text: FORCED_ANSWER_INSTRUCTION }] });
+      // Before 2026-11-10 a read could go on 3 turns past its calls; now a model still calling after zoom was closed
+      // gets the answer-only turn, and there is never a turn after that one.
+      const looping = client(Array.from({ length: 12 }, (_, index) => turn([zoomCall(`toolu_${index}`)], 'tool_use', 10, 10)));
+      const loopTrace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+      const result = await looping.instance.readPage({ ...hardRequest, trace: loopTrace,
+        zoom: createZoomSession(goodZoom, 1, 2, 0) }, new AbortController().signal);
+      expect(result).toMatchObject({ kind: 'failed', reason: 'incomplete', code: 'zoom_loop', attempts: 4,
+        usage: { inputTokens: 40, outputTokens: 40 } });
+      expect(loopTrace.forced).toBe('incomplete');
+      expect(looping.fetch).toHaveBeenCalledTimes(4);
+    });
+
+    it('reproduces job 566c38bf (the #200 reader): zoom turns, then an answer turn cut at max_tokens; now answered', async () => {
+      // The most likely path (README "A hard read always ends with an answer"): each read's zoom turns used its calls,
+      // and the turn that should have answered thought until max_tokens. The #200 client returned
+      // { kind: 'failed', reason: 'max_tokens' } there, silently; both reads did, and the page kept its first reading.
+      const { instance, fetch } = client([turn([thinking('sig-a'), zoomCall('toolu_a'), zoomCall('toolu_b')], 'tool_use'),
+        turn([thinking('sig-b'), zoomCall('toolu_c')], 'tool_use'), turn([thinking('sig-cut')], 'max_tokens', 5_000, 4_000),
+        final()]);
+      const trace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+      const result = await instance.readPage({ ...hardRequest, trace, zoom: createZoomSession(goodZoom, 1, 4, 0) },
+        new AbortController().signal);
+      expect(result).toMatchObject({ kind: 'answer', attempts: 4, answer: { items: [{ name: 'Pyrimethamine?' }] } });
+      expect(trace).toEqual({ turns: 4, followupTurns: 2, cutAttempts: 0, forced: 'max_tokens' });
+      const sentBodies = bodies(fetch);
+      // Every turn before the answer-only one keeps the answer reserve out of its max_tokens (16,000 cap here: 8,000).
+      expect(sentBodies.map((body) => body.max_tokens)).toEqual([8_000, 7_300, 6_600, 8_000]);
+      // The answer-only turn: the two zoom turns with their thinking, not the cut turn, then the instruction.
+      expect(sentBodies[3]!.messages).toHaveLength(6);
+      expect(JSON.stringify(sentBodies[3]!.messages)).not.toContain('sig-cut');
+      expect(sentBodies[3]!.messages[5]).toEqual({ role: 'user', content: [{ type: 'text', text: FORCED_ANSWER_INSTRUCTION }] });
+    });
+
+    it('ends on an unparseable or off-schema answer with its reason code, without a repair turn', async () => {
+      const { instance, fetch } = client([turn([{ type: 'text', text: 'not json' }], 'end_turn'),
+        turn([{ type: 'text', text: JSON.stringify({ items: 'none' }) }], 'end_turn')]);
+      const signal = new AbortController().signal;
+      await expect(instance.readPage({ ...hardRequest, zoom: createZoomSession(goodZoom, 1, 4, 0) }, signal))
+        .resolves.toMatchObject({ kind: 'failed', reason: 'malformed', code: 'parse_error', attempts: 1 });
+      await expect(instance.readPage({ ...hardRequest, zoom: createZoomSession(goodZoom, 1, 4, 0) }, signal))
+        .resolves.toMatchObject({ kind: 'failed', reason: 'malformed', code: 'schema_error', attempts: 1 });
+      expect(fetch).toHaveBeenCalledTimes(2);
     });
 
     it('stops on shutdown between turns, counting the requests already made', async () => {
@@ -698,27 +774,151 @@ describe('ClaudePageClient', () => {
         expect(sent(same.fetch).map((body) => body.output_config.effort)).toEqual(['max', 'max']);
       });
 
-      it('holds a read\'s output tokens over all its turns to OCR_AI_HARD_PAGE_MAX_TOKENS', async () => {
-        // Each tool turn "writes" 10,000 output tokens: max_tokens is what is left of the read's 32,000.
+      it('holds a read\'s output tokens over all its turns to OCR_AI_HARD_PAGE_MAX_TOKENS, keeping the answer reserve', async () => {
+        // Two tool turns "write" 10,000 output tokens each and a third its whole max_tokens: every turn's max_tokens is
+        // what is left of the read's 32,000 less the 8,000 kept for the answer, so the answer-only turn still has them.
         const { instance, fetch } = bounded([turn([zoomCall('toolu_a')], 'tool_use', 5_000, 10_000),
-          turn([zoomCall('toolu_b')], 'tool_use', 5_000, 10_000), turn([zoomCall('toolu_c')], 'tool_use', 5_000, 10_000),
+          turn([zoomCall('toolu_b')], 'tool_use', 5_000, 10_000), turn([zoomCall('toolu_c')], 'tool_use', 5_000, 4_000),
           final()], 32_000);
-        const result = await instance.readPage({ ...hardRequest, zoom: createZoomSession(goodZoom, 1, 4, 0) },
+        const trace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+        const result = await instance.readPage({ ...hardRequest, trace, zoom: createZoomSession(goodZoom, 1, 4, 0) },
           new AbortController().signal);
-        expect(sent(fetch).map((body) => body.max_tokens)).toEqual([32_000, 22_000, 12_000]);
-        // 2,000 left is under HARD_READ_MIN_TURN_TOKENS: no fourth request, the read ends cut off.
-        expect(result).toMatchObject({ kind: 'failed', reason: 'max_tokens', attempts: 3, usage: { outputTokens: 30_000 } });
-        expect(fetch).toHaveBeenCalledTimes(3);
+        expect(HARD_READ_ANSWER_RESERVE_TOKENS).toBe(8_000);
+        expect(sent(fetch).map((body) => body.max_tokens)).toEqual([24_000, 14_000, 4_000, 8_000]);
+        expect(sent(fetch).map((body) => body.output_config.effort)).toEqual(['max', 'max', 'max', 'low']);
+        // The answer-only turn: tool still declared (earlier turns hold tool_use blocks), but not offered.
+        const last = bodies(fetch)[3]!;
+        expect(last.tools).toEqual([ZOOM_TOOL]);
+        expect(last.tool_choice).toEqual({ type: 'none' });
+        expect(result).toMatchObject({ kind: 'answer', attempts: 4, usage: { outputTokens: 24_700 } });
+        expect(trace.forced).toBe('budget');
         expect(HARD_READ_MIN_TURN_TOKENS).toBe(2_048);
-        // A hard page without zoom: one request at the cap. Any other request keeps OCR_AI_MAX_TOKENS.
+        // A hard page without zoom: its one turn keeps the reserve too (24,000 less 8,000); no tool on any turn. Any
+        // other request keeps OCR_AI_MAX_TOKENS.
         const plain = bounded([sse(JSON.stringify(hardAnswer)), sse(JSON.stringify(answer))], 24_000);
         await plain.instance.readPage(hardRequest, new AbortController().signal);
         await plain.instance.readPage({ model: 'claude-opus-5-5', effort: 'high', page: 1, lines }, new AbortController().signal);
-        expect(sent(plain.fetch).map((body) => body.max_tokens)).toEqual([24_000, 64_000]);
-        // Not configured (a client built without it): OCR_AI_MAX_TOKENS, as before.
+        expect(sent(plain.fetch).map((body) => body.max_tokens)).toEqual([16_000, 64_000]);
+        // Not configured (a client built without it): OCR_AI_MAX_TOKENS less the reserve.
         const unset = bounded([sse(JSON.stringify(hardAnswer))]);
         await unset.instance.readPage(hardRequest, new AbortController().signal);
-        expect(sent(unset.fetch)[0]!.max_tokens).toBe(64_000);
+        expect(sent(unset.fetch)[0]!.max_tokens).toBe(56_000);
+        // A cap of 4,096: the reserve is at most half of it.
+        const small = bounded([sse('', 'max_tokens'), sse(JSON.stringify(hardAnswer))], 4_096);
+        const cut: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+        await expect(small.instance.readPage({ ...hardRequest, trace: cut }, new AbortController().signal))
+          .resolves.toMatchObject({ kind: 'answer', attempts: 2 });
+        expect(sent(small.fetch).map((body) => body.max_tokens)).toEqual([2_048, 2_048]);
+        expect(cut.forced).toBe('max_tokens');
+        expect(bodies(small.fetch)[1]).not.toHaveProperty('tool_choice');
+        // A read never offered zoom: the instruction without the zoom sentence.
+        expect(bodies(small.fetch)[1]!.messages[1]).toEqual({ role: 'user',
+          content: [{ type: 'text', text: FORCED_ANSWER_INSTRUCTION_NO_ZOOM }] });
+        expect(FORCED_ANSWER_INSTRUCTION_NO_ZOOM).not.toContain('zoom');
+      });
+
+      it('sends the answer-only turn at once when the page\'s deadline is within the answer\'s time reserve', async () => {
+        const { instance, fetch } = bounded([final()], 32_000);
+        const trace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+        // 69 s left with 50 s kept for the answer: 19 s is too little for a turn to finish.
+        await expect(instance.readPage({ ...hardRequest, trace, zoom: createZoomSession(goodZoom, 1, 4, 0),
+          answerBy: { timeLeftMs: () => 50_000 + HARD_READ_MIN_TURN_MS - 1_000, reserveMs: 50_000 } },
+        new AbortController().signal)).resolves.toMatchObject({ kind: 'answer', attempts: 1 });
+        expect(trace).toEqual({ turns: 1, followupTurns: 0, cutAttempts: 0, forced: 'deadline' });
+        const only = bodies(fetch)[0]!;
+        expect(only.tool_choice).toEqual({ type: 'none' });
+        expect(only.max_tokens).toBe(8_000);
+        expect(only.messages).toHaveLength(2);
+      });
+
+      it('cuts a turn at the start of the answer\'s time reserve (no retry) and sends the answer-only turn', async () => {
+        const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+        const timeouts: number[] = [];
+        // The first attempt's timeout (the reserve's) fires after 30 ms; later ones are long.
+        const spy = jest.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+          timeouts.push(ms);
+          return realTimeout(timeouts.length === 1 ? 30 : 60_000);
+        });
+        try {
+          const responses: Array<(init?: RequestInit) => Response> = [(init) => begunThenHang(init), () => final()];
+          const fetch = jest.fn(async (_url: unknown, init?: RequestInit) => responses.shift()!(init));
+          const instance = new ClaudePageClient({ ...config, OCR_AI_HARD_PAGE_MAX_TOKENS: 32_000,
+            OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 },
+          { fetch: fetch as unknown as typeof globalThis.fetch, sleep: jest.fn().mockResolvedValue(undefined) });
+          const trace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+          const result = await instance.readPage({ ...hardRequest, trace, zoom: createZoomSession(goodZoom, 1, 4, 0),
+            answerBy: { timeLeftMs: () => 150_000, reserveMs: 50_000 } }, new AbortController().signal);
+          expect(result).toMatchObject({ kind: 'answer', attempts: 2 });
+          // The first turn: the reserve's start (100 s), then its own request timeout; the answer-only turn: the request's.
+          expect(timeouts).toEqual([100_000, 900_000, 900_000]);
+          expect(trace).toEqual({ turns: 1, followupTurns: 0, cutAttempts: 1, forced: 'deadline' });
+          expect(fetch).toHaveBeenCalledTimes(2);
+        } finally { spy.mockRestore(); }
+      });
+
+      it('leaves a turn already writing its answer text at the reserve\'s start to finish', async () => {
+        const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+        let calls = 0;
+        // The reserve's start comes after 30 ms; the turn's answer text has begun by then and ends after 120 ms.
+        const spy = jest.spyOn(AbortSignal, 'timeout').mockImplementation(() => realTimeout(++calls === 1 ? 30 : 60_000));
+        try {
+          const fetch = jest.fn(async (_url: unknown, init?: RequestInit) => answerWrittenSlowly(init));
+          const instance = new ClaudePageClient({ ...config, OCR_AI_HARD_PAGE_MAX_TOKENS: 32_000,
+            OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 }, { fetch: fetch as unknown as typeof globalThis.fetch });
+          const trace: HardReadTrace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
+          const result = await instance.readPage({ ...hardRequest, trace, zoom: createZoomSession(goodZoom, 1, 4, 0),
+            answerBy: { timeLeftMs: () => 150_000, reserveMs: 50_000 } }, new AbortController().signal);
+          expect(result).toMatchObject({ kind: 'answer', attempts: 1, answer: { items: [{ name: 'Pyrimethamine?' }] } });
+          expect(trace).toEqual({ turns: 1, followupTurns: 0, cutAttempts: 0 });
+          expect(fetch).toHaveBeenCalledTimes(1);
+        } finally { spy.mockRestore(); }
+      });
+
+      /** A turn that thinks, begins its answer text at once, and finishes it 120 ms later. */
+      const answerWrittenSlowly = (init?: RequestInit) => {
+        const encoder = new TextEncoder();
+        const event = (name: string, data: unknown) => encoder.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+        const json = JSON.stringify(hardAnswer);
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(event('message_start', { type: 'message_start', message: { id: 'msg_slow', type: 'message',
+            role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null,
+            stop_details: null, usage: { input_tokens: 5_000, output_tokens: 1, inference_geo: 'us' } } }));
+          controller.enqueue(event('content_block_start', { type: 'content_block_start', index: 0,
+            content_block: { type: 'thinking', thinking: '', signature: '' } }));
+          controller.enqueue(event('content_block_delta', { type: 'content_block_delta', index: 0,
+            delta: { type: 'signature_delta', signature: 'sig-slow' } }));
+          controller.enqueue(event('content_block_stop', { type: 'content_block_stop', index: 0 }));
+          controller.enqueue(event('content_block_start', { type: 'content_block_start', index: 1,
+            content_block: { type: 'text', text: '' } }));
+          controller.enqueue(event('content_block_delta', { type: 'content_block_delta', index: 1,
+            delta: { type: 'text_delta', text: json.slice(0, 20) } }));
+          const timer = setTimeout(() => {
+            controller.enqueue(event('content_block_delta', { type: 'content_block_delta', index: 1,
+              delta: { type: 'text_delta', text: json.slice(20) } }));
+            controller.enqueue(event('content_block_stop', { type: 'content_block_stop', index: 1 }));
+            controller.enqueue(event('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn',
+              stop_sequence: null, stop_details: null }, usage: { output_tokens: 900 } }));
+            controller.enqueue(event('message_stop', { type: 'message_stop' }));
+            controller.close();
+          }, 120);
+          init?.signal?.addEventListener('abort', () => { clearTimeout(timer); controller.error(init.signal!.reason); },
+            { once: true });
+        } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      };
+
+      it('keeps the answer\'s time reserve out of short deadlines (answerReserveMs)', () => {
+        expect(HARD_READ_ANSWER_RESERVE_MS).toBe(50_000);
+        expect(answerReserveMs(150_000)).toBe(50_000);
+        // At least twice HARD_READ_MIN_TURN_MS before the reserve: the first turn always has time to run.
+        expect(answerReserveMs(60_000)).toBe(20_000);
+        expect(60_000 - answerReserveMs(60_000)).toBeGreaterThanOrEqual(2 * HARD_READ_MIN_TURN_MS);
+        // The configured minimum (30 s), and up to 60 s: no reserve rather than one too short for a turn.
+        expect(answerReserveMs(30_000)).toBe(0);
+        expect(answerReserveMs(59_999)).toBe(0);
+        for (let deadline = 30_000; deadline <= 900_000; deadline += 1_000) {
+          const reserve = answerReserveMs(deadline);
+          if (reserve > 0) expect(deadline - reserve).toBeGreaterThanOrEqual(2 * HARD_READ_MIN_TURN_MS);
+        }
       });
 
       /** A turn whose answer has begun (message_start, then 5,000 characters of thinking) and then hangs until aborted. */
@@ -761,7 +961,7 @@ describe('ClaudePageClient', () => {
         const trace = { turns: 0, followupTurns: 0, cutAttempts: 0 };
         await expect(instance.readPage({ ...hardRequest, trace, zoom: createZoomSession(goodZoom, 1, 4, 0) },
           new AbortController().signal)).resolves.toMatchObject({ kind: 'answer', attempts: 3 });
-        expect(sent(fetch).map((body) => body.max_tokens)).toEqual([32_000, 32_000, 32_000]);
+        expect(sent(fetch).map((body) => body.max_tokens)).toEqual([24_000, 24_000, 24_000]);
         expect(trace).toEqual({ turns: 1, followupTurns: 0, cutAttempts: 2 });
       });
     });

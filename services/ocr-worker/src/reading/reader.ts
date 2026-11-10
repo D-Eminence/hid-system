@@ -1,8 +1,9 @@
 import type { OcrWorkerConfig } from '../config';
 import { forEachBounded } from '../semaphore';
 import type { AiUsageRecord, ReadLine, ReadPage } from '../types';
-import { AiInterruptedError, AiRejectedError, AiTransientError, INFERENCE_GEO, type AiCallUse, type Effort,
-  type HardReadTrace, type PageAnswer, type PageModelClient, type TokenUsage } from './claude.client';
+import { AiInterruptedError, AiRejectedError, AiTransientError, answerReserveMs, HARD_READ_FORCED_EFFORT, INFERENCE_GEO,
+  type AiCallUse, type Effort, type ForcedAnswerReason, type HardReadTrace, type PageAnswer, type PageModelClient,
+  type TokenUsage, type ZoomClosedReason } from './claude.client';
 import {
   PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type ImageRereadSkipReason, type PaperIdentity,
   type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
@@ -110,7 +111,27 @@ export interface ReadingSummary {
   hardPageDeadlinePages: number[];
   /** One entry per hard-page read, for the ocr.reading.usage log only: counts and codes, never text. */
   hardPageReadUsage: HardReadUsage[];
+  /**
+   * Items the first pass kept (after its checks) over every page, before any re-read: a page that keeps its first
+   * reading after a failed re-read keeps exactly these. For the completion log only (a count).
+   */
+  firstPassItemCount: number;
+  /**
+   * Every page-level way a reading of a page gave nothing usable, for one warn line each (worker.ts
+   * ocr.reading.page_read_failed): codes and page numbers only. A hard page's reads have their own warn lines
+   * (hardPageReadUsage `failure`), and the page one line here when neither answered.
+   */
+  pageReadFailures: PageReadFailure[];
 }
+
+/**
+ * A page whose reading in one pass gave nothing usable: the pass, and a reason code. 'refusal', 'max_tokens',
+ * 'parse_error', 'schema_error', 'zoom_loop', 'incomplete' (how the answer ended); 'api_error' or 'api_rejected' (no
+ * answer after the retries, or the API refused the request; `errorCode` is the safe AI_* code); 'kept_nothing' (an
+ * answer, but no item of it held to the page while the first pass had some, so the first pass was kept);
+ * 'hard_reads_failed' (neither of a hard page's two reads answered).
+ */
+export interface PageReadFailure { page: number; pass: ReadingPass; reason: string; errorCode?: string }
 
 /**
  * How one hard-page read ended: its answer; aborted at the page's deadline; cut off at its output-token cap (or the
@@ -118,6 +139,15 @@ export interface ReadingSummary {
  * incomplete answer).
  */
 export type HardReadEnd = 'answer' | 'deadline' | 'max_tokens' | 'refused' | 'error';
+
+/**
+ * Why a hard-page read gave no answer (README "A hard read always ends with an answer"): how its last turn ended
+ * ('max_tokens', 'parse_error', 'schema_error', 'refusal', 'zoom_loop', 'incomplete'), the page's deadline
+ * ('deadline'), or no answer from the API after the retries ('api_error') or a refused request ('api_rejected').
+ * Codes only.
+ */
+export type HardReadFailure = 'max_tokens' | 'parse_error' | 'schema_error' | 'refusal' | 'zoom_loop' | 'incomplete'
+  | 'deadline' | 'api_error' | 'api_rejected';
 
 /** One hard-page read (read 1 or 2 of its page): what it used and how it went. Numbers and codes only. */
 export interface HardReadUsage extends AiUsageRecord {
@@ -128,9 +158,15 @@ export interface HardReadUsage extends AiUsageRecord {
   turns: number;
   zoomCalls: number;
   zoomLimited: number;
-  /** The first turn's effort, and the follow-up turns' (null when there was no follow-up turn). */
+  /**
+   * The first turn's effort, the follow-up turns' (null when there was no follow-up turn; the answer-only turn is not
+   * one), and the answer-only turn's (null when it was not sent).
+   */
   effort: Effort;
   followupEffort: Effort | null;
+  forcedEffort: Effort | null;
+  /** Why zoom stopped being offered (HardReadTrace.zoomClosed; the expected end of a zoom read); null: it was not. */
+  zoomClosed: ZoomClosedReason | null;
   endedBy: HardReadEnd;
   /**
    * True when an attempt of this read was cut after the model had begun its answer (a deadline or shutdown abort, a
@@ -139,6 +175,12 @@ export interface HardReadUsage extends AiUsageRecord {
    * report, not from this line.
    */
   outputTokensIncomplete: boolean;
+  /** Why the read gave no answer; null when it answered. */
+  failure: HardReadFailure | null;
+  /** The safe AI_* code of an 'api_error' or 'api_rejected' failure; null otherwise. */
+  errorCode: string | null;
+  /** Why the read was sent its answer-only turn; null when it was not (it answered, or failed, on its own turns). */
+  forcedAnswer: ForcedAnswerReason | null;
 }
 
 /** 'hard_page_read': both best-guess reads of a hard page (owner decision 2026-11-05), so their cost shows apart. */
@@ -258,6 +300,7 @@ export class PaperReadingService {
       error instanceof AiInterruptedError ? error.reason : error, { ...usage }, tally.list());
     let requests = 0;
     let refusals = 0;
+    const pageFailures: PageReadFailure[] = [];
     let servedGeo: string | null = null;
     const states: PageState[] = input.pages.filter((page) => page.lines.length > 0).map((page) => {
       const masker = createMasker();
@@ -268,12 +311,15 @@ export class PaperReadingService {
     /** `hard`: a hard-page read's own abort signal (the job's, or its page's deadline), follow-up effort and trace. */
     const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage,
       pass: ReadingPass = image ? 'image_reread' : 'reread', hardPage = false, zoom?: ZoomToolSession,
-      hard?: { signal: AbortSignal; followupEffort: Effort; trace: HardReadTrace }) => {
+      hard?: { signal: AbortSignal; followupEffort: Effort; trace: HardReadTrace;
+        answerBy?: { timeLeftMs: () => number; reserveMs: number } }) => {
       let answer: PageAnswer;
       try {
         answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
           ...(image ? { image } : {}), ...(hardPage ? { hardPage: true } : {}), ...(zoom ? { zoom } : {}),
-          ...(hard ? { followupEffort: hard.followupEffort, trace: hard.trace } : {}) }, hard?.signal ?? signal);
+          ...(hard ? { followupEffort: hard.followupEffort, trace: hard.trace,
+            ...(hard.answerBy ? { answerBy: hard.answerBy } : {}) } : {}) },
+        hard?.signal ?? signal);
       } catch (error) {
         // A call that ended without an answer still made requests (and may have used tokens): count them.
         // A call stopped before its first request (waiting for a permit) made none and adds nothing.
@@ -305,6 +351,8 @@ export class PaperReadingService {
           state.firstCheck = checkPage({ page: state.page, lines: state.lines, answer: state.first.answer,
             sourceSha256Hex: input.sourceSha256Hex, readBy: 'first_pass', masker: state.masker });
           state.final = state.firstCheck;
+        } else {
+          pageFailures.push({ page: state.page, pass: 'first_pass', reason: answerFailure(state.first) });
         }
       });
     } catch (error) {
@@ -390,6 +438,10 @@ export class PaperReadingService {
         done: false, cut: false, durationMs: 0, attempts: 0, usage: zeroUsage(),
       }));
       const started = Date.now();
+      // The answer-only turn's time (README "A hard read always ends with an answer"): at most a third of the deadline,
+      // and none at a deadline too short for a turn and an answer-only turn (answerReserveMs).
+      const reserveMs = answerReserveMs(deadlineMs);
+      const answerBy = reserveMs > 0 ? { timeLeftMs: () => deadlineMs - (Date.now() - started), reserveMs } : undefined;
       const deadline = setTimeout(() => {
         for (const read of reads) {
           if (read.done) continue;
@@ -402,7 +454,8 @@ export class PaperReadingService {
         settled = await Promise.allSettled(reads.map(async (read) => {
           try {
             const answer = await ask(state, rereadModel, hardEffort, picture, 'hard_page_read', true, read.session,
-              { signal: AbortSignal.any([signal, read.controller.signal]), followupEffort, trace: read.trace });
+              { signal: AbortSignal.any([signal, read.controller.signal]), followupEffort, trace: read.trace,
+                ...(answerBy ? { answerBy } : {}) });
             read.attempts = answer.attempts;
             read.usage = answer.usage;
             return answer;
@@ -434,8 +487,11 @@ export class PaperReadingService {
           durationMs: read.durationMs, turns: read.trace.turns, zoomCalls: read.session?.stats.calls ?? 0,
           zoomLimited: read.session?.stats.limited ?? 0, effort: hardEffort,
           followupEffort: read.trace.followupTurns > 0 ? followupEffort : null,
+          forcedEffort: read.trace.forced === undefined ? null : HARD_READ_FORCED_EFFORT,
+          zoomClosed: read.trace.zoomClosed ?? null,
           endedBy: endOf(result, read.cut && !signal.aborted),
-          outputTokensIncomplete: read.trace.cutAttempts > 0 });
+          outputTokensIncomplete: read.trace.cutAttempts > 0,
+          ...failureOf(result, read.cut && !signal.aborted), forcedAnswer: read.trace.forced ?? null });
       });
       // A read the deadline cut is not an error of the job; a shutdown (or an unexpected error) still is.
       const cutByDeadline = (index: number) => reads[index]!.cut && !signal.aborted
@@ -456,6 +512,7 @@ export class PaperReadingService {
         if (kinds.every((kind) => kind === 'invalid' || kind === 'refused')) {
           return { kind: 'fallback', reason: kinds.includes('refused') ? 'image_refused' : 'image_rejected' };
         }
+        pageFailures.push({ page: state.page, pass: 'hard_page_read', reason: 'hard_reads_failed' });
         return { kind: 'failed' };
       }
       if (answers.length === 1) hardSingle.push(state.page);
@@ -474,6 +531,8 @@ export class PaperReadingService {
       let hardCheck: PageCheck | null = null;
       // Only a flagged page (one the first pass answered) may go with its picture.
       const decision = state.firstCheck === null ? null : this.imageDecision(state, input);
+      // The pass of the request being made, for a warn line if it gives nothing.
+      let pass: ReadingPass = 'reread';
       try {
         if (decision?.kind === 'image' && this.isHardPage(state)) {
           const hard = await readHard(state, pictureOf(decision), decision);
@@ -483,11 +542,13 @@ export class PaperReadingService {
           } else if (hard.kind === 'fallback') {
             skipped.push({ page: state.page, reason: hard.reason });
             answer = await ask(state, rereadModel, rereadEffort);
+            if (answer.kind !== 'answer') pageFailures.push({ page: state.page, pass, reason: answerFailure(answer) });
           } else {
             imageFailed.push(state.page);
           }
         } else if (decision?.kind === 'image') {
           try {
+            pass = 'image_reread';
             answer = await ask(state, rereadModel, rereadEffort, pictureOf(decision));
             fromImage = true;
           } catch (error) {
@@ -498,6 +559,7 @@ export class PaperReadingService {
             // blamed on the picture, and the page goes on as a failed re-read.
             if (error instanceof AiRejectedError && error.code === 'AI_BAD_REQUEST' && error.invalidRequest) {
               skipped.push({ page: state.page, reason: 'image_rejected' });
+              pass = 'reread';
               answer = await ask(state, rereadModel, rereadEffort);
             } else {
               if (error instanceof AiTransientError || error instanceof AiRejectedError) imageFailed.push(state.page);
@@ -506,19 +568,25 @@ export class PaperReadingService {
           }
           if (fromImage && answer.kind === 'refused') {
             // The decline may be about the picture: re-read the text instead, once.
+            pageFailures.push({ page: state.page, pass, reason: 'refusal' });
             skipped.push({ page: state.page, reason: 'image_refused' });
             fromImage = false;
+            pass = 'reread';
             answer = await ask(state, rereadModel, rereadEffort);
           } else if (fromImage && answer.kind !== 'answer') {
             imageFailed.push(state.page);
           }
+          if (answer.kind !== 'answer') pageFailures.push({ page: state.page, pass, reason: answerFailure(answer) });
         } else {
           if (decision !== null) skipped.push({ page: state.page, reason: decision.reason });
           answer = await ask(state, rereadModel, rereadEffort);
+          if (answer.kind !== 'answer') pageFailures.push({ page: state.page, pass, reason: answerFailure(answer) });
         }
       } catch (error) {
         if (signal.aborted) throw error;
         if (!(error instanceof AiTransientError) && !(error instanceof AiRejectedError)) throw error;
+        pageFailures.push({ page: state.page, pass, reason: error instanceof AiTransientError ? 'api_error' : 'api_rejected',
+          errorCode: error.code });
       }
       if ((hardCheck !== null || answer?.kind === 'answer') && state.firstCheck) {
         // A flagged page the first pass answered, re-read from the picture or the text: merged, fail-safe, so no
@@ -530,6 +598,7 @@ export class PaperReadingService {
         if (read.items.length === 0 && state.firstCheck.items.length > 0) {
           // Nothing from the second reading held to the page while the first pass had items: not a usable reading.
           if (fromImage) imageFailed.push(state.page);
+          pageFailures.push({ page: state.page, pass: hardCheck !== null ? 'hard_page_read' : pass, reason: 'kept_nothing' });
           state.reread = 'failed';
           state.final = markRereadFailed(state.firstCheck);
           return;
@@ -599,6 +668,8 @@ export class PaperReadingService {
     summary.hardPageZoomPages = zoomPages;
     summary.hardPageDeadlinePages = [...deadlinePages].sort((a, b) => a - b);
     summary.hardPageReadUsage = readUsage;
+    summary.firstPassItemCount = states.reduce((sum, state) => sum + (state.firstCheck?.items.length ?? 0), 0);
+    summary.pageReadFailures = [...pageFailures].sort((a, b) => a.page - b.page);
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
 
@@ -648,7 +719,7 @@ export class PaperReadingService {
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
       modelUsage, passUsage, hardPages: [], hardPageReads: 0, hardPageSingleReadPages: [],
       hardPageAgreement: noAgreement(), zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageZoomPages: [],
-      hardPageDeadlinePages: [], hardPageReadUsage: [],
+      hardPageDeadlinePages: [], hardPageReadUsage: [], firstPassItemCount: 0, pageReadFailures: [],
     };
   }
 
@@ -686,6 +757,26 @@ function endOf(result: PromiseSettledResult<PageAnswer>, cut: boolean): HardRead
   if (answer.kind === 'answer') return 'answer';
   if (answer.kind === 'refused') return 'refused';
   return answer.reason === 'max_tokens' ? 'max_tokens' : 'error';
+}
+
+/** Why a hard-page read gave no answer, and the safe error code where the API gave none (README). */
+function failureOf(result: PromiseSettledResult<PageAnswer>, cut: boolean):
+  { failure: HardReadFailure | null; errorCode: string | null } {
+  if (result.status === 'rejected') {
+    if (cut) return { failure: 'deadline', errorCode: null };
+    const error: unknown = result.reason;
+    if (error instanceof AiRejectedError) return { failure: 'api_rejected', errorCode: error.code };
+    return { failure: 'api_error', errorCode: error instanceof AiTransientError ? error.code : null };
+  }
+  const answer = result.value;
+  if (answer.kind === 'answer') return { failure: null, errorCode: null };
+  return { failure: answerFailure(answer) as HardReadFailure, errorCode: null };
+}
+
+/** The reason code of an answer that is not one (refused, or failed with its finer code). */
+function answerFailure(answer: Exclude<PageAnswer, { kind: 'answer' }>): string {
+  if (answer.kind === 'refused') return 'refusal';
+  return answer.code ?? (answer.reason === 'malformed' ? 'schema_error' : answer.reason);
 }
 
 function addZoomStats(total: ZoomStats, more: ZoomStats): void {
