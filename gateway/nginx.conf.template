@@ -57,7 +57,15 @@ server {
   location = /api/v1/auth { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
   location ^~ /api/v1/auth/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
   location = /api/v1/identity { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
-  location ^~ /api/v1/identity/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  location ^~ /api/v1/identity/ {
+    # The support chat's Health ID check (0109) is for support-api on the
+    # internal load balancer only: the public gateway never answers which
+    # Health IDs are issued. $uri is decoded and its slashes merged, and the
+    # match ignores case, as Express routing does.
+    if ($uri ~* "^/api/v1/identity/service/support/") { return 404; }
+    include /etc/nginx/hid-proxy-headers.conf;
+    proxy_pass $hid_identity_upstream;
+  }
   location = /api/v1/audit { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
   location ^~ /api/v1/audit/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
   location = /api/v1/admin { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }

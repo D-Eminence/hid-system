@@ -3592,3 +3592,81 @@ grant's scope test alone or its `break_glass` test alone (a consent_grants
 CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
+
+## 37. Support chat Health ID check (0109)
+
+The public support chat (`POST /api/v1/support/chat`, support-api, Lex) never
+passes an issued Health ID to Lex (owner decision of 2026-10-31, option (a)
+with a server check). The website and the blue EHR's Help also refuse the
+shapes they recognise before sending (health #61). The server check catches
+what they miss.
+
+### support-api
+
+- Every message is read, after NFKC folding and upper-casing, for anything
+  that could be a Health ID: after a `HID` label (`HID-AB2CD3`,
+  `hid ab2 cd3`, `HID: AB2-CD3`, `HIDAB2CD3`), a word of 6 to 32 Health ID
+  characters on its own, or two or three short parts typed apart with a digit
+  among them (`AB2 CD3`). Ordinary words in the Health ID alphabet are
+  candidates too.
+- Only those candidates (`HID-` and 6 to 32 Health ID characters) go to
+  identity-api, never the message. Each issued one is replaced with
+  `[Health ID]` (with its label and separators) before the text goes to Lex.
+- The answer to the browser is the same shape whether or not anything was
+  replaced.
+- **Fail closed.** support-api answers `503 SUPPORT_BOT_UNAVAILABLE` (the same
+  as a Lex failure) and sends nothing to Lex when any of these happen:
+  - `IDENTITY_API_URL` or the workload token is missing (for every message);
+  - identity-api does not answer 200 with a valid answer within 2 s;
+  - the answer names anything not asked;
+  - a message holds more than 200 candidates.
+- **Settings:** `IDENTITY_API_URL` (identity-api's internal HTTPS origin),
+  `IDENTITY_SERVICE_IDENTITY_MODE` (`jwt`; `local-secret` only outside
+  production) and `IDENTITY_SUPPORT_WORKLOAD_TOKEN_FILE`, which the
+  `workload-token-agent` sidecar writes. A malformed URL or mode stops the
+  service at start-up.
+- Nothing about a message, candidate or match is logged.
+
+### identity-api
+
+```text
+POST /api/v1/identity/service/support/health-id-matches
+x-hid-internal-caller: support-api
+x-hid-service-authorization: Bearer <workload JWT, sub = IDENTITY_SUPPORT_CALLER_SUBJECT, aud hid-identity-api>
+{ "candidates": ["HID-AB2CD3", "HID-PLEASE"] }          ->  200 { "matches": ["HID-AB2CD3"] }
+```
+
+- **Who may call.** support-api's workload alone, with no browser session.
+  support-api is not an Identity caller of any other service route, and no
+  other caller is accepted here. Without `IDENTITY_SUPPORT_CALLER_SUBJECT` the
+  route answers 503.
+- **Body.** 1 to 200 candidates, each exactly `^HID-[A-HJ-NP-Z2-9]{6,32}$`,
+  and nothing else. Anything else answers 400 `VALIDATION_FAILED` without
+  echoing a value.
+- **Answer.** The issued ones, each once, `Cache-Control: no-store`. Every
+  status counts, because a Health ID stays personal once issued. Nothing else
+  about a patient is returned.
+- **Logs.** The counts only (`candidates`, `matches`).
+- **Gateway.** The public gateway answers 404 for
+  `/api/v1/identity/service/support/` and its aliases. support-api calls
+  identity-api on the internal load balancer.
+
+### The database (0109)
+
+- `identity.support_health_id_matches(candidates text[]) RETURNS TABLE(health_id text)`:
+  plpgsql, STABLE, SECURITY DEFINER, search_path `pg_catalog, pg_temp`.
+- It is owned by `identity.patients`' owner, so it reads past that table's
+  row-level security. The table must not force it; the migration checks.
+- `hid_identity_runtime` alone may execute it.
+- Input other than 1 to 200 well-formed candidates raises 22023, so a bad
+  request never answers "no match".
+- It uses the unique index on `upper(hid_code)`.
+
+### Release order
+
+1. hid-system #210 (Terraform, `dev`): support-api's workload caller,
+   sidecar and settings, and identity-api's `IDENTITY_SUPPORT_CALLER_SUBJECT`.
+2. identity-api with 0109, then support-api with the check. Until both
+   releases and the apply are in, the new support-api answers 503 to every
+   message.
+3. Only then health #200 and #61.

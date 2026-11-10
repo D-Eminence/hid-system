@@ -212,6 +212,10 @@ assert.doesNotMatch(gatewayConfig, /3010|EVENT_DISPATCHER/, 'dispatcher must not
 const ehrGateway = /location \^~ \/api\/v1\/ehr\/ \{([\s\S]*?)\n  \}/.exec(gatewayConfig)?.[1] ?? ''
 assert.match(ehrGateway, /if \(\$uri ~\* "\^\/api\/v1\/ehr\/documents\/scan-\(events\|targets\)"\) \{ return 404; \}\n(?:\s*#.*\n)*\s*include \/etc\/nginx\/hid-proxy-headers\.conf;\n\s*proxy_pass \$hid_ehr_upstream;/,
   'the public gateway must refuse the document scanner routes before the EHR proxy')
+// The support Health ID check (0109) answers which Health IDs are issued: internal load balancer only.
+const identityGateway = /location \^~ \/api\/v1\/identity\/ \{([\s\S]*?)\n  \}/.exec(gatewayConfig)?.[1] ?? ''
+assert.match(identityGateway, /if \(\$uri ~\* "\^\/api\/v1\/identity\/service\/support\/"\) \{ return 404; \}\n(?:\s*#.*\n)*\s*include \/etc\/nginx\/hid-proxy-headers\.conf;\n\s*proxy_pass \$hid_identity_upstream;/,
+  'the public gateway must refuse the support Health ID check before the Identity proxy')
 for (const [app, base] of Object.entries(bases).filter(([name]) => name !== 'web')) {
   const route = base.slice(0, -1).replaceAll('/', '\\/')
   assert.doesNotMatch(gatewayConfig, new RegExp(`location ${route}\\/`),
