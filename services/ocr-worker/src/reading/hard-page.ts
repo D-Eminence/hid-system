@@ -1,12 +1,11 @@
 import type { FlagReason, PaperItem } from './contract';
 import { diagnosisLookalike, matchDiagnosisName, type ListMatch } from './diagnosis-list';
-import { DRUG_ENTRIES, drugLookalike, editDistance, LOOKALIKE_DISTANCE, matchDrugName, MIN_FUZZY_LETTERS,
+import { DRUG_ENTRIES, drugLookalike, editDistance, matchDrugName, MIN_FUZZY_LETTERS,
   normaliseDrugName, type DrugMatch, UNLISTED_LOOKALIKES } from './drug-list';
 import { CROSSED_OUT_START, crossedOutParts, withoutCrossedOut } from './grounding';
 import { checkReasonSentence, crossedOutOnPlace, itemId, markCrossedOut, mergeIdentity, overlapShare, PAIR_BOX_OVERLAP,
   unionBox, uniqueItemIds, type PageCheck } from './items';
 import { labTestLookalike, matchLabTestName } from './lab-list';
-import { SHORT_WORD } from './list-match';
 import { ALTERNATIVE_OPEN, CROSSED_OUT_OPEN, FIELD_UNREAD, HARD_PAGE_FREQUENCIES, NO_LETTERS, PAPER_QUERY,
   PARTIAL_WORD, type BasisField, type FieldBasis, type HardItemExtras, type ModelItem, type ModelPage } from './prompt';
 import { hasSign, SIGN_READ_MARK } from './signs';
@@ -1277,9 +1276,11 @@ const IDENTITY_ALIASES: Readonly<Record<string, string>> = {
 // Hyphens and other separators split words too ("Vitamin-C" is "vitamin c"), so a joined or hyphenated name has the
 // same identity as the spaced one (review of 2026-11-10).
 // A vitamin written joined ("VitaminK", "VitC", "VitB12") is split from its letter first, so it has the spaced form's
-// identity and its letter still tells it from another vitamin.
+// identity and its letter still tells it from another vitamin. Only the vitamin letters (A, B, C, D, E, K) split, and
+// "Vita" and "Vitamine" are left whole: they are more likely a cut word or a brand than vitamin A or E.
 const identityWords = (text: string) => normaliseDrugName(text).replace(/[-_/.]+/g, ' ')
-  .replace(/\bvit(?:amin)?([a-z]\d{0,2})\b/g, 'vitamin $1').split(' ')
+  .replace(/\bvit(?:amin)?([abcdek]\d{0,2})\b/g, (word, letter: string) =>
+    (word === 'vita' || word === 'vitamine' ? word : `vitamin ${letter}`)).split(' ')
   .filter((word) => word.length > 0 && !NOT_IDENTITY_WORDS.has(word))
   .map((word) => (word === 'vit' ? 'vitamin' : word)).join(' ');
 

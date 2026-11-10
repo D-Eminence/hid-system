@@ -568,18 +568,21 @@ Each claimed job runs, in order:
        `readings_disagree` (not `single_reading_only`), the read with more
        read from the letters first, each drug name marked "?". Same drug:
        both names on the drug list with the same generic (a brand and its
-       generic, two spellings the list matches); a listed and an unlisted
-       name, or two unlisted names, within 2 edits with at least 0.75 of the
-       letters alike, against every name the list gives the generic
-       ("Fictomycin" / "Fictomicin"), only where both have six letters or
-       more and the same short words (under four letters) and digits, so
-       "Vitamin C" / "Vitamin K", "Vit B1" / "Vit B6" and "Ca gluconate" /
+       generic, two spellings the list matches); two unlisted names, or a
+       listed and an unlisted one, only when their letters match exactly
+       (no fuzzy match: "Fictomycin" / "Fictomicin" split, since a wrong
+       split only shows a second `check_carefully` line and a wrong merge
+       mixes two drugs' fields). Hyphens and other separators split words,
+       and a joined vitamin is read spaced ("VitaminK", "Vit-K", "VitB12"),
+       so "Vitamin C" / "Vitamin-K", "Vit B1" / "Vit B6" and "Ca-gluconate" /
        "K gluconate" split. Form, route and release words ("Inj", "Tab",
        "IV", "retard", "SR", "XR") are left out of a name's identity, "Vit"
-       is read as "Vitamin", and two ward abbreviations are read as their
-       listed generic for this rule only ("Vitamin K" as phytomenadione,
-       "PCM" as paracetamol; never shown or respelled), so "Vit K" /
-       "Vitamin K" and "Nifedipine" / "Nifedipine retard" are one item.
+       is read as "Vitamin", and a short list of ward abbreviations is read
+       as its generic for this rule only (Vitamin K, PCM, MgSO4, Mg
+       sulphate, Ca gluconate, KCl; never shown or respelled), so "Vit K" /
+       "Vitamin K", "MgSO4" / "Magnesium sulphate" and "Nifedipine" /
+       "Nifedipine retard" are one item. An abbreviation is matched as the
+       whole name only ("KCl 10%" / "KCl" split).
        Except that a real unlisted look-alike
        of a listed name (`UNLISTED_LOOKALIKES`, or one letter from one:
        "Quinidine" / "Quinine", "Arteether" / "Artemether") is a different

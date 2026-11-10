@@ -174,7 +174,8 @@ describe('two readings naming different drugs (whole-drug rule)', () => {
     const id = (name: string) => drugIdentityOf(name);
     for (const [x, y] of [['Vit C', 'Vit K'], ['Vitamin C', 'Vitamin K'], ['Vit B1', 'Vit B6'], ['Vit A', 'Vit E'],
       ['Vit A', 'Vit K'], ['Ca gluconate', 'K gluconate'], ['Inj Vit K', 'Inj Vit C'], ['Fictomycin A', 'Fictomycin B'],
-      ['Fictomycin 1', 'Fictomycin 2'], ['Vitamin-C', 'Vitamin-K'], ['VitaminC', 'VitaminK'], ['Vitamin-A', 'Vitamin-E'],
+      ['Fictomycin 1', 'Fictomycin 2'], ['Vitamin-C', 'Vitamin-K'], ['VitaminC', 'VitaminK'],
+      ['Vita', 'Vitamin A'], ['Vitamin-A', 'Vitamin-E'],
       ['Ca-gluconate', 'K-gluconate'], ['Inj. Vitamin-K', 'Vitamin-C']]) {
       expect([x, y, sameDrug(id(x!), id(y!))]).toEqual([x, y, false]);
     }
