@@ -587,7 +587,7 @@ describe('hard-page prompt versions', () => {
     expect(withZoom.length - plain.length).toBe(rule.length + 2);
   });
 
-  it('keeps the prompt versions consistent: zoom 10, no zoom still 7, reading 10', () => {
+  it('keeps the prompt versions consistent: zoom 11, no zoom 11-no-zoom, reading 11', () => {
     expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-11');
     expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-11-no-zoom');
     expect(PROMPT_VERSION).toBe('hid-paper-reading-prompt-11');

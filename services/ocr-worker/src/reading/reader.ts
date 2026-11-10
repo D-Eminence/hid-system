@@ -1,9 +1,9 @@
 import type { OcrWorkerConfig } from '../config';
 import { forEachBounded } from '../semaphore';
 import type { AiUsageRecord, ReadLine, ReadPage } from '../types';
-import { AiInterruptedError, AiRejectedError, AiTransientError, HARD_READ_ANSWER_RESERVE_MS, INFERENCE_GEO,
+import { AiInterruptedError, AiRejectedError, AiTransientError, answerReserveMs, HARD_READ_FORCED_EFFORT, INFERENCE_GEO,
   type AiCallUse, type Effort, type ForcedAnswerReason, type HardReadTrace, type PageAnswer, type PageModelClient,
-  type TokenUsage } from './claude.client';
+  type TokenUsage, type ZoomClosedReason } from './claude.client';
 import {
   PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type ImageRereadSkipReason, type PaperIdentity,
   type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
@@ -158,9 +158,15 @@ export interface HardReadUsage extends AiUsageRecord {
   turns: number;
   zoomCalls: number;
   zoomLimited: number;
-  /** The first turn's effort, and the follow-up turns' (null when there was no follow-up turn). */
+  /**
+   * The first turn's effort, the follow-up turns' (null when there was no follow-up turn; the answer-only turn is not
+   * one), and the answer-only turn's (null when it was not sent).
+   */
   effort: Effort;
   followupEffort: Effort | null;
+  forcedEffort: Effort | null;
+  /** Why zoom stopped being offered (HardReadTrace.zoomClosed; the expected end of a zoom read); null: it was not. */
+  zoomClosed: ZoomClosedReason | null;
   endedBy: HardReadEnd;
   /**
    * True when an attempt of this read was cut after the model had begun its answer (a deadline or shutdown abort, a
@@ -306,12 +312,13 @@ export class PaperReadingService {
     const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage,
       pass: ReadingPass = image ? 'image_reread' : 'reread', hardPage = false, zoom?: ZoomToolSession,
       hard?: { signal: AbortSignal; followupEffort: Effort; trace: HardReadTrace;
-        answerBy: { timeLeftMs: () => number; reserveMs: number } }) => {
+        answerBy?: { timeLeftMs: () => number; reserveMs: number } }) => {
       let answer: PageAnswer;
       try {
         answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
           ...(image ? { image } : {}), ...(hardPage ? { hardPage: true } : {}), ...(zoom ? { zoom } : {}),
-          ...(hard ? { followupEffort: hard.followupEffort, trace: hard.trace, answerBy: hard.answerBy } : {}) },
+          ...(hard ? { followupEffort: hard.followupEffort, trace: hard.trace,
+            ...(hard.answerBy ? { answerBy: hard.answerBy } : {}) } : {}) },
         hard?.signal ?? signal);
       } catch (error) {
         // A call that ended without an answer still made requests (and may have used tokens): count them.
@@ -431,9 +438,10 @@ export class PaperReadingService {
         done: false, cut: false, durationMs: 0, attempts: 0, usage: zeroUsage(),
       }));
       const started = Date.now();
-      // The answer-only turn's time (README "A hard read always ends with an answer"): at most a third of the deadline.
-      const answerBy = { timeLeftMs: () => deadlineMs - (Date.now() - started),
-        reserveMs: Math.min(HARD_READ_ANSWER_RESERVE_MS, Math.floor(deadlineMs / 3)) };
+      // The answer-only turn's time (README "A hard read always ends with an answer"): at most a third of the deadline,
+      // and none at a deadline too short for a turn and an answer-only turn (answerReserveMs).
+      const reserveMs = answerReserveMs(deadlineMs);
+      const answerBy = reserveMs > 0 ? { timeLeftMs: () => deadlineMs - (Date.now() - started), reserveMs } : undefined;
       const deadline = setTimeout(() => {
         for (const read of reads) {
           if (read.done) continue;
@@ -446,7 +454,8 @@ export class PaperReadingService {
         settled = await Promise.allSettled(reads.map(async (read) => {
           try {
             const answer = await ask(state, rereadModel, hardEffort, picture, 'hard_page_read', true, read.session,
-              { signal: AbortSignal.any([signal, read.controller.signal]), followupEffort, trace: read.trace, answerBy });
+              { signal: AbortSignal.any([signal, read.controller.signal]), followupEffort, trace: read.trace,
+                ...(answerBy ? { answerBy } : {}) });
             read.attempts = answer.attempts;
             read.usage = answer.usage;
             return answer;
@@ -478,6 +487,8 @@ export class PaperReadingService {
           durationMs: read.durationMs, turns: read.trace.turns, zoomCalls: read.session?.stats.calls ?? 0,
           zoomLimited: read.session?.stats.limited ?? 0, effort: hardEffort,
           followupEffort: read.trace.followupTurns > 0 ? followupEffort : null,
+          forcedEffort: read.trace.forced === undefined ? null : HARD_READ_FORCED_EFFORT,
+          zoomClosed: read.trace.zoomClosed ?? null,
           endedBy: endOf(result, read.cut && !signal.aborted),
           outputTokensIncomplete: read.trace.cutAttempts > 0,
           ...failureOf(result, read.cut && !signal.aborted), forcedAnswer: read.trace.forced ?? null });

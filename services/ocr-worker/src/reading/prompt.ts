@@ -47,8 +47,9 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * (HARD_PAGE_PROMPT_VERSION 10; coordinator's decision of 2026-11-10, a follow-up to version 9: production showed about
  * 4 turns per read, each thinking again). A reading made the older way is not reused. The text-only request, the
  * ordinary image re-read request and the hard-page text without zoom are byte for byte unchanged. Version 11: a hard
- * read that has not answered when its tokens, zoom calls, turns or time run short (or whose turn stopped without an
- * answer) is sent one answer-only turn with a new user message (claude.client.ts FORCED_ANSWER_INSTRUCTION,
+ * read that has not answered when its tokens or time run short (or whose turn stopped without an answer, the turn
+ * after its zoom calls ran out included) is sent one answer-only turn with a new user message (claude.client.ts
+ * FORCED_ANSWER_INSTRUCTION, or FORCED_ANSWER_INSTRUCTION_NO_ZOOM for a read never offered zoom;
  * HARD_PAGE_PROMPT_VERSION 11; coordinator 2026-11-10 after job 566c38bf). A reading made the older way is not reused.
  * The text-only request and the ordinary image re-read request are byte for byte unchanged.
  */
@@ -88,10 +89,12 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * together in one response (several zoom calls at once), then answer from what they show, zooming again only if a
  * crop is still unclear and calls are left (coordinator 2026-11-10, follow-up to version 9: fewer thinking turns per
  * read). The cap of 4 and everything else are unchanged. Version 11 (coordinator 2026-11-10, after job 566c38bf: both
- * reads used everything and gave no answer): the first message is the version 10 text, unchanged; a read that has not
- * answered when its tokens, zoom calls, turns or time run short, or whose turn stopped without an answer, is sent one
- * answer-only turn: claude.client.ts FORCED_ANSWER_INSTRUCTION as a new user message, the zoom tool no longer
- * offered (tool_choice none), at low effort (README "A hard read always ends with an answer").
+ * reads used everything and gave no answer): the first message is the version 10 text, unchanged; once the zoom calls
+ * are used up the next turn is an ordinary follow-up turn with the zoom tool no longer offered (tool_choice none); a
+ * read that has not answered when its tokens or time run short, or whose turn stopped without an answer, is sent one
+ * answer-only turn: claude.client.ts FORCED_ANSWER_INSTRUCTION as a new user message (the -11-no-zoom reads:
+ * FORCED_ANSWER_INSTRUCTION_NO_ZOOM, without the sentence about the zoom tool), the zoom tool not offered, at low
+ * effort (README "A hard read always ends with an answer").
  */
 export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-11';
 /**

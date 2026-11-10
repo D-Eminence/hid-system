@@ -73,6 +73,8 @@ export class OcrWorker {
       // Before completion, so the job is still held; a failure to record never fails the job.
       await this.recordAiUsage(job, outcome.summary.modelUsage, outcome.summary.pagesSent, outcome.summary.passUsage,
         outcome.summary.hardPageReadUsage);
+      // The warn lines come before the contract check and completion, so they are written however the job ends.
+      this.logReadFailures(job, outcome.summary);
       const completion = buildCompletion(text, outcome);
       const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
       if (!checked.success) {
@@ -82,7 +84,6 @@ export class OcrWorker {
       }
       await this.repository.complete(job, completion);
       const summary = outcome.summary;
-      this.logReadFailures(job, summary);
       this.log('info', 'ocr.job.completed', { jobId: job.jobId, correlationId: job.correlationId,
         provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: text.pageCount,
         retryCount: Math.max(0, job.attemptNo - 1), readingStatus: summary.status,
@@ -196,7 +197,8 @@ export class OcrWorker {
             requests: read.requests, turns: read.turns, inputTokens: read.inputTokens, outputTokens: read.outputTokens,
             cacheReadTokens: read.cacheReadTokens, cacheWriteTokens: read.cacheWriteTokens, durationMs: read.durationMs,
             zoomCalls: read.zoomCalls, zoomLimited: read.zoomLimited, effort: read.effort,
-            followupEffort: read.followupEffort, endedBy: read.endedBy,
+            followupEffort: read.followupEffort, forcedEffort: read.forcedEffort, zoomClosed: read.zoomClosed,
+            endedBy: read.endedBy,
             outputTokensIncomplete: read.outputTokensIncomplete, failure: read.failure,
             forcedAnswer: read.forcedAnswer === null ? null : `forced_answer_${read.forcedAnswer}`,
             ...(pagesSent === undefined ? {} : { pagesSent }) });

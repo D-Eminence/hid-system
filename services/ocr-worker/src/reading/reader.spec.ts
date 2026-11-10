@@ -1,4 +1,4 @@
-import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, FORCED_ANSWER_INSTRUCTION,
+import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, FORCED_ANSWER_INSTRUCTION_NO_ZOOM,
   type PageAnswer, type PageModelClient } from './claude.client';
 import { Semaphore } from '../semaphore';
 import { paperReadingPayloadSchema } from './contract';
@@ -1081,9 +1081,11 @@ describe('PaperReadingService', () => {
         expect(summary.passUsage.find((entry) => entry.pass === 'hard_page_read')).toMatchObject({ requests: 2 });
       });
 
-      it('sends a read whose deadline is near straight to its answer-only turn, which the deadline still bounds', async () => {
-        // Deadline 150 ms: a third of it (50 ms) is kept for the answer, which leaves no time for a turn before it, so
-        // each read's one request is the answer-only turn. The fetch never answers: the deadline ends both.
+      it('keeps no answer reserve at a deadline too short for a turn and an answer-only turn; the deadline bounds the reads', async () => {
+        // Deadline 150 ms (as at any deadline under 60 s, the configured minimum of 30 s included): a reserve would leave
+        // no time for a turn before it, and every read would skip its real read for the answer-only turn. So none is
+        // kept (answerReserveMs): each read's one request is its ordinary first turn. The fetch never answers: the
+        // deadline ends both.
         const bodies: string[] = [];
         const fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
           if (!isHard(init)) return sse(JSON.stringify(firstPass));
@@ -1097,11 +1099,11 @@ describe('PaperReadingService', () => {
         expect(Date.now() - started).toBeLessThan(5_000);
         expect(bodies).toHaveLength(2);
         for (const body of bodies) {
-          expect(body).toContain(JSON.stringify(FORCED_ANSWER_INSTRUCTION));
-          expect(JSON.parse(body)).toMatchObject({ max_tokens: 8_000, output_config: { effort: 'low' } });
+          expect(body).not.toContain(JSON.stringify(FORCED_ANSWER_INSTRUCTION_NO_ZOOM).slice(1, -1));
+          expect(JSON.parse(body)).toMatchObject({ max_tokens: 24_000, output_config: { effort: 'high' } });
         }
         expect(summary.hardPageReadUsage.map((entry) => [entry.endedBy, entry.failure, entry.forcedAnswer])).toEqual([
-          ['deadline', 'deadline', 'deadline'], ['deadline', 'deadline', 'deadline']]);
+          ['deadline', 'deadline', null], ['deadline', 'deadline', null]]);
         expect(summary).toMatchObject({ hardPageDeadlinePages: [1], imageRereadFailedPages: [1], rereadFailedPages: 1,
           firstPassItemCount: 2, pageReadFailures: [{ page: 1, pass: 'hard_page_read', reason: 'hard_reads_failed' }] });
         expect(payload.items.every((item) => item.readBy === 'first_pass' && item.checkReasons.includes('reread_failed')))
@@ -1210,7 +1212,8 @@ describe('PaperReadingService', () => {
         for (const text of ['Pyrimethamine', 'Pyrmthmn', 'Hypertension']) expect(kept).not.toContain(text);
         for (const entry of summary.hardPageReadUsage) {
           for (const [key, value] of Object.entries(entry)) {
-            if (['model', 'effort', 'followupEffort', 'endedBy', 'failure', 'errorCode', 'forcedAnswer'].includes(key)) {
+            if (['model', 'effort', 'followupEffort', 'forcedEffort', 'zoomClosed', 'endedBy', 'failure', 'errorCode',
+              'forcedAnswer'].includes(key)) {
               expect(value === null || /^[a-z0-9_-]+$/.test(String(value))).toBe(true);
             } else if (key === 'outputTokensIncomplete') expect(value).toBe(false);
             else expect(typeof value).toBe('number');

@@ -511,8 +511,10 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
       // Numbers and codes only.
       for (const [key, value] of Object.entries(line)) {
         if (!['event', 'level', 'timestamp', 'jobId', 'correlationId', 'model', 'pass', 'effort', 'followupEffort',
-          'endedBy', 'outputTokensIncomplete', 'failure', 'forcedAnswer'].includes(key)) expect(typeof value).toBe('number');
-      expect(line).toMatchObject({ failure: null, forcedAnswer: null });
+          'forcedEffort', 'zoomClosed', 'endedBy', 'outputTokensIncomplete', 'failure', 'forcedAnswer'].includes(key)) {
+          expect(typeof value).toBe('number');
+        }
+      expect(line).toMatchObject({ failure: null, forcedAnswer: null, forcedEffort: null, zoomClosed: null });
       }
     }
     const done = lines.find((line) => line.event === 'ocr.job.completed')!;
@@ -540,8 +542,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
       if (request.image && request.hardPage) {
         hardCalls += 1;
         if (hardCalls === 1) {
+          // Its first turn and the answer-only turn (not a follow-up turn: it runs at low effort).
           request.trace!.turns += 2;
-          request.trace!.followupTurns += 1;
           request.trace!.forced = 'max_tokens';
           return { kind: 'failed' as const, reason: 'max_tokens' as const, code: 'max_tokens' as const, attempts: 2,
             usage: used };
@@ -592,9 +594,34 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read');
     expect(usageLines.map((line) => [line.read, line.failure, line.forcedAnswer])).toEqual([
       [1, 'max_tokens', 'forced_answer_max_tokens'], [2, 'parse_error', null]]);
+    expect(usageLines[0]).toMatchObject({ followupEffort: null, forcedEffort: 'low', zoomClosed: null });
     const logs = written.join('\n');
     for (const secret of ['Fictionalmab', 'rng', 'Pyrimethamine']) expect(logs).not.toContain(secret);
     for (const chunk of chunks) expect(logs).not.toContain(chunk);
+  });
+
+  it('writes the hard-read warn lines even when the job then fails at completion', async () => {
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        request.trace!.turns += 1;
+        return { kind: 'failed' as const, reason: 'malformed' as const, code: 'schema_error' as const, attempts: 1,
+          usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const { repository, reader, provider } = mocks(client);
+    reader.readExact.mockResolvedValue({ ...document, bytes: picture });
+    provider.extract.mockResolvedValue(hardText);
+    repository.complete.mockRejectedValueOnce(new Error('fictional database outage'));
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on' },
+      client);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(repository.fail).toHaveBeenCalledTimes(1);
+    const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines.filter((line) => line.level === 'warn').map((line) => [line.event, line.read ?? null, line.reason ?? null]))
+      .toEqual([['ocr.reading.hard_read_failed', 1, 'schema_error'], ['ocr.reading.hard_read_failed', 2, 'schema_error'],
+        ['ocr.reading.page_read_failed', null, 'hard_reads_failed'], ['ocr.job.failed', null, null]]);
+    expect(lines.some((line) => line.event === 'ocr.job.completed')).toBe(false);
   });
 
   it('records the no-zoom hard-page prompt version when the picture fails zoom\'s header checks', async () => {
