@@ -331,6 +331,23 @@ describe('A failed turn logs its category only',()=>{
   await s.service.answer(request,'Hello');
   expect(timeout).toHaveBeenCalledWith(60_000);
  });
+ it('starts the turn timer before authorization, so authorization and history count against it',async()=>{
+  const timeout=jest.spyOn(AbortSignal,'timeout');
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'I can summarise this patient\'s records.'});
+  const authorize=jest.fn(async()=>auth);
+  await s.service.answer(request,'Hello',{...(staffAccess(s) as object),authorize} as never);
+  const turnTimer=timeout.mock.calls.findIndex(call=>call[0]===48_000);
+  expect(turnTimer).toBeGreaterThanOrEqual(0);
+  expect(timeout.mock.invocationCallOrder[turnTimer]!).toBeLessThan(authorize.mock.invocationCallOrder[0]!);
+ });
+ it('stops a turn whose authorization and history used up its time, before asking the model',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  jest.spyOn(AbortSignal,'timeout').mockReturnValue(AbortSignal.abort(new DOMException('The operation timed out.','TimeoutError')));
+  const s=setup();
+  await expect(s.service.answer(request,'Hello',staffAccess(s))).rejects.toMatchObject({code:'PATIENT_CHAT_UNAVAILABLE'});
+  expect(s.plan).not.toHaveBeenCalled();expect(s.save).not.toHaveBeenCalled();
+  expect(warn.mock.calls[0]?.[0]).toMatchObject({category:'timeout',audience:'staff'});
+ });
 });
 
 describe('B6 stale patient vectors are purged',()=>{

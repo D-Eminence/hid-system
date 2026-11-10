@@ -68,6 +68,9 @@ export class PatientChatService {
       throw new DomainProblem(400, 'INVALID_QUESTION', 'A question of 1 to 500 characters is required');
     }
     const audience = this.audienceOf(access);
+    // The whole turn counts against its limit, authorization and history included, so a staff turn
+    // that is slow before the model is asked still ends inside the gateway's 50 seconds.
+    const signal = AbortSignal.timeout(TURN_LIMIT_MS[audience]);
     const authorization = await access.authorize(request);
     // One patient per turn: every later authorization must be for the same patient.
     const turn: ChatAccess = { ...access, authorize: async current => {
@@ -88,7 +91,8 @@ export class PatientChatService {
       // A removed identifier can be longer than what it replaces; the question stays within its 500-character limit.
       const question = clean(typed).slice(0, 500);
       const context = { ...saved, exchanges: saved.exchanges.map(e => ({ ...e, question: clean(e.question), answer: clean(e.answer) })) };
-      const signal = AbortSignal.timeout(TURN_LIMIT_MS[audience]);
+      // Authorization, history and cleaning take no signal; stop here if they used up the turn.
+      signal.throwIfAborted();
       const plan = await this.claude.plan(question, context.exchanges, signal, audience);
       let reply: ChatReply; let selected: EvidenceBinding[] = [];
       if (plan.intent === 'conversation') {
