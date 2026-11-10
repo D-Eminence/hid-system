@@ -530,8 +530,9 @@ Each claimed job runs, in order:
    - *Request.* The same request twice (`Promise.allSettled`, both inside the
      process-wide request limit), same model (`OCR_AI_REREAD_MODEL`), adaptive
      thinking, `inference_geo: "us"`, fixed endpoint and the same cached system
-     prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `max`, which Claude Opus 5.5
-     accepts: `low` to `max`; any other value fails startup). Its user turn is
+     prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `high` since the owner's
+     decision of 2026-11-10, `max` before; Claude Opus 5.5 accepts `low` to
+     `max`; any other value fails startup). Its user turn is
      `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-9` when
      the reads are offered zoom, else `hid-paper-reading-hard-page-prompt-7`,
      the same text without rule J; `-8` until 2026-11-10, when rule J allowed
@@ -1082,7 +1083,7 @@ Each claimed job runs, in order:
        and about 4x the answer plus thinking of a `max` read without zoom.
      - `OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT` (default `high`): the effort of each
        turn after a zoom `tool_result`; the first turn keeps
-       `OCR_AI_HARD_PAGE_EFFORT` (default `max`). Checked against the Claude
+       `OCR_AI_HARD_PAGE_EFFORT` (default `high`). Checked against the Claude
        API reference: a different top-level effort between turns of one
        tool-use conversation is accepted with adaptive thinking, and the
        earlier thinking blocks (sent back unchanged, signatures and all) stay
@@ -1134,9 +1135,13 @@ Each claimed job runs, in order:
        reading. A read finishes within 150 s only at about 15,000 output
        tokens or fewer, which is what 3 turns at `high` (about 5,000 each)
        give: about $0.66 output plus about $0.15 input (no effort change, so
-       no second cache write) = about $0.80 per page. `max` stays the default
-       only because it was the owner's decision; the measurement below
-       decides.
+       no second cache write) = about $0.80 per page. **Owner decision of
+       2026-11-10, about 16:40 UTC** (relayed by the coordinator): "High
+       (Recommended)" thinking for hard handwritten pages, about 2.5 minutes
+       and about $0.80 a page, both reads kept, 32,000 cap kept. So both
+       `OCR_AI_HARD_PAGE_EFFORT` and `OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT` default
+       to `high` (one effort for the whole read, no cache rewrite); `max` stays
+       a setting for the comparison below.
      **Measuring `high` against `max` in staging** (no API key or owner
      photo was available where this was written, so no offline comparison
      was run): set `OCR_AI_HARD_PAGE_EFFORT` to `max` or `high` (and

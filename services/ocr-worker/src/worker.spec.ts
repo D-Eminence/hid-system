@@ -505,7 +505,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     // Zoom off here: the hard-page usage lines still say how many crops were made (none), the first pass's does not.
     expect(usageLines.map((line) => line.zoomCalls)).toEqual([undefined, 0, 0]);
     for (const line of usageLines.slice(1)) {
-      expect(line).toMatchObject({ page: 1, model: 'claude-opus-5-5', effort: 'max', followupEffort: null,
+      expect(line).toMatchObject({ page: 1, model: 'claude-opus-5-5', effort: 'high', followupEffort: null,
         endedBy: 'answer', outputTokensIncomplete: false, turns: 0, zoomLimited: 0, durationMs: expect.any(Number), inputTokens: expect.any(Number),
         outputTokens: expect.any(Number), cacheReadTokens: expect.any(Number), cacheWriteTokens: expect.any(Number) });
       // Numbers and codes only.

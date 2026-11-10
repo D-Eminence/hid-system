@@ -83,9 +83,10 @@ const schema = z.object({
   // OCR_AI_MODE=claude and 'off' otherwise ('off' sends such pages the ordinary image re-read). Any other value
   // fails startup.
   OCR_AI_HARD_PAGE_READS: z.preprocess(emptyToUndefined, z.enum(['on', 'off']).optional()),
-  // Effort for the first turn of both hard-page reads, 'max' by default (the owner's best-result run); fail-closed like
-  // the others.
-  OCR_AI_HARD_PAGE_EFFORT: effort.default('max'),
+  // Effort for the first turn of both hard-page reads, 'high' by default (owner decision of 2026-11-10, about 16:40 UTC,
+  // relayed by the coordinator: "High (Recommended)" thinking for hard handwritten pages, about 2.5 minutes and about
+  // $0.80 a page, both reads kept; it was 'max'). Set 'max' to compare (README). Fail-closed like the others.
+  OCR_AI_HARD_PAGE_EFFORT: effort.default('high'),
   // Effort for a hard-page read's later turns, the ones after a zoom tool_result (coordinator 2026-11-10, relaying
   // production job 5419047a: 13 minutes and about $3.60 for one hard page, nearly all of it output tokens at 'max').
   // 'high' by default. Sent as the top-level effort of those requests: legal with adaptive thinking (earlier thinking

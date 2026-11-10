@@ -836,12 +836,12 @@ describe('PaperReadingService', () => {
       document: { mediaType: string; bytes: Uint8Array } | undefined = png) => new PaperReadingService(reading, client)
       .read({ facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages, ...(document ? { document } : {}) }, signal());
 
-    it('sends a handwriting or low_confidence page the best-guess request twice, at max effort, with its picture', async () => {
+    it('sends a handwriting or low_confidence page the best-guess request twice, at high effort by default, with its picture', async () => {
       const { client, calls } = hardClient(() => ok(best('Pyrimethamine')));
       const { payload, summary } = await read(hardConfig, client);
       expect(calls.map((call) => [call.model, call.effort, call.image, call.hardPage])).toEqual([
-        ['claude-sonnet-5-5', 'medium', false, false], ['claude-opus-5-5', 'max', true, true],
-        ['claude-opus-5-5', 'max', true, true]]);
+        ['claude-sonnet-5-5', 'medium', false, false], ['claude-opus-5-5', 'high', true, true],
+        ['claude-opus-5-5', 'high', true, true]]);
       expect(summary).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
         hardPageAgreement: { itemsPaired: 1, itemsSingle: 0 }, imageRereadPages: [1], rereadPages: [1] });
       expect(summary.passUsage.map((entry) => [entry.pass, entry.requests])).toEqual([['first_pass', 1],
@@ -1123,8 +1123,8 @@ describe('PaperReadingService', () => {
         const requests = (client.readPage as jest.Mock).mock.calls.map(([request]) => request as { hardPage?: boolean;
           followupEffort?: string; trace?: unknown; effort: string });
         expect(requests.filter((request) => request.hardPage).map((request) => [request.effort, request.followupEffort,
-          request.trace])).toEqual([['max', 'medium', { turns: 0, followupTurns: 0, cutAttempts: 0 }],
-          ['max', 'medium', { turns: 0, followupTurns: 0, cutAttempts: 0 }]]);
+          request.trace])).toEqual([['high', 'medium', { turns: 0, followupTurns: 0, cutAttempts: 0 }],
+          ['high', 'medium', { turns: 0, followupTurns: 0, cutAttempts: 0 }]]);
         // Not given: 'high' after a zoom result (the setting's default); the first pass gets none of it.
         const { client: defaults } = hardClient(() => ok(best('Pyrimethamine')));
         await read(hardConfig, defaults);

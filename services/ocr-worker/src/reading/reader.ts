@@ -335,7 +335,7 @@ export class PaperReadingService {
     };
     const rereadModel = this.config.OCR_AI_REREAD_MODEL;
     const rereadEffort = this.config.OCR_AI_REREAD_EFFORT;
-    const hardEffort: Effort = this.config.OCR_AI_HARD_PAGE_EFFORT ?? 'max';
+    const hardEffort: Effort = this.config.OCR_AI_HARD_PAGE_EFFORT ?? 'high';
     const followupEffort: Effort = this.config.OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT ?? 'high';
     const deadlineMs = this.config.OCR_AI_HARD_PAGE_DEADLINE_MS ?? HARD_PAGE_DEADLINE_MS;
     const deadlinePages: number[] = [];

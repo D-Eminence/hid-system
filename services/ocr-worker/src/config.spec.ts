@@ -103,7 +103,7 @@ describe('OCR worker configuration', () => {
   it('bounds the hard-page reads: follow-up effort, per-read output tokens and the page deadline, fail-closed', () => {
     const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
       OCR_AI_US_PROCESSING_APPROVED: 'true' };
-    expect(readOcrWorkerConfig(claude)).toMatchObject({ OCR_AI_HARD_PAGE_EFFORT: 'max',
+    expect(readOcrWorkerConfig(claude)).toMatchObject({ OCR_AI_HARD_PAGE_EFFORT: 'high',
       OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT: 'high', OCR_AI_HARD_PAGE_MAX_TOKENS: 32_000,
       OCR_AI_HARD_PAGE_DEADLINE_MS: 150_000, OCR_AI_MAX_TOKENS: 64_000 });
     expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT: 'max', OCR_AI_HARD_PAGE_MAX_TOKENS: '4096',
@@ -133,12 +133,13 @@ describe('OCR worker configuration', () => {
   it('reads hard pages twice at max effort by default when AI reading is on, and fails closed on other values', () => {
     const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
       OCR_AI_US_PROCESSING_APPROVED: 'true' };
-    expect(readOcrWorkerConfig(base)).toMatchObject({ OCR_AI_HARD_PAGE_READS: 'off', OCR_AI_HARD_PAGE_EFFORT: 'max',
+    expect(readOcrWorkerConfig(base)).toMatchObject({ OCR_AI_HARD_PAGE_READS: 'off', OCR_AI_HARD_PAGE_EFFORT: 'high',
       OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 });
     expect(readOcrWorkerConfig(claude).OCR_AI_HARD_PAGE_READS).toBe('on');
     expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: ' ' }).OCR_AI_HARD_PAGE_READS).toBe('on');
     expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: 'off' }).OCR_AI_HARD_PAGE_READS).toBe('off');
     expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_EFFORT: 'xhigh' }).OCR_AI_HARD_PAGE_EFFORT).toBe('xhigh');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_EFFORT: 'max' }).OCR_AI_HARD_PAGE_EFFORT).toBe('max');
     for (const value of ['yes', 'ON', 'true']) {
       expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: value })).toThrow(/OCR_AI_HARD_PAGE_READS/);
     }
