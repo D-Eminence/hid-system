@@ -560,6 +560,18 @@ Each claimed job runs, in order:
        completion log (`hardPageAgreement.alternativesDropped`, a count only,
        never text; no payload change). The dropped option itself is not
        stored anywhere (the payload contract is unchanged).
+     - *No option that adds nothing* (`dropEmptyOptions`; coordinator,
+       second cleanup round of 2026-11-10; PROMPT_VERSION 13). An `(or X?)`
+       is never shown, in the shown text, `asWritten` of a pair or any field,
+       inside `(crossed out: …)` too, where X is only a placeholder or `[?]`
+       (`500mg? (or [dose?])`), or is the same as the words straight before
+       it, compared without case, `?`, `…` or spacing, or by listed generic
+       (`Pl… (Plasil?) (or Plasil?)`, `Flagyl? (metronidazole) (or
+       Metronidazole?)`), or is a drug name, with no digits, that a word before
+       it in the same text already names (`(crossed out: Ceftriaxone? 1g? (or
+       Ceftriaxone?))`). A dose, route or frequency repeated further back is
+       kept: it may be another field's option. Each is counted in
+       `alternativesDropped`; the item keeps `readings_disagree`.
      - *Two drugs, two items* (`sameDrug`, `splitPair`). Where two items
        paired by place are medicines whose reads name different drugs, they
        are two items, one per read, each with its own fields, `asWritten` and

@@ -243,7 +243,7 @@ export function alternatives(first: string | null, second: string | null,
   const [main, ownOther] = optionsOf(a);
   const [otherMain, otherOther] = optionsOf(b);
   const differs = (option: string | null): option is string => option !== null && !isBlank(option)
-    && bare(option) !== bare(main);
+    && bare(option) !== bare(main) && !addsNothing(option, words(main));
   const fromOther = [otherMain, otherOther].filter(differs);
   const own = [ownOther].filter(differs);
   // One pool, ranked by `score`; on a tie the other read's options first (in the order offered), then A's own.
@@ -266,6 +266,57 @@ export function alternatives(first: string | null, second: string | null,
   return `${markWords(main)} ${ALTERNATIVE_OPEN}${markWords(chosen)})`;
 }
 
+/** A field placeholder or "[?]" alone: an other option that says nothing (cleanup of 2026-11-10, second round). */
+const PLACEHOLDER = /^\[(?:\?|route\?|drug\?|dose\?|freq\?)\]$/;
+/** A text compared as the reading it shows: case, "?", "…", spacing and the brackets of a guess group left out. */
+const optionKey = (text: string) => bare(text).replace(/…/g, '').replace(/[()\s]/g, '');
+/** The listed generic of a drug name with no digits ("Plasil?" is metoclopramide), else null. */
+const genericOf = (text: string) => /\d/.test(text) ? null : matchDrugName(bare(text))?.generic ?? null;
+
+/**
+ * Whether an other option adds nothing to the reading before it (coordinator cleanup of 2026-11-10, second round):
+ * - a field placeholder or "[?]" only ("500mg? (or [dose?])");
+ * - the same as the words straight before it, by optionKey or by listed generic ("Pl… (Plasil?) (or Plasil?)",
+ *   "Flagyl? (or Metronidazole?)");
+ * - a drug name with no digits that a word or run of words before it in the same text already names, by optionKey
+ *   or listed generic ("(crossed out: Ceftriaxone? 1g? (or Ceftriaxone?))").
+ * A dose, route or frequency repeated further back is kept: it can be another field's other option.
+ */
+function addsNothing(option: string, before: readonly string[]): boolean {
+  const parts = words(option.trim());
+  if (parts.length === 0 || parts.every((part) => PLACEHOLDER.test(part))) return true;
+  const key = optionKey(option);
+  const generic = genericOf(option);
+  const same = (run: string) => (key !== '' && optionKey(run) === key)
+    || (generic !== null && genericOf(run) === generic);
+  const shown = before.filter((word) => !word.startsWith(ALTERNATIVE_OPEN) && !word.startsWith(CROSSED_OUT_OPEN));
+  // The words straight before it: the last one to four ("500 mg? (or 500mg)" is the same reading spaced).
+  for (let count = 1; count <= Math.min(4, shown.length); count += 1) {
+    if (same(shown.slice(shown.length - count).join(' '))) return true;
+  }
+  if (/\d/.test(option) || !hasLetters(option)) return false;
+  const run = (from: number) => shown.slice(from, from + parts.length).join(' ');
+  return shown.some((_word, index) => index + parts.length <= shown.length && same(run(index)));
+}
+
+/**
+ * The text without other options that add nothing (addsNothing), inside crossed-out writing too, each counted in
+ * `drops`. Run on every shown text and field (limitAlternatives, finish).
+ */
+export function dropEmptyOptions(text: string, drops?: AlternativeDrops): string {
+  if (!text.includes(ALTERNATIVE_OPEN)) return text;
+  const out: string[] = [];
+  for (const word of words(text)) {
+    if (word.startsWith(ALTERNATIVE_OPEN) && addsNothing(word.slice(ALTERNATIVE_OPEN.length, -1), out)) {
+      if (drops) drops.count += 1;
+      continue;
+    }
+    out.push(word.startsWith(CROSSED_OUT_OPEN)
+      ? `${CROSSED_OUT_OPEN}${dropEmptyOptions(word.slice(CROSSED_OUT_OPEN.length, -1), drops)})` : word);
+  }
+  return out.join(' ');
+}
+
 /** A text with at most one other option: "A (or B (or C))" or "A (or B) (or C)" as "A (or B)", the rest counted. */
 function oneOption(text: string, drops?: AlternativeDrops): string {
   if (!text.includes(ALTERNATIVE_OPEN)) return text;
@@ -279,7 +330,7 @@ function oneOption(text: string, drops?: AlternativeDrops): string {
  */
 export function limitAlternatives(text: string, drops?: AlternativeDrops): string {
   const out: string[] = [];
-  for (const word of words(text)) {
+  for (const word of words(dropEmptyOptions(text, drops))) {
     if (word.startsWith(ALTERNATIVE_OPEN)) {
       if (out.length > 0 && out[out.length - 1]!.startsWith(ALTERNATIVE_OPEN)) {
         if (drops) drops.count += 1;
@@ -1224,6 +1275,15 @@ function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: stri
     for (const key of SHOWN_TEXT_FIELDS) {
       const value = values[key];
       if (typeof value === 'string' && hasLetters(value)) values[key] = carryMarks(value, shown.uncarried, new Set());
+    }
+    fields = values as PaperItem['fields'];
+  }
+  // No field shows an other option that adds nothing (dropEmptyOptions; cleanup of 2026-11-10, second round).
+  {
+    const values = { ...fields } as Record<string, unknown>;
+    for (const key of SHOWN_TEXT_FIELDS) {
+      const value = values[key];
+      if (typeof value === 'string') values[key] = dropEmptyOptions(value, drops);
     }
     fields = values as PaperItem['fields'];
   }

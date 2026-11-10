@@ -5,7 +5,7 @@
  */
 import { answerItem, CLEAN_READING_ROWS, lineBox, type CleanReadingAnswer } from './clean-reading-fixtures';
 import type { PaperItem } from './contract';
-import { alternatives, drugIdentityOf, limitAlternatives, mergeAsWritten, mergeHardReadings, prepareHardAnswer,
+import { alternatives, drugIdentityOf, dropEmptyOptions, limitAlternatives, mergeAsWritten, mergeHardReadings, prepareHardAnswer,
   sameDrug, type AlternativeDrops, type HardReading } from './hard-page';
 import { checkPage, type PageCheck } from './items';
 import { createMasker } from './masking';
@@ -249,8 +249,9 @@ describe('two readings naming different drugs (whole-drug rule)', () => {
     const { check, agreement } = two(page, [order('Flagyl 400mg tds', { name: 'Flagyl', frequency: 'tds' }, '400', 'mg')],
       [order('Metronidazole 400mg tds', { name: 'Metronidazole', frequency: 'tds' }, '400', 'mg')]);
     expect(check.items).toHaveLength(1);
-    expect(check.items[0]!.plain).toBe('Flagyl? (metronidazole) (or Metronidazole?) 400mg tds (three times a day)');
-    expect(optionsIn(check.items[0]!.plain)).toBe(1);
+    // The other reading names the same generic already shown: no "(or Metronidazole?)" (second round).
+    expect(check.items[0]!.plain).toBe('Flagyl? (metronidazole) 400mg tds (three times a day)');
+    expect(optionsIn(check.items[0]!.plain)).toBe(0);
     expect(agreement).toMatchObject({ drugSplits: 0, itemsPaired: 1 });
   });
 });
@@ -427,5 +428,50 @@ describe('clinical notes are never dropped by the tidy step', () => {
   it('treats a first-pass note with no marks the same way', () => {
     expect(isHeadingNote(kept('note', 'Treatment Sheet', 1))).toBe(true);
     expect(isHeadingNote(kept('note', 'Transfer to the ward', 1))).toBe(false);
+  });
+});
+
+describe('other options that add nothing (second cleanup round of 2026-11-10)', () => {
+  it('leaves out the live examples: a repeat of the reading, a placeholder, a repeat inside crossed-out writing', () => {
+    const drops = { count: 0 };
+    expect(limitAlternatives('Pl… (Plasil?) (or Plasil?) 10mg', drops)).toBe('Pl… (Plasil?) 10mg');
+    expect(limitAlternatives('500mg? (or [dose?]) bd', drops)).toBe('500mg? bd');
+    expect(limitAlternatives('IV (crossed out: Ceftriaxone? 1g? (or Ceftriaxone?)) 2g', drops))
+      .toBe('IV (crossed out: Ceftriaxone? 1g?) 2g');
+    expect(drops.count).toBe(3);
+  });
+
+  it('leaves out every placeholder, and a repeat by case, "?", "…" or spacing, or by the same generic', () => {
+    for (const placeholder of ['[dose?]', '[freq?]', '[route?]', '[drug?]', '[?]']) {
+      expect(dropEmptyOptions(`IV? (or ${placeholder}) Ceftriaxone`)).toBe('IV? Ceftriaxone');
+    }
+    expect(dropEmptyOptions('Ceftriaxone? (or ceftriaxone)')).toBe('Ceftriaxone?');
+    expect(dropEmptyOptions('500 mg? (or 500mg)')).toBe('500 mg?');
+    expect(dropEmptyOptions('Amox… (or Amox)')).toBe('Amox…');
+    // A brand and its listed generic: one drug.
+    expect(dropEmptyOptions('Flagyl? (or Metronidazole?) 400mg')).toBe('Flagyl? 400mg');
+    expect(alternatives('Flagyl', 'Metronidazole')).toBe('Flagyl?');
+    expect(alternatives('500mg', '[dose?]')).toBe('500mg?');
+  });
+
+  it('keeps an option that says something else', () => {
+    for (const text of ['Cefuroxime? (or Ceftriaxone?) 1g', '500mg? (or 250mg?) bd', 'IV? (or IM?) Ceftriaxone',
+      'IV? (or ✓?) Ceftriaxone', 'Vit C? (or Vit K?)', '[dose?] (or 500mg?)',
+      // A dose repeated further back can be another field's other option: kept.
+      'Ceftriaxone 1g? stat then 2g? (or 1g?) bd',
+      '(crossed out: Ceftriaxone? 1g? (or 2g?))']) {
+      expect(dropEmptyOptions(text)).toBe(text);
+    }
+    expect(alternatives('Cefuroxime', 'Ceftriaxone')).toBe('Cefuroxime? (or Ceftriaxone?)');
+  });
+
+  it('leaves no such option in a merged item, its shown text or its fields', () => {
+    const page = hand('IV Ceftriaxone 1g bd');
+    const { check } = two(page,
+      [order('IV Ceftriaxone 1g? (or [dose?]) bd', { route: 'IV', name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g')],
+      [order('IV Ceftriaxone 1g bd', { route: 'IV', name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g')]);
+    const [item] = check.items;
+    expect(item!.plain).not.toMatch(/\(or \[/);
+    expect(JSON.stringify(item!.fields)).not.toMatch(/\(or \[/);
   });
 });
