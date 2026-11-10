@@ -1488,6 +1488,33 @@ fields are optional to clients: answers saved before this change have neither.
 The origin is outside each source's content and hash, so saved conversations
 and stored vectors stay current.
 
+### Record chat: time and length limits
+
+Staff questions ("summarise this patient's history") need longer answers than
+a patient's, so the two have their own limits:
+
+| | Patient (`/ehr/me/chat`) | Staff (`/ehr/patients/:patientId/chat`) |
+|---|---|---|
+| Output tokens per Claude call | 1200 | 2000 |
+| Time per Claude call | `AI_REQUEST_TIMEOUT_MS` (20 s by default) | 40 s |
+| Whole turn | 60 s | 48 s |
+| Gateway read timeout | 45 s | 50 s |
+| Gateway rate limit (per address) | `hid_chat`, 6 a minute, burst 2 | `hid_staff_chat`, 20 a minute, burst 5 |
+| Answer length | 3800 characters, then the server's lines | 4000 characters; the model is asked for under 3000 |
+
+The model's raw text may be up to 8000 characters when it answers in JSON
+blocks (field names and quotes add length) and 4000 otherwise; the answer
+limits above still apply to the answer it becomes. The staff chat location is
+nested in the gateway's `^~ /api/v1/ehr/` location, because that location
+stops nginx from looking at regex locations outside it. Its history and source
+routes stay on the ordinary EHR proxy. A failed turn is still a 503: ehr-api
+answers `PATIENT_CHAT_UNAVAILABLE`, which the gateway replaces with its own
+`UPSTREAM_UNAVAILABLE` (as it does every 502, 503 and 504), so the browser
+cannot tell the two apart. ehr-api logs only the category (for example
+`timeout`, `model_answer_cut_off`, `model_request_failed` with the provider's
+status), the audience and the correlation ID, never the question, record text,
+the model's words or an error message.
+
 ## 18. API Documentation
 
 Public and internal service APIs should maintain OpenAPI documentation.

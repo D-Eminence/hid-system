@@ -6,6 +6,10 @@ limit_req_zone $binary_remote_addr zone=hid_chat:1m rate=6r/m;
 # the inherited "main" log for every location (health checks stay off).
 log_format hid_uri '$remote_addr - [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent '
                    '$request_time "$http_user_agent"';
+# Staff record chat ("Ask about this patient") has its own zone: a clinic's
+# staff often share one address, and a clinician's turn is longer than a
+# patient's. ehr-api still admits one question at a time per clinician.
+limit_req_zone $binary_remote_addr zone=hid_staff_chat:1m rate=20r/m;
 
 server {
   listen 3000;
@@ -103,6 +107,22 @@ server {
     if ($uri ~* "^/api/v1/ehr/documents/scan-(events|targets)") { return 404; }
     include /etc/nginx/hid-proxy-headers.conf;
     proxy_pass $hid_ehr_upstream;
+
+    # Staff record chat: POST /api/v1/ehr/patients/:patientId/chat. It is
+    # nested here because this ^~ location stops nginx from looking at regex
+    # locations outside it. Mixed case and a trailing slash, which Express
+    # accepts, land here too; history and sources stay on the EHR proxy above.
+    # ehr-api ends a staff turn at 48 seconds, so it answers before this
+    # 50-second read timeout gives up.
+    location ~* "^/api/v1/ehr/patients/[^/]+/chat/?$" {
+      limit_except POST { deny all; }
+      limit_req zone=hid_staff_chat burst=5 nodelay;
+      limit_req_status 429;
+      client_max_body_size 2k;
+      include /etc/nginx/hid-proxy-headers.conf;
+      proxy_read_timeout 50s;
+      proxy_pass $hid_ehr_upstream;
+    }
   }
   location ^~ /api/ {
     default_type application/problem+json;
