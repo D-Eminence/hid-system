@@ -210,30 +210,39 @@ const pageOf = (items: PaperItem[]): PageCheck => ({ items, droppedUngrounded: 0
     lineIds: [], box: null }, pageUnsure: false, rereadReasons: [], flagReasons: [] });
 
 describe('headings and form labels are not items', () => {
-  it('leaves out a note made only of heading words, and nothing else', () => {
-    for (const text of ['Trauma? surgery? Treatment? sheet?', 'Immediate? Management?', 'Plan?', 'TREATMENT SHEET',
-      'Drug chart', 'Accident and Emergency', 'Department of Surgery', 'Ward notes']) {
+  it('leaves out a note that is exactly a form title, and nothing else', () => {
+    for (const text of ['Trauma? surgery? Treatment? sheet?', 'Immediate? Management?', 'Treatment? Sheet?', 'Plan?',
+      'TREATMENT SHEET', 'Drug chart', 'Medication chart', 'Prescription chart', 'Fluid chart', 'Observation chart',
+      'Progress notes', 'Clinical notes', 'Case notes', "Doctor's notes", 'Doctor\u2019s notes', 'Nursing notes',
+      'Surgical treatment sheet', 'Paediatrics drug chart', 'Emergency treatment sheet', 'Medical progress notes',
+      'Management', 'Treatment', 'Plan (? on paper)', 'immediate management?']) {
       expect([text, isHeadingNote(kept('note', text, 1))]).toEqual([text, true]);
     }
-    for (const text of ['Transfer to the ward', '— Admit?', 'Admit?', 'Switch to IV Ceftriaxone 1g', 'Review in [?] days',
-      'Ward round', 'Plan: admit', 'Plan: review in 2 days', 'Discharge plan', 'Surgery tomorrow', 'Ward 3',
-      '(crossed out: Treatment sheet)', 'Plan (? on paper)', 'Stop treatment', 'Continue management',
-      'Omeprazole chart', 'Malaria']) {
-      expect([text, isHeadingNote(kept('note', text, 1))]).toEqual([text, false]);
-    }
-    // Plans written alone or after "for" are never headings (review of 2026-11-10).
-    for (const text of ['For theatre', 'For surgery', 'For emergency surgery', 'Emergency surgery', 'Surgery', 'ICU',
-      'For ICU', 'HDU care', 'For admission', 'Observation', 'For observation', 'Intensive care', 'Investigations',
+  });
+
+  it('keeps every note that is not exactly a form title (re-review of 2026-11-10)', () => {
+    for (const text of [
+      // Reviewer examples: a ward, unit or department with a colon, an arrow or alone is a plan.
+      '→ Renal unit', 'Admission: medical unit', 'Plan: medical unit', 'Plan: theatre', '→ Accident & Emergency',
+      '-> Medical unit', '=> ICU', '> Surgery', 'Medical unit', 'Renal unit', 'Surgical unit', 'Accident & Emergency',
+      'Accident and Emergency', 'Department of Surgery', 'Ward notes', 'ICU notes', 'Admission notes',
+      'Continuation sheet', 'Plan of management',
+      // Instructions and plans.
+      'Transfer to the ward', '— Admit?', 'Admit?', 'Switch to IV Ceftriaxone 1g', 'Review in [?] days', 'Ward round',
+      'Plan: admit', 'Plan: review in 2 days', 'Discharge plan', 'Surgery tomorrow', 'Ward 3', 'For theatre',
+      'For surgery', 'For emergency surgery', 'Emergency surgery', 'Emergency', 'Surgery', 'ICU', 'For ICU', 'HDU care',
+      'For admission', 'Observation', 'For observation', 'Intensive care', 'Investigations', 'Fluids',
       'For investigations', 'Fluid input and output chart', 'Vital signs chart', 'Nursing care', 'For ENT',
-      'Medical management', 'For surgical management', 'Plan of care', 'Theatre', 'Observation chart',
-      'For drug chart']) {
+      'Medical management', 'Surgical management', 'Emergency treatment', 'For surgical management', 'Plan of care',
+      'Theatre', 'For drug chart', 'Stop treatment', 'Continue management', 'Omeprazole chart', 'Malaria',
+      // Marks other than "?" and "(? on paper)", symbols, digits, brackets.
+      '(crossed out: Treatment sheet)', 'Treatment sheet 2', 'Treatment sheet.', 'Drug chart / fluids',
+      'Treatment sheet (cont.)', 'Plan:', 'Plan →', 'Treat… sheet', 'Plan [?]',
+    ]) {
       expect([text, isHeadingNote(kept('note', text, 1))]).toEqual([text, false]);
     }
-    // Form labels and exact headings still are.
-    for (const text of ['Accident & Emergency', 'Admission notes', 'Plan of management', 'Medication chart',
-      'Continuation sheet', 'ICU notes', 'Surgical unit']) {
-      expect([text, isHeadingNote(kept('note', text, 1))]).toEqual([text, true]);
-    }
+    // Both the writing and the note text must be a title.
+    expect(isHeadingNote(kept('note', 'Treatment sheet', 1, { text: 'Treatment sheet: day 2' }))).toBe(false);
     // Never an item of another kind, whatever its words.
     for (const kind of ['medicine', 'diagnosis', 'lab_result', 'allergy', 'vital'] as const) {
       expect(isHeadingNote(kept(kind, 'Treatment sheet', 1))).toBe(false);
@@ -269,42 +278,62 @@ describe('a note repeating a medicine\'s order', () => {
     expect(tidied.items).toEqual([stopped]);
     expect(tidied.items[0]!.fields).toMatchObject({ status: 'stopped' });
     expect(tidied.droppedByReason).toEqual({ duplicate_of_order: 1 });
-    // The stop word in another spelling, the drug under its brand.
-    expect(duplicatesOrder(kept('note', 'Stopped gentamicin', 1), stopped)).toBe(true);
+    // Every stop cue, either order, the drug under its brand, a box overlapping by half on another line.
+    for (const text of ['Stopped gentamicin', 'Gentamicin stop', 'd/c Gentamicin', 'Discontinue gentamicin',
+      'Discontinued Gentamicin?', 'Gentamicin off', 'Stop Gentamicin (? on paper)']) {
+      expect([text, duplicatesOrder(kept('note', text, 1), stopped)]).toEqual([text, true]);
+    }
     const flagyl = kept('medicine', 'Stop Metronidazole', 2, { name: 'Metronidazole', status: 'stopped' });
     expect(duplicatesOrder(kept('note', 'D/C Flagyl?', 2), flagyl)).toBe(true);
+    expect(duplicatesOrder(kept('note', 'DC Gentamicin', 3, {}, stopped.box), stopped)).toBe(true);
+    // A combination by its whole name or brand.
+    const coartem = kept('medicine', 'Stop Coartem', 1, { name: 'Coartem', status: 'stopped' });
+    expect(duplicatesOrder(kept('note', 'Stop Coartem', 1), coartem)).toBe(true);
+    // An unlisted name by its whole name.
+    const fictional = kept('medicine', 'Stop Fictozolam', 1, { name: 'Fictozolam?', status: 'stopped' });
+    expect(duplicatesOrder(kept('note', 'Stop fictozolam', 1), fictional)).toBe(true);
   });
 
-  it('keeps the note wherever it is not fully covered by one medicine on its place', () => {
+  it('keeps the note wherever it is not exactly the stop of the same drug (re-review of 2026-11-10)', () => {
+    // Reviewer examples: a part of a combination, a salt word, a crossed-out name.
+    const coartem = kept('medicine', 'Stop Coartem', 1, { name: 'Coartem', status: 'stopped' });
+    expect(duplicatesOrder(kept('note', 'Stop artemether', 1), coartem)).toBe(false);
+    expect(duplicatesOrder(kept('note', 'Stop lumefantrine', 1), coartem)).toBe(false);
+    const valproate = kept('medicine', 'Stop sodium valproate', 1, { name: 'Sodium valproate', status: 'stopped' });
+    expect(duplicatesOrder(kept('note', 'Stop sodium', 1), valproate)).toBe(false);
+    expect(duplicatesOrder(kept('note', 'Stop valproate', 1), valproate)).toBe(false);
+    const crossed = kept('medicine', 'Gentamicin (crossed out: Ceftriaxone)', 1,
+      { name: 'Gentamicin (crossed out: Ceftriaxone)', status: 'stopped' });
+    expect(duplicatesOrder(kept('note', 'Stop ceftriaxone', 1), crossed)).toBe(false);
+    expect(duplicatesOrder(kept('note', 'Stop gentamicin', 1), crossed)).toBe(true);
+    const option = kept('medicine', 'Stop Gentamicin', 1, { name: 'Gentamicin? (or Amikacin?)', status: 'stopped' });
+    expect(duplicatesOrder(kept('note', 'Stop amikacin', 1), option)).toBe(false);
+    // An unlisted name that is not the whole name.
+    const fictional = kept('medicine', 'Stop Fictozolam', 1, { name: 'Fictozolam forte', status: 'stopped' });
+    expect(duplicatesOrder(kept('note', 'Stop fictozolam', 1), fictional)).toBe(false);
     // The medicine does not say stop: the note carries the stop.
-    const active = kept('medicine', 'Gentamicin 80mg', 1, { name: 'Gentamicin', strength: '80mg', status: 'new' });
-    expect(duplicatesOrder(kept('note', 'DC? Gentamicin?', 1), active)).toBe(false);
-    // More than the order: another drug, a reason, a number.
+    for (const status of ['new', 'unknown', 'current']) {
+      const medicine = kept('medicine', 'Gentamicin 80mg', 1, { name: 'Gentamicin', strength: '80mg', status });
+      expect([status, duplicatesOrder(kept('note', 'DC? Gentamicin?', 1), medicine)]).toEqual([status, false]);
+    }
+    // More than the order: another drug, a reason, a number, a second cue, a cue alone, a symbol.
     for (const text of ['DC Gentamicin, start Ceftriaxone', 'DC Gentamicin due to AKI', 'DC Gentamicin day 5',
-      'Stop?', 'DC (? on paper) Gentamicin']) {
+      'Stop?', 'Stop stop Gentamicin', 'Stop Gentamicin off', 'Gentamicin', 'Gentamicin?', 'Continue gentamicin',
+      'Hold Gentamicin', 'Start Gentamicin', 'Give Gentamicin', 'Cease Gentamicin', 'Stop Gentamicin.',
+      '→ Stop Gentamicin', 'Stop Gentamicin 80mg', 'Stop Gentamicin (crossed out: Amikacin)', 'Stop Gentamicin now',
+      'If AKI stop Gentamicin', 'Stop IV Gentamicin']) {
       expect([text, duplicatesOrder(kept('note', text, 1), stopped)]).toEqual([text, false]);
-    }
-    // A stop word in the medicine's writing is no stop: only its status stopped counts (review of 2026-11-10).
-    for (const [writing, status] of [['Gentamicin 80mg bd (crossed out: stop)', 'current'],
-      ['Gentamicin 80mg bd x5/7 then stop', 'current'], ['Gentamicin 80mg bd stop if rash', 'new'],
-      ['Gentamicin 80mg bd? (or stop?)', 'unknown']] as const) {
-      const medicine = kept('medicine', writing, 1, { name: 'Gentamicin', strength: '80mg', frequency: 'bd', status });
-      expect([writing, duplicatesOrder(kept('note', 'Stop Gentamicin', 1), medicine)]).toEqual([writing, false]);
-    }
-    // A drug name alone, or a start, continue or hold word, is never taken as a repeat.
-    for (const [text, status] of [['Gentamicin', 'new'], ['Gentamicin?', 'unknown'], ['Continue Gentamicin', 'current'],
-      ['Give Gentamicin', 'new'], ['Gentamicin', 'stopped'], ['Hold Gentamicin', 'stopped'],
-      ['Start Gentamicin', 'stopped']] as const) {
-      const medicine = kept('medicine', 'Gentamicin 80mg bd', 1, { name: 'Gentamicin', strength: '80mg', status });
-      expect([text, status, duplicatesOrder(kept('note', text, 1), medicine)]).toEqual([text, status, false]);
     }
     // Another drug.
     expect(duplicatesOrder(kept('note', 'DC Amikacin', 1), stopped)).toBe(false);
     // Another place: no shared line, boxes apart.
     expect(duplicatesOrder(kept('note', 'DC Gentamicin', 5), stopped)).toBe(false);
     // Kept by tidyPage too, with nothing counted.
+    const active = kept('medicine', 'Gentamicin 80mg', 1, { name: 'Gentamicin', strength: '80mg', status: 'new' });
     const page = pageOf([active, kept('note', 'DC? Gentamicin?', 1)]);
     expect(tidyPage(page)).toBe(page);
+    const reviewPage = pageOf([coartem, kept('note', 'Stop artemether', 1), valproate, kept('note', 'Stop sodium', 1)]);
+    expect(tidyPage(reviewPage)).toBe(reviewPage);
   });
 
   it('drops the duplicate from a hard page\'s reading, the medicine shown stopped or unknown', () => {

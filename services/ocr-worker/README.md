@@ -586,41 +586,53 @@ Each claimed job runs, in order:
        prompts are unchanged: they ask only for clinically relevant items and
        have not been seen to give headings, and the text-only request is
        pinned by hash. Then, on every page however it was read, a
-       narrow filter (`tidy.ts` `isHeadingNote`, applied in
-       `reader.ts` after each page's reading is final): a `note` only (never
-       a medicine, diagnosis, lab result, allergy or vital) whose words, "?"
-       and punctuation off, are all heading words (`HEADING_WORDS`: sheet,
-       treatment, management, plan, immediate, chart, ward, notes, record,
-       form, page, history, department and specialty names such as surgery,
-       medicine, trauma, paediatrics, and the like) with only "and", "of",
-       "the" or "&" between them (never "for": "For surgery", "For ICU" are
-       plans), that holds a form-label word (`FORM_LABEL_WORDS`: sheet, form,
-       record, notes, kardex, continuation, department, dept, unit; "chart"
-       only beside drug, medication, prescription or treatment) or is one of
-       `HEADING_PHRASES` ("Plan", "Immediate management", "Plan of
-       management", "Accident and Emergency"), and with no digit, no bracketed
-       group or reading mark, no instruction word (`INSTRUCTION_VERBS`:
-       transfer, switch, stop, give, admit, discharge, review, continue,
-       refer and others, plus every stop or change word of `STATUS_WORDS`),
-       and nothing on the drug, diagnosis or lab list. "Transfer to the
-       ward", "Admit?", "Ward round", "Plan: review in 2 days", "Surgery",
-       "ICU", "Observation", "Investigations", "Vital signs chart", "Nursing
-       care", "Medical management" stay (a plan-bearing word alone is never
-       a heading; when in doubt the note is kept). Counted
-       as `droppedByReason.heading`.
+       whole-phrase filter (`tidy.ts` `isHeadingNote`, applied in
+       `reader.ts` after each page's reading is final; re-review of
+       2026-11-10 replaced the earlier word lists, which dropped "→ Renal
+       unit", "Admission: medical unit", "Plan: medical unit" and "→
+       Accident & Emergency"). A `note` only (never a medicine, diagnosis,
+       lab result, allergy or vital) is left out only if its whole text,
+       with the reading marks "?" and "(? on paper)" and case off, is
+       exactly a form title: an optional prefix (`HEADING_PREFIXES`:
+       trauma, trauma surgery, surgery, surgical, general surgery, medical,
+       medicine, internal medicine, paediatric(s), pediatric(s),
+       obstetric(s), gynae, gynaecology, gynecology, emergency) and then one
+       title (`HEADING_TITLES`: treatment sheet, drug chart, medication
+       chart, prescription chart, fluid chart, observation chart, progress
+       notes, clinical notes, case notes, doctor's notes, nursing notes,
+       immediate management), or exactly "plan", "management" or
+       "treatment" with nothing else (`HEADING_ALONE`; never after a
+       prefix: "Medical management", "Surgical management" are plans). The
+       text may hold only letters, spaces, apostrophes and those marks: a
+       colon, an arrow (→, ->, =>, >), a slash, a digit, a bracket or any
+       other symbol keeps it. Nothing else is a heading: "Transfer to the
+       ward", "Admit?", "Plan: theatre", "For theatre", "ICU", "Surgery",
+       "Observation", "Investigations", "Medical unit", "Fluids", "Accident &
+       Emergency", "Ward notes" stay. When in doubt the note is kept: a kept
+       heading costs one Keep/Change tap, a dropped plan is a safety loss.
+       Counted as `droppedByReason.heading`.
      - *No repeated order* (`tidy.ts` `duplicatesOrder`). A note that only
        repeats a medicine's stop ("DC? Gentamicin?" beside the medicine "Dc
-       Gentamicin", status stopped) is left out and the medicine kept. Only
-       where the medicine's status is stopped (its status alone: a stop word
-       in its writing, crossed out, conditional or in an "(or stop?)" option,
-       is no stop), the note names the drug (its name, its listed generic, or
-       any name the list gives the generic), holds at least one stop word
-       ("DC", "d/c", "stopped" are one) and nothing else (marks off), and the
-       two share a cited line or their boxes overlap by half the smaller.
-       Anything more (another drug, a reason, a number, a mark, a hold,
-       start, continue or change word) or a drug name alone keeps the note.
-       Counted as
-       `droppedByReason.duplicate_of_order`.
+       Gentamicin", status stopped) is left out and the medicine kept, only
+       if all hold: (1) the medicine's status is stopped (its status alone,
+       never a stop word in its writing) and the two share a cited line or
+       their boxes overlap by half the smaller; (2) the note (and its note
+       text), marks off, is exactly one stop cue (`STOP_CUES`: dc, d/c,
+       stop, stopped, discontinue, discontinued, off) and a drug name, in
+       either order, with nothing else (letters, spaces and a hyphen inside
+       the name only); (3) that name, its words joined, is the same drug as
+       the medicine's live name (the name field without any bracketed
+       group: never its crossed-out writing or an "(or …)" option): both
+       found by `matchDrugName` with the same generic and the note's name
+       as many words as a listed name of it ("Stop IV gentamicin" stays),
+       else, for an unlisted name, the same whole name once normalised; (4)
+       where the medicine is a combination, the note names the whole
+       combination, never a part. Kept (re-review of 2026-11-10): "Stop
+       artemether" beside Coartem, "Stop sodium" beside sodium valproate,
+       "Stop ceftriaxone" beside "Gentamicin (crossed out: Ceftriaxone)",
+       "Gentamicin?" alone, "Continue gentamicin", a stop note beside a
+       medicine of status new or unknown, a stop note on another line.
+       Counted as `droppedByReason.duplicate_of_order`.
      - *Fixture.* Owner transcript rows changed only where these rules
        apply: the two-drug row (`Cefuroxime` / `Ceftriaxone`) is now two
        items; the heading rows ("Immediate? Management?", "Treatment?

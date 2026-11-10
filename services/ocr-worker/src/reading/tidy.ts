@@ -1,33 +1,30 @@
 import type { PaperItem } from './contract';
-import { matchDiagnosisName } from './diagnosis-list';
 import { DRUG_ENTRIES, matchDrugName, normaliseDrugName } from './drug-list';
-import { INSTRUCTION_WORDS, STATUS_WORDS } from './hard-page';
 import { overlapShare, PAIR_BOX_OVERLAP, type PageCheck } from './items';
-import { matchLabTestName } from './lab-list';
 
 /**
  * The last step of a page's reading (coordinator/owner cleanups of 2026-11-10, about 20:30 UTC, after the first live
  * run with the clean hard-page reading): items that are not items are left out of what the check screen shows.
+ * Both rules match whole phrases, never word by word (re-review of 2026-11-10: "→ Renal unit", "Admission: medical
+ * unit", "Stop artemether" beside Coartem were dropped by word lists). When in doubt the note is kept: a kept
+ * heading costs one Keep/Change tap, a dropped plan or stop is a safety loss.
  *
- * - heading: a page heading, section title or form label read as a note ("Trauma? surgery? Treatment? sheet?",
- *   "Immediate? Management?", "Plan?"), like printed form text. The hard-page prompt (rule A, version 12) asks for
- *   them to be left out; this is the second layer, narrow and conservative (review of 2026-11-10: a word such as
- *   "surgery", "ICU" or "observation" alone, or after "for", is a plan, never a heading): only a note whose words
- *   (with "?" and punctuation off) are all HEADING_WORDS (CONNECTOR_WORDS between them, never "for") AND that either
- *   holds a form-label word (FORM_LABEL_WORDS: sheet, form, record, notes, kardex, continuation, department, unit;
- *   "chart" only with a drug, medication, prescription or treatment word: "Drug chart", never "Vital signs chart")
- *   or is one of HEADING_PHRASES ("Plan", "Immediate management", "Accident and Emergency"). Never with a digit, a
- *   reading mark or bracketed group (a crossed-out word, "[?]", "(? on paper)" and the like keep it), an instruction
- *   word (INSTRUCTION_VERBS, a stop or change word: "Admit?", "Transfer to the ward" stay) or a word or whole text on
- *   the drug, diagnosis or lab list. Never a medicine, diagnosis, lab result, allergy or vital. When in doubt the
- *   note is kept.
+ * - heading: a note whose whole text, with reading marks ("?", "(? on paper)") and case off, is exactly a form title:
+ *   an optional prefix from HEADING_PREFIXES ("trauma surgery", "medical", "emergency", ...) and then one title from
+ *   HEADING_TITLES ("treatment sheet", "drug chart", "immediate management", ...), or exactly one of
+ *   HEADING_ALONE ("plan", "management", "treatment") with nothing else at all. The original text may hold only
+ *   letters, spaces, apostrophes and the marks: a colon, an arrow (→, ->, =>, >), a slash, a digit, a bracket or any
+ *   other symbol keeps the note. Nothing else is a heading ("Medical unit", "Surgery", "ICU", "Observation",
+ *   "Medical management", "Accident & Emergency" stay). Never a medicine, diagnosis, lab result, allergy or vital.
  * - duplicate_of_order: a note that only repeats a medicine's stop ("DC? Gentamicin?" beside the medicine "Dc
- *   Gentamicin", status stopped): the medicine is kept, the note left out. Narrow (review of 2026-11-10): only where
- *   the medicine's status is stopped (its status, never a word of its writing: a crossed-out "stop", "then stop",
- *   "stop if rash" or an "(or stop?)" option is no stop), the note names that medicine's drug (its name as read, its
- *   listed generic, or any name the drug list gives that generic), holds at least one stop word and nothing but the
- *   drug and stop words (a hold, start, continue or change word, a drug name alone, anything else keeps it), and the
- *   two share a cited line or their boxes overlap by PAIR_BOX_OVERLAP of the smaller.
+ *   Gentamicin", status stopped). Only where all hold: the medicine's status is stopped (its status, never a word of
+ *   its writing); the two share a cited line or their boxes overlap by PAIR_BOX_OVERLAP of the smaller; the note,
+ *   marks off, is exactly one STOP_CUES word and a drug name, in either order, with nothing else; that drug name (its
+ *   words joined) is the same drug as the medicine's live name (its name field without any bracketed group: never its
+ *   crossed-out writing or an "(or …)" option): both on the drug list with the same generic, else the same whole name
+ *   once normalised (a listed match only with as many words as a listed name of the generic: "Stop IV gentamicin"
+ *   stays); and where the medicine is a combination, the note names the same combination, never one of its
+ *   parts ("Stop artemether" beside Coartem stays). Otherwise the note is kept.
  *
  * Counted per code in PageCheck.droppedByReason (codes and counts only, for the completion log). These are not
  * ungrounded items: droppedUngrounded (in the payload) is unchanged, so for a page with a heading or duplicate dropped
@@ -36,124 +33,109 @@ import { matchLabTestName } from './lab-list';
 export const TIDY_DROP_REASONS = ['heading', 'duplicate_of_order'] as const;
 export type TidyDropReason = (typeof TIDY_DROP_REASONS)[number];
 
-/**
- * The words a heading, section title or form label is made of (lower case, "?" and punctuation off). Words that are
- * a plan when written alone or after "for" (theatre, observation, investigations, care, intensive, fluid, input,
- * output, vital signs) are not here; department and specialty names are, but a note made of them alone is never a
- * heading (it needs a FORM_LABEL_WORDS word or to be one of HEADING_PHRASES).
- */
-export const HEADING_WORDS: ReadonlySet<string> = new Set([
-  // What the form or section is.
-  'sheet', 'sheets', 'treatment', 'treatments', 'management', 'plan', 'plans', 'immediate', 'chart', 'charts', 'ward',
-  'wards', 'department', 'dept', 'unit', 'clinic', 'notes', 'record', 'records', 'form', 'forms', 'page',
-  'history', 'clinical', 'progress', 'nursing', 'medication', 'medications', 'drug', 'drugs', 'prescription',
-  'prescriptions', 'orders', 'admission', 'summary', 'assessment', 'examination', 'findings',
-  'emergency', 'casualty', 'outpatient', 'inpatient', 'general', 'patient', 'patients', 'kardex', 'continuation',
-  'details',
-  // Department and specialty names (only with a form-label word: "Department of Surgery", "Trauma surgery treatment
-  // sheet"; "Surgery" or "ICU" alone is kept).
-  'surgery', 'surgical', 'medicine', 'medical', 'trauma', 'orthopaedic', 'orthopaedics', 'orthopedic', 'orthopedics',
-  'paediatric', 'paediatrics', 'pediatric', 'pediatrics', 'obstetric', 'obstetrics', 'gynaecology', 'gynecology',
-  'gynaecological', 'o&g', 'cardiology', 'neurology', 'neurosurgery', 'oncology', 'psychiatry', 'internal', 'ent',
-  'ophthalmology', 'urology', 'renal', 'maternity', 'labour', 'icu', 'hdu', 'a&e', 'opd', 'gopd', 'sopd', 'accident',
-  'dental', 'dermatology', 'haematology', 'hematology', 'nephrology', 'gastroenterology', 'endocrinology',
-]);
-/** Words allowed between heading words ("Accident and Emergency", "Department of Surgery"); never "for". */
-export const CONNECTOR_WORDS: ReadonlySet<string> = new Set(['and', 'of', 'the', '&']);
-/** The words that make a run of heading words a form label or title ("Treatment sheet", "Ward notes"). */
-export const FORM_LABEL_WORDS: ReadonlySet<string> = new Set(['sheet', 'sheets', 'form', 'forms', 'record', 'records',
-  'notes', 'kardex', 'continuation', 'department', 'dept', 'unit']);
-/** "Chart" is a title only beside one of these ("Drug chart"); "Vital signs chart" or "Fluid chart" is a plan. */
-const CHART_TITLE_WORDS: ReadonlySet<string> = new Set(['drug', 'drugs', 'medication', 'medications', 'prescription',
-  'prescriptions', 'treatment', 'treatments', 'kardex']);
-/** Exact headings without a form-label word (words joined by one space, "&" as "and"). */
-export const HEADING_PHRASES: ReadonlySet<string> = new Set(['plan', 'plans', 'immediate management',
-  'plan of management', 'accident and emergency']);
-/** Instruction words that make a note an instruction, never a heading (with STATUS_WORDS and INSTRUCTION_WORDS). */
-export const INSTRUCTION_VERBS: ReadonlySet<string> = new Set([
-  'transfer', 'transferred', 'switch', 'stop', 'give', 'admit', 'admitted', 'discharge', 'discharged', 'review',
-  'continue', 'start', 'refer', 'referred', 'repeat', 'check', 'monitor', 'send', 'call', 'observe', 'keep', 'nbm',
-  'commence', 'change', 'increase', 'reduce', 'withhold', 'hold', 'omit', 'encourage', 'advise', 'counsel', 'book',
-  'arrange', 'consult', 'do', 'take', 'administer', 'insert', 'remove', 'dress', 'nurse', 'follow', 'f/u', 'fu',
-  'recheck', 'chase', 'inform', 'notify', 'transfuse', 'catheterise', 'catheterize', 'elevate', 'mobilise', 'mobilize',
-  'see', 'seen', 'tco', 'tto',
-]);
+/** The specialty or ward a form title may start with (lower case, words joined by one space). */
+export const HEADING_PREFIXES: readonly string[] = [
+  'trauma', 'trauma surgery', 'surgery', 'surgical', 'general surgery', 'medical', 'medicine', 'internal medicine',
+  'paediatric', 'paediatrics', 'pediatric', 'pediatrics', 'obstetric', 'obstetrics', 'gynae', 'gynaecology',
+  'gynecology', 'emergency',
+];
+/** The form titles (lower case, words joined by one space; "doctor's" also without its apostrophe). */
+export const HEADING_TITLES: readonly string[] = [
+  'treatment sheet', 'drug chart', 'medication chart', 'prescription chart', 'fluid chart', 'observation chart',
+  'progress notes', 'clinical notes', 'case notes', "doctor's notes", 'doctors notes', 'nursing notes',
+  'immediate management',
+];
+/** Titles that are a heading only as the whole text, never after a prefix ("Medical management" is a plan). */
+export const HEADING_ALONE: readonly string[] = ['plan', 'management', 'treatment'];
 
-/** A word with "?" and punctuation off, lower case; "&" and "/" kept ("o&g", "d/c"). */
-const plainWord = (word: string) => word.toLowerCase().replace(/[^\p{L}\p{N}&/]/gu, '').replace(/^\/+|\/+$/g, '');
-const isInstruction = (word: string) => INSTRUCTION_VERBS.has(word) || STATUS_WORDS.test(word) || INSTRUCTION_WORDS.test(word);
+const HEADINGS: ReadonlySet<string> = new Set([...HEADING_ALONE, ...HEADING_TITLES,
+  ...HEADING_PREFIXES.flatMap((prefix) => HEADING_TITLES.map((title) => `${prefix} ${title}`))]);
 
-/** The words of a reading, or null where it holds a bracketed group or reading mark (such a note is never dropped). */
-function plainWords(text: string): string[] | null {
-  if (/[()[\]…]/.test(text)) return null;
-  return text.split(/[\s—–-]+/).map(plainWord).filter(Boolean);
+/** A text with its reading marks off: "(? on paper)" groups and "?" (case and spacing left to the caller). */
+export const withoutMarks = (text: string) => text.replace(/\(\s*\?\s*on paper\s*\)/giu, ' ').replace(/\?/g, ' ');
+
+/** The phrase a text reads as for the heading rule, or null where it holds anything but letters, spaces, "'". */
+function headingPhrase(text: string): string | null {
+  const plain = withoutMarks(text).replace(/[’‘]/g, "'");
+  if (!/^[\p{L}\s']*$/u.test(plain)) return null;
+  return plain.toLowerCase().split(/\s+/).filter(Boolean).join(' ');
 }
 
-/** Whether a note is a page heading, section title or form label (see the header). */
+/** Whether a note is a page heading or form title (see the header). */
 export function isHeadingNote(item: PaperItem): boolean {
   if (item.kind !== 'note') return false;
   const texts = [item.asWritten, item.fields.text ?? ''].filter((text) => text.trim() !== '');
   if (texts.length === 0) return false;
   return texts.every((text) => {
-    const list = plainWords(text);
-    if (list === null || list.length === 0 || /\d/.test(text)) return false;
-    if (!list.some((word) => HEADING_WORDS.has(word))) return false;
-    if (!list.every((word) => HEADING_WORDS.has(word) || CONNECTOR_WORDS.has(word))) return false;
-    if (list.some(isInstruction)) return false;
-    const labelled = list.some((word) => FORM_LABEL_WORDS.has(word))
-      || (list.some((word) => word === 'chart' || word === 'charts') && list.some((word) => CHART_TITLE_WORDS.has(word)))
-      || HEADING_PHRASES.has(list.map((word) => (word === '&' ? 'and' : word)).join(' '));
-    if (!labelled) return false;
-    const whole = text.replace(/\?/g, ' ').trim();
-    if (list.some((word) => word.length > 2 && matchDrugName(word) !== null) || matchDrugName(whole) !== null) return false;
-    return matchDiagnosisName(whole) === null && matchLabTestName(whole) === null;
+    const phrase = headingPhrase(text);
+    return phrase !== null && HEADINGS.has(phrase);
   });
 }
 
-/** What a stop, hold, change or other instruction word stands for, so "DC", "d/c" and "stopped" are one cue. */
-function cueOf(word: string): string | null {
-  if (/^(?:stops?|stopped|stopping|stp|discont\p{L}*|disc|d\/c|dc|cease\p{L}*|cancel\p{L}*|canx|withdr\p{L}*|off|halt\p{L}*)$/u
-    .test(word)) return 'stop';
-  if (/^(?:hold|holding|held|withh\p{L}*|omit|omitted|suspend\p{L}*)$/u.test(word)) return 'hold';
-  if (/^(?:switch\p{L}*|chang\p{L}*|convert\p{L}*)$/u.test(word)) return 'switch';
-  if (/^(?:start\p{L}*|commenc\p{L}*|give|given)$/u.test(word)) return 'start';
-  if (/^(?:continu\p{L}*|cont)$/u.test(word)) return 'continue';
-  if (/^(?:restart\p{L}*|resum\p{L}*)$/u.test(word)) return 'restart';
-  if (/^(?:reduc\p{L}*|taper\p{L}*|wean\p{L}*)$/u.test(word)) return 'reduce';
-  if (/^increas\p{L}*$/u.test(word)) return 'increase';
-  return null;
+/** The stop words a duplicate note may hold, exactly one (lower case). */
+export const STOP_CUES: ReadonlySet<string> = new Set(['dc', 'd/c', 'stop', 'stopped', 'discontinue', 'discontinued',
+  'off']);
+
+/** The drug words of a note that is one stop cue and a drug name, either order (see the header); else null. */
+function stoppedDrugOf(text: string): string | null {
+  const plain = withoutMarks(text).toLowerCase();
+  // Letters, spaces, a hyphen inside a name and the slash of "d/c" only: a comma, a digit, a bracket keeps it.
+  if (!/^[\p{L}\s/-]*$/u.test(plain)) return null;
+  const words = plain.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return null;
+  const cues = words.filter((word) => STOP_CUES.has(word));
+  if (cues.length !== 1) return null;
+  const drug = STOP_CUES.has(words[0]!) ? words.slice(1) : STOP_CUES.has(words.at(-1)!) ? words.slice(0, -1) : null;
+  if (drug === null || drug.some((word) => !/^\p{L}+(?:-\p{L}+)*$/u.test(word))) return null;
+  return drug.join(' ');
 }
-/** Every name the drug list gives a generic (letters and digits), for the duplicate rule. */
-const NAMES_BY_GENERIC = new Map<string, Set<string>>();
+
+/** A medicine's live name: its name field without any bracketed group ("(or …)", "(crossed out: …)", a guess). */
+function liveNameOf(name: string | null): string {
+  let live = name ?? '';
+  for (let previous = ''; previous !== live;) { previous = live; live = live.replace(/\([^()]*\)/g, ' '); }
+  return withoutMarks(live).replace(/[()]/g, ' ').trim();
+}
+
+const isCombination = (generic: string) => generic.includes('+');
+const wordCount = (name: string) => name.split(' ').filter(Boolean).length;
+/** The word counts of the drug list's names for each generic, so "IV gentamicin" is not taken for "gentamicin". */
+const NAME_LENGTHS = new Map<string, Set<number>>();
 for (const entry of DRUG_ENTRIES) {
-  const names = NAMES_BY_GENERIC.get(entry.target) ?? new Set<string>();
-  for (const word of entry.key.split(' ')) names.add(word);
-  NAMES_BY_GENERIC.set(entry.target, names);
+  const lengths = NAME_LENGTHS.get(entry.target) ?? new Set<number>();
+  lengths.add(wordCount(entry.key));
+  NAME_LENGTHS.set(entry.target, lengths);
+}
+
+/** Whether a note's drug name and a medicine's live name are the same drug (see the header). */
+function sameStoppedDrug(noteDrug: string, liveName: string): boolean {
+  const noteName = normaliseDrugName(noteDrug);
+  const live = normaliseDrugName(liveName);
+  if (noteName === '' || live === '') return false;
+  const noteMatch = matchDrugName(noteDrug);
+  const liveMatch = matchDrugName(liveName);
+  if (noteMatch === null || liveMatch === null) return noteName === live;
+  if (noteMatch.generic !== liveMatch.generic) return false;
+  // The note's words are the drug's name, nothing more: as many words as a listed name of that generic.
+  if (!NAME_LENGTHS.get(noteMatch.generic)?.has(wordCount(noteName))) return false;
+  // A combination only by the same whole combination (equal generics), never by one of its parts.
+  return !isCombination(liveMatch.generic) || isCombination(noteMatch.generic) || noteName === live;
 }
 
 /** Whether a note only repeats a stopped medicine's stop (see the header). */
 export function duplicatesOrder(note: PaperItem, medicine: PaperItem): boolean {
   if (note.kind !== 'note' || medicine.kind !== 'medicine') return false;
+  if (medicine.fields.status !== 'stopped') return false;
   const samePlace = note.lineIds.some((id) => medicine.lineIds.includes(id))
     || overlapShare(note.box, medicine.box) >= PAIR_BOX_OVERLAP;
   if (!samePlace) return false;
-  const list = plainWords(note.asWritten);
-  if (list === null || list.length === 0) return false;
-  const name = medicine.fields.name ?? '';
-  const drug = new Set(normaliseDrugName(name).split(' ').filter(Boolean));
-  const generic = matchDrugName(name.replace(/\([^)]*\)/g, ' '))?.generic
-    ?? /\(([^()]+)\)/.exec(name)?.[1]?.trim().toLowerCase() ?? null;
-  if (generic) for (const word of [...generic.split(' '), ...(NAMES_BY_GENERIC.get(generic) ?? [])]) drug.add(word);
-  // Only a stop beside a medicine whose status is stopped (see the header): never a cue taken from its writing.
-  if (medicine.fields.status !== 'stopped') return false;
-  let named = false;
-  let stop = false;
-  for (const word of list) {
-    if (drug.has(word)) { named = true; continue; }
-    if (cueOf(word) !== 'stop') return false;
-    stop = true;
-  }
-  return named && stop;
+  const texts = [note.asWritten, note.fields.text ?? ''].filter((text) => text.trim() !== '');
+  if (texts.length === 0) return false;
+  const liveName = liveNameOf(medicine.fields.name);
+  return texts.every((text) => {
+    const drug = stoppedDrugOf(text);
+    return drug !== null && sameStoppedDrug(drug, liveName);
+  });
 }
 
 /** The page's items without headings and notes repeating an order, each dropped item counted (see the header). */
