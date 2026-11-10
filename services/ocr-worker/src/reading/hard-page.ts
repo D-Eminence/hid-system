@@ -1267,8 +1267,19 @@ const NOT_IDENTITY_WORDS = new Set(['tab', 'tabs', 'tablet', 'tablets', 'cap', '
 const IDENTITY_ALIASES: Readonly<Record<string, string>> = {
   'vitamin k': 'phytomenadione',
   'pcm': 'paracetamol',
+  'mgso4': 'magnesium sulfate',
+  'mg sulphate': 'magnesium sulfate',
+  'mg sulfate': 'magnesium sulfate',
+  'mag sulphate': 'magnesium sulfate',
+  'ca gluconate': 'calcium gluconate',
+  'kcl': 'potassium chloride',
 };
-const identityWords = (text: string) => normaliseDrugName(text).split(' ')
+// Hyphens and other separators split words too ("Vitamin-C" is "vitamin c"), so a joined or hyphenated name has the
+// same identity as the spaced one (review of 2026-11-10).
+// A vitamin written joined ("VitaminK", "VitC", "VitB12") is split from its letter first, so it has the spaced form's
+// identity and its letter still tells it from another vitamin.
+const identityWords = (text: string) => normaliseDrugName(text).replace(/[-_/.]+/g, ' ')
+  .replace(/\bvit(?:amin)?([a-z]\d{0,2})\b/g, 'vitamin $1').split(' ')
   .filter((word) => word.length > 0 && !NOT_IDENTITY_WORDS.has(word))
   .map((word) => (word === 'vit' ? 'vitamin' : word)).join(' ');
 
@@ -1303,28 +1314,18 @@ const namesOf = (identity: { generic: string } | { key: string }) =>
   'generic' in identity ? LISTED_NAMES.get(identity.generic) ?? [normaliseDrugName(identity.generic)] : [identity.key];
 
 /**
- * Two spellings of one name by their letters: the same, or within LOOKALIKE_DISTANCE edits with at least 0.75 of the
- * letters in common ("Tramacet" and "Tramaset"), only where both have at least MIN_FUZZY_LETTERS letters and the
- * same short words (under SHORT_WORD letters) and digits: "Vitamin C" and "Vitamin K", "Vit B1" and "Vit B6", "Ca
- * gluconate" and "K gluconate" are different drugs, never one item (review of 2026-11-10). A real unlisted look-alike of a listed name ("Arteether" and the
- * listed artemether, "Quinidine" and the listed quinine) is not reached here: sameDrug keeps those apart.
+ * Two spellings of one unlisted name: the same drug only when their letters and digits are exactly the same, spaces,
+ * hyphens and other separators aside ("Vitamin-C", "VitaminC" and "Vitamin C" are one name; "Vitamin C" and "Vitamin
+ * K", "Vit B1" and "Vit B6", "Ca gluconate" and "K gluconate" are not). No fuzzy match here (review of 2026-11-10):
+ * wrongly splitting one drug only shows the order twice, each check_carefully, while wrongly joining two drugs mixes
+ * their fields in one order. Spellings the drug list knows still join through their listed generic (sameDrug).
  */
 const LOOKALIKE_LETTER_KEYS = UNLISTED_LOOKALIKES.map(lettersKey);
 const isUnlistedLookalike = (key: string) => LOOKALIKE_LETTER_KEYS.some((lookalike) => lookalike === key
   || (lookalike.length >= MIN_FUZZY_LETTERS && editDistance(lookalike, key) <= 1));
-const SAME_NAME_SIMILARITY = 0.75;
-const shortWordsOf = (name: string) => name.split(' ').filter((word) => word.length > 0 && word.length < SHORT_WORD)
-  .sort().join(' ');
-const digitsOf = (name: string) => name.replace(/\D/g, '');
-const lettersOf = (name: string) => name.replace(/[^a-z]/g, '');
 function sameName(nameA: string, nameB: string): boolean {
   const [a, b] = [lettersKey(nameA), lettersKey(nameB)];
-  if (a === b) return a !== '';
-  if (!a || !b) return false;
-  if (lettersOf(a).length < MIN_FUZZY_LETTERS || lettersOf(b).length < MIN_FUZZY_LETTERS) return false;
-  if (digitsOf(a) !== digitsOf(b) || shortWordsOf(nameA) !== shortWordsOf(nameB)) return false;
-  const distance = editDistance(a, b);
-  return distance <= LOOKALIKE_DISTANCE && 1 - distance / Math.max(a.length, b.length) >= SAME_NAME_SIMILARITY;
+  return a !== '' && a === b;
 }
 
 /**

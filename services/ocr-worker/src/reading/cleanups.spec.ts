@@ -153,7 +153,10 @@ describe('two readings naming different drugs (whole-drug rule)', () => {
     const id = (name: string) => drugIdentityOf(name);
     expect(sameDrug(id('Flagyl'), id('Metronidazole'))).toBe(true);
     expect(sameDrug(id('Metronidazol'), id('Metronidazole?'))).toBe(true);
-    expect(sameDrug(id('Fictomycin'), id('Fictomicin'))).toBe(true);
+    // Two unlisted spellings are one drug only when their letters are exactly the same: no fuzzy match (review of
+    // 2026-11-10; a wrong split shows the order twice, a wrong join mixes two drugs' fields).
+    expect(sameDrug(id('Fictomycin'), id('Fictomicin'))).toBe(false);
+    expect(sameDrug(id('Fictomycin'), id('Fictomycin?'))).toBe(true);
     expect(sameDrug(id('Am…'), id('Amoxicillin'))).toBe(true);
     expect(sameDrug(id('cr… (Pentazocine?)'), id('Fortwin'))).toBe(true);
     expect(sameDrug(id('Omeprazole?'), id('cr… (Pentazocine?)'))).toBe(false);
@@ -171,7 +174,8 @@ describe('two readings naming different drugs (whole-drug rule)', () => {
     const id = (name: string) => drugIdentityOf(name);
     for (const [x, y] of [['Vit C', 'Vit K'], ['Vitamin C', 'Vitamin K'], ['Vit B1', 'Vit B6'], ['Vit A', 'Vit E'],
       ['Vit A', 'Vit K'], ['Ca gluconate', 'K gluconate'], ['Inj Vit K', 'Inj Vit C'], ['Fictomycin A', 'Fictomycin B'],
-      ['Fictomycin 1', 'Fictomycin 2']]) {
+      ['Fictomycin 1', 'Fictomycin 2'], ['Vitamin-C', 'Vitamin-K'], ['VitaminC', 'VitaminK'], ['Vitamin-A', 'Vitamin-E'],
+      ['Ca-gluconate', 'K-gluconate'], ['Inj. Vitamin-K', 'Vitamin-C']]) {
       expect([x, y, sameDrug(id(x!), id(y!))]).toEqual([x, y, false]);
     }
   });
@@ -180,7 +184,9 @@ describe('two readings naming different drugs (whole-drug rule)', () => {
     const id = (name: string) => drugIdentityOf(name);
     for (const [x, y] of [['Vit K', 'Vitamin K'], ['Vit C', 'Vitamin C'], ['Vitamin K', 'Phytomenadione'],
       ['PCM', 'Paracetamol'], ['Nifedipine', 'Nifedipine retard'], ['Nifedipine SR', 'Nifedipine'],
-      ['Inj Fictomycin', 'Fictomicin'], ['Tab Fictomycin XR', 'Fictomycin']]) {
+      ['Inj Fictomycin', 'Fictomycin'], ['Tab Fictomycin XR', 'Fictomycin'], ['Vitamin-K', 'Vitamin K'],
+      ['VitaminK', 'Vit K'], ['MgSO4', 'Magnesium sulphate'], ['Mg sulphate', 'Magnesium sulfate'],
+      ['Ca gluconate', 'Calcium gluconate'], ['KCl', 'Potassium chloride']]) {
       expect([x, y, sameDrug(id(x!), id(y!))]).toEqual([x, y, true]);
     }
   });
@@ -213,14 +219,27 @@ describe('two readings naming different drugs (whole-drug rule)', () => {
     expect(agreement).toMatchObject({ drugSplits: 0, itemsPaired: 1 });
   });
 
-  it('keeps a spelling-variant disagreement as one item with one other option', () => {
+  it('shows an unlisted spelling-variant disagreement as two items, each to check (no fuzzy join)', () => {
     const page = hand('Fctmycn 250mg bd');
     const { check, agreement } = two(page, [order('Fictomycin 250mg bd', { name: 'Fictomycin', frequency: 'bd' }, '250', 'mg')],
       [order('Fictomicin 250mg bd', { name: 'Fictomicin', frequency: 'bd' }, '250', 'mg')]);
+    expect(check.items).toHaveLength(2);
+    expect(check.items.map((item) => item.plain)).toEqual(['Fictomycin? 250mg bd (twice a day)',
+      'Fictomicin? 250mg bd (twice a day)']);
+    for (const item of check.items) {
+      expect(item.confidence).toBe('check_carefully');
+      expect(item.checkReasons).toContain('readings_disagree');
+      expect(optionsIn(item.plain)).toBe(0);
+    }
+    expect(agreement).toMatchObject({ drugSplits: 1, itemsPaired: 0 });
+  });
+
+  it('keeps a listed spelling variant as one item with one other option', () => {
+    const page = hand('Mtrnidazol 400mg tds');
+    const { check, agreement } = two(page, [order('Metronidazole 400mg tds', { name: 'Metronidazole', frequency: 'tds' }, '400', 'mg')],
+      [order('Metronidazol 400mg tds', { name: 'Metronidazol', frequency: 'tds' }, '400', 'mg')]);
     expect(check.items).toHaveLength(1);
-    expect(check.items[0]!.plain).toBe('Fictomycin? (or Fictomicin?) 250mg bd (twice a day)');
-    expect(optionsIn(check.items[0]!.plain)).toBe(1);
-    expect(check.items[0]!.checkReasons).toContain('readings_disagree');
+    expect(optionsIn(check.items[0]!.plain)).toBeLessThanOrEqual(1);
     expect(agreement).toMatchObject({ drugSplits: 0, itemsPaired: 1 });
   });
 
