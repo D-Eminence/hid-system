@@ -1069,34 +1069,6 @@ Each claimed job runs, in order:
        crops per read and, with the 3 turns allowed past the limit, at most 7
        turns; rule J's text says 4 (hard-page prompt 9, `PROMPT_VERSION` 9;
        still 4 in prompt 10).
-     **Zooms in one turn** (coordinator's decision of 2026-11-10, a
-       follow-up to the bounds above; hard-page prompt 10, `PROMPT_VERSION`
-       10). Production showed about 4 turns per read, one zoom per turn,
-       each turn thinking again over the picture and the crops so far. Rule
-       J now asks the model to decide every place where a closer look would
-       help, request all of those zooms together in one response (several
-       zoom calls at once), answer from what they show, and zoom again only
-       if a crop is still unclear and calls are left. The zoom tool's
-       description says the same (its strict schema is unchanged). The cap
-       of 4 calls per read, the effort, the token cap and the deadline are
-       unchanged; the hard-page text without zoom (`-7`) and the text-only
-       request are byte for byte unchanged. The client already handled
-       several calls in one turn (Claude API parallel tool use: several
-       `tool_use` blocks in one assistant turn, all their `tool_result`
-       blocks in the next user turn, in call order): every call counts
-       against the cap whether answered or not, so 5 calls in one turn with
-       the cap at 4 give 4 crops and 1 `zoom limit reached` error (tested),
-       and a later turn's calls are counted against what is left.
-       *Expected effect*: about 2 turns per read (one turn of zooms, one
-       answer; 3 when one crop is still unclear) instead of about 4, so
-       fewer thinking passes and fewer re-sends of the picture and crops,
-       and more reads finishing inside the 150 s deadline. *How to see it*:
-       the per-read `ocr.reading.usage` line (`pass: "hard_page_read"`)
-       carries `turns` (answered requests of the read) and `zoomCalls`; with
-       this wording a read that zoomed should mostly show `turns` 2 with
-       `zoomCalls` 1 to 4, where before `turns` was about `zoomCalls` + 1.
-       It is an instruction, not a constraint: the model may still zoom one
-       at a time, which the cap and the deadline bound as before.
      - `OCR_AI_HARD_PAGE_MAX_TOKENS` (default 32,000; 4,096 to 128,000):
        output tokens for one read, all its turns together; each turn's
        `max_tokens` is what is left (turn 1: 32,000; after a turn of 10,000:
@@ -1131,6 +1103,36 @@ Each claimed job runs, in order:
        reads are on (startup fails otherwise): with one permit the two reads
        would take turns (a test shows both reads in flight before either
        answers with 2 permits, and only one with 1).
+
+     **Zooms in one turn** (coordinator's decision of 2026-11-10, a
+       follow-up to the bounds above; hard-page prompt 10, `PROMPT_VERSION`
+       10). Production showed about 4 turns per read, one zoom per turn,
+       each turn thinking again over the picture and the crops so far. Rule
+       J now asks the model to decide every place where a closer look would
+       help, request all of those zooms together in one response (several
+       zoom calls at once), answer from what they show, and zoom again only
+       if a crop is still unclear and calls are left. The zoom tool's
+       description says the same (its strict schema is unchanged). The cap
+       of 4 calls per read, the effort, the token cap and the deadline are
+       unchanged; the hard-page text without zoom (`-7`) and the text-only
+       request are byte for byte unchanged. The client already handled
+       several calls in one turn (Claude API parallel tool use: several
+       `tool_use` blocks in one assistant turn, all their `tool_result`
+       blocks in the next user turn, in call order): every call counts
+       against the cap whether answered or not, so 5 calls in one turn with
+       the cap at 4 give 4 crops and 1 `zoom limit reached` error (tested),
+       and a later turn's calls are counted against what is left.
+       *Expected effect*: about 2 turns per read (one turn of zooms, one
+       answer; 3 when one crop is still unclear) instead of about 4, so
+       fewer thinking passes and fewer re-sends of the picture and crops,
+       and more reads finishing inside the 150 s deadline. *How to see it*:
+       the per-read `ocr.reading.usage` line (`pass: "hard_page_read"`)
+       carries `turns` (answered requests of the read) and `zoomCalls`; with
+       this wording a read that zoomed should mostly show `turns` 2 with
+       `zoomCalls` 1 to 4, where before `turns` was about `zoomCalls` + 1.
+       It is an instruction, not a constraint: the model may still zoom one
+       at a time, which the cap and the deadline bound as before.
+
      **Cost model** (Claude Opus 5.5 list price $4 / $20 per million input /
      output tokens, x1.1 for US-only: $4.40 / $22; 5-minute cache writes
      $5.50, cache reads $0.22):
