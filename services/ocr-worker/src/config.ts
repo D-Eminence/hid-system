@@ -110,11 +110,12 @@ const schema = z.object({
   // The last-resort image re-read's own window (coordinator decision of 2026-11-10, about 18:58 UTC; README "Last
   // resort"): it runs for at most this many seconds from when it is decided, never in what is left of the hard
   // page's deadline, so a page whose two hard reads were both cut by the deadline still gets an answer. 60 by default:
-  // a hard page's worst case is then about OCR_AI_HARD_PAGE_DEADLINE_MS + 60 s (210 s), well inside the website's
-  // 20-minute poll. 30 to 300; anything else fails startup. 30 s is the least worth sending (about 3,000 output tokens
+  // a hard page's worst case is then about OCR_AI_HARD_PAGE_DEADLINE_MS + 60 s (210 s) plus the first pass: past the
+  // 3-minute hard-page target above and the website's 3-minute poll (README "Worst case"; raised with the owner and
+  // coordinator). 30 to 300; anything else fails startup. 30 s is the least worth sending (about 3,000 output tokens
   // at the ~100 tokens per second measured in production, a sparse page's answer with little thinking; less would
-  // almost surely be cut, its thinking billed for nothing). 300 s caps a hard page at about 150 s + 300 s, still
-  // well inside the poll, and is more than the last resort's 16,000-token cap needs (about 160 s at that rate).
+  // almost surely be cut, its thinking billed for nothing). 300 s caps a hard page at about 150 s + 300 s (450 s),
+  // further past that poll, and is more than the last resort's 16,000-token cap needs (about 160 s at that rate).
   OCR_AI_LAST_RESORT_SECONDS: z.preprocess(emptyToUndefined, z.coerce.number().int().min(30).max(300).default(60)),
   // Per hard-page request attempt, for the whole streamed answer. 15 minutes by default; the job's lease is renewed
   // meanwhile. OCR_AI_HARD_PAGE_DEADLINE_MS (150 s by default) now ends the whole page well before it.

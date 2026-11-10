@@ -1452,7 +1452,13 @@ Each claimed job runs, in order:
        where `OCR_AI_MAX_TOKENS` would allow 64,000.
        *Worst case* per hard page, defaults: about 150 s
        (`OCR_AI_HARD_PAGE_DEADLINE_MS`, both reads) + 60 s (the last resort)
-       = about 210 s, well inside the website's 20-minute poll; with
+       = about 210 s, plus the first pass; up to about 450 s at the 300 s
+       maximum. That is past the 3-minute target for a hard page (the
+       deadline's 150 s default exists for it) and past the website's
+       3-minute poll noted above, so on such a page the owner may again not
+       see the result before the website stops polling. The repository has no
+       evidence of a longer poll; this is raised with the owner and
+       coordinator rather than settled here. With
        `OCR_AI_PAGE_CONCURRENCY` 2, two such pages run at once.
        *No "no time left" case.* Since the window starts fresh and is at
        least 30 s, the earlier skip (`last_resort_no_time`, `LAST_RESORT_MIN_MS`)
