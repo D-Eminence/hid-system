@@ -104,8 +104,9 @@ export const RECORDS_PROCESSING_REFUSAL = {
 } as const;
 
 /**
- * How long a verified Access PIN gives access when the caller does not say:
- * 24 hours, read and write (owner decision, 10 Nov 2026; database 0121).
+ * The duration asked for a verified Access PIN when the caller does not say:
+ * 1440 minutes. The database (0121) always gives exactly 24 hours of read and
+ * write access, whatever duration is asked (owner decision, 10 Nov 2026).
  */
 export const PATIENT_PIN_ACCESS_MINUTES = 1440;
 

@@ -13,7 +13,7 @@ describe('VerifyPatientAccessPinDto', () => {
     await expect(errorsFor(base)).resolves.toHaveLength(0);
   });
 
-  it.each([5, 60, 61, 1439, 1440])('accepts %i minutes (0121: up to 24 hours)', async (durationMinutes) => {
+  it.each([5, 60, 61, 1439, 1440])('accepts %i minutes (0121: the database then gives 1440 whatever is asked)', async (durationMinutes) => {
     await expect(errorsFor({ ...base, durationMinutes })).resolves.toHaveLength(0);
   });
 

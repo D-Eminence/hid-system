@@ -444,7 +444,7 @@ describe('ConsentService', () => {
     );
   });
 
-  it('returns a narrow governed grant only when the database command verifies the PIN', async () => {
+  it('returns a narrow governed grant only when the database command verifies the PIN (24 hours, though 15 minutes are asked)', async () => {
     query.mockResolvedValueOnce({
       rows: [{
         verified: true,
@@ -452,7 +452,7 @@ describe('ConsentService', () => {
         consentGrantId: '40000000-0000-4000-8000-000000000003',
         patientId: '50000000-0000-4000-8000-000000000002',
         status: 'active',
-        expiresAt: new Date('2026-09-28T00:15:00.000Z'),
+        expiresAt: new Date('2026-09-29T00:00:00.000Z'),
         existingGrant: false,
       }],
     });
@@ -493,7 +493,7 @@ describe('ConsentService', () => {
     );
   });
 
-  it('passes a duration the caller gives, up to 1440 minutes, unchanged', async () => {
+  it.each([60, 1440])('passes %i minutes unchanged; the database always gives 1440 (0121)', async (durationMinutes) => {
     query.mockResolvedValueOnce({
       rows: [{
         verified: true,
@@ -508,11 +508,11 @@ describe('ConsentService', () => {
     await expect(service.verifyPatientAccessPin(context, {
       hid: 'HID-ABCDEFGH',
       pin: '1234',
-      durationMinutes: 1440,
-    })).resolves.toMatchObject({ existingGrant: true });
+      durationMinutes,
+    })).resolves.toMatchObject({ existingGrant: true, expiresAt: new Date('2026-09-29T00:00:00.000Z') });
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.access_patient_with_pin'),
-      ['HID-ABCDEFGH', '1234', 1440],
+      ['HID-ABCDEFGH', '1234', durationMinutes],
     );
   });
 

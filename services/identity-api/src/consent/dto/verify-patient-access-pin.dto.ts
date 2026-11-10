@@ -23,9 +23,10 @@ export class VerifyPatientAccessPinDto {
   pin!: string;
 
   /**
-   * How long the PIN access lasts, 5 to 1440 minutes. Left out, it is 1440
-   * (24 hours), the owner's decision of 10 Nov 2026; the database command
-   * (0121) gives read and write access and refuses more than 1440.
+   * The duration asked, 5 to 1440 minutes (the database command checks the
+   * same range). Left out, the service asks for 1440. Whatever is asked, the
+   * database command (0121) always gives exactly 1440 minutes (24 hours) of
+   * read and write access, the owner's decision of 10 Nov 2026.
    */
   @IsOptional()
   @IsInt()

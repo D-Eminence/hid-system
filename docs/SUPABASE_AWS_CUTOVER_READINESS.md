@@ -66,10 +66,11 @@ implementation:
 - identity.access_patient_with_pin is server-side only. It requires an active
   exact staff membership, selected facility, the
   identity.patient-access-pin.verify permission, direct-care, an active
-  patient, current consent-directive checks, and a 5–1440 minute duration. It
-  creates only a direct-care write_records grant, which also lets its holder
-  read (0121, owner decision of 10 Nov 2026: up to 24 hours, read and write;
-  it was 5–60 minutes and read_records before).
+  patient, current consent-directive checks, and a requested duration of
+  5–1440 minutes. It creates only a direct-care write_records grant, which
+  also lets its holder read, for exactly 24 hours whatever duration is asked
+  (0121, owner decision of 10 Nov 2026: exactly 24 hours, read and write; it
+  was 5–60 minutes as asked and read_records before).
 - The command records immutable attempt evidence, semantic audit information,
   and a minimal outbox notification atomically with the governed request/grant.
   It gives every accepted 04–12 bcrypt envelope a bounded cost-12 comparison

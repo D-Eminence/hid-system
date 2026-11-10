@@ -1,7 +1,7 @@
 -- 0121 Access PIN: 24 hours, read and write. A patient's Access PIN now gives
 -- the staff member who enters it read AND write access to all of that
--- patient's records for up to 24 hours (1440 minutes), instead of read-only
--- access for up to 60 minutes. Written on staging-novu-ci-20261005 at bf4ea233
+-- patient's records for exactly 24 hours (1440 minutes), whatever duration is
+-- asked, instead of read-only access for up to 60 minutes. Written on staging-novu-ci-20261005 at bf4ea233
 -- (migrations 0001-0108 applied there). Numbered 0121, the next number after
 -- every migration on staging and on every open branch (0109-0120); the
 -- coordinator renumbers it at merge.
@@ -25,16 +25,22 @@
 --    again NOT VALID, then VALIDATE CONSTRAINT. Every row today is read_records,
 --    so every row passes.
 -- b. identity.access_patient_with_pin (CREATE OR REPLACE, from 0098's body):
---    - the requested duration may be 5 to 1440 minutes (was 5 to 60);
---      identity-api now asks for 1440 unless told otherwise, and the website
---      will send 1440. A caller that still sends 60 gets 60 minutes;
+--    - every grant lasts exactly 24 hours (1440 minutes), whatever duration
+--      is asked (owner decision, 10 Nov 2026). The argument
+--      requested_duration_minutes is kept, so old and new callers both work,
+--      and is still checked as 5 to 1440 (was 5 to 60): a missing or
+--      out-of-range value is refused as before. A caller that still sends 60
+--      (or 5) gets 1440 minutes; the access request's
+--      requested_duration_minutes and the audit's duration_minutes say 1440;
 --    - the request and the grant it inserts are write_records (was
 --      read_records). write_records also lets its holder read
 --      (identity.has_active_consent_grant, 0104: a write grant answers a read);
 --    - a still-valid PIN grant is reused (existing_grant true, a replay) only
 --      if it is write_records. A 60-minute read grant made before this file is
 --      not reused: the next correct PIN makes a new write grant, and the old
---      read grant runs out by itself within the hour;
+--      read grant runs out by itself within the hour. A reused grant follows
+--      the same rule: whatever duration the new call asks, it keeps its own
+--      24-hour expiry and the replay's audit duration_minutes says 1440;
 --    - a patient's deny directive stops the PIN if it covers reading OR
 --      writing (or every action). Before, only a deny of reading counted. A
 --      deny of reading still stops it, so nothing the patient denied before
@@ -77,16 +83,18 @@
 -- needs no change to work; its new default (1440) and DTO limit (1440) come in
 -- the same pull request. The event dispatcher and the notification worker
 -- check the PIN notice's payload: their change to accept both the two-key and
--- the three-key payload is in its own pull request (branch
+-- the three-key payload is in its own pull request (hid-system#206, branch
 -- claude/fervent-galileo-datz4t-pin-notice-scope, no migration), which must be
--- merged and released before this file. A release that carries a migration
+-- merged and released before this file (then this file and identity-api,
+-- hid-system#208, renumbered at merge; then the websites, hid-system#207 and
+-- health#197). A release that carries a migration
 -- applies it before it rolls out the services (scripts/production_deployment.py),
 -- so the two cannot safely go in one release. If this file applied first, a PIN
 -- notice raised in between would be refused by the old check and not retried
 -- (the patient would miss that notice; the access row and audit row are still
 -- written). The websites keep working: they read the grant's expiresAt. Until
 -- each website is changed it asks for its own duration (hid-system apps/web
--- sends 60), and the grant is then read and write for that time.
+-- sends 60), and the grant is still read and write for 24 hours.
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): the objects this file touches exist; not applied
@@ -175,7 +183,7 @@ begin
   -- b. Not applied yet.
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'identity.access_patient_with_pin(text,text,integer)'::regprocedure)
-     = '6453e3e4c3906e4e565fa93c2979a865' then
+     = 'e17e8bb85b755866bb0f1a03b5555c23' then
     raise exception using errcode = '55000', message = '0121: already applied';
   end if;
   -- c. The body replaced (0098's) and the bodies it and the checks rely on.
@@ -412,8 +420,9 @@ declare
   replayed boolean := false;
   denial_action text := 'identity.patient-access-pin.verify-denied';
   -- 0121 (owner decision, 10 Nov 2026): a PIN opens the patient's records to
-  -- read and to add to, for up to 24 hours.
+  -- read and to add to, for exactly 24 hours, whatever duration is asked.
   pin_scope constant text := 'write_records';
+  pin_minutes constant integer := 1440;
 begin
   if actor_account_id_value is null or actor_membership_id is null or actor_facility_id is null
      or actor_correlation_id is null
@@ -667,7 +676,7 @@ begin
     -- The command may be authorized in this same request transaction.
     -- current_timestamp is transaction-consistent; a later clock_timestamp()
     -- would leave starts_at future-dated versus the authorization default.
-    grant_expires_at := current_timestamp + make_interval(mins => requested_duration_minutes);
+    grant_expires_at := current_timestamp + make_interval(mins => pin_minutes);
     insert into identity.access_requests (
       id, patient_id, staff_id, membership_id, facility_id, scope, purpose_of_use,
       reason, status, requested_duration_minutes, break_glass, approved_at,
@@ -675,7 +684,7 @@ begin
     ) values (
       request_id_value, patient_id_value, actor_staff_id, actor_membership_id,
       actor_facility_id, pin_scope, 'direct-care', 'Patient access PIN verification',
-      'approved', requested_duration_minutes, false, current_timestamp, actor_correlation_id,
+      'approved', pin_minutes, false, current_timestamp, actor_correlation_id,
       'patient_access_pin'
     );
     insert into identity.consent_grants (
@@ -704,7 +713,7 @@ begin
     actor_organization_id, actor_facility_id, patient_id_value,
     case when replayed then 'identity.patient-access-pin.replay' else 'identity.patient-access-pin.verify' end,
     'success', 'consent-grant', grant_id_value::text, 'direct-care', 'application', 'identity-api',
-    jsonb_build_object('access_request_id', request_id_value, 'duration_minutes', requested_duration_minutes,
+    jsonb_build_object('access_request_id', request_id_value, 'duration_minutes', pin_minutes,
       'expires_at', grant_expires_at, 'existing_grant', replayed, 'review_required', true,
       'scope', pin_scope)
   );
@@ -723,7 +732,7 @@ end;
 $$;
 
 comment on function identity.access_patient_with_pin(text,text,integer) is
-  '0121: a verified patient Access PIN gives the staff member direct-care read and write access (write_records) to the patient for 5 to 1440 minutes; a still-valid write_records PIN grant is reused; a deny directive for reading or writing stops it; audit details and the PatientAccessPinVerified payload carry the scope.';
+  '0121: a verified patient Access PIN gives the staff member direct-care read and write access (write_records) to the patient for exactly 24 hours (1440 minutes), whatever duration is asked (5 to 1440 is still checked); a still-valid write_records PIN grant is reused; a deny directive for reading or writing stops it; audit details and the PatientAccessPinVerified payload carry the scope.';
 
 -- 4. Post-checks.
 do $$
@@ -732,7 +741,7 @@ declare
 begin
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'identity.access_patient_with_pin(text,text,integer)'::regprocedure)
-     is distinct from '6453e3e4c3906e4e565fa93c2979a865' then
+     is distinct from 'e17e8bb85b755866bb0f1a03b5555c23' then
     raise exception using errcode = '55000', message = '0121: the function body is not this file''s';
   end if;
   select string_agg(before_row.signature, '; ') into mismatch
