@@ -285,8 +285,9 @@ const genericOf = (text: string) => {
  * - a field placeholder or "[?]" only ("500mg? (or [dose?])");
  * - the same as the last one to four words straight before it, by optionKey, or a one-word name with the same listed
  *   generic as the word straight before it ("Pl… (Plasil?) (or Plasil?)", "Flagyl? (or Metronidazole?)");
- * - a listed one-word drug name straight after a dose (a word with a digit, so not that word's other option) whose
- *   generic a word before it in the same text already names ("(crossed out: Ceftriaxone? 1g? (or Ceftriaxone?))").
+ * - a listed one-word drug name straight after a dose (a word with a digit, so not that word's other option) with the
+ *   generic of that order's own name, the nearest word before the dose with letters and no digit ("(crossed out:
+ *   Ceftriaxone? 1g? (or Ceftriaxone?))", "Rocephin? 1g? (or Ceftriaxone?)").
  * Anything else is kept: a route, frequency, dose or vitamin letter repeated further back can be another field's
  * other option ("IV Ceftriaxone 1g IM? (or IV?)", "Vit K? 1mg Vit C? (or Vit K?)"; review of 2026-11-10).
  */
@@ -303,7 +304,11 @@ function addsNothing(option: string, before: readonly string[]): boolean {
   const last = shown[shown.length - 1]!;
   if (generic === null) return false;
   if (genericOf(last) === generic) return true;
-  return /\d/.test(last) && shown.slice(0, -1).some((word) => genericOf(word) === generic);
+  if (!/\d/.test(last)) return false;
+  // This order's own drug name: the nearest word before the dose with letters and no digit. Another order's name
+  // further back says nothing about this one ("Cefuroxime 500mg Ceftriaxone 1g? (or Cefuroxime?)" is kept).
+  const name = shown.slice(0, -1).reverse().find((word) => !/\d/.test(word) && hasLetters(word));
+  return name !== undefined && genericOf(name) === generic;
 }
 
 /**

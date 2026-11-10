@@ -452,6 +452,8 @@ describe('other options that add nothing (second cleanup round of 2026-11-10)', 
     expect(dropEmptyOptions('Amox… (or Amox)')).toBe('Amox…');
     // A brand and its listed generic: one drug.
     expect(dropEmptyOptions('Flagyl? (or Metronidazole?) 400mg')).toBe('Flagyl? 400mg');
+    // After a dose, the same drug as that order's own name.
+    expect(dropEmptyOptions('Rocephin 1g Ceftriaxone? 2g? (or Rocephin?)')).toBe('Rocephin 1g Ceftriaxone? 2g?');
     expect(alternatives('Flagyl', 'Metronidazole')).toBe('Flagyl?');
     expect(alternatives('500mg', '[dose?]')).toBe('500mg?');
   });
@@ -465,6 +467,8 @@ describe('other options that add nothing (second cleanup round of 2026-11-10)', 
       // Review of 2026-11-10: a route, frequency, vitamin letter or second drug repeated further back is kept.
       'IV Ceftriaxone 1g IM? (or IV?)', 'Amoxicillin 500mg tds PO bd? (or tds?)', 'Vit K? 1mg Vit C? (or Vit K?)',
       'Amoxicillin? Metronidazole? (or Amoxicillin?)',
+      // Another order's drug name further back says nothing about this order's.
+      'Cefuroxime 500mg Ceftriaxone 1g? (or Cefuroxime?)', 'Amoxicillin 500mg Metronidazole 400mg? (or Amoxicillin?)',
       // A quantity and a dose are two words: "1 5mg" is not "15mg".
       'Tab 1 5mg? (or 15mg?)',
       // The same generic in another form is another reading.

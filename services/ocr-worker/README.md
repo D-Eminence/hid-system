@@ -571,7 +571,7 @@ Each claimed job runs, in order:
        word straight before it (`Pl… (Plasil?) (or Plasil?)`, `Flagyl?
        (metronidazole) (or Metronidazole?)`); or is a listed one-word drug
        name straight after a dose (a word with a digit, so it cannot be that
-       word's option) that a word before it already names (`(crossed out:
+       word's option) with the generic of that order's own name, the nearest word before the dose (`(crossed out:
        Ceftriaxone? 1g? (or Ceftriaxone?))`). Anything else is kept: a route,
        frequency, dose, vitamin letter or second drug repeated further back
        (`IV Ceftriaxone 1g IM? (or IV?)`, `Vit K? 1mg Vit C? (or Vit K?)`), and
