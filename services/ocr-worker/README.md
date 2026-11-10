@@ -185,7 +185,7 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-10` (version 3 for this routing, 4 since picture
+   is `hid-paper-reading-prompt-11` (version 3 for this routing, 4 since picture
    items on hard lines whose scanned text is nonsense are kept, 5 since hard
    pages get two best-guess readings, 6 since hard pages use the brand,
    diagnosis and lab test lists and read handwritten signs, 7 since those
@@ -193,7 +193,9 @@ Each claimed job runs, in order:
    2026-11-06, below, 9 since the hard-page time and cost bounds of
    2026-11-10 (at most 4 zooms per read, so rule J says 4; see "Hard-page
    time and cost bounds"), 10 since rule J asks for all of a read's zooms
-   in one turn (see "Zooms in one turn"); the text prompt and request bodies are unchanged
+   in one turn (see "Zooms in one turn"), 11 since a hard read that has
+   not answered in time is sent one answer-only turn (see "A hard read
+   always ends with an answer"); the text prompt and request bodies are unchanged
    from version 2, and the label is only recorded), so `ocr-api` never reuses
    a reading made under older rules.
 
@@ -534,9 +536,12 @@ Each claimed job runs, in order:
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `high` since the owner's
      decision of 2026-11-10, `max` before; Claude Opus 5.5 accepts `low` to
      `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-10` when
-     the reads are offered zoom, else `hid-paper-reading-hard-page-prompt-7`,
-     the same text without rule J; `-9` until the one-turn zoom wording of
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-11` when
+     the reads are offered zoom, else `hid-paper-reading-hard-page-prompt-11-no-zoom`,
+     the same text without rule J, which is the `-7` text; `-11` adds the
+     answer-only turn of "A hard read always ends with an answer" to the
+     `-10` text, unchanged, and `-11-no-zoom` to the `-7` text, recorded as
+     `-7` before; `-9` until the one-turn zoom wording of
      2026-11-10, `-8` before that, when rule J allowed 8 zooms; until 2026-11-06 `-4` and `-3`, and `-6`
      and `-5` were never released; the rules
      below are as of `-4`, with the clean-reading changes above; recorded in provenance as
@@ -1066,14 +1071,17 @@ Each claimed job runs, in order:
        `OCR_AI_HARD_PAGE_TIMEOUT_MS` (default 900,000) still applies inside
        it but no longer bounds the page.
      - `OCR_AI_ZOOM_MAX_CALLS` default and maximum 4 (was 8), so at most 4
-       crops per read and, with the 3 turns allowed past the limit, at most 7
-       turns; rule J's text says 4 (hard-page prompt 9, `PROMPT_VERSION` 9;
+       crops per read and (since "A hard read always ends with an answer",
+       which replaced the 3 turns allowed past the limit) at most 5 turns:
+       up to 4 zoom turns, then the answer-only turn; rule J's text says 4 (hard-page prompt 9, `PROMPT_VERSION` 9;
        still 4 in prompt 10).
      - `OCR_AI_HARD_PAGE_MAX_TOKENS` (default 32,000; 4,096 to 128,000):
        output tokens for one read, all its turns together; each turn's
        `max_tokens` is what is left (turn 1: 32,000; after a turn of 10,000:
        22,000), and a turn with less than 2,048 left is not sent (the read
-       ends `max_tokens`, a failed read). It counts the output the API
+       ends `max_tokens`, a failed read). Since "A hard read always ends
+       with an answer" each turn before the answer-only one keeps 8,000 of
+       it back (turn 1: 24,000), and the answer-only turn gets them. It counts the output the API
        *reported*, so it bounds each attempt, not the read's billed output:
        a retry of a turn (`OCR_AI_MAX_RETRIES`) is sent the same
        `max_tokens`, and an attempt that failed mid-answer counts about 1
@@ -1201,6 +1209,145 @@ Each claimed job runs, in order:
      the staging key and time window, not from these lines. Compare the
      readings against the owner's two chat transcripts for style (they are
      not ground truth) and the usage lines for cost and time.
+   - **A hard read always ends with an answer** (coordinator decision of
+     2026-11-10, after staging job 566c38bf on the #200 reader, before the
+     bounds above were deployed). **Incident**: claimed 16:38:18, completed
+     16:57:22, `durationMs` 1,143,769 (19 minutes); `hard_page_read` 8
+     requests, 174,266 output tokens, 16 zoom calls; `ocr.job.completed`
+     `imageRereadFailedPages` 1, `rereadFailedPages` 1, `itemCount` 0,
+     `hardPageReads` 2, `hardPageAgreement` all zeros; no warn or error line
+     for the job. About $3.50 (174,266 x $20 per million is $3.49 output)
+     and the owner got nothing.
+     **Diagnosis** (from the #200 code, `git show f411b760`, and those
+     counts; the real API was not called, and the #200 reader logged
+     nothing per read, so the exact stop reasons are not in the logs). In
+     #200 every turn of a zoom read was sent `max_tokens` =
+     `OCR_AI_MAX_TOKENS` (64,000 by default) at `max` effort, up to 8 zoom
+     calls per read, no deadline, and a read ended at the first turn that
+     did not stop with `tool_use` (`interpret`): `refusal` (refused),
+     `max_tokens` or `model_context_window_exceeded` (failed `max_tokens`),
+     another stop reason (failed `incomplete`), or `end_turn` whose text was
+     not JSON or not the answer schema (failed `malformed`); or a turn with
+     `tool_use` and no call, or the 12th turn (8 calls + 3 extra turns +
+     1), as failed `incomplete`; or an error after the retries. None of them
+     logged anything: the reader turned a hard page with no answer into a
+     failed image re-read (`imageRereadFailedPages`), and that was all.
+     What the counts allow: 16 crops returned is 8 per read, each read's
+     whole cap; 8 requests is 4 per read (the two reads always run
+     together), so each read ended on its 4th request and that request did
+     not stop with `tool_use` (else a 5th would have been sent). That rules
+     out the turn guard (it needs 12 turns), a timeout (each turn could take
+     900 s and a turn that timed out is retried, so a read ending that way
+     shows at least 5 attempts and about 1 output token for each cut one,
+     not 87,000 reported tokens per read), and both reads refused (the page
+     would then have gone to a text re-read and not be counted in
+     `imageRereadFailedPages`). What is left for each read: its last turn
+     stopped at `max_tokens`, or ended `end_turn` with an answer that failed
+     the schema check. **Most likely: `max_tokens`** (about 70%
+     confidence). 87,000 output tokens per read is what 3 zoom turns of
+     about 7,700 tokens and an answer turn that thought at `max` until its
+     64,000 cap give (2 x 64,000 + 6 x 7,711 = 174,266); with all 8 crops
+     in front of it, a `max` turn deciding every field of a dense
+     handwritten page has nowhere to stop but the cap. The schema failure
+     is less likely: structured outputs (`output_config.format`) constrain
+     the final JSON to the schema, and the worker's own checks beyond it
+     (strings up to 2,000 characters, 60 line ids, 300 items, finite
+     numbers) are rarely reached. A per-request check would settle it: in
+     the Anthropic Console's usage for that key and time window, two
+     requests with exactly 64,000 output tokens. Reproduced with the fake
+     API (`claude.client.spec.ts`, "reproduces job 566c38bf").
+     **`itemCount` 0 is not a bug**: with both reads failed, the page keeps
+     its first reading (`markRereadFailed`, every item `reread_failed`;
+     `rereadFailedPages` 1 is that path), and `itemCount` counts what the
+     page ends with, so the first pass kept no item on that page: a hard
+     page is chosen by its lines' legibility (`handwriting` or
+     `low_confidence`), not by its items, and on garbled handwriting the
+     text-only first pass often has nothing that holds to the scanned lines.
+     The job's `droppedUngrounded` and `droppedByReason` (which, with the
+     re-read failed, are the first pass's) would show whether it read
+     items that were then dropped. Tested: both reads failing keep the first
+     pass's items (worker test), and a first pass with none gives 0 items,
+     the page flagged `ai_unsure` and named in `imageRereadFailedPages`
+     (reader test, "incident shape"). `ocr.job.completed` now also logs
+     `firstPassItemCount`.
+     **Could the bounded reader (#201, #202) fail the same way?** Yes, and
+     more often: at the measured rate of about 100 output tokens per second
+     a read gets about 15,000 output tokens in the 150 s deadline, so the
+     32,000-token cap and the 2,048-token rule almost never bind first (they
+     would only above about 210 tokens per second); the zoom cap of 4 plus 3
+     extra turns is out of reach in 150 s; refusals and schema failures are
+     rare. What does bind is the deadline: a read whose turns had not
+     finished at 150 s was aborted with no answer, and the two reads run the
+     same request at the same time, so they tend to be cut together. That
+     is the incident again (a page with nothing from either read after the
+     thinking was paid for), only shorter: up to about $0.66 output per page.
+     **The rule**: a hard read that has not answered gets one answer-only
+     turn, while time allows (`claude.client.ts`):
+     - Reserves: each turn before it is sent `max_tokens` = what is left of
+       `OCR_AI_HARD_PAGE_MAX_TOKENS` less 8,000 (at most half the cap), so
+       8,000 are always left for the answer (a 12-item answer is about 3,000
+       to 4,000 tokens, job 5419047a; room for a page about twice as dense);
+       and the last 50 s before the page's deadline (at most a third of
+       `OCR_AI_HARD_PAGE_DEADLINE_MS`) are kept for it: about 4,000 to 5,000
+       tokens at 100 per second, a 12-item answer with little thinking, plus
+       a few seconds to read the picture and crops again.
+     - It is sent when: the tokens left reach the reserve (`budget`); the
+       zoom calls are used up (`zoom_cap`); the read has had as many zoom
+       turns as it has calls (`turns`); less than 20 s is left before the time
+       reserve, or a turn is still running when the reserve begins (that
+       attempt is aborted, not retried; its thinking so far is billed and
+       lost) (`deadline`); a turn stops at `max_tokens` (`max_tokens`); or a
+       turn ends with neither an answer nor a tool call (`incomplete`).
+     - What it is: the conversation so far, append-only (a turn cut off or
+       stopped without an answer is left out: its thinking block cannot be
+       sent back), then a new user message (`FORCED_ANSWER_INSTRUCTION`:
+       stop looking, answer from what has been seen, in the answer format),
+       `max_tokens` the reserve (or what is left, if less), effort `low`
+       (thinking cannot be turned off on Claude Opus 5.5; the turn writes
+       down what earlier turns read, and every thinking token is time and
+       tokens the answer does not get), the same answer schema
+       (`output_config.format`), and, when the zoom tool was declared,
+       `tool_choice: {type: "none"}` with the tool still declared (earlier
+       turns hold `tool_use` and `tool_result` blocks; forced tool use is a
+       400 on Claude Opus 5.5, `none` is accepted, with adaptive thinking and
+       with structured outputs). The changed effort and `tool_choice` break
+       the messages cache for that one turn.
+     - Only one answer-only turn; how it ends is how the read ends. A
+       refusal ends a read at once (the reader may still send the page to a
+       text re-read), and so does an answer that is not JSON or not the
+       schema: no repair turn, since structured outputs constrain the JSON
+       and a failure would most likely repeat, at the price of another read
+       of the picture and crops; its reason is logged.
+     - Unchanged: the two reads run at once; the page's deadline still ends
+       every read (the answer-only turn included; it is not retried past
+       it); the read's reported output stays within
+       `OCR_AI_HARD_PAGE_MAX_TOKENS` (the reserve is carved out of it, never
+       added); text-only and ordinary image re-read requests are byte for
+       byte as before. The hard-page prompt is version 11 (`-11`,
+       `-11-no-zoom`) and `PROMPT_VERSION` 11, here and in ocr-api, so a
+       reading made the older way is not reused.
+     **Logs** (codes and counts only; never item text, page content or the
+     picture):
+     - `ocr.reading.hard_read_failed` (warn), one per hard read without an
+       answer: `page`, `read`, `reason` (`max_tokens`, `parse_error`,
+       `schema_error`, `refusal`, `zoom_loop`, `incomplete`, `deadline`,
+       `api_error`, `api_rejected`), `code` (the AI_* code of an API
+       failure), `forcedAnswer`, `turns`, `requests`, `outputTokens`,
+       `outputTokensIncomplete`, `zoomCalls`, `zoomLimited`, `durationMs`.
+     - `ocr.reading.hard_read_forced_answer` (warn), one per read sent the
+       answer-only turn: `reason` `forced_answer_budget`, `_zoom_cap`,
+       `_turns`, `_deadline`, `_max_tokens` or `_incomplete`, `answered`, and
+       the same counts.
+     - `ocr.reading.page_read_failed` (warn), one per page whose reading in a
+       pass gave nothing usable, for the paths that logged nothing before:
+       `page`, `pass` (`first_pass`, `reread`, `image_reread`,
+       `hard_page_read`), `reason` (as above, or `kept_nothing` for an answer
+       none of whose items held to the page while the first pass had some,
+       or `hard_reads_failed`), `code`.
+     - `ocr.reading.usage` per hard read gains `failure` and `forcedAnswer`;
+       `ocr.job.completed` gains `hardReadFailures` and
+       `hardReadForcedAnswers` (counts per reason), `pageReadFailures` and
+       `firstPassItemCount`.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`
    payload (schema `hid-paper-reading-schema-2`: `src/reading/contract.ts`), `raw_text` (every line in
    reading order) and the mean line confidence. Provenance holds models,

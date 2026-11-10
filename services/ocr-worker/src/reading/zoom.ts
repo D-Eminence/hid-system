@@ -260,6 +260,11 @@ export interface ToolCall { id: string; name: string; input: unknown }
 export interface ZoomToolSession {
   readonly maxCalls: number;
   readonly stats: ZoomStats;
+  /**
+   * Zoom calls this read may still make (maxCalls less every call so far, answered or not). At 0 the client's next
+   * turn is the answer-only turn (claude.client.ts, README "A hard read always ends with an answer").
+   */
+  readonly callsLeft: number;
   /** The tool_result for one tool call. Never throws; never echoes the input. An abort ends a running crop. */
   answer(call: ToolCall, signal?: AbortSignal): Promise<Anthropic.ToolResultBlockParam>;
 }
@@ -281,6 +286,7 @@ export function createZoomSession(zoom: PageZoom, page: number, maxCalls: number
   return {
     maxCalls,
     stats,
+    get callsLeft() { return Math.max(0, maxCalls - requested); },
     async answer(call, signal) {
       if (call.name !== ZOOM_TOOL_NAME) { stats.failed += 1; return errorResult(call.id, 'unknown tool'); }
       requested += 1;

@@ -556,8 +556,8 @@ describe('hard-page prompt versions', () => {
 
   it('sends the version 7 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
     // Pinned from the version 7 prompt (the clean reading of 2026-11-06, with partial words and placeholders); a change here needs a new version.
-    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-7');
-    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-10');
+    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-11-no-zoom');
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-11');
     expect(createHash('sha256').update(hardPageMessage(1, lines, size, 0)).digest('hex'))
       .toBe('7feb2c96cc86bf7d67c5394249ed21269f0bb9803b7fd7f9d5a45f035c77ce07');
     expect(hardPageMessage(1, lines, size)).toBe(hardPageMessage(1, lines, size, 0));
@@ -588,9 +588,9 @@ describe('hard-page prompt versions', () => {
   });
 
   it('keeps the prompt versions consistent: zoom 10, no zoom still 7, reading 10', () => {
-    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-10');
-    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-7');
-    expect(PROMPT_VERSION).toBe('hid-paper-reading-prompt-10');
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-11');
+    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-11-no-zoom');
+    expect(PROMPT_VERSION).toBe('hid-paper-reading-prompt-11');
   });
 });
 

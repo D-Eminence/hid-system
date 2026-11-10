@@ -8,7 +8,7 @@
  * provenance.reading.promptVersion: the frozen Claude prompt that read the lines into items.
  */
 export const OCR_PROCESSING_CONTRACT = 'hid-textract-v2';
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-10';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-11';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 
 /** The first contract: structured_payload was { pages: [{ page, text, confidence }] }. Read-only now. */

@@ -42,7 +42,14 @@ export interface PageRequest { model: string; effort: Effort; page: number; line
    */
   followupEffort?: Effort;
   /** A hard page's read only: filled in by the client as the read goes, for the per-read usage log (counts only). */
-  trace?: HardReadTrace }
+  trace?: HardReadTrace;
+  /**
+   * A hard page's read only: the time left before the page's deadline (OCR_AI_HARD_PAGE_DEADLINE_MS, on the reader's
+   * clock) and how much of it is kept for the answer-only turn. A turn that would run into the kept time is cut there
+   * and the answer-only turn is sent instead (README "A hard read always ends with an answer"). Not given: no time
+   * reserve (the token reserve and the zoom-cap and turn rules still apply).
+   */
+  answerBy?: { timeLeftMs: () => number; reserveMs: number } }
 
 /**
  * What one hard-page read did, as it went: requests answered (turns), how many of them were follow-up turns, and
@@ -51,7 +58,50 @@ export interface PageRequest { model: string; effort: Effort; page: number; line
  * message_delta, so the usage counted for such an attempt is its input and about 1 output token, while the thinking
  * it had already generated is billed: with any cut attempt, the read's outputTokens is a lower bound, not the figure.
  */
-export interface HardReadTrace { turns: number; followupTurns: number; cutAttempts: number }
+export interface HardReadTrace { turns: number; followupTurns: number; cutAttempts: number;
+  /** Why the read was sent an answer-only turn (README "A hard read always ends with an answer"); absent: it was not. */
+  forced?: ForcedAnswerReason }
+
+/**
+ * Why a hard read was sent its answer-only turn: its output tokens left reached the answer reserve ('budget'), its
+ * zoom calls were used up ('zoom_cap'), it had taken as many zoom turns as it has calls ('turns'), the page's
+ * deadline came within the answer's time reserve ('deadline'), a turn stopped at its max_tokens before an answer
+ * ('max_tokens'), or a turn ended without an answer or tool calls ('incomplete'). Codes only.
+ */
+export type ForcedAnswerReason = 'budget' | 'zoom_cap' | 'turns' | 'deadline' | 'max_tokens' | 'incomplete';
+
+/**
+ * Output tokens of a hard read's OCR_AI_HARD_PAGE_MAX_TOKENS kept for its answer-only turn (at most half the cap):
+ * every turn before it is sent with max_tokens = what is left less this, so the answer-only turn always has it. 8,000:
+ * a hard page's JSON answer is about 3,000 to 4,000 tokens for 12 items (README, job 5419047a), and a turn at
+ * HARD_READ_FORCED_EFFORT thinks little, so 8,000 leaves room for a page about twice as dense.
+ */
+export const HARD_READ_ANSWER_RESERVE_TOKENS = 8_000;
+/**
+ * Milliseconds before a hard page's deadline kept for the answer-only turn (at most a third of the deadline;
+ * reader.ts). 50 s: about 4,000 to 5,000 output tokens at the roughly 100 tokens per second measured in production
+ * (README, job 5419047a), which is a 12-item answer (3,000 to 4,000 tokens) and a little thinking at low effort, plus
+ * a few seconds to read the picture and crops again (the effort change rewrites the messages cache).
+ */
+export const HARD_READ_ANSWER_RESERVE_MS = 50_000;
+/**
+ * A turn before the answer-only one is not started with less than this left before the time reserve: it would be cut
+ * before it could finish (its thinking billed for nothing). The answer-only turn is sent at once instead.
+ */
+export const HARD_READ_MIN_TURN_MS = 20_000;
+/**
+ * The effort of the answer-only turn. 'low': the turn's job is to write down what was already read (the earlier
+ * turns' thinking and crops are in its context), and every token it spends thinking is time and tokens the answer
+ * does not get; on Claude Opus 5.5 thinking cannot be turned off, so low effort is the least thinking there is.
+ */
+export const HARD_READ_FORCED_EFFORT: Effort = 'low';
+/**
+ * The answer-only turn's instruction, a user message appended to the read (append-only, after the last tool results).
+ * Part of the hard-page prompt (HARD_PAGE_PROMPT_VERSION 11): never logged.
+ */
+export const FORCED_ANSWER_INSTRUCTION = 'Stop looking now and give your answer for this page: write it from what you '
+  + 'have already seen in the picture and any enlarged views, as your best reading under the rules above, in the '
+  + 'answer format. The zoom tool is no longer available.';
 
 /**
  * A turn of a hard-page read is not sent with less than this many output tokens left of the read's
@@ -69,7 +119,13 @@ export interface TokenUsage {
 export type PageAnswer =
   | { kind: 'answer'; answer: ModelPage; usage: TokenUsage; servedInferenceGeo: string | null; attempts: number }
   | { kind: 'refused'; usage: TokenUsage; attempts: number }
-  | { kind: 'failed'; reason: 'max_tokens' | 'malformed' | 'incomplete'; usage: TokenUsage; attempts: number };
+  | { kind: 'failed'; reason: 'max_tokens' | 'malformed' | 'incomplete'; usage: TokenUsage; attempts: number;
+    /**
+     * The finer code, for the warn logs: 'parse_error' (the answer was not JSON) or 'schema_error' (JSON, but not the
+     * answer schema) for 'malformed'; 'zoom_loop' (tool calls where an answer was required) or 'incomplete' (another
+     * stop reason) for 'incomplete'; 'max_tokens'. Codes only.
+     */
+    code?: 'max_tokens' | 'parse_error' | 'schema_error' | 'zoom_loop' | 'incomplete' };
 
 const noUsage = (): TokenUsage => ({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
 
@@ -132,8 +188,16 @@ export interface ClaudeClientOptions {
  */
 interface CallState { sent: number; spent: TokenUsage; requestMs: number; trace?: HardReadTrace }
 
-/** Turns a zoom read may take beyond its zoom calls (the answer, and a turn or two of calls past the limit). */
-const ZOOM_EXTRA_TURNS = 3;
+/**
+ * A turn of a hard read cut at the start of the answer's time reserve (never retried): the read goes on to its
+ * answer-only turn. Internal to the client.
+ */
+class ReserveReachedError extends Error {
+  constructor() { super('HARD_READ_RESERVE_REACHED'); this.name = 'ReserveReachedError'; }
+}
+
+/** One attempt's timeout, and whether the answer's time reserve (rather than the request time) is what bounds it. */
+interface AttemptTime { ms: number; reserve: boolean }
 
 const silentLogger = { error: () => undefined, warn: () => undefined, info: () => undefined, debug: () => undefined };
 
@@ -211,47 +275,96 @@ export class ClaudePageClient implements PageModelClient {
     };
     const trace = hard ? request.trace : undefined;
     const state: CallState = { sent: 0, spent: noUsage(), requestMs: 0, ...(trace ? { trace } : {}) };
-    if (!zoom) {
-      const message = await this.send(params, () => timeoutMs, signal, state);
-      if (trace) trace.turns += 1;
+    if (!hard) {
+      const message = await this.send(params, () => ({ ms: timeoutMs, reserve: false }), signal, state);
       return interpret(message, state.sent, state.spent, seen ?? undefined, hard);
     }
-    // The tool loop. Each attempt of each turn gets the hard-page timeout, as a read without zoom does, and the
-    // whole loop's time in requests (every turn and retry, not the permit waits, the backoff sleeps or the crops)
-    // is held to what one request with all its retries could take: the hard-page timeout times
-    // (OCR_AI_MAX_RETRIES + 1). The abort signal ends it between turns as within them. Each turn's usage is counted.
+    return this.readHard(request, params, zoom, readCap, timeoutMs, seen!, signal, state);
+  }
+
+  /**
+   * A hard page's read: its turns (the zoom tool loop when zoom is offered, else one turn), then, whenever a turn did
+   * not answer, one answer-only turn (README "A hard read always ends with an answer", coordinator 2026-11-10, after
+   * job 566c38bf gave the owner nothing). Each attempt of each turn gets the hard-page timeout, and the read's time in
+   * requests (every turn and retry, not the permit waits, the backoff sleeps or the crops) is held to what one request
+   * with all its retries could take: the hard-page timeout times (OCR_AI_MAX_RETRIES + 1). The abort signal (the
+   * job's, and the page's deadline) ends it between turns as within them. Each turn's usage is counted.
+   *
+   * Bounds (coordinator 2026-11-10): the read's reported output tokens over all its turns are held to readCap. Every
+   * turn before the answer-only one is sent with max_tokens = what is left less the answer reserve
+   * (HARD_READ_ANSWER_RESERVE_TOKENS, at most half the cap), and never with less than HARD_READ_MIN_TURN_TOKENS; the
+   * answer-only turn gets the reserve (or what is left, if less). A retried attempt of a turn is sent with the same
+   * max_tokens, and an attempt that failed mid-stream counts about 1 output token (HardReadTrace.cutAttempts), so the
+   * cap bounds each attempt, not the read's billed output; the read's bound in time (and so in money) is
+   * OCR_AI_HARD_PAGE_DEADLINE_MS. The turns after a zoom tool_result run at followupEffort. A different top-level
+   * effort from the first turn's is accepted with adaptive thinking (the earlier thinking blocks stay valid) but is a
+   * messages-cache breaker: the first follow-up turn writes the cache again and the later ones read it. The
+   * per-message effort system message (mid-conversation-output-config-2026-07-01) keeps the cache but cannot be used
+   * here: placed after a user turn of only tool_result blocks, it waits for the next user turn with new input, which a
+   * zoom loop never has.
+   *
+   * The answer-only turn is sent when: the output tokens left reach the reserve; the zoom calls are used up; the read
+   * has had as many zoom turns as it has calls; the page's deadline is within the time reserve (answerBy) of now, or
+   * close enough that a turn could not finish before it (HARD_READ_MIN_TURN_MS); a turn is cut at the start of the time
+   * reserve; or a turn stops at max_tokens or with neither an answer nor tool calls. It is the conversation so far
+   * (the cut or unanswered turn left out: a cut turn's thinking cannot be sent back) and FORCED_ANSWER_INSTRUCTION as a
+   * new user message, at HARD_READ_FORCED_EFFORT, with tool_choice {type: 'none'} where the zoom tool is declared (the
+   * tool stays declared, since earlier turns hold tool_use and tool_result blocks; forced tool use is not available on
+   * Claude Opus 5.5, but 'none' is, with adaptive thinking), and the same structured-output answer schema. Only one
+   * answer-only turn is sent; how it ends is how the read ends. A refusal, or an answer that is not the answer schema,
+   * ends the read at once (no repair turn: structured outputs constrain the JSON, so a schema failure would most likely
+   * repeat, and the turn would cost another read of the picture and crops).
+   */
+  private async readHard(request: PageRequest, params: Anthropic.MessageCreateParamsNonStreaming,
+    zoom: ZoomToolSession | undefined, readCap: number, timeoutMs: number, seen: { width: number; height: number },
+    signal: AbortSignal, state: CallState): Promise<PageAnswer> {
+    const trace = state.trace;
     const budget = timeoutMs * (this.config.OCR_AI_MAX_RETRIES + 1);
     const remaining = () => Math.min(timeoutMs, budget - state.requestMs);
+    const reserveTokens = Math.min(HARD_READ_ANSWER_RESERVE_TOKENS, Math.floor(readCap / 2));
+    const answerBy = request.answerBy;
+    /** Milliseconds before the answer's time reserve begins (no reserve: never). */
+    const untilReserve = () => answerBy ? answerBy.timeLeftMs() - answerBy.reserveMs : Number.POSITIVE_INFINITY;
     const messages: Anthropic.MessageParam[] = [...params.messages];
-    // Bounds (coordinator 2026-11-10): the read's reported output tokens over all its turns are held to readCap (each
-    // turn's max_tokens is what is left of it, never less than HARD_READ_MIN_TURN_TOKENS). `left` is set per turn: a
-    // retried attempt of the turn is sent with the same max_tokens, and an attempt that failed mid-stream counts about
-    // 1 output token (HardReadTrace.cutAttempts), so the cap bounds each attempt, not the read's billed output; the
-    // read's bound in time (and so in money) is OCR_AI_HARD_PAGE_DEADLINE_MS (README). The turns after a zoom
-    // tool_result run at followupEffort. A different top-level effort from the first turn's is accepted with adaptive
-    // thinking (the earlier thinking blocks stay valid) but is a messages-cache breaker: the first follow-up turn
-    // writes the cache again and the later ones read it. The per-message effort system message
-    // (mid-conversation-output-config-2026-07-01) keeps the cache but cannot be used here: placed after a user turn
-    // of only tool_result blocks, it waits for the next user turn with new input, which a zoom loop never has.
     const followupEffort = request.followupEffort ?? request.effort;
-    for (let turn = 0; ; turn += 1) {
+    /** An answered request; every one after the read's first is a follow-up turn. */
+    const countTurn = () => {
+      if (!trace) return;
+      if (trace.turns > 0) trace.followupTurns += 1;
+      trace.turns += 1;
+    };
+    let forced: ForcedAnswerReason | undefined;
+    let toolTurns = 0;
+    for (let turn = 0; forced === undefined; turn += 1) {
       const left = readCap - state.spent.outputTokens;
-      if (left < HARD_READ_MIN_TURN_TOKENS) {
-        return { kind: 'failed', reason: 'max_tokens', usage: { ...state.spent }, attempts: state.sent };
-      }
+      if (left - reserveTokens < HARD_READ_MIN_TURN_TOKENS) { forced = 'budget'; break; }
+      if (untilReserve() < HARD_READ_MIN_TURN_MS) { forced = 'deadline'; break; }
       const effort = turn === 0 ? request.effort : followupEffort;
-      const message = await this.send({ ...params, max_tokens: left,
-        output_config: { ...params.output_config, effort }, messages }, remaining, signal, state);
-      if (trace) {
-        trace.turns += 1;
-        if (turn > 0) trace.followupTurns += 1;
+      let message: Anthropic.Message;
+      try {
+        message = await this.send({ ...params, max_tokens: left - reserveTokens,
+          output_config: { ...params.output_config, effort }, messages }, () => {
+          const request = remaining();
+          const reserve = untilReserve();
+          return reserve < request ? { ms: reserve, reserve: true } : { ms: request, reserve: false };
+        }, signal, state);
+      } catch (error) {
+        if (error instanceof ReserveReachedError) { forced = 'deadline'; break; }
+        throw error;
       }
-      if (message.stop_reason !== 'tool_use') return interpret(message, state.sent, state.spent, seen ?? undefined, hard);
+      countTurn();
+      // A refusal or an answer (well formed or not) ends the read as it is.
+      if (message.stop_reason === 'refusal' || message.stop_reason === 'end_turn') {
+        return interpret(message, state.sent, state.spent, seen, true);
+      }
       addTokens(state.spent, usageOf(message));
-      const calls = message.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
-      if (calls.length === 0 || turn >= zoom.maxCalls + ZOOM_EXTRA_TURNS) {
-        return { kind: 'failed', reason: 'incomplete', usage: { ...state.spent }, attempts: state.sent };
+      if (message.stop_reason !== 'tool_use' || !zoom) {
+        forced = message.stop_reason === 'max_tokens' || message.stop_reason === 'model_context_window_exceeded'
+          ? 'max_tokens' : 'incomplete';
+        break;
       }
+      const calls = message.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
+      if (calls.length === 0) { forced = 'incomplete'; break; }
       // Every call of the turn answered, in order, in one user turn. A malformed input or a failed zoom is an
       // is_error result (zoom.ts never throws): the read goes on.
       const results: Anthropic.ToolResultBlockParam[] = [];
@@ -261,16 +374,32 @@ export class ClaudePageClient implements PageModelClient {
       // with thinking requires; then the results.
       messages.push({ role: 'assistant', content: message.content as Anthropic.ContentBlockParam[] },
         { role: 'user', content: results });
+      toolTurns += 1;
+      if (zoom.callsLeft <= 0) forced = 'zoom_cap';
+      else if (toolTurns >= zoom.maxCalls) forced = 'turns';
     }
+    if (trace) trace.forced = forced;
+    const left = readCap - state.spent.outputTokens;
+    if (left < HARD_READ_MIN_TURN_TOKENS) {
+      return { kind: 'failed', reason: 'max_tokens', code: 'max_tokens', usage: { ...state.spent }, attempts: state.sent };
+    }
+    messages.push({ role: 'user', content: [{ type: 'text', text: FORCED_ANSWER_INSTRUCTION }] });
+    const message = await this.send({ ...params, max_tokens: Math.min(left, reserveTokens),
+      output_config: { ...params.output_config, effort: HARD_READ_FORCED_EFFORT }, messages,
+      ...(zoom ? { tool_choice: { type: 'none' as const } } : {}) },
+    () => ({ ms: remaining(), reserve: false }), signal, state);
+    countTurn();
+    return interpret(message, state.sent, state.spent, seen, true);
   }
 
   /**
-   * One request, with our retries. `timeoutFor` gives each attempt's timeout, read once the permit is held (for the
-   * zoom loop, capped by its request-time budget left); none left is a timeout. Every attempt is counted in `state`
+   * One request, with our retries. `timeoutFor` gives each attempt's timeout, read once the permit is held (for a
+   * hard read, capped by its request-time budget left and by the start of its answer reserve); none left is a timeout,
+   * or, where the answer reserve is what bounds it, a ReserveReachedError (as is an attempt cut by it). Every attempt is counted in `state`
    * (sent, its time in the request, and the tokens of any that failed after it started).
    */
-  private async send(params: Anthropic.MessageCreateParamsNonStreaming, timeoutFor: () => number, signal: AbortSignal,
-    state: CallState): Promise<Anthropic.Message> {
+  private async send(params: Anthropic.MessageCreateParamsNonStreaming, timeoutFor: () => AttemptTime,
+    signal: AbortSignal, state: CallState): Promise<Anthropic.Message> {
     const maxAttempts = this.config.OCR_AI_MAX_RETRIES + 1;
     for (let attempt = 1; ; attempt += 1) {
       // The wait for a permit is not part of the request timeout or the zoom loop's budget; only shutdown ends it.
@@ -280,9 +409,11 @@ export class ClaudePageClient implements PageModelClient {
       } catch (error) {
         throw signal.aborted ? new AiInterruptedError(signal.reason, state.sent, state.spent) : error;
       }
-      const ms = timeoutFor();
+      const { ms, reserve } = timeoutFor();
       if (ms <= 0) {
         release();
+        // A hard read's answer reserve has begun (README "A hard read always ends with an answer"): no retry.
+        if (reserve) throw new ReserveReachedError();
         throw new AiTransientError('AI_TIMEOUT', state.sent, state.spent);
       }
       const timeout = AbortSignal.timeout(ms);
@@ -306,6 +437,8 @@ export class ClaudePageClient implements PageModelClient {
         // The answer had begun: its output so far is billed but was never reported (see HardReadTrace).
         if (partial.started && state.trace) state.trace.cutAttempts += 1;
         if (signal.aborted) throw new AiInterruptedError(signal.reason, state.sent, state.spent);
+        // Cut at the start of a hard read's answer reserve: not retried; the read goes on to its answer-only turn.
+        if (timeout.aborted && reserve) throw new ReserveReachedError();
         const decision = classify(error, timeout.aborted);
         if (decision.kind === 'rejected') {
           throw new AiRejectedError(decision.code, state.sent, state.spent, decision.invalidRequest === true);
@@ -358,18 +491,19 @@ export function interpret(message: Anthropic.Message, attempts: number, earlier:
   addTokens(usage, earlier);
   if (message.stop_reason === 'refusal') return { kind: 'refused', usage, attempts };
   if (message.stop_reason === 'max_tokens' || message.stop_reason === 'model_context_window_exceeded') {
-    return { kind: 'failed', reason: 'max_tokens', usage, attempts };
+    return { kind: 'failed', reason: 'max_tokens', code: 'max_tokens', usage, attempts };
   }
-  if (message.stop_reason !== 'end_turn') return { kind: 'failed', reason: 'incomplete', usage, attempts };
+  if (message.stop_reason === 'tool_use') return { kind: 'failed', reason: 'incomplete', code: 'zoom_loop', usage, attempts };
+  if (message.stop_reason !== 'end_turn') return { kind: 'failed', reason: 'incomplete', code: 'incomplete', usage, attempts };
   const text = message.content.filter((block): block is Anthropic.TextBlock => block.type === 'text')
     .map((block) => block.text).join('');
   let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { return { kind: 'failed', reason: 'malformed', usage, attempts }; }
+  try { parsed = JSON.parse(text); } catch { return { kind: 'failed', reason: 'malformed', code: 'parse_error', usage, attempts }; }
   if (imageSize && hardPage) {
     // A hard page's best guess: boxes to page fractions, and the dose, unit, crossed-out writing and basis kept beside
     // each item.
     const read = modelHardPageSchema.safeParse(parsed);
-    if (!read.success) return { kind: 'failed', reason: 'malformed', usage, attempts };
+    if (!read.success) return { kind: 'failed', reason: 'malformed', code: 'schema_error', usage, attempts };
     const page: ModelPage = { ...read.data, items: read.data.items.map(({ dose, doseUnit, crossedOut, basis, box, ...item }) => ({
       ...item, box: toFractionBox(box, imageSize), hard: { dose, doseUnit, crossedOut, basis } })) };
     return { kind: 'answer', answer: page, usage, attempts, servedInferenceGeo: message.usage.inference_geo ?? null };
@@ -377,13 +511,13 @@ export function interpret(message: Anthropic.Message, attempts: number, earlier:
   if (imageSize) {
     // Read from the picture: the model's pixel boxes become page fractions here, before any check sees them.
     const read = modelImagePageSchema.safeParse(parsed);
-    if (!read.success) return { kind: 'failed', reason: 'malformed', usage, attempts };
+    if (!read.success) return { kind: 'failed', reason: 'malformed', code: 'schema_error', usage, attempts };
     const page: ModelPage = { ...read.data, items: read.data.items.map((item) => ({ ...item,
       box: toFractionBox(item.box, imageSize) })) };
     return { kind: 'answer', answer: page, usage, attempts, servedInferenceGeo: message.usage.inference_geo ?? null };
   }
   const answer = modelPageSchema.safeParse(parsed);
-  if (!answer.success) return { kind: 'failed', reason: 'malformed', usage, attempts };
+  if (!answer.success) return { kind: 'failed', reason: 'malformed', code: 'schema_error', usage, attempts };
   return { kind: 'answer', answer: answer.data, usage, attempts,
     servedInferenceGeo: message.usage.inference_geo ?? null };
 }

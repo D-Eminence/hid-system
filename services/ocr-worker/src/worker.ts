@@ -82,6 +82,7 @@ export class OcrWorker {
       }
       await this.repository.complete(job, completion);
       const summary = outcome.summary;
+      this.logReadFailures(job, summary);
       this.log('info', 'ocr.job.completed', { jobId: job.jobId, correlationId: job.correlationId,
         provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: text.pageCount,
         retryCount: Math.max(0, job.attemptNo - 1), readingStatus: summary.status,
@@ -102,6 +103,12 @@ export class OcrWorker {
         // Hard-page reads whose outputTokens is a lower bound (an attempt cut mid-answer): outputTokens below
         // under-counts by their unreported thinking (README "Hard-page time and cost bounds").
         hardPageReadsOutputIncomplete: summary.hardPageReadUsage.filter((read) => read.outputTokensIncomplete).length,
+        // Hard-page reads with no answer, and reads sent the answer-only turn, by reason code (README "A hard read
+        // always ends with an answer"); pages whose reading in some pass gave nothing; the first pass's items.
+        hardReadFailures: countBy(summary.hardPageReadUsage.map((read) => read.failure)),
+        hardReadForcedAnswers: countBy(summary.hardPageReadUsage.map((read) =>
+          read.forcedAnswer === null ? null : `forced_answer_${read.forcedAnswer}`)),
+        pageReadFailures: summary.pageReadFailures.length, firstPassItemCount: summary.firstPassItemCount,
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
         cacheReadInputTokens: summary.usage.cacheReadInputTokens,
         cacheCreationInputTokens: summary.usage.cacheCreationInputTokens,
@@ -190,7 +197,8 @@ export class OcrWorker {
             cacheReadTokens: read.cacheReadTokens, cacheWriteTokens: read.cacheWriteTokens, durationMs: read.durationMs,
             zoomCalls: read.zoomCalls, zoomLimited: read.zoomLimited, effort: read.effort,
             followupEffort: read.followupEffort, endedBy: read.endedBy,
-            outputTokensIncomplete: read.outputTokensIncomplete,
+            outputTokensIncomplete: read.outputTokensIncomplete, failure: read.failure,
+            forcedAnswer: read.forcedAnswer === null ? null : `forced_answer_${read.forcedAnswer}`,
             ...(pagesSent === undefined ? {} : { pagesSent }) });
         }
         continue;
@@ -212,6 +220,35 @@ export class OcrWorker {
         this.log('error', 'ocr.reading.usage_record_failed', { jobId: job.jobId, correlationId: job.correlationId,
           model: entry.model, code: safeErrorCode(error) });
       }
+    }
+  }
+
+  /**
+   * One warn line per hard-page read that gave no answer (ocr.reading.hard_read_failed), per read sent the
+   * answer-only turn (ocr.reading.hard_read_forced_answer, whether that turn answered or not), and per page whose
+   * reading in a pass gave nothing usable (ocr.reading.page_read_failed). Codes and counts only: never item text, page
+   * content or the picture (README "A hard read always ends with an answer").
+   */
+  private logReadFailures(job: ClaimedOcrJob, summary: ReadingOutcome['summary']): void {
+    for (const read of summary.hardPageReadUsage) {
+      const counts = { page: read.page, read: read.read, turns: read.turns, requests: read.requests,
+        outputTokens: read.outputTokens, outputTokensIncomplete: read.outputTokensIncomplete, zoomCalls: read.zoomCalls,
+        zoomLimited: read.zoomLimited, durationMs: read.durationMs };
+      if (read.forcedAnswer !== null) {
+        this.log('warn', 'ocr.reading.hard_read_forced_answer', { jobId: job.jobId, correlationId: job.correlationId,
+          attempt: job.attemptNo, reason: `forced_answer_${read.forcedAnswer}`, answered: read.failure === null,
+          ...counts });
+      }
+      if (read.failure !== null) {
+        this.log('warn', 'ocr.reading.hard_read_failed', { jobId: job.jobId, correlationId: job.correlationId,
+          attempt: job.attemptNo, reason: read.failure, ...(read.errorCode === null ? {} : { code: read.errorCode }),
+          forcedAnswer: read.forcedAnswer === null ? null : `forced_answer_${read.forcedAnswer}`, ...counts });
+      }
+    }
+    for (const failure of summary.pageReadFailures) {
+      this.log('warn', 'ocr.reading.page_read_failed', { jobId: job.jobId, correlationId: job.correlationId,
+        attempt: job.attemptNo, page: failure.page, pass: failure.pass, reason: failure.reason,
+        ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }) });
     }
   }
 
@@ -270,6 +307,13 @@ export class OcrWorker {
     const line = JSON.stringify({ timestamp: new Date().toISOString(), level, event, ...fields });
     (level === 'error' ? process.stderr : process.stdout).write(line + '\n');
   }
+}
+
+/** Counts per code, codes in sorted order; nulls not counted. */
+function countBy(codes: readonly (string | null)[]): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const code of codes) if (code !== null) counts.set(code, (counts.get(code) ?? 0) + 1);
+  return Object.fromEntries([...counts.entries()].sort(([a], [b]) => a.localeCompare(b)));
 }
 
 function safeErrorCode(error: unknown): string {

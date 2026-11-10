@@ -1,5 +1,5 @@
-import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, type PageAnswer,
-  type PageModelClient } from './claude.client';
+import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, FORCED_ANSWER_INSTRUCTION,
+  type PageAnswer, type PageModelClient } from './claude.client';
 import { Semaphore } from '../semaphore';
 import { paperReadingPayloadSchema } from './contract';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingConfig } from './reader';
@@ -46,7 +46,7 @@ describe('PaperReadingService', () => {
     expect(calls.map((call) => call.model)).toEqual(['claude-sonnet-5-5']);
     expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
     expect(payload.reading).toMatchObject({ status: 'read', firstPassModel: 'claude-sonnet-5-5', rereadModel: null,
-      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-10' });
+      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-11' });
     expect(payload.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', folderNumberAsWritten: 'TEST-0001' });
     expect(payload.items[0]).toMatchObject({ kind: 'diagnosis', readBy: 'first_pass', confidence: 'clear' });
     expect(summary).toMatchObject({ requests: 1, inferenceGeo: 'us', servedInferenceGeo: 'us' });
@@ -801,6 +801,28 @@ describe('PaperReadingService', () => {
     });
   });
 
+  it('names every page whose reading in a pass gave nothing, by pass and reason code (for the warn lines)', async () => {
+    const pages = [readPage(1, ['Dx: Hypertension']), readPage(2, ['Dx: Asthma'])];
+    let calls = 0;
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      calls += 1;
+      if (request.page === 1 && request.model === config.OCR_AI_FIRST_PASS_MODEL) {
+        return { kind: 'failed' as const, reason: 'malformed' as const, code: 'schema_error' as const, usage, attempts: 1 };
+      }
+      if (request.page === 1) throw new AiTransientError('AI_HTTP_529', 2);
+      return { kind: 'refused' as const, usage, attempts: 1 };
+    }) };
+    const { summary } = await new PaperReadingService(config, client)
+      .read({ facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages }, signal());
+    expect(calls).toBe(4);
+    expect(summary.pageReadFailures).toEqual([
+      { page: 1, pass: 'first_pass', reason: 'schema_error' },
+      { page: 1, pass: 'reread', reason: 'api_error', errorCode: 'AI_HTTP_529' },
+      { page: 2, pass: 'first_pass', reason: 'refusal' },
+      { page: 2, pass: 'reread', reason: 'refusal' }]);
+    expect(JSON.stringify(summary.pageReadFailures)).not.toMatch(/Hypertension|Asthma/);
+  });
+
   describe('hard pages: two best-guess readings from the picture (owner decision 2026-11-05)', () => {
     const hardConfig: ReadingConfig = { ...config, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on' };
     const png = { mediaType: 'image/png', bytes: fixturePng(1240, 1754) };
@@ -855,7 +877,7 @@ describe('PaperReadingService', () => {
       expect(payload.items.filter((item) => item.readBy === 'first_pass').map((item) => item.asWritten))
         .toEqual(['Pyrmthmn 25 rng od', 'Hypertension']);
       expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
-      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-10');
+      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-11');
       // The configured effort is used when given; a printed page below REVIEW_BELOW (low_confidence) is hard too.
       const faint = readPage(1, [['Pyrmthmn 25 rng od', { confidence: 0.5 }], 'Dx: Hypertension']);
       const xhigh = hardClient(() => ok(best('Pyrimethamine')));
@@ -1059,6 +1081,60 @@ describe('PaperReadingService', () => {
         expect(summary.passUsage.find((entry) => entry.pass === 'hard_page_read')).toMatchObject({ requests: 2 });
       });
 
+      it('sends a read whose deadline is near straight to its answer-only turn, which the deadline still bounds', async () => {
+        // Deadline 150 ms: a third of it (50 ms) is kept for the answer, which leaves no time for a turn before it, so
+        // each read's one request is the answer-only turn. The fetch never answers: the deadline ends both.
+        const bodies: string[] = [];
+        const fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+          if (!isHard(init)) return sse(JSON.stringify(firstPass));
+          bodies.push(String(init?.body));
+          return hang(init);
+        });
+        const client = new ClaudePageClient(clientConfig, { fetch: fetch as unknown as typeof globalThis.fetch,
+          limiter: new Semaphore(4) });
+        const started = Date.now();
+        const { payload, summary } = await read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 150 }, client);
+        expect(Date.now() - started).toBeLessThan(5_000);
+        expect(bodies).toHaveLength(2);
+        for (const body of bodies) {
+          expect(body).toContain(JSON.stringify(FORCED_ANSWER_INSTRUCTION));
+          expect(JSON.parse(body)).toMatchObject({ max_tokens: 8_000, output_config: { effort: 'low' } });
+        }
+        expect(summary.hardPageReadUsage.map((entry) => [entry.endedBy, entry.failure, entry.forcedAnswer])).toEqual([
+          ['deadline', 'deadline', 'deadline'], ['deadline', 'deadline', 'deadline']]);
+        expect(summary).toMatchObject({ hardPageDeadlinePages: [1], imageRereadFailedPages: [1], rereadFailedPages: 1,
+          firstPassItemCount: 2, pageReadFailures: [{ page: 1, pass: 'hard_page_read', reason: 'hard_reads_failed' }] });
+        expect(payload.items.every((item) => item.readBy === 'first_pass' && item.checkReasons.includes('reread_failed')))
+          .toBe(true);
+      });
+
+      it('gives each read the time left to the page\'s deadline and a third of it (at most 50 s) for the answer', async () => {
+        const seenBy: Array<{ left: number; reserveMs: number }> = [];
+        const { client } = hardClient(() => ok(best('Pyrimethamine')));
+        const inner = client.readPage as jest.Mock;
+        const wrapped: PageModelClient = { readPage: jest.fn(async (request, readSignal) => {
+          if (request.answerBy) seenBy.push({ left: request.answerBy.timeLeftMs(), reserveMs: request.answerBy.reserveMs });
+          return inner(request, readSignal) as Promise<PageAnswer>;
+        }) };
+        await read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 150_000 }, wrapped);
+        await read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 60_000 }, wrapped);
+        expect(seenBy.map((entry) => entry.reserveMs)).toEqual([50_000, 50_000, 20_000, 20_000]);
+        expect(seenBy.every((entry, index) => entry.left > (index < 2 ? 149_000 : 59_000))).toBe(true);
+      });
+
+      it('incident shape (job 566c38bf): both reads fail on a page whose first pass kept nothing: 0 items, the page '
+        + 'flagged and named as a failed re-read', async () => {
+        const { client } = hardClient(() => ({ kind: 'failed', reason: 'max_tokens', code: 'max_tokens', usage, attempts: 4 }),
+          ok(modelPage([])));
+        const { payload, summary } = await read(hardConfig, client);
+        expect(summary).toMatchObject({ itemCount: 0, firstPassItemCount: 0, rereadFailedPages: 1, imageRereadFailedPages: [1],
+          hardPageAgreement: { fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 0 } });
+        expect(summary.hardPageReadUsage.map((entry) => entry.failure)).toEqual(['max_tokens', 'max_tokens']);
+        expect(payload.items).toEqual([]);
+        expect(payload.pages[0]!.flagReasons).toEqual(expect.arrayContaining(['handwriting', 'ai_unsure']));
+        expect(payload.reading).toMatchObject({ status: 'read', itemCount: 0, imageRereadFailedPages: [1] });
+      });
+
       it('keeps the first reading (reread_failed) when neither read finishes, including one still waiting for a permit', async () => {
         const fetch = jest.fn(async (_url: unknown, init?: RequestInit) => isHard(init) ? hang(init)
           : sse(JSON.stringify(firstPass)));
@@ -1134,7 +1210,7 @@ describe('PaperReadingService', () => {
         for (const text of ['Pyrimethamine', 'Pyrmthmn', 'Hypertension']) expect(kept).not.toContain(text);
         for (const entry of summary.hardPageReadUsage) {
           for (const [key, value] of Object.entries(entry)) {
-            if (['model', 'effort', 'followupEffort', 'endedBy'].includes(key)) {
+            if (['model', 'effort', 'followupEffort', 'endedBy', 'failure', 'errorCode', 'forcedAnswer'].includes(key)) {
               expect(value === null || /^[a-z0-9_-]+$/.test(String(value))).toBe(true);
             } else if (key === 'outputTokensIncomplete') expect(value).toBe(false);
             else expect(typeof value).toBe('number');

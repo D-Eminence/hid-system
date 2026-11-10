@@ -46,9 +46,13 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * re-read request are still byte for byte unchanged. Version 10: rule J asks for all the zooms a read needs in one turn
  * (HARD_PAGE_PROMPT_VERSION 10; coordinator's decision of 2026-11-10, a follow-up to version 9: production showed about
  * 4 turns per read, each thinking again). A reading made the older way is not reused. The text-only request, the
- * ordinary image re-read request and the hard-page text without zoom are byte for byte unchanged.
+ * ordinary image re-read request and the hard-page text without zoom are byte for byte unchanged. Version 11: a hard
+ * read that has not answered when its tokens, zoom calls, turns or time run short (or whose turn stopped without an
+ * answer) is sent one answer-only turn with a new user message (claude.client.ts FORCED_ANSWER_INSTRUCTION,
+ * HARD_PAGE_PROMPT_VERSION 11; coordinator 2026-11-10 after job 566c38bf). A reading made the older way is not reused.
+ * The text-only request and the ordinary image re-read request are byte for byte unchanged.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-10';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-11';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -83,15 +87,21 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * still version 7): rule J asks the model to decide every place it needs a closer look at and request all those zooms
  * together in one response (several zoom calls at once), then answer from what they show, zooming again only if a
  * crop is still unclear and calls are left (coordinator 2026-11-10, follow-up to version 9: fewer thinking turns per
- * read). The cap of 4 and everything else are unchanged.
+ * read). The cap of 4 and everything else are unchanged. Version 11 (coordinator 2026-11-10, after job 566c38bf: both
+ * reads used everything and gave no answer): the first message is the version 10 text, unchanged; a read that has not
+ * answered when its tokens, zoom calls, turns or time run short, or whose turn stopped without an answer, is sent one
+ * answer-only turn: claude.client.ts FORCED_ANSWER_INSTRUCTION as a new user message, the zoom tool no longer
+ * offered (tool_choice none), at low effort (README "A hard read always ends with an answer").
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-10';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-11';
 /**
  * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
  * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
- * calls, which is the version 8 (and 9 and 10) text without rule J (pinned by hash in hard-page.spec.ts).
+ * calls, which is the version 8 (and 9, 10 and 11) text without rule J (pinned by hash in hard-page.spec.ts), and,
+ * since version 11, the same answer-only turn as with zoom when the read's tokens or time run short or its turn
+ * stops without an answer (it was 'hid-paper-reading-hard-page-prompt-7' before).
  */
-export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-7';
+export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-11-no-zoom';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
