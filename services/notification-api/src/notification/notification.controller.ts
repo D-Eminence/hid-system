@@ -6,6 +6,8 @@ import { WorkloadAuthService } from '../auth/workload-auth.service';
 import { getEnvironment } from '../config/environment';
 import { WebPushProvider, webPushServiceOf } from '../providers/web-push';
 import { DeliverAccountDeletionDto } from './dto/deliver-account-deletion.dto';
+import { DeliverCardCodeDto, DeliverCardCreatedDto, DeliverCardLinkDto, DeliverCardOpenedDto }
+  from './dto/deliver-card-link-emails.dto';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
 import { DeliverContactChangedDto, DeliverEmailChangeCodeDto, DeliverPasswordResetCodeDto, DeliverPasswordUpdatedDto,
@@ -213,6 +215,55 @@ export class NotificationController {
   }
 
   /**
+   * E5 to E8 (0118, card links): workload authentication, the idempotency
+   * key and an email recipient as every email route; 404 while
+   * CARD_LINKS_ENABLED is false (on by default), before anything is sent.
+   * Identity keys E5 card-share:<link>, E6 card-share-code:<code> and E7/E8
+   * card-share-email:<row>. Nothing here logs a recipient, token or code.
+   */
+  @Post('card-share') @HttpCode(202)
+  async cardShareLink(@Body() input: DeliverCardLinkDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    this.assertCardLinksOn();
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverCardShareLink({ recipient: input.recipient, token: input.token,
+      reference: input.reference, expiresAt: new Date(input.expiresAt), stopToken: input.stopToken,
+      idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  @Post('card-share-code') @HttpCode(202)
+  async cardShareCode(@Body() input: DeliverCardCodeDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    this.assertCardLinksOn();
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverCardShareCode({ recipient: input.recipient, code: input.code,
+      reference: input.reference, stopToken: input.stopToken, idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  @Post('card-share-opened') @HttpCode(202)
+  async cardShareOpened(@Body() input: DeliverCardOpenedDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    this.assertCardLinksOn();
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverCardShareOpened({ recipient: input.recipient,
+      reference: input.reference, openedAt: new Date(input.openedAt), idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  @Post('card-share-created') @HttpCode(202)
+  async cardShareCreated(@Body() input: DeliverCardCreatedDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    this.assertCardLinksOn();
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverCardShareCreated({ recipient: input.recipient,
+      reference: input.reference, recipientHint: input.recipientHint, expiresAt: new Date(input.expiresAt),
+      linkEmailed: input.linkEmailed, idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /**
    * N1 (B6, 0097): one empty, VAPID-signed web push to a browser subscription
    * Identity holds. Not routed by the gateway (VPC only). The DTO through the
    * pipe, then workload authentication and the idempotency key as every
@@ -246,6 +297,11 @@ export class NotificationController {
     const result = await webPush.send(input.endpoint, pushService);
     return { requestId: randomUUID(), outcome: result.outcome, pushStatus: result.pushStatus,
       retryAfterSeconds: result.retryAfterSeconds, safeCode: result.safeCode };
+  }
+
+  /** 404 while CARD_LINKS_ENABLED is off: the route reads as not served, as on an older notification-api. */
+  private assertCardLinksOn(): void {
+    if (!getEnvironment().CARD_LINKS_ENABLED) throw new NotFoundException();
   }
 
   /** Workload authentication first, then the idempotency key, then an email recipient on the email channel. */

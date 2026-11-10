@@ -51,4 +51,34 @@ describe('EHR production database transport', () => {
     process.env.AI_ENABLED = 'false'; delete process.env.ANTHROPIC_API_KEY; resetEnvironmentForTests();
     expect(getEnvironment().AI_ENABLED).toBe(false);
   });
+
+  it('keeps the records patients add on unless PATIENT_ENTRIES_ENABLED is exactly false', () => {
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://synthetic:test@localhost/hid',
+      CORS_ORIGINS: 'https://app.example', STORAGE_MODE: 'disabled' });
+    delete process.env.PATIENT_ENTRIES_ENABLED; resetEnvironmentForTests();
+    expect(getEnvironment().PATIENT_ENTRIES_ENABLED).toBe(true);
+    process.env.PATIENT_ENTRIES_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().PATIENT_ENTRIES_ENABLED).toBe(false);
+    process.env.PATIENT_ENTRIES_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().PATIENT_ENTRIES_ENABLED).toBe(true);
+    for (const value of ['yes', '1', 'TRUE']) {
+      process.env.PATIENT_ENTRIES_ENABLED = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow();
+    }
+  });
+
+  it('serves card links by default (the owner\'s decision of 4 Nov 2026, after legal approval); false switches them off', () => {
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://synthetic:test@localhost/hid',
+      CORS_ORIGINS: 'https://app.example', STORAGE_MODE: 'disabled' });
+    delete process.env.CARD_LINKS_ENABLED; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(true);
+    process.env.CARD_LINKS_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(true);
+    process.env.CARD_LINKS_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(false);
+    for (const value of ['yes', '1', 'TRUE']) {
+      process.env.CARD_LINKS_ENABLED = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow();
+    }
+  });
 });

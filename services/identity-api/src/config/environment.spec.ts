@@ -81,6 +81,20 @@ describe('Identity production database transport', () => {
     expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(false);
   });
 
+  it('serves card links by default (the owner\'s decision of 4 Nov 2026, after legal approval); false switches them off', () => {
+    // Production's task definitions set no CARD_LINKS_ENABLED key, as with PATIENT_SHARES_ENABLED.
+    production(); delete process.env.CARD_LINKS_ENABLED; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(true);
+    production(); process.env.CARD_LINKS_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(true);
+    production(); process.env.CARD_LINKS_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(false);
+    for (const value of ['yes', '1', 'TRUE']) {
+      production(); process.env.CARD_LINKS_ENABLED = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow(/CARD_LINKS_ENABLED/);
+    }
+  });
+
   it('reads emergency-contact channels as a non-empty subset of email and SMS', () => {
     for (const [value, channels] of [['', ['email']], ['sms', ['sms']], [' email , sms ', ['email', 'sms']]] as const) {
       production(); process.env.EMERGENCY_CONTACT_CHANNELS = value; resetEnvironmentForTests();

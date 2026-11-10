@@ -414,9 +414,68 @@ export class NotificationOtpClient {
     return { outcome: 'retry', safeCode: `http_${status}` };
   }
 
+  /**
+   * E5 (0118): the card link, to the address the patient typed. The link
+   * (notification-api builds it on this deployment's patient site) and the
+   * reference only; never a name, Health ID, label or code. Keyed
+   * card-share:<link>. An older notification-api answers 404, a non-send.
+   */
+  async deliverCardShareLink(input: {
+    shareId: string; recipient: string; token: string; reference: string; expiresAt: Date; stopToken: string;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('card-share', `card-share:${input.shareId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, token: input.token, reference: input.reference,
+      expiresAt: input.expiresAt.toISOString(), stopToken: input.stopToken, plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /** E6 (0118): the one-time code, to the same address; never the card link. Keyed card-share-code:<code>. */
+  async deliverCardShareCode(input: {
+    codeId: string; recipient: string; code: string; reference: string; stopToken: string; correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('card-share-code', `card-share-code:${input.codeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, code: input.code, reference: input.reference,
+      stopToken: input.stopToken, plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /** E7 (0118): to the patient, the first open of a link each Lagos day. Keyed card-share-email:<row>. */
+  async deliverCardShareOpened(input: {
+    emailId: string; recipient: string; reference: string; openedAt: Date; correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('card-share-opened', `card-share-email:${input.emailId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, reference: input.reference, openedAt: input.openedAt.toISOString(),
+      plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * E8 (0118): to the patient, every new link: the masked address, reference and end, and whether the link
+   * was emailed. Keyed card-share-email:<row>.
+   */
+  async deliverCardShareCreated(input: {
+    emailId: string; recipient: string; reference: string; recipientHint: string; expiresAt: Date; linkEmailed: boolean;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('card-share-created', `card-share-email:${input.emailId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, reference: input.reference, recipientHint: input.recipientHint,
+      expiresAt: input.expiresAt.toISOString(), linkEmailed: input.linkEmailed, plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
   private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation' | 'patient-welcome'
     | 'password-reset-code' | 'password-updated' | 'email-change-code' | 'contact-changed'
-    | 'patient-share-invitation' | 'share-received' | 'record-access-alert' | 'account-deletion',
+    | 'patient-share-invitation' | 'share-received' | 'record-access-alert' | 'account-deletion'
+    | 'card-share' | 'card-share-code' | 'card-share-opened' | 'card-share-created',
     idempotencyKey: string, correlationId: string,
     body: Record<string, unknown>, timeoutMs: number,
   ): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {

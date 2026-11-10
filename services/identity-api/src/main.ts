@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { json, type Express } from 'express';
 import { AppModule } from './app.module';
+import { corsOptions } from './common/cors';
 import { DomainProblem, ProblemDetailsFilter } from './common/problem';
 import { preventResponseCaching } from './common/response-security.middleware';
 import { getEnvironment } from './config/environment';
@@ -34,17 +35,7 @@ async function bootstrap(): Promise<void> {
       ? { maxAge: 31_536_000, includeSubDomains: true, preload: true } : false,
   }));
   const allowedOrigins = new Set(environment.CORS_ORIGINS.split(',').map((origin) => origin.trim()));
-  app.enableCors({
-    origin: (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => {
-      if (!origin || allowedOrigins.has(origin)) callback(null, true);
-      else callback(new Error('Origin is not permitted'), false);
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'if-match', 'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-purpose-of-use', 'x-hid-internal-caller', 'x-hid-service-authorization', 'x-hid-service-token', 'x-hid-scanner-authorization'],
-    exposedHeaders: ['etag', 'location', 'x-correlation-id', 'x-csrf-token'],
-    maxAge: 600,
-  });
+  app.enableCors(corsOptions(allowedOrigins));
   app.useGlobalPipes(new ValidationPipe({
     whitelist: true,
     forbidNonWhitelisted: true,

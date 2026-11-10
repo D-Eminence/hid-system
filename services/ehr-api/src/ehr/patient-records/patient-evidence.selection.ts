@@ -1,8 +1,10 @@
 import type { Evidence,RecordIntent,Coverage } from './patient-evidence.types';
 const time=(r:Evidence)=>Date.parse(r.effectiveAt??r.recordedAt??'')||0;
 const medication=(r:Evidence)=>r.kind==='prescription'||r.kind==='health_profile'||r.kind==='note'||r.kind==='document'||r.kind==='attachment'||r.kind==='import_version'
-  ||(r.kind==='import'&&/medication|prescription|drug/.test(JSON.stringify(r.fields).toLowerCase()));
+  ||(r.kind==='import'&&/medication|prescription|drug/.test(JSON.stringify(r.fields).toLowerCase()))
+  ||(r.kind==='patient_entry'&&r.fields.type==='medicine');
 const labs=(r:Evidence)=>['lab_result','investigation','document','attachment','import_version'].includes(r.kind)
+  ||(r.kind==='patient_entry'&&r.fields.type==='test')
   ||(r.kind==='note'&&/lab|laboratory|result|investigation/.test(r.content.toLowerCase()))
   ||(r.kind==='import'&&/lab|laboratory|test_result/.test(JSON.stringify(r.fields).toLowerCase()));
 const stop=new Set('the a an my this patient what when was is were has have had are and or of for in to most last latest recent recorded previously condition related appear records its it all history medical please summarise summarize explain first'.split(' '));

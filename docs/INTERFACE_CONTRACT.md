@@ -1478,7 +1478,7 @@ The server sets them from the record itself, never the model:
 
 | `origin` | Source kinds | `originLabel` (patient / staff) |
 |---|---|---|
-| `patient` | imported history recorded as patient provided, imported health profile | "You added this" / "Added by the patient" |
+| `patient` | imported history recorded as patient provided, imported health profile, records the patient added (`patient_entry`, 0116, while `PATIENT_ENTRIES_ENABLED` is on) | "You added this" / "Added by the patient" |
 | `health_worker` | notes, encounters, diagnoses, prescriptions, investigations, vitals, released lab results, imported history recorded as provider authored | "Recorded by a health worker" |
 | `scanned_paper` | readable documents and imported files, and a clinical note imported from a scanned record | "From a scanned paper record" |
 | `health_id_profile` | the Health ID profile | "Your Health ID profile" / "The patient's Health ID profile" |
@@ -3592,3 +3592,445 @@ grant's scope test alone or its `break_glass` test alone (a consent_grants
 CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
+
+## 37. Records patients add themselves (0116)
+
+Akos handover step 6 (owner decision 25 of 2026-11-01; D7: a record the
+patient removes is hidden everywhere and kept). Text only: photos and files
+come with a later migration. 0116 is unsigned until the owner signs its
+declaration.
+
+Switch: `PATIENT_ENTRIES_ENABLED` (ehr-api, default `true` since the owner's decision of 4 Nov 2026 after legal approval; production sets no key; `false` switches it off). While it is off:
+
+- every route below answers a plain 404 (`application/problem+json`, code
+  `NOT_FOUND`) before authentication, CSRF, validation or audit, which the
+  website reads as "not served";
+- `GET /api/v1/ehr/me/records` answers exactly its existing keys;
+- neither chat reads `ehr.patient_entries`, so the image may run before 0116
+  is applied.
+
+Release order (required, because the switch is on by default and production
+sets no key, so it goes live the moment this ehr-api image ships): 0116 is
+applied first, then the health website release whose chat parser accepts the
+kind `patient_entry` (branch `claude/patient-entries-website`) is live in
+production, and only then is this ehr-api image released. If this image has
+to ship before that website release, production sets
+`PATIENT_ENTRIES_ENABLED=false` for ehr-api until the website is live, then
+removes the key. See "Release order checks".
+
+### Add a record
+
+`POST /api/v1/ehr/me/patient-entries` (patient session, CSRF for a cookie
+session, `Cache-Control: no-store`). Optional `Idempotency-Key` (16 to 128 of
+`A-Z a-z 0-9 . _ : -`, starting with a letter or digit), checked when sent.
+
+| Field | Rule |
+|---|---|
+| `kind` | `visit`, `test`, `medicine`, `diagnosis`, `vaccination` or `other` |
+| `title` | trimmed, 2 to 160 characters, one line |
+| `facilityName` | trimmed; blank or `null` is none; else at most 160 characters, one line |
+| `occurredOn` | `YYYY-MM-DD`, a real date from 1900-01-01 to today in Africa/Lagos |
+| `notes` | CRLF and CR read as a newline; trimmed; blank or `null` is none; at most 1000 characters, the newline the only control character |
+| `attachments`, `fileIds` | absent or `[]`; a non-empty list answers 422 `PATIENT_ENTRY_FILES_NOT_READY` |
+
+The upper limits (160, 160 and 1000) count UTF-16 units, as a browser's
+`maxLength` and JavaScript's `length` do, so every record the API accepts is
+one the website shows (an emoji counts two). A title also needs at least two
+characters as the database counts them (code points). The table's CHECKs
+count code points (title 2 to 160, place 1 to 160, notes 1 to 1000), so they
+hold whatever the API accepts. With these limits a saved record's JSON stays
+far under the edge's 8 KB request limit.
+
+Answers:
+
+- 201 `{ entry, replayed: false }` for a new record.
+- 200 `{ entry, replayed: true }` for the same key and the same saved values,
+  or, without a key, the same saved values as an active record added in the
+  last 60 seconds (a double tap). A replay is never limited. A replayed key
+  whose record has since been removed still answers that record.
+- `entry` is `{ id, source: 'patient', kind, title, facilityName, occurredOn,
+  notes, createdAt, documents: [] }` (`occurredOn` as entered, `createdAt`
+  ISO 8601).
+
+| Status | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "One or more request fields are invalid.", with `errors[{field, messages}]`: title "Use 2 to 160 characters, on one line."; facilityName "Use at most 160 characters, on one line."; occurredOn "Use a real date from 1 January 1900 to today."; notes "Use at most 1000 characters of plain text."; kind "Choose visit, test, medicine, diagnosis, vaccination or other." |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | a malformed key |
+| 400 | `PATIENT_ENTRY_INVALID` | "Check the record's details and try again." (the database refused a value) |
+| 403 | `PATIENT_SESSION_REQUIRED`, `PATIENT_ACCESS_DENIED` | as the other patient routes |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | "This request was already used for a different record. Please try again." |
+| 422 | `PATIENT_ENTRY_FILES_NOT_READY` | "Photos can't be added yet. Save the record without them." |
+| 429 | `PATIENT_ENTRY_LIMITED` | "You've added a lot of records today. Try again tomorrow." (30 added in the last 24 hours, removed ones included) |
+
+### Remove a record
+
+`POST /api/v1/ehr/me/patient-entries/:entryId/withdraw` (patient session, no
+body, `no-store`): 200 `{ entry: { id, status: 'withdrawn', withdrawnAt },
+replayed }`; a repeat answers the first `withdrawnAt` with `replayed: true`.
+An entry that is not the patient's, or does not exist, answers 404
+`PATIENT_ENTRY_NOT_FOUND` ("This record could not be found."), never the
+plain 404. The row is kept and hidden from the records answer, the lists,
+the staff read, both chats and saved chat answers that cite it (D7). The
+patient's own chat vectors of it are deleted at once. Neither chat ranks it
+again, and each chat deletes its remaining vectors of it (the staff chat's,
+and the patient's should a search that overlapped the removal write them) at
+that chat's next search.
+
+### Reads
+
+- `GET /api/v1/ehr/me/records` adds, while the switch is on,
+  `patientEntries` (the first page: active records, newest `occurredOn`
+  first, then newest added, then id, at most 50, each as `entry` above),
+  `patientEntriesMore` (whether there are more) and
+  `patientEntriesNextBefore` (the cursor of the next page, or `null`). Its
+  audit row gains `patientEntryCount`. The emergency read and the imported
+  history read are unchanged.
+- `GET /api/v1/ehr/me/patient-entries?before=<cursor>` (patient session,
+  `no-store`): 200 `{ items, nextBefore }`, the page after the cursor (the
+  first page without one), 50 at a time in the same order; `nextBefore` is
+  `null` on the last page. Audited `ehr.patient.self.records.read` on
+  resource type `patient-entries` (details `entryCount`, `more`,
+  `continued`). The website pages with it to show, and offer Remove for,
+  every record.
+- `GET /api/v1/ehr/patients/:patientId/patient-entries?before=<cursor>`
+  (staff; `ehr.note.read`, `X-Facility-ID`, `X-Purpose-Of-Use:
+  direct-care`, the patient's read access at that facility): 200 `{ items,
+  more, nextBefore }`, the same items and pages. 400
+  `PURPOSE_OF_USE_REQUIRED`, 403 `CONSENT_REQUIRED`, `PERMISSION_DENIED`,
+  `FACILITY_ACCESS_DENIED`, `PATIENT_SCOPE_DENIED`. Audited
+  `ehr.record.read` on resource type `patient-entries` (details
+  `entryCount`, `more`), which the patient's access log shows as a view.
+- A cursor is opaque, at most 512 of `A-Z a-z 0-9 _ -`, and names a position
+  in one patient's list, not a permission: each page applies the reader's
+  access again. A cursor of another shape answers 400 `VALIDATION_FAILED`;
+  one not exactly as issued for that patient's list answers 400
+  `INVALID_CURSOR` ("This list changed. Load it again from the start.").
+- Chat: `patient_entry` is a source kind for the patient's and the staff
+  chat (staff need `ehr.note.read`): origin `patient`, "You added this" /
+  "Added by the patient"; provenance "Record added by the patient, not
+  checked by a health worker"; fields `type` (the kind), `place`, `date`,
+  `notes`. A `medicine` record answers medicine questions and a `test`
+  record result questions. The patient chat's safety rules (#167, patient
+  chat safety PR 1, `patient-evidence.policy.ts`) apply to it as to every
+  kind: only those four fields reach the chat; the patient's identifiers are removed
+  from its title, place and notes before anything reaches a model, the index
+  or saved history; a record whose title names a sensitive test, condition
+  or medicine (the same lists as the clinician's records) stays out of the
+  patient chat; a cited `diagnosis` record, or one stating a result, gets
+  the server's follow-up line; the source viewer shows it as "Record you
+  added" with "Not checked by a clinician."; its vectors are purged with the
+  other local kinds. The staff chat reads it unchanged, and its one-patient
+  rule covers it: a row for any other patient refuses the whole read.
+
+### Audit
+
+Written by the database commands in the same transaction, actor `patient`,
+resource type `patient-entry`, purpose `patient-self`, source `ehr-api`, never
+a title, place or note:
+
+| Action | Outcome | Details |
+|---|---|---|
+| `ehr.patient-entry.create` | `success` | `kind`, `hasFacilityName`, `hasNotes` |
+| `ehr.patient-entry.create` | `denied` (30 a day) | `reason: daily_limit`, `limit`, `windowHours` |
+| `ehr.patient-entry.withdraw` | `success` (first time only) | `kind` |
+
+A replay, a reused key and a removal of an entry that is not the patient's
+write nothing. The reads are audited by ehr-api as above (the patient's list
+as `ehr.patient.self.records.read`, the staff read as `ehr.record.read`).
+
+### Database (0116)
+
+`ehr.patient_entries`, forced row-level security: the applier's own policy
+(the two commands) and a read policy of active entries in
+`ehr.imported_record_read_context` (the patient's fresh patient-self
+transaction or a clinician with granted read access at the current
+facility). Rows are never deleted or truncated and change only from active
+to withdrawn. `ehr.create_my_patient_entry` and
+`ehr.withdraw_my_patient_entry` are SECURITY DEFINER and work only in a fresh
+patient-self transaction (else 42501). The EHR runtime has SELECT on the
+table and EXECUTE on the commands, nothing else. The source-kind CHECK of
+`ehr.patient_evidence_chunks` and `ehr.staff_evidence_chunks` gains
+`patient_entry`. The statement each chat runs at its next search to delete a
+removed record's vectors (ehr-api's `withdrawnPatientEntryChunksSql`) relies
+on row-level security showing only active entries; the suite runs it in both
+chats' transactions. The suite is
+`services/ehr-api/test/database/patient-entries.integration.sql`. 0116 has no
+down migration. It is released on 0108 (0106, section 34, only seeds the OCR
+worker's account; 0107, section 35, changes only objects in schema `ocr`;
+0108, section 36, replaces only the body of
+`identity.records_processing_direct_care_cover`; none of them changes these
+bodies): its preconditions pin the bodies it relies on as measured there,
+all as on 0103 except `identity.has_active_consent_grant`, which is 0104's
+body (md5 `732d11892dd4e27e1ff9093ae3b7de5a`, which 0108 leaves as it is),
+so 0104 must be applied first. The records-processing cover (0104, widened
+by 0108 to last as long as the access and to count patient shares) answers
+only for `healthcare-operations`; the staff read and the staff chat take
+`direct-care` only, so it never opens these records.
+
+### Release order checks
+
+With the switch on by default there is no separate switch-on step: releasing
+this ehr-api image is what turns it on. Each check below must hold before the
+image is released to production.
+
+1. The owner signs the 0116 declaration and it is applied.
+2. Deploy order: the health website release whose chat parser
+   (`packages/contracts/src/stagingChat.ts`) accepts the kind
+   `patient_entry` (branch `claude/patient-entries-website`) is live in
+   production before this ehr-api image. The parser on the website's main
+   today rejects that kind ("Record chat returned invalid sources."), so
+   releasing this image first makes every chat answer, and every saved
+   conversation, that cites a record a patient added unreadable, for the
+   patient and for staff. If the image must ship first, production sets
+   `PATIENT_ENTRIES_ENABLED=false` for ehr-api until the website is live.
+3. The website hides the photo step until photos and files are served (it
+   reads `patientEntries` as "records and uploads served"; a picked photo
+   would fail at its upload link).
+4. On by default (the owner's decision of 4 Nov 2026, after legal approval).
+   `PATIENT_ENTRIES_ENABLED=false` for ehr-api switches it off again, which
+   hides the records everywhere and keeps them.
+
+## 38. Card links: a patient sends their card by email, opened with a one-time code (0118)
+
+Akos handover step 8 (the design and critique of 2026-11-04; the owner's
+answers of 2026-11-04, "all recommended"). On since the owner's decision of
+4 Nov 2026 after legal approval (NDPA, D13). 0118 is unsigned until the
+owner signs its declaration.
+
+Switch: `CARD_LINKS_ENABLED` in identity-api, ehr-api and notification-api,
+a code default, `true` (on), as `PATIENT_SHARES_ENABLED`; production sets no
+key. `false` switches it off, and anything but exactly `false` reads as on.
+While it is `false` every route below answers a plain 404
+(`application/problem+json`, code `NOT_FOUND`) before authentication, CSRF,
+Turnstile, validation or audit; nothing is written or sent and the sweeper
+is idle, so an image may run on a database without 0118 only with
+`CARD_LINKS_ENABLED=false`.
+
+Every answer is `Cache-Control: no-store`. Every refusal is
+`application/problem+json` with `code` and a plain-English `detail` (the
+website shows `detail`); a refusal never repeats an address, token or code
+that was sent. No receiver route ever answers 401.
+
+### The patient (identity-api; patient cookie session, Origin and CSRF on POST)
+
+`GET /api/v1/identity/me/card-shares` (also the website's "is it served"
+check) → 200
+
+```
+{ items: CardShare[], createdToday, dailyLimit: 5, liveCount, liveLimit: 20 }
+CardShare = { id, reference ('K7P2-QX9M'), scope: 'card' | 'card_and_records',
+  recipientEmail: string | null, label: string | null, recipientHint: string | null,
+  duration: '24h' | '7d', createdAt, expiresAt,
+  status: 'active' | 'locked' | 'ended' | 'expired', endedAt | null,
+  endedReason: null | 'patient_ended' | 'replaced' | 'expired' | 'account_deleted' | 'patient_inactive'
+    | 'address_blocked' | 'too_many_wrong_codes' | 'not_sent',
+  lockedUntil | null, delivery: 'sent' | 'not_sent' | 'pending', openCount, lastOpenedAt | null }
+```
+
+Live links and links ended in the last 30 days, newest first, at most 50.
+`recipientEmail` and `label` are null once a link ends (the address is
+erased); `recipientHint` (`k•••@gmail.com`; a domain that is not a common
+provider is masked too, `a•••@l•••.ng`) is null 12 months after the end.
+`delivery` reads `not_sent` alike for a blocked address, an address past its
+daily limit across patients and a failed send (the reason is in the audit
+only). A link that is not emailed because the address is blocked or past its
+daily limit is recorded already ended (`status: 'ended'`, `endedReason:
+'not_sent'`, its address erased): nobody holds its token, so it never
+replaces a live link and never counts as live.
+
+`POST /api/v1/identity/me/card-shares`, header `Idempotency-Key` (16 to 128
+of `A-Z a-z 0-9 . _ : -`), body (unknown fields refused):
+
+| Field | Rule |
+|---|---|
+| `email` | at most 254 characters; trimmed and lower-cased; one `@` and a dot in the domain |
+| `label` | optional, at most 80 characters, a person's name ("Who is this? (only you see this)"); encrypted with the address, never emailed |
+| `scope` | `card` (card face, blood group, genotype, allergies) or `card_and_records` (also visits, signed notes, older records, all the health information they entered, the records they added; anything added while the link is open is included) |
+| `duration` | `24h` (the website's default) or `7d` |
+
+Needs a sign-in within 10 minutes and no account recovery in the last 24
+hours. Answers 201 `{ share: CardShare, delivery: 'sent' | 'not_sent',
+replacedId: string | null, replayed: false }` (the link email E5 is sent
+before answering); 200 with `replayed: true` for the same key and body. A
+live link to the same address is ended (`replaced`) and named in
+`replacedId`, only when the new link is emailed (a link that is not emailed
+replaces nothing: `replacedId: null`). The patient is also emailed E8 ("You
+sent your Health ID card to k•••@…", or, when the link was not emailed,
+"Someone signed in to your Health ID tried to send your card to k•••@…. We
+couldn't email it, so nobody can open it.").
+
+| Status | Code | `detail` |
+|---|---|---|
+| 400 | `CARD_SHARE_EMAIL_INVALID` | Enter an email address like name@example.com. |
+| 400 | `CARD_SHARE_OWN_EMAIL` | That's your own email address. To see your card, open it in Health ID. |
+| 400 | `VALIDATION_FAILED` | a bad `scope`, `duration` or `label`, or an unknown field (with `errors[{field, messages}]`) |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | (missing or malformed key) |
+| 403 | `PATIENT_RECENT_AUTH_REQUIRED` | For your security, sign out, sign in again, and send it within 10 minutes. |
+| 403 | `PATIENT_RECENT_RECOVERY_HOLD`, `PATIENT_SESSION_REQUIRED` | as the other patient routes |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | Something changed while sending. Check your shared links before trying again. |
+| 409 | `CARD_SHARE_LIVE_LIMIT` | You have 20 card links open. End one to send another. |
+| 429 | `CARD_SHARE_CREATE_LIMITED` | You've sent 5 card links today. Try again tomorrow. |
+| 429 | `CARD_SHARE_ADDRESS_LIMITED` | You've sent your card to this address twice today. Try again tomorrow. |
+| 503 | `CARD_SHARE_UNAVAILABLE` | Card links are not available right now. Try again later. |
+
+`POST /api/v1/identity/me/card-shares/:shareId/end` (no body) → 200
+`{ share: CardShare }`, also for a link already ended. 404
+`CARD_SHARE_NOT_FOUND` ("We couldn't find that link. It may have ended
+already.") for another patient's or an unknown id; 400 for a malformed id.
+Ending tells the receiver nothing; an open view stops at its next request.
+
+### The person the link went to (public, `/api/v1/card-share/*`)
+
+The page is `<patient site>/card#<token>` (production
+`https://app.healthidentitydirectory.com`, staging
+`https://staging.healthidentitydirectory.com`). The token (43 base64url
+characters) travels only in POST bodies. Every POST checks `Origin` (403
+`ORIGIN_DENIED`). Cookies are `HttpOnly; Secure; SameSite=Strict;
+Path=/api/v1/card-share`; the routes never read a patient or staff session.
+The page and the API are on different origins, so identity-api and ehr-api
+allow the request header `X-Card-View` in their CORS answer (with
+credentials).
+
+`GET /api/v1/card-share/availability` → 204 while on.
+
+`POST /api/v1/card-share/code` `{ token, turnstileToken }` (Turnstile action
+`card-share-code`, on the patient site) → 202 `{ sentTo: 'k•••@gmail.com',
+expiresInSeconds: 600, resendAfterSeconds: 60 }` and the cookie
+`hid_card_code_<first 16 hex of the link's keyed token HMAC>` (Max-Age 600):
+the code works only in this browser. One cookie per link, so codes asked for
+two links in one browser never overwrite or clear each other. The code email
+E6 goes after the answer.
+
+| Status | Code | `detail` |
+|---|---|---|
+| 400 | `CARD_SHARE_LINK_INVALID` | This link isn't complete. Open it again from your email. |
+| 400/403/503 | `TURNSTILE_*` | as the other Turnstile checks |
+| 410 | `CARD_SHARE_ENDED` | This card is no longer shared. (unknown, ended and expired links alike) |
+| 429 | `CARD_SHARE_LOCKED` + `retryAfterSeconds` | Too many wrong codes. Try again in {n} minutes. |
+| 429 | `CARD_SHARE_CODE_LIMITED` + `retryAfterSeconds` | Too many codes asked for. Try again later. (1 a minute, 3 an hour, 6 a Lagos day per link) |
+| 429 | (gateway) | 10 a minute per connection on `code` and `verify` |
+
+`POST /api/v1/card-share/verify` `{ token, code }` (with that link's
+`hid_card_code_…` cookie, cleared on success; other links' cookies are left)
+→ 200
+
+```
+{ viewId, viewExpiresAt, card: { fullName, healthId, ninVerified }, sharedByFirstName,
+  recipientHint, reference, scope: 'card' | 'card_and_records', expiresAt }
+```
+
+and the cookie `hid_cv_<viewId without dashes>` (a session cookie; the server
+ends the view after 30 minutes). One live view per link: opening again ends
+the earlier view.
+
+| Status | Code | `detail` |
+|---|---|---|
+| 400 | `CARD_SHARE_CODE_FORMAT` | Enter the 6-digit code from the email. (no try used) |
+| 400 | `CARD_SHARE_CODE_WRONG` + `attemptsLeft` | That code isn't right. Check the email and try again. {n} tries left. (also the right code from another browser) |
+| 410 | `CARD_SHARE_CODE_EXPIRED` | That code has stopped working. Ask for a new one. (expired, used, or 5 wrong tries) |
+| 429 | `CARD_SHARE_LOCKED` + `retryAfterSeconds` | Too many wrong codes. Try again in {n} minutes. (3 dead codes: 1 hour; the patient is told) |
+| 410 | `CARD_SHARE_ENDED` | This card is no longer shared. (also when a second lock ends the link; the patient is told once) |
+
+`GET /api/v1/card-share/view`, header `X-Card-View: <viewId>` → 200 the same
+body as verify, or 410 `CARD_SHARE_VIEW_ENDED` ("This card is no longer
+shared with you.") when the view is gone, timed out, closed, replaced or its
+link ended. The page calls it every 30 seconds while the card is shown.
+
+`POST /api/v1/card-share/end-view`, header `X-Card-View` → 204 and the
+view's cookie cleared ("Close"); an unknown or ended view answers the same.
+
+`POST /api/v1/card-share/stop` `{ stopToken }` (from `/card/stop#<stopToken>`
+in E5 and E6) → 204 for any well-formed token; a genuine one blocks the
+address for every patient and ends every live link to it (each patient is
+told). 400 `CARD_SHARE_LINK_INVALID` for a malformed token.
+
+`GET /api/v1/card-share/records` (ehr-api), header `X-Card-View` and the
+view's cookie → 200, every key always present:
+
+```
+{ scope, encounters, notes, importedRecords, importedHealthProfile,
+  healthProfile: { bloodGroup, genotype, allergies[, chronicConditions, medications, notes] } | null,
+  patientEntries, patientEntriesMore, diagnoses: [], prescriptions: [], labRequests: [],
+  vitals: [], documents: [], limit: 50 }
+```
+
+"Card only": `healthProfile` has the blood group, genotype and allergies and
+every other list is empty. "Card and records": completed visits, signed or
+amended notes (current revision), the imported history (files carry `id`,
+`fileName` and `mediaType` only: nothing opens in v1), the imported profile,
+all six health-information fields, and the records the patient added
+(`[]` while `PATIENT_ENTRIES_ENABLED` is off; on by default, §37), active
+ones only (the read policy and the query both take `status = 'active'`, so a
+record the patient removed is never shown). The view has no chat: nothing it
+reads reaches the AI, the search index, either chat's history or the chat
+source viewer, so #167's patient-chat rules are unaffected; it shows no
+diagnoses, prescriptions, lab results, vitals or documents. 410 `CARD_SHARE_VIEW_ENDED`
+otherwise. The read names the live view first (`ehr.card_share_view_context`,
+which writes the audit row `ehr.card-share.records.read`); only then does the
+transaction turn read only for the reads.
+
+### Emails (notification-api, from identity-api only)
+
+Plain text, never naming the patient, never a Health ID or health data:
+E5 `POST notifications/card-share` (the link `<patient site>/card#<token>`
+and the reference; never a code), E6 `POST notifications/card-share-code`
+(the code and the reference; never the link), each with the "Stop these
+emails" link `<patient site>/card/stop#<stopToken>` and the privacy notice
+`<patient site>/card/privacy`. To the patient's verified address: E7
+`POST notifications/card-share-opened` (the first open of each link each
+Lagos day: reference and time) and E8 `POST notifications/card-share-created`
+(every new link: masked address, reference, end, and `linkEmailed`, false
+when the link itself was not emailed). All four answer 404 while
+notification-api's `CARD_LINKS_ENABLED` is `false`.
+
+### Inbox and Activity
+
+Inbox codes, resource type `card-share`, metadata `{ recipientHint,
+reference }`: `SHARED_CARD_OPENED` (opens, metadata also `opens`),
+`SHARED_CARD_LOCKED` (the first lock), `SHARED_CARD_ENDED` (`reason:
+'too_many_wrong_codes'`, the second lock), `SHARED_CARD_STOPPED` (the address
+asked to stop). Opens of one link within 30 minutes of its notice count into
+that notice (`opens` grows, and it is unread again) instead of making a new
+one, so a link causes at most one push per 30 minutes (0097 pushes for new
+items only). `recipientHint` is removed from a link's notices when the link
+is anonymised (12 months after it ends) and from all card-link notices when
+the login is deleted. Activity (`identity.patient_self_access_log`, 0093's,
+replaced): `card_opened` (every open) by actor kind `card_recipient`;
+`card_shared` by the patient, with `reason: 'not_sent'` when the link was not
+emailed; `card_ended` for every ending with its `reason`: by the patient
+(`patient_ended`, `replaced`) or by the system (`expired`,
+`too_many_wrong_codes`, `address_blocked`, `patient_inactive`,
+`account_deleted`). Each has `actorName` the hint while it is kept ("Someone
+opened your card using the link sent to a•••"); other kinds carry no
+`reason`. Older images and websites drop unknown kinds and fields.
+
+### Database (0118)
+
+`identity.card_shares`, `identity.card_share_codes`, `identity.card_share_views`,
+`identity.card_share_patient_emails` and `identity.card_share_address_blocks`,
+forced row-level security, no grants, never deleted; the commands are
+SECURITY DEFINER (`identity.*card_share*`, 13 to the Identity runtime). The
+read policies `<table>_card_share_read` on eleven EHR tables are SELECT only
+and true only in a card-share transaction (`ehr.card_share_read_context`,
+which the EHR runtime may execute) whose digest names a live view; it is
+false whenever a patient, account, session, facility or membership is set.
+Retention: the address is erased when a link ends; network data after 30
+days; the hint and address hash 12 months after the end, or at once when the
+login is deleted (the hint also from the patient's card-link notices). The
+suite is
+`services/ehr-api/test/database/card-links.integration.sql`. 0118 has no down
+migration.
+
+### Switched on (the owner's decision of 4 Nov 2026, after legal approval)
+
+1. Legal approved it (D13): the receiver privacy notice at `/card/privacy`,
+   the processors (Amazon SES, Brevo, Cloudflare Turnstile, Sentry), and
+   click and open tracking kept off on the SES configuration set and the
+   Brevo account (the emails are plain text, so no link is rewritten).
+2. The owner signs the 0118 declaration and it is applied before these
+   images run; an image on a database without 0118 needs
+   `CARD_LINKS_ENABLED=false` until it is.
+3. The website's receiver page, the patient's pages and its flag ship.
+4. No key is set: `CARD_LINKS_ENABLED` is on by default in notification-api,
+   ehr-api and identity-api. `CARD_LINKS_ENABLED=false` switches a service
+   off (identity-api first, then ehr-api, then notification-api).

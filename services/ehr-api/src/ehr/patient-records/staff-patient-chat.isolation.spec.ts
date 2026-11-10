@@ -9,13 +9,15 @@ import { DomainProblem } from '../../common/problem';
 import { PatientChatService } from './patient-chat.service';
 import { PatientAttachmentTextService } from './patient-attachment-text.service';
 import { patientEvidence } from './patient-evidence.policy';
-import { STAFF_EVIDENCE_QUERY } from './patient-evidence.query';
+import { evidenceQuery } from './patient-evidence.query';
 import type { Evidence } from './patient-evidence.types';
 import { StaffChatHistoryService } from './staff-chat-history.service';
 import { STAFF_SOURCE_PERMISSIONS, StaffChatScopeService } from './staff-chat-scope.service';
 import { STAFF_ATTACHMENT_TEXT_QUERY, StaffEvidenceService } from './staff-evidence.service';
 import { StaffPatientChatController } from './staff-patient-chat.controller';
 
+// PATIENT_ENTRIES_ENABLED is on by default (0116): the staff chat reads with the records patients add.
+const STAFF_EVIDENCE_QUERY = evidenceQuery('staff', true);
 jest.mock('../../config/environment', () => ({ getEnvironment: () => ({ AI_ENABLED: true,
   AI_EMBEDDING_MODEL_ID: 'synthetic-embedding-model', S3_REGION: 'eu-west-1' }) }));
 
@@ -162,6 +164,15 @@ describe('C1: a chat for patient A cannot reach patient B through the question',
   it('refuses the whole turn with 403 when the evidence query returns a row for another patient', async () => {
     const s = setup();
     s.data.evidence.push({ ...evidenceRowsA()[0]!, id: B_NOTE, patient_id: B, fields: { text: 'Synthetic B note' } });
+    await expect(s.ask('Summarise this patient')).rejects.toMatchObject({ code: 'CHAT_ACCESS_DENIED' });
+    expect(s.claude.answer).not.toHaveBeenCalled();
+    expect(savedExchanges(s.calls)).toHaveLength(0);
+  });
+
+  it('refuses the whole turn the same way when that row is a record the other patient added (0116)', async () => {
+    const s = setup();
+    s.data.evidence.push({ ...evidenceRowsA()[0]!, kind: 'patient_entry', id: B_NOTE, patient_id: B, origin_hint: null,
+      fields: { type: 'visit', place: null, date: '2026-10-01', notes: 'Synthetic B record' } });
     await expect(s.ask('Summarise this patient')).rejects.toMatchObject({ code: 'CHAT_ACCESS_DENIED' });
     expect(s.claude.answer).not.toHaveBeenCalled();
     expect(savedExchanges(s.calls)).toHaveLength(0);

@@ -14,11 +14,13 @@ import { selectEvidence,answerCoverage,boundEvidence } from './patient-evidence.
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
 import { citedNumbers,conversationLines,patientLines,withPatientLines } from './patient-chat-safety';
 import { redactIdentifiers } from './patient-evidence.policy';
+import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
+import { withdrawnPatientEntryChunksSql } from '../patient-entries/patient-entries.query';
 
 const NO_GROUNDED_ANSWER = 'I could not verify an answer from the available records.';
 const unavailable = () => new DomainProblem(503, 'PATIENT_CHAT_UNAVAILABLE', 'Patient chat is temporarily unavailable');
 /** Record kinds read by the local evidence query (everything except Lab and documents). */
-const LOCAL_KINDS = ['note','encounter','diagnosis','prescription','investigation','vital','import','import_version','health_profile','profile'];
+const LOCAL_KINDS = ['note','encounter','diagnosis','prescription','investigation','vital','import','import_version','health_profile','patient_entry','profile'];
 const LOCAL_PAGE_LIMIT = 2000;
 /** A search question about the patient's age or sex, answered from the age-and-sex profile. */
 const AGE_OR_SEX = /\b(?:age|aged|old|older|born|birthday|sex|gender|male|female|man|woman|boy|girl)\b/i;
@@ -179,11 +181,16 @@ export class PatientChatService {
     const records=patient?all.filter(r=>r.kind!=='profile'):all;
     const auth=await access.authorize(request);
     const currentKeys=records.map(r=>`${evidenceKey(r)}:${r.version}:${r.hash}`);
-    const existing=await access.transaction(auth,request.correlationId,async client=>(await client.query(
+    const existing=await access.transaction(auth,request.correlationId,async client=>{
+      // Vectors of a record the patient removed (0116) go at this chat's next search, whatever else is
+      // refreshed: the staff chat's, which the removal cannot reach, and any a search that overlapped
+      // the removal wrote. Only while the setting is on: off, nothing names ehr.patient_entries.
+      if(patientEntriesEnabled())await client.query(withdrawnPatientEntryChunksSql(access.chunksTable),[auth.patientId]);
+      return (await client.query(
       `select source_kind,source_id,source_version,source_hash,chunk_no from ${access.chunksTable}
        where patient_id=$1 and model_id=$2 and normalizer_version=1
        and source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($3::text[])`,
-      [auth.patientId,env.AI_EMBEDDING_MODEL_ID,currentKeys])).rows);
+      [auth.patientId,env.AI_EMBEDDING_MODEL_ID,currentKeys])).rows;});
     const keys=new Set(existing.map(r=>`${r.source_kind}:${r.source_id}:${r.source_version}:${String(r.source_hash).trim()}:${r.chunk_no}`));
     const missing=records.flatMap(source=>chunks(source).slice(0,1000).map((text,no)=>({source,text,no})))
       .filter(c=>!keys.has(`${evidenceKey(c.source)}:${c.source.version}:${c.source.hash}:${c.no}`));

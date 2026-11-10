@@ -25,6 +25,8 @@ import { PatientEvidenceService } from './patient-records/patient-evidence.servi
 import { PatientAttachmentTextService } from './patient-records/patient-attachment-text.service';
 import { HealthProfileController } from './health-profile/health-profile.controller';
 import { HealthProfileService } from './health-profile/health-profile.service';
+import { PatientEntriesModule } from './patient-entries/patient-entries.module';
+import { CardShareModule } from './card-share/card-share.module';
 
 @Module({
   imports: [
@@ -38,6 +40,8 @@ import { HealthProfileService } from './health-profile/health-profile.service';
     PrescriptionsModule,
     LabRequestsModule,
     OrderRoutesModule,
+    PatientEntriesModule,
+    CardShareModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,
