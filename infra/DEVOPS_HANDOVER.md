@@ -403,7 +403,8 @@ plan changes nothing. With the bot on:
 
 Apply order (each a separate reviewed plan and apply, as in section 4):
 
-1. The issuer limit raise (six to eight) on its own, first.
+1. The issuer limit raise (six to eight) on its own, first: hid-system #171,
+   on `dev`. Confirm it is applied before planning this change.
 2. This change. The plan should show the issuer Lambda's caller policy (one
    more caller), a `request-workload-tokens` role policy on the support-api
    task role, and new task definition revisions for support-api (sidecar,
@@ -411,11 +412,16 @@ Apply order (each a separate reviewed plan and apply, as in section 4):
    the services updated in place and no image change. The running images
    ignore the new keys: identity-api drops environment keys it does not know,
    and the current support-api reads none of them.
-3. The backend release: identity-api with migration 0102 (the match
-   function) first, then support-api with the check. A support-api with the
+3. The backend release: identity-api with the migration that adds the match
+   function (the next free number; 0102 is already used on the staging
+   branch) first, then support-api with the check. A support-api with the
    check that starts without the token or the URL answers every message with
-   503 and never sends text to Lex.
-4. Only then merge health #61 (the website's own guard).
+   503 and never sends text to Lex. As of 10 November 2026 that code
+   (identity-api's route and migration, support-api's check) is on no
+   hid-system branch yet, so until it is written and released this wiring
+   changes nothing a user sees.
+4. Only then merge health #61 (the support assistant's own guard, on every
+   staff product site).
 
 Check after step 2, names only:
 
