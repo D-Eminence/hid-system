@@ -4,7 +4,9 @@ import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
-import { ConsentService, RECORDS_PROCESSING_REFUSAL, REVOCATION_DETAIL } from './consent.service';
+import {
+  ConsentService, PATIENT_PIN_ACCESS_MINUTES, RECORDS_PROCESSING_REFUSAL, REVOCATION_DETAIL,
+} from './consent.service';
 
 const context: DataAccessContext = {
   correlationId: 'consent-service-test-correlation',
@@ -465,6 +467,52 @@ describe('ConsentService', () => {
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.access_patient_with_pin'),
       ['HID-ABCDEFGH', '1234', 15],
+    );
+  });
+
+  it('asks for 24 hours (1440 minutes) when the caller gives no duration (0121)', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        verified: true,
+        accessRequestId: '40000000-0000-4000-8000-000000000002',
+        consentGrantId: '40000000-0000-4000-8000-000000000003',
+        patientId: '50000000-0000-4000-8000-000000000002',
+        status: 'active',
+        expiresAt: new Date('2026-09-29T00:00:00.000Z'),
+        existingGrant: false,
+      }],
+    });
+    expect(PATIENT_PIN_ACCESS_MINUTES).toBe(1440);
+    await expect(service.verifyPatientAccessPin(context, {
+      hid: 'HID-ABCDEFGH',
+      pin: '1234',
+    })).resolves.toMatchObject({ status: 'active', expiresAt: new Date('2026-09-29T00:00:00.000Z') });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.access_patient_with_pin'),
+      ['HID-ABCDEFGH', '1234', 1440],
+    );
+  });
+
+  it('passes a duration the caller gives, up to 1440 minutes, unchanged', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        verified: true,
+        accessRequestId: '40000000-0000-4000-8000-000000000002',
+        consentGrantId: '40000000-0000-4000-8000-000000000003',
+        patientId: '50000000-0000-4000-8000-000000000002',
+        status: 'active',
+        expiresAt: new Date('2026-09-29T00:00:00.000Z'),
+        existingGrant: true,
+      }],
+    });
+    await expect(service.verifyPatientAccessPin(context, {
+      hid: 'HID-ABCDEFGH',
+      pin: '1234',
+      durationMinutes: 1440,
+    })).resolves.toMatchObject({ existingGrant: true });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.access_patient_with_pin'),
+      ['HID-ABCDEFGH', '1234', 1440],
     );
   });
 

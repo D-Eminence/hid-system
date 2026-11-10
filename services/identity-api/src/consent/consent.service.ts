@@ -104,6 +104,12 @@ export const RECORDS_PROCESSING_REFUSAL = {
 } as const;
 
 /** main's answer to an approval from a session not freshly signed in (eb9b1ca consent.service.ts). */
+/**
+ * How long a verified Access PIN gives access when the caller does not say:
+ * 24 hours, read and write (owner decision, 10 Nov 2026; database 0121).
+ */
+export const PATIENT_PIN_ACCESS_MINUTES = 1440;
+
 export const RECENT_APPROVAL_AUTH_DETAIL = 'For your security, sign out, sign in again, and approve within 10 minutes.';
 
 @Injectable()
@@ -346,7 +352,7 @@ export class ConsentService {
           + 'grant_status as status, expires_at as "expiresAt", '
           + 'existing_grant as "existingGrant" '
           + 'from identity.access_patient_with_pin($1, $2, $3)',
-          [input.hid, input.pin, input.durationMinutes ?? 15],
+          [input.hid, input.pin, input.durationMinutes ?? PATIENT_PIN_ACCESS_MINUTES],
         );
         return this.requireRow(result.rows[0]);
       });
