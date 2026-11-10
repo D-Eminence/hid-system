@@ -38,6 +38,10 @@ const environmentSchema = z.object({
   OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,
   OUTREACH_IDENTITY_WORKLOAD_TOKEN_FILE: optionalString,
+  // Visits, the Health ID link preview, linking by Health ID and the staff
+  // names on case and member answers (0115). Off: those routes answer a plain
+  // 404 and the answers keep today's shape.
+  OUTREACH_VISITS_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE === 'local-secret'
       && !environment.OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN) {
