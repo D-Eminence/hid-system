@@ -168,7 +168,7 @@ $$;
 
 -- A `$2y$` source envelope has the same ASCII-PIN bcrypt behavior as `$2b$`.
 -- Store it unchanged and verify through the same public command; the replay
--- must retain the existing short-lived grant rather than create a new one.
+-- must return the existing 24-hour write grant rather than create a new one.
 update identity.patient_access_pins
    set pin_hash = '$2y$' || substring(pin_hash from 5), updated_at = clock_timestamp()
  where patient_id = 'b5000000-0000-4000-8000-000000000001';
