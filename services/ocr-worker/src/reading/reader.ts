@@ -2,7 +2,7 @@ import type { OcrWorkerConfig } from '../config';
 import { forEachBounded } from '../semaphore';
 import type { AiUsageRecord, ReadLine, ReadPage } from '../types';
 import { AiInterruptedError, AiRejectedError, AiTransientError, INFERENCE_GEO, type AiCallUse, type Effort,
-  type PageAnswer, type PageModelClient, type TokenUsage } from './claude.client';
+  type HardReadTrace, type PageAnswer, type PageModelClient, type TokenUsage } from './claude.client';
 import {
   PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type ImageRereadSkipReason, type PaperIdentity,
   type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
@@ -22,10 +22,14 @@ export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILI
   // and a page with a masked number is sent as a picture unless OCR_AI_IMAGE_MASKED_PAGES is 'text_only'.
   & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY' | 'OCR_AI_IMAGE_REREAD' | 'OCR_AI_IMAGE_MASKED_PAGES'>>
   // Hard-page best-guess reads (two per hard page); off when not given, as the image re-read. Effort 'max' when not
-  // given.
-  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_READS' | 'OCR_AI_HARD_PAGE_EFFORT'>>
-  // Zoom in the hard-page reads (zoom.ts); off when not given. At most OCR_AI_ZOOM_MAX_CALLS (8 when not given) per read.
+  // given, 'high' after a zoom result (OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT), and the page's deadline 150 s when not given.
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_READS' | 'OCR_AI_HARD_PAGE_EFFORT'
+    | 'OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT' | 'OCR_AI_HARD_PAGE_DEADLINE_MS'>>
+  // Zoom in the hard-page reads (zoom.ts); off when not given. At most OCR_AI_ZOOM_MAX_CALLS (4 when not given) per read.
   & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_ZOOM' | 'OCR_AI_ZOOM_MAX_CALLS'>>;
+
+/** OCR_AI_HARD_PAGE_DEADLINE_MS when the reading config does not give it (the setting's default). */
+export const HARD_PAGE_DEADLINE_MS = 150_000;
 
 export interface ReadingInput {
   facilityId: string;
@@ -99,6 +103,42 @@ export interface ReadingSummary {
   zoomFailed: number;
   /** Hard pages whose reads were offered the zoom tool (their prompt carried rule J). */
   hardPageZoomPages: number[];
+  /**
+   * Hard pages where OCR_AI_HARD_PAGE_DEADLINE_MS passed with a read still running (that read was aborted; the other
+   * one, if it had finished, was used alone, else the page kept its first reading).
+   */
+  hardPageDeadlinePages: number[];
+  /** One entry per hard-page read, for the ocr.reading.usage log only: counts and codes, never text. */
+  hardPageReadUsage: HardReadUsage[];
+}
+
+/**
+ * How one hard-page read ended: its answer; aborted at the page's deadline; cut off at its output-token cap (or the
+ * API's max_tokens); declined; or anything else (a transient failure after retries, a rejection, a malformed or
+ * incomplete answer).
+ */
+export type HardReadEnd = 'answer' | 'deadline' | 'max_tokens' | 'refused' | 'error';
+
+/** One hard-page read (read 1 or 2 of its page): what it used and how it went. Numbers and codes only. */
+export interface HardReadUsage extends AiUsageRecord {
+  page: number;
+  read: 1 | 2;
+  durationMs: number;
+  /** Requests answered (zoom-loop turns), as against `requests`, which also counts failed attempts. */
+  turns: number;
+  zoomCalls: number;
+  zoomLimited: number;
+  /** The first turn's effort, and the follow-up turns' (null when there was no follow-up turn). */
+  effort: Effort;
+  followupEffort: Effort | null;
+  endedBy: HardReadEnd;
+  /**
+   * True when an attempt of this read was cut after the model had begun its answer (a deadline or shutdown abort, a
+   * timeout or a stream failure; HardReadTrace.cutAttempts): its thinking so far was billed but the stream never
+   * reported it, so outputTokens is a lower bound. The cost of such a read comes from the Anthropic usage and cost
+   * report, not from this line.
+   */
+  outputTokensIncomplete: boolean;
 }
 
 /** 'hard_page_read': both best-guess reads of a hard page (owner decision 2026-11-05), so their cost shows apart. */
@@ -225,12 +265,15 @@ export class PaperReadingService {
       return { page: page.page, masker, lines, hasMaskedNumber: masker.count > 0, first: null, firstCheck: null,
         final: null, declined: false, failed: false, reread: 'none', fromImage: false };
     });
+    /** `hard`: a hard-page read's own abort signal (the job's, or its page's deadline), follow-up effort and trace. */
     const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage,
-      pass: ReadingPass = image ? 'image_reread' : 'reread', hardPage = false, zoom?: ZoomToolSession) => {
+      pass: ReadingPass = image ? 'image_reread' : 'reread', hardPage = false, zoom?: ZoomToolSession,
+      hard?: { signal: AbortSignal; followupEffort: Effort; trace: HardReadTrace }) => {
       let answer: PageAnswer;
       try {
         answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
-          ...(image ? { image } : {}), ...(hardPage ? { hardPage: true } : {}), ...(zoom ? { zoom } : {}) }, signal);
+          ...(image ? { image } : {}), ...(hardPage ? { hardPage: true } : {}), ...(zoom ? { zoom } : {}),
+          ...(hard ? { followupEffort: hard.followupEffort, trace: hard.trace } : {}) }, hard?.signal ?? signal);
       } catch (error) {
         // A call that ended without an answer still made requests (and may have used tokens): count them.
         // A call stopped before its first request (waiting for a permit) made none and adds nothing.
@@ -292,7 +335,11 @@ export class PaperReadingService {
     };
     const rereadModel = this.config.OCR_AI_REREAD_MODEL;
     const rereadEffort = this.config.OCR_AI_REREAD_EFFORT;
-    const hardEffort: Effort = this.config.OCR_AI_HARD_PAGE_EFFORT ?? 'max';
+    const hardEffort: Effort = this.config.OCR_AI_HARD_PAGE_EFFORT ?? 'high';
+    const followupEffort: Effort = this.config.OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT ?? 'high';
+    const deadlineMs = this.config.OCR_AI_HARD_PAGE_DEADLINE_MS ?? HARD_PAGE_DEADLINE_MS;
+    const deadlinePages: number[] = [];
+    const readUsage: HardReadUsage[] = [];
     const hardPages: number[] = [];
     const hardSingle: number[] = [];
     const agreement = noAgreement();
@@ -324,6 +371,11 @@ export class PaperReadingService {
      * re-read instead ('image_refused' when either declined, else 'image_rejected').
      * Zoom (owner decision 2026-11-05, about 18:45 UTC): with OCR_AI_HARD_PAGE_ZOOM on, each read may ask for up to
      * OCR_AI_ZOOM_MAX_CALLS enlarged crops of the picture (zoom.ts), each read with its own count.
+     * Bounds (coordinator 2026-11-10): the two reads start together (each holds a request permit only per attempt;
+     * config requires at least 2), and OCR_AI_HARD_PAGE_DEADLINE_MS after they start every read still running is
+     * aborted through its own signal, which ends a permit wait, a request, a zoom crop or a backoff sleep alike. A read
+     * that had answered is then used alone (single_reading_only); none answered: a failed image re-read (the first
+     * pass kept, reread_failed). The job is never failed for it.
      */
     const readHard = async (state: PageState, picture: PageImage,
       decision: Extract<PageImageDecision, { kind: 'image' }>): Promise<{ kind: 'read'; check: PageCheck }
@@ -332,26 +384,74 @@ export class PaperReadingService {
       hardReads += 2;
       const zoom = zoomOf(state, decision);
       if (zoom) zoomPages.push(state.page);
-      const sessions = [0, 1].map(() => zoom ? createZoomSession(zoom, state.page, zoomMaxCalls, picture.base64.length)
-        : undefined);
-      const settled = await Promise.allSettled(sessions.map((session) =>
-        ask(state, rereadModel, hardEffort, picture, 'hard_page_read', true, session)));
+      const reads = [0, 1].map(() => ({
+        session: zoom ? createZoomSession(zoom, state.page, zoomMaxCalls, picture.base64.length) : undefined,
+        controller: new AbortController(), trace: { turns: 0, followupTurns: 0, cutAttempts: 0 } as HardReadTrace,
+        done: false, cut: false, durationMs: 0, attempts: 0, usage: zeroUsage(),
+      }));
+      const started = Date.now();
+      const deadline = setTimeout(() => {
+        for (const read of reads) {
+          if (read.done) continue;
+          read.cut = true;
+          read.controller.abort(new HardPageDeadlineError());
+        }
+      }, deadlineMs);
+      let settled: PromiseSettledResult<PageAnswer>[];
+      try {
+        settled = await Promise.allSettled(reads.map(async (read) => {
+          try {
+            const answer = await ask(state, rereadModel, hardEffort, picture, 'hard_page_read', true, read.session,
+              { signal: AbortSignal.any([signal, read.controller.signal]), followupEffort, trace: read.trace });
+            read.attempts = answer.attempts;
+            read.usage = answer.usage;
+            return answer;
+          } catch (error) {
+            if (error instanceof AiTransientError || error instanceof AiRejectedError || error instanceof AiInterruptedError) {
+              read.attempts = error.attempts;
+              read.usage = { ...error.usage };
+            }
+            throw error;
+          } finally {
+            read.done = true;
+            read.durationMs = Date.now() - started;
+          }
+        }));
+      } finally {
+        clearTimeout(deadline);
+      }
       // Counted however the reads ended (a failed read's crops were still sent).
-      for (const session of sessions) {
-        if (!session) continue;
-        addZoomStats(zoomTotals, session.stats);
-        tally.addZoomCalls(rereadModel, 'hard_page_read', session.stats.calls);
+      for (const read of reads) {
+        if (!read.session) continue;
+        addZoomStats(zoomTotals, read.session.stats);
+        tally.addZoomCalls(rereadModel, 'hard_page_read', read.session.stats.calls);
       }
-      for (const result of settled) {
-        if (result.status === 'rejected' && (signal.aborted
+      reads.forEach((read, index) => {
+        const result = settled[index]!;
+        readUsage.push({ page: state.page, read: index === 0 ? 1 : 2, model: rereadModel, requests: read.attempts,
+          inputTokens: read.usage.inputTokens, outputTokens: read.usage.outputTokens,
+          cacheReadTokens: read.usage.cacheReadInputTokens, cacheWriteTokens: read.usage.cacheCreationInputTokens,
+          durationMs: read.durationMs, turns: read.trace.turns, zoomCalls: read.session?.stats.calls ?? 0,
+          zoomLimited: read.session?.stats.limited ?? 0, effort: hardEffort,
+          followupEffort: read.trace.followupTurns > 0 ? followupEffort : null,
+          endedBy: endOf(result, read.cut && !signal.aborted),
+          outputTokensIncomplete: read.trace.cutAttempts > 0 });
+      });
+      // A read the deadline cut is not an error of the job; a shutdown (or an unexpected error) still is.
+      const cutByDeadline = (index: number) => reads[index]!.cut && !signal.aborted
+        && settled[index]!.status === 'rejected';
+      if (reads.some((read, index) => read.cut && cutByDeadline(index))) deadlinePages.push(state.page);
+      settled.forEach((result, index) => {
+        if (result.status === 'rejected' && !cutByDeadline(index) && (signal.aborted
           || !(result.reason instanceof AiTransientError || result.reason instanceof AiRejectedError))) throw result.reason;
-      }
+      });
       const answers = settled.flatMap((result) => result.status === 'fulfilled' && result.value.kind === 'answer'
         ? [result.value.answer] : []);
       if (answers.length === 0) {
-        const kinds = settled.map((result) => result.status === 'fulfilled' ? result.value.kind
-          : result.reason instanceof AiRejectedError && result.reason.code === 'AI_BAD_REQUEST' && result.reason.invalidRequest
-            ? 'invalid' : 'error');
+        const kinds = settled.map((result, index) => result.status === 'fulfilled' ? result.value.kind
+          : cutByDeadline(index) ? 'deadline'
+            : result.reason instanceof AiRejectedError && result.reason.code === 'AI_BAD_REQUEST' && result.reason.invalidRequest
+              ? 'invalid' : 'error');
         // Each read either refused as an invalid request or declined: the picture is the likely cause either way.
         if (kinds.every((kind) => kind === 'invalid' || kind === 'refused')) {
           return { kind: 'fallback', reason: kinds.includes('refused') ? 'image_refused' : 'image_rejected' };
@@ -497,6 +597,8 @@ export class PaperReadingService {
     summary.zoomLimited = zoomTotals.limited;
     summary.zoomFailed = zoomTotals.failed;
     summary.hardPageZoomPages = zoomPages;
+    summary.hardPageDeadlinePages = [...deadlinePages].sort((a, b) => a - b);
+    summary.hardPageReadUsage = readUsage;
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
 
@@ -546,6 +648,7 @@ export class PaperReadingService {
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
       modelUsage, passUsage, hardPages: [], hardPageReads: 0, hardPageSingleReadPages: [],
       hardPageAgreement: noAgreement(), zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageZoomPages: [],
+      hardPageDeadlinePages: [], hardPageReadUsage: [],
     };
   }
 
@@ -570,6 +673,19 @@ export class PaperReadingService {
       },
     };
   }
+}
+
+/** The abort reason a hard page's deadline gives its reads still running (a code only). */
+export class HardPageDeadlineError extends Error {
+  constructor() { super('HARD_PAGE_DEADLINE'); this.name = 'HardPageDeadlineError'; }
+}
+
+function endOf(result: PromiseSettledResult<PageAnswer>, cut: boolean): HardReadEnd {
+  if (result.status === 'rejected') return cut ? 'deadline' : 'error';
+  const answer = result.value;
+  if (answer.kind === 'answer') return 'answer';
+  if (answer.kind === 'refused') return 'refused';
+  return answer.reason === 'max_tokens' ? 'max_tokens' : 'error';
 }
 
 function addZoomStats(total: ZoomStats, more: ZoomStats): void {

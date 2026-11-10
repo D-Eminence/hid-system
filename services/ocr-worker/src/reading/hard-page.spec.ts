@@ -557,7 +557,7 @@ describe('hard-page prompt versions', () => {
   it('sends the version 7 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
     // Pinned from the version 7 prompt (the clean reading of 2026-11-06, with partial words and placeholders); a change here needs a new version.
     expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-7');
-    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-8');
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-9');
     expect(createHash('sha256').update(hardPageMessage(1, lines, size, 0)).digest('hex'))
       .toBe('7feb2c96cc86bf7d67c5394249ed21269f0bb9803b7fd7f9d5a45f035c77ce07');
     expect(hardPageMessage(1, lines, size)).toBe(hardPageMessage(1, lines, size, 0));

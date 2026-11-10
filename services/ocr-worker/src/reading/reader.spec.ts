@@ -1,11 +1,13 @@
-import { AiInterruptedError, AiRejectedError, AiTransientError, type PageAnswer, type PageModelClient } from './claude.client';
+import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, type PageAnswer,
+  type PageModelClient } from './claude.client';
+import { Semaphore } from '../semaphore';
 import { paperReadingPayloadSchema } from './contract';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingConfig } from './reader';
 import { CLINIC_PAGE, fixtureExifSegment, fixtureJpeg, fixturePng, modelItem, modelPage, readPage, SOURCE_SHA,
   pngChunk, pngFromChunks, pngIhdr, syntheticJpeg, syntheticPng, withRepeatedScan } from './test-fixtures';
-import { IMAGE_MAX_BASE64_LENGTH } from './page-image';
-import type { ModelPage } from './prompt';
-import { ZOOM_JPEG_MAX_SCANS } from './zoom';
+import { IMAGE_MAX_BASE64_LENGTH, imageTierOf, resizedSize } from './page-image';
+import { hardPageMessage, type ModelPage } from './prompt';
+import { ZOOM_JPEG_MAX_SCANS, ZOOM_MAX_CALLS } from './zoom';
 import { liveZoomWorkers } from './zoom-jobs';
 
 const FACILITY = '11111111-2222-4333-8444-555555555555';
@@ -44,7 +46,7 @@ describe('PaperReadingService', () => {
     expect(calls.map((call) => call.model)).toEqual(['claude-sonnet-5-5']);
     expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
     expect(payload.reading).toMatchObject({ status: 'read', firstPassModel: 'claude-sonnet-5-5', rereadModel: null,
-      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-8' });
+      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-9' });
     expect(payload.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', folderNumberAsWritten: 'TEST-0001' });
     expect(payload.items[0]).toMatchObject({ kind: 'diagnosis', readBy: 'first_pass', confidence: 'clear' });
     expect(summary).toMatchObject({ requests: 1, inferenceGeo: 'us', servedInferenceGeo: 'us' });
@@ -834,12 +836,12 @@ describe('PaperReadingService', () => {
       document: { mediaType: string; bytes: Uint8Array } | undefined = png) => new PaperReadingService(reading, client)
       .read({ facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages, ...(document ? { document } : {}) }, signal());
 
-    it('sends a handwriting or low_confidence page the best-guess request twice, at max effort, with its picture', async () => {
+    it('sends a handwriting or low_confidence page the best-guess request twice, at high effort by default, with its picture', async () => {
       const { client, calls } = hardClient(() => ok(best('Pyrimethamine')));
       const { payload, summary } = await read(hardConfig, client);
       expect(calls.map((call) => [call.model, call.effort, call.image, call.hardPage])).toEqual([
-        ['claude-sonnet-5-5', 'medium', false, false], ['claude-opus-5-5', 'max', true, true],
-        ['claude-opus-5-5', 'max', true, true]]);
+        ['claude-sonnet-5-5', 'medium', false, false], ['claude-opus-5-5', 'high', true, true],
+        ['claude-opus-5-5', 'high', true, true]]);
       expect(summary).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
         hardPageAgreement: { itemsPaired: 1, itemsSingle: 0 }, imageRereadPages: [1], rereadPages: [1] });
       expect(summary.passUsage.map((entry) => [entry.pass, entry.requests])).toEqual([['first_pass', 1],
@@ -853,7 +855,7 @@ describe('PaperReadingService', () => {
       expect(payload.items.filter((item) => item.readBy === 'first_pass').map((item) => item.asWritten))
         .toEqual(['Pyrmthmn 25 rng od', 'Hypertension']);
       expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
-      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-8');
+      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-9');
       // The configured effort is used when given; a printed page below REVIEW_BELOW (low_confidence) is hard too.
       const faint = readPage(1, [['Pyrmthmn 25 rng od', { confidence: 0.5 }], 'Dx: Hypertension']);
       const xhigh = hardClient(() => ok(best('Pyrimethamine')));
@@ -950,6 +952,222 @@ describe('PaperReadingService', () => {
       const stored = JSON.stringify([payload, summary]);
       for (let index = 0; index + 24 < base64.length; index += 64) expect(stored).not.toContain(base64.slice(index, index + 24));
       expect(payload.pages[0]!.lines[1]!.text).toBe('Dx: Hypertension tel 08030000000');
+    });
+
+    describe('hard-page time and cost bounds (coordinator 2026-11-10)', () => {
+      const FAKE_KEY = 'sk-ant-test-0000000000000000000000';
+      const clientConfig = { ANTHROPIC_API_KEY: FAKE_KEY, OCR_AI_MAX_TOKENS: 64_000, OCR_AI_TIMEOUT_MS: 30_000,
+        OCR_AI_MAX_RETRIES: 0, OCR_AI_HARD_PAGE_MAX_TOKENS: 32_000 };
+      /** A streamed answer, as the Claude API sends it (fictional text only). */
+      const sse = (text: string, outputTokens = 300) => new Response([
+        ['message_start', { type: 'message_start', message: { id: 'msg_test', type: 'message', role: 'assistant',
+          model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null, stop_details: null,
+          usage: { input_tokens: 6_000, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+            inference_geo: 'us' } } }],
+        ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+        ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }],
+        ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+        ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null,
+          stop_details: null }, usage: { output_tokens: outputTokens } }],
+        ['message_stop', { type: 'message_stop' }],
+      ].map(([event, data]) => `event: ${String(event)}\ndata: ${JSON.stringify(data)}\n\n`).join(''),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      // The hard-page answer as the model writes it (the item best() gives): pixel boxes in the picture as the model
+      // sees it, dose, unit, crossed-out writing and basis.
+      const seen = resizedSize(1240, 1754, imageTierOf('claude-opus-5-5')!);
+      const rawHard = JSON.stringify({ ...firstPass, items: [{ ...modelItem({ kind: 'medicine',
+        asWritten: 'Pyrimethamine? 25 mg od', lineIds: ['p1-l1'], name: 'Pyrimethamine', strength: '25mg',
+        frequency: 'od', status: 'new' }), box: { x1: 0.12 * seen.width, y1: 0.05 * seen.height, x2: 0.42 * seen.width,
+        y2: 0.07 * seen.height }, dose: '25', doseUnit: 'mg', crossedOut: '', basis }] });
+      const isHard = (init?: RequestInit) => String(init?.body).includes('"type":"image"');
+      /** A fetch that never answers a hard-page request: it ends only when that request is aborted. */
+      const hang = (init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        const abort = init?.signal;
+        if (abort?.aborted) { reject(abort.reason); return; }
+        abort?.addEventListener('abort', () => reject(abort.reason), { once: true });
+      });
+      /** A hard-page answer that has begun (message_start, then some thinking) and then goes on until aborted. */
+      const begunThenHang = (init?: RequestInit) => {
+        const encoder = new TextEncoder();
+        const event = (name: string, data: unknown) => encoder.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+        return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(event('message_start', { type: 'message_start', message: { id: 'msg_cut', type: 'message',
+            role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null,
+            stop_details: null, usage: { input_tokens: 6_000, output_tokens: 1 } } }));
+          controller.enqueue(event('content_block_start', { type: 'content_block_start', index: 0,
+            content_block: { type: 'thinking', thinking: '', signature: '' } }));
+          controller.enqueue(event('content_block_delta', { type: 'content_block_delta', index: 0,
+            delta: { type: 'thinking_delta', thinking: 'x'.repeat(5_000) } }));
+          init?.signal?.addEventListener('abort', () => controller.error(init.signal!.reason), { once: true });
+        } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      };
+
+      it('starts both reads before either finishes, through the real client and request limit', async () => {
+        for (const permits of [2, 1]) {
+          let startedBeforeFirstFinished = 0;
+          let started = 0;
+          let open!: () => void;
+          const gate = new Promise<void>((resolve) => { open = resolve; });
+          const fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+            if (!isHard(init)) return sse(JSON.stringify(firstPass));
+            started += 1;
+            // Both reads in flight: let them answer. With one permit the second never starts, so open after a while.
+            if (started === 2) open();
+            const timer = setTimeout(open, 300);
+            await gate;
+            clearTimeout(timer);
+            if (startedBeforeFirstFinished === 0) startedBeforeFirstFinished = started;
+            return sse(rawHard);
+          });
+          const client = new ClaudePageClient(clientConfig, { fetch: fetch as unknown as typeof globalThis.fetch,
+            limiter: new Semaphore(permits) });
+          const { summary } = await read(hardConfig, client);
+          // Two permits (the configured minimum when hard-page reads are on): both reads in flight at once. One
+          // permit (refused by config since 2026-11-10) would make them take turns.
+          expect(startedBeforeFirstFinished).toBe(permits === 2 ? 2 : 1);
+          expect(summary).toMatchObject({ hardPages: [1], hardPageSingleReadPages: [], hardPageDeadlinePages: [] });
+          expect(summary.hardPageReadUsage.map((entry) => [entry.read, entry.endedBy, entry.requests, entry.turns,
+            entry.outputTokens])).toEqual([[1, 'answer', 1, 1, 300], [2, 'answer', 1, 1, 300]]);
+        }
+      });
+
+      it('aborts the slower read at the deadline and uses the one that finished, without failing the job', async () => {
+        let hardRequests = 0;
+        const fetch = jest.fn(async (_url: unknown, init?: RequestInit): Promise<Response> => {
+          if (!isHard(init)) return sse(JSON.stringify(firstPass));
+          // The first hard read answers at once; the second has begun its answer and never ends it.
+          hardRequests += 1;
+          return hardRequests === 1 ? sse(rawHard) : begunThenHang(init);
+        });
+        const client = new ClaudePageClient(clientConfig, { fetch: fetch as unknown as typeof globalThis.fetch,
+          limiter: new Semaphore(4) });
+        const started = Date.now();
+        const { payload, summary } = await read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 200 }, client);
+        expect(Date.now() - started).toBeLessThan(5_000);
+        expect(summary).toMatchObject({ status: 'read', hardPages: [1], hardPageSingleReadPages: [1],
+          hardPageDeadlinePages: [1], imageRereadPages: [1], imageRereadFailedPages: [] });
+        expect(summary.hardPageReadUsage.map((entry) => [entry.read, entry.endedBy, entry.requests])).toEqual([
+          [1, 'answer', 1], [2, 'deadline', 1]]);
+        expect(summary.hardPageReadUsage[1]!.durationMs).toBeGreaterThanOrEqual(150);
+        // The cut read's thinking so far was never reported (1 output token from message_start): marked a lower bound.
+        expect(summary.hardPageReadUsage.map((entry) => [entry.outputTokens, entry.outputTokensIncomplete])).toEqual([
+          [300, false], [1, true]]);
+        const medicine = payload.items.find((item) => item.kind === 'medicine')!;
+        expect(medicine.checkReasons).toEqual(expect.arrayContaining(['single_reading_only', 'best_guess_from_picture']));
+        expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+        // The cut read's request counts (it was sent), in the pass and in the per-read entry.
+        expect(summary.passUsage.find((entry) => entry.pass === 'hard_page_read')).toMatchObject({ requests: 2 });
+      });
+
+      it('keeps the first reading (reread_failed) when neither read finishes, including one still waiting for a permit', async () => {
+        const fetch = jest.fn(async (_url: unknown, init?: RequestInit) => isHard(init) ? hang(init)
+          : sse(JSON.stringify(firstPass)));
+        // Two permits, one held elsewhere the whole time: the first pass and then one read get the other; the
+        // second read waits for a permit until the deadline ends the wait.
+        const limiter = new Semaphore(2);
+        const held = await limiter.acquire();
+        try {
+          const client = new ClaudePageClient(clientConfig, { fetch: fetch as unknown as typeof globalThis.fetch, limiter });
+          const { payload, summary } = await read({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 150 }, client);
+          expect(summary).toMatchObject({ status: 'read', hardPages: [1], hardPageDeadlinePages: [1],
+            imageRereadFailedPages: [1], rereadFailedPages: 1, imageRereadPages: [], imageRereadSkipped: [] });
+          expect(summary.hardPageReadUsage.map((entry) => [entry.read, entry.endedBy, entry.requests])).toEqual([
+            [1, 'deadline', 1], [2, 'deadline', 0]]);
+          expect(payload.items.length).toBeGreaterThan(0);
+          expect(payload.items.every((item) => item.readBy === 'first_pass' && item.checkReasons.includes('reread_failed')))
+            .toBe(true);
+          expect(limiter.inFlight).toBe(1);
+          expect(limiter.waiting).toBe(0);
+        } finally { held(); }
+      });
+
+      it('ends a read stuck in its zoom loop at the deadline too, and a shutdown still stops the reading', async () => {
+        // Fake client: read 1 answers; read 2 keeps zooming (each crop answered) until its signal is aborted.
+        const zoomConfig: ReadingConfig = { ...hardConfig, OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_HARD_PAGE_DEADLINE_MS: 150 };
+        const synthetic = { mediaType: 'image/png', bytes: syntheticPng(400, 560) };
+        let hard = 0;
+        const client: PageModelClient = { readPage: jest.fn(async (request, readSignal) => {
+          if (!request.hardPage) return ok(firstPass);
+          if (hard++ === 0) return ok(best('Pyrimethamine'));
+          for (let call = 0; !readSignal.aborted; call += 1) {
+            await request.zoom!.answer({ id: `toolu_${call}`, name: 'zoom', input: { page: 1,
+              box: { x: 10, y: 10, w: 40, h: 20 }, scale: 2 } }, readSignal);
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          throw new AiInterruptedError(readSignal.reason, 3, usage);
+        }) };
+        const { summary } = await read(zoomConfig, client, [hardPage], synthetic);
+        expect(summary).toMatchObject({ hardPageSingleReadPages: [1], hardPageDeadlinePages: [1] });
+        expect(summary.hardPageReadUsage.map((entry) => [entry.endedBy, entry.requests])).toEqual([['answer', 1],
+          ['deadline', 3]]);
+        expect(liveZoomWorkers()).toBe(0);
+        // The job's own abort (worker shutdown) during the reads is not a deadline: the reading stops as before.
+        const controller = new AbortController();
+        const reason = new Error('worker shutdown');
+        const stopping: PageModelClient = { readPage: jest.fn(async (request, readSignal) => {
+          if (!request.hardPage) return ok(firstPass);
+          setTimeout(() => controller.abort(reason), 5);
+          await new Promise((resolve) => readSignal.addEventListener('abort', resolve, { once: true }));
+          throw new AiInterruptedError(readSignal.reason, 1, usage);
+        }) };
+        const error = await new PaperReadingService({ ...hardConfig, OCR_AI_HARD_PAGE_DEADLINE_MS: 60_000 }, stopping)
+          .read({ facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages: [hardPage], document: png }, controller.signal)
+          .catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(ReadingInterruptedError);
+        expect((error as ReadingInterruptedError).cause).toBe(reason);
+      });
+
+      it('sends the follow-up effort with each read, and logs per read only numbers and codes', async () => {
+        const { client } = hardClient(() => ok(best('Pyrimethamine')));
+        const { summary } = await read({ ...hardConfig, OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT: 'medium' }, client);
+        const requests = (client.readPage as jest.Mock).mock.calls.map(([request]) => request as { hardPage?: boolean;
+          followupEffort?: string; trace?: unknown; effort: string });
+        expect(requests.filter((request) => request.hardPage).map((request) => [request.effort, request.followupEffort,
+          request.trace])).toEqual([['high', 'medium', { turns: 0, followupTurns: 0, cutAttempts: 0 }],
+          ['high', 'medium', { turns: 0, followupTurns: 0, cutAttempts: 0 }]]);
+        // Not given: 'high' after a zoom result (the setting's default); the first pass gets none of it.
+        const { client: defaults } = hardClient(() => ok(best('Pyrimethamine')));
+        await read(hardConfig, defaults);
+        const sent = (defaults.readPage as jest.Mock).mock.calls.map(([request]) => request as { followupEffort?: string });
+        expect(sent.map((request) => request.followupEffort)).toEqual([undefined, 'high', 'high']);
+        const kept = JSON.stringify(summary.hardPageReadUsage);
+        for (const text of ['Pyrimethamine', 'Pyrmthmn', 'Hypertension']) expect(kept).not.toContain(text);
+        for (const entry of summary.hardPageReadUsage) {
+          for (const [key, value] of Object.entries(entry)) {
+            if (['model', 'effort', 'followupEffort', 'endedBy'].includes(key)) {
+              expect(value === null || /^[a-z0-9_-]+$/.test(String(value))).toBe(true);
+            } else if (key === 'outputTokensIncomplete') expect(value).toBe(false);
+            else expect(typeof value).toBe('number');
+          }
+        }
+      });
+
+      it('offers each read at most 4 zoom calls by default, and says 4 in rule J', async () => {
+        const seen: Array<number | null> = [];
+        let crops = 0;
+        const client: PageModelClient = { readPage: jest.fn(async (request) => {
+          if (!request.hardPage) return ok(firstPass);
+          seen.push(request.zoom?.maxCalls ?? null);
+          for (let call = 0; call < 6; call += 1) {
+            const result = await request.zoom!.answer({ id: `toolu_${call}`, name: 'zoom', input: { page: 1,
+              box: { x: 10, y: 10, w: 40, h: 20 }, scale: 2 } });
+            if (Array.isArray(result.content)) crops += 1;
+          }
+          return ok(best('Pyrimethamine'));
+        }) };
+        const { summary } = await read({ ...hardConfig, OCR_AI_HARD_PAGE_ZOOM: 'on' }, client, [hardPage],
+          { mediaType: 'image/png', bytes: syntheticPng(400, 560) });
+        expect(seen).toEqual([4, 4]);
+        expect(crops).toBe(8);
+        expect(summary).toMatchObject({ zoomCalls: 8, zoomLimited: 4 });
+        expect(summary.hardPageReadUsage.map((entry) => [entry.zoomCalls, entry.zoomLimited])).toEqual([[4, 2], [4, 2]]);
+        // A configured 8 (no longer valid config) is still held to 4 here.
+        const over = await read({ ...hardConfig, OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 8 }, client, [hardPage],
+          { mediaType: 'image/png', bytes: syntheticPng(400, 560) });
+        expect(over.summary.zoomCalls).toBe(8);
+        expect(hardPageMessage(1, [], { width: 100, height: 100 }, ZOOM_MAX_CALLS)).toContain('You may zoom at most 4 times');
+        expect(liveZoomWorkers()).toBe(0);
+      }, 60_000);
     });
 
     describe('zoom in the hard-page reads (owner decision 2026-11-05, about 18:45 UTC)', () => {
