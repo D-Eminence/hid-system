@@ -76,12 +76,17 @@
 -- Services on this schema. identity-api reads the same result columns and
 -- needs no change to work; its new default (1440) and DTO limit (1440) come in
 -- the same pull request. The event dispatcher and the notification worker
--- check the PIN notice's payload: from the same pull request they accept both
--- the two-key and the three-key payload. They must run that code before this
--- file applies, or a PIN notice raised in between is refused by the old
--- check and not retried (the patient would miss that notice; the access row
--- and audit row are still written). The website keeps working: it reads the
--- grant's expiresAt.
+-- check the PIN notice's payload: their change to accept both the two-key and
+-- the three-key payload is in its own pull request (branch
+-- claude/fervent-galileo-datz4t-pin-notice-scope, no migration), which must be
+-- merged and released before this file. A release that carries a migration
+-- applies it before it rolls out the services (scripts/production_deployment.py),
+-- so the two cannot safely go in one release. If this file applied first, a PIN
+-- notice raised in between would be refused by the old check and not retried
+-- (the patient would miss that notice; the access row and audit row are still
+-- written). The websites keep working: they read the grant's expiresAt. Until
+-- each website is changed it asks for its own duration (hid-system apps/web
+-- sends 60), and the grant is then read and write for that time.
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): the objects this file touches exist; not applied

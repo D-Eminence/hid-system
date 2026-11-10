@@ -3080,7 +3080,8 @@ covers when all of these hold, and only then:
 - The check's time is from the grant's `starts_at`, before `least(expires_at,
   starts_at + 24 hours)`: never past the grant's end, and never more than 24
   hours from its start (requests last at most 24 hours and PIN grants at most
-  60 minutes today, so today the grant's end comes first). (0108 D-a: from
+  60 minutes today, so today the grant's end comes first; until 0121: since
+  0121 a PIN grant is write_records for up to 24 hours, section 37). (0108 D-a: from
   `starts_at` before `expires_at`, with no 24-hour bound.)
 - The patient is 18 or over on that day's Africa/Lagos date and has a date of
   birth on record (the request trigger's rule, at each check, since no request
@@ -3093,10 +3094,13 @@ covers when all of these hold, and only then:
   organization, staff member or all, for this action (0012's reading).
 
 Within the cover both `read_records` and `write_records` are allowed for
-records processing, also under a PIN grant, which is read only for direct care:
+records processing, also under a PIN grant, which is read only for direct care
+(until 0121; since 0121 a PIN grant is write_records for up to 24 hours,
+section 37):
 bringing in paper records means creating, validating, confirming and retrying
 OCR jobs. Direct care itself is unchanged: the PIN still opens the chart for
-reading only, and publishing into the chart still needs the publisher's own
+reading only (until 0121; since 0121 the PIN opens the chart to read and
+write, section 37), and publishing into the chart still needs the publisher's own
 direct-care write grant.
 
 The patient can still say no: denying the request (no grant), revoking the
@@ -3183,7 +3187,8 @@ nothing; unexpired grants (and covers) work again if the code is reactivated. Wh
 Unchanged: `create_access_request`, `approve_access_request` and every other
 function body but `has_active_consent_grant`'s (32.1; their md5 pins stay
 true), policy, role, permission and grant; break-glass (emergency only), the
-PIN command (direct care, read only; its grant covers records processing as
+PIN command (direct care, read only (until 0121; since 0121 read and write
+for up to 24 hours, section 37); its grant covers records processing as
 32.1 says) and patient shares (direct care, never covering records
 processing; since 0108 an active share covers it, section 36). A pending request is
 not checked again on approval, so a requester whose role changes afterwards
@@ -3638,11 +3643,26 @@ time (`revoke_my_consent_grant`, or turning the PIN off, which ends every PIN
 grant); their deny choices still apply. Records processing (section 36)
 already counted a PIN grant of either scope and now lasts its 24 hours.
 
-Order of release: the event dispatcher and the notification worker must run
-the code that accepts the three-key PIN notice before 0121 applies (they also
-accept the two-key one), or a PIN notice raised in between is refused and not
-retried. identity-api can go before or after 0121. The website sends 1440 and
-says "see and add to records for 24 hours" after 0121 is live.
+Order of release:
+1. The event dispatcher and the notification worker change that accepts the
+   three-key PIN notice (they also accept the two-key one). It is in its own
+   pull request (branch `claude/fervent-galileo-datz4t-pin-notice-scope`, no
+   migration) and must be merged and released before 0121. It cannot share a
+   release with 0121: a release that carries a migration applies it before it
+   rolls out the services (`scripts/production_deployment.py`), so a PIN
+   notice raised in between would be refused by the old check and not
+   retried.
+2. 0121 with identity-api (this pull request).
+3. The websites, after 0121 is live: health's staff site, and hid-system's
+   own `apps/web` (its doctor portal sends 60 and its patient portal says
+   "read-only" today; its change is a separate pull request). They send 1440
+   and say "see and add to records for 24 hours". Until each is changed, a
+   PIN gives read and write access for the time that site asks (60 minutes).
+
+A staff member whose role loses `identity.patient-access-pin.verify` keeps a
+PIN grant they already have until it ends (up to 24 hours), unless the
+patient ends it, turns the PIN off, or the membership at that facility ends:
+`has_active_consent_grant` checks the membership, not the permission.
 
 To undo: a follow-up migration that puts back 0098's body (60 minutes,
 `read_records`) and narrows the two PIN constraints again, after every
