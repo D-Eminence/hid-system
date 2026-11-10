@@ -19,8 +19,7 @@ const EVENT_TYPES: Readonly<Record<EventProducer, ReadonlySet<string>>> = {
 };
 
 const ALLOWED_PAYLOAD_KEYS: Readonly<Record<EventProducer, ReadonlySet<string>>> = {
-  identity: new Set(['source', 'identifierType', 'verified', 'resolution', 'consentGrantId', 'reviewRequired',
-    'scope']),
+  identity: new Set(['source', 'identifierType', 'verified', 'resolution', 'consentGrantId', 'reviewRequired']),
   ocr: new Set(['jobId', 'documentId', 'status', 'patientResolved', 'confirmationId',
     'publicationId', 'validationId', 'targetResourceType', 'targetResourceId',
     'failureCode', 'retryable']),
@@ -65,16 +64,10 @@ export function eventEnvelope(event: ClaimedEvent): HidEventEnvelopeV1 {
       throw new EventContractFailure('EVENT_PAYLOAD_POLICY_REJECTED', 'Event payload contains a field outside its producer contract');
     }
   }
-  // A PIN notice may name its grant's scope (database 0121: read and write for
-  // up to 24 hours); an emergency notice never does. Both shapes of the PIN
-  // notice pass, so this code can run before 0121 applies.
-  const pinScope = event.eventType === 'PatientAccessPinVerified' && Object.keys(event.payload).length === 3
-    ? event.payload.scope : undefined;
   if ((event.eventType === 'EmergencyAccessActivated' || event.eventType === 'PatientAccessPinVerified')
       && (event.aggregateType !== 'identity-consent-grant' || event.aggregateVersion !== 1
         || event.patientId === null || event.facilityId === null
-        || Object.keys(event.payload).length !== (pinScope === undefined ? 2 : 3)
-        || (pinScope !== undefined && pinScope !== 'read_records' && pinScope !== 'write_records')
+        || Object.keys(event.payload).length !== 2
         || event.payload.consentGrantId !== event.aggregateId || event.payload.reviewRequired !== true)) {
     throw new EventContractFailure('INVALID_EVENT_ENVELOPE', event.eventType === 'PatientAccessPinVerified'
       ? 'Patient PIN notification contract is invalid'
