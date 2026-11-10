@@ -334,7 +334,8 @@ begin
     (select count(*) from (values
       ('identity.create_access_request(text,text,text,integer)', 'f88923a49a180c2180fdedb29bf2eccf'),
       ('identity.activate_break_glass(text,text,integer)', '6b888391ef7f0e4f264918baf00a6fe7'),
-      ('identity.access_patient_with_pin(text,text,integer)', '830c1baa4bca3df57cc02b7b002a8831'),
+      -- 0121 replaced 0098's PIN body (830c1baa...) with its 24-hour read and write one.
+      ('identity.access_patient_with_pin(text,text,integer)', '6453e3e4c3906e4e565fa93c2979a865'),
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '4202ba3bbf02abd7db34606d42adca9c'),
       ('identity.search_order_destinations(text,text)', '7890a21333d012621a36302fd7ad24cc'),
       ('identity.search_share_providers(text,uuid,text)', '2cc1107289f6ff4d55266c6ee4842932'),

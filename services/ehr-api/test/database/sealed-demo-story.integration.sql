@@ -562,13 +562,14 @@ select pg_temp.assert('a second call changes nothing and answers zero counts',
   and pg_temp.story_counts() = current_setting('hid.test.after'));
 
 -- 8. The PIN at Demo Hospital, as the EHR asks it (the demo login's doctor
--- membership, direct care): the test PIN opens Adaeze's record for 30
--- minutes; a wrong one does not.
+-- membership, direct care): the test PIN opens Adaeze's record to read and
+-- add to (write_records, 0121) for the 30 minutes asked; a wrong one does not.
+-- Chinedu's opens for 24 hours, as the website asks since 0121.
 set local role hid_identity_api_runtime;
 select pg_temp.as_demo_staff(1);
 select pg_temp.assert('a wrong PIN is refused',
   (select not verified from identity.access_patient_with_pin('HID-ZDEMAAA2', '1111', 30)));
-select pg_temp.assert('the test PIN opens Adaeze''s record (a read grant by PIN)',
+select pg_temp.assert('the test PIN opens Adaeze''s record (a read and write grant by PIN, 0121)',
   (select verified and grant_status = 'active' from identity.access_patient_with_pin('HID-ZDEMAAA2', '9157', 30)));
 reset role;
 select pg_temp.assert('the grant is the PIN''s, at Demo Hospital, for direct care',
@@ -576,13 +577,21 @@ select pg_temp.assert('the grant is the PIN''s, at Demo Hospital, for direct car
            where grant_row.patient_id = '98d00009-0000-4000-8000-000000000001'
              and grant_row.authorization_method = 'patient_access_pin' and grant_row.status = 'active'
              and grant_row.facility_id = '98d00002-0000-4000-8000-000000000001'
-             and grant_row.purpose_of_use = 'direct-care' and grant_row.scope = 'read_records'));
+             and grant_row.purpose_of_use = 'direct-care' and grant_row.scope = 'write_records'
+             and grant_row.expires_at = grant_row.starts_at + interval '30 minutes'));
 set local role hid_identity_api_runtime;
 select pg_temp.as_demo_staff(1);
 select pg_temp.assert('Chinedu''s record opens with the same test PIN, not with a wrong one',
   (select not verified from identity.access_patient_with_pin('HID-ZDEMAAA3', '2222', 30))
-  and (select verified from identity.access_patient_with_pin('HID-ZDEMAAA3', '9157', 30)));
+  and (select verified from identity.access_patient_with_pin('HID-ZDEMAAA3', '9157', 1440)));
 reset role;
+select pg_temp.assert('as the website asks it (1440 minutes), the PIN opens Chinedu''s record to read and add to for 24 hours',
+  exists (select 1 from identity.consent_grants grant_row
+           where grant_row.patient_id = '98d00009-0000-4000-8000-000000000002'
+             and grant_row.authorization_method = 'patient_access_pin' and grant_row.status = 'active'
+             and grant_row.facility_id = '98d00002-0000-4000-8000-000000000001'
+             and grant_row.purpose_of_use = 'direct-care' and grant_row.scope = 'write_records'
+             and grant_row.expires_at = grant_row.starts_at + interval '24 hours'));
 
 -- 9. Emergency: break-glass by the demo login at Demo Hospital (emergency
 -- purpose, a reason): Abubakar Bello (Patient Three, no share) and Adaeze

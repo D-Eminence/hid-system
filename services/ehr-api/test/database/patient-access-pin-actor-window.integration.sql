@@ -127,7 +127,7 @@ begin
   select * into granted from identity.access_patient_with_pin('HID-PNACCE55', '24 68', 15);
   if not granted.verified or granted.existing_grant or granted.grant_status <> 'active'
      or granted.subject_patient_id <> 'b5000000-0000-4000-8000-000000000001'::uuid then
-    raise exception 'Valid legacy bcrypt PIN did not produce the expected read grant';
+    raise exception 'Valid legacy bcrypt PIN did not produce the expected grant';
   end if;
   if not identity.has_active_consent_grant(
       granted.subject_patient_id, 'staff:pin-integration',
@@ -136,16 +136,20 @@ begin
     ) then
     raise exception 'PIN grant did not authorize its exact read context';
   end if;
-  if identity.has_active_consent_grant(
+  -- 0121: a PIN grant is read and write (write_records), at its facility only.
+  if not identity.has_active_consent_grant(
       granted.subject_patient_id, 'staff:pin-integration',
       'b4000000-0000-4000-8000-000000000001',
       'b1000000-0000-4000-8000-000000000002', 'write_records', 'direct-care'
-    ) or identity.has_active_consent_grant(
+    ) then
+    raise exception 'PIN grant did not authorize its exact write context';
+  end if;
+  if identity.has_active_consent_grant(
       granted.subject_patient_id, 'staff:pin-integration',
       'b4000000-0000-4000-8000-000000000001',
       'b1000000-0000-4000-8000-000000000099', 'read_records', 'direct-care'
     ) then
-    raise exception 'PIN grant escaped write or exact-facility scope';
+    raise exception 'PIN grant escaped exact-facility scope';
   end if;
 end
 $$;
@@ -294,7 +298,7 @@ begin
       select 1 from identity.consent_grants
        where patient_id = 'b5000000-0000-4000-8000-000000000001'
          and authorization_method = 'patient_access_pin'
-         and scope = 'read_records' and purpose_of_use = 'direct-care'
+         and scope = 'write_records' and purpose_of_use = 'direct-care'
          and status = 'active'
     ) then
     raise exception 'Valid PIN grant was not recorded with narrow authorization metadata';
@@ -305,7 +309,8 @@ begin
         where event_type = 'PatientAccessPinVerified'
           and (registration_case_id is not null
             or patient_access_pin_grant_id <> aggregate_id
-            or payload <> jsonb_build_object('consentGrantId', aggregate_id, 'reviewRequired', true))
+            or payload <> jsonb_build_object('consentGrantId', aggregate_id, 'reviewRequired', true,
+                 'scope', 'write_records'))
      ) then
     raise exception 'PIN notification intent is missing or exceeds the minimum-necessary envelope';
   end if;
