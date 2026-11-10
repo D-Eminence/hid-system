@@ -268,35 +268,42 @@ export function alternatives(first: string | null, second: string | null,
 
 /** A field placeholder or "[?]" alone: an other option that says nothing (cleanup of 2026-11-10, second round). */
 const PLACEHOLDER = /^\[(?:\?|route\?|drug\?|dose\?|freq\?)\]$/;
-/** A text compared as the reading it shows: case, "?", "…", spacing and the brackets of a guess group left out. */
-const optionKey = (text: string) => bare(text).replace(/…/g, '').replace(/[()\s]/g, '');
-/** The listed generic of a drug name with no digits ("Plasil?" is metoclopramide), else null. */
-const genericOf = (text: string) => /\d/.test(text) ? null : matchDrugName(bare(text))?.generic ?? null;
+/** A text compared as the reading it shows: case, "?", "…", the brackets of a guess group and spacing left out
+ * ("500 mg" is "500mg" as in bare; "1 5mg" stays two words, never "15mg"). */
+const optionKey = (text: string) => bare(text.replace(/[()…]/g, ' ')).replace(/\s+/g, ' ').trim();
+/**
+ * The listed generic of a one-word drug name with no digits ("Plasil?" is metoclopramide), else null. One word only:
+ * "Hydrocortisone cream" is not the same reading as "Hydrocortisone", whatever their generic.
+ */
+const genericOf = (text: string) => {
+  const key = optionKey(text);
+  return key === '' || /\d/.test(key) || key.includes(' ') ? null : matchDrugName(key)?.generic ?? null;
+};
 
 /**
  * Whether an other option adds nothing to the reading before it (coordinator cleanup of 2026-11-10, second round):
  * - a field placeholder or "[?]" only ("500mg? (or [dose?])");
- * - the same as the words straight before it, by optionKey or by listed generic ("Pl… (Plasil?) (or Plasil?)",
- *   "Flagyl? (or Metronidazole?)");
- * - a drug name with no digits that a word or run of words before it in the same text already names, by optionKey
- *   or listed generic ("(crossed out: Ceftriaxone? 1g? (or Ceftriaxone?))").
- * A dose, route or frequency repeated further back is kept: it can be another field's other option.
+ * - the same as the last one to four words straight before it, by optionKey, or a one-word name with the same listed
+ *   generic as the word straight before it ("Pl… (Plasil?) (or Plasil?)", "Flagyl? (or Metronidazole?)");
+ * - a listed one-word drug name straight after a dose (a word with a digit, so not that word's other option) whose
+ *   generic a word before it in the same text already names ("(crossed out: Ceftriaxone? 1g? (or Ceftriaxone?))").
+ * Anything else is kept: a route, frequency, dose or vitamin letter repeated further back can be another field's
+ * other option ("IV Ceftriaxone 1g IM? (or IV?)", "Vit K? 1mg Vit C? (or Vit K?)"; review of 2026-11-10).
  */
 function addsNothing(option: string, before: readonly string[]): boolean {
   const parts = words(option.trim());
   if (parts.length === 0 || parts.every((part) => PLACEHOLDER.test(part))) return true;
   const key = optionKey(option);
   const generic = genericOf(option);
-  const same = (run: string) => (key !== '' && optionKey(run) === key)
-    || (generic !== null && genericOf(run) === generic);
   const shown = before.filter((word) => !word.startsWith(ALTERNATIVE_OPEN) && !word.startsWith(CROSSED_OUT_OPEN));
-  // The words straight before it: the last one to four ("500 mg? (or 500mg)" is the same reading spaced).
+  if (shown.length === 0) return false;
   for (let count = 1; count <= Math.min(4, shown.length); count += 1) {
-    if (same(shown.slice(shown.length - count).join(' '))) return true;
+    if (key !== '' && optionKey(shown.slice(shown.length - count).join(' ')) === key) return true;
   }
-  if (/\d/.test(option) || !hasLetters(option)) return false;
-  const run = (from: number) => shown.slice(from, from + parts.length).join(' ');
-  return shown.some((_word, index) => index + parts.length <= shown.length && same(run(index)));
+  const last = shown[shown.length - 1]!;
+  if (generic === null) return false;
+  if (genericOf(last) === generic) return true;
+  return /\d/.test(last) && shown.slice(0, -1).some((word) => genericOf(word) === generic);
 }
 
 /**
@@ -311,8 +318,10 @@ export function dropEmptyOptions(text: string, drops?: AlternativeDrops): string
       if (drops) drops.count += 1;
       continue;
     }
-    out.push(word.startsWith(CROSSED_OUT_OPEN)
-      ? `${CROSSED_OUT_OPEN}${dropEmptyOptions(word.slice(CROSSED_OUT_OPEN.length, -1), drops)})` : word);
+    if (word.startsWith(CROSSED_OUT_OPEN)) {
+      const inner = dropEmptyOptions(word.slice(CROSSED_OUT_OPEN.length, -1), drops).trim();
+      out.push(`${CROSSED_OUT_OPEN}${inner === '' ? NO_LETTERS : inner})`);
+    } else out.push(word);
   }
   return out.join(' ');
 }
@@ -1283,7 +1292,8 @@ function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: stri
     const values = { ...fields } as Record<string, unknown>;
     for (const key of SHOWN_TEXT_FIELDS) {
       const value = values[key];
-      if (typeof value === 'string') values[key] = dropEmptyOptions(value, drops);
+      // Not counted again: the shown text counts the options it leaves out (limitAlternatives).
+      if (typeof value === 'string') values[key] = dropEmptyOptions(value);
     }
     fields = values as PaperItem['fields'];
   }

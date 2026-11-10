@@ -439,6 +439,8 @@ describe('other options that add nothing (second cleanup round of 2026-11-10)', 
     expect(limitAlternatives('IV (crossed out: Ceftriaxone? 1g? (or Ceftriaxone?)) 2g', drops))
       .toBe('IV (crossed out: Ceftriaxone? 1g?) 2g');
     expect(drops.count).toBe(3);
+    // Nothing left inside crossed-out writing: the no-letters mark, never an empty group.
+    expect(dropEmptyOptions('(crossed out: (or [?]))')).toBe('(crossed out: [?])');
   });
 
   it('leaves out every placeholder, and a repeat by case, "?", "…" or spacing, or by the same generic', () => {
@@ -459,7 +461,14 @@ describe('other options that add nothing (second cleanup round of 2026-11-10)', 
       'IV? (or ✓?) Ceftriaxone', 'Vit C? (or Vit K?)', '[dose?] (or 500mg?)',
       // A dose repeated further back can be another field's other option: kept.
       'Ceftriaxone 1g? stat then 2g? (or 1g?) bd',
-      '(crossed out: Ceftriaxone? 1g? (or 2g?))']) {
+      '(crossed out: Ceftriaxone? 1g? (or 2g?))',
+      // Review of 2026-11-10: a route, frequency, vitamin letter or second drug repeated further back is kept.
+      'IV Ceftriaxone 1g IM? (or IV?)', 'Amoxicillin 500mg tds PO bd? (or tds?)', 'Vit K? 1mg Vit C? (or Vit K?)',
+      'Amoxicillin? Metronidazole? (or Amoxicillin?)',
+      // A quantity and a dose are two words: "1 5mg" is not "15mg".
+      'Tab 1 5mg? (or 15mg?)',
+      // The same generic in another form is another reading.
+      'Hydrocortisone? (or Hydrocortisone cream?)', 'Prednisolone eye drops? (or Prednisolone?)']) {
       expect(dropEmptyOptions(text)).toBe(text);
     }
     expect(alternatives('Cefuroxime', 'Ceftriaxone')).toBe('Cefuroxime? (or Ceftriaxone?)');
