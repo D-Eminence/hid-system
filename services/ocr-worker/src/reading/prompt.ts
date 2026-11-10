@@ -43,9 +43,12 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * most 4 zoom calls per read, so rule J's text says 4 where it said 8 (HARD_PAGE_PROMPT_VERSION 9); turns after a zoom
  * at OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT; a per-read output-token cap; and a deadline for the page after which a read
  * still running is dropped. A reading made the older way is not reused. The text-only request and the ordinary image
- * re-read request are still byte for byte unchanged.
+ * re-read request are still byte for byte unchanged. Version 10: rule J asks for all the zooms a read needs in one turn
+ * (HARD_PAGE_PROMPT_VERSION 10; coordinator's decision of 2026-11-10, a follow-up to version 9: production showed about
+ * 4 turns per read, each thinking again). A reading made the older way is not reused. The text-only request, the
+ * ordinary image re-read request and the hard-page text without zoom are byte for byte unchanged.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-9';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-10';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -76,13 +79,17 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * names a field read from where it sits or what is typical as basis "context". Versions 5 and 6 were never released.
  * Version 9 (zoom offered; the text without rule J is unchanged, still version 7): rule J allows at most 4 zoom calls
  * where version 8 allowed 8 (OCR_AI_ZOOM_MAX_CALLS now 0 to 4, default 4; coordinator 2026-11-10). The count is part
- * of the text, so a setting below 4 also changes it, as before.
+ * of the text, so a setting below 4 also changes it, as before. Version 10 (zoom offered; the text without rule J is
+ * still version 7): rule J asks the model to decide every place it needs a closer look at and request all those zooms
+ * together in one response (several zoom calls at once), then answer from what they show, zooming again only if a
+ * crop is still unclear and calls are left (coordinator 2026-11-10, follow-up to version 9: fewer thinking turns per
+ * read). The cap of 4 and everything else are unchanged.
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-9';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-10';
 /**
  * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
  * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
- * calls, which is the version 8 (and 9) text without rule J (pinned by hash in hard-page.spec.ts).
+ * calls, which is the version 8 (and 9 and 10) text without rule J (pinned by hash in hard-page.spec.ts).
  */
 export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-7';
 
@@ -520,8 +527,10 @@ ${SIGNS_RULE}
 ${zoomCalls > 0 ? `J. You can use the zoom tool to look closer at hard-to-read writing before you answer: give page ${page}, a box \
 around the writing in this picture's pixels (the same pixels as the line boxes and the boxes in your answer) and a \
 scale from 1 to 4. It returns that part of the picture enlarged. You may zoom at most ${zoomCalls} times for this \
-page; use it where a closer look can settle a word or number, not for every line. Every box in your answer stays \
-in the full picture's pixels.
+page; use it where a closer look can settle a word or number, not for every line. First decide every place where \
+a closer look would help, and ask for all of those zooms together in one response (several zoom calls at once), not \
+one at a time. Then answer from what they show; zoom again only if a crop is still unclear and you have calls left. \
+Every box in your answer stays in the full picture's pixels.
 
 ` : ''}The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
 ${JSON.stringify(lines.map((line) => ({

@@ -6,7 +6,7 @@ import { markGuess, mergeAsWritten, mergeHardReadings, normaliseDose, normaliseF
 import { checkPage, checkReasonSentence, mergeReread } from './items';
 import { createMasker } from './masking';
 import { HARD_PAGE_PROMPT_VERSION, HARD_PAGE_PROMPT_VERSION_NO_ZOOM, hardPageMessage, imagePageMessage, pageMessage,
-  SIGNS_RULE, SYSTEM_PROMPT, type BasisField, type FieldBasis, type ModelItem, type ModelPage } from './prompt';
+  PROMPT_VERSION, SIGNS_RULE, SYSTEM_PROMPT, type BasisField, type FieldBasis, type ModelItem, type ModelPage } from './prompt';
 import { SIGN_TABLE } from './signs';
 import { modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ReadLine, ReadPage } from '../types';
@@ -557,7 +557,7 @@ describe('hard-page prompt versions', () => {
   it('sends the version 7 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
     // Pinned from the version 7 prompt (the clean reading of 2026-11-06, with partial words and placeholders); a change here needs a new version.
     expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-7');
-    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-9');
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-10');
     expect(createHash('sha256').update(hardPageMessage(1, lines, size, 0)).digest('hex'))
       .toBe('7feb2c96cc86bf7d67c5394249ed21269f0bb9803b7fd7f9d5a45f035c77ce07');
     expect(hardPageMessage(1, lines, size)).toBe(hardPageMessage(1, lines, size, 0));
@@ -572,6 +572,25 @@ describe('hard-page prompt versions', () => {
     expect(rule).toContain('at most 8 times for this page');
     expect(withZoom.replace(`${rule}\n\n`, '')).toBe(plain);
     expect(withZoom.indexOf(SIGNS_RULE)).toBeLessThan(withZoom.indexOf('J. You can use the zoom tool'));
+  });
+
+  it('asks in rule J for all the zooms a read needs in one turn, keeping the cap (hard-page prompt 10)', () => {
+    const withZoom = hardPageMessage(1, lines, size, 4);
+    const plain = hardPageMessage(1, lines, size, 0);
+    const rule = withZoom.slice(withZoom.indexOf('\n\nJ. ') + 2, withZoom.indexOf('\n\nThe lines the service found'));
+    expect(rule).toContain('at most 4 times for this page');
+    expect(rule).toContain('ask for all of those zooms together in one response (several zoom calls at once), not one at a time');
+    expect(rule).toContain('Then answer from what they show; zoom again only if a crop is still unclear and you have calls left.');
+    expect(rule).toContain('Every box in your answer stays in the full picture\'s pixels.');
+    // The text with zoom differs from the text without it only by rule J.
+    expect(withZoom.replace(`${rule}\n\n`, '')).toBe(plain);
+    expect(withZoom.length - plain.length).toBe(rule.length + 2);
+  });
+
+  it('keeps the prompt versions consistent: zoom 10, no zoom still 7, reading 10', () => {
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-10');
+    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-7');
+    expect(PROMPT_VERSION).toBe('hid-paper-reading-prompt-10');
   });
 });
 

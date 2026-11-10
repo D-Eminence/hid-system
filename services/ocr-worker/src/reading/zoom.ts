@@ -69,12 +69,18 @@ export const ZOOM_UNAVAILABLE_MESSAGE = 'zoom unavailable';
 
 export interface ZoomBox { x: number; y: number; w: number; h: number }
 
-/** The tool as declared to the model (hard-page reads only). Strict: the API holds the input to the schema. */
+/**
+ * The tool as declared to the model (hard-page reads only). Strict: the API holds the input to the schema. The
+ * description, like rule J (hard-page prompt 10), asks for all the zooms a read needs in one response (coordinator
+ * 2026-11-10); the schema is unchanged. Changing the description changes every hard-page zoom request, which the
+ * hard-page prompt version 10 already marks.
+ */
 export const ZOOM_TOOL: Anthropic.Tool = {
   name: ZOOM_TOOL_NAME,
   description: 'Look closer at part of the page picture. Returns an enlarged view of the box you give, cut from the '
     + 'same picture. Use it to look closer at hard-to-read writing (a drug name, a dose, a number, a word) before you '
-    + 'answer. "page" is the page number of this picture. "box" is in the picture\'s pixels, the same pixels as the line '
+    + 'answer. Ask for every zoom you need together, several calls in one response, rather than one at a time. '
+    + '"page" is the page number of this picture. "box" is in the picture\'s pixels, the same pixels as the line '
     + 'boxes and the boxes in your answer: x and y the top-left corner, w and h the width and height. "scale" is how '
     + 'much to enlarge it, from 1 to 4 (2 when not given). The boxes in your answer stay in the full picture\'s pixels, '
     + 'never in the enlarged view\'s.',

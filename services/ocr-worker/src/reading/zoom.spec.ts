@@ -717,6 +717,34 @@ describe('zoom tool session', () => {
     expect(JSON.stringify(ZOOM_TOOL.input_schema)).not.toMatch(/minimum|maximum/);
   });
 
+  it('asks in its description for every zoom together, several calls in one response; the strict schema is unchanged', () => {
+    expect(ZOOM_TOOL.description).toContain('Ask for every zoom you need together, several calls in one response, rather '
+      + 'than one at a time.');
+    expect(ZOOM_TOOL.strict).toBe(true);
+    // Strict tool use needs additionalProperties: false and every property required or optional as declared.
+    expect(ZOOM_TOOL.input_schema).toEqual({ type: 'object', additionalProperties: false, required: ['page', 'box'],
+      properties: {
+        page: { type: 'integer', description: 'The page number of this picture.' },
+        box: { type: 'object', additionalProperties: false, required: ['x', 'y', 'w', 'h'],
+          description: 'The part of the picture to look at, in the picture\'s pixels.',
+          properties: { x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' } } },
+        scale: { type: 'number', description: 'How much to enlarge, 1 to 4 (default 2).' },
+      } });
+  });
+
+  it('counts calls across turns: 3 then 2 with a cap of 4 give 4 crops and 1 limit error', async () => {
+    const zoom = fixed({ kind: 'crop', crop });
+    const session = createZoomSession(zoom, 1, 4, 1_000);
+    const first = [];
+    for (let index = 0; index < 3; index += 1) first.push(await session.answer(call(good, `toolu_a${index}`)));
+    const second = [await session.answer(call(good, 'toolu_b0')), await session.answer(call(good, 'toolu_b1'))];
+    expect(first.every((result) => result.is_error === undefined)).toBe(true);
+    expect(second[0]!.is_error).toBeUndefined();
+    expect(second[1]).toEqual({ type: 'tool_result', tool_use_id: 'toolu_b1', is_error: true, content: ZOOM_LIMIT_MESSAGE });
+    expect(zoom.crop).toHaveBeenCalledTimes(4);
+    expect(session.stats).toEqual({ calls: 4, limited: 1, failed: 0 });
+  });
+
   it('returns the crop as an image tool_result with its place in the picture', async () => {
     const zoom = fixed({ kind: 'crop', crop });
     const session = createZoomSession(zoom, 1, 8, 1_000);
