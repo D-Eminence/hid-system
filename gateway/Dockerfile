@@ -13,7 +13,7 @@ USER 0
 # health check. Removing it also removes its unused libcurl dependency; no
 # curl fix is available in this Alpine branch. Keep nginx modules installed.
 RUN apk del --no-cache curl \
-    && apk add --no-cache 'pcre2=10.49-r0' 'libexpat=2.10.0-r0' 'zlib=1.3.2-r1' 'libx11=1.8.14-r0' 'brotli-libs=1.2.1-r0' \
+    && apk add --no-cache 'pcre2=10.49-r0' 'libexpat=2.10.0-r0' 'zlib=1.4-r0' 'libx11=1.8.14-r0' 'brotli-libs=1.2.1-r0' \
        'musl=1.2.6-r3' 'musl-utils=1.2.6-r3'
 
 ENV IDENTITY_API_UPSTREAM=http://identity-api:3001 \
