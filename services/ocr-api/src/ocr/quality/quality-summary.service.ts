@@ -19,17 +19,28 @@ export const MAX_REVIEWS = 50_000;
 
 /** Platform administration authority, and the operations-read permission, as Identity's admin routes require. */
 export const QUALITY_PERMISSIONS = ['platform.admin.access', 'platform.operations.read'] as const;
+/** A facility's own manager (the workforce permission facility managers hold) reads that facility's summary. */
+export const FACILITY_QUALITY_PERMISSION = 'workforce.manage';
 
 /**
- * The strictest admin gate in the platform (Identity requireAdminContext plus a specific platform permission): a
- * staff actor whose platform permissions include platform.admin.access and platform.operations.read. Facility
- * permissions do not count. Anyone else gets 403 PERMISSION_DENIED.
+ * Who may read the summary of the facility named by X-Facility-ID: a platform administrator (a staff actor whose
+ * platform permissions include platform.admin.access and platform.operations.read), or that facility's own manager (a
+ * staff actor whose membership at that very facility holds workforce.manage). A manager's permission at another
+ * facility never counts. Anyone else gets 403 PERMISSION_DENIED. The data is content-free, bound to that one facility
+ * by row-level security, and small groups are suppressed.
  */
 export function assertQualityReader(request: HidRequest): void {
   const actor = request.actor as (HidRequest['actor'] & { platformPermissions?: readonly string[] }) | undefined;
-  if (!actor || actor.kind === 'patient'
-    || !QUALITY_PERMISSIONS.every((permission) => actor.platformPermissions?.includes(permission))) {
-    throw new DomainProblem(403, 'PERMISSION_DENIED', 'Platform administration authority is required');
+  if (!actor || actor.kind === 'patient') {
+    throw new DomainProblem(403, 'PERMISSION_DENIED', 'Platform administration or facility management is required');
+  }
+  const platformAdmin = QUALITY_PERMISSIONS.every((permission) => actor.platformPermissions?.includes(permission));
+  const membership = request.facilityId
+    ? actor.facilities?.find((assignment) => assignment.id === request.facilityId) : undefined;
+  const facilityManager = membership !== undefined && actor.facility?.id === request.facilityId
+    && membership.permissions.includes(FACILITY_QUALITY_PERMISSION);
+  if (!platformAdmin && !facilityManager) {
+    throw new DomainProblem(403, 'PERMISSION_DENIED', 'Platform administration or facility management is required');
   }
 }
 
