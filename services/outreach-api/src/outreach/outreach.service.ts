@@ -398,6 +398,29 @@ export class OutreachService {
     return result.rows[0]?.role ?? null;
   }
 
+  /**
+   * Who is in a campaign, by name, and to its admins who could be added (0111's outreach.campaign_staff), with the
+   * caller's own role in it. A non-member gets no one.
+   */
+  async listCampaignStaff(id: string, context: DataAccessContext): Promise<CampaignStaff> {
+    return this.database.withTransaction(context, async (client) => {
+      const exists = await client.query(`select 1 from outreach.campaigns where id=$1 and facility_id=$2`, [id, context.facilityId]);
+      if (!exists.rowCount) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
+      const result = await client.query<{ membership_id: string; display_name: string; campaign_role: CampaignRole | null }>(
+        `select membership_id, display_name, campaign_role from outreach.campaign_staff($1)`, [id]);
+      const people = result.rows.map((row) => ({ membershipId: row.membership_id, name: row.display_name,
+        campaignRole: row.campaign_role }));
+      return { yourRole: people.find((person) => person.membershipId === context.membershipId)?.campaignRole ?? null, people };
+    }, { readOnly: true });
+  }
+
+  /** The caller's own role in a campaign of its facility, or null. */
+  private async campaignRole(client: PoolClient, campaignId: string, context: DataAccessContext): Promise<string | null> {
+    const result = await client.query<{ role: string }>(`select role from outreach.campaign_members
+      where campaign_id=$1 and facility_id=$2 and membership_id=$3`, [campaignId, context.facilityId, context.membershipId]);
+    return result.rows[0]?.role ?? null;
+  }
+
   private async replay(client: PoolClient, context: DataAccessContext, operation: string,
     key: string, digest: string): Promise<OutreachRegistrationCase | null> {
     const result = await client.query<IdempotencyRow>(`select request_sha256,registration_case_id

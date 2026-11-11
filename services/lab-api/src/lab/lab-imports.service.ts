@@ -7,7 +7,8 @@ import { requestDigest } from '../common/idempotency';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
-import type { CreateLabImportDto, ImportedLabObservationDto } from './dto/create-lab-import.dto';
+import { LAB_IMPORT_PAGE_DEFAULT, LAB_IMPORT_PAGE_MAX } from './dto/create-lab-import.dto';
+import type { CreateLabImportDto, ImportedLabObservationDto, ListLabImportsQueryDto } from './dto/create-lab-import.dto';
 import type { OcrLabImportCommand } from './lab-import.types';
 
 interface ImportRow extends QueryResultRow {
@@ -18,6 +19,10 @@ interface ImportRow extends QueryResultRow {
   validation_id: string | null; validation_version: number | null; publication_id: string | null;
   row_version: string; created_at: Date;
 }
+
+const OBSERVATION_COLUMNS = `id::text,"ordinal",test_code as "testCode",test_name as "testName",value,
+  value_text as "valueText",unit,reference_range as "referenceRange",
+  abnormal_flag as "abnormalFlag",reported_at as "reportedAt",status,created_at as "createdAt"`;
 
 const IMPORT_SELECT = `select id::text,patient_id::text,facility_id::text,source_type,status,
   external_lab_name,external_reference,collected_at,reported_at,received_at,
@@ -42,12 +47,54 @@ export class LabImportsService {
       const row = await this.find(client, importId);
       await this.authorize(row.patient_id, context, 'read_records');
       const observations = await client.query(
-        `select id::text,"ordinal",test_code as "testCode",test_name as "testName",value,
-          value_text as "valueText",unit,reference_range as "referenceRange",
-          abnormal_flag as "abnormalFlag",reported_at as "reportedAt",status,created_at as "createdAt"
-         from lab.imported_observations where import_id=$1 order by "ordinal"`, [row.id]);
+        `select ${OBSERVATION_COLUMNS} from lab.imported_observations where import_id=$1 order by "ordinal"`, [row.id]);
       await this.audit.recordWithClient(client, this.auditEvent(context, row, 'lab.import.read'));
       return { ...this.project(row), observations: observations.rows };
+    });
+  }
+
+  /**
+   * One patient's imported Lab evidence with its observations, newest received
+   * first (received_at desc, id desc: the 0017 patient timeline index). The
+   * same canonical read_records decision as get(), but before any query, so a
+   * refusal reads no row and writes no audit. Rows are this facility's only:
+   * the query names the facility and the 0017 read policies check facility and
+   * the consent grant again. The cursor is the last import id of the previous
+   * page; one not visible here (another patient or facility) ends the list.
+   * One audit row per page, with ids and counts only.
+   */
+  async listForPatient(context: DataAccessContext, query: ListLabImportsQueryDto) {
+    const { patientId } = query;
+    const limit = Math.min(Math.max(query.limit ?? LAB_IMPORT_PAGE_DEFAULT, 1), LAB_IMPORT_PAGE_MAX);
+    const cursor = query.cursor ?? null;
+    await this.authorize(patientId, context, 'read_records');
+    return this.database.withTransaction(context, async (client) => {
+      const page = await client.query<ImportRow>(
+        `${IMPORT_SELECT} e where e.patient_id=$1 and e.facility_id=$2
+          and ($3::uuid is null or (e.received_at,e.id) < (select c.received_at,c.id from lab.imported_evidence c
+            where c.id=$3::uuid and c.patient_id=$1 and c.facility_id=$2))
+         order by e.received_at desc, e.id desc limit $4`,
+        [patientId, context.facilityId, cursor, limit + 1]);
+      const rows = page.rows.slice(0, limit);
+      const ids = rows.map((row) => row.id);
+      const observations = ids.length === 0 ? [] : (await client.query<{ importId: string } & QueryResultRow>(
+        `select import_id::text as "importId",${OBSERVATION_COLUMNS} from lab.imported_observations
+         where import_id=any($1::uuid[]) and patient_id=$2 and facility_id=$3 order by import_id,"ordinal"`,
+        [ids, patientId, context.facilityId])).rows;
+      const byImport = new Map<string, QueryResultRow[]>(ids.map((id) => [id, []]));
+      for (const { importId, ...observation } of observations) byImport.get(importId)?.push(observation);
+      await this.audit.recordWithClient(client, {
+        correlationId: context.correlationId, actorType: 'staff', actorSubject: context.actor.subject,
+        actorAccountId: context.actor.accountId, actorMembershipId: context.membershipId,
+        organizationId: context.actor.facility?.organizationId, facilityId: context.facilityId, patientId,
+        action: 'lab.import.list', resourceType: 'lab-imported-evidence-collection', outcome: 'success',
+        purposeOfUse: context.purposeOfUse, sourceSystem: 'lab-api',
+        details: { recordCount: rows.length, observationCount: observations.length, importIds: ids },
+      });
+      return {
+        records: rows.map((row) => ({ ...this.project(row), observations: byImport.get(row.id) ?? [] })),
+        nextCursor: page.rows.length > limit ? rows.at(-1)!.id : null,
+      };
     });
   }
 

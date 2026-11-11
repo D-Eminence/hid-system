@@ -18,7 +18,8 @@ export class OutreachController {
   /**
    * How campaigns are governed here (0111, ADR-045 option B): a campaign's own admins open, close and staff it. A
    * website asks this to learn that campaign management is served; a backend before 0111 answers 404. At an
-   * outreach group's facility it also says whether Health ID has checked the group (organiserStatus).
+   * outreach group's facility it also gives the group's status (organiserStatus: 'unverified', or 'suspended' when
+   * Health ID has paused it). Health ID does not check a group before its campaigns go Active (owner decision Q38).
    */
   @Get('/campaigns/governance')
   @RequirePermissions('outreach.campaign.read')

@@ -1136,6 +1136,7 @@ POST /api/v1/lab/requests
 GET  /api/v1/lab/requests/:requestId
 PATCH /api/v1/lab/requests/:requestId
 POST /api/v1/lab/imports
+GET  /api/v1/lab/imports?patientId=<uuid>[&cursor=<importId>][&limit=1..50]
 GET  /api/v1/lab/imports/:importId
 ```
 
@@ -1147,6 +1148,20 @@ represents native HID accessioning, specimen handling, execution, QC, or Lab
 verification. OCR LAB publication invokes the same Lab service contract with
 the exact document, job, extraction, validation/version, publication, patient,
 facility, reviewer, and publishing actor references.
+
+`GET /api/v1/lab/imports?patientId=<uuid>` lists one patient's imported Lab
+evidence at the requesting facility, newest received first, each with its
+observations in order, so OCR-published paper results reach the chart. It
+needs `lab.import.read` and `X-Purpose-Of-Use`, and the same canonical
+`read_records` decision as `GET /api/v1/lab/imports/:importId` (taken before
+any query; a refusal is `403 LAB_IMPORT_ACCESS_DENIED` with no rows and no
+read audit). The 0017 row-level security policies apply as well. The page is
+`{ records, nextCursor }`: `limit` defaults to 20 and is at most 50;
+`nextCursor` is the last import id, sent back as `cursor`. Each record carries
+`externalLabName`, `collectedAt`, `reportedAt`, `receivedAt` and the source
+document and OCR job, extraction, validation (and version) and publication
+ids. One audit row per page (`lab.import.list`) records ids and counts only.
+`patientId` is the Identity UUID; a Health ID is never accepted in this URL.
 
 Exact contract should be documented through OpenAPI.
 
