@@ -244,4 +244,19 @@ describe('OCR worker configuration', () => {
       expect(() => readOcrWorkerConfig({ ...base, [name!]: value })).toThrow(new RegExp(name!));
     }
   });
+
+  it('deletes sources every 900 seconds by default, and validates the switch and the interval', () => {
+    const defaults = readOcrWorkerConfig(base);
+    expect(defaults.OCR_SOURCE_DELETION_ENABLED).toBe(true);
+    expect(defaults.OCR_SOURCE_DELETION_INTERVAL_SECONDS).toBe(900);
+    expect(readOcrWorkerConfig({ ...base, OCR_SOURCE_DELETION_ENABLED: '' }).OCR_SOURCE_DELETION_ENABLED).toBe(true);
+    expect(readOcrWorkerConfig({ ...base, OCR_SOURCE_DELETION_ENABLED: 'false' }).OCR_SOURCE_DELETION_ENABLED).toBe(false);
+    expect(readOcrWorkerConfig({ ...base, OCR_SOURCE_DELETION_INTERVAL_SECONDS: '60' })
+      .OCR_SOURCE_DELETION_INTERVAL_SECONDS).toBe(60);
+    for (const [name, value] of [['OCR_SOURCE_DELETION_ENABLED', 'yes'], ['OCR_SOURCE_DELETION_ENABLED', 'TRUE'],
+      ['OCR_SOURCE_DELETION_INTERVAL_SECONDS', '59'], ['OCR_SOURCE_DELETION_INTERVAL_SECONDS', '86401'],
+      ['OCR_SOURCE_DELETION_INTERVAL_SECONDS', '90.5'], ['OCR_SOURCE_DELETION_INTERVAL_SECONDS', 'often']]) {
+      expect(() => readOcrWorkerConfig({ ...base, [name!]: value })).toThrow(new RegExp(name!));
+    }
+  });
 });
