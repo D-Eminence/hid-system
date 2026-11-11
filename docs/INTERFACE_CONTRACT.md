@@ -1397,9 +1397,13 @@ and stale job versions.
 Publication requires `Idempotency-Key`, `direct-care`, an explicit validation
 ID/version, and the latest confirmation ID. It needs the publisher's own
 direct-care `write_records` grant on the patient for every target (section
-37): a caller who can read the job but has none answers 403
-`OCR_PUBLISH_NEEDS_DIRECT_CARE`; one who cannot read the job answers 404
-`OCR_JOB_NOT_FOUND`. Current operations are EHR
+39), or the patient's dedicated records-processing grant, which publishes any
+reading (a Lab, medicine or document-only one as a draft note titled by kind)
+as a draft into the patient's "Imported paper
+records" encounter (section 42, 0113): a caller with neither who can read the
+job answers 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE`; one who cannot read the job
+answers 404 `OCR_JOB_NOT_FOUND`. An EHR reading's `encounterId` is optional
+since 0113: without one, the note goes to the imported paper records. Current operations are EHR
 `create_imported_clinical_note`, Lab `create_imported_lab_evidence`, Pharmacy
 `create_imported_medication_evidence`, and `retain_validated_document` for
 `DOCUMENT_ONLY`. EHR creates a draft imported
@@ -3090,7 +3094,7 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 | Validate or reject | `ocr.validation.write` | `healthcare-operations` write |
 | Confirm the source patient | `ocr.patient.confirm` (doctor, clinician, nurse) | `healthcare-operations` write |
 | EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
-| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; without it 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 39) |
+| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; or, for any reading as a draft note, the dedicated records-processing grant (an approved `healthcare-operations` `write_records` request; never the cover: section 42, 0113); otherwise 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 39) |
 
 Without a records-processing grant or a cover, OCR's create answers 403
 `OCR_RECORDS_PROCESSING_CONSENT_REQUIRED` when the request names the patient
@@ -3228,7 +3232,9 @@ else:
   import (`POST /ehr/internal/ocr/patients/:patientId/clinical-notes`) now answer
   `healthcare-operations` 400 `PURPOSE_OF_USE_REQUIRED` ("X-Purpose-Of-Use must
   be direct-care or emergency for the patient record") before any work; direct
-  care and emergency answer as before.
+  care and emergency answer as before. (Since 0113 the OCR clinical-note import
+  takes `healthcare-operations` as a draft in the imported paper records; see
+  section 42.)
 - lab-api and pharmacy-api: every route takes `direct-care` or `emergency`; a
   `healthcare-operations` purpose answers 400 `PURPOSE_OF_USE_REQUIRED`
   ("X-Purpose-Of-Use must be direct-care or emergency"). No Lab or Pharmacy
@@ -3531,8 +3537,8 @@ entry paths do not read the allowance. Tables `ocr.facility_page_limits`,
 `ocr.page_usage` and `ocr.ai_usage` (key `(job_id, attempt_no, model)`;
 facility, Lagos month, requests and the four token counts) hold ids, counts,
 dates, the model name and the limit's reason only, have no runtime grant, no
-foreign key to `ocr.jobs` (the 24-hour deletion of a job's working data never
-waits on them or removes them) and are read only through these commands.
+foreign key to `ocr.jobs` (the 7-day deletion of a job's working data,
+section 41, never waits on them or removes them) and are read only through these commands.
 `ocr.claim_worker_job` keeps the body 0105 gave it. The only change to an existing function
 is one more allowed transition in `ocr.validate_job_write`: a queued job whose
 `last_error_code` is exactly `OCR_PAGE_ALLOWANCE_USED_UP` may move
@@ -3825,9 +3831,9 @@ confirm OCR jobs, never publishes. Only the answer changes.
 
 A Migrate staff member working under the cover, with direct-care read access
 (an approval, Access PIN or share) but no direct-care write, now sees step 4
-instead of the 404 they got before. Until the database can tell Identity which
-grant covered a check, a draft-only publishing path under the cover is not
-offered.
+instead of the 404 they got before. The cover never publishes; since 0113 the
+patient's dedicated records-processing grant publishes an EHR reading as a
+draft (section 42), checked between steps 3 and 4.
 
 ## 40. Outreach campaigns: their own admins manage them (0111)
 
@@ -3903,7 +3909,247 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
 `outreach.campaign.write` accepted. On a database without 0111, that would
 reopen the ungoverned writes.
 
-## 41. Patient details on this facility's own lab and pharmacy work (0121)
+## 41. OCR source deletion after 7 days (0112)
+
+Owner and coordinator decisions of 2026-11-11: (1) at 24 hours (7 days since
+Q36, below) after an OCR job finishes, saved or not, the uploaded source file
+goes with every S3 version, and so do the Textract text, the AI reading and
+the content of the job's working rows; what a person saved or published into the record
+(EHR rows, `ehr.ocr_import_provenance`), `ocr.page_usage`, `ocr.ai_usage`, a
+deletion audit event and the job ids and status stay. (2) The source scan is
+not kept in the chart; published records keep provenance by job id. (3)
+Content is removed, rows are not deleted, through one narrow SECURITY DEFINER
+purge; the append-only triggers stay. Owner decision Q36 of 2026-11-11
+("make it 7days (signed)") made the 24 hours of (1) 7 days: a document is
+due 7 days after its latest job finished and overdue 7 days and 2 hours
+after.
+
+**When.** A document is due when its status is `uploaded`, `legal_hold` is
+false, it has at least one OCR job, every job is finished
+(`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled`), and
+the latest finish (`completed_at`; `failed_at` for a failed job; `updated_at`
+for a cancelled one) is at least 7 days ago. A publication of its jobs that
+could still run (`pending`, `processing`, or `failed` with
+`OWNING_SERVICE_UNAVAILABLE` or `REQUEST_IN_PROGRESS` and attempts left)
+blocks until 72 hours after the finish and no longer after that (a hard cap);
+since 7 days is longer than the cap, it no longer delays deletion (`due_at` is
+the finish + greatest(7 days, 72 hours while blocked)). A blocked document is
+not due, so it counts neither as due nor as overdue.
+
+**Claim, then S3, then purge.** The OCR worker
+(`OCR_SOURCE_DELETION_INTERVAL_SECONDS`, default 900) first claims the
+document: under a row lock on it and its jobs the database checks again that
+it is due and sets status `source_deleting`. From then the database refuses
+(55000) a new OCR job on it, a failed -> queued retry of its jobs, setting
+`legal_hold` and any other change to the document; ocr-api answers 410 (see
+below). Only after the claim does the worker delete every S3 version and
+delete marker whose key is exactly the document's stored `storage_key` and
+confirm none remain; then it purges, which requires `source_deleting`. If S3
+fails the document stays `source_deleting` and is listed first in the next
+round (ocr-worker README, "Source deletion after 7 days"). Claimed
+documents go least recently attempted first (`ocr.source_deletion_attempts`:
+ids, counts and times, no runtime grant) and take at most half of a batch
+while due documents wait. There is no unclaim: a claim that keeps failing
+stays for an operator and keeps counting as overdue. A job insert takes the
+document row `FOR SHARE` first, so it serializes with a claim in flight and is
+refused once the document is `source_deleting`.
+
+Accepted: a publication requested near the 72-hour cap may run its attempt
+after the claim or the purge. ocr-api reads the source again for each attempt
+and answers 410 `DOCUMENT_SOURCE_DELETED`, recording a terminal failure before
+any owning-domain call, so nothing is published; a blanked validation would
+fail the candidate check (`OCR_INVALID_CLINICAL_NOTE`) anyway.
+
+**What the purge changes**, once, under a row lock on the document and its
+jobs:
+
+| Table | Columns | Value after |
+|---|---|---|
+| `ehr.documents` | `status`, `original_file_name`, `row_version` | `source_deleted`, `Source page deleted after 7 days`, + 1 (+ 1 more at the claim; no `ehr.record_versions` row for either: the audit rows `ocr.source.deletion_claimed` and the one below record them; earlier record versions keep the original file name) |
+| `ocr.extractions` | `raw_text`, `structured_payload` | NULL, `{}` |
+| `ocr.validations` | `validated_payload`, `accepted_fields`, `rejected_fields`, `corrections`, `reason` | `{}`, `{}`, `[]`, `[]`, `Content deleted after 7 days` |
+| `ocr.patient_confirmations` | `reason`, `evidence_reference` | `Content deleted after 7 days`, NULL |
+| `audit.events` | one row `ocr.source.deleted_after_7d` | workload actor, resource the document; details `jobCount`, `objectVersionsDeleted` (summed over the worker's rounds for the document), `extractionsBlanked`, `validationsBlanked`, `confirmationsBlanked`, `alreadyDeleted`, `secondsPastDue` |
+
+Every other column stays (dispositions, target domains, versions, reviewers,
+extraction provenance, confidence and content hash), as do `ocr.jobs`,
+`ocr.job_events`, `ocr.outbox_events`, `ocr.publications`,
+`ehr.ocr_import_provenance`, `ocr.page_usage`, `ocr.ai_usage` and every EHR
+record. A purge of a document already `source_deleted` blanks only what still
+holds content (a row added after the purge) and writes an audit row only then.
+
+**Triggers.** `ocr.reject_immutable_change()` still refuses (55000) every
+DELETE and UPDATE of `ocr.job_events`, `ocr.extractions`, `ocr.validations`,
+`ocr.patient_confirmations` and `ehr.ocr_import_provenance`, except an UPDATE
+of the middle three that changes only the columns above to exactly the values
+above, made by the OCR functions' owner (inside the purge), on a row whose
+document is already `source_deleted`. No session setting is consulted. A
+`source_deleting` or `source_deleted` document changes only by the two exact
+steps the OCR functions' owner makes (the claim from `uploaded` with no legal
+hold, nothing else changed; the purge to `source_deleted` with the neutral
+file name, nothing else changed), and an insert with either status is refused
+(55000). `ocr.validate_job_write` refuses a job insert and any change to
+`queued` or `processing` on such a document (0107 let failed -> queued pass
+without the document check).
+
+**Worker commands** (`hid_ocr_worker` only; 42501 for a subject without the
+`ocr_worker` role):
+
+| Command | Notes |
+|---|---|
+| `ocr.list_worker_source_deletions(limit 1-500)` returns `(document_id, facility_id, storage_bucket, storage_key, due_seconds)` | `source_deleting` documents first (least recently attempted first, at most half the limit while due documents wait), then oldest due first. 22023 for a bad limit. |
+| `ocr.worker_source_deletion_backlog()` returns `(due, overdue)` | Due or claimed now; overdue = those due for more than 2 hours (7 days and 2 hours after the finish), plus `uploaded` documents with a job stuck in `extracted` for more than 24 hours or in `queued` or `processing` for more than 48 hours, not counting a job parked by the page allowance (counted, never deleted). |
+| `ocr.claim_worker_source_deletion(document_id, correlation_id 8-128)` returns `(outcome, storage_bucket, storage_key)` | `claimed` (now `source_deleting`; audit `ocr.source.deletion_claimed`), `already_claimed`, `already_deleted` or `not_due` (nothing changed; bucket and key NULL); P0002, 22023. |
+| `ocr.purge_worker_source_document(document_id, versions_deleted 0-100000, correlation_id 8-128)` returns `(outcome, extractions, validations, confirmations)` | `deleted`, `already_deleted` or `not_claimed` (not `source_deleting`; nothing changed); P0002 for an unknown document; 22023 for bad input. |
+
+**Services.**
+- ehr-api: `GET /api/v1/ehr/documents/:id/download` for a
+  `source_deleting` or `source_deleted` document answers 410 `DOCUMENT_SOURCE_DELETED`, detail
+  `Source page deleted after 7 days` (after the read check, so a caller
+  without access still gets 403). The document list shows status
+  `source_deleting` or `source_deleted`. The internal OCR source read
+  (`GET /api/v1/ehr/internal/ocr/documents/:documentId/source`) still answers
+  the metadata, with that status: ocr-api needs the document's
+  patient to authorize reads of the job.
+- ocr-api: each item of `GET /api/v1/ocr/jobs/:jobId/extractions` carries
+  `contentDeleted` (true when the job's document is `source_deleting` or
+  `source_deleted`; then `rawText` is `''`, `structuredPayload` `{}` and the
+  reading empty). Creating a job on such a document, and retry, validation,
+  patient confirmation and publication of its jobs, answer 410
+  `DOCUMENT_SOURCE_DELETED`; a publication already claimed fails terminally
+  with that code. `@hid/api-client` parses a `contentDeleted` extraction
+  without text and still rejects an empty `rawText` on any other; the EHR app
+  shows `Source page deleted after 7 days` instead of the page and `Content
+  deleted after 7 days` instead of the review.
+
+Under an owner that neither is a superuser nor bypasses row-level security
+(release checklist P8) the worker commands see no document, as every OCR
+worker command sees no job. 0112 has no down migration; the declaration is
+signed separately. Suite:
+`services/ehr-api/test/database/ocr-source-deletion.integration.sql`.
+
+## 42. Records processing: publishing a reading as a draft (0113)
+
+Owner decision (D-Eminence, 2026-11-11), verbatim: "Option B: allow drafts,
+but only for staff given a dedicated "records processing" permission for that
+patient. Never through shares or PINs. The draft stays a draft until a
+clinician signs it. This needs database change 0113 and a little more work.
+but the staff permission should cover publish to patient profile/health ID".
+
+Dated note, 2026-11-11, amending the owner decisions recorded in 0104 D7 and
+0108 D-b (both migrations are applied and unchanged; 0113's header carries the
+same note): publishing into the chart still needs the publisher's own
+direct-care write grant, and the cover (sections 32.1 and 36: approval, Access
+PIN, any share) still never publishes. The one exception: the holder of the
+patient's dedicated records-processing grant may publish any reading as a
+DRAFT note. "Patient profile/health ID" is read as the patient's record: an EHR
+clinical-note reading is published as it is; a Lab, medication or
+`DOCUMENT_ONLY` reading becomes a draft note of the same kind in the same
+encounter, built from the reviewed fields only (ocr-api
+`paperRecordDraftNote`), titled "Lab results", "Medicines" or "Document" (EHR
+shows "From a paper record (Migrate): Lab results"). Structured Lab and
+Pharmacy records (Lab imported evidence, Pharmacy imported medications) still
+need direct care: under the grant they are never written, and the publication's
+`targetResourceType` is `clinical-note`. A clinician signs the draft later.
+
+**The database keeps it a draft (0113 D4).** Under `healthcare-operations` the
+API is not the only check: `ehr.records_processing_draft_guard()` (BEFORE
+INSERT, UPDATE and DELETE on `ehr.encounters`, `ehr.clinical_notes` and
+`ehr.clinical_note_revisions`) refuses with 42501
+`RECORDS_PROCESSING_DRAFT_ONLY` every update and delete, and every insert but
+the "Imported paper records" encounter, a draft note in it and that note's
+first revision, for a patient for whom the session's dedicated grant is named.
+The draft must be inserted unsigned, at revision 1, with the paper-record note
+type and title prefix.
+
+**One route per publication (0113 D5).** `ocr.publications.publication_basis`
+(`direct_care` or `records_processing_grant`; NULL before 0113, read as direct
+care) is written by the request and never changed. Every execution attempt is
+authorized on that basis alone: a Lab or medicine reading requested under the
+grant is retried as the same draft note, never as Lab or Pharmacy evidence,
+and one requested under direct care is never retried as a draft note (403
+`OCR_PUBLISH_NEEDS_DIRECT_CARE` when direct care is gone). The draft note of a
+Lab reading writes each date as written on the paper; a document-only reading
+too long for a note (100,000 characters) is refused at validation.
+A `healthcare-operations` write grant that the check does not name (for
+example one imported from legacy identity) writes nothing. Under any other
+purpose the guard does nothing.
+
+**The dedicated grant.** `identity.records_processing_write_grant(patient,
+subject, membership, facility)` returns its id or NULL (SECURITY DEFINER, for
+`hid_ocr_runtime` and `hid_ehr_runtime` only). It is the grant the patient's
+approval of a records-processing access request writes (0104 D2-D4, 0072):
+purpose `healthcare-operations`, scope `write_records`, active, at most 24
+hours, this membership and facility and the live account, `source_system`
+`hid`, not break-glass, not held, no authorization method, granted by the
+patient; its request approved by the patient, `healthcare-operations`,
+`write_records`, 5-1440 minutes. Still refused (0104 D8): a patient under 18 or
+with no date of birth (Africa/Lagos), a membership without `ocr.job.write`,
+`healthcare-operations` or `direct-care` inactive, a deny directive for writing
+under records processing or direct care. Only the session's own subject,
+membership and facility may be asked about. A share has no request, a PIN grant
+is direct care with an authorization method, and a read-only approval writes a
+`read_records` grant, so none of them is ever named.
+
+**OCR API** (`POST /api/v1/ocr/validations/:validationId/publications`, the
+request and each attempt):
+
+1. Steps 1-3 of section 39 under `direct-care`, as before (with direct-care
+   write, every target publishes as before; a visit named in the reading is
+   used; a reading with no visit goes to the imported paper records, still
+   `direct-care`).
+2. Otherwise the check above is asked about the job's patient (the source's,
+   or the confirmed patient's when the source is hidden under direct care). With
+   a grant, the source is read again under `healthcare-operations` and must be
+   that patient's; then an EHR reading is published as a draft (any other
+   target: 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE`). EHR is called under
+   `healthcare-operations`, without `encounterId`, with `confirmedBy`.
+3. Otherwise 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (job readable) or 404
+   `OCR_JOB_NOT_FOUND`, as section 39.
+
+The same person may confirm the patient and publish. `ocr.publication.request`,
+`.succeed` and `.fail` carry, ids only: `basis` (`records_processing_grant` or
+`direct_care`), `grantId` (the dedicated grant), `confirmedBy` and
+`publishedBy` (account ids).
+
+**EHR API** (`POST /api/v1/ehr/internal/ocr/patients/:patientId/clinical-notes`):
+now also takes `X-Purpose-Of-Use: healthcare-operations`; `encounterId` is
+optional; `confirmedBy` (uuid) is optional. Under `healthcare-operations` it
+checks the dedicated grant again in its transaction (403
+`OCR_PUBLISH_NEEDS_DIRECT_CARE` without it, nothing written; 400
+`OCR_DRAFT_ENCOUNTER_NOT_CHOSEN` if a visit is named). Without `encounterId`
+(either purpose) the note goes to the patient's one "Imported paper records"
+encounter at the facility, found or created by
+`ehr.imported_paper_records_encounter(patient)`: `encounter_type` `other`,
+`status` `completed`, `started_at` = `ended_at` = creation time,
+`chief_complaint` "Imported paper records (Migrate)", the new column
+`imported_paper_records` true (unique per patient and facility, a partial unique
+index; INSERT ... ON CONFLICT DO NOTHING then SELECT, so concurrent publishers
+share one row; the flag cannot be changed after insert). The note is a
+`draft`, note type "From a paper record (Migrate)", title "From a paper record
+(Migrate): " + the reading's title, with `ehr.ocr_import_provenance` linking
+the OCR job, as before. The audit `ehr.note.import-ocr` names `basis`,
+`grantId`, `confirmedBy`, `publishedBy` and `importedPaperRecords`. Signing is
+unchanged: `PATCH .../encounters/:encounterId/clinical-notes/:noteId` is
+`direct-care` only.
+
+**What the patient sees.** The "Imported paper records" encounter is hidden
+from every patient-self read until it holds a signed or amended note: the
+patient-self row-level security policy on `ehr.encounters`
+(`encounters_patient_self_read`, through
+`ehr.imported_paper_records_signed`), and the patient record summary
+(`GET /api/v1/ehr/me/records`) and patient chat evidence filter it
+too. Drafts stay hidden as before. Staff encounter reads carry
+`importedPaperRecords: true` so staff screens can label it; the patient's
+record summary and chat evidence carry the same field and the title "Imported
+paper records (Migrate)".
+
+**Website (not in place).** Migrate's publish step must stop requiring a visit
+under records processing and explain that the reading lands as a draft for a
+clinician to sign; patient and staff record views should label the encounter
+by `importedPaperRecords`.
+
+## 43. Patient details on this facility's own lab and pharmacy work (0121)
 
 Owner decision 25 of 2026-11-01 (D-Eminence, "all recommended except D5", on
 the Akos handover backend plan, item 3a; D8: emergency sessions see the

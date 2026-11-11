@@ -38,6 +38,22 @@ source read is now this 404 too, rather than EHR's own code). A refusal at an
 execution attempt (a grant gone after the request) fails the publication with
 `OCR_PUBLISH_NEEDS_DIRECT_CARE` in place of `OCR_JOB_NOT_FOUND`.
 
+Since 0113 (owner decision of 2026-11-11, `docs/INTERFACE_CONTRACT.md`
+section 42) a caller without direct-care write who holds the patient's
+dedicated records-processing grant (an approved `healthcare-operations`
+`write_records` access request; never a share, an Access PIN or an approval of
+direct care: `identity.records_processing_write_grant`, asked in the
+publication's transaction) publishes any reading as a draft note: EHR is
+called under `healthcare-operations` without a visit and puts the draft note
+into the patient's "Imported paper records" encounter at the facility. A
+clinical-note reading goes as it is; a Lab, medication or document-only reading
+becomes a draft note titled "Lab results", "Medicines" or "Document" from its
+reviewed fields (`paperRecordDraftNote`), never a structured Lab or Pharmacy
+record (those stay direct care). A reading may
+name no visit (`encounterId` optional); a direct-care publisher of such a
+reading also lands it there. The publication audit events carry `basis`,
+`grantId`, `confirmedBy` and `publishedBy` (ids only).
+
 ## Paper readings (`hid-paper-reading-v2`)
 
 The worker writes `provenance.processingContract` `hid-textract-v2` and a
