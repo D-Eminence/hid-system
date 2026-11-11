@@ -4,7 +4,7 @@ Plan PR-3 and PR-4, with the owner's decisions of 11 November 2026: no Health ID
 campaigns go live (decision Q38: a new organiser may set a campaign Active at once; support can still pause a
 group, the name blocklist stays, and registrants see "Unverified organiser"), no per-organiser limits, unlinked registrations kept 1 year, joint-controller
 terms version `2026-11-01`, an existing account may start an outreach group with the same login, free for now.
-The database side (migrations 0114 "outreach organisers" and 0115 "outreach retention", branch
+The database side (migrations 0115 "outreach organisers" and 0116 "outreach retention", branch
 `wt-outreach-signup-db`) is a separate change; every rule below is enforced there too, and the calls listed at the
 end are its functions exactly. Identity and Outreach only answer earlier and in plain English.
 
@@ -30,6 +30,8 @@ identity-api (all under `/api/v1`):
 | `POST admin/outreach-organisers/:organizationId/suspend` | `platform.facility.manage` and `.unlock` | If-Match version and `{ reason }`; answers `{ status: 'suspended', label: 'Paused', version, revokedRoles }` |
 | `POST admin/outreach-campaigns/:campaignId/close` | `platform.facility.manage` and `.unlock` | the campaign's version as If-Match and `{ reason }` |
 | `POST admin/outreach-campaigns/:campaignId/admins` | `platform.facility.manage` and `.unlock` | `{ membershipId, reason }` |
+| `POST admin/outreach-registrations/search` | `platform.facility.manage` and `.unlock` | `{ organizationId, temporaryPatientId }` or `{ organizationId, phone }` (exactly one; 400 `OUTREACH_REGISTRATION_LOOKUP_INVALID` otherwise); answers `{ registrations: [{ caseId, groupName, campaignName, temporaryPatientId, createdAt, redacted }] }`, never the person's name, phone or notes; 0116 audits the search without the phone number |
+| `POST admin/outreach-registrations/:caseId/redact` | `platform.facility.manage` and `.unlock` | `{ reason }` (8 to 500); answers `{ caseId, outcome: 'redacted' }`; 409 `OUTREACH_REGISTRATION_NOT_REDACTABLE` when already deleted, linked or not at an outreach group |
 
 Every sign-up route answers 423 `OUTREACH_ORGANISER_SIGNUP_UNAVAILABLE` while the control
 `outreach_organiser_signup_enabled` (seeded off) is off, the Outreach portal is off or maintenance is on. An email
@@ -39,7 +41,7 @@ command the shared public application quota, 5 sign-ups a network a day and 3 si
 (429 `OUTREACH_ORGANISER_EMAIL_RATE_LIMITED`). A patient's Health ID email is refused with 409
 `OUTREACH_ORGANISER_PATIENT_LOGIN`. A suspended group's organiser cannot start again: "Start an outreach group"
 answers 403 `OUTREACH_ORGANISER_SUSPENDED` for a login that organised a suspended group or a suspended group's
-contact phone, and the public sign-up answers 423 for that phone. Group names are checked as 0114 checks them
+contact phone, and the public sign-up answers 423 for that phone. Group names are checked as 0115 checks them
 (accents dropped, Latin letters only, words kept for hospitals, health agencies and government bodies in any case).
 Outreach invitations are accepted by link only; the email shows no code. Abuse guards, because the email names the
 group: at most 50 invitations wait at once and 30 are made a day per group, cancelled ones included (429
@@ -60,7 +62,7 @@ refusals answer 423 `OUTREACH_ORGANISER_SUSPENDED` and 422 for consent (`OUTREAC
 `GET .../campaigns/governance` adds `organiserStatus` (`not_outreach_group|unverified|suspended|unknown`):
 `unverified` is any outreach group that is not paused (Health ID never verifies one).
 
-Retention (owner decision 3): identity-api's `OutreachRetentionSweeper` calls 0115's
+Retention (owner decision 3): identity-api's `OutreachRetentionSweeper` calls 0116's
 `identity.sweep_expired_outreach_registrations(500)` as `system:auth` every `OUTREACH_RETENTION_SWEEP_SECONDS`
 (default 3600, 0 off). It redacts registrations never linked to a Health ID once `closed_at + 365 days` (or
 `starts_at + 365 days` for a campaign never closed) has passed. The same call deletes sign-ups never activated
@@ -76,10 +78,10 @@ A facility is an outreach group when the membership's roles include `outreach_or
 The database's fence on `auth.account_roles` keeps those roles at outreach groups only and keeps every clinical role
 out of them; the same account may hold hospital roles at hospital facilities.
 
-## The database calls the services make (0114 and 0115)
+## The database calls the services make (0115 and 0116)
 
 Positional arguments; refusals are matched by the code in the error's message (the specs compare the codes with
-0114's raise messages). P = a `system:auth` transaction, A = a transaction as the signed-in account (facility ''
+0115's raise messages). P = a `system:auth` transaction, A = a transaction as the signed-in account (facility ''
 when none, purpose `healthcare-operations`), ADM = a platform administrator's transaction.
 
 - P `identity.start_outreach_organiser_signup(signup_id, token_hmac, email, organiser_name, group_name, kind,
@@ -116,9 +118,9 @@ when none, purpose `healthcare-operations`), ADM = a platform administrator's tr
 - P `identity.sweep_expired_outreach_registrations(requested_limit)` returns the number redacted.
 - outreach-api: `insert into outreach.registration_consents (registration_case_id, facility_id,
   consent_text_version, language, method, guardian_name, captured_by_account_id, captured_by_membership_id)` with
-  `platform.current_account_id()` as the capturer (0114's policy); `select outreach.organiser_status()`, a scalar
+  `platform.current_account_id()` as the capturer (0115's policy); `select outreach.organiser_status()`, a scalar
   for `app.facility_id`: `active` or `suspended` (any other text is read as not paused), null when the facility is
   not an outreach group.
 
 `services/identity-api/scripts/verify-outreach-organisers-runtime.mjs` runs these calls through the real services
-against a disposable Postgres 16 with 0114 and 0115 applied.
+against a disposable Postgres 16 with 0115 and 0116 applied.

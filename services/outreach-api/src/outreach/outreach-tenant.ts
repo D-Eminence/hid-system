@@ -22,17 +22,17 @@ export function tenantNoHealthIdLink(): DomainProblem {
     'Outreach groups cannot link people to a Health ID. The person can link their own Health ID later from their account.');
 }
 
-/** The codes outreachRuleProblem matches, each raised by 0114. */
+/** The codes outreachRuleProblem matches, each raised by 0115. */
 export const OUTREACH_TENANT_RULE_CODES = ['OUTREACH_ORGANISER_SUSPENDED',
   'OUTREACH_TENANT_NO_HEALTH_ID_LINK', 'OUTREACH_CONSENT_GUARDIAN_REQUIRED', 'OUTREACH_CONSENT_CASE_INVALID',
   'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_NOTES_TOO_LONG'] as const;
 
 /**
  * The outreach group rules the database enforces (plan PR-1, migration
- * 0114), answered in plain English. The refusal code is matched in the
+ * 0115), answered in plain English. The refusal code is matched in the
  * error's message, so any SQLSTATE works. Undefined for any other error.
  * OUTREACH_TENANT_RULE_CODES lists every code matched; a test compares it
- * with 0114's raise messages. There is no check before a campaign goes live
+ * with 0115's raise messages. There is no check before a campaign goes live
  * (owner decision Q38, 11 Nov 2026); a paused group is refused everything.
  */
 export function outreachRuleProblem(error: unknown): DomainProblem | undefined {

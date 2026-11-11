@@ -75,7 +75,7 @@ export class OutreachService {
         // The person's agreement, in the same transaction (plan PR-4): the
         // database refuses an outreach group's registration without it.
         if (normalized.consent) {
-          // 0114's policy: the capturer is the request's own account and membership.
+          // 0115's policy: the capturer is the request's own account and membership.
           await client.query(`insert into outreach.registration_consents (
             registration_case_id,facility_id,consent_text_version,language,method,guardian_name,
             captured_by_account_id,captured_by_membership_id
@@ -363,7 +363,7 @@ export class OutreachService {
     if (!isOutreachTenant(context)) return { rule: 'campaign_admins', organiserStatus: 'not_outreach_group' };
     try {
       const state = await this.database.withTransaction(context, async (client) =>
-        // 0114's outreach.organiser_status() answers a scalar: 'suspended' for a paused group, another
+        // 0115's outreach.organiser_status() answers a scalar: 'suspended' for a paused group, another
         // state for one that is not paused, or null when the facility is not an outreach group.
         (await client.query<{ organiser_status: string | null }>('select outreach.organiser_status() as organiser_status'))
           .rows[0]?.organiser_status, { readOnly: true });
@@ -373,29 +373,6 @@ export class OutreachService {
     } catch {
       return { rule: 'campaign_admins', organiserStatus: 'unknown' };
     }
-  }
-
-  /**
-   * Who is in a campaign, by name, and to its admins who could be added (0111's outreach.campaign_staff), with the
-   * caller's own role in it. A non-member gets no one.
-   */
-  async listCampaignStaff(id: string, context: DataAccessContext): Promise<CampaignStaff> {
-    return this.database.withTransaction(context, async (client) => {
-      const exists = await client.query(`select 1 from outreach.campaigns where id=$1 and facility_id=$2`, [id, context.facilityId]);
-      if (!exists.rowCount) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
-      const result = await client.query<{ membership_id: string; display_name: string; campaign_role: CampaignRole | null }>(
-        `select membership_id, display_name, campaign_role from outreach.campaign_staff($1)`, [id]);
-      const people = result.rows.map((row) => ({ membershipId: row.membership_id, name: row.display_name,
-        campaignRole: row.campaign_role }));
-      return { yourRole: people.find((person) => person.membershipId === context.membershipId)?.campaignRole ?? null, people };
-    }, { readOnly: true });
-  }
-
-  /** The caller's own role in a campaign of its facility, or null. */
-  private async campaignRole(client: PoolClient, campaignId: string, context: DataAccessContext): Promise<string | null> {
-    const result = await client.query<{ role: string }>(`select role from outreach.campaign_members
-      where campaign_id=$1 and facility_id=$2 and membership_id=$3`, [campaignId, context.facilityId, context.membershipId]);
-    return result.rows[0]?.role ?? null;
   }
 
   /**

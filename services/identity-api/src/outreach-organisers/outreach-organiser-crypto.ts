@@ -21,7 +21,7 @@ export function normalizeOutreachPhone(raw: string): string | undefined {
 
 /**
  * Group names that suggest a hospital, a health agency or a government body
- * (plan PR-1), the same rule as identity.outreach_group_name_allowed (0114).
+ * (plan PR-1), the same rule as identity.outreach_group_name_allowed (0115).
  * The name is first reduced to plain Latin letters: Unicode NFKD, then
  * accents dropped (Yoruba, Igbo and Hausa letters keep their base letter);
  * anything left that is not a Latin letter, a digit, a space or . , ' ’ &

@@ -7,8 +7,8 @@ import { OutreachInvitationsService } from './outreach-invitations.service';
 import { OutreachOrganiserAccountController, OutreachOrganiserController } from './outreach-organiser.controller';
 import { OutreachOrganiserService } from './outreach-organiser.service';
 import { OutreachRetentionSweeper } from './outreach-retention.sweeper';
-import { OutreachCampaignsAdminController, OutreachOrganisersAdminController,
-  OutreachOrganisersAdminService } from './outreach-organisers-admin';
+import { OutreachCampaignsAdminController, OutreachOrganisersAdminController, OutreachOrganisersAdminService,
+  OutreachRegistrationsAdminController } from './outreach-organisers-admin';
 
 /**
  * Open sign-up on outreach. (plan PR-3): the public sign-up, "Start an
@@ -21,7 +21,7 @@ import { OutreachCampaignsAdminController, OutreachOrganisersAdminController,
   controllers: [OutreachOrganiserAccountController, OutreachOrganiserController,
     OutreachInvitationsSignedInController, OutreachInvitationsPublicController, OutreachInvitationsPreviewController,
     OutreachInvitationsController,
-    OutreachOrganisersAdminController, OutreachCampaignsAdminController],
+    OutreachOrganisersAdminController, OutreachCampaignsAdminController, OutreachRegistrationsAdminController],
   providers: [OutreachOrganiserService, OutreachInvitationsService, OutreachOrganisersAdminService,
     OutreachRetentionSweeper],
 })

@@ -22,7 +22,7 @@ export const OUTREACH_INVITATION_ACCEPT_WINDOW = { windowSeconds: 3600, maxReque
 
 const HMAC_DOMAIN = 'outreach-invitation';
 
-/** identity.create_outreach_invitation (0114). */
+/** identity.create_outreach_invitation (0115). */
 interface CreateRow extends QueryResultRow {
   result: string;
   invitation_id: string | null;
@@ -31,7 +31,7 @@ interface CreateRow extends QueryResultRow {
   dispatch: boolean | null;
 }
 
-/** identity.list_outreach_team (0114): the group's members, then its pending invitations. */
+/** identity.list_outreach_team (0115): the group's members, then its pending invitations. */
 interface TeamRow extends QueryResultRow {
   entry_kind: 'member' | 'invitation';
   entry_id: string;
@@ -43,7 +43,7 @@ interface TeamRow extends QueryResultRow {
   expires_at: Date | string | null;
 }
 
-/** identity.preview_outreach_invitation (0114). */
+/** identity.preview_outreach_invitation (0115). */
 interface PreviewRow extends QueryResultRow {
   result: string;
   group_name: string | null;
@@ -54,7 +54,7 @@ interface PreviewRow extends QueryResultRow {
   expires_at: Date | string | null;
 }
 
-/** identity.accept_outreach_invitation_with_password / _for_account (0114). */
+/** identity.accept_outreach_invitation_with_password / _for_account (0115). */
 interface AcceptRow extends QueryResultRow {
   result: string;
   account_id?: string | null;
@@ -77,7 +77,7 @@ export function isOutreachOrganiserAt(context: DataAccessContext): boolean {
   return context.actor.facility?.roles.includes('outreach_organiser') === true;
 }
 
-/** The answer for a link `result` other than 'ready', in plain English (0114's answers). */
+/** The answer for a link `result` other than 'ready', in plain English (0115's answers). */
 export function invitationResultProblem(result: string | undefined): DomainProblem {
   switch (result) {
     case 'invalid': return new DomainProblem(400, 'OUTREACH_INVITATION_INVALID',
@@ -103,7 +103,7 @@ export function invitationResultProblem(result: string | undefined): DomainProbl
   }
 }
 
-/** The refusal codes 0114's invitation commands raise, in plain English. */
+/** The refusal codes 0115's invitation commands raise, in plain English. */
 export const OUTREACH_INVITATION_REFUSALS: ReadonlyArray<readonly [string, () => DomainProblem]> = [
   ['OUTREACH_ORGANISER_PERMISSION_DENIED', organiserRequired],
   ['OUTREACH_ORGANISER_ACCOUNT_REQUIRED', () => new DomainProblem(401, 'OUTREACH_ORGANISER_ACCOUNT_REQUIRED',
@@ -140,7 +140,7 @@ function organiserRequired(): DomainProblem {
 }
 
 /**
- * Outreach invitations (plan PR-1/PR-3, migration 0114): an organiser invites
+ * Outreach invitations (plan PR-1/PR-3, migration 0115): an organiser invites
  * a helper by email as outreach_volunteer. They are separate commands from facility
  * staff invitations, which are unchanged. The helper opens the emailed link:
  * a new person sets a password and is signed in; someone with a Health ID
@@ -188,7 +188,7 @@ export class OutreachInvitationsService {
     }
     if (!row.invitation_id || !row.expires_at) throw unavailable();
     const expiresAt = new Date(iso(row.expires_at) as string);
-    // Not emailed when the address already had 3 outreach invitation emails today (0114 answers dispatch false).
+    // Not emailed when the address already had 3 outreach invitation emails today (0115 answers dispatch false).
     const deliveryOutcome = row.dispatch === true
       ? await this.send(context, row.invitation_id, email, token, expiresAt)
       : 'unknown' as const;

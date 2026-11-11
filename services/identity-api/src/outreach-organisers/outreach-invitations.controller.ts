@@ -31,7 +31,7 @@ export class OutreachInvitationsController {
   }
 
   /**
-   * 201 { invitationId, expiresAt, deliveryOutcome }. 0114 keeps no
+   * 201 { invitationId, expiresAt, deliveryOutcome }. 0115 keeps no
    * idempotency record: the same invitation sent again answers 409
    * OUTREACH_INVITATION_ALREADY_SENT, so a retry never sends a second email.
    */

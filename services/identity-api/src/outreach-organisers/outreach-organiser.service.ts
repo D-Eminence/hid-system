@@ -25,11 +25,11 @@ export const OUTREACH_SIGNUP_SESSION_SECONDS = 60 * 60;
 
 const HMAC_DOMAIN = 'outreach-organiser-signup';
 
-/** 0114's fixed timings: a code lasts 15 minutes, a new one can be asked for after a minute. */
+/** 0115's fixed timings: a code lasts 15 minutes, a new one can be asked for after a minute. */
 export const OUTREACH_SIGNUP_CODE_SECONDS = 15 * 60;
 export const OUTREACH_SIGNUP_RESEND_SECONDS = 60;
 
-/** identity.activate_outreach_organiser (0114). */
+/** identity.activate_outreach_organiser (0115). */
 interface ActivateRow extends QueryResultRow {
   organization_id: string;
   facility_id: string;
@@ -39,7 +39,7 @@ interface ActivateRow extends QueryResultRow {
   replayed: boolean;
 }
 
-/** identity.activate_outreach_organiser_for_account (0114). */
+/** identity.activate_outreach_organiser_for_account (0115). */
 interface ForAccountRow extends QueryResultRow {
   result: string;
   organization_id: string | null;
@@ -81,13 +81,13 @@ function newCode(): string {
   return randomInt(0, 1_000_000).toString().padStart(6, '0');
 }
 
-/** The code as 0114 stores it: keyed, and bound to the sign-up. */
+/** The code as 0115 stores it: keyed, and bound to the sign-up. */
 function codeHmac(key: Buffer, signupId: string, code: string): string {
   return domainHmac(key, HMAC_DOMAIN, 'otp', signupId, code);
 }
 
 /**
- * The refusal codes 0114's sign-up commands raise, in plain English. A test
+ * The refusal codes 0115's sign-up commands raise, in plain English. A test
  * compares this list with the migration's raise messages.
  */
 export const OUTREACH_SIGNUP_REFUSALS: ReadonlyArray<readonly [string, () => DomainProblem]> = [

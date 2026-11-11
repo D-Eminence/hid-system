@@ -78,7 +78,7 @@ describe('Outreach group rules (open sign-up on outreach.)', () => {
       .create(minor, 'tenant-key-0002', tenant)).resolves.toMatchObject({ id: ids.case, possibleDuplicate: true });
     expect(database.withTransaction).toHaveBeenCalledTimes(1);
     const consentCall = query.mock.calls.find(([sql]) => String(sql).includes('outreach.registration_consents'));
-    // 0114's columns: registration_case_id, the facility, and the capturer as the request's own account.
+    // 0115's columns: registration_case_id, the facility, and the capturer as the request's own account.
     expect(String(consentCall?.[0])).toMatch(/registration_case_id,facility_id,consent_text_version,language,method,guardian_name,\s*captured_by_account_id,captured_by_membership_id/);
     expect(String(consentCall?.[0])).toContain('platform.current_account_id()');
     expect(consentCall?.[1]).toEqual([ids.case, ids.facility, consent.textVersion, 'yo', 'guardian', 'Bisi Fictional',
@@ -204,22 +204,22 @@ describe('Registration DTO: consent and E.164 phones', () => {
   });
 });
 
-describe('The refusal codes match migration 0114', () => {
-  // 0114's raise messages for the rules outreach-api answers (the db branch,
-  // services/ehr-api/database/migrations/0114_outreach_organisers.sql). When
+describe('The refusal codes match migration 0115', () => {
+  // 0115's raise messages for the rules outreach-api answers (the db branch,
+  // services/ehr-api/database/migrations/0115_outreach_organisers.sql). When
   // the migration is in this tree, the list is read from it too.
-  const RAISED_BY_0114 = ['OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_CONSENT_CASE_INVALID',
+  const RAISED_BY_0115 = ['OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_CONSENT_CASE_INVALID',
     'OUTREACH_CONSENT_GUARDIAN_REQUIRED', 'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_NOTES_TOO_LONG',
     'OUTREACH_ORGANISER_SUSPENDED', 'OUTREACH_TENANT_NO_HEALTH_ID_LINK'];
 
-  it('matches only codes 0114 raises, and every rule of an outreach group\'s data', () => {
-    expect([...OUTREACH_TENANT_RULE_CODES].sort()).toEqual([...RAISED_BY_0114].sort());
+  it('matches only codes 0115 raises, and every rule of an outreach group\'s data', () => {
+    expect([...OUTREACH_TENANT_RULE_CODES].sort()).toEqual([...RAISED_BY_0115].sort());
     for (const code of OUTREACH_TENANT_RULE_CODES) {
       expect(outreachRuleProblem({ code: 'P0001', message: code })).toBeDefined();
     }
   });
 
-  const migration = join(__dirname, '../../../ehr-api/database/migrations/0114_outreach_organisers.sql');
+  const migration = join(__dirname, '../../../ehr-api/database/migrations/0115_outreach_organisers.sql');
   (existsSync(migration) ? it : it.skip)('every code matched is raised by the migration in this tree', () => {
     const raised = new Set([...readFileSync(migration, 'utf8').matchAll(/message\s*=\s*'([A-Z_]+)'/g)].map((m) => m[1]));
     for (const code of OUTREACH_TENANT_RULE_CODES) expect(raised.has(code)).toBe(true);

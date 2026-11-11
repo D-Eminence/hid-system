@@ -219,7 +219,7 @@ export function staffInvitationContent(input: {
  * An outreach organiser's invitation to a helper: the group's name when
  * Identity found it safe, otherwise "an outreach group". The link opens the
  * outreach site's invitation page. Outreach invitations are accepted by
- * link only (0114), so no code is shown.
+ * link only (0115), so no code is shown.
  */
 function outreachInvitationContent(input: {
   facilityName?: string | null;

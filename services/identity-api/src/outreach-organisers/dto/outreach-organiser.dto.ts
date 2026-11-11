@@ -87,7 +87,7 @@ export class CreateOutreachInvitationDto {
   email!: string;
 }
 
-/** The invitation link's id and token (0114 accepts by link only). */
+/** The invitation link's id and token (0115 accepts by link only). */
 export class OutreachInvitationProofDto {
   @IsUUID('4')
   invitationId!: string;

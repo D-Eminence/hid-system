@@ -28,6 +28,35 @@ export class OutreachAdminReasonDto extends OutreachAdminVersionDto {
   reason!: string;
 }
 
+/** A value as typed, trimmed; an empty one is no value. */
+const trimmedOrNone = ({ value }: { value: unknown }) => {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
+/**
+ * Support's search before deleting someone's details at their request: the outreach group, and either the temporary ID
+ * on the slip the group gave the person (it starts tmp_) or the phone number the group took down. Exactly one of the two
+ * (findRegistrations); 0116 checks each value's shape.
+ */
+export class FindOutreachRegistrationsDto {
+  @IsUUID('4')
+  organizationId!: string;
+
+  @IsOptional() @Transform(trimmedOrNone) @IsString() @MaxLength(64)
+  temporaryPatientId?: string;
+
+  @IsOptional() @Transform(trimmedOrNone) @IsString() @MaxLength(32)
+  phone?: string;
+}
+
+/** Why the details are deleted, kept in the audit log (8 to 500 characters). */
+export class RedactOutreachRegistrationDto {
+  @Transform(trim) @IsString() @MinLength(8, { message: 'Write a short reason (at least 8 characters)' }) @MaxLength(500)
+  reason!: string;
+}
+
 export class AppointCampaignAdminDto {
   @Transform(trim) @IsString() @MinLength(8, { message: 'Write a short reason (at least 8 characters)' }) @MaxLength(500)
   reason!: string;
@@ -37,7 +66,7 @@ export class AppointCampaignAdminDto {
 }
 
 /**
- * identity.admin_list_outreach_organisers (0114). Owner decision Q38 (11 Nov
+ * identity.admin_list_outreach_organisers (0115). Owner decision Q38 (11 Nov
  * 2026) removed Health ID's one-time check: a group is 'active' or
  * 'suspended' (paused), and nothing else is read about its state.
  */
@@ -80,7 +109,7 @@ export function outreachAdminVersion(ifMatch: string | undefined, bodyVersion: n
   return version;
 }
 
-/** The refusals of 0114's support commands, in plain English. */
+/** The refusals of 0115's support commands, in plain English. */
 export const OUTREACH_ADMIN_REFUSALS: Readonly<Record<string, readonly [number, string]>> = {
   OUTREACH_ORGANISER_NOT_FOUND: [404, 'That outreach group was not found.'],
   OUTREACH_ORGANISER_VERSION_CONFLICT: [409, 'Someone else changed this outreach group just now. Reload the list and try again.'],
@@ -91,8 +120,21 @@ export const OUTREACH_ADMIN_REFUSALS: Readonly<Record<string, readonly [number, 
   OUTREACH_CAMPAIGN_VERSION_CONFLICT: [409, 'Someone else changed this campaign just now. Reload and try again.'],
   OUTREACH_CAMPAIGN_RESCUE_INVALID: [422, 'Write a short reason (at least 8 characters).'],
   OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE: [422, 'That person is not an active member of this outreach group.'],
+  OUTREACH_REGISTRATION_LOOKUP_INVALID: [400,
+    'Choose the outreach group, then enter the temporary ID (it starts tmp_) or the phone number the person gave.'],
+  OUTREACH_REDACTION_INVALID: [422, 'Write a short reason (at least 8 characters).'],
   ADMIN_PERMISSION_DENIED: [403, 'You do not have permission to do this.'],
 };
+
+/** identity.admin_find_outreach_registrations (0116): where and when, never the person's details. */
+interface RegistrationFoundRow extends QueryResultRow {
+  case_id: string;
+  group_name: string;
+  campaign_name: string | null;
+  temporary_patient_id: string;
+  created_at: Date | string;
+  redacted: boolean;
+}
 
 export function adminProblem(error: unknown): DomainProblem {
   if (error instanceof DomainProblem) return error;
@@ -117,7 +159,7 @@ export function outreachOrganiserLabel(status: OutreachOrganiserStatus): string 
  * pausing a group (which stops everything it does), and the rescue of a
  * campaign whose only admin has gone. There is no check before a group's
  * campaigns go live (owner decision Q38, 11 Nov 2026). The commands are
- * 0114's identity.admin_*; each writes its own audit row, and the list writes
+ * 0115's identity.admin_*; each writes its own audit row, and the list writes
  * one too, so no transaction here is read-only.
  */
 @Injectable()
@@ -178,6 +220,52 @@ export class OutreachOrganisersAdminService {
     } catch (error) {
       throw adminProblem(error);
     }
+  }
+
+  /**
+   * The registrations at an outreach group that match the temporary ID or the phone number a person gives, when they ask
+   * for their details to be deleted sooner: where and when each was made, and whether its details are already deleted.
+   * Never the person's name, phone number or notes. 0116 writes the search's audit row, without the phone number.
+   */
+  async findRegistrations(context: PlatformAdminContext, input: FindOutreachRegistrationsDto) {
+    if ((input.temporaryPatientId === undefined) === (input.phone === undefined)) {
+      throw adminProblem(Object.assign(new Error('OUTREACH_REGISTRATION_LOOKUP_INVALID'), { code: '22023' }));
+    }
+    try {
+      return await this.database.withPlatformTransaction(context, async (client) => {
+        const result = await client.query<RegistrationFoundRow>(
+          'select * from identity.admin_find_outreach_registrations($1,$2,$3)',
+          [input.organizationId, input.temporaryPatientId ?? null, input.phone ?? null]);
+        return { registrations: result.rows.map((row) => ({
+          caseId: row.case_id, groupName: row.group_name, campaignName: row.campaign_name,
+          temporaryPatientId: row.temporary_patient_id, createdAt: iso(row.created_at), redacted: row.redacted === true,
+        })) };
+      });
+    } catch (error) {
+      throw adminProblem(error);
+    }
+  }
+
+  /**
+   * Deletes one person's details from an outreach registration now, at their request, instead of at the yearly sweep
+   * (0116's identity.admin_redact_outreach_registration, which writes the audit row with the reason). A registration
+   * already deleted, linked to a Health ID, or not at an outreach group answers 409.
+   */
+  async redactRegistration(context: PlatformAdminContext, caseId: string, reason: string) {
+    let result: string | undefined;
+    try {
+      result = await this.database.withPlatformTransaction(context, async (client) =>
+        (await client.query<{ result: string }>('select identity.admin_redact_outreach_registration($1,$2) as result',
+          [caseId, reason])).rows[0]?.result);
+    } catch (error) {
+      throw adminProblem(error);
+    }
+    if (result === 'redacted') return { caseId, outcome: 'redacted' as const };
+    if (result === 'not_redactable') {
+      throw new DomainProblem(409, 'OUTREACH_REGISTRATION_NOT_REDACTABLE',
+        'These details are already deleted, or this is not a registration at an outreach group. Search again.');
+    }
+    throw adminProblem(undefined);
   }
 
   /** 'appointed' or 'already_admin'. */
@@ -244,5 +332,33 @@ export class OutreachCampaignsAdminController {
   appointAdmin(@Param('campaignId', new ParseUUIDPipe()) campaignId: string, @Body() input: AppointCampaignAdminDto,
     @Req() request: HidRequest) {
     return this.admin.appointCampaignAdmin(requireAdminContext(request), campaignId, input);
+  }
+}
+
+/**
+ * A person registered at an outreach group can ask Health ID to delete their details sooner than the yearly sweep (the
+ * registration notice and the organiser terms say so). Support finds the registration, then deletes it. Both are POSTs,
+ * so a phone number never goes in an address; the request audit row records the route, never the body.
+ */
+@Controller('admin/outreach-registrations')
+@FacilityOptional()
+export class OutreachRegistrationsAdminController {
+  constructor(private readonly admin: OutreachOrganisersAdminService) {}
+
+  @Post('search')
+  @HttpCode(200)
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
+  @AuditAction('admin.outreach-registrations.search')
+  search(@Body() input: FindOutreachRegistrationsDto, @Req() request: HidRequest) {
+    return this.admin.findRegistrations(requireAdminContext(request), input);
+  }
+
+  @Post(':caseId/redact')
+  @HttpCode(200)
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
+  @AuditAction('admin.outreach-registration.redact')
+  redact(@Param('caseId', new ParseUUIDPipe()) caseId: string, @Body() input: RedactOutreachRegistrationDto,
+    @Req() request: HidRequest) {
+    return this.admin.redactRegistration(requireAdminContext(request), caseId, input.reason);
   }
 }

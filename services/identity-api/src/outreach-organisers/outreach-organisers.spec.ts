@@ -23,8 +23,10 @@ import { decryptOutreachPhone, domainHmac, encryptOutreachPhone, normalizeOutrea
 import { assertOutreachSignupOpen } from './outreach-organiser-gate';
 import { OUTREACH_SIGNUP_COOKIE, OutreachOrganiserController } from './outreach-organiser.controller';
 import { OUTREACH_SIGNUP_REFUSALS, OutreachOrganiserService } from './outreach-organiser.service';
-import { ListOutreachOrganisersDto, OUTREACH_ADMIN_REFUSALS, OutreachOrganisersAdminController, OutreachOrganisersAdminService,
+import { FindOutreachRegistrationsDto, ListOutreachOrganisersDto, OUTREACH_ADMIN_REFUSALS, OutreachOrganisersAdminController,
+  OutreachOrganisersAdminService, OutreachRegistrationsAdminController, RedactOutreachRegistrationDto,
   outreachAdminVersion } from './outreach-organisers-admin';
+import { REQUIRED_PERMISSIONS } from '../common/decorators';
 import { OUTREACH_RETENTION_SWEEP_BATCH, OutreachRetentionSweeper } from './outreach-retention.sweeper';
 
 // Fictional test data only.
@@ -110,7 +112,7 @@ describe('helpers', () => {
       expect(reservedOrganiserName(name)).toBe(false);
   });
 
-  it('refuses the names that once slipped past the list (as 0114 does), and keeps accented names', () => {
+  it('refuses the names that once slipped past the list (as 0115 does), and keeps accented names', () => {
     for (const name of ['World Health Organization', 'Nigeria Centre for Disease Control', 'Ncdc Outreach', 'N.C.D.C Outreach',
       'Lagos University Teaching Hosp', 'General H\u043Espital Ikeja', 'Lagos State Primary Health Care Board', 'FMC Abeokuta',
       'UNICEF Nigeria', 'Red Cross Nigeria', 'W.H.O. Friends', '\uFF28ospital Friends', 'Hope\u200BGroup',
@@ -174,7 +176,7 @@ describe('OutreachOrganiserService', () => {
     db as unknown as DatabaseService, otp as unknown as NotificationOtpClient,
     completion as unknown as OrganizationProfileCompletionService);
 
-  it('starts a sign-up: the network window first, then 0114\'s 12-argument command with HMACs only, then the email', async () => {
+  it('starts a sign-up: the network window first, then 0115\'s 12-argument command with HMACs only, then the email', async () => {
     const system = jest.fn(async (sql: string) => sql.includes('start_outreach_organiser_signup')
       ? { rows: [{ outcome: 'started' }] } : { rows: [] });
     const db = database({ system });
@@ -183,7 +185,7 @@ describe('OutreachOrganiserService', () => {
     expect(started.cookie).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
     expect(started.body).toMatchObject({ accepted: true, expiresInSeconds: 900, resendAfterSeconds: 60 });
     const sqls = system.mock.calls.map((call) => String(call[0]));
-    // The command charges the public application quota itself (0114); Identity does not charge it twice.
+    // The command charges the public application quota itself (0115); Identity does not charge it twice.
     expect(sqls.some((sql) => sql.includes('platform.consume_public_application_quota'))).toBe(false);
     const command = system.mock.calls.find((call) => String(call[0]).includes('start_outreach_organiser_signup')) as unknown[];
     expect(String(command[0])).toBe('select identity.start_outreach_organiser_signup($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) as outcome');
@@ -255,7 +257,7 @@ describe('OutreachOrganiserService', () => {
       '203.0.113.10', correlationId)).rejects.toMatchObject({ status: 429, code: 'OUTREACH_ORGANISER_SIGNUP_RATE_LIMITED' });
   });
 
-  it('verifies the code with 0114\'s 3 arguments and answers each result plainly', async () => {
+  it('verifies the code with 0115\'s 3 arguments and answers each result plainly', async () => {
     const cookie = `${signupId}.${token}`;
     for (const [result, expected] of [['verified', { verified: true }], ['wrong_code', 'OTP_INVALID'], ['code_expired', 'OTP_EXPIRED'],
       ['locked', 'OTP_ATTEMPTS_EXHAUSTED'], ['expired', 'OUTREACH_ORGANISER_SIGNUP_EXPIRED'],
@@ -272,7 +274,7 @@ describe('OutreachOrganiserService', () => {
     await expect(make(database()).verify('not-a-cookie', '123456', correlationId)).rejects.toMatchObject({ status: 401 });
   });
 
-  it('sends a new code through 0114\'s resend command, to the email the command answers (one query, no table read)', async () => {
+  it('sends a new code through 0115\'s resend command, to the email the command answers (one query, no table read)', async () => {
     const cookie = `${signupId}.${token}`;
     const system = jest.fn(async () => ({ rows: [{ result: 'sent', email: 'ada.organiser@example.test' }] }));
     const otp = notification();
@@ -363,12 +365,12 @@ describe('OutreachOrganiserService', () => {
   });
 });
 
-describe('The refusal codes match migration 0114', () => {
-  // 0114's raise messages that reach the sign-up, invitation and support
-  // commands (the db branch, services/ehr-api/database/migrations/
-  // 0114_outreach_organisers.sql). When the migration is in this tree it is
-  // read too.
-  const RAISED_BY_0114 = new Set(['ADMIN_PERMISSION_DENIED', 'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE',
+describe('The refusal codes match migrations 0115 and 0116', () => {
+  // The raise messages that reach the sign-up, invitation and support
+  // commands: 0115_outreach_organisers.sql, and 0116_outreach_retention.sql
+  // for support's search and deletion of a registration. When the migrations
+  // are in this tree they are read too.
+  const RAISED = new Set(['ADMIN_PERMISSION_DENIED', 'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE',
     'OUTREACH_CAMPAIGN_NOT_FOUND', 'OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_CAMPAIGN_RESCUE_INVALID',
     'OUTREACH_CAMPAIGN_VERSION_CONFLICT', 'OUTREACH_CONSENT_CASE_INVALID', 'OUTREACH_CONSENT_GUARDIAN_REQUIRED',
     'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_GROUP_ROLE_INVALID', 'OUTREACH_INVITATION_INVALID',
@@ -379,15 +381,15 @@ describe('The refusal codes match migration 0114', () => {
     'OUTREACH_ORGANISER_SIGNUP_DENIED', 'OUTREACH_ORGANISER_SIGNUP_INVALID', 'OUTREACH_ORGANISER_SIGNUP_NOT_READY',
     'OUTREACH_ORGANISER_STATE_INVALID', 'OUTREACH_ORGANISER_SUSPENDED', 'OUTREACH_ORGANISER_SUSPEND_INVALID',
     'OUTREACH_ORGANISER_TERMS_REQUIRED', 'OUTREACH_ORGANISER_VERSION_CONFLICT', 'OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP',
-    'OUTREACH_TENANT_NO_HEALTH_ID_LINK']);
+    'OUTREACH_TENANT_NO_HEALTH_ID_LINK', 'OUTREACH_REGISTRATION_LOOKUP_INVALID', 'OUTREACH_REDACTION_INVALID']);
   const matched = [...OUTREACH_SIGNUP_REFUSALS.map(([code]) => code), ...OUTREACH_INVITATION_REFUSALS.map(([code]) => code),
     ...Object.keys(OUTREACH_ADMIN_REFUSALS)];
 
-  it('matches only codes 0114 raises', () => {
-    expect(matched.filter((code) => !RAISED_BY_0114.has(code))).toEqual([]);
+  it('matches only codes 0115 and 0116 raise', () => {
+    expect(matched.filter((code) => !RAISED.has(code))).toEqual([]);
   });
 
-  it('answers every sign-up, invitation and support refusal of 0114', () => {
+  it('answers every sign-up, invitation and support refusal of 0115 and 0116', () => {
     const answered = new Set(matched);
     for (const code of ['OUTREACH_ORGANISER_EMAIL_REGISTERED', 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED', 'OUTREACH_ORGANISER_SIGNUP_NOT_READY',
       'OUTREACH_ORGANISER_TERMS_REQUIRED', 'OUTREACH_ORGANISER_PASSWORD_INVALID', 'OUTREACH_ORGANISER_SIGNUP_INVALID',
@@ -397,14 +399,17 @@ describe('The refusal codes match migration 0114', () => {
       'OUTREACH_ORGANISER_VERSION_CONFLICT', 'OUTREACH_ORGANISER_ALREADY_SUSPENDED',
       'OUTREACH_ORGANISER_SUSPEND_INVALID', 'OUTREACH_ORGANISER_STATE_INVALID',
       'OUTREACH_CAMPAIGN_NOT_FOUND', 'OUTREACH_CAMPAIGN_VERSION_CONFLICT', 'OUTREACH_CAMPAIGN_RESCUE_INVALID',
-      'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE', 'ADMIN_PERMISSION_DENIED']) {
+      'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE', 'ADMIN_PERMISSION_DENIED', 'OUTREACH_REGISTRATION_LOOKUP_INVALID',
+      'OUTREACH_REDACTION_INVALID']) {
       expect(answered.has(code)).toBe(true);
     }
   });
 
-  const migration = join(__dirname, '../../../ehr-api/database/migrations/0114_outreach_organisers.sql');
-  (existsSync(migration) ? it : it.skip)('every code matched is raised by the migration in this tree', () => {
-    const raised = new Set([...readFileSync(migration, 'utf8').matchAll(/message\s*=\s*'([A-Z_]+)'/g)].map((m) => m[1]));
+  const migrations = ['0115_outreach_organisers.sql', '0116_outreach_retention.sql']
+    .map((name) => join(__dirname, '../../../ehr-api/database/migrations', name));
+  (migrations.every((file) => existsSync(file)) ? it : it.skip)('every code matched is raised by the migrations in this tree', () => {
+    const raised = new Set(migrations.flatMap((file) =>
+      [...readFileSync(file, 'utf8').matchAll(/message\s*=\s*'([A-Z_]+)'/g)].map((m) => m[1])));
     expect(matched.filter((code) => !raised.has(code))).toEqual([]);
   });
 
@@ -467,7 +472,7 @@ describe('OutreachInvitationsService', () => {
   const invitationId = '6d2d0a0a-5e78-4a3c-9f8d-3b4c5d6e7f80';
   const linkHmac = () => domainHmac(outreachKey() as Buffer, 'outreach-invitation', 'link', invitationId, token);
 
-  it('lets only the organiser invite, with 0114\'s 4 arguments, and emails the link', async () => {
+  it('lets only the organiser invite, with 0115\'s 4 arguments, and emails the link', async () => {
     const actor = jest.fn(async (sql: string) => sql.includes('create_outreach_invitation')
       ? { rows: [{ result: 'created', invitation_id: 'inv-1', expires_at: '2026-11-18T10:00:00.000Z', dispatch: true }] } : { rows: [] });
     const db = database({ actor });
@@ -605,7 +610,7 @@ describe('OutreachOrganisersAdminService', () => {
     subject: 'staff:support', accountId: 'support-1', roles: [], permissions: [], platformPermissions: ['platform.admin.access'],
     facilityIds: [], facilities: [], authenticationMethod: 'local' } };
 
-  it('lists the groups with their version, the phone readable only here and the plain label (not read-only: 0114 audits it)', async () => {
+  it('lists the groups with their version, the phone readable only here and the plain label (not read-only: 0115 audits it)', async () => {
     const key = outreachKey() as Buffer;
     const platform = jest.fn(async () => ({ rows: [{ organization_id: 'org-1', facility_id: 'fac-1', row_version: '3',
       display_name: 'Synthetic Community Volunteers', kind: 'group', registration_number: null, status: 'active',
@@ -646,7 +651,7 @@ describe('OutreachOrganisersAdminService', () => {
     }
   });
 
-  it('suspends, closes and appoints with 0114\'s arguments', async () => {
+  it('suspends, closes and appoints with 0115\'s arguments', async () => {
     const platform = jest.fn(async (sql: string) => {
       if (sql.includes('admin_suspend')) return { rows: [{ row_version: '5', revoked_roles: 2 }] };
       if (sql.includes('admin_close_outreach_campaign')) return { rows: [{ result: 'closed' }] };
@@ -675,7 +680,7 @@ describe('OutreachOrganisersAdminService', () => {
     expect(() => outreachAdminVersion(undefined, undefined)).toThrow(expect.objectContaining({ status: 428 }));
   });
 
-  it('answers 0114\'s refusals plainly: missing 404, version conflict 409, unknown 503', async () => {
+  it('answers 0115\'s refusals plainly: missing 404, version conflict 409, unknown 503', async () => {
     for (const [message, errcode, status] of [['OUTREACH_ORGANISER_NOT_FOUND', 'P0002', 404],
       ['OUTREACH_ORGANISER_VERSION_CONFLICT', '40001', 409], ['OUTREACH_ORGANISER_ALREADY_SUSPENDED', '23514', 409]] as const) {
       const failing = jest.fn(async () => { throw Object.assign(new Error(message), { code: errcode }); });
@@ -689,10 +694,89 @@ describe('OutreachOrganisersAdminService', () => {
   });
 });
 
+describe('Support deletes a registered person\'s details at their request (0116)', () => {
+  beforeEach(() => setEnvironment());
+  const admin: PlatformAdminContext = { correlationId, purposeOfUse: 'healthcare-operations', actor: { kind: 'staff', id: 'staff:support',
+    subject: 'staff:support', accountId: 'support-1', roles: [], permissions: [], platformPermissions: ['platform.admin.access'],
+    facilityIds: [], facilities: [], authenticationMethod: 'local' } };
+  // Fictional ids only.
+  const organizationId = '0a5e0000-0000-4000-8000-000000000001';
+  const caseId = 'ca5e0000-0000-4000-8000-000000000001';
+  const temporaryPatientId = 'tmp_ca5e0000-0000-4000-8000-0000000000aa';
+
+  it('searches by the temporary ID or the phone number with 0116\'s three arguments, and answers where and when only', async () => {
+    const platform = jest.fn(async () => ({ rows: [{ case_id: caseId, group_name: 'Synthetic Community Volunteers',
+      campaign_name: 'Synthetic market week', temporary_patient_id: temporaryPatientId, created_at: '2026-11-11T08:00:00.000Z',
+      redacted: false }] }));
+    const service = new OutreachOrganisersAdminService(database({ platform }) as unknown as DatabaseService);
+    const byId = await service.findRegistrations(admin, { organizationId, temporaryPatientId });
+    expect(byId).toEqual({ registrations: [{ caseId, groupName: 'Synthetic Community Volunteers',
+      campaignName: 'Synthetic market week', temporaryPatientId, createdAt: '2026-11-11T08:00:00.000Z', redacted: false }] });
+    expect(platform).toHaveBeenLastCalledWith('select * from identity.admin_find_outreach_registrations($1,$2,$3)',
+      [organizationId, temporaryPatientId, null]);
+    await service.findRegistrations(admin, { organizationId, phone: '0803 123 4567' });
+    expect(platform).toHaveBeenLastCalledWith('select * from identity.admin_find_outreach_registrations($1,$2,$3)',
+      [organizationId, null, '0803 123 4567']);
+    // Nothing about the person is answered.
+    expect(Object.keys(byId.registrations[0] ?? {}).filter((key) => /name$|phone|notes|guardian/i.test(key) && key !== 'groupName'
+      && key !== 'campaignName')).toEqual([]);
+  });
+
+  it('asks for exactly one of the temporary ID and the phone number, before asking the database', async () => {
+    const platform = jest.fn(async () => ({ rows: [] }));
+    const service = new OutreachOrganisersAdminService(database({ platform }) as unknown as DatabaseService);
+    for (const input of [{ organizationId }, { organizationId, temporaryPatientId, phone: '08031234567' }]) {
+      await expect(service.findRegistrations(admin, input)).rejects.toMatchObject({ status: 400,
+        code: 'OUTREACH_REGISTRATION_LOOKUP_INVALID' });
+    }
+    expect(platform).not.toHaveBeenCalled();
+    const refusing = jest.fn(async () => { throw Object.assign(new Error('OUTREACH_REGISTRATION_LOOKUP_INVALID'), { code: '22023' }); });
+    await expect(new OutreachOrganisersAdminService(database({ platform: refusing }) as unknown as DatabaseService)
+      .findRegistrations(admin, { organizationId, phone: '12' })).rejects.toMatchObject({ status: 400,
+      code: 'OUTREACH_REGISTRATION_LOOKUP_INVALID' });
+  });
+
+  it('takes the group as a UUID and the values trimmed, an empty one as none', async () => {
+    const dto = (body: unknown) => plainToInstance(FindOutreachRegistrationsDto, body);
+    expect(await validate(dto({ organizationId, temporaryPatientId: ` ${temporaryPatientId} ` }))).toHaveLength(0);
+    expect(dto({ organizationId, temporaryPatientId: ` ${temporaryPatientId} ` }).temporaryPatientId).toBe(temporaryPatientId);
+    expect(dto({ organizationId, phone: '   ', temporaryPatientId }).phone).toBeUndefined();
+    expect((await validate(dto({ organizationId: 'org-1', temporaryPatientId }))).length).toBeGreaterThan(0);
+    expect((await validate(dto({ organizationId, phone: '0'.repeat(33) }))).length).toBeGreaterThan(0);
+    expect((await validate(plainToInstance(RedactOutreachRegistrationDto, { reason: 'short' }))).length).toBeGreaterThan(0);
+    expect(await validate(plainToInstance(RedactOutreachRegistrationDto, { reason: 'The person asked by phone.' }))).toHaveLength(0);
+  });
+
+  it('deletes with 0116\'s two arguments, and says plainly when there is nothing to delete', async () => {
+    const platform = jest.fn(async () => ({ rows: [{ result: 'redacted' }] }));
+    const service = new OutreachOrganisersAdminService(database({ platform }) as unknown as DatabaseService);
+    await expect(service.redactRegistration(admin, caseId, 'The person asked by phone.')).resolves
+      .toEqual({ caseId, outcome: 'redacted' });
+    expect(platform).toHaveBeenCalledWith('select identity.admin_redact_outreach_registration($1,$2) as result',
+      [caseId, 'The person asked by phone.']);
+    const nothing = jest.fn(async () => ({ rows: [{ result: 'not_redactable' }] }));
+    await expect(new OutreachOrganisersAdminService(database({ platform: nothing }) as unknown as DatabaseService)
+      .redactRegistration(admin, caseId, 'The person asked by phone.'))
+      .rejects.toMatchObject({ status: 409, code: 'OUTREACH_REGISTRATION_NOT_REDACTABLE' });
+    for (const [message, errcode, status] of [['OUTREACH_REDACTION_INVALID', '22023', 422],
+      ['ADMIN_PERMISSION_DENIED', '42501', 403]] as const) {
+      const failing = jest.fn(async () => { throw Object.assign(new Error(message), { code: errcode }); });
+      await expect(new OutreachOrganisersAdminService(database({ platform: failing }) as unknown as DatabaseService)
+        .redactRegistration(admin, caseId, 'The person asked by phone.')).rejects.toMatchObject({ status, code: message });
+    }
+  });
+
+  it('needs platform.facility.manage and platform.facility.unlock on both routes', () => {
+    for (const handler of [OutreachRegistrationsAdminController.prototype.search, OutreachRegistrationsAdminController.prototype.redact]) {
+      expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['platform.facility.manage', 'platform.facility.unlock']);
+    }
+  });
+});
+
 describe('OutreachRetentionSweeper (owner decision 3: 1 year, then redacted)', () => {
   beforeEach(() => setEnvironment());
 
-  it('calls 0115\'s identity.sweep_expired_outreach_registrations with a bounded batch as system:auth', async () => {
+  it('calls 0116\'s identity.sweep_expired_outreach_registrations with a bounded batch as system:auth', async () => {
     const system = jest.fn(async () => ({ rows: [{ redacted: '3' }] }));
     const db = database({ system });
     await expect(new OutreachRetentionSweeper(db as unknown as DatabaseService).runOnce()).resolves.toBe(3);

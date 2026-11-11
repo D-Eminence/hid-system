@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Open sign-up on outreach. (migrations 0114 and 0115, owner decisions of
+// Open sign-up on outreach. (migrations 0115 and 0116, owner decisions of
 // 11 November 2026) run through the real Identity and Outreach services
 // against a disposable Postgres 16 with the migrations applied. Every
 // Identity call runs as hid_identity_api_runtime and every Outreach call as
@@ -298,7 +298,7 @@ try {
       { status: 409, code: 'OUTREACH_ORGANISER_VERSION_CONFLICT' });
   });
   let registrationId;
-  await step('registration with consent at a new group (0114\'s consent columns)', async () => {
+  await step('registration with consent at a new group (0115\'s consent columns)', async () => {
     const campaign = await outreach.createCampaign({ name: 'Verifier Health Day', services: ['registration'],
       startsAt: new Date(Date.now() - 60_000).toISOString() }, atOrganiserGroup());
     const active = await outreach.updateCampaignStatus(campaign.id, { status: 'active', reason: 'Starting the health day' },
