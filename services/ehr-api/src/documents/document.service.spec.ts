@@ -456,7 +456,7 @@ describe('DocumentService: downstream uses the detected media type (owner decisi
   });
 });
 
-describe('DocumentService: a source the OCR worker deleted after 24 hours (migration 0111)', () => {
+describe('DocumentService: a source the OCR worker deleted after 24 hours (migration 0112)', () => {
   function deletedHarness(status = 'source_deleted') {
     const row = {
       id: documentId, patient_id: patientId, facility_id: facilityId, created_by: uploaderAccountId,

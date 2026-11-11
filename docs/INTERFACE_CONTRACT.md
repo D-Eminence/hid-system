@@ -3761,7 +3761,7 @@ member's resolution of a campaign-linked registration with `linkExisting`'s
 UPDATE are refused; a non-member's same UPDATE finds no row on both); the
 outreach-api service tests cover the 403 and 409.
 
-## 39. OCR source deletion after 24 hours (0111)
+## 39. OCR source deletion after 24 hours (0112)
 
 Owner and coordinator decisions of 2026-11-11: (1) at 24 hours after an OCR
 job finishes, saved or not, the uploaded source file goes with every S3
@@ -3871,6 +3871,6 @@ without the document check).
 
 Under an owner that neither is a superuser nor bypasses row-level security
 (release checklist P8) the worker commands see no document, as every OCR
-worker command sees no job. 0111 has no down migration; the declaration is
+worker command sees no job. 0112 has no down migration; the declaration is
 signed separately. Suite:
 `services/ehr-api/test/database/ocr-source-deletion.integration.sql`.

@@ -12,7 +12,7 @@ export interface ExtractionRow {
   attempt: number;
   provider: string;
   providerModel: string | null;
-  /** NULL once the OCR worker deleted the source and its reading after 24 hours (migration 0111). */
+  /** NULL once the OCR worker deleted the source and its reading after 24 hours (migration 0112). */
   rawText: string | null;
   structuredPayload: unknown;
   confidence: number | string | null;
@@ -145,7 +145,7 @@ function confidenceNumber(value: number | string | null): number | null {
 /**
  * The extraction exactly as GET /api/v1/ocr/jobs/:jobId/extractions answers it. contentDeleted is true when the
  * job's source document is 'source_deleted' (the OCR worker deleted the page and blanked the reading 24 hours after
- * the job finished, migration 0111): rawText is then '' and the reading empty, whatever the row still holds.
+ * the job finished, migration 0112): rawText is then '' and the reading empty, whatever the row still holds.
  */
 export function projectExtraction(row: ExtractionRow, contentDeleted = false) {
   const parsed = contentDeleted ? { contract: null } as const : parseStructuredPayload(row.structuredPayload);

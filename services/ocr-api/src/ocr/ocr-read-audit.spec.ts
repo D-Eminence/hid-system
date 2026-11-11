@@ -395,7 +395,7 @@ describe('listExtractions answers the contract view only', () => {
   });
 });
 
-describe('A source the OCR worker deleted after 24 hours (migration 0111)', () => {
+describe('A source the OCR worker deleted after 24 hours (migration 0112)', () => {
   const deletedSource = { ...source, status: 'source_deleted' };
   const purgedRow = { ...extractionRow({}), rawText: null, structuredPayload: {} };
 

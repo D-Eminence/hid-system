@@ -261,7 +261,7 @@ describe('OCR publication failure classification', () => {
       summary: 'Owning clinical service is temporarily unavailable (REQUEST_IN_PROGRESS)', retryable: true });
   });
 
-  // 0111: a publication started near the 72-hour cap, whose source is claimed for deletion or deleted between the
+  // 0112: a publication started near the 72-hour cap, whose source is claimed for deletion or deleted between the
   // request and the attempt, fails cleanly and terminally: no owning-domain call, nothing published.
   it.each(['source_deleting', 'source_deleted'])('fails terminally without publishing once the source is %s', async (status) => {
     const ehrNote = jest.fn();

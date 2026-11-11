@@ -3,7 +3,7 @@ import { DeleteObjectCommand, ListObjectVersionsCommand, S3Client } from '@aws-s
 import type { OcrWorkerConfig } from './config';
 
 /**
- * Deletion of an OCR source 24 hours after its jobs finished (migration 0111; owner and coordinator decisions of
+ * Deletion of an OCR source 24 hours after its jobs finished (migration 0112; owner and coordinator decisions of
  * 2026-11-11). Each round the worker lists the documents due (those already claimed first), and for each: claims it
  * (status source_deleting, under a row lock; from then the database refuses a new job, a retry or a legal hold),
  * deletes every S3 version and delete marker of its stored key, confirms none remain, and only then has the database
@@ -11,7 +11,7 @@ import type { OcrWorkerConfig } from './config';
  * A storage failure leaves the document claimed; the next round retries it first. Logs carry ids, codes and counts.
  */
 
-/** One row of ocr.list_worker_source_deletions (0111). */
+/** One row of ocr.list_worker_source_deletions (0112). */
 export interface SourceDeletionCandidate {
   documentId: string;
   facilityId: string;

@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0111",
-    "count": 112,
+    "last": "0112",
+    "count": 113,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -543,8 +543,8 @@
         "sha256": "0a56d7fb26ea5fd78030a7ec516ec3430491fc459f2251c1e6a77fdb35ee7835"
       },
       {
-        "name": "0111_ocr_source_deletion_24h.sql",
-        "sha256": "81549b6cc997fab2f414433c463b1a2e9179863980bdd7be71a8868b9dc4539b"
+        "name": "0112_ocr_source_deletion_24h.sql",
+        "sha256": "974386e5ae533b8d8601e21f2de9567143e2c3b392c339c797024930240174f3"
       }
     ]
   },
