@@ -543,12 +543,12 @@
         "sha256": "0a56d7fb26ea5fd78030a7ec516ec3430491fc459f2251c1e6a77fdb35ee7835"
       },
       {
-        "name": "0112_ocr_source_deletion_24h.sql",
-        "sha256": "ecdc7ed21a32ceb0c227dda91a6a937744535ded85149380ce61e0e16d010eae"
+        "name": "0112_ocr_source_deletion_7d.sql",
+        "sha256": "bbc494dd7db3c221ca61f9a11312e59ca2cba8e5a6759c9c3ccc65b8390d1587"
       },
       {
         "name": "0113_records_processing_draft_publication.sql",
-        "sha256": "3bcdb325f4db9652d321b9da6ded6d7d5cee8e8190f5993583abe2c0078966ab"
+        "sha256": "af6d1df7e9e7e1761a38ac9164807e2e559394baf2db2e99672264a77808214b"
       }
     ]
   },

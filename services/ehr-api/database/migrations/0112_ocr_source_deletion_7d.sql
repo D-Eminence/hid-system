@@ -1,7 +1,8 @@
--- 0112 OCR source deletion after 24 hours (owner and coordinator decisions
+-- 0112 OCR source deletion after 7 days (owner and coordinator decisions
 -- of 2026-11-11, relayed by the coordinator; decision (4) reserved 0110,
--- renumbered 0112 as noted there). The declaration is signed separately
--- (reviewed_by is empty until the owner signs).
+-- renumbered 0112 as noted there; decision (5) made the window 7 days).
+-- The declaration is signed separately (reviewed_by is empty until the
+-- owner signs).
 --
 -- The decisions, as given:
 --   (1) "At 24 hours after an OCR job finishes, saved or not, delete the
@@ -19,6 +20,9 @@
 --       owner signs separately."
 --   (4) "Migration number 0110 is reserved for this." Renumbered 0112 by the
 --       coordinator (numbers follow merge order; 0110 went to another change).
+--   (5) Q36, 2026-11-11: "make it 7days (signed)". The 24 hours of (1)
+--       and (2) are 7 days everywhere below: a document is due 7 days after
+--       its latest job finished, and overdue 7 days and 2 hours after.
 --   And: "Keep the existing clinical/objects/ key layout. Do NOT change upload
 --   keys or malware scanning. The sweeper finds each source by the key stored
 --   in ehr.documents."
@@ -43,13 +47,16 @@
 --    is finished (awaiting_validation, validated, rejected, failed or
 --    cancelled); and the latest finish (completed_at, failed_at for a failed
 --    job, updated_at for a cancelled one, updated_at when the column is empty)
---    is at least 24 hours ago, or at least 72 hours ago while a publication
---    of its jobs could still run: pending, processing, or failed with a
---    retryable code (OWNING_SERVICE_UNAVAILABLE, REQUEST_IN_PROGRESS, the codes
---    ocr-api retries) and attempts left. 72 hours after the latest finish
---    nothing blocks any more (a hard cap). due_at is latest finish + 24 h, or
---    + 72 h while blocked; a blocked document is not due, so it is not counted
---    as due or overdue. A document already 'source_deleting' is always
+--    is at least 7 days ago. A publication of its jobs that could still run
+--    (pending, processing, or failed with a retryable code:
+--    OWNING_SERVICE_UNAVAILABLE, REQUEST_IN_PROGRESS, the codes ocr-api
+--    retries, and attempts left) blocks until at least 72 hours after the
+--    latest finish, and no longer after that (a hard cap). Since 7 days is
+--    longer than the 72-hour cap, a publication no longer delays deletion:
+--    due_at is latest finish + greatest(7 days, 72 h while blocked), that is
+--    + 7 days (greatest keeps the cap's bound should the window ever be
+--    shorter). A blocked document is not due, so it is not counted as due or
+--    overdue. A document already 'source_deleting' is always
 --    listed (first), so a claim whose S3 deletion failed is retried; claimed
 --    documents go least recently attempted first and take at most half of a
 --    batch while due documents wait (ocr.source_deletion_attempts holds the
@@ -66,7 +73,7 @@
 --      hid_ocr_worker.
 --    - ocr.worker_source_deletion_backlog() -> (due, overdue): documents due
 --      or 'source_deleting' now; overdue = those of them due for more than 2
---      hours, plus documents still 'uploaded' with a job stuck in 'extracted'
+--      hours (7 days and 2 hours after the latest finish), plus documents still 'uploaded' with a job stuck in 'extracted'
 --      for more than 24 hours, or in 'queued' or 'processing' for more than
 --      48 hours (not a job parked by the page allowance until its reset);
 --      those are never deleted, only surfaced to the CloudWatch overdue
@@ -87,15 +94,15 @@
 --    hid_ocr_worker. The worker calls it only after the S3 deletion was
 --    confirmed. It requires 'source_deleting' ('not_claimed', nothing
 --    changed, for any other status but 'source_deleted'), sets the status to
---    'source_deleted' and original_file_name to 'Source page deleted after 24
---    hours' (row_version + 1), then blanks:
+--    'source_deleted' and original_file_name to 'Source page deleted after 7
+--    days' (row_version + 1), then blanks:
 --    - ocr.extractions: raw_text -> NULL, structured_payload -> '{}';
 --    - ocr.validations: validated_payload -> '{}', accepted_fields -> '{}',
 --      rejected_fields -> '[]', corrections -> '[]', reason -> 'Content
---      deleted after 24 hours';
---    - ocr.patient_confirmations: reason -> 'Content deleted after 24 hours',
+--      deleted after 7 days';
+--    - ocr.patient_confirmations: reason -> 'Content deleted after 7 days',
 --      evidence_reference -> NULL;
---    and writes one audit.events row ocr.source.deleted_after_24h (workload
+--    and writes one audit.events row ocr.source.deleted_after_7d (workload
 --    actor, resource the document; details: job count, S3 versions deleted
 --    (the worker's count across its rounds for the document), rows blanked
 --    per table, seconds past due; ids and counts only).
@@ -139,7 +146,7 @@
 --      membership; the audit rows record the changes). Every other call runs
 --      the 0004 body unchanged.
 --    - ocr.validate_job_write() (0107's body) refuses (55000, 'Source page
---      deleted after 24 hours') an insert of a job, and any update to queued
+--      deleted after 7 days') an insert of a job, and any update to queued
 --      or processing, on a document that is 'source_deleting' or
 --      'source_deleted'. 0107 lets a failed -> queued retry pass without the
 --      document check; this closes it for such documents only. An insert
@@ -379,8 +386,8 @@ as $$
        and (requested_document_id is null or job.document_id = requested_document_id)
   ), reckoned as (
     select per_document.*,
-           per_document.finished_at + case when blocking.document_id is null then interval '24 hours'
-                                           else interval '72 hours' end as due_at
+           per_document.finished_at + greatest(interval '7 days',
+             case when blocking.document_id is null then interval '0 hours' else interval '72 hours' end) as due_at
       from per_document left join blocking on blocking.document_id = per_document.document_id
   )
   select document.id, document.facility_id, document.patient_id, document.storage_bucket, document.storage_key,
@@ -441,7 +448,8 @@ end
 $$;
 
 -- The worker counts the documents due now (claimed ones included) and those
--- overdue: due for more than 2 hours, or still uploaded with a job stuck in
+-- overdue: due for more than 2 hours (7 days and 2 hours after the latest
+-- finish), or still uploaded with a job stuck in
 -- 'extracted' for more than 24 hours, or in 'queued' or 'processing' for
 -- more than 48 hours (a queued job parked by the page allowance until its
 -- reset is not stuck); those are counted, never deleted.
@@ -580,7 +588,7 @@ begin
     end if;
     select due.job_count, due.due_at into due_job_count, due_since
       from ocr.source_deletion_due(document_row.id) due;
-    update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours',
+    update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 7 days',
       row_version = row_version + 1
      where id = document_row.id;
   end if;
@@ -593,17 +601,17 @@ begin
      and (extraction.raw_text is not null or extraction.structured_payload <> '{}'::jsonb);
   get diagnostics blanked_extractions = row_count;
   update ocr.validations validation set validated_payload = '{}'::jsonb, accepted_fields = '{}'::jsonb,
-         rejected_fields = '[]'::jsonb, corrections = '[]'::jsonb, reason = 'Content deleted after 24 hours'
+         rejected_fields = '[]'::jsonb, corrections = '[]'::jsonb, reason = 'Content deleted after 7 days'
     from ocr.jobs job
    where job.id = validation.job_id and job.document_id = document_row.id
      and (validation.validated_payload <> '{}'::jsonb or validation.accepted_fields <> '{}'::jsonb
        or validation.rejected_fields <> '[]'::jsonb or validation.corrections <> '[]'::jsonb
-       or validation.reason <> 'Content deleted after 24 hours');
+       or validation.reason <> 'Content deleted after 7 days');
   get diagnostics blanked_validations = row_count;
-  update ocr.patient_confirmations confirmation set reason = 'Content deleted after 24 hours', evidence_reference = null
+  update ocr.patient_confirmations confirmation set reason = 'Content deleted after 7 days', evidence_reference = null
     from ocr.jobs job
    where job.id = confirmation.job_id and job.document_id = document_row.id
-     and (confirmation.reason <> 'Content deleted after 24 hours' or confirmation.evidence_reference is not null);
+     and (confirmation.reason <> 'Content deleted after 7 days' or confirmation.evidence_reference is not null);
   get diagnostics blanked_confirmations = row_count;
   perform set_config('app.facility_id', coalesce(session_facility, ''), true);
   if not already_deleted or blanked_extractions + blanked_validations + blanked_confirmations > 0 then
@@ -612,7 +620,7 @@ begin
       patient_id, action, outcome, resource_type, resource_id, provenance, details
     ) values (
       requested_correlation_id, 'workload', actor_subject, actor_account,
-      document_row.facility_id, document_row.patient_id, 'ocr.source.deleted_after_24h', 'success',
+      document_row.facility_id, document_row.patient_id, 'ocr.source.deleted_after_7d', 'success',
       'document', document_row.id::text, 'application',
       jsonb_build_object('jobCount', coalesce(due_job_count,
           (select count(*)::integer from ocr.jobs job where job.document_id = document_row.id)),
@@ -649,8 +657,8 @@ begin
       when 'extractions' then pg_catalog.jsonb_build_object('raw_text', null, 'structured_payload', '{}'::jsonb)
       when 'validations' then pg_catalog.jsonb_build_object('validated_payload', '{}'::jsonb,
         'accepted_fields', '{}'::jsonb, 'rejected_fields', '[]'::jsonb, 'corrections', '[]'::jsonb,
-        'reason', 'Content deleted after 24 hours')
-      else pg_catalog.jsonb_build_object('reason', 'Content deleted after 24 hours', 'evidence_reference', null) end;
+        'reason', 'Content deleted after 7 days')
+      else pg_catalog.jsonb_build_object('reason', 'Content deleted after 7 days', 'evidence_reference', null) end;
     content_columns := array(select pg_catalog.jsonb_object_keys(purged));
     old_state := pg_catalog.to_jsonb(old);
     new_state := pg_catalog.to_jsonb(new);
@@ -695,11 +703,11 @@ begin
              and (pg_catalog.to_jsonb(new) - array['status', 'row_version', 'updated_at'])
                = (pg_catalog.to_jsonb(old) - array['status', 'row_version', 'updated_at']))
          or (old.status = 'source_deleting' and new.status = 'source_deleted'
-             and new.original_file_name = 'Source page deleted after 24 hours'
+             and new.original_file_name = 'Source page deleted after 7 days'
              and (pg_catalog.to_jsonb(new) - array['status', 'original_file_name', 'row_version', 'updated_at'])
                = (pg_catalog.to_jsonb(old) - array['status', 'original_file_name', 'row_version', 'updated_at'])))) then
     raise exception using errcode = '55000',
-      message = 'The document''s source is being or has been deleted after 24 hours; it cannot be changed or put on legal hold';
+      message = 'The document''s source is being or has been deleted after 7 days; it cannot be changed or put on legal hold';
   end if;
   return new;
 end;
@@ -734,7 +742,7 @@ begin
                 and (to_jsonb(new) - array['status', 'row_version', 'updated_at'])
                   = (to_jsonb(old) - array['status', 'row_version', 'updated_at']))
             or (to_jsonb(old)->>'status' = 'source_deleting' and to_jsonb(new)->>'status' = 'source_deleted'
-                and to_jsonb(new)->>'original_file_name' = 'Source page deleted after 24 hours'
+                and to_jsonb(new)->>'original_file_name' = 'Source page deleted after 7 days'
                 and (to_jsonb(new) - array['status', 'original_file_name', 'row_version', 'updated_at'])
                   = (to_jsonb(old) - array['status', 'original_file_name', 'row_version', 'updated_at']))) then
       raise exception using errcode = '55000', message = 'Only the OCR source deletion may claim or delete a document source';
@@ -849,7 +857,7 @@ begin
   -- document check below).
   if document_row.status in ('source_deleting', 'source_deleted')
      and (tg_op = 'INSERT' or new.status in ('queued', 'processing')) then
-    raise exception using errcode = '55000', message = 'Source page deleted after 24 hours';
+    raise exception using errcode = '55000', message = 'Source page deleted after 7 days';
   end if;
   binds_source := tg_op = 'INSERT';
   if tg_op = 'UPDATE' then
@@ -938,11 +946,11 @@ revoke all on function ocr.source_deletion_due(uuid),
   ocr.purge_worker_source_document(uuid,integer,text) from public;
 
 comment on function ocr.source_deletion_due(uuid) is
-  '0112: documents due for deletion of their OCR source (status uploaded, no legal hold, every job finished at least 24 hours ago, or 72 hours while a publication could still run), and those already source_deleting, with due_at. Granted to no role.';
+  '0112: documents due for deletion of their OCR source (status uploaded, no legal hold, every job finished at least 7 days ago; a publication that could still run blocks only until 72 hours after, so no longer delays it), and those already source_deleting, with due_at. Granted to no role.';
 comment on function ocr.list_worker_source_deletions(integer) is
   '0112: the OCR worker lists documents to delete (ids, bucket, key, seconds past due): source_deleting first, then oldest due first.';
 comment on function ocr.worker_source_deletion_backlog() is
-  '0112: the OCR worker counts documents due for source deletion now, and the overdue ones (due for more than 2 hours, or a job stuck in extracted for more than 24 hours).';
+  '0112: the OCR worker counts documents due for source deletion now, and the overdue ones (due for more than 2 hours, that is 7 days and 2 hours after the latest finish, or a job stuck in extracted for more than 24 hours).';
 comment on function ocr.claim_worker_source_deletion(uuid,text) is
   '0112: the OCR worker claims a due document (status source_deleting, under a row lock) before deleting its S3 versions; from then no job, retry or legal hold.';
 comment on function ocr.purge_worker_source_document(uuid,integer,text) is
@@ -978,10 +986,10 @@ begin
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
-      ('ocr.reject_immutable_change()', '2b0476d4cfb42c39182899e0ab9c6302'),
-      ('ehr.reject_document_object_rebinding()', '75a7b8c8a48049b899a7dde46b58ad97'),
-      ('ehr.capture_record_version()', '5abc424b632f44b163ecd9c0c0320630'),
-      ('ocr.validate_job_write()', 'd76c42097034925a885ce74a8dae113a'))
+      ('ocr.reject_immutable_change()', '2240da0545eb5125b39d460d23b5e382'),
+      ('ehr.reject_document_object_rebinding()', 'fe673d974c34460a6b64764117a82fc7'),
+      ('ehr.capture_record_version()', 'cae99883d00e70ab1d20ed6fbc97ad7b'),
+      ('ocr.validate_job_write()', '116078d43e2de6861388f51036224226'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
    where md5(proc.prosrc) is distinct from expected.digest;

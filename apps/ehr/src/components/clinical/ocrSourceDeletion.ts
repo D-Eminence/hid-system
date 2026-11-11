@@ -1,5 +1,5 @@
 /**
- * The OCR worker deletes a scanned page, its text and its reading 24 hours after the OCR job finished (migration
+ * The OCR worker deletes a scanned page, its text and its reading 7 days after the OCR job finished (migration
  * 0112; owner decision of 2026-11-11). The document then lists with status 'source_deleting' (while the page is being
  * deleted) or 'source_deleted', and its extractions come
  * back with contentDeleted: true. What a person saved into the record stays; there is nothing left to review.
@@ -7,8 +7,8 @@
  */
 /** 'source_deleting' while the worker deletes the page, 'source_deleted' once it did. */
 export const SOURCE_DELETION_STATUSES: readonly string[] = ['source_deleting', 'source_deleted'];
-export const SOURCE_DELETED_MESSAGE = 'Source page deleted after 24 hours';
-export const CONTENT_DELETED_MESSAGE = 'Content deleted after 24 hours';
+export const SOURCE_DELETED_MESSAGE = 'Source page deleted after 7 days';
+export const CONTENT_DELETED_MESSAGE = 'Content deleted after 7 days';
 
 export interface OcrReviewVisibility {
   /** Ask ehr-api for a signed preview of the page (never for a deleted one: it answers 410). */

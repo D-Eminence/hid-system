@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import ts from 'typescript'
 
-// The pure helper OcrReviewWorkspace uses for a source the OCR worker deleted after 24 hours (migration 0112).
+// The pure helper OcrReviewWorkspace uses for a source the OCR worker deleted after 7 days (migration 0112).
 const source = await readFile(new URL('../src/components/clinical/ocrSourceDeletion.ts', import.meta.url), 'utf8')
 const helper = await import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(source,
   { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString('base64')}`)
@@ -12,8 +12,8 @@ const { ocrReviewVisibility, SOURCE_DELETED_MESSAGE, CONTENT_DELETED_MESSAGE } =
 const workspace = await readFile(new URL('../src/components/clinical/OcrReviewWorkspace.tsx', import.meta.url), 'utf8')
 
 test('the sentences are exactly the agreed ones', () => {
-  assert.equal(SOURCE_DELETED_MESSAGE, 'Source page deleted after 24 hours')
-  assert.equal(CONTENT_DELETED_MESSAGE, 'Content deleted after 24 hours')
+  assert.equal(SOURCE_DELETED_MESSAGE, 'Source page deleted after 7 days')
+  assert.equal(CONTENT_DELETED_MESSAGE, 'Content deleted after 7 days')
 })
 
 test('a normal document is previewed and reviewed', () => {

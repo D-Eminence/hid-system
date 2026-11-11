@@ -5,7 +5,7 @@
 -- signs it. Written on the branch of draft PR #221 after it merged staging
 -- (0001-0110 present; 0109 and 0110 are live on staging and touch nothing
 -- this file reads or replaces). Numbers follow merge order: 0111 is
--- campaign management (#222) and 0112 the 24-hour deletion (#226), both on
+-- campaign management (#222) and 0112 the 7-day deletion (#226), both on
 -- other branches and applied first; neither touches what this file reads
 -- or replaces.
 --

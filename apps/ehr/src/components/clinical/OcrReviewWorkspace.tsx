@@ -58,7 +58,7 @@ export const OcrReviewWorkspace: React.FC<Props> = ({ patient, encounterId, perm
   const loadReview = useCallback(async (document: ClinicalDocumentRecord, signal?: AbortSignal) => {
     setLoading(true); setError(''); setPreviewUrl(''); setJob(null); setExtraction(null); setValidation(null); setPublication(null);
     try {
-      // A source the OCR worker deleted after 24 hours has no page to preview (ehr-api answers 410).
+      // A source the OCR worker deleted after 7 days has no page to preview (ehr-api answers 410).
       const [foundJob, download] = await Promise.all([
         permissions.includes('ocr.job.read') ? ocrApi.findJob(document.id, signal) : Promise.resolve(null),
         ocrReviewVisibility(document, null).loadPreview ? clinicalApi.documentDownload(document.id, signal) : Promise.resolve(null),

@@ -395,7 +395,7 @@ describe('listExtractions answers the contract view only', () => {
   });
 });
 
-describe('A source the OCR worker deleted after 24 hours (migration 0112)', () => {
+describe('A source the OCR worker deleted after 7 days (migration 0112)', () => {
   const deletedSource = { ...source, status: 'source_deleted' };
   const purgedRow = { ...extractionRow({}), rawText: null, structuredPayload: {} };
 
@@ -457,7 +457,7 @@ describe('A source the OCR worker deleted after 24 hours (migration 0112)', () =
       expect(refusal).toBeInstanceOf(DomainProblem);
       expect((refusal as DomainProblem).getStatus()).toBe(410);
       expect((refusal as DomainProblem).code).toBe('DOCUMENT_SOURCE_DELETED');
-      expect((refusal as DomainProblem).message).toBe('Source page deleted after 24 hours');
+      expect((refusal as DomainProblem).message).toBe('Source page deleted after 7 days');
       const statements = built.clients.flatMap((client) => (client.query as jest.Mock).mock.calls.map(([sql]) => String(sql)));
       expect(statements.filter((sql) => /^\s*(insert|update)\b/i.test(sql))).toEqual([]);
       expect(auditEvents(built.audit)).toEqual([]);

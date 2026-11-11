@@ -1782,22 +1782,24 @@ IAM for the worker role:
   `kms:Decrypt` on the document bucket and its key.
 - HTTPS egress to `api.anthropic.com` when AI reading is on.
 
-## Source deletion after 24 hours
+## Source deletion after 7 days
 
-Owner and coordinator decisions of 2026-11-11 (migration 0112): 24 hours after
+Owner and coordinator decisions of 2026-11-11 (migration 0112): 7 days after
 an OCR job finishes, saved or not, the uploaded page goes with every S3
-version, and so do the Textract text and the AI reading. The source is not
-kept in the chart; what a person saved or published stays, with its
-provenance by job id.
+version, and so do the Textract text and the AI reading (the decisions said
+24 hours; owner decision Q36, "make it 7days (signed)", made it 7 days). The
+source is not kept in the chart; what a person saved or published stays, with
+its provenance by job id.
 
 - **When a document is due.** Its status is `uploaded` and `legal_hold` is
   false; it has at least one OCR job; every job is finished
   (`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled`); and
   the latest finish (`completed_at`, `failed_at`, or `updated_at` for a
-  cancelled job) is at least 24 hours ago, or at least 72 hours ago while a
-  publication of its jobs could still run (`pending`, `processing`, or
-  `failed` with a code ocr-api retries and attempts left). After 72 hours
-  nothing blocks any more. A blocked document is not due and not counted.
+  cancelled job) is at least 7 days ago. A publication of its jobs that could
+  still run (`pending`, `processing`, or `failed` with a code ocr-api retries
+  and attempts left) blocks until 72 hours after the finish and no longer
+  after that (a hard cap), so with 7 days it no longer delays deletion. A
+  blocked document is not due and not counted.
 - **A round.** One at start, then every `OCR_SOURCE_DELETION_INTERVAL_SECONDS`
   (default 900, 60-86,400). `OCR_SOURCE_DELETION_ENABLED` (default `true`;
   `false` stops it) is validated like the other settings. The worker counts
@@ -1818,9 +1820,9 @@ provenance by job id.
      is left;
   5. only then calls `ocr.purge_worker_source_document(document, versions
      deleted, correlation id)`, which requires `source_deleting`, sets
-     `source_deleted` with the neutral file name `Source page deleted after 24
-     hours`, blanks the text, reading and review content of its OCR rows and
-     writes one audit row `ocr.source.deleted_after_24h` (ids and counts only;
+     `source_deleted` with the neutral file name `Source page deleted after 7
+     days`, blanks the text, reading and review content of its OCR rows and
+     writes one audit row `ocr.source.deleted_after_7d` (ids and counts only;
      `objectVersionsDeleted` adds up every round of this worker process for the
      document, not only the last).
   A storage failure leaves the document `source_deleting`; the next round lists
@@ -1844,7 +1846,7 @@ provenance by job id.
   - exactly one `{"event":"ocr.source_deletion.overdue","overdue":n,"due":m,"deleted":k}`
     per completed round, also when all are 0 (with `timestamp` and `level` like
     every line): `overdue` = documents due (or claimed) for more than 2 hours
-    (more than 26 hours after their job finished), plus documents with a job
+    (more than 7 days and 2 hours after their job finished), plus documents with a job
     stuck in `extracted` for more than 24 hours (counted, never deleted), `due`
     = due or claimed at the start of the round,
     `deleted` = deleted this round. A round that cannot count or list logs
