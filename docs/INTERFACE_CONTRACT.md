@@ -3531,8 +3531,8 @@ entry paths do not read the allowance. Tables `ocr.facility_page_limits`,
 `ocr.page_usage` and `ocr.ai_usage` (key `(job_id, attempt_no, model)`;
 facility, Lagos month, requests and the four token counts) hold ids, counts,
 dates, the model name and the limit's reason only, have no runtime grant, no
-foreign key to `ocr.jobs` (the 24-hour deletion of a job's working data never
-waits on them or removes them) and are read only through these commands.
+foreign key to `ocr.jobs` (the 7-day deletion of a job's working data,
+section 41, never waits on them or removes them) and are read only through these commands.
 `ocr.claim_worker_job` keeps the body 0105 gave it. The only change to an existing function
 is one more allowed transition in `ocr.validate_job_write`: a queued job whose
 `last_error_code` is exactly `OCR_PAGE_ALLOWANCE_USED_UP` may move
@@ -3902,3 +3902,122 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
 **Release order.** Apply 0111 before identity-api ships with
 `outreach.campaign.write` accepted. On a database without 0111, that would
 reopen the ungoverned writes.
+
+## 41. OCR source deletion after 7 days (0112)
+
+Owner and coordinator decisions of 2026-11-11: (1) at 24 hours (7 days since
+Q36, below) after an OCR job finishes, saved or not, the uploaded source file
+goes with every S3 version, and so do the Textract text, the AI reading and
+the content of the job's working rows; what a person saved or published into the record
+(EHR rows, `ehr.ocr_import_provenance`), `ocr.page_usage`, `ocr.ai_usage`, a
+deletion audit event and the job ids and status stay. (2) The source scan is
+not kept in the chart; published records keep provenance by job id. (3)
+Content is removed, rows are not deleted, through one narrow SECURITY DEFINER
+purge; the append-only triggers stay. Owner decision Q36 of 2026-11-11
+("make it 7days (signed)") made the 24 hours of (1) 7 days: a document is
+due 7 days after its latest job finished and overdue 7 days and 2 hours
+after.
+
+**When.** A document is due when its status is `uploaded`, `legal_hold` is
+false, it has at least one OCR job, every job is finished
+(`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled`), and
+the latest finish (`completed_at`; `failed_at` for a failed job; `updated_at`
+for a cancelled one) is at least 7 days ago. A publication of its jobs that
+could still run (`pending`, `processing`, or `failed` with
+`OWNING_SERVICE_UNAVAILABLE` or `REQUEST_IN_PROGRESS` and attempts left)
+blocks until 72 hours after the finish and no longer after that (a hard cap);
+since 7 days is longer than the cap, it no longer delays deletion (`due_at` is
+the finish + greatest(7 days, 72 hours while blocked)). A blocked document is
+not due, so it counts neither as due nor as overdue.
+
+**Claim, then S3, then purge.** The OCR worker
+(`OCR_SOURCE_DELETION_INTERVAL_SECONDS`, default 900) first claims the
+document: under a row lock on it and its jobs the database checks again that
+it is due and sets status `source_deleting`. From then the database refuses
+(55000) a new OCR job on it, a failed -> queued retry of its jobs, setting
+`legal_hold` and any other change to the document; ocr-api answers 410 (see
+below). Only after the claim does the worker delete every S3 version and
+delete marker whose key is exactly the document's stored `storage_key` and
+confirm none remain; then it purges, which requires `source_deleting`. If S3
+fails the document stays `source_deleting` and is listed first in the next
+round (ocr-worker README, "Source deletion after 7 days"). Claimed
+documents go least recently attempted first (`ocr.source_deletion_attempts`:
+ids, counts and times, no runtime grant) and take at most half of a batch
+while due documents wait. There is no unclaim: a claim that keeps failing
+stays for an operator and keeps counting as overdue. A job insert takes the
+document row `FOR SHARE` first, so it serializes with a claim in flight and is
+refused once the document is `source_deleting`.
+
+Accepted: a publication requested near the 72-hour cap may run its attempt
+after the claim or the purge. ocr-api reads the source again for each attempt
+and answers 410 `DOCUMENT_SOURCE_DELETED`, recording a terminal failure before
+any owning-domain call, so nothing is published; a blanked validation would
+fail the candidate check (`OCR_INVALID_CLINICAL_NOTE`) anyway.
+
+**What the purge changes**, once, under a row lock on the document and its
+jobs:
+
+| Table | Columns | Value after |
+|---|---|---|
+| `ehr.documents` | `status`, `original_file_name`, `row_version` | `source_deleted`, `Source page deleted after 7 days`, + 1 (+ 1 more at the claim; no `ehr.record_versions` row for either: the audit rows `ocr.source.deletion_claimed` and the one below record them; earlier record versions keep the original file name) |
+| `ocr.extractions` | `raw_text`, `structured_payload` | NULL, `{}` |
+| `ocr.validations` | `validated_payload`, `accepted_fields`, `rejected_fields`, `corrections`, `reason` | `{}`, `{}`, `[]`, `[]`, `Content deleted after 7 days` |
+| `ocr.patient_confirmations` | `reason`, `evidence_reference` | `Content deleted after 7 days`, NULL |
+| `audit.events` | one row `ocr.source.deleted_after_7d` | workload actor, resource the document; details `jobCount`, `objectVersionsDeleted` (summed over the worker's rounds for the document), `extractionsBlanked`, `validationsBlanked`, `confirmationsBlanked`, `alreadyDeleted`, `secondsPastDue` |
+
+Every other column stays (dispositions, target domains, versions, reviewers,
+extraction provenance, confidence and content hash), as do `ocr.jobs`,
+`ocr.job_events`, `ocr.outbox_events`, `ocr.publications`,
+`ehr.ocr_import_provenance`, `ocr.page_usage`, `ocr.ai_usage` and every EHR
+record. A purge of a document already `source_deleted` blanks only what still
+holds content (a row added after the purge) and writes an audit row only then.
+
+**Triggers.** `ocr.reject_immutable_change()` still refuses (55000) every
+DELETE and UPDATE of `ocr.job_events`, `ocr.extractions`, `ocr.validations`,
+`ocr.patient_confirmations` and `ehr.ocr_import_provenance`, except an UPDATE
+of the middle three that changes only the columns above to exactly the values
+above, made by the OCR functions' owner (inside the purge), on a row whose
+document is already `source_deleted`. No session setting is consulted. A
+`source_deleting` or `source_deleted` document changes only by the two exact
+steps the OCR functions' owner makes (the claim from `uploaded` with no legal
+hold, nothing else changed; the purge to `source_deleted` with the neutral
+file name, nothing else changed), and an insert with either status is refused
+(55000). `ocr.validate_job_write` refuses a job insert and any change to
+`queued` or `processing` on such a document (0107 let failed -> queued pass
+without the document check).
+
+**Worker commands** (`hid_ocr_worker` only; 42501 for a subject without the
+`ocr_worker` role):
+
+| Command | Notes |
+|---|---|
+| `ocr.list_worker_source_deletions(limit 1-500)` returns `(document_id, facility_id, storage_bucket, storage_key, due_seconds)` | `source_deleting` documents first (least recently attempted first, at most half the limit while due documents wait), then oldest due first. 22023 for a bad limit. |
+| `ocr.worker_source_deletion_backlog()` returns `(due, overdue)` | Due or claimed now; overdue = those due for more than 2 hours (7 days and 2 hours after the finish), plus `uploaded` documents with a job stuck in `extracted` for more than 24 hours or in `queued` or `processing` for more than 48 hours, not counting a job parked by the page allowance (counted, never deleted). |
+| `ocr.claim_worker_source_deletion(document_id, correlation_id 8-128)` returns `(outcome, storage_bucket, storage_key)` | `claimed` (now `source_deleting`; audit `ocr.source.deletion_claimed`), `already_claimed`, `already_deleted` or `not_due` (nothing changed; bucket and key NULL); P0002, 22023. |
+| `ocr.purge_worker_source_document(document_id, versions_deleted 0-100000, correlation_id 8-128)` returns `(outcome, extractions, validations, confirmations)` | `deleted`, `already_deleted` or `not_claimed` (not `source_deleting`; nothing changed); P0002 for an unknown document; 22023 for bad input. |
+
+**Services.**
+- ehr-api: `GET /api/v1/ehr/documents/:id/download` for a
+  `source_deleting` or `source_deleted` document answers 410 `DOCUMENT_SOURCE_DELETED`, detail
+  `Source page deleted after 7 days` (after the read check, so a caller
+  without access still gets 403). The document list shows status
+  `source_deleting` or `source_deleted`. The internal OCR source read
+  (`GET /api/v1/ehr/internal/ocr/documents/:documentId/source`) still answers
+  the metadata, with that status: ocr-api needs the document's
+  patient to authorize reads of the job.
+- ocr-api: each item of `GET /api/v1/ocr/jobs/:jobId/extractions` carries
+  `contentDeleted` (true when the job's document is `source_deleting` or
+  `source_deleted`; then `rawText` is `''`, `structuredPayload` `{}` and the
+  reading empty). Creating a job on such a document, and retry, validation,
+  patient confirmation and publication of its jobs, answer 410
+  `DOCUMENT_SOURCE_DELETED`; a publication already claimed fails terminally
+  with that code. `@hid/api-client` parses a `contentDeleted` extraction
+  without text and still rejects an empty `rawText` on any other; the EHR app
+  shows `Source page deleted after 7 days` instead of the page and `Content
+  deleted after 7 days` instead of the review.
+
+Under an owner that neither is a superuser nor bypasses row-level security
+(release checklist P8) the worker commands see no document, as every OCR
+worker command sees no job. 0112 has no down migration; the declaration is
+signed separately. Suite:
+`services/ehr-api/test/database/ocr-source-deletion.integration.sql`.

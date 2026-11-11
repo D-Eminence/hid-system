@@ -84,6 +84,13 @@ const JOB_SELECT = `
              where confirmation.job_id=ocr.jobs.id order by confirmation.confirmation_version desc limit 1) as confirmed_at
     from ocr.jobs`;
 
+/**
+ * ehr.documents.status while the OCR worker deletes the source and its reading 7 days after the job finished, and
+ * once it did (migration 0112). From the first, nothing is reviewed, retried, published or read again.
+ */
+const SOURCE_DELETION_STATUSES: ReadonlySet<string> = new Set(['source_deleting', 'source_deleted']);
+const sourceDeleted = () => new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 7 days');
+
 /** Publication failure codes a later request may retry; any other failure is terminal. */
 const RETRYABLE_PUBLICATION_FAILURES = ['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'];
 
@@ -163,6 +170,8 @@ export class OcrService {
       }
 
       const source = await this.ehrApi.getOcrDocumentSource(input.documentId, context);
+      // The database refuses a job on such a document too (0112, ocr.validate_job_write).
+      if (SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
       if (source.status !== 'available' || source.scanStatus !== 'clean'
           || !source.objectVersionId || !source.sha256Hex) {
         throw new DomainProblem(409, 'OCR_SOURCE_NOT_ELIGIBLE', 'OCR source must have exact clean immutable object evidence');
@@ -265,8 +274,10 @@ export class OcrService {
         [jobId],
       );
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.extraction.list', job, source.patientId));
-      // Each extraction is re-read through the contract: no stored key outside it, no raw model output.
-      return { items: result.rows.map(projectExtraction) };
+      // Each extraction is re-read through the contract: no stored key outside it, no raw model output. A source
+      // the OCR worker deleted after 7 days (0112) is said so explicitly, from the document's status.
+      const contentDeleted = SOURCE_DELETION_STATUSES.has(source.status);
+      return { items: result.rows.map((row) => projectExtraction(row, contentDeleted)) };
     });
   }
 
@@ -834,6 +845,9 @@ export class OcrService {
     if (!authorization.allowed || (action === 'write_records' && authorization.breakGlass)) {
       throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
     }
+    // Nothing is left to review, confirm, retry or publish once the source and its reading were deleted after
+    // 7 days (migration 0112); reads still answer, with the content marked deleted.
+    if (action === 'write_records' && SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
     return source;
   }
 
@@ -858,7 +872,11 @@ export class OcrService {
       throw error;
     }
     const authorization = await this.identity.authorize(source.patientId, 'write_records', context.purposeOfUse, context);
-    if (authorization.allowed && !authorization.breakGlass) return source;
+    if (authorization.allowed && !authorization.breakGlass) {
+      // Nothing is published once the source and its reading were deleted after 7 days (migration 0112).
+      if (SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
+      return source;
+    }
     if (authorization.allowed) throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
     throw new DomainProblem(403, 'OCR_PUBLISH_NEEDS_DIRECT_CARE', OCR_PUBLISH_NEEDS_DIRECT_CARE_MESSAGE);
   }
