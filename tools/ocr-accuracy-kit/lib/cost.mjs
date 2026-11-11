@@ -43,6 +43,9 @@ function pageCost(model, outputTokens, inputTokens = ASSUMPTIONS.pageInputTokens
     cacheReadInputTokens: ASSUMPTIONS.cachedPromptTokens, cacheCreationInputTokens: 0 });
 }
 
+/** The worker's default output cap per hard-page read (OCR_AI_HARD_PAGE_MAX_TOKENS). */
+export const HARD_READ_MAX_OUTPUT = 32_000;
+
 /** The worker's default model (services/ocr-worker/src/config.ts): Opus 5.5 for the first pass and the re-reads. */
 export const DEFAULT_MODEL = 'claude-opus-5-5';
 
@@ -60,6 +63,8 @@ export function estimate({ pages, features = 'text', firstPassModel = DEFAULT_MO
     textractUsd: round(textract), firstPassUsd: round(firstPass), expectedRereadUsd: round(expectedReread),
     expectedTotalUsd: round(textract + firstPass + expectedReread),
     upperBoundUsd: round(textract + firstPass + worstReread),
+    ceilingUsd: round(textract + firstPass + pages * ASSUMPTIONS.readsPerHardPage
+      * pageCost(rereadModel, HARD_READ_MAX_OUTPUT, ASSUMPTIONS.rereadInputTokens)),
   };
 }
 
@@ -69,7 +74,8 @@ export function formatEstimate(e) {
     `  Textract (${e.features}): $${e.textractUsd.toFixed(2)}`,
     `  AI first pass (${e.firstPassModel}): about $${e.firstPassUsd.toFixed(2)}`,
     `  AI re-reads (${e.rereadModel}, ${ASSUMPTIONS.readsPerHardPage} reads per hard page, ~${Math.round(ASSUMPTIONS.expectedRereadShare * 100)}% of pages): about $${e.expectedRereadUsd.toFixed(2)}`,
-    `  Expected total: about $${e.expectedTotalUsd.toFixed(2)}; at most about $${e.upperBoundUsd.toFixed(2)} if every page is re-read.`,
+    `  Expected total: about $${e.expectedTotalUsd.toFixed(2)}; about $${e.upperBoundUsd.toFixed(2)} if every page is a hard page.`,
+    `  Hard ceiling: each hard-page read may use up to ${HARD_READ_MAX_OUTPUT.toLocaleString('en-US')} output tokens (OCR_AI_HARD_PAGE_MAX_TOKENS), about $${e.ceilingUsd.toFixed(2)} if every page used all of it.`,
   ].join('\n');
 }
 

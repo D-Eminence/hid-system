@@ -269,7 +269,8 @@ runs the worker with its own defaults: Opus 5.5 at high effort for the first pas
 | First pass, 392 pages, Opus 5.5 | about $33 |
 | Hard pages, two reads each, Opus 5.5 (about 35% of pages) | about $49 |
 | **Expected total** | **about $82** |
-| Most it should cost (every page a hard page) | about $172 |
+| If every page were a hard page | about $172 |
+| Hard ceiling (every page a hard page, each read using its full 32,000-token output cap) | about $549 |
 
 Assumptions per page: about 2,000 cached prompt tokens and 900 page tokens in, about 4,000 tokens out on the
 first pass (thinking and the answer); on a hard page two reads, each about 4,000 page and picture tokens in and

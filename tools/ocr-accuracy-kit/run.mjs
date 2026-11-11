@@ -151,7 +151,11 @@ export async function processDocument(context, key, signal) {
     }
   }
   const reading = new worker.reader.PaperReadingService(config, pageClient);
-  const outcome = await reading.read({ facilityId, sourceSha256Hex: document.sha256Hex, pages: text.pages }, signal);
+  // The document's bytes and media type, as the worker gives them (src/worker.ts readItems), so a flagged page gets
+  // the image re-read, the two hard-page reads and zoom exactly as in production. Without them every flagged page
+  // would be re-read from its text only (page-image.ts: image_not_given) and the check would not measure production.
+  const outcome = await reading.read({ facilityId, sourceSha256Hex: document.sha256Hex, pages: text.pages,
+    document: { mediaType: key.mediaType, bytes: document.bytes } }, signal);
   const checked = worker.contract.paperReadingPayloadSchema.safeParse(outcome.payload);
   if (!checked.success) throw new KitError('READING_CONTRACT_VIOLATION', 'payload is not in the contract shape');
   const summary = outcome.summary;
@@ -168,7 +172,9 @@ export async function processDocument(context, key, signal) {
       s3Cleanup,
       reading: { status: summary.status, firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel,
         requests: summary.requests, refusals: summary.refusals, rereadPages: summary.rereadPages,
-        rereadFailedPages: summary.rereadFailedPages, itemCount: summary.itemCount,
+        rereadFailedPages: summary.rereadFailedPages, imageRereadPages: summary.imageRereadPages ?? [],
+        hardPages: summary.hardPages ?? [], hardPageZoomPages: summary.hardPageZoomPages ?? [],
+        itemCount: summary.itemCount,
         droppedUngrounded: summary.droppedUngrounded, flaggedPages: summary.flaggedPages,
         maskedNumbers: summary.maskedNumbers, failureCode: summary.failureCode },
       usage: summary.usage,
@@ -188,6 +194,9 @@ function writeJson(file, value) {
 export function runSettings(config, { fake, facilityId }) {
   return { mode: fake ? 'fake' : 'real', textractFeatures: config.OCR_TEXTRACT_FEATURES ?? 'text',
     firstPassModel: config.OCR_AI_FIRST_PASS_MODEL ?? null, rereadModel: config.OCR_AI_REREAD_MODEL ?? null,
+    firstPassEffort: config.OCR_AI_FIRST_PASS_EFFORT ?? null, rereadEffort: config.OCR_AI_REREAD_EFFORT ?? null,
+    imageReread: config.OCR_AI_IMAGE_REREAD ?? null, hardPageReads: config.OCR_AI_HARD_PAGE_READS ?? null,
+    hardPageEffort: config.OCR_AI_HARD_PAGE_EFFORT ?? null, zoomMaxCalls: config.OCR_AI_ZOOM_MAX_CALLS ?? null,
     facilityId };
 }
 
