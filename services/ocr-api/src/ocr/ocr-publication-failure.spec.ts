@@ -261,6 +261,30 @@ describe('OCR publication failure classification', () => {
       summary: 'Owning clinical service is temporarily unavailable (REQUEST_IN_PROGRESS)', retryable: true });
   });
 
+  // 0111: a publication started near the 72-hour cap, whose source is claimed for deletion or deleted between the
+  // request and the attempt, fails cleanly and terminally: no owning-domain call, nothing published.
+  it.each(['source_deleting', 'source_deleted'])('fails terminally without publishing once the source is %s', async (status) => {
+    const ehrNote = jest.fn();
+    const built = harness({ jobRow: validatedJob, validationRow: noteValidation, publicationRow: notePublication, ehrNote });
+    (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValueOnce(source)
+      .mockResolvedValueOnce({ ...source, status });
+    await expect(publishTo(built.service, 'create_imported_clinical_note'))
+      .rejects.toMatchObject({ code: 'DOCUMENT_SOURCE_DELETED' });
+    expect(ehrNote).not.toHaveBeenCalled();
+    expect(failureUpdate(built.clients)).toEqual({ code: 'DOCUMENT_SOURCE_DELETED',
+      summary: 'Publication was rejected by the owning domain', retryable: false });
+  });
+
+  it('never publishes a blanked validation: empty accepted fields fail as an invalid candidate', async () => {
+    const ehrNote = jest.fn();
+    const { service, clients } = harness({ jobRow: validatedJob,
+      validationRow: { ...noteValidation, accepted_fields: {} }, publicationRow: notePublication, ehrNote });
+    await expect(publishTo(service, 'create_imported_clinical_note'))
+      .rejects.toMatchObject({ code: 'OCR_INVALID_CLINICAL_NOTE' });
+    expect(ehrNote).not.toHaveBeenCalled();
+    expect(failureUpdate(clients)).toMatchObject({ code: 'OCR_INVALID_CLINICAL_NOTE', retryable: false });
+  });
+
   it('stores a database error inside the attempt as a retryable failure', async () => {
     const error = new Error('connection terminated');
     const { service, clients } = harness({ jobRow: validatedJob, attemptReadError: error });

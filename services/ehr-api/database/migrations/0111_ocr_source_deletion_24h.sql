@@ -50,7 +50,12 @@
 --    nothing blocks any more (a hard cap). due_at is latest finish + 24 h, or
 --    + 72 h while blocked; a blocked document is not due, so it is not counted
 --    as due or overdue. A document already 'source_deleting' is always
---    listed (first), so a claim whose S3 deletion failed is retried.
+--    listed (first), so a claim whose S3 deletion failed is retried; claimed
+--    documents go least recently attempted first and take at most half of a
+--    batch while due documents wait (ocr.source_deletion_attempts holds the
+--    attempt count and time; ids, counts and times only, no runtime grant).
+--    There is no unclaim: a claim that keeps failing stays for an operator,
+--    surfaced by the overdue count (ocr-worker README).
 --    - ocr.source_deletion_due(document or NULL for all) -> (document_id,
 --      facility_id, patient_id, storage_bucket, storage_key, status,
 --      job_count, due_at): the shared reckoning (SECURITY INVOKER, granted to
@@ -62,8 +67,10 @@
 --    - ocr.worker_source_deletion_backlog() -> (due, overdue): documents due
 --      or 'source_deleting' now; overdue = those of them due for more than 2
 --      hours, plus documents still 'uploaded' with a job stuck in 'extracted'
---      for more than 24 hours (never deleted, only surfaced to the CloudWatch
---      overdue alarm); hid_ocr_worker.
+--      for more than 24 hours, or in 'queued' or 'processing' for more than
+--      48 hours (not a job parked by the page allowance until its reset);
+--      those are never deleted, only surfaced to the CloudWatch overdue
+--      alarm; hid_ocr_worker.
 -- 3. ocr.claim_worker_source_deletion(document, correlation id) -> (outcome,
 --    storage_bucket, storage_key); hid_ocr_worker. Under a row lock on the
 --    document and its jobs: 'claimed' when the document is due (checked
@@ -135,7 +142,19 @@
 --      deleted after 24 hours') an insert of a job, and any update to queued
 --      or processing, on a document that is 'source_deleting' or
 --      'source_deleted'. 0107 lets a failed -> queued retry pass without the
---      document check; this closes it for such documents only.
+--      document check; this closes it for such documents only. An insert
+--      first takes the document row FOR SHARE, so it waits for a claim in
+--      flight (FOR UPDATE) and then sees 'source_deleting'; a job inserted
+--      first makes the claim, which re-checks after its lock, answer
+--      'not_due'. (Retries and claims of existing jobs already serialize on
+--      the job rows the deletion claim locks.)
+--
+-- Accepted: a publication requested near the 72-hour cap may run its attempt
+-- after the document was claimed or purged. ocr-api reads the source again
+-- for each attempt and answers 410 DOCUMENT_SOURCE_DELETED for both statuses,
+-- so the attempt fails terminally before any owning-domain call; a blanked
+-- validation could not be published anyway (its empty accepted fields fail
+-- the candidate check).
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): the tables present; not applied yet; md5 of
@@ -194,6 +213,7 @@ begin
      or to_regprocedure('ocr.worker_source_deletion_backlog()') is not null
      or to_regprocedure('ocr.purge_worker_source_document(uuid,integer,text)') is not null
      or to_regprocedure('ocr.claim_worker_source_deletion(uuid,text)') is not null
+     or to_regclass('ocr.source_deletion_attempts') is not null
      or exists (select 1 from pg_constraint where conrelid = 'ehr.documents'::regclass
                   and conname = 'documents_status_check'
                   and pg_get_constraintdef(oid) like '%source_deleted%') then
@@ -311,6 +331,23 @@ alter table ehr.documents add constraint documents_status_check check (
   status in ('initiated', 'uploaded', 'rejected', 'entered_in_error', 'source_deleting', 'source_deleted')) not valid;
 alter table ehr.documents validate constraint documents_status_check;
 
+-- The claim's attempts (ids, counts and times only): one row per claimed
+-- document, its last attempt ordering the retries. Only the 0111 SECURITY
+-- DEFINER functions touch it (row-level security forced, the owner's policy
+-- only, no runtime grant). No foreign key, so creating it takes no lock on
+-- ehr.documents beyond the constraint swap's.
+create table ocr.source_deletion_attempts (
+  document_id uuid primary key,
+  attempts integer not null check (attempts >= 1),
+  claimed_at timestamptz not null,
+  last_attempt_at timestamptz not null
+);
+alter table ocr.source_deletion_attempts enable row level security;
+alter table ocr.source_deletion_attempts force row level security;
+revoke all on ocr.source_deletion_attempts from public;
+comment on table ocr.source_deletion_attempts is
+  '0111: per claimed document, how many deletion attempts and when the last one was (the retry order of claimed documents). Ids, counts and times only.';
+
 -- 2. Which documents are due (and those already claimed). Granted to no
 -- role; the callers below run it as its owner.
 create function ocr.source_deletion_due(requested_document_id uuid)
@@ -356,7 +393,9 @@ as $$
 $$;
 
 -- The worker lists the documents to delete: those already claimed first (a
--- retry), then oldest due first.
+-- retry), least recently attempted first, but at most half the batch while
+-- due documents wait, so a claim whose S3 deletion keeps failing never
+-- starves new ones; then the due documents, oldest due first.
 create function ocr.list_worker_source_deletions(requested_limit integer)
 returns table (document_id uuid, facility_id uuid, storage_bucket text, storage_key text, due_seconds bigint)
 language plpgsql volatile security definer
@@ -372,17 +411,40 @@ begin
     raise exception using errcode = '22023', message = 'Invalid OCR source deletion request';
   end if;
   return query
-    select due.document_id, due.facility_id, due.storage_bucket, due.storage_key,
-           greatest(0, floor(extract(epoch from clock_timestamp() - due.due_at)))::bigint
-      from ocr.source_deletion_due(null) due
-     order by (due.status = 'source_deleting') desc, due.due_at, due.document_id
-     limit requested_limit;
+    with due as (
+      select due_row.*, attempt.last_attempt_at
+        from ocr.source_deletion_due(null) due_row
+        left join ocr.source_deletion_attempts attempt on attempt.document_id = due_row.document_id
+    ), claimed as (
+      select due.*, row_number() over (order by due.last_attempt_at nulls first, due.due_at, due.document_id) as rank
+        from due where due.status = 'source_deleting'
+    ), fresh as (
+      select due.*, row_number() over (order by due.due_at, due.document_id) as rank
+        from due where due.status = 'uploaded'
+    ), fresh_taken as (
+      select * from fresh
+       where fresh.rank <= requested_limit - least((select count(*) from claimed), requested_limit / 2)
+    ), claimed_taken as (
+      select * from claimed where claimed.rank <= requested_limit - (select count(*) from fresh_taken)
+    )
+    select taken.document_id, taken.facility_id, taken.storage_bucket, taken.storage_key,
+           greatest(0, floor(extract(epoch from clock_timestamp() - taken.due_at)))::bigint
+      from (select claimed_taken.document_id, claimed_taken.facility_id, claimed_taken.storage_bucket,
+                   claimed_taken.storage_key, claimed_taken.due_at, 0 as part, claimed_taken.rank
+              from claimed_taken
+            union all
+            select fresh_taken.document_id, fresh_taken.facility_id, fresh_taken.storage_bucket,
+                   fresh_taken.storage_key, fresh_taken.due_at, 1, fresh_taken.rank
+              from fresh_taken) taken
+     order by taken.part, taken.rank;
 end
 $$;
 
 -- The worker counts the documents due now (claimed ones included) and those
 -- overdue: due for more than 2 hours, or still uploaded with a job stuck in
--- 'extracted' for more than 24 hours (counted, never deleted).
+-- 'extracted' for more than 24 hours, or in 'queued' or 'processing' for
+-- more than 48 hours (a queued job parked by the page allowance until its
+-- reset is not stuck); those are counted, never deleted.
 create function ocr.worker_source_deletion_backlog()
 returns table (due integer, overdue integer)
 language plpgsql volatile security definer
@@ -399,8 +461,14 @@ begin
            (count(*) filter (where due_row.due_at < clock_timestamp() - interval '2 hours'))::integer
            + (select count(distinct job.document_id)::integer
                 from ocr.jobs job join ehr.documents document on document.id = job.document_id
-               where job.status = 'extracted' and document.status = 'uploaded'
-                 and coalesce(job.completed_at, job.updated_at) < clock_timestamp() - interval '24 hours')
+               where document.status = 'uploaded'
+                 and ((job.status = 'extracted'
+                       and coalesce(job.completed_at, job.updated_at) < clock_timestamp() - interval '24 hours')
+                   or (job.status in ('queued', 'processing')
+                       and coalesce(job.started_at, job.queued_at) < clock_timestamp() - interval '48 hours'
+                       and not (job.status = 'queued'
+                         and job.last_error_code is not distinct from 'OCR_PAGE_ALLOWANCE_USED_UP'
+                         and job.next_attempt_at > clock_timestamp()))))
       from ocr.source_deletion_due(null) due_row;
 end
 $$;
@@ -436,6 +504,10 @@ begin
   -- finds the document claimed and is refused.
   perform 1 from ocr.jobs job where job.document_id = document_row.id order by job.id for update;
   if document_row.status = 'source_deleting' then
+    -- Another attempt at a claim whose S3 deletion has not finished: noted,
+    -- so the listing takes the least recently attempted first.
+    update ocr.source_deletion_attempts set attempts = attempts + 1, last_attempt_at = clock_timestamp()
+     where document_id = document_row.id;
     return query select 'already_claimed'::text, document_row.storage_bucket, document_row.storage_key;
     return;
   end if;
@@ -450,6 +522,8 @@ begin
     return;
   end if;
   update ehr.documents set status = 'source_deleting', row_version = row_version + 1 where id = document_row.id;
+  insert into ocr.source_deletion_attempts (document_id, attempts, claimed_at, last_attempt_at)
+  values (document_row.id, 1, clock_timestamp(), clock_timestamp());
   insert into audit.events (
     correlation_id, actor_type, actor_subject, actor_account_id, facility_id,
     patient_id, action, outcome, resource_type, resource_id, provenance, details
@@ -757,6 +831,11 @@ set search_path = ocr, ehr, identity, auth, platform, pg_temp as $$
 declare document_row record; latest_scan record; scan_found boolean; binds_source boolean;
   leaves_play boolean;
 begin
+  -- 0111: a new job waits for a deletion claim in flight on its document (the
+  -- claim holds the row FOR UPDATE) and then reads the status it left.
+  if tg_op = 'INSERT' then
+    perform 1 from ehr.documents document where document.id = new.document_id for share;
+  end if;
   select document.id, document.patient_id, document.facility_id, document.object_version_id,
          document.sha256_hex, document.status into document_row
     from ehr.documents document where document.id = new.document_id;
@@ -845,7 +924,10 @@ begin
     execute format('alter function ocr.worker_source_deletion_backlog() owner to %I', ocr_owner);
     execute format('alter function ocr.claim_worker_source_deletion(uuid,text) owner to %I', ocr_owner);
     execute format('alter function ocr.purge_worker_source_document(uuid,integer,text) owner to %I', ocr_owner);
+    execute format('alter table ocr.source_deletion_attempts owner to %I', ocr_owner);
   end if;
+  execute format('create policy source_deletion_attempts_owner on ocr.source_deletion_attempts for all '
+    || 'using (current_user = %L) with check (current_user = %L)', ocr_owner, ocr_owner);
 end
 $$;
 
@@ -899,7 +981,7 @@ begin
       ('ocr.reject_immutable_change()', '2b0476d4cfb42c39182899e0ab9c6302'),
       ('ehr.reject_document_object_rebinding()', '75a7b8c8a48049b899a7dde46b58ad97'),
       ('ehr.capture_record_version()', '5abc424b632f44b163ecd9c0c0320630'),
-      ('ocr.validate_job_write()', '19ff87bdadcd7a9c28e4af3aeab74981'))
+      ('ocr.validate_job_write()', '999a135a102f8c4a06092b9d87746cc3'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
    where md5(proc.prosrc) is distinct from expected.digest;
@@ -948,6 +1030,15 @@ begin
           and conname = 'documents_status_check' and convalidated
           and pg_get_constraintdef(oid) = 'CHECK ((status = ANY (ARRAY[''initiated''::text, ''uploaded''::text, ''rejected''::text, ''entered_in_error''::text, ''source_deleting''::text, ''source_deleted''::text])))') then
     mismatch := 'the constraint documents_status_check';
+  end if;
+  if mismatch is null and not exists (
+       select 1 from pg_class class_row
+        where class_row.oid = 'ocr.source_deletion_attempts'::regclass and class_row.relowner = ocr_owner
+          and class_row.relrowsecurity and class_row.relforcerowsecurity
+          and (select count(*) from pg_policy policy_row where policy_row.polrelid = class_row.oid) = 1
+          and not exists (select 1 from aclexplode(coalesce(class_row.relacl, acldefault('r', class_row.relowner))) privilege
+                           where privilege.grantee <> class_row.relowner)) then
+    mismatch := 'the owner, row-level security, policy or ACL of ocr.source_deletion_attempts';
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000', message = format('0111: post-check failed: %s', mismatch);

@@ -3793,7 +3793,19 @@ below). Only after the claim does the worker delete every S3 version and
 delete marker whose key is exactly the document's stored `storage_key` and
 confirm none remain; then it purges, which requires `source_deleting`. If S3
 fails the document stays `source_deleting` and is listed first in the next
-round (ocr-worker README, "Source deletion after 24 hours").
+round (ocr-worker README, "Source deletion after 24 hours"). Claimed
+documents go least recently attempted first (`ocr.source_deletion_attempts`:
+ids, counts and times, no runtime grant) and take at most half of a batch
+while due documents wait. There is no unclaim: a claim that keeps failing
+stays for an operator and keeps counting as overdue. A job insert takes the
+document row `FOR SHARE` first, so it serializes with a claim in flight and is
+refused once the document is `source_deleting`.
+
+Accepted: a publication requested near the 72-hour cap may run its attempt
+after the claim or the purge. ocr-api reads the source again for each attempt
+and answers 410 `DOCUMENT_SOURCE_DELETED`, recording a terminal failure before
+any owning-domain call, so nothing is published; a blanked validation would
+fail the candidate check (`OCR_INVALID_CLINICAL_NOTE`) anyway.
 
 **What the purge changes**, once, under a row lock on the document and its
 jobs:
@@ -3832,8 +3844,8 @@ without the document check).
 
 | Command | Notes |
 |---|---|
-| `ocr.list_worker_source_deletions(limit 1-500)` returns `(document_id, facility_id, storage_bucket, storage_key, due_seconds)` | `source_deleting` documents first, then oldest due first. 22023 for a bad limit. |
-| `ocr.worker_source_deletion_backlog()` returns `(due, overdue)` | Due or claimed now; overdue = those due for more than 2 hours, plus `uploaded` documents with a job stuck in `extracted` for more than 24 hours (counted, never deleted). |
+| `ocr.list_worker_source_deletions(limit 1-500)` returns `(document_id, facility_id, storage_bucket, storage_key, due_seconds)` | `source_deleting` documents first (least recently attempted first, at most half the limit while due documents wait), then oldest due first. 22023 for a bad limit. |
+| `ocr.worker_source_deletion_backlog()` returns `(due, overdue)` | Due or claimed now; overdue = those due for more than 2 hours, plus `uploaded` documents with a job stuck in `extracted` for more than 24 hours or in `queued` or `processing` for more than 48 hours, not counting a job parked by the page allowance (counted, never deleted). |
 | `ocr.claim_worker_source_deletion(document_id, correlation_id 8-128)` returns `(outcome, storage_bucket, storage_key)` | `claimed` (now `source_deleting`; audit `ocr.source.deletion_claimed`), `already_claimed`, `already_deleted` or `not_due` (nothing changed; bucket and key NULL); P0002, 22023. |
 | `ocr.purge_worker_source_document(document_id, versions_deleted 0-100000, correlation_id 8-128)` returns `(outcome, extractions, validations, confirmations)` | `deleted`, `already_deleted` or `not_claimed` (not `source_deleting`; nothing changed); P0002 for an unknown document; 22023 for bad input. |
 

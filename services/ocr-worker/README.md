@@ -1824,7 +1824,9 @@ provenance by job id.
      `objectVersionsDeleted` adds up every round of this worker process for the
      document, not only the last).
   A storage failure leaves the document `source_deleting`; the next round lists
-  it first and finishes it. Any purge answer but `deleted` or `already_deleted`
+  it first and finishes it. Claimed documents go least recently attempted
+  first and take at most half of a batch while due documents wait, so claims
+  that keep failing never stop new deletions. Any purge answer but `deleted` or `already_deleted`
   is logged as `ocr.source_deletion.failed`. Keys outside
   `clinical/objects/<id>` are refused (`SOURCE_KEY_OUTSIDE_LAYOUT`) and never
   deleted. Upload keys and malware scanning are unchanged.
@@ -1849,6 +1851,29 @@ provenance by job id.
     `ocr.source_deletion.failed` (`stage: list`) instead and no overdue line,
     so the CloudWatch alarm (metric filter `{ $.event = "ocr.source_deletion.overdue" }`,
     value `$.overdue`, missing data breaching) also fires when the sweep stops.
+- **A claim that keeps failing** stays `source_deleting`: there is no unclaim,
+  on purpose (a partly deleted source must not go back into use). It keeps
+  counting as overdue, so the alarm stays on. An operator checks, for the
+  `documentId` in the `ocr.source_deletion.failed` lines:
+  - the `code`: `SOURCE_DELETE_FAILED` or `SOURCE_LIST_FAILED` (IAM: the
+    worker role's `s3:ListBucketVersions` and `s3:DeleteObjectVersion`; bucket
+    policy; Object Lock retention or MFA delete; KMS is not needed to delete),
+    `SOURCE_VERSIONS_REMAIN` (a version reappeared or a delete was not
+    applied), `SOURCE_KEY_OUTSIDE_LAYOUT` (the stored key is not
+    `clinical/objects/<id>`; it is never deleted by the worker), or a SQLSTATE
+    from the purge;
+  - `ocr.source_deletion_attempts` (attempt count and last attempt) as the
+    database owner;
+  - once the cause is fixed, the next round finishes the document by itself.
+- **Overdue also counts stuck jobs** (never deleted): an `uploaded` document
+  with a job in `extracted` for more than 24 hours, or in `queued` or
+  `processing` for more than 48 hours (a job parked by the page allowance until
+  its reset does not count).
+- **A late publication.** A publication requested near the 72-hour cap may
+  run its attempt after the document was claimed or purged: ocr-api reads the
+  source again for the attempt, answers 410 `DOCUMENT_SOURCE_DELETED` and
+  records a terminal failure before calling the owning domain, so nothing is
+  published (and a blanked validation would fail the candidate check anyway).
 - **IAM** for the worker's task role, on the documents bucket only:
   `s3:ListBucketVersions` on the bucket with the condition
   `s3:prefix` like `clinical/objects/*`, and `s3:DeleteObjectVersion` on

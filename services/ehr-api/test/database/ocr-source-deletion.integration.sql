@@ -154,6 +154,8 @@ insert into identity.patients (id, hid_code, first_name, last_name, full_name, s
 --   13 a job stuck in 'extracted' since 30 h ago                      -> not due, but overdue
 --   14 failed 30 h ago (attempts left)                                -> due; claimed, then job, retry, hold refused
 --   15 rejected 30 h ago                                              -> due, then put on legal hold before its claim
+--   16 a job queued since 50 h ago                                    -> not due, but overdue
+--   17 a job queued since 50 h ago, parked by the page allowance      -> not due, not overdue
 insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
   storage_bucket, storage_key, object_version_id, declared_media_type, size_bytes, sha256_hex, status,
   retention_class, legal_hold)
@@ -163,7 +165,7 @@ select ('c0116000-0000-4000-8000-0000000000' || n)::uuid, 'c0115000-0000-4000-80
        'clinical/objects/c0116000-0000-4000-8000-0000000000' || n, 'deletion-v' || n, 'application/pdf', 2048,
        repeat(right(n, 1), 64), case when n = '09' then 'entered_in_error' else 'uploaded' end, 'clinical_record',
        n = '07'
-  from unnest(array['01','02','03','04','05','06','07','08','09','10','11','12','13','14','15']) n;
+  from unnest(array['01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17']) n;
 insert into ehr.document_scan_events (document_id, patient_id, facility_id, created_by, event_type,
   detected_media_type, scanner_engine, scanner_version, idempotency_key, correlation_id, object_version_id,
   object_sha256_hex)
@@ -171,7 +173,7 @@ select ('c0116000-0000-4000-8000-0000000000' || n)::uuid, 'c0115000-0000-4000-80
        'c0110000-0000-4000-8000-00000000000a', 'c0111000-0000-4000-8000-000000000001', 'clean', 'application/pdf',
        'synthetic-scanner', '1.0', 'deletion-scan-00' || n || 'x', 'deletion-scan', 'deletion-v' || n,
        repeat(right(n, 1), 64)
-  from unnest(array['01','02','03','04','05','06','07','08','09','10','11','12','13','14','15']) n;
+  from unnest(array['01','02','03','04','05','06','07','08','09','10','11','12','13','14','15','16','17']) n;
 insert into ocr.jobs (id, facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex,
   idempotency_key, request_sha256, provider, max_attempts, created_by, created_by_membership_id, correlation_id,
   status, attempt_count, completed_at, failed_at, last_error_code, updated_at, row_version)
@@ -200,6 +202,17 @@ select ('c0117000-0000-4000-8000-0000000000' || job.n)::uuid, 'c0110000-0000-400
                ('13', '13', 'extracted', interval '30 hours'),
                ('24', '14', 'failed', interval '30 hours'),
                ('15', '15', 'rejected', interval '30 hours')) job(n, document, status, age);
+insert into ocr.jobs (id, facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex,
+  idempotency_key, request_sha256, provider, max_attempts, created_by, created_by_membership_id, correlation_id,
+  status, attempt_count, queued_at, next_attempt_at, last_error_code, updated_at, row_version)
+select ('c0117000-0000-4000-8000-0000000000' || n)::uuid, 'c0110000-0000-4000-8000-00000000000a',
+       ('c0116000-0000-4000-8000-0000000000' || n)::uuid, 'c0115000-0000-4000-8000-000000000001',
+       'deletion-v' || n, repeat(right(n, 1), 64), 'deletion-fixture-00' || n, repeat('e', 64), 'deletion-provider', 3,
+       'c0111000-0000-4000-8000-000000000001', 'c0113000-0000-4000-8000-000000000001', 'deletion-fixture', 'queued', 1,
+       clock_timestamp() - interval '50 hours',
+       case when n = '17' then clock_timestamp() + interval '5 days' else clock_timestamp() - interval '49 hours' end,
+       case when n = '17' then 'OCR_PAGE_ALLOWANCE_USED_UP' end, clock_timestamp() - interval '50 hours', 2
+  from unnest(array['16','17']) n;
 -- Reading and review content of jobs 01 (purged below) and 03 (not due).
 insert into ocr.extractions (id, job_id, facility_id, document_id, patient_id, extraction_version, attempt_no,
   provider, provider_model, provider_result_key, content_sha256, source_object_version_id, source_sha256_hex,
@@ -440,15 +453,15 @@ begin
   select * into backlog from ocr.worker_source_deletion_backlog();
   perform pg_temp.deletion_check('the backlog counts every due document',
     backlog.due = (select count(*) from ocr.list_worker_source_deletions(500)));
-  perform pg_temp.deletion_check('overdue: due for more than 2 hours (01, 06, 10, 12, 14, 15; not 02), plus 13 stuck in extracted',
-    backlog.overdue = (select count(*) from ocr.list_worker_source_deletions(500) where due_seconds > 7200) + 1
+  perform pg_temp.deletion_check('overdue: due for more than 2 hours (01, 06, 10, 12, 14, 15; not 02), plus 13 stuck in extracted and 16 queued for 50 h (not 17, parked by the allowance)',
+    backlog.overdue = (select count(*) from ocr.list_worker_source_deletions(500) where due_seconds > 7200) + 2
     and backlog.overdue >= 7 and backlog.due >= 7);
 
   -- Not due: the claim refuses and nothing changes.
   for purge in select * from (values ('03', 'finished less than 24 hours ago'), ('04', 'a job still queued'),
       ('05', 'a publication pending'), ('07', 'on legal hold'), ('08', 'no OCR job'),
       ('09', 'not uploaded'), ('11', 'a publication failed retryably with attempts left'),
-      ('13', 'a job stuck in extracted')) x(n, why)
+      ('13', 'a job stuck in extracted'), ('16', 'a job queued for 50 h')) x(n, why)
   loop
     perform pg_temp.deletion_value('not due (' || purge.why || ')', 'not_due',
       (select outcome from ocr.claim_worker_source_deletion(('c0116000-0000-4000-8000-0000000000' || purge.n)::uuid,
@@ -467,8 +480,9 @@ begin
   perform pg_temp.deletion_value('a second claim of 01 is idempotent', 'already_claimed',
     (select outcome from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000001',
        'deletion-suite-claim-2')));
-  perform pg_temp.deletion_check('a claimed document is listed first',
-    (select document_id from ocr.list_worker_source_deletions(1)) = 'c0116000-0000-4000-8000-000000000001');
+  perform pg_temp.deletion_check('a claimed document is listed first (a batch of 2: one claimed, one due)',
+    (select array_agg(document_id) from ocr.list_worker_source_deletions(2))
+      = array['c0116000-0000-4000-8000-000000000001', 'c0116000-0000-4000-8000-000000000006']::uuid[]);
   perform pg_temp.deletion_check('a claimed document still counts as due and overdue',
     (select due from ocr.worker_source_deletion_backlog()) = backlog.due
     and (select overdue from ocr.worker_source_deletion_backlog()) = backlog.overdue);
@@ -501,7 +515,7 @@ begin
        'c0116000-0000-4000-8000-000000000003', 'c0116000-0000-4000-8000-000000000004',
        'c0116000-0000-4000-8000-000000000005', 'c0116000-0000-4000-8000-000000000007',
        'c0116000-0000-4000-8000-000000000008', 'c0116000-0000-4000-8000-000000000011',
-       'c0116000-0000-4000-8000-000000000013')) = 7
+       'c0116000-0000-4000-8000-000000000013', 'c0116000-0000-4000-8000-000000000016')) = 8
     and not exists (select 1 from audit.events where action like 'ocr.source.%'
                      and resource_id::text like 'c0116000-%' and resource_id not in (
                        'c0116000-0000-4000-8000-000000000001', 'c0116000-0000-4000-8000-000000000014')));
@@ -594,6 +608,24 @@ begin
   perform pg_temp.deletion_value('a document put on legal hold before its claim is not due', 'not_due',
     (select outcome from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000015',
        'deletion-suite-claim')));
+  -- Stuck claims: 14 (claimed first), then 02, 06 and 10 claimed and their
+  -- S3 deletion assumed failing; 12 is the only due document left.
+  perform ocr.claim_worker_source_deletion(('c0116000-0000-4000-8000-0000000000' || n)::uuid, 'deletion-suite-claim')
+     from unnest(array['02', '06', '10']) n;
+  perform pg_temp.deletion_value('claimed documents take at most half a batch; the least recently attempted first',
+    '14,12', (select string_agg(right(document_id::text, 2), ',') from ocr.list_worker_source_deletions(2)));
+  perform pg_temp.deletion_value('another attempt at 14', 'already_claimed',
+    (select outcome from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000014',
+       'deletion-suite-claim')));
+  perform pg_temp.deletion_value('after that attempt 14 goes last among the claimed', '02,12',
+    (select string_agg(right(document_id::text, 2), ',') from ocr.list_worker_source_deletions(2)));
+  perform pg_temp.deletion_value('with room, every claimed document is listed (least recently attempted first), then the due',
+    '02,06,10,14,12', (select string_agg(right(document_id::text, 2), ',') from ocr.list_worker_source_deletions(500)
+                         where document_id::text like 'c0116000-%'));
+  perform pg_temp.deletion_value('with 3 places: one fresh, two claimed', '02,06,12',
+    (select string_agg(right(document_id::text, 2), ',') from ocr.list_worker_source_deletions(3)));
+  perform pg_temp.deletion_case('the worker may not read the attempts', '42501',
+    'select 1 from ocr.source_deletion_attempts', false);
 end $$;
 reset role;
 select pg_temp.as_staff();
@@ -624,6 +656,15 @@ begin
   perform pg_temp.deletion_case('a failed job of a claimed document may still be cancelled', 'ok',
     $q$update ocr.jobs set status = 'cancelled', row_version = row_version + 1
        where id = 'c0117000-0000-4000-8000-000000000024'$q$, false);
+end $$;
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_check('the attempts table holds ids, counts and times: 14 tried twice, 01 once',
+    (select attempts from ocr.source_deletion_attempts where document_id = 'c0116000-0000-4000-8000-000000000014') = 2
+    and (select attempts from ocr.source_deletion_attempts where document_id = 'c0116000-0000-4000-8000-000000000001') = 2
+    and not exists (select 1 from information_schema.columns where table_schema = 'ocr'
+                     and table_name = 'source_deletion_attempts' and data_type in ('text', 'jsonb', 'json')));
 end $$;
 select pg_temp.deletion_case('a failed -> queued retry on a document not claimed still works', 'ok',
   $q$update ocr.jobs set status = 'queued', failed_at = null, last_error_code = null, next_attempt_at = clock_timestamp(),
