@@ -7,7 +7,8 @@
 // email delivery is a local stub that keeps the code and the link. It proves
 // that each function the services call exists with the arguments and
 // answers they use:
-//   public sign-up (start, wrong code, resend wait, verify, activate), an
+//   public sign-up (start, wrong code, resend wait, resend sent to the
+//   sign-up's own email after the minute, verify, activate), an
 //   email that already has a login refused, "Start an outreach group" for a
 //   signed-in hospital doctor (owner decision 5) and its repeat, outreach
 //   invitations (create, already invited, team list, preview, accept with a
@@ -16,7 +17,8 @@
 //   once (owner decision Q38: no Health ID check first), a registration with
 //   consent, the governance read ("unverified"), support's close and
 //   appoint, the retention sweep (owner decision 3) redacting a registration
-//   kept past its year, and suspension.
+//   kept past its year, suspension, and the suspended organiser refused when
+//   starting again.
 //
 // Usage (a loopback test cluster only; the database is copied first):
 //   NODE_ENV=test HID_OUTREACH_RUNTIME_LOCAL_CLUSTER=loopback PGHOST=127.0.0.1 PGPORT=55461 \
@@ -151,8 +153,17 @@ try {
     refuses(organisers.verify(cookie, sent.codes[0].code === '000000' ? '111111' : '000000', correlationId()), { code: 'OTP_INVALID' }));
   await step('resend: too soon after the first code', () =>
     refuses(organisers.resend(cookie, correlationId()), { status: 429, code: 'OTP_RESEND_COOLDOWN' }));
+  await step('resend: after the minute, sent to the sign-up\'s own email (the command answers it)', async () => {
+    // The minute is moved back as the superuser; Identity itself has no read or write of the sign-up table.
+    await db.query(`update identity.outreach_organiser_signups set code_last_sent_at = clock_timestamp() - interval '61 seconds'
+      where email = 'bola.organiser@example.test' and status = 'pending'`);
+    const resent = await organisers.resend(cookie, correlationId());
+    assert.equal(resent.sent, true);
+    assert.equal(sent.codes.length, 2);
+    assert.equal(sent.codes.at(-1).recipient, 'bola.organiser@example.test');
+  });
   await step('verify: the right code (3 arguments)', async () => {
-    assert.deepEqual(await organisers.verify(cookie, sent.codes[0].code, correlationId()), { verified: true });
+    assert.deepEqual(await organisers.verify(cookie, sent.codes.at(-1).code, correlationId()), { verified: true });
   });
   await step('activate: account, group and the login\'s email', async () => {
     organiser = await organisers.activate(cookie, { termsVersion: '2026-11-01', acceptTerms: true,
@@ -190,6 +201,9 @@ try {
     helperInvitation = await invitations.create(organiserContext(), { name: 'Chika Helper', email: 'chika.helper@example.test' });
     assert.equal(helperInvitation.deliveryOutcome, 'accepted');
     assert.equal(sent.invitations.at(-1).invitationId, helperInvitation.invitationId);
+    const recorded = await db.query('select dispatched, delivery_outcome from identity.outreach_invitations where id = $1',
+      [helperInvitation.invitationId]);
+    assert.deepEqual(recorded.rows[0], { dispatched: true, delivery_outcome: 'accepted' });
   });
   await step('invite: the same person again is "already invited" (409)', () =>
     refuses(invitations.create(organiserContext(), { name: 'Chika Helper', email: 'chika.helper@example.test' }),
@@ -341,6 +355,9 @@ try {
       order by role_code`, [ids.doctor]);
     assert.deepEqual(roles.rows.map((entry) => entry.role_code), ['doctor', 'outreach_volunteer']);
   });
+  await step('for-my-account: the suspended organiser cannot start a new group (403)', () =>
+    refuses(organisers.startForAccount(doctorAccount, { ...details, phone: '0809 876 5432', groupName: 'Ada Fresh Start' }),
+      { status: 403, code: 'OUTREACH_ORGANISER_SUSPENDED' }));
   await identityDatabase.onApplicationShutdown?.();
   await outreachDatabase.onApplicationShutdown?.();
 } finally {

@@ -62,6 +62,16 @@ function signupExpired(): DomainProblem {
     'Your sign-up has expired. Please start again.');
 }
 
+function patientLogin(): DomainProblem {
+  return new DomainProblem(409, 'OUTREACH_ORGANISER_PATIENT_LOGIN',
+    'This email is used for a Health ID patient account, which cannot run an outreach group yet. Use a different email.');
+}
+
+function emailRateLimited(): DomainProblem {
+  return new DomainProblem(429, 'OUTREACH_ORGANISER_EMAIL_RATE_LIMITED',
+    'We have sent sign-up codes to this email 3 times today. Look for the latest code in your inbox or spam folder, or try again tomorrow.');
+}
+
 function notEligible(): DomainProblem {
   return new DomainProblem(403, 'OUTREACH_ORGANISER_NOT_ELIGIBLE',
     'This account cannot start an outreach group. Use a staff account that is active and checked, or contact Health ID support.');
@@ -186,10 +196,17 @@ export class OutreachOrganiserService {
     } catch (error) {
       throw this.mapError(error);
     }
-    if (outcome === 'email_registered') throw emailAlreadyRegistered();
-    if (outcome === 'name_not_allowed') throw reservedNameProblem();
-    if (outcome === 'rate_limited') throw this.rateLimited();
-    if (outcome !== 'started') throw outreachSignupUnavailable();
+    switch (outcome) {
+      case 'started': break;
+      case 'email_registered': throw emailAlreadyRegistered();
+      case 'patient_login': throw patientLogin();
+      case 'name_not_allowed': throw reservedNameProblem();
+      case 'rate_limited': throw this.rateLimited();
+      case 'email_rate_limited': throw emailRateLimited();
+      case 'suspended': throw new DomainProblem(423, 'OUTREACH_ORGANISER_SUSPENDED',
+        'This phone number belongs to an outreach group that Health ID has paused. Contact Health ID support.');
+      default: throw outreachSignupUnavailable();
+    }
 
     const challengeId = await this.sendCode(input.email, code, correlationId);
     return {
@@ -201,31 +218,26 @@ export class OutreachOrganiserService {
 
   /**
    * A new code for the sign-up the cookie names (after a minute, at most 5
-   * codes in all). The email is read back from the sign-up by the database,
-   * so the new code can only go where the first one went.
+   * codes in all). The command answers the sign-up's own email with 'sent'
+   * (Identity has no read of the sign-up table), so the new code can only go
+   * where the first one went.
    */
   async resend(cookie: string | undefined, correlationId: string) {
     await this.assertOpen();
     const key = this.requireKey();
     const session = this.parseCookie(cookie);
     const code = newCode();
-    let answer: { outcome?: string; email?: string } = {};
+    let answer: { result?: string; email?: string | null } = {};
     try {
-      answer = await this.database.withSystemTransaction(correlationId, async (client) => {
-        const outcome = (await client.query<{ outcome: string }>(
-          'select identity.resend_outreach_organiser_signup_code($1,$2,$3) as outcome',
-          [session.signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', session.token), codeHmac(key, session.signupId, code)]))
-          .rows[0]?.outcome;
-        if (outcome !== 'sent') return { outcome };
-        const email = (await client.query<{ email: string }>(
-          'select signup.email from identity.outreach_organiser_signups signup where signup.id = $1',
-          [session.signupId])).rows[0]?.email;
-        return { outcome, email };
-      });
+      answer = await this.database.withSystemTransaction(correlationId, async (client) => (await client.query<{
+        result: string; email: string | null }>(
+        'select * from identity.resend_outreach_organiser_signup_code($1,$2,$3)',
+        [session.signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', session.token), codeHmac(key, session.signupId, code)]))
+        .rows[0] ?? {});
     } catch (error) {
       throw this.mapError(error);
     }
-    switch (answer.outcome) {
+    switch (answer.result) {
       case 'sent': break;
       case 'too_soon': throw new DomainProblem(429, 'OTP_RESEND_COOLDOWN',
         `We sent a code a moment ago. Wait ${OUTREACH_SIGNUP_RESEND_SECONDS} seconds before asking for another.`);
@@ -348,6 +360,10 @@ export class OutreachOrganiserService {
       case 'started': break;
       case 'already_organiser': throw new DomainProblem(409, 'OUTREACH_ORGANISER_ALREADY_RUNNING',
         'You already run an outreach group with this account. Choose it in the facility picker.');
+      case 'suspended': throw new DomainProblem(403, 'OUTREACH_ORGANISER_SUSPENDED',
+        'Your outreach group was paused by Health ID. Contact Health ID support.');
+      case 'patient_login': throw new DomainProblem(403, 'OUTREACH_ORGANISER_PATIENT_LOGIN',
+        'A Health ID patient account cannot run an outreach group yet. Sign in with a staff account.');
       case 'name_not_allowed': throw reservedNameProblem();
       case 'not_eligible': throw notEligible();
       default: throw outreachSignupUnavailable();

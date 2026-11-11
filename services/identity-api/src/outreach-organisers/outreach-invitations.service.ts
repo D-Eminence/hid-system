@@ -27,6 +27,8 @@ interface CreateRow extends QueryResultRow {
   result: string;
   invitation_id: string | null;
   expires_at: Date | string | null;
+  /** False when the address already had 3 outreach invitation emails today: the invitation is made, not emailed. */
+  dispatch: boolean | null;
 }
 
 /** identity.list_outreach_team (0114): the group's members, then its pending invitations. */
@@ -48,7 +50,7 @@ interface PreviewRow extends QueryResultRow {
   inviter_name: string | null;
   invitee_name: string | null;
   invitee_email: string | null;
-  account_case: 'new' | 'existing' | null;
+  account_case: 'new' | 'existing' | 'patient_login' | null;
   expires_at: Date | string | null;
 }
 
@@ -92,6 +94,9 @@ export function invitationResultProblem(result: string | undefined): DomainProbl
       'This invitation was sent to a different email. Sign in with the email it was sent to.');
     case 'already_member': return new DomainProblem(409, 'OUTREACH_INVITEE_ALREADY_MEMBER',
       'You are already in this outreach group. Choose it in the facility picker.');
+    case 'patient_login': return new DomainProblem(409, 'OUTREACH_INVITATION_PATIENT_LOGIN',
+      'This email is used for a Health ID patient account, which cannot help an outreach group yet. '
+      + 'Ask the organiser to invite a different email.');
     case 'not_eligible': return new DomainProblem(403, 'OUTREACH_INVITATION_NOT_ELIGIBLE',
       'This account cannot join an outreach group. Contact Health ID support.');
     default: return unavailable();
@@ -139,8 +144,12 @@ function organiserRequired(): DomainProblem {
  * a helper by email as outreach_volunteer. They are separate commands from facility
  * staff invitations, which are unchanged. The helper opens the emailed link:
  * a new person sets a password and is signed in; someone with a Health ID
- * account accepts while signed in. At most 50 invitations wait at once (an
- * abuse guard, not a business limit).
+ * account accepts while signed in. Abuse guards, not business limits (the
+ * email names the group, which the organiser chooses): at most 50
+ * invitations wait at once and 30 are made a day, cancelled ones included;
+ * sending pauses for the day after 10 undeliverable emails; and one address
+ * gets at most 3 outreach invitation emails a day from all groups (past that
+ * the invitation is made but not emailed).
  */
 @Injectable()
 export class OutreachInvitationsService {
@@ -170,11 +179,19 @@ export class OutreachInvitationsService {
         'This person already has an invitation waiting. Cancel it first if you want to send a new one.');
       case 'too_many_pending': throw new DomainProblem(429, 'OUTREACH_INVITATION_PENDING_LIMIT',
         'You have 50 invitations still waiting. Wait for some to be accepted, or cancel some, before inviting more.');
+      case 'too_many_today': throw new DomainProblem(429, 'OUTREACH_INVITATION_DAILY_LIMIT',
+        'Your group has sent 30 invitations today, counting any you cancelled. You can invite more tomorrow.');
+      case 'sending_paused': throw new DomainProblem(429, 'OUTREACH_INVITATION_DELIVERY_PAUSED',
+        'Invitations are paused for today because 10 of your group\'s invitation emails could not be delivered. '
+        + 'Check the email addresses and try again tomorrow.');
       default: throw unavailable();
     }
     if (!row.invitation_id || !row.expires_at) throw unavailable();
     const expiresAt = new Date(iso(row.expires_at) as string);
-    const deliveryOutcome = await this.send(context, row.invitation_id, email, token, expiresAt);
+    // Not emailed when the address already had 3 outreach invitation emails today (0114 answers dispatch false).
+    const deliveryOutcome = row.dispatch === true
+      ? await this.send(context, row.invitation_id, email, token, expiresAt)
+      : 'unknown' as const;
     return { invitationId: row.invitation_id, expiresAt: expiresAt.toISOString(), deliveryOutcome, replayed: false };
   }
 
@@ -308,8 +325,10 @@ export class OutreachInvitationsService {
   }
 
   /**
-   * Sends the email after commit. 0114 keeps no delivery record, so the
-   * outcome is only answered to the organiser. The outreach email offers the
+   * Sends the email after commit and records the outcome with
+   * identity.record_outreach_invitation_delivery (10 undeliverable emails in
+   * a day pause the group's invitations); a failure to record is only
+   * logged. The outreach email offers the
    * link only; the code field the shared staff-invitation route requires is
    * filled with an unused random value that the outreach email never shows.
    */
@@ -323,6 +342,12 @@ export class OutreachInvitationsService {
     }).catch(() => ({ outcome: 'unknown' as const }));
     if (delivered.outcome !== 'accepted') {
       this.logger.warn(`Outreach invitation email not confirmed (event=outreach_invitation_delivery outcome=${delivered.outcome})`);
+    }
+    try {
+      await this.database.withTransaction(context, (client) =>
+        client.query('select identity.record_outreach_invitation_delivery($1,$2)', [invitationId, delivered.outcome]));
+    } catch {
+      this.logger.warn('Outreach invitation delivery could not be recorded (event=outreach_invitation_delivery_record_failed)');
     }
     return delivered.outcome;
   }

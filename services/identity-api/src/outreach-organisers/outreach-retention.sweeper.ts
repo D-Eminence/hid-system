@@ -13,8 +13,9 @@ export const OUTREACH_RETENTION_SWEEP_BATCH = 500;
  * context it accepts (EXECUTE is granted to Identity's runtime only). The
  * function redacts, never deletes, the registrations of outreach groups never
  * linked to a Health ID whose campaign's retain_until has passed (closed_at +
- * 365 days, or starts_at + 365 days for a campaign never closed), and drops
- * unfinished sign-ups older than 30 days. It decides what is due; the batch
+ * 365 days, or starts_at + 365 days for a campaign never closed), drops
+ * unfinished sign-ups older than 30 days, and drops invitations never
+ * accepted 30 days after they expired or were cancelled. It decides what is due; the batch
  * only bounds one run. Several replicas are safe: it locks what it redacts.
  * A failure is logged by its SQLSTATE only, as an error.
  */

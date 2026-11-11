@@ -20,23 +20,38 @@ export function normalizeOutreachPhone(raw: string): string | undefined {
 }
 
 /**
- * Group names that suggest a hospital or a government body (plan PR-1), the
- * same rule as identity.outreach_group_name_allowed (0114): the words in any
- * case, the acronyms only in capitals (so "Those who care" is not refused).
- * The database refuses them too; Identity answers first so the person is told
- * before they choose a password.
+ * Group names that suggest a hospital, a health agency or a government body
+ * (plan PR-1), the same rule as identity.outreach_group_name_allowed (0114).
+ * The name is first reduced to plain Latin letters: Unicode NFKD, then
+ * accents dropped (Yoruba, Igbo and Hausa letters keep their base letter);
+ * anything left that is not a Latin letter, a digit, a space or . , ' ’ &
+ * ( ) - / refuses the name, so look-alike letters from other scripts and
+ * invisible characters cannot hide a word. Words are then compared in any
+ * case, with single letters joined ("N.C.D.C" and "N C D C" read as "ncdc").
+ * "who" is refused only as the acronym (in capitals, or dotted), so "Those who
+ * care" is fine. The database refuses them too; Identity answers first so the
+ * person is told before they choose a password.
  */
-const RESERVED_NAME = /(^|[^a-z])(hospital|hospitals|ministry|government|federal)([^a-z]|$)/;
-const RESERVED_ACRONYM = /(^|[^A-Za-z])(WHO|NCDC|LUTH|NHIS|NHIA)([^A-Za-z]|$)/;
+const ALLOWED_LETTERS = /^[A-Za-z0-9 .,'\u2019&()/-]+$/;
+const RESERVED_WORD = new RegExp(' (hospitals?|hosp|ministry|ministries|government|govt|federal|commission|agency|agencies'
+  + '|unicef|unfpa|usaid|nafdac|ncdc|nphcda|nhis|nhia|luth|fmc|msf) ');
+const RESERVED_PHRASE = new RegExp(' (health organi[sz]ations?|world health|disease control|primary health ?care|health ?care boards?'
+  + '|medical cent(re|er)s?|health services?|state health|red cross|red crescent|doctors without borders'
+  + '|medecins sans frontieres) ');
 
 export function reservedOrganiserName(name: string): boolean {
-  return RESERVED_NAME.test(name.toLowerCase()) || RESERVED_ACRONYM.test(name);
+  const plain = name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+  if (!ALLOWED_LETTERS.test(plain)) return true;
+  const cased = ` ${plain.replace(/[^A-Za-z0-9]+/g, ' ').trim()} `.replace(/(?<= [A-Za-z]) (?=[A-Za-z] )/g, '');
+  const words = cased.toLowerCase();
+  return RESERVED_WORD.test(words) || RESERVED_PHRASE.test(words) || cased.includes(' WHO ');
 }
 
 export function reservedNameProblem(): DomainProblem {
   return new DomainProblem(422, 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED',
-    'Your group name uses a word kept for hospitals or government bodies, such as "hospital", "ministry" or "federal". '
-    + 'Choose another name. If you really are one of these, contact Health ID support.');
+    'Choose another group name. It cannot use words kept for hospitals, health agencies or government bodies, such as '
+    + '"hospital", "ministry" or "disease control", and it can only use ordinary letters, numbers, spaces and . , \' & ( ) - /. '
+    + 'If you really are one of these bodies, contact Health ID support.');
 }
 
 const localKey = randomBytes(32);

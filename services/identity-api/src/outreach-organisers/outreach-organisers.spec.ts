@@ -110,6 +110,17 @@ describe('helpers', () => {
       expect(reservedOrganiserName(name)).toBe(false);
   });
 
+  it('refuses the names that once slipped past the list (as 0114 does), and keeps accented names', () => {
+    for (const name of ['World Health Organization', 'Nigeria Centre for Disease Control', 'Ncdc Outreach', 'N.C.D.C Outreach',
+      'Lagos University Teaching Hosp', 'General H\u043Espital Ikeja', 'Lagos State Primary Health Care Board', 'FMC Abeokuta',
+      'UNICEF Nigeria', 'Red Cross Nigeria', 'W.H.O. Friends', '\uFF28ospital Friends', 'Hope\u200BGroup',
+      'Ikeja Medical Center Friends', 'Lagos Health Service', 'Lagos State Health Board'])
+      expect([name, reservedOrganiserName(name)]).toEqual([name, true]);
+    for (const name of ['People who care Yaba', '\u1ECCm\u1ECD \u1ECCl\u1ECDrun Friends (Ikeja) - 2',
+      'St. Mary\u2019s Youth', 'Lagos Island Health Volunteers'])
+      expect([name, reservedOrganiserName(name)]).toEqual([name, false]);
+  });
+
   it('encrypts the phone so only Identity can read it back', () => {
     const key = outreachKey() as Buffer;
     const sealed = encryptOutreachPhone(key, '+2348012345678');
@@ -198,6 +209,8 @@ describe('OutreachOrganiserService', () => {
   });
 
   it.each([['name_not_allowed', 422, 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED'], ['rate_limited', 429, 'OUTREACH_ORGANISER_SIGNUP_RATE_LIMITED'],
+    ['email_rate_limited', 429, 'OUTREACH_ORGANISER_EMAIL_RATE_LIMITED'], ['suspended', 423, 'OUTREACH_ORGANISER_SUSPENDED'],
+    ['patient_login', 409, 'OUTREACH_ORGANISER_PATIENT_LOGIN'],
     ['something_else', 503, 'OUTREACH_ORGANISER_SIGNUP_UNAVAILABLE']] as const)(
     'answers the start outcome %s plainly and sends no email', async (outcome, status, code) => {
     const system = jest.fn(async (sql: string) => sql.includes('start_outreach_organiser_signup') ? { rows: [{ outcome }] } : { rows: [] });
@@ -259,23 +272,23 @@ describe('OutreachOrganiserService', () => {
     await expect(make(database()).verify('not-a-cookie', '123456', correlationId)).rejects.toMatchObject({ status: 401 });
   });
 
-  it('sends a new code through 0114\'s resend command, to the sign-up\'s own email', async () => {
+  it('sends a new code through 0114\'s resend command, to the email the command answers (one query, no table read)', async () => {
     const cookie = `${signupId}.${token}`;
-    const system = jest.fn(async (sql: string) => sql.includes('resend_outreach_organiser_signup_code')
-      ? { rows: [{ outcome: 'sent' }] } : { rows: [{ email: 'ada.organiser@example.test' }] });
+    const system = jest.fn(async () => ({ rows: [{ result: 'sent', email: 'ada.organiser@example.test' }] }));
     const otp = notification();
     await expect(make(database({ system }), otp).resend(cookie, correlationId))
       .resolves.toMatchObject({ sent: true, expiresInSeconds: 900, resendAfterSeconds: 60 });
+    expect(system).toHaveBeenCalledTimes(1);
     const [sql, values] = system.mock.calls[0] as unknown as [string, unknown[]];
-    expect(sql).toBe('select identity.resend_outreach_organiser_signup_code($1,$2,$3) as outcome');
+    expect(sql).toBe('select * from identity.resend_outreach_organiser_signup_code($1,$2,$3)');
     const sent = (otp.deliver.mock.calls[0] as unknown as [{ code: string; recipient: string }])[0];
     expect(sent.recipient).toBe('ada.organiser@example.test');
     expect(values[2]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-organiser-signup', 'otp', signupId, sent.code));
     for (const [outcome, code] of [['too_soon', 'OTP_RESEND_COOLDOWN'], ['too_many', 'OTP_RESEND_LIMIT'],
       ['expired', 'OUTREACH_ORGANISER_SIGNUP_EXPIRED'], ['denied', 'OUTREACH_ORGANISER_SIGNUP_SESSION_INVALID']] as const) {
       const refused = notification();
-      await expect(make(database({ system: jest.fn(async () => ({ rows: [{ outcome }] })) }), refused).resend(cookie, correlationId))
-        .rejects.toMatchObject({ code });
+      await expect(make(database({ system: jest.fn(async () => ({ rows: [{ result: outcome, email: null }] })) }), refused)
+        .resend(cookie, correlationId)).rejects.toMatchObject({ code });
       expect(refused.deliver).not.toHaveBeenCalled();
     }
   });
@@ -340,7 +353,8 @@ describe('OutreachOrganiserService', () => {
     await expect(make(db).startForAccount({ ...context, actor: { ...context.actor, kind: 'patient' } }, body))
       .rejects.toMatchObject({ status: 403 });
     for (const [result, status, code] of [['already_organiser', 409, 'OUTREACH_ORGANISER_ALREADY_RUNNING'],
-      ['name_not_allowed', 422, 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED'], ['not_eligible', 403, 'OUTREACH_ORGANISER_NOT_ELIGIBLE']] as const) {
+      ['name_not_allowed', 422, 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED'], ['not_eligible', 403, 'OUTREACH_ORGANISER_NOT_ELIGIBLE'],
+      ['suspended', 403, 'OUTREACH_ORGANISER_SUSPENDED'], ['patient_login', 403, 'OUTREACH_ORGANISER_PATIENT_LOGIN']] as const) {
       // The result rows carry ids (already_organiser) or nulls: never read as a success.
       const refused = database({ actor: jest.fn(async () => ({ rows: [{ result, organization_id: 'org-0', facility_id: 'fac-0',
         membership_id: 'mem-0' }] })) });
@@ -455,7 +469,7 @@ describe('OutreachInvitationsService', () => {
 
   it('lets only the organiser invite, with 0114\'s 4 arguments, and emails the link', async () => {
     const actor = jest.fn(async (sql: string) => sql.includes('create_outreach_invitation')
-      ? { rows: [{ result: 'created', invitation_id: 'inv-1', expires_at: '2026-11-18T10:00:00.000Z' }] } : { rows: [] });
+      ? { rows: [{ result: 'created', invitation_id: 'inv-1', expires_at: '2026-11-18T10:00:00.000Z', dispatch: true }] } : { rows: [] });
     const db = database({ actor });
     const notification = { deliverStaffInvitation: jest.fn(async () => ({ outcome: 'accepted' })) };
     const service = new OutreachInvitationsService(db as unknown as DatabaseService, notification as unknown as NotificationOtpClient);
@@ -469,14 +483,41 @@ describe('OutreachInvitationsService', () => {
     expect(values[1]).toBe('Bola Fictional');
     expect(values[2]).toBe('helper@example.test');
     expect(String(values[3])).toMatch(/^[0-9a-f]{64}$/);
-    expect(actor).toHaveBeenCalledTimes(1);
+    // The email service's answer is recorded (10 undeliverable emails a day pause the group's invitations).
+    expect(actor).toHaveBeenCalledTimes(2);
+    expect(actor.mock.calls[1]).toEqual(['select identity.record_outreach_invitation_delivery($1,$2)', ['inv-1', 'accepted']]);
     const sent = (notification.deliverStaffInvitation.mock.calls[0] as unknown as [{ token: string; invitationId: string }])[0];
     expect(notification.deliverStaffInvitation).toHaveBeenCalledWith(expect.objectContaining({ roleCode: 'outreach_volunteer',
       recipient: 'helper@example.test', facilityName: 'Synthetic Community Volunteers', invitationId: 'inv-1' }));
     expect(values[3]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-invitation', 'link', String(values[0]), sent.token));
   });
 
+  it('makes the invitation but sends no email when the address already had 3 today (dispatch false)', async () => {
+    const actor = jest.fn(async () => ({ rows: [{ result: 'created', invitation_id: 'inv-2',
+      expires_at: '2026-11-18T10:00:00.000Z', dispatch: false }] }));
+    const notification = { deliverStaffInvitation: jest.fn() };
+    const service = new OutreachInvitationsService(database({ actor }) as unknown as DatabaseService,
+      notification as unknown as NotificationOtpClient);
+    await expect(service.create(staffContext(['outreach_organiser']), { name: 'Bola Fictional', email: 'helper@example.test' }))
+      .resolves.toMatchObject({ invitationId: 'inv-2', deliveryOutcome: 'unknown' });
+    expect(notification.deliverStaffInvitation).not.toHaveBeenCalled();
+    expect(actor).toHaveBeenCalledTimes(1);
+  });
+
+  it('still answers when the delivery cannot be recorded', async () => {
+    const actor = jest.fn(async (sql: string) => {
+      if (sql.includes('record_outreach_invitation_delivery')) throw Object.assign(new Error('boom'), { code: '57014' });
+      return { rows: [{ result: 'created', invitation_id: 'inv-3', expires_at: '2026-11-18T10:00:00.000Z', dispatch: true }] };
+    });
+    const notification = { deliverStaffInvitation: jest.fn(async () => ({ outcome: 'definitive_failure' })) };
+    const service = new OutreachInvitationsService(database({ actor }) as unknown as DatabaseService,
+      notification as unknown as NotificationOtpClient);
+    await expect(service.create(staffContext(['outreach_organiser']), { name: 'Bola Fictional', email: 'helper@example.test' }))
+      .resolves.toMatchObject({ invitationId: 'inv-3', deliveryOutcome: 'definitive_failure' });
+  });
+
   it.each([['too_many_pending', 429, 'OUTREACH_INVITATION_PENDING_LIMIT'], ['already_member', 409, 'OUTREACH_INVITEE_ALREADY_MEMBER'],
+    ['too_many_today', 429, 'OUTREACH_INVITATION_DAILY_LIMIT'], ['sending_paused', 429, 'OUTREACH_INVITATION_DELIVERY_PAUSED'],
     ['already_invited', 409, 'OUTREACH_INVITATION_ALREADY_SENT']] as const)(
     'answers the result %s plainly and sends no email', async (result, status, code) => {
     const notification = { deliverStaffInvitation: jest.fn() };
@@ -536,7 +577,7 @@ describe('OutreachInvitationsService', () => {
     expect(String(accept[1][2])).toMatch(/^\$argon2id\$/);
     for (const [result, code] of [['sign_in_required', 'OUTREACH_INVITATION_SIGN_IN_REQUIRED'], ['invalid', 'OUTREACH_INVITATION_INVALID'],
       ['used', 'OUTREACH_INVITATION_ALREADY_ACCEPTED'], ['expired', 'OUTREACH_INVITATION_EXPIRED'],
-      ['group_unavailable', 'OUTREACH_ORGANISER_SUSPENDED']] as const) {
+      ['group_unavailable', 'OUTREACH_ORGANISER_SUSPENDED'], ['patient_login', 'OUTREACH_INVITATION_PATIENT_LOGIN']] as const) {
       const refused = jest.fn(async (sql: string) => sql.includes('accept_outreach') ? { rows: [{ result }] } : { rows: [] });
       await expect(new OutreachInvitationsService(database({ system: refused }) as unknown as DatabaseService, {} as never)
         .acceptWithPassword({ invitationId, token, password: 'a-long-fictional-password', turnstileAction: 'outreach-invitation' },
