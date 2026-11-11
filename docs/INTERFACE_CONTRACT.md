@@ -1488,6 +1488,33 @@ fields are optional to clients: answers saved before this change have neither.
 The origin is outside each source's content and hash, so saved conversations
 and stored vectors stay current.
 
+### Record chat: time and length limits
+
+Staff questions ("summarise this patient's history") need longer answers than
+a patient's, so the two have their own limits:
+
+| | Patient (`/ehr/me/chat`) | Staff (`/ehr/patients/:patientId/chat`) |
+|---|---|---|
+| Output tokens per Claude call | 1200 | 2000 |
+| Time per Claude call | `AI_REQUEST_TIMEOUT_MS` (20 s by default) | 40 s |
+| Whole turn | 60 s | 48 s |
+| Gateway read timeout | 45 s | 50 s |
+| Gateway rate limit (per address) | `hid_chat`, 6 a minute, burst 2 | `hid_staff_chat`, 20 a minute, burst 5 |
+| Answer length | 3800 characters, then the server's lines | 4000 characters; the model is asked for under 3000 |
+
+The model's raw text may be up to 8000 characters when it answers in JSON
+blocks (field names and quotes add length) and 4000 otherwise; the answer
+limits above still apply to the answer it becomes. The staff chat location is
+nested in the gateway's `^~ /api/v1/ehr/` location, because that location
+stops nginx from looking at regex locations outside it. Its history and source
+routes stay on the ordinary EHR proxy. A failed turn is still a 503: ehr-api
+answers `PATIENT_CHAT_UNAVAILABLE`, which the gateway replaces with its own
+`UPSTREAM_UNAVAILABLE` (as it does every 502, 503 and 504), so the browser
+cannot tell the two apart. ehr-api logs only the category (for example
+`timeout`, `model_answer_cut_off`, `model_request_failed` with the provider's
+status), the audience and the correlation ID, never the question, record text,
+the model's words or an error message.
+
 ## 18. API Documentation
 
 Public and internal service APIs should maintain OpenAPI documentation.
@@ -2838,7 +2865,7 @@ What the screens show after the seed (every row demo, written once):
   FOR SHARE, which forced row-level security refuses an owner without
   BYPASSRLS (`outreach.campaign_members` has no UPDATE policy). The same check
   runs for outreach-api, so a live registration into a campaign may meet the
-  same refusal; 0102 reports it and changes nothing. 0110 fixes it (§37); the demo
+  same refusal; 0102 reports it and changes nothing. 0110 fixes it (§38); the demo
   registrations stay unlinked.
 
 Nothing is sent: the order commands' inbox notices are marked read in the same
@@ -3594,7 +3621,85 @@ CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
 
-## 37. Outreach: registering a person into a campaign (0110)
+## 37. Support chat Health ID check (0109)
+
+The public support chat (`POST /api/v1/support/chat`, support-api, Lex) never
+passes an issued Health ID to Lex (owner decision of 2026-10-31, option (a)
+with a server check). The website and the blue EHR's Help also refuse the
+shapes they recognise before sending (health #61). The server check catches
+what they miss.
+
+### support-api
+
+- Every message is read, after NFKC folding and upper-casing, for anything
+  that could be a Health ID: after a `HID` label (`HID-AB2CD3`,
+  `hid ab2 cd3`, `HID: AB2-CD3`, `HIDAB2CD3`), a word of 6 to 32 Health ID
+  characters on its own, or two or three short parts typed apart with a digit
+  among them (`AB2 CD3`). Ordinary words in the Health ID alphabet are
+  candidates too.
+- Only those candidates (`HID-` and 6 to 32 Health ID characters) go to
+  identity-api, never the message. Each issued one is replaced with
+  `[Health ID]` (with its label and separators) before the text goes to Lex.
+- The answer to the browser is the same shape whether or not anything was
+  replaced.
+- **Fail closed.** support-api answers `503 SUPPORT_BOT_UNAVAILABLE` (the same
+  as a Lex failure) and sends nothing to Lex when any of these happen:
+  - `IDENTITY_API_URL` or the workload token is missing (for every message);
+  - identity-api does not answer 200 with a valid answer within 2 s;
+  - the answer names anything not asked;
+  - a message holds more than 200 candidates.
+- **Settings:** `IDENTITY_API_URL` (identity-api's internal HTTPS origin),
+  `IDENTITY_SERVICE_IDENTITY_MODE` (`jwt`; `local-secret` only outside
+  production) and `IDENTITY_SUPPORT_WORKLOAD_TOKEN_FILE`, which the
+  `workload-token-agent` sidecar writes. A malformed URL or mode stops the
+  service at start-up.
+- Nothing about a message, candidate or match is logged.
+
+### identity-api
+
+```text
+POST /api/v1/identity/service/support/health-id-matches
+x-hid-internal-caller: support-api
+x-hid-service-authorization: Bearer <workload JWT, sub = IDENTITY_SUPPORT_CALLER_SUBJECT, aud hid-identity-api>
+{ "candidates": ["HID-AB2CD3", "HID-PLEASE"] }          ->  200 { "matches": ["HID-AB2CD3"] }
+```
+
+- **Who may call.** support-api's workload alone, with no browser session.
+  support-api is not an Identity caller of any other service route, and no
+  other caller is accepted here. Without `IDENTITY_SUPPORT_CALLER_SUBJECT` the
+  route answers 503.
+- **Body.** 1 to 200 candidates, each exactly `^HID-[A-HJ-NP-Z2-9]{6,32}$`,
+  and nothing else. Anything else answers 400 `VALIDATION_FAILED` without
+  echoing a value.
+- **Answer.** The issued ones, each once, `Cache-Control: no-store`. Every
+  status counts, because a Health ID stays personal once issued. Nothing else
+  about a patient is returned.
+- **Logs.** The counts only (`candidates`, `matches`).
+- **Gateway.** The public gateway answers 404 for
+  `/api/v1/identity/service/support/` and its aliases. support-api calls
+  identity-api on the internal load balancer.
+
+### The database (0109)
+
+- `identity.support_health_id_matches(candidates text[]) RETURNS TABLE(health_id text)`:
+  plpgsql, STABLE, SECURITY DEFINER, search_path `pg_catalog, pg_temp`.
+- It is owned by `identity.patients`' owner, so it reads past that table's
+  row-level security. The table must not force it; the migration checks.
+- `hid_identity_runtime` alone may execute it.
+- Input other than 1 to 200 well-formed candidates raises 22023, so a bad
+  request never answers "no match".
+- It uses the unique index on `upper(hid_code)`.
+
+### Release order
+
+1. hid-system #210 (Terraform, `dev`): support-api's workload caller,
+   sidecar and settings, and identity-api's `IDENTITY_SUPPORT_CALLER_SUBJECT`.
+2. identity-api with 0109, then support-api with the check. Until both
+   releases and the apply are in, the new support-api answers 503 to every
+   message.
+3. Only then health #200 and #61.
+
+## 38. Outreach: registering a person into a campaign (0110)
 
 Migration 0110 (`0110_outreach_campaign_registration_lock.sql`; coordinator of
 2026-11-04, "0120 first (prove it, then fix)"; first numbered 0120 and

@@ -1414,6 +1414,10 @@ revoke all on function identity.access_requests_records_processing() from public
 revoke all on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz) from public;
 grant execute on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)
   to hid_identity_runtime;
+-- Support chat Health ID check (0109): which given Health IDs are issued,
+-- read by Identity's support route alone, for the support-api workload.
+revoke all on function identity.support_health_id_matches(text[]) from public;
+grant execute on function identity.support_health_id_matches(text[]) to hid_identity_runtime;
 -- Document scanning (0105): the scanner's resolve and work-list commands are
 -- granted to hid_document_scanner above and to no other role.
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
