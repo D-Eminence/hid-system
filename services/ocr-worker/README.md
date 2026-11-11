@@ -1781,3 +1781,106 @@ IAM for the worker role:
   asynchronous PDF/TIFF reads Textract needs `s3:GetObjectVersion` and
   `kms:Decrypt` on the document bucket and its key.
 - HTTPS egress to `api.anthropic.com` when AI reading is on.
+
+## Source deletion after 24 hours
+
+Owner and coordinator decisions of 2026-11-11 (migration 0112): 24 hours after
+an OCR job finishes, saved or not, the uploaded page goes with every S3
+version, and so do the Textract text and the AI reading. The source is not
+kept in the chart; what a person saved or published stays, with its
+provenance by job id.
+
+- **When a document is due.** Its status is `uploaded` and `legal_hold` is
+  false; it has at least one OCR job; every job is finished
+  (`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled`); and
+  the latest finish (`completed_at`, `failed_at`, or `updated_at` for a
+  cancelled job) is at least 24 hours ago, or at least 72 hours ago while a
+  publication of its jobs could still run (`pending`, `processing`, or
+  `failed` with a code ocr-api retries and attempts left). After 72 hours
+  nothing blocks any more. A blocked document is not due and not counted.
+- **A round.** One at start, then every `OCR_SOURCE_DELETION_INTERVAL_SECONDS`
+  (default 900, 60-86,400). `OCR_SOURCE_DELETION_ENABLED` (default `true`;
+  `false` stops it) is validated like the other settings. The worker counts
+  the documents due (`ocr.worker_source_deletion_backlog()`), lists up to 100
+  (`ocr.list_worker_source_deletions`: documents already claimed first, then
+  oldest due first), and for each:
+  1. claims it (`ocr.claim_worker_source_deletion`): under a row lock the
+     database checks again that it is due, legal hold included, and sets
+     `source_deleting`. From then it refuses a new job on the document, a
+     failed -> queued retry of its jobs, a legal hold and any other change. A
+     refused claim (`not_due`) means no S3 call (`ocr.source_deletion.skipped`,
+     `SOURCE_NO_LONGER_DUE`);
+  2. lists the bucket's versions with `Prefix` = the claimed `storage_key` and
+     keeps only versions and delete markers whose `Key` is exactly that key (a
+     key that only starts with it is never touched);
+  3. deletes each with `DeleteObject` and its `VersionId`;
+  4. lists again and fails the document (`SOURCE_VERSIONS_REMAIN`) if anything
+     is left;
+  5. only then calls `ocr.purge_worker_source_document(document, versions
+     deleted, correlation id)`, which requires `source_deleting`, sets
+     `source_deleted` with the neutral file name `Source page deleted after 24
+     hours`, blanks the text, reading and review content of its OCR rows and
+     writes one audit row `ocr.source.deleted_after_24h` (ids and counts only;
+     `objectVersionsDeleted` adds up every round of this worker process for the
+     document, not only the last).
+  A storage failure leaves the document `source_deleting`; the next round lists
+  it first and finishes it. Claimed documents go least recently attempted
+  first and take at most half of a batch while due documents wait, so claims
+  that keep failing never stop new deletions. Any purge answer but `deleted` or `already_deleted`
+  is logged as `ocr.source_deletion.failed`. Keys outside
+  `clinical/objects/<id>` are refused (`SOURCE_KEY_OUTSIDE_LAYOUT`) and never
+  deleted. Upload keys and malware scanning are unchanged.
+- **Logs** (ids, codes and counts only; never a file name, key or text):
+  - `ocr.source_deletion.done` per document: `documentId`, `outcome`
+    (`deleted`, `already_deleted`, `not_due`), `objectVersionsDeleted`,
+    `extractionsBlanked`, `validationsBlanked`, `confirmationsBlanked`,
+    `dueSeconds`;
+  - `ocr.source_deletion.failed` with `stage` (`list`, `claim`, `storage`,
+    `purge`, `round`) and `code` (an S3 stage code such as `SOURCE_LIST_FAILED`,
+    `SOURCE_DELETE_FAILED`, `SOURCE_VERSIONS_REMAIN`, `SOURCE_NOT_CLAIMED`, or a
+    PostgreSQL SQLSTATE);
+  - `ocr.source_deletion.skipped` (`SOURCE_NO_LONGER_DUE`) when a claim is
+    refused;
+  - exactly one `{"event":"ocr.source_deletion.overdue","overdue":n,"due":m,"deleted":k}`
+    per completed round, also when all are 0 (with `timestamp` and `level` like
+    every line): `overdue` = documents due (or claimed) for more than 2 hours
+    (more than 26 hours after their job finished), plus documents with a job
+    stuck in `extracted` for more than 24 hours (counted, never deleted), `due`
+    = due or claimed at the start of the round,
+    `deleted` = deleted this round. A round that cannot count or list logs
+    `ocr.source_deletion.failed` (`stage: list`) instead and no overdue line,
+    so the CloudWatch alarm (metric filter `{ $.event = "ocr.source_deletion.overdue" }`,
+    value `$.overdue`, missing data breaching) also fires when the sweep stops.
+- **A claim that keeps failing** stays `source_deleting`: there is no unclaim,
+  on purpose (a partly deleted source must not go back into use). It keeps
+  counting as overdue, so the alarm stays on. An operator checks, for the
+  `documentId` in the `ocr.source_deletion.failed` lines:
+  - the `code`: `SOURCE_DELETE_FAILED` or `SOURCE_LIST_FAILED` (IAM: the
+    worker role's `s3:ListBucketVersions` and `s3:DeleteObjectVersion`; bucket
+    policy; Object Lock retention or MFA delete; KMS is not needed to delete),
+    `SOURCE_VERSIONS_REMAIN` (a version reappeared or a delete was not
+    applied), `SOURCE_KEY_OUTSIDE_LAYOUT` (the stored key is not
+    `clinical/objects/<id>`; it is never deleted by the worker), or a SQLSTATE
+    from the purge;
+  - `ocr.source_deletion_attempts` (attempt count and last attempt) as the
+    database owner;
+  - once the cause is fixed, the next round finishes the document by itself.
+- **Overdue also counts stuck jobs** (never deleted): an `uploaded` document
+  with a job in `extracted` for more than 24 hours, or in `queued` or
+  `processing` for more than 48 hours (a job parked by the page allowance until
+  its reset does not count).
+- **A late publication.** A publication requested near the 72-hour cap may
+  run its attempt after the document was claimed or purged: ocr-api reads the
+  source again for the attempt, answers 410 `DOCUMENT_SOURCE_DELETED` and
+  records a terminal failure before calling the owning domain, so nothing is
+  published (and a blanked validation would fail the candidate check anyway).
+- **IAM** for the worker's task role, on the documents bucket only:
+  `s3:ListBucketVersions` on the bucket with the condition
+  `s3:prefix` like `clinical/objects/*`, and `s3:DeleteObjectVersion` on
+  `arn:aws:s3:::<bucket>/clinical/objects/*`. The worker never calls
+  `DeleteObjects` or an unversioned `DeleteObject`. Object Lock retention or
+  MFA delete on the bucket would make every deletion fail (`SOURCE_DELETE_FAILED`).
+- **Not in reach of this worker.** Textract keeps an asynchronous job's
+  results on its side for its own retention period (the worker sets no
+  `OutputConfig`); nothing is written to S3 by Textract. The Claude API keeps
+  no reading (no data retention was requested).

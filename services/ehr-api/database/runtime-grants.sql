@@ -1459,6 +1459,22 @@ revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public
 -- outreach.campaign_members, so it can neither update nor lock a membership.
 revoke all on function outreach.validate_registration_campaign_write() from public;
 
+-- OCR source deletion after 24 hours (0112): the OCR worker lists the
+-- documents due, counts them (due, and overdue), claims each one
+-- (source_deleting) before deleting every S3 version of its source, then
+-- purges the document's OCR content. The shared reckoning
+-- ocr.source_deletion_due and the three replaced trigger functions are
+-- granted to no role. 0112 makes the same grants.
+grant usage on schema ocr to hid_ocr_worker;
+grant execute on function ocr.list_worker_source_deletions(integer),
+  ocr.worker_source_deletion_backlog(),
+  ocr.claim_worker_source_deletion(uuid,text),
+  ocr.purge_worker_source_document(uuid,integer,text) to hid_ocr_worker;
+revoke all on function ocr.source_deletion_due(uuid),
+  ocr.list_worker_source_deletions(integer),
+  ocr.worker_source_deletion_backlog(),
+  ocr.claim_worker_source_deletion(uuid,text),
+  ocr.purge_worker_source_document(uuid,integer,text) from public;
 -- Records processing, draft publication (0113, owner decision of 2026-11-11):
 -- the dedicated records-processing write grant check is called by the OCR API
 -- (hid_ocr_runtime, inherited by hid_ocr_api_runtime; it needs USAGE on the

@@ -1,5 +1,6 @@
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { DataAccessContext } from '../common/request-context';
+import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
 import { DocumentService } from './document.service';
 
 const documentId = '123e4567-e89b-42d3-a456-426614174010';
@@ -420,7 +421,7 @@ describe('DocumentService: downstream uses the detected media type (owner decisi
     const audit = { record: jest.fn().mockResolvedValue(undefined), recordWithClient: jest.fn().mockResolvedValue(undefined) };
     const storage = { createDownload: jest.fn().mockResolvedValue({ url: 'https://s3.example/signed', expiresInSeconds: 60 }) };
     const service = new DocumentService(database as never, identity as never, audit as never, storage as never);
-    return { service, storage, issued };
+    return { service, storage, issued, identity, audit };
   }
 
   it('signs the download as the detected type, inline, under a name with its extension', async () => {
@@ -452,5 +453,75 @@ describe('DocumentService: downstream uses the detected media type (owner decisi
     expect(listSql).toMatch(/from ehr\.documents_effective document/);
     expect(listSql).toMatch(/coalesce\(document\.detected_media_type, document\.declared_media_type\) as "mediaType"/);
     expect(listSql).not.toMatch(/document_scan_events/);
+  });
+});
+
+describe('DocumentService: a source the OCR worker deleted after 24 hours (migration 0112)', () => {
+  function deletedHarness(status = 'source_deleted') {
+    const row = {
+      id: documentId, patient_id: patientId, facility_id: facilityId, created_by: uploaderAccountId,
+      storage_bucket: 'synthetic-bucket', storage_key: 'clinical/objects/synthetic', object_version_id: objectVersionId,
+      declared_media_type: 'application/pdf', detected_media_type: 'application/pdf',
+      original_file_name: 'Source page deleted after 24 hours', size_bytes: '1024', sha256_hex: sha256Hex,
+      scan_status: 'clean', status, row_version: '4',
+    };
+    const client = { query: jest.fn(async (sql: string) =>
+      /from ehr\.documents_effective/.test(sql) ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 }) };
+    const database = { withTransaction: jest.fn(async (_c: unknown, operation: (value: typeof client) => unknown) =>
+      operation(client)) };
+    const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true }) };
+    const audit = { record: jest.fn().mockResolvedValue(undefined), recordWithClient: jest.fn().mockResolvedValue(undefined) };
+    const storage = { createDownload: jest.fn(), inspect: jest.fn() };
+    const service = new DocumentService(database as never, identity as never, audit as never, storage as never);
+    return { service, storage, identity, audit };
+  }
+
+  it('answers a download 410 DOCUMENT_SOURCE_DELETED "Source page deleted after 24 hours", signing nothing', async () => {
+    const { service, storage, audit } = deletedHarness();
+    const refusal = await service.createDownload(documentId, uploader).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(DomainProblem);
+    expect((refusal as DomainProblem).getStatus()).toBe(410);
+    expect((refusal as DomainProblem).code).toBe('DOCUMENT_SOURCE_DELETED');
+    expect((refusal as DomainProblem).message).toBe('Source page deleted after 24 hours');
+    expect(storage.createDownload).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('answers 410 too while the OCR worker is deleting it (source_deleting)', async () => {
+    const { service, storage } = deletedHarness('source_deleting');
+    await expect(service.createDownload(documentId, uploader)).rejects.toMatchObject({ code: 'DOCUMENT_SOURCE_DELETED' });
+    expect(storage.createDownload).not.toHaveBeenCalled();
+  });
+
+  it('checks read access first: a caller without it gets the 403, not the 410', async () => {
+    const { service, identity, storage } = deletedHarness();
+    identity.authorize.mockResolvedValue({ allowed: false });
+    await expect(service.createDownload(documentId, uploader)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(storage.createDownload).not.toHaveBeenCalled();
+  });
+
+  it('is rendered as an RFC 7807 problem with status 410 and the code', () => {
+    const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+    const host = { switchToHttp: () => ({
+      getRequest: () => ({ correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ', method: 'POST',
+        route: { path: '/ehr/documents/:documentId/download' } }),
+      getResponse: () => response }) };
+    new ProblemDetailsFilter().catch(new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 24 hours'),
+      host as never);
+    expect(response.status).toHaveBeenCalledWith(410);
+    expect(response.json.mock.calls[0]?.[0]).toMatchObject({ status: 410, title: 'GONE', code: 'DOCUMENT_SOURCE_DELETED',
+      detail: 'Source page deleted after 24 hours' });
+  });
+
+  it('still gives the OCR API the source metadata (it authorizes the job read by its patient) with status source_deleted', async () => {
+    const { service } = deletedHarness();
+    await expect(service.getOcrSource(documentId, uploader)).resolves.toMatchObject({ id: documentId,
+      patientId, status: 'source_deleted' });
+  });
+
+  it('cannot be completed again', async () => {
+    const { service, storage } = deletedHarness();
+    await expect(service.complete(documentId, uploader)).rejects.toMatchObject({ code: 'INVALID_DOCUMENT_TRANSITION' });
+    expect(storage.inspect).not.toHaveBeenCalled();
   });
 });

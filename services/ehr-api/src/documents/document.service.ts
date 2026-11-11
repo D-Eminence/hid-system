@@ -76,6 +76,14 @@ interface IdempotencyRow {
   result_resource_id: string | null;
 }
 
+/** ehr.documents.status while the OCR worker deletes the stored source, and once it did (migration 0112). */
+export const SOURCE_DELETION_STATUSES: ReadonlySet<string> = new Set(['source_deleting', 'source_deleted']);
+
+/** 410 for a document whose source the OCR worker deleted after 24 hours. */
+export function sourceDeletedProblem(): DomainProblem {
+  return new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 24 hours');
+}
+
 /** Statuses of ehr.documents_effective reached only through a completed upload. */
 const COMPLETED_STATUSES = new Set(['uploaded', 'available', 'rejected']);
 
@@ -281,6 +289,10 @@ export class DocumentService {
     );
     const authorization = await this.identity.authorize(document.patient_id, 'read_records', context.purposeOfUse, context);
     if (!authorization.allowed) throw new ForbiddenException('Patient read access is not authorized');
+    // The OCR worker deletes (source_deleting) or deleted (source_deleted) every stored version 24 hours after the
+    // document's OCR jobs finished (migration 0112, owner decision of 2026-11-11); nothing is served. Answered only
+    // after the read check, as the 409 below.
+    if (SOURCE_DELETION_STATUSES.has(document.status)) throw sourceDeletedProblem();
     if (document.status !== 'available' || document.scan_status !== 'clean' || !document.object_version_id
       || !isSupportedDocumentMediaType(document.detected_media_type)) {
       throw new ConflictException('Document is not available for download');

@@ -4,6 +4,7 @@ import type { ClinicalDocumentRecord, OcrCandidateType, OcrExtraction, OcrJob, O
 import { getSafeClinicalErrorMessage } from '@/api/errors';
 import type { Patient } from '@/types/ehr.types';
 import { Badge, Button, Card, Field, Modal, SectionHeader, Select, Status, Textarea } from '@/components/ui/Primitives';
+import { ocrReviewVisibility } from './ocrSourceDeletion';
 
 type ReviewMode = 'accept' | 'correct' | 'reject';
 type ReviewField = { name: 'noteType' | 'title' | 'content'; original: string; corrected: string; mode: ReviewMode };
@@ -57,18 +58,19 @@ export const OcrReviewWorkspace: React.FC<Props> = ({ patient, encounterId, perm
   const loadReview = useCallback(async (document: ClinicalDocumentRecord, signal?: AbortSignal) => {
     setLoading(true); setError(''); setPreviewUrl(''); setJob(null); setExtraction(null); setValidation(null); setPublication(null);
     try {
+      // A source the OCR worker deleted after 24 hours has no page to preview (ehr-api answers 410).
       const [foundJob, download] = await Promise.all([
         permissions.includes('ocr.job.read') ? ocrApi.findJob(document.id, signal) : Promise.resolve(null),
-        clinicalApi.documentDownload(document.id, signal),
+        ocrReviewVisibility(document, null).loadPreview ? clinicalApi.documentDownload(document.id, signal) : Promise.resolve(null),
       ]);
       if (signal?.aborted) return;
-      setPreviewUrl(download.url); setJob(foundJob);
+      setPreviewUrl(download?.url ?? ''); setJob(foundJob);
       if (!foundJob) return;
       const [extractions, validations] = await Promise.all([ocrApi.listExtractions(foundJob.id, signal), ocrApi.listValidations(foundJob.id, signal)]);
       const latestExtraction = extractions.at(-1) ?? null;
       const latestValidation = validations.at(-1) ?? null;
       setExtraction(latestExtraction); setValidation(latestValidation);
-      if (latestExtraction) setFields([
+      if (latestExtraction && !ocrReviewVisibility(document, latestExtraction).contentNotice) setFields([
         { name: 'noteType', original: 'historical-record', corrected: '', mode: 'accept' },
         { name: 'title', original: `Imported: ${document.fileName}`, corrected: '', mode: 'accept' },
         { name: 'content', original: latestExtraction.rawText, corrected: '', mode: 'accept' },
@@ -148,14 +150,15 @@ export const OcrReviewWorkspace: React.FC<Props> = ({ patient, encounterId, perm
   };
 
   const canStart = selected?.status === 'available' && selected.scanStatus === 'clean' && !job && permissions.includes('ocr.job.write');
-  const canReview = job?.status === 'awaiting_validation' && !!extraction && !patient.breakGlass && permissions.includes('ocr.validation.write');
+  const deletion = ocrReviewVisibility(selected, extraction);
+  const canReview = job?.status === 'awaiting_validation' && !!extraction && !deletion.contentNotice && !patient.breakGlass && permissions.includes('ocr.validation.write');
   const pharmacyMedication = fields.find((field) => field.name === 'title');
   const validFields = targetDomain === 'EHR'
     ? fields.every((field) => field.mode === 'reject' || (field.mode === 'correct' ? field.corrected.trim() : field.original.trim()))
     : targetDomain === 'PHARMACY'
       ? pharmacyMedication?.mode === 'correct' && Boolean(pharmacyMedication.corrected.trim())
       : true;
-  const publishable = validation?.disposition === 'validated' && ['EHR', 'LAB', 'PHARMACY', 'DOCUMENT_ONLY'].includes(validation.targetDomain)
+  const publishable = !deletion.contentNotice && validation?.disposition === 'validated' && ['EHR', 'LAB', 'PHARMACY', 'DOCUMENT_ONLY'].includes(validation.targetDomain)
     && !!job?.patientConfirmation && !patient.breakGlass && permissions.includes('ocr.publication.write') && !publication;
 
   return <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-500)' }}>
@@ -176,12 +179,14 @@ export const OcrReviewWorkspace: React.FC<Props> = ({ patient, encounterId, perm
       </Card>
       {job && <div className="ehr-grid-2" style={{ alignItems: 'start' }}>
         <Card pad><SectionHeader title="Source document" />
-          {previewUrl ? selected.mediaType.startsWith('image/') ? <img src={previewUrl} alt={`Source document ${selected.fileName}`} style={{ width: '100%', maxHeight: 680, objectFit: 'contain' }} />
+          {deletion.sourceNotice ? <p role="status" style={{ color: 'var(--text-secondary)' }}>{deletion.sourceNotice}</p>
+            : previewUrl ? selected.mediaType.startsWith('image/') ? <img src={previewUrl} alt={`Source document ${selected.fileName}`} style={{ width: '100%', maxHeight: 680, objectFit: 'contain' }} />
             : <iframe title={`Source document ${selected.fileName}`} src={previewUrl} style={{ width: '100%', height: 680, border: '1px solid var(--border)' }} />
             : <p style={{ color: 'var(--text-secondary)' }}>Authorized preview unavailable.</p>}
         </Card>
         <Card pad><SectionHeader title="Extracted evidence" />
-          {!extraction ? <p style={{ color: 'var(--text-secondary)' }}>Extraction is {job.status.replaceAll('_', ' ')}. Refresh when processing completes.</p> : <>
+          {deletion.contentNotice ? <p role="status" style={{ color: 'var(--text-secondary)' }}>{deletion.contentNotice}</p>
+            : !extraction ? <p style={{ color: 'var(--text-secondary)' }}>Extraction is {job.status.replaceAll('_', ' ')}. Refresh when processing completes.</p> : <>
             <Field label="Original OCR text" hint="Read-only source evidence; corrections are recorded separately."><Textarea value={extraction.rawText} readOnly rows={12} /></Field>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-400)', marginTop: 'var(--space-400)' }}>{fields.map((field, index) => <div key={field.name}>
               <div className="ehr-grid-2"><Field label={targetDomain === 'PHARMACY' && field.name === 'title' ? 'Medication text candidate' : targetDomain === 'PHARMACY' && field.name === 'content' ? 'Historical source context' : field.name}><Textarea value={field.original} readOnly rows={field.name === 'content' ? 5 : 2} /></Field>

@@ -4,6 +4,7 @@ import { ClaudePageClient } from './reading/claude.client';
 import { PaperReadingService } from './reading/reader';
 import { PostgresWorkerRepository } from './repository';
 import { S3ExactDocumentReader } from './s3-document-reader';
+import { S3SourceObjectEraser, SourceDeletionSweeper } from './source-deletion';
 import { TestOcrProvider } from './test.provider';
 import { TextractOcrProvider } from './textract.provider';
 import type { WorkerOcrProvider } from './types';
@@ -21,8 +22,10 @@ async function bootstrap(): Promise<void> {
   // OCR_AI_MAX_CONCURRENT_REQUESTS) are shared by every claim loop.
   const reading = new PaperReadingService(config,
     config.OCR_AI_MODE === 'claude' ? new ClaudePageClient(config) : null);
-  const worker = new OcrWorker(config, new PostgresWorkerRepository(config),
-    new S3ExactDocumentReader(config), provider, reading);
+  const repository = new PostgresWorkerRepository(config);
+  // Source deletion 24 hours after the job finished (migration 0112); OCR_SOURCE_DELETION_ENABLED=false stops it.
+  const sourceDeletion = new SourceDeletionSweeper(repository, new S3SourceObjectEraser(config));
+  const worker = new OcrWorker(config, repository, new S3ExactDocumentReader(config), provider, reading, sourceDeletion);
   process.once('SIGTERM', () => worker.stop());
   process.once('SIGINT', () => worker.stop());
   await worker.run();
