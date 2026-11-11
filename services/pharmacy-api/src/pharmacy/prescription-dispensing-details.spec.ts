@@ -16,7 +16,7 @@ import { inclusiveDays, PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF,
 
 /*
  * The prescriber's priority, strength, form, duration and quantity to
- * dispense on this facility's own work (0114, owner decision 25 of
+ * dispense on this facility's own work (0122, owner decision 25 of
  * 2026-11-01, "all recommended except D5", items 3b and 4): behind
  * PRESCRIPTION_DISPENSING_DETAILS_ENABLED. Off, nothing is read and the
  * answers are exactly as before. On, own rows carry what
@@ -61,7 +61,7 @@ const none = { priority: null, medication_strength: null, medication_dose_form: 
 const found: Record<string, Omit<PrescriptionDetailsRow, 'work_item_id'>> = {
   [id(1)]: { priority: 'urgent', medication_strength: '500 mg', medication_dose_form: 'capsule', duration_value: 7,
     duration_unit: 'day', quantity_to_dispense: '21.0000', quantity_unit: 'capsule' },
-  // Written before 0114, or without the details: nothing but its dates.
+  // Written before 0122, or without the details: nothing but its dates.
   [id(2)]: none,
   [id(5)]: { ...none, priority: 'stat', quantity_to_dispense: '100.5000', quantity_unit: 'mL' },
 };

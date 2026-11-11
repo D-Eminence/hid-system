@@ -80,7 +80,7 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
  * about 0.6 s for this query (PostgreSQL 16, a shared 4-CPU 2.8 GHz Xeon). So
  * the setting roughly doubles the list's database time. With
  * PRESCRIPTION_DISPENSING_DETAILS_ENABLED on, it also calls
- * pharmacy.work_item_prescription_details (0114) once for the same own rows,
+ * pharmacy.work_item_prescription_details (0122) once for the same own rows,
  * a statement of its own; under a NOBYPASSRLS owner each row then pays the
  * work items' read policy, the consent test and the snapshot table's read
  * policy once (the reader joins the snapshot by its key, so the prescription
@@ -260,7 +260,7 @@ export class PharmacyService {
    * member may read it (0121); off, it carries none. While
    * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on, an own row also carries
    * the prescriber's priority, strength, form, duration and quantity to
-   * dispense (0114; no audit row: no new person is shown). To a member who may
+   * dispense (0122; no audit row: no new person is shown). To a member who may
    * receive prescriptions from other facilities, the answer says whether this
    * facility receives them now and whether any wait or are held here (item 4,
    * 0089; read in the transaction after the audit rows, left out when it
@@ -343,7 +343,7 @@ export class PharmacyService {
       // the read row above, which already names the patient.
       const own = row.order_route_id ? undefined
         : await this.ownPatients.patients(client, [row.id], context.correlationId);
-      // Its prescription details (0114, PRESCRIPTION_DISPENSING_DETAILS_ENABLED).
+      // Its prescription details (0122, PRESCRIPTION_DISPENSING_DETAILS_ENABLED).
       const details = row.order_route_id ? undefined
         : await this.prescriptionDetails.details(client, [row.id], context.correlationId);
       return this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
@@ -615,7 +615,7 @@ export class PharmacyService {
    * facility's own one carries its patient when 0121's reader gave one
    * (OWN_WORK_PATIENT_CARD_ENABLED on, and the member may read it), where a
    * route-backed one carries its card. The list and a single work item pass
-   * an own row's prescription details (0114, PRESCRIPTION_DISPENSING_DETAILS_ENABLED
+   * an own row's prescription details (0122, PRESCRIPTION_DISPENSING_DETAILS_ENABLED
    * on): its medication gains `strength` and `doseForm`, and the item
    * `priority`, `duration`, `quantityToDispense` and `quantityUnit`, each only
    * when there is a value, after today's fields.

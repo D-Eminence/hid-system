@@ -16,7 +16,7 @@ import { PrescriptionsModule } from './prescriptions.module';
 import { PrescriptionsService } from './prescriptions.service';
 
 /*
- * Prescription strength, form, duration, quantity and priority (0114, owner
+ * Prescription strength, form, duration, quantity and priority (0122, owner
  * decision 25 of 2026-11-01, "all recommended except D5", items 3b and 4):
  * behind PRESCRIPTION_DISPENSING_DETAILS_ENABLED. Off, the create body, the
  * statements, the answers and the list are exactly as before; on, a create

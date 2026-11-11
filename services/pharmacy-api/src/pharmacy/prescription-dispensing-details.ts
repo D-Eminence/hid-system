@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { CARD_BATCH, day } from './order-route-cards';
 
-/** A row of `pharmacy.work_item_prescription_details` (0114); the quantity as text. */
+/** A row of `pharmacy.work_item_prescription_details` (0122); the quantity as text. */
 export interface PrescriptionDetailsRow {
   work_item_id: string;
   priority: string | null;
@@ -42,7 +42,7 @@ export function inclusiveDays(start: string | null, end: string | null): number 
 
 /**
  * The prescriber's priority, strength, dose form, duration and quantity to
- * dispense on this facility's own work (0114; owner decision 25 of 2026-11-01,
+ * dispense on this facility's own work (0122; owner decision 25 of 2026-11-01,
  * D-Eminence: "all recommended except D5", items 3b and 4; D9: the pharmacist
  * still confirms the quantity, and nothing compares the two).
  *
@@ -52,7 +52,7 @@ export function inclusiveDays(start: string | null, end: string | null): number 
  * (the values of the prescription version Pharmacy accepted, from its
  * snapshot, for the session's own rows the member may read) in the caller's
  * transaction, in a savepoint, at most 200 ids a statement: a failure (a
- * schema without 0114, a refusal) leaves out the prescriber's values (the
+ * schema without 0122, a refusal) leaves out the prescriber's values (the
  * date fallback below still applies) and never fails the answer. An own row's
  * duration falls back to the whole days from its start date to its end date
  * when the prescription gave none and both are set. Route-backed work gets nothing (item 4b, later). No audit row: no new

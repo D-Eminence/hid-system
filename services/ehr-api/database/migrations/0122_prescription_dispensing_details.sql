@@ -1,12 +1,12 @@
--- 0114 Prescription strength, form, duration, quantity and priority for the
+-- 0122 Prescription strength, form, duration, quantity and priority for the
 -- pharmacy (owner decision 25 of 2026-11-01, D-Eminence: "all recommended
 -- except D5", on the Akos handover backend plan, items 3b and 4; D6: no drug
 -- picture until the price list; D9: the quantity to dispense is the
 -- prescriber's suggestion, the pharmacist still confirms it and the server
 -- does not compare the two). The declaration is signed separately.
--- Written on 0113 (the own-work patient cards, released with it) over 0103
--- (34d69557). It does not use or need anything 0104-0113 add, so it applies
--- on 0103 alone or on 0103 + any of them.
+-- Written as 0114 on 0113 (the own-work patient cards, now 0121) over 0103
+-- (34d69557); released as 0122, after 0121. It does not use or need anything
+-- 0104-0121 add, so it applies on 0103 alone or on 0103 + any of them.
 --
 -- The gap: ehr.prescriptions (0004) records the medicine, dose, route,
 -- frequency, instructions and dates, but not the strength and form the
@@ -48,7 +48,7 @@
 --    insert and update of the prescription. The values therefore stay those
 --    of the accepted version after the prescription later changes. The
 --    snapshot must also name the work item's patient, facility and
---    encounter. A prescription written before 0114 answers seven nulls; a
+--    encounter. A prescription written before 0122 answers seven nulls; a
 --    work item without a snapshot answers no row.
 -- D5 A row needs all of: own work (order_route_id is null;
 --    work_items_route_facility_ck then makes its facility the ordering
@@ -146,7 +146,7 @@
 --    the three triggers, row-level security and the 0100, 0101, 0098 and
 --    0086 bodies as before.
 --
--- Locks (measured with pg_locks before commit on a 0113 copy): ACCESS
+-- Locks (measured with pg_locks before commit on a 0113 copy, as 0114): ACCESS
 -- EXCLUSIVE on ehr.prescriptions, held to commit (and SHARE UPDATE EXCLUSIVE,
 -- VALIDATE's, inside it); ACCESS SHARE on the schema pharmacy, the language
 -- plpgsql and the two granted roles; SHARE UPDATE EXCLUSIVE on the new
@@ -169,7 +169,7 @@
 -- ehr.prescriptions holds ACCESS SHARE on it; behind either the migration
 -- waits and fails, it never blocks them (measured: behind an acceptance held
 -- open through pharmacy-api's runtime and INSERT, the runner's dry run
--- stopped after 5.2 s with this file's 55P03 message and 0114 still pending,
+-- stopped after 5.2 s with this file's 55P03 message and 0122 still pending,
 -- while a read of ehr.prescriptions from another session took 70 ms).
 -- Once taken, the lock lasts to commit: every pending migration runs in one
 -- transaction (the runner's dry run, all files, then rollback; its apply,
@@ -204,12 +204,12 @@
 -- website answer exactly as before; so do the new images while
 -- PRESCRIPTION_DISPENSING_DETAILS_ENABLED is off. New prescriptions'
 -- snapshots carry the seven keys (null when not given). Applied migrations
--- 0001 through 0113 are immutable.
+-- 0001 through 0121 are immutable.
 
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
 -- PUBLIC), ignoring a superuser's bypass (0097's, 0099's and 0100's helper).
-create function pg_temp.prescription_details_0114_holds(holder oid, object_owner oid, object_acl aclitem[],
+create function pg_temp.prescription_details_0122_holds(holder oid, object_owner oid, object_acl aclitem[],
   object_type "char", wanted text)
 returns boolean
 language sql stable
@@ -241,12 +241,12 @@ begin
      or to_regclass('ehr.prescriptions') is null
      or to_regclass('ehr.record_versions') is null
      or to_regclass('pharmacy.work_items') is null then
-    raise exception using errcode = '55000', message = '0114: 0001-0103 must be applied first';
+    raise exception using errcode = '55000', message = '0122: 0001-0103 must be applied first';
   end if;
   -- b. Not applied yet, and nothing in the way.
   if exists (select 1 from pg_proc proc
               where proc.proname = 'work_item_prescription_details' and proc.pronamespace = 'pharmacy'::regnamespace) then
-    raise exception using errcode = '55000', message = '0114: already applied';
+    raise exception using errcode = '55000', message = '0122: already applied';
   end if;
   select string_agg(existing.name, ', ') into mismatch
     from (
@@ -260,7 +260,7 @@ begin
          and constraint_row.conname = 'prescriptions_dispensing_details_ck') existing;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0114: ehr.prescriptions already has a column or CHECK this migration adds: %s', mismatch);
+      message = format('0122: ehr.prescriptions already has a column or CHECK this migration adds: %s', mismatch);
   end if;
   -- c. The bodies relied on, as 0001-0103 left them: the snapshot writer
   -- (0004), the consent test (0012), the membership (0008) and permission
@@ -376,7 +376,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0114: an object this migration relies on differs from 0001-0103: %s', mismatch);
+      message = format('0122: an object this migration relies on differs from 0001-0103: %s', mismatch);
   end if;
   -- d. The columns read.
   select string_agg(format('%s.%s', expected.relation_name, expected.column_name), '; ') into mismatch
@@ -407,7 +407,7 @@ begin
                         and attribute_row.attnotnull = expected.not_null);
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0114: a column this migration relies on differs from 0001-0103: %s', mismatch);
+      message = format('0122: a column this migration relies on differs from 0001-0103: %s', mismatch);
   end if;
   -- e. Ownership and privileges, never through a superuser's bypass
   -- (production's migrator has none). The applier alters
@@ -431,13 +431,13 @@ begin
                      (work_items_owner, 'auth', 'USAGE'), (work_items_owner, 'platform', 'USAGE'))
                wanted(holder, schema_name, privilege)
         join pg_namespace namespace on namespace.nspname = wanted.schema_name
-       where not pg_temp.prescription_details_0114_holds(wanted.holder, namespace.nspowner, namespace.nspacl, 'n',
+       where not pg_temp.prescription_details_0122_holds(wanted.holder, namespace.nspowner, namespace.nspacl, 'n',
                wanted.privilege)
       union all
       select format('%s lacks SELECT on %s', pg_get_userbyid(work_items_owner), relation.oid::regclass)
         from pg_class relation
        where relation.oid in ('pharmacy.work_items'::regclass, 'ehr.record_versions'::regclass)
-         and not pg_temp.prescription_details_0114_holds(work_items_owner, relation.relowner, relation.relacl, 'r',
+         and not pg_temp.prescription_details_0122_holds(work_items_owner, relation.relowner, relation.relacl, 'r',
                'SELECT')
       union all
       select format('%s lacks EXECUTE on %s', pg_get_userbyid(work_items_owner), proc.oid::regprocedure)
@@ -448,12 +448,12 @@ begin
                      ('pharmacy.work_item_allows(uuid,uuid,uuid,text)'),
                      ('ehr.context_allows(uuid,uuid,text)')) wanted(proc_name)
         join pg_proc proc on proc.oid = wanted.proc_name::regprocedure
-       where not pg_temp.prescription_details_0114_holds(work_items_owner, proc.proowner, proc.proacl, 'f',
+       where not pg_temp.prescription_details_0122_holds(work_items_owner, proc.proowner, proc.proacl, 'f',
                'EXECUTE')) missing;
   if mismatch is not null then
-    raise exception using errcode = '42501', message = format('0114: missing privileges: %s', mismatch);
+    raise exception using errcode = '42501', message = format('0122: missing privileges: %s', mismatch);
   end if;
-  raise notice '0114: owners checked: ehr.prescriptions=%, pharmacy.work_items=%, ehr.record_versions=%, applier=%',
+  raise notice '0122: owners checked: ehr.prescriptions=%, pharmacy.work_items=%, ehr.record_versions=%, applier=%',
     pg_get_userbyid(prescriptions_owner), pg_get_userbyid(work_items_owner),
     (select pg_get_userbyid(relation.relowner) from pg_class relation where relation.oid = 'ehr.record_versions'::regclass),
     current_user;
@@ -587,7 +587,7 @@ begin
      or (select count(*) from pg_proc proc
           where proc.proname = 'work_item_prescription_details' and proc.pronamespace = 'pharmacy'::regnamespace) <> 1 then
     raise exception using errcode = '55000',
-      message = format('0114: the function is not as this file makes it: %s', coalesce(mismatch, 'count'));
+      message = format('0122: the function is not as this file makes it: %s', coalesce(mismatch, 'count'));
   end if;
   select string_agg(granted.what, '; ') into mismatch
     from (
@@ -607,7 +607,7 @@ begin
                             and acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE')) granted;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0114: the function''s ACL is not section 2''s: %s', mismatch);
+      message = format('0122: the function''s ACL is not section 2''s: %s', mismatch);
   end if;
 end
 $$;
@@ -627,7 +627,7 @@ begin
     exception when lock_not_available then
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0114: ehr.prescriptions stayed busy for 5 seconds; run the release again at a quieter time';
+          message = '0122: ehr.prescriptions stayed busy for 5 seconds; run the release again at a quieter time';
       end if;
       perform pg_sleep(0.1);
     end;
@@ -691,7 +691,7 @@ begin
                         and not attribute_row.attnotnull and not attribute_row.atthasdef
                         and attribute_row.attgenerated = '' and attribute_row.attidentity = '');
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0114: the columns are not as this file makes them: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0122: the columns are not as this file makes them: %s', mismatch);
   end if;
   -- The CHECK, validated, with this definition (one CHECK for the seven
   -- columns: the value sets, the lengths, the ranges and the two pairs).
@@ -712,7 +712,7 @@ begin
                       || '((quantity_to_dispense IS NULL) OR (quantity_to_dispense > (0)::numeric)) AND '
                       || '((quantity_unit IS NULL) OR ((length(quantity_unit) <= 80) AND (length(btrim(quantity_unit)) >= 1)))))') then
     raise exception using errcode = '55000',
-      message = '0114: the CHECK is not as this file makes it: prescriptions_dispensing_details_ck';
+      message = '0122: the CHECK is not as this file makes it: prescriptions_dispensing_details_ck';
   end if;
   -- Untouched: the triggers, row-level security, and the bodies that read
   -- the row type or fire on the table.
@@ -730,7 +730,7 @@ begin
             ('ehr.sync_order_routes_on_order_change()'::regprocedure, '8ce6b42450cc06fc02fec8d1cf63af41'),
             ('ehr.capture_record_version()'::regprocedure, '70daa16f05bb3ec28f05292e6358a702'))) <> 5 then
     raise exception using errcode = '55000',
-      message = '0114: a trigger, row-level security or a body on ehr.prescriptions changed';
+      message = '0122: a trigger, row-level security or a body on ehr.prescriptions changed';
   end if;
 end
 $$;

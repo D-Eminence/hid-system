@@ -3986,7 +3986,7 @@ recorded, so the runner does not re-create them, and runtime-grants.sql's
 0121 block would then stop `db:bootstrap` with 42883. The suite is
 `services/ehr-api/test/database/work-item-patient-cards.integration.sql`.
 
-## 42. Prescription strength, form, duration, quantity and priority for the pharmacy (0114)
+## 42. Prescription strength, form, duration, quantity and priority for the pharmacy (0122)
 
 Owner decision 25 of 2026-11-01 (D-Eminence, "all recommended except D5", on
 the Akos handover backend plan, items 3b and 4; D6: no drug picture until the
@@ -3994,9 +3994,10 @@ price list; D9: the quantity to dispense is the prescriber's suggestion, the
 pharmacist still confirms it and nothing compares the two). The prescriber
 records how urgent a prescription is, the strength and form meant, how long
 it is for and how much to hand over, and this facility's pharmacy sees them
-on its own work. 0114 releases with 0113 and is unsigned until the owner
-signs their declaration. Sessions working on 0104-0112 add sections too, so
-this section's number is the coordinator's to fix at merge.
+on its own work. 0122 releases after 0121 (section 41), by the
+coordinator's release order of 2026-11-11, and is unsigned until the owner
+signs its declaration. Migrations 0112 to 0120 may add sections too, so this
+section's number is fixed at merge.
 
 Routes (paths and permissions unchanged): `POST
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions`
@@ -4047,7 +4048,7 @@ is a value:
 
 The values are those of the prescription version Pharmacy accepted, so they
 do not change when the prescription later changes (the work item is then not
-dispensable, as before). A prescription written before 0114, or without
+dispensable, as before). A prescription written before 0122, or without
 them, gives none (only the duration from the dates). The prescriber's values
 are left out when the member may not read the work now and when the database
 read fails (it runs in a savepoint and never fails the answer); the duration
@@ -4059,7 +4060,7 @@ later). An emergency session with an active break-glass grant gets them,
 because its work rows are shown too. No audit row is added: no new person is
 shown. `PharmacyWorkItem` in `@hid/api-client` gains the optional fields.
 
-Database (0114): seven nullable columns on `ehr.prescriptions` (`priority`,
+Database (0122): seven nullable columns on `ehr.prescriptions` (`priority`,
 `medication_strength`, `medication_dose_form`, `duration_value`,
 `duration_unit`, `quantity_to_dispense` numeric(12,4), `quantity_unit`), no
 default, and one CHECK, `prescriptions_dispensing_details_ck`, for the value
@@ -4080,7 +4081,7 @@ the prescription history. EXECUTE: `hid_pharmacy_runtime` and
 `hid_schema_test_runtime`; nobody else. The EHR runtime's privileges on
 `ehr.prescriptions` are table-wide, so they cover the new columns.
 
-Locks: 0114 takes ACCESS EXCLUSIVE on `ehr.prescriptions` NOWAIT, retrying
+Locks: 0122 takes ACCESS EXCLUSIVE on `ehr.prescriptions` NOWAIT, retrying
 for at most 5 seconds (an open Pharmacy acceptance or any open read of the
 table makes it wait and then stop the release with nothing applied; it never
 blocks them), and holds it to commit. Once taken, EHR prescription reads and
@@ -4103,22 +4104,22 @@ inside the join, which the planner cannot use under the read policy; it took
 8.8 s with 20 snapshots per patient and passed the 15 s limit with 100,000
 other prescription snapshots at the facility.
 
-0114 has no down migration. To withdraw the feature, set
+0122 has no down migration. To withdraw the feature, set
 `PRESCRIPTION_DISPENSING_DETAILS_ENABLED=false` in ehr-api and pharmacy-api:
 the EHR API then refuses the fields again and pharmacy-api stops reading
 them; the columns, the values already written and the function stay, and
-nothing reads them. Do not drop the function: 0114 stays recorded, so the
-runner does not re-create it, and runtime-grants.sql's 0114 block would then
+nothing reads them. Do not drop the function: 0122 stays recorded, so the
+runner does not re-create it, and runtime-grants.sql's 0122 block would then
 stop `db:bootstrap` with 42883.
 
 The ehr-api setting needs the schema. Switch
-`PRESCRIPTION_DISPENSING_DETAILS_ENABLED` on in ehr-api only after 0114 is
+`PRESCRIPTION_DISPENSING_DETAILS_ENABLED` on in ehr-api only after 0122 is
 applied, and switch it off before restoring ehr-api's database to a point
-before 0114 or pointing ehr-api at a database without it. While it is on
+before 0122 or pointing ehr-api at a database without it. While it is on
 without the seven columns, every statement of the prescription routes names
 them and fails (42703), so every prescription list, read, create, update and
 Pharmacy acceptance hand-off from the EHR answers 500. pharmacy-api is safe
-either way: without 0114 its read fails inside the savepoint and only the
+either way: without 0122 its read fails inside the savepoint and only the
 prescriber's values are left out.
 
 The suite is

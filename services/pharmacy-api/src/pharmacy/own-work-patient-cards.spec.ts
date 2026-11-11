@@ -248,7 +248,7 @@ describe('OWN_WORK_PATIENT_CARD_ENABLED', () => {
       { provide: DatabaseService, useValue: {} }, { provide: IdentityService, useValue: {} },
       { provide: AuditService, useValue: {} }, { provide: PharmacyOrderRouteAccess, useValue: {} },
       { provide: PharmacyOrderRouteCards, useValue: {} }, { provide: PharmacyOwnWorkPatientCards, useValue: reader },
-      // 0114's reader, which the service takes after this one.
+      // 0122's reader, which the service takes after this one.
       { provide: PharmacyPrescriptionDetails, useValue: PRESCRIPTION_DETAILS_OFF }] }).compile();
     expect((moduleRef.get(PharmacyService) as unknown as { ownPatients: unknown }).ownPatients).toBe(reader);
   });

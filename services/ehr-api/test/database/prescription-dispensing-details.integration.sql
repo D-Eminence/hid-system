@@ -1,16 +1,16 @@
 \set ON_ERROR_STOP on
 -- Prescription strength, form, duration, quantity and priority for the
--- pharmacy (0114, owner decision 25 of 2026-11-01, D-Eminence: "all
+-- pharmacy (0122, owner decision 25 of 2026-11-01, D-Eminence: "all
 -- recommended except D5"; the Akos handover backend plan, items 3b and 4).
 -- Rollback-only.
 --
--- 0114 adds seven nullable columns to ehr.prescriptions with one CHECK,
+-- 0122 adds seven nullable columns to ehr.prescriptions with one CHECK,
 -- and pharmacy.work_item_prescription_details(ids), which answers them for
 -- each given work item that is this facility's own work and that the
 -- session's member may read, from the snapshot of the prescription version
 -- Pharmacy accepted (ehr.record_versions). The cases, through the exact EHR
 -- and Pharmacy API runtime roles in the session the services set:
---   1. structure: the function is 0114's (md5), SECURITY DEFINER, STABLE,
+--   1. structure: the function is 0122's (md5), SECURITY DEFINER, STABLE,
 --      plpgsql, not STRICT, search_path pg_catalog, pg_temp, owned by
 --      pharmacy.work_items' owner, EXECUTE for the Pharmacy runtime, its API
 --      login and the schema test runtime only; the seven columns nullable
@@ -18,14 +18,14 @@
 --      and 0086 bodies untouched;
 --   2. the CHECK, through the EHR API's INSERT: every value set and range,
 --      both pairs, blank and long texts; all seven given, and none (today's
---      INSERT, so a row written before 0114 reads null in each); the EHR
+--      INSERT, so a row written before 0122 reads null in each); the EHR
 --      runtime reads the new columns;
 --   3. the snapshot carries the seven values, and acceptances (pharmacy-api's
 --      INSERT under 0100's guard) and a dispensing (0101's guard) pass on
 --      prescriptions with and without them;
 --   4. a pharmacist gets exactly the accepted version's values for its own
 --      rows: all seven, seven nulls for a prescription without them and for
---      one written before 0114 (its snapshot has no such keys); after the EHR
+--      one written before 0122 (its snapshot has no such keys); after the EHR
 --      changes the prescription (a new version, a changed priority) the work
 --      item still answers the accepted version's values, while 0101 still
 --      refuses its dispensing;
@@ -87,7 +87,7 @@ begin
       or not proc.prosecdef or proc.provolatile <> 's' or language_row.lanname <> 'plpgsql' or proc.proisstrict
       or proc.proconfig is distinct from '{"search_path=pg_catalog, pg_temp"}'::text[];
   if mismatch is not null then
-    raise exception 'prescription dispensing details: the function is not 0114''s: %', mismatch;
+    raise exception 'prescription dispensing details: the function is not 0122''s: %', mismatch;
   end if;
   select string_agg(format('%s %s', acl.grantee::regrole, acl.privilege_type), '; ') into mismatch
     from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
@@ -139,7 +139,7 @@ begin
           '4202ba3bbf02abd7db34606d42adca9c'),
          ('ehr.sync_order_routes_on_order_change()', '8ce6b42450cc06fc02fec8d1cf63af41'),
          ('ehr.capture_record_version()', '70daa16f05bb3ec28f05292e6358a702'))) <> 5 then
-    raise exception 'prescription dispensing details: a body 0114 leaves untouched has changed';
+    raise exception 'prescription dispensing details: a body 0122 leaves untouched has changed';
   end if;
 end $$;
 
@@ -419,7 +419,7 @@ select pg_temp.expect('the CHECK outcomes',
 
 -- The prescriptions (e1140007...XX): a1 Ngozi, every value; b1 Ngozi, today's
 -- INSERT (none); c1 Femi, every value; d1 Kemi; e1, e2, e3, e4 Ngozi (named
--- by the mismatched work items); f1 Ngozi (its snapshot is made pre-0114
+-- by the mismatched work items); f1 Ngozi (its snapshot is made pre-0122
 -- below); at F2 by D2: a2, a3 and a4 Ngozi.
 select pg_temp.expect('the EHR prescriptions at F1', (select string_agg(pg_temp.run(pg_temp.prescribe_sql(
     ('e1140007-0000-4000-8000-0000000000' || p.code)::uuid, ('e1140009-0000-4000-8000-00000000000' || p.encounter)::uuid,
@@ -565,7 +565,7 @@ select ('e114000b-0000-4000-8000-0000000000' || item.n)::uuid, ('e1140006-0000-4
                ('12', 1, 1, 2, 'e4', 1, 'e1140009-0000-4000-8000-000000000001', 2, 'e114000c-0000-4000-8000-000000000002'),
                ('13', 1, 1, 1, 'a4', 1, 'e1140009-0000-4000-8000-000000000004', 2, null))
        item(n, patient, site, ordering, code, version, encounter, member, route);
--- f1 as if prescribed before 0114: its snapshot without the seven keys.
+-- f1 as if prescribed before 0122: its snapshot without the seven keys.
 update ehr.record_versions set resulting_state = resulting_state - array['priority', 'medication_strength',
     'medication_dose_form', 'duration_value', 'duration_unit', 'quantity_to_dispense', 'quantity_unit']
  where resource_type = 'prescriptions' and resource_id = 'e1140007-0000-4000-8000-0000000000f1';
@@ -753,7 +753,7 @@ select pg_temp.expect('no snapshot row from the reads', (select count(*)::text f
   (current_setting('details.versions_before')::integer + 2)::text);
 
 -- 9. Row types: this session has run 0100's and 0101's guards on
--- ehr.prescriptions as 0114 left it. After one more ADD COLUMN, as a later
+-- ehr.prescriptions as 0122 left it. After one more ADD COLUMN, as a later
 -- migration would make it, a new prescription, its acceptance, its
 -- dispensing and its details all still pass here (undone).
 savepoint later_column;

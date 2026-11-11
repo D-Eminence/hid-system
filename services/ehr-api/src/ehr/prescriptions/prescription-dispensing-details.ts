@@ -6,7 +6,7 @@ import { CreatePrescriptionDto, CreatePrescriptionWithDetailsDto } from '../shar
 /** The body a prescription create carries: today's, or with the details while they are on. */
 export type CreatePrescriptionInput = CreatePrescriptionDto | CreatePrescriptionWithDetailsDto;
 
-/** The seven optional, create-only fields (0114), by their request and answer names. */
+/** The seven optional, create-only fields (0122), by their request and answer names. */
 export const DISPENSING_DETAIL_FIELDS = ['priority', 'strength', 'doseForm', 'durationValue', 'durationUnit',
   'quantityToDispense', 'quantityUnit'] as const;
 
@@ -36,7 +36,7 @@ const DETAIL_FIELDS: ReadonlySet<string> = new Set(DISPENSING_DETAIL_FIELDS);
 
 /**
  * Prescription strength, form, duration, quantity to dispense and priority
- * (0114; owner decision 25 of 2026-11-01, D-Eminence: "all recommended except
+ * (0122; owner decision 25 of 2026-11-01, D-Eminence: "all recommended except
  * D5", items 3b and 4; D9: the pharmacist still confirms the quantity).
  *
  * Behind PRESCRIPTION_DISPENSING_DETAILS_ENABLED (off by default). Off, the

@@ -45,7 +45,7 @@ export interface PharmacyWorkItemPatient {
 /**
  * A work item's medicine, and on this facility's own work, while
  * pharmacy-api's PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on and the
- * prescriber gave them (0114), its strength as written ("500 mg") and its
+ * prescriber gave them (0122), its strength as written ("500 mg") and its
  * form (tablet, capsule, liquid, injection, cream, inhaler, drops, other).
  */
 export interface PharmacyWorkItemMedication extends PharmacyMedicationReference {
@@ -73,7 +73,7 @@ export interface PharmacyWorkItem {
   /** Present only when pharmacy-api sent it (see PharmacyWorkItemPatient). */
   patient?: PharmacyWorkItemPatient;
   /**
-   * The prescription details on own work (0114), each present only when
+   * The prescription details on own work (0122), each present only when
    * pharmacy-api sent it (see PharmacyWorkItemMedication): the priority
    * (routine, urgent, asap, stat); how long it is for (a whole number of
    * days, weeks or months; from the prescription's dates when it gave none);
@@ -406,7 +406,7 @@ function parseMedication(value: unknown): PharmacyMedicationReference {
 }
 
 /**
- * The optional prescription details (0114): each left out when absent; a
+ * The optional prescription details (0122): each left out when absent; a
  * malformed one is refused like any other field.
  */
 function parseWorkItemDetails(value: Record<string, unknown>): Pick<PharmacyWorkItem,

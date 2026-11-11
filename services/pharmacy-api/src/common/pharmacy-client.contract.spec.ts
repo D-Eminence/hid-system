@@ -99,7 +99,7 @@ describe('PharmacyApiClient transport contract', () => {
     await expect(client.getWorkItem(base.id, context)).rejects.toMatchObject({ status: 502 });
   });
 
-  // 0114: an own work item may carry the prescription details (PRESCRIPTION_DISPENSING_DETAILS_ENABLED on); the
+  // 0122: an own work item may carry the prescription details (PRESCRIPTION_DISPENSING_DETAILS_ENABLED on); the
   // client keeps each one sent, leaves out each one not sent, and refuses a malformed one.
   it('keeps a work item\'s optional prescription details, and leaves them out when absent', async () => {
     const base = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-e89b-42d3-a456-426614174004',

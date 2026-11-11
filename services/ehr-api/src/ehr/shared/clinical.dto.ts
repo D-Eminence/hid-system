@@ -373,7 +373,7 @@ export class CreatePrescriptionDto {
   status!: OrderStatus;
 }
 
-/** How urgent a prescription is (0114): the Lab request priorities. */
+/** How urgent a prescription is (0122): the Lab request priorities. */
 export enum PrescriptionPriority {
   Routine = 'routine',
   Urgent = 'urgent',
@@ -381,7 +381,7 @@ export enum PrescriptionPriority {
   Stat = 'stat',
 }
 
-/** The forms a prescriber chooses from (0114), as the pharmacy queue draws them. */
+/** The forms a prescriber chooses from (0122), as the pharmacy queue draws them. */
 export enum PrescriptionDoseForm {
   Tablet = 'tablet',
   Capsule = 'capsule',
@@ -400,7 +400,7 @@ export enum PrescriptionDurationUnit {
 }
 
 /**
- * A new prescription with the optional dispensing details (0114): its
+ * A new prescription with the optional dispensing details (0122): its
  * priority, its strength and form as the prescriber means them, how long it
  * is for, and how much to hand over (the pharmacist still confirms what is
  * dispensed). Set at creation only: UpdatePrescriptionDto has none of them.

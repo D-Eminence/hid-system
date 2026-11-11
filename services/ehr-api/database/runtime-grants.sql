@@ -1474,7 +1474,7 @@ grant execute on function pharmacy.work_item_patient_cards(uuid[]) to hid_pharma
 revoke all on function lab.work_item_patient_cards(uuid[]), pharmacy.work_item_patient_cards(uuid[]) from public;
 
 -- Prescription strength, form, duration, quantity and priority for the
--- pharmacy (0114), as that migration grants them (its section 2): the
+-- pharmacy (0122), as that migration grants them (its section 2): the
 -- Pharmacy reader to the Pharmacy runtime and the schema test runtime;
 -- nothing to the EHR, Lab, Identity, OCR, Outreach or Notification runtimes
 -- (it reads pharmacy.work_items and ehr.record_versions as its owner). The

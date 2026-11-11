@@ -32,7 +32,7 @@ export class PrescriptionsController {
   /**
    * The body is checked by CreatePrescriptionBodyPipe: today's
    * CreatePrescriptionDto, or with the dispensing details while
-   * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (0114). Its declared type is
+   * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (0122). Its declared type is
    * a union, so the global pipe leaves it to that pipe.
    */
   @Post()

@@ -61,7 +61,7 @@ export class PrescriptionsService {
     private readonly details: PrescriptionDispensingDetails = PRESCRIPTION_DISPENSING_DETAILS_OFF,
   ) {}
 
-  /** The answer's columns: today's, plus the dispensing details while they are on (0114). */
+  /** The answer's columns: today's, plus the dispensing details while they are on (0122). */
   private columns(): string {
     return COLUMNS + this.details.selectList();
   }
@@ -75,7 +75,7 @@ export class PrescriptionsService {
    * website may ask a clinician to have it ended there first (D15); and
    * `lateCorrection: true`: it can also reverse, after the prescription
    * ended, a dispensing it recorded for the wrong person (D17, 0090). While
-   * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (0114), each item carries
+   * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (0122), each item carries
    * the dispensing details it was written with, and `dispensingDetails: true`
    * says a create may carry them; off, neither.
    */
@@ -120,7 +120,7 @@ export class PrescriptionsService {
 
   /**
    * A new prescription. While PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on
-   * (0114) it may carry the dispensing details (CreatePrescriptionBodyPipe),
+   * (0122) it may carry the dispensing details (CreatePrescriptionBodyPipe),
    * each pair together, stored with it and echoed when set; a body without
    * them keeps today's Idempotency-Key digest. Off, exactly as before.
    */

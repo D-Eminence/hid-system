@@ -10,7 +10,7 @@ import { PrescriptionsService } from './prescriptions.service';
   imports: [ClinicalInfrastructureModule, ServiceClientsModule],
   controllers: [PrescriptionsController],
   providers: [PrescriptionsService,
-    // The dispensing details (0114), on only while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is true.
+    // The dispensing details (0122), on only while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is true.
     { provide: PrescriptionDispensingDetails,
       useFactory: () => new PrescriptionDispensingDetails(getEnvironment().PRESCRIPTION_DISPENSING_DETAILS_ENABLED) }],
 })

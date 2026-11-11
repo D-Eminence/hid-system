@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0121",
+    "last": "0122",
     "count": 114,
     "files": [
       {
@@ -547,12 +547,12 @@
         "sha256": "971da7bed817568c6184274e59bcb9d659851149cdc70e223e94123f2ddb09d1"
       },
       {
-        "name": "0114_prescription_dispensing_details.sql",
-        "sha256": "8d7fc15a45d5a92f388de957e4c3b07481fb540c076c692aa651e622f80df031"
-      },
-      {
         "name": "0121_work_item_patient_cards.sql",
         "sha256": "469121a6542b198ba33eef0c577f78f5de474edec249f8acc3bd39b1f7ebde26"
+      },
+      {
+        "name": "0122_prescription_dispensing_details.sql",
+        "sha256": "7b40a0b6b46fba7b031c004f147d086070d31822d03c018216d1e38336f3f783"
       }
     ]
   },

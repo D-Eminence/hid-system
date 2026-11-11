@@ -16,7 +16,7 @@ import { HealthIdInUrlRefusalModule } from './health-id-in-url';
     // The patient on own work (0121), on only while OWN_WORK_PATIENT_CARD_ENABLED is true.
     { provide: PharmacyOwnWorkPatientCards,
       useFactory: () => new PharmacyOwnWorkPatientCards(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED) },
-    // The prescription details on own work (0114), on only while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is true.
+    // The prescription details on own work (0122), on only while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is true.
     { provide: PharmacyPrescriptionDetails,
       useFactory: () => new PharmacyPrescriptionDetails(getEnvironment().PRESCRIPTION_DISPENSING_DETAILS_ENABLED) }] })
 export class PharmacyModule {}
