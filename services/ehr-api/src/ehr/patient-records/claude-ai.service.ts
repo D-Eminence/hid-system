@@ -86,10 +86,10 @@ export const CONVERSATION_FORMAT = '\nWrite a conversation answer in plain Engli
 const BLOCK_FORMAT = ' Layout in blocks: the first block is the bold direct answer. A heading is its own kind=explanation block holding only the heading line. '
   + 'A list is one block whose every line starts with "- ". Keep each block short.';
 const ORDER_RULES: Record<TemporalOrder, string> = {
-  earliest: ' The question asks for the first or earliest item. Records are supplied in date order, earliest first. '
+  earliest: ' The question asks for the first or earliest item. Records are supplied in date order by their own date, earliest first, and records without a date come last; still check each record\'s date. '
     + 'Name the earliest recorded item that answers it, with its date and where it came from, as the direct answer. '
     + 'Say plainly that this is the earliest one in Health ID, and that older history may exist outside Health ID.',
-  latest: ' The question asks for the latest or current item. Records are supplied newest first. '
+  latest: ' The question asks for the latest or current item. Records are supplied in date order by their own date, newest first, and records without a date come last; still check each record\'s date. '
     + 'Name the most recent recorded item that answers it, with its date and where it came from, as the direct answer.',
   timeline: ' The question asks about a history over time. Give the items in date order with their dates, '
     + 'and say plainly that older history may exist outside Health ID when coverage.complete is false.',

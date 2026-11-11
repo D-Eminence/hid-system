@@ -30,32 +30,60 @@ describe('dated questions (first, earliest, latest)',()=>{
   const sources=selectEvidence(records,'condition','person first diagnosis').sources;
   expect(sources.map(s=>s.id)).toEqual(['old','new']);
  });
- it('reads the whole permitted record, oldest first, when a named condition matches nothing',()=>{
-  const sources=selectEvidence([record('note','b','2026-01-01',{text:'Visit'}),record('note','a','2020-01-01',{text:'Visit'})],'condition','synthetic gout').sources;
-  expect(sources.map(s=>s.id)).toEqual(['a','b']);
+ it('gives an empty selection, not unrelated records, when a named condition matches nothing',()=>{
+  // 100 old visits and a diagnosis worded "type 2 diabetic": "diabetes" matches none of them, so the
+  // answer must say nothing was found rather than cite unrelated records.
+  const visits=Array.from({length:100},(_,i)=>record('note',`v${i}`,'2015-01-01',{text:'Routine visit'}));
+  const selection=selectEvidence([...visits,diagnosis('dx','2025-01-01','Type 2 diabetic')],'condition','diabetes');
+  expect(selection.sources).toEqual([]);
  });
  it.each([['What was this person first diagnosis','earliest'],['When did the asthma start?','earliest'],['latest prescription','latest'],
-  ['Show the history of visits','timeline'],['What does this result say?',null]])('reads %j as %j',(question,order)=>{
+  ['Show the history of visits','timeline'],['What does this result say?',null],['What is my first name?',null],['What is my current address',null],
+  ['Have I ever had malaria?',null],['What was my most recent blood test',  'latest'],['first recorded malaria diagnosis','earliest']])('reads %j as %j',(question,order)=>{
   expect(temporalOrder(question)).toBe(order);
  });
- it('adds the earliest and latest diagnoses from the given records only, earliest first, on top of a search selection',()=>{
+ it('adds the earliest and latest diagnoses from the given records only, in date order, on top of a search selection',()=>{
   const many=Array.from({length:40},(_,i)=>diagnosis(`d${String(i).padStart(2,'0')}`,`${2000+i}-01-01`,'Synthetic condition '+i));
   const searched=[record('note','hit','2026-10-01',{text:'Synthetic match'})];
   const result=withTemporalEvidence(many,searched,'what was the first diagnosis',false);
   expect(result.order).toBe('earliest');
-  expect(result.sources[0]!.id).toBe('d00');expect(result.sources.slice(0,10).map(s=>s.id)).toEqual(many.slice(0,10).map(s=>s.id));
-  expect(result.sources.map(s=>s.id)).toEqual(expect.arrayContaining(['d39','hit']));
+  const ids=result.sources.map(s=>s.id);
+  expect(ids.slice(0,6)).toEqual(many.slice(0,6).map(s=>s.id));
+  expect(ids).toEqual(expect.arrayContaining(['d39','hit']));
+  // Strictly in date order, so the model can trust position as well as dates.
+  const dates=result.sources.map(s=>Date.parse(s.effectiveAt!));
+  expect(dates).toEqual([...dates].sort((a,b)=>a-b));
   // Only records the reader was already allowed to read: nothing outside `many` and `searched`.
   const allowed=new Set([...many,...searched].map(s=>s.id));
   expect(result.sources.every(s=>allowed.has(s.id))).toBe(true);
-  expect(result.sources).toHaveLength(21);
-  // Not every dated record was read, so the answer must not claim a complete history.
-  expect(result.partial).toBe(true);
+  expect(result.sources).toHaveLength(13);
+  // The earliest diagnoses were all read, so the earliest answer is not marked incomplete.
+  expect(result.partial).toBe(false);
+ });
+ it('never lets large unrelated dated records push out the records that answer the question',()=>{
+  const documents=Array.from({length:30},(_,i)=>evidence({kind:'document',id:`doc${i}`,version:'1',title:'Scanned page',
+   recordedAt:`${1990+i}-01-01`,effectiveAt:`${1990+i}-01-01`,provenance:'Scanned',quality:'recorded',fields:{text:'x'.repeat(12000)}}));
+  const notes=Array.from({length:5},(_,i)=>record('note',`m${i}`,`202${i}-01-01`,{text:'Malaria treated'}));
+  const all=[...documents,...notes];
+  const selected=selectEvidence(all,'condition','malaria');
+  expect(selected.sources.map(s=>s.id).sort()).toEqual(notes.map(n=>n.id).sort());
+  for(const question of ['Have I ever had malaria?','what was my first malaria diagnosis','my latest malaria test result','history of malaria']) {
+   const result=withTemporalEvidence(all,selected.sources,question,selected.partial);
+   expect(result.sources.map(s=>s.id)).toEqual(expect.arrayContaining(notes.map(n=>n.id)));
+   expect(result.sources.reduce((n,s)=>n+s.content.length,0)).toBeLessThanOrEqual(90_000+5*60);
+  }
+  // A diagnosis question adds only records that state a diagnosis, never scanned documents.
+  expect(withTemporalEvidence(all,selected.sources,'what was my first malaria diagnosis',false).sources.every(s=>s.kind!=='document')).toBe(true);
  });
  it('puts the newest first for "latest" and leaves other questions unchanged',()=>{
   const records=[diagnosis('a','2001-01-01','A'),diagnosis('b','2024-01-01','B')];
   expect(withTemporalEvidence(records,[],'my latest diagnosis',false).sources.map(s=>s.id)).toEqual(['b','a']);
   const plain=withTemporalEvidence(records,[records[0]!],'what does it mean',false);
   expect(plain).toEqual({sources:[records[0]],partial:false,order:null});
+ });
+ it('only reorders the selection for a history question, adding nothing',()=>{
+  const records=[diagnosis('a','2001-01-01','A'),diagnosis('b','2024-01-01','B'),diagnosis('c','2010-01-01','C')];
+  const result=withTemporalEvidence(records,[records[1]!,records[2]!],'history of my diagnoses',false);
+  expect(result).toEqual({sources:[records[2],records[1]],partial:false,order:'timeline'});
  });
 });
