@@ -1,5 +1,6 @@
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { captureServerError, flushErrorReporting, initErrorReporting } from '@hid/server-telemetry';
 import { readEventDispatcherConfig } from './config';
 import { DeterministicEventTransport } from './deterministic.transport';
 import { EventDispatcher } from './dispatcher';
@@ -8,6 +9,7 @@ import { PostgresDeliveryRepository } from './repository';
 import { DispatcherStatusServer } from './status-server';
 
 async function bootstrap(): Promise<void> {
+  initErrorReporting({ service: 'event-dispatcher' });
   const config = readEventDispatcherConfig();
   if (!config.EVENT_DISPATCHER_ENABLED) {
     const status = new DispatcherStatusServer(config, null, null);
@@ -38,4 +40,6 @@ void bootstrap().catch((error: unknown) => {
     event: 'event_dispatcher.startup_failed', code: configuration ? 'INVALID_CONFIGURATION' : 'STARTUP_FAILED',
     acceptingDispatch: false }) + '\n');
   process.exitCode = 1;
+  captureServerError(error);
+  void flushErrorReporting();
 });

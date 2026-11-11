@@ -121,7 +121,8 @@ describe('clean reading pieces', () => {
   it('shows two readings as "A? (or B?)", the readable one first, one alone where the other is blank', () => {
     expect(alternatives('Cefuroxime', 'Ceftriaxone?')).toBe('Cefuroxime? (or Ceftriaxone?)');
     expect(alternatives('500mg', '250mg')).toBe('500mg? (or 250mg?)');
-    expect(alternatives('[?]', 'Ceftriaxone')).toBe('Ceftriaxone? (or [?])');
+    // A "[?]" or placeholder other option adds nothing (second cleanup round of 2026-11-10).
+    expect(alternatives('[?]', 'Ceftriaxone')).toBe('Ceftriaxone?');
     expect(alternatives('', 'IV')).toBe('IV?');
     expect(alternatives('IV', null)).toBe('IV?');
     expect(splitAlternative('HTN? (or Hypertension?)')).toEqual(['HTN?', 'Hypertension?']);

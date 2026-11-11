@@ -13,7 +13,17 @@ function respond(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-export function supportServer(recognize, { timeoutMs = 5500, supportContact = '' } = {}) {
+/** Without a Health ID check nothing is sent to Lex (owner decision of 2026-10-31). */
+async function noHealthIdCheck() {
+  throw new Error('No Health ID check is configured');
+}
+
+// Lex reads at most 1024 characters; each replaced Health ID becomes a fixed placeholder.
+const MAX_CHECKED_TEXT = 1024;
+
+export function supportServer(recognize, {
+  timeoutMs = 5500, supportContact = '', checkHealthIds = noHealthIdCheck, onError = () => {},
+} = {}) {
   const sessions = new Map();
   let inFlight = 0;
   const server = createServer(async (request, response) => {
@@ -63,7 +73,13 @@ export function supportServer(recognize, { timeoutMs = 5500, supportContact = ''
       let timer;
       let messages;
       try {
-        messages = await Promise.race([recognize(text, sessionId), new Promise((_, reject) => {
+        // Lex receives only the checked text, with each issued Health ID replaced; if the check cannot run, the
+        // message is not sent at all and the caller gets the same 503 as for a Lex failure.
+        const checked = await checkHealthIds(text);
+        if (typeof checked !== 'string' || !checked.trim() || checked.length > MAX_CHECKED_TEXT) {
+          throw new Error('Invalid checked support message');
+        }
+        messages = await Promise.race([recognize(checked, sessionId), new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error('Support provider timeout')), timeoutMs);
         })]);
       } finally { clearTimeout(timer); inFlight -= 1; }
@@ -75,7 +91,8 @@ export function supportServer(recognize, { timeoutMs = 5500, supportContact = ''
         sessionId,
         messages: messages.length ? messages : [`I could not answer that. Contact Health ID support${supportContact ? ': ' + supportContact : '.'}`],
       });
-    } catch {
+    } catch (error) {
+      try { onError(error); } catch { /* reporting must never change the response */ }
       respond(response, 503, { code: 'SUPPORT_BOT_UNAVAILABLE' });
     }
   });

@@ -1,4 +1,7 @@
-import { Equals, IsIn, IsInt, IsString, IsUUID, Matches, MaxLength, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+import { Equals, IsIn, IsInt, IsString, IsUUID, Matches, MaxLength, Min, ValidateNested } from 'class-validator';
+import { IsOptionalButNotNull } from '../../../common/validation';
+import { AllergyAcknowledgementDto } from '../../allergies/allergies.dto';
 
 /** A stored attestation text version (T4): `order-route-{lab|prescription}-attestation-v<n>`. */
 export const ATTESTATION_TEXT_VERSION = /^order-route-(lab|prescription)-attestation-v[0-9]+$/;
@@ -21,6 +24,16 @@ export class SendOrderRouteDto {
 
   @IsString() @MaxLength(64) @Matches(ATTESTATION_TEXT_VERSION)
   attestationTextVersion!: string;
+
+  /**
+   * 0124: sending a draft prescription makes it active, so it is checked
+   * against the allergies; sent only after an allergy warning, with the
+   * prescriber's reason and the warning's token. Ignored for a lab request.
+   */
+  @IsOptionalButNotNull()
+  @ValidateNested()
+  @Type(() => AllergyAcknowledgementDto)
+  allergyAcknowledgement?: AllergyAcknowledgementDto;
 }
 
 export const ORDERER_WITHDRAW_REASONS = ['sent_in_error', 'patient_request', 'other'] as const;

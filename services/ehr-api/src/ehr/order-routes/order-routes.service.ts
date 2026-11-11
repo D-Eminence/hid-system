@@ -8,6 +8,8 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { checkPrescriptionAllergies, recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
+import type { AllergyMatch } from '../allergies/allergy-match';
 import type { SendOrderRouteDto, WithdrawOrderRouteDto } from './dto/order-route.dto';
 import {
   orderRouteSummary,
@@ -115,11 +117,18 @@ export class OrderRoutesService {
         patientAgreement: 'clinician_attested',
       },
     }, async (client) => {
+      const allergyMatches = kind === 'prescription'
+        ? await this.checkDraftPrescriptionAllergies(client, context, patientId, encounterId, orderId, input)
+        : [];
       const row = await this.single<SendRow>(client,
         'select * from ehr.send_order_route($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
         [routeId, kind, patientId, orderId, encounterId, input.expectedRowVersion, input.receivingFacilityId,
           input.attestationTextVersion, idempotencyKey, digest], 'ORDER_NOT_FOUND');
       const replayed = row.replayed === true;
+      const allergyOverride = allergyMatches.length > 0 && input.allergyAcknowledgement && !replayed
+        ? await recordAllergyAcknowledgement(client, context, patientId, orderId, 'send', allergyMatches,
+          input.allergyAcknowledgement.reason)
+        : {};
       // C1 answers only these columns. A new route is `sent` and was just
       // checked eligible (H4), so its receiver is available; for a replay the
       // stored route is answered as it is and its receiver's availability now
@@ -143,7 +152,7 @@ export class OrderRoutesService {
           replayed,
         },
         resourceId: row.route_id,
-        details: { routeId: row.route_id, replayed },
+        details: { routeId: row.route_id, replayed, ...allergyOverride },
       };
     // SERIALIZABLE (the review of 0100): the send locks the order only FOR NO KEY UPDATE and
     // reads the Lab or Pharmacy work items, so a same-facility acceptance of the same order
@@ -151,6 +160,25 @@ export class OrderRoutesService {
     // live route and a dispensable work item. DatabaseService runs a send PostgreSQL cancels
     // again; ehr.send_order_route replays its own idempotency key.
     }, undefined, { isolationLevel: 'SERIALIZABLE' });
+  }
+
+  /**
+   * 0124: sending a draft prescription makes it active (ehr.send_order_route),
+   * so it is checked against the allergies as Activate is. An active one was
+   * checked when it became active; one not found is left to the send's own 404.
+   */
+  private async checkDraftPrescriptionAllergies(client: PoolClient, context: DataAccessContext, patientId: string,
+    encounterId: string, prescriptionId: string, input: SendOrderRouteDto): Promise<AllergyMatch[]> {
+    const result = await client.query<{ status: string; medicationDisplay: string; medicationCode: string | null }>(
+      `select status, medication_display as "medicationDisplay", medication_code as "medicationCode"
+         from ehr.prescriptions where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4`,
+      [prescriptionId, encounterId, patientId, context.facilityId],
+    );
+    const prescription = result.rows[0];
+    if (!prescription || prescription.status !== 'draft') return [];
+    return checkPrescriptionAllergies(client, context, patientId,
+      { display: prescription.medicationDisplay, code: prescription.medicationCode }, input.allergyAcknowledgement,
+      prescriptionId);
   }
 
   /** The order's routes, newest first, with the attestation, events and what came back (C3). */

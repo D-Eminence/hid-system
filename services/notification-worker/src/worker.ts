@@ -1,4 +1,5 @@
 import { DeleteMessageCommand, ReceiveMessageCommand, SQSClient, type Message } from '@aws-sdk/client-sqs';
+import { captureServerError } from '@hid/server-telemetry';
 import type { NotificationWorkerConfig } from './config';
 import { parseSqsEvent } from './event';
 import type { NotificationOrchestrator } from './novu.orchestrator';
@@ -55,7 +56,8 @@ export class NotificationWorker {
       recipient = event.context.patientId
         ? await this.repository.getPatientNotificationRecipient(event, claim.claimToken)
         : null;
-    } catch {
+    } catch (error) {
+      captureServerError(error);
       const status = await this.repository.fail(event, claim.claimToken, {
         outcome: 'unknown',
         provider: 'novu',

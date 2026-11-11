@@ -163,18 +163,27 @@ create table ehr.prescription_allergy_acknowledgements (
   created_by uuid not null references auth.accounts(id) on delete restrict,
   created_by_membership_id uuid not null references identity.staff_facility_memberships(id) on delete restrict,
   reason text not null check (
-    char_length(btrim(reason)) between 3 and 500 and reason !~ '[\u0000-\u0009\u000b-\u001f\u007f]'),
+    char_length(btrim(reason)) between 10 and 500 and reason !~ '[\u0000-\u0009\u000b-\u001f\u007f]'),
   matched_recorded_allergy_ids uuid[] not null default '{}'
     check (cardinality(matched_recorded_allergy_ids) <= 50 and array_position(matched_recorded_allergy_ids, null) is null),
   patient_reported_matched boolean not null,
+  -- The patient's own terms that matched (normalized as the matcher does), so a term the patient
+  -- adds later is not taken as already acknowledged.
+  patient_reported_terms text[] not null default '{}'
+    check (cardinality(patient_reported_terms) <= 50 and array_position(patient_reported_terms, null) is null),
+  -- When the reason was given: at create, on Activate (draft) or Resume (on hold), or on sending
+  -- a draft to another facility. A prescription carries one or more, each with its stage.
+  stage text not null check (stage in ('create', 'activate', 'resume', 'send')),
   created_at timestamptz not null default clock_timestamp(),
-  unique (prescription_id),
   foreign key (prescription_id, patient_id, facility_id)
     references ehr.prescriptions(id, patient_id, facility_id) on delete restrict,
   foreign key (created_by_membership_id, facility_id, created_by)
     references identity.staff_facility_memberships(id, facility_id, account_id) on delete restrict,
   check (patient_reported_matched or cardinality(matched_recorded_allergy_ids) > 0)
 );
+
+create index prescription_allergy_acknowledgements_prescription
+  on ehr.prescription_allergy_acknowledgements (prescription_id);
 
 create trigger prescription_allergy_acknowledgements_validate_actor
   before insert on ehr.prescription_allergy_acknowledgements
@@ -184,7 +193,7 @@ create trigger prescription_allergy_acknowledgements_no_mutation
   for each row execute function platform.reject_mutation();
 
 comment on table ehr.prescription_allergy_acknowledgements is
-  '0124: the prescriber''s reason for going ahead with a prescription after an allergy warning, with the allergies that matched. Append-only.';
+  '0124: the prescriber''s reason for going ahead with a prescription after an allergy warning (at create, Activate, Resume or send), with the allergies that matched. Append-only.';
 
 -- 3. Row-level security.
 alter table ehr.recorded_allergies enable row level security;
