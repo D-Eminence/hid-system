@@ -13,6 +13,10 @@ import type { ListFacilitiesDto, ListIdentityReviewsDto,
   ListPlatformAuditDto, ListPrincipalsDto } from './dto/admin-list.dto';
 import type { PlatformControlCommandDto } from './dto/admin-command.dto';
 
+/** The periods the dashboard offers (the database refuses any other). */
+export const ADMIN_ACTIVITY_DAYS = [7, 30, 90] as const;
+export type AdminActivityDays = typeof ADMIN_ACTIVITY_DAYS[number];
+
 /** The opt-out's audit reason: the recipient asked support to stop their emergency-access alerts. */
 const OPT_OUT_AUDIT_REASON = 'Emergency-access alerts stopped at the recipient\'s request';
 
@@ -119,6 +123,27 @@ export class AdminService {
         activeStaffMemberships: Number(row.active_memberships), pendingIdentityReviews: Number(row.pending_identity_reviews),
       };
     }, { readOnly: true });
+  }
+
+  /**
+   * The super admin dashboard (migration 0123): counts for the last 7, 30 or
+   * 90 days and the latest sign-ups and uploads, with names, emails and Health
+   * IDs already shortened by the database. The function refuses anyone without
+   * platform.dashboard.read and writes its own audit row, so this transaction
+   * is not read-only.
+   */
+  async activity(context: PlatformAdminContext, days: AdminActivityDays) {
+    return this.database.withPlatformTransaction(context, async (client) => {
+      try {
+        const result = await client.query<{ activity: unknown }>(
+          'select identity.admin_platform_activity($1) as activity', [days]);
+        const activity = result.rows[0]?.activity;
+        if (!activity || typeof activity !== 'object' || Array.isArray(activity)) {
+          throw new DomainProblem(503, 'ADMIN_DATA_UNAVAILABLE', 'Administration data is unavailable');
+        }
+        return activity;
+      } catch (error) { throw this.commandError(error); }
+    });
   }
 
   async listFacilities(context: PlatformAdminContext, query: ListFacilitiesDto) {

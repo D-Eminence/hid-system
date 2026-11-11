@@ -1491,3 +1491,16 @@ grant execute on function ehr.staff_chat_context(uuid,uuid,uuid,uuid) to hid_ehr
 grant select,insert,update on ehr.staff_chat_state to hid_ehr_runtime;
 grant select,insert,delete on ehr.staff_chat_messages,ehr.staff_evidence_chunks to hid_ehr_runtime;
 grant select,insert,update on ehr.staff_attachment_extractions,ehr.staff_document_extractions to hid_ehr_runtime;
+
+-- Admin dashboard activity (0123): the super admin's activity read is called
+-- by the Identity API alone (the function checks platform.dashboard.read
+-- itself); the two shorteners and the read-window helper it calls, and the
+-- read-window table, are its owner's and granted to no role. 0123 makes the
+-- same grants.
+revoke all on function identity.admin_platform_activity(integer),
+  identity.admin_activity_short_name(text, text, text),
+  identity.admin_activity_short_file_name(text),
+  identity.admin_activity_read_open() from public;
+revoke all on table identity.admin_activity_read_windows from public;
+grant execute on function identity.admin_platform_activity(integer)
+  to hid_identity_runtime, hid_schema_test_runtime;

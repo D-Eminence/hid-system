@@ -209,6 +209,9 @@ const environmentSchema = z.object({
   ADMIN_OUTREACH_STATUS_URL: optionalUrl,
   ADMIN_EVENT_DISPATCHER_STATUS_URL: optionalUrl,
   ADMIN_OPERATIONS_TIMEOUT_MS: z.coerce.number().int().min(250).max(5000).default(1500),
+  /** The admin dashboard's Errors card: the AWS Secrets Manager ARN of a read-only Sentry token (never the token). */
+  SENTRY_READ_TOKEN_SECRET_ARN: z.preprocess(emptyToUndefined,
+    z.string().trim().regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$/).optional()),
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {
