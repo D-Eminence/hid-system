@@ -127,7 +127,7 @@ export class OrderRoutesService {
       const replayed = row.replayed === true;
       const allergyOverride = allergyMatches.length > 0 && input.allergyAcknowledgement && !replayed
         ? await recordAllergyAcknowledgement(client, context, patientId, orderId, 'send', allergyMatches,
-          input.allergyAcknowledgement.reason)
+          input.allergyAcknowledgement)
         : {};
       // C1 answers only these columns. A new route is `sent` and was just
       // checked eligible (H4), so its receiver is available; for a replay the

@@ -194,7 +194,7 @@ const NON_SPECIFIC = new Set(['capsule', 'capsules', 'caps', 'syrup', 'suspensio
   'vaccine', 'forte', 'plus']);
 
 const SEVERITY_WORDS: Readonly<Record<string, string>> = {
-  severe: 'SEVERE', moderate: 'moderate', mild: 'mild', unknown: 'severity not recorded',
+  severe: 'SEVERE', moderate: 'moderate', mild: 'mild', unknown: 'severity not known',
 };
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 

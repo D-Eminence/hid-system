@@ -661,7 +661,8 @@ credentials or tokens. `GET /api/v1/identity/me` answers `ninVerified`
 
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
-the `read_records` action for the exact facility and patient. Activation requires a reason, expires
+the `read_records` action for the exact facility and patient. With 0124 it also answers `allergies` (recorded and
+patient-reported, labelled by source; see "Allergies and the allergy check at prescribing"). Activation requires a reason, expires
 within the configured 5–240 minute bounds, permits at most ten new activations
 per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
 notification and review. Idempotent replay does not extend expiry. Expiry,
@@ -1059,8 +1060,10 @@ exact expected Outreach row version. Outreach calls the Identity authorization
 boundary with separate `outreach-api` workload evidence before opening the
 mutation transaction. Stale versions return 412; a reused idempotency key with
 different content returns 409; Identity/dependency failure never returns
-success. There is no Outreach create-patient, HID, NIN, campaign, encounter,
-screening, document, OCR, or EHR-ingestion endpoint in this slice.
+success. There is no Outreach create-patient, HID, NIN, encounter,
+screening, document, OCR, or EHR-ingestion endpoint in this slice. Campaigns
+are served under the same prefix (`/campaigns`), and only a campaign's own
+admins manage one (section 40, 0111).
 
 ## 9. Patient Identifier Contract
 
@@ -3795,6 +3798,80 @@ instead of the 404 they got before. Until the database can tell Identity which
 grant covered a check, a draft-only publishing path under the cover is not
 offered.
 
+## 40. Outreach campaigns: their own admins manage them (0111)
+
+Decision (relayed in chat, 2026-11-11, ADR-045 option B): any staff member
+allowed to write campaigns (`outreach.campaign.write`) may create one and
+becomes its admin. Only that campaign's own admins can open or close it and
+add members. Identity authorizes `outreach.campaign.write` from this release
+on. Before, it refused it, because any holder could add themselves to any
+campaign, read its linked registrations, or close it.
+
+```text
+GET  /api/v1/outreach/registration-cases/campaigns/governance          # outreach.campaign.read
+GET  /api/v1/outreach/registration-cases/campaigns                     # outreach.campaign.read
+POST /api/v1/outreach/registration-cases/campaigns                     # outreach.campaign.write
+POST /api/v1/outreach/registration-cases/campaigns/:campaignId/status  # outreach.campaign.write, If-Match, the campaign's admins
+GET  /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreach.campaign.read
+GET  /api/v1/outreach/registration-cases/campaigns/:campaignId/staff   # outreach.campaign.read
+POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreach.campaign.write, the campaign's admins
+```
+
+**governance**
+- Answers `{ "rule": "campaign_admins" }`.
+- A website asks it to learn that campaign management is served. A backend
+  before 0111 answers 404.
+
+**Creating** (`{ name, services, startsAt, endsAt? }`)
+- Makes a `planned` campaign, and its creator its first `admin`.
+- An `endsAt` not after `startsAt` answers 400
+  `OUTREACH_CAMPAIGN_DATES_INVALID`.
+
+**status** (`{ status: planned | active | closed, reason }`)
+- `If-Match` must carry the campaign's `rowVersion`.
+- A caller who is not one of the campaign's admins gets 403
+  `OUTREACH_CAMPAIGN_ADMIN_REQUIRED`, before the version is compared.
+- It cannot become `active` before `startsAt` (409
+  `OUTREACH_CAMPAIGN_NOT_STARTED`).
+- A closed campaign cannot be reopened (409 `OUTREACH_CAMPAIGN_CLOSED`).
+
+**staff**
+- Answers `{ yourRole, people: [{ membershipId, name, campaignRole }] }`:
+  - to a member of the campaign, its members by name;
+  - to its admins, also every active staff membership at the facility that
+    could be added (`campaignRole` null).
+- A non-member gets `{ "yourRole": null, "people": [] }`.
+- `name` is the staff member's full name. Nothing else about a person is
+  returned.
+
+**members** (`{ membershipId, role: enumerator | health_worker | admin }`)
+- A caller who is not one of the campaign's admins gets 403
+  `OUTREACH_CAMPAIGN_ADMIN_REQUIRED`.
+- Someone who is not an active staff member at the facility gets 422
+  `OUTREACH_STAFF_NOT_AVAILABLE`.
+- Someone already in the campaign gets 409
+  `OUTREACH_CAMPAIGN_MEMBER_EXISTS`.
+- No route removes a member.
+
+**The database (0111)**
+- `outreach.validate_campaign_write()` refuses any campaign update by a
+  session whose membership is not one of the campaign's admins (42501). A row
+  lock fires no trigger, so a member registering a person into the campaign
+  (0045's `FOR SHARE`) is unaffected. Where the function's owner does not
+  bypass row-level security (RDS), the check reads the members under their
+  policies, so it also needs a direct-care session holding
+  `outreach.campaign.read`; the campaigns update policy needs one already.
+- Restrictive policies on `outreach.campaign_members`:
+  - only a campaign's admins insert or delete its members;
+  - the creator may seed themself as the first admin of a campaign with no
+    member yet.
+- `outreach.campaign_staff(uuid)` answers the staff list above. It is
+  executable by `hid_outreach_runtime` alone.
+
+**Release order.** Apply 0111 before identity-api ships with
+`outreach.campaign.write` accepted. On a database without 0111, that would
+reopen the ungoverned writes.
+
 ## Allergies and the allergy check at prescribing (0124)
 
 Two sources, always kept apart and labelled on screens:
@@ -3854,17 +3931,64 @@ shared with recording an allergy, whenever a prescription is written as or becom
 `status: active` from draft (Activate) or on hold (Resume), and `POST …/prescriptions/:id/order-routes` (send) of a
 draft, which makes it active. On Activate, Resume and send, a match already covered by an acknowledgement stored for
 the prescription (its recorded allergy ids, and each of the patient's own terms) needs no new one. Otherwise, with a
-match and no `allergyAcknowledgement`, nothing is written and the answer is 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED`
-with one `errors[]` entry per match (`field: allergyAcknowledgement`, the match's message) and one more,
-`field: allergyAcknowledgement.warningToken`, whose only message is the current warning's token. The create, PATCH
-and send bodies take `allergyAcknowledgement: { reason (10-500 after trimming, at least one word of three letters, no
-control character but new lines), warningToken (64 lower-case hex) }`. When its token is not the current warning's
-(an allergy recorded meanwhile, another medicine, or the patient's text changed), the answer is the same 409 with the
-current warning and its token and the detail "The allergy warning changed since it was shown. Check the allergies
-again and give a reason to go ahead."; the client shows the new warning, clears the tick and sends the new token. A
-valid acknowledgement writes the prescription (or the change, or the route) and one
-`ehr.prescription_allergy_acknowledgements` row with its stage (`create | activate | resume | send`), the reason, the
-matched recorded allergy ids and the patient's own terms that matched. The audit of that create, update or send adds
-`allergyOverride: true, matchedRecordedCount, patientReportedMatched` (counts and a flag, never the substance or the
-reason). An acknowledgement sent when nothing needs one is ignored. A client must only send `allergyAcknowledgement`
-after a warning: an ehr-api without 0124 refuses the unknown property.
+match and no accepted `allergyAcknowledgement`, nothing is written and the answer is 409
+`ALLERGY_ACKNOWLEDGEMENT_REQUIRED` with, in `errors[]`:
+
+- one entry per match: `{ field: "allergyAcknowledgement", messages: [the match's message] }`;
+- one entry `{ field: "allergyAcknowledgement.warningToken", messages: [the current warning's token] }`;
+- one entry per part of the acknowledgement that failed: `{ field: "allergyAcknowledgement.rejected", code,
+  messages: [a plain-English sentence] }`. A reason and a token can both fail (two entries).
+
+| `code` | When | What the client does |
+| --- | --- | --- |
+| `ALLERGY_ACKNOWLEDGEMENT_MISSING` | no `allergyAcknowledgement` was sent (the first warning) | show the warning, ask for a reason |
+| `ALLERGY_ACKNOWLEDGEMENT_REASON_MISSING` | `reason` absent, or only spaces | ask for a reason; the token was fine unless a token entry is also present |
+| `ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID` | `reason` under 10 or over 500 characters after trimming, no word of three letters, or a control character other than a new line | keep the warning, ask to fix the reason |
+| `ALLERGY_WARNING_TOKEN_INVALID` | `warningToken` absent or not 64 lower-case hex | run the check again (or use the token in this 409) |
+| `ALLERGY_WARNING_TOKEN_STALE` | a well-formed token of another warning (an allergy recorded meanwhile, another medicine, or the patient's text changed) | show the new warning, clear the tick, send the token from this 409 |
+
+The `detail` is "The allergy warning changed since it was shown. Check the allergies again and give a reason to go
+ahead." when the token is stale; "The reason to go ahead after the allergy warning was not accepted. …" for a reason
+or token problem otherwise; and "This medicine may match an allergy on the patient's record. …" when none was sent.
+A client reads `errors[].code` on the `allergyAcknowledgement.rejected` entries, not the detail. The create, PATCH and
+send bodies take `allergyAcknowledgement: { reason, warningToken }`, an object; the request validation only refuses
+(400) a non-object, a non-string or null `reason` or `warningToken`, a `reason` over 2000 or a `warningToken` over 200
+characters, or another property. The reason's rules (10-500 after trimming, at least one word of three letters, no
+control character but new lines) and the token are checked by the allergy check, so their refusals are the 409 above
+with the current warning, never a 400. A valid acknowledgement writes the prescription (or the change, or the route)
+and one `ehr.prescription_allergy_acknowledgements` row with its stage (`create | activate | resume | send`), the
+reason, the matched recorded allergy ids and the patient's own terms that matched. The audit of that create, update
+or send adds `allergyOverride: true, matchedRecordedCount, patientReportedMatched` (counts and a flag, never the
+substance or the reason). An acknowledgement sent when nothing needs one is ignored, whatever it holds. A client must
+only send `allergyAcknowledgement` after a warning: an ehr-api without 0124 refuses the unknown property.
+
+**The stored acknowledgements on the prescription reads.** `GET …/encounters/:encounterId/prescriptions/:id` and each
+item of `GET …/encounters/:encounterId/prescriptions` carry `allergyAcknowledgements:
+PrescriptionAllergyAcknowledgement[]` (oldest first; `[]` when none), so a second clinician activating, resuming or
+sending a draft sees the earlier reason. `PrescriptionAllergyAcknowledgement`: `id, stage (create | activate | resume |
+send), reason, createdBy (account id), createdByMembershipId, createdAt, matchedRecordedAllergyIds (uuid[]: the
+recorded allergies it covered; `GET …/allergies?includeEnteredInError=true` names them), patientReportedMatched,
+patientReportedTerms (string[]: the patient's own terms it covered, normalized)`. Same permission
+(`ehr.prescription.read`), authorization and RLS as before (acknowledgements are read at their own facility with
+read access); the read's audit adds `allergyAcknowledgementCount` (the list: the page's total), never the reason.
+
+**Severity in the messages.** `severe` reads "SEVERE", `moderate` "moderate", `mild` "mild" and `unknown` "severity
+not known" (the clinician's choice "Not known" in the form): "Latex allergy: severity not known."
+
+**In the emergency read (0124).** `GET /api/v1/ehr/patients/:patientId/emergency-records` (purpose `emergency`, a
+current break-glass grant, as before) also answers `allergies`, read-only and labelled by source:
+
+```text
+allergies: {
+  recorded: [{ source: "recorded", id, substance, reaction | null, severity (mild | moderate | severe | unknown),
+               recordedHere, recordedOn }],          // active only, every facility, most serious first, at most 200
+  patientReported: { source: "patient_reported", allergies: string | null, updatedAt | null }
+}
+```
+
+`recordedHere` is whether it was recorded at the current facility; `recordedOn` when. No route changes an allergy
+under the emergency purpose. RLS needs no new policy: 0124's and 0094's read policies
+(`ehr.imported_record_read_context`) go through `ehr.context_allows` at the current facility, which admits the
+reasoned break-glass grant for `read_records` under purpose `emergency` (and only that action). The audit
+(`ehr.emergency.records.read`) adds `recordedAllergyCount` and `patientReportedAllergies` (a flag), never the
+substance, reaction or text.

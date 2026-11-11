@@ -17,7 +17,8 @@ export interface ProblemDetails {
   instance: string;
   correlationId: string;
   code: string;
-  errors?: readonly { field: string; messages: readonly string[] }[];
+  /** `code` (optional) names what failed for that entry, e.g. 0124's ALLERGY_WARNING_TOKEN_STALE. */
+  errors?: readonly { field: string; code?: string; messages: readonly string[] }[];
 }
 
 export class DomainProblem extends HttpException {

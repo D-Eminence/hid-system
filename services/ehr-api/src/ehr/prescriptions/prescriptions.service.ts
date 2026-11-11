@@ -10,7 +10,8 @@ import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
 import { calendarDate } from '../shared/calendar-date';
-import { checkPrescriptionAllergies, recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
+import { checkPrescriptionAllergies, readAllergyAcknowledgements,
+  recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -85,10 +86,14 @@ export class PrescriptionsService {
           [encounterId, patientId, context.facilityId, cursor?.sortAt ?? null, cursor?.id ?? null, query.limit + 1],
         );
         const page = timelinePage(result.rows, query.limit, scope);
-        const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId,
-          page.items.map((item) => item.id));
-        return { value: { ...page, items: page.items.map((item) => withOrderRoute(item, routes)) },
-          details: { resultCount: page.items.length } };
+        const ids = page.items.map((item) => item.id);
+        const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, ids);
+        // 0124: each prescription's stored allergy acknowledgements (audited as a count, never the reason).
+        const acknowledgements = await readAllergyAcknowledgements(client, context, patientId, ids);
+        const items = page.items.map((item) => ({ ...withOrderRoute(item, routes),
+          allergyAcknowledgements: acknowledgements.get(item.id) ?? [] }));
+        return { value: { ...page, items },
+          details: { resultCount: page.items.length, allergyAcknowledgementCount: countValues(acknowledgements) } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
@@ -103,7 +108,11 @@ export class PrescriptionsService {
       async (client) => {
         const row = this.single(await this.find(client, context, patientId, encounterId, prescriptionId));
         const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, [row.id]);
-        return { value: withOrderRoute(row, routes) };
+        // 0124: the allergy acknowledgements stored for it, so whoever activates or resumes a draft
+        // sees the earlier reason (audited as a count, never the reason).
+        const acknowledgements = (await readAllergyAcknowledgements(client, context, patientId, [row.id])).get(row.id) ?? [];
+        return { value: { ...withOrderRoute(row, routes), allergyAcknowledgements: acknowledgements },
+          details: { allergyAcknowledgementCount: acknowledgements.length } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
@@ -145,7 +154,7 @@ export class PrescriptionsService {
             // The audit says the prescriber went ahead after a warning: flags and counts only,
             // never the substance or the reason text.
             const details = await recordAllergyAcknowledgement(client, context, patientId, row.id, 'create', matches,
-              input.allergyAcknowledgement.reason);
+              input.allergyAcknowledgement);
             return { value: row, id: row.id, details };
           }
           return { value: row, id: row.id };
@@ -199,7 +208,7 @@ export class PrescriptionsService {
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Prescription changed since it was loaded');
         if (matches.length > 0 && input.allergyAcknowledgement) {
           const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
-            current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement.reason);
+            current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement);
           return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion, ...override } };
         }
         return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion } };
@@ -319,4 +328,10 @@ export class PrescriptionsService {
     if (!row) throw new DomainProblem(404, 'PRESCRIPTION_NOT_FOUND', 'Prescription was not found');
     return row;
   }
+}
+
+function countValues(map: ReadonlyMap<string, readonly unknown[]>): number {
+  let count = 0;
+  for (const list of map.values()) count += list.length;
+  return count;
 }

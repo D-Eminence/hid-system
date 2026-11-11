@@ -91,3 +91,60 @@ describe('Emergency read grant revalidation', () => {
     },
   );
 });
+
+describe('The emergency read answers the allergies (0124)', () => {
+  const facility = 'facility-here';
+  const createdAt = new Date('2026-03-03T10:00:00Z');
+  function run(answers: [RegExp, unknown[]][]) {
+    const calls: { sql: string; values: unknown[] }[] = [];
+    const query = jest.fn(async (sql: string, values: unknown[]) => {
+      calls.push({ sql, values });
+      return { rows: answers.find(([pattern]) => pattern.test(sql))?.[1] ?? [] };
+    });
+    let outcome: { value: Record<string, unknown>; details?: Record<string, unknown> } | undefined;
+    const clinical = { run: jest.fn(async (_c, _p, _a, _e, work) => {
+      outcome = await work({ query } as unknown as PoolClient);
+      return outcome!.value;
+    }) };
+    const service = new PatientRecordsService({} as DatabaseService, {} as IdentityApiService, {} as AuditService,
+      clinical as unknown as ClinicalRepository);
+    const context = { purposeOfUse: 'emergency', facilityId: facility } as DataAccessContext;
+    return { service, context, calls, clinical, outcome: () => outcome! };
+  }
+
+  it('answers the active recorded allergies and the patient text, labelled by source, with counts in the audit', async () => {
+    const { service, context, calls, clinical, outcome } = run([
+      [/from ehr\.recorded_allergies/, [
+        { id: 'a1', substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe', facilityId: 'elsewhere', createdAt },
+        { id: 'a2', substance: 'Latex', reaction: null, severity: 'unknown', facilityId: facility, createdAt }]],
+      [/patient_reported_health_profiles/, [{ allergies: 'sulfa drugs', updated_at: createdAt }]],
+    ]);
+    const value = await service.emergency('patient-id', context) as Record<string, unknown>;
+    expect(clinical.run).toHaveBeenCalledWith(context, 'patient-id', 'read_records',
+      expect.objectContaining({ action: 'ehr.emergency.records.read', breakGlassOnly: true }), expect.any(Function));
+    expect(value.allergies).toEqual({
+      recorded: [
+        { source: 'recorded', id: 'a1', substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe',
+          recordedHere: false, recordedOn: createdAt },
+        { source: 'recorded', id: 'a2', substance: 'Latex', reaction: null, severity: 'unknown', recordedHere: true,
+          recordedOn: createdAt }],
+      patientReported: { source: 'patient_reported', allergies: 'sulfa drugs', updatedAt: createdAt },
+    });
+    // Active only, any facility (the allergies follow the patient), most serious first.
+    const read = calls.find((call) => /from ehr\.recorded_allergies/.test(call.sql))!;
+    expect(read.sql).toContain("status = 'active'");
+    expect(read.sql).not.toMatch(/facility_id\s*=/);
+    expect(read.sql).toContain("array['severe', 'unknown', 'moderate', 'mild']");
+    expect(read.values).toEqual(['patient-id']);
+    expect(outcome().details).toEqual({ recordedAllergyCount: 2, patientReportedAllergies: true });
+    expect(JSON.stringify(outcome().details)).not.toMatch(/Penicillin|sulfa/);
+  });
+
+  it('answers empty allergies and a null patient text when there are none', async () => {
+    const { service, context, outcome } = run([]);
+    const value = await service.emergency('patient-id', context) as Record<string, unknown>;
+    expect(value.allergies).toEqual({ recorded: [],
+      patientReported: { source: 'patient_reported', allergies: null, updatedAt: null } });
+    expect(outcome().details).toEqual({ recordedAllergyCount: 0, patientReportedAllergies: false });
+  });
+});

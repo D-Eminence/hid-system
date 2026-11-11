@@ -379,6 +379,7 @@ export class CreatePrescriptionDto {
    * warning's token.
    */
   @IsOptionalButNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => AllergyAcknowledgementDto)
   allergyAcknowledgement?: AllergyAcknowledgementDto;
@@ -411,6 +412,7 @@ export class UpdatePrescriptionDto extends VersionedUpdateDto {
    * prescriber's reason and the warning's token.
    */
   @IsOptionalButNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => AllergyAcknowledgementDto)
   allergyAcknowledgement?: AllergyAcknowledgementDto;
