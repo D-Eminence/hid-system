@@ -3996,8 +3996,9 @@ records how urgent a prescription is, the strength and form meant, how long
 it is for and how much to hand over, and this facility's pharmacy sees them
 on its own work. 0122 releases after 0121 (section 41), by the
 coordinator's release order of 2026-11-11, and is unsigned until the owner
-signs its declaration. Migrations 0112 to 0120 may add sections too, so this
-section's number is fixed at merge.
+signs its declaration. Its read consent test is the one 0104 left.
+Migrations 0112 to 0120 may add sections too, so this section's number is
+fixed at merge.
 
 Routes (paths and permissions unchanged): `POST
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions`

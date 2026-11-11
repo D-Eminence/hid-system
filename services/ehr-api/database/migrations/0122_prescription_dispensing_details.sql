@@ -5,8 +5,10 @@
 -- prescriber's suggestion, the pharmacist still confirms it and the server
 -- does not compare the two). The declaration is signed separately.
 -- Written as 0114 on 0113 (the own-work patient cards, now 0121) over 0103
--- (34d69557); released as 0122, after 0121. It does not use or need anything
--- 0104-0121 add, so it applies on 0103 alone or on 0103 + any of them.
+-- (34d69557); released as 0122, after 0121. It relies on one body 0104
+-- replaced: identity.has_active_consent_grant as 0104 left it (0108 kept it),
+-- so its records-processing cover counts here as it does in the work items'
+-- read policy. It uses nothing else 0104-0121 add.
 --
 -- The gap: ehr.prescriptions (0004) records the medicine, dose, route,
 -- frequency, instructions and dates, but not the strength and form the
@@ -109,9 +111,9 @@
 --    identity.organization_application_admin_account body the marker, and
 --    the tables used); not applied yet (the function does not exist); none of
 --    the seven columns or the CHECK name exists on ehr.prescriptions; the
---    bodies relied on are the ones 0001-0103 left (md5 of pg_proc.prosrc):
---    the snapshot writer and its trigger, the consent test and the
---    membership and permission checks the body calls, the four session
+--    bodies relied on are the ones 0001-0104 left (md5 of pg_proc.prosrc):
+--    the snapshot writer and its trigger, the consent test (0104's body) and
+--    the membership and permission checks the body calls, the four session
 --    readers, pharmacy.work_item_allows (its attributes and search_path too:
 --    its body is byte-identical to Lab's) and the route branch it calls,
 --    ehr.context_allows (the snapshot read policy), and the bodies that read
@@ -262,10 +264,11 @@ begin
     raise exception using errcode = '55000',
       message = format('0122: ehr.prescriptions already has a column or CHECK this migration adds: %s', mismatch);
   end if;
-  -- c. The bodies relied on, as 0001-0103 left them: the snapshot writer
-  -- (0004), the consent test (0012), the membership (0008) and permission
-  -- (0010) checks, the four session readers (0001), the Pharmacy work items'
-  -- read-policy function (0086 H8) and its route branch (0086 H7), the
+  -- c. The bodies relied on, as 0001-0104 left them: the snapshot writer
+  -- (0004), the consent test (0012, as 0104 replaced it; 0108 kept it), the
+  -- membership (0008) and permission (0010) checks, the four session readers
+  -- (0001), the Pharmacy work items' read-policy function (0086 H8) and its
+  -- route branch (0086 H7), the
   -- snapshot read policy's function (0005), and the four bodies that read
   -- ehr.prescriptions into its row type or fire on it, left untouched here
   -- (0100, 0101, 0098, 0086).
@@ -273,7 +276,7 @@ begin
     into mismatch
     from (values
       ('ehr.capture_record_version()', '70daa16f05bb3ec28f05292e6358a702'),
-      ('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)', '8b12ce866ee75cce411a2721795ffb92'),
+      ('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)', '732d11892dd4e27e1ff9093ae3b7de5a'),
       ('identity.has_active_membership(text,uuid,uuid)', 'bb52953ef1cd08527db61230a671859e'),
       ('auth.membership_has_permission(text,uuid,uuid,text)', '65e3eaff93fe729fd5c5b986b80c9dd6'),
       ('platform.current_actor_subject()', 'cf14c2d4a16d44a79ea9dbef9dc79c2b'),
@@ -376,7 +379,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0122: an object this migration relies on differs from 0001-0103: %s', mismatch);
+      message = format('0122: an object this migration relies on differs from 0001-0104: %s', mismatch);
   end if;
   -- d. The columns read.
   select string_agg(format('%s.%s', expected.relation_name, expected.column_name), '; ') into mismatch
