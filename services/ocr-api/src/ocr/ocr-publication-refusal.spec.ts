@@ -99,6 +99,7 @@ function harness(domain: Domain, access: Access) {
     target_resource_id: null, failure_code: null, failure_summary: null, row_version: '1',
     requested_at: new Date('2026-10-09T10:06:00Z'), completed_at: null };
   let grantChecks = 0;
+  let storedBasis: string | null = null;
   const route = (sql: string, params: unknown[] = []): Rows => {
     if (sql.includes('identity.records_processing_write_grant')) {
       grantChecks += 1;
@@ -112,9 +113,12 @@ function harness(domain: Domain, access: Access) {
     if (sql.includes('insert into ocr.outbox_events')) return rows([]);
     if (sql.includes('from ocr.publications where facility_id=$1')) return rows([]);
     if (sql.includes('select id::text from ocr.publications where validation_id=$1')) return rows([]);
-    if (sql.includes('insert into ocr.publications')) return rows([publication]);
+    if (sql.includes('insert into ocr.publications')) {
+      storedBasis = params[13] as string;
+      return rows([{ ...publication, publication_basis: storedBasis }]);
+    }
     if (sql.includes("update ocr.publications set status='processing'")) {
-      return rows([{ ...publication, status: 'processing', attempt_count: 1, row_version: '2' }]);
+      return rows([{ ...publication, publication_basis: storedBasis, status: 'processing', attempt_count: 1, row_version: '2' }]);
     }
     if (sql.includes("update ocr.publications set status='published'")) {
       return rows([{ ...publication, status: 'published', row_version: '3', target_resource_type: params[2],
@@ -313,6 +317,22 @@ describe('OCR publication under the dedicated records-processing grant', () => {
       const structured = domain === 'LAB' ? run.labApi.createOcrImport : run.pharmacyApi.createOcrImportBatch;
       expect(structured).toHaveBeenCalledTimes(1);
     });
+
+  it('stores the basis with the request; a retry by a publisher who has since gained direct care still writes the draft note, never Lab evidence', async () => {
+    const run = harness('LAB', { source: 'visible', write: { allowed: false }, attemptWrite: { allowed: true }, grant: grantId });
+    await expect(run.publish()).resolves.toMatchObject({ status: 'published', targetResourceType: 'clinical-note' });
+    expect(run.sql().some((text) => text.includes('publication_basis'))).toBe(true);
+    expect(run.ehrApi.createOcrClinicalNote.mock.calls[0]![2]).toMatchObject({ purposeOfUse: 'healthcare-operations' });
+    expect(run.labApi.createOcrImport).not.toHaveBeenCalled();
+  });
+
+  it('a request authorized under direct care is never retried as a draft note under the grant', async () => {
+    const run = harness('LAB', { source: 'visible', write: { allowed: true }, attemptWrite: { allowed: false }, grant: grantId });
+    const outcome = await run.publish().then(() => undefined, (error: unknown) => error as DomainProblem);
+    expect(outcome?.code).toBe('OCR_PUBLISH_NEEDS_DIRECT_CARE');
+    expect(run.ehrApi.createOcrClinicalNote).not.toHaveBeenCalled();
+    expect(run.labApi.createOcrImport).not.toHaveBeenCalled();
+  });
 
   it('a document-only reading with no typed text says so, and no text is made up', async () => {
     const run = harness('DOCUMENT_ONLY', { source: 404, write: { allowed: false }, grant: grantId, noText: true });

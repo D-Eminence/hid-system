@@ -1467,8 +1467,8 @@ revoke all on function outreach.validate_registration_campaign_write() from publ
 -- by the EHR API alone (SECURITY INVOKER, under its row-level security). The
 -- patient-self policy on ehr.encounters calls the signed-note test, so the
 -- two roles that read encounters (as for ehr.patient_self_context above) may
--- execute it. The flag and draft-guard trigger functions are granted to no
--- role. 0112 makes the same grants.
+-- execute it. The flag, draft-guard and publication-basis trigger functions
+-- are granted to no role. 0112 makes the same grants.
 grant usage on schema identity to hid_ocr_runtime;
 grant execute on function identity.records_processing_write_grant(uuid,text,uuid,uuid)
   to hid_ocr_runtime, hid_ehr_runtime;
@@ -1476,7 +1476,8 @@ grant execute on function ehr.imported_paper_records_encounter(uuid) to hid_ehr_
 grant execute on function ehr.imported_paper_records_signed(uuid,uuid,uuid) to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function identity.records_processing_write_grant(uuid,text,uuid,uuid),
   ehr.imported_paper_records_encounter(uuid), ehr.encounters_imported_paper_records_fixed(),
-  ehr.imported_paper_records_signed(uuid,uuid,uuid), ehr.records_processing_draft_guard() from public;
+  ehr.imported_paper_records_signed(uuid,uuid,uuid), ehr.records_processing_draft_guard(),
+  ocr.publications_basis_fixed() from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.

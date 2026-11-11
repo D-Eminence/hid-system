@@ -291,6 +291,14 @@ export function clinicalNoteCandidate(fields: Record<string, unknown>) {
     content };
 }
 
+/** A paper date as the review kept it: the as-written text, else the reviewer's value; never converted. */
+function writtenDate(fields: Record<string, unknown>, name: 'collectedAt' | 'reportedAt'): string | undefined {
+  for (const value of [fields[`${name}AsWritten`], fields[name]]) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
 /** The note type of a reading that is not a clinical note, published as a draft under the dedicated grant (0112). */
 export const PAPER_RECORD_NOTE_TYPE = 'imported_paper_record';
 
@@ -308,19 +316,23 @@ export function paperRecordDraftNote(domain: OcrTargetDomain, fields: Record<str
   let title: string;
   let lines: string[];
   if (domain === 'LAB') {
+    // The same check as a structured Lab record; then the reviewed text, with
+    // every date as written on the paper (never a converted date or a time
+    // that is not on it).
     const lab = importedLabCandidate(fields, today);
-    title = 'Lab results';
+    const record = fields.observations as Record<string, unknown>[];
     lines = [
       ...(lab.externalLabName ? [`Laboratory: ${lab.externalLabName}`] : []),
       ...(lab.externalReference ? [`Reference: ${lab.externalReference}`] : []),
-      ...(lab.collectedAt ? [`Collected: ${lab.collectedAt}`] : []),
-      ...(lab.reportedAt ? [`Reported: ${lab.reportedAt}`] : []),
-      ...lab.observations.map((item) => `- ${item.testName}: ${join([
+      ...(writtenDate(fields, 'collectedAt') ? [`Collected: ${writtenDate(fields, 'collectedAt')}`] : []),
+      ...(writtenDate(fields, 'reportedAt') ? [`Reported: ${writtenDate(fields, 'reportedAt')}`] : []),
+      ...lab.observations.map((item, index) => `- ${item.testName}${item.testCode ? ` (${item.testCode})` : ''}: ${join([
         join([item.value, item.unit]), item.valueText,
         item.referenceRange ? `(reference ${item.referenceRange})` : undefined,
         item.abnormalFlag ? `[${item.abnormalFlag}]` : undefined,
-        item.reportedAt ? `reported ${item.reportedAt}` : undefined])}`),
+        writtenDate(record[index]!, 'reportedAt') ? `reported ${writtenDate(record[index]!, 'reportedAt')}` : undefined])}`),
     ];
+    title = 'Lab results';
   } else if (domain === 'PHARMACY') {
     const { items } = importedMedicationCandidates(fields);
     title = 'Medicines';
@@ -329,10 +341,13 @@ export function paperRecordDraftNote(domain: OcrTargetDomain, fields: Record<str
       return item.historicalContext ? `${medicine}\n  As written: ${item.historicalContext}` : medicine;
     });
   } else if (domain === 'DOCUMENT_ONLY') {
+    // Every reviewed field, text as typed and any other value as JSON; the
+    // fixed sentence only when the review kept no value at all.
     title = 'Document';
-    const typed = Object.entries(fields).filter((entry): entry is [string, string] =>
-      typeof entry[1] === 'string' && entry[1].trim().length > 0);
-    lines = typed.length > 0 ? typed.map(([name, value]) => `${name}: ${value.trim()}`)
+    const kept = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null
+      && !(typeof value === 'string' && value.trim().length === 0));
+    lines = kept.length > 0
+      ? kept.map(([name, value]) => `${name}: ${typeof value === 'string' ? value.trim() : JSON.stringify(value)}`)
       : ['A paper record kept as a document; the reviewer typed no text from it.'];
   } else {
     throw new DomainProblem(409, 'OCR_TARGET_UNAVAILABLE', 'The owning domain does not support this publication operation');
@@ -354,6 +369,9 @@ export function assertPublishableCandidate(domain: OcrTargetDomain, fields: Reco
   if (domain === 'EHR') clinicalNoteCandidate(fields);
   else if (domain === 'LAB') importedLabCandidate(fields, today);
   else if (domain === 'PHARMACY') importedMedicationCandidates(fields);
+  // 0112: a document-only reading may become a draft note under the dedicated
+  // grant; one too long for a note is refused here, not at publication.
+  else if (domain === 'DOCUMENT_ONLY') paperRecordDraftNote(domain, fields, today);
 }
 
 export function publicationCanRetry(attemptCount: number, maxAttempts: number,

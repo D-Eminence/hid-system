@@ -112,7 +112,16 @@
 --    a draft note in it; the first revision of such a draft note. So a
 --    healthcare-operations write grant that D1 does not name (for example
 --    one imported from legacy identity), or a direct SQL write under it,
---    cannot sign, change or add anything else. (Security review of 0112.)
+--    cannot sign, change or add anything else. The draft note must be
+--    inserted unsigned (signed_at and signed_by null), at revision 1, with
+--    the EHR API's paper-record note type and title prefix. (Security
+--    reviews of 0112.)
+-- D5 One route per publication: ocr.publications gains publication_basis
+--    (direct_care or records_processing_grant; NULL for rows written before
+--    0112, read as direct care), written by the request and never changed
+--    (ocr.publications_basis_fixed()). Every execution attempt is
+--    authorized on that basis only, so a reading requested under the grant
+--    is never retried as Lab or Pharmacy evidence, nor the reverse.
 -- D3 Patient-facing: the patient must not see an empty "Imported paper
 --    records" entry. 0030's policy encounters_patient_self_read (patient-self
 --    context and status completed) is replaced by the same policy that also
@@ -227,6 +236,7 @@ begin
      or to_regprocedure('ehr.encounters_imported_paper_records_fixed()') is not null
      or to_regprocedure('ehr.imported_paper_records_signed(uuid,uuid,uuid)') is not null
      or to_regprocedure('ehr.records_processing_draft_guard()') is not null
+     or to_regprocedure('ocr.publications_basis_fixed()') is not null
      or exists (select 1 from pg_attribute attribute_row
                  where attribute_row.attrelid = 'ehr.encounters'::regclass
                    and attribute_row.attname = 'imported_paper_records' and not attribute_row.attisdropped) then
@@ -612,7 +622,9 @@ begin
     if tg_table_name = 'encounters' then
       allowed := new.imported_paper_records;
     elsif tg_table_name = 'clinical_notes' then
-      allowed := new.status = 'draft' and exists (
+      allowed := new.status = 'draft' and new.signed_at is null and new.signed_by is null
+        and new.current_revision_no = 1 and new.note_type = 'From a paper record (Migrate)'
+        and left(new.title, 31) = 'From a paper record (Migrate): ' and exists (
         select 1 from ehr.encounters encounter_row
          where encounter_row.id = new.encounter_id and encounter_row.patient_id = new.patient_id
            and encounter_row.facility_id = new.facility_id and encounter_row.imported_paper_records);
@@ -644,6 +656,33 @@ create trigger clinical_notes_records_processing_draft_guard
 create trigger clinical_note_revisions_records_processing_draft_guard
   before insert or update or delete on ehr.clinical_note_revisions
   for each row execute function ehr.records_processing_draft_guard();
+
+-- D5: the publication's basis, written by the request and never changed.
+alter table ocr.publications add column publication_basis text
+  check (publication_basis in ('direct_care', 'records_processing_grant'));
+
+comment on column ocr.publications.publication_basis is
+  '0112: the basis the publication request was authorized on (direct_care or records_processing_grant; NULL before 0112, read as direct_care). Every execution attempt is authorized on it alone, so every attempt takes the same route.';
+
+create function ocr.publications_basis_fixed()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if new.publication_basis is distinct from old.publication_basis then
+    raise exception using errcode = '55000', message = 'OCR_PUBLICATION_BASIS_FIXED';
+  end if;
+  return new;
+end
+$$;
+
+comment on function ocr.publications_basis_fixed() is
+  '0112 D5: a publication''s publication_basis keeps the value its request wrote.';
+
+create trigger publications_basis_fixed
+  before update of publication_basis on ocr.publications
+  for each row execute function ocr.publications_basis_fixed();
 
 -- 3. D3: the patient sees the imported encounter only once it holds a signed note.
 create function ehr.imported_paper_records_signed(
@@ -704,6 +743,12 @@ begin
        where proc.oid = 'ehr.records_processing_draft_guard()'::regprocedure) <> ehr_owner then
     execute format('alter function ehr.records_processing_draft_guard() owner to %I', pg_get_userbyid(ehr_owner));
   end if;
+  if (select proc.proowner from pg_proc proc
+       where proc.oid = 'ocr.publications_basis_fixed()'::regprocedure)
+     <> (select relation.relowner from pg_class relation where relation.oid = 'ocr.publications'::regclass) then
+    execute format('alter function ocr.publications_basis_fixed() owner to %I',
+      pg_get_userbyid((select relation.relowner from pg_class relation where relation.oid = 'ocr.publications'::regclass)));
+  end if;
 end
 $$;
 
@@ -713,6 +758,7 @@ revoke all on function ehr.imported_paper_records_encounter(uuid) from public;
 revoke all on function ehr.encounters_imported_paper_records_fixed() from public;
 revoke all on function ehr.imported_paper_records_signed(uuid, uuid, uuid) from public;
 revoke all on function ehr.records_processing_draft_guard() from public;
+revoke all on function ocr.publications_basis_fixed() from public;
 
 do $$
 declare
@@ -755,7 +801,10 @@ begin
       ('ehr.imported_paper_records_encounter(uuid)', ehr_owner, false, 'v', 'plpgsql', 'uuid', '7d08e6e708c8212a22e62b753910ed1c'),
       ('ehr.encounters_imported_paper_records_fixed()', ehr_owner, false, 'v', 'plpgsql', 'trigger', '773f1c6e4a46d47fcba6ec318241b5a8'),
       ('ehr.imported_paper_records_signed(uuid,uuid,uuid)', ehr_owner, true, 's', 'sql', 'boolean', '25df452520faabbc27aceb93f32ec6ef'),
-      ('ehr.records_processing_draft_guard()', ehr_owner, false, 'v', 'plpgsql', 'trigger', 'a3421ff97b43e3bb1d97daddcd897f01'))
+      ('ehr.records_processing_draft_guard()', ehr_owner, false, 'v', 'plpgsql', 'trigger', 'c260a12b14b1c6cc3d4ab0b6017b324a'),
+      ('ocr.publications_basis_fixed()',
+       (select relation.relowner from pg_class relation where relation.oid = 'ocr.publications'::regclass),
+       false, 'v', 'plpgsql', 'trigger', 'd1a48f80a581ae9f1ca9f2b854897ba1'))
          expected(signature, owner_id, definer, volatility, language_name, result, digest)
     join pg_proc proc on proc.oid = expected.signature::regprocedure
     join pg_language language_row on language_row.oid = proc.prolang
@@ -769,7 +818,8 @@ begin
            where (proc.pronamespace = 'identity'::regnamespace and proc.proname = 'records_processing_write_grant')
               or (proc.pronamespace = 'ehr'::regnamespace
                   and proc.proname in ('imported_paper_records_encounter', 'encounters_imported_paper_records_fixed',
-                                       'imported_paper_records_signed', 'records_processing_draft_guard'))) <> 5 then
+                                       'imported_paper_records_signed', 'records_processing_draft_guard'))
+              or (proc.pronamespace = 'ocr'::regnamespace and proc.proname = 'publications_basis_fixed')) <> 6 then
     mismatch := 'count';
   end if;
   -- The column, constraint, index, trigger and policy.
@@ -807,14 +857,27 @@ begin
                                      'ehr.clinical_note_revisions'::regclass)
          and trigger_row.tgfoid = 'ehr.records_processing_draft_guard()'::regprocedure
          and trigger_row.tgenabled = 'O'
-         and pg_get_triggerdef(trigger_row.oid) = format('CREATE TRIGGER %s BEFORE INSERT OR DELETE OR UPDATE ON %s '
+         and pg_get_triggerdef(trigger_row.oid) = format('CREATE TRIGGER %s BEFORE INSERT OR DELETE OR UPDATE ON ehr.%s '
            || 'FOR EACH ROW EXECUTE FUNCTION ehr.records_processing_draft_guard()',
-           trigger_row.tgname, trigger_row.tgrelid::regclass)
-         and trigger_row.tgname = replace(trigger_row.tgrelid::regclass::text, 'ehr.', '')
+           trigger_row.tgname, (select relation.relname from pg_class relation where relation.oid = trigger_row.tgrelid))
+         and trigger_row.tgname = (select relation.relname from pg_class relation where relation.oid = trigger_row.tgrelid)
            || '_records_processing_draft_guard') <> 3
      or (select count(*) from pg_trigger trigger_row
           where trigger_row.tgfoid = 'ehr.records_processing_draft_guard()'::regprocedure) <> 3 then
     mismatch := 'the records-processing draft guard triggers';
+  end if;
+  if mismatch is null and not exists (select 1 from pg_attribute attribute_row
+       where attribute_row.attrelid = 'ocr.publications'::regclass and attribute_row.attname = 'publication_basis'
+         and format_type(attribute_row.atttypid, attribute_row.atttypmod) = 'text' and not attribute_row.attnotnull
+         and not attribute_row.atthasdef and not attribute_row.attisdropped) then
+    mismatch := 'the column ocr.publications.publication_basis';
+  end if;
+  if mismatch is null and (select count(*) from pg_trigger trigger_row
+       where trigger_row.tgrelid = 'ocr.publications'::regclass and trigger_row.tgname = 'publications_basis_fixed'
+         and trigger_row.tgenabled = 'O'
+         and pg_get_triggerdef(trigger_row.oid) = 'CREATE TRIGGER publications_basis_fixed BEFORE UPDATE '
+           || 'OF publication_basis ON ocr.publications FOR EACH ROW EXECUTE FUNCTION ocr.publications_basis_fixed()') <> 1 then
+    mismatch := 'the trigger publications_basis_fixed';
   end if;
   if mismatch is null and (select count(*) from pg_policy policy_row
        where policy_row.polrelid = 'ehr.encounters'::regclass and policy_row.polname = 'encounters_patient_self_read'
@@ -842,7 +905,8 @@ begin
                           'ehr.imported_paper_records_encounter(uuid)'::regprocedure,
                           'ehr.encounters_imported_paper_records_fixed()'::regprocedure,
                           'ehr.imported_paper_records_signed(uuid,uuid,uuid)'::regprocedure,
-                          'ehr.records_processing_draft_guard()'::regprocedure)
+                          'ehr.records_processing_draft_guard()'::regprocedure,
+                          'ocr.publications_basis_fixed()'::regprocedure)
          and acl.grantee <> proc.proowner
          and not (acl.grantee <> 0 and acl.privilege_type = 'EXECUTE'
                   and ((proc.oid = 'identity.records_processing_write_grant(uuid,text,uuid,uuid)'::regprocedure

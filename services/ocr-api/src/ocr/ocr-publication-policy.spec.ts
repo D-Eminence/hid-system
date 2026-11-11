@@ -292,6 +292,27 @@ describe('paperRecordDraftNote', () => {
         + '- Haemoglobin: 12.5 g/dL (reference 12-16) [N]\n- Malaria parasite: Not seen' });
   });
 
+  it('writes every paper date as written, never a converted date or a time that is not on the paper', () => {
+    const note = paperRecordDraftNote('LAB', { collectedAtAsWritten: '05/06/2024', reportedAtAsWritten: 'Jun 2024',
+      observations: [{ testName: 'PCV', testCode: 'PCV-1', value: '36', unit: '%', reportedAtAsWritten: '6/6/24' }] },
+    '2026-11-11');
+    expect(note.content).toBe('Collected: 05/06/2024\nReported: Jun 2024\n- PCV (PCV-1): 36 % reported 6/6/24');
+    expect(note.content).not.toMatch(/T00:00/);
+  });
+
+  it('a document-only reading keeps every reviewed value; the fixed sentence only when none was kept', () => {
+    expect(paperRecordDraftNote('DOCUMENT_ONLY', { note: ' Seen ', pages: 2, flags: ['a'] }, '2026-11-11').content)
+      .toBe('note: Seen\npages: 2\nflags: ["a"]');
+    expect(paperRecordDraftNote('DOCUMENT_ONLY', { note: '  ', other: null }, '2026-11-11').content)
+      .toBe('A paper record kept as a document; the reviewer typed no text from it.');
+  });
+
+  it('refuses at validation a document-only reading too long for a draft note', () => {
+    expect(() => assertPublishableCandidate('DOCUMENT_ONLY', { note: 'x'.repeat(100_001) }))
+      .toThrow(expect.objectContaining({ code: 'OCR_INVALID_CLINICAL_NOTE' }));
+    expect(() => assertPublishableCandidate('DOCUMENT_ONLY', { note: 'Fictional text' })).not.toThrow();
+  });
+
   it('keeps the as-written line of each medicine and never merges two', () => {
     const note = paperRecordDraftNote('PHARMACY', { medicationText: 'Paracetamol', strengthText: '500 mg' }, '2026-11-11');
     expect(note).toMatchObject({ title: 'Medicines', content: '- Paracetamol 500 mg' });

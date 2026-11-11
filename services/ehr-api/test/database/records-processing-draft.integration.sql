@@ -505,6 +505,25 @@ select pg_temp.expect('7h a second revision of the draft', '42501 RECORDS_PROCES
     values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002', 2, 'More text',
       'Synthetic change', 1, '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001')
     returning 'ok'$q$, current_setting('draft.note'))));
+select pg_temp.expect('7l a draft inserted already naming a signer', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try(format($q$insert into ehr.clinical_notes (encounter_id, patient_id, facility_id, created_by,
+      created_by_membership_id, note_type, title, status, signed_by)
+    values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
+      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'From a paper record (Migrate)',
+      'From a paper record (Migrate): Draft', 'draft', '112d1000-0000-4000-8000-000000000008') returning 'ok'$q$,
+    current_setting('draft.encounter'))));
+select pg_temp.expect('7m a draft at a later revision', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try(format($q$insert into ehr.clinical_notes (encounter_id, patient_id, facility_id, created_by,
+      created_by_membership_id, note_type, title, status, current_revision_no)
+    values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
+      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'From a paper record (Migrate)',
+      'From a paper record (Migrate): Draft', 'draft', 9) returning 'ok'$q$, current_setting('draft.encounter'))));
+select pg_temp.expect('7n a draft of another note type or title', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try(format($q$insert into ehr.clinical_notes (encounter_id, patient_id, facility_id, created_by,
+      created_by_membership_id, note_type, title, status)
+    values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
+      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'progress', 'Progress note',
+      'draft') returning 'ok'$q$, current_setting('draft.encounter'))));
 reset role;
 -- A healthcare-operations write grant that D1 does not name (imported from
 -- legacy identity) still passes row-level security; the guard refuses it.
@@ -513,8 +532,8 @@ create function pg_temp.draft_probe() returns text language sql as $$
   select pg_temp.try(format($q$insert into ehr.clinical_notes (encounter_id, patient_id, facility_id, created_by,
       created_by_membership_id, note_type, title, status)
     values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
-      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'progress', 'Another draft',
-      'draft') returning 'ok'$q$, current_setting('draft.encounter')));
+      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'From a paper record (Migrate)',
+      'From a paper record (Migrate): Another draft', 'draft') returning 'ok'$q$, current_setting('draft.encounter')));
 $$;
 grant execute on function pg_temp.draft_probe() to public;
 select pg_temp.expect('7i the probe: a second draft under the dedicated grant', 'ok',

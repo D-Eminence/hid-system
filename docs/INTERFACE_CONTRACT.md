@@ -3829,6 +3829,18 @@ INSERT, UPDATE and DELETE on `ehr.encounters`, `ehr.clinical_notes` and
 `RECORDS_PROCESSING_DRAFT_ONLY` every update and delete, and every insert but
 the "Imported paper records" encounter, a draft note in it and that note's
 first revision, for a patient for whom the session's dedicated grant is named.
+The draft must be inserted unsigned, at revision 1, with the paper-record note
+type and title prefix.
+
+**One route per publication (0112 D5).** `ocr.publications.publication_basis`
+(`direct_care` or `records_processing_grant`; NULL before 0112, read as direct
+care) is written by the request and never changed. Every execution attempt is
+authorized on that basis alone: a Lab or medicine reading requested under the
+grant is retried as the same draft note, never as Lab or Pharmacy evidence,
+and one requested under direct care is never retried as a draft note (403
+`OCR_PUBLISH_NEEDS_DIRECT_CARE` when direct care is gone). The draft note of a
+Lab reading writes each date as written on the paper; a document-only reading
+too long for a note (100,000 characters) is refused at validation.
 A `healthcare-operations` write grant that the check does not name (for
 example one imported from legacy identity) writes nothing. Under any other
 purpose the guard does nothing.
