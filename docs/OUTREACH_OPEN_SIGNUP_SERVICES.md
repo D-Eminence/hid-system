@@ -124,3 +124,18 @@ when none, purpose `healthcare-operations`), ADM = a platform administrator's tr
 
 `services/identity-api/scripts/verify-outreach-organisers-runtime.mjs` runs these calls through the real services
 against a disposable Postgres 16 with 0115 and 0116 applied.
+
+## Launch rehearsal
+
+`scripts/rehearse-outreach-open-signup.mjs` rehearses the launch end to end on a throwaway database, and can be rerun
+from the released commit in the hour after release. It builds the database from this commit's migrations as production
+has it (a migration login without SUPERUSER or BYPASSRLS, runtime-grants.sql, FORCE row-level security lifted on
+`platform.control_settings`), runs the real Identity and Outreach services against it as their runtime roles, and mocks
+only the gateways to the outside: emails go to a mailbox in the process (the invitation email rendered with
+notification-api's own template), and nothing calls Turnstile, an email or SMS provider, or the network. It prints one
+PASS or FAIL line per step:
+the switch OFF as seeded (every sign-up step refused, nothing created, no email); operations turning it ON; an organiser
+signing up, verifying the email and activating; "General Hospital" refused; a campaign opened and a volunteer invited;
+the volunteer accepting and registering two fictional people with consent; support's search and deletion; and the
+switch OFF again (a new sign-up and one in progress refused). Usage is in the script's header; it needs only
+`HID_REHEARSAL_ADMIN_URL`, a superuser of a disposable local PostgreSQL 16.
