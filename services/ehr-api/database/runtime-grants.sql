@@ -1491,3 +1491,32 @@ grant execute on function ehr.staff_chat_context(uuid,uuid,uuid,uuid) to hid_ehr
 grant select,insert,update on ehr.staff_chat_state to hid_ehr_runtime;
 grant select,insert,delete on ehr.staff_chat_messages,ehr.staff_evidence_chunks to hid_ehr_runtime;
 grant select,insert,update on ehr.staff_attachment_extractions,ehr.staff_document_extractions to hid_ehr_runtime;
+
+-- Sign-up fields (0122), as that migration grants them: the states list, the
+-- facility-held patient contact (forced RLS: the case's facility, staff with
+-- identity.registration.write or .approve, a copy of the case's own contact),
+-- facility sign-up's 11-argument code command and the facility
+-- administrator's profile read and save, to the Identity runtime and the
+-- schema test runtime. identity.facility_profiles and the helpers
+-- (department codes, the JSON reader, the guards, the activation copy
+-- trigger) are granted to no role. 0086's 7-argument code command keeps its
+-- grant above.
+grant select on identity.nigeria_states to hid_identity_runtime, hid_schema_test_runtime;
+grant select, insert on identity.patient_facility_contacts to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function
+  identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text,jsonb,text,bytea,text),
+  identity.read_facility_profile(),
+  identity.set_facility_profile(bigint,jsonb,text,char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.facility_department_codes(),
+  identity.facility_departments_valid(text[]),
+  identity.facility_profile_editable_fields(),
+  identity.facility_profile_from_json(jsonb),
+  identity.facility_profile_json(identity.facility_profiles),
+  identity.guard_facility_profile_mutation(),
+  identity.guard_registration_case_contact(),
+  identity.copy_signup_profile_to_facility(),
+  identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text,jsonb,text,bytea,text),
+  identity.read_facility_profile(),
+  identity.set_facility_profile(bigint,jsonb,text,char) from public;
+revoke all on identity.facility_profiles, identity.nigeria_states, identity.patient_facility_contacts from public;

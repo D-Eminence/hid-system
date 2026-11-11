@@ -9,6 +9,7 @@ import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { CompleteOrganizationProfileDto, StartOrganizationProfileCompletionDto } from './dto/organization-application.dto';
+import { CollectedFieldProtector, facilitySignupPhoneLabel } from './collected-field-protector';
 import { selfServiceGateRefusal } from './provider-self-service-gate';
 
 const localCompletionKey = randomBytes(32);
@@ -36,6 +37,14 @@ interface CompletionProfileRow extends QueryResultRow {
 export interface SelfServiceCompletionDetails {
   administratorName: string;
   organizationType: 'clinic' | 'hospital' | 'laboratory' | 'pharmacy' | 'other';
+  /**
+   * 0122: the facility profile (as facilityProfileForDatabase writes it), the
+   * applicant's role and phone. Stored with the code that is sent; the phone
+   * is encrypted here, bound to that code's id.
+   */
+  facilityProfile: Record<string, unknown>;
+  submitterRole: string;
+  submitterPhone: string;
 }
 
 /** The governed completion's start answer: the same for every input (no enumeration). */
@@ -104,6 +113,8 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
   private readonly deliveries = new AfterResponseTasks(new Logger(OrganizationProfileCompletionService.name),
     'Organization completion code delivery or its invalidation failed');
 
+  private readonly fieldProtector = new CollectedFieldProtector();
+
   constructor(private readonly database: DatabaseService,
     private readonly notification: NotificationOtpClient) {}
 
@@ -128,7 +139,9 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
    * Facility self sign-up passes selfService: its code is sent by
    * identity.begin_self_service_provider_enrollment, which stores the
    * administrator name and organization type with the code (the activation
-   * takes them from the code that opened its session, R6) and sends at most
+   * takes them from the code that opened its session, R6), and since 0122
+   * the facility profile and the applicant's role and encrypted phone (the
+   * activation copies them to the facility the same way), and sends at most
    * 10 codes a day to one administrator email (R5); its answer says whether
    * a code was sent (R14), since its start has already told the caller that
    * the application exists.
@@ -148,6 +161,11 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
     const registrationNumber = input.cacRegistrationNumber.replace(/\s+/g, '').toUpperCase();
     const email = input.administratorEmail.trim().toLowerCase();
     const selfService = options.selfService;
+    // Encrypted before the transaction, so a missing key refuses the request
+    // before anything is written or a quota is charged by this call.
+    const submitterPhone = selfService
+      ? this.fieldProtector.encrypt(facilitySignupPhoneLabel(challengeId), selfService.submitterPhone)
+      : undefined;
     let recipient: string | null;
     let state: SelfServiceCodeStateRow | undefined;
     try {
@@ -166,9 +184,12 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
           return { recipient: found.rows[0]?.recipient_email ?? null, state: undefined };
         }
         const found = await client.query<{ recipient_email: string | null }>(
-          'select identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7) as recipient_email',
+          'select identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)'
+            + ' as recipient_email',
           [registrationNumber, email, input.productCode, challengeId, this.hmac('otp', challengeId, code),
-            selfService.administratorName, selfService.organizationType],
+            selfService.administratorName, selfService.organizationType,
+            JSON.stringify(selfService.facilityProfile), selfService.submitterRole, submitterPhone,
+            this.fieldProtector.keyVersion],
         );
         // In the same transaction, so it sees this start's code, if any (R14).
         const current = await client.query<SelfServiceCodeStateRow>(
@@ -513,6 +534,10 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
       'Application request limit reached; try again later');
     if (code === '40001') return new DomainProblem(409, 'VERSION_CONFLICT',
       'Application changed; reload before retrying');
+    const message = typeof error === 'object' && error !== null && 'message' in error ? error.message : undefined;
+    if (code === '22023' && message === 'FACILITY_PROFILE_INVALID') {
+      return new DomainProblem(400, 'FACILITY_PROFILE_INVALID', 'Check the facility details and try again');
+    }
     if (code === '22023') return new DomainProblem(400, 'ORGANIZATION_PROFILE_INVALID',
       'The organization profile contains an invalid or provider-owned field');
     if (code === '42501') return this.invalidSession();

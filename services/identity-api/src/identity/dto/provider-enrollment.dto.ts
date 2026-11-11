@@ -1,8 +1,14 @@
-import { Transform } from 'class-transformer';
-import { IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsDefined, IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength, ValidateNested,
+} from 'class-validator';
+import { COLLECTED_PHONE_E164, FacilityProfileDto, toCollectedPhone } from './facility-profile.dto';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 const products = ['ehr', 'migrate', 'laboratory', 'pharmacy'] as const;
+
+/** The applicant's role at the facility (0122). */
+export const SIGNUP_SUBMITTER_ROLES = ['owner', 'medical_director', 'administrator',
+  'other_authorised_representative'] as const;
 
 export class StartProviderEnrollmentDto {
   @IsIn(products)
@@ -21,6 +27,18 @@ export class StartProviderEnrollmentDto {
 
   @Transform(trim) @IsEmail() @MaxLength(254)
   administratorEmail!: string;
+
+  /** 0122 (owner: "all fields required"): the applicant's role at the facility. */
+  @IsIn(SIGNUP_SUBMITTER_ROLES)
+  administratorRole!: typeof SIGNUP_SUBMITTER_ROLES[number];
+
+  /** 0122: the applicant's own phone, E.164 or a Nigerian local number; stored encrypted (D4). */
+  @Transform(toCollectedPhone) @IsString() @Matches(COLLECTED_PHONE_E164)
+  administratorPhone!: string;
+
+  /** 0122: the facility's profile; the CAC legal name stays as QoreID reads it (D1). */
+  @IsDefined() @ValidateNested() @Type(() => FacilityProfileDto)
+  facilityProfile!: FacilityProfileDto;
 
   @IsIn(['provider-enrollment'])
   turnstileAction!: 'provider-enrollment';

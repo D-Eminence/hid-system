@@ -8,6 +8,8 @@ import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import { matchingCacIncompleteProfile, verifiedCacBinding } from './organization-applications.service';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
 import type { StartProviderEnrollmentDto } from './dto/provider-enrollment.dto';
+import { facilityProfileForDatabase } from './dto/facility-profile.dto';
+import { CollectedFieldProtector } from './collected-field-protector';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { selfServiceClosed, selfServiceDailyCap, selfServiceGateRefusal } from './provider-self-service-gate';
@@ -164,6 +166,9 @@ export class ProviderEnrollmentService {
     if (!environment.QOREID_ENABLED) {
       throw new DomainProblem(503, 'QOREID_DISABLED', 'External verification is not enabled');
     }
+    // 0122: the applicant's phone is stored encrypted; without the key
+    // nothing is written or charged.
+    new CollectedFieldProtector().assertConfigured();
     const platformDailyLimit = selfServiceDailyCap(environment);
     if (platformDailyLimit === null) throw selfServiceClosed();
     // Derived from the server-observed address before anything is written:
@@ -348,7 +353,11 @@ export class ProviderEnrollmentService {
       turnstileToken: input.turnstileToken,
     }, request.ip, request.correlationId, {
       publicApplicationQuotaCharged: true,
-      selfService: { administratorName: input.administratorName, organizationType: input.organizationType },
+      selfService: {
+        administratorName: input.administratorName, organizationType: input.organizationType,
+        facilityProfile: facilityProfileForDatabase(input.facilityProfile),
+        submitterRole: input.administratorRole, submitterPhone: input.administratorPhone,
+      },
     });
   }
 }
