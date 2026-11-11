@@ -388,6 +388,16 @@ select pg_temp.source_case('publication', 'lifecycle: claim from another member'
       processing_expires_at = clock_timestamp() + interval '60 seconds', attempt_count = attempt_count + 1,
       failure_code = null, failure_summary = null, row_version = row_version + 1, correlation_id = 'ocr-source-suite'
     where validation_id = 'e8b80000-0000-4000-8000-000000000005' and status = 'pending'$u$)$s$, true);
+-- 0113 D5: the basis the request wrote is never changed (P0003 marks the
+-- basis trigger's own refusal, not another 55000).
+select pg_temp.source_case('publication', 'lifecycle: changing the publication basis', 'P0003', $s$
+  do $d$ begin
+    update ocr.publications set publication_basis = 'records_processing_grant', row_version = row_version + 1
+     where validation_id = 'e8b80000-0000-4000-8000-000000000005';
+  exception when sqlstate '55000' then
+    if sqlerrm = 'OCR_PUBLICATION_BASIS_FIXED' then raise exception using errcode = 'P0003'; end if;
+    raise;
+  end $d$$s$, false);
 select pg_temp.as_member('', '', 'e8b00000-0000-4000-8000-000000000002');
 select pg_temp.source_case('publication', 'lifecycle: completion from a session without a member', 'ok', $s$
   select pg_temp.one_row($u$update ocr.publications set status = 'published', completed_at = clock_timestamp(),
