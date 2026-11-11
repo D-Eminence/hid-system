@@ -1,7 +1,7 @@
--- 0110 OCR source deletion after 24 hours (owner and coordinator decisions
--- of 2026-11-11, relayed by the coordinator; number 0110 reserved for it by
--- decision (4)). The declaration is signed separately (reviewed_by is empty
--- until the owner signs).
+-- 0111 OCR source deletion after 24 hours (owner and coordinator decisions
+-- of 2026-11-11, relayed by the coordinator; decision (4) reserved 0110,
+-- renumbered 0111 as noted there). The declaration is signed separately
+-- (reviewed_by is empty until the owner signs).
 --
 -- The decisions, as given:
 --   (1) "At 24 hours after an OCR job finishes, saved or not, delete the
@@ -17,18 +17,19 @@
 --   (3) "Content removal, not row deletion: one narrow SECURITY DEFINER purge
 --       path. The append-only triggers stay. reviewed_by stays empty; the
 --       owner signs separately."
---   (4) "Migration number 0110 is reserved for this."
+--   (4) "Migration number 0110 is reserved for this." Renumbered 0111 by the
+--       coordinator (numbers follow merge order; 0110 went to another change).
 --   And: "Keep the existing clinical/objects/ key layout. Do NOT change upload
 --   keys or malware scanning. The sweeper finds each source by the key stored
 --   in ehr.documents."
 --
--- It applies after 0108 (0109 is not part of this change). It needs: the
+-- It applies after 0108 (0109 and 0110 are not part of this change). It needs: the
 -- ehr.documents, ocr.jobs, ocr.extractions, ocr.validations (with 0016's
 -- columns), ocr.patient_confirmations and ocr.publications tables; the four
 -- trigger functions it replaces exactly as 0004, 0009, 0016 and 0107 left them
 -- (md5 pinned in section 0); the session and permission helpers it calls,
 -- whose bodies are pinned the same way; and the runtime roles. If a later
--- migration replaces one of the pinned bodies, section 0 stops 0110 with
+-- migration replaces one of the pinned bodies, section 0 stops 0111 with
 -- nothing applied and the pins must be renewed against that body.
 --
 -- What it adds.
@@ -147,7 +148,7 @@
 --    which may create in schema ocr, and the applier is it or a member that
 --    inherits it and may SET ROLE to it.
 -- 6. Grants are made here too, since a release applies only migrations;
---    runtime-grants.sql gains the same 0110 block for a role bootstrap.
+--    runtime-grants.sql gains the same 0111 block for a role bootstrap.
 -- 7. Post-checks: the replaced bodies by md5, owners, ACLs and attributes,
 --    the new functions' attributes and EXECUTE, and the status constraint.
 --
@@ -167,7 +168,7 @@
 -- stops after its lock_timeout with nothing applied.
 --
 -- Old services on this schema: nothing changes for them until a document is
--- purged; ocr-api, ehr-api and ocr-worker images built before 0110 keep
+-- purged; ocr-api, ehr-api and ocr-worker images built before 0111 keep
 -- working (they never write either new status). After a purge, the old ehr-api
 -- answers a download of the document with its generic 409 and the old ocr-api
 -- shows an empty reading.
@@ -185,7 +186,7 @@ begin
      or to_regclass('ocr.patient_confirmations') is null or to_regclass('ocr.publications') is null
      or to_regclass('ehr.ocr_import_provenance') is null or to_regclass('audit.events') is null
      or to_regprocedure('ocr.claim_worker_job_fair(text,integer,integer)') is null then
-    raise exception using errcode = '55000', message = '0110: the OCR tables and 0107 must be applied first';
+    raise exception using errcode = '55000', message = '0111: the OCR tables and 0107 must be applied first';
   end if;
   -- b. Not applied yet (nor partly present).
   if to_regprocedure('ocr.source_deletion_due(uuid)') is not null
@@ -196,7 +197,7 @@ begin
      or exists (select 1 from pg_constraint where conrelid = 'ehr.documents'::regclass
                   and conname = 'documents_status_check'
                   and pg_get_constraintdef(oid) like '%source_deleted%') then
-    raise exception using errcode = '55000', message = '0110: already applied';
+    raise exception using errcode = '55000', message = '0111: already applied';
   end if;
   -- c. The bodies replaced and relied on, as 0001-0108 left them.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
@@ -263,7 +264,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0110: an object this migration relies on differs from 0001-0108: %s', mismatch);
+      message = format('0111: an object this migration relies on differs from 0001-0108: %s', mismatch);
   end if;
   -- d. One owner for the tables and functions touched; it may create in schema
   -- ocr; the applier is it, or a member that inherits it and may SET ROLE to it.
@@ -281,24 +282,24 @@ begin
   ocr_owner := (select relowner from pg_class where oid = 'ocr.jobs'::regclass);
   if mismatch is distinct from pg_get_userbyid(ocr_owner) then
     raise exception using errcode = '55000',
-      message = format('0110: ocr.jobs, ehr.documents, the OCR evidence tables and the replaced functions must share one owner (found %s)', mismatch);
+      message = format('0111: ocr.jobs, ehr.documents, the OCR evidence tables and the replaced functions must share one owner (found %s)', mismatch);
   end if;
   if not has_schema_privilege(ocr_owner, 'ocr', 'CREATE') then
     raise exception using errcode = '55000',
-      message = format('0110: %s may not create in schema ocr', pg_get_userbyid(ocr_owner));
+      message = format('0111: %s may not create in schema ocr', pg_get_userbyid(ocr_owner));
   end if;
   if applier <> ocr_owner
      and not (pg_has_role(applier, ocr_owner, 'USAGE') and pg_has_role(applier, ocr_owner, 'SET')) then
     raise exception using errcode = '42501',
-      message = format('0110: %s is not %s and may not act as it (INHERIT and SET)', current_user,
+      message = format('0111: %s is not %s and may not act as it (INHERIT and SET)', current_user,
         pg_get_userbyid(ocr_owner));
   end if;
-  raise notice '0110: owners checked: ocr.jobs=%, applier=%', pg_get_userbyid(ocr_owner), current_user;
+  raise notice '0111: owners checked: ocr.jobs=%, applier=%', pg_get_userbyid(ocr_owner), current_user;
 end;
 $$;
 
 -- The ACLs of the replaced trigger functions, for the post-check.
-create temporary table ocr_source_deletion_0110_acl on commit drop as
+create temporary table ocr_source_deletion_0111_acl on commit drop as
   select proc.oid as function_oid, proc.proowner, proc.proacl, proc.prosecdef, proc.proconfig
     from pg_proc proc
    where proc.oid in ('ocr.reject_immutable_change()'::regprocedure, 'ocr.validate_job_write()'::regprocedure,
@@ -764,7 +765,7 @@ begin
     from ehr.document_scan_events scan where scan.document_id = new.document_id
    order by scan.created_at desc, scan.id desc limit 1;
   scan_found := found;
-  -- 0110: no job, retry or new reading once the source is claimed for
+  -- 0111: no job, retry or new reading once the source is claimed for
   -- deletion or deleted (0107 lets failed -> queued pass without the
   -- document check below).
   if document_row.status in ('source_deleting', 'source_deleted')
@@ -855,17 +856,17 @@ revoke all on function ocr.source_deletion_due(uuid),
   ocr.purge_worker_source_document(uuid,integer,text) from public;
 
 comment on function ocr.source_deletion_due(uuid) is
-  '0110: documents due for deletion of their OCR source (status uploaded, no legal hold, every job finished at least 24 hours ago, or 72 hours while a publication could still run), and those already source_deleting, with due_at. Granted to no role.';
+  '0111: documents due for deletion of their OCR source (status uploaded, no legal hold, every job finished at least 24 hours ago, or 72 hours while a publication could still run), and those already source_deleting, with due_at. Granted to no role.';
 comment on function ocr.list_worker_source_deletions(integer) is
-  '0110: the OCR worker lists documents to delete (ids, bucket, key, seconds past due): source_deleting first, then oldest due first.';
+  '0111: the OCR worker lists documents to delete (ids, bucket, key, seconds past due): source_deleting first, then oldest due first.';
 comment on function ocr.worker_source_deletion_backlog() is
-  '0110: the OCR worker counts documents due for source deletion now, and the overdue ones (due for more than 2 hours, or a job stuck in extracted for more than 24 hours).';
+  '0111: the OCR worker counts documents due for source deletion now, and the overdue ones (due for more than 2 hours, or a job stuck in extracted for more than 24 hours).';
 comment on function ocr.claim_worker_source_deletion(uuid,text) is
-  '0110: the OCR worker claims a due document (status source_deleting, under a row lock) before deleting its S3 versions; from then no job, retry or legal hold.';
+  '0111: the OCR worker claims a due document (status source_deleting, under a row lock) before deleting its S3 versions; from then no job, retry or legal hold.';
 comment on function ocr.purge_worker_source_document(uuid,integer,text) is
-  '0110: after the OCR worker deleted every S3 version of a claimed (source_deleting) document, marks it source_deleted and blanks the reading and review content of its OCR rows (owner decisions of 2026-11-11). Idempotent.';
+  '0111: after the OCR worker deleted every S3 version of a claimed (source_deleting) document, marks it source_deleted and blanks the reading and review content of its OCR rows (owner decisions of 2026-11-11). Idempotent.';
 
--- 6. Grants (the same in runtime-grants.sql's 0110 block). A release applies
+-- 6. Grants (the same in runtime-grants.sql's 0111 block). A release applies
 -- only migrations, so the role that already exists gets them here; on a
 -- fresh database the role bootstrap makes them.
 do $$
@@ -898,13 +899,13 @@ begin
       ('ocr.reject_immutable_change()', '2b0476d4cfb42c39182899e0ab9c6302'),
       ('ehr.reject_document_object_rebinding()', '75a7b8c8a48049b899a7dde46b58ad97'),
       ('ehr.capture_record_version()', '5abc424b632f44b163ecd9c0c0320630'),
-      ('ocr.validate_job_write()', 'ab6b7fd54a17cb82846dee5f505d4120'))
+      ('ocr.validate_job_write()', '19ff87bdadcd7a9c28e4af3aeab74981'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
    where md5(proc.prosrc) is distinct from expected.digest;
   if mismatch is not null then mismatch := 'the bodies of ' || mismatch; end if;
   if mismatch is null and exists (
-       select 1 from ocr_source_deletion_0110_acl before_row
+       select 1 from ocr_source_deletion_0111_acl before_row
          left join pg_proc proc on proc.oid = before_row.function_oid
         where proc.oid is null or proc.proowner <> before_row.proowner
            or proc.proacl::text is distinct from before_row.proacl::text
@@ -949,7 +950,7 @@ begin
     mismatch := 'the constraint documents_status_check';
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0110: post-check failed: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0111: post-check failed: %s', mismatch);
   end if;
 end;
 $$;

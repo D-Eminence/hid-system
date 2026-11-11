@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import ts from 'typescript'
 
-// The pure helper OcrReviewWorkspace uses for a source the OCR worker deleted after 24 hours (migration 0110).
+// The pure helper OcrReviewWorkspace uses for a source the OCR worker deleted after 24 hours (migration 0111).
 const source = await readFile(new URL('../src/components/clinical/ocrSourceDeletion.ts', import.meta.url), 'utf8')
 const helper = await import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(source,
   { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString('base64')}`)

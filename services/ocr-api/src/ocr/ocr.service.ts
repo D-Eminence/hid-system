@@ -86,7 +86,7 @@ const JOB_SELECT = `
 
 /**
  * ehr.documents.status while the OCR worker deletes the source and its reading 24 hours after the job finished, and
- * once it did (migration 0110). From the first, nothing is reviewed, retried, published or read again.
+ * once it did (migration 0111). From the first, nothing is reviewed, retried, published or read again.
  */
 const SOURCE_DELETION_STATUSES: ReadonlySet<string> = new Set(['source_deleting', 'source_deleted']);
 const sourceDeleted = () => new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 24 hours');
@@ -168,7 +168,7 @@ export class OcrService {
       }
 
       const source = await this.ehrApi.getOcrDocumentSource(input.documentId, context);
-      // The database refuses a job on such a document too (0110, ocr.validate_job_write).
+      // The database refuses a job on such a document too (0111, ocr.validate_job_write).
       if (SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
       if (source.status !== 'available' || source.scanStatus !== 'clean'
           || !source.objectVersionId || !source.sha256Hex) {
@@ -273,7 +273,7 @@ export class OcrService {
       );
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.extraction.list', job, source.patientId));
       // Each extraction is re-read through the contract: no stored key outside it, no raw model output. A source
-      // the OCR worker deleted after 24 hours (0110) is said so explicitly, from the document's status.
+      // the OCR worker deleted after 24 hours (0111) is said so explicitly, from the document's status.
       const contentDeleted = SOURCE_DELETION_STATUSES.has(source.status);
       return { items: result.rows.map((row) => projectExtraction(row, contentDeleted)) };
     });
@@ -844,7 +844,7 @@ export class OcrService {
       throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
     }
     // Nothing is left to review, confirm, retry or publish once the source and its reading were deleted after
-    // 24 hours (migration 0110); reads still answer, with the content marked deleted.
+    // 24 hours (migration 0111); reads still answer, with the content marked deleted.
     if (action === 'write_records' && SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
     return source;
   }

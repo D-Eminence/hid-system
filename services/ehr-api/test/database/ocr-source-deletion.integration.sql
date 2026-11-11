@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- 0110: deletion of an OCR source and its reading 24 hours after the job
+-- 0111: deletion of an OCR source and its reading 24 hours after the job
 -- finished. Rollback-only. Every person, facility, document and line of text
 -- here is made up (Test Patient Chidi Example, Deletion Test Clinic A/B,
 -- "Fictional reading line" text, storage keys that name no real object).
@@ -7,7 +7,7 @@
 -- Proves, as the exact runtime roles (hid_ocr_worker for the worker
 -- commands, hid_ocr_api_runtime and hid_ehr_api_runtime for the services that
 -- must not reach them), with the session settings each service sets:
---   - the security properties and EXECUTE grants of the 0110 functions; the
+--   - the security properties and EXECUTE grants of the 0111 functions; the
 --     shared reckoning is granted to no role; the worker has no table
 --     privilege on the rows it purges;
 --   - which documents are due: every job finished (awaiting_validation,
@@ -73,7 +73,7 @@ begin
       expected(proc, config) on p.oid = expected.proc
    where not p.prosecdef or p.proconfig is distinct from expected.config or p.proowner <> ocr_owner;
   if mismatch is not null then
-    raise exception '0110 command security properties differ: %', mismatch;
+    raise exception '0111 command security properties differ: %', mismatch;
   end if;
   if exists (select 1 from pg_proc where oid = 'ocr.source_deletion_due(uuid)'::regprocedure
                and (prosecdef or proowner <> ocr_owner)) then
@@ -91,14 +91,14 @@ begin
        ('list_worker_source_deletions', 'hid_ocr_worker'), ('worker_source_deletion_backlog', 'hid_ocr_worker'),
        ('claim_worker_source_deletion', 'hid_ocr_worker'), ('purge_worker_source_document', 'hid_ocr_worker'));
   if mismatch is not null then
-    raise exception 'unexpected EXECUTE grants on the 0110 commands: %', mismatch;
+    raise exception 'unexpected EXECUTE grants on the 0111 commands: %', mismatch;
   end if;
   if (select count(*) from pg_proc p, aclexplode(p.proacl) privilege
        where p.pronamespace = 'ocr'::regnamespace and privilege.privilege_type = 'EXECUTE'
          and privilege.grantee = 'hid_ocr_worker'::regrole
          and p.proname in ('list_worker_source_deletions', 'worker_source_deletion_backlog',
            'claim_worker_source_deletion', 'purge_worker_source_document')) <> 4 then
-    raise exception 'the 0110 EXECUTE grants are incomplete';
+    raise exception 'the 0111 EXECUTE grants are incomplete';
   end if;
   -- The worker purges only through the command: no privilege on the rows.
   select string_agg(format('%s %s', privilege, table_name), '; ') into mismatch

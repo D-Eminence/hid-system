@@ -137,7 +137,7 @@ export class PostgresWorkerRepository implements WorkerRepository, SourceDeletio
           failure.retryDelaySeconds, job.correlationId]);
     });
   }
-  // Source deletion (migration 0110): the documents due and their counts, and the purge after every S3 version of
+  // Source deletion (migration 0111): the documents due and their counts, and the purge after every S3 version of
   // the source is gone. Each runs as the worker subject in the round's correlation.
   async sourceDeletionBacklog(correlationId: string): Promise<SourceDeletionBacklog> {
     return this.transaction(correlationId, async (client) => {

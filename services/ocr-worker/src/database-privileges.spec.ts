@@ -102,7 +102,7 @@ describe('OCR worker database privileges', () => {
     expect(held.filter((name) => !executable.has(name))).toEqual([]);
   });
 
-  it('may execute the source-deletion commands (0110) but not their shared reckoning', () => {
+  it('may execute the source-deletion commands (0111) but not their shared reckoning', () => {
     for (const name of ['ocr.list_worker_source_deletions', 'ocr.worker_source_deletion_backlog',
       'ocr.claim_worker_source_deletion', 'ocr.purge_worker_source_document']) {
       expect(defined.has(name)).toBe(true);

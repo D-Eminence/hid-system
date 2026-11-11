@@ -31,7 +31,7 @@ describe('OcrApiClient browser contract', () => {
       purpose: 'direct-care' }, 'ocr-publication-key-1234')).rejects.toBeInstanceOf(OcrContractError);
   });
 
-  describe('extractions (migration 0110: a reading deleted after 24 hours)', () => {
+  describe('extractions (migration 0111: a reading deleted after 24 hours)', () => {
     const extraction = { id: 'extraction-id', version: 1, attempt: 1, provider: 'textract', providerModel: null,
       contentDeleted: false, rawText: 'Fictional reading line', structuredPayload: { contract: 'hid-paper-reading-v2' },
       confidence: 0.9, provenance: {}, createdAt: '2026-11-10T10:00:00.000Z' };
@@ -64,7 +64,7 @@ describe('OcrApiClient browser contract', () => {
       }
     });
 
-    it('accepts an extraction from an ocr-api built before 0110 (no contentDeleted field) as not deleted', async () => {
+    it('accepts an extraction from an ocr-api built before 0111 (no contentDeleted field) as not deleted', async () => {
       const { contentDeleted: _omitted, ...older } = extraction;
       const client = new OcrApiClient({ transport: jest.fn().mockResolvedValue({ items: [older] }) });
       await expect(client.listExtractions('job-id')).resolves.toEqual([{ ...older, contentDeleted: false }]);

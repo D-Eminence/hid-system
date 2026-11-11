@@ -3593,7 +3593,7 @@ CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
 
-## 37. OCR source deletion after 24 hours (0110)
+## 37. OCR source deletion after 24 hours (0111)
 
 Owner and coordinator decisions of 2026-11-11: (1) at 24 hours after an OCR
 job finishes, saved or not, the uploaded source file goes with every S3
@@ -3691,6 +3691,6 @@ without the document check).
 
 Under an owner that neither is a superuser nor bypasses row-level security
 (release checklist P8) the worker commands see no document, as every OCR
-worker command sees no job. 0110 has no down migration; the declaration is
+worker command sees no job. 0111 has no down migration; the declaration is
 signed separately. Suite:
 `services/ehr-api/test/database/ocr-source-deletion.integration.sql`.

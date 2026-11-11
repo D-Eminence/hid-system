@@ -1766,7 +1766,7 @@ IAM for the worker role:
 
 ## Source deletion after 24 hours
 
-Owner and coordinator decisions of 2026-11-11 (migration 0110): 24 hours after
+Owner and coordinator decisions of 2026-11-11 (migration 0111): 24 hours after
 an OCR job finishes, saved or not, the uploaded page goes with every S3
 version, and so do the Textract text and the AI reading. The source is not
 kept in the chart; what a person saved or published stays, with its

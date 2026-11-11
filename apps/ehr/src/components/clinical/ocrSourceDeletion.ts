@@ -1,6 +1,6 @@
 /**
  * The OCR worker deletes a scanned page, its text and its reading 24 hours after the OCR job finished (migration
- * 0110; owner decision of 2026-11-11). The document then lists with status 'source_deleting' (while the page is being
+ * 0111; owner decision of 2026-11-11). The document then lists with status 'source_deleting' (while the page is being
  * deleted) or 'source_deleted', and its extractions come
  * back with contentDeleted: true. What a person saved into the record stays; there is nothing left to review.
  * No imports, so the node test can load it on its own.
