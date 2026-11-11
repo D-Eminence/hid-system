@@ -1435,7 +1435,8 @@ group's totals; the hidden code cannot). `summaryFailed` counts both
 There are no per-reviewer figures. The read is audited as
 `ocr.quality.summary.read` with the range and counts only. Row-level security
 limits it to the facility named by `X-Facility-ID` (`scope: 'bound_facility'`);
-a cross-facility read needs a database change that is not part of this phase.
+a cross-facility read needs a database change that is not part of this phase
+(0119 adds it: Identity's `GET /api/v1/admin/ocr/quality-summary`, section 43).
 
 Patient confirmation is a separate idempotent command bound to the canonical
 Identity patient already governing the source document. The server rechecks
@@ -4196,3 +4197,149 @@ paper records (Migrate)".
 under records processing and explain that the reading lands as a draft for a
 clinician to sign; patient and staff record views should label the encounter
 by `importedPaperRecords`.
+
+## 43. OCR learning from reviews: correction rules and suggestions (0118, 0119)
+
+Owner decision Q43 of 2026-11-11. The reading learns from the corrections staff
+already make. Staff do no extra work: there are no approvers, no check-box and
+no re-check. Phase 1 (section 15) only measured; this section adds rules and
+suggestions.
+
+**What is learned.** On an accepted validation (`disposition: validated`) ocr-api
+looks at each linked reading item:
+- a Pharmacy medicine saved with its `itemId`: fields `name`, `strength` and
+  `frequency`;
+- a Lab result saved with its `itemId`: fields `test` and `unit`.
+
+For each field the reviewer changed, ocr-api sends `ocr.record_correction_observations(validationId, [{ field, readDigest, suggestValue }])`:
+- `readDigest` is the SHA-256 of `hid.ocr.learning/v1|<field>|<normalised value read>`.
+- `suggestValue` is the saved value when it is a closed-list value, else NULL (a
+  conflict). Closed-list values are:
+  - the drug list's generic or brand spelling, exact match only;
+  - a strength such as `500mg`;
+  - a frequency code (`od`, `bd`, `tds`, `qds`, `nocte`, `mane`, `stat`, `prn`);
+  - a lab test name from the lab list;
+  - a lab unit from the `LAB_UNITS` list.
+
+Nothing from the paper reaches the database: only a digest and list values.
+The database stores the digest only as its HMAC under its own key, and the
+validation id likewise, so a row can be neither checked against guessed text
+nor joined to a validation without the key.
+
+These are not sent:
+- a field saved unchanged (neither support nor conflict), including another
+  spelling of the same list entry (a synonym);
+- a field where a suggestion was shown: an accepted suggestion is recorded as a
+  showing, never as new evidence, so a rule cannot re-arm from its own
+  suggestions.
+
+Two items with one key saved to different values are one conflict. Nothing
+is learned from:
+- EHR notes (whole text);
+- unlinked entries;
+- rejections;
+- any document whose reading holds a sensitive item or page line. The classes
+  are ARVs and HIV, TB, psychiatric and sickle cell, with words, regimens and
+  tests; `services/ocr-api/src/ocr/learning/sensitive-classes.ts` is the
+  versioned list, `hid.ocr.sensitive/v1`;
+- any review that saves a sensitive value.
+
+A suggestion of a sensitive value is never shown, whatever a rule holds.
+
+The staff key is HMAC-SHA-256(account id) under a 32-byte key that 0118 creates
+inside the database (`ocr.learning_key`). The owner of the OCR functions alone
+reads it. It counts distinct staff, never who.
+
+**Switch-on, retirement and kill switches** happen inside the database
+(`ocr.learning_after_validation`). ocr-api calls it in its own READ COMMITTED
+transaction after the validation committed, under a transaction advisory lock
+per key and per rule.
+
+A facility rule switches on when, at that facility, the evidence holds:
+- at least 5 corrections to one value;
+- from at least 3 staff;
+- no conflict.
+
+A platform rule switches on on the same terms with every facility combined,
+from at least 2 facilities. The evidence counted is from the last 180 days and
+after the rule's last retirement.
+
+A rule retires itself when 3 of its last 10 showings were not taken. It re-arms
+only from new evidence.
+
+The owner kill switch exists per rule set: one for the platform and one per
+facility. It is on when there is no row. The platform's switch off hides the
+platform's rules everywhere. A facility's switch off hides every suggestion at
+that facility, the platform's included: off means off for the people there. A
+switch stops what is shown only: corrections are still counted (content-free,
+no cost to users) and rules still switch on (coordinator, 2026-11-11). The
+admin wording for a switched-off set is: "Suggestions are hidden. Health ID
+still counts corrections so suggestions are ready if you switch them back on." `PUT /admin/ocr/learning-switches`
+(Identity, platform super admin only) sets it, and the change is audited as
+`admin.ocr.learning-switch.set`.
+
+Retention:
+- observations and showings are deleted after 180 days, by the learning
+  commands and by the OCR worker's 7-day sweep (`ocr.purge_correction_observations`,
+  `ocr.purge_learning_showings`);
+- rules hold no paper text and are kept.
+
+**Suggestions** appear on `GET /api/v1/ocr/jobs/:jobId/extractions`:
+- Each `paperReading.items[]` entry may carry `suggestion: { field, value, text, ruleId, scope }`.
+  - `field` is one of `name`, `strength`, `frequency`, `test`, `unit`, `diagnosis`.
+  - `value` is the list value.
+  - `text` is "Possibly <value>? Check the paper".
+  - `scope` is `facility` or `platform`.
+- Each item shows at most one suggestion, in this order: name, test, strength,
+  frequency, unit.
+- The facility's rule comes before the platform's. Nothing shows at a facility
+  switched off, and no platform rule shows while the platform is switched off.
+- There is no suggestion for a deleted source, for a sensitive reading, or when
+  the lookup fails.
+
+The website shows `text` as a plain hint beside the field: no click, no dismiss,
+and never prefilled. The saved value is whatever the reviewer leaves. The
+client sends nothing back: at validation ocr-api works out whether each
+suggestion shown was taken (saved list value equals `value`). The
+suggestions are worked out again at save time, so a rule that switched on,
+retired or was switched off while the reviewer had the page open is counted as
+it stands at the save. The suggestion is
+never put in the reader's prompt.
+
+**Failure never blocks.** Learning from a review runs after the validation
+committed, in a separate transaction. Suggestions run in their own savepoint
+of the read. On failure, including on a database without 0118/0119, the review
+is saved and the reading shown. ocr-api logs only `ocr.learning.review_failed` or
+`ocr.learning.suggestions_failed`, with the SQLSTATE and the job id. The OCR
+worker logs `ocr.learning.purged { removed }` or `ocr.learning.purge_failed { code }`.
+
+**Platform-wide quality summary** (the phase-2 part of section 15):
+`GET /api/v1/admin/ocr/quality-summary?from&to` (Identity).
+- Access: `platform.admin.access` and `platform.operations.read`, in a platform
+  session. Anyone else gets 403.
+- Range: UTC days, default the last 28, at most 92, widened to whole ISO weeks.
+  Otherwise 400 `OCR_QUALITY_RANGE_INVALID`.
+- Answer: `{ schema: 'hid.ocr.quality-summary/v1', scope: 'platform', from, to, minGroupSize: 20, itemGroups, reviewGroups }`.
+  It is summed in the database (`ocr.review_outcome_summary`) over every
+  facility's phase-1 outcomes:
+  - item groups per week, facility, kind and prompt version, with `decisions`;
+  - review groups with `counts`: reviews, validated, rejected, estimated,
+    summary_failed;
+  - a group under 20 is `{ ...keys, suppressed: true }`.
+- Codes outside `^[a-z][a-z0-9_]{0,63}$` count as `other`.
+- The read is audited as `admin.ocr.quality-summary.read`, with counts only.
+
+`GET /api/v1/admin/ocr/learning` (`platform.admin.access`) answers
+`{ ruleSets: [{ scope, facilityId, enabled, activeRules, retiredRules, showingsLast180Days, notTakenLast180Days }] }`.
+
+Problems:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `OCR_QUALITY_RANGE_INVALID` | the summary's range |
+| 400 | `OCR_LEARNING_SWITCH_INVALID` | `facilityId` given without scope `facility`, or missing with it |
+| 400 | `OCR_LEARNING_REQUEST_INVALID` | the database refused the input (22023) |
+| 403 | `PLATFORM_SUPER_ADMIN_REQUIRED` | a switch set by anyone but a platform super admin |
+| 403 | `PERMISSION_DENIED` | the database refused the session (42501) |
+| 404 | `FACILITY_NOT_FOUND` | a switch for an unknown facility |
+| 503 | `OCR_LEARNING_UNAVAILABLE` | anything else |

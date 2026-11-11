@@ -1,7 +1,7 @@
 import { DeleteObjectCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
 import type { OcrWorkerConfig } from './config';
 import type { PaperReadingService } from './reading/reader';
-import { S3SourceObjectEraser, SourceDeletionError, SourceDeletionSweeper, type SourceClaimResult,
+import { LEARNING_PURGE_BATCH, S3SourceObjectEraser, SourceDeletionError, SourceDeletionSweeper, type SourceClaimResult,
   type SourcePurgeResult, type SourceDeletionCandidate,
   type SourceDeletionRepository, type SourceObjectEraser } from './source-deletion';
 import type { DocumentReader, WorkerOcrProvider, WorkerRepository } from './types';
@@ -258,6 +258,34 @@ describe('SourceDeletionSweeper', () => {
     expect(logged).not.toContain('synthetic-bucket');
     expect(lines.filter((line) => line.event === 'ocr.source_deletion.failed').map((line) => line.code))
       .toEqual(['UNKNOWN', 'UNKNOWN']);
+  });
+});
+
+describe('SourceDeletionSweeper: OCR learning retention (0118)', () => {
+  it('purges correction observations older than 180 days in the same round, after the overdue line', async () => {
+    const { repository, lines, sweeper } = sweeperMocks();
+    repository.purgeLearningObservations = jest.fn().mockResolvedValue(3);
+    await sweeper.runRound(new AbortController().signal);
+    expect(repository.purgeLearningObservations).toHaveBeenCalledWith(LEARNING_PURGE_BATCH,
+      expect.stringMatching(/^ocr-source-deletion-/));
+    expect(lines.at(-2)).toMatchObject({ event: 'ocr.source_deletion.overdue' });
+    expect(lines.at(-1)).toMatchObject({ level: 'info', event: 'ocr.learning.purged', removed: 3 });
+  });
+
+  it('logs only a code when the purge fails (no 0118 yet) and still finishes the round', async () => {
+    const { repository, lines, sweeper } = sweeperMocks();
+    repository.purgeLearningObservations = jest.fn().mockRejectedValue(
+      Object.assign(new Error('function ocr.purge_correction_observations does not exist'), { code: '42883' }));
+    await expect(sweeper.runRound(new AbortController().signal)).resolves.toMatchObject({ deleted: 2 });
+    expect(lines.at(-1)).toEqual({ level: 'warn', event: 'ocr.learning.purge_failed',
+      correlationId: expect.stringMatching(/^ocr-source-deletion-/), code: '42883' });
+  });
+
+  it('writes no line when nothing was old enough', async () => {
+    const { repository, lines, sweeper } = sweeperMocks();
+    repository.purgeLearningObservations = jest.fn().mockResolvedValue(0);
+    await sweeper.runRound(new AbortController().signal);
+    expect(lines.at(-1)).toMatchObject({ event: 'ocr.source_deletion.overdue' });
   });
 });
 

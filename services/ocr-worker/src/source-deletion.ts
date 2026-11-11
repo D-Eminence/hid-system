@@ -48,7 +48,12 @@ export interface SourceDeletionRepository {
   listSourceDeletions(limit: number, correlationId: string): Promise<readonly SourceDeletionCandidate[]>;
   claimSourceDeletion(documentId: string, correlationId: string): Promise<SourceClaimResult>;
   purgeSourceDocument(documentId: string, deletedVersions: number, correlationId: string): Promise<SourcePurgeResult>;
+  /** OCR correction observations (0118) and suggestion showings (0119) older than 180 days: how many were deleted. */
+  purgeLearningObservations?(limit: number, correlationId: string): Promise<number>;
 }
+
+/** Correction observations deleted per round at most (0118's purge; it deletes the oldest first). */
+export const LEARNING_PURGE_BATCH = 10_000;
 
 export interface SourceObjectEraser {
   /** Deletes every version and delete marker whose key is exactly `key`; resolves with how many it deleted. */
@@ -184,7 +189,22 @@ export class SourceDeletionSweeper {
     // The CloudWatch alarm's line (dev Terraform): metric filter { $.event = "ocr.source_deletion.overdue" }, value
     // $.overdue, missing data breaching. Counts taken at the start of the round.
     this.log('info', 'ocr.source_deletion.overdue', { overdue: backlog.overdue, due: backlog.due, deleted });
+    await this.purgeLearning(correlationId, signal);
     return { due: backlog.due, overdue: backlog.overdue, deleted, failed };
+  }
+
+  /**
+   * The 180-day retention of OCR learning evidence (0118), in the same round. A failure (on a database without 0118
+   * the function is missing) is logged with its code and never stops the source deletion.
+   */
+  private async purgeLearning(correlationId: string, signal: AbortSignal): Promise<void> {
+    if (!this.repository.purgeLearningObservations || signal.aborted) return;
+    try {
+      const removed = await this.repository.purgeLearningObservations(LEARNING_PURGE_BATCH, correlationId);
+      if (removed > 0) this.log('info', 'ocr.learning.purged', { correlationId, removed });
+    } catch (error) {
+      this.log('warn', 'ocr.learning.purge_failed', { correlationId, code: safeCode(error) });
+    }
   }
 
   /** Claim, then S3, then the purge. Never an S3 call without a claim the database granted. */
