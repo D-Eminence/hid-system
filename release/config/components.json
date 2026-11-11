@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0108",
-    "count": 109,
+    "last": "0109",
+    "count": 110,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -533,6 +533,10 @@
       {
         "name": "0108_records_processing_cover_lifetime.sql",
         "sha256": "1562c606256f18555054423b4e632bb863cf3aae6b0776bee87c30e660983ed6"
+      },
+      {
+        "name": "0109_support_health_id_matches.sql",
+        "sha256": "83f5928e442dba7cf2751e77255aed2d035b4d356856159dc5bb52243a10dea2"
       }
     ]
   },

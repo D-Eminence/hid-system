@@ -230,6 +230,10 @@ for (const [app, base] of Object.entries(bases).filter(([name]) => name !== 'web
 }
 assert.match(gatewayConfig, /error_page 502 503 504 = @upstream_unavailable/)
 assert.match(gatewayConfig, /UPSTREAM_UNAVAILABLE/)
+// The support Health ID check (0109) answers which Health IDs are issued: internal load balancer only.
+const identityGateway = /location \^~ \/api\/v1\/identity\/ \{([\s\S]*?)\n  \}/.exec(gatewayConfig)?.[1] ?? ''
+assert.match(identityGateway, /if \(\$uri ~\* "\^\/api\/v1\/identity\/service\/support\/"\) \{ return 404; \}\n(?:\s*#.*\n)*\s*include \/etc\/nginx\/hid-proxy-headers\.conf;\n\s*proxy_pass \$hid_identity_upstream;/,
+  'the public gateway must refuse the support Health ID check before the Identity proxy')
 const proxyHeaders = await readFile(join(repository, 'gateway/proxy-headers.conf'), 'utf8')
 assert.match(proxyHeaders, /X-Forwarded-For \$remote_addr/, 'gateway must overwrite caller-supplied forwarding chains')
 assert.match(proxyHeaders, /Origin \$http_origin/)

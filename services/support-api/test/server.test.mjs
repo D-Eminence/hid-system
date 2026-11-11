@@ -8,8 +8,11 @@ afterEach(async () => {
   for (const server of servers.splice(0)) await new Promise((resolve) => server.close(resolve));
 });
 
+// These tests are about the server itself; the Health ID check is tested in health-id-check.test.mjs.
+const unchanged = async (text) => text;
+
 async function request(recognize, body, options) {
-  const server = supportServer(recognize, options);
+  const server = supportServer(recognize, { checkHealthIds: unchanged, ...options });
   servers.push(server);
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -52,7 +55,7 @@ test('hides Lex errors from callers', async () => {
 
 test('rejects malformed JSON before invoking Lex', async () => {
   let called = false;
-  const server = supportServer(async () => { called = true; return []; });
+  const server = supportServer(async () => { called = true; return []; }, { checkHealthIds: unchanged });
   servers.push(server);
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -64,7 +67,7 @@ test('rejects malformed JSON before invoking Lex', async () => {
 });
 
 test('bounds provider latency and hides timeout internals', async () => {
-  const server = supportServer(async () => new Promise(() => {}), { timeoutMs: 20 });
+  const server = supportServer(async () => new Promise(() => {}), { timeoutMs: 20, checkHealthIds: unchanged });
   servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/support/chat`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'help' }),
@@ -80,7 +83,7 @@ test('rejects oversized provider answers', async () => {
 
 test('limits repeated requests in one opaque support session', async () => {
   let calls = 0;
-  const server = supportServer(async () => { calls += 1; return ['Approved answer']; });
+  const server = supportServer(async () => { calls += 1; return ['Approved answer']; }, { checkHealthIds: unchanged });
   servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const url = `http://127.0.0.1:${server.address().port}/api/v1/support/chat`;
   const body = JSON.stringify({ text: 'help', sessionId: '11111111-1111-4111-8111-111111111111' });
