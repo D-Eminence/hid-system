@@ -1666,7 +1666,9 @@ create policy outreach_campaign_members_support_create on outreach.campaign_memb
   with check (outreach.privileged_run_active('support'));
 create policy outreach_campaign_members_support_delete on outreach.campaign_members for delete
   using (outreach.privileged_run_active('support'));
-alter policy outreach_campaign_members_admin_create on outreach.campaign_members
+drop policy if exists outreach_campaign_members_admin_create on outreach.campaign_members;
+create policy outreach_campaign_members_admin_create on outreach.campaign_members
+  as restrictive for insert
   with check (
     outreach.privileged_run_active('support')
     or exists (select 1 from outreach.campaign_members admin_member
@@ -1683,7 +1685,9 @@ alter policy outreach_campaign_members_admin_create on outreach.campaign_members
         and not exists (select 1 from outreach.campaign_members existing
                          where existing.campaign_id = campaign_members.campaign_id))
   );
-alter policy outreach_campaign_members_admin_delete on outreach.campaign_members
+drop policy if exists outreach_campaign_members_admin_delete on outreach.campaign_members;
+create policy outreach_campaign_members_admin_delete on outreach.campaign_members
+  as restrictive for delete
   using (
     outreach.privileged_run_active('support')
     or exists (select 1 from outreach.campaign_members admin_member

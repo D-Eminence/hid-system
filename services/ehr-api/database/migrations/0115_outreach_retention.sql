@@ -334,9 +334,13 @@ create policy outreach_registration_cases_retention_read on outreach.registratio
   using (outreach.privileged_run_active('retention'));
 create policy outreach_registration_cases_retention_update on outreach.registration_cases for update
   using (outreach.privileged_run_active('retention')) with check (outreach.privileged_run_active('retention'));
-alter policy outreach_registration_campaign_read on outreach.registration_cases
+drop policy if exists outreach_registration_campaign_read on outreach.registration_cases;
+create policy outreach_registration_campaign_read on outreach.registration_cases
+  as restrictive for select
   using (outreach.registration_campaign_member(campaign_id, facility_id) or outreach.privileged_run_active('retention'));
-alter policy outreach_registration_campaign_resolve on outreach.registration_cases
+drop policy if exists outreach_registration_campaign_resolve on outreach.registration_cases;
+create policy outreach_registration_campaign_resolve on outreach.registration_cases
+  as restrictive for update
   using (outreach.registration_campaign_member(campaign_id, facility_id) or outreach.privileged_run_active('retention'))
   with check (outreach.registration_campaign_member(campaign_id, facility_id) or outreach.privileged_run_active('retention'));
 create policy outreach_campaigns_retention_read on outreach.campaigns for select
