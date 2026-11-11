@@ -32,4 +32,10 @@ export interface LabWorkItemResult {
    * OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read it (0121).
    */
   patient?: import('./order-route-cards').WorkItemRoutePatient;
+  /**
+   * The request's clinical information (null when the EHR sent none), on the
+   * reads of a same-facility work item only: never on a route-backed one, and
+   * not in the acceptance answer.
+   */
+  clinicalIndication?: string | null;
 }

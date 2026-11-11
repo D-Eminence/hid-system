@@ -126,6 +126,7 @@ const acceptedMigrations = new Map([
   ['0111_outreach_campaign_admins.sql', '971da7bed817568c6184274e59bcb9d659851149cdc70e223e94123f2ddb09d1'],
   ['0112_ocr_source_deletion_7d.sql', 'bbc494dd7db3c221ca61f9a11312e59ca2cba8e5a6759c9c3ccc65b8390d1587'],
   ['0113_records_processing_draft_publication.sql', 'af6d1df7e9e7e1761a38ac9164807e2e559394baf2db2e99672264a77808214b'],
+  ['0114_collect_signup_fields.sql', '9f3e842a08a9af68a3378647474d98e738f3687c29e2d26b10ea64a5b06937e0'],
   ['0121_work_item_patient_cards.sql', '469121a6542b198ba33eef0c577f78f5de474edec249f8acc3bd39b1f7ebde26'],
 ])
 

@@ -96,6 +96,18 @@ describe('extraction view for the check screen', () => {
     expect(publicProvenance(null)).toEqual({});
   });
 
+  it('is unaffected by the worker\'s provenance listVersion and counts (kept in the database, not shown)', () => {
+    const base = v2Provenance();
+    const withCounts = { ...base, reading: { ...base.reading, listVersion: '0123456789abcdef',
+      counts: { version: 1, droppedByReason: { text_not_on_line: 1 }, droppedByReasonFirstPass: {},
+        hardPageAgreement: { fieldsCompared: 4, fieldsAgreed: 3, itemsPaired: 2, itemsSingle: 1, drugSplits: 0,
+          alternativesDropped: 0 }, zoomCalls: 2, zoomLimited: 0, zoomFailed: 0, hardPageDeadlineHits: 0,
+        hardReadFailures: {} } } };
+    expect(publicProvenance(withCounts)).toEqual(publicProvenance(base));
+    expect(projectExtraction(extractionRow(v2Payload(), withCounts)))
+      .toEqual(projectExtraction(extractionRow(v2Payload(), base)));
+  });
+
   it('reads an ai_off v2 payload as pages with no items', () => {
     const payload = { ...v2Payload(), items: [],
       identity: { nameAsWritten: null, dateOfBirthAsWritten: null, folderNumberAsWritten: null, sexAsWritten: null,
