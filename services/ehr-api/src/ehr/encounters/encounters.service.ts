@@ -33,7 +33,8 @@ const ENCOUNTER_COLUMNS = `
   created_by as "createdBy", created_by_membership_id as "createdByMembershipId",
   encounter_number as "encounterNumber", encounter_type as "encounterType", status,
   started_at as "startedAt", ended_at as "endedAt", chief_complaint as "chiefComplaint",
-  row_version as "rowVersion", created_at as "createdAt", updated_at as "updatedAt"`;
+  row_version as "rowVersion", created_at as "createdAt", updated_at as "updatedAt",
+  imported_paper_records as "importedPaperRecords"`;
 
 const TRANSITIONS: Readonly<Record<EncounterStatus, readonly EncounterStatus[]>> = {
   [EncounterStatus.Planned]: [EncounterStatus.InProgress, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],

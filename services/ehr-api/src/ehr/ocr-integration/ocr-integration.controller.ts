@@ -5,7 +5,7 @@ import { DomainProblem } from '../../common/problem';
 import { requireRequestContext, type HidRequest } from '../../common/request-context';
 import { DocumentService } from '../../documents/document.service';
 import { ClinicalNotesService } from '../clinical-notes/clinical-notes.service';
-import { patientRecordContext } from '../shared/clinical-context';
+import { ocrImportContext } from '../shared/clinical-context';
 import { ImportOcrClinicalNoteDto } from './dto/import-ocr-clinical-note.dto';
 
 @Controller('ehr/internal/ocr')
@@ -40,7 +40,7 @@ export class OcrIntegrationController {
         'The EHR import command must bind idempotency to the OCR publication');
     }
     return this.clinicalNotes.createImportedFromOcr(
-      patientRecordContext(request), patientId, input,
+      ocrImportContext(request), patientId, input,
     );
   }
 }
