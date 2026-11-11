@@ -7,14 +7,18 @@ import { ITEM_ID } from '../reading/paper-reading.contract';
 import { CHANGE_REASONS, FIELD_CLASSES, REJECTION_REASON_CODES, REMOVAL_REASONS,
   type RejectionReasonCode, type RemovalReason } from '../quality/review-outcome';
 
-/** An item of the reading the reviewer left out, and why. Counted only; the id never leaves the request. */
+/**
+ * An item of the reading the reviewer left out, and optionally why (owner decision Q43: nothing is ever required from
+ * staff). Counted only; the id never leaves the request.
+ */
 export class RemovedItemDto {
   @IsString()
   @Matches(ITEM_ID)
   itemId!: string;
 
+  @IsOptionalButNotNull()
   @IsIn(REMOVAL_REASONS)
-  removalReason!: RemovalReason;
+  removalReason?: RemovalReason;
 }
 
 /**

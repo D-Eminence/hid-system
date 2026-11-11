@@ -156,6 +156,10 @@ export function projectExtraction(row: ExtractionRow) {
     provenance: publicProvenance(row.provenance),
     createdAt: row.createdAt,
     paperReading: readingView(parsed),
+    // This server accepts the optional review signals on validation (reviewConfirmed, missedItems, removedItems,
+    // rejectionReasonCode, corrections[].fields / changeReason; section 15). A client sends them only when it sees this:
+    // an older server answers them 400.
+    reviewLearning: true as const,
   };
 }
 

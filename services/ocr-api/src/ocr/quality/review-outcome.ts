@@ -104,7 +104,7 @@ export interface ReviewOutcomeInput {
   corrections: readonly Record<string, unknown>[];
   reviewConfirmed?: boolean;
   missedItems?: number;
-  removedItems?: readonly { itemId: string; removalReason: string }[];
+  removedItems?: readonly { itemId: string; removalReason?: string }[];
   rejectionReasonCode?: string;
   /** ocr.extractions.structured_payload of the reviewed extraction (undefined when it could not be read). */
   structuredPayload: unknown;
@@ -298,7 +298,7 @@ export function computeReviewOutcome(input: ReviewOutcomeInput): ReviewOutcome {
     }
   }
   for (const removed of input.removedItems ?? []) {
-    if ((REMOVAL_REASONS as readonly string[]).includes(removed.removalReason)) {
+    if ((REMOVAL_REASONS as readonly string[]).includes(removed.removalReason ?? '')) {
       bump(reviewer.removalReasons, removed.removalReason as RemovalReason);
     }
   }

@@ -1405,7 +1405,7 @@ on any failure the stored value is `{ schema, error: 'summary_failed' }`.
 
 Optional review signals on the validation body (all optional; existing clients
 are unaffected): `reviewConfirmed` (boolean), `missedItems` (integer 0-200),
-`removedItems` (up to 200 `{ itemId, removalReason }`, reason
+`removedItems` (up to 200 `{ itemId, removalReason? }`, the reason optional:
 `not_on_paper` | `duplicate` | `not_needed` | `unreadable` | `other_patient`),
 `rejectionReasonCode` (only with `rejected`, else 400
 `OCR_REJECTION_REASON_NOT_ALLOWED`: `wrong_patient`, `wrong_document`,
@@ -1415,7 +1415,11 @@ are unaffected): `reviewConfirmed` (boolean), `missedItems` (integer 0-200),
 `date`, `value`, `unit`) and `changeReason` (`misread` | `clinical_update`).
 They enter the review outcome as counts only. When sent they join the request
 digest (the same `Idempotency-Key` with different signals answers 409
-`IDEMPOTENCY_CONFLICT`); when absent the digest is exactly as before.
+`IDEMPOTENCY_CONFLICT`); when absent the digest is exactly as before. None is
+ever required from staff (owner decision Q43): every one, and every reason, may
+be left out. Each extraction on `GET /api/v1/ocr/jobs/:jobId/extractions`
+carries `reviewLearning: true` on a server that accepts them; a client sends
+them only when it sees it (an older server answers them 400).
 
 `GET /api/v1/ocr/quality/summary` (platform administrators only: platform
 permissions `platform.admin.access` and `platform.operations.read`, staff
