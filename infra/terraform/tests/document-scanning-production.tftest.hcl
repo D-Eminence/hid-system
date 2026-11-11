@@ -205,11 +205,12 @@ run "production_stage_3_uses_the_retained_staging_names" {
 
   assert {
     condition = (
-      length(module.application.workload_caller_policy) == 7 &&
+      length(module.application.workload_caller_policy) == 8 &&
       alltrue([for subject in keys(module.application.workload_caller_policy) : startswith(subject, "hid:staging:")]) &&
-      jsonencode(module.application.workload_caller_policy["hid:staging:document-scanner"]) == jsonencode(["hid-identity-api"])
+      jsonencode(module.application.workload_caller_policy["hid:staging:document-scanner"]) == jsonencode(["hid-identity-api"]) &&
+      jsonencode(module.application.workload_caller_policy["hid:staging:support-api"]) == jsonencode(["hid-identity-api"])
     )
-    error_message = "The seventh caller is hid:staging:document-scanner, for hid-identity-api only."
+    error_message = "With the support bot on, as in production, the six ECS callers, the scanner bridge (hid:staging:document-scanner) and support-api (hid:staging:support-api), each for hid-identity-api only, make eight: the issuer's limit."
   }
 
   assert {

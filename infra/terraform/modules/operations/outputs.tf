@@ -27,5 +27,11 @@ output "monitoring_coverage" {
     dead_letter   = length(aws_cloudwatch_metric_alarm.notification_dead_letters)
     backlog       = length(aws_cloudwatch_metric_alarm.notification_backlog_age)
     providers     = length(aws_cloudwatch_metric_alarm.provider_failure)
+    error_rate    = length(aws_cloudwatch_metric_alarm.gateway_error_rate)
+    server_errors = length(aws_cloudwatch_metric_alarm.target_server_errors)
+    unhealthy     = length(aws_cloudwatch_metric_alarm.unhealthy_targets)
+    stopped_tasks = length(aws_cloudwatch_event_rule.stopped_tasks)
+    ocr_queue     = length(aws_cloudwatch_metric_alarm.ocr_queue_age) + length(aws_cloudwatch_metric_alarm.ocr_worker_errors)
+    subscribers   = length(aws_sns_topic_subscription.email) + length(aws_sns_topic_subscription.subscribers)
   }
 }

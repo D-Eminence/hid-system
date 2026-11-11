@@ -250,11 +250,11 @@ variable "support_faqs" {
   validation {
     condition = length(var.support_faqs) <= 40 && alltrue([for name, faq in var.support_faqs :
       can(regex("^[A-Za-z][A-Za-z0-9_]{1,49}$", name)) && !contains(["Fallback", "FallbackIntent"], name) &&
-      length(faq.utterances) >= 2 && length(faq.utterances) <= 10 &&
+      length(faq.utterances) >= 2 && length(faq.utterances) <= 20 &&
       alltrue([for utterance in faq.utterances : length(trimspace(utterance)) >= 3 && length(utterance) <= 200]) &&
       length(trimspace(faq.answer)) >= 10 && length(faq.answer) <= 1000
     ])
-    error_message = "Each FAQ needs a valid intent name, two sample questions, and an answer of at least ten characters."
+    error_message = "Each FAQ needs a valid intent name, 2 to 20 sample questions, and an answer of at least ten characters."
   }
 }
 
@@ -606,6 +606,12 @@ variable "document_scan_enforce_tags" {
 variable "alert_email" {
   type    = string
   default = ""
+}
+
+variable "alert_subscribers" {
+  description = "More people who receive every operational alert, besides alert_email: [{ protocol = \"email\", endpoint = \"name@example.com\" }, { protocol = \"sms\", endpoint = \"+2348000000000\" }]. Set in the environment's tfvars at apply time; do not commit real addresses."
+  type        = list(object({ protocol = string, endpoint = string }))
+  default     = []
 }
 
 variable "enable_cost_governance" {

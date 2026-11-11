@@ -12,11 +12,121 @@
         "Whats Health ID about",
         "Explain Health ID",
         "What does Health ID do",
-        "What is Health Identity Directory"
+        "What is Health Identity Directory",
+        "what is health id about",
+        "tell me about health identity directory",
+        "what is HID"
       ],
       "answer": "Health ID (Health Identity Directory) connects a patient's Health ID identity with health records and authorized healthcare workflows. It helps patients and providers find and share records through controlled access. Open: https://www.staging.healthidentitydirectory.com/about",
       "action_url": "https://www.staging.healthidentitydirectory.com/about",
       "source": "PRODUCT.md",
+      "confirmation_required": null
+    },
+    "WhichSite": {
+      "question": "Which Health ID website do I use?",
+      "utterances": [
+        "Which Health ID website do I use",
+        "Where do staff log in",
+        "Where do patients log in",
+        "What is the difference between app and ehr",
+        "Which site is for doctors",
+        "Which site is for patients",
+        "what is the link for the EHR",
+        "what website is for hospital staff",
+        "wich site do i use",
+        "Where is the lab site",
+        "Where is the pharmacy site"
+      ],
+      "answer": "Patients use the patient portal: https://staging.healthidentitydirectory.com. Staff use the site of the product their facility uses: Health ID EHR (hospitals and clinics) https://ehr.staging.healthidentitydirectory.com, Health ID Lab https://lab.staging.healthidentitydirectory.com, Health ID Pharmacy https://pharmacy.staging.healthidentitydirectory.com, Health ID Migrate (paper and old records) https://migrate.staging.healthidentitydirectory.com and Health ID Outreach https://outreach.staging.healthidentitydirectory.com. Staff sign in with a work account; a patient account and a staff account are separate. General information is on https://www.staging.healthidentitydirectory.com.",
+      "action_url": "https://staging.healthidentitydirectory.com",
+      "source": "health apps/public-web/content/site.ts PRODUCT_SITE_SUBDOMAINS; config/production.json hosts",
+      "confirmation_required": null
+    },
+    "SignUp": {
+      "question": "How do I sign up?",
+      "utterances": [
+        "SIGNUP NOT SIGNIN",
+        "How do I sign up",
+        "I want to sign up",
+        "I want to register",
+        "Create an account",
+        "How do I create an account",
+        "sign up not sign in",
+        "How do I register on Health ID",
+        "signup",
+        "how to register",
+        "new account",
+        "I am new how do i start",
+        "how do i open an account",
+        "regster account"
+      ],
+      "answer": "Signing up depends on who you are. Patients: get your Health ID at https://staging.healthidentitydirectory.com/enroll. Doctors, nurses, pharmacists, lab scientists and other staff do not sign up on their own: your facility administrator invites you from Staff & access, and you set up your account from the link in the invitation email (Accept invitation, for example https://ehr.staging.healthidentitydirectory.com/provider/invitation). If your facility is not on Health ID yet, the facility registers first with Set up your facility, for example https://ehr.staging.healthidentitydirectory.com/provider/enroll for a hospital or clinic.",
+      "action_url": "https://staging.healthidentitydirectory.com/enroll",
+      "source": "health apps/patient-web ehr-blue/frame/auth/BlueSignIn.tsx; productHostname.ts; App.tsx PatientRoutes /enroll",
+      "confirmation_required": null
+    },
+    "StaffAccount": {
+      "question": "How do I sign up as a doctor, nurse, pharmacist or lab scientist?",
+      "utterances": [
+        "HOW I DO I SIGNUP AS DOCTOR",
+        "How do I sign up as a doctor",
+        "Register as a nurse",
+        "How do I sign up as a pharmacist",
+        "Sign up as a lab scientist",
+        "How do I get a staff account",
+        "I am a doctor how do I join Health ID",
+        "Create a staff account",
+        "How can a doctor register",
+        "how do i join my hospital on health id",
+        "docter signup",
+        "nurse account",
+        "how do i get access to the EHR",
+        "I work at a hospital how do I get an account",
+        "register as health worker",
+        "sign up as receptionist"
+      ],
+      "answer": "Staff accounts are created by invitation, not by self sign-up. 1. Ask your facility administrator to invite you: they open Staff & access, choose Invite staff and enter your name, work email and role. 2. Open the link in the invitation email. It opens Accept invitation on your product site, for example https://ehr.staging.healthidentitydirectory.com/provider/invitation, where you set your password (you can also enter your email and the 6-digit invitation code there). 3. Sign in and set up an authenticator app when asked. Already work at another Health ID facility? Sign in and accept with your existing account. If your facility is not on Health ID yet, it registers first with Set up your facility, for example https://ehr.staging.healthidentitydirectory.com/provider/enroll.",
+      "action_url": "https://ehr.staging.healthidentitydirectory.com/provider/invitation",
+      "source": "health apps/patient-web ehr-blue/departments/staff/InviteCard.tsx; BlueStaffInvitation; BlueSignIn.tsx",
+      "confirmation_required": null
+    },
+    "StaffInvitation": {
+      "question": "How do I accept a staff invitation?",
+      "utterances": [
+        "I got an invitation email",
+        "How do I accept my invitation",
+        "Accept invitation",
+        "My invitation link is not working",
+        "My invitation has expired",
+        "Where do I enter my invitation code",
+        "invitation link expired",
+        "I was invited to a facility",
+        "invite link not working",
+        "joining my team",
+        "invitaion code"
+      ],
+      "answer": "Open the link in the invitation email; it opens Accept invitation on the right Health ID site, for example https://ehr.staging.healthidentitydirectory.com/provider/invitation. Complete the security check, see who invited you, then set your password. You can also type the email address the invitation was sent to and the 6-digit code from the email. If you already have a staff account, sign in to accept. If the link has expired or was revoked, ask your facility administrator to resend the invitation from Staff & access. Do not share the code in this chat.",
+      "action_url": "https://ehr.staging.healthidentitydirectory.com/provider/invitation",
+      "source": "health apps/patient-web BlueStaffInvitation; departments/staff/Invitations.tsx",
+      "confirmation_required": null
+    },
+    "InviteStaff": {
+      "question": "How does a facility administrator add staff?",
+      "utterances": [
+        "How do I invite staff",
+        "How do I add a doctor to my facility",
+        "Add a new staff member",
+        "How do I give a nurse access",
+        "Invite a pharmacist",
+        "How do I add users to my hospital",
+        "add staff to EHR",
+        "resend a staff invitation",
+        "how to add my team",
+        "invite stafff"
+      ],
+      "answer": "Sign in to your facility workspace as an administrator who can manage staff, open Staff & access and choose Invite staff. Enter the person's name, work email and role, then send. They get an email to set up their account. Pending and expired invitations are listed on the same page, where you can resend or revoke them. Roles decide which workspaces each person can open. EHR: https://ehr.staging.healthidentitydirectory.com/provider/sign-in",
+      "action_url": "https://ehr.staging.healthidentitydirectory.com/provider/sign-in",
+      "source": "health apps/patient-web ehr-blue/departments/staff (StaffAccess, InviteCard, Invitations)",
       "confirmation_required": null
     },
     "CreateHealthId": {
@@ -25,9 +135,15 @@
         "How do I create my Health ID",
         "How do I register as a patient",
         "Get my Health ID",
-        "Create a Health ID account"
+        "Create a Health ID account",
+        "sign up as a patient",
+        "I am a patient how do I sign up",
+        "get health id",
+        "patient registration",
+        "how to get my HID",
+        "create patient account"
       ],
-      "answer": "Select Get your Health ID. Follow the NIN verification, contact verification code and account activation steps shown on the enrollment page. If verification or activation cannot be completed, contact support. If you already have an account, sign in or recover it instead of creating another. Open: https://staging.healthidentitydirectory.com/enroll",
+      "answer": "Patients: open https://staging.healthidentitydirectory.com/enroll (Get your Health ID). Follow the NIN verification, contact verification code and account activation steps shown on the page. If verification or activation cannot be completed, contact support. If you already have an account, sign in or recover it instead of creating another. Staff do not create a patient account to work; they are invited by their facility.",
       "action_url": "https://staging.healthidentitydirectory.com/enroll",
       "source": "frontend Enrollment.tsx",
       "confirmation_required": null
@@ -49,7 +165,9 @@
       "utterances": [
         "Where can I find my HIDCode",
         "Where is my Health ID number",
-        "Show me where to find my HID code"
+        "Show me where to find my HID code",
+        "what is my health id number",
+        "i lost my health id"
       ],
       "answer": "Sign in to the patient portal and open Profile. Your identifier appears as Health ID. This public chatbot cannot look up your code or account details. Open: https://staging.healthidentitydirectory.com/profile",
       "action_url": "https://staging.healthidentitydirectory.com/profile",
@@ -74,11 +192,15 @@
       "utterances": [
         "How do I share my records with a doctor or hospital",
         "Allow my doctor to see my records",
-        "How do I approve a hospital access request"
+        "How do I approve a hospital access request",
+        "share my records",
+        "how do i give my doctor access",
+        "send my records to a hospital",
+        "shair my records"
       ],
-      "answer": "Ask the provider to use the Health ID access workflow. In the patient portal, open Access to review and approve or deny requests. For the PIN workflow, share your HIDCode and access PIN only with the provider you intend to authorize. Provider role, facility, purpose and access limits still apply. Never share your login password. Open: https://staging.healthidentitydirectory.com/access",
+      "answer": "In the patient portal choose Share Records on your home page, or open Access and consent (https://staging.healthidentitydirectory.com/access) to approve or deny a provider's request. If you use your Access PIN, give it only to the provider you choose, in person; never type it here. Provider role, facility, purpose and access limits still apply. Never share your login password. Support will never ask for your Health ID, NIN or PIN.",
       "action_url": "https://staging.healthidentitydirectory.com/access",
-      "source": "frontend AccessPage; staff Patients.tsx",
+      "source": "health apps/patient-web routes/ShareRecords.tsx; Portal.tsx AccessPage",
       "confirmation_required": null
     },
     "PatientAccessPin": {
@@ -89,9 +211,9 @@
         "Where is my patient PIN",
         "What is an access PIN"
       ],
-      "answer": "Your access PIN is separate from your login password. Set or replace it in Settings after signing in recently. The current form accepts 4 to 8 digits. An authorized provider can use your HIDCode and PIN to request limited record access; the PIN does not bypass provider permissions. Never enter a PIN in this public chat. Open: https://staging.healthidentitydirectory.com/settings",
-      "action_url": "https://staging.healthidentitydirectory.com/settings",
-      "source": "frontend SettingsPage; staff Patients.tsx",
+      "answer": "Your Access PIN is separate from your login password. Set or change it in Profile, under Bio-data (it used to be in Settings). It is 4 to 8 digits, and you must have signed in within the last 10 minutes to change it. An authorized provider can use your Health ID and PIN to request limited record access; the PIN does not bypass provider permissions. Never enter a PIN in this chat. Open: https://staging.healthidentitydirectory.com/profile",
+      "action_url": "https://staging.healthidentitydirectory.com/profile",
+      "source": "health apps/patient-web routes/Portal.tsx Access PIN",
       "confirmation_required": null
     },
     "RevokeAccess": {
@@ -101,9 +223,9 @@
         "Stop a hospital seeing my records",
         "Withdraw access to my health records"
       ],
-      "answer": "Open Access to review requests and access history; deny unwanted pending requests. Settings lets you revoke or replace your access PIN, preventing further use of that PIN. This is different from withdrawing an already issued access grant. The current patient page has no grant-withdrawal button; contact Health ID support for help with an existing grant. Open: https://staging.healthidentitydirectory.com/access",
+      "answer": "Open Access and consent to see requests, access you have granted and the access history. Deny unwanted pending requests, and end access you granted there. Ending access does not change your Access PIN: if that provider has your PIN, change it in Profile too. Open: https://staging.healthidentitydirectory.com/access",
       "action_url": "https://staging.healthidentitydirectory.com/access",
-      "source": "frontend AccessPage and SettingsPage",
+      "source": "health apps/patient-web routes/Portal.tsx (ending a grant)",
       "confirmation_required": null
     },
     "ForgotPin": {
@@ -113,9 +235,9 @@
         "I forgot my access PIN",
         "Reset my patient access PIN"
       ],
-      "answer": "Sign in, open Settings and set a replacement access PIN. You must have signed in recently. If you cannot sign in, use account recovery first. Support will not ask you to reveal your password or PIN in this public chatbot. Open: https://staging.healthidentitydirectory.com/settings",
-      "action_url": "https://staging.healthidentitydirectory.com/settings",
-      "source": "frontend SettingsPage; Recovery.tsx",
+      "answer": "Sign in, open Profile and set a new Access PIN under Bio-data. You must have signed in within the last 10 minutes. If you cannot sign in, recover your account first at https://staging.healthidentitydirectory.com/recover; for your safety the PIN cannot be changed for 24 hours after a recovery. Support will not ask for your password or PIN. Open: https://staging.healthidentitydirectory.com/profile",
+      "action_url": "https://staging.healthidentitydirectory.com/profile",
+      "source": "health apps/patient-web routes/Portal.tsx Access PIN",
       "confirmation_required": null
     },
     "DifferentHospitals": {
@@ -171,9 +293,13 @@
       "utterances": [
         "How do I migrate my existing health records",
         "Import my paper medical records",
-        "How do I move old records into Health ID"
+        "How do I move old records into Health ID",
+        "upload paper records",
+        "scan old patient files",
+        "digitise our paper records",
+        "migrate paper files"
       ],
-      "answer": "Ask your care facility or an authorized Health ID Migrate user to use the document upload and review workflow. Extracted information requires human review and the correct patient match before any supported clinical publication. Uploading a document does not automatically make it a final clinical record. Open: https://migrate.staging.healthidentitydirectory.com",
+      "answer": "Paper and old records go through Health ID Migrate (https://migrate.staging.healthidentitydirectory.com). Your care facility, or staff it has invited to Migrate, upload the documents; the extracted information is reviewed by a person and matched to the correct patient before it is published. Uploading a document does not automatically make it a final clinical record. Patients: ask your facility; you cannot upload them in this chat.",
       "action_url": "https://migrate.staging.healthidentitydirectory.com",
       "source": "PRODUCT.md OCR; MIGRATE_CONSOLIDATION.md",
       "confirmation_required": null
@@ -186,9 +312,25 @@
         "Where do I upload migration documents",
         "Explain Health ID Migrate"
       ],
-      "answer": "Health ID Migrate is the document digitization and migration workspace. Authorized users upload existing records, review extracted information and confirm the patient before supported publication. It does not replace clinical review or automatically make extracted text an official record. Open: https://migrate.staging.healthidentitydirectory.com",
-      "action_url": "https://migrate.staging.healthidentitydirectory.com",
+      "answer": "Health ID Migrate is the staff workspace for digitising paper and old records. Authorized staff upload documents, review the extracted information and confirm the patient before supported publication. It does not replace clinical review. Staff sign in at https://migrate.staging.healthidentitydirectory.com/provider/sign-in; a facility gets Migrate with Set up your facility at https://migrate.staging.healthidentitydirectory.com/provider/enroll.",
+      "action_url": "https://migrate.staging.healthidentitydirectory.com/provider/sign-in",
       "source": "PRODUCT.md OCR; MIGRATE_CONSOLIDATION.md",
+      "confirmation_required": null
+    },
+    "Outreach": {
+      "question": "What is Health ID Outreach?",
+      "utterances": [
+        "What is Health ID Outreach",
+        "How do I use Outreach",
+        "Outreach campaign",
+        "field registration cases",
+        "Where do outreach workers log in",
+        "outreach sign in",
+        "outrech"
+      ],
+      "answer": "Health ID Outreach is the staff workspace for outreach programmes: managing campaigns and their members and reviewing field registration cases linked to existing Health IDs. Outreach staff are invited by their organisation and sign in at https://outreach.staging.healthidentitydirectory.com/provider/sign-in. It is not a patient sign-up page; patients get a Health ID at https://staging.healthidentitydirectory.com/enroll.",
+      "action_url": "https://outreach.staging.healthidentitydirectory.com/provider/sign-in",
+      "source": "health apps/public-web/content/about.ts and pages.ts (outreach)",
       "confirmation_required": null
     },
     "ProviderRegistration": {
@@ -196,11 +338,20 @@
       "utterances": [
         "How do healthcare providers register",
         "How do hospitals join Health ID",
-        "Register a laboratory or pharmacy"
+        "Register a laboratory or pharmacy",
+        "Register my hospital",
+        "Set up your facility",
+        "How do I register a facility",
+        "register a clinic",
+        "my hospital is not on health id",
+        "onboard my facility",
+        "register pharmacy",
+        "how do we join as a hospital",
+        "facility registration"
       ],
-      "answer": "Use Setup Your Facility on the public site and choose the relevant product. Submit the required CAC registration and administrator details. Verification, profile completion and Health ID review are separate steps; submitting the form does not activate a facility or create a signed-in administrator session. Open: https://www.staging.healthidentitydirectory.com/provider/apply",
+      "answer": "A facility joins with Set up your facility on the site of the product it needs: a hospital or clinic at https://ehr.staging.healthidentitydirectory.com/provider/enroll, a laboratory at https://lab.staging.healthidentitydirectory.com/provider/enroll, a pharmacy at https://pharmacy.staging.healthidentitydirectory.com/provider/enroll, or Migrate at https://migrate.staging.healthidentitydirectory.com/provider/enroll. You can also start at https://www.staging.healthidentitydirectory.com/provider/apply. Have the CAC registration number and the administrator's details ready. Verification and Health ID review come before the facility is active; then its administrator signs in and invites staff.",
       "action_url": "https://www.staging.healthidentitydirectory.com/provider/apply",
-      "source": "HEALTH_ID_ORGANIZATION_ONBOARDING_CONTRACT.md",
+      "source": "health frontend-worker.mjs landingHref; productHostname.ts providerEnrollmentHref; provider-application.ts",
       "confirmation_required": null
     },
     "HospitalHealthId": {
@@ -244,9 +395,13 @@
       "utterances": [
         "How do I contact Health ID support",
         "Contact Health ID support",
-        "How can I get help from support"
+        "How can I get help from support",
+        "talk to a human",
+        "customer care",
+        "support email",
+        "i need help"
       ],
-      "answer": "Email Health ID support at support@healthidentitydirectory.com. Explain the issue without including passwords, PINs, verification codes, NINs or medical records in public chat. The chatbot cannot sign in for you or change your account. Open: mailto:support@healthidentitydirectory.com",
+      "answer": "Email Health ID support at support@healthidentitydirectory.com. Explain the issue without including passwords, PINs, verification codes, NINs, Health IDs or medical records. Staff can also ask their facility administrator about roles and access. The chatbot cannot sign in for you or change your account. Open: mailto:support@healthidentitydirectory.com",
       "action_url": "mailto:support@healthidentitydirectory.com",
       "source": "Existing approved support_contact",
       "confirmation_required": null
@@ -306,7 +461,7 @@
         "Change my profile information",
         "Update my Health ID details"
       ],
-      "answer": "Open Profile to review your current details. The current patient profile displays identity information rather than offering unrestricted editing. Contact Health ID support for identity or contact corrections; the care facility handles clinical-record corrections. Settings is for available account controls such as the access PIN. Open: https://staging.healthidentitydirectory.com/profile",
+      "answer": "Open Profile to review your current details. The patient profile shows identity information rather than offering unrestricted editing. Contact Health ID support for identity or contact corrections; the care facility handles clinical-record corrections. Your Access PIN, emergency contacts and account deletion are also on Profile. Open: https://staging.healthidentitydirectory.com/profile",
       "action_url": "https://staging.healthidentitydirectory.com/profile",
       "source": "frontend ProfilePage and SettingsPage",
       "confirmation_required": null
@@ -316,23 +471,112 @@
       "utterances": [
         "How do I sign in",
         "Where is the patient login",
-        "Log in to my Health ID account"
+        "Log in to my Health ID account",
+        "how do i log in",
+        "where do i login",
+        "sign in page",
+        "login",
+        "how to signin"
       ],
-      "answer": "Open the patient sign-in page and use your registered email or Health ID and password, or the available Google sign-in option. Provider and admin workspaces use their own access scopes. If patient sign-in fails, use the recovery option. Open: https://staging.healthidentitydirectory.com/sign-in",
+      "answer": "Patients sign in at https://staging.healthidentitydirectory.com/sign-in with email, phone or Health ID and password, or with Google. Staff sign in on the site of the product they use, for example https://ehr.staging.healthidentitydirectory.com/provider/sign-in for Health ID EHR (Lab, Pharmacy, Migrate and Outreach have their own), with their work email and password and then a code from their authenticator app. A patient account and a staff account are separate: use the page for yours.",
       "action_url": "https://staging.healthidentitydirectory.com/sign-in",
-      "source": "frontend SignIn.tsx",
+      "source": "health apps/patient-web ehr-blue/frame/auth/BlueSignIn.tsx; productHostname.ts; routes/SignIn.tsx",
+      "confirmation_required": null
+    },
+    "StaffSignIn": {
+      "question": "I cannot sign in to my staff workspace",
+      "utterances": [
+        "I cannot log in to the EHR",
+        "Staff login not working",
+        "I cant sign in to my workspace",
+        "It says I have no active facility",
+        "cannot access EHR",
+        "doctor login problem",
+        "lab login not working",
+        "pharmacy sign in problem",
+        "my work account is locked",
+        "cant login as staff"
+      ],
+      "answer": "Use the staff sign-in page of the site your facility uses, for example https://ehr.staging.healthidentitydirectory.com/provider/sign-in, with your work email, not a patient Health ID. Wrong password: choose Forgot password? on that page. If it says your account has no active facility, your facility administrator must invite you or restore your access in Staff & access. If the authenticator code is refused, set your phone clock to automatic and use the newest code, or use a recovery code. Still stuck? Email support from your work email.",
+      "action_url": "https://ehr.staging.healthidentitydirectory.com/provider/sign-in",
+      "source": "health apps/patient-web ehr-blue/frame/auth/BlueSignIn.tsx; productHostname.ts; staff/routes/SignIn.tsx NO_ACTIVE_FACILITY_MEMBERSHIP",
       "confirmation_required": null
     },
     "PasswordRecovery": {
       "question": "I forgot my password",
       "utterances": [
+        "HOW DO I RESET MY PASSWORD",
         "I forgot my password",
         "How do I recover my account",
-        "Reset my Health ID password"
+        "Reset my Health ID password",
+        "forgot password",
+        "change my password",
+        "i forgot my pasword",
+        "password reset",
+        "how to recover password",
+        "cant remember my password",
+        "reset pasword"
       ],
-      "answer": "Use Forgot password on the patient sign-in page. Follow the recovery form and verification steps using your own registered details. Do not share verification codes, passwords or access PINs in chat. Open: https://staging.healthidentitydirectory.com/recover",
-      "action_url": "https://staging.healthidentitydirectory.com/recover",
-      "source": "frontend Recovery.tsx",
+      "answer": "It depends on your account. Staff (doctors, nurses, pharmacists, lab scientists and other facility staff): on the sign-in page of the site you work on, choose Forgot password?, for example https://ehr.staging.healthidentitydirectory.com/provider/recover for Health ID EHR (Lab, Pharmacy, Migrate and Outreach have the same page on their own site). Enter your work email, then the 6-digit code sent to your verified contact, and choose a new password of at least 12 characters. Patients: use https://staging.healthidentitydirectory.com/recover with your email, phone or Health ID. Never share codes or passwords in this chat.",
+      "action_url": "https://ehr.staging.healthidentitydirectory.com/provider/recover",
+      "source": "health ehr-blue/frame/auth/BlueRecovery.tsx; routes/Recovery.tsx; productHostname.ts STAFF_RECOVERY_PATH",
+      "confirmation_required": null
+    },
+    "StaffPasswordReset": {
+      "question": "I forgot my staff password",
+      "utterances": [
+        "I forgot my staff password",
+        "Reset my EHR password",
+        "Doctor forgot password",
+        "Forgot my work password",
+        "Reset password on the lab site",
+        "pharmacy password reset",
+        "nurse forgot password",
+        "staff password reset",
+        "forgot ehr pasword",
+        "reset my work account password"
+      ],
+      "answer": "Staff reset their password on the site they sign in to: EHR https://ehr.staging.healthidentitydirectory.com/provider/recover, Lab https://lab.staging.healthidentitydirectory.com/provider/recover, Pharmacy https://pharmacy.staging.healthidentitydirectory.com/provider/recover, Migrate https://migrate.staging.healthidentitydirectory.com/provider/recover, Outreach https://outreach.staging.healthidentitydirectory.com/provider/recover (or choose Forgot password? on the sign-in page). Enter your work email, then the 6-digit code sent to your verified contact, and choose a new password of at least 12 characters. The patient portal's recovery page is for patient accounts only.",
+      "action_url": "https://ehr.staging.healthidentitydirectory.com/provider/recover",
+      "source": "health ehr-blue/frame/auth/BlueRecovery.tsx; productHostname.ts STAFF_RECOVERY_PATH",
+      "confirmation_required": null
+    },
+    "TwoStepVerification": {
+      "question": "How does two-step verification work?",
+      "utterances": [
+        "authenticator app",
+        "two step verification",
+        "2FA code not working",
+        "I lost my phone with the authenticator",
+        "What is MFA",
+        "recovery codes",
+        "how do i set up authenticator",
+        "two factor authentication",
+        "authenticator code wrong",
+        "new phone authenticator",
+        "2 step verification"
+      ],
+      "answer": "Staff accounts need a code from an authenticator app at sign-in. The first time, the sign-in page shows a QR code to scan with your authenticator app (you may first get a code by email), then shows recovery codes: store them offline. If a code is refused, set your phone clock to automatic and use the newest code. Lost or changed your phone? Sign in with one of your recovery codes; each works once. With none left, ask your facility administrator or email Health ID support from your work email. Never share codes in this chat.",
+      "action_url": null,
+      "source": "health apps/patient-web staff/routes/SignIn.tsx STAFF_MFA_NOTICE; mfa/RecoveryCodes.tsx",
+      "confirmation_required": null
+    },
+    "VerificationCode": {
+      "question": "I did not get my verification code",
+      "utterances": [
+        "I did not get the code",
+        "Verification code not received",
+        "OTP not coming",
+        "My code expired",
+        "where is my verification code",
+        "didnt receive code",
+        "resend code",
+        "no sms code",
+        "email code not received"
+      ],
+      "answer": "Codes go to the email or phone on the account (for staff, the verified work contact). Wait a minute, check spam or junk, check the email or phone you typed, then ask for a new code and use only the newest one; codes expire after a short time. Authenticator app codes are made on your phone, not sent. Never share a code with anyone, including this chat. If codes still do not arrive, email Health ID support.",
+      "action_url": null,
+      "source": "health routes/Recovery.tsx; BlueRecovery.tsx; Enrollment.tsx",
       "confirmation_required": null
     },
     "MedicalAdviceBoundary": {
