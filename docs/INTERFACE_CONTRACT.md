@@ -1465,6 +1465,20 @@ backends do not send it, so clients treat it as optional. Pharmacy sends no
 such field: its items already carry `dispensing` (null while open; a reversed
 dispensing counts as done), which is the same rule.
 
+Each same-facility Lab work item also carries `clinicalIndication` (string or
+null): the clinical information the EHR sent with the lab request, stored as
+`clinical_indication` on `lab.work_items` when Lab accepted it. It is null when
+the request had none. Both work-item reads send it: each item of
+`GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/{id}`. It is read
+in the same statement and under the same row-level security as the rest of
+the row, so only a member who may already read the work item gets it, and it
+adds no audit row (the single read's `lab.work-item.read` row is unchanged).
+A work item from another facility's order route never carries it: that
+route's detail gives the same text as `clinicalInformation`, and only while
+the route allows a read. The answer to `accept-ehr-order` is unchanged.
+Earlier backends do not send it, so clients treat it as optional. No
+migration.
+
 Known limit of the Lab list (no schema change in this step). Every row the
 list reads from a Lab table pays its own row-level security check, mostly the
 member's consent check, over a millisecond each. The list reads each Lab

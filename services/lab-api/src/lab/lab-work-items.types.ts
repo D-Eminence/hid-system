@@ -28,4 +28,10 @@ export interface LabWorkItemResult {
   orderRoute?: import('./order-route-cards').WorkItemOrderRoute;
   /** Its patient, only while the route allows a read (P10.5). */
   patient?: import('./order-route-cards').WorkItemRoutePatient;
+  /**
+   * The request's clinical information (null when the EHR sent none), on the
+   * reads of a same-facility work item only: never on a route-backed one, and
+   * not in the acceptance answer.
+   */
+  clinicalIndication?: string | null;
 }
