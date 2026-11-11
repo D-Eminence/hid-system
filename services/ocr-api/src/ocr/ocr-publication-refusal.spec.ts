@@ -59,6 +59,8 @@ interface Access {
   /** EHR's answer to the source read: the source, or a refusal status. */
   source: 'visible' | 404 | 403;
   write: { allowed: boolean; breakGlass?: boolean };
+  /** Identity's answer at the execution attempt, when it differs from the one at the request (a grant revoked). */
+  attemptWrite?: { allowed: boolean; breakGlass?: boolean };
 }
 
 type Rows = { rows: unknown[]; rowCount: number };
@@ -93,6 +95,10 @@ function harness(domain: Domain, access: Access) {
       return rows([{ ...publication, status: 'published', row_version: '3', target_resource_type: params[2],
         target_resource_id: params[3] }]);
     }
+    if (sql.includes('update ocr.publications set') && sql.includes("'failed'")) {
+      return rows([{ ...publication, status: 'failed', attempt_count: 1, row_version: '3',
+        failure_code: params.find((value) => typeof value === 'string' && /^[A-Z_]+$/.test(value)) ?? null }]);
+    }
     throw new Error(`Unexpected SQL in test: ${sql}`);
   };
   const clients: PoolClient[] = [];
@@ -110,8 +116,12 @@ function harness(domain: Domain, access: Access) {
     createOcrClinicalNote: jest.fn(async (_patient: string, _input: unknown, _call: DataAccessContext, _key: string) =>
       ({ id: noteId, status: 'draft' })),
   };
-  const identity = { authorize: jest.fn(async () => ({ allowed: access.write.allowed,
-    breakGlass: access.write.breakGlass ?? false })) };
+  let writeChecks = 0;
+  const identity = { authorize: jest.fn(async () => {
+    writeChecks += 1;
+    const answer = writeChecks > 1 && access.attemptWrite ? access.attemptWrite : access.write;
+    return { allowed: answer.allowed, breakGlass: answer.breakGlass ?? false };
+  }) };
   const labApi = { createOcrImport: jest.fn() };
   const pharmacyApi = { createOcrImport: jest.fn(), createOcrImportBatch: jest.fn() };
   const audit = { recordWithClient: jest.fn(async () => undefined) };
@@ -133,7 +143,7 @@ function harness(domain: Domain, access: Access) {
     expect(pharmacyApi.createOcrImportBatch).not.toHaveBeenCalled();
     expect(audit.recordWithClient).not.toHaveBeenCalled();
   };
-  return { publish, ehrApi, identity, nothingWritten };
+  return { publish, ehrApi, identity, audit, sql, nothingWritten };
 }
 
 async function refusal(run: () => Promise<unknown>): Promise<DomainProblem> {
@@ -172,10 +182,27 @@ describe('OCR publication refusals', () => {
     run.nothingWritten();
   });
 
-  it('still refuses a break-glass write as before, with 404 OCR_JOB_NOT_FOUND', async () => {
-    const run = harness('EHR', { source: 'visible', write: { allowed: true, breakGlass: true } });
+  it.each(['EHR', 'LAB', 'PHARMACY', 'DOCUMENT_ONLY'] as const)(
+    'still refuses a break-glass write for %s as before, with 404 OCR_JOB_NOT_FOUND', async (domain) => {
+    const run = harness(domain, { source: 'visible', write: { allowed: true, breakGlass: true } });
     const problem = await refusal(run.publish);
     expect([problem.getStatus(), problem.code]).toEqual([404, 'OCR_JOB_NOT_FOUND']);
     run.nothingWritten();
+  });
+
+  it('refuses at the execution attempt when the grant is gone after the request: failed with the code, audited, nothing written', async () => {
+    const run = harness('EHR', { source: 'visible', write: { allowed: true }, attemptWrite: { allowed: false } });
+    const outcome = await run.publish().then((value) => ({ value }), (error: unknown) => ({ error }));
+    expect(run.identity.authorize).toHaveBeenCalledTimes(2);
+    expect(run.ehrApi.createOcrClinicalNote).not.toHaveBeenCalled();
+    expect(run.sql().some((text) => text.includes('update ocr.publications set') && text.includes("'failed'"))).toBe(true);
+    const failedAudit = run.audit.recordWithClient.mock.calls.map((call) => JSON.stringify(call))
+      .find((text) => text.includes('ocr.publication.fail'));
+    expect(failedAudit).toContain('OCR_PUBLISH_NEEDS_DIRECT_CARE');
+    if ('error' in outcome) {
+      expect((outcome.error as DomainProblem).code).toBe('OCR_PUBLISH_NEEDS_DIRECT_CARE');
+    } else {
+      expect(outcome.value).toMatchObject({ status: 'failed' });
+    }
   });
 });

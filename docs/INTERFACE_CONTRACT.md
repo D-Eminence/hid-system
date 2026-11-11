@@ -3611,7 +3611,9 @@ confirm OCR jobs, never publishes. Only the answer changes.
 1. EHR's source read (`GET /api/v1/ehr/internal/ocr/documents/:documentId/source`,
    EHR's row-level security and Identity read check under the request's
    purpose) does not return the job's source (404 or 403): 404
-   `OCR_JOB_NOT_FOUND`, as before, so nothing is revealed.
+   `OCR_JOB_NOT_FOUND`, so nothing is revealed. (Before, an EHR 403 on the
+   source read was passed through with EHR's own code; it is now the same
+   404, which reveals less.)
 2. Identity allows `write_records` under `direct-care`, not break-glass: the
    publication proceeds as before.
 3. Identity allows it only as break-glass: refused as before, 404
