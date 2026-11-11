@@ -48,7 +48,7 @@ describe('PharmacyApiClient transport contract', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  // 0113: an own work item may carry its patient (OWN_WORK_PATIENT_CARD_ENABLED on); the client keeps it, and
+  // 0121: an own work item may carry its patient (OWN_WORK_PATIENT_CARD_ENABLED on); the client keeps it, and
   // answers exactly as before when it is absent.
   it('keeps a work item\'s optional patient, and leaves it out when absent', async () => {
     const base = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-e89b-42d3-a456-426614174004',

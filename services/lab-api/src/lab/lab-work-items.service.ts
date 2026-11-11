@@ -68,11 +68,11 @@ const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility
  * (no schema change in this step, docs/INTERFACE_CONTRACT.md): past roughly
  * 2,000 work items at a laboratory the list exceeds lab-api's 15-second limit.
  * With OWN_WORK_PATIENT_CARD_ENABLED on, each list load also calls
- * lab.work_item_patient_cards (0113) once for its own rows, at most 200. That
+ * lab.work_item_patient_cards (0121) once for its own rows, at most 200. That
  * is a statement of its own, so it does not count toward this query's
  * 15-second limit and does not grow with the laboratory. Under a NOBYPASSRLS
  * owner, as in production, each of those rows pays the work items' read
- * policy and then the same consent test again (0113's header, D5): 0.7-1.1 s
+ * policy and then the same consent test again (0121's header, D5): 0.7-1.1 s
  * for 200 rows, against 0.8-1.2 s for this query (PostgreSQL 16, a shared
  * 4-CPU 2.8 GHz Xeon). So the setting roughly doubles the list's database time.
  */
@@ -206,7 +206,7 @@ export class LabWorkItemsService {
         workItemDenied);
       await this.audit.recordWithClient(client, this.auditEvent(context,row,'lab.work-item.read', basisDetails(basis)));
       const cards = row.order_route_id ? await this.routeCards.cards(client, [row.id], context.correlationId) : undefined;
-      // Own work (0113, OWN_WORK_PATIENT_CARD_ENABLED): its patient, read after
+      // Own work (0121, OWN_WORK_PATIENT_CARD_ENABLED): its patient, read after
       // the read row above, which already names the patient.
       const own = row.order_route_id ? undefined
         : await this.ownPatients.patients(client, [row.id], context.correlationId);
@@ -222,7 +222,7 @@ export class LabWorkItemsService {
    * shape is unchanged. A route-backed row carries its route
    * card and, while the route allows a read, its patient (C12). This
    * facility's own row carries its patient while OWN_WORK_PATIENT_CARD_ENABLED
-   * is on and the member may read it (0113); off, it carries none. To a member
+   * is on and the member may read it (0121); off, it carries none. To a member
    * who may receive lab requests from other facilities, the answer says
    * whether this facility receives them now and whether any wait or are held
    * here (item 4, 0089; read in the transaction after the audit rows, left
@@ -259,7 +259,7 @@ export class LabWorkItemsService {
    * (ids only, §12) and basis 'order-route', in the list's transaction (no
    * answer without its audit). Rows without a patient on the card (the route
    * allows no read now, or C12 failed) name no one. Own work whose patient is
-   * shown (0113) gets the same: one row per patient, with the work items (ids
+   * shown (0121) gets the same: one row per patient, with the work items (ids
    * only) and basis 'consent', which the patient's access log shows as a view;
    * none while OWN_WORK_PATIENT_CARD_ENABLED is off.
    */
@@ -302,7 +302,7 @@ export class LabWorkItemsService {
    * A work item as Lab answers it. A route-backed one (P4c) never carries
    * the other facility's order id (PRIV P4.3); it carries its route card
    * instead, and its patient only while the route allows a read. This
-   * facility's own one carries its patient when 0113's reader gave one
+   * facility's own one carries its patient when 0121's reader gave one
    * (OWN_WORK_PATIENT_CARD_ENABLED on, and the member may read it).
    */
   private project(row: WorkItemRow, card?: OrderRouteCard, ownPatient?: WorkItemRoutePatient): LabWorkItemResult {

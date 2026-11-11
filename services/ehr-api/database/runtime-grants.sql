@@ -1463,7 +1463,7 @@ revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public
 -- outreach.campaign_members, so it can neither update nor lock a membership.
 revoke all on function outreach.validate_registration_campaign_write() from public;
 
--- Patient details on this facility's own lab and pharmacy work (0113), as
+-- Patient details on this facility's own lab and pharmacy work (0121), as
 -- that migration grants them (its section 2): the Lab reader to the Lab
 -- runtime and the Pharmacy reader to the Pharmacy runtime, each also to the
 -- schema test runtime; nothing to the EHR, Identity, OCR, Outreach or

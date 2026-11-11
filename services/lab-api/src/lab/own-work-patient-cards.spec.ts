@@ -13,7 +13,7 @@ import { LabOrderRouteCards } from './order-route-cards';
 import { LabOwnWorkPatientCards, OWN_WORK_PATIENT_CARDS_OFF } from './own-work-patient-cards';
 
 /*
- * The patient on this facility's own work (0113, owner decision 25 of
+ * The patient on this facility's own work (0121, owner decision 25 of
  * 2026-11-01, "all recommended except D5"): behind OWN_WORK_PATIENT_CARD_ENABLED.
  * Off, nothing is read and the answers and audit rows are exactly as before.
  * On, own rows carry the patient lab.work_item_patient_cards gives, read in a

@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0113",
+    "last": "0121",
     "count": 113,
     "files": [
       {
@@ -547,8 +547,8 @@
         "sha256": "971da7bed817568c6184274e59bcb9d659851149cdc70e223e94123f2ddb09d1"
       },
       {
-        "name": "0113_work_item_patient_cards.sql",
-        "sha256": "42460fbb5628dd5a1b6fc53d3d044839b3abb6970a48f0b497cd5876d615c736"
+        "name": "0121_work_item_patient_cards.sql",
+        "sha256": "536f0f1fb50b28017d25209b1c00d55f83df52e3a3ec7e38d3063a32448ee02b"
       }
     ]
   },

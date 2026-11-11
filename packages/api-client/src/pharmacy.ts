@@ -33,7 +33,7 @@ export interface PharmacyMedicationReference {
  * The patient on a work item: name, sex, date of birth and the last 4
  * characters of the Health ID. On this facility's own work it is sent while
  * pharmacy-api's OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read
- * the work (0113); absent otherwise.
+ * the work (0121); absent otherwise.
  */
 export interface PharmacyWorkItemPatient {
   fullName: string;

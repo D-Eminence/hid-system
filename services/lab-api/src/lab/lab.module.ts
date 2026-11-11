@@ -27,7 +27,7 @@ import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 @Module({ imports: [LabIdentityAuthorizationModule, HealthIdInUrlRefusalModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController, LabOrderRoutesController],
   providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService, PatientResultsService,
     LabOrderRoutesService, LabOrderRouteAccess, LabOrderRouteCards,
-    // The patient on own work (0113), on only while OWN_WORK_PATIENT_CARD_ENABLED is true.
+    // The patient on own work (0121), on only while OWN_WORK_PATIENT_CARD_ENABLED is true.
     { provide: LabOwnWorkPatientCards,
       useFactory: () => new LabOwnWorkPatientCards(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED) }],
   exports: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService] })

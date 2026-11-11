@@ -3886,14 +3886,14 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
 `outreach.campaign.write` accepted. On a database without 0111, that would
 reopen the ungoverned writes.
 
-## 41. Patient details on this facility's own lab and pharmacy work (0113)
+## 41. Patient details on this facility's own lab and pharmacy work (0121)
 
 Owner decision 25 of 2026-11-01 (D-Eminence, "all recommended except D5", on
 the Akos handover backend plan, item 3a; D8: emergency sessions see the
 patient details with the work). Laboratories and pharmacies run as
 stand-alone products for the whole facility, so their staff need the
 patient's name, sex, date of birth and Health ID ending on their own work,
-not only on work sent from another facility. 0113 is unsigned until the
+not only on work sent from another facility. 0121 is unsigned until the
 owner signs its declaration. Sessions working on 0104-0112 add sections
 too, so this section's number is the coordinator's to fix at merge.
 
@@ -3924,7 +3924,7 @@ because its work rows are shown too. Route-backed work items are unchanged:
 their patient still comes from the route card, only while the route allows a
 read.
 
-Database (0113, functions only): `lab.work_item_patient_cards(uuid[])` and
+Database (0121, functions only): `lab.work_item_patient_cards(uuid[])` and
 `pharmacy.work_item_patient_cards(uuid[])`, SECURITY DEFINER, owned by
 `identity.patients`' owner, at most 200 ids (else 22023
 `WORK_ITEM_PATIENT_CARDS_INVALID`). A row is answered only for own work at
@@ -3953,16 +3953,16 @@ own rows (at most 200), as a statement of its own, so it does not count
 toward the list query's 15-second limit and does not grow with the size of
 the laboratory or pharmacy. Under a NOBYPASSRLS owner, as in production, each
 of those rows pays the work items' read policy and then the same consent
-test again (0113's header, D5). Measured on PostgreSQL 16 on a shared 4-CPU
+test again (0121's header, D5). Measured on PostgreSQL 16 on a shared 4-CPU
 2.8 GHz Xeon with 200 own rows: the Lab reader 0.7-1.1 s against 0.8-1.2 s
 for the Lab list query, the Pharmacy reader 0.6-1.0 s against about 0.6 s
 for the Pharmacy list query. So the setting roughly doubles a list's
 database time. The Lab list's known limit (about 2,000 work items) is
 unchanged.
 
-0113 has no down migration. To withdraw the feature, set
+0121 has no down migration. To withdraw the feature, set
 `OWN_WORK_PATIENT_CARD_ENABLED=false` in lab-api and pharmacy-api; the two
-functions stay and nothing calls them. Do not drop them: 0113 stays
+functions stay and nothing calls them. Do not drop them: 0121 stays
 recorded, so the runner does not re-create them, and runtime-grants.sql's
-0113 block would then stop `db:bootstrap` with 42883. The suite is
+0121 block would then stop `db:bootstrap` with 42883. The suite is
 `services/ehr-api/test/database/work-item-patient-cards.integration.sql`.
