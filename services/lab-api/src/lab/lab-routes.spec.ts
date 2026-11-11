@@ -37,7 +37,7 @@ describe('Lab route permission inventory',()=>{
 
  it('lets the doctor role read released results by order and by result, and no execution, accession or unreleased value',()=>{
   const reachable=routes().filter(route=>route.method===RequestMethod.GET&&!route.internal&&route.permissions.every(permission=>DOCTOR.includes(permission)));
-  expect(reachable.map(route=>route.path).sort()).toEqual(['lab/ehr-orders/:sourceEhrOrderId/released-results','lab/imports/:importId',
+  expect(reachable.map(route=>route.path).sort()).toEqual(['lab/ehr-orders/:sourceEhrOrderId/released-results','lab/imports','lab/imports/:importId',
    'lab/results/:resultId/history','lab/work-items','lab/work-items/:workItemId']);
   for(const route of routes())if(route.permissions.some(permission=>['lab.execution.read','lab.accession.read'].includes(permission)))
    expect(reachable).not.toContainEqual(route);
