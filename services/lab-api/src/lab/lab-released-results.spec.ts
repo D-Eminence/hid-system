@@ -19,6 +19,8 @@ const executionId='70000000-0000-4000-8000-000000000001',pendingExecutionId='700
 const resultId='a0000000-0000-4000-8000-000000000001',pendingResultId='a0000000-0000-4000-8000-000000000002';
 const workItemId='b0000000-0000-4000-8000-000000000001',sourceEhrOrderId='c0000000-0000-4000-8000-000000000001';
 const grantId='e0000000-0000-4000-8000-000000000001';
+// The lab scientist who entered every revision here: never the reader, and never named in an answer.
+const scientistId='20000000-0000-4000-8000-000000000009';
 // The doctor role's Lab permissions (0017, 0018, 0021): no execution or accession read.
 const DOCTOR=['lab.import.read','lab.import.write','lab.work-item.read','lab.work-item.accept','lab.result.released.read'];
 const LAB_STAFF=['lab.execution.read','lab.result.released.read','lab.result.enter','lab.result.correct'];
@@ -36,12 +38,12 @@ interface StoredResult {executionId:string;currentVersion:number;revisions:Revis
 const revisionRow=(id:string,result:StoredResult,r:Revision)=>({id:`revision-${id}-${r.version}`,result_id:id,execution_id:result.executionId,
  patient_id:patientId,facility_id:facilityId,version:String(r.version),result_type:'numeric',numeric_value:String(r.value),text_value:null,
  unit:'g/dL',reference_range:'12.0-16.0',abnormal_flag:'normal',entry_source:'manual',verification_status:'unverified',entered_at:enteredAt,
- correction_reason:r.version===1?null:CORRECTION_REASON,request_sha256:'a'.repeat(64),verified_at:r.verified?verifiedAt:null,
+ entered_by:scientistId,correction_reason:r.version===1?null:CORRECTION_REASON,request_sha256:'a'.repeat(64),verified_at:r.verified?verifiedAt:null,
  released_at:r.released?releasedAt:null,invalidated_at:r.invalidated?invalidatedAt:null});
 /** The revision as a released-only reader receives it. */
 const released=(version:number,value:number,verificationStatus:'verified'|'entered_in_error'='verified')=>({version,resultType:'numeric',
  numericValue:value,textValue:null,unit:'g/dL',referenceRange:'12.0-16.0',abnormalFlag:'normal',entrySource:'manual',verificationStatus,
- releaseStatus:'released',enteredAt,releasedAt,correctionReason:version===1?null:CORRECTION_REASON});
+ releaseStatus:'released',enteredAt,enteredByYou:false,releasedAt,correctionReason:version===1?null:CORRECTION_REASON});
 
 // Version 1 (12.5) released; version 2 (7.1), a correction, entered and not verified.
 const correctedAfterRelease:StoredResult={executionId,currentVersion:2,revisions:[{version:1,value:12.5,verified:true,released:true},{version:2,value:7.1}]};
@@ -91,7 +93,7 @@ describe('LabExecutionsService.getResultHistory for released-only readers',()=>{
   const {service}=harness();
   const history=await service.getResultHistory(doctor,resultId);
   expect(history).toEqual({id:resultId,executionId,status:'released',verificationStatus:'verified',currentVersion:1,
-   currentReleasedVersion:1,revisions:[released(1,12.5)]});
+   currentReleasedVersion:1,correctionPending:true,revisions:[released(1,12.5)]});
   const body=JSON.stringify(history);
   expect(body).not.toContain('7.1');
   expect(body).not.toContain(CORRECTION_REASON);
@@ -110,10 +112,10 @@ describe('LabExecutionsService.getResultHistory for released-only readers',()=>{
   const superseded=harness({results:{[resultId]:{executionId,currentVersion:3,revisions:[{version:1,value:12.5,verified:true,released:true,invalidated:true},
    {version:2,value:13.4,verified:true,released:true},{version:3,value:7.1}]}}});
   await expect(superseded.service.getResultHistory(doctor,resultId)).resolves.toEqual({id:resultId,executionId,status:'released',
-   verificationStatus:'verified',currentVersion:2,currentReleasedVersion:2,revisions:[released(1,12.5,'entered_in_error'),released(2,13.4)]});
+   verificationStatus:'verified',currentVersion:2,currentReleasedVersion:2,correctionPending:true,revisions:[released(1,12.5,'entered_in_error'),released(2,13.4)]});
   const withdrawn=harness({results:{[resultId]:{executionId,currentVersion:2,revisions:[{version:1,value:12.5,verified:true,released:true,invalidated:true},{version:2,value:7.1}]}}});
   await expect(withdrawn.service.getResultHistory(doctor,resultId)).resolves.toEqual({id:resultId,executionId,status:'entered_in_error',
-   verificationStatus:'entered_in_error',currentVersion:1,currentReleasedVersion:1,revisions:[released(1,12.5,'entered_in_error')]});
+   verificationStatus:'entered_in_error',currentVersion:1,currentReleasedVersion:1,correctionPending:true,revisions:[released(1,12.5,'entered_in_error')]});
  });
 
  it('keeps stored version numbers, so a revision never released leaves a gap and nothing else',async()=>{
@@ -122,7 +124,7 @@ describe('LabExecutionsService.getResultHistory for released-only readers',()=>{
    {version:2,value:7.1},{version:3,value:13.4,verified:true,released:true}]}}});
   const history=await service.getResultHistory(doctor,resultId);
   expect(history).toEqual({id:resultId,executionId,status:'released',verificationStatus:'verified',currentVersion:3,
-   currentReleasedVersion:3,revisions:[released(1,12.5),released(3,13.4)]});
+   currentReleasedVersion:3,correctionPending:false,revisions:[released(1,12.5),released(3,13.4)]});
   expect(JSON.stringify(history)).not.toContain('7.1');
  });
 
@@ -172,10 +174,18 @@ describe('LabExecutionsService.listReleasedForEhrOrder',()=>{
   const found=await byOrder(service).listReleasedForEhrOrder(doctor,sourceEhrOrderId);
   expect(found).toEqual({workItemId,sourceEhrOrderId,sourceEhrOrderVersion:1,patientId,acceptedAt,
    test:{codeSystem:'http://loinc.org',code:'718-7',name:'Haemoglobin'},
-   results:[{id:resultId,executionId,status:'released',verificationStatus:'verified',currentVersion:1,currentReleasedVersion:1,revisions:[released(1,12.5)]}]});
+   results:[{id:resultId,executionId,status:'released',verificationStatus:'verified',currentVersion:1,currentReleasedVersion:1,correctionPending:true,revisions:[released(1,12.5)]}]});
   const body=JSON.stringify(found);
   for(const hidden of ['7.1','9.9',CORRECTION_REASON,pendingResultId,pendingExecutionId])expect(body).not.toContain(hidden);
   expect(body).not.toMatch(/hasUnreleased|unreleased/i);
+ });
+
+ it('says enteredByYou to a reader who entered the released version, and never names them',async()=>{
+  const {service}=harness();
+  const scientist={...doctor,actor:{...doctor.actor,accountId:scientistId}};
+  const found=await byOrder(service).listReleasedForEhrOrder(scientist,sourceEhrOrderId);
+  expect((found.results as {revisions:{enteredByYou:unknown}[]}[]).map(r=>r.revisions.map(v=>v.enteredByYou))).toEqual([[true]]);
+  expect(JSON.stringify(found)).not.toContain(scientistId);
  });
 
  it('answers with no results while nothing of the order is released',async()=>{
@@ -262,7 +272,7 @@ describe('LabExecutionsService.listReleasedForEhrOrder',()=>{
  it('gives Lab staff the released view on this route too',async()=>{
   const {service}=harness();
   const found=await byOrder(service).listReleasedForEhrOrder(labStaff,sourceEhrOrderId);
-  expect(found.results).toEqual([{id:resultId,executionId,status:'released',verificationStatus:'verified',currentVersion:1,currentReleasedVersion:1,revisions:[released(1,12.5)]}]);
+  expect(found.results).toEqual([{id:resultId,executionId,status:'released',verificationStatus:'verified',currentVersion:1,currentReleasedVersion:1,correctionPending:true,revisions:[released(1,12.5)]}]);
  });
 
  it('allows an emergency read under an active break-glass grant, as the history read does',async()=>{
@@ -270,5 +280,51 @@ describe('LabExecutionsService.listReleasedForEhrOrder',()=>{
   const {service,provider}=harness({},async()=>decision({purpose:'emergency',breakGlass:true}));
   await expect(byOrder(service).listReleasedForEhrOrder(emergency,sourceEhrOrderId)).resolves.toMatchObject({workItemId,results:[{id:resultId}]});
   expect(provider.authorize).toHaveBeenCalledWith({patientId,scope:'read_records',purpose:'emergency',context:emergency});
+ });
+});
+
+/**
+ * The clinician saw a released result with no sign that the lab was correcting it, so they could act on a value the lab
+ * knew was wrong (lab-release step 9). The released view now says when a newer version of a released result waits to
+ * be checked and released (correctionPending), and still answers nothing of that version.
+ */
+describe('The released view says when a correction of a released result is waiting',()=>{
+ const pending=async(revisions:Revision[])=>(await harness({results:{[resultId]:{executionId,currentVersion:revisions.length,revisions}}})
+  .service.getResultHistory(doctor,resultId) as {correctionPending?:unknown}).correctionPending;
+
+ it('says so while a correction waits to be checked, and nothing of it',async()=>{
+  const history=await harness().service.getResultHistory(doctor,resultId);
+  expect(history).toMatchObject({correctionPending:true,currentVersion:1,currentReleasedVersion:1});
+  expect(history.revisions.map(r=>r.version)).toEqual([1]);
+  const body=JSON.stringify(history);
+  for(const hidden of ['7.1',CORRECTION_REASON,'"version":2'])expect(body).not.toContain(hidden);
+ });
+
+ it('still says so once the correction is checked but not yet released',async()=>{
+  expect(await pending([{version:1,value:12.5,verified:true,released:true},{version:2,value:7.1,verified:true}])).toBe(true);
+ });
+
+ it('says so for a correction corrected again before it was checked',async()=>{
+  expect(await pending([{version:1,value:12.5,verified:true,released:true},{version:2,value:7.1},{version:3,value:13.4}])).toBe(true);
+ });
+
+ it('says nothing waits when the released version is the current one, or the correction is released',async()=>{
+  expect(await pending([{version:1,value:12.5,verified:true,released:true}])).toBe(false);
+  expect(await pending([{version:1,value:12.5,verified:true,released:true},{version:2,value:13.4,verified:true,released:true}])).toBe(false);
+ });
+
+ it('says nothing waits when the newer version was marked entered in error',async()=>{
+  expect(await pending([{version:1,value:12.5,verified:true,released:true},{version:2,value:7.1,invalidated:true}])).toBe(false);
+ });
+
+ it('says it of each result of the order the clinician placed, naming only released versions in the audit row',async()=>{
+  const settled:StoredResult={executionId:pendingExecutionId,currentVersion:1,revisions:[{version:1,value:9.9,verified:true,released:true}]};
+  const {service,client,audit}=harness({results:{[resultId]:correctedAfterRelease,[pendingResultId]:settled}});
+  const found=await byOrder(service).listReleasedForEhrOrder(doctor,sourceEhrOrderId);
+  expect((found.results as {id:string;correctionPending:boolean}[]).map(r=>[r.id,r.correctionPending]))
+   .toEqual([[resultId,true],[pendingResultId,false]]);
+  expect(JSON.stringify(found)).not.toContain('7.1');
+  expect(audit.recordWithClient).toHaveBeenCalledWith(client,auditEvent({action:'lab.result.released.read',resourceType:'lab-work-item',
+   resourceId:workItemId,details:{sourceEhrOrderId,results:[{resultId,versionsReturned:[1]},{resultId:pendingResultId,versionsReturned:[1]}]}}));
  });
 });
