@@ -155,3 +155,110 @@ describe('LabImportsService database refusals', () => {
     expect(answer(error, '/lab/imports')).toMatchObject({ status: 500, code: 'INTERNAL_ERROR' });
   });
 });
+
+/**
+ * GET lab/imports?patientId=…: one patient's imported evidence for the chart,
+ * on the same read_records decision and audit pattern as GET :importId.
+ */
+describe('LabImportsService.listForPatient', () => {
+  const patientId = command.patientId;
+  const otherPatientId = '50000000-0000-4000-8000-000000000002';
+  const evidence = (n: number, patient = patientId, facility = context.facilityId) => ({
+    id: `b0000000-0000-4000-8000-${String(n).padStart(12, '0')}`, patient_id: patient, facility_id: facility,
+    source_type: 'IMPORTED_EXTERNAL', status: 'accepted', external_lab_name: 'Synthetic Reference Lab',
+    external_reference: null, collected_at: new Date('2026-10-01T08:00:00Z'), reported_at: new Date('2026-10-02T08:00:00Z'),
+    received_at: new Date(Date.UTC(2026, 9, 10, 0, 0, 0) - n * 60_000), source_document_id: command.sourceDocumentId,
+    ocr_job_id: command.ocrJobId, extraction_id: command.extractionId, validation_id: command.validationId,
+    validation_version: 3, publication_id: command.publicationId, row_version: '1', created_at: new Date() });
+
+  /** A stand-in database that applies the WHERE clauses the service sends: patient, facility, cursor and limit. */
+  const harness = (stored: ReturnType<typeof evidence>[], decision = { allowed: true, breakGlass: false }) => {
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const client = { query: jest.fn(async (sql: string, params: unknown[]) => {
+      queries.push({ sql, params });
+      if (sql.includes('from lab.imported_evidence e')) {
+        const [patient, facility, cursor, limit] = params as [string, string, string | null, number];
+        const visible = stored.filter((row) => row.patient_id === patient && row.facility_id === facility)
+          .sort((a, b) => b.received_at.getTime() - a.received_at.getTime() || b.id.localeCompare(a.id));
+        const at = cursor ? visible.findIndex((row) => row.id === cursor) : -1;
+        if (cursor && at < 0) return { rows: [], rowCount: 0 };
+        const rows = visible.slice(at + 1, at + 1 + limit);
+        return { rows, rowCount: rows.length };
+      }
+      if (sql.includes('from lab.imported_observations')) {
+        const [ids] = params as [string[]];
+        const rows = ids.map((id) => ({ importId: id, id: `c-${id}`, ordinal: 1, testName: 'Haemoglobin', value: '12.5' }));
+        return { rows, rowCount: rows.length };
+      }
+      return { rows: [], rowCount: 0 };
+    }) } as unknown as PoolClient;
+    const database = { withTransaction: jest.fn(async <T>(_context: DataAccessContext,
+      operation: (db: PoolClient) => Promise<T>) => operation(client)) } as unknown as DatabaseService;
+    const identity = { authorize: jest.fn().mockResolvedValue(decision) } as unknown as IdentityService;
+    const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
+    return { service: new LabImportsService(database, identity, audit), queries, database, identity, audit };
+  };
+
+  it('returns the patient\'s evidence newest first with observations, provenance ids and one ids-only audit row', async () => {
+    const { service, identity, audit, queries } = harness([evidence(2), evidence(1), evidence(3)]);
+    const page = await service.listForPatient(context, { patientId });
+    expect(identity.authorize).toHaveBeenCalledWith(patientId, 'read_records', 'direct-care', context);
+    expect(page.nextCursor).toBeNull();
+    expect(page.records.map((record) => record.id)).toEqual([evidence(1).id, evidence(2).id, evidence(3).id]);
+    expect(page.records[0]).toMatchObject({ patientId, facilityId: context.facilityId, externalLabName: 'Synthetic Reference Lab',
+      reportedAt: evidence(1).reported_at, collectedAt: evidence(1).collected_at, sourceDocumentId: command.sourceDocumentId,
+      ocrJobId: command.ocrJobId, extractionId: command.extractionId, validationId: command.validationId,
+      validationVersion: 3, publicationId: command.publicationId,
+      observations: [{ id: `c-${evidence(1).id}`, ordinal: 1, testName: 'Haemoglobin', value: '12.5' }] });
+    expect(page.records[0]!.observations[0]).not.toHaveProperty('importId');
+    expect(queries[0]!.sql).toMatch(/order by e\.received_at desc, e\.id desc limit \$4/);
+    expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
+    const event = (audit.recordWithClient as jest.Mock).mock.calls[0][1];
+    expect(event).toMatchObject({ action: 'lab.import.list', patientId, facilityId: context.facilityId,
+      resourceType: 'lab-imported-evidence-collection', purposeOfUse: 'direct-care',
+      details: { recordCount: 3, observationCount: 3, importIds: page.records.map((record) => record.id) } });
+    expect(JSON.stringify(event)).not.toMatch(/Haemoglobin|12\.5|Synthetic Reference Lab/);
+  });
+
+  it('refuses before any query or audit when canonical authorization is absent', async () => {
+    const { service, database, audit } = harness([evidence(1)], { allowed: false, breakGlass: false });
+    await expect(service.listForPatient(context, { patientId })).rejects.toMatchObject({ status: 403, code: 'LAB_IMPORT_ACCESS_DENIED' });
+    expect(database.withTransaction).not.toHaveBeenCalled();
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('allows a break-glass read, as get() does', async () => {
+    const { service } = harness([evidence(1)], { allowed: true, breakGlass: true });
+    await expect(service.listForPatient(context, { patientId })).resolves.toMatchObject({ records: [{ id: evidence(1).id }] });
+  });
+
+  it('returns no other patient\'s evidence and no other facility\'s, and binds both in the query', async () => {
+    const otherFacility = '10000000-0000-4000-8000-000000000009';
+    const { service, queries } = harness([evidence(1), evidence(2, otherPatientId), evidence(3, patientId, otherFacility)]);
+    const page = await service.listForPatient(context, { patientId });
+    expect(page.records.map((record) => record.id)).toEqual([evidence(1).id]);
+    expect(queries[0]!.params.slice(0, 2)).toEqual([patientId, context.facilityId]);
+    expect(queries[1]!.params).toEqual([[evidence(1).id], patientId, context.facilityId]);
+  });
+
+  it('pages by cursor within the default and maximum bounds', async () => {
+    const stored = Array.from({ length: 60 }, (_, index) => evidence(index + 1));
+    const { service, queries } = harness(stored);
+    const first = await service.listForPatient(context, { patientId });
+    expect(first.records).toHaveLength(20);
+    expect(queries[0]!.params[3]).toBe(21);
+    expect(first.nextCursor).toBe(evidence(20).id);
+    const second = await service.listForPatient(context, { patientId, cursor: first.nextCursor!, limit: 50 });
+    expect(second.records.map((record) => record.id)).toEqual(stored.slice(20, 60).map((row) => row.id));
+    expect(second.nextCursor).toBeNull();
+    const clamped = await service.listForPatient(context, { patientId, limit: 10_000 });
+    expect(clamped.records).toHaveLength(50);
+  });
+
+  it('answers an empty page, without an observation query, when there is no evidence', async () => {
+    const { service, queries, audit } = harness([]);
+    await expect(service.listForPatient(context, { patientId })).resolves.toEqual({ records: [], nextCursor: null });
+    expect(queries.some((query) => query.sql.includes('lab.imported_observations'))).toBe(false);
+    expect((audit.recordWithClient as jest.Mock).mock.calls[0][1].details).toEqual({ recordCount: 0, observationCount: 0, importIds: [] });
+  });
+});
