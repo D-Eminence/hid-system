@@ -1363,8 +1363,9 @@ and stale job versions.
 Publication requires `Idempotency-Key`, `direct-care`, an explicit validation
 ID/version, and the latest confirmation ID. It needs the publisher's own
 direct-care `write_records` grant on the patient for every target (section
-39), or, for an EHR reading only, the patient's dedicated records-processing
-grant, which publishes it as a draft into the patient's "Imported paper
+39), or the patient's dedicated records-processing grant, which publishes any
+reading (a Lab, medicine or document-only one as a draft note titled by kind)
+as a draft into the patient's "Imported paper
 records" encounter (section 41, 0113): a caller with neither who can read the
 job answers 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE`; one who cannot read the job
 answers 404 `OCR_JOB_NOT_FOUND`. An EHR reading's `encounterId` is optional
@@ -3059,7 +3060,7 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 | Validate or reject | `ocr.validation.write` | `healthcare-operations` write |
 | Confirm the source patient | `ocr.patient.confirm` (doctor, clinician, nurse) | `healthcare-operations` write |
 | EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
-| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; or, for an EHR reading as a draft, the dedicated records-processing grant (an approved `healthcare-operations` `write_records` request; never the cover: section 41, 0113); otherwise 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 39) |
+| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; or, for any reading as a draft note, the dedicated records-processing grant (an approved `healthcare-operations` `write_records` request; never the cover: section 41, 0113); otherwise 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 39) |
 
 Without a records-processing grant or a cover, OCR's create answers 403
 `OCR_RECORDS_PROCESSING_CONSENT_REQUIRED` when the request names the patient

@@ -73,6 +73,8 @@ interface Access {
   attemptGrant?: string | null;
   /** EHR's answer to the source read under healthcare-operations (default: the same source). */
   draftSource?: 'visible' | 'another patient' | 404;
+  /** The source's status under healthcare-operations (the OCR worker deleting or deleted it). */
+  draftStatus?: 'source_deleting' | 'source_deleted';
   /** The validated reading names no visit. */
   noVisit?: boolean;
   /** A document-only reading with no typed text. */
@@ -140,7 +142,9 @@ function harness(domain: Domain, access: Access) {
   const ehrApi = {
     getOcrDocumentSource: jest.fn(async (_document: string, call: DataAccessContext) => {
       const answer = call.purposeOfUse === 'healthcare-operations' ? access.draftSource ?? 'visible' : access.source;
-      if (answer === 'visible') return source;
+      if (answer === 'visible') {
+        return call.purposeOfUse === 'healthcare-operations' && access.draftStatus ? { ...source, status: access.draftStatus } : source;
+      }
       if (answer === 'another patient') return { ...source, patientId: '50000000-0000-4000-8000-000000000002' };
       throw new DomainProblem(answer, 'DOCUMENT_REFUSED', 'Document was not available');
     }),
@@ -332,6 +336,21 @@ describe('OCR publication under the dedicated records-processing grant', () => {
     expect(outcome?.code).toBe('OCR_PUBLISH_NEEDS_DIRECT_CARE');
     expect(run.ehrApi.createOcrClinicalNote).not.toHaveBeenCalled();
     expect(run.labApi.createOcrImport).not.toHaveBeenCalled();
+  });
+
+  it.each(['source_deleting', 'source_deleted'] as const)(
+    'under the grant, a source the OCR worker is deleting or deleted (%s) is refused with 410, nothing written', async (status) => {
+      const run = harness('EHR', { source: 404, write: { allowed: false }, grant: grantId, draftStatus: status });
+      const problem = await refusal(run.publish);
+      expect([problem.getStatus(), problem.code]).toEqual([410, 'DOCUMENT_SOURCE_DELETED']);
+      run.nothingWritten();
+    });
+
+  it('a deleted source never answers 410 to a caller with neither basis: 404 as before', async () => {
+    const run = harness('EHR', { source: 404, write: { allowed: false }, grant: null, draftStatus: 'source_deleted' });
+    const problem = await refusal(run.publish);
+    expect([problem.getStatus(), problem.code]).toEqual([404, 'OCR_JOB_NOT_FOUND']);
+    run.nothingWritten();
   });
 
   it('a document-only reading with no typed text says so, and no text is made up', async () => {
