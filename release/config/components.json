@@ -96,7 +96,7 @@
   "migration": {
     "first": "0001",
     "last": "0112",
-    "count": 113,
+    "count": 112,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
