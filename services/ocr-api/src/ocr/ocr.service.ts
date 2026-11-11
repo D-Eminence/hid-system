@@ -94,6 +94,8 @@ const sourceDeleted = () => new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'S
 /** Publication failure codes a later request may retry; any other failure is terminal. */
 const RETRYABLE_PUBLICATION_FAILURES = ['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'];
 
+export const OCR_PUBLISH_NEEDS_DIRECT_CARE_MESSAGE = 'Ask a clinician with access to this patient to publish it.';
+
 function isTerminalFailure(publication: PublicationRow): boolean {
   return publication.status === 'failed' && publication.failure_code !== null
     && !RETRYABLE_PUBLICATION_FAILURES.includes(publication.failure_code);
@@ -466,7 +468,7 @@ export class OcrService {
       // command of the job, serializes publication requests (Phase 4 Stage 9).
       const validation = await this.findValidation(client, validationId);
       const job = await this.findJob(client, validation.job_id, true);
-      const source = await this.authorizeJob(job, context, 'write_records');
+      const source = await this.authorizePublication(job, context);
       this.assertPublicationRequest(validation, input);
       const confirmation = await this.findConfirmation(client, input.patientConfirmationId, validation.job_id);
       // A replay only reads its publication; executePublication's conditional
@@ -551,7 +553,7 @@ export class OcrService {
       const evidence = await this.database.withTransaction(context, async (client) => {
         const validation = await this.findValidation(client, claimed.validation_id);
         const job = await this.findJob(client, claimed.job_id);
-        const source = await this.authorizeJob(job, context, 'write_records');
+        const source = await this.authorizePublication(job, context);
         return { validation, job, patientId: source.patientId };
       });
       let resourceType: string;
@@ -847,6 +849,32 @@ export class OcrService {
     // 24 hours (migration 0112); reads still answer, with the content marked deleted.
     if (action === 'write_records' && SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
     return source;
+  }
+
+  /**
+   * Publishing needs the publisher's own direct-care write_records grant on
+   * the patient (the request's purpose, always direct-care), for every
+   * target. A caller who can read the job (EHR answers its source under that
+   * purpose: EHR's row-level security and Identity read check) but has no
+   * such grant gets 403 OCR_PUBLISH_NEEDS_DIRECT_CARE, so a records-processing
+   * cover holder learns to ask a clinician. A caller who cannot read the job
+   * gets 404 OCR_JOB_NOT_FOUND, revealing nothing. A break-glass write is
+   * refused as before, with 404.
+   */
+  private async authorizePublication(row: OcrJobRow, context: DataAccessContext) {
+    let source: Awaited<ReturnType<EhrApiService['getOcrDocumentSource']>>;
+    try {
+      source = await this.ehrApi.getOcrDocumentSource(row.document_id, context);
+    } catch (error) {
+      if (error instanceof DomainProblem && (error.getStatus() === 404 || error.getStatus() === 403)) {
+        throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
+      }
+      throw error;
+    }
+    const authorization = await this.identity.authorize(source.patientId, 'write_records', context.purposeOfUse, context);
+    if (authorization.allowed && !authorization.breakGlass) return source;
+    if (authorization.allowed) throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
+    throw new DomainProblem(403, 'OCR_PUBLISH_NEEDS_DIRECT_CARE', OCR_PUBLISH_NEEDS_DIRECT_CARE_MESSAGE);
   }
 
   // Every OCR job event names the canonical patient of the source document:
