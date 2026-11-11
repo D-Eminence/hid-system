@@ -10,6 +10,8 @@ export interface FacilityAssignment {
   roles: readonly string[];
   permissions: readonly string[];
   isPrimary: boolean;
+  /** Identity sends this only for a self-signed-up organization: pending until Health ID support has reviewed it. */
+  selfService?: { review: 'pending' | 'reviewed'; organizationType?: string };
 }
 
 export interface ActorContext {

@@ -88,13 +88,18 @@ outcomes outlive the content they were computed from.
 `GET /api/v1/ocr/quality/summary?from=&to=` is for platform administrators
 (`platform.admin.access` and `platform.operations.read`) and for a facility's
 own manager (`workforce.manage` in their membership at the facility named by
-`X-Facility-ID`, never at another facility): it sums review
+`X-Facility-ID`, never at another facility, and not while the facility awaits
+Health ID support's review). A manager gets `{ available: false, reason:
+'too_few_reviewers' }` unless at least 3 distinct reviewers contributed in the
+range, any group with fewer than 3 distinct reviewers is suppressed, and the
+range ends at the last finished ISO week (a cut-off last week is left out);
+reviewers are counted by a random per-request key, never by id. It sums review
 outcomes by ISO week, facility, kind and prompt version, widens the range to
 whole ISO weeks, returns groups under 20 items as suppressed, leaves out reason
 counts under 5 inside shown groups (`smallCellsHidden`), and has no per-reviewer
-figures. At a facility with one reviewer the figures are in effect that
-reviewer's; the route is for platform administrators and that facility's
-manager only. `ocr.validations`
+figures. Figures from one or two reviewers would in effect be theirs, so a
+manager never sees a group with fewer than 3 distinct reviewers, nor a week
+still filling up (no staff monitoring); platform administrators do. `ocr.validations`
 row-level security admits only `platform.current_facility_id()`, and the
 runtime role has no cross-facility policy, so the summary covers the facility
 named by `X-Facility-ID`, where the reader (administrator or manager) must be active. A

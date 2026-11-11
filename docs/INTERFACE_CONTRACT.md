@@ -1424,9 +1424,24 @@ them only when it sees it (an older server answers them 400).
 `GET /api/v1/ocr/quality/summary` (staff actors only: a platform
 administrator, holding platform permissions `platform.admin.access` and
 `platform.operations.read`, or the manager of the facility named by
-`X-Facility-ID`, whose membership at that facility holds `workforce.manage`; a
-manager's permission at another facility never counts; anyone else 403
-`PERMISSION_DENIED`) sums stored review outcomes by ISO
+`X-Facility-ID`, whose membership at that facility holds `workforce.manage`, at
+a facility not awaiting Health ID support's review; a manager's permission at
+another facility never counts; anyone else, including the administrator of a
+self-signed-up facility still awaiting review, 403 `PERMISSION_DENIED`). Every
+answer carries `available`. No staff monitoring: for a manager, each review is
+read with its reviewer keyed by a fresh random per-request key (SHA-256 in the
+database; unlinkable to a person or across requests, never returned or
+logged). Fewer than 3 distinct reviewers in the (widened) range answers `{
+schema, from, to, scope, available: false, reason: 'too_few_reviewers' }` with
+no counts; otherwise any group to which fewer than 3 distinct reviewers
+contributed is suppressed like a small group (the rule counts distinct
+reviewers; it does not weigh how much each did). A manager's range also ends at
+the last finished ISO week (the answer's `to`; asking only about the current
+week answers `too_few_reviewers`), so a group shown never changes later, and
+when more than 50,000 reviews match, the last, cut-off week is left out.
+Platform administrators get every group over the minimum size, current week
+included. When figures are returned (`available:
+true`) the route sums stored review outcomes by ISO
 week, facility, item kind and prompt version (`itemGroups`) and by ISO week,
 facility and prompt version (`reviewGroups`) for `from`..`to` (UTC days,
 inclusive, default the last 28 days, at most 92; else 400
@@ -1440,7 +1455,8 @@ group's totals; the hidden code cannot). `summaryFailed` counts both
 `summary_failed` and `summary_too_large`; an outcome stored with
 `checkReasonsDropped` adds no check-reason counts.
 There are no per-reviewer figures. The read is audited as
-`ocr.quality.summary.read` with the range and counts only. Row-level security
+`ocr.quality.summary.read` with the range, the reader kind
+(`platform_admin` or `facility_manager`), `available` and counts only. Row-level security
 limits it to the facility named by `X-Facility-ID` (`scope: 'bound_facility'`);
 a cross-facility read needs a database change that is not part of this phase
 (0119 adds it: Identity's `GET /api/v1/admin/ocr/quality-summary`, section 43).

@@ -3,7 +3,9 @@ import type { AuditService } from '../../audit/audit.service';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
 import { OcrQualityController } from './quality-summary.controller';
-import { aggregateReviewOutcomes, MIN_CELL_SIZE, MIN_GROUP_SIZE, OcrQualityService } from './quality-summary.service';
+import {
+  aggregateReviewOutcomes, finishedWeeks, MIN_CELL_SIZE, MIN_GROUP_SIZE, MIN_REVIEWERS_FOR_MANAGER, OcrQualityService,
+} from './quality-summary.service';
 import { computeReviewOutcome } from './review-outcome';
 
 const facilityId = '10000000-0000-4000-8000-000000000001';
@@ -22,7 +24,8 @@ const request = (platformPermissions: string[], kind: 'staff' | 'patient' = 'sta
 const otherFacilityId = '10000000-0000-4000-8000-000000000002';
 const managerAt = (id: string, permissions: string[]) => ({ ...assignment, id, permissions,
   membershipId: id === facilityId ? assignment.membershipId : '40000000-0000-4000-8000-000000000002' });
-const managerRequest = (bound: string, memberships: ReturnType<typeof managerAt>[]) => ({
+const managerRequest = (bound: string,
+  memberships: (ReturnType<typeof managerAt> & { selfService?: { review: 'pending' | 'reviewed' } })[]) => ({
   actor: { ...actor([]), facilities: memberships, facilityIds: memberships.map((m) => m.id),
     facility: memberships.find((m) => m.id === bound), permissions: memberships.find((m) => m.id === bound)?.permissions ?? [] },
   facilityId: bound, correlationId: 'ocr-quality-correlation', header: () => undefined, method: 'GET' }) as unknown as HidRequest;
@@ -91,9 +94,33 @@ describe('OCR quality summary', () => {
     expect((Object as unknown as Record<string, unknown>).removed).toBeUndefined();
   });
 
+  it('with a reviewer minimum, suppresses a group 2 reviewers did and shows one 3 did', () => {
+    const keyed = (n: number) => Array.from({ length: 20 }, (_, i) => ({ ...row(), reviewer_key: `k${i % n}` }));
+    expect(aggregateReviewOutcomes(keyed(2), 3).reviewGroups).toEqual([{ week: '2026-W45', facilityId,
+      promptVersion: 'hid-paper-reading-prompt-13', suppressed: true }]);
+    expect(aggregateReviewOutcomes(keyed(2), 3).itemGroups).toEqual([expect.objectContaining({ suppressed: true })]);
+    expect(aggregateReviewOutcomes(keyed(3), 3).reviewGroups).toEqual([expect.objectContaining({ reviews: 20 })]);
+    // Without a minimum (platform administrators) the keys are ignored.
+    expect(aggregateReviewOutcomes(keyed(1)).reviewGroups).toEqual([expect.objectContaining({ reviews: 20 })]);
+  });
+
+  it('ends a manager\'s range at the last finished ISO week', () => {
+    const wednesday = new Date('2026-11-11T09:00:00Z');
+    expect(finishedWeeks({ from: '2026-10-19', to: '2026-11-15' }, wednesday)).toEqual({ from: '2026-10-19', to: '2026-11-08' });
+    expect(finishedWeeks({ from: '2026-10-19', to: '2026-11-01' }, wednesday)).toEqual({ from: '2026-10-19', to: '2026-11-01' });
+    expect(finishedWeeks({ from: '2026-11-09', to: '2026-11-15' }, wednesday)).toBeNull();
+    expect(finishedWeeks({ from: '2026-11-02', to: '2026-11-15' }, new Date('2026-11-09T00:00:00Z'))).toEqual({ from: '2026-11-02', to: '2026-11-08' });
+    expect(finishedWeeks({ from: '2026-11-02', to: '2026-11-15' }, new Date('2026-11-15T23:59:00Z'))).toEqual({ from: '2026-11-02', to: '2026-11-08' });
+  });
+
   describe('route', () => {
-    const harness = (outcomeRows: unknown[] = Array.from({ length: 20 }, () => row())) => {
-      const query = jest.fn(async () => ({ rows: outcomeRows, rowCount: outcomeRows.length }));
+    // reviewers: how many distinct reviewers saved the rows (round-robin), keyed as the database would for a manager.
+    const harness = (outcomeRows: Record<string, unknown>[] = Array.from({ length: 20 }, () => row()), reviewers = 3) => {
+      const query = jest.fn(async (sql: string, _params?: unknown[]) => {
+        const rows = sql.includes('reviewer_key')
+          ? outcomeRows.map((r, i) => ({ reviewer_key: `key-${i % reviewers}`, ...r })) : outcomeRows;
+        return { rows, rowCount: rows.length };
+      });
       const database = { withTransaction: jest.fn(async <T>(_c: DataAccessContext,
         operation: (client: PoolClient) => Promise<T>) => operation({ query } as unknown as PoolClient)) } as unknown as DatabaseService;
       const audit = { recordWithClient: jest.fn(async () => undefined) } as unknown as AuditService;
@@ -109,6 +136,8 @@ describe('OCR quality summary', () => {
       ['a manager of facility A reading facility B, where they are not a member', managerRequest(otherFacilityId, [managerOfA])],
       ['a manager of facility A reading facility B, where they hold no workforce.manage',
         managerRequest(otherFacilityId, [managerOfA, managerAt(otherFacilityId, ['ocr.job.read', 'ocr.validation.write'])])],
+      ['the manager of a facility still awaiting support review',
+        managerRequest(facilityId, [{ ...managerOfA, selfService: { review: 'pending' as const } }])],
     ])('refuses %s with 403 and reads nothing', async (_name, req) => {
       const { controller, database } = harness();
       expect(() => controller.summary({}, req)).toThrow(expect.objectContaining({ code: 'PERMISSION_DENIED' }));
@@ -133,13 +162,102 @@ describe('OCR quality summary', () => {
       }
     });
 
-    it('answers the manager of the bound facility with that facility only', async () => {
-      const { controller, database, audit } = harness();
+    it('answers the manager of the bound facility with that facility only, when 3 or more reviewers contributed', async () => {
+      for (const membership of [managerOfA, { ...managerOfA, selfService: { review: 'reviewed' as const } }]) {
+        const { controller, database, audit, query } = harness(undefined, MIN_REVIEWERS_FOR_MANAGER);
+        const answer = await controller.summary({ from: '2026-11-02', to: '2026-11-08' }, managerRequest(facilityId, [membership]));
+        expect(answer).toMatchObject({ scope: 'bound_facility', available: true, truncated: false,
+          itemGroups: [expect.objectContaining({ items: 40 })], reviewGroups: [expect.objectContaining({ reviews: 20 })] });
+        expect((database.withTransaction as jest.Mock).mock.calls[0]?.[0]).toMatchObject({ facilityId });
+        const [sql, params] = query.mock.calls[0] as unknown as [string, unknown[]];
+        expect(sql).toContain('sha256(convert_to($5::text || validation.validated_by::text');
+        // UTC days whatever the database session's time zone, as the ISO weeks are.
+        expect(sql).toContain("< ($2::date + 1)::timestamp at time zone 'UTC'");
+        expect(params.slice(0, 4)).toEqual(['2026-11-02', '2026-11-08', 'hid.ocr.review-outcome/v1', 50_001]);
+        expect(params[4]).toMatch(/^[0-9a-f]{64}$/);
+        const event = ((audit.recordWithClient as jest.Mock).mock.calls as [PoolClient, Record<string, unknown>][])[0]?.[1];
+        expect(event).toMatchObject({ action: 'ocr.quality.summary.read', facilityId,
+          details: { reader: 'facility_manager', available: true } });
+        expect(JSON.stringify([answer, event])).not.toContain('key-');
+      }
+    });
+
+    it('keys reviewers afresh on every request', async () => {
+      const { controller, query } = harness();
+      await controller.summary({}, managerRequest(facilityId, [managerOfA]));
+      await controller.summary({}, managerRequest(facilityId, [managerOfA]));
+      const keys = query.mock.calls.map((call) => (call as unknown as [string, unknown[]])[1][4]);
+      expect(keys[0]).not.toEqual(keys[1]);
+    });
+
+    it.each([1, 2])('answers a manager "too few reviewers" with no figures when %i reviewer(s) contributed', async (n) => {
+      const { controller, audit } = harness(undefined, n);
       const answer = await controller.summary({ from: '2026-11-02', to: '2026-11-08' }, managerRequest(facilityId, [managerOfA]));
-      expect(answer).toMatchObject({ scope: 'bound_facility', truncated: false });
-      expect((database.withTransaction as jest.Mock).mock.calls[0]?.[0]).toMatchObject({ facilityId });
+      expect(answer).toEqual({ schema: 'hid.ocr.quality-summary/v1', from: '2026-11-02', to: '2026-11-08',
+        scope: 'bound_facility', available: false, reason: 'too_few_reviewers' });
       const event = ((audit.recordWithClient as jest.Mock).mock.calls as [PoolClient, Record<string, unknown>][])[0]?.[1];
-      expect(event).toMatchObject({ action: 'ocr.quality.summary.read', facilityId });
+      expect(event?.details).toEqual({ from: '2026-11-02', to: '2026-11-08', reader: 'facility_manager', available: false });
+    });
+
+    it('suppresses, for a manager, a week that fewer than 3 reviewers did, even when the range has 3', async () => {
+      // W44: 20 reviews by one reviewer; W45: 20 reviews by three.
+      const rows = [...Array.from({ length: 20 }, () => ({ ...row('2026-W44'), reviewer_key: 'key-solo' })),
+        ...Array.from({ length: 20 }, () => row('2026-W45'))];
+      const { controller } = harness(rows, 3);
+      const answer = await controller.summary({ from: '2026-10-26', to: '2026-11-08' },
+        managerRequest(facilityId, [managerOfA])) as { itemGroups: unknown[]; reviewGroups: unknown[] };
+      expect(answer.reviewGroups).toEqual([
+        { week: '2026-W44', facilityId, promptVersion: 'hid-paper-reading-prompt-13', suppressed: true },
+        expect.objectContaining({ week: '2026-W45', reviews: 20 })]);
+      expect(answer.itemGroups).toEqual([
+        { week: '2026-W44', facilityId, kind: 'medicine', promptVersion: 'hid-paper-reading-prompt-13', suppressed: true },
+        expect.objectContaining({ week: '2026-W45', items: 40 })]);
+      // A platform administrator sees both weeks.
+      const admin = harness(rows, 3);
+      const all = await admin.controller.summary({ from: '2026-10-26', to: '2026-11-08' },
+        request(['platform.admin.access', 'platform.operations.read'])) as { reviewGroups: unknown[] };
+      expect(all.reviewGroups).toEqual([expect.objectContaining({ week: '2026-W44', reviews: 20 }),
+        expect.objectContaining({ week: '2026-W45', reviews: 20 })]);
+    });
+
+    it('suppresses, for a manager, a kind that fewer than 3 reviewers read while the week is shown', async () => {
+      const lab = { ...outcome, buckets: outcome.buckets.map((bucket) => ({ ...bucket, kind: 'lab_result' })) };
+      const rows = [...Array.from({ length: 20 }, () => row()),
+        ...Array.from({ length: 20 }, () => ({ week: '2026-W45', facility_id: facilityId, outcome: lab, reviewer_key: 'key-solo' }))];
+      const { controller } = harness(rows, 3);
+      const answer = await controller.summary({ from: '2026-11-02', to: '2026-11-08' },
+        managerRequest(facilityId, [managerOfA])) as { itemGroups: unknown[]; reviewGroups: unknown[] };
+      expect(answer.reviewGroups).toEqual([expect.objectContaining({ reviews: 40 })]);
+      expect(answer.itemGroups).toEqual(expect.arrayContaining([
+        { week: '2026-W45', facilityId, kind: 'lab_result', promptVersion: 'hid-paper-reading-prompt-13', suppressed: true },
+        expect.objectContaining({ kind: 'medicine', items: 40 })]));
+    });
+
+    it('answers a manager asking only about the current week "too few reviewers" without reading', async () => {
+      const { controller, query } = harness();
+      const today = new Date().toISOString().slice(0, 10);
+      const answer = await controller.summary({ from: today, to: today }, managerRequest(facilityId, [managerOfA]));
+      expect(answer).toMatchObject({ available: false, reason: 'too_few_reviewers' });
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('leaves a cut-off last week out of a manager\'s answer', async () => {
+      const rows = [...Array.from({ length: 30_000 }, () => row('2026-W44')), ...Array.from({ length: 20_001 }, () => row('2026-W45'))];
+      const { controller } = harness(rows, 3);
+      const answer = await controller.summary({ from: '2026-10-26', to: '2026-11-08' },
+        managerRequest(facilityId, [managerOfA])) as { truncated: boolean; reviewGroups: { week: string }[] };
+      expect(answer.truncated).toBe(true);
+      expect(answer.reviewGroups.map((group) => group.week)).toEqual(['2026-W44']);
+    });
+
+    it('never applies the reviewer minimum to a platform administrator', async () => {
+      const { controller, query } = harness(undefined, 1);
+      const answer = await controller.summary({ from: '2026-11-02', to: '2026-11-08' },
+        request(['platform.admin.access', 'platform.operations.read']));
+      expect(answer).toMatchObject({ available: true, itemGroups: [expect.objectContaining({ items: 40 })] });
+      const [sql, params] = query.mock.calls[0] as unknown as [string, unknown[]];
+      expect(sql).not.toContain('reviewer_key');
+      expect(params).toHaveLength(4);
     });
 
     it('widens the range to whole ISO weeks so a one-day difference cannot be subtracted', async () => {

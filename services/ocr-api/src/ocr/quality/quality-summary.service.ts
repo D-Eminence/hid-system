@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../../audit/audit.service';
@@ -21,33 +22,39 @@ export const MAX_REVIEWS = 50_000;
 export const QUALITY_PERMISSIONS = ['platform.admin.access', 'platform.operations.read'] as const;
 /** A facility's own manager (the workforce permission facility managers hold) reads that facility's summary. */
 export const FACILITY_QUALITY_PERMISSION = 'workforce.manage';
+/** A manager sees a group's figures only when at least this many distinct reviewers contributed (no staff monitoring). */
+export const MIN_REVIEWERS_FOR_MANAGER = 3;
+
+export type QualityReader = 'platform_admin' | 'facility_manager';
 
 /**
  * Who may read the summary of the facility named by X-Facility-ID: a platform administrator (a staff actor whose
  * platform permissions include platform.admin.access and platform.operations.read), or that facility's own manager (a
- * staff actor whose membership at that very facility holds workforce.manage). A manager's permission at another
- * facility never counts. Anyone else gets 403 PERMISSION_DENIED. The data is content-free, bound to that one facility
- * by row-level security, and small groups are suppressed.
+ * staff actor whose membership at that very facility holds workforce.manage, at a facility not awaiting Health ID
+ * support's review). A manager's permission at another facility never counts. Anyone else gets 403
+ * PERMISSION_DENIED. The data is content-free, bound to that one facility by row-level security, and small groups
+ * are suppressed; a manager also needs MIN_REVIEWERS_FOR_MANAGER distinct reviewers, overall and per group (summary).
  */
-export function assertQualityReader(request: HidRequest): void {
+export function assertQualityReader(request: HidRequest): QualityReader {
   const actor = request.actor as (HidRequest['actor'] & { platformPermissions?: readonly string[] }) | undefined;
   if (!actor || actor.kind === 'patient') {
     throw new DomainProblem(403, 'PERMISSION_DENIED', 'Platform administration or facility management is required');
   }
-  const platformAdmin = QUALITY_PERMISSIONS.every((permission) => actor.platformPermissions?.includes(permission));
+  if (QUALITY_PERMISSIONS.every((permission) => actor.platformPermissions?.includes(permission))) return 'platform_admin';
   const membership = request.facilityId
     ? actor.facilities?.find((assignment) => assignment.id === request.facilityId) : undefined;
-  const facilityManager = membership !== undefined && actor.facility?.id === request.facilityId
-    && membership.permissions.includes(FACILITY_QUALITY_PERMISSION);
-  if (!platformAdmin && !facilityManager) {
-    throw new DomainProblem(403, 'PERMISSION_DENIED', 'Platform administration or facility management is required');
-  }
+  if (membership !== undefined && actor.facility?.id === request.facilityId
+    && membership.permissions.includes(FACILITY_QUALITY_PERMISSION)
+    && membership.selfService?.review !== 'pending') return 'facility_manager';
+  throw new DomainProblem(403, 'PERMISSION_DENIED', 'Platform administration or facility management is required');
 }
 
 export interface OutcomeRow extends QueryResultRow {
   week: string;
   facility_id: string;
   outcome: unknown;
+  /** Manager reads only: the reviewer keyed with a random per-request key (unlinkable, never returned or logged). */
+  reviewer_key?: string | null;
 }
 
 type Counts = Record<string, number>;
@@ -107,11 +114,20 @@ function hideSmallReviewCells(group: ReviewGroup): ReviewGroup {
 
 /**
  * Sums stored review outcomes by ISO week, facility, item kind and prompt version (items), and by ISO week,
- * facility and prompt version (reviews). No per-reviewer figure exists in the input or the output.
+ * facility and prompt version (reviews). No per-reviewer figure exists in the output. With minReviewers, a group to
+ * which fewer distinct reviewers (row reviewer_key) contributed is suppressed too, so no group shows one or two
+ * people's work; the keys only ever count.
  */
-export function aggregateReviewOutcomes(rows: readonly OutcomeRow[]) {
+export function aggregateReviewOutcomes(rows: readonly OutcomeRow[], minReviewers = 0) {
   const items = new Map<string, ItemGroup>();
   const reviews = new Map<string, ReviewGroup>();
+  const reviewersOf = new Map<object, Set<string>>();
+  const contributed = (group: object, row: OutcomeRow) => {
+    let keys = reviewersOf.get(group);
+    if (!keys) { keys = new Set(); reviewersOf.set(group, keys); }
+    if (typeof row.reviewer_key === 'string') keys.add(row.reviewer_key);
+  };
+  const tooFewReviewers = (group: object) => minReviewers > 0 && (reviewersOf.get(group)?.size ?? 0) < minReviewers;
   for (const row of rows) {
     const outcome = row.outcome;
     if (!isRecord(outcome) || outcome.schema !== REVIEW_OUTCOME_SCHEMA) continue;
@@ -125,6 +141,7 @@ export function aggregateReviewOutcomes(rows: readonly OutcomeRow[]) {
       reviews.set(reviewKey, review);
     }
     review.reviews += 1;
+    contributed(review, row);
     if (outcome.error !== undefined) { review.summaryFailed += 1; continue; }
     if (outcome.disposition === 'validated') review.validated += 1;
     if (outcome.disposition === 'rejected') review.rejected += 1;
@@ -149,6 +166,7 @@ export function aggregateReviewOutcomes(rows: readonly OutcomeRow[]) {
         items.set(key, group);
       }
       group.items += bucket.items;
+      contributed(group, row);
       add(group.decisions, bucket.decision, bucket.items);
       add(nested(group.byConfidence, String(bucket.confidence)), bucket.decision, bucket.items);
       add(nested(group.byReadBy, String(bucket.readBy)), bucket.decision, bucket.items);
@@ -164,11 +182,11 @@ export function aggregateReviewOutcomes(rows: readonly OutcomeRow[]) {
   const order = (a: { week: string; facilityId: string }, b: { week: string; facilityId: string }) =>
     a.week.localeCompare(b.week) || a.facilityId.localeCompare(b.facilityId);
   const itemGroups = [...items.values()].sort(order).map((group): ItemGroup
-    | Suppressed<ItemGroup, 'week' | 'facilityId' | 'kind' | 'promptVersion'> => (group.items < MIN_GROUP_SIZE
+    | Suppressed<ItemGroup, 'week' | 'facilityId' | 'kind' | 'promptVersion'> => (group.items < MIN_GROUP_SIZE || tooFewReviewers(group)
     ? { week: group.week, facilityId: group.facilityId, kind: group.kind, promptVersion: group.promptVersion,
       suppressed: true } : hideSmallItemCells(group)));
   const reviewGroups = [...reviews.values()].sort(order).map((group): ReviewGroup
-    | Suppressed<ReviewGroup, 'week' | 'facilityId' | 'promptVersion'> => (group.reviews < MIN_GROUP_SIZE
+    | Suppressed<ReviewGroup, 'week' | 'facilityId' | 'promptVersion'> => (group.reviews < MIN_GROUP_SIZE || tooFewReviewers(group)
     ? { week: group.week, facilityId: group.facilityId, promptVersion: group.promptVersion, suppressed: true }
     : hideSmallReviewCells(group)));
   return { itemGroups, reviewGroups };
@@ -198,6 +216,18 @@ function range(from: string | undefined, to: string | undefined, now: Date): { f
   return { from: day(monday), to: day(sunday) };
 }
 
+/**
+ * A manager sees finished ISO weeks only: the range ends at the Sunday before the current week, so a group shown
+ * never changes later (two reads of a week still filling up would differ by one shift's work). Null when no finished
+ * week is left in the range.
+ */
+export function finishedWeeks(window: { from: string; to: string }, now: Date): { from: string; to: string } | null {
+  const todayMs = Date.parse(`${now.toISOString().slice(0, 10)}T00:00:00Z`);
+  const lastSunday = new Date(todayMs - (((new Date(todayMs).getUTCDay() + 6) % 7) + 1) * DAY_MS).toISOString().slice(0, 10);
+  const to = window.to < lastSunday ? window.to : lastSunday;
+  return window.from <= to ? { from: window.from, to } : null;
+}
+
 @Injectable()
 export class OcrQualityService {
   constructor(private readonly database: DatabaseService, private readonly audit: AuditService) {}
@@ -208,32 +238,58 @@ export class OcrQualityService {
    * request; the facility grouping is kept so a later cross-facility read (README "Review outcomes") answers in the
    * same shape.
    */
-  async summary(query: { from?: string; to?: string }, context: DataAccessContext, now = new Date()) {
-    const window = range(query.from, query.to, now);
+  async summary(query: { from?: string; to?: string }, context: DataAccessContext, reader: QualityReader,
+    now = new Date()) {
+    const manager = reader === 'facility_manager';
+    const asked = range(query.from, query.to, now);
+    const finished = manager ? finishedWeeks(asked, now) : asked;
+    const window = finished ?? asked;
     return this.database.withTransaction(context, async (client) => {
+      const tooFew = async () => {
+        await this.audit.recordWithClient(client, this.auditEvent(context, window, { reader, available: false }));
+        return { schema: 'hid.ocr.quality-summary/v1', from: window.from, to: window.to, scope: 'bound_facility',
+          available: false as const, reason: 'too_few_reviewers' as const };
+      };
+      if (!finished) return tooFew();
+      // A manager's read keys each reviewer with a fresh random key: rows can be counted per group, never linked to
+      // a person or across requests, and the keys never leave this method.
       const result = await client.query<OutcomeRow>(
         `select to_char(validation.created_at at time zone 'UTC', 'IYYY-"W"IW') as week,
                 validation.facility_id::text as facility_id,
-                validation.provenance -> 'reviewOutcome' as outcome
+                validation.provenance -> 'reviewOutcome' as outcome${manager ? `,
+                encode(sha256(convert_to($5::text || validation.validated_by::text, 'UTF8')), 'hex') as reviewer_key` : ''}
            from ocr.validations validation
-          where validation.created_at >= $1::date and validation.created_at < ($2::date + 1)
+          where validation.created_at >= ($1::date)::timestamp at time zone 'UTC'
+            and validation.created_at < ($2::date + 1)::timestamp at time zone 'UTC'
             and validation.provenance -> 'reviewOutcome' ->> 'schema' = $3
           order by validation.created_at limit $4`,
-        [window.from, window.to, REVIEW_OUTCOME_SCHEMA, MAX_REVIEWS + 1]);
+        [window.from, window.to, REVIEW_OUTCOME_SCHEMA, MAX_REVIEWS + 1,
+          ...(manager ? [randomBytes(32).toString('hex')] : [])]);
       const truncated = result.rows.length > MAX_REVIEWS;
-      const { itemGroups, reviewGroups } = aggregateReviewOutcomes(result.rows.slice(0, MAX_REVIEWS));
+      let rows = result.rows.slice(0, MAX_REVIEWS);
+      // Cut off inside its last week, a manager's answer leaves that week out, so two ranges ending in the same week
+      // cannot be subtracted.
+      if (manager && truncated) rows = rows.filter((row) => row.week !== rows.at(-1)?.week);
+      if (manager && new Set(rows.map((row) => row.reviewer_key)).size < MIN_REVIEWERS_FOR_MANAGER) return tooFew();
+      const { itemGroups, reviewGroups } = aggregateReviewOutcomes(rows, manager ? MIN_REVIEWERS_FOR_MANAGER : 0);
       const suppressed = [...itemGroups, ...reviewGroups].filter((group) => 'suppressed' in group).length;
-      await this.audit.recordWithClient(client, {
-        correlationId: context.correlationId, actorType: 'staff', actorSubject: context.actor.subject,
-        actorAccountId: context.actor.accountId, actorMembershipId: context.membershipId,
-        organizationId: context.actor.facility?.organizationId, facilityId: context.facilityId,
-        action: 'ocr.quality.summary.read', resourceType: 'ocr-quality-summary', outcome: 'success',
-        purposeOfUse: context.purposeOfUse, sourceSystem: 'ocr-api',
-        details: { from: window.from, to: window.to, reviews: Math.min(result.rows.length, MAX_REVIEWS), truncated,
-          itemGroups: itemGroups.length, reviewGroups: reviewGroups.length, suppressedGroups: suppressed },
-      });
+      await this.audit.recordWithClient(client, this.auditEvent(context, window, { reader, available: true,
+        reviews: rows.length, truncated, itemGroups: itemGroups.length,
+        reviewGroups: reviewGroups.length, suppressedGroups: suppressed }));
       return { schema: 'hid.ocr.quality-summary/v1', from: window.from, to: window.to,
-        scope: 'bound_facility', minGroupSize: MIN_GROUP_SIZE, truncated, itemGroups, reviewGroups };
+        scope: 'bound_facility', available: true as const, minGroupSize: MIN_GROUP_SIZE, truncated, itemGroups, reviewGroups };
     });
+  }
+
+  private auditEvent(context: DataAccessContext, window: { from: string; to: string },
+    details: Record<string, string | number | boolean>) {
+    return {
+      correlationId: context.correlationId, actorType: 'staff' as const, actorSubject: context.actor.subject,
+      actorAccountId: context.actor.accountId, actorMembershipId: context.membershipId,
+      organizationId: context.actor.facility?.organizationId, facilityId: context.facilityId,
+      action: 'ocr.quality.summary.read', resourceType: 'ocr-quality-summary', outcome: 'success' as const,
+      purposeOfUse: context.purposeOfUse, sourceSystem: 'ocr-api',
+      details: { from: window.from, to: window.to, ...details },
+    };
   }
 }
