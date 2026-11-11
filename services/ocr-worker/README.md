@@ -560,6 +560,24 @@ Each claimed job runs, in order:
        completion log (`hardPageAgreement.alternativesDropped`, a count only,
        never text; no payload change). The dropped option itself is not
        stored anywhere (the payload contract is unchanged).
+     - *No option that adds nothing* (`dropEmptyOptions`; coordinator,
+       second cleanup round of 2026-11-10; PROMPT_VERSION 13). An `(or X?)`
+       is never shown, in the shown text, `asWritten` of a pair or any field,
+       inside `(crossed out: …)` too, where X is only a placeholder or `[?]`
+       (`500mg? (or [dose?])`); or is the same as the one to four words
+       straight before it, compared without case, `?`, `…` or brackets and
+       with spacing as in `bare` ("500 mg" is "500mg", "1 5mg" is not
+       "15mg"); or is a one-word name with the same listed generic as the
+       word straight before it (`Pl… (Plasil?) (or Plasil?)`, `Flagyl?
+       (metronidazole) (or Metronidazole?)`); or is a listed one-word drug
+       name straight after a dose (a word with a digit, so it cannot be that
+       word's option) with the generic of that order's own name, the nearest word before the dose (`(crossed out:
+       Ceftriaxone? 1g? (or Ceftriaxone?))`). Anything else is kept: a route,
+       frequency, dose, vitamin letter or second drug repeated further back
+       (`IV Ceftriaxone 1g IM? (or IV?)`, `Vit K? 1mg Vit C? (or Vit K?)`), and
+       the same generic in another form (`Hydrocortisone? (or Hydrocortisone
+       cream?)`). Options left out of the shown text are counted in
+       `alternativesDropped`; the item keeps `readings_disagree`.
      - *Two drugs, two items* (`sameDrug`, `splitPair`). Where two items
        paired by place are medicines whose reads name different drugs, they
        are two items, one per read, each with its own fields, `asWritten` and

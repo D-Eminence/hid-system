@@ -58,9 +58,12 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * different drugs, and headings and notes repeating an order left out of every page (hard-page.ts, tidy.ts). A
  * reading made the older way is not reused. SYSTEM_PROMPT, the text-only request and the ordinary image re-read
  * request are byte for byte unchanged (the first pass is not seen to give headings as items, and its request is
- * pinned by hash).
+ * pinned by hash). Version 13 (coordinator, second cleanup round of 2026-11-10, after the first live run with
+ * version 12): the reading changes in code only: an other option that adds nothing (a field placeholder or "[?]", or
+ * the same reading again by case, "?", "…", spacing or listed generic) is never shown, inside crossed-out writing too
+ * (hard-page.ts dropEmptyOptions). Every request and HARD_PAGE_PROMPT_VERSION are unchanged (12, 12-no-zoom).
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-12';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-13';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).

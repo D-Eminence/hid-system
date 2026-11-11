@@ -1,6 +1,10 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app/services/identity-api
 COPY services/identity-api/package.json services/identity-api/package-lock.json ./
+# Shared privacy-scrubbed error reporting (@hid/server-telemetry) with its own lockfile.
+COPY packages/server-telemetry/package.json packages/server-telemetry/package-lock.json packages/server-telemetry/tsconfig.json /app/packages/server-telemetry/
+COPY packages/server-telemetry/src /app/packages/server-telemetry/src
+RUN cd /app/packages/server-telemetry && npm ci && npm run build
 RUN npm ci
 COPY services/identity-api/nest-cli.json services/identity-api/tsconfig.json services/identity-api/tsconfig.build.json ./
 COPY services/identity-api/src ./src
@@ -10,6 +14,9 @@ FROM node:22-bookworm-slim AS production-dependencies
 ENV NODE_ENV=production
 WORKDIR /app/services/identity-api
 COPY services/identity-api/package.json services/identity-api/package-lock.json ./
+COPY packages/server-telemetry/package.json packages/server-telemetry/package-lock.json /app/packages/server-telemetry/
+RUN cd /app/packages/server-telemetry && npm ci --omit=dev && npm cache clean --force
+COPY --from=build /app/packages/server-telemetry/dist /app/packages/server-telemetry/dist
 RUN npm ci --omit=dev && npm cache clean --force
 RUN mkdir -p /var/run/hid/workload-tokens && chown 65532:65532 /var/run/hid/workload-tokens && chmod 0700 /var/run/hid/workload-tokens
 
@@ -20,6 +27,7 @@ FROM gcr.io/distroless/nodejs22-debian13@sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a
 ENV NODE_ENV=production
 WORKDIR /app/services/identity-api
 COPY --chown=65532:65532 --from=production-dependencies /app/services/identity-api/node_modules ./node_modules
+COPY --chown=65532:65532 --from=production-dependencies /app/packages/server-telemetry /app/packages/server-telemetry
 COPY --chown=65532:65532 --from=build /app/services/identity-api/dist ./dist
 COPY --chown=65532:65532 services/workload-token-agent/src /app/services/workload-token-agent/src
 COPY --chown=65532:65532 --chmod=0700 --from=production-dependencies /var/run/hid/workload-tokens /var/run/hid/workload-tokens

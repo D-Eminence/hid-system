@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { captureServerError } from '@hid/server-telemetry';
 import type { OcrWorkerConfig } from './config';
 import { paperReadingPayloadSchema } from './reading/contract';
 import { HARD_PAGE_PROMPT_VERSION, HARD_PAGE_PROMPT_VERSION_NO_ZOOM, IMAGE_PROMPT_VERSION } from './reading/prompt';
@@ -130,6 +131,7 @@ export class OcrWorker {
         durationMs: Date.now() - started });
     } catch (error) {
       const failure = this.toSafeFailure(error);
+      if (failure.code === 'WORKER_INTERNAL_ERROR') captureServerError(error);
       try {
         await this.repository.fail(job, failure);
         this.log('warn', 'ocr.job.failed', { jobId: job.jobId, correlationId: job.correlationId,
@@ -293,6 +295,7 @@ export class OcrWorker {
       } catch (error) {
         if (this.shutdown.signal.aborted) break;
         consecutiveErrors += 1;
+        captureServerError(error);
         this.log('error', 'ocr.worker.loop_error', { workerIndex, code: safeErrorCode(error),
           consecutiveErrors });
         const backoff = Math.min(30_000, this.config.OCR_WORKER_POLL_MS * (2 ** Math.min(consecutiveErrors, 5)));

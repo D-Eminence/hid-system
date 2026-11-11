@@ -23,9 +23,9 @@
 --   keys or malware scanning. The sweeper finds each source by the key stored
 --   in ehr.documents."
 --
--- It applies after 0108 (0109 and 0110 are not part of this change). It needs: the
--- ehr.documents, ocr.jobs, ocr.extractions, ocr.validations (with 0016's
--- columns), ocr.patient_confirmations and ocr.publications tables; the four
+-- It applies after 0110 (staging's 0109 and 0110 touch none of the objects
+-- below). It needs: the ehr.documents, ocr.jobs, ocr.extractions,
+-- ocr.validations (with 0016's columns), ocr.patient_confirmations and ocr.publications tables; the four
 -- trigger functions it replaces exactly as 0004, 0009, 0016 and 0107 left them
 -- (md5 pinned in section 0); the session and permission helpers it calls,
 -- whose bodies are pinned the same way; and the runtime roles. If a later
@@ -172,7 +172,7 @@
 -- working (they never write either new status). After a purge, the old ehr-api
 -- answers a download of the document with its generic 409 and the old ocr-api
 -- shows an empty reading.
--- Applied migrations 0001 through 0108 are immutable.
+-- Applied migrations 0001 through 0110 are immutable.
 
 do $$
 declare
@@ -199,7 +199,7 @@ begin
                   and pg_get_constraintdef(oid) like '%source_deleted%') then
     raise exception using errcode = '55000', message = '0111: already applied';
   end if;
-  -- c. The bodies replaced and relied on, as 0001-0108 left them.
+  -- c. The bodies replaced and relied on, as 0001-0110 left them.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
@@ -264,7 +264,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0111: an object this migration relies on differs from 0001-0108: %s', mismatch);
+      message = format('0111: an object this migration relies on differs from 0001-0110: %s', mismatch);
   end if;
   -- d. One owner for the tables and functions touched; it may create in schema
   -- ocr; the applier is it, or a member that inherits it and may SET ROLE to it.

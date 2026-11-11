@@ -1414,6 +1414,10 @@ revoke all on function identity.access_requests_records_processing() from public
 revoke all on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz) from public;
 grant execute on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)
   to hid_identity_runtime;
+-- Support chat Health ID check (0109): which given Health IDs are issued,
+-- read by Identity's support route alone, for the support-api workload.
+revoke all on function identity.support_health_id_matches(text[]) from public;
+grant execute on function identity.support_health_id_matches(text[]) to hid_identity_runtime;
 -- Document scanning (0105): the scanner's resolve and work-list commands are
 -- granted to hid_document_scanner above and to no other role.
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
@@ -1448,6 +1452,12 @@ revoke all on function ocr.facility_page_allowance_state(uuid),
   ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text),
   ocr.facility_ocr_usage(uuid,date) from public;
 revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public;
+-- Outreach campaign registration (0110): outreach.validate_registration_
+-- campaign_write, the SECURITY DEFINER trigger function 0110 replaces (owner
+-- and ACL kept), is granted to no role; a trigger needs no EXECUTE to fire.
+-- No grant changes: the Outreach runtime still has no UPDATE on
+-- outreach.campaign_members, so it can neither update nor lock a membership.
+revoke all on function outreach.validate_registration_campaign_write() from public;
 
 -- OCR source deletion after 24 hours (0111): the OCR worker lists the
 -- documents due, counts them (due, and overdue), claims each one
