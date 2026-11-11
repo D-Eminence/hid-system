@@ -1361,7 +1361,11 @@ write authorization and rejects break-glass, facility mismatch, wrong-patient,
 and stale job versions.
 
 Publication requires `Idempotency-Key`, `direct-care`, an explicit validation
-ID/version, and the latest confirmation ID. Current operations are EHR
+ID/version, and the latest confirmation ID. It needs the publisher's own
+direct-care `write_records` grant on the patient for every target (section
+37): a caller who can read the job but has none answers 403
+`OCR_PUBLISH_NEEDS_DIRECT_CARE`; one who cannot read the job answers 404
+`OCR_JOB_NOT_FOUND`. Current operations are EHR
 `create_imported_clinical_note`, Lab `create_imported_lab_evidence`, Pharmacy
 `create_imported_medication_evidence`, and `retain_validated_document` for
 `DOCUMENT_ONLY`. EHR creates a draft imported
@@ -3024,7 +3028,7 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 | Validate or reject | `ocr.validation.write` | `healthcare-operations` write |
 | Confirm the source patient | `ocr.patient.confirm` (doctor, clinician, nurse) | `healthcare-operations` write |
 | EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
-| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own |
+| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; without it 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 37) |
 
 Without a records-processing grant or a cover, OCR's create answers 403
 `OCR_RECORDS_PROCESSING_CONSENT_REQUIRED` when the request names the patient
@@ -3592,3 +3596,31 @@ grant's scope test alone or its `break_glass` test alone (a consent_grants
 CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
+
+## 37. Publishing needs direct care: the refusal a records-processing caller sees
+
+The rule is unchanged (0104 D7, 0108 D-b): publishing a reviewed reading into
+the chart, EHR, Lab, Pharmacy or `DOCUMENT_ONLY`, needs the publisher's own
+direct-care `write_records` grant on the patient. The records-processing
+cover (sections 32, 32.1, 36), which lets staff create, read, validate and
+confirm OCR jobs, never publishes. Only the answer changes.
+
+`POST /api/v1/ocr/validations/:validationId/publications` (purpose
+`direct-care`), for the request and again for each attempt:
+
+1. EHR's source read (`GET /api/v1/ehr/internal/ocr/documents/:documentId/source`,
+   EHR's row-level security and Identity read check under the request's
+   purpose) does not return the job's source (404 or 403): 404
+   `OCR_JOB_NOT_FOUND`, as before, so nothing is revealed.
+2. Identity allows `write_records` under `direct-care`, not break-glass: the
+   publication proceeds as before.
+3. Identity allows it only as break-glass: refused as before, 404
+   `OCR_JOB_NOT_FOUND`.
+4. Identity refuses it: 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE`, message "Ask a
+   clinician with access to this patient to publish it." Nothing is written.
+
+A Migrate staff member working under the cover, with direct-care read access
+(an approval, Access PIN or share) but no direct-care write, now sees step 4
+instead of the 404 they got before. Until the database can tell Identity which
+grant covered a check, a draft-only publishing path under the cover is not
+offered.
