@@ -153,3 +153,108 @@ describe('OutreachService', () => {
     expect(database.withTransaction).not.toHaveBeenCalled();
   });
 });
+
+// 0122 (ADR-045 option B): a campaign's own admins open, close and staff it. Fictional ids only.
+describe('OutreachService campaign admins', () => {
+  const audit = { recordWithClient: jest.fn() };
+  const identity = { authorizeExistingPatient: jest.fn() };
+  const other = '123e4567-e89b-42d3-a456-426614174009';
+  const campaignRow = { id: ids.campaign, facility_id: ids.facility, name: 'Campaign', services: ['registration'],
+    status: 'planned', starts_at: new Date(Date.now() - 60_000), ends_at: null, row_version: '3',
+    created_at: new Date(), updated_at: new Date() };
+  const service = (query: jest.Mock) => new OutreachService(
+    { withTransaction: jest.fn(async (_context, operation) => operation({ query })) } as never, audit as never, identity as never);
+  const statusInput = { status: 'active' as const, reason: 'Team ready to start' };
+  beforeEach(() => jest.clearAllMocks());
+
+  it('refuses a non-admin member opening a campaign before the version or the update', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [campaignRow] }).mockResolvedValueOnce({ rows: [{ role: 'enumerator' }] });
+    await expect(service(query).updateCampaignStatus(ids.campaign, statusInput, 1, context))
+      .rejects.toMatchObject({ status: 403, code: 'OUTREACH_CAMPAIGN_ADMIN_REQUIRED' });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[1][1]).toEqual([ids.campaign, ids.facility, ids.membership]);
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-member closing a campaign', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [campaignRow] }).mockResolvedValueOnce({ rows: [] });
+    await expect(service(query).updateCampaignStatus(ids.campaign, { status: 'closed', reason: 'Campaign finished' }, 3, context))
+      .rejects.toMatchObject({ status: 403, code: 'OUTREACH_CAMPAIGN_ADMIN_REQUIRED' });
+  });
+
+  it('lets an admin open it, and records the change', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [campaignRow] }).mockResolvedValueOnce({ rows: [{ role: 'admin' }] })
+      .mockResolvedValueOnce({ rows: [{ ...campaignRow, status: 'active', row_version: '4' }] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(service(query).updateCampaignStatus(ids.campaign, statusInput, 3, context))
+      .resolves.toMatchObject({ status: 'active', rowVersion: 4 });
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context, 'outreach.campaign.status-changed', ids.campaign);
+  });
+
+  it('answers the database\'s own admin refusal as the same 403', async () => {
+    const refusal = Object.assign(new Error('Outreach campaign admin is required'), { code: '42501' });
+    const query = jest.fn().mockResolvedValueOnce({ rows: [campaignRow] }).mockResolvedValueOnce({ rows: [{ role: 'admin' }] })
+      .mockRejectedValueOnce(refusal);
+    await expect(service(query).updateCampaignStatus(ids.campaign, statusInput, 3, context))
+      .rejects.toMatchObject({ status: 403, code: 'OUTREACH_CAMPAIGN_ADMIN_REQUIRED' });
+  });
+
+  it('refuses a non-admin adding a member, before looking the person up', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rowCount: 1, rows: [{}] }).mockResolvedValueOnce({ rows: [{ role: 'health_worker' }] });
+    await expect(service(query).addCampaignMember(ids.campaign, { membershipId: other, role: 'enumerator' }, context))
+      .rejects.toMatchObject({ status: 403, code: 'OUTREACH_CAMPAIGN_ADMIN_REQUIRED' });
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('adds only active staff at the facility, and not twice', async () => {
+    const notStaff = jest.fn().mockResolvedValueOnce({ rowCount: 1, rows: [{}] }).mockResolvedValueOnce({ rows: [{ role: 'admin' }] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(service(notStaff).addCampaignMember(ids.campaign, { membershipId: other, role: 'enumerator' }, context))
+      .rejects.toMatchObject({ status: 422, code: 'OUTREACH_STAFF_NOT_AVAILABLE' });
+    expect(notStaff.mock.calls[2][0]).toContain('outreach.campaign_staff($1)');
+    expect(notStaff.mock.calls[2][1]).toEqual([ids.campaign, other]);
+    const already = jest.fn().mockResolvedValueOnce({ rowCount: 1, rows: [{}] }).mockResolvedValueOnce({ rows: [{ role: 'admin' }] })
+      .mockResolvedValueOnce({ rows: [{ campaign_role: 'enumerator' }] });
+    await expect(service(already).addCampaignMember(ids.campaign, { membershipId: other, role: 'enumerator' }, context))
+      .rejects.toMatchObject({ status: 409, code: 'OUTREACH_CAMPAIGN_MEMBER_EXISTS' });
+  });
+
+  it('lets an admin add an available person, and records it', async () => {
+    const member = { id: 'm1', campaignId: ids.campaign, membershipId: other, role: 'enumerator', createdAt: new Date() };
+    const query = jest.fn().mockResolvedValueOnce({ rowCount: 1, rows: [{}] }).mockResolvedValueOnce({ rows: [{ role: 'admin' }] })
+      .mockResolvedValueOnce({ rows: [{ campaign_role: null }] }).mockResolvedValueOnce({ rows: [member] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(service(query).addCampaignMember(ids.campaign, { membershipId: other, role: 'enumerator' }, context))
+      .resolves.toMatchObject({ membershipId: other, role: 'enumerator' });
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context, 'outreach.campaign.member-added', ids.campaign);
+  });
+
+  it('answers the member policy\'s refusal as the same 403', async () => {
+    const refusal = Object.assign(new Error('new row violates row-level security policy "outreach_campaign_members_admin_create" for table "campaign_members"'), { code: '42501' });
+    const query = jest.fn().mockResolvedValueOnce({ rowCount: 1, rows: [{}] }).mockResolvedValueOnce({ rows: [{ role: 'admin' }] })
+      .mockResolvedValueOnce({ rows: [{ campaign_role: null }] }).mockRejectedValueOnce(refusal);
+    await expect(service(query).addCampaignMember(ids.campaign, { membershipId: other, role: 'enumerator' }, context))
+      .rejects.toMatchObject({ status: 403, code: 'OUTREACH_CAMPAIGN_ADMIN_REQUIRED' });
+  });
+
+  it('lists a campaign\'s people by name with the caller\'s own role', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rowCount: 1, rows: [{}] }).mockResolvedValueOnce({ rows: [
+      { membership_id: ids.membership, display_name: 'Ada Admin', campaign_role: 'admin' },
+      { membership_id: other, display_name: 'Bayo Candidate', campaign_role: null }] });
+    await expect(service(query).listCampaignStaff(ids.campaign, context)).resolves.toEqual({ yourRole: 'admin', people: [
+      { membershipId: ids.membership, name: 'Ada Admin', campaignRole: 'admin' },
+      { membershipId: other, name: 'Bayo Candidate', campaignRole: null }] });
+    const missing = jest.fn().mockResolvedValueOnce({ rowCount: 0, rows: [] });
+    await expect(service(missing).listCampaignStaff(ids.campaign, context)).rejects.toMatchObject({ status: 404 });
+    const outsider = jest.fn().mockResolvedValueOnce({ rowCount: 1, rows: [{}] }).mockResolvedValueOnce({ rows: [] });
+    await expect(service(outsider).listCampaignStaff(ids.campaign, context)).resolves.toEqual({ yourRole: null, people: [] });
+  });
+
+  it('refuses a campaign that ends before it starts, before the database', async () => {
+    const query = jest.fn();
+    await expect(service(query).createCampaign({ name: 'Campaign', services: ['registration'],
+      startsAt: '2026-11-20T08:00:00.000Z', endsAt: '2026-11-19T08:00:00.000Z' }, context))
+      .rejects.toMatchObject({ status: 400, code: 'OUTREACH_CAMPAIGN_DATES_INVALID' });
+    expect(query).not.toHaveBeenCalled();
+  });
+});

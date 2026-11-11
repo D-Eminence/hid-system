@@ -121,6 +121,7 @@ const acceptedMigrations = new Map([
   ['0106_ocr_worker_account.sql', 'a78f979774aed619c656990d0f0bc531c5eb00fd4998c5b7f00337ba156414d2'],
   ['0107_ocr_page_allowance.sql', '3379f5e388f83bd1179d7fbcbe886ed57717a933e40a51f58b23116e5d46cf60'],
   ['0108_records_processing_cover_lifetime.sql', '1562c606256f18555054423b4e632bb863cf3aae6b0776bee87c30e660983ed6'],
+  ['0122_outreach_campaign_admins.sql', 'f51bd42bcfa0e50bdb7f9f2ce3094540e8825ba0ed423b176ee16f1fc157857a'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

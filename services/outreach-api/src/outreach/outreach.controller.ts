@@ -15,6 +15,16 @@ export class OutreachController {
   constructor(private readonly outreach: OutreachService) {}
 
 
+  /**
+   * How campaigns are governed here (0122, ADR-045 option B): a campaign's own admins open, close and staff it. A
+   * website asks this to learn that campaign management is served; a backend before 0122 answers 404.
+   */
+  @Get('/campaigns/governance')
+  @RequirePermissions('outreach.campaign.read')
+  campaignGovernance() {
+    return { rule: 'campaign_admins' as const };
+  }
+
   @Get('/campaigns')
   @RequirePermissions('outreach.campaign.read')
   listCampaigns(@Req() request: HidRequest) {
@@ -45,6 +55,12 @@ export class OutreachController {
   @RequirePermissions('outreach.campaign.read')
   listCampaignMembers(@Param('campaignId', new ParseUUIDPipe()) campaignId: string, @Req() request: HidRequest) {
     return this.outreach.listCampaignMembers(campaignId, requireRequestContext(request));
+  }
+
+  @Get('/campaigns/:campaignId/staff')
+  @RequirePermissions('outreach.campaign.read')
+  listCampaignStaff(@Param('campaignId', new ParseUUIDPipe()) campaignId: string, @Req() request: HidRequest) {
+    return this.outreach.listCampaignStaff(campaignId, requireRequestContext(request));
   }
 
   @Post('/campaigns/:campaignId/members')
