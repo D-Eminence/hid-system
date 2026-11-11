@@ -101,6 +101,19 @@ export interface PharmacyImportBatch {
   items: PharmacyImportedMedicationEvidence[];
 }
 
+/** One page of a patient's imported medication records, newest first. */
+export interface PharmacyImportedMedicationPage {
+  items: PharmacyImportedMedicationEvidence[];
+  /** Pass as `cursor` for the next page; null on the last page. */
+  nextCursor: string | null;
+}
+
+export interface ListPharmacyImportedMedicationsOptions {
+  /** 1-100; Pharmacy answers 50 when it is left out. */
+  limit?: number;
+  cursor?: string;
+}
+
 export interface CreatePharmacyDispensingInput {
   expectedWorkItemVersion: number;
   quantityDispensed: number;
@@ -220,6 +233,27 @@ export class PharmacyApiClient {
     signal?: AbortSignal): Promise<PharmacyImportedMedicationEvidence> {
     return parseImport(await this.get(
       `/api/v1/pharmacy/imports/${encodeURIComponent(importId)}`, context, signal));
+  }
+
+  /** One patient's imported medication records at the request's facility, newest first (GET pharmacy/imports). */
+  async listImportedMedicationEvidence(patientId: string, context: PharmacyRequestContext,
+    options: ListPharmacyImportedMedicationsOptions = {}, signal?: AbortSignal): Promise<PharmacyImportedMedicationPage> {
+    const query = new URLSearchParams({ patientId });
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    const value = record(await this.get(`/api/v1/pharmacy/imports?${query.toString()}`, context, signal),
+      'Imported medication evidence page');
+    if (!Array.isArray(value.items)) throw new PharmacyApiProblem(502, value);
+    if (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !value.nextCursor)) {
+      throw new PharmacyApiProblem(502, value);
+    }
+    // Never pass on more than a page, or a record of another patient, to the chart.
+    if (value.items.length > 100) throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+    const items = value.items.map(parseImport);
+    if (items.some((item) => item.patientId !== patientId)) {
+      throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+    }
+    return { items, nextCursor: value.nextCursor };
   }
 
   private async resourceCommand(
