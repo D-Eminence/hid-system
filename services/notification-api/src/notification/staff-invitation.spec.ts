@@ -4,7 +4,7 @@ import { getEnvironment, resetEnvironmentForTests } from '../config/environment'
 import type { WorkloadAuthService } from '../auth/workload-auth.service';
 import {
   isTemplateOtp, messageContent, type OtpProvider, type ProviderResult, STAFF_INVITATION_ROLES, STAFF_ROLE_LABELS,
-  staffInvitationContent, type StaffInvitationRole, staffInvitationReference, staffSiteForRole, staffSiteOrigin,
+  staffInvitationContent, type FacilityStaffInvitationRole, staffInvitationReference, staffSiteForRole, staffSiteOrigin,
 } from '../providers/provider.types';
 import { DeliverStaffInvitationDto, STAFF_INVITATION_FACILITY_NAME } from './dto/deliver-staff-invitation.dto';
 import { NotificationController } from './notification.controller';
@@ -84,7 +84,24 @@ describe('Facility staff invitation email (P4b)', () => {
 
     it('opens the link on the staff site the role works on, never the patient portal', () => {
       expect(Object.fromEntries(STAFF_INVITATION_ROLES.map((role) => [role, staffSiteForRole(role)]))).toEqual({
-        doctor: 'ehr', nurse: 'ehr', lab: 'lab', pharmacist: 'pharmacy', receptionist: 'ehr' });
+        doctor: 'ehr', nurse: 'ehr', lab: 'lab', pharmacist: 'pharmacy', receptionist: 'ehr', outreach_volunteer: 'outreach' });
+    });
+
+    it('words an outreach volunteer\'s invitation for the group and opens it on outreach.', () => {
+      expect(staffSiteOrigin('production', 'outreach')).toBe('https://outreach.healthidentitydirectory.com');
+      expect(staffSiteOrigin('staging', 'outreach')).toBe('https://outreach.staging.healthidentitydirectory.com');
+      const outreachPage = 'https://outreach.healthidentitydirectory.com/provider/outreach-invitation';
+      const content = staffInvitationContent({ facilityName: 'Synthetic Community Health Volunteers',
+        roleCode: 'outreach_volunteer', invitationId, token, code: '482913', expiresAt: new Date(expiresAt),
+        origin: 'https://outreach.healthidentitydirectory.com', supportEmail: 'support@healthidentitydirectory.com' });
+      expect(content.subject).toBe('Invitation to help Synthetic Community Health Volunteers on Health ID Outreach');
+      expect(content.text).toContain('The organiser of Synthetic Community Health Volunteers has invited you to help');
+      expect(content.text).toContain(`${outreachPage}#${invitationId}.${token}`);
+      expect(content.text).toContain('the code 482913');
+      expect(content.text).not.toContain('join the facility');
+      expect(staffInvitationContent({ facilityName: null, roleCode: 'outreach_volunteer', invitationId, token,
+        code: '482913', expiresAt: new Date(expiresAt), origin: 'https://outreach.healthidentitydirectory.com',
+        supportEmail: 'support@healthidentitydirectory.com' }).subject).toBe('Invitation to help an outreach group on Health ID Outreach');
     });
 
     it('takes the link origin from the deployment and the site, never from a request', () => {
@@ -125,7 +142,7 @@ describe('Facility staff invitation email (P4b)', () => {
       ['staging', 'pharmacist', 'https://pharmacy.staging.healthidentitydirectory.com'],
       ['development', 'doctor', 'http://localhost:5173'],
     ] as const)('delivers by email in %s for a %s with the link on %s, the stable key and Novu\'s response shape',
-      async (deployment, roleCode: StaffInvitationRole, origin) => {
+      async (deployment, roleCode: FacilityStaffInvitationRole, origin) => {
       process.env.HID_DEPLOYMENT_ENV = deployment;
       resetEnvironmentForTests();
       const email = provider('ses');
