@@ -206,7 +206,7 @@
     "pillow": "12.3.0",
     "reportlab": "5.0.1"
   },
-  "keysSha256": "39fd22132827b9f99e686bdf8491ba618923e4da447c6bdebdd396eec6ebac41",
+  "keysSha256": "c13b21251e4faa262261e4e18e09bd5edc491b235fd768a42391979e866945c1",
   "kitVersion": "hid-ocr-accuracy-kit-1",
   "seed": 20261103
 }

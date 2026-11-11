@@ -46,8 +46,12 @@ allergy entries, 366 lab results, 1,753 vital signs and 401 notes.
 - Different difficulty: clean typed (born-digital PDFs and clean images), faint scans, skewed and noisy
   scans with specks and a dark scanner edge, handwriting (three handwriting fonts) and noisy handwriting.
 - Traps: look-alike names in the same document (hydroxyzine / hydralazine, chlorpromazine / chlorpropamide,
-  carbamazepine / carbimazole), look-alike strengths on the same page (5 mg next to 50 mg), and negations
-  ("No evidence of malaria", "?Malaria", "Query typhoid", "FHx DM", "Past history of PUD", "(stopped)").
+  carbamazepine / carbimazole), look-alike strengths on the same page (5 mg next to 50 mg), negations
+  ("No evidence of malaria", "?Malaria", "Query typhoid", "Working diagnosis: ...", "FHx DM", "Past history of
+  PUD", "(stopped)"), allergy conflicts (an active medicine the documented allergy should warn about, such as
+  co-amoxiclav with a penicillin allergy, or an NSAID with an aspirin or ibuprofen allergy: these arise by
+  chance, as the generator picks allergies and medicines independently, and are listed so they serve as
+  allergy-warning test cases), and a future date (a page dated after the set was made, 2026-11-03: D013).
 
 ### The answer keys
 
@@ -63,6 +67,21 @@ page, line and fields, in the same shape as the reading contract `hid-paper-read
 - lab result: test, value, unit, referenceRange, flag,
 - vital: measure, value, unit,
 - note: text.
+
+Every item also has `dateAsWritten`, as in the contract: the date its page gives for it, copied as written (the
+visit date on each page of an outpatient card; the prescription date; the admitted date for what was found on
+admission and the discharged date for discharge medicines and follow-up, on the page that gives them; the
+request date on page 1 of a lab report; the letter date on page 1 of a referral; the chart day), or null where
+its page gives none (a continuation page without a date, treatment given and investigations in a discharge
+summary). Each item has a `trap` (null, `lookalike:a/b`, `strength:a/b`, `negation`, `allergy_conflict:a/b`
+or `future_date`), and the document's `traps` is the sorted set of its items' trap types.
+
+**For markers** (also in LABELLING.md): in a discharge summary, "Treatment given" is what was given during the
+admission, so its medicines are `past`, never active; "Medications on discharge" are `new`. Document details
+are not items: the patient's name, folder number, date of birth or age and sex (they are the `identity`, once,
+from the first page that gives them), the requester ("Requested by"), the prescriber or doctor's signature,
+"Charted by", "Lab scientist", the letterhead, headings and the footer. A "Working diagnosis" is provisional:
+`suspected`.
 
 The keys are written by the generator from the same seed as the documents, so they always agree.
 
@@ -247,6 +266,33 @@ such as status, vital measure and allergy severity are not text and are not chec
 
 The report also gives the same count against the text-reading step's own lines, which separates "the AI
 added something" from "the scan was misread".
+
+### Other readings accepted
+
+Some things on the paper can fairly be read two ways. The scorer accepts either, narrowly:
+
+- **Route "inhaled"** (or "inhalation") for an inhaler whose route is not written: not unsupported when the
+  line shows "Inh" or "Inhaler" right before the medicine's name, and counted correct against a key route of
+  null. Any other unwritten route is still unsupported.
+- **"Mist. ... 10 ml"**: the key gives 10 ml as the strength; a reading that leaves the strength empty
+  (treating 10 ml as the dose, which the contract has no field for) is exact too. Only for a mixture whose key
+  strength is a volume in ml.
+- **IV fluids** given as treatment ("IV fluids 0.9% saline 1L 8hrly") are a note in the key; a medicine on the
+  same page with status `past` or `stopped` and the same words is paired with that note. Read as `new` or
+  `current`, it is an extra medicine and the note is not found.
+- **A prescription's date read as a note of its own** ("Date: 03/04/2026") is accepted and not counted as
+  extra; the medicines' date then counts as "read as a separate note".
+- **A lab test with or without a method in brackets** ("MP (thick film)" and "MP") is the same test.
+
+### Dates
+
+Each paired item's date (`dateAsWritten`, or else its prescription's date) is compared with the key's and
+counted as: the same as written; the same date spelt another way (`3/4/26` for `03/04/2026`); **day and month
+swapped** (`04/03/2026` for `03/04/2026`, listed by item id); another date the page gives (the admitted date
+for a discharge medicine); wrong; not read; read as a separate note; or a date where the key has none. The
+contract carries an item date and the reader copies it from the page, so a date that is not on the paper is
+already counted in (b). Dates are reported on their own and **do not change the two launch measures**: the
+medicine measure stays name, strength, how often and status.
 
 ### Other numbers in the report
 

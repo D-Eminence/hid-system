@@ -1,7 +1,7 @@
 // Scorer correctness on small hand-made cases (fictional text only).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { renderMarkdown, scoreDocument, scoreRun, supported } from '../score.mjs';
+import { compareDate, renderMarkdown, scoreDocument, scoreRun, supported } from '../score.mjs';
 import { normFrequency, normName, normStrength, onPage } from '../lib/normalise.mjs';
 
 const box = { left: 0.1, top: 0.2, width: 0.5, height: 0.02 };
@@ -211,4 +211,126 @@ test('an invented "nocte" is not supported by the everyday word "on" elsewhere o
   assert.equal(supported('frequency', 'nocte', lines, ''), false);
   assert.equal(supported('frequency', 'nocte', lines, 'Amitriptyline'), true, 'written ON after the medicine');
   assert.equal(supported('frequency', 'daily', lines, 'Amlodipine'), true, 'daily for a written od');
+});
+
+// ----- Other readings accepted (Ola's pre-check) and dates -----
+
+const RX_LINES = ['DEMO HOSPITAL', 'Date: 03/04/2026', 'Inh Salbutamol 100mcg 2 puffs prn',
+  'Mist. Magnesium trisilicate 10 ml tds', 'Treatment given:', 'IV fluids 0.9% saline 1L 8hrly',
+  'Admitted: 01/04/2026   Discharged: 06/04/2026'];
+const rxKey = (items) => ({ ...key(items), text: [{ page: 1, lines: RX_LINES.map((text, index) => ({ n: index + 1, text,
+  handwritten: false, box: { ...box, top: 0.05 * (index + 1) } })) }] });
+const rx = { prescriberAsWritten: null, dateAsWritten: '03/04/2026' };
+const SALB = med('T001-i01', 'Inh Salbutamol 100mcg 2 puffs prn', 'Salbutamol', '100mcg', 'prn', 3,
+  { prescription: rx, dateAsWritten: '03/04/2026',
+    fields: { name: 'Salbutamol', strength: '100mcg', form: 'Inh', route: null, frequency: 'prn', duration: null, status: 'new' } });
+const MIST = med('T001-i02', 'Mist. Magnesium trisilicate 10 ml tds', 'Magnesium trisilicate', '10 ml', 'tds', 4,
+  { prescription: rx, dateAsWritten: '03/04/2026',
+    fields: { name: 'Magnesium trisilicate', strength: '10 ml', form: 'Mist.', route: null, frequency: 'tds', duration: null, status: 'new' } });
+const FLUIDS = { id: 'T001-i03', kind: 'note', asWritten: 'IV fluids 0.9% saline 1L 8hrly', page: 1, lines: [6],
+  prescription: null, trap: null, dateAsWritten: null, fields: { text: 'IV fluids 0.9% saline 1L 8hrly' } };
+const RX_ITEMS = [SALB, MIST, FLUIDS];
+const rxPayload = (items) => ({ ...payload(items), pages: [{ page: 1, flagged: false, flagReasons: [],
+  lines: RX_LINES.map((text, index) => ({ id: `p1-l${index + 1}`, text, box, confidence: 0.99, handwritten: false })) }] });
+const salbOut = (route, extra = {}) => ({ ...out('medicine', 'Inh Salbutamol 100mcg 2 puffs prn', { name: 'Salbutamol',
+  strength: '100mcg', form: 'Inh', route, frequency: 'prn', duration: null, status: 'new' }), dateAsWritten: '03/04/2026', ...extra });
+const mistOut = (strength) => ({ ...out('medicine', 'Mist. Magnesium trisilicate 10 ml tds', { name: 'Magnesium trisilicate',
+  strength, form: 'Mist.', route: null, frequency: 'tds', duration: null, status: 'new' }, { line: 4 }), dateAsWritten: '03/04/2026' });
+const fluidsNote = () => out('note', 'IV fluids 0.9% saline 1L 8hrly', { text: 'IV fluids 0.9% saline 1L 8hrly' }, { line: 6 });
+
+test('route "inhaled" for an inhaler with no route written is supported and correct; elsewhere it is not', () => {
+  const doc = scoreDocument(rxKey(RX_ITEMS), rxPayload([salbOut('inhaled'), mistOut('10 ml'), fluidsNote()]));
+  assert.equal(doc.unsupported.unsupported, 0);
+  assert.equal(doc.kinds.medicine.fieldsCorrect, 2);
+  assert.equal(supported('route', 'inhaled', RX_LINES, 'Salbutamol'), true);
+  assert.equal(supported('route', 'inhaled', RX_LINES, 'Magnesium trisilicate'), false, 'not an inhaler');
+  assert.equal(supported('route', 'po', RX_LINES, 'Salbutamol'), false, 'any other route still has to be written');
+  const iv = scoreDocument(rxKey(RX_ITEMS), rxPayload([salbOut('IM'), mistOut('10 ml'), fluidsNote()]));
+  assert.equal(iv.unsupported.byValue.route, 1);
+  assert.equal(iv.kinds.medicine.fieldsCorrect, 1);
+});
+
+test('"Mist. ... 10 ml" read as the strength or as a dose (strength left empty) is exact; another volume is not', () => {
+  for (const strength of ['10 ml', '10ml', null]) {
+    const doc = scoreDocument(rxKey(RX_ITEMS), rxPayload([salbOut(null), mistOut(strength), fluidsNote()]));
+    assert.equal(doc.medicines.exact, 2, String(strength));
+  }
+  const wrong = scoreDocument(rxKey(RX_ITEMS), rxPayload([salbOut(null), mistOut('5 ml'), fluidsNote()]));
+  assert.equal(wrong.medicines.exact, 1);
+  // A tablet whose strength is left empty is still not exact.
+  const items = perfect();
+  items[0] = outMed('Tab Amlodipine 5 mg od', 'Amlodipine', null, 'od');
+  assert.equal(scoreDocument(key(KEY_ITEMS), payload(items)).medicines.exact, 2);
+});
+
+test('IV fluids read as a note or as a past or stopped medicine are found; as an active medicine they are extra', () => {
+  const asMedicine = (status) => out('medicine', 'IV fluids 0.9% saline 1L 8hrly', { name: '0.9% saline', strength: '1L',
+    form: null, route: 'IV', frequency: '8hrly', duration: null, status }, { line: 6 });
+  for (const status of ['past', 'stopped']) {
+    const doc = scoreDocument(rxKey(RX_ITEMS), rxPayload([salbOut(null), mistOut('10 ml'), asMedicine(status)]));
+    assert.equal(doc.kinds.note.matched, 1, status);
+    assert.equal(doc.extraItems, 0, status);
+    assert.equal(doc.alternatives.ivFluidsAsPastMedicine, 1);
+    assert.equal(doc.medicines.expected, 2, 'the launch measure counts the key medicines only');
+  }
+  for (const status of ['new', 'current']) {
+    const doc = scoreDocument(rxKey(RX_ITEMS), rxPayload([salbOut(null), mistOut('10 ml'), asMedicine(status)]));
+    assert.equal(doc.kinds.note.matched, 0, status);
+    assert.equal(doc.extraItems, 1, status);
+  }
+});
+
+test('a prescription date read as a separate note is accepted, not extra, and its medicines\' date is "given as note"', () => {
+  const noDate = (item) => ({ ...item, dateAsWritten: null });
+  const items = [noDate(salbOut(null)), noDate(mistOut('10 ml')), fluidsNote(),
+    out('note', 'Date: 03/04/2026', { text: '03/04/2026' }, { line: 2 })];
+  const report = scoreRun([rxKey(RX_ITEMS)], new Map([['T001', rxPayload(items)]]));
+  assert.equal(report.alternatives.prescriptionDateAsNote, 1);
+  assert.equal(report.perKind.note.precision, 1);
+  assert.equal(report.dates.given_as_note, 2);
+  assert.equal(report.dates.missing, 0);
+  // A note with some other date is not a prescription date.
+  const other = scoreDocument(rxKey(RX_ITEMS), rxPayload([...items.slice(0, 3),
+    out('note', 'Admitted: 01/04/2026', { text: '01/04/2026' }, { line: 7 })]));
+  assert.equal(other.extraItems, 1);
+  assert.equal(other.dates.missing, 2);
+});
+
+test('dates: a day/month swap is its own outcome, and dates never change the two launch measures', () => {
+  assert.equal(compareDate('03/04/2026', '03/04/2026'), 'same');
+  assert.equal(compareDate('3/4/26', '03/04/2026'), 'same_date_other_spelling');
+  assert.equal(compareDate('2026-04-03', '03/04/2026'), 'same_date_other_spelling');
+  assert.equal(compareDate('04/03/2026', '03/04/2026'), 'day_month_swapped');
+  assert.equal(compareDate('04/04/2026', '04/04/2026'), 'same');
+  assert.equal(compareDate('06/04/2026', '01/04/2026', ['01/04/2026', '06/04/2026']), 'other_date_on_page');
+  assert.equal(compareDate('09/09/2026', '03/04/2026'), 'wrong');
+  assert.equal(compareDate(null, '03/04/2026'), 'missing');
+  assert.equal(compareDate('03/04/2026', null), 'extra');
+  assert.equal(compareDate(null, null), null);
+  const right = scoreRun([rxKey(RX_ITEMS)], new Map([['T001', rxPayload([salbOut(null), mistOut('10 ml'), fluidsNote()])]]));
+  // The produced item's date may also come only in its prescription.
+  const swapped = scoreRun([rxKey(RX_ITEMS)], new Map([['T001', rxPayload([
+    salbOut(null, { dateAsWritten: null, prescription: { prescriberAsWritten: null, dateAsWritten: '04/03/2026' } }),
+    mistOut('10 ml'), fluidsNote()])]]));
+  assert.equal(right.dates.same, 2);
+  assert.equal(swapped.dates.day_month_swapped, 1);
+  assert.deepEqual(swapped.dates.swappedIds, ['T001-i01']);
+  assert.equal(swapped.launchMetrics.medicineAccuracyAfterChecking.value, right.launchMetrics.medicineAccuracyAfterChecking.value);
+  assert.match(renderMarkdown(swapped), /## Dates[\s\S]*Day and month swapped: T001-i01/);
+});
+
+test('a lab test with or without its method in brackets is the same test', () => {
+  const lines = ['MALARIA PARASITE', 'MP (thick film): Positive (++)'];
+  const labKey = { ...key([{ id: 'T001-i01', kind: 'lab_result', asWritten: 'MP (thick film): Positive (++)', page: 1,
+    lines: [2], prescription: null, trap: null, dateAsWritten: null,
+    fields: { test: 'MP (thick film)', value: 'Positive (++)', unit: null, referenceRange: null, flag: null } }]),
+  text: [{ page: 1, lines: lines.map((text, index) => ({ n: index + 1, text, handwritten: false, box })) }] };
+  for (const test of ['MP (thick film)', 'MP']) {
+    const doc = scoreDocument(labKey, payload([out('lab_result', 'MP (thick film): Positive (++)',
+      { test, value: 'Positive (++)', unit: null, referenceRange: null, flag: null }, { line: 2 })]));
+    assert.equal(doc.kinds.lab_result.fieldsCorrect, 1, test);
+  }
+  const other = scoreDocument(labKey, payload([out('lab_result', 'MP (thick film): Positive (++)',
+    { test: 'mRDT', value: 'Positive (++)', unit: null, referenceRange: null, flag: null }, { line: 2 })]));
+  assert.equal(other.kinds.lab_result.matched, 0);
 });
