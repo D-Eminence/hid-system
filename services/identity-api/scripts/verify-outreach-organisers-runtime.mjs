@@ -24,7 +24,7 @@
 // All values are synthetic. No network call is made.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
 const identityRoot = resolve(import.meta.dirname, '..');
@@ -97,7 +97,7 @@ try {
   // Identity, as its runtime role.
   Object.assign(process.env, { DATABASE_URL: url(isolated, 'hid_identity_api_runtime'), DATABASE_SSL: 'false',
     CORS_ORIGINS: 'https://outreach.healthidentitydirectory.com', AUTH_MODE: 'local',
-    AUTH_SIGNING_SECRET: 'verifier-signing-secret-0123456789abcdef', AUTH_LOGIN_PEPPER: 'verifier-login-pepper-0123456789abcdef',
+    AUTH_SIGNING_SECRET: randomBytes(32).toString('base64url'), AUTH_LOGIN_PEPPER: randomBytes(32).toString('base64url'),
     OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'), CONTACT_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
     IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'public-synthetic-ehr-workload-token' });
   requireIdentity('ts-node').register({ project: join(identityRoot, 'tsconfig.json'), transpileOnly: true });
