@@ -171,6 +171,12 @@ begin
   reset role;
   perform set_config('outreach_guard.owner_sees', visible::text, true);
 end $$;
+-- Whether the campaign guard's owner bypasses row-level security decides what
+-- its admin check (0122) reads: an owner without it reads campaign_members
+-- under their policies, which need a direct-care session.
+select set_config('outreach_guard.campaign_owner_bypasses_rls',
+  (select (r.rolsuper or r.rolbypassrls)::text from pg_proc p join pg_roles r on r.oid = p.proowner
+    where p.oid = 'outreach.validate_campaign_write()'::regprocedure), true);
 
 -- The sessions every guard is checked under. Each case's row names one member
 -- (its account and membership) as creator, resolver or event actor, so that
@@ -348,7 +354,10 @@ $$;
 -- guard does not compare the purpose, and a campaign update compares only the
 -- facility (0045) and, since 0122, that the session's membership is one of the
 -- campaign's admins (A is C1's): those cases are accepted here, and an update
--- by another membership, or none, is refused as not an admin. The runtime cannot make those
+-- by another membership, or none, is refused as not an admin. Where the guard's
+-- owner does not bypass RLS (an RDS-shaped database), its admin check reads the
+-- members under their policies, so A without direct care is refused as not an
+-- admin as well. The runtime cannot make those
 -- writes: RLS hides R1 from the event guard, refuses the campaign, or hides C1
 -- from the update (runtime cases below).
 set local session_replication_role = replica;
@@ -385,7 +394,9 @@ select pg_temp.outreach_case('isolated', 'campaign update: ' || session_name
       || case when seq = 9 then ', rewriting the creator to B' else ', planned to active' end,
     case when seq = 9 then pg_temp.refusal('campaign history')
       when seq in (1, 6) then pg_temp.refusal('campaign context')
-      when seq in (2, 3, 4, 5) then pg_temp.refusal('campaign admin') else 'ok' end, seq,
+      when seq in (2, 3, 4, 5) then pg_temp.refusal('campaign admin')
+      when seq in (7, 8) and not current_setting('outreach_guard.campaign_owner_bypasses_rls')::boolean
+        then pg_temp.refusal('campaign admin') else 'ok' end, seq,
     case when seq = 9 then pg_temp.campaign_creator_update('e8e70000-0000-4000-8000-000000000001', actor,
       actor_membership) else pg_temp.campaign_status_update('e8e70000-0000-4000-8000-000000000001', 'active') end,
     false, 'outreach_guard.returned')

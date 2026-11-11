@@ -3654,7 +3654,10 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
 - `outreach.validate_campaign_write()` refuses any campaign update by a
   session whose membership is not one of the campaign's admins (42501). A row
   lock fires no trigger, so a member registering a person into the campaign
-  (0045's `FOR SHARE`) is unaffected.
+  (0045's `FOR SHARE`) is unaffected. Where the function's owner does not
+  bypass row-level security (RDS), the check reads the members under their
+  policies, so it also needs a direct-care session holding
+  `outreach.campaign.read`; the campaigns update policy needs one already.
 - Restrictive policies on `outreach.campaign_members`:
   - only a campaign's admins insert or delete its members;
   - the creator may seed themself as the first admin of a campaign with no
