@@ -15,14 +15,14 @@ async function accepts(permission: unknown): Promise<boolean> {
 }
 
 describe('AuthorizeOutreachDto', () => {
-  it('accepts every Outreach permission the database defines, campaign writes included since 0122', async () => {
+  it('accepts every Outreach permission the database defines, campaign writes included since 0111', async () => {
     expect(outreachPermissions).toEqual(['outreach.campaign.read', 'outreach.campaign.write',
       'outreach.registration.read', 'outreach.registration.write']);
     for (const permission of outreachPermissions) expect({ permission, accepted: await accepts(permission) })
       .toEqual({ permission, accepted: true });
   });
 
-  it('accepts campaign writes only alongside 0122, which makes them admin-only', () => {
+  it('accepts campaign writes only alongside 0111, which makes them admin-only', () => {
     const governance = readdirSync(migrations).filter((file) => file.endsWith('.sql'))
       .map((file) => readFileSync(join(migrations, file), 'utf8'))
       .find((source) => source.includes('create function outreach.campaign_staff(requested_campaign_id uuid)'));

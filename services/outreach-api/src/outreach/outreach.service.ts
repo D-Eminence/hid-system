@@ -17,12 +17,12 @@ import { isOutreachTenant, OUTREACH_NOTES_LIMIT, outreachRuleProblem, tenantNoHe
 
 interface IdempotencyRow { request_sha256: string; registration_case_id: string }
 
-/** 403 for anyone but a campaign's own admins (0122, ADR-045 option B). */
+/** 403 for anyone but a campaign's own admins (0111, ADR-045 option B). */
 function campaignAdminRequired(what: string): DomainProblem {
   return new DomainProblem(403, 'OUTREACH_CAMPAIGN_ADMIN_REQUIRED', `Only this Outreach campaign's admins can ${what}`);
 }
 
-/** The database's own admin refusals (0122's trigger and member policy) as the same 403; anything else unchanged. */
+/** The database's own admin refusals (0111's trigger and member policy) as the same 403; anything else unchanged. */
 function adminRefusal(error: unknown, what: string): unknown {
   const code = typeof error === 'object' && error && 'code' in error ? (error as { code?: string }).code : undefined;
   const message = error instanceof Error ? error.message : '';
@@ -287,7 +287,7 @@ export class OutreachService {
     return this.withRules(() => this.database.withTransaction(context, async (client) => {
       const current = (await client.query(`select * from outreach.campaigns where id=$1 and facility_id=$2 for update`, [id, context.facilityId])).rows[0];
       if (!current) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
-      // 0122 (ADR-045 option B): only this campaign's own admins open or close it.
+      // 0111 (ADR-045 option B): only this campaign's own admins open or close it.
       if (await this.campaignRole(client, id, context) !== 'admin') throw campaignAdminRequired('open or close it');
       if (Number(current.row_version) !== expectedVersion) throw new DomainProblem(412, 'VERSION_CONFLICT', 'The Outreach campaign changed; reload before retrying');
       if (current.status === input.status) throw new DomainProblem(409, 'OUTREACH_CAMPAIGN_STATE_CONFLICT', 'The Outreach campaign is already in that state');
@@ -321,7 +321,7 @@ export class OutreachService {
     return this.withRules(() => this.database.withTransaction(context, async (client) => {
       const campaign = await client.query(`select 1 from outreach.campaigns where id=$1 and facility_id=$2`, [id, context.facilityId]);
       if (!campaign.rowCount) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
-      // 0122 (ADR-045 option B): only this campaign's own admins add members, and only active staff at the facility.
+      // 0111 (ADR-045 option B): only this campaign's own admins add members, and only active staff at the facility.
       if (await this.campaignRole(client, id, context) !== 'admin') throw campaignAdminRequired('add members');
       const person = (await client.query<{ campaign_role: string | null }>(`select campaign_role
         from outreach.campaign_staff($1) where membership_id=$2`, [id, input.membershipId])).rows[0];
@@ -375,7 +375,7 @@ export class OutreachService {
   }
 
   /**
-   * Who is in a campaign, by name, and to its admins who could be added (0122's outreach.campaign_staff), with the
+   * Who is in a campaign, by name, and to its admins who could be added (0111's outreach.campaign_staff), with the
    * caller's own role in it. A non-member gets no one.
    */
   async listCampaignStaff(id: string, context: DataAccessContext): Promise<CampaignStaff> {
