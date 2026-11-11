@@ -178,7 +178,9 @@ describe('message text cannot become stack frames', () => {
   it('drops hostile "at ..." lines from an error message', async () => {
     const { json, event } = await sentFrames(
       new Error('invalid input "foo\n    at Jane Doe (NHS 943 476 5919)\n    at 12 Baker Street London'));
-    for (const secret of ['Jane', 'Doe', '943', 'Baker', 'London', 'NHS']) expect(json).not.toContain(secret);
+    // '943 476 5919', not '943' alone: Sentry's own Unix timestamp (1794 3...) contains 943
+    // in November 2026, which failed the check without any personal data in the event.
+    for (const secret of ['Jane', 'Doe', '943 476 5919', 'Baker', 'London', 'NHS']) expect(json).not.toContain(secret);
     const frames = event.exception.values[0].stacktrace.frames as Array<Record<string, unknown>>;
     expect(frames.length).toBeGreaterThan(0);
     for (const frame of frames) expect(typeof frame.lineno).toBe('number');
