@@ -7,12 +7,14 @@ COPY gateway/proxy-headers.conf /tmp/hid-proxy-headers.conf
 FROM nginxinc/nginx-unprivileged@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 AS runtime
 # Pin fixes from the base's signed Alpine 3.24 repository. Keep the existing
 # unprivileged runtime and regex pin; fail if a reviewed package is unavailable.
+# musl 1.2.6-r3 fixes CVE-2026-107891 (High; musl and musl-utils 1.2.6-r2 in the base).
 USER 0
 # curl is a base-image utility, unused by nginx, its entrypoint or our wget
 # health check. Removing it also removes its unused libcurl dependency; no
 # curl fix is available in this Alpine branch. Keep nginx modules installed.
 RUN apk del --no-cache curl \
-    && apk add --no-cache 'pcre2=10.49-r0' 'libexpat=2.10.0-r0' 'zlib=1.3.2-r1' 'libx11=1.8.14-r0' 'brotli-libs=1.2.1-r0'
+    && apk add --no-cache 'pcre2=10.49-r0' 'libexpat=2.10.0-r0' 'zlib=1.4-r0' 'libx11=1.8.14-r0' 'brotli-libs=1.2.1-r0' \
+       'musl=1.2.6-r3' 'musl-utils=1.2.6-r3'
 
 ENV IDENTITY_API_UPSTREAM=http://identity-api:3001 \
     EHR_API_UPSTREAM=http://ehr-api:3002 \

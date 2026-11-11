@@ -38,7 +38,7 @@ describe('OCR worker configuration', () => {
     const config = readOcrWorkerConfig(base);
     expect(config).toMatchObject({ OCR_AI_MODE: 'off', OCR_AI_FIRST_PASS_MODEL: 'claude-opus-5-5',
       OCR_AI_FIRST_PASS_EFFORT: 'high', OCR_AI_REREAD_MODEL: 'claude-opus-5-5', OCR_AI_REREAD_EFFORT: 'high',
-      OCR_AI_MAX_TOKENS: 32_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
+      OCR_AI_MAX_TOKENS: 64_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
     expect(config.OCR_AI_FACILITY_IDS).toBeUndefined();
   });
 
@@ -77,6 +77,92 @@ describe('OCR worker configuration', () => {
     expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_REREAD: 'on' }).OCR_AI_IMAGE_REREAD).toBe('on');
     for (const value of ['yes', 'true', 'ON', '1', 'auto']) {
       expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_IMAGE_REREAD: value })).toThrow(/OCR_AI_IMAGE_REREAD/);
+    }
+  });
+
+  it('zooms in the hard-page reads by default when they are on, up to 4 calls, and fails closed on other values', () => {
+    const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'true' };
+    expect(readOcrWorkerConfig(base)).toMatchObject({ OCR_AI_HARD_PAGE_ZOOM: 'off', OCR_AI_ZOOM_MAX_CALLS: 4 });
+    expect(readOcrWorkerConfig(claude)).toMatchObject({ OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 4 });
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: 'off' }).OCR_AI_HARD_PAGE_ZOOM).toBe('off');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_ZOOM: ' ' }).OCR_AI_HARD_PAGE_ZOOM).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_ZOOM: 'off' }).OCR_AI_HARD_PAGE_ZOOM).toBe('off');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_ZOOM_MAX_CALLS: '0' }).OCR_AI_ZOOM_MAX_CALLS).toBe(0);
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_ZOOM_MAX_CALLS: '' }).OCR_AI_ZOOM_MAX_CALLS).toBe(4);
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_ZOOM_MAX_CALLS: '4' }).OCR_AI_ZOOM_MAX_CALLS).toBe(4);
+    for (const value of ['yes', 'ON', 'true', '1']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_ZOOM: value })).toThrow(/OCR_AI_HARD_PAGE_ZOOM/);
+    }
+    // 5 to 8 were allowed before the coordinator's decision of 2026-11-10: now they fail startup too.
+    for (const value of ['5', '8', '9', '-1', '2.5', 'eight']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_ZOOM_MAX_CALLS: value })).toThrow(/OCR_AI_ZOOM_MAX_CALLS/);
+    }
+  });
+
+  it('gives the last resort its own window, OCR_AI_LAST_RESORT_SECONDS: 60 by default, 30 to 300, fail-closed', () => {
+    const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'true' };
+    expect(readOcrWorkerConfig(base).OCR_AI_LAST_RESORT_SECONDS).toBe(60);
+    expect(readOcrWorkerConfig(claude).OCR_AI_LAST_RESORT_SECONDS).toBe(60);
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_LAST_RESORT_SECONDS: ' ' }).OCR_AI_LAST_RESORT_SECONDS).toBe(60);
+    for (const [value, seconds] of [['30', 30], ['90', 90], ['300', 300]] as const) {
+      expect(readOcrWorkerConfig({ ...claude, OCR_AI_LAST_RESORT_SECONDS: value }).OCR_AI_LAST_RESORT_SECONDS).toBe(seconds);
+    }
+    for (const value of ['29', '301', '0', '-60', '60.5', '60s', 'lots', '60000']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_LAST_RESORT_SECONDS: value }))
+        .toThrow(/OCR_AI_LAST_RESORT_SECONDS/);
+    }
+  });
+
+  it('bounds the hard-page reads: follow-up effort, per-read output tokens and the page deadline, fail-closed', () => {
+    const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'true' };
+    expect(readOcrWorkerConfig(claude)).toMatchObject({ OCR_AI_HARD_PAGE_EFFORT: 'high',
+      OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT: 'high', OCR_AI_HARD_PAGE_MAX_TOKENS: 32_000,
+      OCR_AI_HARD_PAGE_DEADLINE_MS: 150_000, OCR_AI_MAX_TOKENS: 64_000 });
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT: 'max', OCR_AI_HARD_PAGE_MAX_TOKENS: '4096',
+      OCR_AI_HARD_PAGE_DEADLINE_MS: '30000' })).toMatchObject({ OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT: 'max',
+      OCR_AI_HARD_PAGE_MAX_TOKENS: 4_096, OCR_AI_HARD_PAGE_DEADLINE_MS: 30_000 });
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_MAX_TOKENS: '', OCR_AI_HARD_PAGE_DEADLINE_MS: ' ' }))
+      .toMatchObject({ OCR_AI_HARD_PAGE_MAX_TOKENS: 32_000, OCR_AI_HARD_PAGE_DEADLINE_MS: 150_000 });
+    for (const value of ['', 'HIGH', 'medium-high', 'none']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT: value }))
+        .toThrow(/OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT/);
+    }
+    for (const value of ['4095', '128001', '32000.5', 'lots', '-1']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_MAX_TOKENS: value })).toThrow(/OCR_AI_HARD_PAGE_MAX_TOKENS/);
+    }
+    for (const value of ['29999', '1800001', '150s', '0']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_DEADLINE_MS: value })).toThrow(/OCR_AI_HARD_PAGE_DEADLINE_MS/);
+    }
+    // The two reads of a hard page run at once: one request permit would make them take turns.
+    expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_MAX_CONCURRENT_REQUESTS: '1' }))
+      .toThrow(/OCR_AI_MAX_CONCURRENT_REQUESTS: Hard-page reads need at least 2/);
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_MAX_CONCURRENT_REQUESTS: '2' }).OCR_AI_MAX_CONCURRENT_REQUESTS).toBe(2);
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_MAX_CONCURRENT_REQUESTS: '1', OCR_AI_HARD_PAGE_READS: 'off' })
+      .OCR_AI_MAX_CONCURRENT_REQUESTS).toBe(1);
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_MAX_CONCURRENT_REQUESTS: '1' }).OCR_AI_MAX_CONCURRENT_REQUESTS).toBe(1);
+  });
+
+  it('reads hard pages twice at max effort by default when AI reading is on, and fails closed on other values', () => {
+    const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'true' };
+    expect(readOcrWorkerConfig(base)).toMatchObject({ OCR_AI_HARD_PAGE_READS: 'off', OCR_AI_HARD_PAGE_EFFORT: 'high',
+      OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 });
+    expect(readOcrWorkerConfig(claude).OCR_AI_HARD_PAGE_READS).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: ' ' }).OCR_AI_HARD_PAGE_READS).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: 'off' }).OCR_AI_HARD_PAGE_READS).toBe('off');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_EFFORT: 'xhigh' }).OCR_AI_HARD_PAGE_EFFORT).toBe('xhigh');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_EFFORT: 'max' }).OCR_AI_HARD_PAGE_EFFORT).toBe('max');
+    for (const value of ['yes', 'ON', 'true']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: value })).toThrow(/OCR_AI_HARD_PAGE_READS/);
+    }
+    for (const value of ['maximum', 'MAX', 'highest']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_EFFORT: value })).toThrow(/OCR_AI_HARD_PAGE_EFFORT/);
+    }
+    for (const value of ['9999', '1800001']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_TIMEOUT_MS: value })).toThrow(/OCR_AI_HARD_PAGE_TIMEOUT_MS/);
     }
   });
 

@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem, VITAL_MEASURES } from './contract';
 import {
-  ambiguousDate, combinedStrengths, compact, DOSE, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
-  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, wordsIn,
+  ambiguousDate, combinedStrengths, compact, crossedOutParts, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
+  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit,
+  withoutReadingMarks, wordsIn,
 } from './grounding';
 import { withoutPlaceholders, type Masker } from './masking';
 import type { ModelItem, ModelPage } from './prompt';
@@ -18,8 +19,33 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['nkda_not_on_paper', 'nkda_conflicts'], "The paper doesn't clearly say there are no known allergies."],
   [['value_mismatch', 'reading_number_mismatch', 'plain_mismatch'], "A number on the paper doesn't match what was read."],
   [['number_not_in_text_read'], "A number read from the picture isn't in the text read from the page; check it against the paper."],
+  // A hard page read twice from its picture: the two readings disagreed on part of this item (that part is shown
+  // as "A? (or B?)", hard-page prompt 5/6).
+  [['readings_disagree'], 'Two readings of the picture disagree on part of this; check it against the paper.'],
+  // A hard-page item with writing crossed out on the paper, shown "(crossed out: X)" on the item.
+  [['crossed_out'], 'Part of this is crossed out on the paper; check it against the paper.'],
+  // Some text of this item looks like a description of the writing, not a reading of it (shown as read).
+  [['description_suspected'], 'This may describe the writing instead of reading it; check it against the paper.'],
   // After the dose and number disagreements, before the text-match ones (an item read from the picture is
   // expected to differ from the text the service read).
+  // A hard page's best guesses (owner decision 2026-11-05 about 18:40 UTC): below the real disagreements above, and
+  // before read_from_image, which every such item also has, so they are said instead of it. Most specific first.
+  [['field_from_context'], 'Part of this was guessed from what is usual, not read from the writing; check it against the paper.'],
+  // Found by only one of the two readings: said before a sign, so the person checking is told the item itself may
+  // not be on the paper.
+  // A handwritten sign read as its meaning ("alternate (sign)") or not read ("[sign?]"): an interpretation of a mark,
+  // below a guess from what is usual and one reading only, above the plainer hard-page sentences.
+  [['single_reading_only'], 'Only one of two readings of the picture found this; check it against the paper.'],
+  [['sign_read'], 'A handwritten sign was read as a word, marked "(sign)", or could not be read, marked "[sign?]"; check it against the paper.'],
+  // A hard-page item with words marked "?" because their letters were hard to make out (kept apart from
+  // field_from_context, which is said first; the website shows both as "?").
+  [['unsure_from_letters'], 'Words marked "?" were hard to make out; check them against the paper.'],
+  [['best_guess_from_picture'], 'This is a best guess from the picture; check every word against the paper.'],
+  // Just before read_from_image (which every picture item has), so it is shown where it applies.
+  [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],
+  // The page's last-resort reading from the picture (README "Last resort"): every other reading of the page gave
+  // nothing, so this is the only one there is. Said before the general picture sentence, after the specific ones.
+  [['last_resort_read'], 'The other readings of this page did not work; this was read from the picture as a last try. Check every word against the paper.'],
   [['read_from_image'], 'This was read from the picture of the page; check it against the paper.'],
   [['measure_mismatch'], "What was measured doesn't match the label on the paper."],
   [['plain_contradicts'], "The plain reading says something the paper doesn't."],
@@ -31,6 +57,7 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['lines_not_together'], 'This was put together from separate parts of the page.'],
   [['status_not_active', 'status_unclear'], 'This may not be current (for example past, stopped or suspected).'],
   [['status_cue_on_line'], 'The paper has words that may change whether this is current.'],
+  [['status_not_written'], "The paper doesn't say whether this is current."],
   [['date_ambiguous'], 'The date could be read two ways (day/month or month/day).'],
   [['duplicate_source_span'], 'Another item was read from the same words; check nothing was missed.'],
   // Below the disagreements and status warnings: a second reading that read the same words differently, then a
@@ -152,58 +179,179 @@ function onLine(box: Box, line: Box): boolean {
 /**
  * Whether the item read from the picture shares anything with the text read of its lines: a word of three letters
  * or more, or a number. It need not match the text (the service may have misread it), but an item with nothing in
- * common with its lines (a box copied from the prompt around a made-up item) is not kept.
+ * common with its lines (a box copied from the prompt around a made-up item) is not kept. The hard-page sign marks
+ * ("(sign)", "[sign?]") and the other reading marks ("(? on paper)", "[?]", the "crossed out" label) are not words
+ * of the item (withoutReadingMarks).
  */
 function anchored(asWritten: string, source: string): boolean {
   const text = withoutPlaceholders(source);
   const words = new Set(wordsIn(text).filter((word) => word.length >= 3));
   const numbers = new Set(numbersIn(text));
-  const own = withoutPlaceholders(asWritten);
+  const own = withoutReadingMarks(withoutPlaceholders(asWritten));
   return wordsIn(own).some((word) => words.has(word)) || numbersIn(own).some((number) => numbers.has(number));
 }
 
+/** Two lines on one written row: they overlap vertically by at least half the smaller line's height. */
+function sameRow(a: Box, b: Box): boolean {
+  return span(a.top, a.height, b.top, b.height) >= 0.5 * Math.min(a.height, b.height);
+}
+
+/** A written row may be at most this many times as tall as its tallest line. */
+export const IMAGE_ROW_MAX_HEIGHT = 1.5;
 /**
- * The stored box of an image-read item, or null where it is not held to its cited lines (it is then dropped):
- * at most IMAGE_MAX_CITED_LINES cited lines, which lie together (one row, or consecutive in reading order and
- * vertically adjacent: the lines_not_together test, here a reason to drop); the box at least IMAGE_MIN_BOX on each
- * side; its area at most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines plus
- * IMAGE_AREA_ALLOWANCE of the page (or, if larger, that box padded by IMAGE_MIN_PADDING on every side); running
- * past that box's left and right edges by at most IMAGE_MAX_SIDE_OVERFLOW of its width in total (or by at most
- * IMAGE_MIN_SIDE_OVERFLOW of the page width on each side); on every cited line that has a box (each measured on its own, not
- * as one box around them all); on no line it does not cite (by the same onLine test), with at most
- * IMAGE_UNCITED_SHARE of the line area it covers on lines it does not cite; and its asWritten anchored in the
- * cited lines' text. A box around the whole page that cites every line
- * fails the first three.
+ * After same-row fragments are added, an image-read item may have at most this many lines on any one written row,
+ * and at most IMAGE_MAX_LINES_PER_ITEM lines in all (the lines it cites and those added); more drops the item, so
+ * a box cannot claim a whole row or block of cells, whether the model cited them or not.
  */
-function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly ReadLine[], source: string,
-  order: ReadonlyMap<string, number>): Box | null {
-  if (!raw.box) return null;
-  if (cited.length > IMAGE_MAX_CITED_LINES || (cited.length > 1 && !together(cited, order))) return null;
+export const IMAGE_MAX_LINES_PER_ROW = 4;
+export const IMAGE_MAX_LINES_PER_ITEM = 6;
+
+/**
+ * Lines grouped into written rows, in reading order. A line joins a row only when it is on one row (sameRow) with
+ * every line already in it, never by a chain of neighbours (a slant), and the row stays at most
+ * IMAGE_ROW_MAX_HEIGHT times as tall as its tallest line; otherwise it starts a row of its own.
+ */
+function rowsOf(lines: readonly ReadLine[]): ReadLine[][] {
+  const rows: ReadLine[][] = [];
+  for (const line of lines) {
+    const fits = (row: ReadLine[]) => {
+      if (line.box === null || row.some((other) => other.box === null || !sameRow(other.box, line.box!))) return false;
+      const boxes = [...row, line].map((member) => member.box!);
+      const top = Math.min(...boxes.map((box) => box.top));
+      const bottom = Math.max(...boxes.map((box) => box.top + box.height));
+      return bottom - top <= IMAGE_ROW_MAX_HEIGHT * Math.max(...boxes.map((box) => box.height)) + 1e-9;
+    };
+    const row = rows.find(fits);
+    if (row) row.push(line);
+    else rows.push([line]);
+  }
+  return rows;
+}
+
+/**
+ * Whether rows of cited lines lie together (the lines_not_together test, applied to rows): each row stands for one
+ * line with the box around it, and two rows are next in reading order when no line outside the cited rows comes
+ * between them.
+ */
+function rowsTogether(rows: readonly ReadLine[][], all: readonly ReadLine[], order: ReadonlyMap<string, number>): boolean {
+  if (rows.length <= 1) return true;
+  const rowOf = new Map<string, number>();
+  rows.forEach((row, index) => { for (const line of row) rowOf.set(line.id, index); });
+  const sequence: string[] = [];
+  for (const line of [...all].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))) {
+    const key = rowOf.has(line.id) ? `r${rowOf.get(line.id)}` : `u${line.id}`;
+    if (sequence[sequence.length - 1] !== key) sequence.push(key);
+  }
+  const rank = new Map<string, number>();
+  rows.forEach((row, index) => rank.set(row[0]!.id, sequence.indexOf(`r${index}`)));
+  const placed = rows.map((row) => ({ id: row[0]!.id, box: unionBox(row.map((line) => line.box)) }));
+  return together(placed, rank);
+}
+
+/** A picture item held to its lines: its stored box, its cited lines (with row fragments added), and whether its
+ * asWritten could be matched to the scanned text of those lines. */
+interface ImagePlace { box: Box; cited: ReadLine[]; matched: boolean }
+
+/**
+ * Why an item was dropped (codes only, never text; counted per code in PageCheck.droppedByReason):
+ * - no_line_cited: the item cites no line;
+ * - line_not_on_page: it cites a line id that is not on this page;
+ * - empty_as_written: its asWritten is empty;
+ * - text_not_on_line: (text reading) its asWritten is not in the cited lines' text;
+ * and, for an item read from the picture (imagePlace):
+ * - no_box: it has no box;
+ * - box_too_small: its box, clipped to the page, is empty or under IMAGE_MIN_BOX on a side;
+ * - too_many_lines: more than IMAGE_MAX_LINES_PER_ITEM lines, cited and added;
+ * - too_many_lines_on_row: more than IMAGE_MAX_LINES_PER_ROW lines on one written row;
+ * - too_many_rows: more than IMAGE_MAX_CITED_LINES written rows;
+ * - rows_not_together: its rows are not one row or one wrapped block (the lines_not_together test on rows);
+ * - cited_lines_no_box: none of its cited lines has a box to hold it to;
+ * - not_on_cited_line: its box does not lie on every cited line;
+ * - area_too_large: its box is too large for its lines;
+ * - side_overflow: its box runs too far past its lines' left and right edges;
+ * - covers_uncited_line: its box lies on a line it does not cite;
+ * - uncited_share: too much of the line area under its box is on lines it does not cite;
+ * - not_anchored: it shares no word or number with legible cited lines.
+ */
+export const DROP_REASONS = ['no_line_cited', 'line_not_on_page', 'empty_as_written', 'text_not_on_line', 'no_box',
+  'box_too_small', 'too_many_lines', 'too_many_lines_on_row', 'too_many_rows', 'rows_not_together',
+  'cited_lines_no_box', 'not_on_cited_line', 'area_too_large', 'side_overflow', 'covers_uncited_line',
+  'uncited_share', 'not_anchored'] as const;
+export type DropReason = (typeof DROP_REASONS)[number];
+
+/**
+ * Where an image-read item sits, or null where it is not held to its lines (it is then dropped).
+ *
+ * Row fragments first: an uncited hard line (below REVIEW_BELOW) the item's box lies on (onLine) that is on the
+ * same written row as a cited line is a fragment of the same writing that the text service split off, and is
+ * added to the cited lines in reading order. Then, cited and added together, at most IMAGE_MAX_LINES_PER_ROW lines
+ * on any one row and IMAGE_MAX_LINES_PER_ITEM in all, or the item is dropped (a box claiming a whole row of
+ * cells). Rows are cliques (rowsOf), never chains. Then: at most IMAGE_MAX_CITED_LINES rows (groups of cited lines on one row) that lie together (the
+ * lines_not_together test on rows, here a reason to drop); the box at least IMAGE_MIN_BOX on each side; its area at
+ * most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines plus IMAGE_AREA_ALLOWANCE of the page
+ * (or, if larger, that box padded by IMAGE_MIN_PADDING on every side); running past that box's left and right
+ * edges by at most IMAGE_MAX_SIDE_OVERFLOW of its width in total (or by at most IMAGE_MIN_SIDE_OVERFLOW of the page
+ * width on each side); on every cited line that has a box (each measured on its own, not as one box around them
+ * all); on no line it does not cite (so not on another row's line), with at most IMAGE_UNCITED_SHARE of the line
+ * area it covers on lines it does not cite. A box around the whole page that cites every line fails these.
+ *
+ * Text anchor: where any cited line is legible (confidence at least REVIEW_BELOW), the item's asWritten must share
+ * a word or number with the cited lines' text, so a box copied from a clean line around a made-up item is dropped.
+ * Where every cited line is below REVIEW_BELOW the scanned text may be nonsense, so the anchor is not required:
+ * `matched` is then false when it fails, and the item gets not_matched_to_scanned_text.
+ */
+function imagePlace(raw: ModelItem, citedAsGiven: readonly ReadLine[], all: readonly ReadLine[],
+  order: ReadonlyMap<string, number>): ImagePlace | { drop: DropReason } {
+  if (!raw.box) return { drop: 'no_box' };
   const box = clipBox(raw.box);
-  if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX) return null;
+  if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX || !(area(box) > 0)) {
+    return { drop: 'box_too_small' };
+  }
+  const givenIds = new Set(citedAsGiven.map((line) => line.id));
+  // Only a hard line (below REVIEW_BELOW) is taken for a fragment: a legible line on the row is its own writing,
+  // and a box over it still drops the item below.
+  const fragments = all.filter((line) => !givenIds.has(line.id) && line.confidence < REVIEW_BELOW
+    && line.box !== null && onLine(box, line.box)
+    && citedAsGiven.some((other) => other.box !== null && sameRow(other.box, line.box!)));
+  const cited = [...citedAsGiven, ...fragments].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  const rows = rowsOf(cited);
+  if (cited.length > IMAGE_MAX_LINES_PER_ITEM) return { drop: 'too_many_lines' };
+  if (rows.some((row) => row.length > IMAGE_MAX_LINES_PER_ROW)) return { drop: 'too_many_lines_on_row' };
+  if (rows.length > IMAGE_MAX_CITED_LINES) return { drop: 'too_many_rows' };
+  if (!rowsTogether(rows, all, order)) return { drop: 'rows_not_together' };
   const citedBoxes = cited.map((line) => line.box).filter((line): line is Box => line !== null);
-  if (citedBoxes.length === 0 || !citedBoxes.every((line) => onLine(box, line))) return null;
+  if (citedBoxes.length === 0) return { drop: 'cited_lines_no_box' };
+  if (!citedBoxes.every((line) => onLine(box, line))) return { drop: 'not_on_cited_line' };
   const around = unionBox(citedBoxes)!;
   const padded = (around.width + 2 * IMAGE_MIN_PADDING) * (around.height + 2 * IMAGE_MIN_PADDING);
-  if (area(box) > Math.max(IMAGE_MAX_AREA_RATIO * area(around) + IMAGE_AREA_ALLOWANCE, padded) + 1e-9) return null;
+  if (area(box) > Math.max(IMAGE_MAX_AREA_RATIO * area(around) + IMAGE_AREA_ALLOWANCE, padded) + 1e-9) {
+    return { drop: 'area_too_large' };
+  }
   const leftOver = Math.max(0, around.left - box.left);
   const rightOver = Math.max(0, box.left + box.width - (around.left + around.width));
   const withinQuarter = leftOver + rightOver <= IMAGE_MAX_SIDE_OVERFLOW * around.width + 1e-9;
   const withinFloor = leftOver <= IMAGE_MIN_SIDE_OVERFLOW + 1e-9 && rightOver <= IMAGE_MIN_SIDE_OVERFLOW + 1e-9;
-  if (!withinQuarter && !withinFloor) return null;
+  if (!withinQuarter && !withinFloor) return { drop: 'side_overflow' };
   const citedIds = new Set(cited.map((line) => line.id));
   // A box that also lies on a line it does not cite (by the same test as for its cited lines) is not this item's.
-  if (all.some((line) => !citedIds.has(line.id) && line.box !== null && onLine(box, line.box))) return null;
+  if (all.some((line) => !citedIds.has(line.id) && line.box !== null && onLine(box, line.box))) {
+    return { drop: 'covers_uncited_line' };
+  }
   const coveredBy = (lines: readonly ReadLine[]) => lines.reduce((sum, line) => sum + (line.box ? intersection(box, line.box) : 0), 0);
   const onCited = coveredBy(cited);
   const onUncited = coveredBy(all.filter((line) => !citedIds.has(line.id)));
-  if (onUncited > IMAGE_UNCITED_SHARE * (onCited + onUncited)) return null;
-  return anchored(raw.asWritten, source) && area(box) > 0 ? box : null;
+  if (onUncited > IMAGE_UNCITED_SHARE * (onCited + onUncited)) return { drop: 'uncited_share' };
+  const matched = anchored(raw.asWritten, cited.map((line) => line.text).join(' '));
+  const trustworthy = cited.some((line) => line.confidence >= REVIEW_BELOW);
+  if (!matched && trustworthy) return { drop: 'not_anchored' };
+  return { box, cited, matched };
 }
 
 export interface PageCheck {
   items: PaperItem[];
   droppedUngrounded: number;
+  /** The same drops by reason code (DROP_REASONS); the counts sum to droppedUngrounded. Codes only, never text. */
+  droppedByReason: Record<string, number>;
   identity: PaperIdentity;
   pageUnsure: boolean;
   /**
@@ -212,6 +360,11 @@ export interface PageCheck {
    */
   rereadReasons: string[];
   flagReasons: FlagReason[];
+  /**
+   * For each kept item (same order as items), the index of the answer item it was read from. Set by checkPage;
+   * the hard-page merge uses it to find each kept item's dose, unit and basis. Never stored.
+   */
+  rawIndexes?: number[];
 }
 
 const blankIdentity = (): PaperIdentity => ({ nameAsWritten: null, dateOfBirthAsWritten: null,
@@ -231,40 +384,56 @@ export function checkPage(input: PageCheckInput): PageCheck {
   const order = new Map(input.lines.map((line, index) => [line.id, index]));
   const pageText = input.lines.map((line) => line.text).join('\n');
   const medicineNames = input.answer.items.filter((item) => item.kind === 'medicine' && norm(item.name))
-    .map((item) => item.name);
+    .map((item) => forMatching(item.name));
   const allergySubstances = input.answer.items
     .filter((item) => item.kind === 'allergy' && !item.noKnownAllergies && norm(item.substance))
-    .map((item) => item.substance);
+    .map((item) => forMatching(item.substance));
   const items: PaperItem[] = [];
   /** Kept items by base id: the same kind, cited lines and asWritten. */
   const seen = new Map<string, PaperItem[]>();
   let duplicateSpan = false;
   let dropped = 0;
-  for (const raw of input.answer.items) {
+  const droppedByReason: Record<string, number> = {};
+  const drop = (reason: DropReason) => { dropped += 1; droppedByReason[reason] = (droppedByReason[reason] ?? 0) + 1; };
+  const rawIndexes: number[] = [];
+  for (const [rawIndex, raw] of input.answer.items.entries()) {
     const lineIds = [...new Set(raw.lineIds)].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
     const cited = lineIds.map((id) => byId.get(id));
     const source = cited.map((line) => line?.text ?? '').join(' ');
-    if (lineIds.length === 0 || cited.some((line) => line === undefined) || !norm(raw.asWritten)
-        || (!input.fromImage && !has(source, raw.asWritten))) {
-      dropped += 1;
+    const textDrop: DropReason | null = lineIds.length === 0 ? 'no_line_cited'
+      : cited.some((line) => line === undefined) ? 'line_not_on_page'
+        : !norm(raw.asWritten) ? 'empty_as_written'
+          : !input.fromImage && !has(source, raw.asWritten) ? 'text_not_on_line' : null;
+    if (textDrop !== null) {
+      drop(textDrop);
       continue;
     }
-    const lines = cited as ReadLine[];
+    let lines = cited as ReadLine[];
+    let itemLineIds = lineIds;
+    let itemSource = source;
     // Read from the picture: held to the page by place. Dropped items are only counted, as above.
-    const place = input.fromImage ? imagePlace(raw, lines, input.lines, source, order) : null;
-    if (input.fromImage && place === null) {
-      dropped += 1;
+    const placed = input.fromImage ? imagePlace(raw, lines, input.lines, order) : null;
+    if (placed !== null && 'drop' in placed) {
+      drop(placed.drop);
       continue;
+    }
+    const place = placed;
+    if (place !== null) {
+      // Row fragments the item's box covers are cited with it.
+      lines = place.cited;
+      itemLineIds = lines.map((line) => line.id);
+      itemSource = lines.map((line) => line.text).join(' ');
     }
     // An item read from the picture is meant to differ from the text the service read, so its fields are held
     // to what the model read in the picture (its asWritten), not to the line text: a dose or word the service
     // misread is not "on the paper doesn't match". How legible the lines were still counts, and a number the
     // line text doesn't have is flagged in markReadFromImage.
     const item = place === null
-      ? checkItem(raw, lines, lineIds, source, pageText, order, medicineNames, allergySubstances, input)
-      : checkItem(raw, lines.map((line, index) => ({ ...line, text: index === 0 ? raw.asWritten : '' })), lineIds,
-        raw.asWritten, `${pageText}\n${raw.asWritten}`, order, medicineNames, allergySubstances, input);
-    if (place !== null) markReadFromImage(item, raw, source, place);
+      ? checkItem(raw, lines, itemLineIds, itemSource, pageText, order, medicineNames, allergySubstances, input)
+      : checkItem(raw, lines.map((line, index) => ({ ...line, text: index === 0 ? forMatching(raw.asWritten) : '' })),
+        itemLineIds, forMatching(raw.asWritten), `${pageText}\n${forMatching(raw.asWritten)}`, order, medicineNames,
+        allergySubstances, input);
+    if (place !== null) markReadFromImage(item, raw, itemSource, place.box, place.matched);
     const group = seen.get(item.id) ?? [];
     // An exact repeat (same kind, lines, asWritten and fields) collapses to one.
     if (group.some((kept) => JSON.stringify(kept.fields) === JSON.stringify(item.fields))) continue;
@@ -276,6 +445,7 @@ export function checkPage(input: PageCheckInput): PageCheck {
     group.push(item);
     seen.set(item.id, group);
     items.push(item);
+    rawIndexes.push(rawIndex);
   }
   const identity = checkIdentity(input.answer.identity, byId, pageText, input.masker);
   const cited = new Set([...items.flatMap((item) => item.lineIds), ...identity.lineIds]);
@@ -309,20 +479,25 @@ export function checkPage(input: PageCheckInput): PageCheck {
   ];
   // Stored text is the original: placeholders the model copied go back to the numbers on the paper.
   for (const item of items) item.asWritten = input.masker.restore(item.asWritten);
-  return { items: uniqueItemIds(items), droppedUngrounded: dropped, identity, pageUnsure: input.answer.pageUnsure,
-    rereadReasons, flagReasons };
+  return { items: uniqueItemIds(items), droppedUngrounded: dropped, droppedByReason, identity,
+    pageUnsure: input.answer.pageUnsure,
+    rereadReasons, flagReasons, rawIndexes };
 }
 
 /**
  * An item read from the picture always goes to a person: 'read_from_image', check_carefully, the stored box its
  * own place on the page, and 'number_not_in_text_read' where it has a number the text read of its lines doesn't.
  */
-function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, place: Box): void {
+function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, place: Box, matched: boolean): void {
   const textNumbers = new Set(numbersIn(withoutPlaceholders(source)));
   const written = [raw.asWritten, raw.strength, raw.frequency, raw.duration, raw.value, raw.referenceRange,
     raw.dateAsWritten, raw.prescriptionDate, raw.noteText];
   if (written.some((text) => numbersIn(withoutPlaceholders(text)).some((number) => !textNumbers.has(number)))) {
     if (!item.checkReasons.includes('number_not_in_text_read')) item.checkReasons.push('number_not_in_text_read');
+  }
+  // Kept on scanned text too poor to hold it to (see imagePlace): say so.
+  if (!matched && !item.checkReasons.includes('not_matched_to_scanned_text')) {
+    item.checkReasons.push('not_matched_to_scanned_text');
   }
   if (!item.checkReasons.includes('read_from_image')) item.checkReasons.push('read_from_image');
   item.checkReasons = item.checkReasons.filter((code) => code !== 'no_position');
@@ -341,6 +516,10 @@ function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, plac
  * 'not_in_picture_reading' (image) or 'not_in_second_reading' (text); where it has a best match among the
  * second-reading items (bestMatch: same kind, shared line, the same name, substance, test or measure, or for a note
  * the most shared words), that one pair gets 'differs_from_second_reading' so the person checking compares them.
+ * Crossed out, line by line: where any item of either reading shows crossed-out writing ("(crossed out: X)" in its
+ * asWritten or plain), every medicine of either reading on one of its lines or over its box (crossedOutOnPlace) has
+ * status 'unknown' (unless stopped or past) and 'crossed_out', and 'readings_disagree' where only the other reading
+ * shows that writing. No name is matched: a struck drug before its replacement makes the replacement unknown too.
  * Items are in reading order (page, first cited line; second-reading items first on the same line) and their ids
  * are made unique again. Identity is merged field by field (mergeIdentity); a field the two readings give
  * differently keeps the first pass's value and flags the page ai_unsure. possible_missed_item is worked out again
@@ -368,6 +547,19 @@ export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly
   }
   const missing = from === 'image' ? 'not_in_picture_reading' : 'not_in_second_reading';
   const kept = earlier.filter((item) => !removed.has(item));
+  // Crossed out, line by line (crossedOutOnPlace): any crossed-out writing either reading shows makes every medicine
+  // on its line or over its place status unknown and crossed_out; where only the other reading shows it,
+  // readings_disagree too.
+  const marks = [...read.map((item) => ({ item, from: 'second' })), ...earlier.map((item) => ({ item, from: 'first' }))]
+    .filter(({ item }) => showsCrossedOut(item)).map(({ item, from }) => ({ lineIds: item.lineIds, box: item.box, from }));
+  for (const [items, from] of [[read, 'second'], [kept, 'first']] as const) {
+    for (const item of items) {
+      const hits = item.kind === 'medicine' ? marks.filter((mark) => crossedOutOnPlace(item, mark)) : [];
+      if (hits.length === 0) continue;
+      markCrossedOut(item);
+      if (item.kind === 'medicine' && hits.every((mark) => mark.from !== from)) addReason(item, 'readings_disagree');
+    }
+  }
   for (const item of kept) {
     addReason(item, missing);
     const best = bestMatch(item, read.filter((candidate) => sharesLine(candidate, item)), matched);
@@ -387,6 +579,39 @@ export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly
   return { ...second, items: merged, identity, flagReasons };
 }
 
+/** Two items are on the same place when they share a cited line or their boxes overlap by half the smaller box. */
+export const PAIR_BOX_OVERLAP = 0.5;
+
+/** How much of the smaller of two boxes the other covers (0 to 1). */
+export function overlapShare(a: Box, b: Box): number {
+  const smaller = Math.min(a.width * a.height, b.width * b.height);
+  if (!(smaller > 0)) return 0;
+  return intersection(a, b) / smaller;
+}
+
+/** Whether an item shows crossed-out writing: a "(crossed out: X)" group in what was read or in what is shown. */
+export const showsCrossedOut = (item: Pick<PaperItem, 'asWritten' | 'plain'>) =>
+  [item.asWritten, item.plain].some((text) => typeof text === 'string' && crossedOutParts(text).length > 0);
+
+/**
+ * The crossed-out rule (line by line, of any kind, no name matching): an item stands where crossed-out writing is
+ * when it shares a cited line with it or their boxes overlap by PAIR_BOX_OVERLAP of the smaller.
+ */
+export function crossedOutOnPlace(item: Pick<PaperItem, 'lineIds' | 'box'>,
+  struck: { lineIds: readonly string[]; box: Box }): boolean {
+  return item.lineIds.some((id) => struck.lineIds.includes(id)) || overlapShare(item.box, struck.box) >= PAIR_BOX_OVERLAP;
+}
+
+/**
+ * A medicine standing where crossed-out writing is: whether it is active is not known (status unknown, unless it is
+ * already stopped or past), crossed_out, check_carefully. Any other kind is left as it is.
+ */
+export function markCrossedOut(item: PaperItem): void {
+  if (item.kind !== 'medicine') return;
+  if (item.fields.status !== 'stopped' && item.fields.status !== 'past') item.fields = { ...item.fields, status: 'unknown' };
+  addReason(item, 'crossed_out');
+}
+
 /** Add a check reason once; the item goes to a person, with the sentence of its first reason. */
 function addReason(item: PaperItem, code: string): void {
   if (!item.checkReasons.includes(code)) item.checkReasons.push(code);
@@ -394,8 +619,11 @@ function addReason(item: PaperItem, code: string): void {
   item.checkReason = checkReasonSentence(item.checkReasons);
 }
 
-/** Normalised text for comparing two readings: compact (case, spacing, "5 mg" = "5mg"), placeholders blanked. */
-const comparable = (text: string) => compact(withoutPlaceholders(text));
+/**
+ * Normalised text for comparing two readings: compact (case, spacing, "5 mg" = "5mg"), placeholders blanked, and
+ * guess marks off (forMatching), so "Toxoplasmosis?" and "Toxoplasmosis" are the same reading.
+ */
+const comparable = (text: string) => compact(withoutPlaceholders(forMatching(text)));
 
 /**
  * The one second-reading item (same kind, on a shared line: the candidates) that a kept first-pass item is to be
@@ -507,9 +735,22 @@ export function uniqueItemIds(items: readonly PaperItem[]): PaperItem[] {
   return items.map((item, index) => (item.id === ids[index] ? item : { ...item, id: ids[index]! }));
 }
 
-function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly string[], source: string,
+/** The item's text fields with their guess marks off (forMatching): what checkItem holds to the page. */
+function matchingItem(item: ModelItem): ModelItem {
+  return Object.fromEntries(Object.entries(item).map(([key, value]) => [key,
+    typeof value === 'string' ? forMatching(value) : value])) as ModelItem;
+}
+
+/**
+ * One kept item's checks. Every comparison with the page is made on the fields with their guess marks off
+ * (`raw`, matchingItem), so "Sulfa?" is found in "No sulfa allergy" and "Hb?" labels its value; the item stores
+ * and shows the fields as read (`shown`), marks and all. Dates and the prescriber are stored only where written
+ * exactly on the page, as read.
+ */
+function checkItem(shown: ModelItem, lines: readonly ReadLine[], lineIds: readonly string[], source: string,
   pageText: string, order: ReadonlyMap<string, number>, medicineNames: readonly string[],
   allergySubstances: readonly string[], input: PageCheckInput): PaperItem {
+  const raw = matchingItem(shown);
   const reasons: string[] = [];
   const add = (code: string) => { if (!reasons.includes(code)) reasons.push(code); };
   const restore = (text: string) => value(text, input.masker);
@@ -529,7 +770,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
   const sourceNumbers = new Set(numbers(source));
   if (numbers(raw.plain).some((number) => !sourceNumbers.has(number))) add('reading_number_mismatch');
 
-  let dateAsWritten = restoreIfPresent(raw.dateAsWritten, source, pageText, input.masker);
+  let dateAsWritten = restoreIfPresent(shown.dateAsWritten, source, pageText, input.masker);
   if (raw.dateAsWritten.trim() && dateAsWritten === null) add('date_not_on_page');
   if (dateAsWritten !== null && ambiguousDate(dateAsWritten)) add('date_ambiguous');
 
@@ -583,11 +824,11 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       const status = (['current', 'new', 'stopped', 'past', 'unknown'] as const)
         .find((candidate) => candidate === raw.status);
       if (!status) add('status_unclear');
-      fields = { name: restore(raw.name), strength: restore(raw.strength), form: restore(raw.form),
-        route: restore(raw.route), frequency: restore(raw.frequency), duration: restore(raw.duration),
+      fields = { name: restore(shown.name), strength: restore(shown.strength), form: restore(shown.form),
+        route: restore(shown.route), frequency: restore(shown.frequency), duration: restore(shown.duration),
         status: status ?? 'unknown' };
-      const prescriber = restoreIfPresent(raw.prescriberAsWritten, source, pageText, input.masker);
-      const prescribed = restoreIfPresent(raw.prescriptionDate, source, pageText, input.masker);
+      const prescriber = restoreIfPresent(shown.prescriberAsWritten, source, pageText, input.masker);
+      const prescribed = restoreIfPresent(shown.prescriptionDate, source, pageText, input.masker);
       if ((raw.prescriberAsWritten.trim() && prescriber === null) || (raw.prescriptionDate.trim() && prescribed === null)) {
         add('prescription_detail_not_on_page');
       }
@@ -601,7 +842,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       const status = (['confirmed', 'suspected', 'ruled_out', 'history', 'family_history'] as const)
         .find((candidate) => candidate === raw.status);
       if (!status) add('status_unclear');
-      fields = { name: restore(raw.name), status: status ?? 'history' };
+      fields = { name: restore(shown.name), status: status ?? 'history' };
       break;
     }
     case 'allergy': {
@@ -636,8 +877,8 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       const severity = raw.severity === 'none' ? null : raw.severity;
       if (severity === 'unknown' ? !SEVERITY_UNKNOWN.test(norm(withoutPlaceholders(own)))
         : severity !== null && !severityOnPaper(own, severity)) add('field_not_on_paper');
-      fields = { substance: raw.noKnownAllergies ? null : restore(raw.substance),
-        reaction: restore(raw.reaction), severity: raw.noKnownAllergies ? null : severity,
+      fields = { substance: raw.noKnownAllergies ? null : restore(shown.substance),
+        reaction: restore(shown.reaction), severity: raw.noKnownAllergies ? null : severity,
         noKnownAllergies: raw.noKnownAllergies };
       break;
     }
@@ -653,7 +894,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
         || (norm(raw.referenceRange) && !asWrittenIn(raw.asWritten, raw.referenceRange))) add('value_mismatch');
       // The value is the one written for this test: the first after its name, before another test's name.
       const otherTests = input.answer.items.filter((item) => item.kind === 'lab_result' && norm(item.test))
-        .map((item) => item.test).filter((other) => !has(other, raw.test) && !has(raw.test, other));
+        .map((item) => forMatching(item.test)).filter((other) => !has(other, raw.test) && !has(raw.test, other));
       if (norm(raw.value) && norm(raw.test)
         && !valueLeads(labelledParts(raw.asWritten, [pattern(raw.test)], otherTests.map(pattern)), raw.value)) {
         add('value_mismatch');
@@ -664,8 +905,8 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       if (opposite(resultSign(raw.plain), resultSign(norm(raw.value) ? raw.value : raw.asWritten))) {
         add('plain_contradicts');
       }
-      fields = { test: restore(raw.test), value: restore(raw.value), unit: restore(raw.unit),
-        referenceRange: restore(raw.referenceRange), flag: restore(raw.flag) };
+      fields = { test: restore(shown.test), value: restore(shown.value), unit: restore(shown.unit),
+        referenceRange: restore(shown.referenceRange), flag: restore(shown.flag) };
       break;
     }
     case 'vital': {
@@ -673,7 +914,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
         // A reading with no recognisable measure is kept for the reviewer as a note, never as a vital.
         add('measure_unclear');
         kind = 'note';
-        fields = { text: restore(raw.asWritten) };
+        fields = { text: restore(shown.asWritten) };
         break;
       }
       if (!norm(raw.value)) add('name_missing');
@@ -688,28 +929,32 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       if (labelled.length === 0 && labelledParts(raw.asWritten, otherLabels, []).length > 0) add('measure_mismatch');
       else if (labelled.length > 0 && norm(raw.value) && !valueLeads(labelled, raw.value)) add('value_mismatch');
       if (fieldWordsMissing(raw.unit) || !unitWritten(raw.asWritten, raw.value, raw.unit)) add('unit_mismatch');
-      fields = { measure: raw.measure, value: restore(raw.value), unit: restore(raw.unit) };
+      fields = { measure: raw.measure, value: restore(shown.value), unit: restore(shown.unit) };
       break;
     }
     case 'note':
     default:
       // A note's text is the paper's: noteText only where it is written in the cited lines, else asWritten.
       if (norm(raw.noteText) && !has(source, raw.noteText)) add('field_not_on_paper');
-      fields = { text: (norm(raw.noteText) && has(source, raw.noteText) ? restore(raw.noteText) : null)
-        ?? restore(raw.asWritten) };
+      fields = { text: (norm(raw.noteText) && has(source, raw.noteText) ? restore(shown.noteText) : null)
+        ?? restore(shown.asWritten) };
       break;
   }
   if (kind === 'medicine' || kind === 'diagnosis') {
     const status = (fields as { status: string }).status;
-    if (!ACTIVE_STATUSES.has(status)) add('status_not_active');
-    else if ([...norm(source).matchAll(STATUS_CUES)].length > 0) add('status_cue_on_line');
+    const cue = [...norm(source).matchAll(STATUS_CUES)].length > 0;
+    // A medicine read with no status ('unknown'): words on the line that may change whether it is current (such as
+    // "stopped" or "d/c") come first; only where there are none does the paper not say.
+    if (kind === 'medicine' && status === 'unknown') add(cue ? 'status_cue_on_line' : 'status_not_written');
+    else if (!ACTIVE_STATUSES.has(status)) add('status_not_active');
+    else if (cue) add('status_cue_on_line');
   }
   let box = unionBox(lines.map((line) => line.box));
   if (box === null) { add('no_position'); box = { left: 0, top: 0, width: 1, height: 1 }; }
   if (dateAsWritten === '') dateAsWritten = null;
-  const id = itemId(input.sourceSha256Hex, kind, lineIds, input.masker.restore(raw.asWritten));
+  const id = itemId(input.sourceSha256Hex, kind, lineIds, input.masker.restore(shown.asWritten));
   return {
-    id, kind, asWritten: raw.asWritten, plain: input.masker.restore(raw.plain.trim()), dateAsWritten,
+    id, kind, asWritten: shown.asWritten, plain: input.masker.restore(shown.plain.trim()), dateAsWritten,
     page: input.page, lineIds: [...lineIds], box,
     confidence: reasons.length > 0 ? 'check_carefully' : 'clear',
     checkReasons: reasons, checkReason: checkReasonSentence(reasons),

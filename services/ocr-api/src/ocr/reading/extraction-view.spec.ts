@@ -89,7 +89,7 @@ describe('extraction view for the check screen', () => {
   it('passes on only versions, models, status and counts from provenance', () => {
     expect(publicProvenance(v2Provenance())).toEqual({ processingContract: 'hid-textract-v2',
       adapter: 'amazon-textract', operation: 'analyze', pageCount: 2, lineCount: 4, sourceVersionBound: true,
-      reading: { contract: 'hid-paper-reading-v2', status: 'read', promptVersion: 'hid-paper-reading-prompt-3',
+      reading: { contract: 'hid-paper-reading-v2', status: 'read', promptVersion: 'hid-paper-reading-prompt-12',
         schemaVersion: 's', firstPassModel: 'claude-sonnet-5-5', rereadModel: 'claude-opus-5-5', itemCount: 3,
         flaggedPages: 1, droppedUngrounded: 1 } });
     expect(publicProvenance({ processingContract: { nested: 'x' }, reading: 'x' })).toEqual({});

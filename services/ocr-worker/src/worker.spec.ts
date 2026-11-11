@@ -2,7 +2,8 @@ import type { OcrWorkerConfig } from './config';
 import { AiInterruptedError, AiTransientError, type PageModelClient } from './reading/claude.client';
 import { paperReadingPayloadSchema, type PaperReadingPayload } from './reading/contract';
 import { PaperReadingService, type ReadingConfig } from './reading/reader';
-import { fixturePng, modelItem, modelPage, readPage } from './reading/test-fixtures';
+import { fixturePng, modelItem, modelPage, readPage, syntheticJpeg, withRepeatedScan } from './reading/test-fixtures';
+import { ZOOM_JPEG_MAX_SCANS } from './reading/zoom';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
 import { Semaphore } from './semaphore';
@@ -70,6 +71,20 @@ describe('OcrWorker processing', () => {
   afterEach(() => { stdout.mockRestore(); stderr.mockRestore(); });
   const logs = () => [...stdout.mock.calls, ...stderr.mock.calls].map((call) => String(call[0]));
 
+  it('logs the reading settings in force at ready, the last resort\'s own window among them (settings only)', async () => {
+    const { repository, reader, provider, reading } = mocks();
+    repository.claim.mockResolvedValue(null);
+    const worker = new OcrWorker({ ...config, OCR_AI_HARD_PAGE_DEADLINE_MS: 150_000, OCR_AI_LAST_RESORT_SECONDS: 90 },
+      repository, reader, provider, reading);
+    const running = worker.run();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    worker.stop();
+    await running;
+    const ready = logs().map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((line) => line.event === 'ocr.worker.ready')!;
+    expect(ready).toMatchObject({ aiLastResortSeconds: 90, aiHardPageDeadlineMs: 150_000 });
+  });
+
   it('verifies the source, checks the allowance, reads text, records pages, reads items, then completes', async () => {
     const { repository, reader, provider, reading } = mocks();
     const order: string[] = [];
@@ -99,10 +114,23 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-3', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-12', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
+  });
+
+  it('logs the dropped items by reason code on completion, and keeps the map out of the payload and provenance', async () => {
+    const { repository, reader, provider, reading } = mocks();
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    const line = logs().find((entry) => entry.includes('ocr.job.completed'))!;
+    const logged = JSON.parse(line) as { droppedUngrounded: number; droppedByReason: Record<string, number> };
+    expect(logged.droppedByReason).toEqual({ text_not_on_line: 1 });
+    expect(Object.values(logged.droppedByReason).reduce((sum, count) => sum + count, 0)).toBe(logged.droppedUngrounded);
+    expect(line).not.toContain('Inventedcillin');
+    const result = completed(repository);
+    expect(JSON.stringify(result.structuredPayload)).not.toContain('droppedByReason');
+    expect(JSON.stringify(result.provenance)).not.toContain('droppedByReason');
   });
 
   it('never logs line text, items, names or SDK error details across a full job', async () => {
@@ -361,6 +389,28 @@ describe('OcrWorker processing', () => {
       expect(repository.claim).toHaveBeenCalledWith('test', 60, 3, expect.stringMatching(/^ocr-worker-/));
     });
 
+    it('logs the opaque document id (never its key, bucket or patient) on the claimed and completed lines', async () => {
+      const { repository, reader, provider, reading } = mocks();
+      const worker = new OcrWorker(config, repository, reader, provider, reading);
+      let claims = 0;
+      repository.claim.mockImplementation(async () => {
+        claims += 1;
+        if (claims === 1) return job;
+        worker.stop();
+        return null;
+      });
+      await worker.run();
+      const lines = logs().map((line) => JSON.parse(line) as Record<string, unknown>);
+      for (const event of ['ocr.job.claimed', 'ocr.job.completed']) {
+        const line = lines.find((entry) => entry.event === event)!;
+        expect(line).toMatchObject({ jobId: job.jobId, documentId: job.documentId, correlationId: job.correlationId });
+      }
+      const text = logs().join('\n');
+      for (const secret of [job.storageKey, job.storageBucket, job.objectVersionId, job.claimToken, job.facilityId]) {
+        expect(text).not.toContain(secret);
+      }
+    });
+
     it('keeps renewing the lease while the job waits for a Claude API permit', async () => {
       jest.useFakeTimers();
       try {
@@ -401,9 +451,19 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } })]);
   const used = { inputTokens: 6000, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 };
 
-  function setUp(rereadFails: boolean) {
+  const basis = { name: 'letters', dose: 'letters', unit: 'letters', route: 'empty', frequency: 'context',
+    duration: 'empty', value: 'empty', other: 'empty' } as const;
+  const bestGuess = modelPage([{ ...modelItem({ kind: 'medicine', asWritten: 'Pyrimethamine? 437 mg od', lineIds: ['p1-l1'],
+    name: 'Pyrimethamine', strength: '437mg', frequency: 'od', status: 'new' }),
+  box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 }, hard: { dose: '437', doseUnit: 'mg', basis } }]);
+
+  function setUp(rereadFails: boolean, hardPages = false) {
     const images: string[] = [];
     const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        images.push(request.image.base64);
+        return { kind: 'answer' as const, answer: bestGuess, attempts: 1, servedInferenceGeo: 'us', usage: used };
+      }
       if (request.image) {
         images.push(request.image.base64);
         if (rereadFails) throw new AiTransientError('AI_HTTP_529', 1);
@@ -414,7 +474,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     const parts = mocks(client);
     parts.reader.readExact.mockResolvedValue({ ...document, bytes: picture });
     parts.provider.extract.mockResolvedValue(hardText);
-    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on' }, client);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on',
+      OCR_AI_HARD_PAGE_READS: hardPages ? 'on' : 'off' }, client);
     return { ...parts, reading, images };
   }
 
@@ -445,7 +506,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(payload.items[0]!.checkReasons).toContain('read_from_image');
     expect(payload.items[0]!.checkReasons).not.toContain('strength_mismatch');
     expect(result.provenance.reading).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [],
-      imagePromptVersion: 'hid-paper-reading-image-prompt-3' });
+      imagePromptVersion: 'hid-paper-reading-image-prompt-5' });
     // Picture tokens count in the usage records as any other input.
     expect(repository.recordAiUsage).toHaveBeenCalledWith(job, expect.objectContaining({ model: 'claude-opus-5-5',
       requests: 1, inputTokens: 6000 }));
@@ -454,6 +515,298 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(written.length).toBeGreaterThan(0);
     for (const chunk of chunks) expect(everything).not.toContain(chunk);
     expect(written.join('\n')).toContain('"imageRereadPages":1');
+  });
+
+  it('reads a hard page twice and logs only codes and counts: hard-page use, reads and agreement', async () => {
+    const { repository, reader, provider, reading, images } = setUp(false, true);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(images).toEqual([base64, base64]);
+    const result = completed(repository);
+    const payload = result.structuredPayload as PaperReadingPayload;
+    expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+    const medicine = payload.items.find((item) => item.kind === 'medicine')!;
+    // asWritten "Pyrimethamine? 437 mg od": the model's "?" on the name is shown; the frequency came from context.
+    expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '437mg' });
+    expect(medicine.plain).toBe('Pyrimethamine? 437 mg od?');
+    expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
+    expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
+      // Zoom off: the reads sent the version 7 hard-page text (version 8 without rule J), and provenance says so.
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-12-no-zoom', hardPageZoomPages: [], imagePromptVersion: null,
+      promptVersion: 'hid-paper-reading-prompt-12' });
+    const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
+    // One line per hard-page read (read 1 and 2), in the pass's place; together they are the pass's use.
+    expect(usageLines.map((line) => [line.pass, line.read, line.requests])).toEqual([['first_pass', undefined, 1],
+      ['hard_page_read', 1, 1], ['hard_page_read', 2, 1]]);
+    // Zoom off here: the hard-page usage lines still say how many crops were made (none), the first pass's does not.
+    expect(usageLines.map((line) => line.zoomCalls)).toEqual([undefined, 0, 0]);
+    for (const line of usageLines.slice(1)) {
+      expect(line).toMatchObject({ page: 1, model: 'claude-opus-5-5', effort: 'high', followupEffort: null,
+        endedBy: 'answer', outputTokensIncomplete: false, turns: 0, zoomLimited: 0, durationMs: expect.any(Number), inputTokens: expect.any(Number),
+        outputTokens: expect.any(Number), cacheReadTokens: expect.any(Number), cacheWriteTokens: expect.any(Number) });
+      // Numbers and codes only.
+      for (const [key, value] of Object.entries(line)) {
+        if (!['event', 'level', 'timestamp', 'jobId', 'correlationId', 'model', 'pass', 'effort', 'followupEffort',
+          'forcedEffort', 'zoomClosed', 'endedBy', 'outputTokensIncomplete', 'failure', 'forcedAnswer'].includes(key)) {
+          expect(typeof value).toBe('number');
+        }
+      expect(line).toMatchObject({ failure: null, forcedAnswer: null, forcedEffort: null, zoomClosed: null });
+      }
+    }
+    const done = lines.find((line) => line.event === 'ocr.job.completed')!;
+    expect(done).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageDeadlineHits: 0,
+      hardPageReadsOutputIncomplete: 0, hardReadFailures: {}, hardReadForcedAnswers: {}, pageReadFailures: 0,
+      firstPassItemCount: 1 });
+    // Both reads answered on their own turns: no warn line.
+    expect(lines.filter((line) => line.level === 'warn')).toEqual([]);
+    expect(result.provenance.reading).toMatchObject({ hardPageDeadlinePages: [] });
+    expect(done).toMatchObject({ hardPages: 1, hardPageReads: 2,
+      hardPageAgreement: { itemsPaired: 1, itemsSingle: 0, fieldsCompared: expect.any(Number), fieldsAgreed: expect.any(Number) } });
+    expect(Object.values(done.hardPageAgreement as Record<string, unknown>).every((value) => typeof value === 'number')).toBe(true);
+    const logs = written.join('\n');
+    for (const secret of ['Pyrimethamine', 'Fictionalmab', 'Ultramarine', 'rng']) expect(logs).not.toContain(secret);
+    const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');
+    for (const chunk of chunks) expect(everything).not.toContain(chunk);
+  });
+
+  it('keeps the first pass when both hard reads fail, and logs a warn line per read and page: codes and counts only', async () => {
+    // Job 566c38bf (README "A hard read always ends with an answer"): both reads ended without an answer and nothing
+    // said so. Read 1 was sent the answer-only turn after a turn stopped at max_tokens and that turn was cut off too;
+    // read 2 answered with text that was not JSON.
+    let hardCalls = 0;
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        hardCalls += 1;
+        if (hardCalls === 1) {
+          // Its first turn and the answer-only turn (not a follow-up turn: it runs at low effort).
+          request.trace!.turns += 2;
+          request.trace!.forced = 'max_tokens';
+          return { kind: 'failed' as const, reason: 'max_tokens' as const, code: 'max_tokens' as const, attempts: 2,
+            usage: used };
+        }
+        request.trace!.turns += 1;
+        return { kind: 'failed' as const, reason: 'malformed' as const, code: 'parse_error' as const, attempts: 1,
+          usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const { repository, reader, provider } = mocks(client);
+    reader.readExact.mockResolvedValue({ ...document, bytes: picture });
+    provider.extract.mockResolvedValue(hardText);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on' },
+      client);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    const result = completed(repository);
+    const payload = result.structuredPayload as PaperReadingPayload;
+    expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+    // The first pass survives: its item, marked reread_failed; the page flagged ai_unsure; the payload names the page.
+    expect(payload.items).toHaveLength(1);
+    expect(payload.items[0]).toMatchObject({ readBy: 'first_pass', confidence: 'check_carefully' });
+    expect(payload.items[0]!.checkReasons).toContain('reread_failed');
+    expect(payload.pages[0]!.flagReasons).toContain('ai_unsure');
+    expect(payload.reading).toMatchObject({ imageRereadFailedPages: [1], itemCount: 1 });
+    const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    const warns = lines.filter((line) => line.level === 'warn');
+    expect(warns.map((line) => [line.event, line.read ?? null, line.reason])).toEqual([
+      ['ocr.reading.hard_read_forced_answer', 1, 'forced_answer_max_tokens'],
+      ['ocr.reading.hard_read_failed', 1, 'max_tokens'],
+      ['ocr.reading.hard_read_failed', 2, 'parse_error'],
+      ['ocr.reading.page_read_failed', null, 'hard_reads_failed']]);
+    expect(warns[0]).toMatchObject({ answered: false, page: 1, turns: 2, requests: 2, outputTokens: 400, zoomCalls: 0 });
+    expect(warns[1]).toMatchObject({ forcedAnswer: 'forced_answer_max_tokens', page: 1, turns: 2, outputTokens: 400 });
+    expect(warns[2]).toMatchObject({ forcedAnswer: null, turns: 1, requests: 1 });
+    expect(warns[3]).toMatchObject({ page: 1, pass: 'hard_page_read' });
+    for (const line of warns) {
+      for (const [key, value] of Object.entries(line)) {
+        if (typeof value === 'string' && !['timestamp', 'jobId', 'correlationId'].includes(key)) {
+          expect(value).toMatch(/^[a-z0-9_.]+$/);
+        }
+      }
+    }
+    const done = lines.find((line) => line.event === 'ocr.job.completed')!;
+    expect(done).toMatchObject({ itemCount: 1, firstPassItemCount: 1, rereadFailedPages: 1, imageRereadFailedPages: 1,
+      hardReadFailures: { max_tokens: 1, parse_error: 1 }, hardReadForcedAnswers: { forced_answer_max_tokens: 1 },
+      pageReadFailures: 1 });
+    const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read');
+    expect(usageLines.map((line) => [line.read, line.failure, line.forcedAnswer])).toEqual([
+      [1, 'max_tokens', 'forced_answer_max_tokens'], [2, 'parse_error', null]]);
+    expect(usageLines[0]).toMatchObject({ followupEffort: null, forcedEffort: 'low', zoomClosed: null });
+    const logs = written.join('\n');
+    for (const secret of ['Fictionalmab', 'rng', 'Pyrimethamine']) expect(logs).not.toContain(secret);
+    for (const chunk of chunks) expect(logs).not.toContain(chunk);
+  });
+
+  describe('last resort (coordinator 2026-11-10, README "Last resort")', () => {
+    /** Hard reads fail; the first pass kept nothing; the last resort (an ordinary image re-read) answers `last`. */
+    function lastResortSetUp(last: 'answer' | 'refused') {
+      const images: string[] = [];
+      const efforts: string[] = [];
+      const client: PageModelClient = { readPage: jest.fn(async (request) => {
+        if (request.image && request.hardPage) {
+          request.trace!.turns += 1;
+          return { kind: 'failed' as const, reason: 'max_tokens' as const, code: 'max_tokens' as const, attempts: 1,
+            usage: used };
+        }
+        if (request.image) {
+          images.push(request.image.base64);
+          efforts.push(request.effort);
+          return last === 'answer'
+            ? { kind: 'answer' as const, answer: fromPicture, attempts: 1, servedInferenceGeo: 'us', usage: used }
+            : { kind: 'refused' as const, attempts: 1, usage: used };
+        }
+        return { kind: 'answer' as const, answer: modelPage([]), attempts: 1, servedInferenceGeo: 'us', usage: used };
+      }) };
+      const parts = mocks(client);
+      parts.reader.readExact.mockResolvedValue({ ...document, bytes: picture });
+      parts.provider.extract.mockResolvedValue(hardText);
+      const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on' },
+        client);
+      return { ...parts, reading, images, efforts };
+    }
+    const parsed = () => written.flatMap((line) => line.split('\n')).filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    it('reads the page from its picture once more and says so in provenance and the completion log, never its text',
+      async () => {
+        const { repository, reader, provider, reading, images, efforts } = lastResortSetUp('answer');
+        await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+        expect(images).toEqual([base64]);
+        expect(efforts).toEqual(['high']);
+        const result = completed(repository);
+        const payload = result.structuredPayload as PaperReadingPayload;
+        expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+        expect(payload.items).toHaveLength(1);
+        expect(payload.items[0]!.checkReasons).toEqual(expect.arrayContaining(['last_resort_read', 'read_from_image']));
+        expect(payload.reading).toMatchObject({ itemCount: 1, imageRereadPages: [1], imageRereadFailedPages: [] });
+        // The payload's reading gains no field (ocr-api reads it strictly); the last resort is in provenance.
+        expect(Object.keys(payload.reading)).not.toEqual(expect.arrayContaining(['lastResortPages']));
+        expect(result.provenance.reading).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [],
+          lastResortSkipped: [], imagePromptVersion: 'hid-paper-reading-image-prompt-5' });
+        const lines = parsed();
+        const done = lines.find((line) => line.event === 'ocr.job.completed')!;
+        expect(done).toMatchObject({ itemCount: 1, firstPassItemCount: 0, lastResortReads: 1, lastResortFailed: 0,
+          lastResortSkipped: 0, imageRereadFailedPages: 0 });
+        expect(lines.filter((line) => line.event === 'ocr.reading.usage').map((line) => line.pass))
+          .toEqual(['first_pass', 'hard_page_read', 'hard_page_read', 'last_resort_read']);
+        const logs = written.join('\n');
+        for (const secret of ['Fictionalmab', 'rng', SECRET_NOTE]) expect(logs).not.toContain(secret);
+        const everything = [JSON.stringify([result.provenance, repository.recordAiUsage.mock.calls]), ...written].join('\n');
+        for (const chunk of chunks) expect(everything).not.toContain(chunk);
+      });
+
+    it('logs a last_resort_failed warn with how it ended when the last resort gives nothing; the page stays named as failed',
+      async () => {
+        const { repository, reader, provider, reading } = lastResortSetUp('refused');
+        await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+        const result = completed(repository);
+        const payload = result.structuredPayload as PaperReadingPayload;
+        expect(payload.items).toEqual([]);
+        expect(payload.pages[0]!.flagReasons).toContain('ai_unsure');
+        expect(payload.reading).toMatchObject({ itemCount: 0, imageRereadFailedPages: [1] });
+        expect(result.provenance.reading).toMatchObject({ lastResortPages: [1], lastResortFailedPages: [1],
+          imageRereadFailedPages: [1], rereadFailedPages: 1 });
+        const lines = parsed();
+        const pageWarns = lines.filter((line) => line.event === 'ocr.reading.page_read_failed');
+        expect(pageWarns.map((line) => [line.pass, line.reason, line.detail ?? null])).toEqual([
+          ['hard_page_read', 'hard_reads_failed', null], ['last_resort_read', 'last_resort_failed', 'refusal']]);
+        expect(pageWarns[1]).toMatchObject({ level: 'warn', jobId: job.jobId, correlationId: job.correlationId, page: 1 });
+        for (const line of pageWarns) {
+          for (const [key, value] of Object.entries(line)) {
+            if (typeof value === 'string' && !['timestamp', 'jobId', 'correlationId'].includes(key)) {
+              expect(value).toMatch(/^[a-z0-9_.]+$/);
+            }
+          }
+        }
+        const done = lines.find((line) => line.event === 'ocr.job.completed')!;
+        expect(done).toMatchObject({ lastResortReads: 1, lastResortFailed: 1, lastResortSkipped: 0, pageReadFailures: 2,
+          itemCount: 0, firstPassItemCount: 0 });
+      });
+  });
+
+  it('writes the hard-read warn lines even when the job then fails at completion', async () => {
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        request.trace!.turns += 1;
+        return { kind: 'failed' as const, reason: 'malformed' as const, code: 'schema_error' as const, attempts: 1,
+          usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const { repository, reader, provider } = mocks(client);
+    reader.readExact.mockResolvedValue({ ...document, bytes: picture });
+    provider.extract.mockResolvedValue(hardText);
+    repository.complete.mockRejectedValueOnce(new Error('fictional database outage'));
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on' },
+      client);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(repository.fail).toHaveBeenCalledTimes(1);
+    const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines.filter((line) => line.level === 'warn').map((line) => [line.event, line.read ?? null, line.reason ?? null]))
+      .toEqual([['ocr.reading.hard_read_failed', 1, 'schema_error'], ['ocr.reading.hard_read_failed', 2, 'schema_error'],
+        ['ocr.reading.page_read_failed', null, 'hard_reads_failed'], ['ocr.job.failed', null, null]]);
+    expect(lines.some((line) => line.event === 'ocr.job.completed')).toBe(false);
+  });
+
+  it('records the no-zoom hard-page prompt version when the picture fails zoom\'s header checks', async () => {
+    // A synthetic JPEG with more scans than zoom decodes: the hard page is read, but never offered the tool.
+    const synthetic = withRepeatedScan(syntheticJpeg(480, 640), ZOOM_JPEG_MAX_SCANS + 1);
+    const offered: boolean[] = [];
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        offered.push(request.zoom !== undefined);
+        return { kind: 'answer' as const, answer: bestGuess, attempts: 1, servedInferenceGeo: 'us', usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const { repository, reader, provider } = mocks(client);
+    reader.readExact.mockResolvedValue({ ...document, mediaType: 'image/jpeg', bytes: synthetic });
+    provider.extract.mockResolvedValue(hardText);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on',
+      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 4 }, client);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(offered).toEqual([false, false]);
+    expect(completed(repository).provenance.reading).toMatchObject({ hardPages: [1],
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-12-no-zoom', hardPageZoomPages: [] });
+  });
+
+  it('zooms in a hard page and logs only the counts: no crop in a log, the payload, provenance or the usage records', async () => {
+    // A real, decodable, synthetic JPEG (no page of anyone's), so the zoom decodes and crops it.
+    const synthetic = syntheticJpeg(480, 640);
+    const crops: string[] = [];
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        for (const id of ['toolu_a', 'toolu_b', 'toolu_bad']) {
+          const result = await request.zoom!.answer({ id, name: 'zoom', input: id === 'toolu_bad' ? { page: 1 }
+            : { page: 1, box: { x: 20, y: 30, w: 120, h: 40 }, scale: 3 } });
+          if (Array.isArray(result.content)) {
+            for (const block of result.content) if (block.type === 'image' && block.source.type === 'base64') crops.push(block.source.data);
+          }
+        }
+        return { kind: 'answer' as const, answer: bestGuess, attempts: 2, servedInferenceGeo: 'us', usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const { repository, reader, provider } = mocks(client);
+    reader.readExact.mockResolvedValue({ ...document, mediaType: 'image/jpeg', bytes: synthetic });
+    provider.extract.mockResolvedValue(hardText);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on',
+      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 4 }, client);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(crops).toHaveLength(4);
+    const result = completed(repository);
+    expect(result.provenance.reading).toMatchObject({ hardPages: [1],
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-12', hardPageZoomPages: [1] });
+    const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    const hardUsage = lines.filter((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read');
+    expect(hardUsage).toEqual([expect.objectContaining({ read: 1, requests: 2, zoomCalls: 2, zoomLimited: 0 }),
+      expect.objectContaining({ read: 2, requests: 2, zoomCalls: 2, zoomLimited: 0 })]);
+    const done = lines.find((line) => line.event === 'ocr.job.completed')!;
+    expect(done).toMatchObject({ zoomCalls: 4, zoomLimited: 0, zoomFailed: 2 });
+    const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');
+    const pictureBase64 = Buffer.from(synthetic).toString('base64');
+    for (const crop of [...crops, pictureBase64]) {
+      for (let at = 0; at + 24 <= Math.min(crop.length, 4_000); at += 200) expect(everything).not.toContain(crop.slice(at, at + 24));
+    }
   });
 
   it('keeps the picture out of logs and what is stored when the re-read with it fails', async () => {
