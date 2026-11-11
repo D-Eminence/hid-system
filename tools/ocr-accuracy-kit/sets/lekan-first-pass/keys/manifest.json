@@ -1,0 +1,28 @@
+{
+  "count": 20,
+  "seed": "lekan-first-pass",
+  "handLabelled": true,
+  "files": {
+    "L001-outpatient_card.png": "61f595ab22c8ae8af3aa1f9c136914f3764e2bc386b9083f971ab14a6ec1c146",
+    "L002-lab_report.jpg": "8891bd63b5cc973275953a9ef7dbc7b5570034b105eb77ba5f96b67374ebc299",
+    "L003-discharge_summary.pdf": "a7b4b9d16107cee0cab31455b96adefb200fa0a0af1a051f3853b813141bd2eb",
+    "L004-prescription.png": "02c3d38e649dd4b07c5b20de25884905e73628144339d62508a17a39b2619cec",
+    "L005-outpatient_card.jpg": "a228ecdd504bb7f134c0534a040aec194ae737baedb82e8ba025612a924fab29",
+    "L006-prescription.png": "5259327c3aaa809886ab3729f6f386050d5410e18723fcb016362da76bcc4a55",
+    "L007-outpatient_card.jpg": "0a857580104ade6c3d1ccc748697593f6877d21e42c15079c96d2757e748ef46",
+    "L008-prescription.jpg": "70fa970405f4718184ed93b439ed464c5043be5037a9c7555de08c75aa3f29c6",
+    "L009-outpatient_card.jpg": "138523dcfa9dd1d1788fb2ddd13dd3ad8036a46dd61457738b330c5437620014",
+    "L010-lab_report.png": "9978f38e609b02eb6010634d61a8af834db29054c2d9222b19c34fd735b56bf7",
+    "L011-lab_report.jpg": "9bf20589a3664f8469ed606bdf3587cfd545a4008feead144035ee3252be4553",
+    "L012-lab_report.pdf": "4a22ec8af5d5323bbe11c4c76e0eda79cf48f389e181a68dd4b3083c89c9837e",
+    "L013-lab_report.png": "01be865b3f8fe67bdcd716af20d051a5777c9217c50de4c972e8405b5f1d98a4",
+    "L014-lab_report.pdf": "54a734b1d0cacb0b76f3c6dd95dc57d43578576aa3b9e9fabd30e6120e4b49c4",
+    "L015-discharge_summary.pdf": "d36c1f72256ee5945dbe5d688e6ff390b45cdbc87e8a76778ba79ec652713f01",
+    "L016-discharge_summary.pdf": "36186f8644fb3793cc5c2783a9324280fcf08de49ecadae5bbd73f330a1ffec9",
+    "L017-discharge_summary.pdf": "9810f1dd52fc4d8eeec44eb7d9363b299d4a01a76a13a394068096823df24e61",
+    "L018-referral_letter.png": "b68f75c66ee74d319d50e5a7c0c45e87569d8b42c4906390c7d0b01750fc914e",
+    "L019-referral_letter.pdf": "01280e3490ac0303bd8916ef585142de58a37572a96fd69ad4913144236a55d8",
+    "L020-vitals_chart.jpg": "219cd66316b56258fde0b1fd4ca204f5dc423f8fba6f98cec50d3e780e1caea3"
+  },
+  "keysSha256": "09719c582fa3f95216b6e4b1d0dfe1349edd1cb4a563ce9523fc3e85ce0efa0e"
+}
