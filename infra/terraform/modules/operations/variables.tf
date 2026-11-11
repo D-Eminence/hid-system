@@ -51,6 +51,11 @@ variable "notification_queue_names" {
   type    = map(string)
   default = {}
 }
+variable "ocr_worker_log_group" {
+  type        = string
+  default     = ""
+  description = "The OCR worker's log group; empty creates no OCR source deletion alarm."
+}
 variable "provider_log_groups" {
   type    = map(string)
   default = {}

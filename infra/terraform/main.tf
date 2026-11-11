@@ -218,6 +218,7 @@ module "operations" {
   load_balancer_targets      = module.application.operational_target_dimensions
   notification_queue_names   = var.enable_runtime ? module.messaging.queue_names : {}
   provider_log_groups        = module.application.provider_log_groups
+  ocr_worker_log_group       = module.application.ocr_worker_log_group
 }
 
 # 7. Account-level budgets and anomaly monitoring. Disabled until the existing
