@@ -278,13 +278,85 @@ export function clinicalNoteCandidate(fields: Record<string, unknown>) {
   const noteType = fields.noteType;
   const title = fields.title;
   const content = fields.content;
-  if (typeof encounterId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(encounterId)
+  // The visit is optional (0113): a reading without one is published as a
+  // draft into the patient's "Imported paper records" encounter.
+  if ((encounterId !== undefined && (typeof encounterId !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(encounterId)))
     || typeof noteType !== 'string' || noteType.trim().length < 1 || noteType.length > 80
     || typeof title !== 'string' || title.trim().length < 1 || title.length > 240
     || typeof content !== 'string' || content.trim().length < 1 || content.length > 100_000) {
     throw new DomainProblem(400, 'OCR_INVALID_CLINICAL_NOTE', 'Validated clinical-note candidate is incomplete or invalid');
   }
-  return { encounterId, noteType: noteType.trim(), title: title.trim(), content };
+  return { ...(typeof encounterId === 'string' ? { encounterId } : {}), noteType: noteType.trim(), title: title.trim(),
+    content };
+}
+
+/** A paper date as the review kept it: the as-written text, else the reviewer's value; never converted. */
+function writtenDate(fields: Record<string, unknown>, name: 'collectedAt' | 'reportedAt'): string | undefined {
+  for (const value of [fields[`${name}AsWritten`], fields[name]]) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+/** The note type of a reading that is not a clinical note, published as a draft under the dedicated grant (0113). */
+export const PAPER_RECORD_NOTE_TYPE = 'imported_paper_record';
+
+/**
+ * A Lab, Pharmacy or document-only reading published under the dedicated
+ * records-processing grant (0113): not a structured Lab or Pharmacy record
+ * (those still need direct care) but a draft note in the patient's "Imported
+ * paper records" encounter, titled by kind (EHR puts "From a paper record
+ * (Migrate): " before it, and its own note type), for a clinician to sign. The
+ * text is the reviewed fields only, checked by the same candidate check as
+ * direct care, in reading order; nothing is added or inferred.
+ */
+export function paperRecordDraftNote(domain: OcrTargetDomain, fields: Record<string, unknown>, today: string) {
+  const join = (parts: Array<string | undefined>, separator = ' ') => parts.filter((part) => part).join(separator);
+  let title: string;
+  let lines: string[];
+  if (domain === 'LAB') {
+    // The same check as a structured Lab record; then the reviewed text, with
+    // every date as written on the paper (never a converted date or a time
+    // that is not on it).
+    const lab = importedLabCandidate(fields, today);
+    const record = fields.observations as Record<string, unknown>[];
+    lines = [
+      ...(lab.externalLabName ? [`Laboratory: ${lab.externalLabName}`] : []),
+      ...(lab.externalReference ? [`Reference: ${lab.externalReference}`] : []),
+      ...(writtenDate(fields, 'collectedAt') ? [`Collected: ${writtenDate(fields, 'collectedAt')}`] : []),
+      ...(writtenDate(fields, 'reportedAt') ? [`Reported: ${writtenDate(fields, 'reportedAt')}`] : []),
+      ...lab.observations.map((item, index) => `- ${item.testName}${item.testCode ? ` (${item.testCode})` : ''}: ${join([
+        join([item.value, item.unit]), item.valueText,
+        item.referenceRange ? `(reference ${item.referenceRange})` : undefined,
+        item.abnormalFlag ? `[${item.abnormalFlag}]` : undefined,
+        writtenDate(record[index]!, 'reportedAt') ? `reported ${writtenDate(record[index]!, 'reportedAt')}` : undefined])}`),
+    ];
+    title = 'Lab results';
+  } else if (domain === 'PHARMACY') {
+    const { items } = importedMedicationCandidates(fields);
+    title = 'Medicines';
+    lines = items.map((item) => {
+      const medicine = `- ${join([item.medicationText, item.strengthText, item.doseText, item.frequencyText])}`;
+      return item.historicalContext ? `${medicine}\n  As written: ${item.historicalContext}` : medicine;
+    });
+  } else if (domain === 'DOCUMENT_ONLY') {
+    // Every reviewed field, text as typed and any other value as JSON; the
+    // fixed sentence only when the review kept no value at all.
+    title = 'Document';
+    const kept = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null
+      && !(typeof value === 'string' && value.trim().length === 0));
+    lines = kept.length > 0
+      ? kept.map(([name, value]) => `${name}: ${typeof value === 'string' ? value.trim() : JSON.stringify(value)}`)
+      : ['A paper record kept as a document; the reviewer typed none of its text.'];
+  } else {
+    throw new DomainProblem(409, 'OCR_TARGET_UNAVAILABLE', 'The owning domain does not support this publication operation');
+  }
+  const content = lines.join('\n');
+  if (content.length > 100_000) {
+    throw new DomainProblem(400, 'OCR_INVALID_CLINICAL_NOTE', 'Validated clinical-note candidate is incomplete or invalid');
+  }
+  return { noteType: PAPER_RECORD_NOTE_TYPE, title, content };
 }
 
 /**
@@ -297,6 +369,9 @@ export function assertPublishableCandidate(domain: OcrTargetDomain, fields: Reco
   if (domain === 'EHR') clinicalNoteCandidate(fields);
   else if (domain === 'LAB') importedLabCandidate(fields, today);
   else if (domain === 'PHARMACY') importedMedicationCandidates(fields);
+  // 0113: a document-only reading may become a draft note under the dedicated
+  // grant; one too long for a note is refused here, not at publication.
+  else if (domain === 'DOCUMENT_ONLY') paperRecordDraftNote(domain, fields, today);
 }
 
 export function publicationCanRetry(attemptCount: number, maxAttempts: number,

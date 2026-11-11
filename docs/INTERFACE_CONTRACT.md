@@ -1182,6 +1182,7 @@ GET  /api/v1/pharmacy/dispensings/:dispensingId
 POST /api/v1/pharmacy/dispensings/:dispensingId/reversals
 POST /api/v1/pharmacy/imports/from-ocr                  # internal OCR caller
 POST /api/v1/pharmacy/imports/from-ocr/batch            # internal OCR caller, 2-50 medicines
+GET  /api/v1/pharmacy/imports?patientId=<uuid>[&limit=1-100][&cursor=<id>]
 GET  /api/v1/pharmacy/imports/:importId
 ```
 
@@ -1224,6 +1225,22 @@ the single route, answers 409 `IDEMPOTENCY_CONFLICT`. The answer is
 `{ id, count, items }`, where `items` are the records in array order and `id`
 is the first.
 
+`GET /api/v1/pharmacy/imports?patientId=` answers one patient's imported
+medication records at the request's facility (single and batch alike), newest
+first (`created_at`, then `id`), as `{ items, nextCursor }`: each item is the
+same projection as `GET imports/:importId`, OCR provenance ids included
+(`sourceDocumentId`, `ocrJobId`, `extractionId`, `validationId`,
+`validationVersion`, `publicationId`). `limit` is 1-100 (default 50);
+`nextCursor` is the last record's id when more may follow, else `null`, and is
+passed back as `cursor` (a cursor that is not one of this patient's records
+here answers an empty page). It has the guards of `GET imports/:importId`:
+browser route, `pharmacy.import.read`, Identity `read_records` for that patient
+at that facility under `X-Purpose-Of-Use` (break-glass may read), checked
+before any read, so a refusal reads and audits nothing; row-level security
+(`pharmacy_imports_read`) applies as well. One audit row
+`pharmacy.import.list` names the patient, with the returned ids and count only.
+Any other query parameter, `healthId` among them, is refused 400.
+
 ## 14. OCR
 
 The gateway owns `/api/v1/ocr/*` and routes it to the independently runnable
@@ -1245,6 +1262,7 @@ GET  /api/v1/ocr/jobs/:jobId/validations
 POST /api/v1/ocr/jobs/:jobId/patient-confirmation
 POST /api/v1/ocr/validations/:validationId/publications
 GET  /api/v1/ocr/validations/:validationId/publications
+GET  /api/v1/ocr/quality/summary?from=YYYY-MM-DD&to=YYYY-MM-DD
 ```
 
 The document-scoped job lookup returns the latest authorized job as
@@ -1372,6 +1390,93 @@ the stored review) rather than refusing or inventing a time; two times in the
 wrong order answer 400 `OCR_LAB_DATE_ORDER`. The as-written keys, `page` and
 `itemId` are never sent to Lab.
 
+Review outcome (phase 1, measurement only; no migration). Every validation,
+validated or rejected, stores `provenance.reviewOutcome` in
+`ocr.validations` (beside `source` and `extractionId`) and the same object in
+the `details.reviewOutcome` of its `ocr.validation.accept` /
+`ocr.validation.reject` audit event. It compares the reviewed extraction's
+reading (`structured_payload` items and `provenance.reading`) with what the
+reviewer kept, as counts and codes only: schema `hid.ocr.review-outcome/v1`,
+`promptVersion`, `processingContract`, `readingStatus`, `linkage`
+(`item_ids` | `estimated` | `none`), `estimated`, `totals`, `buckets` (per item
+kind x decision x AI confidence x hard page x `readBy`, each with check-reason
+code counts and field-change class counts) and `reviewer` (counts of the
+optional signals below). Decisions: `kept_unchanged`, `kept_changed`,
+`removed`, `added_by_reviewer` (entries linked by `itemId`, or typed),
+`unlinked` (whole text saved without item links: an EHR note, the legacy
+single medicine, a list with no `itemId`; the summary is then `estimated` and
+carries `estimate.foundInSavedText` / `notFoundInSavedText` / `notChecked`
+instead of per-item decisions; at most 300 items are checked, within a fixed
+allowance of 1,000,000 word comparisons and 2,000,000 edit-distance cells, the
+rest are `notChecked`), `not_in_target` and
+`rejected_with_document`. When nothing was read of the kept kinds, typed
+entries are `added_by_reviewer` and `linkage` is `none`. "Changed" uses the
+OCR accuracy kit's normalisers (name, strength, frequency for medicines; name,
+value, unit and date for lab results), so spacing, case and spellings such as
+"5 mg"/"5mg" or "bd"/"twice daily" are not changes. It never holds a name,
+value, text, item id or reviewer identifier. It is kept to 16,384 bytes
+serialised: past that every bucket's check-reason counts are emptied and
+`checkReasonsDropped: true` is added, and if it is still larger the stored value
+is `{ schema, error: 'summary_too_large' }`. Computing it never blocks a save:
+on any failure the stored value is `{ schema, error: 'summary_failed' }`.
+
+Optional review signals on the validation body (all optional; existing clients
+are unaffected): `reviewConfirmed` (boolean), `missedItems` (integer 0-200),
+`removedItems` (up to 200 `{ itemId, removalReason? }`, the reason optional:
+`not_on_paper` | `duplicate` | `not_needed` | `unreadable` | `other_patient`),
+`rejectionReasonCode` (only with `rejected`, else 400
+`OCR_REJECTION_REASON_NOT_ALLOWED`: `wrong_patient`, `wrong_document`,
+`unreadable`, `duplicate_document`, `pages_missing`, `reading_unusable`,
+`not_clinical`, `other`), and on any `corrections[]` entry `itemId`, `fields`
+(1-9 distinct of `name`, `strength`, `dose`, `frequency`, `route`, `duration`,
+`date`, `value`, `unit`) and `changeReason` (`misread` | `clinical_update`).
+They enter the review outcome as counts only. When sent they join the request
+digest (the same `Idempotency-Key` with different signals answers 409
+`IDEMPOTENCY_CONFLICT`); when absent the digest is exactly as before. None is
+ever required from staff (owner decision Q43): every one, and every reason, may
+be left out. Each extraction on `GET /api/v1/ocr/jobs/:jobId/extractions`
+carries `reviewLearning: true` on a server that accepts them; a client sends
+them only when it sees it (an older server answers them 400).
+
+`GET /api/v1/ocr/quality/summary` (staff actors only: a platform
+administrator, holding platform permissions `platform.admin.access` and
+`platform.operations.read`, or the manager of the facility named by
+`X-Facility-ID`, whose membership at that facility holds `workforce.manage`, at
+a facility not awaiting Health ID support's review; a manager's permission at
+another facility never counts; anyone else, including the administrator of a
+self-signed-up facility still awaiting review, 403 `PERMISSION_DENIED`). Every
+answer carries `available`. No staff monitoring: for a manager, each review is
+read with its reviewer keyed by a fresh random per-request key (SHA-256 in the
+database; unlinkable to a person or across requests, never returned or
+logged). Fewer than 3 distinct reviewers in the (widened) range answers `{
+schema, from, to, scope, available: false, reason: 'too_few_reviewers' }` with
+no counts; otherwise any group to which fewer than 3 distinct reviewers
+contributed is suppressed like a small group (the rule counts distinct
+reviewers; it does not weigh how much each did). A manager's range also ends at
+the last finished ISO week (the answer's `to`; asking only about the current
+week answers `too_few_reviewers`), so a group shown never changes later, and
+when more than 50,000 reviews match, the last, cut-off week is left out.
+Platform administrators get every group over the minimum size, current week
+included. When figures are returned (`available:
+true`) the route sums stored review outcomes by ISO
+week, facility, item kind and prompt version (`itemGroups`) and by ISO week,
+facility and prompt version (`reviewGroups`) for `from`..`to` (UTC days,
+inclusive, default the last 28 days, at most 92; else 400
+`OCR_QUALITY_RANGE_INVALID`), widened to whole ISO weeks (Monday to Sunday;
+the answer's `from`/`to` are the widened days) so two ranges a day apart cannot
+be subtracted. A group with fewer than 20 items (reviews, for a review group) is
+returned as `{ ...keys, suppressed: true }` with no counts. Inside a group that
+is shown, reason, check-reason and field-class counts under 5 are left out and
+counted in `smallCellsHidden` (a hidden count can still be worked out from the
+group's totals; the hidden code cannot). `summaryFailed` counts both
+`summary_failed` and `summary_too_large`; an outcome stored with
+`checkReasonsDropped` adds no check-reason counts.
+There are no per-reviewer figures. The read is audited as
+`ocr.quality.summary.read` with the range, the reader kind
+(`platform_admin` or `facility_manager`), `available` and counts only. Row-level security
+limits it to the facility named by `X-Facility-ID` (`scope: 'bound_facility'`);
+a cross-facility read needs a database change that is not part of this phase.
+
 Patient confirmation is a separate idempotent command bound to the canonical
 Identity patient already governing the source document. The server rechecks
 write authorization and rejects break-glass, facility mismatch, wrong-patient,
@@ -1380,9 +1485,13 @@ and stale job versions.
 Publication requires `Idempotency-Key`, `direct-care`, an explicit validation
 ID/version, and the latest confirmation ID. It needs the publisher's own
 direct-care `write_records` grant on the patient for every target (section
-37): a caller who can read the job but has none answers 403
-`OCR_PUBLISH_NEEDS_DIRECT_CARE`; one who cannot read the job answers 404
-`OCR_JOB_NOT_FOUND`. Current operations are EHR
+39), or the patient's dedicated records-processing grant, which publishes any
+reading (a Lab, medicine or document-only one as a draft note titled by kind)
+as a draft into the patient's "Imported paper
+records" encounter (section 42, 0113): a caller with neither who can read the
+job answers 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE`; one who cannot read the job
+answers 404 `OCR_JOB_NOT_FOUND`. An EHR reading's `encounterId` is optional
+since 0113: without one, the note goes to the imported paper records. Current operations are EHR
 `create_imported_clinical_note`, Lab `create_imported_lab_evidence`, Pharmacy
 `create_imported_medication_evidence`, and `retain_validated_document` for
 `DOCUMENT_ONLY`. EHR creates a draft imported
@@ -1474,6 +1583,14 @@ only and cannot be dispensed again. Earlier backends answered the 200 oldest ite
 the member could read whatever their state, so a busy facility stopped seeing
 new work. The answer's shape and audit rows are unchanged.
 
+Each Lab work-list item also carries `openWork` (boolean): true while the work
+item is open by the rule above, false once every test it asks for has a
+released, current result not marked entered in error. It is the value the
+list is ordered by, so a client can show finished work as done. Earlier
+backends do not send it, so clients treat it as optional. Pharmacy sends no
+such field: its items already carry `dispensing` (null while open; a reversed
+dispensing counts as done), which is the same rule.
+
 Known limit of the Lab list (no schema change in this step). Every row the
 list reads from a Lab table pays its own row-level security check, mostly the
 member's consent check, over a millisecond each. The list reads each Lab
@@ -1489,6 +1606,63 @@ work item, kept by the database), which is a separate owner decision.
 `services/ehr-api/scripts/lab-work-list-runtime-checks.mjs` (run by
 `test-patient-evidence-runtime.mjs`) checks 1,050 work items within the
 limit and counts the checks.
+
+### Clinical information on Lab work items
+
+Each same-facility Lab work item carries `clinicalIndication` (string or
+null): the clinical information on the version of the EHR lab request that Lab
+accepted (`sourceEhrOrderVersion`), stored as `clinical_indication` on
+`lab.work_items`. It is null when that version had none. Lab keeps the version
+it accepted: if the doctor later changes the request's clinical information,
+the EHR is told `already_accepted` and Lab still sends the earlier text. A
+client therefore shows it as the text sent with the request, not as the
+request's current text. Both work-item reads send it: each item of
+`GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/{id}`. It is read
+in the same statement and under the same row-level security as the rest of
+the row, so only a member who may already read the work item gets it, and it
+adds no audit row (the single read's `lab.work-item.read` row is unchanged).
+A work item from another facility's order route never carries it: that
+route's detail gives the same text as `clinicalInformation`, and only while
+the route allows a read. The answer to `accept-ehr-order` is unchanged.
+Earlier backends do not send it, so clients treat it as optional. No
+migration.
+
+### Lab results: check, release and correction
+
+Checking a result (`POST /api/v1/lab/results/{resultId}/verify`) needs
+someone other than the person who entered that version; the database keeps
+the rule. When the person who entered it tries, Lab answers
+`409 LAB_RESULT_VERIFIER_NOT_INDEPENDENT` with the detail "You entered this
+result, so someone else at your lab must check it." Earlier backends
+answered `500`. A check of a version marked entered in error is refused by
+the same database rule and still answers `500`.
+
+Each result revision Lab answers also carries `enteredByYou` (boolean): true
+when the member asking entered that version. That is every revision in the
+execution reads (`GET .../executions/{id}`, `GET .../specimens/{id}/executions`),
+a result's history, the answers to entering, correcting, checking and
+releasing a result, and the released views. Lab works it out from the
+version's author and the session, and never answers anyone's account id. A
+client can use it to offer no check to the person who entered the version.
+Earlier backends do not send it, so clients treat it as optional.
+
+The `reason` of a check, a release (`POST .../results/{resultId}/release`)
+and a correction (`POST .../executions/{executionId}/results/{resultId}/corrections`)
+needs at least 3 characters, not counting spaces at either end, and at most
+500: what Lab keeps. A shorter one is refused `400 VALIDATION_FAILED` with
+the field error `reason must be at least 3 characters`; earlier backends
+passed it to the database and answered `500`.
+
+The released view of a result also carries `correctionPending` (boolean).
+That is each result of
+`GET /api/v1/lab/ehr-orders/{sourceEhrOrderId}/released-results`, which the
+clinician who placed the order reads, and `GET .../results/{resultId}/history`
+for a reader without `lab.execution.read`. It is true while a newer version
+of that released result waits to be checked and released: a correction or
+amendment entered after the release, checked or not, and not marked entered
+in error. Lab answers nothing else of that version (no value, reason or
+version number), and the read's audit row still names only the versions
+returned. Earlier backends do not send it, so clients treat it as optional.
 
 ### Record chat: where each source came from
 
@@ -3073,7 +3247,7 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 | Validate or reject | `ocr.validation.write` | `healthcare-operations` write |
 | Confirm the source patient | `ocr.patient.confirm` (doctor, clinician, nurse) | `healthcare-operations` write |
 | EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
-| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; without it 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 39) |
+| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; or, for any reading as a draft note, the dedicated records-processing grant (an approved `healthcare-operations` `write_records` request; never the cover: section 42, 0113); otherwise 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 39) |
 
 Without a records-processing grant or a cover, OCR's create answers 403
 `OCR_RECORDS_PROCESSING_CONSENT_REQUIRED` when the request names the patient
@@ -3211,7 +3385,9 @@ else:
   import (`POST /ehr/internal/ocr/patients/:patientId/clinical-notes`) now answer
   `healthcare-operations` 400 `PURPOSE_OF_USE_REQUIRED` ("X-Purpose-Of-Use must
   be direct-care or emergency for the patient record") before any work; direct
-  care and emergency answer as before.
+  care and emergency answer as before. (Since 0113 the OCR clinical-note import
+  takes `healthcare-operations` as a draft in the imported paper records; see
+  section 42.)
 - lab-api and pharmacy-api: every route takes `direct-care` or `emergency`; a
   `healthcare-operations` purpose answers 400 `PURPOSE_OF_USE_REQUIRED`
   ("X-Purpose-Of-Use must be direct-care or emergency"). No Lab or Pharmacy
@@ -3514,8 +3690,8 @@ entry paths do not read the allowance. Tables `ocr.facility_page_limits`,
 `ocr.page_usage` and `ocr.ai_usage` (key `(job_id, attempt_no, model)`;
 facility, Lagos month, requests and the four token counts) hold ids, counts,
 dates, the model name and the limit's reason only, have no runtime grant, no
-foreign key to `ocr.jobs` (the 24-hour deletion of a job's working data never
-waits on them or removes them) and are read only through these commands.
+foreign key to `ocr.jobs` (the 7-day deletion of a job's working data,
+section 41, never waits on them or removes them) and are read only through these commands.
 `ocr.claim_worker_job` keeps the body 0105 gave it. The only change to an existing function
 is one more allowed transition in `ocr.validate_job_write`: a queued job whose
 `last_error_code` is exactly `OCR_PAGE_ALLOWANCE_USED_UP` may move
@@ -3779,7 +3955,9 @@ runs the trigger under an owner that does not bypass row-level security (on a
 superuser-migrated database it lends the function to such a role until the
 rollback) and fails on 0105 (a member's registration into a campaign and a
 member's resolution of a campaign-linked registration with `linkExisting`'s
-UPDATE are refused; a non-member's same UPDATE finds no row on both); the
+UPDATE are refused; a non-member's same UPDATE finds no row on both); it
+covers a campaign admin and a member who is not an admin (an enumerator, the
+campaign's volunteer), both refused on 0109 and kept with 0110; the
 outreach-api service tests cover the 403 and 409.
 
 ## 39. Publishing needs direct care: the refusal a records-processing caller sees
@@ -3808,9 +3986,9 @@ confirm OCR jobs, never publishes. Only the answer changes.
 
 A Migrate staff member working under the cover, with direct-care read access
 (an approval, Access PIN or share) but no direct-care write, now sees step 4
-instead of the 404 they got before. Until the database can tell Identity which
-grant covered a check, a draft-only publishing path under the cover is not
-offered.
+instead of the 404 they got before. The cover never publishes; since 0113 the
+patient's dedicated records-processing grant publishes an EHR reading as a
+draft (section 42), checked between steps 3 and 4.
 
 ## 40. Outreach campaigns: their own admins manage them (0111)
 
@@ -3885,3 +4063,502 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
 **Release order.** Apply 0111 before identity-api ships with
 `outreach.campaign.write` accepted. On a database without 0111, that would
 reopen the ungoverned writes.
+
+## 41. OCR source deletion after 7 days (0112)
+
+Owner and coordinator decisions of 2026-11-11: (1) at 24 hours (7 days since
+Q36, below) after an OCR job finishes, saved or not, the uploaded source file
+goes with every S3 version, and so do the Textract text, the AI reading and
+the content of the job's working rows; what a person saved or published into the record
+(EHR rows, `ehr.ocr_import_provenance`), `ocr.page_usage`, `ocr.ai_usage`, a
+deletion audit event and the job ids and status stay. (2) The source scan is
+not kept in the chart; published records keep provenance by job id. (3)
+Content is removed, rows are not deleted, through one narrow SECURITY DEFINER
+purge; the append-only triggers stay. Owner decision Q36 of 2026-11-11
+("make it 7days (signed)") made the 24 hours of (1) 7 days: a document is
+due 7 days after its latest job finished and overdue 7 days and 2 hours
+after.
+
+**When.** A document is due when its status is `uploaded`, `legal_hold` is
+false, it has at least one OCR job, every job is finished
+(`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled`), and
+the latest finish (`completed_at`; `failed_at` for a failed job; `updated_at`
+for a cancelled one) is at least 7 days ago. A publication of its jobs that
+could still run (`pending`, `processing`, or `failed` with
+`OWNING_SERVICE_UNAVAILABLE` or `REQUEST_IN_PROGRESS` and attempts left)
+blocks until 72 hours after the finish and no longer after that (a hard cap);
+since 7 days is longer than the cap, it no longer delays deletion (`due_at` is
+the finish + greatest(7 days, 72 hours while blocked)). A blocked document is
+not due, so it counts neither as due nor as overdue.
+
+**Claim, then S3, then purge.** The OCR worker
+(`OCR_SOURCE_DELETION_INTERVAL_SECONDS`, default 900) first claims the
+document: under a row lock on it and its jobs the database checks again that
+it is due and sets status `source_deleting`. From then the database refuses
+(55000) a new OCR job on it, a failed -> queued retry of its jobs, setting
+`legal_hold` and any other change to the document; ocr-api answers 410 (see
+below). Only after the claim does the worker delete every S3 version and
+delete marker whose key is exactly the document's stored `storage_key` and
+confirm none remain; then it purges, which requires `source_deleting`. If S3
+fails the document stays `source_deleting` and is listed first in the next
+round (ocr-worker README, "Source deletion after 7 days"). Claimed
+documents go least recently attempted first (`ocr.source_deletion_attempts`:
+ids, counts and times, no runtime grant) and take at most half of a batch
+while due documents wait. There is no unclaim: a claim that keeps failing
+stays for an operator and keeps counting as overdue. A job insert takes the
+document row `FOR SHARE` first, so it serializes with a claim in flight and is
+refused once the document is `source_deleting`.
+
+Accepted: a publication requested near the 72-hour cap may run its attempt
+after the claim or the purge. ocr-api reads the source again for each attempt
+and answers 410 `DOCUMENT_SOURCE_DELETED`, recording a terminal failure before
+any owning-domain call, so nothing is published; a blanked validation would
+fail the candidate check (`OCR_INVALID_CLINICAL_NOTE`) anyway.
+
+**What the purge changes**, once, under a row lock on the document and its
+jobs:
+
+| Table | Columns | Value after |
+|---|---|---|
+| `ehr.documents` | `status`, `original_file_name`, `row_version` | `source_deleted`, `Source page deleted after 7 days`, + 1 (+ 1 more at the claim; no `ehr.record_versions` row for either: the audit rows `ocr.source.deletion_claimed` and the one below record them; earlier record versions keep the original file name) |
+| `ocr.extractions` | `raw_text`, `structured_payload` | NULL, `{}` |
+| `ocr.validations` | `validated_payload`, `accepted_fields`, `rejected_fields`, `corrections`, `reason` | `{}`, `{}`, `[]`, `[]`, `Content deleted after 7 days` |
+| `ocr.patient_confirmations` | `reason`, `evidence_reference` | `Content deleted after 7 days`, NULL |
+| `audit.events` | one row `ocr.source.deleted_after_7d` | workload actor, resource the document; details `jobCount`, `objectVersionsDeleted` (summed over the worker's rounds for the document), `extractionsBlanked`, `validationsBlanked`, `confirmationsBlanked`, `alreadyDeleted`, `secondsPastDue` |
+
+Every other column stays (dispositions, target domains, versions, reviewers,
+extraction provenance, confidence and content hash), as do `ocr.jobs`,
+`ocr.job_events`, `ocr.outbox_events`, `ocr.publications`,
+`ehr.ocr_import_provenance`, `ocr.page_usage`, `ocr.ai_usage` and every EHR
+record. A purge of a document already `source_deleted` blanks only what still
+holds content (a row added after the purge) and writes an audit row only then.
+
+**Triggers.** `ocr.reject_immutable_change()` still refuses (55000) every
+DELETE and UPDATE of `ocr.job_events`, `ocr.extractions`, `ocr.validations`,
+`ocr.patient_confirmations` and `ehr.ocr_import_provenance`, except an UPDATE
+of the middle three that changes only the columns above to exactly the values
+above, made by the OCR functions' owner (inside the purge), on a row whose
+document is already `source_deleted`. No session setting is consulted. A
+`source_deleting` or `source_deleted` document changes only by the two exact
+steps the OCR functions' owner makes (the claim from `uploaded` with no legal
+hold, nothing else changed; the purge to `source_deleted` with the neutral
+file name, nothing else changed), and an insert with either status is refused
+(55000). `ocr.validate_job_write` refuses a job insert and any change to
+`queued` or `processing` on such a document (0107 let failed -> queued pass
+without the document check).
+
+**Worker commands** (`hid_ocr_worker` only; 42501 for a subject without the
+`ocr_worker` role):
+
+| Command | Notes |
+|---|---|
+| `ocr.list_worker_source_deletions(limit 1-500)` returns `(document_id, facility_id, storage_bucket, storage_key, due_seconds)` | `source_deleting` documents first (least recently attempted first, at most half the limit while due documents wait), then oldest due first. 22023 for a bad limit. |
+| `ocr.worker_source_deletion_backlog()` returns `(due, overdue)` | Due or claimed now; overdue = those due for more than 2 hours (7 days and 2 hours after the finish), plus `uploaded` documents with a job stuck in `extracted` for more than 24 hours or in `queued` or `processing` for more than 48 hours, not counting a job parked by the page allowance (counted, never deleted). |
+| `ocr.claim_worker_source_deletion(document_id, correlation_id 8-128)` returns `(outcome, storage_bucket, storage_key)` | `claimed` (now `source_deleting`; audit `ocr.source.deletion_claimed`), `already_claimed`, `already_deleted` or `not_due` (nothing changed; bucket and key NULL); P0002, 22023. |
+| `ocr.purge_worker_source_document(document_id, versions_deleted 0-100000, correlation_id 8-128)` returns `(outcome, extractions, validations, confirmations)` | `deleted`, `already_deleted` or `not_claimed` (not `source_deleting`; nothing changed); P0002 for an unknown document; 22023 for bad input. |
+
+**Services.**
+- ehr-api: `GET /api/v1/ehr/documents/:id/download` for a
+  `source_deleting` or `source_deleted` document answers 410 `DOCUMENT_SOURCE_DELETED`, detail
+  `Source page deleted after 7 days` (after the read check, so a caller
+  without access still gets 403). The document list shows status
+  `source_deleting` or `source_deleted`. The internal OCR source read
+  (`GET /api/v1/ehr/internal/ocr/documents/:documentId/source`) still answers
+  the metadata, with that status: ocr-api needs the document's
+  patient to authorize reads of the job.
+- ocr-api: each item of `GET /api/v1/ocr/jobs/:jobId/extractions` carries
+  `contentDeleted` (true when the job's document is `source_deleting` or
+  `source_deleted`; then `rawText` is `''`, `structuredPayload` `{}` and the
+  reading empty). Creating a job on such a document, and retry, validation,
+  patient confirmation and publication of its jobs, answer 410
+  `DOCUMENT_SOURCE_DELETED`; a publication already claimed fails terminally
+  with that code. `@hid/api-client` parses a `contentDeleted` extraction
+  without text and still rejects an empty `rawText` on any other; the EHR app
+  shows `Source page deleted after 7 days` instead of the page and `Content
+  deleted after 7 days` instead of the review.
+
+Under an owner that neither is a superuser nor bypasses row-level security
+(release checklist P8) the worker commands see no document, as every OCR
+worker command sees no job. 0112 has no down migration; the declaration is
+signed separately. Suite:
+`services/ehr-api/test/database/ocr-source-deletion.integration.sql`.
+
+## 42. Records processing: publishing a reading as a draft (0113)
+
+Owner decision (D-Eminence, 2026-11-11), verbatim: "Option B: allow drafts,
+but only for staff given a dedicated "records processing" permission for that
+patient. Never through shares or PINs. The draft stays a draft until a
+clinician signs it. This needs database change 0113 and a little more work.
+but the staff permission should cover publish to patient profile/health ID".
+
+Dated note, 2026-11-11, amending the owner decisions recorded in 0104 D7 and
+0108 D-b (both migrations are applied and unchanged; 0113's header carries the
+same note): publishing into the chart still needs the publisher's own
+direct-care write grant, and the cover (sections 32.1 and 36: approval, Access
+PIN, any share) still never publishes. The one exception: the holder of the
+patient's dedicated records-processing grant may publish any reading as a
+DRAFT note. "Patient profile/health ID" is read as the patient's record: an EHR
+clinical-note reading is published as it is; a Lab, medication or
+`DOCUMENT_ONLY` reading becomes a draft note of the same kind in the same
+encounter, built from the reviewed fields only (ocr-api
+`paperRecordDraftNote`), titled "Lab results", "Medicines" or "Document" (EHR
+shows "From a paper record (Migrate): Lab results"). Structured Lab and
+Pharmacy records (Lab imported evidence, Pharmacy imported medications) still
+need direct care: under the grant they are never written, and the publication's
+`targetResourceType` is `clinical-note`. A clinician signs the draft later.
+
+**The database keeps it a draft (0113 D4).** Under `healthcare-operations` the
+API is not the only check: `ehr.records_processing_draft_guard()` (BEFORE
+INSERT, UPDATE and DELETE on `ehr.encounters`, `ehr.clinical_notes` and
+`ehr.clinical_note_revisions`) refuses with 42501
+`RECORDS_PROCESSING_DRAFT_ONLY` every update and delete, and every insert but
+the "Imported paper records" encounter, a draft note in it and that note's
+first revision, for a patient for whom the session's dedicated grant is named.
+The draft must be inserted unsigned, at revision 1, with the paper-record note
+type and title prefix.
+
+**One route per publication (0113 D5).** `ocr.publications.publication_basis`
+(`direct_care` or `records_processing_grant`; NULL before 0113, read as direct
+care) is written by the request and never changed. Every execution attempt is
+authorized on that basis alone: a Lab or medicine reading requested under the
+grant is retried as the same draft note, never as Lab or Pharmacy evidence,
+and one requested under direct care is never retried as a draft note (403
+`OCR_PUBLISH_NEEDS_DIRECT_CARE` when direct care is gone). The draft note of a
+Lab reading writes each date as written on the paper; a document-only reading
+too long for a note (100,000 characters) is refused at validation.
+A `healthcare-operations` write grant that the check does not name (for
+example one imported from legacy identity) writes nothing. Under any other
+purpose the guard does nothing.
+
+**The dedicated grant.** `identity.records_processing_write_grant(patient,
+subject, membership, facility)` returns its id or NULL (SECURITY DEFINER, for
+`hid_ocr_runtime` and `hid_ehr_runtime` only). It is the grant the patient's
+approval of a records-processing access request writes (0104 D2-D4, 0072):
+purpose `healthcare-operations`, scope `write_records`, active, at most 24
+hours, this membership and facility and the live account, `source_system`
+`hid`, not break-glass, not held, no authorization method, granted by the
+patient; its request approved by the patient, `healthcare-operations`,
+`write_records`, 5-1440 minutes. Still refused (0104 D8): a patient under 18 or
+with no date of birth (Africa/Lagos), a membership without `ocr.job.write`,
+`healthcare-operations` or `direct-care` inactive, a deny directive for writing
+under records processing or direct care. Only the session's own subject,
+membership and facility may be asked about. A share has no request, a PIN grant
+is direct care with an authorization method, and a read-only approval writes a
+`read_records` grant, so none of them is ever named.
+
+**OCR API** (`POST /api/v1/ocr/validations/:validationId/publications`, the
+request and each attempt):
+
+1. Steps 1-3 of section 39 under `direct-care`, as before (with direct-care
+   write, every target publishes as before; a visit named in the reading is
+   used; a reading with no visit goes to the imported paper records, still
+   `direct-care`).
+2. Otherwise the check above is asked about the job's patient (the source's,
+   or the confirmed patient's when the source is hidden under direct care). With
+   a grant, the source is read again under `healthcare-operations` and must be
+   that patient's; then an EHR reading is published as a draft (any other
+   target: 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE`). EHR is called under
+   `healthcare-operations`, without `encounterId`, with `confirmedBy`.
+3. Otherwise 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (job readable) or 404
+   `OCR_JOB_NOT_FOUND`, as section 39.
+
+The same person may confirm the patient and publish. `ocr.publication.request`,
+`.succeed` and `.fail` carry, ids only: `basis` (`records_processing_grant` or
+`direct_care`), `grantId` (the dedicated grant), `confirmedBy` and
+`publishedBy` (account ids).
+
+**EHR API** (`POST /api/v1/ehr/internal/ocr/patients/:patientId/clinical-notes`):
+now also takes `X-Purpose-Of-Use: healthcare-operations`; `encounterId` is
+optional; `confirmedBy` (uuid) is optional. Under `healthcare-operations` it
+checks the dedicated grant again in its transaction (403
+`OCR_PUBLISH_NEEDS_DIRECT_CARE` without it, nothing written; 400
+`OCR_DRAFT_ENCOUNTER_NOT_CHOSEN` if a visit is named). Without `encounterId`
+(either purpose) the note goes to the patient's one "Imported paper records"
+encounter at the facility, found or created by
+`ehr.imported_paper_records_encounter(patient)`: `encounter_type` `other`,
+`status` `completed`, `started_at` = `ended_at` = creation time,
+`chief_complaint` "Imported paper records (Migrate)", the new column
+`imported_paper_records` true (unique per patient and facility, a partial unique
+index; INSERT ... ON CONFLICT DO NOTHING then SELECT, so concurrent publishers
+share one row; the flag cannot be changed after insert). The note is a
+`draft`, note type "From a paper record (Migrate)", title "From a paper record
+(Migrate): " + the reading's title, with `ehr.ocr_import_provenance` linking
+the OCR job, as before. The audit `ehr.note.import-ocr` names `basis`,
+`grantId`, `confirmedBy`, `publishedBy` and `importedPaperRecords`. Signing is
+unchanged: `PATCH .../encounters/:encounterId/clinical-notes/:noteId` is
+`direct-care` only.
+
+**What the patient sees.** The "Imported paper records" encounter is hidden
+from every patient-self read until it holds a signed or amended note: the
+patient-self row-level security policy on `ehr.encounters`
+(`encounters_patient_self_read`, through
+`ehr.imported_paper_records_signed`), and the patient record summary
+(`GET /api/v1/ehr/me/records`) and patient chat evidence filter it
+too. Drafts stay hidden as before. Staff encounter reads carry
+`importedPaperRecords: true` so staff screens can label it; the patient's
+record summary and chat evidence carry the same field and the title "Imported
+paper records (Migrate)".
+
+**Website (not in place).** Migrate's publish step must stop requiring a visit
+under records processing and explain that the reading lands as a draft for a
+clinician to sign; patient and staff record views should label the encounter
+by `importedPaperRecords`.
+
+## 43. Sign-up, setup wizard and registration desk fields (0114)
+
+Migration 0114 (`services/ehr-api/database/migrations/0114_collect_signup_fields.sql`), unsigned.
+
+Owner decisions: "don't remove them instead we need to collect those information" and
+"allow trading name, all fields required". Every field below is required **on the website**,
+which must always send it. For the release step (43.0) the API accepts a sign-up or desk request
+that carries **none** of the new fields, and refuses one that carries only **some** of them
+(400 `VALIDATION_FAILED`, with `errors[].field`). A follow-up release makes them required in the
+API too. These stay
+**not collected** until the document bucket and its virus scanner exist: operating licence,
+CAC certificate, proof of address, and the facility logo. Hide them; do not grey them out (D5).
+Sending any of them (for example `logo`) is refused as an unknown field.
+
+All existing request validation stays the same: `whitelist` and `forbidNonWhitelisted`, so an
+unknown field gets 400 `VALIDATION_FAILED`.
+
+### 43.0. Release order (important)
+
+Today's backend refuses unknown fields (`forbidNonWhitelisted`), so the website cannot send
+the new fields before this backend is live. This backend therefore accepts both bodies: the old
+one (none of the new fields) and the new one (all of them). A partial set is refused. Release in
+three steps:
+
+1. This backend (0114 and Identity). The live website keeps working unchanged.
+2. The website that always sends every new field (sign-up, setup wizard, every desk screen).
+3. A small follow-up backend release that makes the fields required in the API.
+
+Every screen that posts to `POST /api/v1/identity/nin/resolve` must send the desk fields in
+section 43.3 before step 3, including the pharmacy `newHealthId.tsx`, the classic Registration
+screen and hid-system `apps/web/src/lib/patientRegistrationApi.ts`.
+
+### 43.1. Shared shape: `FacilityProfile`
+
+This object is used by facility sign-up (`facilityProfile`) and by the setup wizard's save.
+
+| Field | Type | Rule |
+|---|---|---|
+| `tradingName` | string | Trimmed, 2-200 characters. The name people use. The CAC legal name is kept as QoreID reads it (D1). |
+| `ownership` | string | One of `public`, `private`, `faith_based`, `ngo` |
+| `careLevel` | string | One of `primary`, `secondary`, `tertiary` |
+| `addressLine` | string | Trimmed, 5-300 characters. The site address. It is not shown in the public directory, which keeps the CAC address (D2). |
+| `city` | string | Trimmed, 2-100 characters |
+| `stateCode` | string | One of the 37 codes in section 43.5 |
+| `lga` | string | Trimmed, 2-100 characters. Free text until the official list is loaded (D6). |
+| `gpsLatitude` | number | 4 to 14, at most 6 decimal places |
+| `gpsLongitude` | number | 2.5 to 15, at most 6 decimal places |
+| `phone` | string | E.164 (`+` and 8-15 digits). Spaces, dots, dashes and brackets are ignored. A Nigerian local number (`0` and 10 digits) is read as `+234…`. |
+| `email` | string | A valid email, at most 254 characters. It is lower-cased and trimmed. |
+| `bedCount` | integer | 0 to 100000 |
+| `operatingHours` | string | Trimmed, 2-200 characters, for example `Mon-Sun 24 hours` |
+| `emergency24h` | boolean | |
+| `departments` | string[] | 1-15 codes, no repeats, from section 43.6. Informational only: it creates no departments (D7). |
+| `servicesOffered` | string | Trimmed, 2-2000 characters |
+| `smohLicenceNumber` | string | Trimmed, 2-100 characters. The State Ministry of Health licence number. |
+| `hasRegistryId` | boolean | |
+| `registryId` | string or null | 2-100 characters **exactly when** `hasRegistryId` is true. Must be `null` or left out when it is false. |
+| `hasNhiaAccreditation` | boolean | |
+| `nhiaAccreditationNumber` | string or null | 2-100 characters **exactly when** `hasNhiaAccreditation` is true. Must be `null` or left out when it is false. |
+| `medicalDirectorName` | string | Trimmed, 2-200 characters |
+| `medicalDirectorMdcn` | string | It is upper-cased with spaces collapsed, then must match `^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$` (the staff-licence format). Example: `MDCN/12345`. |
+| `expectedStaff` | integer | 1 to 100000 |
+| `migratingRecords` | boolean | "Will you bring records from an older system?" |
+| `needsInteroperability` | boolean | "Do you need to exchange records with other systems?" |
+
+### 43.2. Facility sign-up: `POST /api/v1/identity/provider-enrollments` (start)
+
+The existing body gains three fields, sent together (all or none, see 43.0):
+
+```json
+{
+  "productCode": "ehr", "organizationType": "hospital", "cacRegistrationNumber": "RC1234567",
+  "administratorName": "…", "administratorEmail": "…",
+  "turnstileAction": "provider-enrollment", "turnstileToken": "…",
+
+  "administratorRole": "owner",
+  "administratorPhone": "+2348098765432",
+  "facilityProfile": { …FacilityProfile… }
+}
+```
+
+| Field | Rule |
+|---|---|
+| `administratorRole` | One of `owner`, `medical_director`, `administrator`, `other_authorised_representative` |
+| `administratorPhone` | Same phone rule as `FacilityProfile.phone`. It is stored encrypted (personal data, D4) and is never returned. |
+| `facilityProfile` | The object in section 43.1 |
+
+The response is unchanged. The profile is stored with the emailed code that this request sends.
+When the application is activated (self-service activation, or a platform administrator's
+approval), the profile sent with the confirmed code is copied to the facility.
+
+New refusal: **400 `FACILITY_PROFILE_INVALID`** ("Check the facility details and try again").
+The database refused the profile; this should not happen when the DTO rules above are followed.
+**503 `COLLECTED_FIELDS_UNAVAILABLE`** means the server's encryption key is missing. Nothing is
+written or charged.
+
+Suggested website mapping: "Role at facility" is `administratorRole` and "Your phone" is
+`administratorPhone`. If the role is Medical Director, the website may prefill
+`medicalDirectorName`.
+
+### 43.3. Staff patient registration: `POST /api/v1/identity/nin/resolve`
+
+The existing body (`nin`, `firstName`, `lastName`, `dateOfBirth`, `gender?`, `purpose`) gains
+these fields, sent together (all or none, see 43.0; `existingHealthId` follows its own rule):
+
+| Field | Type | Rule |
+|---|---|---|
+| `phone` | string | Same phone rule as in section 43.1 |
+| `addressLine` | string | Trimmed, 5-300 characters |
+| `city` | string | Trimmed, 2-100 characters |
+| `stateCode` | string | One of the 37 codes in section 43.5 |
+| `lga` | string | Trimmed, 2-100 characters |
+| `hasExistingHealthId` | boolean | "Does the patient already have a Health ID?" (D13) |
+| `existingHealthId` | string or null | **Exactly when** `hasExistingHealthId` is true: `HID-` and 6-32 of `A-H J-N P-Z 2-9`. Trimmed and upper-cased before the check, so `hid-abc234` is accepted. Must be `null` or left out when false. |
+
+Not collected: allergies (D11, left to clinical records) and "provisional local identity" (D12, off).
+Sending `allergies` is refused as an unknown field.
+
+The phone and address are stored encrypted with the registration case. When the case resolves to
+a patient (an existing NIN match, an approved new patient, or a linked existing patient), they
+are copied as a **facility-held, unverified** contact at the same moment. They are never used
+for sign-in or recovery and are never returned in plain text.
+
+Deletion rule (NDPA): this data is never changed and never deleted, except by **erasure**: the
+encrypted phone and address, their key version and the stated Health ID are set to null and the
+erasure time and reason are recorded. Erasure happens for every facility's copy when the
+patient's account deletion completes (0096), and on an NDPA erasure request, which Health ID
+support has run through the database owner (`identity.erase_patient_facility_contacts`). The
+same erasure removes the patient's Health ID from any other person's case that stated it (for
+example by a typo); that person's own phone and address stay. A case that never became a
+patient (rejected, cancelled or never reviewed) is erased by case on an NDPA erasure request
+(`identity.erase_registration_case_contact`, run through the database owner). Both erasures
+refuse to run, rather than erase nothing, if they are not run as the owner of the contact
+tables.
+
+The Idempotency-Key is bound to all of these fields. A retry with a different phone, address or
+stated Health ID under the same key is refused (409 `IDEMPOTENCY_KEY_REUSED`).
+
+Stated Health ID (D13). It is a hint only. It never adds a review candidate, never shows
+staff a patient they could not otherwise see, and never bypasses the name and date-of-birth
+matching (a patient-lookup by Health ID needs the patient's consent; this route does not).
+- If the patient it names is already a review candidate (by name and date of birth against the
+  verified NIN details), that candidate gains the reason `stated_hid`. Nothing else changes.
+- If the NIN matches a patient, the NIN match wins.
+- Otherwise it is noted internally as `no_match`. Staff are never told whether the Health ID
+  exists.
+- link-existing refuses (409 `PATIENT_NOT_A_REVIEW_CANDIDATE`) a candidate whose only reason is
+  `stated_hid`.
+
+Response (`RegistrationCaseResult`) gains one field:
+
+```json
+{ "caseId": "…", "status": "…", "version": 1, "candidateCount": 1,
+  "contactRecorded": true, "patient": { "patientId": "…", "hid": "HID-…" } }
+```
+
+`contactRecorded` is false when the request carried no desk fields (43.0) or the contact has
+been erased.
+
+The same `contactRecorded` field appears on `GET /api/v1/identity/registration-cases/:id`,
+approve-new and link-existing. No phone or address is ever returned.
+
+### 43.4. Setup wizard and facility profile (after activation)
+
+Both routes need a staff session at the `X-Facility-ID` facility with `workforce.manage` (the
+facility administrator), plus the usual CSRF header and `X-Purpose-Of-Use: healthcare-operations`.
+Only **self-service** facilities can use them. Governed, legacy and sealed demo facilities are
+refused.
+
+### `GET /api/v1/identity/facility-profile`
+
+200, with header `ETag: "<version>"`:
+
+```json
+{
+  "facility": { "id": "uuid", "name": "Name as Health ID has it (CAC)", "reviewState": "pending|reviewed|…" },
+  "version": 0,
+  "profile": null
+}
+```
+
+When the facility has a profile, `version` is at least 1 and `profile` is:
+
+```json
+{ …every FacilityProfile field…,
+  "source": "self_service_signup" | "facility_administrator",
+  "submitterRole": "owner" | "medical_director" | "administrator" | "other_authorised_representative" | null,
+  "submitterPhoneOnRecord": true,
+  "updatedAt": "2026-11-11T10:00:00.000Z",
+  "version": 3 }
+```
+
+`registryId` and `nhiaAccreditationNumber` are `null` when the matching yes/no is false.
+The applicant's phone is never returned; only `submitterPhoneOnRecord` says it was given.
+
+### `POST /api/v1/identity/facility-profile` (save; POST because the API's CORS allows GET and POST only)
+
+Headers:
+- `If-Match: "<version>"`: the `version` from the GET. Use `"0"` for a facility with no profile
+  yet. `W/"3"`, `"3"` and `3` are all accepted.
+- `Idempotency-Key`: 16-128 URL-safe characters (`[A-Za-z0-9][A-Za-z0-9._:-]{15,127}`). Use a
+  new key for each save the user makes.
+
+Body: a `FacilityProfile` (section 43.1), with every field required.
+
+200, with header `ETag: "<new version>"`:
+
+```json
+{ "facilityId": "uuid", "version": 4, "changedFields": ["phone", "tradingName"], "replayed": false }
+```
+
+`changedFields` lists API field names (sorted by their database column names), never values.
+A save with no changes answers the same version and `changedFields: []`. Replaying the same key
+with the same body answers the first answer with `replayed: true`.
+
+Refusals:
+
+| Status | code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | A field is missing or invalid (DTO) |
+| 400 | `FACILITY_PROFILE_INVALID` | The database refused the profile |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | The Idempotency-Key header is missing or malformed |
+| 428 | `IF_MATCH_REQUIRED` | If-Match is missing or not a whole number of 0 or more |
+| 412 | `VERSION_CONFLICT` | Someone saved first. Reload, then save again. |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | The same key was used with a different body |
+| 409 | `FACILITY_PROFILE_SEALED` | A sealed demo facility (D9) |
+| 403 | `STAFF_MANAGEMENT_NOT_AVAILABLE` | Not a self-service facility. Health ID support keeps its details. |
+| 403 | `PERMISSION_DENIED` | Not the facility administrator |
+| 503 | `FACILITY_PROFILE_UNAVAILABLE` | Anything else |
+
+The GET uses the same 403 and 503 codes.
+
+The setup wizard and the review step should load from GET, show the real values, and save with
+POST. `FacilityProfile.tsx` can show the GET answer.
+
+### 43.5. State codes (ISO 3166-2:NG), as `identity.nigeria_states` holds them
+
+AB Abia, AD Adamawa, AK Akwa Ibom, AN Anambra, BA Bauchi, BY Bayelsa, BE Benue, BO Borno,
+CR Cross River, DE Delta, EB Ebonyi, ED Edo, EK Ekiti, EN Enugu, FC Federal Capital Territory,
+GO Gombe, IM Imo, JI Jigawa, KD Kaduna, KN Kano, KT Katsina, KE Kebbi, KO Kogi, KW Kwara,
+LA Lagos, NA Nasarawa, NI Niger, OG Ogun, ON Ondo, OS Osun, OY Oyo, PL Plateau, RI Rivers,
+SO Sokoto, TA Taraba, YO Yobe, ZA Zamfara.
+
+The website's facility list says "FCT". Show "Federal Capital Territory (FCT)" and send `FC`.
+
+### 43.6. Department codes
+
+`general_outpatient`, `emergency`, `inpatient`, `laboratory`, `pharmacy`, `maternity`,
+`pediatrics`, `radiology`, `dental`, `physiotherapy`, `dialysis`, `oncology`, `cardiology`,
+`icu`, `theatre`.
+
+### 43.7. Not in this backend change
+
+- The admin console's application list does not show the new fields yet. The admin dashboard
+  belongs to other agents; ask the coordinator.
+- The current-staff-context `facility` object does not include the profile. Use
+  `GET /identity/facility-profile`.
+- The QoreID state, LGA, city and company email are not captured for pre-fill yet (plan A.5).

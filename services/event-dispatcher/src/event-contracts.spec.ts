@@ -48,6 +48,32 @@ describe('HID event envelope v1', () => {
     expect(() => eventEnvelope({ ...pinAccess, payload: { ...pinAccess.payload, pin: '1234' } }))
       .toThrow(/outside its producer contract/);
   });
+  it('allows the PIN notice to name its grant\'s scope (0120), and nothing else', () => {
+    const pinAccess = { ...event, eventType: 'PatientAccessPinVerified', aggregateType: 'identity-consent-grant', aggregateVersion: 1,
+      payload: { consentGrantId: event.aggregateId, reviewRequired: true, scope: 'write_records' } };
+    expect(eventEnvelope(pinAccess)).toMatchObject({ type: 'PatientAccessPinVerified', payload: pinAccess.payload });
+    expect(eventEnvelope({ ...pinAccess, payload: { ...pinAccess.payload, scope: 'read_records' } }))
+      .toMatchObject({ payload: { scope: 'read_records' } });
+    for (const scope of ['break_glass', 'read', '', 1, null]) {
+      expect(() => eventEnvelope({ ...pinAccess, payload: { ...pinAccess.payload, scope } }))
+        .toThrow(/Patient PIN notification contract is invalid/);
+    }
+    expect(() => eventEnvelope({ ...pinAccess, payload: { consentGrantId: event.aggregateId, scope: 'write_records' } }))
+      .toThrow(/Patient PIN notification contract is invalid/);
+    expect(() => eventEnvelope({ ...pinAccess, payload: { ...pinAccess.payload, reviewRequired: false } }))
+      .toThrow(/Patient PIN notification contract is invalid/);
+    const emergency = { ...pinAccess, eventType: 'EmergencyAccessActivated' };
+    expect(() => eventEnvelope(emergency)).toThrow(/outside its producer contract/);
+  });
+  it.each(['PatientRegistered', 'PatientIdentifierAdded', 'PatientIdentityResolved'])(
+    'refuses a scope on any identity event other than the PIN notice (%s)', (eventType) => {
+      let failure: unknown;
+      try {
+        eventEnvelope({ ...event, eventType, payload: { ...event.payload, scope: 'write_records' } });
+      } catch (error) { failure = error; }
+      expect(failure).toMatchObject({ code: 'EVENT_PAYLOAD_POLICY_REJECTED' });
+      expect(String((failure as Error).message)).toMatch(/outside its producer contract/);
+    });
 
 
   it('accepts the two rows the late correction writes (D17, 0090), the same shapes as the wrong-patient report\'s', () => {

@@ -1,3 +1,4 @@
+import { signupCollectedFields } from '../../test/collected-fields.fixtures';
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
 import type { Response } from 'express';
@@ -17,6 +18,7 @@ const startInput = {
   productCode: 'ehr' as const, organizationType: 'hospital' as const, cacRegistrationNumber: 'RC1234567',
   administratorName: 'Synthetic Provider Admin', administratorEmail: 'provider@example.invalid',
   turnstileAction: 'provider-enrollment' as const, turnstileToken: 'opaque-proof',
+  ...signupCollectedFields(),
 };
 const verifyInput = { challengeId: '8ce75fc3-0bda-4300-b198-f5688df65d6c', code: '123456' };
 const closed = () => new DomainProblem(423, 'PROVIDER_ENROLLMENT_UNAVAILABLE', 'Facility self sign-up is not open');

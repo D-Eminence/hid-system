@@ -226,6 +226,23 @@ const maintenance = new Pool({ host: socket, port, user: pgUser, database: 'post
 await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 const owner = new Pool({ host: socket, port, user: pgUser, database: isolated, max: 3 });
 const one = async (sql, values = []) => (await owner.query(sql, values)).rows[0];
+// 0114: the sign-up fields Health ID collects (fictional values), and the
+// synthetic key Identity encrypts the applicant's phone with in this run.
+const signupCollectedFields = (label) => ({
+  administratorRole: 'owner',
+  administratorPhone: '+2348000000101',
+  facilityProfile: {
+    tradingName: `Verifier ${label} Clinic`, ownership: 'private', careLevel: 'secondary',
+    addressLine: '1 Synthetic Site Road, Ikeja', city: 'Lagos', stateCode: 'LA', lga: 'Ikeja',
+    gpsLatitude: 6.6018, gpsLongitude: 3.3515, phone: '+2348000000102', email: 'front.desk@verifier.invalid',
+    bedCount: 10, operatingHours: 'Mon-Sun 24 hours', emergency24h: true,
+    departments: ['general_outpatient', 'laboratory'], servicesOffered: 'Synthetic outpatient and laboratory care',
+    smohLicenceNumber: 'LSMOH/VERIFIER/0001', hasRegistryId: false, registryId: null,
+    hasNhiaAccreditation: false, nhiaAccreditationNumber: null, medicalDirectorName: 'Dr Verifier Example',
+    medicalDirectorMdcn: 'MDCN/00001', expectedStaff: 5, migratingRecords: false, needsInteroperability: false,
+  },
+});
+const collectedFieldsKey = randomBytes(32).toString('base64');
 const temporary = await mkdtemp(join(tmpdir(), 'hid-records-processing-'));
 const evidence = { stage, steps };
 const startedAt = Date.now();
@@ -263,6 +280,7 @@ try {
     boot('identity-api', identityDirectory, { ...common, DATABASE_URL: databaseUrl('hid_identity_api_runtime'),
       AUTH_MODE: 'local', AUTH_SIGNING_SECRET: process.env.AUTH_SIGNING_SECRET, AUTH_LOGIN_PEPPER: process.env.AUTH_LOGIN_PEPPER,
       OTP_HMAC_KEY_B64: process.env.OTP_HMAC_KEY_B64, AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'production',
+      NIN_ENCRYPTION_KEY_B64: collectedFieldsKey, NIN_KEY_VERSION: 'verifier-v1',
       NIN_PROVIDER_MODE: 'unavailable', TURNSTILE_MODE: 'disabled', QOREID_ENABLED: 'true',
       QOREID_CLIENT_ID: 'example-qoreid-client', QOREID_CLIENT_SECRET: 'example-qoreid-secret',
       IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: tokens.identityEhr,
@@ -333,7 +351,8 @@ try {
     const email = synthetic(`admin-${signUps}`);
     const started = await http(identity, 'POST', '/identity/provider-enrollments', { origin: appOrigin,
       forwardedFor: `198.51.160.${signUps}`, body: { cacRegistrationNumber: cac, administratorEmail: email, organizationType,
-        productCode, administratorName, turnstileAction: 'provider-enrollment', turnstileToken: 'disabled-in-this-run' } });
+        productCode, administratorName, turnstileAction: 'provider-enrollment', turnstileToken: 'disabled-in-this-run',
+        ...signupCollectedFields(label) } });
     expectStatus(started, 200, `sign-up start ${label}`);
     const deadline = Date.now() + 15_000;
     while (!otpCodes.has(started.body.challengeId)) {
@@ -346,6 +365,11 @@ try {
     const activated = await http(identity, 'POST', '/identity/provider-enrollments/activate', { origin: appOrigin,
       cookie: verified.cookies.find(value => value.startsWith('hid_provider_enrollment=')), body: { password } });
     expectStatus(activated, 200, `sign-up activation ${label}`);
+    // 0114: the profile sent with the confirmed code is the facility's now.
+    const profile = await one(`select trading_name, submitter_role, submitter_phone_ciphertext is not null as phone_kept
+      from identity.facility_profiles where facility_id=$1`, [activated.body.facilityId]);
+    assert.deepEqual(profile, { trading_name: `Verifier ${label} Clinic`, submitter_role: 'owner', phone_kept: true },
+      `facility profile ${label}`);
     const facility = await one(`select facility.name, application.id as application_id
       from identity.facilities facility join identity.organization_applications application
         on application.organization_id = facility.organization_id where facility.id=$1`, [activated.body.facilityId]);
@@ -500,6 +524,8 @@ try {
     reportedHealthProfile: expectProblem(await chart(doctor, '/reported-health-profile', RECORDS), 400,
       'PURPOSE_OF_USE_REQUIRED', 'reported health profile'),
     encounters: expectProblem(await chart(doctor, '/encounters', RECORDS), 400, 'PURPOSE_OF_USE_REQUIRED', 'encounters'),
+    // Since 0113 the internal OCR note import takes records processing, but only as a draft in the imported paper
+    // records: naming a visit is refused before anything is read or written (INTERFACE_CONTRACT section 42).
     ocrNoteImport: await (async () => {
       const publicationId = randomUUID();
       return expectProblem(await http(ehr, 'POST', `/ehr/internal/ocr/patients/${patient.id}/clinical-notes`, {
@@ -507,7 +533,8 @@ try {
         key: `ocr-publication:${publicationId}`, headers: { 'x-hid-internal-caller': 'ocr-api', 'x-hid-service-token': tokens.ehr },
         body: { encounterId: randomUUID(), noteType: 'imported', title: 'Synthetic imported note', content: 'Synthetic content',
           publicationId, documentId: document, ocrJobId: randomUUID(), extractionId: randomUUID(), validationId: randomUUID(),
-          validationVersion: 1, reviewedBy: 'Synthetic reviewer' } }), 400, 'PURPOSE_OF_USE_REQUIRED', 'OCR note import');
+          validationVersion: 1, reviewedBy: 'Synthetic reviewer' } }), 400, 'OCR_DRAFT_ENCOUNTER_NOT_CHOSEN',
+        'OCR note import into a chosen visit');
     })(),
     labWorkItems: expectProblem(await call(lab, labStaff, 'GET', '/lab/work-items', undefined, { purpose: RECORDS }), 400,
       'PURPOSE_OF_USE_REQUIRED', 'lab work items'),

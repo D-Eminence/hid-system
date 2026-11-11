@@ -1529,6 +1529,42 @@ grant execute on function identity.sweep_expired_outreach_registrations(integer)
   identity.admin_redact_outreach_registration(uuid,text), identity.admin_find_outreach_registrations(uuid,text,text)
   to hid_identity_runtime;
 
+-- OCR source deletion after 7 days (0112): the OCR worker lists the
+-- documents due, counts them (due, and overdue), claims each one
+-- (source_deleting) before deleting every S3 version of its source, then
+-- purges the document's OCR content. The shared reckoning
+-- ocr.source_deletion_due and the three replaced trigger functions are
+-- granted to no role. 0112 makes the same grants.
+grant usage on schema ocr to hid_ocr_worker;
+grant execute on function ocr.list_worker_source_deletions(integer),
+  ocr.worker_source_deletion_backlog(),
+  ocr.claim_worker_source_deletion(uuid,text),
+  ocr.purge_worker_source_document(uuid,integer,text) to hid_ocr_worker;
+revoke all on function ocr.source_deletion_due(uuid),
+  ocr.list_worker_source_deletions(integer),
+  ocr.worker_source_deletion_backlog(),
+  ocr.claim_worker_source_deletion(uuid,text),
+  ocr.purge_worker_source_document(uuid,integer,text) from public;
+-- Records processing, draft publication (0113, owner decision of 2026-11-11):
+-- the dedicated records-processing write grant check is called by the OCR API
+-- (hid_ocr_runtime, inherited by hid_ocr_api_runtime; it needs USAGE on the
+-- identity schema for that one function, and no identity table privilege)
+-- and the EHR API; the "Imported paper records" encounter is found or created
+-- by the EHR API alone (SECURITY INVOKER, under its row-level security). The
+-- patient-self policy on ehr.encounters calls the signed-note test, so the
+-- two roles that read encounters (as for ehr.patient_self_context above) may
+-- execute it. The flag, draft-guard and publication-basis trigger functions
+-- are granted to no role. 0113 makes the same grants.
+grant usage on schema identity to hid_ocr_runtime;
+grant execute on function identity.records_processing_write_grant(uuid,text,uuid,uuid)
+  to hid_ocr_runtime, hid_ehr_runtime;
+grant execute on function ehr.imported_paper_records_encounter(uuid) to hid_ehr_runtime;
+grant execute on function ehr.imported_paper_records_signed(uuid,uuid,uuid) to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function identity.records_processing_write_grant(uuid,text,uuid,uuid),
+  ehr.imported_paper_records_encounter(uuid), ehr.encounters_imported_paper_records_fixed(),
+  ehr.imported_paper_records_signed(uuid,uuid,uuid), ehr.records_processing_draft_guard(),
+  ocr.publications_basis_fixed() from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
@@ -1571,3 +1607,41 @@ grant execute on function ehr.staff_chat_context(uuid,uuid,uuid,uuid) to hid_ehr
 grant select,insert,update on ehr.staff_chat_state to hid_ehr_runtime;
 grant select,insert,delete on ehr.staff_chat_messages,ehr.staff_evidence_chunks to hid_ehr_runtime;
 grant select,insert,update on ehr.staff_attachment_extractions,ehr.staff_document_extractions to hid_ehr_runtime;
+
+-- Sign-up fields (0114), as that migration grants them: the states list, the
+-- desk's case contact (forced RLS: the case's facility, written by the desk
+-- member who created the case) and the facility-held patient contact (forced
+-- RLS: the case's facility, staff with identity.registration.write or
+-- .approve, a copy of the case's own contact), select and insert only (their
+-- only change is the owner's erasure),
+-- facility sign-up's 11-argument code command and the facility
+-- administrator's profile read and save, to the Identity runtime and the
+-- schema test runtime. identity.facility_profiles and the helpers
+-- (department codes, the JSON reader, the guards, the activation copy
+-- trigger) are granted to no role. 0086's 7-argument code command keeps its
+-- grant above.
+grant select on identity.nigeria_states to hid_identity_runtime, hid_schema_test_runtime;
+grant select, insert on identity.registration_case_contacts to hid_identity_runtime, hid_schema_test_runtime;
+grant select, insert on identity.patient_facility_contacts to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function
+  identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text,jsonb,text,bytea,text),
+  identity.read_facility_profile(),
+  identity.set_facility_profile(bigint,jsonb,text,char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.facility_department_codes(),
+  identity.facility_departments_valid(text[]),
+  identity.facility_profile_editable_fields(),
+  identity.facility_profile_from_json(jsonb),
+  identity.facility_profile_json(identity.facility_profiles),
+  identity.guard_facility_profile_mutation(),
+  identity.guard_facility_contact_erasure(),
+  identity.assert_facility_contact_eraser(),
+  identity.erase_patient_facility_contacts(uuid, text),
+  identity.erase_registration_case_contact(uuid, text),
+  identity.erase_facility_contacts_on_account_deletion(),
+  identity.copy_signup_profile_to_facility(),
+  identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text,jsonb,text,bytea,text),
+  identity.read_facility_profile(),
+  identity.set_facility_profile(bigint,jsonb,text,char) from public;
+revoke all on identity.facility_profiles, identity.nigeria_states, identity.registration_case_contacts,
+  identity.patient_facility_contacts from public;

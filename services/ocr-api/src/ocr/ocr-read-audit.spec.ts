@@ -382,8 +382,11 @@ describe('listExtractions answers the contract view only', () => {
 
     expect(result.items.map((item) => item.paperReading.contract)).toEqual(
       ['hid-paper-reading-v2', 'hid-textract-v1', null]);
-    expect(Object.keys(result.items[0]!).sort()).toEqual(['attempt', 'confidence', 'createdAt', 'id', 'paperReading',
-      'provenance', 'provider', 'providerModel', 'rawText', 'structuredPayload', 'version']);
+    expect(Object.keys(result.items[0]!).sort()).toEqual(['attempt', 'confidence', 'contentDeleted', 'createdAt', 'id',
+      'paperReading', 'provenance', 'provider', 'providerModel', 'rawText', 'reviewLearning', 'structuredPayload', 'version']);
+    expect(result.items.map((item) => item.contentDeleted)).toEqual([false, false, false]);
+    // The signal the website waits for before sending the optional review signals (section 15).
+    expect(result.items.every((item) => item.reviewLearning === true)).toBe(true);
     expect(Object.keys(result.items[0]!.paperReading).sort()).toEqual(['contract', 'identity', 'items', 'pages', 'reading']);
     expect(result.items[0]!.paperReading.items).toHaveLength(3);
     expect(result.items[1]!.paperReading.pages[0].text).toBe('Dx: Hypertension');
@@ -392,4 +395,73 @@ describe('listExtractions answers the contract view only', () => {
     // The audit event carries counts and ids only, never extracted text.
     expect(JSON.stringify(auditEvents(audit))).not.toMatch(/Hypertension|Adaeze/);
   });
+});
+
+describe('A source the OCR worker deleted after 7 days (migration 0112)', () => {
+  const deletedSource = { ...source, status: 'source_deleted' };
+  const purgedRow = { ...extractionRow({}), rawText: null, structuredPayload: {} };
+
+  it('lists the extraction as contentDeleted, with no text and an empty reading, from the document status', async () => {
+    const built = harness({ extractionRows: [purgedRow] });
+    (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValue(deletedSource);
+    const result = await built.service.listExtractions(jobId, context) as { items: Array<Record<string, any>> };
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({ contentDeleted: true, rawText: '', structuredPayload: {},
+      paperReading: { contract: null, pages: [], identity: null, items: [], reading: null } });
+    expect(auditEvents(built.audit).map(([, event]) => event.action)).toEqual(['ocr.extraction.list']);
+  });
+
+  it('creating a job on a document being deleted or deleted answers 410 and writes nothing', async () => {
+    for (const status of ['source_deleting', 'source_deleted']) {
+      const built = harness({ aiReadingOn: true });
+      (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValue({ ...source, status });
+      await expect(built.service.createJob({ documentId, provider: 'textract', purpose: 'healthcare-operations' },
+        'ocr-create-key-000099', context)).rejects.toMatchObject({ code: 'DOCUMENT_SOURCE_DELETED' });
+      const statements = built.clients.flatMap((client) => (client.query as jest.Mock).mock.calls.map(([sql]) => String(sql)));
+      expect(statements.filter((sql) => /^\s*(insert|update)\b/i.test(sql))).toEqual([]);
+    }
+  });
+
+  it('treats a document being deleted (source_deleting) as deleted: no text, and writes refused', async () => {
+    const built = harness({ extractionRows: [extractionRow({ ...v2Payload() })] });
+    (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValue({ ...source, status: 'source_deleting' });
+    const result = await built.service.listExtractions(jobId, context) as { items: Array<Record<string, any>> };
+    expect(result.items[0]).toMatchObject({ contentDeleted: true, rawText: '' });
+    await expect(built.service.retry(jobId, { expectedVersion: 4, reason: 'Provider timeout',
+      purpose: 'healthcare-operations' }, context)).rejects.toMatchObject({ code: 'DOCUMENT_SOURCE_DELETED' });
+  });
+
+  it('marks a row deleted by its document even if text were still there', async () => {
+    const built = harness({ extractionRows: [extractionRow({ ...v2Payload() })] });
+    (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValue(deletedSource);
+    const result = await built.service.listExtractions(jobId, context) as { items: Array<Record<string, any>> };
+    expect(result.items[0]).toMatchObject({ contentDeleted: true, rawText: '', structuredPayload: {} });
+  });
+
+  it.each([
+    ['retry', (service: OcrService) => service.retry(jobId, { expectedVersion: 4, reason: 'Provider timeout',
+      purpose: 'healthcare-operations' }, context)],
+    ['validate', (service: OcrService) => service.validate(jobId, { extractionId: validation.extraction_id,
+      expectedVersion: 4, validatedPayload: {}, disposition: 'rejected', targetDomain: 'UNCLASSIFIED',
+      candidateType: 'unclassified', acceptedFields: {}, rejectedFields: [], corrections: [],
+      reason: 'Reviewed against the source', purpose: 'healthcare-operations' }, 'ocr-validate-key-000099', context)],
+    ['confirm', (service: OcrService) => service.confirmPatient(jobId, { patientId, expectedJobVersion: 4,
+      method: 'source_document', reason: 'Matches the source document', purpose: 'healthcare-operations' },
+      'ocr-confirm-key-000099', context)],
+    ['publish', (service: OcrService) => service.createPublication(validationId, { validationVersion: 1,
+      patientConfirmationId: confirmationId, targetOperation: 'retain_validated_document', purpose: 'direct-care' },
+      'ocr-publish-key-000099', context)],
+  ] as [string, (service: OcrService) => Promise<unknown>][])('refuses %s with 410 DOCUMENT_SOURCE_DELETED and writes nothing',
+    async (_name, run) => {
+      const built = harness({ jobRow: { ...job, status: 'validated', row_version: '5' } });
+      (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValue(deletedSource);
+      const refusal = await run(built.service).catch((error: unknown) => error);
+      expect(refusal).toBeInstanceOf(DomainProblem);
+      expect((refusal as DomainProblem).getStatus()).toBe(410);
+      expect((refusal as DomainProblem).code).toBe('DOCUMENT_SOURCE_DELETED');
+      expect((refusal as DomainProblem).message).toBe('Source page deleted after 7 days');
+      const statements = built.clients.flatMap((client) => (client.query as jest.Mock).mock.calls.map(([sql]) => String(sql)));
+      expect(statements.filter((sql) => /^\s*(insert|update)\b/i.test(sql))).toEqual([]);
+      expect(auditEvents(built.audit)).toEqual([]);
+    });
 });

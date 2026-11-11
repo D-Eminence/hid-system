@@ -1,3 +1,5 @@
+import { type FacilityProfileDto, facilityProfileForDatabase } from './dto/facility-profile.dto';
+import { signupCollectedFields, TEST_FIELD_KEY_B64 } from '../../test/collected-fields.fixtures';
 import type { ArgumentsHost } from '@nestjs/common';
 import * as environment from '../config/environment';
 import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
@@ -14,10 +16,12 @@ const input = {
   productCode: 'ehr' as const, organizationType: 'clinic' as const, cacRegistrationNumber: 'RC1234567',
   administratorName: 'Synthetic Provider Admin', administratorEmail: 'provider@example.invalid',
   turnstileAction: 'provider-enrollment' as const, turnstileToken: 'opaque-proof',
+  ...signupCollectedFields(),
 };
 const openControls = { self_service: true, provider_portal: true, maintenance: false };
 const testEnvironment = (overrides: Partial<environment.Environment> = {}) => ({
   NODE_ENV: 'test', QOREID_ENABLED: true, OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
+  NIN_ENCRYPTION_KEY_B64: TEST_FIELD_KEY_B64, NIN_KEY_VERSION: 'test-v1',
   PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP: 200, ...overrides,
 } as environment.Environment);
 
@@ -182,7 +186,9 @@ describe('the public application quota is charged once per start (CRITIC C8, rev
     expect(completion.start).toHaveBeenCalledWith(expect.objectContaining({
       productCode: 'ehr', cacRegistrationNumber: 'RC1234567', turnstileAction: 'organization-completion' }),
     '203.0.113.44', 'provider-enrollment-test', { publicApplicationQuotaCharged: true,
-      selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic' } });
+      selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic', signup: {
+        facilityProfile: facilityProfileForDatabase(input.facilityProfile as unknown as FacilityProfileDto),
+        submitterRole: 'owner', submitterPhone: '+2348098765432' } } });
   });
 
   it('keeps the charge when the submit refuses the start (409), so probing which CACs have applications costs quota', async () => {
@@ -246,7 +252,9 @@ describe('the public application quota is charged once per start (CRITIC C8, rev
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
     expect(completion.start).toHaveBeenCalledWith(expect.anything(), '203.0.113.44', 'provider-enrollment-test',
       { publicApplicationQuotaCharged: true,
-        selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic' } });
+        selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic', signup: {
+        facilityProfile: facilityProfileForDatabase(input.facilityProfile as unknown as FacilityProfileDto),
+        submitterRole: 'owner', submitterPhone: '+2348098765432' } } });
   });
 
   it('answers an exhausted public application quota 429 APPLICATION_RATE_LIMITED with no submit or QoreID', async () => {
@@ -586,5 +594,40 @@ describe('a database refusal when the application is submitted', () => {
       await expect(service.start(input, request('203.0.113.44'))).rejects.toMatchObject({ status, code: answer });
       expect(qoreid.verifyCac).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('the collected-field key at sign-up start (0114)', () => {
+  afterEach(() => jest.restoreAllMocks());
+  const oldBody = {
+    productCode: 'ehr' as const, organizationType: 'clinic' as const, cacRegistrationNumber: 'RC1234567',
+    administratorName: 'Synthetic Provider Admin', administratorEmail: 'provider@example.invalid',
+    turnstileAction: 'provider-enrollment' as const, turnstileToken: 'opaque-proof',
+  };
+  const verified = {
+    state: 'verified', providerReference: '990072', verifiedRegistrationNumber: 'RC1234567',
+    cacBinding: { registrationNumber: 'RC1234567', providerRegistrationNumber: '1234567',
+      companyName: 'Synthetic Clinic Ltd', entityType: 'Private Company Limited by Shares',
+      registrationDate: '2021-01-01', address: '1 Synthetic Registry Road, Lagos', registryStatus: 'ACTIVE' },
+  };
+
+  it('does not need the key for the old body (the live website keeps working without it)', async () => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue(testEnvironment({ NIN_ENCRYPTION_KEY_B64: undefined }));
+    const { service, completion, qoreid } = setup();
+    qoreid.verifyCac.mockResolvedValue(verified);
+    await expect(service.start(oldBody, request('203.0.113.44'))).resolves.toMatchObject({ accepted: true });
+    expect(completion.start).toHaveBeenCalledWith(expect.anything(), '203.0.113.44', 'provider-enrollment-test',
+      { publicApplicationQuotaCharged: true,
+        selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic' } });
+  });
+
+  it('refuses a body with the new fields 503 COLLECTED_FIELDS_UNAVAILABLE without the key, before anything is charged', async () => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue(testEnvironment({ NIN_ENCRYPTION_KEY_B64: undefined }));
+    const { service, query, completion, qoreid } = setup();
+    await expect(service.start(input, request('203.0.113.44')))
+      .rejects.toMatchObject({ status: 503, code: 'COLLECTED_FIELDS_UNAVAILABLE' });
+    expect(query).not.toHaveBeenCalled();
+    expect(qoreid.verifyCac).not.toHaveBeenCalled();
+    expect(completion.start).not.toHaveBeenCalled();
   });
 });

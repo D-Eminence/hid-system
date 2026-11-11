@@ -18,11 +18,13 @@ interface WorkItemRow extends QueryResultRow {
   accepted_at: Date; row_version: string; created_at: Date;
   /** Set when the work item came from another facility's order route (P4c). */
   order_route_id?: string | null;
+  /** The request's clinical information, as the EHR sent it (null when it sent none); read by get and list only. */
+  clinical_indication?: string | null;
 }
 
 const WORK_ITEM_SELECT = `select id::text,patient_id::text,facility_id::text,ordering_facility_id::text,
   source_ehr_order_id::text,source_ehr_order_version::text,source_encounter_id::text,status,priority,
-  accepted_by::text,accepted_at,row_version::text,created_at,order_route_id::text from lab.work_items`;
+  accepted_by::text,accepted_at,row_version::text,created_at,order_route_id::text,clinical_indication from lab.work_items`;
 
 const workItemDenied = () => new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab work-item access is not authorized');
 
@@ -34,7 +36,7 @@ const workOrder = (q: string) => `${q}.open_work desc,case when ${q}.open_work t
 /** A work item's own columns, as `w` (both in the ordering and in the answer). */
 const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility_id', 'source_ehr_order_id',
   'source_ehr_order_version', 'source_encounter_id', 'status', 'priority', 'accepted_by', 'accepted_at', 'row_version',
-  'created_at', 'order_route_id', 'test_name'].map((column) => `w.${column}`).join(',');
+  'created_at', 'order_route_id', 'test_name', 'clinical_indication'].map((column) => `w.${column}`).join(',');
 
 /**
  * The work list (200 rows, as before). Open work comes first, oldest first,
@@ -85,8 +87,9 @@ export const WORK_LIST_QUERY = `with released_tests as materialized (
     order by ${workOrder('x')} limit 200)
 select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id::text,
   w.source_ehr_order_id::text,w.source_ehr_order_version::text,w.source_encounter_id::text,w.status,w.priority,
-  w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.order_route_id::text,w.test_name,a.id::text as accession_id,
-  a.accession_number,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from shown w
+  w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.order_route_id::text,w.test_name,w.clinical_indication,
+  a.id::text as accession_id,
+  a.accession_number,w.open_work,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from shown w
   left join lab.accessions a on a.work_item_id=w.id left join lab.specimens s on s.accession_id=a.id
   group by ${WORK_ITEM_COLUMNS},w.open_work,a.id,a.accession_number
   order by ${workOrder('w')}`;
@@ -196,7 +199,7 @@ export class LabWorkItemsService {
         workItemDenied);
       await this.audit.recordWithClient(client, this.auditEvent(context,row,'lab.work-item.read', basisDetails(basis)));
       const cards = row.order_route_id ? await this.routeCards.cards(client, [row.id], context.correlationId) : undefined;
-      return this.project(row, cards?.get(row.id));
+      return { ...this.project(row, cards?.get(row.id)), ...clinicalIndication(row) };
     });
   }
 
@@ -204,9 +207,13 @@ export class LabWorkItemsService {
    * The work list. Row-level security shows this facility's rows the member
    * may read: under a consent grant, or bound to an order route that allows
    * a read now (P4c, strict policy). Open work comes first, oldest first, then
-   * done work, newest first, 200 rows in all (WORK_LIST_QUERY); the answer's
-   * shape is unchanged. A route-backed row carries its route
-   * card and, while the route allows a read, its patient (C12). To a member
+   * done work, newest first, 200 rows in all (WORK_LIST_QUERY). Each item
+   * says whether it still has work to do (`openWork`, the open_work the list
+   * is ordered by: false once every test it asks for has a released result,
+   * so the website can show it as done). A same-facility row also carries
+   * its request's clinical information (`clinicalIndication`, null when the
+   * EHR sent none). A route-backed row carries its route card and, while the
+   * route allows a read, its patient (C12). To a member
    * who may receive lab requests from other facilities, the answer says
    * whether this facility receives them now and whether any wait or are held
    * here (item 4, 0089; read in the transaction after the audit rows, left
@@ -222,13 +229,14 @@ export class LabWorkItemsService {
     }
     const page = await this.database.withTransaction(context, async (client) => {
       const result = await client.query<WorkItemRow & { test_name:string; accession_id:string|null; accession_number:string|null;
-        specimen_statuses:string[]|null }>(WORK_LIST_QUERY, [context.facilityId]);
+        open_work:boolean; specimen_statuses:string[]|null }>(WORK_LIST_QUERY, [context.facilityId]);
       const routed = result.rows.filter((row) => row.order_route_id).map((row) => row.id);
       const cards = await this.routeCards.cards(client, routed, context.correlationId);
       await this.auditShownPatients(client, context, result.rows, cards);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id)),testName:row.test_name,
-        accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [] })),
+        accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [],
+        openWork:row.open_work, ...clinicalIndication(row) })),
       ...receiving, ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
@@ -286,6 +294,19 @@ export class LabWorkItemsService {
       patientId: row.patient_id,action,resourceType: 'lab-work-item',resourceId: row.id,
       outcome: 'success' as const,purposeOfUse: context.purposeOfUse,details,sourceSystem: 'lab-api' };
   }
+}
+
+/**
+ * The request's clinical information, as the work-item reads (get and list)
+ * answer it: on a same-facility work item, the clinical_indication the EHR
+ * sent with the order, or null when it sent none. Row-level security already
+ * decided that the member may read the row, so it adds no access of its own.
+ * A route-backed work item (P4c) does not carry it: its route's detail (C8)
+ * gives the same text, and only while the route allows a read. The acceptance
+ * answer is unchanged.
+ */
+function clinicalIndication(row: WorkItemRow): { clinicalIndication?: string | null } {
+  return row.order_route_id ? {} : { clinicalIndication: row.clinical_indication ?? null };
 }
 
 /*

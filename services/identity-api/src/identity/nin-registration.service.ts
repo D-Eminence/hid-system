@@ -6,6 +6,7 @@ import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { requestDigest, requireIdempotencyKey } from '../common/idempotency';
 import { DatabaseService } from '../database/database.service';
+import { CollectedFieldProtector, registrationCaseContactLabel } from './collected-field-protector';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
 import { assertSafeNinVerificationResult } from './nin-verification.provider';
@@ -31,7 +32,15 @@ interface RegistrationCaseRow extends QueryResultRow {
   resolved_patient_id: string | null;
   resolved_hid_code: string | null;
   candidate_count: string;
+  contact_recorded?: boolean;
 }
+
+/**
+ * D13: how the Health ID the patient stated compares with what matching found.
+ * 'no_match' covers both "no such Health ID" and "someone else", so nothing
+ * recorded tells staff whether a Health ID exists.
+ */
+type StatedHealthIdOutcome = 'none' | 'matches' | 'no_match';
 
 export interface CandidateRow extends QueryResultRow {
   id: string;
@@ -57,6 +66,7 @@ interface CaseDataRow extends RegistrationCaseRow {
   verified_at: Date;
   review_idempotency_key: string | null;
   review_request_sha256: string | null;
+  has_contact: boolean;
 }
 
 export interface RegistrationCaseResult {
@@ -64,6 +74,8 @@ export interface RegistrationCaseResult {
   status: RegistrationStatus;
   version: number;
   candidateCount: number;
+  /** 0114: the desk recorded the patient's phone and address (never returned). */
+  contactRecorded: boolean;
   candidates?: Array<{ patientId: string; fullName: string; dateOfBirth: string | null }>;
   patient?: { patientId: string; hid: string };
 }
@@ -75,13 +87,17 @@ const CASE_SELECT = `
     registration.row_version::text,
     registration.resolved_patient_id::text,
     patient.hid_code as resolved_hid_code,
-    (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count
+    (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count,
+    exists (select 1 from identity.registration_case_contacts contact
+             where contact.registration_case_id = registration.id and contact.erased_at is null) as contact_recorded
   from identity.registration_cases registration
   left join identity.patients patient on patient.id = registration.resolved_patient_id
 `;
 
 @Injectable()
 export class NinRegistrationService {
+  private readonly fieldProtector = new CollectedFieldProtector();
+
   constructor(
     private readonly database: DatabaseService,
     private readonly audit: AuditService,
@@ -97,6 +113,11 @@ export class NinRegistrationService {
       await this.auditFailure(context, 'identity.nin.verify', error);
       throw error;
     }
+    // 0114: the desk's phone and address are stored encrypted; without the
+    // key nothing is verified (charged) or written. A body in the old shape
+    // (no desk fields, contract 43.0) needs no key.
+    const deskFields = deskFieldsOf(input);
+    if (deskFields) this.fieldProtector.assertConfigured();
     let ninLookupHmac: string;
     try {
       ninLookupHmac = this.protector.lookup(input.nin);
@@ -158,6 +179,8 @@ export class NinRegistrationService {
     if (protectedNin.lookupHmac !== ninLookupHmac) {
       throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection lookup is inconsistent');
     }
+    const contact = deskFields ? this.protectContact(caseId, deskFields) : null;
+    const statedHid = deskFields?.hasExistingHealthId && input.existingHealthId ? input.existingHealthId : null;
     try {
       return await this.database.withTransaction(context, async (client) => {
       const replay = await this.findByIdempotency(client, context, idempotencyKey, requestSha256);
@@ -180,6 +203,17 @@ export class NinRegistrationService {
       );
       const existingPatient = existing.rows[0];
       const candidates = existingPatient ? [] : await this.findCandidates(client, verification.demographics);
+      // D13: the stated Health ID is a hint only. It never adds a candidate
+      // (that would show staff a patient who gave this facility no consent,
+      // and make a typo linkable): it only marks a patient who is already a
+      // candidate by name and date of birth, or the verified NIN match.
+      let statedOutcome: StatedHealthIdOutcome = 'none';
+      if (statedHid) {
+        const stated = await this.findStatedPatient(client, statedHid);
+        const listed = stated ? candidates.find((candidate) => candidate.patientId === stated) : undefined;
+        if (listed) listed.reasons = [...listed.reasons, 'stated_hid'];
+        statedOutcome = stated && (listed || stated === existingPatient?.patient_id) ? 'matches' : 'no_match';
+      }
       const status: RegistrationStatus = existingPatient
         ? 'resolved_existing_identity'
         : candidates.length > 0 ? 'review_required' : 'pending_new_identity_approval';
@@ -218,6 +252,16 @@ export class NinRegistrationService {
         ],
       );
       if (!inserted.rows[0]) throw new DomainProblem(503, 'REGISTRATION_CASE_NOT_CREATED', 'The registration case could not be created');
+      if (contact) {
+        await client.query(
+          `insert into identity.registration_case_contacts (
+             registration_case_id, facility_id, phone_ciphertext, address_ciphertext, key_version,
+             stated_hid_code, created_by_account_id, created_by_membership_id
+           ) values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [caseId, context.facilityId, contact.phone, contact.address, contact.keyVersion, statedHid,
+            context.actor.accountId, context.membershipId],
+        );
+      }
       for (const candidate of candidates) {
         await client.query(
           `insert into identity.registration_case_candidates (case_id, patient_id, match_score, match_reasons)
@@ -237,10 +281,12 @@ export class NinRegistrationService {
           context.membershipId,
           context.facilityId,
           existingPatient?.patient_id ?? null,
-          JSON.stringify({ provider: verification.provider, candidateCount: candidates.length }),
+          JSON.stringify({ provider: verification.provider, candidateCount: candidates.length,
+            contactRecorded: Boolean(contact), statedHealthId: statedOutcome }),
         ],
       );
       if (existingPatient) {
+        if (contact) await this.copyContact(client, caseId, existingPatient.patient_id, context);
         await this.outbox(client, 'PatientIdentityResolved', caseId, 1,
           existingPatient.patient_id, context, { resolution: 'verified-existing' });
       }
@@ -263,6 +309,8 @@ export class NinRegistrationService {
           status,
           candidateCount: candidates.length,
           matchedExistingIdentity: Boolean(existingPatient),
+          contactRecorded: Boolean(contact),
+          statedHealthId: statedOutcome,
         },
       });
       const row = await this.loadCase(client, caseId);
@@ -351,6 +399,7 @@ export class NinRegistrationService {
               where id = $7`,
             [patientId, context.actor.accountId, context.membershipId, input.reason, idempotencyKey, requestSha256, caseId],
           );
+          if (row.has_contact) await this.copyContact(client, caseId, patientId, context);
           await client.query(
             `insert into identity.registration_case_events (
                case_id, event_type, actor_account_id, actor_membership_id,
@@ -426,8 +475,13 @@ export class NinRegistrationService {
         }
         this.assertCaseVersion(row, input.expectedVersion);
         if (row.status !== 'review_required') throw new ConflictException('This registration case is not awaiting duplicate review');
+        // A candidate whose only reason is the stated Health ID never passed
+        // the name and date-of-birth match, so it is not linkable (D13).
         const candidate = await client.query(
-          `select 1 from identity.registration_case_candidates where case_id = $1 and patient_id = $2 limit 1`,
+          `select 1 from identity.registration_case_candidates
+            where case_id = $1 and patient_id = $2
+              and match_reasons <> '["stated_hid"]'::jsonb
+            limit 1`,
           [caseId, input.patientId],
         );
         if ((candidate.rowCount ?? 0) === 0) throw new DomainProblem(409, 'PATIENT_NOT_A_REVIEW_CANDIDATE', 'The selected patient was not a reviewed candidate');
@@ -450,6 +504,7 @@ export class NinRegistrationService {
             where id = $7`,
           [input.patientId, context.actor.accountId, context.membershipId, input.reason, idempotencyKey, requestSha256, caseId],
         );
+        if (row.has_contact) await this.copyContact(client, caseId, input.patientId, context);
         await client.query(
           `insert into identity.registration_case_events (
              case_id, event_type, actor_account_id, actor_membership_id,
@@ -503,6 +558,47 @@ export class NinRegistrationService {
        ) values ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
       [eventType, aggregateId, aggregateVersion, context.facilityId,
         patientId, context.correlationId, JSON.stringify(payload)],
+    );
+  }
+
+  /**
+   * 0114 (D10): the phone and the address (addressLine, city, stateCode, lga
+   * as JSON) encrypted for this case. Only ciphertext leaves this method; no
+   * value goes to an event, the outbox or the audit.
+   */
+  private protectContact(caseId: string, input: DeskFields) {
+    return {
+      phone: this.fieldProtector.encrypt(registrationCaseContactLabel(caseId, 'phone'), input.phone),
+      address: this.fieldProtector.encrypt(registrationCaseContactLabel(caseId, 'address'), JSON.stringify({
+        addressLine: input.addressLine, city: input.city, stateCode: input.stateCode, lga: input.lga,
+      })),
+      keyVersion: this.fieldProtector.keyVersion,
+    };
+  }
+
+  /** The active patient with this Health ID, if any (D13). */
+  private async findStatedPatient(client: PoolClient, hid: string): Promise<string | null> {
+    const found = await client.query<{ id: string }>(
+      `select id::text from identity.patients where upper(hid_code) = $1 and status = 'active' limit 1`, [hid]);
+    return found.rows[0]?.id ?? null;
+  }
+
+  /**
+   * 0114: the facility-held, unverified copy of the case's phone and address
+   * for the patient the case resolved to (the database checks it is the
+   * case's own ciphertext, patient and facility). Same transaction as the
+   * resolution.
+   */
+  private copyContact(client: PoolClient, caseId: string, patientId: string, context: DataAccessContext) {
+    return client.query(
+      `insert into identity.patient_facility_contacts (
+         patient_id, facility_id, registration_case_id, phone_ciphertext, address_ciphertext, key_version,
+         created_by_account_id, created_by_membership_id)
+       select $1::uuid, contact.facility_id, contact.registration_case_id, contact.phone_ciphertext,
+              contact.address_ciphertext, contact.key_version, $3::uuid, $4::uuid
+         from identity.registration_case_contacts contact
+        where contact.registration_case_id = $2::uuid and contact.erased_at is null`,
+      [patientId, caseId, context.actor.accountId, context.membershipId],
     );
   }
 
@@ -576,6 +672,9 @@ export class NinRegistrationService {
               registration.nin_key_version, registration.verification_provider,
               registration.verification_reference, registration.verified_at,
               registration.review_idempotency_key, registration.review_request_sha256,
+              exists (select 1 from identity.registration_case_contacts contact
+                       where contact.registration_case_id = registration.id
+                         and contact.erased_at is null) as has_contact,
               (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count
          from identity.registration_cases registration
          left join identity.patients patient on patient.id = registration.resolved_patient_id
@@ -616,6 +715,7 @@ export class NinRegistrationService {
       status: row.status,
       version: Number(row.row_version),
       candidateCount: Number(row.candidate_count),
+      contactRecorded: row.contact_recorded === true,
       ...(row.resolved_patient_id && row.resolved_hid_code
         ? { patient: { patientId: row.resolved_patient_id, hid: row.resolved_hid_code } }
         : {}),
@@ -694,6 +794,17 @@ export function ninResolutionRequestDigest(input: ResolveNinDto, ninLookupHmac: 
     dateOfBirth: input.dateOfBirth,
     gender: input.gender ?? null,
     purpose: input.purpose,
+    // 0114: the desk's fields, so a retry with other values is a new request.
+    // Only when sent, so an old-shape body keeps its digest (contract 43.0).
+    ...(deskFieldsOf(input) ? {
+      phone: input.phone,
+      addressLine: input.addressLine,
+      city: input.city,
+      stateCode: input.stateCode,
+      lga: input.lga,
+      hasExistingHealthId: input.hasExistingHealthId,
+      existingHealthId: input.hasExistingHealthId ? input.existingHealthId ?? null : null,
+    } : {}),
   });
 }
 
@@ -721,4 +832,21 @@ function isConstraintViolation(error: unknown, constraint: string): boolean {
     && error !== null
     && (error as { code?: unknown }).code === '23505'
     && (error as { constraint?: unknown }).constraint === constraint;
+}
+
+/** 0114: the desk fields, all present (the DTO refuses a partial set), or null for an old-shape body. */
+interface DeskFields {
+  phone: string;
+  addressLine: string;
+  city: string;
+  stateCode: string;
+  lga: string;
+  hasExistingHealthId: boolean;
+}
+
+function deskFieldsOf(input: ResolveNinDto): DeskFields | null {
+  const { phone, addressLine, city, stateCode, lga, hasExistingHealthId } = input;
+  if (phone == null || addressLine == null || city == null || stateCode == null
+    || lga == null || hasExistingHealthId == null) return null;
+  return { phone, addressLine, city, stateCode, lga, hasExistingHealthId };
 }

@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { captureServerError } from '@hid/server-telemetry';
 import type { OcrWorkerConfig } from './config';
-import { paperReadingPayloadSchema } from './reading/contract';
+import { listVersionSchema, paperReadingPayloadSchema, READING_COUNTS_VERSION, readingCountsSchema,
+  type ReadingCounts } from './reading/contract';
+import { LIST_VERSION, LIST_VERSION_ERROR } from './reading/list-version';
 import { HARD_PAGE_PROMPT_VERSION, HARD_PAGE_PROMPT_VERSION_NO_ZOOM, IMAGE_PROMPT_VERSION } from './reading/prompt';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type HardReadUsage, type PassUsageRecord,
   type ReadingOutcome } from './reading/reader';
+import type { SourceDeletionSweeper } from './source-deletion';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type VerifiedDocument, type WorkerOcrProvider, type WorkerRepository } from './types';
 
@@ -15,7 +18,7 @@ export class OcrWorker {
   private acceptingClaims = false;
   constructor(private readonly config: OcrWorkerConfig, private readonly repository: WorkerRepository,
     private readonly reader: DocumentReader, private readonly provider: WorkerOcrProvider,
-    private readonly reading: PaperReadingService) {}
+    private readonly reading: PaperReadingService, private readonly sourceDeletion?: SourceDeletionSweeper) {}
 
   async run(): Promise<void> {
     await this.repository.checkReadiness();
@@ -32,8 +35,13 @@ export class OcrWorker {
       aiHardPageMaxTokens: this.config.OCR_AI_HARD_PAGE_MAX_TOKENS,
       aiHardPageDeadlineMs: this.config.OCR_AI_HARD_PAGE_DEADLINE_MS, aiZoomMaxCalls: this.config.OCR_AI_ZOOM_MAX_CALLS,
       aiLastResortSeconds: this.config.OCR_AI_LAST_RESORT_SECONDS,
-      textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
-    await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
+      textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false,
+      sourceDeletion: this.sourceDeletionEnabled(),
+      ...(this.sourceDeletionEnabled() ? { sourceDeletionIntervalSeconds: this.config.OCR_SOURCE_DELETION_INTERVAL_SECONDS } : {}) });
+    await Promise.all([
+      ...Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)),
+      ...(this.sourceDeletionEnabled() ? [this.sourceDeletionLoop()] : []),
+    ]);
     await this.repository.close();
     this.log('info', 'ocr.worker.stopped', { acceptingClaims: false });
   }
@@ -77,7 +85,13 @@ export class OcrWorker {
         outcome.summary.hardPageReadUsage);
       // The warn lines come before the contract check and completion, so they are written however the job ends.
       this.logReadFailures(job, outcome.summary);
-      const completion = buildCompletion(text, outcome);
+      // Counts and listVersion for provenance: a failure omits the field and logs a code, never fails the job.
+      const extras = readingProvenanceExtras(outcome.summary);
+      for (const code of extras.omitted) {
+        this.log('warn', 'ocr.reading.provenance_field_omitted', { jobId: job.jobId, correlationId: job.correlationId,
+          code });
+      }
+      const completion = buildCompletion(text, outcome, extras);
       const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
       if (!checked.success) {
         this.log('error', 'ocr.reading.contract_violation', { jobId: job.jobId, correlationId: job.correlationId,
@@ -91,7 +105,8 @@ export class OcrWorker {
       this.log('info', 'ocr.job.completed', { jobId: job.jobId, documentId: job.documentId,
         correlationId: job.correlationId, provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: text.pageCount,
         retryCount: Math.max(0, job.attemptNo - 1), readingStatus: summary.status,
-        firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel, aiRequests: summary.requests,
+        firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel,
+        listVersion: extras.listVersion ?? null, aiRequests: summary.requests,
         aiRefusals: summary.refusals, rereadPages: summary.rereadPages.length,
         imageRereadPages: summary.imageRereadPages.length, imageRereadSkippedPages: summary.imageRereadSkipped.length,
         imageRereadFailedPages: summary.imageRereadFailedPages.length,
@@ -299,6 +314,25 @@ export class OcrWorker {
     }
   }
 
+  private sourceDeletionEnabled(): boolean {
+    return this.sourceDeletion !== undefined && this.config.OCR_SOURCE_DELETION_ENABLED === true;
+  }
+
+  /** One deletion round at start, then one every OCR_SOURCE_DELETION_INTERVAL_SECONDS, until shutdown. */
+  private async sourceDeletionLoop(): Promise<void> {
+    const sweeper = this.sourceDeletion;
+    if (!sweeper) return;
+    while (!this.shutdown.signal.aborted) {
+      try {
+        await sweeper.runRound(this.shutdown.signal);
+      } catch (error) {
+        if (this.shutdown.signal.aborted) break;
+        this.log('error', 'ocr.source_deletion.failed', { stage: 'round', code: safeErrorCode(error) });
+      }
+      await delay(this.config.OCR_SOURCE_DELETION_INTERVAL_SECONDS * 1_000, this.shutdown.signal).catch(() => undefined);
+    }
+  }
+
   private startLeaseRenewal(job: ClaimedOcrJob): ReturnType<typeof setInterval> {
     const intervalMs = Math.max(10_000, Math.floor(this.config.OCR_WORKER_LEASE_SECONDS * 1_000 / 3));
     return setInterval(() => {
@@ -345,8 +379,49 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/**
+ * What the worker adds to provenance.reading beside promptVersion (README "Provenance"): listVersion and the
+ * counts that were once only logged. Each is validated against the contract (contract.ts readingCountsSchema,
+ * listVersionSchema) and left out, with a code in `omitted`, if it cannot be computed or is not in that shape.
+ */
+export interface ReadingProvenanceExtras {
+  listVersion?: string;
+  counts?: ReadingCounts;
+  omitted: string[];
+}
+
+export function readingProvenanceExtras(summary: ReadingOutcome['summary'],
+  listVersion: string | null = LIST_VERSION): ReadingProvenanceExtras {
+  const extras: ReadingProvenanceExtras = { omitted: [] };
+  if (listVersion !== null && listVersionSchema.safeParse(listVersion).success) extras.listVersion = listVersion;
+  else extras.omitted.push(LIST_VERSION_ERROR ?? 'LIST_VERSION_UNAVAILABLE');
+  try {
+    const agreement = summary.hardPageAgreement;
+    const candidate = {
+      version: READING_COUNTS_VERSION,
+      droppedByReason: { ...summary.droppedByReason },
+      droppedByReasonFirstPass: { ...summary.droppedByReasonFirstPass },
+      hardPageAgreement: { fieldsCompared: agreement.fieldsCompared, fieldsAgreed: agreement.fieldsAgreed,
+        itemsPaired: agreement.itemsPaired, itemsSingle: agreement.itemsSingle, drugSplits: agreement.drugSplits,
+        alternativesDropped: agreement.alternativesDropped },
+      zoomCalls: summary.zoomCalls,
+      zoomLimited: summary.zoomLimited,
+      zoomFailed: summary.zoomFailed,
+      hardPageDeadlineHits: summary.hardPageDeadlinePages.length,
+      hardReadFailures: countBy(summary.hardPageReadUsage.map((read) => read.failure)),
+    };
+    const checked = readingCountsSchema.safeParse(candidate);
+    if (checked.success) extras.counts = checked.data;
+    else extras.omitted.push('READING_COUNTS_INVALID');
+  } catch {
+    extras.omitted.push('READING_COUNTS_FAILED');
+  }
+  return extras;
+}
+
 /** raw_text is every line in reading order; provenance carries ids, counts, codes and models, never text. */
-export function buildCompletion(text: TextReading, outcome: ReadingOutcome): CompletedExtraction {
+export function buildCompletion(text: TextReading, outcome: ReadingOutcome,
+  extras: ReadingProvenanceExtras = readingProvenanceExtras(outcome.summary)): CompletedExtraction {
   const lines = text.pages.flatMap((page) => page.lines);
   const summary = outcome.summary;
   return {
@@ -365,6 +440,8 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         firstPassModel: summary.firstPassModel,
         rereadModel: summary.rereadModel,
         promptVersion: outcome.payload.reading.promptVersion,
+        // The reference lists' version (list-version.ts); left out when it could not be computed.
+        ...(extras.listVersion === undefined ? {} : { listVersion: extras.listVersion }),
         schemaVersion: outcome.payload.reading.schemaVersion,
         inferenceGeo: summary.inferenceGeo,
         servedInferenceGeo: summary.servedInferenceGeo,
@@ -402,6 +479,8 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         maskedNumbers: summary.maskedNumbers,
         failureCode: summary.failureCode,
         usage: summary.usage,
+        // Counts that were once only in the completion log (contract.ts readingCountsSchema); codes and counts only.
+        ...(extras.counts === undefined ? {} : { counts: extras.counts }),
       },
     },
   };
