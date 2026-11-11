@@ -138,7 +138,9 @@ begin
          ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)',
           '4202ba3bbf02abd7db34606d42adca9c'),
          ('ehr.sync_order_routes_on_order_change()', '8ce6b42450cc06fc02fec8d1cf63af41'),
-         ('ehr.capture_record_version()', '70daa16f05bb3ec28f05292e6358a702'))) <> 5 then
+         ('ehr.capture_record_version()', '70daa16f05bb3ec28f05292e6358a702'),
+         -- 0112 (OCR source deletion) replaces the snapshot writer's body.
+         ('ehr.capture_record_version()', 'cae99883d00e70ab1d20ed6fbc97ad7b'))) <> 5 then
     raise exception 'prescription dispensing details: a body 0122 leaves untouched has changed';
   end if;
 end $$;

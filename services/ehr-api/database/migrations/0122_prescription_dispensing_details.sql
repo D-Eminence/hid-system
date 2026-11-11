@@ -46,7 +46,7 @@
 --    accepted: they are read from that version's immutable snapshot,
 --    ehr.record_versions.resulting_state at (resource_type 'prescriptions',
 --    resource_id the prescription id as text, version_no the accepted
---    version), which ehr.capture_record_version (0004) writes on every
+--    version), which ehr.capture_record_version (0004, or 0112's body) writes on every
 --    insert and update of the prescription. The values therefore stay those
 --    of the accepted version after the prescription later changes. The
 --    snapshot must also name the work item's patient, facility and
@@ -292,7 +292,11 @@ begin
       ('ehr.sync_order_routes_on_order_change()', '8ce6b42450cc06fc02fec8d1cf63af41'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
-   where md5(proc.prosrc) is distinct from expected.digest;
+   where md5(proc.prosrc) is distinct from expected.digest
+     -- 0112 (OCR source deletion) replaces the snapshot writer; it runs 0004's body
+     -- unchanged for every call except its own purge, so either body is accepted.
+     and not (expected.proc = 'ehr.capture_record_version()'
+              and md5(proc.prosrc) = 'cae99883d00e70ab1d20ed6fbc97ad7b');
   -- Lab's and Pharmacy's work_item_allows have the same text; the search_path
   -- tells them apart. The snapshot writer and the two guards are SECURITY
   -- DEFINER plpgsql triggers; the others are SECURITY DEFINER SQL checks.
@@ -731,7 +735,8 @@ begin
             ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure,
              '4202ba3bbf02abd7db34606d42adca9c'),
             ('ehr.sync_order_routes_on_order_change()'::regprocedure, '8ce6b42450cc06fc02fec8d1cf63af41'),
-            ('ehr.capture_record_version()'::regprocedure, '70daa16f05bb3ec28f05292e6358a702'))) <> 5 then
+            ('ehr.capture_record_version()'::regprocedure, '70daa16f05bb3ec28f05292e6358a702'),
+            ('ehr.capture_record_version()'::regprocedure, 'cae99883d00e70ab1d20ed6fbc97ad7b'))) <> 5 then
     raise exception using errcode = '55000',
       message = '0122: a trigger, row-level security or a body on ehr.prescriptions changed';
   end if;
