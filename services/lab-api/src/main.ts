@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { ErrorReportingInterceptor, initErrorReporting } from '@hid/server-telemetry';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -11,6 +12,7 @@ import { preventResponseCaching } from './common/response-security.middleware';
 import { getEnvironment } from './config/environment';
 
 async function bootstrap(): Promise<void> {
+  initErrorReporting({ service: 'lab-api' });
   const environment = getEnvironment();
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
@@ -81,6 +83,7 @@ async function bootstrap(): Promise<void> {
     ),
   }));
   app.useGlobalFilters(new ProblemDetailsFilter());
+  app.useGlobalInterceptors(new ErrorReportingInterceptor());
 app.enableShutdownHooks();
 
 await app.listen(environment.PORT, '0.0.0.0');

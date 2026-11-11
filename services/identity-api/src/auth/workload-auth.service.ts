@@ -94,6 +94,41 @@ export class WorkloadAuthService {
     return { subject: payload.sub, accountId: payload.sub };
   }
 
+  /**
+   * The support Health ID check's caller (0109): support-api alone, with its own subject. It is not an
+   * IdentityCaller, so it reaches no other service route.
+   */
+  async authenticateSupport(
+    caller: string | undefined,
+    authorization: string | undefined,
+    localToken: string | undefined,
+  ): Promise<WorkloadActor> {
+    if (caller !== 'support-api') throw new UnauthorizedException('Support workload identity is required');
+    if (this.environment.IDENTITY_SERVICE_IDENTITY_MODE === 'local-secret') {
+      if (this.environment.NODE_ENV === 'production') {
+        throw new ServiceUnavailableException('Local workload authentication is disabled in production');
+      }
+      const expected = this.environment.IDENTITY_SUPPORT_INTERNAL_SERVICE_TOKEN;
+      if (!expected) throw new ServiceUnavailableException('Support workload authentication is not configured');
+      if (!localToken || !this.equal(localToken, expected)) {
+        throw new UnauthorizedException('Support workload identity is required');
+      }
+      return { subject: 'local:support-api', accountId: 'local:support-api' };
+    }
+    const expectedSubject = this.environment.IDENTITY_SUPPORT_CALLER_SUBJECT;
+    if (!this.jwks || !this.environment.WORKLOAD_ISSUER_URL || !expectedSubject) {
+      throw new ServiceUnavailableException('Support workload authentication is not configured');
+    }
+    const token = this.bearerToken(authorization);
+    const { payload } = await jwtVerify(token, this.jwks, {
+      issuer: this.environment.WORKLOAD_ISSUER_URL,
+      audience: this.environment.WORKLOAD_AUDIENCE,
+      algorithms: ['RS256', 'ES256'],
+    }).catch(() => { throw new UnauthorizedException('Invalid workload token'); });
+    if (payload.sub !== expectedSubject) throw new ForbiddenException('Workload caller subject is not authorized');
+    return { subject: payload.sub, accountId: payload.sub };
+  }
+
   authenticateOutreach(
     caller: string | undefined,
     authorization: string | undefined,

@@ -38,10 +38,34 @@ const PATIENT_RULES = '\nYou are speaking with the patient about their own recor
   + 'and do not explain what a diagnosis implies for their health. Report what is recorded and leave its meaning to their doctor. '
   + 'Do not write a "talk to your doctor" line yourself; Health ID adds it. '
   + 'A lab result with correctionPending has no value: never give or guess one; say only that the lab is correcting it.';
+/** What the staff rules ask for, below the 4000-character staff answer limit, so citations and a long word still fit. */
+const STAFF_ANSWER_TARGET = 3000;
+/**
+ * Limits for each Claude call. Staff questions ("summarise this patient's history") need longer answers
+ * than a patient's: more output tokens and more time. The staff time limit stays under the gateway's
+ * 50-second read timeout for the staff chat route (gateway/nginx.conf.template), so the server, not the
+ * gateway, ends a slow request. Patient chat keeps its limits.
+ */
+const CALL_LIMITS: Record<ChatAudience, { maxTokens: number; timeoutMs: (environment: ReturnType<typeof getEnvironment>) => number }> = {
+  patient: { maxTokens: 1200, timeoutMs: environment => environment.AI_REQUEST_TIMEOUT_MS },
+  staff: { maxTokens: 2000, timeoutMs: () => 40_000 },
+};
+/** Raw model text: an answer in JSON blocks carries field names and quotes on top of its words. */
+const RAW_TEXT_LIMIT = 4000; const RAW_SCHEMA_LIMIT = 8000;
+
+/** Why a Claude call failed, as one fixed word. It never carries the question, record text or the model's words. */
+export type ClaudeFailure = 'not_configured' | 'request_failed' | 'response_invalid' | 'answer_cut_off'
+  | 'answer_too_long' | 'output_invalid';
+export class ClaudeCallError extends Error {
+  /** status: the provider's HTTP status for request_failed (for example 429 or 529), never its body. */
+  constructor(readonly category: ClaudeFailure, message: string, readonly status?: number) { super(message); }
+}
 /** Rules for a clinician: the conversation stays on the one patient whose record is open. */
 const STAFF_RULES = '\nThis conversation is about one patient only, the patient whose record is open. '
   + 'Clinicians, relatives and other people named in this patient\'s own record are part of it: answer from the record as usual. '
-  + 'Only a question about a different patient (another patient\'s Health ID or record) gets the reply that you can only answer about this patient.';
+  + 'Only a question about a different patient (another patient\'s Health ID or record) gets the reply that you can only answer about this patient. '
+  + `Keep the whole answer under ${STAFF_ANSWER_TARGET} characters, however long the record is: give the most recent and most relevant `
+  + 'entries first, group similar entries instead of listing each one, and say that the rest can be read in the record.';
 const rules = (audience: ChatAudience) => audience === 'patient' ? PATIENT_RULES : STAFF_RULES;
 
 @Injectable()
@@ -65,14 +89,14 @@ export class ClaudeAiService {
       + 'Do not assume records exist. Even a request about unavailable records still uses intent=records.'
       + (audience === 'patient' ? ' A question about what an earlier result or diagnosis means uses intent=records, never conversation.' : '')
       + rules(audience),
-    this.messages(question, history), signal, jsonPlanSchema);
-    const result = planSchema.parse(JSON.parse(text));
+    this.messages(question, history), signal, audience, jsonPlanSchema);
+    const result = parseOutput(planSchema, text);
     if (result.intent === 'conversation' && result.answer.trim() && !result.query.trim()
       && !/\[\d+\]/.test(result.answer) && (audience !== 'patient' || result.answer.trim().length <= PATIENT_ANSWER_LIMIT)) return { intent: 'conversation', answer: result.answer.trim() };
     if (result.intent === 'records' && result.query.trim() && !result.answer.trim()) {
       return { intent: 'records', query: result.query.trim(),...(result.recordIntent?{recordIntent:result.recordIntent}:{}) };
     }
-    throw new Error('Invalid conversation plan');
+    throw new ClaudeCallError('output_invalid', 'Invalid conversation plan');
   }
 
   async answer(question: string, sources: readonly (Pick<Evidence,'title'|'content'> & Partial<Evidence>)[],
@@ -113,39 +137,40 @@ export class ClaudeAiService {
       + (sources.length?' Return JSON blocks: kind=record for every paragraph with patient facts, with current source references. kind=explanation must contain no patient facts and no references. Do not embed citation markers in block text. ':'')
       + 'Do not repeat the same stock warning on every turn. When records cannot answer a question, say so.'
       + rules(audience),
-    messages, signal,sources.length?jsonAnswerSchema:undefined);
-    if(!sources.length){if(audience==='patient'&&result.length>PATIENT_ANSWER_LIMIT)throw new Error('Invalid answer size');return result;}
-    const output=answerSchema.parse(JSON.parse(result));
+    messages, signal, audience, sources.length?jsonAnswerSchema:undefined);
+    if(!sources.length){if(audience==='patient'&&result.length>PATIENT_ANSWER_LIMIT)throw new ClaudeCallError('answer_too_long','Invalid answer size');return result;}
+    const output=parseOutput(answerSchema,result);
     const paragraphs=output.blocks.map(block=>{
       const references=[...new Set(block.references)];
       if(references.some(n=>n>sources.length)||/\[\d+\]/.test(block.text)
-        ||(block.kind==='record'&&!references.length)||(block.kind==='explanation'&&references.length))throw new Error('Invalid grounded answer references');
+        ||(block.kind==='record'&&!references.length)||(block.kind==='explanation'&&references.length))throw new ClaudeCallError('output_invalid','Invalid grounded answer references');
       return block.text+(references.length?' '+references.map(n=>'['+n+']').join(' '):'');
     });
-    const answer=paragraphs.join('\n\n');if(answer.length>(audience==='patient'?PATIENT_ANSWER_LIMIT:4000))throw new Error('Invalid grounded answer size');
+    const answer=paragraphs.join('\n\n');if(answer.length>(audience==='patient'?PATIENT_ANSWER_LIMIT:4000))throw new ClaudeCallError('answer_too_long','Invalid grounded answer size');
     return answer;
   }
 
   private async invoke(system: string, messages: Array<{ role: string; content: string }>,
-    signal: AbortSignal, schema?: object): Promise<string> {
+    signal: AbortSignal, audience: ChatAudience, schema?: object): Promise<string> {
     const environment = getEnvironment();
     if (!environment.ANTHROPIC_API_KEY || !environment.ANTHROPIC_PROCESSING_APPROVED) {
-      throw new Error('Claude configuration unavailable');
+      throw new ClaudeCallError('not_configured', 'Claude configuration unavailable');
     }
-    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(environment.AI_REQUEST_TIMEOUT_MS)]);
+    const limits = CALL_LIMITS[audience];
+    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(limits.timeoutMs(environment))]);
     requestSignal.throwIfAborted();
     // Fixed first-party origin; no redirects, retries, customer identifiers or tools.
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', redirect: 'error', signal: requestSignal,
       headers: { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01',
         'x-api-key': environment.ANTHROPIC_API_KEY },
-      body: JSON.stringify({ model: environment.AI_GENERATION_MODEL_ID, max_tokens: 1200,
+      body: JSON.stringify({ model: environment.AI_GENERATION_MODEL_ID, max_tokens: limits.maxTokens,
         inference_geo: 'us', system, messages,
         ...(schema ? { output_config: { format: { type: 'json_schema', schema } } } : {}) }),
     });
-    if (!response.ok) { await response.body?.cancel(); throw new Error('Claude request failed'); }
+    if (!response.ok) { await response.body?.cancel(); throw new ClaudeCallError('request_failed', 'Claude request failed', response.status); }
     if (!response.headers.get('Content-Type')?.toLowerCase().includes('application/json') || !response.body) {
-      await response.body?.cancel(); throw new Error('Invalid Claude response');
+      await response.body?.cancel(); throw new ClaudeCallError('response_invalid', 'Invalid Claude response');
     }
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = []; let size = 0;
@@ -155,16 +180,28 @@ export class ClaudeAiService {
         const next = await reader.read();
         if (next.done) break;
         size += next.value.byteLength;
-        if (size > 100_000) throw new Error('Invalid Claude response size');
+        if (size > 100_000) throw new ClaudeCallError('response_invalid', 'Invalid Claude response size');
         chunks.push(next.value);
       }
     } catch (error) { await reader.cancel().catch(() => undefined); throw error; }
     finally { reader.releaseLock(); }
-    const payload = z.object({ type: z.literal('message'), role: z.literal('assistant'),
-      stop_reason: z.literal('end_turn'), content: z.array(z.object({ type: z.literal('text'), text: z.string() })).min(1),
-    }).parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    const payload = parseOutput(z.object({ type: z.literal('message'), role: z.literal('assistant'),
+      stop_reason: z.string(), content: z.array(z.object({ type: z.literal('text'), text: z.string() })).min(1),
+    }), Buffer.concat(chunks).toString('utf8'), 'response_invalid');
+    // An answer that reached max_tokens is cut off mid-way; any other stop (a refusal, a tool call) is not an answer either.
+    if (payload.stop_reason === 'max_tokens') throw new ClaudeCallError('answer_cut_off', 'Claude answer cut off');
+    if (payload.stop_reason !== 'end_turn') throw new ClaudeCallError('response_invalid', 'Unexpected Claude stop');
     const answer = payload.content.map(block => block.text).join('').trim();
-    if (!answer || answer.length > 4000) throw new Error('Invalid Claude answer size');
+    if (!answer || answer.length > (schema ? RAW_SCHEMA_LIMIT : RAW_TEXT_LIMIT)) throw new ClaudeCallError('answer_too_long', 'Invalid Claude answer size');
     return answer;
   }
+}
+
+/** JSON from the model, checked against its schema. A failure names its category, never the text it read. */
+function parseOutput<T>(schema: z.ZodType<T>, text: string, category: ClaudeFailure = 'output_invalid'): T {
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { throw new ClaudeCallError(category, 'Invalid Claude output'); }
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new ClaudeCallError(category, 'Invalid Claude output');
+  return parsed.data;
 }
