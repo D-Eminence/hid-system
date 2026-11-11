@@ -1,5 +1,7 @@
 import { captureServerError, flushErrorReporting, initErrorReporting } from '@hid/server-telemetry';
 import { readOcrWorkerConfig } from './config';
+import { ClaudePageClient } from './reading/claude.client';
+import { PaperReadingService } from './reading/reader';
 import { PostgresWorkerRepository } from './repository';
 import { S3ExactDocumentReader } from './s3-document-reader';
 import { TestOcrProvider } from './test.provider';
@@ -15,8 +17,12 @@ async function bootstrap(): Promise<void> {
   }
   const provider: WorkerOcrProvider = config.OCR_PROVIDER === 'textract'
     ? new TextractOcrProvider(config) : new TestOcrProvider();
+  // One provider and one Claude client for the whole process: their call limits (OCR_TEXTRACT_MAX_CONCURRENT,
+  // OCR_AI_MAX_CONCURRENT_REQUESTS) are shared by every claim loop.
+  const reading = new PaperReadingService(config,
+    config.OCR_AI_MODE === 'claude' ? new ClaudePageClient(config) : null);
   const worker = new OcrWorker(config, new PostgresWorkerRepository(config),
-    new S3ExactDocumentReader(config), provider);
+    new S3ExactDocumentReader(config), provider, reading);
   process.once('SIGTERM', () => worker.stop());
   process.once('SIGINT', () => worker.stop());
   await worker.run();

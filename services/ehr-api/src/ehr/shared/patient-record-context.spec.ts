@@ -12,7 +12,7 @@ import { OcrIntegrationController } from '../ocr-integration/ocr-integration.con
 import type { ImportedAttachmentService } from '../patient-records/imported-attachment.service';
 import type { PatientChatHistoryService } from '../patient-records/patient-chat-history.service';
 import type { PatientChatService } from '../patient-records/patient-chat.service';
-import type { PatientEvidenceService } from '../patient-records/patient-evidence.service';
+import type { PatientChatSourceService } from '../patient-records/patient-chat-source.service';
 import { PatientRecordsController } from '../patient-records/patient-records.controller';
 import type { PatientRecordsService } from '../patient-records/patient-records.service';
 import { patientRecordContext } from './clinical-context';
@@ -79,7 +79,7 @@ describe('records processing reaches the documents but not the chart', () => {
     createDownload: jest.fn(), getOcrSource: jest.fn() };
   const recordRoutes = new PatientRecordsController(records as unknown as PatientRecordsService,
     attachments as unknown as ImportedAttachmentService, {} as PatientChatService, {} as PatientChatHistoryService,
-    {} as PatientEvidenceService);
+    {} as PatientChatSourceService);
   const profileRoutes = new HealthProfileController(profiles as unknown as HealthProfileService);
   const ocrRoutes = new OcrIntegrationController(documents as unknown as DocumentService,
     clinicalNotes as unknown as ClinicalNotesService);

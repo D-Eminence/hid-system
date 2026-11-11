@@ -10,8 +10,9 @@ import { getEnvironment } from '../../config/environment';
 import type { HidRequest } from '../../common/request-context';
 import { evidence,type Evidence } from './patient-evidence.types';
 import { DomainProblem } from '../../common/problem';
+import type { EvidenceAudience } from './patient-evidence.query';
 
-export const ATTACHMENT_TEXT_QUERY=`with files as (select 'attachment' kind,null::uuid facility_id,f.id,f.patient_id,f.source_created_at,
+const BASE_ATTACHMENT_TEXT_QUERY=`with files as (select 'attachment' kind,null::uuid facility_id,f.id,f.patient_id,f.source_created_at,
  f.source_payload->>'original_file_name' title,b.storage_bucket,b.storage_key,b.object_version_id,b.sha256_hex,b.size_bytes,
  s.result scan_result,s.detected_media_type,s.sequence_id scan_sequence,
  x.status,x.job_id,x.next_token,x.extracted_text,x.minimum_confidence,x.unclear_lines,x.page_count,x.started_at,x.updated_at,x.updated_at::text updated_at_token
@@ -29,6 +30,28 @@ export const ATTACHMENT_TEXT_QUERY=`with files as (select 'attachment' kind,null
  from ehr.documents_effective d left join ehr.patient_document_extractions x on x.file_id=d.id and x.patient_id=d.patient_id
  and x.object_version_id=d.object_version_id and x.sha256_hex=d.sha256_hex and x.extractor_version=1
  where d.patient_id=$1 and d.status='available') select * from files where($2::uuid[] is null or id=any($2::uuid[])) order by source_created_at desc,kind,id desc limit 201`;
+
+function replaceOnce(text:string,from:string,to:string):string {
+  const at=text.indexOf(from);
+  if(at<0||text.indexOf(from,at+1)>=0)throw new Error(`Attachment query anchor must occur exactly once: ${from.slice(0,60)}`);
+  return text.slice(0,at)+to+text.slice(at+from.length);
+}
+const DOCUMENT_BRANCH="where d.patient_id=$1 and d.status='available'";
+/**
+ * Staff: exactly the staff chat's document query (staff extraction tables,
+ * documents from completed visits, every classification). Patient: the
+ * patient's own extraction tables and only documents classified 'phi', so a
+ * restricted or internal document is neither read nor sent for extraction.
+ */
+export function attachmentTextQuery(audience:EvidenceAudience):string {
+  if(audience==='staff')return replaceOnce(BASE_ATTACHMENT_TEXT_QUERY
+    .replaceAll('ehr.patient_attachment_extractions','ehr.staff_attachment_extractions')
+    .replaceAll('ehr.patient_document_extractions','ehr.staff_document_extractions'),
+    DOCUMENT_BRANCH,DOCUMENT_BRANCH+" and exists(select 1 from ehr.encounters e where e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed')");
+  if(audience!=='patient')throw new Error('Unknown evidence audience');
+  return replaceOnce(BASE_ATTACHMENT_TEXT_QUERY,DOCUMENT_BRANCH,DOCUMENT_BRANCH+" and d.classification='phi'");
+}
+const PATIENT_ATTACHMENT_TEXT_QUERY=attachmentTextQuery('patient');
 
 export function readableLines(blocks:readonly Block[]) {
   let confidence=100,unclear=0,pages=0;const lines:string[]=[];
@@ -136,7 +159,7 @@ export class PatientAttachmentTextService {
     return {authorize:request=>this.records.authorizeSelf(request),
       transaction:(auth,correlationId,operation)=>this.database.withPatientTransaction(
         auth as Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>,correlationId,operation),
-      query:ATTACHMENT_TEXT_QUERY,table:kind=>{
+      query:PATIENT_ATTACHMENT_TEXT_QUERY,table:kind=>{
         if(kind==='document')return 'ehr.patient_document_extractions';
         if(kind==='attachment')return 'ehr.patient_attachment_extractions';
         throw new Error('Unknown extraction source');

@@ -473,8 +473,8 @@ key) every route below answers 404, as an Identity before 0095 does.
 
 "Your records were opened": after every allowed staff authorization that
 carries a non-emergency grant (`service/patients/:id/record-read-authorization`,
-`authorization/check`, `service/authorization/check`, `patient-lookup`),
-Identity notes the access once per patient, facility and Africa/Lagos day (at
+`authorization/check`, `service/authorization/check`, `patient-lookup`; never
+`service/authorization/precheck` or `consent-status`), Identity notes the access once per patient, facility and Africa/Lagos day (at
 most 10 a day), after the answer and never failing it: the inbox item
 `RECORDS_OPENED` (resource `record-access`, metadata `facilityName`,
 `accessKind` standard, share or pin) and, for a verified email with
@@ -812,7 +812,17 @@ caller subject; local per-caller secrets are development-only.
 
 Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST` for cookie mutation revalidation. Patient decisions use
-`POST /api/v1/identity/service/authorization/check`. These return API DTOs,
+`POST /api/v1/identity/service/authorization/check`. A service that must refuse
+before it opens anything prechecks a records read with `POST
+/api/v1/identity/service/authorization/precheck` (body `{ patientId, scope:
+'read_records', purpose }`; 400 `PRECHECK_READ_ONLY` for any other scope): the
+same answer without `consentGrantId` or `expiresAt`, and without the check's
+side effects (no "Your records were opened" note, no
+`identity.authorization.check` row; Identity records only a neutral
+`identity.authorization.precheck` row, which the patient's access history does
+not list). The service still calls `service/authorization/check` before it
+opens the record. An Identity without the route answers 404, and the caller
+goes on without the precheck. These return API DTOs,
 never database rows. Problem Details status/code, correlation, bounded timeout,
 and safe JSON request bodies are preserved by the typed client.
 
@@ -1154,6 +1164,7 @@ POST /api/v1/pharmacy/work-items/:workItemId/dispensings
 GET  /api/v1/pharmacy/dispensings/:dispensingId
 POST /api/v1/pharmacy/dispensings/:dispensingId/reversals
 POST /api/v1/pharmacy/imports/from-ocr                  # internal OCR caller
+POST /api/v1/pharmacy/imports/from-ocr/batch            # internal OCR caller, 2-50 medicines
 GET  /api/v1/pharmacy/imports/:importId
 ```
 
@@ -1177,6 +1188,24 @@ validation/version/publication provenance and bounded medication text. Its
 response is always `IMPORTED_MEDICATION_EVIDENCE` with activity status
 `unknown`; no request can supply `active`, `dispensed`, stock, or administration
 state. No direct EHR- or OCR-to-Pharmacy database access exists.
+
+The batch command takes the same provenance once plus `medications`, 2 to 50
+entries of the same bounded text (`medicationText`, `strengthText`, `doseText`,
+`frequencyText`, `historicalContext`), and stores each entry as its own record
+in one SERIALIZABLE transaction: every record is written, or none is. It has
+the same guards as the single route (`InternalCaller('ocr-api')`,
+`pharmacy.import.write`, `write_records` with view-only shares and break-glass
+refused). Entries are never merged. Each record gets the idempotency key
+`<Idempotency-Key>:mNN` (NN = 01-50 in array order; the batch key may be at most
+120 characters) and a per-medicine `publicationId`: the UUID version 5 of
+`<publicationId>:NN` in a fixed namespace (`batchPublicationId` in
+pharmacy.service.ts). For batch records, `publicationId` is therefore not the
+OCR publication id; `validationId`, one-to-one with the OCR publication, links
+every record of the batch. A replay with the same body answers the stored
+records; a partial or different replay, or a publication already stored through
+the single route, answers 409 `IDEMPOTENCY_CONFLICT`. The answer is
+`{ id, count, items }`, where `items` are the records in array order and `id`
+is the first.
 
 ## 14. OCR
 
@@ -1274,6 +1303,57 @@ Validation records an explicit `validated` or `rejected` disposition, confirmed
 target domain, HID-owned candidate type, accepted/rejected fields, corrections,
 reviewer, reason, and provenance. It requires `Idempotency-Key` and an expected
 OCR job version. The singular validation route remains a compatible alias.
+
+Several medicines from one paper (`PHARMACY`): `acceptedFields.medications` is a
+list of 1 to 50 entries in reading order, each `{ itemId?, page, medicationText,
+strengthText?, doseText?, frequencyText?, historicalContext }`; `page` is an
+integer 1-10000 and `historicalContext` (the as-written text and page) is
+required. `itemId` is the reading item id (`it-` and 16 hex characters, unique
+in the review) when the entry was taken from a reading item; it must then be a
+`medicine` item read on that `page` of the reviewed extraction, or validation
+answers 400 `OCR_MEDICATION_NOT_READ`. An entry the reviewer typed from the
+page has no `itemId` (AI reading off, which is the default, declined, failed,
+or missed that medicine); its `page` must be a page of the reviewed extraction,
+or validation answers 400 `OCR_MEDICATION_PAGE_NOT_FOUND`. Read and typed
+entries may be mixed. Every entry stays its own record, even when identical. The
+legacy shape (the five text fields at the top of `acceptedFields`) is unchanged;
+sending both shapes, an empty list or more than 50 answers 400
+`OCR_INVALID_MEDICATION_EVIDENCE` and stores nothing. One medicine in either
+shape publishes through `POST /api/v1/pharmacy/imports/from-ocr` exactly as
+before; two or more publish through one call to `.../from-ocr/batch`, all or
+none, and the publication's `targetResourceId` is the first record (the audit
+`ocr.publication.succeed` lists every id and the count). `itemId` and `page`
+stay in the stored review and are not sent to Pharmacy.
+
+Dates on paper lab results (`LAB`): the reviewer sends the text as written as
+`collectedAtAsWritten`, `reportedAtAsWritten` and, per observation,
+`reportedAtAsWritten` (1-120 characters), optionally with `page` and `itemId`
+per observation. The text is always kept in the stored review. Lab receives a
+real date only when the text is unambiguous: the whole text is day/month/year
+with `/`, `-` or `.` (day first, as used in Nigeria), day month-name year, or
+month-name day year (an ordinal suffix and a comma are allowed), or an ISO date
+(optionally with a time `THH:mm`, `THH:mm:ss` or `THH:mm:ss.fff`, with or
+without a zone, as Lab's ISO 8601 check accepts; the time must be real);
+the year has 4 digits and is 1900 or later; the day exists on the calendar; and
+it is not later than today in Lagos (for publication, the day the review was
+stored). Forms other than ISO become midnight UTC of that day; ISO passes
+unchanged. Anything else (2-digit year, month and year only, a range, extra
+words) sends no date and is not an error. A legacy `reportedAt`/`collectedAt`
+that is not ISO is read as text written on paper by the same rule. An ISO value
+sent together with as-written text must be the same day, else 400
+`OCR_LAB_DATE_CONFLICT`; when it carries a time it is sent instead of midnight.
+A legacy ISO `reportedAt`/`collectedAt` (with or without a time or zone) passes
+unchanged, and one that is not a real day and time answers 400
+`OCR_INVALID_LAB_EVIDENCE`. Order of the top-level dates (Lab's
+`reported_at >= collected_at`): days are compared first (a value with a zone by
+its day in Lagos, otherwise the day written; a value without a zone is read as
+UTC, as the database reads it); a report day before the collection day answers
+400 `OCR_LAB_DATE_ORDER`. On the same day, when one side names a day only (a
+converted paper date or an ISO day without a time) and would fall before the
+other side's time, that day-only date is not sent (its as-written text stays in
+the stored review) rather than refusing or inventing a time; two times in the
+wrong order answer 400 `OCR_LAB_DATE_ORDER`. The as-written keys, `page` and
+`itemId` are never sent to Lab.
 
 Patient confirmation is a separate idempotent command bound to the canonical
 Identity patient already governing the source document. The server rechecks
@@ -2946,12 +3026,36 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 | EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
 | Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own |
 
-Without a records-processing grant or a cover, OCR's create answers 404 (EHR's
-source read does not find the document under that purpose, so nobody learns
-whether it exists) and the other job routes 404 `OCR_JOB_NOT_FOUND`; the website
-explains that the patient has not given records-processing access yet.
+Without a records-processing grant or a cover, OCR's create answers 403
+`OCR_RECORDS_PROCESSING_CONSENT_REQUIRED` when the request names the patient
+(`patientId`): OCR API prechecks that patient with Identity (`read_records`,
+`healthcare-operations`, `service/authorization/precheck`) before it reads any
+document, so the answer says nothing about whether the document exists. The
+precheck notes nothing: the named patient gets no "Your records were opened"
+notice and Identity records no allowed read for them. The one authorization
+that notes and audits the read stays the check on the document's patient after
+the source read. A named patient who has given cover but is not the document's
+patient still ends in 409 `OCR_PATIENT_MISMATCH`, or 404 when EHR's source read
+does not find the document, with no authorization of anybody. An
+`Idempotency-Key` replay is answered before the precheck, as before it: the key
+reused for a different request (a different `patientId` included) answers 409
+`IDEMPOTENCY_CONFLICT`, and an exact replay is authorized as the existing job,
+so after the cover has lapsed it answers 404 `OCR_JOB_NOT_FOUND`. Against an
+Identity without the precheck route the source read decides, as before. Without a `patientId`,
+create answers 404 (EHR's source read does not find the document under that
+purpose, so nobody learns whether it exists), and 403 `OCR_ACCESS_DENIED` when
+the source is found but the source patient's check refuses. The other job routes
+(read, retry, extractions, validations) answer 404 `OCR_JOB_NOT_FOUND` for every
+refusal: they act on an existing job, and a 403 there would reveal that a job
+exists for the patient. Each 4xx answer is logged by OCR API and EHR API as one
+`Request refused` warning carrying only the problem code, status, method, route
+template and correlation id.
 
 ### 32.1 The patient's approval or Access PIN covers records processing for 24 hours (decision 34(1))
+
+Since 0108 (section 36) the cover lasts as long as the grant (no 24-hour
+bound) and an active patient share covers too; the rules below are 0104's,
+with those two changes.
 
 A records-processing check (`healthcare-operations`, `read_records` or
 `write_records`) for a patient, staff member (membership) and facility is also
@@ -2971,11 +3075,13 @@ covers when all of these hold, and only then:
   0072's approval), or the patient's Access PIN was used (grant and request
   both `authorization_method = 'patient_access_pin'`: 0075's and 0098's PIN
   command). A patient share (0095), a seeded or imported grant, an emergency
-  grant and break-glass never cover it.
+  grant and break-glass never cover it. (0108 D-b: an active patient share
+  is a third way, section 36.)
 - The check's time is from the grant's `starts_at`, before `least(expires_at,
   starts_at + 24 hours)`: never past the grant's end, and never more than 24
   hours from its start (requests last at most 24 hours and PIN grants at most
-  60 minutes today, so today the grant's end comes first).
+  60 minutes today, so today the grant's end comes first). (0108 D-a: from
+  `starts_at` before `expires_at`, with no 24-hour bound.)
 - The patient is 18 or over on that day's Africa/Lagos date and has a date of
   birth on record (the request trigger's rule, at each check, since no request
   is made). The membership's roles hold `ocr.job.write` at the facility, at
@@ -2998,7 +3104,8 @@ grant from the access history (`POST /identity/me/consent-grants/:id/revoke`),
 turning the Access PIN off (`DELETE /identity/me/access-pin`, which ends its
 grants) or a deny directive each end the cover at the next check; ending the
 direct-care grant ends this too. A separate records-processing request (above)
-still works as before and is the way past 24 hours.
+still works as before and was the way past 24 hours (since 0108 the cover
+itself lasts as long as the grant).
 
 Where it lives: `identity.records_processing_direct_care_cover(patient,
 subject, membership, facility, action, at_time)` returns `(consent_grant_id,
@@ -3036,6 +3143,9 @@ screens, access history, the request inbox item and the PIN explainer). Under
 18: the patient's approval or PIN still grants direct care as today, but the
 words about paper records must not be shown for a patient under 18, who is not
 covered.
+Since 0108 this paragraph is replaced by "What the patient must be told
+(0108)" in section 36: the cover lasts as long as the access (no 24-hour
+limit), and the share screens must say it too.
 
 The grant never opens the chart. The services refuse the purpose everywhere
 else:
@@ -3075,7 +3185,7 @@ function body but `has_active_consent_grant`'s (32.1; their md5 pins stay
 true), policy, role, permission and grant; break-glass (emergency only), the
 PIN command (direct care, read only; its grant covers records processing as
 32.1 says) and patient shares (direct care, never covering records
-processing). A pending request is
+processing; since 0108 an active share covers it, section 36). A pending request is
 not checked again on approval, so a requester whose role changes afterwards
 keeps a request the patient may still approve.
 
@@ -3280,3 +3390,205 @@ its own signed declaration. 0105's declaration names only 0105 and
 and its hash in the declaration is measured again). 0105's prerequisite is
 0103's admin gate body and it reads nothing 0104 adds, so it applies the same
 way after 0104 as on 0103 alone.
+
+## 34. The OCR worker's account (0106)
+
+Migration 0106 (`0106_ocr_worker_account.sql`, unsigned until the owner signs)
+gives the OCR worker the database identity its commands have always required.
+`ocr.claim_worker_job` and the worker's other commands (0014, 0077, 0105) refuse
+with 42501 `Authorized OCR workload context is required` unless
+`app.actor_subject` is the subject of an active `auth.accounts` row holding the
+platform `ocr_worker` role. Before 0106 no such row existed, so every claim in
+production was refused and no OCR job was ever claimed.
+
+- 0106 seeds the account `0c4e0106-0106-4000-8000-000000000001` (subject
+  `hid:staging:ocr-worker`, display name `OCR worker`, no email, no password,
+  `source_system` `hid-workload`) and its role row
+  `0c4e0106-0106-4000-8000-000000000002` (platform `ocr_worker`, which grants
+  only `ocr.job.process`). `auth.admin_change_platform_role` refuses this role,
+  so the seed bypasses the governed admin command, as 0105 does for the
+  scanner; the owner signs that in the declaration. A different row already
+  holding the subject stops the migration with nothing applied. No function,
+  policy or grant changes; `runtime-grants.sql` is unchanged.
+- The worker sets `app.actor_subject` from `OCR_WORKER_SUBJECT`
+  (`services/ocr-worker/src/repository.ts`) and uses no workload token. Its own
+  subject keeps the OCR API's service identity (`hid:staging:ocr-api`) free of
+  worker authority and tells the two apart in audit rows. Terraform on `dev`
+  must set `OCR_WORKER_SUBJECT = "hid:${local.workload_identity_environment}:ocr-worker"`
+  (`infra/terraform/modules/application/workloads.tf`); until then the worker
+  keeps answering 42501 exactly as before 0106.
+- A claim still takes only a job whose document's latest scan event is clean
+  (0105), so claims return no job until the document scanner is live.
+- Kill switch, no release: revoke the role row (`revoked_at`, `revoked_by`, an
+  8-500 character `revocation_reason`) or set the account's status to
+  `disabled`; the next claim answers 42501 again.
+
+`test/database/ocr-worker-account.integration.sql` pins the seed and checks, as
+`hid_ocr_worker`, that the seeded subject claims while `hid:staging:ocr-api`, a
+random subject, an empty subject, the scanner's subject, a near-miss subject and
+the seeded subject with its role revoked or its account disabled are refused
+with 42501.
+
+## 35. OCR page allowance (0107)
+
+Owner decision (D-Eminence, 2026-11-02/03, Migrate item 7): 500 pages per
+facility per month, Textract and the AI reading counted together; only a
+super admin raises it; at 100% reading pauses but review and manual entry keep
+working. 0107 is unsigned until the owner signs its declaration. Drafted as
+0110 on 0103 and renumbered 0107, the next free number after 0106 (numbers
+follow release order). It applies after 0106; it needs `ocr.claim_worker_job`
+exactly as 0105 left it (the fair claim copies that body, md5 pinned) and uses
+nothing 0104 or 0106 add.
+
+Month: the Africa/Lagos calendar month. `resets_on` is the first day of the
+next month; a parked job becomes due at 00:00 Africa/Lagos that day.
+`paused` is `pages_used >= pages_limit`; `pages_used` is the sum of the
+facility's job counts first recorded this month; `pages_limit` is 500 unless
+a super admin set another (1-100000).
+
+Database commands (every one returns `(pages_used integer, pages_limit
+integer, resets_on date, paused boolean)` unless noted):
+
+| Command | Caller (role) | Notes |
+| --- | --- | --- |
+| `ocr.worker_page_allowance(job_id, claim_token)` | OCR worker (`hid_ocr_worker`) | The facility of the job it holds; the same claim checks as `ocr.fail_worker_job` (42501 not a worker, 55000 claim not active). `paused` is false for a job whose pages are already recorded, so a retry is never parked by its own pages. |
+| `ocr.record_worker_pages(job_id, claim_token, page_count, correlation_id)` | OCR worker | 1-200 pages (22023 otherwise). Once per job: a replay or a smaller count changes nothing; a larger count is kept. Audit `ocr.worker.pages_recorded` (`details.pages` only) when stored or raised. |
+| `ocr.pause_worker_job_for_allowance(job_id, claim_token, correlation_id)` returns `timestamptz` | OCR worker | NULL, changing nothing, unless the allowance is used up and the job's pages are not yet recorded (a limit raised since the read, or a retry); the worker then reads the job. Otherwise the job goes processing -> failed -> queued, `attempt_count` back by one (a pause never uses an attempt), `last_error_code = OCR_PAGE_ALLOWANCE_USED_UP`, `last_error_summary = Reading is paused because this facility has used this month's page allowance`, `next_attempt_at` = the returned resume time. Job events `OcrFailed` and `OcrJobQueued` carry the reason code. Audit `ocr.worker.paused_for_allowance`. Takes the facility's page-limit lock (the transaction advisory lock `ocr.set_facility_page_limit` takes) before it reads the allowance, so a raise above use racing a pause never leaves the job parked: either the pause sees the new limit and answers NULL, or the raise waits and then resumes the job. |
+| `ocr.facility_page_allowance(facility_id)` | OCR API (`hid_ocr_runtime`) and Identity API (`hid_identity_runtime`) | A session naming that facility and an active membership there with `ocr.job.read`, or a platform session (no facility, no membership) whose account has `platform.admin.access`; 42501 otherwise; P0002 for an unknown facility. |
+| `ocr.set_facility_page_limit(facility_id, pages_limit, reason)` returns `void` | Identity API (`hid_identity_runtime`) | Platform session, `platform.admin.access` and an active platform `platform_super_admin` role (only: a limit is a cost decision; `platform_admin`, support admins and facility staff read the allowance and usage but cannot set it), a correlation id and purpose `healthcare-operations` (42501 otherwise); limit 1-100000 and reason 1-240 characters (22023); P0002 unknown facility. Audit `admin.ocr.page-limit.set` (`actor_type = 'platform'`, resource the facility, details: new and previous limit, use, resumed and skipped jobs). When the new limit is above this month's use, the facility's queued jobs parked with `OCR_PAGE_ALLOWANCE_USED_UP` become due now (same attempt count, next version). |
+| `ocr.claim_worker_job_fair(provider, lease_seconds, max_in_flight_per_facility)` returns the row of `ocr.claim_worker_job` (`job_id, facility_id, document_id, patient_id, storage_bucket, storage_key, object_version_id, source_sha256_hex, size_bytes, media_type, provider, attempt_no, max_attempts, claim_token, claim_expires_at, correlation_id`; no row when nothing is claimable) | OCR worker (`hid_ocr_worker`) | The authorization (42501), validation (22023: provider 1-120 characters, lease 30-3600 seconds, cap 1-16), lease recovery, eligibility and result of `ocr.claim_worker_job` as 0105 left it (`media_type` is the detected type of the clean scan bound to the job's source, not the declared type), plus: a facility that already has `max_in_flight_per_facility` jobs `processing` under an unexpired lease (any provider) is skipped, and among the rest the job of the facility with the fewest such jobs is taken first, then `next_attempt_at`, `queued_at`, `id`. `FOR UPDATE SKIP LOCKED`; the candidate's facility is taken with `pg_try_advisory_xact_lock` (never waits) and counted again, so the cap is exact among fair claimers; claims through the unchanged `ocr.claim_worker_job` (an old worker image) are counted but not bounded. Audit `ocr.worker.claim` adds `maxInFlightPerFacility` and `inFlightBefore`. |
+| `ocr.record_worker_ai_usage(job_id, claim_token, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, correlation_id)` returns `void` | OCR worker | The claim checks of `ocr.fail_worker_job` (42501, 55000). `model` matches `^claude-[a-z0-9-]+$` (at most 100 characters) and every count is a non-NULL number >= 0 (22023). One row per (job, the job's current attempt, model): the totals given replace the stored ones, so a replay changes nothing. Audit `ocr.worker.ai_usage_recorded` (attempt, model and the counts only) when something changed. |
+| `ocr.facility_ocr_usage(facility_id, month date)` returns `(model text, requests bigint, input_tokens bigint, output_tokens bigint, cache_read_tokens bigint, cache_write_tokens bigint, pages bigint)` | OCR API (`hid_ocr_runtime`) and Identity API (`hid_identity_runtime`) | The callers and errors of `ocr.facility_page_allowance`. The Africa/Lagos month containing `month` (NULL: this month). One row per Claude model with its summed requests and tokens (`pages` 0), then one row `model = 'textract'` with the month's pages from the page count (requests and tokens 0; present even when 0), ordered by model. |
+
+Nothing else changes: job, extraction, validation, publication and manual
+entry paths do not read the allowance. Tables `ocr.facility_page_limits`,
+`ocr.page_usage` and `ocr.ai_usage` (key `(job_id, attempt_no, model)`;
+facility, Lagos month, requests and the four token counts) hold ids, counts,
+dates, the model name and the limit's reason only, have no runtime grant, no
+foreign key to `ocr.jobs` (the 24-hour deletion of a job's working data never
+waits on them or removes them) and are read only through these commands.
+`ocr.claim_worker_job` keeps the body 0105 gave it. The only change to an existing function
+is one more allowed transition in `ocr.validate_job_write`: a queued job whose
+`last_error_code` is exactly `OCR_PAGE_ALLOWANCE_USED_UP` may move
+`next_attempt_at` earlier, not before now minus one minute (with the next
+version and optionally a new correlation id), nothing else; a queued job with
+no or another error code, the same or a later time, or any other column
+change is refused (23514). 0107 has no down
+migration. The suite is
+`services/ehr-api/test/database/ocr-page-allowance.integration.sql`.
+
+## 36. Records processing cover: as long as the access, and patient shares (0108)
+
+Owner decisions (D-Eminence, 2026-11-05, about 12:00 UTC, relayed by the
+coordinator). At about 12:03 UTC the owner typed "approve 0108" after
+reading: D-a no 24 h bound; D-b active patient shares count, view-only
+included -- a view-only share can start, read and check a reading but never
+publish into the chart, which needs the publisher's own direct-care write;
+all other 0104 rules kept. The declaration's `reviewed_by` stays empty until
+the owner signs it.
+Migration `0108_records_processing_cover_lifetime.sql` replaces the body of
+`identity.records_processing_direct_care_cover` (32.1) and nothing else:
+signature, result `(consent_grant_id, covered_until)`, owner, SECURITY
+DEFINER, STABLE, search_path, ACL (`hid_identity_runtime` EXECUTE only) and
+`identity.has_active_consent_grant` (body md5
+`732d11892dd4e27e1ff9093ae3b7de5a`) are unchanged; the cover's body md5 is now
+`6928763d3b69f0e4b4acf96a6a255736`.
+
+- D-a (lifetime). The owner answered "recommended" to removing the 24-hour
+  bound. A covering grant (the patient's approval of a direct-care
+  request, or the Access PIN) covers records processing (`read_records` and
+  `write_records`) from its `starts_at` until its `expires_at`, and whenever it
+  stops being active before that (revoked, PIN turned off, held by the
+  cutover, membership or account ended). The 24-hour bound of decision 34(1)
+  is gone; `covered_until` is the grant's `expires_at`.
+- D-b (shares). The owner's answer: "Yes, shares count (Recommended)", to
+  "Should a patient SHARE also let that staff member bring in the patient's
+  paper records (OCR)?", option text "Any active access the patient gave
+  (approval, Access PIN or share) lets that staff member at that facility
+  bring in paper records for as long as the access lasts. Under-18s, deny
+  choices and the OCR permission still apply. The share screen will tell
+  patients this." An active patient share (0095) covers it too: a grant with
+  its `identity.patient_consent_shares` row (same patient and membership),
+  direct care, `read_records` or `write_records`, not break-glass, active, not
+  held by the cutover, `source_system = 'hid'`, no request, no authorization
+  method, granted by the patient. Any share level, `view_only` included
+  (`view_only`, `clinical_review`, `clinical_collaboration`), covers
+  records-processing read AND write, as a PIN grant does: under
+  `healthcare-operations`, creating an OCR job and getting or listing jobs
+  are `read_records`; retrying, validating, confirming the patient and
+  creating a publication are `write_records`. Publishing a reading into the
+  chart still needs the publisher's own direct-care `write_records` grant, so
+  a `view_only` or `clinical_review` share can start, read and check a
+  reading but never publish it. Direct care is unchanged (a `view_only` or
+  `clinical_review` share still reads only). It ends when the patient revokes
+  or replaces the share, or at its `expires_at` (24 hours, 7, 30 or 365 days).
+  D-b is a separate alternative in the body; without it the sealed demo
+  doctor (whose only grant is 0098's seeded share) would get no cover.
+
+Everything else of 32.1 stays: the same membership at the same facility on
+the live account; `ocr.job.write` at each check; the patient 18 or over on
+the Africa/Lagos date with a date of birth on record; deny directives for
+records processing or direct care; break-glass, emergency and seeded or
+imported grants (`source_system` not `'hid'`) never cover; both codes active
+(kill switch).
+
+Which grants count as seeded or imported: a grant whose `source_system` is not
+`'hid'` (imported, or seeded by a migration as a legacy row) never covers. A
+grant a migration seeds with `source_system = 'hid'` in the shape of a share
+is a share for D-b: 0098's sealed demo share (granted by the demo patient, no
+request, no authorization method, with its `patient_consent_shares` row,
+`clinical_collaboration`) covers records processing at Demo Hospital under
+D-b's rules, the only migration-seeded grant that does.
+
+What the patient must be told (0108; website lane, health; this branch does
+not edit the website). This replaces 32.1's paragraph of the same name and
+keeps the owner's rule from decision 34(1), "said clearly to the patient":
+
+- D-a: the approval screen, the PIN screens, the request inbox item and the
+  PIN explainer must no longer say "for up to 24 hours". They must say that
+  approving the access (or giving the PIN) also lets that staff member bring
+  in (scan and read) the patient's paper records at that facility for as long
+  as the access lasts, and that ending the access stops it.
+- D-b: the share screens must say, before
+  the patient confirms, that a share at any level, `view_only` included, also
+  lets that clinician bring in (scan and read, which creates OCR jobs from) the
+  patient's paper records at that facility for the share's whole duration (24
+  hours, 7 days, 30 days, or until revoked: up to 365 days), and that
+  revoking the share stops it. The places are the share search and its
+  confirmation (`POST /identity/me/shares`), the invitation confirmation
+  (`POST /identity/me/share-invitations/:invitationId/confirm`) and the
+  invitation creation (`POST /identity/me/share-invitations`), whose level and
+  duration are chosen then.
+- The access history shows each covering grant (approval, PIN or share) as
+  also covering records processing until `covered_until`, which is now the
+  grant's `expiresAt`.
+- Under 18 or with no date of birth: the words about paper records are not
+  shown, as in 32.1 (no cover).
+
+Until the website shows these words, a patient who approves an access, gives
+the PIN or creates a share is told less than the cover allows (with D-b, a
+`view_only` share is not described as allowing paper records to be brought
+in). The owner decides D-a and D-b knowing that this disclosure is not yet in
+place; the release notes for the website lane list it.
+
+Identity (`postgres-identity.provider.ts`) reads `covered_until` from the
+cover and answers it as `expiresAt`, so `POST /identity/authorization/check`
+and `POST /identity/consent-status` report the longer cover with no code
+change. Applying 0108 takes only ACCESS SHARE
+on the tables the cover reads and SHARE UPDATE EXCLUSIVE on the cover itself.
+Suite: `services/ehr-api/test/database/records-processing.integration.sql`
+(sections 10l-10o, 10r2-10r3, 10s, 10sk, 10za and 10zk change conditions of
+the cover one at a time, on a share and on the approval or PIN grant). A
+mutant run of the cover body (269 mutants, each one condition made true,
+false or negated, or one comparison, literal, time zone or age boundary
+changed; each on a fresh 0001-0108 database with the body-md5 case 1g2 set
+aside) shows 255 caught by behavioural cases and 14 that no row the tables
+allow can tell apart from the body: dropping `at_time is not null` or `dob is
+not null` (NULL already fails the comparison that follows), the account's
+subject or status test or the account join, the grant's facility test, the
+directive membership's facility (all implied by
+`auth.membership_has_permission` with the exact-membership foreign key), the
+grant's scope test alone or its `break_glass` test alone (a consent_grants
+CHECK ties them), the request's patient, membership, facility or purpose
+test (the exact-request foreign key), and `coalesce(..., true)` on the
+permission (it never answers null). The suite header lists them.

@@ -78,3 +78,8 @@ test('active patient and emergency components cannot import legacy helpers or cl
     assert.doesNotMatch(source, /hidApi|functions\.invoke|edgeRequest|token-exchange|createMedicalRecord|WithUploads|experienceWarmup/)
   }
 })
+test('the patient chat numbers each listed source by its citation number, not its position', async () => {
+  // The API lists only cited sources, so "[5]" in an answer must point at list item 5.
+  const source = await readFile(new URL('../src/components/PatientRecordChat.tsx', import.meta.url), 'utf8')
+  assert.match(source, /<ol>[\s\S]*<li key=\{source\.number\} value=\{source\.number\}>/)
+})

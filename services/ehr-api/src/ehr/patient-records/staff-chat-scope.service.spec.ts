@@ -35,3 +35,40 @@ it('rejects emergency purpose and patient actors before any Identity or database
   await expect(s.service.open({...s.request as object,actor:{...actor,kind:'patient'}} as never,'patient-a')).rejects.toThrow('consent');
   expect(s.fresh).not.toHaveBeenCalled();
 });
+describe('one patient per chat, access re-checked on every use (C3)',()=>{
+  it('binds the chat to the URL patient: every authorization and database scope is for that patient only',async()=>{
+    const s=setup(),scope=await s.service.open(s.request,'patient-a');
+    expect((await scope.authorize({...s.request as object,params:{patientId:'patient-b'}} as never)).patientId).toBe('patient-a');
+    await scope.transaction(await scope.authorize(s.request),'synthetic',async()=>undefined);
+    expect(s.authorize.mock.calls.every(c=>c[0]==='patient-a')).toBe(true);
+    expect(s.query.mock.calls.every(c=>c[1][0]==='patient-a')).toBe(true);
+  });
+  it('refuses with 403, before any database work, once the record-read decision is withdrawn after opening',async()=>{
+    const s=setup(),scope=await s.service.open(s.request,'patient-a');
+    s.authorize.mockResolvedValue({...decision,allowed:false});
+    await expect(scope.authorize(s.request)).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+    await expect(scope.transaction({patientId:'patient-a'} as never,'synthetic',async()=>42)).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+    expect(s.transaction).not.toHaveBeenCalled();
+  });
+  it.each([{scope:'read_summary'},{purpose:'emergency'}])('refuses a decision for another scope or purpose %j',async patch=>{
+    const s=setup();s.authorize.mockResolvedValue({...decision,...patch});
+    await expect(s.service.open(s.request,'patient-a')).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+  });
+  it('gives 409 CHAT_ACCESS_CHANGED when permissions change during an open chat, and 403 when note reading is removed',async()=>{
+    const s=setup(),scope=await s.service.open(s.request,'patient-a');
+    s.fresh.mockResolvedValue({...actor,facilities:[{...assignment,permissions:['ehr.note.read','ehr.prescription.read','ehr.diagnosis.read']}]});
+    await expect(scope.authorize(s.request)).rejects.toMatchObject({code:'CHAT_ACCESS_CHANGED'});
+    s.fresh.mockResolvedValue({...actor,facilities:[{...assignment,permissions:['ehr.prescription.read']}]});
+    await expect(scope.authorize(s.request)).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+    expect(s.transaction).not.toHaveBeenCalled();
+  });
+  it('re-checks Identity and the record-read decision on every transaction, with a 30-second database window',async()=>{
+    const s=setup(),scope=await s.service.open(s.request,'patient-a');
+    const before=s.authorize.mock.calls.length,started=Date.now();
+    await scope.transaction({patientId:'patient-a'} as never,'synthetic',async()=>undefined);
+    await scope.transaction({patientId:'patient-a'} as never,'synthetic',async()=>undefined);
+    expect(s.authorize.mock.calls.length-before).toBe(2);expect(s.fresh.mock.calls.length).toBe(s.authorize.mock.calls.length);
+    const until=Date.parse(s.query.mock.calls[0][1][2]);
+    expect(until-started).toBeGreaterThanOrEqual(29_000);expect(until-started).toBeLessThanOrEqual(31_000);
+  });
+});

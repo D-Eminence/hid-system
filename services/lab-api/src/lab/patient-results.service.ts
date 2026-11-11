@@ -8,7 +8,8 @@ import { DomainProblem } from '../common/problem';
 import { requireRequestContext } from '../common/request-context';
 import type { HidRequest } from '../common/request-context';
 
-export const PATIENT_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.id::text version,t.name title,
+// Staff chat: every released current version, with the correction reason.
+export const STAFF_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.id::text version,t.name title,
  rel.released_at as "recordedAt",s.collected_at as "effectiveAt",
  jsonb_build_object('test',t.name,'codeSystem',t.code_system,'code',t.code,
  'specimen',s.specimen_type,'resultType',v.result_type,'numericValue',v.numeric_value::text,
@@ -26,6 +27,79 @@ export const PATIENT_LAB_QUERY = `select r.id, r.current_version::text||':'||rel
  join lab.specimens s on s.id=e.specimen_id and s.patient_id=r.patient_id and s.facility_id=r.facility_id
  where r.patient_id=$1 and r.id::text>$2 and not exists(select 1 from lab.result_invalidations i
  where i.result_id=r.id and i.result_version=r.current_version and i.patient_id=r.patient_id)
+ order by r.id::text limit 201`;
+
+/*
+ * Sensitive tests (S4), left out of the patient's own chat until a clinician
+ * has discussed them. A constant default list for Ola to approve; it matches
+ * SENSITIVE_TEST_FRAGMENTS in ehr-api's patient-evidence.policy.ts, which
+ * filters the same names again. No value from a request is interpolated.
+ * SENSITIVE_LOINC_CODES (identical to ehr-api's) are left out when the code
+ * system is LOINC, whatever the name: HIV 1+2 Ab/Ag and HIV 1 Ab, HIV 1 RNA
+ * viral load, CD4 count, HBsAg, HCV Ab, hCG, PSA, AFP, CEA and CA-125. The
+ * code system is LOINC by name or URL, or by its OID (LOINC_SYSTEM_SQL_PATTERN,
+ * identical to ehr-api's).
+ */
+export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
+  'hiv[a-z0-9]*','aids','rvs','retrovir[a-z]*','cd[ -]?4[a-z0-9]*','viral[ -]?loads?',
+  'hepatitis','hbsag','hbeag','anti[ -]?hbc','hbc[ -]?ab','hbv[a-z]*','hcv[a-z]*',
+  'syphili[a-z]*','vdrl','rpr','tpha','treponem[a-z]*','chlamydi[a-z]*','gonorr[a-z]*','gonococc[a-z]*',
+  'herpes','hsv[a-z0-9]*','trichomon[a-z]*','sti','std',
+  'b?hcg','pregnan[a-z]*','upt',
+  'psa','afp','cea','ca[ .-]?125','ca[ .-]?19[ .-]?9','ca[ .-]?15[ .-]?3','tumou?r[ -]?markers?',
+  'biops[a-z]*','histolog[a-z]*','histopath[a-z]*','cytolog[a-z]*','pap','pap[ -]?smears?',
+  'karyotyp[a-z]*','brca[0-9]*','genetic[a-z]*','genotyp[a-z]*',
+  'phq[ -]?[0-9]*','gad[ -]?[0-9]+','psych[a-z]*',
+  'vl','hb[ -]?electrophoresis','ha?emoglobin[ -]?electrophoresis',
+  'prostate[ -]specific','[a-z]*fetoprotein','carcinoembryonic','cancer[ -]?(?:ag|antigen)','chorionic','choriogonadotrop[a-z]*',
+  'human[ -]*immuno[ -]*deficiency','hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?','hbs[ -]?ag','h[ .]+i[ .]+v',
+].join('|')+')($|[^a-z0-9])';
+export const SENSITIVE_LOINC_CODES=[
+  '75622-1','56888-1','7917-8','68961-2','20447-9','24467-3','5196-1','5195-3','16128-1','13955-0',
+  '2106-3','21198-7','2119-6','2857-1','35741-8','1834-1','19176-1','2039-6','10334-1',
+  '7918-6','29893-5','31201-7','5221-7','10351-5','25836-8','2118-8','19080-2',
+] as const;
+export const LOINC_SYSTEM_SQL_PATTERN='(loinc|(^|[^0-9.])2[.]16[.]840[.]1[.]113883[.]6[.]1($|[^0-9.]))';
+/** Codes hold only digits and a hyphen, so the quoted list cannot break out of the SQL. */
+export const SENSITIVE_LOINC_SQL_LIST=SENSITIVE_LOINC_CODES.map(code=>`'${code}'`).join(',');
+
+/*
+ * The patient's own released results. The latest release of each result is
+ * found first. When it is the current version, the row is as staff see it,
+ * less the lab's correction reason. When a correction is pending (the current
+ * version is not released yet), the patient gets a placeholder that says the
+ * lab is correcting the result and carries no value. A result whose current or
+ * last released version was entered in error is left out, and so is a
+ * sensitive test.
+ */
+export const PATIENT_SELF_LAB_QUERY = `select r.id,
+ case when rel.result_version=r.current_version then r.current_version::text||':'||rel.id::text
+ else r.current_version::text||':pending:'||rel.id::text end version,t.name title,
+ rel.released_at as "recordedAt",s.collected_at as "effectiveAt",
+ case when rel.result_version=r.current_version then jsonb_build_object('test',t.name,'codeSystem',t.code_system,'code',t.code,
+ 'specimen',s.specimen_type,'resultType',v.result_type,'numericValue',v.numeric_value::text,
+ 'textValue',v.text_value,'unit',v.unit,'referenceRange',v.reference_range,'recordedFlag',v.abnormal_flag,
+ 'revisionKind',v.revision_kind,
+ 'collectedAt',s.collected_at,'releasedAt',rel.released_at,'verification','exact-version manually verified and released')
+ else jsonb_build_object('test',t.name,'codeSystem',t.code_system,'code',t.code,'specimen',s.specimen_type,
+ 'collectedAt',s.collected_at,'correctionPending',true,'status','The lab is correcting this result.') end fields
+ from lab.results r
+ join lateral(select x.id,x.result_version,x.released_at,x.verification_id from lab.result_releases x
+ where x.result_id=r.id and x.patient_id=r.patient_id and x.facility_id=r.facility_id
+ order by x.result_version desc limit 1) rel on true
+ join lab.result_revisions v on v.result_id=r.id and v.version=rel.result_version
+ and v.patient_id=r.patient_id and v.facility_id=r.facility_id
+ join lab.result_verifications ver on ver.id=rel.verification_id and ver.result_id=r.id and ver.result_version=rel.result_version
+ and ver.patient_id=r.patient_id and ver.facility_id=r.facility_id
+ join lab.test_executions e on e.id=r.execution_id and e.patient_id=r.patient_id and e.facility_id=r.facility_id
+ join lab.work_item_requested_tests t on t.id=e.requested_test_id and t.patient_id=r.patient_id and t.facility_id=r.facility_id
+ join lab.specimens s on s.id=e.specimen_id and s.patient_id=r.patient_id and s.facility_id=r.facility_id
+ where r.patient_id=$1 and r.id::text>$2 and not exists(select 1 from lab.result_invalidations i
+ where i.result_id=r.id and i.result_version=r.current_version and i.patient_id=r.patient_id)
+ and not exists(select 1 from lab.result_invalidations i
+ where i.result_id=r.id and i.result_version=rel.result_version and i.patient_id=r.patient_id)
+ and coalesce(t.name,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'
+ and not (btrim(coalesce(t.code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(t.code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))
  order by r.id::text limit 201`;
 
 @Injectable()
@@ -49,7 +123,7 @@ export class PatientResultsService {
     if(!decision.allowed||decision.breakGlass||decision.patientId!==patientId||decision.facilityId!==context.facilityId
       ||decision.membershipId!==context.membershipId) throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient access is not authorized');
     return this.database.withTransaction(context,async client=>{
-      const rows=(await client.query(PATIENT_LAB_QUERY,[patientId,cursor])).rows;
+      const rows=(await client.query(STAFF_LAB_QUERY,[patientId,cursor])).rows;
       const records=rows.slice(0,200);
       await this.audit.recordWithClient(client,{correlationId:request.correlationId,actorType:'staff',actorSubject:context.actor.subject,
         actorAccountId:context.actor.accountId,actorMembershipId:context.membershipId,facilityId:context.facilityId,
@@ -69,7 +143,7 @@ export class PatientResultsService {
     if(auth.patientId!==actor.patientId||auth.accountId!==actor.accountId||auth.subject!==actor.subject||auth.sessionId!==actor.sessionId)
       throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient authorization changed');
     return this.database.withPatientTransaction(auth,request.correlationId,async client=>{
-      const rows=(await client.query(PATIENT_LAB_QUERY,[auth.patientId,cursor])).rows;
+      const rows=(await client.query(PATIENT_SELF_LAB_QUERY,[auth.patientId,cursor])).rows;
       const records=rows.slice(0,200);
       await this.audit.recordWithClient(client,{correlationId:request.correlationId,actorType:'patient',actorSubject:auth.subject,
         actorAccountId:auth.accountId,patientId:auth.patientId,action:'lab.patient.released-results.read',resourceType:'released-result-collection',

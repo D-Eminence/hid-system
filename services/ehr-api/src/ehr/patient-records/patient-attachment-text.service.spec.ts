@@ -1,4 +1,4 @@
-import {readableLines,PatientAttachmentTextService} from './patient-attachment-text.service';
+import {readableLines,PatientAttachmentTextService,attachmentTextQuery} from './patient-attachment-text.service';
 jest.mock('../../config/environment',()=>({getEnvironment:()=>({S3_REGION:'eu-west-1'})}));
 it('omits unreadable or uncertain OCR lines instead of treating uncertain medical values as facts',()=>{
  const result=readableLines([{BlockType:'PAGE',Page:1},{BlockType:'LINE',Page:1,Text:'Recorded medicine: synthetic',Confidence:99},
@@ -19,4 +19,14 @@ it('omits a dose line with an uncertain word even when aggregate line confidence
  const result=readableLines([{BlockType:'LINE',Text:'Dose 10 mg',Confidence:99,Relationships:[{Type:'CHILD',Ids:['dose-word']}]},
  {BlockType:'WORD',Id:'dose-word',Text:'10',Confidence:40}]);
  expect(result.text).not.toContain('10 mg');expect(result.unclear).toBe(1);
+});
+it('reads and prepares only phi documents for the patient, and keeps the staff query separate',async()=>{
+ const query=jest.fn().mockResolvedValue({rows:[]});const transact=jest.fn(async(_a:unknown,_c:string,work:(client:unknown)=>Promise<unknown>)=>work({query}));
+ const storage={bucket:()=> 'owned-bucket',inspectVersion:jest.fn()};
+ const svc=new PatientAttachmentTextService({withPatientTransaction:transact} as never,{authorizeSelf:jest.fn().mockResolvedValue({patientId:'patient-a'})} as never,storage as never);
+ await svc.read({correlationId:'synthetic-document'} as never);
+ await svc.prepare({correlationId:'synthetic-document'} as never,new AbortController().signal);
+ expect(query).toHaveBeenCalledTimes(2);
+ for(const [sql] of query.mock.calls){expect(sql).toBe(attachmentTextQuery('patient'));expect(sql).toContain("d.classification='phi'");}
+ expect(attachmentTextQuery('staff')).not.toContain('classification');
 });

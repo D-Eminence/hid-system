@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import type { DataAccessContext } from '../../common/request-context';
 import { ClinicalRepository, type OperationResult, type SemanticEvent } from '../shared/clinical.repository';
 import { ClinicalNotesService, type ClinicalNoteRow } from './clinical-notes.service';
-import { LOCAL_EVIDENCE_QUERY } from '../patient-records/patient-evidence.query';
+import { PATIENT_EVIDENCE_QUERY, STAFF_EVIDENCE_QUERY } from '../patient-records/patient-evidence.query';
 
 const context = {
   correlationId: 'ocr-import-correlation', facilityId: '10000000-0000-4000-8000-000000000001',
@@ -57,6 +57,7 @@ describe('ClinicalNotesService OCR ingestion boundary', () => {
     const revision = queries.find((sql) => sql.includes('insert into ehr.clinical_note_revisions'))!;
     const reason = /values \(\$1,\$2,\$3,1,\$4,'([^']+)'/.exec(revision.replace(/\s+/g, ' '))?.[1];
     expect(reason).toBe('OCR import from human-validated source evidence');
-    expect(LOCAL_EVIDENCE_QUERY).toContain(`r.revision_no=1 and r.change_reason='${reason}'`);
+    expect(PATIENT_EVIDENCE_QUERY).toContain(`r.revision_no=1 and r.change_reason='${reason}'`);
+    expect(STAFF_EVIDENCE_QUERY).toContain(`r.revision_no=1 and r.change_reason='${reason}'`);
   });
 });
