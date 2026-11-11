@@ -39,7 +39,7 @@ execution attempt (a grant gone after the request) fails the publication with
 `OCR_PUBLISH_NEEDS_DIRECT_CARE` in place of `OCR_JOB_NOT_FOUND`.
 
 Since 0113 (owner decision of 2026-11-11, `docs/INTERFACE_CONTRACT.md`
-section 41) a caller without direct-care write who holds the patient's
+section 42) a caller without direct-care write who holds the patient's
 dedicated records-processing grant (an approved `healthcare-operations`
 `write_records` access request; never a share, an Access PIN or an approval of
 direct care: `identity.records_processing_write_grant`, asked in the
