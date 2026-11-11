@@ -52,6 +52,9 @@ export interface HidEnvironmentConfig {
   // Deliberately opt-in at synth time. The default task definition contains
   // no QoreID credential reference and application calls remain disabled.
   readonly qoreIdEnabled: boolean;
+  // Off unless HID_OWN_WORK_PATIENT_CARD_ENABLED=true at synth time: lab-api and
+  // pharmacy-api then add the patient's details to this facility's own work (0121).
+  readonly ownWorkPatientCardEnabled: boolean;
 }
 
 interface ProfileValues {
@@ -159,6 +162,7 @@ export function environmentConfig(
   value: string | undefined,
   stagingModeValue?: string,
   qoreIdEnabledValue?: string,
+  ownWorkPatientCardEnabledValue?: string,
 ): HidEnvironmentConfig {
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -180,10 +184,15 @@ export function environmentConfig(
   if (!['true', 'false'].includes(qoreIdEnabledInput)) {
     throw new Error('HID_QOREID_ENABLED must be true or false when supplied');
   }
+  const ownWorkPatientCardEnabledInput = ownWorkPatientCardEnabledValue ?? 'false';
+  if (!['true', 'false'].includes(ownWorkPatientCardEnabledInput)) {
+    throw new Error('HID_OWN_WORK_PATIENT_CARD_ENABLED must be true or false when supplied');
+  }
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
     qoreIdEnabled: qoreIdEnabledInput === 'true',
+    ownWorkPatientCardEnabled: ownWorkPatientCardEnabledInput === 'true',
   };
 }
 

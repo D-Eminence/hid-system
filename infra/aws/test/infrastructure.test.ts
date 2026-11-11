@@ -45,6 +45,11 @@ const qoreIdStagingApplication = new App();
 const qoreIdStagingRegional = Template.fromStack(new HidRegionalStack(qoreIdStagingApplication, 'QoreIdStagingRegionalTest', {
   configuration: environmentConfig('staging', 'economy', 'true'),
 })).toJSON() as typeof regional;
+const ownWorkPatientCardApplication = new App();
+const ownWorkPatientCardRegional = Template.fromStack(new HidRegionalStack(ownWorkPatientCardApplication,
+  'OwnWorkPatientCardRegionalTest', {
+    configuration: environmentConfig('staging', 'economy', undefined, 'true'),
+  })).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
   return Object.entries(template.Resources).filter(([, resource]) => resource.Type === type);
@@ -71,6 +76,16 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.throws(() => environmentConfig('staging', 'economy', 'enabled'), /HID_QOREID_ENABLED/);
   assert.equal(environmentConfig('staging', 'economy').qoreIdEnabled, false);
   assert.equal(environmentConfig('staging', 'economy', 'true').qoreIdEnabled, true);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, 'enabled'),
+    /HID_OWN_WORK_PATIENT_CARD_ENABLED must be true or false when supplied/);
+  assert.throws(() => environmentConfig('production', undefined, undefined, 'TRUE'), /HID_OWN_WORK_PATIENT_CARD_ENABLED/);
+  assert.equal(environmentConfig('staging', 'economy').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('production').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, 'false').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, 'true').ownWorkPatientCardEnabled, true);
+  assert.equal(environmentConfig('production', undefined, undefined, 'true').ownWorkPatientCardEnabled, true);
+  assert.equal(environmentConfig('staging', 'economy', undefined, 'true').qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', 'true').ownWorkPatientCardEnabled, false);
   assert.equal(environmentConfig('staging', 'economy').publicApiSubdomain, 'api.staging');
   assert.deepEqual(environmentConfig('staging', 'economy').browserSubdomains, [
     'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'admin.staging',
@@ -499,6 +514,33 @@ test('an explicit QoreID staging synth injects its distinct server-only secret i
   assert.ok(identityContainer.Secrets.some(item => item.Name === 'NIN_ENCRYPTION_KEY_B64'));
   for (const task of tasks.filter(task => task !== identity)) {
     assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /QOREID_CLIENT_ID|QOREID_CLIENT_SECRET|NIN_LOOKUP_HMAC_KEY_B64/);
+  }
+});
+
+test('own-work patient cards are passed to lab-api and pharmacy-api only, false unless explicitly enabled', () => {
+  const carriers = ['lab-api', 'pharmacy-api'];
+  const cases: Array<[typeof regional, string]> = [
+    [regional, 'false'], [stagingRegional, 'false'], [fidelityRegional, 'false'], [sleepRegional, 'false'],
+    [qoreIdStagingRegional, 'false'], [ownWorkPatientCardRegional, 'true'],
+  ];
+  for (const [template, expected] of cases) {
+    const tasks = properties(template, 'AWS::ECS::TaskDefinition');
+    for (const name of carriers) {
+      const task = tasks.find(item => JSON.stringify(item.Family).includes(name));
+      assert.ok(task, `missing ${name}`);
+      const api = (task.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+        .find(item => item.Name === name)!;
+      const environment = Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+      assert.equal(environment.OWN_WORK_PATIENT_CARD_ENABLED, expected, `${name} should carry ${expected}`);
+    }
+    const others = tasks.filter(task => !carriers.some(name => JSON.stringify(task.Family).includes(name)));
+    assert.ok(others.length > 0);
+    for (const task of others) {
+      assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /OWN_WORK_PATIENT_CARD_ENABLED/,
+        `${JSON.stringify(task.Family)} should not carry OWN_WORK_PATIENT_CARD_ENABLED`);
+    }
+    const carrying = tasks.filter(task => JSON.stringify(task.ContainerDefinitions).includes('OWN_WORK_PATIENT_CARD_ENABLED'));
+    assert.equal(carrying.length, carriers.length);
   }
 });
 
