@@ -162,3 +162,34 @@ run "no_deletion_alarm_without_the_worker" {
     error_message = "Without the OCR worker's log group there is nothing to watch."
   }
 }
+
+run "no_deletion_alarm_while_the_worker_is_scaled_to_zero" {
+  command = plan
+
+  module {
+    source = "./modules/operations"
+  }
+
+  variables {
+    name_prefix                = "hid-staging"
+    environment                = "staging"
+    enable_database            = false
+    database_arn               = ""
+    database_identifier        = ""
+    database_kms_key_arn       = ""
+    database_connection_budget = 120
+    backup_retention_days      = 30
+    enable_backup_plan         = false
+    alert_email                = ""
+    aws_account_id             = "123456789012"
+    aws_region                 = "eu-west-1"
+    ecs_cluster_name           = "hid-staging"
+    ocr_worker_log_group       = "/hid/staging/ocr-worker"
+    ocr_worker_running         = false
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.ocr_source_deletion_overdue) == 0 && length(aws_cloudwatch_log_metric_filter.ocr_source_deletion_overdue) == 0
+    error_message = "A worker scaled to zero (staging sleep or economy) logs no sweep rounds; the missing-data alarm would breach forever."
+  }
+}
