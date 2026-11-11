@@ -46,7 +46,7 @@ export interface ClinicalNoteRevisionRow extends QueryResultRow {
 }
 
 export interface OcrClinicalNoteImport {
-  /** The visit a direct-care publisher chose; absent: the "Imported paper records" encounter (0112). */
+  /** The visit a direct-care publisher chose; absent: the "Imported paper records" encounter (0113). */
   encounterId?: string;
   noteType: string;
   title: string;
@@ -62,12 +62,12 @@ export interface OcrClinicalNoteImport {
   confirmedBy?: string;
 }
 
-/** The note type and title prefix of a reading published as a draft into the imported encounter (0112). */
+/** The note type and title prefix of a reading published as a draft into the imported encounter (0113). */
 export const PAPER_RECORD_NOTE_TYPE = 'From a paper record (Migrate)';
 const PAPER_RECORD_TITLE_PREFIX = 'From a paper record (Migrate): ';
 
 /**
- * Who may publish an OCR reading, and how (0112, owner decision of
+ * Who may publish an OCR reading, and how (0113, owner decision of
  * 2026-11-11): under direct care with a chosen visit, as before; under direct
  * care with no visit, or under records processing (healthcare-operations)
  * with the patient's dedicated records-processing grant, as a draft in the

@@ -116,7 +116,7 @@ describe('records processing reaches the documents but not the chart', () => {
     },
   );
 
-  // 0112 (owner decision of 2026-11-11): the OCR note import takes
+  // 0113 (owner decision of 2026-11-11): the OCR note import takes
   // healthcare-operations to the service, which publishes only a draft into
   // the imported paper records and only under the dedicated records-processing
   // grant (clinical-notes.ocr-import.spec.ts).

@@ -32,7 +32,7 @@ export interface EhrOcrDocumentSource {
 }
 
 export interface EhrOcrClinicalNoteImport {
-  /** Absent: the patient's "Imported paper records" encounter at the facility (0112). */
+  /** Absent: the patient's "Imported paper records" encounter at the facility (0113). */
   encounterId?: string;
   noteType: string;
   title: string;

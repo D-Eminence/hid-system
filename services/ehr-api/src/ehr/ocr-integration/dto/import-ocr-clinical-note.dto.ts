@@ -4,7 +4,7 @@ import { IsInt, IsOptional, IsString, IsUUID, Length, MaxLength, Min } from 'cla
 const trim = ({ value }: TransformFnParams): unknown => typeof value === 'string' ? value.trim() : value;
 
 export class ImportOcrClinicalNoteDto {
-  /** Absent: the patient's "Imported paper records" encounter at this facility (0112). */
+  /** Absent: the patient's "Imported paper records" encounter at this facility (0113). */
   @IsOptional() @IsUUID('4') encounterId?: string;
   @Transform(trim) @IsString() @Length(1, 80) noteType!: string;
   @Transform(trim) @IsString() @Length(1, 240) title!: string;

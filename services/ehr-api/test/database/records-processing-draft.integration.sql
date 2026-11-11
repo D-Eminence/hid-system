@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Records processing, draft publication (0112, owner decision of 2026-11-11,
+-- Records processing, draft publication (0113, owner decision of 2026-11-11,
 -- Option B): identity.records_processing_write_grant names only the patient's
 -- dedicated records-processing grant (an approved healthcare-operations
 -- write request); a view_only, clinical_review or clinical_collaboration
@@ -38,7 +38,7 @@ exception when others then
 end $$;
 grant execute on function pg_temp.expect(text, text, text), pg_temp.try(text) to public;
 
--- 1. What 0112 installs.
+-- 1. What 0113 installs.
 select pg_temp.expect('1a the check', 't/s/sql/{"search_path=pg_catalog, pg_temp"}/owner=t/hid_ehr_runtime EXECUTE, hid_ocr_runtime EXECUTE',
   (select format('%s/%s/%s/%s/owner=%s/%s', p.prosecdef, p.provolatile, l.lanname, p.proconfig,
             p.proowner = (select relowner from pg_class where oid = 'identity.access_requests'::regclass),
@@ -474,7 +474,7 @@ select pg_temp.expect('7b staff (records processing) see the encounter, labelled
     where id::text = current_setting('draft.encounter') and imported_paper_records));
 
 -- 7c-7k D4: under healthcare-operations the database itself allows only the
--- draft path, whatever the API does (security review of 0112).
+-- draft path, whatever the API does (security review of 0113).
 select pg_temp.as_staff(1, 'healthcare-operations');
 select set_config('app.change_reason', 'Synthetic records-processing write', true);
 select pg_temp.expect('7c the draft cannot be signed under records processing', '42501 RECORDS_PROCESSING_DRAFT_ONLY',

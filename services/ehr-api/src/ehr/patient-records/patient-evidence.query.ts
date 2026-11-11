@@ -96,7 +96,7 @@ export function evidenceQuery(audience: EvidenceAudience): string {
     return replaceOnce(q, SELECT, SELECT_WITH_PATIENT);
   }
   if (audience !== 'patient') throw new Error('Unknown evidence audience');
-  // Encounters: the "Imported paper records" encounter (0112) only once it
+  // Encounters: the "Imported paper records" encounter (0113) only once it
   // holds a signed note (the patient-self policy requires it too), and named
   // as such. The staff query is left exactly as it was (golden).
   q = replaceOnce(q, "'Encounter: '||e.encounter_type,",

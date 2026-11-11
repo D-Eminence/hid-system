@@ -57,7 +57,7 @@ export class PatientRecordsService {
   private async read(client: PoolClient, patientId: string, facilityId?: string) {
     const values = facilityId ? [patientId, facilityId] : [patientId];
     const facility = facilityId ? ' and facility_id=$2' : '';
-    // 0112: the "Imported paper records" encounter is labelled; the patient
+    // 0113: the "Imported paper records" encounter is labelled; the patient
     // (no facility: the patient-self read) sees it only once it holds a signed
     // note, which the patient-self row-level security policy also requires.
     const importedHidden = facilityId ? ''

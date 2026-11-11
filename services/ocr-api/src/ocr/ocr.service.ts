@@ -60,7 +60,7 @@ interface ConfirmationRow extends QueryResultRow {
 }
 
 /**
- * Who may publish, and as what (0112, owner decision of 2026-11-11): the
+ * Who may publish, and as what (0113, owner decision of 2026-11-11): the
  * publisher's own direct-care write grant publishes as before, for every
  * target; the patient's dedicated records-processing grant
  * (identity.records_processing_write_grant) publishes a clinical-note reading
@@ -85,7 +85,7 @@ interface PublicationRow extends QueryResultRow {
   request_sha256: string; attempt_count: number; max_attempts: number;
   target_resource_type: string | null; target_resource_id: string | null;
   failure_code: string | null; failure_summary: string | null; row_version: string;
-  /** 0112: the basis the request was authorized on; every attempt takes the same route. Null before 0112: direct care. */
+  /** 0113: the basis the request was authorized on; every attempt takes the same route. Null before 0113: direct care. */
   publication_basis?: PublicationBasis | null;
   requested_at: Date; completed_at: Date | null;
 }
@@ -568,7 +568,7 @@ export class OcrService {
       const evidence = await this.database.withTransaction(context, async (client) => {
         const validation = await this.findValidation(client, claimed.validation_id);
         const job = await this.findJob(client, claimed.job_id);
-        // The route is the one the request was authorized on (0112): a Lab
+        // The route is the one the request was authorized on (0113): a Lab
         // reading requested under the grant never becomes Lab evidence on a
         // retry by a publisher who has since gained direct care, nor the reverse.
         const authority = await this.authorizePublication(client, job, context, claimed.target_domain,
@@ -894,7 +894,7 @@ export class OcrService {
   /**
    * Publishing needs the publisher's own direct-care write_records grant on
    * the patient (the request's purpose, always direct-care), for every
-   * target, or (0112, owner decision of 2026-11-11) the patient's dedicated
+   * target, or (0113, owner decision of 2026-11-11) the patient's dedicated
    * records-processing grant, which publishes any reading as a draft note. In order:
    * - the source is read under the request's purpose; when Identity allows a
    *   write there without break-glass: direct_care, as before; with

@@ -1459,7 +1459,7 @@ revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public
 -- outreach.campaign_members, so it can neither update nor lock a membership.
 revoke all on function outreach.validate_registration_campaign_write() from public;
 
--- Records processing, draft publication (0112, owner decision of 2026-11-11):
+-- Records processing, draft publication (0113, owner decision of 2026-11-11):
 -- the dedicated records-processing write grant check is called by the OCR API
 -- (hid_ocr_runtime, inherited by hid_ocr_api_runtime; it needs USAGE on the
 -- identity schema for that one function, and no identity table privilege)
@@ -1468,7 +1468,7 @@ revoke all on function outreach.validate_registration_campaign_write() from publ
 -- patient-self policy on ehr.encounters calls the signed-note test, so the
 -- two roles that read encounters (as for ehr.patient_self_context above) may
 -- execute it. The flag, draft-guard and publication-basis trigger functions
--- are granted to no role. 0112 makes the same grants.
+-- are granted to no role. 0113 makes the same grants.
 grant usage on schema identity to hid_ocr_runtime;
 grant execute on function identity.records_processing_write_grant(uuid,text,uuid,uuid)
   to hid_ocr_runtime, hid_ehr_runtime;

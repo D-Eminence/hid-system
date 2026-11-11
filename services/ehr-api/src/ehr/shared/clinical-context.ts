@@ -19,7 +19,7 @@ export function clinicalContext(request: HidRequest): DataAccessContext {
  * records-processing grant (healthcare-operations, 0104) lets OCR read the
  * documents it turns into the digital record (the document routes and the
  * OCR source route keep taking it); it never opens the chart. The OCR note
- * import takes ocrImportContext instead (0112: a draft under the dedicated
+ * import takes ocrImportContext instead (0113: a draft under the dedicated
  * grant).
  */
 export function patientRecordContext(request: HidRequest): DataAccessContext {
@@ -31,7 +31,7 @@ export function patientRecordContext(request: HidRequest): DataAccessContext {
 }
 
 /**
- * The OCR note import (0112, owner decision of 2026-11-11): direct care and
+ * The OCR note import (0113, owner decision of 2026-11-11): direct care and
  * emergency as patientRecordContext, and also healthcare-operations, under
  * which ClinicalNotesService.createImportedFromOcr requires the patient's
  * dedicated records-processing grant (identity.records_processing_write_grant)

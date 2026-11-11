@@ -35,7 +35,7 @@ describe('Owning EHR patient and emergency read boundary', () => {
     expect(recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ actorType: 'patient', outcome: 'success' }));
   });
 
-  it('hides an empty "Imported paper records" encounter from the patient and labels it (0112)', async () => {
+  it('hides an empty "Imported paper records" encounter from the patient and labels it (0113)', async () => {
     const { service, query } = setup();
     await service.self(request);
     expect(query.mock.calls[0]?.[0]).toContain(

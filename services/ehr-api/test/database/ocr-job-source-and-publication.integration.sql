@@ -388,7 +388,7 @@ select pg_temp.source_case('publication', 'lifecycle: claim from another member'
       processing_expires_at = clock_timestamp() + interval '60 seconds', attempt_count = attempt_count + 1,
       failure_code = null, failure_summary = null, row_version = row_version + 1, correlation_id = 'ocr-source-suite'
     where validation_id = 'e8b80000-0000-4000-8000-000000000005' and status = 'pending'$u$)$s$, true);
--- 0112 D5: the basis the request wrote is never changed (P0003 marks the
+-- 0113 D5: the basis the request wrote is never changed (P0003 marks the
 -- basis trigger's own refusal, not another 55000).
 select pg_temp.source_case('publication', 'lifecycle: changing the publication basis', 'P0003', $s$
   do $d$ begin

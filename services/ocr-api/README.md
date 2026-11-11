@@ -38,7 +38,7 @@ source read is now this 404 too, rather than EHR's own code). A refusal at an
 execution attempt (a grant gone after the request) fails the publication with
 `OCR_PUBLISH_NEEDS_DIRECT_CARE` in place of `OCR_JOB_NOT_FOUND`.
 
-Since 0112 (owner decision of 2026-11-11, `docs/INTERFACE_CONTRACT.md`
+Since 0113 (owner decision of 2026-11-11, `docs/INTERFACE_CONTRACT.md`
 section 40) a caller without direct-care write who holds the patient's
 dedicated records-processing grant (an approved `healthcare-operations`
 `write_records` access request; never a share, an Access PIN or an approval of

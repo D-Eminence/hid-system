@@ -1,20 +1,20 @@
--- 0112 Records processing, publishing a reading as a draft: a staff member
+-- 0113 Records processing, publishing a reading as a draft: a staff member
 -- holding the patient's dedicated records-processing grant may publish a
 -- clinical-note reading into the patient's record as a DRAFT note in one
 -- "Imported paper records" encounter per patient per facility; a clinician
 -- signs it. Written on the branch of draft PR #221 after it merged staging
 -- (0001-0110 present; 0109 and 0110 are live on staging and touch nothing
--- this file reads or replaces). 0111 is taken by the 24-hour deletion on
--- another branch and is not here; the coordinator sets the final number at
--- push time (numbers follow merge order), and this file then needs only its
--- number and messages renamed.
+-- this file reads or replaces). Numbers follow merge order: 0111 is
+-- campaign management (#222) and 0112 the 24-hour deletion (#226), both on
+-- other branches and applied first; neither touches what this file reads
+-- or replaces.
 --
 -- Owner decision (D-Eminence, in chat, relayed by the coordinator on
 -- 2026-11-11), verbatim:
 --   "Option B: allow drafts, but only for staff given a dedicated "records
 --   processing" permission for that patient. Never through shares or PINs.
 --   The draft stays a draft until a clinician signs it. This needs database
---   change 0112 and a little more work. but the staff permission should
+--   change 0113 and a little more work. but the staff permission should
 --   cover publish to patient profile/health ID"
 -- The declaration in config/production-schema-compatibility.json is signed
 -- separately: its reviewed_by stays empty until the owner signs it there.
@@ -115,10 +115,10 @@
 --    cannot sign, change or add anything else. The draft note must be
 --    inserted unsigned (signed_at and signed_by null), at revision 1, with
 --    the EHR API's paper-record note type and title prefix. (Security
---    reviews of 0112.)
+--    reviews of 0113.)
 -- D5 One route per publication: ocr.publications gains publication_basis
 --    (direct_care or records_processing_grant; NULL for rows written before
---    0112, read as direct care), written by the request and never changed
+--    0113, read as direct care), written by the request and never changed
 --    (ocr.publications_basis_fixed()). Every execution attempt is
 --    authorized on that basis only, so a reading requested under the grant
 --    is never retried as Lab or Pharmacy evidence, nor the reverse.
@@ -145,8 +145,8 @@
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): 0001-0108 applied (0109 and 0110 are not
 --    needed and not read; 0108's cover body md5
---    6928763d3b69f0e4b4acf96a6a255736 is the marker, else "0112: 0001-0108
---    must be applied first"); not applied yet (else "0112: already
+--    6928763d3b69f0e4b4acf96a6a255736 is the marker, else "0113: 0001-0108
+--    must be applied first"); not applied yet (else "0113: already
 --    applied"); md5 of the bodies relied on (the platform session helpers,
 --    auth.membership_has_permission, identity.has_active_membership,
 --    identity.approve_access_request (the grant's writer), the 0104 request
@@ -163,7 +163,7 @@
 -- 1. D1. 2. D2 (column, constraint, index, trigger, function) and D4
 --    (the guard function and its three triggers). 3. D3 (function, policy).
 -- 4. Owners, REVOKE FROM PUBLIC and grants (here when the roles exist, and in
---    runtime-grants.sql, which gains the same 0112 block).
+--    runtime-grants.sql, which gains the same 0113 block).
 -- 5. Post-checks: bodies (md5), attributes, owners, ACLs, the column, the
 --    constraint (validated), the index, the trigger and the policy.
 --
@@ -188,7 +188,7 @@
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
 -- PUBLIC), ignoring a superuser's bypass (0104's and 0108's helper).
-create function pg_temp.records_processing_0112_holds(holder oid, object_owner oid, object_acl aclitem[],
+create function pg_temp.records_processing_0113_holds(holder oid, object_owner oid, object_acl aclitem[],
   object_type "char", wanted text)
 returns boolean
 language sql stable
@@ -228,7 +228,7 @@ begin
      or to_regclass('ehr.encounters') is null
      or to_regclass('ehr.clinical_notes') is null
      or to_regprocedure('identity.access_requests_records_processing()') is null then
-    raise exception using errcode = '55000', message = '0112: 0001-0108 must be applied first';
+    raise exception using errcode = '55000', message = '0113: 0001-0108 must be applied first';
   end if;
   -- b. Not applied yet.
   if to_regprocedure('identity.records_processing_write_grant(uuid,text,uuid,uuid)') is not null
@@ -240,7 +240,7 @@ begin
      or exists (select 1 from pg_attribute attribute_row
                  where attribute_row.attrelid = 'ehr.encounters'::regclass
                    and attribute_row.attname = 'imported_paper_records' and not attribute_row.attisdropped) then
-    raise exception using errcode = '55000', message = '0112: already applied';
+    raise exception using errcode = '55000', message = '0113: already applied';
   end if;
   -- c. The bodies relied on, as 0001-0108 left them.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
@@ -276,7 +276,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0112: an object this migration relies on differs from 0001-0108: %s', mismatch);
+      message = format('0113: an object this migration relies on differs from 0001-0108: %s', mismatch);
   end if;
   -- d. The columns read or constrained.
   select string_agg(format('%s.%s', expected.relation_name, expected.column_name), '; ') into mismatch
@@ -358,7 +358,7 @@ begin
                         and attribute_row.attnotnull = expected.not_null);
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0112: a column this migration relies on differs from 0001-0108: %s', mismatch);
+      message = format('0113: a column this migration relies on differs from 0001-0108: %s', mismatch);
   end if;
   -- e. Ownership and privileges, never through a superuser's bypass.
   identity_owner := (select relation.relowner from pg_class relation
@@ -382,7 +382,7 @@ begin
                      ('auth', 'USAGE', identity_owner), ('platform', 'USAGE', identity_owner),
                      ('ehr', 'CREATE', ehr_owner), ('ehr', 'USAGE', ehr_owner)) wanted(schema_name, privilege, owner_id)
         join pg_namespace namespace on namespace.nspname = wanted.schema_name
-       where not pg_temp.records_processing_0112_holds(wanted.owner_id, namespace.nspowner, namespace.nspacl, 'n',
+       where not pg_temp.records_processing_0113_holds(wanted.owner_id, namespace.nspowner, namespace.nspacl, 'n',
                wanted.privilege)
       union all
       select format('%s lacks SELECT on %s', pg_get_userbyid(identity_owner), relation.oid::regclass)
@@ -390,7 +390,7 @@ begin
        where relation.oid in ('auth.accounts'::regclass, 'identity.consent_directives'::regclass,
            'identity.consent_directive_versions'::regclass, 'identity.staff_facility_memberships'::regclass,
            'identity.purpose_of_use_codes'::regclass)
-         and not pg_temp.records_processing_0112_holds(identity_owner, relation.relowner, relation.relacl, 'r', 'SELECT')
+         and not pg_temp.records_processing_0113_holds(identity_owner, relation.relowner, relation.relacl, 'r', 'SELECT')
       union all
       select format('%s forces row-level security on its owner', relation.oid::regclass)
         from pg_class relation
@@ -405,11 +405,11 @@ begin
                      ('platform.current_facility_id()'), ('auth.membership_has_permission(text,uuid,uuid,text)'))
                wanted(proc_name)
         join pg_proc proc on proc.oid = wanted.proc_name::regprocedure
-       where not pg_temp.records_processing_0112_holds(identity_owner, proc.proowner, proc.proacl, 'f', 'EXECUTE')) missing;
+       where not pg_temp.records_processing_0113_holds(identity_owner, proc.proowner, proc.proacl, 'f', 'EXECUTE')) missing;
   if mismatch is not null then
-    raise exception using errcode = '42501', message = format('0112: missing privileges: %s', mismatch);
+    raise exception using errcode = '42501', message = format('0113: missing privileges: %s', mismatch);
   end if;
-  raise notice '0112: owners checked: identity.access_requests=%, ehr.encounters=%, applier=%',
+  raise notice '0113: owners checked: identity.access_requests=%, ehr.encounters=%, applier=%',
     pg_get_userbyid(identity_owner), pg_get_userbyid(ehr_owner), current_user;
 end
 $$;
@@ -513,7 +513,7 @@ as $$
 $$;
 
 comment on function identity.records_processing_write_grant(uuid, text, uuid, uuid) is
-  '0112 (owner decision of 2026-11-11, Option B): the patient''s dedicated records-processing grant (an approved healthcare-operations write_records access request of at most 24 hours, approved by the patient, source_system ''hid'', not break-glass, not the Access PIN, not a share) of the session''s own subject, membership and facility, or NULL: none for a patient under 18 or with no date of birth, a membership without ocr.job.write, an inactive healthcare-operations or direct-care code, or a deny directive for writing under records processing or direct care. The only check that lets a staff member publish an OCR reading as a draft note. Never the cover (identity.records_processing_direct_care_cover).';
+  '0113 (owner decision of 2026-11-11, Option B): the patient''s dedicated records-processing grant (an approved healthcare-operations write_records access request of at most 24 hours, approved by the patient, source_system ''hid'', not break-glass, not the Access PIN, not a share) of the session''s own subject, membership and facility, or NULL: none for a patient under 18 or with no date of birth, a membership without ocr.job.write, an inactive healthcare-operations or direct-care code, or a deny directive for writing under records processing or direct care. The only check that lets a staff member publish an OCR reading as a draft note. Never the cover (identity.records_processing_direct_care_cover).';
 
 -- 2. D2: the "Imported paper records" encounter.
 alter table ehr.encounters add column imported_paper_records boolean not null default false;
@@ -529,7 +529,7 @@ create unique index encounters_imported_paper_records_key on ehr.encounters (pat
   where imported_paper_records;
 
 comment on column ehr.encounters.imported_paper_records is
-  '0112: the one "Imported paper records" encounter of a patient at a facility (unique), which holds the draft notes published from paper records under the patient''s dedicated records-processing grant. Shown to the patient only once it holds a signed note.';
+  '0113: the one "Imported paper records" encounter of a patient at a facility (unique), which holds the draft notes published from paper records under the patient''s dedicated records-processing grant. Shown to the patient only once it holds a signed note.';
 
 create function ehr.encounters_imported_paper_records_fixed()
 returns trigger
@@ -545,7 +545,7 @@ end
 $$;
 
 comment on function ehr.encounters_imported_paper_records_fixed() is
-  '0112: an encounter''s imported_paper_records flag keeps the value it was inserted with.';
+  '0113: an encounter''s imported_paper_records flag keeps the value it was inserted with.';
 
 create trigger encounters_imported_paper_records_fixed
   before update of imported_paper_records on ehr.encounters
@@ -597,7 +597,7 @@ end
 $$;
 
 comment on function ehr.imported_paper_records_encounter(uuid) is
-  '0112: finds or creates the session facility''s one "Imported paper records" encounter of the patient (other, completed, started and ended when created) and returns its id; as the caller, under row-level security. 42501 RECORDS_PROCESSING_GRANT_REQUIRED unless the purpose is healthcare-operations and identity.records_processing_write_grant names the dedicated grant, or the purpose is direct-care and the caller may write the patient''s record.';
+  '0113: finds or creates the session facility''s one "Imported paper records" encounter of the patient (other, completed, started and ended when created) and returns its id; as the caller, under row-level security. 42501 RECORDS_PROCESSING_GRANT_REQUIRED unless the purpose is healthcare-operations and identity.records_processing_write_grant names the dedicated grant, or the purpose is direct-care and the caller may write the patient''s record.';
 
 -- D4: under healthcare-operations, the database allows only the draft path.
 create function ehr.records_processing_draft_guard()
@@ -645,7 +645,7 @@ end
 $$;
 
 comment on function ehr.records_processing_draft_guard() is
-  '0112 D4: under healthcare-operations, only the session''s dedicated records-processing grant (identity.records_processing_write_grant) may write, and only the "Imported paper records" encounter, a draft note in it and that note''s first revision; every UPDATE and DELETE is refused (42501 RECORDS_PROCESSING_DRAFT_ONLY). Under any other purpose it does nothing.';
+  '0113 D4: under healthcare-operations, only the session''s dedicated records-processing grant (identity.records_processing_write_grant) may write, and only the "Imported paper records" encounter, a draft note in it and that note''s first revision; every UPDATE and DELETE is refused (42501 RECORDS_PROCESSING_DRAFT_ONLY). Under any other purpose it does nothing.';
 
 create trigger encounters_records_processing_draft_guard
   before insert or update or delete on ehr.encounters
@@ -662,7 +662,7 @@ alter table ocr.publications add column publication_basis text
   check (publication_basis in ('direct_care', 'records_processing_grant'));
 
 comment on column ocr.publications.publication_basis is
-  '0112: the basis the publication request was authorized on (direct_care or records_processing_grant; NULL before 0112, read as direct_care). Every execution attempt is authorized on it alone, so every attempt takes the same route.';
+  '0113: the basis the publication request was authorized on (direct_care or records_processing_grant; NULL before 0113, read as direct_care). Every execution attempt is authorized on it alone, so every attempt takes the same route.';
 
 create function ocr.publications_basis_fixed()
 returns trigger
@@ -678,7 +678,7 @@ end
 $$;
 
 comment on function ocr.publications_basis_fixed() is
-  '0112 D5: a publication''s publication_basis keeps the value its request wrote.';
+  '0113 D5: a publication''s publication_basis keeps the value its request wrote.';
 
 create trigger publications_basis_fixed
   before update of publication_basis on ocr.publications
@@ -707,7 +707,7 @@ as $$
 $$;
 
 comment on function ehr.imported_paper_records_signed(uuid, uuid, uuid) is
-  '0112: whether an encounter holds a signed or amended clinical note; the patient-self policy on ehr.encounters shows an "Imported paper records" encounter only then.';
+  '0113: whether an encounter holds a signed or amended clinical note; the patient-self policy on ehr.encounters shows an "Imported paper records" encounter only then.';
 
 drop policy encounters_patient_self_read on ehr.encounters;
 create policy encounters_patient_self_read on ehr.encounters for select
@@ -891,7 +891,7 @@ begin
     mismatch := 'the number of policies on ehr.encounters';
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0112: not as this file makes it: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0113: not as this file makes it: %s', mismatch);
   end if;
   -- The ACLs: no PUBLIC; the write-grant check for the OCR and EHR runtimes,
   -- the encounter for the EHR runtime, the signed-note test for the two roles
@@ -934,7 +934,7 @@ begin
                           where namespace.nspname = 'identity' and acl.grantee = role_row.oid
                             and acl.privilege_type = 'USAGE')) granted;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0112: an ACL is not this file''s: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0113: an ACL is not this file''s: %s', mismatch);
   end if;
 end
 $$;

@@ -265,7 +265,7 @@ describe('dates written on paper lab results', () => {
   });
 });
 
-describe('clinicalNoteCandidate visit (0112)', () => {
+describe('clinicalNoteCandidate visit (0113)', () => {
   const fields = { noteType: 'progress', title: 'Clinic card', content: 'Fictional clinical text' };
   it('accepts a reading that names no visit (the imported paper records take it as a draft)', () => {
     expect(clinicalNoteCandidate(fields)).toEqual(fields);
@@ -279,7 +279,7 @@ describe('clinicalNoteCandidate visit (0112)', () => {
   });
 });
 
-// 0112: a Lab, Pharmacy or document-only reading under the dedicated grant is a
+// 0113: a Lab, Pharmacy or document-only reading under the dedicated grant is a
 // draft note labelled by kind, built from the reviewed fields only.
 describe('paperRecordDraftNote', () => {
   it('writes every Lab field that was reviewed, in reading order, and nothing else', () => {

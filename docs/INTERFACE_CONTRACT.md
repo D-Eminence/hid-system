@@ -1365,10 +1365,10 @@ ID/version, and the latest confirmation ID. It needs the publisher's own
 direct-care `write_records` grant on the patient for every target (section
 39), or, for an EHR reading only, the patient's dedicated records-processing
 grant, which publishes it as a draft into the patient's "Imported paper
-records" encounter (section 40, 0112): a caller with neither who can read the
+records" encounter (section 40, 0113): a caller with neither who can read the
 job answers 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE`; one who cannot read the job
 answers 404 `OCR_JOB_NOT_FOUND`. An EHR reading's `encounterId` is optional
-since 0112: without one, the note goes to the imported paper records. Current operations are EHR
+since 0113: without one, the note goes to the imported paper records. Current operations are EHR
 `create_imported_clinical_note`, Lab `create_imported_lab_evidence`, Pharmacy
 `create_imported_medication_evidence`, and `retain_validated_document` for
 `DOCUMENT_ONLY`. EHR creates a draft imported
@@ -3059,7 +3059,7 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 | Validate or reject | `ocr.validation.write` | `healthcare-operations` write |
 | Confirm the source patient | `ocr.patient.confirm` (doctor, clinician, nurse) | `healthcare-operations` write |
 | EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
-| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; or, for an EHR reading as a draft, the dedicated records-processing grant (an approved `healthcare-operations` `write_records` request; never the cover: section 40, 0112); otherwise 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 39) |
+| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own; or, for an EHR reading as a draft, the dedicated records-processing grant (an approved `healthcare-operations` `write_records` request; never the cover: section 40, 0113); otherwise 403 `OCR_PUBLISH_NEEDS_DIRECT_CARE` (section 39) |
 
 Without a records-processing grant or a cover, OCR's create answers 403
 `OCR_RECORDS_PROCESSING_CONSENT_REQUIRED` when the request names the patient
@@ -3794,20 +3794,20 @@ confirm OCR jobs, never publishes. Only the answer changes.
 
 A Migrate staff member working under the cover, with direct-care read access
 (an approval, Access PIN or share) but no direct-care write, now sees step 4
-instead of the 404 they got before. The cover never publishes; since 0112 the
+instead of the 404 they got before. The cover never publishes; since 0113 the
 patient's dedicated records-processing grant publishes an EHR reading as a
 draft (section 40), checked between steps 3 and 4.
 
-## 40. Records processing: publishing a reading as a draft (0112)
+## 40. Records processing: publishing a reading as a draft (0113)
 
 Owner decision (D-Eminence, 2026-11-11), verbatim: "Option B: allow drafts,
 but only for staff given a dedicated "records processing" permission for that
 patient. Never through shares or PINs. The draft stays a draft until a
-clinician signs it. This needs database change 0112 and a little more work.
+clinician signs it. This needs database change 0113 and a little more work.
 but the staff permission should cover publish to patient profile/health ID".
 
 Dated note, 2026-11-11, amending the owner decisions recorded in 0104 D7 and
-0108 D-b (both migrations are applied and unchanged; 0112's header carries the
+0108 D-b (both migrations are applied and unchanged; 0113's header carries the
 same note): publishing into the chart still needs the publisher's own
 direct-care write grant, and the cover (sections 32.1 and 36: approval, Access
 PIN, any share) still never publishes. The one exception: the holder of the
@@ -3822,7 +3822,7 @@ Pharmacy records (Lab imported evidence, Pharmacy imported medications) still
 need direct care: under the grant they are never written, and the publication's
 `targetResourceType` is `clinical-note`. A clinician signs the draft later.
 
-**The database keeps it a draft (0112 D4).** Under `healthcare-operations` the
+**The database keeps it a draft (0113 D4).** Under `healthcare-operations` the
 API is not the only check: `ehr.records_processing_draft_guard()` (BEFORE
 INSERT, UPDATE and DELETE on `ehr.encounters`, `ehr.clinical_notes` and
 `ehr.clinical_note_revisions`) refuses with 42501
@@ -3832,8 +3832,8 @@ first revision, for a patient for whom the session's dedicated grant is named.
 The draft must be inserted unsigned, at revision 1, with the paper-record note
 type and title prefix.
 
-**One route per publication (0112 D5).** `ocr.publications.publication_basis`
-(`direct_care` or `records_processing_grant`; NULL before 0112, read as direct
+**One route per publication (0113 D5).** `ocr.publications.publication_basis`
+(`direct_care` or `records_processing_grant`; NULL before 0113, read as direct
 care) is written by the request and never changed. Every execution attempt is
 authorized on that basis alone: a Lab or medicine reading requested under the
 grant is retried as the same draft note, never as Lab or Pharmacy evidence,

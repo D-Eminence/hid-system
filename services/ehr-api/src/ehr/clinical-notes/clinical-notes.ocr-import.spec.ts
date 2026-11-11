@@ -63,10 +63,10 @@ describe('ClinicalNotesService OCR ingestion boundary', () => {
   });
 });
 
-// 0112 (owner decision of 2026-11-11, Option B): a reading published under
+// 0113 (owner decision of 2026-11-11, Option B): a reading published under
 // records processing becomes a draft in the patient's "Imported paper records"
 // encounter, only with the dedicated records-processing grant.
-describe('ClinicalNotesService OCR draft path (0112)', () => {
+describe('ClinicalNotesService OCR draft path (0113)', () => {
   const patientId = '50000000-0000-4000-8000-000000000001';
   const grantId = 'd0000000-0000-4000-8000-000000000001';
   const importedEncounterId = 'e0000000-0000-4000-8000-000000000001';

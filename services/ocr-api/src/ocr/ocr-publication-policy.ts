@@ -278,7 +278,7 @@ export function clinicalNoteCandidate(fields: Record<string, unknown>) {
   const noteType = fields.noteType;
   const title = fields.title;
   const content = fields.content;
-  // The visit is optional (0112): a reading without one is published as a
+  // The visit is optional (0113): a reading without one is published as a
   // draft into the patient's "Imported paper records" encounter.
   if ((encounterId !== undefined && (typeof encounterId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(encounterId)))
@@ -299,12 +299,12 @@ function writtenDate(fields: Record<string, unknown>, name: 'collectedAt' | 'rep
   return undefined;
 }
 
-/** The note type of a reading that is not a clinical note, published as a draft under the dedicated grant (0112). */
+/** The note type of a reading that is not a clinical note, published as a draft under the dedicated grant (0113). */
 export const PAPER_RECORD_NOTE_TYPE = 'imported_paper_record';
 
 /**
  * A Lab, Pharmacy or document-only reading published under the dedicated
- * records-processing grant (0112): not a structured Lab or Pharmacy record
+ * records-processing grant (0113): not a structured Lab or Pharmacy record
  * (those still need direct care) but a draft note in the patient's "Imported
  * paper records" encounter, titled by kind (EHR puts "From a paper record
  * (Migrate): " before it, and its own note type), for a clinician to sign. The
@@ -369,7 +369,7 @@ export function assertPublishableCandidate(domain: OcrTargetDomain, fields: Reco
   if (domain === 'EHR') clinicalNoteCandidate(fields);
   else if (domain === 'LAB') importedLabCandidate(fields, today);
   else if (domain === 'PHARMACY') importedMedicationCandidates(fields);
-  // 0112: a document-only reading may become a draft note under the dedicated
+  // 0113: a document-only reading may become a draft note under the dedicated
   // grant; one too long for a note is refused here, not at publication.
   else if (domain === 'DOCUMENT_ONLY') paperRecordDraftNote(domain, fields, today);
 }

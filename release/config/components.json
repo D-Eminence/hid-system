@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0112",
+    "last": "0113",
     "count": 112,
     "files": [
       {
@@ -543,7 +543,7 @@
         "sha256": "0a56d7fb26ea5fd78030a7ec516ec3430491fc459f2251c1e6a77fdb35ee7835"
       },
       {
-        "name": "0112_records_processing_draft_publication.sql",
+        "name": "0113_records_processing_draft_publication.sql",
         "sha256": "5723e68d8ed562a8244dd885199db4935d68d9c8463412744f96e6e20b953b04"
       }
     ]

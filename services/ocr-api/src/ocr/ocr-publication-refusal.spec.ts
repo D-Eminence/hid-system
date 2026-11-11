@@ -67,7 +67,7 @@ interface Access {
   write: { allowed: boolean; breakGlass?: boolean };
   /** Identity's answer at the execution attempt, when it differs from the one at the request (a grant revoked). */
   attemptWrite?: { allowed: boolean; breakGlass?: boolean };
-  /** identity.records_processing_write_grant's answer (0112): the dedicated grant, or none (the default). */
+  /** identity.records_processing_write_grant's answer (0113): the dedicated grant, or none (the default). */
   grant?: string | null;
   /** Its answer at the execution attempt, when it differs. */
   attemptGrant?: string | null;
@@ -252,7 +252,7 @@ describe('OCR publication refusals', () => {
   });
 });
 
-// 0112 (owner decision of 2026-11-11, Option B): the patient's dedicated
+// 0113 (owner decision of 2026-11-11, Option B): the patient's dedicated
 // records-processing grant publishes a clinical-note reading as a draft into
 // the "Imported paper records" encounter; never through shares or PINs (the
 // SQL check answers none for them, as the cases above with grant: null).
