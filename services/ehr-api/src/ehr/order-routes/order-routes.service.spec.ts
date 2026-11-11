@@ -155,7 +155,7 @@ describe('OrderRoutesService send (C1)', () => {
   });
 });
 
-describe('OrderRoutesService send of a prescription: the allergy check (0124)', () => {
+describe('OrderRoutesService send of a prescription: the allergy check (0117)', () => {
   const prescriptionInput = { ...sendInput, attestationTextVersion: 'order-route-prescription-attestation-v1' };
   const allergyId = '123e4567-e89b-42d3-a456-426614174010';
   const penicillin = { id: allergyId, substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe' };

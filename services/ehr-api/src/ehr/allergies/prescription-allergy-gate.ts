@@ -80,7 +80,7 @@ export function allergyAcknowledgementRequired(
 
 /**
  * The allergy check before a prescription is written as, or becomes, active
- * (0124). Answers the matches the prescriber's reason covers (empty: nothing
+ * (0117). Answers the matches the prescriber's reason covers (empty: nothing
  * to record). A match already covered by a reason stored for this
  * prescription (`prescriptionId`, on Activate, Resume or send) needs none.
  * Otherwise the request must carry an acknowledgement with a valid reason
@@ -159,7 +159,7 @@ export async function recordAllergyAcknowledgement(
 }
 
 /**
- * A stored acknowledgement as the prescription reads answer it (0124): when
+ * A stored acknowledgement as the prescription reads answer it (0117): when
  * (`stage`, `createdAt`), who (`createdBy` account, `createdByMembershipId`),
  * the reason, and what it covered (the recorded allergy ids, whether the
  * patient's own text matched and which of its terms). Oldest first.

@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Recorded allergies and allergy-warning acknowledgements (0124).
+-- Recorded allergies and allergy-warning acknowledgements (0117).
 -- Rollback-only. The EHR's statements run as hid_ehr_api_runtime in the
 -- context ClinicalRepository sets (app.actor_subject, facility, membership,
 -- purpose, correlation). Synthetic values only; uuid prefix a124.
@@ -57,17 +57,17 @@ begin
      or not has_table_privilege('hid_ehr_api_runtime', 'ehr.prescription_allergy_acknowledgements', 'INSERT')
      or has_table_privilege('hid_ehr_api_runtime', 'ehr.prescription_allergy_acknowledgements', 'UPDATE')
      or has_table_privilege('hid_ehr_api_runtime', 'ehr.prescription_allergy_acknowledgements', 'DELETE') then
-    raise exception '1a: the EHR runtime''s privileges on the 0124 tables are not as granted';
+    raise exception '1a: the EHR runtime''s privileges on the 0117 tables are not as granted';
   end if;
   if exists (select 1 from information_schema.role_table_grants
               where table_schema = 'ehr' and table_name in ('recorded_allergies', 'prescription_allergy_acknowledgements')
                 and grantee = 'PUBLIC') then
-    raise exception '1b: PUBLIC holds a privilege on a 0124 table';
+    raise exception '1b: PUBLIC holds a privilege on a 0117 table';
   end if;
   if not (select relrowsecurity and relforcerowsecurity from pg_class where oid = 'ehr.recorded_allergies'::regclass)
      or not (select relrowsecurity and relforcerowsecurity from pg_class
               where oid = 'ehr.prescription_allergy_acknowledgements'::regclass) then
-    raise exception '1c: row-level security is not forced on a 0124 table';
+    raise exception '1c: row-level security is not forced on a 0117 table';
   end if;
   if has_table_privilege('hid_lab_api_runtime', 'ehr.recorded_allergies', 'SELECT')
      or has_table_privilege('hid_pharmacy_api_runtime', 'ehr.recorded_allergies', 'SELECT') then

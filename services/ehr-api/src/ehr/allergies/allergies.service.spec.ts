@@ -62,7 +62,7 @@ function repositoryWith(client: unknown) {
   };
 }
 
-describe('AllergiesService (0124)', () => {
+describe('AllergiesService (0117)', () => {
   it('lists recorded and patient-reported allergies apart, and says which were recorded here', async () => {
     const { client } = fakeClient([
       [/from ehr\.recorded_allergies/, [allergyRow(), allergyRow({ id: 'x', facilityId: otherFacilityId })]],
@@ -186,7 +186,7 @@ describe('AllergiesService (0124)', () => {
   });
 });
 
-describe('PrescriptionsService allergy check at create (0124)', () => {
+describe('PrescriptionsService allergy check at create (0117)', () => {
   const input = { medicationDisplay: 'Amoxicillin 500 mg', frequency: 'Three times daily', instructions: 'After food',
     status: OrderStatus.Active };
   const prescriptionRow = { id: '123e4567-e89b-42d3-a456-426614174020', encounterId, patientId, facilityId };
@@ -327,7 +327,7 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
   });
 });
 
-describe('PrescriptionsService allergy check on Activate and Resume (0124)', () => {
+describe('PrescriptionsService allergy check on Activate and Resume (0117)', () => {
   const prescriptionId = '123e4567-e89b-42d3-a456-426614174020';
   const current = (status: OrderStatus) => ({ id: prescriptionId, encounterId, patientId, facilityId, status, rowVersion: '1',
     medicationDisplay: 'Amoxicillin 500 mg', medicationCode: null });
@@ -445,7 +445,7 @@ describe('PrescriptionsService allergy check on Activate and Resume (0124)', () 
   });
 });
 
-describe('an allergy marked entered in error, across facilities and beside an active one (0124)', () => {
+describe('an allergy marked entered in error, across facilities and beside an active one (0117)', () => {
   // "does not warn for an allergy marked entered in error" above shows the check's read leaves out an
   // allergy marked here. These add: an allergy recorded at another facility keeps warning here until
   // that facility marks it; an active allergy beside one marked still warns, alone; and the database
@@ -563,7 +563,7 @@ describe('an allergy marked entered in error, across facilities and beside an ac
   });
 });
 
-describe('the prescription reads answer its stored allergy acknowledgements (0124)', () => {
+describe('the prescription reads answer its stored allergy acknowledgements (0117)', () => {
   const prescriptionId = '123e4567-e89b-42d3-a456-426614174020';
   const otherPrescriptionId = '123e4567-e89b-42d3-a456-426614174021';
   const createdAt = new Date('2026-11-10T09:00:00Z');

@@ -13,7 +13,7 @@ export const ACK_REASON = /^(?=[\s\S]*\p{L}{3})[^\u0000-\u0009\u000b-\u001f\u007
 export const ALLERGY_SEVERITIES = ['mild', 'moderate', 'severe', 'unknown'] as const;
 export type AllergySeverity = typeof ALLERGY_SEVERITIES[number];
 
-/** POST ehr/patients/:patientId/allergies (0124). */
+/** POST ehr/patients/:patientId/allergies (0117). */
 export class CreateAllergyDto {
   @Transform(trim) @IsString() @Length(1, 200) @Matches(ONE_LINE)
   substance!: string;
@@ -25,7 +25,7 @@ export class CreateAllergyDto {
   severity!: AllergySeverity;
 }
 
-/** POST ehr/patients/:patientId/allergies/:allergyId/entered-in-error (0124). */
+/** POST ehr/patients/:patientId/allergies/:allergyId/entered-in-error (0117). */
 export class MarkAllergyEnteredInErrorDto {
   @IsInt() @Min(1)
   expectedRowVersion!: number;
@@ -34,7 +34,7 @@ export class MarkAllergyEnteredInErrorDto {
   reason!: string;
 }
 
-/** POST ehr/patients/:patientId/allergy-check (0124): the medicine about to be prescribed. */
+/** POST ehr/patients/:patientId/allergy-check (0117): the medicine about to be prescribed. */
 export class AllergyCheckDto {
   @Transform(trim) @IsString() @Length(1, 500)
   medicationDisplay!: string;
@@ -55,7 +55,7 @@ export const WARNING_TOKEN = /^[a-f0-9]{64}$/;
 
 /**
  * On a prescription: the prescriber's reason to go ahead after an allergy
- * warning (0124), and the warningToken of the warning they were shown (from
+ * warning (0117), and the warningToken of the warning they were shown (from
  * the allergy check or the 409); a reason for another warning is refused.
  * Only the types are checked here: the reason's rules and the token are
  * checked by the allergy check at prescribing, so a refusal is the 409

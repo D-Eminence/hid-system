@@ -92,7 +92,7 @@ describe('Emergency read grant revalidation', () => {
   );
 });
 
-describe('The emergency read answers the allergies (0124)', () => {
+describe('The emergency read answers the allergies (0117)', () => {
   const facility = 'facility-here';
   const createdAt = new Date('2026-03-03T10:00:00Z');
   function run(answers: [RegExp, unknown[]][]) {

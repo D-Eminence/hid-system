@@ -55,7 +55,7 @@ describe('clinical DTO optional-field semantics', () => {
   });
 });
 
-describe('the allergy acknowledgement through the ValidationPipe (0124)', () => {
+describe('the allergy acknowledgement through the ValidationPipe (0117)', () => {
   const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, forbidUnknownValues: true, transform: true });
   const warningToken = 'a'.repeat(64);
   const bodies: [new () => object, Record<string, unknown>][] = [

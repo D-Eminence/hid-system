@@ -1506,7 +1506,7 @@ grant select,insert,update on ehr.staff_chat_state to hid_ehr_runtime;
 grant select,insert,delete on ehr.staff_chat_messages,ehr.staff_evidence_chunks to hid_ehr_runtime;
 grant select,insert,update on ehr.staff_attachment_extractions,ehr.staff_document_extractions to hid_ehr_runtime;
 
--- Allergies a facility records and allergy-warning acknowledgements (0124),
+-- Allergies a facility records and allergy-warning acknowledgements (0117),
 -- as that migration grants them (its section 4). Forced RLS on both tables;
 -- no DELETE (rows are never deleted).
 grant select, insert, update on ehr.recorded_allergies to hid_ehr_runtime, hid_schema_test_runtime;

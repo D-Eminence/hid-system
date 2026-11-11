@@ -374,7 +374,7 @@ export class CreatePrescriptionDto {
   status!: OrderStatus;
 
   /**
-   * 0124: sent only after an allergy warning (409 ALLERGY_ACKNOWLEDGEMENT_REQUIRED
+   * 0117: sent only after an allergy warning (409 ALLERGY_ACKNOWLEDGEMENT_REQUIRED
    * or the allergy check), with the prescriber's reason to go ahead and the
    * warning's token.
    */
@@ -407,7 +407,7 @@ export class UpdatePrescriptionDto extends VersionedUpdateDto {
   endsOn?: string;
 
   /**
-   * 0124: on Activate or Resume, sent only after an allergy warning (409
+   * 0117: on Activate or Resume, sent only after an allergy warning (409
    * ALLERGY_ACKNOWLEDGEMENT_REQUIRED or the allergy check), with the
    * prescriber's reason and the warning's token.
    */

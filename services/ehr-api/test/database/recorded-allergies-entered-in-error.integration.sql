@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Recorded allergies (0124): an allergy marked entered in error stops warning.
+-- Recorded allergies (0117): an allergy marked entered in error stops warning.
 -- Rollback-only. The EHR's statements run as hid_ehr_api_runtime in the
 -- context ClinicalRepository sets (app.actor_subject, facility, membership,
 -- purpose, correlation). Synthetic values only; uuid prefix e124.

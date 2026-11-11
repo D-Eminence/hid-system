@@ -661,7 +661,7 @@ credentials or tokens. `GET /api/v1/identity/me` answers `ninVerified`
 
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
-the `read_records` action for the exact facility and patient. With 0124 it also answers `allergies` (recorded and
+the `read_records` action for the exact facility and patient. With 0117 it also answers `allergies` (recorded and
 patient-reported, labelled by source; see "Allergies and the allergy check at prescribing"). Activation requires a reason, expires
 within the configured 5–240 minute bounds, permits at most ten new activations
 per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
@@ -3887,11 +3887,11 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
 `outreach.campaign.write` accepted. On a database without 0111, that would
 reopen the ungoverned writes.
 
-## Allergies and the allergy check at prescribing (0124)
+## Allergies and the allergy check at prescribing (0117)
 
 Two sources, always kept apart and labelled on screens:
 
-- **Recorded** (`ehr.recorded_allergies`, 0124): what a clinician recorded at a facility.
+- **Recorded** (`ehr.recorded_allergies`, 0117): what a clinician recorded at a facility.
 - **Reported by the patient** (`ehr.patient_reported_health_profiles.allergies`, 0094): free text the patient typed.
 
 All routes are direct care only (`X-Purpose-Of-Use: direct-care`), go through `ClinicalRepository.run` (Identity's
@@ -3975,7 +3975,7 @@ and one `ehr.prescription_allergy_acknowledgements` row with its stage (`create 
 reason, the matched recorded allergy ids and the patient's own terms that matched. The audit of that create, update
 or send adds `allergyOverride: true, matchedRecordedCount, patientReportedMatched` (counts and a flag, never the
 substance or the reason). An acknowledgement sent when nothing needs one is ignored, whatever it holds. A client must
-only send `allergyAcknowledgement` after a warning: an ehr-api without 0124 refuses the unknown property.
+only send `allergyAcknowledgement` after a warning: an ehr-api without 0117 refuses the unknown property.
 
 **The stored acknowledgements on the prescription reads.** `GET …/encounters/:encounterId/prescriptions/:id` and each
 item of `GET …/encounters/:encounterId/prescriptions` carry `allergyAcknowledgements:
@@ -3990,7 +3990,7 @@ read access); the read's audit adds `allergyAcknowledgementCount` (the list: the
 **Severity in the messages.** `severe` reads "SEVERE", `moderate` "moderate", `mild` "mild" and `unknown` "severity
 not known" (the clinician's choice "Not known" in the form): "Latex allergy: severity not known."
 
-**In the emergency read (0124).** `GET /api/v1/ehr/patients/:patientId/emergency-records` (purpose `emergency`, a
+**In the emergency read (0117).** `GET /api/v1/ehr/patients/:patientId/emergency-records` (purpose `emergency`, a
 current break-glass grant, as before) also answers `allergies`, read-only and labelled by source:
 
 ```text
@@ -4002,7 +4002,7 @@ allergies: {
 ```
 
 `recordedHere` is whether it was recorded at the current facility; `recordedOn` when. No route changes an allergy
-under the emergency purpose. RLS needs no new policy: 0124's and 0094's read policies
+under the emergency purpose. RLS needs no new policy: 0117's and 0094's read policies
 (`ehr.imported_record_read_context`) go through `ehr.context_allows` at the current facility, which admits the
 reasoned break-glass grant for `read_records` under purpose `emergency` (and only that action). The audit
 (`ehr.emergency.records.read`) adds `recordedAllergyCount` and `patientReportedAllergies` (a flag), never the

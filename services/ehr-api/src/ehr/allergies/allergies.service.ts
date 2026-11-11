@@ -13,7 +13,7 @@ import type { AllergyCheckDto, CreateAllergyDto, MarkAllergyEnteredInErrorDto } 
 export type RecordedAllergy = RecordedAllergyRow & { recordedHere: boolean };
 
 /**
- * Allergies (0124). Recorded allergies (ehr.recorded_allergies) are what a
+ * Allergies (0117). Recorded allergies (ehr.recorded_allergies) are what a
  * clinician recorded at a facility; patient-reported allergies are the text
  * the patient entered in their own health information (0094). The list
  * answers both, apart. Every read and write goes through

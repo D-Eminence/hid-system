@@ -1,4 +1,4 @@
--- 0124 Allergies a facility records, and the prescriber's acknowledgement of
+-- 0117 Allergies a facility records, and the prescriber's acknowledgement of
 -- an allergy warning (EHR clinical safety).
 --
 -- Today a clinician cannot record an allergy, and nothing checks allergies
@@ -11,7 +11,7 @@
 --
 -- 0. Preconditions (catalog reads only; 55000, nothing applied): the tables
 --    and functions this migration refers to exist (0004, 0005, 0061, 0094);
---    no object of this migration exists yet ('0124: already applied').
+--    no object of this migration exists yet ('0117: already applied').
 -- 1. ehr.recorded_allergies: per patient, an allergy a clinician recorded at
 --    a facility: substance (1-200 characters, trimmed, no control
 --    characters), reaction (1-500, the same rules, or null), severity
@@ -70,12 +70,12 @@ begin
      or to_regprocedure('platform.reject_mutation()') is null
      or to_regprocedure('platform.current_actor_subject()') is null
      or to_regprocedure('auth.account_id_for_subject(text)') is null then
-    raise exception using errcode = '55000', message = '0124: 0001-0094 must be applied first';
+    raise exception using errcode = '55000', message = '0117: 0001-0094 must be applied first';
   end if;
   if to_regclass('ehr.recorded_allergies') is not null
      or to_regclass('ehr.prescription_allergy_acknowledgements') is not null
      or to_regprocedure('ehr.guard_recorded_allergy_update()') is not null then
-    raise exception using errcode = '55000', message = '0124: already applied';
+    raise exception using errcode = '55000', message = '0117: already applied';
   end if;
 end
 $$;
@@ -152,7 +152,7 @@ create trigger recorded_allergies_no_delete before delete on ehr.recorded_allerg
   for each row execute function platform.reject_mutation();
 
 comment on table ehr.recorded_allergies is
-  '0124: allergies a clinician recorded at a facility (kept apart from the patient-reported ones of 0094). Never deleted; only marked entered in error with a reason.';
+  '0117: allergies a clinician recorded at a facility (kept apart from the patient-reported ones of 0094). Never deleted; only marked entered in error with a reason.';
 
 -- 2. Acknowledgements of an allergy warning at prescribing.
 create table ehr.prescription_allergy_acknowledgements (
@@ -193,7 +193,7 @@ create trigger prescription_allergy_acknowledgements_no_mutation
   for each row execute function platform.reject_mutation();
 
 comment on table ehr.prescription_allergy_acknowledgements is
-  '0124: the prescriber''s reason for going ahead with a prescription after an allergy warning (at create, Activate, Resume or send), with the allergies that matched. Append-only.';
+  '0117: the prescriber''s reason for going ahead with a prescription after an allergy warning (at create, Activate, Resume or send), with the allergies that matched. Append-only.';
 
 -- 3. Row-level security.
 alter table ehr.recorded_allergies enable row level security;

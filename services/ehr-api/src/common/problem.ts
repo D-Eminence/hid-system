@@ -17,7 +17,7 @@ export interface ProblemDetails {
   instance: string;
   correlationId: string;
   code: string;
-  /** `code` (optional) names what failed for that entry, e.g. 0124's ALLERGY_WARNING_TOKEN_STALE. */
+  /** `code` (optional) names what failed for that entry, e.g. 0117's ALLERGY_WARNING_TOKEN_STALE. */
   errors?: readonly { field: string; code?: string; messages: readonly string[] }[];
 }
 

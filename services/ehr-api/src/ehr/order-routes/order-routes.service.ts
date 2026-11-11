@@ -163,7 +163,7 @@ export class OrderRoutesService {
   }
 
   /**
-   * 0124: sending a draft prescription makes it active (ehr.send_order_route),
+   * 0117: sending a draft prescription makes it active (ehr.send_order_route),
    * so it is checked against the allergies as Activate is. An active one was
    * checked when it became active; one not found is left to the send's own 404.
    */

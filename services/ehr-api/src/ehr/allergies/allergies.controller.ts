@@ -6,7 +6,7 @@ import { AllergyCheckDto, CreateAllergyDto, MarkAllergyEnteredInErrorDto } from 
 import { AllergiesService } from './allergies.service';
 
 /**
- * Allergies (0124): the list (recorded and patient-reported, apart), adding a
+ * Allergies (0117): the list (recorded and patient-reported, apart), adding a
  * recorded allergy, marking one entered in error, and the check the
  * prescribing form runs. Direct care only. Reading needs ehr.note.read and
  * recording ehr.note.write (doctors, clinicians and nurses); the check needs

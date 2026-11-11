@@ -88,7 +88,7 @@ export class PrescriptionsService {
         const page = timelinePage(result.rows, query.limit, scope);
         const ids = page.items.map((item) => item.id);
         const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, ids);
-        // 0124: each prescription's stored allergy acknowledgements (audited as a count, never the reason).
+        // 0117: each prescription's stored allergy acknowledgements (audited as a count, never the reason).
         const acknowledgements = await readAllergyAcknowledgements(client, context, patientId, ids);
         const items = page.items.map((item) => ({ ...withOrderRoute(item, routes),
           allergyAcknowledgements: acknowledgements.get(item.id) ?? [] }));
@@ -108,7 +108,7 @@ export class PrescriptionsService {
       async (client) => {
         const row = this.single(await this.find(client, context, patientId, encounterId, prescriptionId));
         const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, [row.id]);
-        // 0124: the allergy acknowledgements stored for it, so whoever activates or resumes a draft
+        // 0117: the allergy acknowledgements stored for it, so whoever activates or resumes a draft
         // sees the earlier reason (audited as a count, never the reason).
         const acknowledgements = (await readAllergyAcknowledgements(client, context, patientId, [row.id])).get(row.id) ?? [];
         return { value: { ...withOrderRoute(row, routes), allergyAcknowledgements: acknowledgements },
@@ -130,7 +130,7 @@ export class PrescriptionsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'prescription',
         async () => {
-          // 0124: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
+          // 0117: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
           // the warning they were shown (its warningToken); without it nothing is written (the whole
           // transaction, idempotency key included, rolls back).
           const matches = await checkPrescriptionAllergies(client, context, patientId,
@@ -184,7 +184,7 @@ export class PrescriptionsService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
         }
-        // 0124: Activate (draft) and Resume (on hold) check the allergies again: one may have been
+        // 0117: Activate (draft) and Resume (on hold) check the allergies again: one may have been
         // recorded since the prescription was saved. A match already covered by a stored reason for
         // this prescription needs none.
         const activating = input.status === OrderStatus.Active && current.status !== OrderStatus.Active;

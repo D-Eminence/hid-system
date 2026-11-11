@@ -4,7 +4,7 @@ const recorded = (substance: string, id = '123e4567-e89b-42d3-a456-426614174010'
   ({ source: 'recorded', id, substance, reaction: 'Rash', severity: 'moderate' });
 const reported = (text: string): AllergyForCheck => ({ source: 'patient_reported', substance: text });
 
-describe('allergy matching (0124)', () => {
+describe('allergy matching (0117)', () => {
   it('matches the same medicine by generic name, whatever the strength or case', () => {
     const [match] = matchAllergies({ display: 'AMOXICILLIN 500 mg capsule' }, [recorded('Amoxicillin')]);
     expect(match).toMatchObject({ matchKind: 'same_medicine', source: 'recorded', substance: 'Amoxicillin',

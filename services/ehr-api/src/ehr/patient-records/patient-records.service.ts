@@ -47,7 +47,7 @@ export class PatientRecordsService {
       action: 'ehr.emergency.records.read', resourceType: 'patient-record-summary', breakGlassOnly: true,
     }, async (client) => {
       const value = await this.read(client, patientId, context.facilityId);
-      // 0124: the allergies, read-only and labelled by source. The audit carries counts only.
+      // 0117: the allergies, read-only and labelled by source. The audit carries counts only.
       const allergies = await emergencyAllergies(client, patientId, context.facilityId);
       return { value: { ...value, allergies },
         details: { recordedAllergyCount: allergies.recorded.length,

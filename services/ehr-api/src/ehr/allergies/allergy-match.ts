@@ -1,5 +1,5 @@
 /**
- * Allergy check at prescribing (0124). A small, conservative matcher: it
+ * Allergy check at prescribing (0117). A small, conservative matcher: it
  * warns when the medicine's name (display text and code) names the same
  * medicine as an allergy (brand names read as their generics, one-letter
  * misspellings of long names allowed), a medicine of the same class
