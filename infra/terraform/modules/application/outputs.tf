@@ -43,6 +43,7 @@ output "anthropic_runtime_access" {
       for key, value in local.workload_environment["ocr-worker"] : key => value
       if contains(["OCR_AI_MODE", "OCR_AI_US_PROCESSING_APPROVED", "OCR_TEXTRACT_FEATURES"], key)
     }
+    ocr_api_ai_mode = lookup(lookup(local.production_task_environment, "ocr-api", local.container_environment["ocr-api"]), "OCR_AI_MODE", "")
   }
 }
 

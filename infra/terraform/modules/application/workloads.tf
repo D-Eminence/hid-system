@@ -93,6 +93,9 @@ locals {
   # from paper records into typed items. No other workload receives it.
   anthropic_enabled       = var.enable_ai && var.ai_generation_provider == "anthropic"
   anthropic_key_workloads = toset(concat(["ehr-api"], var.ocr_ai_us_processing_approved ? ["ocr-worker"] : []))
+  # ocr-api mirrors the worker's reading mode so it can tell when a failed
+  # reading may be reused; it never calls Claude and gets no key.
+  ocr_ai_mode = local.anthropic_enabled && contains(local.anthropic_key_workloads, "ocr-worker") ? "claude" : "off"
   anthropic_secret_specs = local.anthropic_enabled ? [
     { name = "ANTHROPIC_API_KEY", arn = var.anthropic_secret_arn, key = var.anthropic_secret_json_key }
   ] : []
@@ -345,6 +348,7 @@ locals {
       EHR_SERVICE_IDENTITY_MODE      = "jwt"
       LAB_SERVICE_IDENTITY_MODE      = "jwt"
       PHARMACY_SERVICE_IDENTITY_MODE = "jwt"
+      OCR_AI_MODE                    = local.ocr_ai_mode
     })
 
     outreach-api = merge(local.common_api_environment, local.workload_token_files.outreach-api, {
@@ -396,7 +400,7 @@ locals {
       AWS_REGION                               = var.aws_region
       S3_FORCE_PATH_STYLE                      = "false"
       OCR_TEXTRACT_FEATURES                    = "text"
-      OCR_AI_MODE                              = local.anthropic_enabled && contains(local.anthropic_key_workloads, "ocr-worker") ? "claude" : "off"
+      OCR_AI_MODE                              = local.ocr_ai_mode
       OCR_AI_US_PROCESSING_APPROVED            = tostring(local.anthropic_enabled && contains(local.anthropic_key_workloads, "ocr-worker"))
     }
 
