@@ -95,7 +95,10 @@ Each claimed job runs, in order:
    `cited_lines_no_box`, `not_on_cited_line`, `area_too_large`,
    `side_overflow`, `covers_uncited_line`, `uncited_share`, `not_anchored`).
    The counts per code (`droppedByReason`, summing to `droppedUngrounded`, for
-   the reading each page ended with) go in the `ocr.job.completed` log only,
+   the reading each page ended with, plus `heading` and `duplicate_of_order`
+   for the items the last step leaves out, which are not ungrounded and not
+   in `droppedUngrounded`; see "Cleanups of 2026-11-10") go in the
+   `ocr.job.completed` log only,
    never in the payload or provenance. The same log carries, codes and counts only,
    `hardPages` (hard pages sent for best-guess readings), `hardPageReads`
    (best-guess requests sent, two per page), `hardPageAgreement`
@@ -185,7 +188,7 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-11` (version 3 for this routing, 4 since picture
+   is `hid-paper-reading-prompt-12` (version 3 for this routing, 4 since picture
    items on hard lines whose scanned text is nonsense are kept, 5 since hard
    pages get two best-guess readings, 6 since hard pages use the brand,
    diagnosis and lab test lists and read handwritten signs, 7 since those
@@ -195,7 +198,9 @@ Each claimed job runs, in order:
    time and cost bounds"), 10 since rule J asks for all of a read's zooms
    in one turn (see "Zooms in one turn"), 11 since a hard read that has
    not answered in time is sent one answer-only turn (see "A hard read
-   always ends with an answer"); the text prompt and request bodies are unchanged
+   always ends with an answer"), 12 since the cleanups of 2026-11-10 (one
+   other option per field, two items for two drugs, headings and repeated
+   orders left out; see "Cleanups of 2026-11-10"); the text prompt and request bodies are unchanged
    from version 2, and the label is only recorded), so `ocr-api` never reuses
    a reading made under older rules.
 
@@ -521,6 +526,131 @@ Each claimed job runs, in order:
      2026-11-06 about 10:16 UTC; target style only, not ground truth) as
      model answers in our schema with the clean text we show.
    - *Logs.* Unchanged: codes and counts only, never item text.
+   - **Cleanups of 2026-11-10** (coordinator and owner, about 20:30 UTC,
+     after the first live run with #201 to #204, job 656c9cf3: 70 s, about
+     $0.45 a page, 13 items, close to the owner's chat transcripts; one line
+     read "sc? (or IV?) Omeprazole? (or Enoxaparin?) 40mg? (or IM? cr…
+     (Pentazocine?) 30mg?) 8hrly?"). `PROMPT_VERSION` 12, hard-page prompt
+     `-12` / `-12-no-zoom`. Everything else is as before. Decisions and rules:
+     - *One other option per field* (`hard-page.ts` `alternatives`,
+       `mergeAsWritten`, `limitAlternatives`). A field shows at most one
+       `(or X?)`, and an option never holds one itself. Read A's own reading
+       comes first (read A chosen as before); the option is the strongest of
+       one pool: the other read's reading, the other read's own option (a
+       look-alike, the model's own strength or `(or X?)`) and read A's own
+       option, ranked, in this order, by read from the letters before from
+       context (that read's basis for the field), on its list before not
+       (drug list for a drug name, diagnosis or lab list for those names, the
+       frequency codes), then the other read's before read A's own, then
+       closest to read A's reading by its letters (edit distance), ties in
+       the order offered (deterministic). So read A's own option is shown
+       only where it is stronger by letters or list than everything the
+       other read offers, or where the other read offers nothing different. In `asWritten` a read's own `(or X?)` stays
+       with the word it follows; where the reads differ on that word one
+       option is chosen the same way; where they differ on a stretch of
+       unequal length the other read's words are the one option and the
+       reads' own options in it are left out; the other read's crossed-out
+       writing is written after the option, never inside it. Every shown text
+       is then guarded: an option straight after another is left out, an
+       option inside one is taken out of it. Nothing that changes safety is
+       silently lost: the item keeps `readings_disagree` and goes to a person
+       (`check_carefully`); two different drugs are never an option left out
+       but two items (below); a difference in what to do with an order still
+       makes its status unknown; and the options left out are counted in the
+       completion log (`hardPageAgreement.alternativesDropped`, a count only,
+       never text; no payload change). The dropped option itself is not
+       stored anywhere (the payload contract is unchanged).
+     - *Two drugs, two items* (`sameDrug`, `splitPair`). Where two items
+       paired by place are medicines whose reads name different drugs, they
+       are two items, one per read, each with its own fields, `asWritten` and
+       crossed-out writing (never fields mixed across reads), both on the
+       lines and box of the two together, both `check_carefully` with
+       `readings_disagree` (not `single_reading_only`), the read with more
+       read from the letters first, each drug name marked "?". Same drug:
+       both names on the drug list with the same generic (a brand and its
+       generic, two spellings the list matches); two unlisted names, or a
+       listed and an unlisted one, only when their letters match exactly
+       (no fuzzy match: "Fictomycin" / "Fictomicin" split, since a wrong
+       split only shows a second `check_carefully` line and a wrong merge
+       mixes two drugs' fields). Hyphens and other separators split words,
+       and a joined vitamin is read spaced ("VitaminK", "Vit-K", "VitB12"),
+       so "Vitamin C" / "Vitamin-K", "Vit B1" / "Vit B6" and "Ca-gluconate" /
+       "K gluconate" split. Form, route and release words ("Inj", "Tab",
+       "IV", "retard", "SR", "XR") are left out of a name's identity, "Vit"
+       is read as "Vitamin", and a short list of ward abbreviations is read
+       as its generic for this rule only (Vitamin K, PCM, MgSO4, Mg
+       sulphate, Ca gluconate, KCl; never shown or respelled), so "Vit K" /
+       "Vitamin K", "MgSO4" / "Magnesium sulphate" and "Nifedipine" /
+       "Nifedipine retard" are one item. An abbreviation is matched as the
+       whole name only ("KCl 10%" / "KCl" split).
+       Except that a real unlisted look-alike
+       of a listed name (`UNLISTED_LOOKALIKES`, or one letter from one:
+       "Quinidine" / "Quinine", "Arteether" / "Artemether") is a different
+       drug and splits; a word cut
+       short ("cr… (Pentazocine?)") by its bracketed guess, or by its letters
+       starting the other name. A name that says nothing (blank, `[drug?]`,
+       `[?]`) never splits. A read's own `(or X?)` on the name does not
+       count: its first reading does. Counted as `drugSplits`.
+     - *Headings are not items* (two layers). Rule A of the hard-page prompt
+       now says page headings, section titles and form labels ("Treatment
+       sheet", "Immediate management", "Plan") are not items and are left
+       out, the writing under them listed. The first-pass and ordinary image
+       prompts are unchanged: they ask only for clinically relevant items and
+       have not been seen to give headings, and the text-only request is
+       pinned by hash. Then, on every page however it was read, a
+       whole-phrase filter (`tidy.ts` `isHeadingNote`, applied in
+       `reader.ts` after each page's reading is final; re-review of
+       2026-11-10 replaced the earlier word lists, which dropped "→ Renal
+       unit", "Admission: medical unit", "Plan: medical unit" and "→
+       Accident & Emergency"). A `note` only (never a medicine, diagnosis,
+       lab result, allergy or vital) is left out only if its whole text,
+       with the reading marks "?" and "(? on paper)" and case off, is
+       exactly a form title: an optional prefix (`HEADING_PREFIXES`:
+       trauma, trauma surgery, surgery, surgical, general surgery, medical,
+       medicine, internal medicine, paediatric(s), pediatric(s),
+       obstetric(s), gynae, gynaecology, gynecology, emergency) and then one
+       title (`HEADING_TITLES`: treatment sheet, drug chart, medication
+       chart, prescription chart, fluid chart, observation chart, progress
+       notes, clinical notes, case notes, doctor's notes, nursing notes,
+       immediate management), or exactly "plan", "management" or
+       "treatment" with nothing else (`HEADING_ALONE`; never after a
+       prefix: "Medical management", "Surgical management" are plans). The
+       text may hold only letters, spaces, apostrophes and those marks: a
+       colon, an arrow (→, ->, =>, >), a slash, a digit, a bracket or any
+       other symbol keeps it. Nothing else is a heading: "Transfer to the
+       ward", "Admit?", "Plan: theatre", "For theatre", "ICU", "Surgery",
+       "Observation", "Investigations", "Medical unit", "Fluids", "Accident &
+       Emergency", "Ward notes" stay. When in doubt the note is kept: a kept
+       heading costs one Keep/Change tap, a dropped plan is a safety loss.
+       Counted as `droppedByReason.heading`.
+     - *No repeated order* (`tidy.ts` `duplicatesOrder`). A note that only
+       repeats a medicine's stop ("DC? Gentamicin?" beside the medicine "Dc
+       Gentamicin", status stopped) is left out and the medicine kept, only
+       if all hold: (1) the medicine's status is stopped (its status alone,
+       never a stop word in its writing) and the two share a cited line or
+       their boxes overlap by half the smaller; (2) the note (and its note
+       text), marks off, is exactly one stop cue (`STOP_CUES`: dc, d/c,
+       stop, stopped, discontinue, discontinued, off) and a drug name, in
+       either order, with nothing else (letters, spaces and a hyphen inside
+       the name only); (3) that name, its words joined, is the same drug as
+       the medicine's live name (the name field without any bracketed
+       group: never its crossed-out writing or an "(or …)" option): both
+       found by `matchDrugName` with the same generic and the note's name
+       as many words as a listed name of it ("Stop IV gentamicin" stays),
+       else, for an unlisted name, the same whole name once normalised; (4)
+       where the medicine is a combination, the note names the whole
+       combination, never a part. Kept (re-review of 2026-11-10): "Stop
+       artemether" beside Coartem, "Stop sodium" beside sodium valproate,
+       "Stop ceftriaxone" beside "Gentamicin (crossed out: Ceftriaxone)",
+       "Gentamicin?" alone, "Continue gentamicin", a stop note beside a
+       medicine of status new or unknown, a stop note on another line.
+       Counted as `droppedByReason.duplicate_of_order`.
+     - *Fixture.* Owner transcript rows changed only where these rules
+       apply: the two-drug row (`Cefuroxime` / `Ceftriaxone`) is now two
+       items; the heading rows ("Immediate? Management?", "Treatment?
+       Sheet?") are left out by the tidy step (`cleanups.spec.ts`); every
+       other row is as it was. `cleanups.spec.ts` also holds a fictional
+       reconstruction of the live run's line.
 
    - *Which pages.* A hard page is a page the first pass flagged
      `handwriting` or `low_confidence` whose re-read goes with its picture
@@ -536,9 +666,12 @@ Each claimed job runs, in order:
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `high` since the owner's
      decision of 2026-11-10, `max` before; Claude Opus 5.5 accepts `low` to
      `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-11` when
-     the reads are offered zoom, else `hid-paper-reading-hard-page-prompt-11-no-zoom`,
-     the same text without rule J, which is the `-7` text; `-11` adds the
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-12` when
+     the reads are offered zoom, else `hid-paper-reading-hard-page-prompt-12-no-zoom`,
+     the same text without rule J; `-12` and `-12-no-zoom` add rule A's
+     sentence leaving headings out (see "Cleanups of 2026-11-10") to the
+     `-11` and `-11-no-zoom` texts, which were the `-10` and `-7` texts;
+     `-11` adds the
      answer-only turn of "A hard read always ends with an answer" to the
      `-10` text, unchanged, and `-11-no-zoom` to the `-7` text, recorded as
      `-7` before; `-9` until the one-turn zoom wording of

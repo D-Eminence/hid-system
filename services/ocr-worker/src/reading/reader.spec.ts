@@ -51,7 +51,7 @@ describe('PaperReadingService', () => {
     expect(calls.map((call) => call.model)).toEqual(['claude-sonnet-5-5']);
     expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
     expect(payload.reading).toMatchObject({ status: 'read', firstPassModel: 'claude-sonnet-5-5', rereadModel: null,
-      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-11' });
+      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-12' });
     expect(payload.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', folderNumberAsWritten: 'TEST-0001' });
     expect(payload.items[0]).toMatchObject({ kind: 'diagnosis', readBy: 'first_pass', confidence: 'clear' });
     expect(summary).toMatchObject({ requests: 1, inferenceGeo: 'us', servedInferenceGeo: 'us' });
@@ -205,6 +205,23 @@ describe('PaperReadingService', () => {
     expect(twice.summary.droppedByReason).toEqual({ text_not_on_line: 1 });
     expect(Object.values(twice.summary.droppedByReason).reduce((sum, count) => sum + count, 0))
       .toBe(twice.summary.droppedUngrounded);
+  });
+
+  it('leaves headings out of every page\'s reading, counting them by code only (cleanup of 2026-11-10)', async () => {
+    const page = readPage(1, ['Name: Test Patient Adaeze Example  Folder: TEST-0001', 'TREATMENT SHEET',
+      'Dx: Hypertension', 'Transfer to the ward']);
+    const answer = modelPage([...clearPage.items.map((item) => ({ ...item, lineIds: ['p1-l3'] })),
+      modelItem({ kind: 'note', asWritten: 'TREATMENT SHEET', lineIds: ['p1-l2'], noteText: 'TREATMENT SHEET' }),
+      modelItem({ kind: 'note', asWritten: 'Transfer to the ward', lineIds: ['p1-l4'], noteText: 'Transfer to the ward' })],
+    { identity: clearPage.identity });
+    const { client } = fakeClient(() => ok(answer));
+    const { payload, summary } = await new PaperReadingService(config, client).read(input([page]), signal());
+    expect(payload.items.map((item) => item.asWritten)).toEqual(['Hypertension', 'Transfer to the ward']);
+    expect(summary.droppedByReason).toEqual({ heading: 1 });
+    expect(summary.droppedUngrounded).toBe(0);
+    expect(summary.droppedByReasonFirstPass).toEqual({});
+    expect(JSON.stringify(summary.droppedByReason)).not.toMatch(/TREATMENT|SHEET/i);
+    expect(paperReadingPayloadSchema.safeParse(payload).success).toBe(true);
   });
 
   it('masks NIN-like and phone numbers before sending, and restores them in what is stored', async () => {
@@ -893,7 +910,7 @@ describe('PaperReadingService', () => {
       expect(payload.items.filter((item) => item.readBy === 'first_pass').map((item) => item.asWritten))
         .toEqual(['Pyrmthmn 25 rng od', 'Hypertension']);
       expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
-      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-11');
+      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-12');
       // The configured effort is used when given; a printed page below REVIEW_BELOW (low_confidence) is hard too.
       const faint = readPage(1, [['Pyrmthmn 25 rng od', { confidence: 0.5 }], 'Dx: Hypertension']);
       const xhigh = hardClient(() => ok(best('Pyrimethamine')));
@@ -926,20 +943,31 @@ describe('PaperReadingService', () => {
       }
     });
 
-    it('shows a disagreeing name and dose as "A? (or B?)", listed or not (owner decision 2026-11-06)', async () => {
-      const { client } = hardClient((call) => ok(call === 0 ? best('Pyrimethamine') : best('Primaquine', '15')));
+    it('shows a disagreeing dose as "A? (or B?)", and two different drugs as two items, listed or not', async () => {
+      const { client } = hardClient((call) => ok(call === 0 ? best('Pyrimethamine') : best('Pyrimethamine', '15')));
       const { payload, summary } = await read(hardConfig, client);
       const medicine = payload.items.find((item) => item.kind === 'medicine')!;
-      // Primaquine is not on the list: shown as read, as the second option; nothing becomes "[?]" for disagreeing.
-      expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine? (or Primaquine?)', strength: '25mg? (or 15mg?)' });
-      expect(medicine.plain).toBe('Pyrimethamine? (or Primaquine?) 25mg? (or 15mg?) od');
+      expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '25mg? (or 15mg?)' });
+      expect(medicine.plain).toBe('Pyrimethamine? 25mg? (or 15mg?) od');
       expect(medicine).toMatchObject({ confidence: 'check_carefully' });
       expect(medicine.checkReasons).toContain('readings_disagree');
       expect(summary.hardPageAgreement.fieldsAgreed).toBeLessThan(summary.hardPageAgreement.fieldsCompared);
-      const listed = hardClient((call) => ok(call === 0 ? best('Pyrimethamine') : best('Proguanil')));
-      const both = await read(hardConfig, listed.client);
-      expect(both.payload.items.find((item) => item.kind === 'medicine')!.fields)
-        .toMatchObject({ name: 'Pyrimethamine? (or Proguanil?)', strength: '25mg' });
+      // Different drugs (cleanup of 2026-11-10), Primaquine not on the list and Proguanil on it: one item per reading,
+      // each with its own fields, nothing becoming "[?]" for disagreeing.
+      for (const [other, dose] of [['Primaquine', '15'], ['Proguanil', '25']] as const) {
+        const split = hardClient((call) => ok(call === 0 ? best('Pyrimethamine') : best(other, dose)));
+        const both = await read(hardConfig, split.client);
+        const medicines = both.payload.items.filter((item) => item.kind === 'medicine');
+        expect(medicines.map((item) => item.fields)).toEqual([
+          expect.objectContaining({ name: 'Pyrimethamine?', strength: '25mg' }),
+          expect.objectContaining({ name: `${other}?`, strength: `${dose}mg` })]);
+        for (const item of medicines) {
+          expect(item).toMatchObject({ confidence: 'check_carefully' });
+          expect(item.checkReasons).toContain('readings_disagree');
+          expect(item.checkReasons).not.toContain('single_reading_only');
+        }
+        expect(both.summary.hardPageAgreement).toMatchObject({ drugSplits: 1, itemsPaired: 0 });
+      }
     });
 
     it('uses the other reading alone when one fails or declines, saying so on every item', async () => {
@@ -1146,7 +1174,8 @@ describe('PaperReadingService', () => {
           ok(modelPage([])));
         const { payload, summary } = await read(hardConfig, client);
         expect(summary).toMatchObject({ itemCount: 0, firstPassItemCount: 0, rereadFailedPages: 1, imageRereadFailedPages: [1],
-          hardPageAgreement: { fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 0 } });
+          hardPageAgreement: { fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 0, drugSplits: 0,
+            alternativesDropped: 0 } });
         expect(summary.hardPageReadUsage.map((entry) => entry.failure)).toEqual(['max_tokens', 'max_tokens']);
         // Since the last resort (README "Last resort") the page is sent one ordinary image re-read; here it answers
         // with items that have no box, so it keeps nothing and the page is still clearly failed.

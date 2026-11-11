@@ -234,23 +234,27 @@ describe('two readings of a hard page', () => {
     expect(check.items[0]!.checkReasons).toContain('readings_disagree');
   });
 
-  it('shows "A? (or B?)" for a drug name the two readings disagree on', () => {
+  it('shows two different drugs the readings name as two items, one per reading (cleanup of 2026-11-10)', () => {
+    // Before: one item, "Metronidazole? (or Tinidazole?) 400 mg tds".
     const { check, agreement } = merge(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]),
       modelPage([medicine(1, 'Tinidazole', '400', 'mg', 'tds')]));
-    const item = check.items[0]!;
-    expect(fieldsOf(item).name).toBe('Metronidazole? (or Tinidazole?)');
-    expect(item.checkReasons).toContain('readings_disagree');
-    expect(item.checkReason).toBe('Two readings of the picture disagree on part of this; check it against the paper.');
-    expect(item.asWritten).toBe('Metronidazole? (or Tinidazole?) 400 mg tds');
-    expect(item.plain).toBe('Metronidazole? (or Tinidazole?) 400 mg tds (three times a day)');
-    expect(agreement.fieldsAgreed).toBe(agreement.fieldsCompared - 1);
+    expect(check.items.map((item) => [fieldsOf(item).name, item.plain])).toEqual([
+      ['Metronidazole?', 'Metronidazole? 400 mg tds (three times a day)'],
+      ['Tinidazole?', 'Tinidazole? 400 mg tds (three times a day)']]);
+    for (const item of check.items) {
+      expect(item.checkReasons).toContain('readings_disagree');
+      expect(item.checkReasons).not.toContain('single_reading_only');
+      expect(item.checkReason).toBe('Two readings of the picture disagree on part of this; check it against the paper.');
+      expect(item.lineIds).toEqual(['p1-l1']);
+    }
+    expect(agreement).toMatchObject({ itemsPaired: 0, itemsSingle: 0, drugSplits: 1, fieldsCompared: 0 });
   });
 
-  it('shows an unlisted name the other reading gave as the other option, never "[?]" for disagreeing', () => {
+  it('shows an unlisted name the other reading gave as its own item, never "[?]" for disagreeing', () => {
     const { check } = merge(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]),
       modelPage([medicine(1, 'Metrofictional', '400', 'mg', 'tds')]));
-    expect(fieldsOf(check.items[0]!).name).toBe('Metronidazole? (or Metrofictional?)');
-    expect(check.items[0]!.checkReasons).toContain('readings_disagree');
+    expect(check.items.map((item) => fieldsOf(item).name)).toEqual(['Metronidazole?', 'Metrofictional?']);
+    expect(check.items.every((item) => item.checkReasons.includes('readings_disagree'))).toBe(true);
   });
 
   it('shows two doses, units, routes or frequencies as "A? (or B?)" (owner decision 2026-11-06)', () => {
@@ -269,16 +273,15 @@ describe('two readings of a hard page', () => {
 
   it('chooses read A deterministically: the reading whose basis for the field is letters, else the first', () => {
     const letters = medicine(1, 'Metronidazole', '500', 'mg', 'tds');
-    const guessed = medicine(1, 'Tinidazole', '250', 'mg', 'tds', { basis: { name: 'context', dose: 'context' } });
+    const guessed = medicine(1, 'Metronidazole', '250', 'mg', 'bd', { basis: { frequency: 'context', dose: 'context' } });
     for (const order of [[letters, guessed], [guessed, letters]]) {
       const { check } = merge(...order.map((item) => modelPage([item])));
       // The guess from what is usual is only ever the second option, whichever reading it came from.
-      expect(fieldsOf(check.items[0]!)).toMatchObject({ name: 'Metronidazole? (or Tinidazole?)',
-        strength: '500mg? (or 250mg?)' });
+      expect(fieldsOf(check.items[0]!)).toMatchObject({ frequency: 'tds? (or bd?)', strength: '500mg? (or 250mg?)' });
     }
     // Both from the letters: the first reading leads.
-    const { check } = merge(modelPage([medicine(1, 'Tinidazole', '250', 'mg', 'tds')]), modelPage([letters]));
-    expect(fieldsOf(check.items[0]!)).toMatchObject({ name: 'Tinidazole? (or Metronidazole?)', strength: '250mg? (or 500mg?)' });
+    const { check } = merge(modelPage([medicine(1, 'Metronidazole', '250', 'mg', 'bd')]), modelPage([letters]));
+    expect(fieldsOf(check.items[0]!)).toMatchObject({ frequency: 'bd? (or tds?)', strength: '250mg? (or 500mg?)' });
   });
 
   it('keeps an item only one reading found, when it holds to the page, saying so', () => {
@@ -422,7 +425,8 @@ describe('two readings of a hard page', () => {
     const { check, agreement } = mergeHardReadings([reading(modelPage([medicine(1, 'Metronidazole', '400', 'mg',
       'tds')]))], SOURCE_SHA);
     expect(check.items.every((item) => item.checkReasons.includes('single_reading_only'))).toBe(true);
-    expect(agreement).toEqual({ fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 1 });
+    expect(agreement).toEqual({ fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 1, drugSplits: 0,
+      alternativesDropped: 0 });
   });
 
   it('marks a field filled from context, and says so first among the best-guess reasons', () => {
@@ -441,12 +445,14 @@ describe('two readings of a hard page', () => {
     // The letters say pyrimethamine (rarely prescribed); one reading fell back on what is usual (paracetamol).
     const read = medicine(2, 'Pyrimethamine', '25', 'mg', 'od');
     const usual = medicine(2, 'Paracetamol', '25', 'mg', 'od', { basis: { name: 'context' } });
+    // Two different drugs (cleanup of 2026-11-10): one item per reading, the letters' first, whichever reading it was.
     for (const answers of [[read, usual], [usual, read]]) {
       const { check } = merge(...answers.map((item) => modelPage([item])));
-      expect(fieldsOf(check.items[0]!).name).toBe('Pyrimethamine? (or Paracetamol?)');
+      expect(check.items.map((item) => fieldsOf(item).name)).toEqual(['Pyrimethamine?', 'Paracetamol?']);
     }
     const { check } = merge(modelPage([read]), modelPage([usual]));
-    const item = check.items[0]!;
+    expect(check.items[0]!.checkReasons).not.toContain('field_from_context');
+    const item = check.items[1]!;
     expect(item.checkReasons).toEqual(expect.arrayContaining(['readings_disagree', 'field_from_context',
       'best_guess_from_picture']));
     // The real disagreement is said first.
@@ -550,15 +556,21 @@ describe('diagnosis and lab test names on a hard page, grounded after the readin
 });
 
 describe('hard-page prompt versions', () => {
+  const HEADING_SENTENCE = ' Page headings, section titles and form labels (such as "Treatment sheet", "Immediate '
+    + 'management" or "Plan") are not items: leave them out, as you would printed form text, and list the writing under '
+    + 'them.';
   const lines = [{ id: 'p1-l1', text: 'Amoxil 500mg', confidence: 0.4, handwritten: true,
     box: { left: 0.1, top: 0.2, width: 0.4, height: 0.05 } }, { id: 'p1-l2', text: 'x', confidence: 0.4, handwritten: true, box: null }];
   const size = { width: 800, height: 1000 };
 
-  it('sends the version 7 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
-    // Pinned from the version 7 prompt (the clean reading of 2026-11-06, with partial words and placeholders); a change here needs a new version.
-    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-11-no-zoom');
-    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-11');
+  it('sends the version 12 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
+    // Pinned from the version 12 prompt (rule A leaves headings out, cleanup of 2026-11-10); a change here needs a new
+    // version. Without rule A's heading sentence it is the version 7 to 11 text, byte for byte (its old pin).
+    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-12-no-zoom');
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-12');
     expect(createHash('sha256').update(hardPageMessage(1, lines, size, 0)).digest('hex'))
+      .toBe('ead67796708ff1035a20057838b2b7006419d19c1884d02e8ac5dd82915d9318');
+    expect(createHash('sha256').update(hardPageMessage(1, lines, size, 0).replace(HEADING_SENTENCE, '')).digest('hex'))
       .toBe('7feb2c96cc86bf7d67c5394249ed21269f0bb9803b7fd7f9d5a45f035c77ce07');
     expect(hardPageMessage(1, lines, size)).toBe(hardPageMessage(1, lines, size, 0));
     expect(hardPageMessage(1, lines, size, 0)).not.toContain('zoom');
@@ -587,10 +599,18 @@ describe('hard-page prompt versions', () => {
     expect(withZoom.length - plain.length).toBe(rule.length + 2);
   });
 
-  it('keeps the prompt versions consistent: zoom 11, no zoom 11-no-zoom, reading 11', () => {
-    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-11');
-    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-11-no-zoom');
-    expect(PROMPT_VERSION).toBe('hid-paper-reading-prompt-11');
+  it('asks in rule A for headings, section titles and form labels to be left out (hard-page prompt 12)', () => {
+    for (const zoomCalls of [0, 4]) expect(hardPageMessage(1, lines, size, zoomCalls)).toContain(HEADING_SENTENCE);
+    // Only the hard-page request: the first pass and the ordinary image re-read are unchanged.
+    expect(SYSTEM_PROMPT).not.toContain('headings');
+    expect(imagePageMessage(1, lines, size)).not.toContain('headings');
+    expect(pageMessage(1, lines)).not.toContain('headings');
+  });
+
+  it('keeps the prompt versions consistent: zoom 12, no zoom 12-no-zoom, reading 12', () => {
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-12');
+    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-12-no-zoom');
+    expect(PROMPT_VERSION).toBe('hid-paper-reading-prompt-12');
   });
 });
 

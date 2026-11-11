@@ -51,9 +51,16 @@ import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './s
  * after its zoom calls ran out included) is sent one answer-only turn with a new user message (claude.client.ts
  * FORCED_ANSWER_INSTRUCTION, or FORCED_ANSWER_INSTRUCTION_NO_ZOOM for a read never offered zoom;
  * HARD_PAGE_PROMPT_VERSION 11; coordinator 2026-11-10 after job 566c38bf). A reading made the older way is not reused.
- * The text-only request and the ordinary image re-read request are byte for byte unchanged.
+ * The text-only request and the ordinary image re-read request are byte for byte unchanged. Version 12 (coordinator and
+ * owner cleanups of 2026-11-10, about 20:30 UTC, after the first live run with versions 11): the hard-page rule A asks
+ * for page headings, section titles and form labels to be left out (HARD_PAGE_PROMPT_VERSION 12, and 12-no-zoom), and
+ * the reading changes in code: at most one other option per field, two items where a hard page's two readings name
+ * different drugs, and headings and notes repeating an order left out of every page (hard-page.ts, tidy.ts). A
+ * reading made the older way is not reused. SYSTEM_PROMPT, the text-only request and the ordinary image re-read
+ * request are byte for byte unchanged (the first pass is not seen to give headings as items, and its request is
+ * pinned by hash).
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-11';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-12';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -94,17 +101,21 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * read that has not answered when its tokens or time run short, or whose turn stopped without an answer, is sent one
  * answer-only turn: claude.client.ts FORCED_ANSWER_INSTRUCTION as a new user message (the -11-no-zoom reads:
  * FORCED_ANSWER_INSTRUCTION_NO_ZOOM, without the sentence about the zoom tool), the zoom tool not offered, at low
- * effort (README "A hard read always ends with an answer").
+ * effort (README "A hard read always ends with an answer"). Version 12 (coordinator and owner cleanups of 2026-11-10,
+ * about 20:30 UTC): rule A adds that page headings, section titles and form labels ("Treatment sheet", "Immediate
+ * management", "Plan") are not items and are left out, the writing under them listed; the text without rule J
+ * changes the same way (12-no-zoom, new hash pin). Everything else is the version 11 text.
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-11';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-12';
 /**
  * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
  * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
- * calls, which is the version 8 (and 9, 10 and 11) text without rule J (pinned by hash in hard-page.spec.ts), and,
- * since version 11, the same answer-only turn as with zoom when the read's tokens or time run short or its turn
- * stops without an answer (it was 'hid-paper-reading-hard-page-prompt-7' before).
+ * calls, which is the version 12 text without rule J (pinned by hash in hard-page.spec.ts; the version 8 to 11 text
+ * without rule J before rule A's heading sentence), and, since version 11, the same answer-only turn as with zoom when
+ * the read's tokens or time run short or its turn stops without an answer (it was
+ * 'hid-paper-reading-hard-page-prompt-7' before, then '-11-no-zoom').
  */
-export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-11-no-zoom';
+export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-12-no-zoom';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -480,8 +491,10 @@ you would read it out to a colleague: your best guess for every word, marked whe
 
 A. Read the page line by line from the picture, top to bottom, and list every item written on it, including \
 instructions and plans written in words (such as "Transfer to the ward", "Review in 2 days" or "Switch to IV \
-Ceftriaxone 1g"): an order for a medicine is a "medicine", any other instruction or plan is a "note". Read each item \
-from the picture itself, not from the line text below: on hard handwriting that text may be wrong or nonsense.
+Ceftriaxone 1g"): an order for a medicine is a "medicine", any other instruction or plan is a "note". Page \
+headings, section titles and form labels (such as "Treatment sheet", "Immediate management" or "Plan") are not \
+items: leave them out, as you would printed form text, and list the writing under them. Read each item from the \
+picture itself, not from the line text below: on hard handwriting that text may be wrong or nonsense.
 
 B. "asWritten" is the item as you read it in the picture, word for word in the order written, with its spelling \
 and abbreviations. Give your best guess for every word and number, and put "?" straight after each one you are not \
