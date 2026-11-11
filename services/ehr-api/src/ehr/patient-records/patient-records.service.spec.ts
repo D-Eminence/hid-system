@@ -34,6 +34,14 @@ describe('Owning EHR patient and emergency read boundary', () => {
     expect(query.mock.calls[1]?.[0]).toContain("n.status in ('signed','amended')");
     expect(recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ actorType: 'patient', outcome: 'success' }));
   });
+
+  it('hides an empty "Imported paper records" encounter from the patient and labels it (0113)', async () => {
+    const { service, query } = setup();
+    await service.self(request);
+    expect(query.mock.calls[0]?.[0]).toContain(
+      'and (not imported_paper_records or ehr.imported_paper_records_signed(id,patient_id,facility_id))');
+    expect(query.mock.calls[0]?.[0]).toContain('imported_paper_records as "importedPaperRecords"');
+  });
   it('denies altered patient mapping before opening an EHR transaction', async () => {
     const { service, authorizeSelf, transaction } = setup();
     authorizeSelf.mockResolvedValue({ ...actor, patientId: 'other-patient' });

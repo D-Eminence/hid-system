@@ -14,18 +14,30 @@ export function clinicalContext(request: HidRequest): DataAccessContext {
 
 /**
  * The patient record outside the encounter routes: imported records and
- * attachments, the reported health profile and the OCR note import. Any
- * purpose but healthcare-operations, so emergency reads stay as they are. A
+ * attachments and the reported health profile. Any purpose but
+ * healthcare-operations, so emergency reads stay as they are. A
  * records-processing grant (healthcare-operations, 0104) lets OCR read the
  * documents it turns into the digital record (the document routes and the
- * OCR source route keep taking it); it never opens the chart, and OCR
- * publishes into the chart under direct care only.
+ * OCR source route keep taking it); it never opens the chart. The OCR note
+ * import takes ocrImportContext instead (0113: a draft under the dedicated
+ * grant).
  */
 export function patientRecordContext(request: HidRequest): DataAccessContext {
   if (request.header('x-purpose-of-use') === 'healthcare-operations') {
     throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED',
       'X-Purpose-Of-Use must be direct-care or emergency for the patient record');
   }
+  return requireRequestContext(request);
+}
+
+/**
+ * The OCR note import (0113, owner decision of 2026-11-11): direct care and
+ * emergency as patientRecordContext, and also healthcare-operations, under
+ * which ClinicalNotesService.createImportedFromOcr requires the patient's
+ * dedicated records-processing grant (identity.records_processing_write_grant)
+ * and writes only a draft note into the "Imported paper records" encounter.
+ */
+export function ocrImportContext(request: HidRequest): DataAccessContext {
   return requireRequestContext(request);
 }
 

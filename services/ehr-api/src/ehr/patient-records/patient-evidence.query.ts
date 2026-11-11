@@ -96,6 +96,13 @@ export function evidenceQuery(audience: EvidenceAudience): string {
     return replaceOnce(q, SELECT, SELECT_WITH_PATIENT);
   }
   if (audience !== 'patient') throw new Error('Unknown evidence audience');
+  // Encounters: the "Imported paper records" encounter (0113) only once it
+  // holds a signed note (the patient-self policy requires it too), and named
+  // as such. The staff query is left exactly as it was (golden).
+  q = replaceOnce(q, "'Encounter: '||e.encounter_type,",
+    "case when e.imported_paper_records then 'Imported paper records (Migrate)' else 'Encounter: '||e.encounter_type end,");
+  q = replaceOnce(q, "from ehr.encounters e where e.status='completed'",
+    "from ehr.encounters e where e.status='completed' and (not e.imported_paper_records or ehr.imported_paper_records_signed(e.id,e.patient_id,e.facility_id))");
   // Notes: only from a completed visit (withdrawn and unfinished visits are left out).
   q = replaceOnce(q, "jsonb_build_object('_encounterId',n.encounter_id,'noteType'", "jsonb_build_object('_encounterId',n.encounter_id,'_encounterStatus',e.status,'noteType'");
   q = replaceOnce(q, 'from ehr.clinical_notes n join ehr.clinical_note_revisions r', `from ehr.clinical_notes n ${completedEncounter('n')} join ehr.clinical_note_revisions r`);
