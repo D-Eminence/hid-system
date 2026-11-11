@@ -43,7 +43,7 @@ select set_config('hid.test.control_owner_bypasses_rls',
      join pg_roles role_row on role_row.oid = proc.proowner
     where proc.oid = 'platform.control_enabled(text)'::regprocedure), true);
 
--- 1. The table: eleven keys (0114 added outreach_organiser_signup_enabled), the seeds, forced row-level security.
+-- 1. The table: eleven keys (0115 added outreach_organiser_signup_enabled), the seeds, forced row-level security.
 do $$
 declare violated text; seed record;
 begin
@@ -56,7 +56,7 @@ begin
        'cross_facility_route_access_enabled', 'maintenance_mode', 'outreach_organiser_signup_enabled',
        'outreach_portal_enabled', 'patient_portal_enabled', 'provider_portal_enabled', 'provider_self_service_enabled',
        'staff_invitations_enabled', 'uploads_enabled'] then
-    raise exception 'control_settings_control_key_check does not list exactly the eleven keys (0114 added outreach_organiser_signup_enabled)';
+    raise exception 'control_settings_control_key_check does not list exactly the eleven keys (0115 added outreach_organiser_signup_enabled)';
   end if;
   if (select count(*) from pg_constraint constraint_row
        where constraint_row.conrelid = 'platform.control_settings'::regclass and constraint_row.contype = 'c'

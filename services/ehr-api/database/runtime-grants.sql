@@ -1462,12 +1462,12 @@ revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public
 -- No grant changes: the Outreach runtime still has no UPDATE on
 -- outreach.campaign_members, so it can neither update nor lock a membership.
 revoke all on function outreach.validate_registration_campaign_write() from public;
--- Outreach organisers (0114), as that migration grants them: the public
+-- Outreach organisers (0115), as that migration grants them: the public
 -- sign-up, the signed-in "Start an outreach group", outreach invitations and
 -- support's organiser commands to the Identity runtime; the consent rows, the
 -- organiser status and the support/retention run check (which the outreach
 -- policies call as the querying role) to the Outreach runtime. Everything
--- else 0114 adds is owner-only.
+-- else 0115 adds is owner-only.
 revoke all on function
   identity.outreach_organiser_terms_version(), identity.outreach_group_name_allowed(text),
   identity.outreach_text_valid(text,integer,integer), identity.outreach_email_valid(text),
@@ -1517,15 +1517,17 @@ grant execute on function
 grant select, insert on outreach.registration_consents to hid_outreach_runtime;
 grant execute on function outreach.privileged_run_active(text), outreach.organiser_status() to hid_outreach_runtime;
 grant execute on function outreach.privileged_run_active(text) to hid_schema_test_runtime;
--- Outreach retention (0115): the sweeper and support's redaction on request
--- to the Identity runtime only, never the Outreach runtime.
+-- Outreach retention (0116): the sweeper, and support's search and redaction on
+-- request, to the Identity runtime only, never the Outreach runtime.
 revoke all on function outreach.stamp_campaign_closed_at(), outreach.registration_retain_until(outreach.campaigns),
   outreach.guard_command_idempotency_mutation(), outreach.redact_registration_case(uuid,text,text,uuid),
-  identity.sweep_expired_outreach_registrations(integer), identity.admin_redact_outreach_registration(uuid,text)
+  identity.sweep_expired_outreach_registrations(integer), identity.admin_redact_outreach_registration(uuid,text),
+  identity.admin_find_outreach_registrations(uuid,text,text), outreach.registration_phone_key(text)
   from public;
 revoke all on outreach.registration_redactions from public;
 grant execute on function identity.sweep_expired_outreach_registrations(integer),
-  identity.admin_redact_outreach_registration(uuid,text) to hid_identity_runtime;
+  identity.admin_redact_outreach_registration(uuid,text), identity.admin_find_outreach_registrations(uuid,text,text)
+  to hid_identity_runtime;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.

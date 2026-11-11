@@ -1,15 +1,16 @@
--- 0115 Outreach retention: registrations an outreach group collected and
+-- 0116 Outreach retention: registrations an outreach group collected and
 -- that were never linked to a Health ID are kept 1 year, then redacted (plan
 -- "Open sign-up on outreach.", PR-2; owner decision 3 of 11 Nov 2026). Must
 -- be live before the sign-up control is switched on. Written as 0126;
--- numbered 0115 on 2026-11-11, directly after 0114 (outreach organisers).
+-- numbered 0115 on 2026-11-11, then 0116 the same day in the release plan,
+-- directly after 0115 (outreach organisers).
 --
 -- WHAT IT DOES
 -- 1. outreach.campaigns gains closed_at, stamped by the trigger
 --    outreach_campaign_closed_at whenever a campaign becomes closed (cleared
 --    if it is opened again); nobody can set it directly.
 --    outreach.registration_retain_until(campaign): closed_at + 365 days or,
---    for a campaign closed before 0115, the time it was last changed + 365
+--    for a campaign closed before 0116, the time it was last changed + 365
 --    days; starts_at + 365 days if the campaign is not closed.
 -- 2. Redaction. A redacted registration keeps its sex, age, campaign,
 --    status, dates and temporary ID (so counts stay right); its full_name
@@ -19,7 +20,7 @@
 --    outreach.registration_redactions records it, and an audit row. Only a
 --    registration of an outreach group that was never linked (status
 --    identity_resolution_pending) is redacted.
---    Redaction runs inside a "retention run" (0114's outreach.privileged_runs,
+--    Redaction runs inside a "retention run" (0115's outreach.privileged_runs,
 --    a row for the current transaction that only these commands write). The
 --    replaced trigger bodies and the policies below allow exactly that change
 --    inside a retention run and nothing else:
@@ -47,9 +48,18 @@
 --      on a person's request (helpline, voice call or message), with
 --      platform.admin.access, platform.facility.manage and
 --      platform.facility.unlock.
+--    - identity.admin_find_outreach_registrations(organization, temporary
+--      ID, phone): support's search before that deletion, with the same
+--      permissions. Exactly one of the temporary ID (tmp_ and a UUID) and the
+--      phone number (7 or more digits; +234 and a leading 0 compare alike,
+--      outreach.registration_phone_key). It answers where and when each
+--      matching registration of that outreach group was made and whether its
+--      details are already deleted, never the person's name, phone number or
+--      notes, at most 20 rows; its audit row records the group, which of the
+--      two was given and how many matched, never the value.
 --
 -- PRECONDITIONS (catalog reads only; 55000 or 42501, nothing applied):
--- 0114 applied (outreach.privileged_run_active(text) is the marker); not
+-- 0115 applied (outreach.privileged_run_active(text) is the marker); not
 -- applied yet; the two replaced bodies as 0024 and 0110 left them; the
 -- no-mutation trigger on outreach.command_idempotency calls
 -- platform.reject_mutation(); the restrictive registration policies as 0045
@@ -67,22 +77,22 @@ declare
 begin
   if to_regprocedure('outreach.privileged_run_active(text)') is null
      or to_regclass('outreach.registration_consents') is null then
-    raise exception using errcode = '55000', message = '0115: 0114 must be applied first';
+    raise exception using errcode = '55000', message = '0116: 0115 must be applied first';
   end if;
   if to_regclass('outreach.registration_redactions') is not null then
-    raise exception using errcode = '55000', message = '0115: already applied';
+    raise exception using errcode = '55000', message = '0116: already applied';
   end if;
   if (select md5(proc.prosrc) from pg_proc proc where proc.oid = 'outreach.validate_registration_case_write()'::regprocedure)
        is distinct from 'a12d2b2573c5c7e52bcb5a8cdb1ec190'
      or (select md5(proc.prosrc) from pg_proc proc where proc.oid = 'outreach.validate_registration_campaign_write()'::regprocedure)
        is distinct from '69469315f04554d2639dfa9f83591d4d' then
-    raise exception using errcode = '55000', message = '0115: the registration triggers are not as 0024 and 0110 left them';
+    raise exception using errcode = '55000', message = '0116: the registration triggers are not as 0024 and 0110 left them';
   end if;
   if not exists (select 1 from pg_trigger trigger_row
                   where trigger_row.tgrelid = 'outreach.command_idempotency'::regclass
                     and trigger_row.tgname = 'outreach_command_idempotency_no_mutation'
                     and trigger_row.tgfoid = 'platform.reject_mutation()'::regprocedure) then
-    raise exception using errcode = '55000', message = '0115: outreach.command_idempotency is not as 0024 left it';
+    raise exception using errcode = '55000', message = '0116: outreach.command_idempotency is not as 0024 left it';
   end if;
   if (select count(*) from pg_policy policy_row
        where policy_row.polrelid = 'outreach.registration_cases'::regclass and not policy_row.polpermissive
@@ -94,13 +104,13 @@ begin
                    = 'outreach.registration_campaign_member(campaign_id, facility_id)'
                and pg_get_expr(policy_row.polwithcheck, policy_row.polrelid)
                    = 'outreach.registration_campaign_member(campaign_id, facility_id)'))) <> 2 then
-    raise exception using errcode = '55000', message = '0115: the registration policies are not as 0045 made them';
+    raise exception using errcode = '55000', message = '0116: the registration policies are not as 0045 made them';
   end if;
   if not pg_has_role(current_user, outreach_owner, 'SET')
      or exists (select 1 from pg_proc proc where proc.oid in ('outreach.validate_registration_case_write()'::regprocedure,
                   'outreach.validate_registration_campaign_write()'::regprocedure) and proc.proowner <> outreach_owner) then
     raise exception using errcode = '42501', message = format(
-      '0115: the applier (%s) must be able to SET ROLE to the outreach tables'' owner (%s), which owns the triggers',
+      '0116: the applier (%s) must be able to SET ROLE to the outreach tables'' owner (%s), which owns the triggers',
       current_user, pg_get_userbyid(outreach_owner));
   end if;
   loop
@@ -113,7 +123,7 @@ begin
     exception when lock_not_available then
       if attempt >= 500 then
         raise exception using errcode = '55P03',
-          message = '0115: the outreach tables stayed busy for 5 seconds; run the release again later';
+          message = '0116: the outreach tables stayed busy for 5 seconds; run the release again later';
       end if;
       perform pg_sleep(0.01);
     end;
@@ -124,7 +134,7 @@ $$;
 -- 1. When a campaign closed.
 alter table outreach.campaigns add column closed_at timestamptz;
 comment on column outreach.campaigns.closed_at is
-  '0115: when the campaign last became closed (null while it is not closed); stamped by outreach_campaign_closed_at, never written by a caller.';
+  '0116: when the campaign last became closed (null while it is not closed); stamped by outreach_campaign_closed_at, never written by a caller.';
 create function outreach.stamp_campaign_closed_at()
 returns trigger language plpgsql
 set search_path = pg_catalog, pg_temp
@@ -188,7 +198,7 @@ declare
   actor_membership uuid := platform.current_membership_id();
   actor_facility uuid := platform.current_facility_id();
 begin
-  -- 0115: a retention run redacts an unlinked registration and nothing else.
+  -- 0116: a retention run redacts an unlinked registration and nothing else.
   if tg_op = 'UPDATE' and outreach.privileged_run_active('retention') then
     if old.status is distinct from 'identity_resolution_pending'
        or new.status is distinct from old.status
@@ -274,7 +284,7 @@ begin
       message = 'Outreach registration campaign association cannot be overwritten';
   end if;
   if new.campaign_id is null then return new; end if;
-  -- 0115: validate_registration_case_write checks the redaction itself.
+  -- 0116: validate_registration_case_write checks the redaction itself.
   if tg_op = 'UPDATE' and outreach.privileged_run_active('retention') then return new; end if;
 
   -- The campaign row lock serializes capture with a campaign status change.
@@ -489,7 +499,73 @@ begin
 end
 $$;
 
--- Ownership, as 0114.
+-- 3c. Support's search before a deletion at a person's request (see the
+-- header). Read inside a retention run, so the registrations of an outreach
+-- group (forced row-level security) can be read here and nowhere else.
+create function outreach.registration_phone_key(phone text)
+returns text language sql immutable set search_path = pg_catalog
+as $$
+  select case
+    when digits is null or length(digits) < 7 then null
+    when length(digits) = 14 and digits like '2340%' then substr(digits, 4)
+    when length(digits) = 13 and digits like '234%' then '0' || substr(digits, 4)
+    when length(digits) = 10 and digits !~ '^0' then '0' || digits
+    else digits end
+  from (select nullif(regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g'), '') as digits) given
+$$;
+revoke all on function outreach.registration_phone_key(text) from public;
+
+create function identity.admin_find_outreach_registrations(target_organization_id uuid,
+  requested_temporary_patient_id text, requested_phone text)
+returns table (case_id uuid, group_name text, campaign_name text, temporary_patient_id text,
+  created_at timestamptz, redacted boolean)
+language plpgsql security definer
+set search_path = pg_catalog, identity, outreach, audit, platform, pg_temp
+as $$
+#variable_conflict use_column
+declare
+  actor_account uuid := identity.outreach_support_actor(true);
+  wanted_id text := lower(btrim(requested_temporary_patient_id));
+  wanted_phone text := outreach.registration_phone_key(requested_phone);
+  group_facility uuid;
+  group_display_name text;
+  matched integer := 0;
+begin
+  if target_organization_id is null
+     or (requested_temporary_patient_id is null) = (requested_phone is null)
+     or (requested_temporary_patient_id is not null
+         and wanted_id !~ '^tmp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+     or (requested_phone is not null and wanted_phone is null) then
+    raise exception using errcode = '22023', message = 'OUTREACH_REGISTRATION_LOOKUP_INVALID';
+  end if;
+  select organisation.facility_id, organisation.display_name into group_facility, group_display_name
+    from identity.outreach_organisations organisation
+   where organisation.organization_id = target_organization_id;
+  if group_facility is not null then
+    perform outreach.begin_privileged_run('retention');
+    return query
+      select case_row.id, group_display_name, campaign.name, case_row.temporary_patient_id, case_row.created_at,
+             exists (select 1 from outreach.registration_redactions redaction
+                      where redaction.registration_case_id = case_row.id)
+        from outreach.registration_cases case_row
+        left join outreach.campaigns campaign
+          on campaign.id = case_row.campaign_id and campaign.facility_id = case_row.facility_id
+       where case_row.facility_id = group_facility
+         and case when wanted_id is not null then lower(case_row.temporary_patient_id) = wanted_id
+                  else outreach.registration_phone_key(case_row.phone) = wanted_phone end
+       order by case_row.created_at desc, case_row.id
+       limit 20;
+    get diagnostics matched = row_count;
+    perform outreach.end_privileged_run();
+  end if;
+  perform identity.outreach_support_audit(actor_account, target_organization_id, group_facility,
+    'admin.outreach-registrations.search', 'outreach-organisation', target_organization_id::text, null,
+    jsonb_build_object('lookup', case when wanted_id is not null then 'temporaryPatientId' else 'phone' end,
+      'matches', matched));
+end
+$$;
+
+-- Ownership, as 0115.
 do $$
 declare
   outreach_owner name := pg_get_userbyid((select relowner from pg_class where oid = 'outreach.campaigns'::regclass));
@@ -514,13 +590,15 @@ $$;
 -- Grants (here and in runtime-grants.sql).
 revoke all on function outreach.stamp_campaign_closed_at(), outreach.registration_retain_until(outreach.campaigns),
   outreach.guard_command_idempotency_mutation(),
-  identity.sweep_expired_outreach_registrations(integer), identity.admin_redact_outreach_registration(uuid,text)
+  identity.sweep_expired_outreach_registrations(integer), identity.admin_redact_outreach_registration(uuid,text),
+  identity.admin_find_outreach_registrations(uuid,text,text)
   from public;
 do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'hid_identity_runtime') then
     grant execute on function identity.sweep_expired_outreach_registrations(integer),
-      identity.admin_redact_outreach_registration(uuid,text) to hid_identity_runtime;
+      identity.admin_redact_outreach_registration(uuid,text),
+      identity.admin_find_outreach_registrations(uuid,text,text) to hid_identity_runtime;
   end if;
 end
 $$;
@@ -542,12 +620,14 @@ begin
     mismatch := 'the retention policies';
   elsif exists (select 1 from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
                  where proc.oid in ('identity.sweep_expired_outreach_registrations(integer)'::regprocedure,
-                   'identity.admin_redact_outreach_registration(uuid,text)'::regprocedure)
+                   'identity.admin_redact_outreach_registration(uuid,text)'::regprocedure,
+                   'identity.admin_find_outreach_registrations(uuid,text,text)'::regprocedure,
+                   'outreach.registration_phone_key(text)'::regprocedure)
                    and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) in ('hid_outreach_runtime', 'hid_outreach_api_runtime'))) then
     mismatch := 'the retention commands are executable by PUBLIC or the Outreach runtime';
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0115: not as this file makes it: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0116: not as this file makes it: %s', mismatch);
   end if;
 end
 $$;

@@ -211,9 +211,9 @@ end $$;
 
 -- Case 4: a campaign-linked Outreach registration share-locks its campaign,
 -- which passes only a campaign UPDATE policy: 0038's (outreach.campaign.write)
--- or, since 0114, outreach_campaigns_member_lock (a member of the campaign who
+-- or, since 0115, outreach_campaigns_member_lock (a member of the campaign who
 -- holds outreach.registration.write). A role that may register without
--- campaign.write needs that policy; outreach_volunteer (0114) is the only one.
+-- campaign.write needs that policy; outreach_volunteer (0115) is the only one.
 do $$
 declare missing text := (
   select string_agg(registration.role_code, ', ' order by registration.role_code)

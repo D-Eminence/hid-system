@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Outreach retention (0115): an outreach group's registrations never linked to
+-- Outreach retention (0116): an outreach group's registrations never linked to
 -- a Health ID are kept 1 year (closed_at + 365 days, or starts_at + 365 days
 -- for a campaign never closed), then redacted by the sweeper; support redacts
 -- one on request. Rollback-only. Fictional people and places only.
@@ -18,15 +18,18 @@ begin
      or to_regprocedure('identity.sweep_expired_outreach_registrations(integer)') is null
      or has_function_privilege('hid_outreach_api_runtime', 'identity.sweep_expired_outreach_registrations(integer)', 'EXECUTE')
      or has_function_privilege('hid_outreach_api_runtime', 'identity.admin_redact_outreach_registration(uuid,text)', 'EXECUTE')
+     or to_regprocedure('identity.admin_find_outreach_registrations(uuid,text,text)') is null
+     or has_function_privilege('hid_outreach_api_runtime', 'identity.admin_find_outreach_registrations(uuid,text,text)', 'EXECUTE')
+     or not has_function_privilege('hid_identity_api_runtime', 'identity.admin_find_outreach_registrations(uuid,text,text)', 'EXECUTE')
      or has_table_privilege('hid_outreach_api_runtime', 'outreach.privileged_runs', 'INSERT') then
-    raise exception 'the retention objects are not as 0115 makes them';
+    raise exception 'the retention objects are not as 0116 makes them';
   end if;
 end $$;
 
 -- Fixtures. Outreach group G (0f00...02, active) with organiser O (n=1);
 -- hospital H (0f00...12) with doctor D (n=2); support S (n=3).
 -- Campaigns at G: 1 closed 400 days ago; 2 closed 10 days ago; 3 active,
--- started 400 days ago; 4 closed before 0115 (no closed_at), last changed 400
+-- started 400 days ago; 4 closed before 0116 (no closed_at), last changed 400
 -- days ago; 5 active, started yesterday. Campaign 6 at H closed 400 days ago.
 -- One unlinked registration in each (cases 1-6), with a guardian's name and
 -- an idempotency record.
@@ -243,6 +246,80 @@ select pg_temp.rt_case('4f the request is recorded with who asked', '2 request 0
   session_user::text, null, null, null, null,
   $s$select right(registration_case_id::text, 1) || ' ' || kind || ' ' || requested_by_account_id
        from outreach.registration_redactions where kind = 'request'$s$);
+
+-- 4g-4r. Support's search before a deletion: by the group and the temporary ID
+-- or phone number the person gives; where and when only. The registrations'
+-- temporary IDs are random, so each statement is written around the one read
+-- here (as the superuser).
+create temporary table rt_ids on commit drop as
+  select right(id::text, 1)::integer as n, temporary_patient_id from outreach.registration_cases
+   where id::text like '0f080000-0000-4000-8000-00000000000_';
+select pg_temp.support('4g support finds a registration by its temporary ID, in any case and with spaces round it',
+  'Retention Test Group / Retention Campaign 5 / f / t', 'synthetic:rt-support',
+  (select format($q$select case_row.group_name || ' / ' || case_row.campaign_name || ' / ' || case_row.redacted::text::char
+      || ' / ' || (case_row.temporary_patient_id = %L)::text::char
+      from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', %L, null) case_row$q$,
+      temporary_patient_id, '  ' || upper(temporary_patient_id) || ' ') from rt_ids where n = 5));
+select pg_temp.support('4h by the phone number as the person says it (0800 000 0005)',
+  'Retention Test Group / Retention Campaign 5 / f / t', 'synthetic:rt-support',
+  (select format($q$select case_row.group_name || ' / ' || case_row.campaign_name || ' / ' || case_row.redacted::text::char
+      || ' / ' || (case_row.temporary_patient_id = %L)::text::char
+      from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', null, '0800 000 0005') case_row$q$,
+      temporary_patient_id) from rt_ids where n = 5));
+select pg_temp.support('4i the same number typed with +234 or without the leading 0', '5 | 5',
+  'synthetic:rt-support',
+  $s$select right(case_id::text, 1) from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', null, '+234 800 000 0005')
+     union all select right(case_id::text, 1) from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', null, '800-000-0005')$s$);
+select pg_temp.support('4j a registration whose details are deleted is found by its ID as deleted, and no longer by its phone',
+  't | none', 'synthetic:rt-support',
+  (select format($q$select coalesce((select redacted::text::char from identity.admin_find_outreach_registrations(
+        '0f000000-0000-4000-8000-000000000001', %L, null)), 'none')
+     union all select coalesce((select right(case_id::text, 1) from identity.admin_find_outreach_registrations(
+        '0f000000-0000-4000-8000-000000000001', null, '08000000002')), 'none')$q$, temporary_patient_id) from rt_ids where n = 2));
+select pg_temp.support('4k a hospital''s registration is never found through an outreach group, by ID or phone', 'none',
+  'synthetic:rt-support',
+  (select format($q$select right(case_id::text, 1) from identity.admin_find_outreach_registrations(
+        '0f000000-0000-4000-8000-000000000001', %L, null)
+     union all select right(case_id::text, 1) from identity.admin_find_outreach_registrations(
+        '0f000000-0000-4000-8000-000000000001', null, '08000000006')
+     union all select right(case_id::text, 1) from identity.admin_find_outreach_registrations(
+        '0f000000-0000-4000-8000-000000000011', null, '08000000006')$q$, temporary_patient_id) from rt_ids where n = 6));
+select pg_temp.support('4l an organization that is not an outreach group has nothing to find', 'none', 'synthetic:rt-support',
+  $s$select right(case_id::text, 1) from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-0000000000ff', null, '08000000005')$s$);
+select pg_temp.support('4m exactly one of the temporary ID and the phone number: neither', '22023: OUTREACH_REGISTRATION_LOOKUP_INVALID',
+  'synthetic:rt-support',
+  $s$select case_id from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', null, null)$s$, false);
+select pg_temp.support('4n exactly one of the temporary ID and the phone number: both', '22023: OUTREACH_REGISTRATION_LOOKUP_INVALID',
+  'synthetic:rt-support',
+  $s$select case_id from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001',
+      'tmp_0f000000-0000-4000-8000-000000000001', '08000000005')$s$, false);
+select pg_temp.support('4o a temporary ID that is not one', '22023: OUTREACH_REGISTRATION_LOOKUP_INVALID',
+  'synthetic:rt-support',
+  $s$select case_id from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', 'tmp_005', null)$s$, false);
+select pg_temp.support('4o2 a phone number too short to tell people apart', '22023: OUTREACH_REGISTRATION_LOOKUP_INVALID',
+  'synthetic:rt-support',
+  $s$select case_id from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', null, '0800 00')$s$, false);
+select pg_temp.support('4p a doctor cannot use support''s search', '42501: ADMIN_PERMISSION_DENIED', 'synthetic:rt-doctor',
+  $s$select case_id from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', null, '08000000005')$s$, false);
+select pg_temp.rt_case('4q the Outreach runtime cannot run the search',
+  '42501: permission denied for function admin_find_outreach_registrations', 'hid_outreach_api_runtime',
+  'synthetic:rt-organiser', '0f000000-0000-4000-8000-000000000002', '0f030000-0000-4000-8000-000000000001', 'direct-care',
+  $s$select case_id from identity.admin_find_outreach_registrations('0f000000-0000-4000-8000-000000000001', null, '08000000005')$s$);
+select pg_temp.rt_case('4r each search is audited with the group, which of the two was given and how many matched, never the value',
+  'temporaryPatientId 1 | phone 1 | phone 1 | phone 1 | temporaryPatientId 1 | phone 0 | temporaryPatientId 0 | phone 0 | phone 0 | phone 0 | no value recorded',
+  session_user::text, null, null, null, null,
+  $s$select * from (select details ->> 'lookup' || ' ' || (details ->> 'matches') from audit.events
+       where action = 'admin.outreach-registrations.search' and correlation_id = 'outreach-retention-suite'
+       order by occurred_at, sequence_id) searches
+     union all select case when exists (select 1 from audit.events event, pg_temp.rt_ids ids
+       where event.action = 'admin.outreach-registrations.search'
+         and (event.details::text ilike '%' || ids.temporary_patient_id || '%' or event.details::text ilike '%tmp%'
+              or regexp_replace(event.details::text, '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '', 'g')
+                 ~ '[0-9]{3}'
+              or event.reason is not null or coalesce(event.resource_id, '') ilike '%tmp%'))
+       then 'a value was recorded' else 'no value recorded' end$s$);
+select pg_temp.rt_case('4s no retention run is left behind by a search', '0', session_user::text, null, null, null, null,
+  'select count(*)::text from outreach.privileged_runs');
 
 -- 5. closed_at is stamped, never written by a caller.
 select pg_temp.organiser('5a the admin closes a campaign, trying to back-date closed_at', 'rows 1',

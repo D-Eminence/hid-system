@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Outreach organisers (0114): public sign-up, the signed-in "Start an
+-- Outreach organisers (0115): public sign-up, the signed-in "Start an
 -- outreach group", the role fence, campaigns going Active with no Health ID
 -- check (owner decision "Q38 no check", 2026-11-11), consent, outreach
 -- invitations, suspension and support's campaign rescue.
@@ -21,7 +21,7 @@
 -- outcome differs.
 begin;
 
--- 1. The objects as 0114 makes them.
+-- 1. The objects as 0115 makes them.
 do $$
 begin
   if to_regclass('identity.outreach_organisations') is null
@@ -30,7 +30,7 @@ begin
      or not exists (select 1 from auth.roles where code = 'outreach_organiser')
      or exists (select 1 from auth.role_permissions where role_code in ('outreach_organiser', 'outreach_volunteer')
                  and permission_code not like 'outreach.%') then
-    raise exception 'the outreach organiser objects are not as 0114 makes them';
+    raise exception 'the outreach organiser objects are not as 0115 makes them';
   end if;
 end $$;
 
@@ -455,7 +455,7 @@ select pg_temp.os_case('7g the helper holds outreach_volunteer only', 'outreach_
 select pg_temp.staff_case('7h a helper cannot invite', '42501: OUTREACH_ORGANISER_PERMISSION_DENIED',
   pg_temp.subject_of('acct3'), pg_temp.invite('inv3', 'Someone Else', 'someone@example.invalid'), false, 'query',
   pg_temp.id('fac1'), pg_temp.id('mem3'));
--- A helper registers into a campaign they are a member of (0114's member-lock
+-- A helper registers into a campaign they are a member of (0115's member-lock
 -- policy lets their FOR SHARE through) but cannot create or change campaigns.
 select pg_temp.outreach_case('7p the organiser adds the helper to the campaign', 'ok',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
