@@ -10,7 +10,7 @@ import { PATIENT_EVIDENCE_QUERY } from './patient-evidence.query';
 import { patientEvidence,type PatientProfileInput } from './patient-evidence.policy';
 import { PatientAttachmentTextService } from './patient-attachment-text.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
-import { evidence,evidenceKey,type Evidence,type EvidenceSnapshot,type EvidenceBinding,type SourceKind } from './patient-evidence.types';
+import { DOCUMENTS_UNAVAILABLE,LAB_UNAVAILABLE,evidence,evidenceKey,type Evidence,type EvidenceSnapshot,type EvidenceBinding,type SourceKind } from './patient-evidence.types';
 
 const iso=(value:unknown):string|null=>value instanceof Date?value.toISOString():typeof value==='string'&&Number.isFinite(Date.parse(value))?new Date(value).toISOString():null;
 @Injectable()
@@ -23,7 +23,7 @@ export class PatientEvidenceService {
     try {await this.attachments.prepare(request,signal);return [];}
     catch(error) {
       if(signal.aborted || (error instanceof DomainProblem && [401,403].includes(error.getStatus())))throw error;
-      return ['Document extraction unavailable; some attachment contents are not included'];
+      return [DOCUMENTS_UNAVAILABLE];
     }
   }
 
@@ -86,7 +86,7 @@ export class PatientEvidenceService {
     } catch(error) {
       if(signal?.aborted)throw error;
       if(error instanceof DomainProblem && error.getStatus()<500 && error.getStatus()!==404)throw error;
-      unavailable.push('Laboratory service unavailable; result coverage is unknown');
+      unavailable.push(LAB_UNAVAILABLE);
       // Do not use a partial, failed multi-page Lab response as a complete history.
       local.records=local.records.filter(r=>r.kind!=='lab_result');
     }
