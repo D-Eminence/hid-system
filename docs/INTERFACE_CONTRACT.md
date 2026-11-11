@@ -3894,8 +3894,10 @@ patient details with the work). Laboratories and pharmacies run as
 stand-alone products for the whole facility, so their staff need the
 patient's name, sex, date of birth and Health ID ending on their own work,
 not only on work sent from another facility. 0121 is unsigned until the
-owner signs its declaration. Sessions working on 0104-0112 add sections
-too, so this section's number is the coordinator's to fix at merge.
+owner signs its declaration. It ships after 0120 (the coordinator's release
+order of 2026-11-11), and its read consent test is the one 0104 left.
+Migrations 0112 to 0120 may add sections too, so this section's number is
+fixed at merge.
 
 Routes (paths, permissions, requests unchanged):
 `GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/:workItemId`
