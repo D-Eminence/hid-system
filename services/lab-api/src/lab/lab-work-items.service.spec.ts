@@ -65,7 +65,8 @@ const harness = (rows: (typeof stored)[], insertError?: Error, later?: { stateme
       if (rows.some((row) => row.source_ehr_order_id === values[4])) {
         throw uniqueViolation('work_items', 'work_items_source_ehr_order_id_key');
       }
-      return { rows: [{ ...stored, source_ehr_order_version: String(values[5]), priority: values[7] }] };
+      return { rows: [{ ...stored, source_ehr_order_version: String(values[5]), priority: values[7],
+        clinical_indication: values[11] ?? null }] };
     }
     if (later?.statement.test(sql)) throw later.error;
     return { rows: [], rowCount: 1 };
@@ -102,8 +103,10 @@ describe('LabWorkItemsService.acceptEhrOrder', () => {
 
   it('replays the same version of the same order without writing', async () => {
     const { service, queries } = harness([stored]);
-    await expect(service.acceptEhrOrder(context, command(1))).resolves.toMatchObject({ id: workItemId,
-      sourceEhrOrderId: orderId, sourceEhrOrderVersion: 1, status: 'accepted' });
+    const answer = await service.acceptEhrOrder(context, command(1));
+    expect(answer).toMatchObject({ id: workItemId, sourceEhrOrderId: orderId, sourceEhrOrderVersion: 1, status: 'accepted' });
+    // The acceptance answer is unchanged: the clinical information is on the work-item reads only.
+    expect(answer).not.toHaveProperty('clinicalIndication');
     expect(inserts(queries)).toEqual([]);
   });
 
@@ -116,7 +119,10 @@ describe('LabWorkItemsService.acceptEhrOrder', () => {
 
   it('accepts a new order, reading it without a lock', async () => {
     const { service, queries } = harness([]);
-    await expect(service.acceptEhrOrder(context, command(1))).resolves.toMatchObject({ sourceEhrOrderVersion: 1 });
+    const answer = await service.acceptEhrOrder(context, command(1));
+    expect(answer).toMatchObject({ sourceEhrOrderVersion: 1 });
+    // The acceptance answer is unchanged: the clinical information is on the work-item reads only.
+    expect(answer).not.toHaveProperty('clinicalIndication');
     expect(inserts(queries).filter((sql) => /insert into lab\.work_items\b/.test(sql))).toHaveLength(1);
     expect(queries.filter((sql) => /\bfor\s+(update|share|no key update|key share)\b/i.test(sql))).toEqual([]);
   });
