@@ -78,7 +78,7 @@ begin
      or position('of campaign, member' in pg_get_functiondef('outreach.validate_registration_campaign_write()'::regprocedure)) > 0
      or (select md5(prosrc) from pg_proc
           where oid = 'outreach.validate_registration_campaign_write()'::regprocedure)
-        <> '737f6d2da8449dd5e8c8aa3575796392' then  -- 0116 (outreach retention) let a redaction through; was 0110's 69469315f04554d2639dfa9f83591d4d
+        <> '8812e9009aed4841b99fae04d5525d7b' then  -- 0116 (outreach retention) let a redaction through; was 0110's 69469315f04554d2639dfa9f83591d4d
     raise exception 'outreach.validate_registration_campaign_write must lock the campaign only (FOR SHARE OF campaign), not the membership';
   end if;
   if (select count(*) from pg_trigger
