@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg';
 import type { OcrWorkerConfig } from './config';
 import type { AiUsageRecord, ClaimedOcrJob, CompletedExtraction, PageAllowance, SafeWorkerFailure, WorkerRepository } from './types';
+import type { SourceDeletionBacklog, SourceDeletionCandidate, SourceDeletionRepository,
+  SourcePurgeResult } from './source-deletion';
 
 interface ClaimRow extends QueryResultRow {
   job_id: string; facility_id: string; document_id: string; patient_id: string | null;
@@ -20,7 +22,11 @@ interface QueueMetricsRow extends QueryResultRow {
   oldest_queue_age_seconds: string;
 }
 
-export class PostgresWorkerRepository implements WorkerRepository {
+interface SourceDeletionRow extends QueryResultRow {
+  document_id: string; facility_id: string; storage_bucket: string; storage_key: string; due_seconds: string;
+}
+
+export class PostgresWorkerRepository implements WorkerRepository, SourceDeletionRepository {
   private readonly pool: Pool;
   constructor(private readonly config: OcrWorkerConfig) {
     const ssl: PoolConfig['ssl'] = config.OCR_WORKER_DATABASE_SSL ? {
@@ -131,6 +137,41 @@ export class PostgresWorkerRepository implements WorkerRepository {
           failure.retryDelaySeconds, job.correlationId]);
     });
   }
+  // Source deletion (migration 0110): the documents due and their counts, and the purge after every S3 version of
+  // the source is gone. Each runs as the worker subject in the round's correlation.
+  async sourceDeletionBacklog(correlationId: string): Promise<SourceDeletionBacklog> {
+    return this.transaction(correlationId, async (client) => {
+      const row = (await client.query<{ due: number; overdue: number }>(
+        'select due, overdue from ocr.worker_source_deletion_backlog()')).rows[0];
+      if (!row || !Number.isSafeInteger(Number(row.due)) || !Number.isSafeInteger(Number(row.overdue))) {
+        throw new Error('OCR source deletion backlog returned an invalid row');
+      }
+      return { due: Number(row.due), overdue: Number(row.overdue) };
+    });
+  }
+
+  async listSourceDeletions(limit: number, correlationId: string): Promise<readonly SourceDeletionCandidate[]> {
+    return this.transaction(correlationId, async (client) => (await client.query<SourceDeletionRow>(
+      `select document_id::text as document_id, facility_id::text as facility_id, storage_bucket, storage_key,
+              due_seconds::text as due_seconds
+         from ocr.list_worker_source_deletions($1)`, [limit])).rows.map((row) => ({
+      documentId: row.document_id, facilityId: row.facility_id, storageBucket: row.storage_bucket,
+      storageKey: row.storage_key, dueSeconds: Number(row.due_seconds) })));
+  }
+
+  async purgeSourceDocument(documentId: string, deletedVersions: number, correlationId: string): Promise<SourcePurgeResult> {
+    return this.transaction(correlationId, async (client) => {
+      const row = (await client.query<{ outcome: string; extractions: number; validations: number; confirmations: number }>(
+        'select outcome, extractions, validations, confirmations from ocr.purge_worker_source_document($1, $2, $3)',
+        [documentId, deletedVersions, correlationId])).rows[0];
+      if (!row || !['deleted', 'already_deleted', 'not_due'].includes(row.outcome)) {
+        throw new Error('OCR source purge returned an invalid row');
+      }
+      return { outcome: row.outcome as SourcePurgeResult['outcome'], extractions: Number(row.extractions),
+        validations: Number(row.validations), confirmations: Number(row.confirmations) };
+    });
+  }
+
   async close(): Promise<void> { await this.pool.end(); }
 
   private async transaction<Result>(correlationId: string, operation: (client: PoolClient) => Promise<Result>): Promise<Result> {

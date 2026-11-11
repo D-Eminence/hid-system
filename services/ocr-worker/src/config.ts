@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 const booleanString = z.enum(['true', 'false']).default('false').transform((value) => value === 'true');
+const booleanStringDefaultTrue = z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
+  z.enum(['true', 'false']).default('true')).transform((value) => value === 'true');
 const optionalString = z.preprocess(
   (value) => typeof value === 'string' && value.trim() === '' ? undefined : value,
   z.string().trim().min(1).optional(),
@@ -49,6 +51,12 @@ const schema = z.object({
   OCR_WORKER_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(300),
   OCR_WORKER_MAX_OBJECT_BYTES: z.coerce.number().int().min(1).max(52_428_800).default(52_428_800),
   OCR_WORKER_API_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
+  // Deletion of the OCR source and its reading 24 hours after the job finished (migration 0110; README "Source
+  // deletion after 24 hours"). 'true' by default: the owner's decision of 2026-11-11 is that the source does not stay;
+  // 'false' stops the sweep (the overdue alarm then sees no data). A round every 60 to 86,400 seconds, 900 by default.
+  OCR_SOURCE_DELETION_ENABLED: booleanStringDefaultTrue,
+  OCR_SOURCE_DELETION_INTERVAL_SECONDS: z.preprocess(emptyToUndefined,
+    z.coerce.number().int().min(60).max(86_400).default(900)),
   OCR_TEXTRACT_POLL_MS: z.coerce.number().int().min(250).max(30_000).default(1_500),
   OCR_TEXTRACT_MAX_POLL_SECONDS: z.coerce.number().int().min(5).max(3_600).default(300),
   AWS_REGION: z.string().trim().min(1).default('eu-west-1'),

@@ -1,0 +1,672 @@
+\set ON_ERROR_STOP on
+-- 0110: deletion of an OCR source and its reading 24 hours after the job
+-- finished. Rollback-only. Every person, facility, document and line of text
+-- here is made up (Test Patient Chidi Example, Deletion Test Clinic A/B,
+-- "Fictional reading line" text, storage keys that name no real object).
+--
+-- Proves, as the exact runtime roles (hid_ocr_worker for the worker
+-- commands, hid_ocr_api_runtime and hid_ehr_api_runtime for the services that
+-- must not reach them), with the session settings each service sets:
+--   - the security properties and EXECUTE grants of the 0110 functions; the
+--     shared reckoning is granted to no role; the worker has no table
+--     privilege on the rows it purges;
+--   - which documents are due: every job finished (awaiting_validation,
+--     validated, rejected, failed, cancelled) and the latest finish at least
+--     24 hours ago; a document with a job still queued, finished less than
+--     24 hours ago, with a publication pending for less than 24 hours, on
+--     legal hold, with no job or not 'uploaded' is not due; a publication
+--     active for more than 24 hours no longer blocks; due_seconds and the
+--     backlog's due and overdue (more than 2 hours) counts;
+--   - only an active ocr_worker subject may list, count or purge; bad input is
+--     refused;
+--   - the purge of a due document: status 'source_deleted', the neutral file
+--     name and the next row_version (no ehr.record_versions row); extractions'
+--     raw_text NULL and structured_payload {}; validations' payloads, fields
+--     and corrections emptied and the neutral reason; confirmations' neutral
+--     reason and no evidence reference; every other column unchanged; job
+--     ids and status, job events, outbox payloads, publications,
+--     ehr.ocr_import_provenance, ocr.page_usage and ocr.ai_usage kept; one
+--     audit row with ids and counts only;
+--   - a document not due is refused ('not_due') and nothing changes;
+--   - idempotency: a second purge changes nothing and writes no audit row; a
+--     row added after the purge is blanked by the next call, with an audit row;
+--   - the append-only triggers: a purge-shaped update of a row whose document
+--     is not 'source_deleted' is refused, also with forged session settings;
+--     any other update or a delete of an evidence row is refused, also on a
+--     purged document; job events and ehr.ocr_import_provenance get no
+--     exception; a runtime role cannot update the evidence tables at all;
+--   - the document guard: a purged document is never changed again; only the
+--     purge's exact change moves a document to 'source_deleted' (not another
+--     shape, not a non-worker session, not a runtime role); an insert with
+--     status 'source_deleted' is refused.
+-- Under an owner that does not bypass row-level security (release checklist
+-- P8) the worker commands see no document (as every OCR worker command sees
+-- no job); the suite then checks the properties and the triggers only.
+begin;
+
+-- Security properties.
+do $$
+declare
+  mismatch text;
+  ocr_owner oid := (select relowner from pg_class where oid = 'ocr.jobs'::regclass);
+begin
+  select string_agg(format('%s: definer=%s config=%s', p.oid::regprocedure, p.prosecdef, p.proconfig), '; ')
+    into mismatch
+    from pg_proc p
+    join (values
+      ('ocr.list_worker_source_deletions(integer)'::regprocedure,
+       '{"search_path=pg_catalog, ocr, auth, platform, pg_temp"}'::text[]),
+      ('ocr.worker_source_deletion_backlog()'::regprocedure,
+       '{"search_path=pg_catalog, ocr, auth, platform, pg_temp"}'::text[]),
+      ('ocr.purge_worker_source_document(uuid,integer,text)'::regprocedure,
+       '{"search_path=pg_catalog, ocr, ehr, audit, auth, platform, pg_temp"}'::text[]))
+      expected(proc, config) on p.oid = expected.proc
+   where not p.prosecdef or p.proconfig is distinct from expected.config or p.proowner <> ocr_owner;
+  if mismatch is not null then
+    raise exception '0110 command security properties differ: %', mismatch;
+  end if;
+  if exists (select 1 from pg_proc where oid = 'ocr.source_deletion_due(uuid)'::regprocedure
+               and (prosecdef or proowner <> ocr_owner)) then
+    raise exception 'ocr.source_deletion_due must be SECURITY INVOKER and the OCR owner''s';
+  end if;
+  select string_agg(format('%s to %s', p.oid::regprocedure, coalesce(grantee.rolname, 'PUBLIC')), '; ')
+    into mismatch
+    from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) privilege
+    left join pg_roles grantee on grantee.oid = privilege.grantee
+   where p.pronamespace = 'ocr'::regnamespace
+     and p.proname in ('source_deletion_due', 'list_worker_source_deletions', 'worker_source_deletion_backlog',
+       'purge_worker_source_document')
+     and privilege.privilege_type = 'EXECUTE' and privilege.grantee <> p.proowner
+     and (p.proname, coalesce(grantee.rolname, 'PUBLIC')) not in (
+       ('list_worker_source_deletions', 'hid_ocr_worker'), ('worker_source_deletion_backlog', 'hid_ocr_worker'),
+       ('purge_worker_source_document', 'hid_ocr_worker'));
+  if mismatch is not null then
+    raise exception 'unexpected EXECUTE grants on the 0110 commands: %', mismatch;
+  end if;
+  if (select count(*) from pg_proc p, aclexplode(p.proacl) privilege
+       where p.pronamespace = 'ocr'::regnamespace and privilege.privilege_type = 'EXECUTE'
+         and privilege.grantee = 'hid_ocr_worker'::regrole
+         and p.proname in ('list_worker_source_deletions', 'worker_source_deletion_backlog',
+           'purge_worker_source_document')) <> 3 then
+    raise exception 'the 0110 EXECUTE grants are incomplete';
+  end if;
+  -- The worker purges only through the command: no privilege on the rows.
+  select string_agg(format('%s %s', privilege, table_name), '; ') into mismatch
+    from unnest(array['ehr.documents', 'ocr.extractions', 'ocr.validations', 'ocr.patient_confirmations',
+                      'ocr.jobs', 'ocr.publications']) table_name
+    cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) privilege
+   where has_table_privilege('hid_ocr_worker', table_name, privilege);
+  if mismatch is not null then
+    raise exception 'hid_ocr_worker has a table privilege: %', mismatch;
+  end if;
+end $$;
+
+-- Fixtures (triggers and references skipped while they are inserted).
+set local session_replication_role = replica;
+insert into identity.organizations (id, name, slug) values
+  ('c0110000-0000-4000-8000-000000000001', 'Deletion Test Organization', 'deletion-test-organization');
+insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status) values
+  ('c0110000-0000-4000-8000-00000000000a', 'c0110000-0000-4000-8000-000000000001', 'Deletion Test Clinic A',
+   'DELETION-A', 'Africa/Lagos', true, 'verified');
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('c0111000-0000-4000-8000-000000000001', 'staff:deletion-doctor', 'deletion-doctor@example.invalid', 'Deletion Doctor', 'active'),
+  ('c0111000-0000-4000-8000-000000000002', 'workload:deletion-worker', null, 'Deletion Worker', 'active'),
+  ('c0111000-0000-4000-8000-000000000003', 'workload:deletion-not-a-worker', null, 'Deletion Not A Worker', 'active');
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
+  ('c0112000-0000-4000-8000-000000000001', 'c0111000-0000-4000-8000-000000000001', 'Deletion Doctor',
+   'deletion-doctor@example.invalid', 'verified', 'doctor');
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+  membership_role, app_role, active) values
+  ('c0113000-0000-4000-8000-000000000001', 'c0112000-0000-4000-8000-000000000001',
+   'c0111000-0000-4000-8000-000000000001', 'c0110000-0000-4000-8000-000000000001',
+   'c0110000-0000-4000-8000-00000000000a', 'doctor', 'doctor', true);
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
+  ('c0114000-0000-4000-8000-000000000001', 'c0111000-0000-4000-8000-000000000001', 'doctor', 'facility',
+   'c0113000-0000-4000-8000-000000000001', 'c0110000-0000-4000-8000-00000000000a', 'Synthetic deletion test');
+insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason) values
+  ('c0114000-0000-4000-8000-000000000002', 'c0111000-0000-4000-8000-000000000002', 'ocr_worker', 'platform',
+   'Synthetic deletion worker');
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, status) values
+  ('c0115000-0000-4000-8000-000000000001', 'HID-DELTST', 'Chidi', 'Example', 'Test Patient Chidi Example', 'active');
+-- Documents (two-digit suffix):
+--   01 one validated job finished 30 h ago, published               -> due, overdue
+--   02 one job awaiting validation, finished 25 h ago                -> due, not overdue
+--   03 one job awaiting validation, finished 23 h ago                -> not due
+--   04 a job failed 30 h ago and a job still queued                  -> not due
+--   05 validated 30 h ago, a publication pending since 10 h ago      -> not due
+--   06 validated 60 h ago, a publication processing since 30 h ago   -> due (the stuck publication no longer blocks)
+--   07 cancelled 30 h ago, on legal hold                              -> not due
+--   08 no OCR job                                                     -> not due
+--   09 rejected 30 h ago, status entered_in_error                     -> not due
+--   10 rejected 30 h ago                                              -> due
+insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
+  storage_bucket, storage_key, object_version_id, declared_media_type, size_bytes, sha256_hex, status,
+  retention_class, legal_hold)
+select ('c0116000-0000-4000-8000-0000000000' || n)::uuid, 'c0115000-0000-4000-8000-000000000001',
+       'c0110000-0000-4000-8000-00000000000a', 'c0111000-0000-4000-8000-000000000001',
+       'c0113000-0000-4000-8000-000000000001', 'Fictional Example scan ' || n || '.pdf', 'synthetic-bucket',
+       'clinical/objects/c0116000-0000-4000-8000-0000000000' || n, 'deletion-v' || n, 'application/pdf', 2048,
+       repeat(right(n, 1), 64), case when n = '09' then 'entered_in_error' else 'uploaded' end, 'clinical_record',
+       n = '07'
+  from unnest(array['01','02','03','04','05','06','07','08','09','10']) n;
+insert into ehr.document_scan_events (document_id, patient_id, facility_id, created_by, event_type,
+  detected_media_type, scanner_engine, scanner_version, idempotency_key, correlation_id, object_version_id,
+  object_sha256_hex)
+select ('c0116000-0000-4000-8000-0000000000' || n)::uuid, 'c0115000-0000-4000-8000-000000000001',
+       'c0110000-0000-4000-8000-00000000000a', 'c0111000-0000-4000-8000-000000000001', 'clean', 'application/pdf',
+       'synthetic-scanner', '1.0', 'deletion-scan-00' || n || 'x', 'deletion-scan', 'deletion-v' || n,
+       repeat(right(n, 1), 64)
+  from unnest(array['01','02','03','04','05','06','07','08','09','10']) n;
+insert into ocr.jobs (id, facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex,
+  idempotency_key, request_sha256, provider, max_attempts, created_by, created_by_membership_id, correlation_id,
+  status, attempt_count, completed_at, failed_at, last_error_code, updated_at, row_version)
+select ('c0117000-0000-4000-8000-0000000000' || job.n)::uuid, 'c0110000-0000-4000-8000-00000000000a',
+       ('c0116000-0000-4000-8000-0000000000' || job.document)::uuid, 'c0115000-0000-4000-8000-000000000001',
+       'deletion-v' || job.document, repeat(right(job.document, 1), 64), 'deletion-fixture-00' || job.n,
+       repeat('e', 64), 'deletion-provider', 3, 'c0111000-0000-4000-8000-000000000001',
+       'c0113000-0000-4000-8000-000000000001', 'deletion-fixture', job.status, 1,
+       case when job.status in ('awaiting_validation', 'validated', 'rejected')
+            then clock_timestamp() - job.age end,
+       case when job.status = 'failed' then clock_timestamp() - job.age end,
+       case when job.status = 'failed' then 'PROVIDER_THROTTLED' end,
+       clock_timestamp() - job.age, 4
+  from (values ('01', '01', 'validated', interval '30 hours'),
+               ('02', '02', 'awaiting_validation', interval '25 hours'),
+               ('03', '03', 'awaiting_validation', interval '23 hours'),
+               ('04', '04', 'failed', interval '30 hours'),
+               ('14', '04', 'queued', interval '30 hours'),
+               ('05', '05', 'validated', interval '30 hours'),
+               ('06', '06', 'validated', interval '60 hours'),
+               ('07', '07', 'cancelled', interval '30 hours'),
+               ('09', '09', 'rejected', interval '30 hours'),
+               ('10', '10', 'rejected', interval '30 hours')) job(n, document, status, age);
+-- Reading and review content of jobs 01 (purged below) and 03 (not due).
+insert into ocr.extractions (id, job_id, facility_id, document_id, patient_id, extraction_version, attempt_no,
+  provider, provider_model, provider_result_key, content_sha256, source_object_version_id, source_sha256_hex,
+  raw_text, structured_payload, confidence, provenance)
+select ('c0118000-0000-4000-8000-0000000000' || n)::uuid, ('c0117000-0000-4000-8000-0000000000' || n)::uuid,
+       'c0110000-0000-4000-8000-00000000000a', ('c0116000-0000-4000-8000-0000000000' || n)::uuid,
+       'c0115000-0000-4000-8000-000000000001', 1, 1, 'deletion-provider', 'synthetic-model',
+       'deletion-result-' || n, repeat('a', 64), 'deletion-v' || n, repeat(right(n, 1), 64),
+       'Fictional reading line for Test Patient Chidi Example',
+       '{"contract":"hid-paper-reading-v2","pages":[{"page":1,"text":"Fictional reading line"}]}'::jsonb, 0.9,
+       '{"processingContract":"hid-textract-v2","pageCount":1,"lineCount":1}'::jsonb
+  from unnest(array['01','03']) n;
+insert into ocr.validations (id, job_id, facility_id, extraction_id, validation_version, validated_payload,
+  corrections, reason, validated_by, validated_by_membership_id, disposition, target_domain, candidate_type,
+  accepted_fields, rejected_fields, provenance, idempotency_key, request_sha256)
+select ('c0119000-0000-4000-8000-0000000000' || n)::uuid, ('c0117000-0000-4000-8000-0000000000' || n)::uuid,
+       'c0110000-0000-4000-8000-00000000000a', ('c0118000-0000-4000-8000-0000000000' || n)::uuid, 1,
+       '{"title":"Fictional clinic visit","content":"Fictional reading line"}'::jsonb,
+       '[{"field":"title","originalValue":"Fictional","correctedValue":"Fictional clinic visit"}]'::jsonb,
+       'Reviewer checked the fictional page', 'c0111000-0000-4000-8000-000000000001',
+       'c0113000-0000-4000-8000-000000000001', 'validated', 'EHR', 'clinical_note',
+       '{"title":"Fictional clinic visit","content":"Fictional reading line"}'::jsonb,
+       '[{"field":"noteType","originalValue":"Fictional note type"}]'::jsonb,
+       '{"source":"human_review"}'::jsonb, 'deletion-validation-' || n || 'xxxxx', repeat('b', 64)
+  from unnest(array['01','03']) n;
+insert into ocr.patient_confirmations (id, job_id, facility_id, patient_id, confirmation_version, method,
+  evidence_reference, reason, confirmed_by, confirmed_by_membership_id, idempotency_key, request_sha256)
+select ('c011a000-0000-4000-8000-0000000000' || n)::uuid, ('c0117000-0000-4000-8000-0000000000' || n)::uuid,
+       'c0110000-0000-4000-8000-00000000000a', 'c0115000-0000-4000-8000-000000000001', 1, 'source_document',
+       'Fictional folder 0000', 'Name on the fictional page matches', 'c0111000-0000-4000-8000-000000000001',
+       'c0113000-0000-4000-8000-000000000001', 'deletion-confirm-' || n || 'xxxxxxx', repeat('c', 64)
+  from unnest(array['01','03']) n;
+-- Publications: 01 published, 05 pending since 10 h ago, 06 processing since 30 h ago.
+insert into ocr.publications (id, job_id, validation_id, validation_version, patient_confirmation_id, facility_id,
+  patient_id, target_domain, target_operation, status, idempotency_key, request_sha256, requested_by,
+  requested_by_membership_id, requested_at, completed_at, target_resource_type, target_resource_id,
+  processing_token, processing_expires_at, correlation_id)
+select ('c011b000-0000-4000-8000-0000000000' || p.n)::uuid, ('c0117000-0000-4000-8000-0000000000' || p.n)::uuid,
+       ('c0119000-0000-4000-8000-0000000000' || p.n)::uuid, 1, ('c011a000-0000-4000-8000-0000000000' || p.n)::uuid,
+       'c0110000-0000-4000-8000-00000000000a', 'c0115000-0000-4000-8000-000000000001', 'EHR',
+       'create_imported_clinical_note', p.status, 'deletion-publication-' || p.n || 'xxx', repeat('d', 64),
+       'c0111000-0000-4000-8000-000000000001', 'c0113000-0000-4000-8000-000000000001',
+       clock_timestamp() - p.age,
+       case when p.status = 'published' then clock_timestamp() - p.age end,
+       case when p.status = 'published' then 'clinical_note' end,
+       case when p.status = 'published' then 'c011c000-0000-4000-8000-000000000001'::uuid end,
+       case when p.status = 'processing' then 'c011d000-0000-4000-8000-000000000006'::uuid end,
+       case when p.status = 'processing' then clock_timestamp() - interval '29 hours' end,
+       'deletion-publication'
+  from (values ('01', 'published', interval '29 hours'), ('05', 'pending', interval '10 hours'),
+               ('06', 'processing', interval '30 hours')) p(n, status, age);
+insert into ehr.ocr_import_provenance (id, clinical_resource_type, clinical_resource_id, facility_id, patient_id,
+  document_id, ocr_job_id, extraction_id, validation_id, validation_version, publication_id, reviewed_by,
+  published_by) values
+  ('c011e000-0000-4000-8000-000000000001', 'clinical_note', 'c011c000-0000-4000-8000-000000000001',
+   'c0110000-0000-4000-8000-00000000000a', 'c0115000-0000-4000-8000-000000000001',
+   'c0116000-0000-4000-8000-000000000001', 'c0117000-0000-4000-8000-000000000001',
+   'c0118000-0000-4000-8000-000000000001', 'c0119000-0000-4000-8000-000000000001', 1,
+   'c011b000-0000-4000-8000-000000000001', 'c0111000-0000-4000-8000-000000000001',
+   'c0111000-0000-4000-8000-000000000001');
+insert into ocr.job_events (job_id, facility_id, from_status, to_status, job_version, correlation_id)
+values ('c0117000-0000-4000-8000-000000000001', 'c0110000-0000-4000-8000-00000000000a', 'awaiting_validation',
+        'validated', 4, 'deletion-fixture');
+insert into ocr.page_usage (job_id, facility_id, usage_month, pages) values
+  ('c0117000-0000-4000-8000-000000000001', 'c0110000-0000-4000-8000-00000000000a',
+   date_trunc('month', clock_timestamp() at time zone 'Africa/Lagos')::date, 2);
+insert into ocr.ai_usage (job_id, attempt_no, model, facility_id, usage_month, requests, input_tokens,
+  output_tokens, cache_read_tokens, cache_write_tokens) values
+  ('c0117000-0000-4000-8000-000000000001', 1, 'claude-synthetic-model', 'c0110000-0000-4000-8000-00000000000a',
+   date_trunc('month', clock_timestamp() at time zone 'Africa/Lagos')::date, 2, 100, 50, 0, 0);
+set local session_replication_role = origin;
+
+-- What the fixtures looked like, to compare against after the purge.
+create temporary table deletion_before on commit drop as
+  select 'extraction' as kind, to_jsonb(row_value) - array['raw_text', 'structured_payload'] as kept
+    from ocr.extractions row_value where id = 'c0118000-0000-4000-8000-000000000001'
+  union all
+  select 'validation', to_jsonb(row_value) - array['validated_payload', 'accepted_fields', 'rejected_fields',
+           'corrections', 'reason']
+    from ocr.validations row_value where id = 'c0119000-0000-4000-8000-000000000001'
+  union all
+  select 'confirmation', to_jsonb(row_value) - array['reason', 'evidence_reference']
+    from ocr.patient_confirmations row_value where id = 'c011a000-0000-4000-8000-000000000001'
+  union all
+  select 'document', to_jsonb(row_value) - array['status', 'original_file_name', 'row_version', 'updated_at']
+    from ehr.documents row_value where id = 'c0116000-0000-4000-8000-000000000001'
+  union all
+  select 'document-version', jsonb_build_object('row_version', row_version)
+    from ehr.documents where id = 'c0116000-0000-4000-8000-000000000001'
+  union all
+  select 'job', to_jsonb(row_value) from ocr.jobs row_value where id = 'c0117000-0000-4000-8000-000000000001'
+  union all
+  select 'publication', to_jsonb(row_value) from ocr.publications row_value
+   where id = 'c011b000-0000-4000-8000-000000000001'
+  union all
+  select 'provenance', to_jsonb(row_value) from ehr.ocr_import_provenance row_value
+   where id = 'c011e000-0000-4000-8000-000000000001'
+  union all
+  select 'job-events', jsonb_agg(to_jsonb(row_value) order by row_value.id) from ocr.job_events row_value
+   where job_id = 'c0117000-0000-4000-8000-000000000001'
+  union all
+  select 'usage', jsonb_build_object(
+      'pages', (select jsonb_agg(to_jsonb(page_row)) from ocr.page_usage page_row
+                 where job_id = 'c0117000-0000-4000-8000-000000000001'),
+      'ai', (select jsonb_agg(to_jsonb(ai_row)) from ocr.ai_usage ai_row
+              where job_id = 'c0117000-0000-4000-8000-000000000001'))
+  union all
+  select 'record-versions', jsonb_build_object('count', count(*)) from ehr.record_versions
+   where resource_id = 'c0116000-0000-4000-8000-000000000001';
+
+-- Can the commands' owner see the fixture documents? Not under a non-bypass
+-- owner (release checklist P8).
+do $$
+declare
+  owner_role name := (select pg_get_userbyid(relowner) from pg_class where oid = 'ocr.jobs'::regclass);
+  visible boolean;
+begin
+  execute format('set local role %I', owner_role);
+  visible := exists (select 1 from ehr.documents where id = 'c0116000-0000-4000-8000-000000000001');
+  reset role;
+  perform set_config('ocr_deletion.owner_sees', visible::text, true);
+end $$;
+
+create temporary table deletion_cases (seq serial, name text, expected text, actual text) on commit drop;
+grant insert, select on deletion_cases to public;
+grant usage on sequence deletion_cases_seq_seq to public;
+
+-- 'ok' or the SQLSTATE; with keep = false a success is undone.
+create function pg_temp.deletion_try(statement text, keep boolean) returns text language plpgsql as $$
+declare outcome text;
+begin
+  begin
+    execute statement;
+    outcome := 'ok';
+    if not keep then raise exception using errcode = 'P0001', message = 'deletion-suite: undo'; end if;
+  exception when others then
+    if sqlerrm <> 'deletion-suite: undo' then outcome := sqlstate; end if;
+  end;
+  return outcome;
+end $$;
+create function pg_temp.deletion_case(case_name text, expected text, statement text, keep boolean) returns void
+language plpgsql as $$
+begin
+  insert into deletion_cases (name, expected, actual)
+  values (case_name, expected, pg_temp.deletion_try(statement, keep));
+end $$;
+create function pg_temp.deletion_check(case_name text, ok boolean) returns void language plpgsql as $$
+begin
+  insert into deletion_cases (name, expected, actual) values (case_name, 'true', coalesce(ok, false)::text);
+end $$;
+create function pg_temp.deletion_value(case_name text, expected text, actual text) returns void language plpgsql as $$
+begin
+  insert into deletion_cases (name, expected, actual) values (case_name, expected, actual);
+end $$;
+grant execute on function pg_temp.deletion_try(text, boolean), pg_temp.deletion_case(text, text, text, boolean),
+  pg_temp.deletion_check(text, boolean), pg_temp.deletion_value(text, text, text) to public;
+
+create function pg_temp.as_worker(subject text) returns void language sql as $$
+  select set_config('app.actor_subject', subject, true), set_config('app.correlation_id', 'deletion-suite-worker', true),
+    set_config('app.facility_id', '', true), set_config('app.membership_id', '', true);
+$$;
+create function pg_temp.as_staff() returns void language sql as $$
+  select set_config('app.actor_subject', 'staff:deletion-doctor', true),
+    set_config('app.facility_id', 'c0110000-0000-4000-8000-00000000000a', true),
+    set_config('app.membership_id', 'c0113000-0000-4000-8000-000000000001', true),
+    set_config('app.correlation_id', 'deletion-suite-staff', true),
+    set_config('app.purpose_of_use', 'direct-care', true),
+    set_config('app.change_reason', 'Synthetic deletion suite change', true);
+$$;
+grant execute on function pg_temp.as_worker(text), pg_temp.as_staff() to public;
+
+-- 1. The worker: listing, counting, refusals, the purge.
+set local role hid_ocr_worker;
+select pg_temp.as_worker('workload:deletion-not-a-worker');
+select pg_temp.deletion_case('a subject without ocr_worker may not list', '42501',
+  'select * from ocr.list_worker_source_deletions(10)', false);
+select pg_temp.deletion_case('a subject without ocr_worker may not count', '42501',
+  'select * from ocr.worker_source_deletion_backlog()', false);
+select pg_temp.deletion_case('a subject without ocr_worker may not purge', '42501',
+  $q$select * from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 1, 'deletion-suite-purge')$q$, false);
+select pg_temp.as_worker('workload:deletion-worker');
+select pg_temp.deletion_case('the worker may not read the evidence tables', '42501',
+  'select 1 from ocr.extractions limit 1', false);
+select pg_temp.deletion_case('the worker may not update the evidence tables', '42501',
+  $q$update ocr.extractions set raw_text = null where id = 'c0118000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a limit of 0 is refused', '22023',
+  'select * from ocr.list_worker_source_deletions(0)', false);
+select pg_temp.deletion_case('a limit over 500 is refused', '22023',
+  'select * from ocr.list_worker_source_deletions(501)', false);
+select pg_temp.deletion_case('a negative version count is refused', '22023',
+  $q$select * from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', -1, 'deletion-suite-purge')$q$, false);
+select pg_temp.deletion_case('a short correlation id is refused', '22023',
+  $q$select * from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 1, 'short')$q$, false);
+select pg_temp.deletion_case('an unknown document is not found', 'P0002',
+  $q$select * from ocr.purge_worker_source_document('c0116000-0000-4000-8000-0000000000ff', 1, 'deletion-suite-purge')$q$, false);
+
+do $$
+declare
+  listed text;
+  owner_sees boolean := current_setting('ocr_deletion.owner_sees')::boolean;
+  backlog record;
+  purge record;
+begin
+  if not owner_sees then
+    raise notice 'ocr-source-deletion: the commands'' owner does not bypass row-level security; worker data cases skipped';
+    return;
+  end if;
+  select string_agg(right(document_id::text, 2), ',' order by document_id) into listed
+    from ocr.list_worker_source_deletions(500) where document_id::text like 'c0116000-%';
+  perform pg_temp.deletion_value('due: 01, 02, 06 and 10 only', '01,02,06,10', listed);
+  perform pg_temp.deletion_check('the listing gives the stored bucket and exact key',
+    exists (select 1 from ocr.list_worker_source_deletions(500)
+             where document_id = 'c0116000-0000-4000-8000-000000000001'
+               and facility_id = 'c0110000-0000-4000-8000-00000000000a' and storage_bucket = 'synthetic-bucket'
+               and storage_key = 'clinical/objects/c0116000-0000-4000-8000-000000000001'));
+  perform pg_temp.deletion_check('01 is due for about 6 hours (finished 30 h ago)',
+    (select due_seconds between 6 * 3600 - 60 and 6 * 3600 + 60 from ocr.list_worker_source_deletions(500)
+      where document_id = 'c0116000-0000-4000-8000-000000000001'));
+  perform pg_temp.deletion_check('02 is due for about 1 hour',
+    (select due_seconds between 3600 - 60 and 3600 + 60 from ocr.list_worker_source_deletions(500)
+      where document_id = 'c0116000-0000-4000-8000-000000000002'));
+  perform pg_temp.deletion_check('06 is due 24 hours after its stuck publication was requested (about 6 hours)',
+    (select due_seconds between 6 * 3600 - 60 and 6 * 3600 + 60 from ocr.list_worker_source_deletions(500)
+      where document_id = 'c0116000-0000-4000-8000-000000000006'));
+  perform pg_temp.deletion_check('the listing is oldest due first and honours the limit',
+    (select count(*) from ocr.list_worker_source_deletions(1)) = 1);
+  select * into backlog from ocr.worker_source_deletion_backlog();
+  perform pg_temp.deletion_check('the backlog counts every due document',
+    backlog.due = (select count(*) from ocr.list_worker_source_deletions(500)));
+  perform pg_temp.deletion_check('the backlog counts as overdue those due for more than 2 hours (01, 06, 10, not 02)',
+    backlog.overdue = (select count(*) from ocr.list_worker_source_deletions(500) where due_seconds > 7200)
+    and backlog.overdue >= 3 and backlog.due >= 4);
+
+  -- Not due: refused, nothing changed.
+  for purge in select * from (values ('03', 'finished less than 24 hours ago'), ('04', 'a job still queued'),
+      ('05', 'a publication pending for less than 24 hours'), ('07', 'on legal hold'), ('08', 'no OCR job'),
+      ('09', 'not uploaded')) x(n, why)
+  loop
+    perform pg_temp.deletion_value('not due (' || purge.why || ')', 'not_due,0,0,0',
+      (select concat_ws(',', outcome, extractions, validations, confirmations)
+         from ocr.purge_worker_source_document(('c0116000-0000-4000-8000-0000000000' || purge.n)::uuid, 1,
+           'deletion-suite-purge')));
+  end loop;
+
+  -- The purge of 01, after the worker deleted 2 S3 versions.
+  perform pg_temp.deletion_value('the purge of 01', 'deleted,1,1,1',
+    (select concat_ws(',', outcome, extractions, validations, confirmations)
+       from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 2, 'deletion-suite-purge')));
+  perform pg_temp.deletion_value('a second purge of 01 changes nothing', 'already_deleted,0,0,0',
+    (select concat_ws(',', outcome, extractions, validations, confirmations)
+       from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 0, 'deletion-suite-purge-2')));
+  perform pg_temp.deletion_check('01 is no longer listed',
+    not exists (select 1 from ocr.list_worker_source_deletions(500)
+                 where document_id = 'c0116000-0000-4000-8000-000000000001'));
+end $$;
+reset role;
+
+-- 2. What the purge left, read as the owner.
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_check('the document is source_deleted with the neutral name and the next version',
+    (select status = 'source_deleted' and original_file_name = 'Source page deleted after 24 hours'
+            and row_version = (select (kept ->> 'row_version')::bigint + 1 from deletion_before
+                                where kind = 'document-version')
+       from ehr.documents where id = 'c0116000-0000-4000-8000-000000000001'));
+  perform pg_temp.deletion_check('ehr.documents_effective shows source_deleted',
+    (select status from ehr.documents_effective where id = 'c0116000-0000-4000-8000-000000000001')
+      = 'source_deleted');
+  perform pg_temp.deletion_check('every other document column is unchanged',
+    (select to_jsonb(d) - array['status', 'original_file_name', 'row_version', 'updated_at'] from ehr.documents d
+      where id = 'c0116000-0000-4000-8000-000000000001')
+      = (select kept from deletion_before where kind = 'document'));
+  perform pg_temp.deletion_check('no ehr.record_versions row was written for the purge',
+    (select count(*) from ehr.record_versions where resource_id = 'c0116000-0000-4000-8000-000000000001')
+      = (select (kept ->> 'count')::bigint from deletion_before where kind = 'record-versions'));
+  perform pg_temp.deletion_check('the extraction holds no text or reading, the rest unchanged',
+    (select raw_text is null and structured_payload = '{}'::jsonb
+            and to_jsonb(e) - array['raw_text', 'structured_payload']
+              = (select kept from deletion_before where kind = 'extraction')
+       from ocr.extractions e where id = 'c0118000-0000-4000-8000-000000000001'));
+  perform pg_temp.deletion_check('the validation holds no payload, fields or corrections and the neutral reason',
+    (select validated_payload = '{}'::jsonb and accepted_fields = '{}'::jsonb and rejected_fields = '[]'::jsonb
+            and corrections = '[]'::jsonb and reason = 'Content deleted after 24 hours'
+            and to_jsonb(v) - array['validated_payload', 'accepted_fields', 'rejected_fields', 'corrections', 'reason']
+              = (select kept from deletion_before where kind = 'validation')
+       from ocr.validations v where id = 'c0119000-0000-4000-8000-000000000001'));
+  perform pg_temp.deletion_check('the confirmation holds the neutral reason and no evidence reference',
+    (select reason = 'Content deleted after 24 hours' and evidence_reference is null
+            and to_jsonb(c) - array['reason', 'evidence_reference']
+              = (select kept from deletion_before where kind = 'confirmation')
+       from ocr.patient_confirmations c where id = 'c011a000-0000-4000-8000-000000000001'));
+  perform pg_temp.deletion_check('the job, its events, the publication, the EHR provenance and the usage are kept',
+    (select to_jsonb(j) from ocr.jobs j where id = 'c0117000-0000-4000-8000-000000000001')
+      = (select kept from deletion_before where kind = 'job')
+    and (select to_jsonb(p) from ocr.publications p where id = 'c011b000-0000-4000-8000-000000000001')
+      = (select kept from deletion_before where kind = 'publication')
+    and (select to_jsonb(p) from ehr.ocr_import_provenance p where id = 'c011e000-0000-4000-8000-000000000001')
+      = (select kept from deletion_before where kind = 'provenance')
+    and (select jsonb_agg(to_jsonb(e) order by e.id) from ocr.job_events e
+          where job_id = 'c0117000-0000-4000-8000-000000000001')
+      = (select kept from deletion_before where kind = 'job-events')
+    and jsonb_build_object(
+          'pages', (select jsonb_agg(to_jsonb(page_row)) from ocr.page_usage page_row
+                     where job_id = 'c0117000-0000-4000-8000-000000000001'),
+          'ai', (select jsonb_agg(to_jsonb(ai_row)) from ocr.ai_usage ai_row
+                  where job_id = 'c0117000-0000-4000-8000-000000000001'))
+      = (select kept from deletion_before where kind = 'usage'));
+  perform pg_temp.deletion_check('the not-due documents and their rows are untouched',
+    (select count(*) from ehr.documents where id::text like 'c0116000-%' and status = 'source_deleted') = 1
+    and (select raw_text from ocr.extractions where id = 'c0118000-0000-4000-8000-000000000003')
+      = 'Fictional reading line for Test Patient Chidi Example');
+  perform pg_temp.deletion_check('exactly one audit row, ids and counts only',
+    (select count(*) from audit.events where action = 'ocr.source.deleted_after_24h'
+      and resource_id = 'c0116000-0000-4000-8000-000000000001') = 1
+    and (select actor_type = 'workload' and actor_subject = 'workload:deletion-worker'
+              and facility_id = 'c0110000-0000-4000-8000-00000000000a'
+              and patient_id = 'c0115000-0000-4000-8000-000000000001' and resource_type = 'document'
+              and details ->> 'objectVersionsDeleted' = '2' and details ->> 'jobCount' = '1'
+              and details ->> 'extractionsBlanked' = '1' and details ->> 'validationsBlanked' = '1'
+              and details ->> 'confirmationsBlanked' = '1' and (details ->> 'secondsPastDue')::bigint > 6 * 3600 - 120
+              and position('Fictional' in details::text) = 0 and position('Example' in details::text) = 0
+              and reason is null
+         from audit.events where action = 'ocr.source.deleted_after_24h'
+          and resource_id = 'c0116000-0000-4000-8000-000000000001'));
+end $$;
+
+-- 3. A confirmation added after the purge is blanked by the next call.
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  set local session_replication_role = replica;
+  insert into ocr.patient_confirmations (id, job_id, facility_id, patient_id, confirmation_version, method,
+    evidence_reference, reason, confirmed_by, confirmed_by_membership_id, idempotency_key, request_sha256)
+  values ('c011a000-0000-4000-8000-000000000011', 'c0117000-0000-4000-8000-000000000001',
+    'c0110000-0000-4000-8000-00000000000a', 'c0115000-0000-4000-8000-000000000001', 2, 'source_document',
+    'Fictional folder 0001', 'Late fictional confirmation reason', 'c0111000-0000-4000-8000-000000000001',
+    'c0113000-0000-4000-8000-000000000001', 'deletion-confirm-late-xxxxx', repeat('c', 64));
+  set local session_replication_role = origin;
+end $$;
+set local role hid_ocr_worker;
+select pg_temp.as_worker('workload:deletion-worker');
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_value('a late row is blanked by the next purge call', 'already_deleted,0,0,1',
+    (select concat_ws(',', outcome, extractions, validations, confirmations)
+       from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 0, 'deletion-suite-purge-3')));
+end $$;
+reset role;
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_check('the late blanking wrote one more audit row',
+    (select count(*) from audit.events where action = 'ocr.source.deleted_after_24h'
+      and resource_id = 'c0116000-0000-4000-8000-000000000001') = 2
+    and (select reason = 'Content deleted after 24 hours' and evidence_reference is null
+           from ocr.patient_confirmations where id = 'c011a000-0000-4000-8000-000000000011'));
+end $$;
+
+-- 4. The append-only triggers, as the OCR functions' owner (the only role
+-- the exception can apply to) and as runtime roles.
+select pg_temp.as_worker('workload:deletion-worker');
+select set_config('hid.ocr.source_purge', 'c0116000-0000-4000-8000-000000000003', true);
+select pg_temp.deletion_case('a purge-shaped extraction update of a document not deleted is refused (forged settings)',
+  '55000', $q$update ocr.extractions set raw_text = null, structured_payload = '{}'
+   where id = 'c0118000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a purge-shaped validation update of a document not deleted is refused', '55000',
+  $q$update ocr.validations set validated_payload = '{}', accepted_fields = '{}', rejected_fields = '[]',
+     corrections = '[]', reason = 'Content deleted after 24 hours'
+   where id = 'c0119000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a purge-shaped confirmation update of a document not deleted is refused', '55000',
+  $q$update ocr.patient_confirmations set reason = 'Content deleted after 24 hours', evidence_reference = null
+   where id = 'c011a000-0000-4000-8000-000000000003'$q$, false);
+select set_config('hid.ocr.source_purge', '', true);
+select pg_temp.deletion_case('an ordinary extraction update is refused', '55000',
+  $q$update ocr.extractions set raw_text = 'Changed fictional line' where id = 'c0118000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('an extraction delete is refused', '55000',
+  $q$delete from ocr.extractions where id = 'c0118000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a validation delete is refused', '55000',
+  $q$delete from ocr.validations where id = 'c0119000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a confirmation delete is refused', '55000',
+  $q$delete from ocr.patient_confirmations where id = 'c011a000-0000-4000-8000-000000000003'$q$, false);
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_case('on a deleted document, text written back is refused', '55000',
+    $q$update ocr.extractions set raw_text = 'Fictional text again' where id = 'c0118000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('on a deleted document, another column with the blanking is refused', '55000',
+    $q$update ocr.extractions set raw_text = null, structured_payload = '{}', confidence = 0.1
+     where id = 'c0118000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('on a deleted document, another reason is refused', '55000',
+    $q$update ocr.validations set reason = 'Another neutral sentence' where id = 'c0119000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('on a deleted document, the disposition stays', '55000',
+    $q$update ocr.validations set disposition = 'rejected' where id = 'c0119000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('on a deleted document, a delete is refused', '55000',
+    $q$delete from ocr.extractions where id = 'c0118000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('on a deleted document, the owner may re-apply the exact blanking', 'ok',
+    $q$update ocr.extractions set raw_text = null, structured_payload = '{}'
+     where id = 'c0118000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('job events get no exception', '55000',
+    $q$update ocr.job_events set reason_code = null where job_id = 'c0117000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('ehr.ocr_import_provenance gets no exception', '55000',
+    $q$update ehr.ocr_import_provenance set validation_version = 1
+     where id = 'c011e000-0000-4000-8000-000000000001'$q$, false);
+end $$;
+
+-- A runtime role (the OCR API) cannot update the evidence tables, even for a
+-- deleted document.
+set local role hid_ocr_api_runtime;
+select pg_temp.as_staff();
+select pg_temp.deletion_case('the OCR API may not blank an extraction', '42501',
+  $q$update ocr.extractions set raw_text = null, structured_payload = '{}'
+   where id = 'c0118000-0000-4000-8000-000000000001'$q$, false);
+select pg_temp.deletion_case('the OCR API may not blank a validation', '42501',
+  $q$update ocr.validations set reason = 'Content deleted after 24 hours'
+   where id = 'c0119000-0000-4000-8000-000000000003'$q$, false);
+reset role;
+
+-- 5. The document guard. (The OCR functions' owner is trusted: it may make
+-- the purge's exact change itself, which the purge function relies on.)
+set local role hid_ocr_worker;
+select pg_temp.as_worker('workload:deletion-worker');
+select pg_temp.deletion_case('the worker may not update a document outside the purge command', '42501',
+  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
+   where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+reset role;
+select pg_temp.deletion_case('a worker-actor change of another shape is refused', '55000',
+  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours',
+     retention_class = 'changed' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a worker-actor change keeping the file name is refused', '55000',
+  $q$update ehr.documents set status = 'source_deleted' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a document on legal hold is never moved to source_deleted', '55000',
+  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
+   where id = 'c0116000-0000-4000-8000-000000000007'$q$, false);
+select pg_temp.deletion_case('the owner, in a worker session, may make the exact change (as the purge does)', 'ok',
+  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
+   where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.as_staff();
+select pg_temp.deletion_case('a staff session may not delete a source', '55000',
+  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
+   where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('an insert with status source_deleted is refused', '55000',
+  $q$insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
+       storage_bucket, storage_key, declared_media_type, status, retention_class)
+     values ('c0116000-0000-4000-8000-0000000000aa', 'c0115000-0000-4000-8000-000000000001',
+       'c0110000-0000-4000-8000-00000000000a', 'c0111000-0000-4000-8000-000000000001',
+       'c0113000-0000-4000-8000-000000000001', 'Source page deleted after 24 hours', 'synthetic-bucket',
+       'clinical/objects/c0116000-0000-4000-8000-0000000000aa', 'application/pdf', 'source_deleted',
+       'clinical_record')$q$, false);
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_case('a deleted document is never changed again (staff)', '55000',
+    $q$update ehr.documents set original_file_name = 'Fictional Example scan 01.pdf'
+     where id = 'c0116000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('a deleted document is never restored (staff)', '55000',
+    $q$update ehr.documents set status = 'uploaded' where id = 'c0116000-0000-4000-8000-000000000001'$q$, false);
+end $$;
+-- The EHR API's runtime role cannot do it either (refused, or the row is not
+-- visible to it and nothing changes).
+set local role hid_ehr_api_runtime;
+select pg_temp.as_staff();
+create temporary table deletion_ehr_attempt (outcome text) on commit drop;
+reset role;
+grant insert, select on deletion_ehr_attempt to public;
+set local role hid_ehr_api_runtime;
+insert into deletion_ehr_attempt select pg_temp.deletion_try(
+  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
+   where id = 'c0116000-0000-4000-8000-000000000003'$q$, true);
+reset role;
+select pg_temp.deletion_check('the EHR API runtime role cannot delete a source',
+  (select outcome in ('55000', '42501') or (outcome = 'ok'
+     and (select status from ehr.documents where id = 'c0116000-0000-4000-8000-000000000003') = 'uploaded')
+     from deletion_ehr_attempt));
+
+-- Verdict.
+do $$
+declare failures text;
+begin
+  select string_agg(format('%s: expected %s, got %s', name, expected, coalesce(actual, 'nothing')), E'\n' order by seq)
+    into failures from deletion_cases where actual is distinct from expected;
+  if failures is not null then
+    raise exception E'OCR source deletion cases failed:\n%', failures;
+  end if;
+  raise notice 'ocr-source-deletion: % cases passed (owner sees documents: %)', (select count(*) from deletion_cases),
+    current_setting('ocr_deletion.owner_sees');
+end $$;
+
+rollback;

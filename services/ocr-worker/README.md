@@ -1763,3 +1763,66 @@ IAM for the worker role:
   asynchronous PDF/TIFF reads Textract needs `s3:GetObjectVersion` and
   `kms:Decrypt` on the document bucket and its key.
 - HTTPS egress to `api.anthropic.com` when AI reading is on.
+
+## Source deletion after 24 hours
+
+Owner and coordinator decisions of 2026-11-11 (migration 0110): 24 hours after
+an OCR job finishes, saved or not, the uploaded page goes with every S3
+version, and so do the Textract text and the AI reading. The source is not
+kept in the chart; what a person saved or published stays, with its
+provenance by job id.
+
+- **When a document is due.** It has at least one OCR job; every job is
+  finished (`awaiting_validation`, `validated`, `rejected`, `failed`,
+  `cancelled`) and the latest finish (`completed_at`, `failed_at`, or
+  `updated_at` for a cancelled job) is at least 24 hours ago; no publication of
+  its jobs is `pending` or `processing`, unless it was requested more than 24
+  hours ago (a stuck publication delays deletion by at most a further 24
+  hours); `legal_hold` is false; its status is `uploaded`.
+- **A round.** One at start, then every `OCR_SOURCE_DELETION_INTERVAL_SECONDS`
+  (default 900, 60-86,400). `OCR_SOURCE_DELETION_ENABLED` (default `true`;
+  `false` stops it) is validated like the other settings. The worker counts
+  the documents due (`ocr.worker_source_deletion_backlog()`), lists up to 100,
+  oldest due first (`ocr.list_worker_source_deletions`), and for each:
+  1. lists the bucket's versions with `Prefix` = the document's stored
+     `storage_key` and keeps only versions and delete markers whose `Key` is
+     exactly that key (a key that only starts with it is never touched);
+  2. deletes each with `DeleteObject` and its `VersionId`;
+  3. lists again and fails the document (`SOURCE_VERSIONS_REMAIN`) if anything
+     is left;
+  4. only then calls `ocr.purge_worker_source_document(document, versions
+     deleted, correlation id)`, which checks again that the document is due,
+     marks it `source_deleted` with the neutral file name `Source page deleted
+     after 24 hours`, blanks the text, reading and review content of its OCR
+     rows and writes one audit row `ocr.source.deleted_after_24h` (ids and
+     counts only).
+  A storage failure skips the purge; the document stays due and the next round
+  retries it (a retry finds nothing left in S3 and purges with 0 versions).
+  Keys outside `clinical/objects/<id>` are refused (`SOURCE_KEY_OUTSIDE_LAYOUT`)
+  and never deleted. Upload keys and malware scanning are unchanged.
+- **Logs** (ids, codes and counts only; never a file name, key or text):
+  - `ocr.source_deletion.done` per document: `documentId`, `outcome`
+    (`deleted`, `already_deleted`, `not_due`), `objectVersionsDeleted`,
+    `extractionsBlanked`, `validationsBlanked`, `confirmationsBlanked`,
+    `dueSeconds`;
+  - `ocr.source_deletion.failed` with `stage` (`list`, `storage`, `purge`,
+    `round`) and `code` (an S3 stage code such as `SOURCE_LIST_FAILED`,
+    `SOURCE_DELETE_FAILED`, `SOURCE_VERSIONS_REMAIN`, or a PostgreSQL SQLSTATE);
+  - exactly one `{"event":"ocr.source_deletion.overdue","overdue":n,"due":m,"deleted":k}`
+    per completed round, also when all are 0 (with `timestamp` and `level` like
+    every line): `overdue` = documents due for more than 2 hours (more than 26
+    hours after their job finished), `due` = due at the start of the round,
+    `deleted` = deleted this round. A round that cannot count or list logs
+    `ocr.source_deletion.failed` (`stage: list`) instead and no overdue line,
+    so the CloudWatch alarm (metric filter `{ $.event = "ocr.source_deletion.overdue" }`,
+    value `$.overdue`, missing data breaching) also fires when the sweep stops.
+- **IAM** for the worker's task role, on the documents bucket only:
+  `s3:ListBucketVersions` on the bucket with the condition
+  `s3:prefix` like `clinical/objects/*`, and `s3:DeleteObjectVersion` on
+  `arn:aws:s3:::<bucket>/clinical/objects/*`. The worker never calls
+  `DeleteObjects` or an unversioned `DeleteObject`. Object Lock retention or
+  MFA delete on the bucket would make every deletion fail (`SOURCE_DELETE_FAILED`).
+- **Not in reach of this worker.** Textract keeps an asynchronous job's
+  results on its side for its own retention period (the worker sets no
+  `OutputConfig`); nothing is written to S3 by Textract. The Claude API keeps
+  no reading (no data retention was requested).
