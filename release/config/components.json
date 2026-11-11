@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0113",
-    "count": 114,
+    "last": "0118",
+    "count": 115,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -553,6 +553,10 @@
       {
         "name": "0113_records_processing_draft_publication.sql",
         "sha256": "af6d1df7e9e7e1761a38ac9164807e2e559394baf2db2e99672264a77808214b"
+      },
+      {
+        "name": "0118_ocr_correction_observations.sql",
+        "sha256": "048bca4bed5261b686249a97a5edd2336807eb4cf7ccf15e145d7bb684a8ae45"
       }
     ]
   },

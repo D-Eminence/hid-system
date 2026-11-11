@@ -1499,6 +1499,19 @@ revoke all on function identity.records_processing_write_grant(uuid,text,uuid,uu
   ehr.imported_paper_records_signed(uuid,uuid,uuid), ehr.records_processing_draft_guard(),
   ocr.publications_basis_fixed() from public;
 
+-- OCR correction observations (0118, owner decision Q43 of 2026-11-11): the
+-- OCR API (hid_ocr_runtime, inherited by hid_ocr_api_runtime) records the
+-- corrected fields of an accepted validation; the OCR worker purges rows older
+-- than 180 days. The two tables (the in-database HMAC key and the
+-- observations) are granted to no role (row-level security forced, the
+-- owner's policy only). 0118 makes the same grants.
+grant usage on schema ocr to hid_ocr_runtime, hid_ocr_worker;
+grant execute on function ocr.record_correction_observations(uuid,jsonb) to hid_ocr_runtime;
+grant execute on function ocr.purge_correction_observations(integer) to hid_ocr_worker;
+revoke all on function ocr.record_correction_observations(uuid,jsonb),
+  ocr.purge_correction_observations(integer) from public;
+revoke all on ocr.learning_key, ocr.correction_observations from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
