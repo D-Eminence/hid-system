@@ -20,7 +20,7 @@ export interface OcrValidationInput {
   reviewConfirmed?: boolean;
   missedItems?: number;
   removedItems?: { itemId: string;
-    removalReason: 'not_on_paper' | 'duplicate' | 'not_needed' | 'unreadable' | 'other_patient' }[];
+    removalReason?: 'not_on_paper' | 'duplicate' | 'not_needed' | 'unreadable' | 'other_patient' }[];
   rejectionReasonCode?: 'wrong_patient' | 'wrong_document' | 'unreadable' | 'duplicate_document' | 'pages_missing'
     | 'reading_unusable' | 'not_clinical' | 'other';
 }
@@ -57,6 +57,8 @@ export interface OcrExtraction {
   contentDeleted: boolean;
   rawText: string; structuredPayload: Record<string, unknown>; confidence: number | null;
   provenance: Record<string, unknown>; createdAt: string;
+  /** Present on a server that accepts the optional review signals on validation (section 15). */
+  reviewLearning?: true;
 }
 export interface OcrValidation {
   id: string; jobId: string; extractionId: string; version: number;

@@ -21,6 +21,11 @@ describe('optional review signals on a validation', () => {
       .toEqual([]);
   });
 
+  it('never requires a reason: a removed item, a correction and a total on their own (owner decision Q43)', async () => {
+    expect(await errorsOf({ missedItems: 3, removedItems: [{ itemId: 'it-00000000000000a1' }],
+      corrections: [{ itemId: 'it-00000000000000a1', fields: ['strength'] }] })).toEqual([]);
+  });
+
   it.each([
     ['reviewConfirmed', { reviewConfirmed: 'yes' }],
     ['reviewConfirmed', { reviewConfirmed: null }],
