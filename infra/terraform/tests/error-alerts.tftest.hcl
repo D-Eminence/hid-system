@@ -35,6 +35,7 @@ variables {
   alert_subscribers = [
     { protocol = "email", endpoint = "operations@example.invalid" },
     { protocol = "email", endpoint = "oncall@example.invalid" },
+    { protocol = "email", endpoint = "OnCall@example.invalid" },
     { protocol = "sms", endpoint = "+2348000000000" },
   ]
 }
@@ -58,6 +59,17 @@ run "error_alerts_cover_every_service" {
     error_message = "The gateway error-rate alarm and a server-error and unhealthy-task alarm for every load-balanced service must exist."
   }
 
+  # The load balancer leaves 5xx counts out for periods without one, so each
+  # raw metric must be filled with 0 before it is added up; the rate must only
+  # read the filled series.
+  assert {
+    condition = (
+      toset([for q in aws_cloudwatch_metric_alarm.gateway_error_rate[0].metric_query : q.expression if q.id != "rate" && q.expression != null && q.expression != ""]) == toset(["FILL(target_errors, 0)", "FILL(edge_errors, 0)", "FILL(requests, 0)"]) &&
+      one([for q in aws_cloudwatch_metric_alarm.gateway_error_rate[0].metric_query : q.expression if q.id == "rate"]) == "IF(all_requests >= 20 AND (gateway_5xx + edge_5xx) >= 5, 100 * (gateway_5xx + edge_5xx) / all_requests, 0)"
+    )
+    error_message = "The gateway error rate must fill every load-balancer metric with 0 so one kind of 5xx alone still raises the alarm."
+  }
+
   assert {
     condition = (
       aws_cloudwatch_log_metric_filter.ocr_queue_age[0].log_group_name == "/hid/production/ocr-worker" &&
@@ -70,6 +82,7 @@ run "error_alerts_cover_every_service" {
   assert {
     condition = (
       toset(keys(aws_sns_topic_subscription.subscribers)) == toset(["email:oncall@example.invalid", "sms:+2348000000000"]) &&
+      aws_sns_topic_subscription.subscribers["email:oncall@example.invalid"].endpoint == "oncall@example.invalid" &&
       length(aws_sns_topic_subscription.email) == 1
     )
     error_message = "Every listed subscriber gets one subscription, and alert_email is not subscribed twice."

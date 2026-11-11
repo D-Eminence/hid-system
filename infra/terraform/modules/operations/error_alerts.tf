@@ -5,11 +5,14 @@
 locals {
   # Everyone who receives alerts: the original alert_email plus the list the
   # owner sets at apply time. Keyed by protocol and endpoint so adding or
-  # removing one person leaves the other subscriptions alone.
-  alert_subscribers = {
-    for subscriber in var.alert_subscribers : "${subscriber.protocol}:${lower(subscriber.endpoint)}" => subscriber
+  # removing one person leaves the other subscriptions alone. Entries that
+  # differ only in letter case are grouped and the first one is kept, so a
+  # repeated address never stops the plan with a duplicate-key error.
+  alert_subscriber_groups = {
+    for subscriber in var.alert_subscribers : "${subscriber.protocol}:${lower(subscriber.endpoint)}" => subscriber...
     if !(subscriber.protocol == "email" && lower(subscriber.endpoint) == lower(var.alert_email))
   }
+  alert_subscribers = { for key, subscribers in local.alert_subscriber_groups : key => subscribers[0] }
 
   gateway_target = lookup(var.load_balancer_targets, "gateway", { load_balancer = "", target_group = "" })
 
@@ -32,6 +35,11 @@ resource "aws_sns_topic_subscription" "subscribers" {
 # that end in a server error (5xx from the gateway or from the load balancer
 # itself when no gateway task can answer). Needs at least 20 requests and 5
 # errors in the five minutes so a single failure at night does not page anyone.
+# The load balancer only publishes a 5xx count for periods that had one, and
+# metric math gives no value where any input is missing, so every input is
+# filled with 0. Without that, the alarm would only see periods where both
+# kinds of 5xx happened, and would stay quiet in a full outage (load balancer
+# 502/503s only).
 resource "aws_cloudwatch_metric_alarm" "gateway_error_rate" {
   count               = contains(keys(var.load_balancer_targets), "gateway") ? 1 : 0
   alarm_name          = "${var.name_prefix}-gateway-server-error-rate"
@@ -46,8 +54,23 @@ resource "aws_cloudwatch_metric_alarm" "gateway_error_rate" {
   metric_query {
     id          = "rate"
     label       = "Server error rate (%)"
-    expression  = "IF(requests >= 20 AND (target_errors + edge_errors) >= 5, 100 * (target_errors + edge_errors) / requests, 0)"
+    expression  = "IF(all_requests >= 20 AND (gateway_5xx + edge_5xx) >= 5, 100 * (gateway_5xx + edge_5xx) / all_requests, 0)"
     return_data = true
+  }
+
+  metric_query {
+    id         = "gateway_5xx"
+    expression = "FILL(target_errors, 0)"
+  }
+
+  metric_query {
+    id         = "edge_5xx"
+    expression = "FILL(edge_errors, 0)"
+  }
+
+  metric_query {
+    id         = "all_requests"
+    expression = "FILL(requests, 0)"
   }
 
   metric_query {
@@ -165,9 +188,13 @@ resource "aws_cloudwatch_event_target" "stopped_tasks" {
 
 # OCR jobs wait in a database queue, not SQS. The worker logs the age of the
 # oldest waiting job each time it picks one up (event ocr.job.claimed). If
-# that age stays over 15 minutes, documents are waiting too long. If every
-# worker is down nothing is logged; the ocr-worker running-task alarm covers
-# that case.
+# that age stays over 15 minutes, documents are waiting too long.
+# Limits: this only sees a queue that is still moving. When no job is picked
+# up (every worker exited, every claim loop hung, or the per-facility limit is
+# used up by stuck jobs) nothing is logged and this alarm stays quiet; an
+# empty queue looks the same, so missing data cannot count as breaching. The
+# ocr-worker running-task alarm covers workers that exited. Catching a hung
+# worker needs the worker to log the queue age on a timer (OCR worker owner).
 resource "aws_cloudwatch_log_metric_filter" "ocr_queue_age" {
   count          = local.ocr_alarms_enabled ? 1 : 0
   name           = "${var.name_prefix}-ocr-oldest-queued-age"
@@ -184,7 +211,7 @@ resource "aws_cloudwatch_log_metric_filter" "ocr_queue_age" {
 resource "aws_cloudwatch_metric_alarm" "ocr_queue_age" {
   count               = local.ocr_alarms_enabled ? 1 : 0
   alarm_name          = "${var.name_prefix}-ocr-queue-age"
-  alarm_description   = "Migrate documents have waited more than 15 minutes to be read. The OCR workers are behind or stuck."
+  alarm_description   = "Migrate documents that were picked up had waited more than 15 minutes to be read. The OCR workers are behind. This alarm cannot see a worker that has stopped picking up jobs."
   namespace           = local.ocr_metric_namespace
   metric_name         = aws_cloudwatch_log_metric_filter.ocr_queue_age[0].metric_transformation[0].name
   statistic           = "Maximum"
