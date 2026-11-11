@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0120",
+    "last": "0110",
     "count": 110,
     "files": [
       {
@@ -535,8 +535,8 @@
         "sha256": "1562c606256f18555054423b4e632bb863cf3aae6b0776bee87c30e660983ed6"
       },
       {
-        "name": "0120_outreach_campaign_registration_lock.sql",
-        "sha256": "a60459e27210f57534ed4d118565cf72387e5b75c3cc67e03645c8800a4145f4"
+        "name": "0110_outreach_campaign_registration_lock.sql",
+        "sha256": "0a56d7fb26ea5fd78030a7ec516ec3430491fc459f2251c1e6a77fdb35ee7835"
       }
     ]
   },

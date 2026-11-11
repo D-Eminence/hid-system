@@ -1,8 +1,10 @@
--- 0120 Outreach: a staff member can register a person into a campaign again
--- (coordinator, 2026-11-04: "0120 first (prove it, then fix)"; the number
--- 0120 assigned by the coordinator, 0106-0119 belonging to other builders;
--- the declaration is signed separately). Written on 0105 (f11c9ec9). It uses
--- and needs nothing 0106-0119 add, so it applies on 0105 alone or after them.
+-- 0110 Outreach: a staff member can register a person into a campaign again
+-- (coordinator, 2026-11-04: "0120 first (prove it, then fix)"; first numbered
+-- 0120, renumbered 0110 on 2026-11-11 because the release contract needs a
+-- contiguous list: production ends at 0108 and 0109 (support Health ID
+-- matches, #213) releases first; signed by the owner, see the declaration).
+-- Written on 0105 (f11c9ec9). It applies after 0109 and uses nothing 0106-0109
+-- add: none of them changes an object this migration reads, pins or replaces.
 --
 -- The gap: every registration into a campaign is refused in production. The
 -- campaign trigger outreach.validate_registration_campaign_write (0045) reads
@@ -48,11 +50,12 @@
 -- (no UPDATE privilege, no UPDATE policy).
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
---    and nothing is applied): 0001-0105 applied (0105's
---    documents_scanner_function_lock policy on ehr.documents the marker); not
---    applied yet (else "0120: already applied"); the body replaced is exactly
+--    and nothing is applied): 0001-0109 applied (0109's
+--    identity.support_health_id_matches(text[]), body md5
+--    e4f1577e17334abde24784ff9c5c6c66, the marker); not
+--    applied yet (else "0110: already applied"); the body replaced is exactly
 --    0045's (md5 of pg_proc.prosrc afabd66c378c6e076062f35e80de9cb2, the pin
---    0102 also checked) and the helpers relied on are as 0001-0105 left them
+--    0102 also checked) and the helpers relied on are as 0001-0109 left them
 --    (platform.current_membership_id, outreach.context_allows,
 --    platform.reject_mutation); the function's attributes; the trigger that
 --    calls it; the columns read have their types and NOT NULLs; the policies
@@ -60,10 +63,10 @@
 --    the members) and their row-level security; the applier is the
 --    function's owner or a member that inherits it and may SET ROLE to it.
 -- 1. The body (CREATE OR REPLACE keeps owner, ACL and the trigger). Here and
---    in runtime-grants.sql (0120 block): revoke from PUBLIC, as 0045 did; no
+--    in runtime-grants.sql (0110 block): revoke from PUBLIC, as 0045 did; no
 --    grant changes.
 -- 2. Post-checks: the body is this file's (md5
---    2af7fea46fab6a1e03e88999170c51d4), attributes, owner and ACL as before,
+--    69469315f04554d2639dfa9f83591d4d), attributes, owner and ACL as before,
 --    the trigger kept, and still no UPDATE policy on the members.
 --
 -- Locks (measured with pg_locks before commit on a 0105 copy): SHARE UPDATE
@@ -80,7 +83,7 @@
 -- release also answers a refusal that still comes from this trigger, after
 -- its own check passed, as that check does (403 OUTREACH_CAMPAIGN_ACCESS_DENIED,
 -- 409 OUTREACH_CAMPAIGN_NOT_ACCEPTING_REGISTRATIONS); today's image answers it
--- 500. Applied migrations 0001 through 0105 are immutable.
+-- 500. Applied migrations 0001 through 0109 are immutable.
 
 do $$
 declare
@@ -88,22 +91,22 @@ declare
   applier oid := (select oid from pg_roles where rolname = current_user);
   function_owner oid;
 begin
-  -- a. Prerequisites: 0001-0105 (0105's scanner lock policy is the marker).
-  if to_regclass('ehr.documents') is null
-     or to_regclass('outreach.campaign_members') is null
+  -- a. Prerequisites: 0001-0109 (0109's support Health ID check is the marker).
+  if to_regclass('outreach.campaign_members') is null
      or to_regprocedure('outreach.validate_registration_campaign_write()') is null
-     or not exists (select 1 from pg_policy policy_row
-                     where policy_row.polrelid = 'ehr.documents'::regclass
-                       and policy_row.polname = 'documents_scanner_function_lock') then
-    raise exception using errcode = '55000', message = '0120: 0001-0105 must be applied first';
+     or to_regprocedure('identity.support_health_id_matches(text[])') is null
+     or (select md5(proc.prosrc) from pg_proc proc
+          where proc.oid = to_regprocedure('identity.support_health_id_matches(text[])'))
+        is distinct from 'e4f1577e17334abde24784ff9c5c6c66' then
+    raise exception using errcode = '55000', message = '0110: 0001-0109 must be applied first';
   end if;
   -- b. Not applied yet.
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'outreach.validate_registration_campaign_write()'::regprocedure)
-     = '2af7fea46fab6a1e03e88999170c51d4' then
-    raise exception using errcode = '55000', message = '0120: already applied';
+     = '69469315f04554d2639dfa9f83591d4d' then
+    raise exception using errcode = '55000', message = '0110: already applied';
   end if;
-  -- c. The body replaced and the helpers relied on, as 0001-0105 left them.
+  -- c. The body replaced and the helpers relied on, as 0001-0109 left them.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
@@ -199,7 +202,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0120: an object this migration relies on differs from 0001-0105: %s', mismatch);
+      message = format('0110: an object this migration relies on differs from 0001-0109: %s', mismatch);
   end if;
   -- d. The applier may replace the function (its owner, or a member that
   -- inherits the owner and may SET ROLE to it; never a superuser's bypass
@@ -209,16 +212,16 @@ begin
   if applier <> function_owner
      and not (pg_has_role(applier, function_owner, 'USAGE') and pg_has_role(applier, function_owner, 'SET')) then
     raise exception using errcode = '42501',
-      message = format('0120: %s is not %s and may not act as it (INHERIT and SET)', current_user,
+      message = format('0110: %s is not %s and may not act as it (INHERIT and SET)', current_user,
         pg_get_userbyid(function_owner));
   end if;
-  raise notice '0120: owner checked: outreach.validate_registration_campaign_write()=%, applier=%',
+  raise notice '0110: owner checked: outreach.validate_registration_campaign_write()=%, applier=%',
     pg_get_userbyid(function_owner), current_user;
 end;
 $$;
 
 -- The owner and ACL before, for the post-check.
-create temporary table outreach_campaign_registration_0120_acl on commit drop as
+create temporary table outreach_campaign_registration_0110_acl on commit drop as
   select proc.oid as function_oid, proc.proowner, proc.proacl
     from pg_proc proc
    where proc.oid = 'outreach.validate_registration_campaign_write()'::regprocedure;
@@ -244,7 +247,7 @@ begin
   -- The campaign row lock serializes capture with a campaign status change.
   -- The membership is read, not locked: outreach.campaign_members forces
   -- row-level security and has no UPDATE policy, so a lock on it finds no row
-  -- for an owner without BYPASSRLS (0120).
+  -- for an owner without BYPASSRLS (0110).
   select campaign.status, campaign.services, campaign.starts_at, campaign.ends_at
     into campaign_status, campaign_services, campaign_starts_at, campaign_ends_at
   from outreach.campaigns campaign
@@ -273,7 +276,7 @@ end
 $$;
 
 comment on function outreach.validate_registration_campaign_write() is
-  'Campaign-linked registration capture: exact campaign membership, and on insert an active registration campaign. Locks the campaign row only (0120).';
+  'Campaign-linked registration capture: exact campaign membership, and on insert an active registration campaign. Locks the campaign row only (0110).';
 
 -- Here and in runtime-grants.sql: granted to no role; a trigger needs no
 -- EXECUTE to fire.
@@ -286,11 +289,11 @@ declare
 begin
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'outreach.validate_registration_campaign_write()'::regprocedure)
-     is distinct from '2af7fea46fab6a1e03e88999170c51d4' then
+     is distinct from '69469315f04554d2639dfa9f83591d4d' then
     mismatch := 'the body of outreach.validate_registration_campaign_write()';
   end if;
   if mismatch is null and exists (
-       select 1 from outreach_campaign_registration_0120_acl before_row
+       select 1 from outreach_campaign_registration_0110_acl before_row
          left join pg_proc proc on proc.oid = before_row.function_oid
          left join pg_language language_row on language_row.oid = proc.prolang
         where proc.oid is null or proc.proowner <> before_row.proowner
@@ -313,7 +316,7 @@ begin
     mismatch := 'an UPDATE or ALL policy on outreach.campaign_members';
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0120: post-check failed: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0110: post-check failed: %s', mismatch);
   end if;
 end;
 $$;

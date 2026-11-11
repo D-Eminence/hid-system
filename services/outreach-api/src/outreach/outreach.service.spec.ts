@@ -124,13 +124,13 @@ describe('OutreachService', () => {
     expect(query).toHaveBeenCalledTimes(2);
   });
 
-  // The trigger's refusals at the insert (0045, 0120), after the service's own
+  // The trigger's refusals at the insert (0045, 0110), after the service's own
   // check passed: the same 403 and 409 as that check, not 500.
   const activeCampaign = { rows: [{ status: 'active', services: ['registration'],
     starts_at: new Date(Date.now() - 60_000), ends_at: null }] };
   const triggerRefusal = (code: string, message: string) => Object.assign(new Error(message), { code });
 
-  it('answers 403 when the registration trigger refuses the campaign membership (0120)', async () => {
+  it('answers 403 when the registration trigger refuses the campaign membership (0110)', async () => {
     const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(activeCampaign)
       .mockRejectedValueOnce(triggerRefusal('42501', 'Exact Outreach campaign membership is required'));
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };

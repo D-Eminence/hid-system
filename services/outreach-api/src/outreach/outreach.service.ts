@@ -271,8 +271,8 @@ export class OutreachService {
    * lock campaign_members (no UPDATE, 42501), and no API command changes or
    * deletes a membership. The registration trigger checks the membership
    * again at the insert, reading it as its owner and locking only the campaign
-   * (0120: campaign_members forces row-level security and has no UPDATE
-   * policy, so before 0120 its membership lock refused every campaign
+   * (0110: campaign_members forces row-level security and has no UPDATE
+   * policy, so before 0110 its membership lock refused every campaign
    * registration under a migration owner without BYPASSRLS); its refusal
    * answers 403 like this check. The campaign lock needs the campaign UPDATE
    * policy, so it relies on every role with outreach.registration.write also
@@ -319,7 +319,7 @@ export class OutreachService {
 
   /**
    * The registration trigger (outreach.validate_registration_campaign_write,
-   * 0045, 0120) checks the campaign again at the insert. Its refusals answer as
+   * 0045, 0110) checks the campaign again at the insert. Its refusals answer as
    * this service's own check does, not 500: a membership removed after the
    * check, or a campaign that stopped accepting registrations in between.
    */

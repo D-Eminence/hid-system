@@ -2838,7 +2838,7 @@ What the screens show after the seed (every row demo, written once):
   FOR SHARE, which forced row-level security refuses an owner without
   BYPASSRLS (`outreach.campaign_members` has no UPDATE policy). The same check
   runs for outreach-api, so a live registration into a campaign may meet the
-  same refusal; 0102 reports it and changes nothing. 0120 fixes it (§37); the demo
+  same refusal; 0102 reports it and changes nothing. 0110 fixes it (§37); the demo
   registrations stay unlinked.
 
 Nothing is sent: the order commands' inbox notices are marked read in the same
@@ -3594,13 +3594,15 @@ CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
 
-## 37. Outreach: registering a person into a campaign (0120)
+## 37. Outreach: registering a person into a campaign (0110)
 
-Migration 0120 (`0120_outreach_campaign_registration_lock.sql`; coordinator of
-2026-11-04, "0120 first (prove it, then fix)", the number assigned by the
-coordinator; unsigned until the owner signs) is written on 0105 and uses
-nothing 0106-0119 add. It applies after staging's 0106, 0107 and 0108
-unchanged: none of them touches an object 0120 reads, pins or replaces.
+Migration 0110 (`0110_outreach_campaign_registration_lock.sql`; coordinator of
+2026-11-04, "0120 first (prove it, then fix)"; first numbered 0120 and
+renumbered 0110 on 2026-11-11 so the release list stays contiguous after 0109;
+signed by the owner on 2026-11-11) is written on 0105 and uses nothing
+0106-0109 add. It applies after 0109 (its marker,
+`identity.support_health_id_matches(text[])`, is a precondition): none of
+0106-0109 touches an object 0110 reads, pins or replaces.
 
 The gap: every registration into a campaign was refused in production. The
 campaign trigger `outreach.validate_registration_campaign_write` (0045,
@@ -3642,7 +3644,7 @@ The change:
   `OUTREACH_CAMPAIGN_NOT_ACCEPTING_REGISTRATIONS`. Any other database error is
   unchanged.
 
-Applying 0120 replaces one function body and takes no lock on an application
+Applying 0110 replaces one function body and takes no lock on an application
 table to commit. It has no down migration. Today's outreach-api image works
 on it unchanged (its registration into a campaign now succeeds; a late
 trigger refusal stays a 500 until the new image). Tests:

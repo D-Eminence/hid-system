@@ -427,8 +427,8 @@ select pg_temp.outreach_case('runtime', 'campaign update: ' || session_name
 -- statement in order. Not run here: the audit insert of each command
 -- (services/outreach-api/src/audit/audit.service.ts:9-17), which no Outreach
 -- guard reads; campaign-linked capture, which
--- test/database/outreach-campaign-registration.integration.sql covers (0120:
--- assertCampaignAcceptsRegistration locks only the campaign, and since 0120 so
+-- test/database/outreach-campaign-registration.integration.sql covers (0110:
+-- assertCampaignAcceptsRegistration locks only the campaign, and since 0110 so
 -- does the registration trigger; the runtime still cannot lock
 -- outreach.campaign_members); and
 -- addCampaignMember (lines 224-248), which writes only outreach.campaign_members
