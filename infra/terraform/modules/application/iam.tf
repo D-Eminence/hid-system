@@ -59,6 +59,20 @@ output "ocr_textract_actions" {
   ]))
 }
 
+output "ocr_source_deletion_permissions" {
+  description = "The OCR worker's 7-day deletion statements: sid, actions, resources and conditions (no ARNs beyond the bucket)."
+  value = [
+    for statement in data.aws_iam_policy_document.ocr_documents.statement : {
+      sid       = statement.sid
+      actions   = sort(statement.actions)
+      resources = sort(statement.resources)
+      conditions = [for condition in(statement.condition == null ? [] : statement.condition) : {
+        test = condition.test, variable = condition.variable, values = condition.values
+      }]
+    } if statement.sid != null && startswith(statement.sid, "OcrSource")
+  ]
+}
+
 data "aws_iam_policy_document" "ocr_documents" {
   statement {
     actions   = ["s3:ListBucket"]
@@ -67,6 +81,25 @@ data "aws_iam_policy_document" "ocr_documents" {
   statement {
     actions   = ["s3:GetObject", "s3:GetObjectVersion"]
     resources = ["${var.document_bucket_arn}/*"]
+  }
+  # 7-day deletion of OCR sources (owner condition before the first real
+  # patient; the sweeper in services/ocr-worker): list every version and delete
+  # marker of one exact uploaded document key, and delete them. Only uploads
+  # (clinical/objects/), never other prefixes; nothing else can be deleted.
+  statement {
+    sid       = "OcrSourceVersionsList"
+    actions   = ["s3:ListBucketVersions"]
+    resources = [var.document_bucket_arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["clinical/objects/*"]
+    }
+  }
+  statement {
+    sid       = "OcrSourceVersionsDelete"
+    actions   = ["s3:DeleteObjectVersion"]
+    resources = ["${var.document_bucket_arn}/clinical/objects/*"]
   }
   statement {
     actions   = ["kms:Decrypt"]

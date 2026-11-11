@@ -72,8 +72,13 @@ variable "notify_stopped_tasks" {
   type        = bool
   default     = false
 }
+variable "ocr_worker_running" {
+  description = "Whether the OCR worker is scaled above zero. The source-deletion alarm treats a missing sweep round as a breach, so it exists only while the worker runs (a staging sleep or economy profile can scale the worker to zero)."
+  type        = bool
+  default     = true
+}
 variable "ocr_worker_log_group" {
-  description = "The OCR worker's log group; its queue-age and loop-error lines feed the OCR alarms. Null turns those alarms off."
+  description = "The OCR worker's log group; its queue-age, loop-error and source-deletion lines feed the OCR alarms. Null turns those alarms off."
   type        = string
   default     = null
 }

@@ -221,6 +221,7 @@ module "operations" {
   alert_subscribers          = var.alert_subscribers
   notify_stopped_tasks       = var.enable_runtime
   ocr_worker_log_group       = module.application.ocr_worker_log_group
+  ocr_worker_running         = lookup(local.desired_counts, "ocr-worker", 0) > 0
 }
 
 # 7. Account-level budgets and anomaly monitoring. Disabled until the existing
