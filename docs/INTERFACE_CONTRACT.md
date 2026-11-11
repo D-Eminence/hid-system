@@ -1059,8 +1059,10 @@ exact expected Outreach row version. Outreach calls the Identity authorization
 boundary with separate `outreach-api` workload evidence before opening the
 mutation transaction. Stale versions return 412; a reused idempotency key with
 different content returns 409; Identity/dependency failure never returns
-success. There is no Outreach create-patient, HID, NIN, campaign, encounter,
-screening, document, OCR, or EHR-ingestion endpoint in this slice.
+success. There is no Outreach create-patient, HID, NIN, encounter,
+screening, document, OCR, or EHR-ingestion endpoint in this slice. Campaigns
+are served under the same prefix (`/campaigns`), and only a campaign's own
+admins manage one (section 40, 0111).
 
 ## 9. Patient Identifier Contract
 
@@ -3498,7 +3500,7 @@ entry paths do not read the allowance. Tables `ocr.facility_page_limits`,
 facility, Lagos month, requests and the four token counts) hold ids, counts,
 dates, the model name and the limit's reason only, have no runtime grant, no
 foreign key to `ocr.jobs` (the 7-day deletion of a job's working data,
-section 40, never waits on them or removes them) and are read only through these commands.
+section 41, never waits on them or removes them) and are read only through these commands.
 `ocr.claim_worker_job` keeps the body 0105 gave it. The only change to an existing function
 is one more allowed transition in `ocr.validate_job_write`: a queued job whose
 `last_error_code` is exactly `OCR_PAGE_ALLOWANCE_USED_UP` may move
@@ -3795,7 +3797,81 @@ instead of the 404 they got before. Until the database can tell Identity which
 grant covered a check, a draft-only publishing path under the cover is not
 offered.
 
-## 40. OCR source deletion after 7 days (0112)
+## 40. Outreach campaigns: their own admins manage them (0111)
+
+Decision (relayed in chat, 2026-11-11, ADR-045 option B): any staff member
+allowed to write campaigns (`outreach.campaign.write`) may create one and
+becomes its admin. Only that campaign's own admins can open or close it and
+add members. Identity authorizes `outreach.campaign.write` from this release
+on. Before, it refused it, because any holder could add themselves to any
+campaign, read its linked registrations, or close it.
+
+```text
+GET  /api/v1/outreach/registration-cases/campaigns/governance          # outreach.campaign.read
+GET  /api/v1/outreach/registration-cases/campaigns                     # outreach.campaign.read
+POST /api/v1/outreach/registration-cases/campaigns                     # outreach.campaign.write
+POST /api/v1/outreach/registration-cases/campaigns/:campaignId/status  # outreach.campaign.write, If-Match, the campaign's admins
+GET  /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreach.campaign.read
+GET  /api/v1/outreach/registration-cases/campaigns/:campaignId/staff   # outreach.campaign.read
+POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreach.campaign.write, the campaign's admins
+```
+
+**governance**
+- Answers `{ "rule": "campaign_admins" }`.
+- A website asks it to learn that campaign management is served. A backend
+  before 0111 answers 404.
+
+**Creating** (`{ name, services, startsAt, endsAt? }`)
+- Makes a `planned` campaign, and its creator its first `admin`.
+- An `endsAt` not after `startsAt` answers 400
+  `OUTREACH_CAMPAIGN_DATES_INVALID`.
+
+**status** (`{ status: planned | active | closed, reason }`)
+- `If-Match` must carry the campaign's `rowVersion`.
+- A caller who is not one of the campaign's admins gets 403
+  `OUTREACH_CAMPAIGN_ADMIN_REQUIRED`, before the version is compared.
+- It cannot become `active` before `startsAt` (409
+  `OUTREACH_CAMPAIGN_NOT_STARTED`).
+- A closed campaign cannot be reopened (409 `OUTREACH_CAMPAIGN_CLOSED`).
+
+**staff**
+- Answers `{ yourRole, people: [{ membershipId, name, campaignRole }] }`:
+  - to a member of the campaign, its members by name;
+  - to its admins, also every active staff membership at the facility that
+    could be added (`campaignRole` null).
+- A non-member gets `{ "yourRole": null, "people": [] }`.
+- `name` is the staff member's full name. Nothing else about a person is
+  returned.
+
+**members** (`{ membershipId, role: enumerator | health_worker | admin }`)
+- A caller who is not one of the campaign's admins gets 403
+  `OUTREACH_CAMPAIGN_ADMIN_REQUIRED`.
+- Someone who is not an active staff member at the facility gets 422
+  `OUTREACH_STAFF_NOT_AVAILABLE`.
+- Someone already in the campaign gets 409
+  `OUTREACH_CAMPAIGN_MEMBER_EXISTS`.
+- No route removes a member.
+
+**The database (0111)**
+- `outreach.validate_campaign_write()` refuses any campaign update by a
+  session whose membership is not one of the campaign's admins (42501). A row
+  lock fires no trigger, so a member registering a person into the campaign
+  (0045's `FOR SHARE`) is unaffected. Where the function's owner does not
+  bypass row-level security (RDS), the check reads the members under their
+  policies, so it also needs a direct-care session holding
+  `outreach.campaign.read`; the campaigns update policy needs one already.
+- Restrictive policies on `outreach.campaign_members`:
+  - only a campaign's admins insert or delete its members;
+  - the creator may seed themself as the first admin of a campaign with no
+    member yet.
+- `outreach.campaign_staff(uuid)` answers the staff list above. It is
+  executable by `hid_outreach_runtime` alone.
+
+**Release order.** Apply 0111 before identity-api ships with
+`outreach.campaign.write` accepted. On a database without 0111, that would
+reopen the ungoverned writes.
+
+## 41. OCR source deletion after 7 days (0112)
 
 Owner and coordinator decisions of 2026-11-11: (1) at 24 hours (7 days since
 Q36, below) after an OCR job finishes, saved or not, the uploaded source file
