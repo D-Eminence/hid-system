@@ -5,6 +5,7 @@ import { paperReadingPayloadSchema } from './reading/contract';
 import { HARD_PAGE_PROMPT_VERSION, HARD_PAGE_PROMPT_VERSION_NO_ZOOM, IMAGE_PROMPT_VERSION } from './reading/prompt';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type HardReadUsage, type PassUsageRecord,
   type ReadingOutcome } from './reading/reader';
+import type { SourceDeletionSweeper } from './source-deletion';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type VerifiedDocument, type WorkerOcrProvider, type WorkerRepository } from './types';
 
@@ -15,7 +16,7 @@ export class OcrWorker {
   private acceptingClaims = false;
   constructor(private readonly config: OcrWorkerConfig, private readonly repository: WorkerRepository,
     private readonly reader: DocumentReader, private readonly provider: WorkerOcrProvider,
-    private readonly reading: PaperReadingService) {}
+    private readonly reading: PaperReadingService, private readonly sourceDeletion?: SourceDeletionSweeper) {}
 
   async run(): Promise<void> {
     await this.repository.checkReadiness();
@@ -32,8 +33,13 @@ export class OcrWorker {
       aiHardPageMaxTokens: this.config.OCR_AI_HARD_PAGE_MAX_TOKENS,
       aiHardPageDeadlineMs: this.config.OCR_AI_HARD_PAGE_DEADLINE_MS, aiZoomMaxCalls: this.config.OCR_AI_ZOOM_MAX_CALLS,
       aiLastResortSeconds: this.config.OCR_AI_LAST_RESORT_SECONDS,
-      textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
-    await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
+      textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false,
+      sourceDeletion: this.sourceDeletionEnabled(),
+      ...(this.sourceDeletionEnabled() ? { sourceDeletionIntervalSeconds: this.config.OCR_SOURCE_DELETION_INTERVAL_SECONDS } : {}) });
+    await Promise.all([
+      ...Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)),
+      ...(this.sourceDeletionEnabled() ? [this.sourceDeletionLoop()] : []),
+    ]);
     await this.repository.close();
     this.log('info', 'ocr.worker.stopped', { acceptingClaims: false });
   }
@@ -296,6 +302,25 @@ export class OcrWorker {
         await delay(backoff + Math.floor(Math.random() * Math.min(backoff, 1_000)), this.shutdown.signal)
           .catch(() => undefined);
       }
+    }
+  }
+
+  private sourceDeletionEnabled(): boolean {
+    return this.sourceDeletion !== undefined && this.config.OCR_SOURCE_DELETION_ENABLED === true;
+  }
+
+  /** One deletion round at start, then one every OCR_SOURCE_DELETION_INTERVAL_SECONDS, until shutdown. */
+  private async sourceDeletionLoop(): Promise<void> {
+    const sweeper = this.sourceDeletion;
+    if (!sweeper) return;
+    while (!this.shutdown.signal.aborted) {
+      try {
+        await sweeper.runRound(this.shutdown.signal);
+      } catch (error) {
+        if (this.shutdown.signal.aborted) break;
+        this.log('error', 'ocr.source_deletion.failed', { stage: 'round', code: safeErrorCode(error) });
+      }
+      await delay(this.config.OCR_SOURCE_DELETION_INTERVAL_SECONDS * 1_000, this.shutdown.signal).catch(() => undefined);
     }
   }
 
