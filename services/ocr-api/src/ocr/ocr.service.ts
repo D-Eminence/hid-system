@@ -15,7 +15,7 @@ import type { RetryOcrJobDto } from './dto/retry-ocr-job.dto';
 import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
 import { assertCandidateClassification, assertPublishableCandidate, clinicalNoteCandidate,
   expectedPublicationOperation, importedLabCandidate,
-  importedMedicationCandidates, type ImportedMedicationEntry } from './ocr-publication-policy';
+  importedMedicationCandidates, paperRecordDraftNote, type ImportedMedicationEntry, type OcrTargetDomain } from './ocr-publication-policy';
 import { lagosToday } from './paper-date';
 import { LabApiService } from '../integrations/lab-api.service';
 import { OcrPublicationSwitch } from './ocr-publication-switch';
@@ -56,7 +56,26 @@ interface ValidationRow extends QueryResultRow {
 
 interface ConfirmationRow extends QueryResultRow {
   id: string; job_id: string; patient_id: string; confirmation_version: number;
-  method: string; created_at: Date; request_sha256: string;
+  method: string; created_at: Date; request_sha256: string; confirmed_by?: string;
+}
+
+/**
+ * Who may publish, and as what (0113, owner decision of 2026-11-11): the
+ * publisher's own direct-care write grant publishes as before, for every
+ * target; the patient's dedicated records-processing grant
+ * (identity.records_processing_write_grant) publishes a clinical-note reading
+ * as a draft into the patient's "Imported paper records" encounter, and
+ * nothing else. The cover (approval, Access PIN, share) never counts.
+ */
+type PublicationBasis = 'direct_care' | 'records_processing_grant';
+
+interface PublicationAuthority {
+  source: Awaited<ReturnType<EhrApiService['getOcrDocumentSource']>>;
+  basis: PublicationBasis;
+  /** The dedicated grant, under records_processing_grant. */
+  grantId?: string;
+  /** The context the owning domain is called with: healthcare-operations under the dedicated grant. */
+  context: DataAccessContext;
 }
 
 interface PublicationRow extends QueryResultRow {
@@ -66,6 +85,8 @@ interface PublicationRow extends QueryResultRow {
   request_sha256: string; attempt_count: number; max_attempts: number;
   target_resource_type: string | null; target_resource_id: string | null;
   failure_code: string | null; failure_summary: string | null; row_version: string;
+  /** 0113: the basis the request was authorized on; every attempt takes the same route. Null before 0113: direct care. */
+  publication_basis?: PublicationBasis | null;
   requested_at: Date; completed_at: Date | null;
 }
 
@@ -468,7 +489,8 @@ export class OcrService {
       // command of the job, serializes publication requests (Phase 4 Stage 9).
       const validation = await this.findValidation(client, validationId);
       const job = await this.findJob(client, validation.job_id, true);
-      const source = await this.authorizePublication(job, context);
+      const authority = await this.authorizePublication(client, job, context, validation.target_domain);
+      const source = authority.source;
       this.assertPublicationRequest(validation, input);
       const confirmation = await this.findConfirmation(client, input.patientConfirmationId, validation.job_id);
       // A replay only reads its publication; executePublication's conditional
@@ -493,16 +515,18 @@ export class OcrService {
       const inserted = await client.query<PublicationRow>(
         `insert into ocr.publications (job_id,validation_id,validation_version,
           patient_confirmation_id,facility_id,patient_id,target_domain,target_operation,
-          idempotency_key,request_sha256,requested_by,requested_by_membership_id,correlation_id)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning *`,
+          idempotency_key,request_sha256,requested_by,requested_by_membership_id,correlation_id,
+          publication_basis)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) returning *`,
         [validation.job_id, validation.id, validation.validation_version, confirmation.id,
           context.facilityId, confirmation.patient_id, validation.target_domain,
           input.targetOperation, idempotencyKey, digest, context.actor.accountId,
-          context.membershipId, context.correlationId]);
+          context.membershipId, context.correlationId, authority.basis]);
       const created = inserted.rows[0];
       if (!created) throw new DomainProblem(503, 'OCR_PUBLICATION_NOT_CREATED', 'Publication command could not be created');
-      await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.request', job,
-        source.patientId, { publicationId: created.id, validationId, targetDomain: validation.target_domain }));
+      await this.audit.recordWithClient(client, this.auditEvent(authority.context, 'ocr.publication.request', job,
+        source.patientId, { publicationId: created.id, validationId, targetDomain: validation.target_domain,
+          ...this.publicationActors(authority, context, confirmation.confirmed_by) }));
       await this.appendOutbox(client, job, 'OcrPublicationRequested', Number(created.row_version),
         { publicationId: created.id, validationId });
       return created;
@@ -549,24 +573,53 @@ export class OcrService {
       throw new DomainProblem(409, 'OCR_PUBLICATION_IN_PROGRESS', 'Publication is already processing or is not retryable');
     }
 
+    let actors: Record<string, unknown> = {};
+    let auditContext = context;
     try {
       const evidence = await this.database.withTransaction(context, async (client) => {
         const validation = await this.findValidation(client, claimed.validation_id);
         const job = await this.findJob(client, claimed.job_id);
-        const source = await this.authorizePublication(job, context);
-        return { validation, job, patientId: source.patientId };
+        // The route is the one the request was authorized on (0113): a Lab
+        // reading requested under the grant never becomes Lab evidence on a
+        // retry by a publisher who has since gained direct care, nor the reverse.
+        const authority = await this.authorizePublication(client, job, context, claimed.target_domain,
+          claimed.publication_basis ?? 'direct_care');
+        const confirmation = await client.query<{ confirmed_by: string }>(
+          `select confirmed_by::text from ocr.patient_confirmations where id=$1 and job_id=$2`,
+          [claimed.patient_confirmation_id, claimed.job_id]);
+        actors = this.publicationActors(authority, context, confirmation.rows[0]?.confirmed_by);
+        auditContext = authority.context;
+        return { validation, job, patientId: authority.source.patientId, authority,
+          confirmedBy: confirmation.rows[0]?.confirmed_by };
       });
       let resourceType: string;
       let resourceId: string;
       let auditDetails: Record<string, unknown> = {};
-      if (claimed.target_domain === 'EHR' && claimed.target_operation === 'create_imported_clinical_note') {
-        const note = clinicalNoteCandidate(evidence.validation.accepted_fields);
+      const draftOfAnotherKind = evidence.authority.basis === 'records_processing_grant'
+        && claimed.target_domain !== 'EHR';
+      if (draftOfAnotherKind
+        || (claimed.target_domain === 'EHR' && claimed.target_operation === 'create_imported_clinical_note')) {
+        // A Lab, Pharmacy or document-only reading under the dedicated grant is
+        // a draft note too, labelled by kind (EHR shows "From a paper record
+        // (Migrate): Lab results"); structured Lab and Pharmacy records need
+        // direct care.
+        const candidate: { encounterId?: string; noteType: string; title: string; content: string } = draftOfAnotherKind
+          ? paperRecordDraftNote(claimed.target_domain as OcrTargetDomain, evidence.validation.accepted_fields,
+            lagosToday(new Date(evidence.validation.created_at)))
+          : clinicalNoteCandidate(evidence.validation.accepted_fields);
+        const { encounterId, ...note } = candidate;
+        // Under the dedicated grant the reading becomes a draft in the
+        // patient's "Imported paper records" encounter: no visit is sent, and
+        // EHR checks the same grant again. Under direct care a reading that
+        // names no visit goes there too; one that names a visit goes to it.
+        const visit = evidence.authority.basis === 'direct_care' && encounterId ? { encounterId } : {};
         const created = await this.ehrApi.createOcrClinicalNote(claimed.patient_id, {
-          ...note, publicationId: claimed.id, documentId: evidence.validation.document_id,
+          ...note, ...visit, publicationId: claimed.id, documentId: evidence.validation.document_id,
           ocrJobId: evidence.validation.job_id, extractionId: evidence.validation.extraction_id,
           validationId: evidence.validation.id, validationVersion: evidence.validation.validation_version,
           reviewedBy: evidence.validation.validated_by,
-        }, context, `ocr-publication:${claimed.id}`);
+          ...(evidence.confirmedBy ? { confirmedBy: evidence.confirmedBy } : {}),
+        }, evidence.authority.context, `ocr-publication:${claimed.id}`);
         resourceType = 'clinical-note'; resourceId = created.id;
       } else if (claimed.target_domain === 'LAB'
         && claimed.target_operation === 'create_imported_lab_evidence') {
@@ -625,10 +678,10 @@ export class OcrService {
           [claimed.id, token, resourceType, resourceId]);
         const published = result.rows[0];
         if (!published) throw new DomainProblem(409, 'OCR_PUBLICATION_CLAIM_LOST', 'Publication ownership expired before completion');
-        await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.succeed', evidence.job,
+        await this.audit.recordWithClient(client, this.auditEvent(auditContext, 'ocr.publication.succeed', evidence.job,
           evidence.patientId,
           { publicationId: published.id, targetResourceType: resourceType, targetResourceId: resourceId,
-            ...auditDetails }));
+            ...auditDetails, ...actors }));
         await this.appendOutbox(client, evidence.job, 'OcrPublicationSucceeded', Number(published.row_version),
           { publicationId: published.id, targetResourceType: resourceType, targetResourceId: resourceId });
         return this.projectPublication(published);
@@ -661,10 +714,10 @@ export class OcrService {
           // last permitted attempt no further attempt follows, whatever the code.
           const retryable = !terminal && failed.attempt_count < failed.max_attempts;
           const job = await this.findJob(client, failed.job_id);
-          await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.fail', job,
+          await this.audit.recordWithClient(client, this.auditEvent(auditContext, 'ocr.publication.fail', job,
             failed.patient_id,
             { publicationId: failed.id, failureCode: failed.failure_code, ownerFailureCode: ownerCode,
-              retryable }));
+              retryable, ...actors }));
           await this.appendOutbox(client, job, 'OcrPublicationFailed', Number(failed.row_version),
             { publicationId: failed.id, failureCode: failed.failure_code, retryable });
         }
@@ -742,7 +795,8 @@ export class OcrService {
 
   private async findConfirmation(client: PoolClient, confirmationId: string, jobId: string): Promise<ConfirmationRow> {
     const result = await client.query<ConfirmationRow>(
-      `select id::text,job_id::text,patient_id::text,confirmation_version,method,created_at,request_sha256
+      `select id::text,job_id::text,patient_id::text,confirmation_version,method,created_at,request_sha256,
+              confirmed_by::text
          from ocr.patient_confirmations where id=$1 and job_id=$2
           and confirmation_version=(select max(latest.confirmation_version)
             from ocr.patient_confirmations latest where latest.job_id=$2)`, [confirmationId, jobId]);
@@ -854,31 +908,73 @@ export class OcrService {
   /**
    * Publishing needs the publisher's own direct-care write_records grant on
    * the patient (the request's purpose, always direct-care), for every
-   * target. A caller who can read the job (EHR answers its source under that
-   * purpose: EHR's row-level security and Identity read check) but has no
-   * such grant gets 403 OCR_PUBLISH_NEEDS_DIRECT_CARE, so a records-processing
-   * cover holder learns to ask a clinician. A caller who cannot read the job
-   * gets 404 OCR_JOB_NOT_FOUND, revealing nothing. A break-glass write is
-   * refused as before, with 404.
+   * target, or (0113, owner decision of 2026-11-11) the patient's dedicated
+   * records-processing grant, which publishes any reading as a draft note. In order:
+   * - the source is read under the request's purpose; when Identity allows a
+   *   write there without break-glass: direct_care, as before; with
+   *   break-glass only: 404, as before;
+   * - otherwise identity.records_processing_write_grant is asked about the
+   *   job's patient (the source's, or the confirmed one when the source is
+   *   hidden under direct care), in this transaction, for the session's own
+   *   subject, membership and facility; with a grant, the source is read again
+   *   under healthcare-operations and must be that patient's: then
+   *   records_processing_grant, for every target: a clinical-note reading as
+   *   it is, a Lab, Pharmacy or document-only reading as a draft note
+   *   labelled by kind (paperRecordDraftNote), never a structured Lab or
+   *   Pharmacy record;
+   * - at an execution attempt `required` is the basis stored with the
+   *   request (ocr.publications.publication_basis): only that basis counts,
+   *   so every attempt takes the same route;
+   * - otherwise 403 OCR_PUBLISH_NEEDS_DIRECT_CARE to a caller who can read
+   *   the job, and 404 OCR_JOB_NOT_FOUND to one who cannot, as #221.
+   * Shares, Access PINs and approvals (the cover) never reach the draft path:
+   * the SQL check names only the dedicated grant.
    */
-  private async authorizePublication(row: OcrJobRow, context: DataAccessContext) {
-    let source: Awaited<ReturnType<EhrApiService['getOcrDocumentSource']>>;
-    try {
-      source = await this.ehrApi.getOcrDocumentSource(row.document_id, context);
-    } catch (error) {
-      if (error instanceof DomainProblem && (error.getStatus() === 404 || error.getStatus() === 403)) {
+  private async authorizePublication(client: PoolClient, row: OcrJobRow, context: DataAccessContext,
+    targetDomain: string, required?: PublicationBasis): Promise<PublicationAuthority> {
+    const readSource = async (call: DataAccessContext) => {
+      try {
+        return await this.ehrApi.getOcrDocumentSource(row.document_id, call);
+      } catch (error) {
+        if (error instanceof DomainProblem && (error.getStatus() === 404 || error.getStatus() === 403)) return undefined;
+        throw error;
+      }
+    };
+    const source = await readSource(context);
+    if (source) {
+      const authorization = await this.identity.authorize(source.patientId, 'write_records', context.purposeOfUse, context);
+      if (authorization.allowed && authorization.breakGlass) {
         throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
       }
-      throw error;
+      if (authorization.allowed && required !== 'records_processing_grant') {
+        // Nothing is published once the source and its reading were deleted after 7 days (migration 0112).
+        if (SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
+        return { source, basis: 'direct_care', context };
+      }
     }
-    const authorization = await this.identity.authorize(source.patientId, 'write_records', context.purposeOfUse, context);
-    if (authorization.allowed && !authorization.breakGlass) {
-      // Nothing is published once the source and its reading were deleted after 7 days (migration 0112).
-      if (SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
-      return source;
+    const patientId = source?.patientId ?? row.confirmed_patient_id ?? row.patient_id ?? undefined;
+    if (patientId && required !== 'direct_care') {
+      const grant = await client.query<{ id: string | null }>(
+        `select identity.records_processing_write_grant($1, $2, $3, $4)::text as id`,
+        [patientId, context.actor.subject, context.membershipId, context.facilityId]);
+      const grantId = grant.rows[0]?.id ?? undefined;
+      if (grantId) {
+        const recordsProcessing: DataAccessContext = { ...context, purposeOfUse: 'healthcare-operations' };
+        const draftSource = await readSource(recordsProcessing);
+        if (draftSource && draftSource.patientId === patientId && targetDomain !== 'UNCLASSIFIED') {
+          if (SOURCE_DELETION_STATUSES.has(draftSource.status)) throw sourceDeleted();
+          return { source: draftSource, basis: 'records_processing_grant', grantId, context: recordsProcessing };
+        }
+      }
     }
-    if (authorization.allowed) throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
+    if (!source) throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
     throw new DomainProblem(403, 'OCR_PUBLISH_NEEDS_DIRECT_CARE', OCR_PUBLISH_NEEDS_DIRECT_CARE_MESSAGE);
+  }
+
+  /** Ids only: the basis, the dedicated grant, and who confirmed the patient and who publishes. */
+  private publicationActors(authority: PublicationAuthority, context: DataAccessContext, confirmedBy?: string) {
+    return { basis: authority.basis, ...(authority.grantId ? { grantId: authority.grantId } : {}),
+      ...(confirmedBy ? { confirmedBy } : {}), publishedBy: context.actor.accountId };
   }
 
   // Every OCR job event names the canonical patient of the source document:

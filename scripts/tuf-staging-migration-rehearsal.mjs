@@ -98,6 +98,15 @@ function quote(identifier) {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+// Columns a later migration adds to tables that already hold historical rows.
+// The snapshot leaves them out, so a historical row compares on the columns it
+// had; the upgrade check then asserts every historical row holds the added
+// column's default (see historicalDefaults below).
+const addedColumns = {
+  'ehr.encounters': ['imported_paper_records'], // 0113, default false
+  'ocr.publications': ['publication_basis'], // 0113, default NULL (read as direct care)
+};
+
 async function snapshot(db) {
   return withClient(db, async (client) => {
     await client.query("set timezone = 'UTC'");
@@ -106,8 +115,10 @@ async function snapshot(db) {
     const result = {};
     for (const table of tables) {
       const name = `${table.schemaname}.${table.tablename}`;
-      const rows = (await client.query(`select to_jsonb(t)::text as value from
-        ${quote(table.schemaname)}.${quote(table.tablename)} t order by to_jsonb(t)::text collate "C"`)).rows;
+      const added = addedColumns[name] ?? [];
+      const projected = added.length ? `(to_jsonb(t) - ${added.map((column) => `'${column}'`).join(' - ')})` : 'to_jsonb(t)';
+      const rows = (await client.query(`select ${projected}::text as value from
+        ${quote(table.schemaname)}.${quote(table.tablename)} t order by ${projected}::text collate "C"`)).rows;
       result[name] = { rows: rows.length, sha256: sha256(rows.map((row) => row.value).join('\n')) };
     }
     const sequences = (await client.query(`select schemaname, sequencename from pg_sequences
@@ -354,6 +365,17 @@ try {
   for (const [name, value] of Object.entries(upgradeBefore)) {
     if (!expectedChanged.has(name)) assert.deepEqual(upgradeAfter[name], value, `Upgrade changed historical ${name}`);
   }
+  // Every historical row holds the default of a column a migration added.
+  await withClient('hid_upgrade', async (client) => {
+    const historicalDefaults = [
+      ['ehr.encounters', 'imported_paper_records is distinct from false'],
+      ['ocr.publications', 'publication_basis is not null'],
+    ];
+    for (const [table, offending] of historicalDefaults) {
+      const { rows } = await client.query(`select count(*)::int as n from ${table} where ${offending}`);
+      assert.equal(rows[0].n, 0, `Upgrade set a non-default value of an added column on historical ${table} rows`);
+    }
+  });
   restore('hid_upgrade_restored', upgradeBackup);
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
