@@ -71,5 +71,10 @@ describe('PharmacyApiClient transport contract', () => {
       { status: 200, headers: { 'content-type': 'application/json' } }));
     await expect(client.listImportedMedicationEvidence(record.patientId, context))
       .rejects.toMatchObject({ status: 502 });
+    // A page holding another patient's record is refused, never passed to the chart.
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ items: [record], nextCursor: null }),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+    await expect(client.listImportedMedicationEvidence('50000000-0000-4000-8000-0000000000ff', context))
+      .rejects.toMatchObject({ status: 502 });
   });
 });

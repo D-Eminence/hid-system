@@ -247,7 +247,13 @@ export class PharmacyApiClient {
     if (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !value.nextCursor)) {
       throw new PharmacyApiProblem(502, value);
     }
-    return { items: value.items.map(parseImport), nextCursor: value.nextCursor };
+    // Never pass on more than a page, or a record of another patient, to the chart.
+    if (value.items.length > 100) throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+    const items = value.items.map(parseImport);
+    if (items.some((item) => item.patientId !== patientId)) {
+      throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+    }
+    return { items, nextCursor: value.nextCursor };
   }
 
   private async resourceCommand(
