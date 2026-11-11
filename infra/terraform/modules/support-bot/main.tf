@@ -14,7 +14,7 @@ resource "aws_iam_role" "lex" {
 }
 
 locals {
-  fallback_answer = "I could not match that to a Health ID FAQ. Contact Health ID support: ${var.support_contact}. This chatbot cannot diagnose or recommend treatment. For symptoms or treatment questions, contact a qualified healthcare professional. If you think this is an emergency, seek urgent medical care."
+  fallback_answer = "I could not match that to a Health ID help topic. Try a short question such as: reset my password, sign up as a doctor, register a facility, accept an invitation or share my records. Or contact Health ID support: ${var.support_contact}. This chatbot cannot diagnose or recommend treatment. For symptoms or treatment questions, contact a qualified healthcare professional. If you think this is an emergency, seek urgent medical care."
   faq_revision = sha256(jsonencode({
     faqs            = var.faqs
     support_contact = var.support_contact

@@ -77,13 +77,21 @@ locals {
     if contains(["ehr", "lab", "pharmacy", "ocr", "migrate", local.runtime_environment], split(".", subdomain)[0])
   ]
   # Keep the current FAQ untouched during preparation. Only the coordinated
-  # runtime cutover moves its public links to the approved production hosts.
+  # runtime cutover moves its public links to the approved production hosts:
+  # the public site, the patient portal and each staff product site. No staging
+  # address is a prefix of another (each starts "https://<name>."), so the
+  # order of the replacements does not matter.
   runtime_support_faqs = var.promote_existing_staging && var.activate_production_runtime ? {
     for name, faq in var.support_faqs : name => {
       utterances = faq.utterances
-      answer = replace(replace(faq.answer,
+      answer = replace(replace(replace(replace(replace(replace(replace(faq.answer,
         "https://www.staging.${var.root_domain_name}", "https://${try(var.production_hosts["public"], "")}"),
-      "https://staging.${var.root_domain_name}", "https://${try(var.production_hosts["web"], "")}")
+        "https://staging.${var.root_domain_name}", "https://${try(var.production_hosts["web"], "")}"),
+        "https://ehr.staging.${var.root_domain_name}", "https://${try(var.production_hosts["ehr"], "")}"),
+        "https://lab.staging.${var.root_domain_name}", "https://${try(var.production_hosts["lab"], "")}"),
+        "https://pharmacy.staging.${var.root_domain_name}", "https://${try(var.production_hosts["pharmacy"], "")}"),
+        "https://migrate.staging.${var.root_domain_name}", "https://${try(var.production_hosts["ocr"], "")}"),
+      "https://outreach.staging.${var.root_domain_name}", "https://${try(var.production_hosts["outreach"], "")}")
     }
   } : var.support_faqs
 }
