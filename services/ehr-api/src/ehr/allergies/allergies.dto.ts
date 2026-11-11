@@ -45,7 +45,9 @@ export class AllergyCheckDto {
 
 /** The rules of an acknowledgement's reason: 10-500 characters after trimming, a word of three letters. */
 export function isValidAcknowledgementReason(reason: string): boolean {
-  return reason.length >= 10 && reason.length <= 500 && ACK_REASON.test(reason);
+  // Count characters (code points) as the database's char_length does, so an emoji counts once.
+  const length = [...reason].length;
+  return length >= 10 && length <= 500 && ACK_REASON.test(reason);
 }
 
 /** A warningToken as the allergy check answers it: 64 lower-case hex characters. */
