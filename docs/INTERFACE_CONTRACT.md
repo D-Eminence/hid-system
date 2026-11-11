@@ -3822,6 +3822,17 @@ Pharmacy records (Lab imported evidence, Pharmacy imported medications) still
 need direct care: under the grant they are never written, and the publication's
 `targetResourceType` is `clinical-note`. A clinician signs the draft later.
 
+**The database keeps it a draft (0112 D4).** Under `healthcare-operations` the
+API is not the only check: `ehr.records_processing_draft_guard()` (BEFORE
+INSERT, UPDATE and DELETE on `ehr.encounters`, `ehr.clinical_notes` and
+`ehr.clinical_note_revisions`) refuses with 42501
+`RECORDS_PROCESSING_DRAFT_ONLY` every update and delete, and every insert but
+the "Imported paper records" encounter, a draft note in it and that note's
+first revision, for a patient for whom the session's dedicated grant is named.
+A `healthcare-operations` write grant that the check does not name (for
+example one imported from legacy identity) writes nothing. Under any other
+purpose the guard does nothing.
+
 **The dedicated grant.** `identity.records_processing_write_grant(patient,
 subject, membership, facility)` returns its id or NULL (SECURITY DEFINER, for
 `hid_ocr_runtime` and `hid_ehr_runtime` only). It is the grant the patient's

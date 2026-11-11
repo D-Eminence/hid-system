@@ -99,6 +99,20 @@
 --    adds each such reading to it as a draft clinical note with
 --    ehr.ocr_import_provenance, as today; signing stays the direct-care PATCH
 --    route.
+-- D4 The database keeps it a draft: under healthcare-operations the API is
+--    not the only check. ehr.records_processing_draft_guard() (plpgsql,
+--    SECURITY INVOKER, search_path pg_catalog, pg_temp, owned by
+--    ehr.encounters' owner, EXECUTE for no one) runs BEFORE INSERT, UPDATE
+--    and DELETE on ehr.encounters, ehr.clinical_notes and
+--    ehr.clinical_note_revisions. Under any other purpose (or none) it does
+--    nothing. Under healthcare-operations it refuses (42501
+--    RECORDS_PROCESSING_DRAFT_ONLY) every UPDATE and DELETE, and every INSERT
+--    that is not, for a patient for whom D1 names the session's dedicated
+--    grant at the session's facility: the "Imported paper records" encounter;
+--    a draft note in it; the first revision of such a draft note. So a
+--    healthcare-operations write grant that D1 does not name (for example
+--    one imported from legacy identity), or a direct SQL write under it,
+--    cannot sign, change or add anything else. (Security review of 0112.)
 -- D3 Patient-facing: the patient must not see an empty "Imported paper
 --    records" entry. 0030's policy encounters_patient_self_read (patient-self
 --    context and status completed) is replaced by the same policy that also
@@ -137,8 +151,8 @@
 --    memberships and the purpose codes and execute the helpers, never through
 --    a superuser's bypass; the tables D1 reads as O_i do not force row-level
 --    security on it.
--- 1. D1. 2. D2 (column, constraint, index, trigger, function). 3. D3
---    (function, policy).
+-- 1. D1. 2. D2 (column, constraint, index, trigger, function) and D4
+--    (the guard function and its three triggers). 3. D3 (function, policy).
 -- 4. Owners, REVOKE FROM PUBLIC and grants (here when the roles exist, and in
 --    runtime-grants.sql, which gains the same 0112 block).
 -- 5. Post-checks: bodies (md5), attributes, owners, ACLs, the column, the
@@ -212,6 +226,7 @@ begin
      or to_regprocedure('ehr.imported_paper_records_encounter(uuid)') is not null
      or to_regprocedure('ehr.encounters_imported_paper_records_fixed()') is not null
      or to_regprocedure('ehr.imported_paper_records_signed(uuid,uuid,uuid)') is not null
+     or to_regprocedure('ehr.records_processing_draft_guard()') is not null
      or exists (select 1 from pg_attribute attribute_row
                  where attribute_row.attrelid = 'ehr.encounters'::regclass
                    and attribute_row.attname = 'imported_paper_records' and not attribute_row.attisdropped) then
@@ -574,6 +589,62 @@ $$;
 comment on function ehr.imported_paper_records_encounter(uuid) is
   '0112: finds or creates the session facility''s one "Imported paper records" encounter of the patient (other, completed, started and ended when created) and returns its id; as the caller, under row-level security. 42501 RECORDS_PROCESSING_GRANT_REQUIRED unless the purpose is healthcare-operations and identity.records_processing_write_grant names the dedicated grant, or the purpose is direct-care and the caller may write the patient''s record.';
 
+-- D4: under healthcare-operations, the database allows only the draft path.
+create function ehr.records_processing_draft_guard()
+returns trigger
+language plpgsql
+security invoker
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  actor_subject text := platform.current_actor_subject();
+  actor_membership uuid := platform.current_membership_id();
+  actor_facility uuid := platform.current_facility_id();
+  allowed boolean := false;
+begin
+  if platform.current_purpose_of_use() is distinct from 'healthcare-operations' then
+    return case when tg_op = 'DELETE' then old else new end;
+  end if;
+  if tg_op = 'INSERT' and actor_subject is not null and actor_membership is not null and actor_facility is not null
+     and new.facility_id = actor_facility
+     and identity.records_processing_write_grant(new.patient_id, actor_subject, actor_membership,
+           actor_facility) is not null then
+    if tg_table_name = 'encounters' then
+      allowed := new.imported_paper_records;
+    elsif tg_table_name = 'clinical_notes' then
+      allowed := new.status = 'draft' and exists (
+        select 1 from ehr.encounters encounter_row
+         where encounter_row.id = new.encounter_id and encounter_row.patient_id = new.patient_id
+           and encounter_row.facility_id = new.facility_id and encounter_row.imported_paper_records);
+    elsif tg_table_name = 'clinical_note_revisions' then
+      allowed := new.revision_no = 1 and exists (
+        select 1 from ehr.clinical_notes note_row
+          join ehr.encounters encounter_row on encounter_row.id = note_row.encounter_id
+         where note_row.id = new.clinical_note_id and note_row.patient_id = new.patient_id
+           and note_row.facility_id = new.facility_id and note_row.status = 'draft'
+           and encounter_row.imported_paper_records);
+    end if;
+  end if;
+  if not coalesce(allowed, false) then
+    raise exception using errcode = '42501', message = 'RECORDS_PROCESSING_DRAFT_ONLY';
+  end if;
+  return new;
+end
+$$;
+
+comment on function ehr.records_processing_draft_guard() is
+  '0112 D4: under healthcare-operations, only the session''s dedicated records-processing grant (identity.records_processing_write_grant) may write, and only the "Imported paper records" encounter, a draft note in it and that note''s first revision; every UPDATE and DELETE is refused (42501 RECORDS_PROCESSING_DRAFT_ONLY). Under any other purpose it does nothing.';
+
+create trigger encounters_records_processing_draft_guard
+  before insert or update or delete on ehr.encounters
+  for each row execute function ehr.records_processing_draft_guard();
+create trigger clinical_notes_records_processing_draft_guard
+  before insert or update or delete on ehr.clinical_notes
+  for each row execute function ehr.records_processing_draft_guard();
+create trigger clinical_note_revisions_records_processing_draft_guard
+  before insert or update or delete on ehr.clinical_note_revisions
+  for each row execute function ehr.records_processing_draft_guard();
+
 -- 3. D3: the patient sees the imported encounter only once it holds a signed note.
 create function ehr.imported_paper_records_signed(
   request_encounter_id uuid,
@@ -629,6 +700,10 @@ begin
        where proc.oid = 'ehr.imported_paper_records_signed(uuid,uuid,uuid)'::regprocedure) <> ehr_owner then
     execute format('alter function ehr.imported_paper_records_signed(uuid,uuid,uuid) owner to %I', pg_get_userbyid(ehr_owner));
   end if;
+  if (select proc.proowner from pg_proc proc
+       where proc.oid = 'ehr.records_processing_draft_guard()'::regprocedure) <> ehr_owner then
+    execute format('alter function ehr.records_processing_draft_guard() owner to %I', pg_get_userbyid(ehr_owner));
+  end if;
 end
 $$;
 
@@ -637,6 +712,7 @@ revoke all on function identity.records_processing_write_grant(uuid, text, uuid,
 revoke all on function ehr.imported_paper_records_encounter(uuid) from public;
 revoke all on function ehr.encounters_imported_paper_records_fixed() from public;
 revoke all on function ehr.imported_paper_records_signed(uuid, uuid, uuid) from public;
+revoke all on function ehr.records_processing_draft_guard() from public;
 
 do $$
 declare
@@ -678,7 +754,8 @@ begin
        '8985814bf1aa5ca5dace8f4232a18838'),
       ('ehr.imported_paper_records_encounter(uuid)', ehr_owner, false, 'v', 'plpgsql', 'uuid', '7d08e6e708c8212a22e62b753910ed1c'),
       ('ehr.encounters_imported_paper_records_fixed()', ehr_owner, false, 'v', 'plpgsql', 'trigger', '773f1c6e4a46d47fcba6ec318241b5a8'),
-      ('ehr.imported_paper_records_signed(uuid,uuid,uuid)', ehr_owner, true, 's', 'sql', 'boolean', '25df452520faabbc27aceb93f32ec6ef'))
+      ('ehr.imported_paper_records_signed(uuid,uuid,uuid)', ehr_owner, true, 's', 'sql', 'boolean', '25df452520faabbc27aceb93f32ec6ef'),
+      ('ehr.records_processing_draft_guard()', ehr_owner, false, 'v', 'plpgsql', 'trigger', 'a3421ff97b43e3bb1d97daddcd897f01'))
          expected(signature, owner_id, definer, volatility, language_name, result, digest)
     join pg_proc proc on proc.oid = expected.signature::regprocedure
     join pg_language language_row on language_row.oid = proc.prolang
@@ -692,7 +769,7 @@ begin
            where (proc.pronamespace = 'identity'::regnamespace and proc.proname = 'records_processing_write_grant')
               or (proc.pronamespace = 'ehr'::regnamespace
                   and proc.proname in ('imported_paper_records_encounter', 'encounters_imported_paper_records_fixed',
-                                       'imported_paper_records_signed'))) <> 4 then
+                                       'imported_paper_records_signed', 'records_processing_draft_guard'))) <> 5 then
     mismatch := 'count';
   end if;
   -- The column, constraint, index, trigger and policy.
@@ -725,6 +802,20 @@ begin
            || 'ehr.encounters_imported_paper_records_fixed()') <> 1 then
     mismatch := 'the trigger encounters_imported_paper_records_fixed';
   end if;
+  if mismatch is null and (select count(*) from pg_trigger trigger_row
+       where trigger_row.tgrelid in ('ehr.encounters'::regclass, 'ehr.clinical_notes'::regclass,
+                                     'ehr.clinical_note_revisions'::regclass)
+         and trigger_row.tgfoid = 'ehr.records_processing_draft_guard()'::regprocedure
+         and trigger_row.tgenabled = 'O'
+         and pg_get_triggerdef(trigger_row.oid) = format('CREATE TRIGGER %s BEFORE INSERT OR DELETE OR UPDATE ON %s '
+           || 'FOR EACH ROW EXECUTE FUNCTION ehr.records_processing_draft_guard()',
+           trigger_row.tgname, trigger_row.tgrelid::regclass)
+         and trigger_row.tgname = replace(trigger_row.tgrelid::regclass::text, 'ehr.', '')
+           || '_records_processing_draft_guard') <> 3
+     or (select count(*) from pg_trigger trigger_row
+          where trigger_row.tgfoid = 'ehr.records_processing_draft_guard()'::regprocedure) <> 3 then
+    mismatch := 'the records-processing draft guard triggers';
+  end if;
   if mismatch is null and (select count(*) from pg_policy policy_row
        where policy_row.polrelid = 'ehr.encounters'::regclass and policy_row.polname = 'encounters_patient_self_read'
          and policy_row.polcmd = 'r' and policy_row.polpermissive and policy_row.polroles = '{0}'::oid[]
@@ -750,7 +841,8 @@ begin
        where proc.oid in ('identity.records_processing_write_grant(uuid,text,uuid,uuid)'::regprocedure,
                           'ehr.imported_paper_records_encounter(uuid)'::regprocedure,
                           'ehr.encounters_imported_paper_records_fixed()'::regprocedure,
-                          'ehr.imported_paper_records_signed(uuid,uuid,uuid)'::regprocedure)
+                          'ehr.imported_paper_records_signed(uuid,uuid,uuid)'::regprocedure,
+                          'ehr.records_processing_draft_guard()'::regprocedure)
          and acl.grantee <> proc.proowner
          and not (acl.grantee <> 0 and acl.privilege_type = 'EXECUTE'
                   and ((proc.oid = 'identity.records_processing_write_grant(uuid,text,uuid,uuid)'::regprocedure

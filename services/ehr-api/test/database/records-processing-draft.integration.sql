@@ -435,6 +435,9 @@ select pg_temp.expect('6m the same with ON CONFLICT does nothing', 'ok',
       '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'other', 'completed', now(), now(),
       'Imported paper records (Migrate)', true)
     on conflict (patient_id, facility_id) where imported_paper_records do nothing returning 'inserted'$q$));
+-- The shape check under direct care (under healthcare-operations the D4
+-- guard, below, refuses this patient first: no dedicated grant for P2).
+select pg_temp.as_staff(1, 'direct-care');
 select pg_temp.expect('6n an imported encounter in progress', '23514',
   split_part(pg_temp.try($q$insert into ehr.encounters (patient_id, facility_id, created_by, created_by_membership_id,
       encounter_type, status, started_at, chief_complaint, imported_paper_records)
@@ -469,6 +472,63 @@ select pg_temp.expect('7a the note is a draft in the imported encounter', 'draft
 select pg_temp.expect('7b staff (records processing) see the encounter, labelled', '1 imported',
   (select count(*) || ' imported' from ehr.encounters
     where id::text = current_setting('draft.encounter') and imported_paper_records));
+
+-- 7c-7k D4: under healthcare-operations the database itself allows only the
+-- draft path, whatever the API does (security review of 0112).
+select pg_temp.as_staff(1, 'healthcare-operations');
+select set_config('app.change_reason', 'Synthetic records-processing write', true);
+select pg_temp.expect('7c the draft cannot be signed under records processing', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try(format($q$update ehr.clinical_notes set status = 'signed', signed_at = clock_timestamp(),
+      signed_by = '112d1000-0000-4000-8000-000000000001' where id = %L returning status$q$, current_setting('draft.note'))));
+select pg_temp.expect('7d nor its title changed', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try(format($q$update ehr.clinical_notes set title = 'Changed' where id = %L returning 'ok'$q$,
+    current_setting('draft.note'))));
+select pg_temp.expect('7e a note inserted already signed', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try(format($q$insert into ehr.clinical_notes (encounter_id, patient_id, facility_id, created_by,
+      created_by_membership_id, note_type, title, status, signed_at, signed_by)
+    values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
+      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'progress', 'Signed',
+      'signed', clock_timestamp(), '112d1000-0000-4000-8000-000000000001') returning 'ok'$q$,
+    current_setting('draft.encounter'))));
+select pg_temp.expect('7f an ordinary encounter', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try($q$insert into ehr.encounters (patient_id, facility_id, created_by, created_by_membership_id,
+      encounter_type, status, started_at, chief_complaint)
+    values ('112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
+      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'ambulatory', 'in_progress',
+      now(), 'Synthetic visit') returning 'ok'$q$));
+select pg_temp.expect('7g the imported encounter cannot be changed', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try(format($q$update ehr.encounters set chief_complaint = 'Changed' where id = %L returning 'ok'$q$,
+    current_setting('draft.encounter'))));
+select pg_temp.expect('7h a second revision of the draft', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.try(format($q$insert into ehr.clinical_note_revisions (clinical_note_id, patient_id, facility_id,
+      revision_no, content, change_reason, supersedes_revision_no, created_by, created_by_membership_id)
+    values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002', 2, 'More text',
+      'Synthetic change', 1, '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001')
+    returning 'ok'$q$, current_setting('draft.note'))));
+reset role;
+-- A healthcare-operations write grant that D1 does not name (imported from
+-- legacy identity) still passes row-level security; the guard refuses it.
+create function pg_temp.draft_probe() returns text language sql as $$
+  select pg_temp.as_staff(1, 'healthcare-operations');
+  select pg_temp.try(format($q$insert into ehr.clinical_notes (encounter_id, patient_id, facility_id, created_by,
+      created_by_membership_id, note_type, title, status)
+    values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
+      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'progress', 'Another draft',
+      'draft') returning 'ok'$q$, current_setting('draft.encounter')));
+$$;
+grant execute on function pg_temp.draft_probe() to public;
+select pg_temp.expect('7i the probe: a second draft under the dedicated grant', 'ok',
+  pg_temp.after_change('select 1', 'hid_ehr_api_runtime', 'select pg_temp.draft_probe()'));
+select pg_temp.expect('7j the same under an imported (legacy) grant', '42501 RECORDS_PROCESSING_DRAFT_ONLY',
+  pg_temp.after_change(format($c$update identity.consent_grants set source_system = 'legacy_identity' where id = %L$c$,
+    current_setting('draft.grant_dedicated')), 'hid_ehr_api_runtime', 'select pg_temp.draft_probe()'));
+select pg_temp.expect('7k direct care is untouched by the guard: a direct-care writer adds a note to a visit', 'ok',
+  pg_temp.after_change('select 1', 'hid_ehr_api_runtime', $p$select pg_temp.as_staff(8, 'direct-care');
+    select pg_temp.try(format($q$insert into ehr.clinical_notes (encounter_id, patient_id, facility_id, created_by,
+      created_by_membership_id, note_type, title, status)
+    values (%L, '112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
+      '112d1000-0000-4000-8000-000000000008', '112d3000-0000-4000-8000-000000000008', 'progress', 'Visit note',
+      'draft') returning 'ok'$q$, current_setting('draft.encounter')))$p$));
 reset role;
 
 -- 8. Patient-facing: the patient does not see the empty entry (a draft only),
