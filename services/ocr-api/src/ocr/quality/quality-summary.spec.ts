@@ -171,6 +171,8 @@ describe('OCR quality summary', () => {
         expect((database.withTransaction as jest.Mock).mock.calls[0]?.[0]).toMatchObject({ facilityId });
         const [sql, params] = query.mock.calls[0] as unknown as [string, unknown[]];
         expect(sql).toContain('sha256(convert_to($5::text || validation.validated_by::text');
+        // UTC days whatever the database session's time zone, as the ISO weeks are.
+        expect(sql).toContain("< ($2::date + 1)::timestamp at time zone 'UTC'");
         expect(params.slice(0, 4)).toEqual(['2026-11-02', '2026-11-08', 'hid.ocr.review-outcome/v1', 50_001]);
         expect(params[4]).toMatch(/^[0-9a-f]{64}$/);
         const event = ((audit.recordWithClient as jest.Mock).mock.calls as [PoolClient, Record<string, unknown>][])[0]?.[1];

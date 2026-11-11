@@ -259,7 +259,8 @@ export class OcrQualityService {
                 validation.provenance -> 'reviewOutcome' as outcome${manager ? `,
                 encode(sha256(convert_to($5::text || validation.validated_by::text, 'UTF8')), 'hex') as reviewer_key` : ''}
            from ocr.validations validation
-          where validation.created_at >= $1::date and validation.created_at < ($2::date + 1)
+          where validation.created_at >= ($1::date)::timestamp at time zone 'UTC'
+            and validation.created_at < ($2::date + 1)::timestamp at time zone 'UTC'
             and validation.provenance -> 'reviewOutcome' ->> 'schema' = $3
           order by validation.created_at limit $4`,
         [window.from, window.to, REVIEW_OUTCOME_SCHEMA, MAX_REVIEWS + 1,
