@@ -29,7 +29,7 @@ default since the owner turned OCR publication on in production (2026-10-31);
 job, validation and patient confirmation do not depend on it.
 
 Publishing needs the publisher's own direct-care `write_records` grant on the
-patient, for every target (`docs/INTERFACE_CONTRACT.md` section 37). A caller
+patient, for every target (`docs/INTERFACE_CONTRACT.md` section 39). A caller
 who can read the job but has no such grant (for example under the
 records-processing cover) gets `403 OCR_PUBLISH_NEEDS_DIRECT_CARE` ("Ask a
 clinician with access to this patient to publish it."); one who cannot read the

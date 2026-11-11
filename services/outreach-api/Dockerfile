@@ -2,6 +2,10 @@ FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY packages/api-client/package.json packages/api-client/tsconfig.json ./packages/api-client/
 COPY services/outreach-api/package.json services/outreach-api/package-lock.json ./services/outreach-api/
+# Shared privacy-scrubbed error reporting (@hid/server-telemetry) with its own lockfile.
+COPY packages/server-telemetry/package.json packages/server-telemetry/package-lock.json packages/server-telemetry/tsconfig.json /app/packages/server-telemetry/
+COPY packages/server-telemetry/src /app/packages/server-telemetry/src
+RUN cd /app/packages/server-telemetry && npm ci && npm run build
 RUN cd services/outreach-api && npm ci
 COPY packages/api-client/src ./packages/api-client/src
 RUN services/outreach-api/node_modules/.bin/tsc -p packages/api-client/tsconfig.json
@@ -14,12 +18,16 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY packages/api-client/package.json ./packages/api-client/
 COPY services/outreach-api/package.json services/outreach-api/package-lock.json ./services/outreach-api/
+COPY packages/server-telemetry/package.json packages/server-telemetry/package-lock.json /app/packages/server-telemetry/
+RUN cd /app/packages/server-telemetry && npm ci --omit=dev && npm cache clean --force
+COPY --from=build /app/packages/server-telemetry/dist /app/packages/server-telemetry/dist
 RUN cd services/outreach-api && npm ci --omit=dev && npm cache clean --force
 
 FROM gcr.io/distroless/nodejs22-debian13@sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=65532:65532 --from=production-dependencies /app/services/outreach-api/node_modules ./services/outreach-api/node_modules
+COPY --chown=65532:65532 --from=production-dependencies /app/packages/server-telemetry /app/packages/server-telemetry
 COPY --chown=65532:65532 --from=production-dependencies /app/packages/api-client/package.json ./packages/api-client/package.json
 COPY --chown=65532:65532 --from=build /app/packages/api-client/dist ./packages/api-client/dist
 COPY --chown=65532:65532 --from=build /app/services/outreach-api/dist ./services/outreach-api/dist
