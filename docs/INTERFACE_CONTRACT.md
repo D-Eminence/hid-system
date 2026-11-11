@@ -3200,7 +3200,9 @@ else:
   import (`POST /ehr/internal/ocr/patients/:patientId/clinical-notes`) now answer
   `healthcare-operations` 400 `PURPOSE_OF_USE_REQUIRED` ("X-Purpose-Of-Use must
   be direct-care or emergency for the patient record") before any work; direct
-  care and emergency answer as before.
+  care and emergency answer as before. (Since 0113 the OCR clinical-note import
+  takes `healthcare-operations` as a draft in the imported paper records; see
+  section 42.)
 - lab-api and pharmacy-api: every route takes `direct-care` or `emergency`; a
   `healthcare-operations` purpose answers 400 `PURPOSE_OF_USE_REQUIRED`
   ("X-Purpose-Of-Use must be direct-care or emergency"). No Lab or Pharmacy
