@@ -51,9 +51,14 @@ class. Field comparisons use `src/ocr/quality/normalise.ts`, a port of the OCR
 accuracy kit's `lib/normalise.mjs` (`normalise.spec.ts` carries its test
 vectors; keep the two in step). Reviews saved as whole text (EHR notes, the
 legacy single medicine, medicine or lab lists without `itemId`) are marked
-`estimated`. The extraction is read inside a savepoint and the computation is
-wrapped, so a failure stores `{ schema, error: 'summary_failed' }` and the review
-is saved anyway; the log line `ocr.review_outcome.failed` carries a code and the
+`estimated`. That estimate runs inside the save transaction, so its work is
+bounded: the saved text is tokenised once, at most 300 items and 100,000 word
+comparisons are checked (the rest count `notChecked`). The stored outcome is
+kept under 16 KB (the audit details row has a 64 KB check): check-reason counts
+are dropped first (`checkReasonsDropped`), then `summary_too_large`. The
+extraction is read inside a savepoint and the computation is wrapped, so a
+failure stores `{ schema, error: 'summary_failed' }` and the review is saved
+anyway; the log line `ocr.review_outcome.failed` carries a code and the
 job id only.
 
 The 7-day source purge (0112) blanks `validated_payload`, `accepted_fields`,
@@ -62,8 +67,11 @@ outcomes outlive the content they were computed from.
 
 `GET /api/v1/ocr/quality/summary?from=&to=` is for platform administrators
 (`platform.admin.access` and `platform.operations.read`): it sums review
-outcomes by ISO week, facility, kind and prompt version, returns groups under
-20 items as suppressed, and has no per-reviewer figures. `ocr.validations`
+outcomes by ISO week, facility, kind and prompt version, widens the range to
+whole ISO weeks, returns groups under 20 items as suppressed, leaves out reason
+counts under 5 inside shown groups (`smallCellsHidden`), and has no per-reviewer
+figures. At a facility with one reviewer the figures are in effect that
+reviewer's; the route is for platform administrators only. `ocr.validations`
 row-level security admits only `platform.current_facility_id()`, and the
 runtime role has no cross-facility policy, so the summary covers the facility
 named by `X-Facility-ID`, where the administrator must be active. A

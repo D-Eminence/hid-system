@@ -8,6 +8,11 @@ import { REVIEW_OUTCOME_SCHEMA, type OutcomeBucket } from './review-outcome';
 
 /** A group with fewer items (or, for review groups, fewer reviews) than this is returned suppressed, with no counts. */
 export const MIN_GROUP_SIZE = 20;
+/**
+ * Inside a group that is shown, a reason or field-class count under this is left out (the number of cells left out
+ * is returned as smallCellsHidden): a single wrong_patient rejection in a week must not point at one review.
+ */
+export const MIN_CELL_SIZE = 5;
 export const MAX_RANGE_DAYS = 92;
 /** The most reviews one summary reads; more and the answer says truncated. */
 export const MAX_REVIEWS = 50_000;
@@ -39,11 +44,13 @@ export interface ItemGroup {
   week: string; facilityId: string; kind: string; promptVersion: string | null; items: number;
   decisions: Counts; byConfidence: Record<string, Counts>; byReadBy: Record<string, Counts>;
   hardPage: Record<string, Counts>; fieldChanges: Counts; checkReasons: Record<string, Counts>;
+  smallCellsHidden?: number;
 }
 export interface ReviewGroup {
   week: string; facilityId: string; promptVersion: string | null; reviews: number; validated: number;
   rejected: number; estimated: number; summaryFailed: number; reviewConfirmed: number; missedItems: number;
   rejectionReasons: Counts; removalReasons: Counts; changeReasons: Counts; correctionFields: Counts;
+  smallCellsHidden?: number;
 }
 type Suppressed<Group, Keys extends keyof Group> = Pick<Group, Keys> & { suppressed: true };
 
@@ -55,6 +62,30 @@ const addAll = (counts: Counts, from: unknown) => {
   for (const [key, value] of Object.entries(from)) if (typeof value === 'number' && value > 0) add(counts, key, value);
 };
 const nested = (record: Record<string, Counts>, key: string): Counts => (record[key] ??= {});
+
+/** Removes counts under MIN_CELL_SIZE from a reason / field-class map in place; returns how many were removed. */
+function hideSmall(counts: Counts): number {
+  let hidden = 0;
+  for (const [key, value] of Object.entries(counts)) {
+    if (value < MIN_CELL_SIZE) { delete counts[key]; hidden += 1; }
+  }
+  return hidden;
+}
+
+function hideSmallItemCells(group: ItemGroup): ItemGroup {
+  let hidden = hideSmall(group.fieldChanges);
+  for (const [code, counts] of Object.entries(group.checkReasons)) {
+    hidden += hideSmall(counts);
+    if (Object.keys(counts).length === 0) delete group.checkReasons[code];
+  }
+  return hidden ? { ...group, smallCellsHidden: hidden } : group;
+}
+
+function hideSmallReviewCells(group: ReviewGroup): ReviewGroup {
+  const hidden = hideSmall(group.rejectionReasons) + hideSmall(group.removalReasons) + hideSmall(group.changeReasons)
+    + hideSmall(group.correctionFields);
+  return hidden ? { ...group, smallCellsHidden: hidden } : group;
+}
 
 /**
  * Sums stored review outcomes by ISO week, facility, item kind and prompt version (items), and by ISO week,
@@ -115,11 +146,11 @@ export function aggregateReviewOutcomes(rows: readonly OutcomeRow[]) {
   const itemGroups = [...items.values()].sort(order).map((group): ItemGroup
     | Suppressed<ItemGroup, 'week' | 'facilityId' | 'kind' | 'promptVersion'> => (group.items < MIN_GROUP_SIZE
     ? { week: group.week, facilityId: group.facilityId, kind: group.kind, promptVersion: group.promptVersion,
-      suppressed: true } : group));
+      suppressed: true } : hideSmallItemCells(group)));
   const reviewGroups = [...reviews.values()].sort(order).map((group): ReviewGroup
     | Suppressed<ReviewGroup, 'week' | 'facilityId' | 'promptVersion'> => (group.reviews < MIN_GROUP_SIZE
     ? { week: group.week, facilityId: group.facilityId, promptVersion: group.promptVersion, suppressed: true }
-    : group));
+    : hideSmallReviewCells(group)));
   return { itemGroups, reviewGroups };
 }
 
@@ -139,7 +170,12 @@ function range(from: string | undefined, to: string | undefined, now: Date): { f
     throw new DomainProblem(400, 'OCR_QUALITY_RANGE_INVALID',
       `from must not be after to, and the range must be at most ${MAX_RANGE_DAYS} days`);
   }
-  return { from: start, to: end };
+  // Groups are ISO weeks: the range is widened to whole weeks (Monday to Sunday), so two ranges differing by a
+  // day cannot be subtracted to show a suppressed day.
+  const monday = startMs - ((new Date(startMs).getUTCDay() + 6) % 7) * DAY_MS;
+  const sunday = endMs + ((7 - new Date(endMs).getUTCDay()) % 7) * DAY_MS;
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  return { from: day(monday), to: day(sunday) };
 }
 
 @Injectable()

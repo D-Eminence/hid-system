@@ -5,7 +5,7 @@
  * text, item ids or reviewer identifiers ever enter it. Text from the reading and the review is compared here, in
  * memory, and dropped.
  */
-import { normFrequency, normName, normStrength, normText, onPage } from './normalise';
+import { normFrequency, normName, normStrength, normText, onPrepared, prepareLines, tokens } from './normalise';
 
 export const REVIEW_OUTCOME_SCHEMA = 'hid.ocr.review-outcome/v1';
 
@@ -72,9 +72,14 @@ export interface ReviewOutcome {
   estimated: boolean;
   totals: { read: number; keptUnchanged: number; keptChanged: number; removed: number; addedByReviewer: number;
     unlinked: number; notInTarget: number; rejectedWithDocument: number };
-  /** With estimated: reading items of the target kinds whose words were / were not found in the saved text. */
-  estimate?: { foundInSavedText: number; notFoundInSavedText: number };
+  /**
+   * With estimated: reading items of the target kinds whose words were / were not found in the saved text, and
+   * those not checked because the comparison allowance (MAX_ESTIMATE_ITEMS, MAX_ESTIMATE_COMPARISONS) ran out.
+   */
+  estimate?: { foundInSavedText: number; notFoundInSavedText: number; notChecked: number };
   buckets: OutcomeBucket[];
+  /** True when checkReasons were emptied in every bucket to keep the outcome under MAX_OUTCOME_BYTES. */
+  checkReasonsDropped?: true;
   reviewer: {
     reviewConfirmed: boolean | null;
     missedItems: number | null;
@@ -86,7 +91,11 @@ export interface ReviewOutcome {
   };
 }
 
-export interface ReviewOutcomeFailure { schema: typeof REVIEW_OUTCOME_SCHEMA; error: 'summary_failed' }
+export interface ReviewOutcomeFailure {
+  schema: typeof REVIEW_OUTCOME_SCHEMA;
+  /** summary_failed: computing it threw; summary_too_large: over MAX_OUTCOME_BYTES even without check reasons. */
+  error: 'summary_failed' | 'summary_too_large';
+}
 
 export interface ReviewOutcomeInput {
   disposition: 'validated' | 'rejected';
@@ -108,6 +117,15 @@ const isRecord = (value: unknown): value is Rec => typeof value === 'object' && 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const VERSION = /^[A-Za-z0-9][A-Za-z0-9._+:-]{0,119}$/;
 const MAX_CODES_PER_BUCKET = 40;
+/** Reading items the estimate looks for in saved whole text; the rest are counted notChecked. */
+export const MAX_ESTIMATE_ITEMS = 300;
+/** Token comparisons the whole estimate may make (it runs inside the save transaction); then notChecked. */
+export const MAX_ESTIMATE_COMPARISONS = 100_000;
+/**
+ * The largest serialised outcome stored. It goes into the audit details too, which 0003 caps at 64 KB together with
+ * the other keys, so it stays well under that.
+ */
+export const MAX_OUTCOME_BYTES = 16_384;
 
 const versionOrNull = (value: unknown): string | null =>
   typeof value === 'string' && VERSION.test(value) ? value : null;
@@ -150,7 +168,8 @@ function medicineEntries(fields: Rec): KeptShape {
     // The legacy single medicine: five text fields, no item link.
     const text = ['medicationText', 'strengthText', 'doseText', 'frequencyText']
       .map((name) => fields[name]).filter((value): value is string => typeof value === 'string');
-    return { linked: null, wholeText: text.length ? [text.join(' ')] : [] };
+    const typed: KeptEntry[] = text.some(has) ? [{ itemId: null, page: null, compare: () => [] }] : [];
+    return { linked: null, wholeText: text.length ? [text.join(' ')] : [], typed };
   }
   const entries = fields.medications.filter(isRecord);
   const linked = entries.map((entry): KeptEntry => ({
@@ -240,12 +259,14 @@ export function computeReviewOutcome(input: ReviewOutcomeInput): ReviewOutcome {
     const key = [kind, decision, confidence, hardPage, readBy].join('|');
     let bucket = buckets.get(key);
     if (!bucket) {
-      bucket = { kind, decision, confidence, hardPage, readBy, items: 0, checkReasons: {}, fieldChanges: {} };
+      const checkReasons = Object.create(null) as Record<string, number>;
+      bucket = { kind, decision, confidence, hardPage, readBy, items: 0, checkReasons, fieldChanges: {} };
       buckets.set(key, bucket);
     }
     bucket.items += 1;
     for (const code of item?.checkReasons ?? []) {
-      const known = code in bucket.checkReasons || Object.keys(bucket.checkReasons).length < MAX_CODES_PER_BUCKET;
+      const known = Object.hasOwn(bucket.checkReasons, code)
+        || Object.keys(bucket.checkReasons).length < MAX_CODES_PER_BUCKET;
       bump(bucket.checkReasons, known ? code : 'other');
     }
     for (const field of new Set(changes)) bump(bucket.fieldChanges, field);
@@ -305,19 +326,28 @@ export function computeReviewOutcome(input: ReviewOutcomeInput): ReviewOutcome {
       }
       for (const item of targetItems) if (item.id === null || !used.has(item.id)) add(item.kind, 'removed', item, item.page);
     } else if (targetItems.length === 0) {
-      // Nothing read of these kinds (AI reading off, failed, or it found none): every kept entry was typed.
-      linkage = kept.typed.length ? 'item_ids' : 'none';
+      // Nothing read of these kinds (AI reading off, failed, or it found none): every kept entry was typed. There
+      // is no reading to link to, so linkage stays none.
       for (const entry of kept.typed) add(kept.kinds[0] ?? 'other', 'added_by_reviewer', null, entry.page);
     } else {
       linkage = 'estimated';
-      estimate = { foundInSavedText: 0, notFoundInSavedText: 0 };
-      for (const item of targetItems) {
+      const counts = { foundInSavedText: 0, notFoundInSavedText: 0, notChecked: 0 };
+      estimate = counts;
+      // The saved text is tokenised once; every comparison counts against one allowance (bounded work while the
+      // job row is locked).
+      const windows = prepareLines(kept.wholeText);
+      const budget = { left: MAX_ESTIMATE_COMPARISONS };
+      targetItems.forEach((item, index) => {
+        add(item.kind, 'unlinked', item, item.page);
+        if (index >= MAX_ESTIMATE_ITEMS || budget.left <= 0) { counts.notChecked += 1; return; }
         const probe = item.kind === 'medicine' ? item.fields.name ?? item.asWritten
           : item.kind === 'lab_result' ? item.fields.test ?? item.asWritten : item.asWritten;
-        const found = kept.wholeText.length > 0 && (onPage(probe, kept.wholeText) || onPage(item.plain, kept.wholeText));
-        if (found) estimate.foundInSavedText += 1; else estimate.notFoundInSavedText += 1;
-        add(item.kind, 'unlinked', item, item.page);
-      }
+        let found = onPrepared(tokens(probe), windows, budget);
+        if (found === false) found = onPrepared(tokens(item.plain), windows, budget);
+        if (found === null) counts.notChecked += 1;
+        else if (found) counts.foundInSavedText += 1;
+        else counts.notFoundInSavedText += 1;
+      });
     }
   }
 
@@ -340,9 +370,15 @@ export function computeReviewOutcome(input: ReviewOutcomeInput): ReviewOutcome {
 /** The review outcome, or a failure code: computing it must never stop a review being saved. */
 export function safeReviewOutcome(input: ReviewOutcomeInput,
   compute: (value: ReviewOutcomeInput) => ReviewOutcome = computeReviewOutcome): ReviewOutcome | ReviewOutcomeFailure {
+  let outcome: ReviewOutcome;
   try {
-    return compute(input);
+    outcome = compute(input);
   } catch {
     return { schema: REVIEW_OUTCOME_SCHEMA, error: 'summary_failed' };
   }
+  const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+  if (size(outcome) <= MAX_OUTCOME_BYTES) return outcome;
+  const trimmed: ReviewOutcome = { ...outcome, checkReasonsDropped: true,
+    buckets: outcome.buckets.map((bucket) => ({ ...bucket, checkReasons: {} })) };
+  return size(trimmed) <= MAX_OUTCOME_BYTES ? trimmed : { schema: REVIEW_OUTCOME_SCHEMA, error: 'summary_too_large' };
 }

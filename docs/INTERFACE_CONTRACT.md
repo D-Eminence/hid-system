@@ -1388,12 +1388,18 @@ optional signals below). Decisions: `kept_unchanged`, `kept_changed`,
 `removed`, `added_by_reviewer` (entries linked by `itemId`, or typed),
 `unlinked` (whole text saved without item links: an EHR note, the legacy
 single medicine, a list with no `itemId`; the summary is then `estimated` and
-carries `estimate.foundInSavedText` / `notFoundInSavedText` instead of per-item
-decisions), `not_in_target` and `rejected_with_document`. "Changed" uses the
+carries `estimate.foundInSavedText` / `notFoundInSavedText` / `notChecked`
+instead of per-item decisions; at most 300 items and 100,000 word comparisons
+are checked, the rest are `notChecked`), `not_in_target` and
+`rejected_with_document`. When nothing was read of the kept kinds, typed
+entries are `added_by_reviewer` and `linkage` is `none`. "Changed" uses the
 OCR accuracy kit's normalisers (name, strength, frequency for medicines; name,
 value, unit and date for lab results), so spacing, case and spellings such as
 "5 mg"/"5mg" or "bd"/"twice daily" are not changes. It never holds a name,
-value, text, item id or reviewer identifier. Computing it never blocks a save:
+value, text, item id or reviewer identifier. It is kept to 16,384 bytes
+serialised: past that every bucket's check-reason counts are emptied and
+`checkReasonsDropped: true` is added, and if it is still larger the stored value
+is `{ schema, error: 'summary_too_large' }`. Computing it never blocks a save:
 on any failure the stored value is `{ schema, error: 'summary_failed' }`.
 
 Optional review signals on the validation body (all optional; existing clients
@@ -1416,8 +1422,12 @@ actor; anyone else 403 `PERMISSION_DENIED`) sums stored review outcomes by ISO
 week, facility, item kind and prompt version (`itemGroups`) and by ISO week,
 facility and prompt version (`reviewGroups`) for `from`..`to` (UTC days,
 inclusive, default the last 28 days, at most 92; else 400
-`OCR_QUALITY_RANGE_INVALID`). A group with fewer than 20 items (reviews, for a
-review group) is returned as `{ ...keys, suppressed: true }` with no counts.
+`OCR_QUALITY_RANGE_INVALID`), widened to whole ISO weeks (Monday to Sunday;
+the answer's `from`/`to` are the widened days) so two ranges a day apart cannot
+be subtracted. A group with fewer than 20 items (reviews, for a review group) is
+returned as `{ ...keys, suppressed: true }` with no counts. Inside a group that
+is shown, reason, check-reason and field-class counts under 5 are left out and
+counted in `smallCellsHidden`.
 There are no per-reviewer figures. The read is audited as
 `ocr.quality.summary.read` with the range and counts only. Row-level security
 limits it to the facility named by `X-Facility-ID` (`scope: 'bound_facility'`);

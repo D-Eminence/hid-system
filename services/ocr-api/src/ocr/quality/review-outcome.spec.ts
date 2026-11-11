@@ -1,4 +1,5 @@
-import { computeReviewOutcome, REVIEW_OUTCOME_SCHEMA, safeReviewOutcome, type OutcomeBucket,
+import { computeReviewOutcome, MAX_ESTIMATE_ITEMS, MAX_OUTCOME_BYTES, REVIEW_OUTCOME_SCHEMA, safeReviewOutcome,
+  type OutcomeBucket,
   type ReviewOutcome, type ReviewOutcomeInput } from './review-outcome';
 
 // Fictional fixtures only: invented names, medicines and values.
@@ -96,7 +97,7 @@ describe('review outcome', () => {
       content: 'Zentoprilax 5 mg od\nQuorvadine 50mg bd\nFictional Fever Syndrome' } }));
     expect(outcome.linkage).toBe('estimated');
     expect(outcome.estimated).toBe(true);
-    expect(outcome.estimate).toEqual({ foundInSavedText: 3, notFoundInSavedText: 1 });
+    expect(outcome.estimate).toEqual({ foundInSavedText: 3, notFoundInSavedText: 1, notChecked: 0 });
     expect(outcome.totals).toMatchObject({ unlinked: 4, keptUnchanged: 0, keptChanged: 0, removed: 0 });
     expect(sum(find(outcome, { decision: 'unlinked' }))).toBe(4);
   });
@@ -105,7 +106,7 @@ describe('review outcome', () => {
     const outcome = computeReviewOutcome(base({ acceptedFields: { medicationText: 'Quorvadine',
       strengthText: '50mg', historicalContext: 'Fictional context' } }));
     expect(outcome.estimated).toBe(true);
-    expect(outcome.estimate).toEqual({ foundInSavedText: 1, notFoundInSavedText: 2 });
+    expect(outcome.estimate).toEqual({ foundInSavedText: 1, notFoundInSavedText: 2, notChecked: 0 });
     expect(outcome.totals).toMatchObject({ unlinked: 3, notInTarget: 1 });
   });
 
@@ -150,5 +151,59 @@ describe('review outcome', () => {
     expect(safeReviewOutcome(base({ structuredPayload: 'not an object', extractionProvenance: [1, 2],
       acceptedFields: null as unknown as Record<string, unknown> }))).toMatchObject({ schema: REVIEW_OUTCOME_SCHEMA,
       linkage: 'none' });
+  });
+  it('bounds the estimate on a large note with many items, counting the rest notChecked', () => {
+    const many = Array.from({ length: 400 }, (_, n) => medicine(100 + n,
+      { name: `Fictionalmed${n.toString(36)}`, strength: `${n}mg`, frequency: 'od' }, { plain: `Fictional plain ${n}` }));
+    const note = Array.from({ length: 2_000 }, (_, n) => `fictional line words ${n} sample text here`).join('\n');
+    const started = Date.now();
+    const outcome = computeReviewOutcome(base({ targetDomain: 'EHR', structuredPayload: payload(many),
+      acceptedFields: { encounterId: 'c0000000-0000-4000-8000-000000000001', noteType: 'imported',
+        title: 'Fictional', content: note.slice(0, 100_000) } }));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    const estimate = outcome.estimate!;
+    expect(estimate.foundInSavedText + estimate.notFoundInSavedText + estimate.notChecked).toBe(400);
+    expect(estimate.notChecked).toBeGreaterThanOrEqual(400 - MAX_ESTIMATE_ITEMS);
+    expect(outcome.totals.unlinked).toBe(400);
+  });
+
+  it('does not count an item whose text has no words as found in the saved text', () => {
+    const outcome = computeReviewOutcome(base({ targetDomain: 'EHR',
+      structuredPayload: payload([{ ...diagnosis(9), kind: 'note', asWritten: '...', plain: '' }]),
+      acceptedFields: { encounterId: 'c0000000-0000-4000-8000-000000000001', noteType: 'imported',
+        title: 'Fictional', content: 'Fictional clinic note' } }));
+    expect(outcome.estimate).toEqual({ foundInSavedText: 0, notFoundInSavedText: 1, notChecked: 0 });
+  });
+
+  it('stores an inherited-looking check code as a plain count', () => {
+    const outcome = computeReviewOutcome(base({
+      structuredPayload: payload([medicine(1, { name: 'Zentoprilax', strength: '5mg', frequency: 'od' },
+        { checkReasons: ['constructor', 'handwritten'] })]),
+      acceptedFields: { medications: [kept(1, { medicationText: 'Zentoprilax', strengthText: '5mg',
+        frequencyText: 'od' })] } }));
+    expect({ ...outcome.buckets[0]?.checkReasons }).toEqual({ constructor: 1, handwritten: 1 });
+  });
+
+  it('counts the legacy single medicine typed with nothing read as added by the reviewer, linkage none', () => {
+    const outcome = computeReviewOutcome(base({ structuredPayload: payload([]),
+      acceptedFields: { medicationText: 'Plinavex', strengthText: '5mg' } }));
+    expect(outcome.linkage).toBe('none');
+    expect(outcome.totals).toMatchObject({ read: 0, addedByReviewer: 1 });
+  });
+
+  it(`keeps the stored outcome under ${MAX_OUTCOME_BYTES} bytes: check reasons first, then summary_too_large`, () => {
+    const normal = computeReviewOutcome(base({}));
+    const bucket = (n: number, codes: number) => ({ ...normal.buckets[0]!, confidence: 'unknown' as const,
+      decision: 'removed' as const, kind: 'medicine' as const, hardPage: n % 2 === 0,
+      checkReasons: Object.fromEntries(Array.from({ length: codes }, (_, c) => [`code_${c}_padding_padding`, 1])) });
+    const wide = { ...normal, buckets: Array.from({ length: 40 }, (_, n) => bucket(n, 40)) };
+    const trimmed = safeReviewOutcome(base({}), () => wide) as ReviewOutcome;
+    expect(trimmed.checkReasonsDropped).toBe(true);
+    expect(trimmed.buckets.every((entry) => Object.keys(entry.checkReasons).length === 0)).toBe(true);
+    expect(JSON.stringify(trimmed).length).toBeLessThanOrEqual(MAX_OUTCOME_BYTES);
+    const huge = { ...normal, buckets: Array.from({ length: 400 }, (_, n) => bucket(n, 0)) };
+    expect(safeReviewOutcome(base({}), () => huge)).toEqual({ schema: REVIEW_OUTCOME_SCHEMA,
+      error: 'summary_too_large' });
+    expect(safeReviewOutcome(base({}))).toEqual(normal);
   });
 });

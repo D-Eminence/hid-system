@@ -156,3 +156,45 @@ export function overlap(a: unknown, b: unknown): number {
   for (const token of left) if (right.has(token)) shared += 1;
   return shared / (left.size + right.size - shared);
 }
+
+/** Longest word compared with edit distance; longer words must match exactly (keeps each comparison bounded). */
+const MAX_FUZZY_WORD = 40;
+
+/** A comparison allowance shared by many onPrepared calls; when it runs out the answer is "not checked". */
+export interface MatchBudget { left: number }
+
+/**
+ * The lines tokenised once, as the flat token list of every window of up to `windowSize` consecutive lines, so
+ * many values can be looked for in one text without tokenising it again for each.
+ */
+export function prepareLines(pageLines: readonly string[], windowSize = 3): string[][] {
+  const lineTokens = pageLines.map((line) => tokens(line));
+  return lineTokens.map((_, start) => lineTokens.slice(start, start + windowSize).flat());
+}
+
+/**
+ * onPage over prepareLines output, counting every token comparison against `budget`. A value with no tokens is
+ * not found (it cannot be evidence). Returns null when the budget ran out before an answer.
+ */
+export function onPrepared(want: readonly string[], windows: readonly string[][],
+  budget: MatchBudget): boolean | null {
+  if (want.length === 0) return false;
+  for (const have of windows) {
+    let position = 0;
+    let ok = true;
+    for (const token of want) {
+      while (position < have.length) {
+        if (budget.left <= 0) return null;
+        budget.left -= 1;
+        const candidate = have[position] as string;
+        if (token === candidate || (token.length <= MAX_FUZZY_WORD && candidate.length <= MAX_FUZZY_WORD
+          && tokenMatches(token, candidate))) break;
+        position += 1;
+      }
+      if (position >= have.length) { ok = false; break; }
+      position += 1;
+    }
+    if (ok) return true;
+  }
+  return false;
+}

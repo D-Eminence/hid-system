@@ -3,7 +3,7 @@ import type { AuditService } from '../../audit/audit.service';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
 import { OcrQualityController } from './quality-summary.controller';
-import { aggregateReviewOutcomes, MIN_GROUP_SIZE, OcrQualityService } from './quality-summary.service';
+import { aggregateReviewOutcomes, MIN_CELL_SIZE, MIN_GROUP_SIZE, OcrQualityService } from './quality-summary.service';
 import { computeReviewOutcome } from './review-outcome';
 
 const facilityId = '10000000-0000-4000-8000-000000000001';
@@ -63,6 +63,15 @@ describe('OCR quality summary', () => {
     expect(reviewGroups).toEqual([expect.objectContaining({ reviews: 20, summaryFailed: 20, promptVersion: null })]);
   });
 
+  it(`leaves out reason counts under ${MIN_CELL_SIZE} inside a group that is shown`, () => {
+    const rejected = (code: string) => ({ week: '2026-W45', facility_id: facilityId, outcome: { ...outcome,
+      disposition: 'rejected', reviewer: { ...outcome.reviewer, rejectionReasonCode: code } } });
+    const { reviewGroups } = aggregateReviewOutcomes([...Array.from({ length: 19 }, () => rejected('unreadable')),
+      rejected('wrong_patient')]);
+    expect(reviewGroups[0]).toMatchObject({ reviews: 20, rejectionReasons: { unreadable: 19 }, smallCellsHidden: 1 });
+    expect(JSON.stringify(reviewGroups)).not.toContain('wrong_patient');
+  });
+
   describe('route', () => {
     const harness = (outcomeRows: unknown[] = Array.from({ length: 20 }, () => row())) => {
       const query = jest.fn(async () => ({ rows: outcomeRows, rowCount: outcomeRows.length }));
@@ -100,6 +109,14 @@ describe('OCR quality summary', () => {
         expect(JSON.stringify(answer)).not.toContain(text);
         if (text !== 'staff:fictional') expect(JSON.stringify(event?.details)).not.toContain(text);
       }
+    });
+
+    it('widens the range to whole ISO weeks so a one-day difference cannot be subtracted', async () => {
+      const { controller, query } = harness();
+      const answer = await controller.summary({ from: '2026-11-04', to: '2026-11-10' },
+        request(['platform.admin.access', 'platform.operations.read']));
+      expect(answer).toMatchObject({ from: '2026-11-02', to: '2026-11-15' });
+      expect((query.mock.calls[0] as unknown[])[1]).toEqual(expect.arrayContaining(['2026-11-02', '2026-11-15']));
     });
 
     it.each([
