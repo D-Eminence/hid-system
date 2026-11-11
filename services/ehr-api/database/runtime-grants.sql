@@ -1512,6 +1512,26 @@ revoke all on function ocr.record_correction_observations(uuid,jsonb),
   ocr.purge_correction_observations(integer) from public;
 revoke all on ocr.learning_key, ocr.correction_observations from public;
 
+-- OCR learning rules (0119, owner decision Q43 of 2026-11-11): the OCR API
+-- records whether each suggestion shown was taken (which also retires and
+-- switches on rules) and reads the active suggestions of a reading; the OCR
+-- worker purges showings older than 180 days; the
+-- Identity API admin console sets the owner kill switches (platform super
+-- admin only, checked in the command), reads the rule counts and the
+-- platform-wide review-outcome summary. The switch-on reckoning
+-- ocr.learning_evaluate and the three tables are granted to no role. 0119
+-- makes the same grants.
+grant usage on schema ocr to hid_ocr_runtime, hid_identity_runtime;
+grant execute on function ocr.learning_after_validation(uuid,jsonb), ocr.reading_suggestions(jsonb)
+  to hid_ocr_runtime;
+grant execute on function ocr.set_learning_switch(text,uuid,boolean,text), ocr.learning_overview(),
+  ocr.review_outcome_summary(date,date) to hid_identity_runtime;
+grant execute on function ocr.purge_learning_showings(integer) to hid_ocr_worker;
+revoke all on function ocr.learning_evaluate(text,bytea), ocr.learning_after_validation(uuid,jsonb),
+  ocr.reading_suggestions(jsonb), ocr.set_learning_switch(text,uuid,boolean,text), ocr.learning_overview(),
+  ocr.review_outcome_summary(date,date), ocr.purge_learning_showings(integer) from public;
+revoke all on ocr.learning_rules, ocr.learning_rule_showings, ocr.learning_switches from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),

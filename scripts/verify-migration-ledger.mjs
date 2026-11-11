@@ -127,6 +127,7 @@ const acceptedMigrations = new Map([
   ['0112_ocr_source_deletion_7d.sql', 'bbc494dd7db3c221ca61f9a11312e59ca2cba8e5a6759c9c3ccc65b8390d1587'],
   ['0113_records_processing_draft_publication.sql', 'af6d1df7e9e7e1761a38ac9164807e2e559394baf2db2e99672264a77808214b'],
   ['0118_ocr_correction_observations.sql', '048bca4bed5261b686249a97a5edd2336807eb4cf7ccf15e145d7bb684a8ae45'],
+  ['0119_ocr_learning_rules.sql', '1dbbd507f487c67b697f742f70b04736705666eea56c50c5b3eabc584e852928'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
