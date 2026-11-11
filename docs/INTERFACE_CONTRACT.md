@@ -4598,10 +4598,12 @@ this facility for this purpose, a revoked or expired grant, a deny
 directive, no work-list read permission, a disabled account), when the
 database read fails (it runs in a savepoint and never fails the answer), and
 whenever the setting is off. Off is the default and answers exactly as
-before. An emergency session with an active break-glass grant gets it,
-because its work rows are shown too. Route-backed work items are unchanged:
-their patient still comes from the route card, only while the route allows a
-read.
+before. `infra/aws` passes the setting to lab-api and pharmacy-api only, from
+`HID_OWN_WORK_PATIENT_CARD_ENABLED` at synth: `false` unless that is `true`
+(production's environment switches are made in `dev`'s Terraform). An
+emergency session with an active break-glass grant gets it, because its work
+rows are shown too. Route-backed work items are unchanged: their patient
+still comes from the route card, only while the route allows a read.
 
 Database (0121, functions only): `lab.work_item_patient_cards(uuid[])` and
 `pharmacy.work_item_patient_cards(uuid[])`, SECURITY DEFINER, owned by
