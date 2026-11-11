@@ -8,14 +8,25 @@
 const PRINTED_CONFIDENCE = 99.2;
 const HANDWRITTEN_CONFIDENCE = 93.5;
 
-function blocksForPage(page, handwrittenDoc) {
+/**
+ * Whether each line is handwriting: the per-line "handwritten": true where any line of the document carries it;
+ * where none does (a hand-labelled set without the flag), every line of a document whose difficulty starts with
+ * "handwritten".
+ */
+export function handwritingOf(key) {
+  const flagged = key.text.some((page) => page.lines.some((line) => line.handwritten === true));
+  const wholeDocument = String(key.difficulty ?? '').startsWith('handwritten');
+  return (line) => (flagged ? line.handwritten === true : wholeDocument);
+}
+
+function blocksForPage(page, isHandwritten) {
   const blocks = [];
   for (const line of page.lines) {
     const lineId = `fake-p${page.page}-l${line.n}`;
     const box = line.box ?? { left: 0, top: 0, width: 1, height: 0.02 };
     const words = line.text.split(/\s+/).filter((word) => word.length > 0);
     const wordIds = words.map((_, index) => `${lineId}-w${index + 1}`);
-    const handwritten = handwrittenDoc && line.handwritten;
+    const handwritten = isHandwritten(line);
     const confidence = handwritten ? HANDWRITTEN_CONFIDENCE : PRINTED_CONFIDENCE;
     blocks.push({ BlockType: 'LINE', Id: lineId, Page: page.page, Text: line.text, Confidence: confidence,
       Geometry: { BoundingBox: { Left: box.left, Top: box.top, Width: box.width, Height: box.height } },
@@ -33,7 +44,7 @@ export class FakeTextractClient {
   constructor(key, sdk) {
     this.key = key;
     this.sdk = sdk;
-    this.handwritten = key.difficulty.startsWith('handwritten');
+    this.handwritten = handwritingOf(key);
     this.calls = [];
   }
 
@@ -73,7 +84,7 @@ export function modelItemFromKey(item) {
     plain: item.asWritten,
     lineIds: item.lines.map((n) => `p${item.page}-l${n}`),
     unsure: false,
-    dateAsWritten: '',
+    dateAsWritten: blank(item.dateAsWritten),
     status: item.kind === 'medicine' || item.kind === 'diagnosis' ? f.status : 'none',
     name: item.kind === 'medicine' || item.kind === 'diagnosis' ? blank(f.name) : '',
     strength: blank(f.strength), form: blank(f.form), route: blank(f.route), frequency: blank(f.frequency),
