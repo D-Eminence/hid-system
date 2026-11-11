@@ -1,12 +1,13 @@
--- 0122 Outreach campaigns are managed by their own admins (ADR-045 option B).
+-- 0111 Outreach campaigns are managed by their own admins (ADR-045 option B).
 -- Written on staging-novu-ci-20261005 at c9b59eff (migrations 0001-0108
 -- applied) and brought up to staging at 13d5b518, after 0109 (support Health
 -- ID matches) and 0110 (campaign registration lock) went live: it now applies
--- after 0110. 0122 is taken by another change (#223), so this takes the next
--- free number when it merges and is renumbered then. It uses nothing 0109 and
--- 0110 add: 0110 replaces the registration trigger's body
--- (validate_registration_campaign_write), not the campaign trigger replaced
--- here, and changes no policy, grant or row-level security setting.
+-- after 0110. Numbered 0122 when written; renumbered 0111 by the coordinator
+-- on 2026-11-11 because production ends at 0110 and the release contract
+-- requires contiguous numbers. It uses nothing 0109 and 0110 add: 0110
+-- replaces the registration trigger's body (validate_registration_campaign_write),
+-- not the campaign trigger replaced here, and changes no policy, grant or
+-- row-level security setting.
 --
 -- Decision (relayed by the user in chat, 2026-11-11, answering which rule
 -- campaign management should follow): "Campaign admins only". Any staff member
@@ -53,7 +54,7 @@
 -- PRECONDITIONS (catalog reads only; 55000 or 42501, nothing applied):
 -- 0001-0110 applied (0110's outreach.validate_registration_campaign_write()
 -- body md5 69469315f04554d2639dfa9f83591d4d is the marker); not applied yet (else
--- "0122: already applied"); validate_campaign_write's body is 0077's (md5
+-- "0111: already applied"); validate_campaign_write's body is 0077's (md5
 -- 1ac1e424e645378ab6e88a45542fccf9), SECURITY DEFINER with its search_path;
 -- outreach.campaigns and outreach.campaign_members force row-level security
 -- and carry 0038's policies; identity.staff and
@@ -76,11 +77,11 @@ begin
      or (select md5(proc.prosrc) from pg_proc proc
           where proc.oid = to_regprocedure('outreach.validate_registration_campaign_write()'))
         is distinct from '69469315f04554d2639dfa9f83591d4d' then
-    raise exception using errcode = '55000', message = '0122: 0001-0110 must be applied first';
+    raise exception using errcode = '55000', message = '0111: 0001-0110 must be applied first';
   end if;
   -- b. Not applied yet.
   if to_regprocedure('outreach.campaign_staff(uuid)') is not null then
-    raise exception using errcode = '55000', message = '0122: already applied';
+    raise exception using errcode = '55000', message = '0111: already applied';
   end if;
   -- c. The trigger function replaced here, as 0077 left it.
   if not exists (select 1 from pg_proc proc
@@ -88,14 +89,14 @@ begin
                     and md5(proc.prosrc) = '1ac1e424e645378ab6e88a45542fccf9'
                     and proc.prosecdef
                     and proc.proconfig = '{"search_path=pg_catalog, platform, auth, identity, outreach"}'::text[]) then
-    raise exception using errcode = '55000', message = '0122: outreach.validate_campaign_write() is not as 0077 left it';
+    raise exception using errcode = '55000', message = '0111: outreach.validate_campaign_write() is not as 0077 left it';
   end if;
   if not exists (select 1 from pg_trigger trigger_row
                   where trigger_row.tgrelid = 'outreach.campaigns'::regclass
                     and trigger_row.tgname = 'outreach_campaign_validate'
                     and trigger_row.tgfoid = 'outreach.validate_campaign_write()'::regprocedure
                     and not trigger_row.tgisinternal) then
-    raise exception using errcode = '55000', message = '0122: the campaign trigger is missing';
+    raise exception using errcode = '55000', message = '0111: the campaign trigger is missing';
   end if;
   -- d. Row-level security and 0038's policies.
   if (select count(*) from pg_class relation
@@ -111,12 +112,12 @@ begin
      or exists (select 1 from pg_policy policy_row
                  where policy_row.polrelid = 'outreach.campaign_members'::regclass
                    and policy_row.polname in ('outreach_campaign_members_admin_create', 'outreach_campaign_members_admin_delete')) then
-    raise exception using errcode = '55000', message = '0122: the campaign tables are not as 0038 left them';
+    raise exception using errcode = '55000', message = '0111: the campaign tables are not as 0038 left them';
   end if;
   if exists (select 1 from pg_class relation
               where relation.oid in ('identity.staff'::regclass, 'identity.staff_facility_memberships'::regclass)
                 and relation.relforcerowsecurity) then
-    raise exception using errcode = '55000', message = '0122: identity staff tables force row-level security';
+    raise exception using errcode = '55000', message = '0111: identity staff tables force row-level security';
   end if;
   -- e. Who will own the function.
   table_owner := (select relation.relowner from pg_class relation where relation.oid = 'outreach.campaigns'::regclass);
@@ -124,7 +125,7 @@ begin
      or not has_schema_privilege(table_owner, 'outreach', 'CREATE')
      or (select proc.proowner from pg_proc proc where proc.oid = 'outreach.validate_campaign_write()'::regprocedure) <> table_owner then
     raise exception using errcode = '42501', message = format(
-      '0122: the applier (%s) must be able to SET ROLE to outreach.campaigns'' owner (%s), which owns the trigger function and needs CREATE on schema outreach',
+      '0111: the applier (%s) must be able to SET ROLE to outreach.campaigns'' owner (%s), which owns the trigger function and needs CREATE on schema outreach',
       current_user, pg_get_userbyid(table_owner));
   end if;
 end
@@ -158,7 +159,7 @@ begin
        or new.row_version is distinct from old.row_version + 1 then
       raise exception using errcode='55000',message='Outreach campaign history cannot be overwritten';
     end if;
-    -- 0122 (ADR-045 option B): only this campaign's own admins change it.
+    -- 0111 (ADR-045 option B): only this campaign's own admins change it.
     if actor_membership is null or not exists (
          select 1 from outreach.campaign_members member
           where member.campaign_id = old.id and member.facility_id = old.facility_id
@@ -171,7 +172,7 @@ begin
 end $$;
 
 comment on function outreach.validate_campaign_write() is
-  '0077''s campaign checks, and (0122, ADR-045 option B) on UPDATE the session''s membership must be an admin member of the campaign. A row lock fires no trigger, so a registration''s FOR SHARE of the campaign is unaffected.';
+  '0077''s campaign checks, and (0111, ADR-045 option B) on UPDATE the session''s membership must be an admin member of the campaign. A row lock fires no trigger, so a registration''s FOR SHARE of the campaign is unaffected.';
 
 -- 2. Only a campaign's own admins add (or remove) its members; its creator seeds
 -- themself as its first admin.
@@ -246,7 +247,7 @@ end
 $$;
 
 comment on function outreach.campaign_staff(uuid) is
-  '0122: a campaign''s members (membership, staff full_name, campaign role) to a member of it holding outreach.campaign.read at the session facility; to its admins also every active staff membership at the facility that could be added (campaign role null). Anyone else gets no row. At most 1000 rows.';
+  '0111: a campaign''s members (membership, staff full_name, campaign role) to a member of it holding outreach.campaign.read at the session facility; to its admins also every active staff membership at the facility that could be added (campaign role null). Anyone else gets no row. At most 1000 rows.';
 
 -- The campaigns' owner owns the new function (a no-op when the applier is that
 -- owner, as on every database built by one migration login).
@@ -313,7 +314,7 @@ begin
                               and acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE')) granted;
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0122: not as this file makes it: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0111: not as this file makes it: %s', mismatch);
   end if;
 end
 $$;

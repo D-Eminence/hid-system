@@ -1062,7 +1062,7 @@ different content returns 409; Identity/dependency failure never returns
 success. There is no Outreach create-patient, HID, NIN, encounter,
 screening, document, OCR, or EHR-ingestion endpoint in this slice. Campaigns
 are served under the same prefix (`/campaigns`), and only a campaign's own
-admins manage one (section 39, 0122).
+admins manage one (section 39, 0111).
 
 ## 9. Patient Identifier Contract
 
@@ -3763,7 +3763,7 @@ member's resolution of a campaign-linked registration with `linkExisting`'s
 UPDATE are refused; a non-member's same UPDATE finds no row on both); the
 outreach-api service tests cover the 403 and 409.
 
-## 39. Outreach campaigns: their own admins manage them (0122)
+## 39. Outreach campaigns: their own admins manage them (0111)
 
 Decision (relayed in chat, 2026-11-11, ADR-045 option B): any staff member
 allowed to write campaigns (`outreach.campaign.write`) may create one and
@@ -3785,7 +3785,7 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
 **governance**
 - Answers `{ "rule": "campaign_admins" }`.
 - A website asks it to learn that campaign management is served. A backend
-  before 0122 answers 404.
+  before 0111 answers 404.
 
 **Creating** (`{ name, services, startsAt, endsAt? }`)
 - Makes a `planned` campaign, and its creator its first `admin`.
@@ -3818,7 +3818,7 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
   `OUTREACH_CAMPAIGN_MEMBER_EXISTS`.
 - No route removes a member.
 
-**The database (0122)**
+**The database (0111)**
 - `outreach.validate_campaign_write()` refuses any campaign update by a
   session whose membership is not one of the campaign's admins (42501). A row
   lock fires no trigger, so a member registering a person into the campaign
@@ -3833,6 +3833,6 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
 - `outreach.campaign_staff(uuid)` answers the staff list above. It is
   executable by `hid_outreach_runtime` alone.
 
-**Release order.** Apply 0122 before identity-api ships with
-`outreach.campaign.write` accepted. On a database without 0122, that would
+**Release order.** Apply 0111 before identity-api ships with
+`outreach.campaign.write` accepted. On a database without 0111, that would
 reopen the ungoverned writes.
