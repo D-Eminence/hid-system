@@ -608,6 +608,12 @@ variable "alert_email" {
   default = ""
 }
 
+variable "alert_subscribers" {
+  description = "More people who receive every operational alert, besides alert_email: [{ protocol = \"email\", endpoint = \"name@example.com\" }, { protocol = \"sms\", endpoint = \"+2348000000000\" }]. Set in the environment's tfvars at apply time; do not commit real addresses."
+  type        = list(object({ protocol = string, endpoint = string }))
+  default     = []
+}
+
 variable "enable_cost_governance" {
   description = "Create budgets only after checking existing account budgets."
   type        = bool

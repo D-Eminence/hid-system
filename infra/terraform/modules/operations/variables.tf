@@ -55,3 +55,25 @@ variable "provider_log_groups" {
   type    = map(string)
   default = {}
 }
+variable "alert_subscribers" {
+  description = "Extra people who receive every operational alert. Each entry is { protocol = \"email\" or \"sms\", endpoint = mailbox or E.164 phone number }. Set at apply time; never commit real addresses."
+  type        = list(object({ protocol = string, endpoint = string }))
+  default     = []
+  validation {
+    condition = alltrue([for subscriber in var.alert_subscribers : (
+      (subscriber.protocol == "email" && can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", subscriber.endpoint))) ||
+      (subscriber.protocol == "sms" && can(regex("^\\+[1-9][0-9]{7,14}$", subscriber.endpoint)))
+    )])
+    error_message = "Each alert subscriber must be an email (a mailbox address) or sms (a phone number in +<country><number> form, for example +2348000000000)."
+  }
+}
+variable "notify_stopped_tasks" {
+  description = "Send an alert when a service task stops because it crashed or failed its health checks."
+  type        = bool
+  default     = false
+}
+variable "ocr_worker_log_group" {
+  description = "The OCR worker's log group; its queue-age and loop-error lines feed the OCR alarms. Null turns those alarms off."
+  type        = string
+  default     = null
+}

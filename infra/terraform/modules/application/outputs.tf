@@ -111,6 +111,10 @@ output "provider_log_groups" {
   } : {}
 }
 
+output "ocr_worker_log_group" {
+  value = try(aws_cloudwatch_log_group.workload["ocr-worker"].name, null)
+}
+
 output "api_load_balancer_dns_name" {
   value = try(aws_lb.public[0].dns_name, null)
 }

@@ -45,7 +45,15 @@ resource "aws_kms_key" "alerts" {
           StringEquals = { "aws:SourceAccount" = var.aws_account_id }
           ArnLike      = { "aws:SourceArn" = source_arn }
         }
-    }])
+        }], var.notify_stopped_tasks ? [{
+        Sid       = "ScopedEventBridgeStoppedTaskAlerts", Effect = "Allow",
+        Principal = { Service = "events.amazonaws.com" },
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey*"], Resource = "*",
+        Condition = {
+          StringEquals = { "aws:SourceAccount" = var.aws_account_id }
+          ArnEquals    = { "aws:SourceArn" = local.stopped_task_rule_arn }
+        }
+    }] : [])
   })
 }
 
@@ -78,7 +86,15 @@ resource "aws_sns_topic_policy" "alerts" {
           StringEquals = { "aws:SourceAccount" = var.aws_account_id }
           ArnLike      = { "aws:SourceArn" = source_arn }
         }
-    }])
+        }], var.notify_stopped_tasks ? [{
+        Sid       = "ScopedEventBridgeStoppedTaskPublish", Effect = "Allow",
+        Principal = { Service = "events.amazonaws.com" },
+        Action    = "sns:Publish", Resource = aws_sns_topic.alerts.arn,
+        Condition = {
+          StringEquals = { "aws:SourceAccount" = var.aws_account_id }
+          ArnEquals    = { "aws:SourceArn" = local.stopped_task_rule_arn }
+        }
+    }] : [])
   })
 }
 
