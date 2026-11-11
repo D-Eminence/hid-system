@@ -159,7 +159,8 @@ describe('OrderRoutesService send of a prescription: the allergy check (0124)', 
   const prescriptionInput = { ...sendInput, attestationTextVersion: 'order-route-prescription-attestation-v1' };
   const allergyId = '123e4567-e89b-42d3-a456-426614174010';
   const penicillin = { id: allergyId, substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe' };
-  const token = warningToken(matchAllergies({ display: 'Amoxicillin 500 mg' }, [{ source: 'recorded', ...penicillin }]));
+  const token = warningToken(matchAllergies({ display: 'Amoxicillin 500 mg' }, [{ source: 'recorded', ...penicillin }]),
+    { display: 'Amoxicillin 500 mg' });
 
   /** The harness, answering the prescription read, the allergy reads and the send. */
   function sendHarness(status: string, recorded: unknown[], replayed = false) {
@@ -191,7 +192,7 @@ describe('OrderRoutesService send of a prescription: the allergy check (0124)', 
     const sendAt = statements.findIndex((statement) => /send_order_route/.test(statement.sql));
     const ackAt = statements.findIndex((statement) => /insert into ehr\.prescription_allergy_acknowledgements/.test(statement.sql));
     expect(ackAt).toBeGreaterThan(sendAt);
-    expect(statements[ackAt]?.values.slice(5)).toEqual(['No alternative; observe 30 minutes', [allergyId], false, 'send']);
+    expect(statements[ackAt]?.values.slice(5)).toEqual(['No alternative; observe 30 minutes', [allergyId], false, 'send', []]);
     expect(audits[0]?.details).toMatchObject({ allergyOverride: true, matchedRecordedCount: 1 });
   });
 

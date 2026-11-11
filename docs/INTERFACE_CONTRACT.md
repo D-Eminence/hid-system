@@ -3811,7 +3811,7 @@ reason text.
 | `GET ehr/patients/:patientId/allergies[?includeEnteredInError=true]` | `ehr.note.read` | `{ recorded: RecordedAllergy[], patientReported: { allergies: string \| null, updatedAt } }` |
 | `POST ehr/patients/:patientId/allergies` (`Idempotency-Key`) | `ehr.note.write` | 201 `RecordedAllergy` |
 | `POST ehr/patients/:patientId/allergies/:allergyId/entered-in-error` | `ehr.note.write` | 200 `RecordedAllergy` |
-| `POST ehr/patients/:patientId/allergy-check` | `ehr.prescription.write` | `{ matches: AllergyMatch[], acknowledgementRequired }` |
+| `POST ehr/patients/:patientId/allergy-check` | `ehr.prescription.write` | `{ matches: AllergyMatch[], acknowledgementRequired, warningToken }` |
 
 `RecordedAllergy`: `id, patientId, facilityId, createdBy, createdByMembershipId, substance, reaction, severity
 (mild | moderate | severe | unknown), status (active | entered_in_error), enteredInErrorBy, enteredInErrorAt,
@@ -3820,25 +3820,51 @@ clinician with read access at any facility sees those recorded at every facility
 (`recordedHere: true`) may mark one entered in error (else 409 `ALLERGY_RECORDED_ELSEWHERE`, decided from a plain
 read before the row is locked, because under forced RLS a locking read at another facility sees no row).
 
-Create body: `{ substance (1-200, one line), reaction? (1-500, one line), severity }`.
+Create body: `{ substance (1-200, one line), reaction? (1-500, one line), severity }`. "NKDA", "No known allergies",
+"none" and the like are refused with 400 `ALLERGY_NOT_A_SUBSTANCE` (they are not an allergy). The list answers active
+allergies first, the most serious first (severe, not known, moderate, mild), then newest first.
 Entered in error body: `{ expectedRowVersion, reason (3-500) }`; 412 `VERSION_CONFLICT`, 409
 `ALLERGY_ALREADY_ENTERED_IN_ERROR`. Nothing is ever deleted.
 
-**The check.** `AllergyMatch`: `source (recorded | patient_reported), allergyId? (recorded only), substance,
-reaction, severity, matchKind (same_medicine | same_class | cross_reactivity), className?, message` (one
-plain-English sentence). The medicine's display text and code are compared with each allergy (the patient's text is
-split into terms on commas, semicolons, slashes, new lines and "and"; "none", "nil", "NKDA" and the like are
-ignored; a hyphen separates words, so "Amoxicillin-clavulanate" names amoxicillin and "Aspirin-sensitive asthma"
-names aspirin): the same medicine by name; the same class (penicillins, cephalosporins, sulfonamide antibiotics, NSAIDs,
-by class words, generic and common brand names); and penicillin/cephalosporin cross-reactivity, both ways. No match
-never means "safe".
+**The check.** `AllergyMatch`: `source (recorded | patient_reported), allergyId? (recorded only; the first when
+grouped), allergyIds? (recorded only: every recorded allergy the line stands for), substance, reaction, severity,
+matchKind (same_medicine | same_class | cross_reactivity), className?, recordedHere? and recordedOn? (recorded only:
+whether it was recorded at the current facility, and when), message`. The message is plain English: the allergy with
+its severity and reaction ("Penicillin allergy: SEVERE (Anaphylaxis)." or "Patient-reported allergy: “…”."), why
+it matched, then where it came from ("Recorded by a clinician at this facility on 3 Mar 2026.", "… at another
+facility …", or "Entered by the patient in their Health ID portal, not checked by a clinician."). The same substance,
+severity and reaction recorded more than once is one line with every id in `allergyIds` ("recorded at 2
+facilities"). The medicine's display text and code are compared with each allergy (the patient's text is split into
+terms on commas, semicolons, slashes, new lines and "and"; "none", "nil", "NKDA" and the like are ignored; a hyphen
+separates words, so "Amoxicillin-clavulanate" names amoxicillin; "sulph" is read as "sulf"; brand and other names are
+read as their generics, e.g. Flagyl as metronidazole and Augmentin as amoxicillin with clavulanic acid; one-letter
+misspellings and plurals of names of 8 letters or more match; salts, forms and strengths such as "sodium",
+"sulfate", "capsules" or "500mg" do not name a medicine on their own): the same medicine; the same class
+(`className`: "penicillins", "cephalosporins", "carbapenems", "sulfonamides (“sulfa” medicines)", "NSAIDs, the
+anti-inflammatory painkillers"; by class words, members, prefixes and name patterns); and cross-reactivity between
+penicillins, cephalosporins and carbapenems, both ways, and between ceftazidime and aztreonam (`className` is then the
+medicine's name). No match never means "safe".
 
-**At prescribing.** `POST ehr/patients/:patientId/encounters/:encounterId/prescriptions` runs the same check inside
-its transaction. With a match and no `allergyAcknowledgement`, nothing is written and the answer is 409
-`ALLERGY_ACKNOWLEDGEMENT_REQUIRED` with one `errors[]` entry per match (`field: allergyAcknowledgement`, the match's
-message). Sending `allergyAcknowledgement: { reason (3-500) }` creates the prescription and one
-`ehr.prescription_allergy_acknowledgements` row (the reason, the matched recorded allergy ids, whether the
-patient-reported text matched). The `ehr.prescription.create` audit of such a create adds
+`warningToken` names exactly the warning shown: the sha256 (hex) of the medicine (its normalized display text and
+code) and every matched allergy with how it matched. The prescriber's acknowledgement must carry it.
+
+**At prescribing.** The check runs, inside the transaction that writes the prescription and under a per-patient lock
+shared with recording an allergy, whenever a prescription is written as or becomes active:
+`POST ehr/patients/:patientId/encounters/:encounterId/prescriptions` (create), `PATCH …/prescriptions/:id` with
+`status: active` from draft (Activate) or on hold (Resume), and `POST …/prescriptions/:id/order-routes` (send) of a
+draft, which makes it active. On Activate, Resume and send, a match already covered by an acknowledgement stored for
+the prescription (its recorded allergy ids, and each of the patient's own terms) needs no new one. Otherwise, with a
+match and no `allergyAcknowledgement`, nothing is written and the answer is 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED`
+with one `errors[]` entry per match (`field: allergyAcknowledgement`, the match's message) and one more,
+`field: allergyAcknowledgement.warningToken`, whose only message is the current warning's token. The create, PATCH
+and send bodies take `allergyAcknowledgement: { reason (10-500 after trimming, at least one word of three letters, no
+control character but new lines), warningToken (64 lower-case hex) }`. When its token is not the current warning's
+(an allergy recorded meanwhile, another medicine, or the patient's text changed), the answer is the same 409 with the
+current warning and its token and the detail "The allergy warning changed since it was shown. Check the allergies
+again and give a reason to go ahead."; the client shows the new warning, clears the tick and sends the new token. A
+valid acknowledgement writes the prescription (or the change, or the route) and one
+`ehr.prescription_allergy_acknowledgements` row with its stage (`create | activate | resume | send`), the reason, the
+matched recorded allergy ids and the patient's own terms that matched. The audit of that create, update or send adds
 `allergyOverride: true, matchedRecordedCount, patientReportedMatched` (counts and a flag, never the substance or the
-reason). An acknowledgement sent when nothing matches is ignored. A client must only send
-`allergyAcknowledgement` after a warning: an ehr-api without 0124 refuses the unknown property.
+reason). An acknowledgement sent when nothing needs one is ignored. A client must only send `allergyAcknowledgement`
+after a warning: an ehr-api without 0124 refuses the unknown property.

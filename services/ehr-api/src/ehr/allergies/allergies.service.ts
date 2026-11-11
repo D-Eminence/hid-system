@@ -6,7 +6,7 @@ import { requestDigest } from '../shared/clinical-context';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { isNoKnownAllergy } from './allergy-match';
 import { checkMedicineAgainstAllergies, patientReportedAllergies, RECORDED_ALLERGY_COLUMNS,
-  type RecordedAllergyRow, warningToken } from './allergy-reader';
+  lockPatientAllergies, type RecordedAllergyRow, warningToken } from './allergy-reader';
 import type { AllergyCheckDto, CreateAllergyDto, MarkAllergyEnteredInErrorDto } from './allergies.dto';
 
 /** A recorded allergy as the routes answer it; recordedHere tells the website whether it may mark it entered in error. */
@@ -63,6 +63,8 @@ export class AllergiesService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'allergy',
         async () => {
+          // Serialized with the allergy check at prescribing for this patient (allergy-reader.ts).
+          await lockPatientAllergies(client, patientId);
           const result = await client.query<RecordedAllergyRow>(
             `insert into ehr.recorded_allergies (
                patient_id, facility_id, created_by, created_by_membership_id, substance, reaction, severity
@@ -129,9 +131,9 @@ export class AllergiesService {
       context, patientId, 'read_records',
       { action: 'ehr.allergy.check', resourceType: 'allergy', resourceId: patientId },
       async (client) => {
-        const matches = await checkMedicineAgainstAllergies(client, patientId, context.facilityId,
-          { display: input.medicationDisplay, code: input.medicationCode ?? null });
-        return { value: { matches, acknowledgementRequired: matches.length > 0, warningToken: warningToken(matches) },
+        const medicine = { display: input.medicationDisplay, code: input.medicationCode ?? null };
+        const matches = await checkMedicineAgainstAllergies(client, patientId, context.facilityId, medicine);
+        return { value: { matches, acknowledgementRequired: matches.length > 0, warningToken: warningToken(matches, medicine) },
           details: { matchCount: matches.length } };
       },
     );

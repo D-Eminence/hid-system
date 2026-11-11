@@ -79,15 +79,32 @@ export async function checkMedicineAgainstAllergies(
 
 /**
  * Names exactly the warning a prescriber was shown: the sha256 (hex) of the
- * sorted allergies that matched (a recorded allergy by id, the patient's own
- * text by its normalized term). A reason given for one warning is refused for
- * another (a new allergy recorded meanwhile, or a changed medicine).
+ * medicine (its normalized display text and code) and the sorted allergies
+ * that matched, each with how it matched (a recorded allergy by id, the
+ * patient's own text by its normalized term). A reason given for one warning
+ * is refused for another: a new allergy recorded meanwhile, another medicine,
+ * or the same allergy matching differently.
  */
-export function warningToken(matches: readonly AllergyMatch[]): string {
-  const pairs = matches.flatMap((match) => match.source === 'recorded'
-    ? (match.allergyIds ?? (match.allergyId ? [match.allergyId] : [])).map((id) => [match.source, id])
-    : [[match.source, normalizeMedicineText(match.substance).trim()]]);
-  // JSON.stringify of the sorted pairs.
-  const sorted = pairs.map((pair) => JSON.stringify(pair)).sort();
-  return createHash('sha256').update(`[${sorted.join(',')}]`).digest('hex');
+export function warningToken(matches: readonly AllergyMatch[], medicine: { display: string; code?: string | null }): string {
+  const entries = matches.flatMap((match) => match.source === 'recorded'
+    ? (match.allergyIds ?? (match.allergyId ? [match.allergyId] : [])).map((id) => [match.source, id, match.matchKind])
+    : [[match.source, patientReportedTerm(match), match.matchKind]]);
+  const sorted = entries.map((entry) => JSON.stringify(entry)).sort();
+  const medicineText = normalizeMedicineText(`${medicine.display} ${medicine.code ?? ''}`).trim();
+  // JSON.stringify of [medicine, sorted entries].
+  return createHash('sha256').update(`[${JSON.stringify(medicineText)},[${sorted.join(',')}]]`).digest('hex');
+}
+
+/** A patient-reported match's term as stored with an acknowledgement and compared later. */
+export function patientReportedTerm(match: AllergyMatch): string {
+  return normalizeMedicineText(match.substance).trim();
+}
+
+/**
+ * Serializes allergy writes and allergy checks for one patient within their
+ * transactions, so an allergy recorded while a prescription is being written
+ * is either seen by its check or recorded after it.
+ */
+export async function lockPatientAllergies(client: PoolClient, patientId: string): Promise<void> {
+  await client.query(`select pg_advisory_xact_lock(hashtext('ehr.allergy:' || $1::text))`, [patientId]);
 }

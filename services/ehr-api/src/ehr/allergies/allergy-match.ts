@@ -166,6 +166,12 @@ const ALIASES: Readonly<Record<string, string>> = {
   'celebrex': 'celecoxib',
   'indocid': 'indomethacin',
   'phytomenadione': 'vitamin k',
+  'vitamin k1': 'vitamin k',
+  'konakion': 'vitamin k',
+  'hep b': 'hepatitis b',
+  'hepatitis b': 'hep b',
+  'bicarb': 'bicarbonate',
+  'bicarbonate': 'bicarb',
 };
 
 /** Words that are never an allergy on their own. */
@@ -196,10 +202,12 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
  * Lower case, letters and digits kept; everything else, hyphens included, one
  * space. A hyphen separates words: "Amoxicillin-clavulanate" is two medicines
  * and "Amoxicillin-induced rash" names amoxicillin. List entries go through
- * the same function, so "co-amoxiclav" is "co amoxiclav" on both sides.
+ * the same function, so "co-amoxiclav" is "co amoxiclav" on both sides. The
+ * British "sulph-" is spelled "sulf-", so "sulphate" and "sulfate" are one word.
  */
 export function normalizeMedicineText(value: string): string {
   return ` ${value.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    .replace(/sulph/g, 'sulf')
     .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
 }
 
@@ -216,9 +224,14 @@ function words(normalized: string): string[] {
   return normalized.trim().split(' ').filter((word) => word.length > 0);
 }
 
+/** The generic names of every alias a text contains. */
+function genericsIn(normalized: string): string[] {
+  return Object.entries(ALIASES).filter(([alias]) => hasWord(normalized, alias)).map(([, generic]) => generic);
+}
+
 /** The text with the generic names of every alias it contains appended. */
 function expand(normalized: string): string {
-  const generics = Object.entries(ALIASES).filter(([alias]) => hasWord(normalized, alias)).map(([, generic]) => generic);
+  const generics = genericsIn(normalized);
   return generics.length ? `${normalized}${generics.join(' ')} ` : normalized;
 }
 
@@ -327,8 +340,7 @@ export function matchAllergies(
   for (const allergy of allergies) {
     const terms = allergy.source === 'patient_reported' ? allergyTerms(allergy.substance) : [allergy.substance];
     for (const term of terms) {
-      const normalizedTerm = expand(normalizeMedicineText(term));
-      const found = matchTerm(normalizedTerm, drugText, drugClasses, drugMembers, named);
+      const found = matchTerm(normalizeMedicineText(term), drugText, drugClasses, drugMembers, named);
       if (!found) continue;
       const match: AllergyMatch = {
         source: allergy.source, ...(allergy.id ? { allergyId: allergy.id, allergyIds: [allergy.id] } : {}),
@@ -375,13 +387,19 @@ function regroup(match: AllergyMatch, allergies: AllergyForCheck[], why: string)
 }
 
 function matchTerm(
-  normalizedTerm: string, drugText: string, drugClasses: DrugClass[], drugMembers: string[],
+  rawTerm: string, drugText: string, drugClasses: DrugClass[], drugMembers: string[],
   named: (word: string) => boolean,
 ): { matchKind: AllergyMatchKind; className?: string; why: string } | undefined {
-  const termWords = nameWords(normalizedTerm);
-  const sameMedicine = (termWords.every
-    ? termWords.words.length > 0 && termWords.words.every(named)
-    : termWords.words.some(named))
+  const normalizedTerm = expand(rawTerm);
+  // The term as written, or the generic names of a brand or other name in it, each on its own:
+  // "Vitamin K1" names vitamin K, and its "k1" need not appear in the medicine.
+  const candidates = [rawTerm, ...genericsIn(rawTerm).map((generic) => normalizeMedicineText(generic))];
+  const sameMedicine = candidates.some((candidate) => {
+    const termWords = nameWords(candidate);
+    return termWords.every
+      ? termWords.words.length > 0 && termWords.words.every(named)
+      : termWords.words.some(named);
+  })
     || drugMembers.some((member) => hasWord(normalizedTerm, member));
   if (sameMedicine) {
     return { matchKind: 'same_medicine', why: 'This medicine may be, or may contain, the same medicine.' };

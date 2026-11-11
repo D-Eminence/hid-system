@@ -240,6 +240,27 @@ describe('allergy matching (0124)', () => {
     same('Amoxicillin 500 mg', 'Amoxicillin trihydrate');
   });
 
+  it('keeps warning for a salt, vitamin or vaccine written another way (sulph/sulf, K1, Hep B, bicarb)', () => {
+    const same = (display: string, allergy: string) =>
+      expect(matchAllergies({ display }, [recorded(allergy)])[0]).toMatchObject({ matchKind: 'same_medicine' });
+    same('Magnesium sulphate 4 g', 'Magnesium sulfate');
+    same('Magnesium sulfate 4 g', 'Magnesium sulphate');
+    same('Vitamin K1 1 mg IM', 'Vitamin K');
+    same('Konakion 10 mg injection', 'Vitamin K');
+    same('Vitamin K 1 mg IM', 'Vitamin K1');
+    same('Hepatitis B vaccine 1 ml', 'Hep B vaccine');
+    same('Hep B vaccine 1 ml', 'Hepatitis B vaccine');
+    same('Sodium bicarbonate 8.4% injection', 'Sodium bicarb');
+    same('Sodium bicarb 600 mg', 'Sodium bicarbonate');
+    const silent = (display: string, allergy: string) =>
+      expect(matchAllergies({ display }, [recorded(allergy)])).toEqual([]);
+    silent('Ferrous sulphate 200 mg', 'Sulpha');
+    silent('Ferrous sulfate 200 mg', 'Sulfa');
+    silent('Magnesium sulfate 4 g', 'Morphine sulphate');
+    silent('Magnesium sulphate 4 g', 'Morphine sulfate');
+    silent('Sodium chloride 0.9%', 'Sodium bicarbonate');
+  });
+
   it('says the severity and reaction first, then why, in plain words', () => {
     const severe = { source: 'recorded' as const, id: 'a', substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe' };
     expect(matchAllergies({ display: 'Amoxicillin 500 mg capsules' }, [severe])[0]?.message)

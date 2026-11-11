@@ -18,8 +18,9 @@
 --      nothing else may change; nothing is deleted; the allergy check's read
 --      no longer returns it;
 --   5. acknowledgements: written at the prescription's facility with a
---      match, a stage and a reason of 10 to 500 characters; one per stage;
---      append-only; a row with nothing matched is refused.
+--      match, a stage and a reason of 10 to 500 characters; one or more
+--      per prescription, each with its stage, and the patient's own terms
+--      that matched; append-only; a row with nothing matched is refused.
 begin;
 
 create function pg_temp.as_staff(subject text, membership text, facility text, purpose text, correlation text)
@@ -326,7 +327,7 @@ begin
       'a124d000-0000-4000-8000-000000000002', 'a124a000-0000-4000-8000-000000000001',
       'a124f000-0000-4000-8000-000000000001', 'Nothing matched', '{}', false, 'create')$q$);
   if answer not like '23514%' then raise exception '5c: an acknowledgement without a match: %', answer; end if;
-  -- 5d. A reason under 10 characters once trimmed, or a stage that is not one of the four, is refused.
+  -- 5d. A reason under 10 characters once trimmed, a stage that is not one of the four, or a null term is refused.
   foreach answer in array array[
       pg_temp.sqlstate_of($q$insert into ehr.prescription_allergy_acknowledgements (prescription_id, patient_id,
         facility_id, created_by, created_by_membership_id, reason, matched_recorded_allergy_ids, patient_reported_matched,
@@ -345,22 +346,35 @@ begin
         stage)
       values ('a1240000-0000-4000-8000-0000000000a2', 'a124b000-0000-4000-8000-000000000001',
         'a124d000-0000-4000-8000-000000000002', 'a124a000-0000-4000-8000-000000000001',
-        'a124f000-0000-4000-8000-000000000001', 'Tolerated before', '{}', true, 'later')$q$)] loop
+        'a124f000-0000-4000-8000-000000000001', 'Tolerated before', '{}', true, 'later')$q$),
+      pg_temp.sqlstate_of($q$insert into ehr.prescription_allergy_acknowledgements (prescription_id, patient_id,
+        facility_id, created_by, created_by_membership_id, reason, matched_recorded_allergy_ids, patient_reported_matched,
+        stage, patient_reported_terms)
+      values ('a1240000-0000-4000-8000-0000000000a2', 'a124b000-0000-4000-8000-000000000001',
+        'a124d000-0000-4000-8000-000000000002', 'a124a000-0000-4000-8000-000000000001',
+        'a124f000-0000-4000-8000-000000000001', 'Tolerated before', '{}', true, 'create', array['penicillin', null])$q$)] loop
     if answer not like '23514%' then raise exception '5d: an invalid acknowledgement was stored: %', answer; end if;
   end loop;
-  -- 5g. A prescription may carry a reason per stage: one at create and another on Activate.
+  -- 5g. A prescription may carry one or more reasons, each with its stage: at create and on Activate.
   insert into ehr.prescription_allergy_acknowledgements (prescription_id, patient_id, facility_id, created_by,
-    created_by_membership_id, reason, matched_recorded_allergy_ids, patient_reported_matched, stage)
+    created_by_membership_id, reason, matched_recorded_allergy_ids, patient_reported_matched, stage,
+    patient_reported_terms)
   values ('a1240000-0000-4000-8000-0000000000a2', 'a124b000-0000-4000-8000-000000000001',
     'a124d000-0000-4000-8000-000000000002', 'a124a000-0000-4000-8000-000000000001',
-    'a124f000-0000-4000-8000-000000000001', 'Patient-reported only; tolerated before', '{}', true, 'create'),
+    'a124f000-0000-4000-8000-000000000001', 'Patient-reported only; tolerated before', '{}', true, 'create',
+    array['penicillin']),
     ('a1240000-0000-4000-8000-0000000000a2', 'a124b000-0000-4000-8000-000000000001',
     'a124d000-0000-4000-8000-000000000002', 'a124a000-0000-4000-8000-000000000001',
     'a124f000-0000-4000-8000-000000000001', 'New allergy reviewed with the patient before activating',
-    array['a1241000-0000-4000-8000-000000000001']::uuid[], false, 'activate');
+    array['a1241000-0000-4000-8000-000000000001']::uuid[], false, 'activate', default);
   if (select string_agg(stage, ',' order by stage) from ehr.prescription_allergy_acknowledgements
        where prescription_id = 'a1240000-0000-4000-8000-0000000000a2') <> 'activate,create' then
     raise exception '5g: the reasons per stage are not stored';
+  end if;
+  if (select string_agg(format('%s:%s', stage, patient_reported_terms), ',' order by stage)
+        from ehr.prescription_allergy_acknowledgements
+       where prescription_id = 'a1240000-0000-4000-8000-0000000000a2') <> 'activate:{},create:{penicillin}' then
+    raise exception '5g: the patient''s acknowledged terms are not stored';
   end if;
   -- 5e. From F2, even with write access there, no acknowledgement for F1's prescription.
   perform pg_temp.as_staff('staff:a124-doctor', 'a124f000-0000-4000-8000-000000000002',

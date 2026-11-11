@@ -167,8 +167,12 @@ create table ehr.prescription_allergy_acknowledgements (
   matched_recorded_allergy_ids uuid[] not null default '{}'
     check (cardinality(matched_recorded_allergy_ids) <= 50 and array_position(matched_recorded_allergy_ids, null) is null),
   patient_reported_matched boolean not null,
+  -- The patient's own terms that matched (normalized as the matcher does), so a term the patient
+  -- adds later is not taken as already acknowledged.
+  patient_reported_terms text[] not null default '{}'
+    check (cardinality(patient_reported_terms) <= 50 and array_position(patient_reported_terms, null) is null),
   -- When the reason was given: at create, on Activate (draft) or Resume (on hold), or on sending
-  -- a draft to another facility. A prescription can carry one per stage it went through.
+  -- a draft to another facility. A prescription carries one or more, each with its stage.
   stage text not null check (stage in ('create', 'activate', 'resume', 'send')),
   created_at timestamptz not null default clock_timestamp(),
   foreign key (prescription_id, patient_id, facility_id)
