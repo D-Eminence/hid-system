@@ -51,7 +51,8 @@ allergy entries, 366 lab results, 1,753 vital signs and 401 notes.
   PUD", "(stopped)"), allergy conflicts (an active medicine the documented allergy should warn about, such as
   co-amoxiclav with a penicillin allergy, or an NSAID with an aspirin or ibuprofen allergy: these arise by
   chance, as the generator picks allergies and medicines independently, and are listed so they serve as
-  allergy-warning test cases), and a future date (a page dated after the set was made, 2026-11-03: D013).
+  allergy-warning test cases), and a future date (D013: a visit written in November 2027, a year after the set was made on 2026-11-03, so
+  it stays in the future for the life of the kit; a reader may flag it).
 
 ### The answer keys
 
@@ -70,11 +71,14 @@ page, line and fields, in the same shape as the reading contract `hid-paper-read
 
 Every item also has `dateAsWritten`, as in the contract: the date its page gives for it, copied as written (the
 visit date on each page of an outpatient card; the prescription date; the admitted date for what was found on
-admission and the discharged date for discharge medicines and follow-up, on the page that gives them; the
+admission and the discharged date for the final diagnosis, discharge medicines and follow-up, on the page that
+gives them; the
 request date on page 1 of a lab report; the letter date on page 1 of a referral; the chart day), or null where
 its page gives none (a continuation page without a date, treatment given and investigations in a discharge
 summary). Each item has a `trap` (null, `lookalike:a/b`, `strength:a/b`, `negation`, `allergy_conflict:a/b`
-or `future_date`), and the document's `traps` is the sorted set of its items' trap types.
+or `future_date`), and the document's `traps` is the sorted set of its items' trap types. An item holds one
+trap: where a medicine is both in a look-alike strength pair and one the allergy should warn about, it carries
+`allergy_conflict`.
 
 **For markers** (also in LABELLING.md): in a discharge summary, "Treatment given" is what was given during the
 admission, so its medicines are `past`, never active; "Medications on discharge" are `new`. Document details

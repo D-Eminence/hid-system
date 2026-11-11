@@ -333,4 +333,12 @@ test('a lab test with or without its method in brackets is the same test', () =>
   const other = scoreDocument(labKey, payload([out('lab_result', 'MP (thick film): Positive (++)',
     { test: 'mRDT', value: 'Positive (++)', unit: null, referenceRange: null, flag: null }, { line: 2 })]));
   assert.equal(other.kinds.lab_result.matched, 0);
+  // Only a known method in brackets is dropped: "FBS (random)" is not "FBS".
+  const fbsKey = { ...labKey, items: [{ ...labKey.items[0], asWritten: 'FBS (random): 6.1 mmol/L',
+    fields: { test: 'FBS (random)', value: '6.1', unit: 'mmol/L', referenceRange: null, flag: null } }],
+  text: [{ page: 1, lines: [{ n: 1, text: 'BLOOD SUGAR', handwritten: false, box },
+    { n: 2, text: 'FBS (random): 6.1 mmol/L', handwritten: false, box }] }] };
+  const fbs = scoreDocument(fbsKey, payload([out('lab_result', 'FBS (random): 6.1 mmol/L',
+    { test: 'FBS', value: '6.1', unit: 'mmol/L', referenceRange: null, flag: null }, { line: 2 })]));
+  assert.equal(fbs.kinds.lab_result.fieldsCorrect, 0, '"FBS (random)" is not "FBS"');
 });

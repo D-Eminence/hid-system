@@ -256,11 +256,14 @@ class Doc:
         month = self.month + (day - 1) // 28
         day = (day - 1) % 28 + 1
         style = self.rng.random()
+        # A date that would fall after the set was made is written a year later, so it stays a future date for
+        # the life of the kit (the future_date trap; only D013 has one, and no other document changes).
+        year = 2027 if (2026, month, day) > SET_DATE else 2026
         if style < 0.6:
-            return f'{day:02d}/{month:02d}/2026'
+            return f'{day:02d}/{month:02d}/{year}'
         if style < 0.85:
-            return f'{day}/{month}/26'
-        return f'{day:02d}-{month:02d}-2026'
+            return f'{day}/{month}/{year % 100}'
+        return f'{day:02d}-{month:02d}-{year}'
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -579,7 +582,9 @@ def discharge_summary(doc: Doc, page: Page):
             page.date = doc.admitted
             write_note(doc, page, f'{complaint}', label='Presenting complaint:')
             write_allergy(doc, page)
+            page.date = doc.discharged  # the final diagnosis is the one made at discharge
             write_diagnosis(doc, page, r.choice(names), 'confirmed', label='Final diagnosis:')
+            page.date = doc.admitted
             negations(doc, page, cond)
         elif section == 'vitals':
             page.add('Vitals on admission:', 'heading')
@@ -1012,7 +1017,7 @@ def build_document(seed: int, index: int):
 
 def mark_allergy_conflicts(items: list) -> None:
     """The allergy and each active medicine it should warn about carry 'allergy_conflict:<substance>/<medicine>'
-    (a medicine that already carries a trap keeps it)."""
+    (replacing a strength trap; another trap is kept)."""
     active = [item for item in items if item['kind'] == 'medicine' and item['fields']['status'] in ('new', 'current')]
     for allergy in (item for item in items if item['kind'] == 'allergy'):
         substance = allergy['fields']['substance']
@@ -1023,7 +1028,9 @@ def mark_allergy_conflicts(items: list) -> None:
         trap = f'allergy_conflict:{substance.lower()}/{names}'
         allergy['trap'] = trap
         for medicine in clashes:
-            medicine['trap'] = medicine['trap'] or trap
+            # One trap per item: the allergy warning wins over a look-alike strength (the larger harm).
+            medicine['trap'] = trap if medicine['trap'] in (None,) or medicine['trap'].startswith('strength:') \
+                else medicine['trap']
 
 
 def parse_date(text: str | None):

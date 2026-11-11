@@ -133,8 +133,13 @@ export function pairScore(produced, expected) {
 }
 
 const compactValue = (value) => normText(value).replace(/\s+/g, '');
-/** A lab test's name without a method in brackets at its end: "MP (thick film)" and "MP" are the same test. */
-const testCore = (value) => normText(String(value ?? '').replace(/\s*\([^()]*\)\s*$/, ''));
+/**
+ * A lab test's name without a known method in brackets at its end: "MP (thick film)" and "MP" are the same test.
+ * Only these method words; any other bracket ("FBS (random)") names a different test. The generator writes none.
+ */
+const TEST_METHODS = ['thick film', 'thin film', 'smear', 'thick smear', 'thin smear', 'hrp2', 'hrp-2'];
+const testCore = (value) => normText(String(value ?? '').replace(/\s*\(([^()]*)\)\s*$/,
+  (bracket, inside) => (TEST_METHODS.includes(normText(inside)) ? '' : bracket)));
 const sameTestCore = (a, b) => testCore(a) !== '' && testCore(a) === testCore(b);
 const sameOptional = (a, b, normalise = normText) => normalise(a ?? '') === normalise(b ?? '');
 

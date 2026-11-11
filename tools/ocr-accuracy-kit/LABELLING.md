@@ -155,15 +155,16 @@ Its line in `keys.jsonl` (spread out here):
 - **Dates**: each item's `dateAsWritten` is the date the page gives for it, copied exactly from that page
   (`check` refuses one that is not on the item's page), or `null` where its page gives none; it is optional
   and null when left out. Use the visit or prescription date for everything recorded under it; in a discharge
-  summary the admitted date for what was found on admission, the discharged date for discharge medicines and
-  follow-up, and null for treatment given and investigations; null on a continuation page with no date. The
+  summary the admitted date for what was found on admission, the discharged date for the final diagnosis,
+  discharge medicines and follow-up, and null for treatment given and investigations; null on a continuation page with no date. The
   score reports dates on their own (a day/month swap is listed), outside the two launch measures.
 - **Traps**: each item may have `"trap"`: `null`, or one of `lookalike:<a>/<b>` (a look-alike name on the
   same page), `strength:<a>/<b>` (a look-alike strength on the same page), `negation` (required on every
   diagnosis that is not `confirmed` and every `stopped` medicine; never on a `past` one), `allergy_conflict:<allergy>/<medicine>`
   (the allergy and each active medicine it should warn about) or `future_date` (an item dated after the day
   the page was made). The document's `"traps"` is the sorted list of its items' trap types (the part before
-  `:`), for example `["lookalike", "negation"]`, and `[]` when none. `check` refuses any other value and a list
+  `:`), for example `["lookalike", "negation"]`, and `[]` when none. An item holds one trap; when two apply,
+  the safety one wins: `allergy_conflict` over `strength` (as the kit's D026 Diclofenac). `check` refuses any other value and a list
   that differs from the items'.
 - Lines need no position. Without one, a medicine read wrongly but marked "check carefully" is paired only by its
   name, not by where it sits on the page, so a hand-labelled set can score slightly lower than the kit's own set.
