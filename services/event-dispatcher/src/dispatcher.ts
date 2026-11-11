@@ -1,3 +1,4 @@
+import { captureServerError } from '@hid/server-telemetry';
 import { eventEnvelope } from './event-contracts';
 import type { EventDispatcherConfig } from './config';
 import { EventContractFailure, type ClaimedEvent, type DeliveryRepository,
@@ -91,7 +92,8 @@ export class EventDispatcher {
     try {
       results = await this.transport.publish(deliverable.map((item) => item.envelope),
         this.transportAbort.signal);
-    } catch (_error) {
+    } catch (error) {
+      captureServerError(error);
       const failure = { code: 'TRANSPORT_ADAPTER_FAILURE',
         safeSummary: 'Event transport adapter failed unexpectedly', retryable: true };
       await Promise.all(deliverable.map((item) => this.persistFailure(item.claimed,
@@ -139,6 +141,7 @@ export class EventDispatcher {
       } catch (error) {
         if (this.stopRequested.signal.aborted) break;
         consecutiveErrors += 1;
+        captureServerError(error);
         this.log('error', 'event_dispatcher.loop_error', { workerIndex,
           code: safeErrorCode(error), consecutiveErrors });
         const cap = Math.min(30_000, this.config.EVENT_DISPATCHER_POLL_MS

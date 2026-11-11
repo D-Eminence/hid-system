@@ -1,3 +1,4 @@
+import { captureServerError, flushErrorReporting, initErrorReporting } from '@hid/server-telemetry';
 import { readConfig } from './config';
 import { NovuOrchestrator } from './novu.orchestrator';
 import { NotificationRepository } from './repository';
@@ -5,6 +6,7 @@ import { StatusServer } from './status-server';
 import { NotificationWorker } from './worker';
 
 async function main(): Promise<void> {
+  initErrorReporting({ service: 'notification-worker' });
   const config = readConfig();
   if (!config.NOTIFICATION_WORKER_ENABLED) {
     const status = new StatusServer(config);
@@ -29,7 +31,9 @@ async function main(): Promise<void> {
   await worker.run();
 }
 
-void main().catch(() => {
+void main().catch((error: unknown) => {
   process.stderr.write('notification_worker_startup_failed\n');
   process.exitCode = 1;
+  captureServerError(error);
+  void flushErrorReporting();
 });

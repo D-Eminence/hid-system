@@ -515,6 +515,10 @@ grant execute on function platform.current_actor_subject(), platform.current_acc
   auth.membership_has_permission(text, uuid, uuid, text),
   outreach.context_allows(uuid,text),
   outreach.registration_campaign_member(uuid,uuid) to hid_outreach_runtime;
+-- Outreach campaigns (0111): a campaign's members by name, and to its admins
+-- who could be added; read by outreach-api alone.
+revoke all on function outreach.campaign_staff(uuid) from public;
+grant execute on function outreach.campaign_staff(uuid) to hid_outreach_runtime;
 -- Outreach RLS policies and its invoker-rights event trigger call
 -- platform.current_account_id() as the runtime, and that SQL function calls
 -- auth.account_id_for_subject(text), which is revoked from PUBLIC below (0074).
@@ -1414,6 +1418,10 @@ revoke all on function identity.access_requests_records_processing() from public
 revoke all on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz) from public;
 grant execute on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)
   to hid_identity_runtime;
+-- Support chat Health ID check (0109): which given Health IDs are issued,
+-- read by Identity's support route alone, for the support-api workload.
+revoke all on function identity.support_health_id_matches(text[]) from public;
+grant execute on function identity.support_health_id_matches(text[]) to hid_identity_runtime;
 -- Document scanning (0105): the scanner's resolve and work-list commands are
 -- granted to hid_document_scanner above and to no other role.
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
@@ -1448,6 +1456,12 @@ revoke all on function ocr.facility_page_allowance_state(uuid),
   ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text),
   ocr.facility_ocr_usage(uuid,date) from public;
 revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public;
+-- Outreach campaign registration (0110): outreach.validate_registration_
+-- campaign_write, the SECURITY DEFINER trigger function 0110 replaces (owner
+-- and ACL kept), is granted to no role; a trigger needs no EXECUTE to fire.
+-- No grant changes: the Outreach runtime still has no UPDATE on
+-- outreach.campaign_members, so it can neither update nor lock a membership.
+revoke all on function outreach.validate_registration_campaign_write() from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
@@ -1492,7 +1506,7 @@ grant select,insert,update on ehr.staff_chat_state to hid_ehr_runtime;
 grant select,insert,delete on ehr.staff_chat_messages,ehr.staff_evidence_chunks to hid_ehr_runtime;
 grant select,insert,update on ehr.staff_attachment_extractions,ehr.staff_document_extractions to hid_ehr_runtime;
 
--- Sign-up fields (0122), as that migration grants them: the states list, the
+-- Sign-up fields (0114), as that migration grants them: the states list, the
 -- desk's case contact (forced RLS: the case's facility, written by the desk
 -- member who created the case) and the facility-held patient contact (forced
 -- RLS: the case's facility, staff with identity.registration.write or

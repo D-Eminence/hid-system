@@ -6,12 +6,12 @@ import { COLLECTED_PHONE_E164, FacilityProfileDto, toCollectedPhone } from './fa
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 const products = ['ehr', 'migrate', 'laboratory', 'pharmacy'] as const;
 
-/** The applicant's role at the facility (0122). */
+/** The applicant's role at the facility (0114). */
 export const SIGNUP_SUBMITTER_ROLES = ['owner', 'medical_director', 'administrator',
   'other_authorised_representative'] as const;
 
 /**
- * 0122 release step (INTERFACE_CONTRACT 37.0): the sign-up fields come all
+ * 0114 release step (INTERFACE_CONTRACT 43.0): the sign-up fields come all
  * together or not at all, so the live website's body still works. A follow-up
  * makes them required.
  */
@@ -40,17 +40,17 @@ export class StartProviderEnrollmentDto {
   @Transform(trim) @IsEmail() @MaxLength(254)
   administratorEmail!: string;
 
-  /** 0122 (owner: "all fields required"): the applicant's role at the facility. All or none. */
+  /** 0114 (owner: "all fields required"): the applicant's role at the facility. All or none. */
   @ValidateIf(hasAnySignupField)
   @IsIn(SIGNUP_SUBMITTER_ROLES)
   administratorRole?: typeof SIGNUP_SUBMITTER_ROLES[number];
 
-  /** 0122: the applicant's own phone, E.164 or a Nigerian local number; stored encrypted (D4). */
+  /** 0114: the applicant's own phone, E.164 or a Nigerian local number; stored encrypted (D4). */
   @ValidateIf(hasAnySignupField)
   @Transform(toCollectedPhone) @IsString() @Matches(COLLECTED_PHONE_E164)
   administratorPhone?: string;
 
-  /** 0122: the facility's profile; the CAC legal name stays as QoreID reads it (D1). */
+  /** 0114: the facility's profile; the CAC legal name stays as QoreID reads it (D1). */
   @ValidateIf(hasAnySignupField)
   @IsDefined() @ValidateNested() @Type(() => FacilityProfileDto)
   facilityProfile?: FacilityProfileDto;

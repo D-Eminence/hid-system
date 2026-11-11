@@ -1,4 +1,4 @@
--- 0122 Collect the sign-up fields Health ID did not collect ("Not collected by
+-- 0114 Collect the sign-up fields Health ID did not collect ("Not collected by
 -- Health ID yet"): the facility's profile at facility sign-up and in the setup
 -- wizard, and the patient's contact at the registration desk.
 --
@@ -103,7 +103,7 @@ begin
      or to_regclass('identity.nigeria_states') is not null
      or to_regclass('identity.patient_facility_contacts') is not null
      or to_regclass('identity.registration_case_contacts') is not null then
-    raise exception using errcode = '55000', message = '0122: already applied';
+    raise exception using errcode = '55000', message = '0114: already applied';
   end if;
   if to_regprocedure('identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)') is null
      or to_regprocedure('identity.staff_management_actor(boolean)') is null
@@ -120,8 +120,10 @@ begin
      or to_regprocedure('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)') is null
      or not exists (select 1 from pg_attribute
                      where attrelid = 'identity.organization_profile_completion_challenges'::regclass
-                       and attname = 'requested_organization_type' and not attisdropped) then
-    raise exception using errcode = '55000', message = '0122: 0001-0108 must be applied first';
+                       and attname = 'requested_organization_type' and not attisdropped)
+     -- 0111 (the last migration before this one on staging) is applied.
+     or to_regprocedure('outreach.campaign_staff(uuid)') is null then
+    raise exception using errcode = '55000', message = '0114: 0001-0111 must be applied first';
   end if;
   -- The applier will own the new tables, functions and the trigger on
   -- identity.organization_applications, so it must own (or be a member of the
@@ -130,7 +132,7 @@ begin
     'identity.organization_profile_completion_challenges', 'identity.registration_cases',
     'identity.facilities', 'identity.patients', 'identity.patient_account_deletion_requests'] loop
     if not pg_has_role(applier, (select relowner from pg_class where oid = table_name::regclass), 'USAGE') then
-      raise exception using errcode = '42501', message = format('0122: the applier must own %s', table_name);
+      raise exception using errcode = '42501', message = format('0114: the applier must own %s', table_name);
     end if;
   end loop;
 end
@@ -882,16 +884,16 @@ end
 $$;
 
 comment on table identity.facility_profiles is
-  '0122: a facility''s profile (sign-up and setup wizard fields); before activation, the one sent with an emailed sign-up code. Not shown publicly (D2).';
+  '0114: a facility''s profile (sign-up and setup wizard fields); before activation, the one sent with an emailed sign-up code. Not shown publicly (D2).';
 comment on table identity.registration_case_contacts is
-  '0122: the phone and address a registration desk recorded for a case (encrypted) and the Health ID the patient stated; written once, erasable, never deleted.';
+  '0114: the phone and address a registration desk recorded for a case (encrypted) and the Health ID the patient stated; written once, erasable, never deleted.';
 comment on table identity.patient_facility_contacts is
-  '0122: a patient''s phone and address as a facility''s registration desk recorded them (encrypted, unverified, facility-held); never used for sign-in or recovery; erased on account deletion or an erasure request.';
+  '0114: a patient''s phone and address as a facility''s registration desk recorded them (encrypted, unverified, facility-held); never used for sign-in or recovery; erased on account deletion or an erasure request.';
 comment on function identity.erase_patient_facility_contacts(uuid, text) is
-  '0122: owner-only NDPA erasure of every facility-held contact of a patient (account deletion or an erasure request); audited with counts only.';
+  '0114: owner-only NDPA erasure of every facility-held contact of a patient (account deletion or an erasure request); audited with counts only.';
 comment on function identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text,jsonb,text,bytea,text) is
-  '0122: 0086''s facility sign-up code, with the facility profile and the applicant''s role and encrypted phone stored with the code it sends.';
+  '0114: 0086''s facility sign-up code, with the facility profile and the applicant''s role and encrypted phone stored with the code it sends.';
 comment on function identity.read_facility_profile() is
-  '0122: the facility administrator''s read of the X-Facility-ID facility''s profile (workforce.manage, self-service facility).';
+  '0114: the facility administrator''s read of the X-Facility-ID facility''s profile (workforce.manage, self-service facility).';
 comment on function identity.set_facility_profile(bigint,jsonb,text,char) is
-  '0122: the facility administrator saves the X-Facility-ID facility''s profile (If-Match row_version, Idempotency-Key); audited with field names only.';
+  '0114: the facility administrator saves the X-Facility-ID facility''s profile (If-Match row_version, Idempotency-Key); audited with field names only.';

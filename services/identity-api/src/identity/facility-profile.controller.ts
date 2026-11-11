@@ -7,7 +7,7 @@ import { FacilityProfileDto } from './dto/facility-profile.dto';
 import { FacilityProfileService, facilityProfileVersion } from './facility-profile.service';
 
 /**
- * The facility profile (0122): the details collected at facility sign-up
+ * The facility profile (0114): the details collected at facility sign-up
  * and in the setup wizard, read and saved by the facility administrator
  * (workforce.manage at the X-Facility-ID facility). The save is a POST (the
  * API's CORS allows GET and POST only) with If-Match (the version the page

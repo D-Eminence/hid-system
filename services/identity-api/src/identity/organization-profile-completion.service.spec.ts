@@ -36,7 +36,7 @@ interface AfterResponseLifecycle {
 const lifecycle = (service: OrganizationProfileCompletionService): AfterResponseLifecycle =>
   service as unknown as AfterResponseLifecycle;
 
-// 0122: the sign-up fields as ProviderEnrollmentService passes them.
+// 0114: the sign-up fields as ProviderEnrollmentService passes them.
 const collected = { signup: {
   facilityProfile: facilityProfileForDatabase(facilityProfileInput() as unknown as FacilityProfileDto),
   submitterRole: 'owner', submitterPhone: '+2348098765432',
@@ -390,7 +390,7 @@ describe('facility self sign-up activation and its quota (P4)', () => {
     expect(query.mock.calls[0]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr', started.challengeId,
       expect.stringMatching(/^[a-f0-9]{64}$/), 'Dr Ada Obi', 'hospital',
       JSON.stringify(collected.signup.facilityProfile), 'owner', expect.any(Buffer), 'test-v1']);
-    // 0122: the applicant's phone is stored encrypted, bound to the code it was sent with.
+    // 0114: the applicant's phone is stored encrypted, bound to the code it was sent with.
     const phone = query.mock.calls[0]?.[1]?.[9] as Buffer;
     expect(phone.toString('latin1')).not.toContain('8098765432');
     expect(new CollectedFieldProtector().decrypt(facilitySignupPhoneLabel(started.challengeId!), 'test-v1', phone))
@@ -401,7 +401,7 @@ describe('facility self sign-up activation and its quota (P4)', () => {
     expect(query.mock.calls[1]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr']);
     expect(started).toEqual({ accepted: true, codeSent: true, challengeId: expect.stringMatching(/^[0-9a-f-]{36}$/),
       expiresInSeconds: 600, resendAfterSeconds: 60 });
-    // 0122 release step (contract 37.0): a sign-up in the old shape (no new
+    // 0114 release step (contract 43.0): a sign-up in the old shape (no new
     // fields) keeps 0086's 7-argument command and needs no encryption key.
     query.mockClear();
     query.mockResolvedValueOnce({ rows: [{ recipient_email: 'admin@example.invalid' }] })

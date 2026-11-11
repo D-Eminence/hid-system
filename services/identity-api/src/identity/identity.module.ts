@@ -46,6 +46,8 @@ import { StaffInvitationsService } from './staff-invitations.service';
 import { StaffReauthenticationService } from './staff-reauthentication.service';
 import { OrderDestinationsController } from './order-destinations.controller';
 import { OrderDestinationsService } from './order-destinations.service';
+import { SupportHealthIdController } from './support-health-id.controller';
+import { SupportHealthIdService } from './support-health-id.service';
 
 @Module({
   imports: [AuthModule, TurnstileModule, IntegrationModule],
@@ -60,12 +62,15 @@ import { OrderDestinationsService } from './order-destinations.service';
     // :invitationId/revoke.
     StaffInvitationsSignedInController, StaffInvitationsPublicController, FacilityStaffController,
     AdminFacilityStaffController,
-    // The facility profile collected at sign-up and in the setup wizard (0122).
+    // The facility profile collected at sign-up and in the setup wizard (0114).
     FacilityProfileController,
     // The directory of laboratories and pharmacies an order can go to (P4c).
-    OrderDestinationsController],
+    OrderDestinationsController,
+    // The support chat's server Health ID check (0109), for support-api's workload alone.
+    SupportHealthIdController],
   providers: [
     IdentityService,
+    SupportHealthIdService,
     RecordAccessNoticeService,
     NinRegistrationService,
     FacilityProfileService,

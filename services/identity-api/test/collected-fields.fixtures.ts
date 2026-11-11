@@ -1,5 +1,5 @@
 /**
- * Fictional values for the fields 0122 collects, shared by the specs.
+ * Fictional values for the fields 0114 collects, shared by the specs.
  * Not imported by the application.
  */
 export function facilityProfileInput() {
@@ -33,7 +33,7 @@ export function facilityProfileInput() {
   };
 }
 
-/** The sign-up fields 0122 adds to StartProviderEnrollmentDto. */
+/** The sign-up fields 0114 adds to StartProviderEnrollmentDto. */
 export function signupCollectedFields() {
   return {
     administratorRole: 'owner' as const,
@@ -42,7 +42,7 @@ export function signupCollectedFields() {
   };
 }
 
-/** The desk fields 0122 adds to ResolveNinDto. */
+/** The desk fields 0114 adds to ResolveNinDto. */
 export function deskCollectedFields() {
   return {
     phone: '+2348011112222',

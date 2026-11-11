@@ -12,7 +12,7 @@ import { FacilityProfileService, facilityProfileProblem, facilityProfileVersion 
 import { ninResolutionRequestDigest, NinRegistrationService } from './nin-registration.service';
 
 /**
- * 0122: the sign-up, setup wizard and registration desk fields Health ID now
+ * 0114: the sign-up, setup wizard and registration desk fields Health ID now
  * collects. Owner: "all fields required" (the three document uploads and the
  * logo wait for the document scanner).
  */
@@ -37,7 +37,7 @@ async function errorsOf<T extends object>(dto: new () => T, value: Record<string
   return { fields: flatten(errors), instance };
 }
 
-describe('facility sign-up fields (0122)', () => {
+describe('facility sign-up fields (0114)', () => {
   it('accepts a complete sign-up and normalizes the phones, email and MDCN number', async () => {
     const { fields, instance } = await errorsOf(StartProviderEnrollmentDto, {
       ...signupBase, ...signupCollectedFields(), administratorPhone: '0809 876 5432',
@@ -51,7 +51,7 @@ describe('facility sign-up fields (0122)', () => {
     expect(instance.facilityProfile!.medicalDirectorMdcn).toBe('MDCN/12345');
   });
 
-  it('still accepts the live website\'s sign-up with none of the new fields (release step, contract 37.0)', async () => {
+  it('still accepts the live website\'s sign-up with none of the new fields (release step, contract 43.0)', async () => {
     expect((await errorsOf(StartProviderEnrollmentDto, signupBase)).fields).toEqual([]);
     expect((await errorsOf(StartProviderEnrollmentDto, { ...signupBase, administratorRole: null,
       administratorPhone: null, facilityProfile: null })).fields).toEqual([]);
@@ -105,7 +105,7 @@ describe('facility sign-up fields (0122)', () => {
       administratorRole: 'janitor' })).fields).toContain('administratorRole');
   });
 
-  it('writes the profile with 0122\'s column names, and the numbers only when said', () => {
+  it('writes the profile with 0114\'s column names, and the numbers only when said', () => {
     const json = facilityProfileForDatabase({ ...facilityProfileInput(), hasRegistryId: true, registryId: 'FR-1',
       hasNhiaAccreditation: false, nhiaAccreditationNumber: 'ignored' } as unknown as FacilityProfileDto);
     expect(Object.keys(json).sort()).toEqual(['address_line', 'bed_count', 'care_level', 'city', 'departments',
@@ -118,7 +118,7 @@ describe('facility sign-up fields (0122)', () => {
   });
 });
 
-describe('the facility administrator\'s profile read and save (0122)', () => {
+describe('the facility administrator\'s profile read and save (0114)', () => {
   const context = { actor: { subject: 'synthetic:admin', accountId: 'account' }, facilityId: 'facility',
     membershipId: 'membership', correlationId: 'correlation', purposeOfUse: 'healthcare-operations',
   } as unknown as DataAccessContext;
@@ -194,8 +194,8 @@ describe('the facility administrator\'s profile read and save (0122)', () => {
   });
 });
 
-describe('the registration desk fields (0122)', () => {
-  it('still accepts the live website\'s body with none of the desk fields (release step, contract 37.0)', async () => {
+describe('the registration desk fields (0114)', () => {
+  it('still accepts the live website\'s body with none of the desk fields (release step, contract 43.0)', async () => {
     expect((await errorsOf(ResolveNinDto, ninBase)).fields).toEqual([]);
     expect((await errorsOf(ResolveNinDto, { ...ninBase, existingHealthId: 'HID-ABC234' })).fields)
       .toContain('existingHealthId');

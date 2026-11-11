@@ -241,7 +241,7 @@ const maintenance = new Pool({ host: socket, port, user: pgUser, database: 'post
 await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 const owner = new Pool({ host: socket, port, user: pgUser, database: isolated, max: 3 });
 const one = async (sql, values = []) => (await owner.query(sql, values)).rows[0];
-// 0122: the sign-up fields Health ID collects (fictional values), and the
+// 0114: the sign-up fields Health ID collects (fictional values), and the
 // synthetic key Identity encrypts the applicant's phone with in this run.
 const signupCollectedFields = (label) => ({
   administratorRole: 'owner',
@@ -376,7 +376,7 @@ try {
     const activated = await http(identity, 'POST', '/identity/provider-enrollments/activate', { origin: appOrigin,
       cookie: verified.cookies.find(value => value.startsWith('hid_provider_enrollment=')), body: { password } });
     expectStatus(activated, 200, `sign-up activation ${label}`);
-    // 0122: the profile sent with the confirmed code is the facility's now.
+    // 0114: the profile sent with the confirmed code is the facility's now.
     const profile = await one(`select trading_name, submitter_role, submitter_phone_ciphertext is not null as phone_kept
       from identity.facility_profiles where facility_id=$1`, [activated.body.facilityId]);
     assert.deepEqual(profile, { trading_name: `Verifier ${label} Clinic`, submitter_role: 'owner', phone_kept: true },

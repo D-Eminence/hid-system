@@ -38,10 +38,10 @@ export interface SelfServiceCompletionDetails {
   administratorName: string;
   organizationType: 'clinic' | 'hospital' | 'laboratory' | 'pharmacy' | 'other';
   /**
-   * 0122: the facility profile (as facilityProfileForDatabase writes it), the
+   * 0114: the facility profile (as facilityProfileForDatabase writes it), the
    * applicant's role and phone. Stored with the code that is sent; the phone
    * is encrypted here, bound to that code's id. Absent for a request in the
-   * old shape (contract 37.0), which uses 0086's 7-argument command.
+   * old shape (contract 43.0), which uses 0086's 7-argument command.
    */
   signup?: {
     facilityProfile: Record<string, unknown>;
@@ -142,7 +142,7 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
    * Facility self sign-up passes selfService: its code is sent by
    * identity.begin_self_service_provider_enrollment, which stores the
    * administrator name and organization type with the code (the activation
-   * takes them from the code that opened its session, R6), and since 0122
+   * takes them from the code that opened its session, R6), and since 0114
    * the facility profile and the applicant's role and encrypted phone (the
    * activation copies them to the facility the same way), and sends at most
    * 10 codes a day to one administrator email (R5); its answer says whether

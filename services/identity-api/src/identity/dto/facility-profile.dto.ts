@@ -6,13 +6,13 @@ import {
 import { normalizeLicenceNumber, LICENCE_NUMBER } from '../staff-licence';
 
 /**
- * The facility profile 0122 collects at facility sign-up and in the setup
+ * The facility profile 0114 collects at facility sign-up and in the setup
  * wizard (owner: "all fields required"). Every field is required; the
  * registry ID and the NHIA number are required exactly when the matching yes/no
  * is true and must be null (or left out) when it is false. The three document
  * uploads and the logo are not collected yet (they wait for the document
  * scanner). The rules are the database's (identity.facility_profiles), so a
- * request the DTO accepts is one 0122 stores.
+ * request the DTO accepts is one 0114 stores.
  */
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
@@ -148,7 +148,7 @@ export class FacilityProfileDto {
   needsInteroperability!: boolean;
 }
 
-/** The profile as 0122's JSON (the identity.facility_profiles column names). */
+/** The profile as 0114's JSON (the identity.facility_profiles column names). */
 export function facilityProfileForDatabase(profile: FacilityProfileDto): Record<string, unknown> {
   return {
     trading_name: profile.tradingName,
@@ -180,7 +180,7 @@ export function facilityProfileForDatabase(profile: FacilityProfileDto): Record<
   };
 }
 
-/** The stored profile (0122's JSON) as the API answers it. */
+/** The stored profile (0114's JSON) as the API answers it. */
 export interface FacilityProfileView {
   tradingName: string;
   ownership: string;

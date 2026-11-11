@@ -28,6 +28,16 @@ validated OCR evidence into EHR, Lab or Pharmacy. It answers
 default since the owner turned OCR publication on in production (2026-10-31);
 job, validation and patient confirmation do not depend on it.
 
+Publishing needs the publisher's own direct-care `write_records` grant on the
+patient, for every target (`docs/INTERFACE_CONTRACT.md` section 39). A caller
+who can read the job but has no such grant (for example under the
+records-processing cover) gets `403 OCR_PUBLISH_NEEDS_DIRECT_CARE` ("Ask a
+clinician with access to this patient to publish it."); one who cannot read the
+job, and a break-glass write, get `404 OCR_JOB_NOT_FOUND` (an EHR 403 on the
+source read is now this 404 too, rather than EHR's own code). A refusal at an
+execution attempt (a grant gone after the request) fails the publication with
+`OCR_PUBLISH_NEEDS_DIRECT_CARE` in place of `OCR_JOB_NOT_FOUND`.
+
 ## Paper readings (`hid-paper-reading-v2`)
 
 The worker writes `provenance.processingContract` `hid-textract-v2` and a

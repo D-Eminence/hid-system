@@ -36,7 +36,7 @@ export interface FacilityProfileSaveAnswer {
   replayed: boolean;
 }
 
-/** 0122's column names → the API's field names. */
+/** 0114's column names → the API's field names. */
 const API_FIELD: Readonly<Record<string, string>> = Object.freeze({
   trading_name: 'tradingName', ownership: 'ownership', care_level: 'careLevel', address_line: 'addressLine',
   city: 'city', state_code: 'stateCode', lga: 'lga', gps_latitude: 'gpsLatitude', gps_longitude: 'gpsLongitude',
@@ -50,7 +50,7 @@ const API_FIELD: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
- * The facility administrator's read and save of the facility profile (0122,
+ * The facility administrator's read and save of the facility profile (0114,
  * decisions D8 and D9): workforce.manage at the X-Facility-ID facility, a
  * self-service facility only (governed and legacy facilities are refused with
  * 403 STAFF_MANAGEMENT_NOT_AVAILABLE; their profile is kept by Health ID

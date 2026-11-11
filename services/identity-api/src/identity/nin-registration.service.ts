@@ -74,7 +74,7 @@ export interface RegistrationCaseResult {
   status: RegistrationStatus;
   version: number;
   candidateCount: number;
-  /** 0122: the desk recorded the patient's phone and address (never returned). */
+  /** 0114: the desk recorded the patient's phone and address (never returned). */
   contactRecorded: boolean;
   candidates?: Array<{ patientId: string; fullName: string; dateOfBirth: string | null }>;
   patient?: { patientId: string; hid: string };
@@ -113,9 +113,9 @@ export class NinRegistrationService {
       await this.auditFailure(context, 'identity.nin.verify', error);
       throw error;
     }
-    // 0122: the desk's phone and address are stored encrypted; without the
+    // 0114: the desk's phone and address are stored encrypted; without the
     // key nothing is verified (charged) or written. A body in the old shape
-    // (no desk fields, contract 37.0) needs no key.
+    // (no desk fields, contract 43.0) needs no key.
     const deskFields = deskFieldsOf(input);
     if (deskFields) this.fieldProtector.assertConfigured();
     let ninLookupHmac: string;
@@ -562,7 +562,7 @@ export class NinRegistrationService {
   }
 
   /**
-   * 0122 (D10): the phone and the address (addressLine, city, stateCode, lga
+   * 0114 (D10): the phone and the address (addressLine, city, stateCode, lga
    * as JSON) encrypted for this case. Only ciphertext leaves this method; no
    * value goes to an event, the outbox or the audit.
    */
@@ -584,7 +584,7 @@ export class NinRegistrationService {
   }
 
   /**
-   * 0122: the facility-held, unverified copy of the case's phone and address
+   * 0114: the facility-held, unverified copy of the case's phone and address
    * for the patient the case resolved to (the database checks it is the
    * case's own ciphertext, patient and facility). Same transaction as the
    * resolution.
@@ -794,8 +794,8 @@ export function ninResolutionRequestDigest(input: ResolveNinDto, ninLookupHmac: 
     dateOfBirth: input.dateOfBirth,
     gender: input.gender ?? null,
     purpose: input.purpose,
-    // 0122: the desk's fields, so a retry with other values is a new request.
-    // Only when sent, so an old-shape body keeps its digest (contract 37.0).
+    // 0114: the desk's fields, so a retry with other values is a new request.
+    // Only when sent, so an old-shape body keeps its digest (contract 43.0).
     ...(deskFieldsOf(input) ? {
       phone: input.phone,
       addressLine: input.addressLine,
@@ -834,7 +834,7 @@ function isConstraintViolation(error: unknown, constraint: string): boolean {
     && (error as { constraint?: unknown }).constraint === constraint;
 }
 
-/** 0122: the desk fields, all present (the DTO refuses a partial set), or null for an old-shape body. */
+/** 0114: the desk fields, all present (the DTO refuses a partial set), or null for an old-shape body. */
 interface DeskFields {
   phone: string;
   addressLine: string;

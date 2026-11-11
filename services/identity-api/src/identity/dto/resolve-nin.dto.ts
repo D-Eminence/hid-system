@@ -30,7 +30,7 @@ function HealthIdExactlyWhenStated() {
 }
 
 /**
- * 0122 release step (INTERFACE_CONTRACT 37.0): the desk fields come all
+ * 0114 release step (INTERFACE_CONTRACT 43.0): the desk fields come all
  * together or not at all. The live website still sends the old body; a body
  * with only some of them is refused. A follow-up makes them required.
  */
@@ -69,7 +69,7 @@ export class ResolveNinDto {
   @IsIn(['healthcare-operations'])
   purpose!: PurposeOfUse;
 
-  // 0122 (owner: "all fields required"; D10): the patient's phone and address
+  // 0114 (owner: "all fields required"; D10): the patient's phone and address
   // as the desk records them. Facility-held and unverified, stored encrypted,
   // never used for sign-in or recovery. All or none (DESK_FIELDS) until the
   // website that always sends them is live.

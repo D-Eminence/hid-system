@@ -164,13 +164,18 @@ export class ClinicalNotesService {
         'clinical-note',
         async () => {
           const signed = input.status === NoteStatus.Signed;
+          // $4 (the author) is used twice. Without the casts PostgreSQL types the
+          // CASE branch `$4 else null` as text before it types the created_by
+          // value as uuid, and refuses the whole statement with 42P08
+          // ("inconsistent types deduced for parameter $4"). That refusal made
+          // every staff visit-note save fail with a 500 (production, 5 Nov 2026).
           const result = await client.query<ClinicalNoteRow>(
             `insert into ehr.clinical_notes (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
                note_type, title, status, signed_at, signed_by
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8,
-               case when $9 then clock_timestamp() else null end,
-               case when $9 then $4 else null end)
+             ) values ($1, $2, $3, $4::uuid, $5, $6, $7, $8,
+               case when $9::boolean then clock_timestamp() else null end,
+               case when $9::boolean then $4::uuid else null end)
              returning ${NOTE_COLUMNS}`,
             [
               encounterId,

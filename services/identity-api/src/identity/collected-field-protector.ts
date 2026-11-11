@@ -5,7 +5,7 @@ import { getEnvironment } from '../config/environment';
 const CIPHERTEXT_VERSION = 1;
 
 /**
- * Encrypts the personal data 0122 collects (the facility applicant's phone at
+ * Encrypts the personal data 0114 collects (the facility applicant's phone at
  * sign-up; the patient's phone and address at the registration desk) with the
  * application AES-256-GCM convention of the emergency contacts (0084): a
  * version byte, a 12-byte nonce, the ciphertext and the tag, under the NIN

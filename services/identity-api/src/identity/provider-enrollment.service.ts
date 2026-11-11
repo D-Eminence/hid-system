@@ -166,7 +166,7 @@ export class ProviderEnrollmentService {
     if (!environment.QOREID_ENABLED) {
       throw new DomainProblem(503, 'QOREID_DISABLED', 'External verification is not enabled');
     }
-    // 0122: the applicant's phone is stored encrypted; without the key
+    // 0114: the applicant's phone is stored encrypted; without the key
     // nothing is written or charged.
     new CollectedFieldProtector().assertConfigured();
     const platformDailyLimit = selfServiceDailyCap(environment);
@@ -355,8 +355,8 @@ export class ProviderEnrollmentService {
       publicApplicationQuotaCharged: true,
       selfService: {
         administratorName: input.administratorName, organizationType: input.organizationType,
-        // 0122: all or none (the DTO refuses a partial set); the old body
-        // sends none and keeps 0086's 7-argument command (contract 37.0).
+        // 0114: all or none (the DTO refuses a partial set); the old body
+        // sends none and keeps 0086's 7-argument command (contract 43.0).
         ...(input.facilityProfile && input.administratorRole && input.administratorPhone ? {
           signup: {
             facilityProfile: facilityProfileForDatabase(input.facilityProfile),

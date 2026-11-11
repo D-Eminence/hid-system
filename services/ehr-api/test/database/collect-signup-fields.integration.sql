@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- 0122: the sign-up fields Health ID now collects. Rollback-only. Every
+-- 0114: the sign-up fields Health ID now collects. Rollback-only. Every
 -- command runs as the Identity API runtime role in the context Identity's
 -- transactions set.
 --
