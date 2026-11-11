@@ -160,20 +160,32 @@ export const readingSchema = z.strictObject({
  * - hardReadFailures: hard-page reads with no answer, by reason code ('deadline', 'max_tokens', 'api_error', ...).
  * The re-read failures are already counted in provenance.reading.rereadFailedPages (a count).
  */
-const countCode = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
+/**
+ * The only keys the counts may hold: the reader's drop reasons (items.ts DROP_REASONS and tidy.ts
+ * TIDY_DROP_REASONS) and hard-read failures (reader.ts HardReadFailure). A closed list, so no other word (a
+ * medicine or diagnosis) can ever be stored as a key; contract-codes.spec.ts keeps these equal to the reader's.
+ */
+export const READING_DROP_REASON_CODES = ['no_line_cited', 'line_not_on_page', 'empty_as_written', 'text_not_on_line',
+  'no_box', 'box_too_small', 'too_many_lines', 'too_many_lines_on_row', 'too_many_rows', 'rows_not_together',
+  'cited_lines_no_box', 'not_on_cited_line', 'area_too_large', 'side_overflow', 'covers_uncited_line',
+  'uncited_share', 'not_anchored', 'heading', 'duplicate_of_order'] as const;
+export const HARD_READ_FAILURE_CODES = ['max_tokens', 'parse_error', 'schema_error', 'refusal', 'zoom_loop',
+  'incomplete', 'deadline', 'api_error', 'api_rejected'] as const;
+const dropCode = z.enum(READING_DROP_REASON_CODES);
+const failureCode = z.enum(HARD_READ_FAILURE_CODES);
 const count = z.number().int().min(0);
 export const READING_COUNTS_VERSION = 1;
 export const readingCountsSchema = z.strictObject({
   version: z.literal(READING_COUNTS_VERSION),
-  droppedByReason: z.record(countCode, count),
-  droppedByReasonFirstPass: z.record(countCode, count),
+  droppedByReason: z.partialRecord(dropCode, count),
+  droppedByReasonFirstPass: z.partialRecord(dropCode, count),
   hardPageAgreement: z.strictObject({ fieldsCompared: count, fieldsAgreed: count, itemsPaired: count,
     itemsSingle: count, drugSplits: count, alternativesDropped: count }),
   zoomCalls: count,
   zoomLimited: count,
   zoomFailed: count,
   hardPageDeadlineHits: count,
-  hardReadFailures: z.record(countCode, count),
+  hardReadFailures: z.partialRecord(failureCode, count),
 });
 /** provenance.reading.listVersion (list-version.ts): 16 hex characters. */
 export const listVersionSchema = z.string().regex(/^[0-9a-f]{16}$/);

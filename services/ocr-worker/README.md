@@ -1691,10 +1691,19 @@ written; the structured payload is unchanged.
   the signs and abbreviation tables (`signs.ts`) and the hard-page
   `FREQUENCY_WORDS` (`hard-page.ts`). Computed once at module load from the
   lists' contents only, so every worker built from the same source writes the
-  same value, and any edit to any list changes it. Also in the
-  `ocr.job.completed` log line (`listVersion`, `null` when unavailable).
+  same value, and any edit to any of these lists changes it. It covers these
+  named lists only: other reference data the reader uses (the heading prefixes
+  and titles in `tidy.ts`, the status and instruction word patterns in
+  `hard-page.ts`, the brand-row source filter) is versioned by `promptVersion`
+  or the code, not by `listVersion`. It is recorded for tracing only and is not
+  part of the reuse match (coordinator decision of 2026-11-11: list updates
+  apply to new readings, no forced re-reads). Also in the `ocr.job.completed`
+  log line (`listVersion`, `null` when unavailable).
 * `counts` (version 1), codes and non-negative integer counts only; every map
-  key is a reason code:
+  key is one of a closed list of reason codes (`contract.ts`
+  `READING_DROP_REASON_CODES`, `HARD_READ_FAILURE_CODES`, kept equal to the
+  reader's own lists by `contract-codes.spec.ts`), so no other word can be
+  stored as a key:
   * `droppedByReason`, `droppedByReasonFirstPass`: dropped items by reason
     code, as in the completion log (see "Reading paper records").
   * `hardPageAgreement`: `fieldsCompared`, `fieldsAgreed` (agree;
