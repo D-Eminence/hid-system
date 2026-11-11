@@ -37,10 +37,10 @@ const lifecycle = (service: OrganizationProfileCompletionService): AfterResponse
   service as unknown as AfterResponseLifecycle;
 
 // 0122: the sign-up fields as ProviderEnrollmentService passes them.
-const collected = {
+const collected = { signup: {
   facilityProfile: facilityProfileForDatabase(facilityProfileInput() as unknown as FacilityProfileDto),
   submitterRole: 'owner', submitterPhone: '+2348098765432',
-};
+} };
 
 describe('organization applicant profile completion', () => {
   beforeEach(() => {
@@ -389,7 +389,7 @@ describe('facility self sign-up activation and its quota (P4)', () => {
       .toContain('identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)');
     expect(query.mock.calls[0]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr', started.challengeId,
       expect.stringMatching(/^[a-f0-9]{64}$/), 'Dr Ada Obi', 'hospital',
-      JSON.stringify(collected.facilityProfile), 'owner', expect.any(Buffer), 'test-v1']);
+      JSON.stringify(collected.signup.facilityProfile), 'owner', expect.any(Buffer), 'test-v1']);
     // 0122: the applicant's phone is stored encrypted, bound to the code it was sent with.
     const phone = query.mock.calls[0]?.[1]?.[9] as Buffer;
     expect(phone.toString('latin1')).not.toContain('8098765432');
@@ -401,6 +401,23 @@ describe('facility self sign-up activation and its quota (P4)', () => {
     expect(query.mock.calls[1]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr']);
     expect(started).toEqual({ accepted: true, codeSent: true, challengeId: expect.stringMatching(/^[0-9a-f-]{36}$/),
       expiresInSeconds: 600, resendAfterSeconds: 60 });
+    // 0122 release step (contract 37.0): a sign-up in the old shape (no new
+    // fields) keeps 0086's 7-argument command and needs no encryption key.
+    query.mockClear();
+    query.mockResolvedValueOnce({ rows: [{ recipient_email: 'admin@example.invalid' }] })
+      .mockResolvedValueOnce({ rows: [{ application_open: true, challenge_id: 'in-force', expires_in_seconds: 600,
+        resend_after_seconds: 60 }] });
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({
+      NODE_ENV: 'test', OTP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
+      CORS_ORIGINS: 'https://app.healthidentitydirectory.com', AUTH_COOKIE_SECURE: true,
+    } as environment.Environment);
+    const oldShape = await completion.start(input, '203.0.113.44', correlationId, { publicApplicationQuotaCharged: true,
+      selfService: { administratorName: 'Dr Ada Obi', organizationType: 'hospital' } });
+    expect(query.mock.calls[0]?.[0])
+      .toContain('identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7) as recipient_email');
+    expect(query.mock.calls[0]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr', oldShape.challengeId,
+      expect.stringMatching(/^[a-f0-9]{64}$/), 'Dr Ada Obi', 'hospital']);
+    expect(oldShape).toMatchObject({ accepted: true, codeSent: true });
     // The governed completion keeps 0056's command and its uniform answer.
     query.mockClear();
     query.mockResolvedValue({ rows: [{ recipient_email: null }] });

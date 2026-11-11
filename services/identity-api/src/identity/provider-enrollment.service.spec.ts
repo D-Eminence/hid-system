@@ -186,9 +186,9 @@ describe('the public application quota is charged once per start (CRITIC C8, rev
     expect(completion.start).toHaveBeenCalledWith(expect.objectContaining({
       productCode: 'ehr', cacRegistrationNumber: 'RC1234567', turnstileAction: 'organization-completion' }),
     '203.0.113.44', 'provider-enrollment-test', { publicApplicationQuotaCharged: true,
-      selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic',
+      selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic', signup: {
         facilityProfile: facilityProfileForDatabase(input.facilityProfile as unknown as FacilityProfileDto),
-        submitterRole: 'owner', submitterPhone: '+2348098765432' } });
+        submitterRole: 'owner', submitterPhone: '+2348098765432' } } });
   });
 
   it('keeps the charge when the submit refuses the start (409), so probing which CACs have applications costs quota', async () => {
@@ -252,9 +252,9 @@ describe('the public application quota is charged once per start (CRITIC C8, rev
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
     expect(completion.start).toHaveBeenCalledWith(expect.anything(), '203.0.113.44', 'provider-enrollment-test',
       { publicApplicationQuotaCharged: true,
-        selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic',
+        selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic', signup: {
         facilityProfile: facilityProfileForDatabase(input.facilityProfile as unknown as FacilityProfileDto),
-        submitterRole: 'owner', submitterPhone: '+2348098765432' } });
+        submitterRole: 'owner', submitterPhone: '+2348098765432' } } });
   });
 
   it('answers an exhausted public application quota 429 APPLICATION_RATE_LIMITED with no submit or QoreID', async () => {

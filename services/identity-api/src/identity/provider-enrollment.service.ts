@@ -355,8 +355,14 @@ export class ProviderEnrollmentService {
       publicApplicationQuotaCharged: true,
       selfService: {
         administratorName: input.administratorName, organizationType: input.organizationType,
-        facilityProfile: facilityProfileForDatabase(input.facilityProfile),
-        submitterRole: input.administratorRole, submitterPhone: input.administratorPhone,
+        // 0122: all or none (the DTO refuses a partial set); the old body
+        // sends none and keeps 0086's 7-argument command (contract 37.0).
+        ...(input.facilityProfile && input.administratorRole && input.administratorPhone ? {
+          signup: {
+            facilityProfile: facilityProfileForDatabase(input.facilityProfile),
+            submitterRole: input.administratorRole, submitterPhone: input.administratorPhone,
+          },
+        } : {}),
       },
     });
   }

@@ -40,11 +40,14 @@ export interface SelfServiceCompletionDetails {
   /**
    * 0122: the facility profile (as facilityProfileForDatabase writes it), the
    * applicant's role and phone. Stored with the code that is sent; the phone
-   * is encrypted here, bound to that code's id.
+   * is encrypted here, bound to that code's id. Absent for a request in the
+   * old shape (contract 37.0), which uses 0086's 7-argument command.
    */
-  facilityProfile: Record<string, unknown>;
-  submitterRole: string;
-  submitterPhone: string;
+  signup?: {
+    facilityProfile: Record<string, unknown>;
+    submitterRole: string;
+    submitterPhone: string;
+  };
 }
 
 /** The governed completion's start answer: the same for every input (no enumeration). */
@@ -163,8 +166,9 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
     const selfService = options.selfService;
     // Encrypted before the transaction, so a missing key refuses the request
     // before anything is written or a quota is charged by this call.
-    const submitterPhone = selfService
-      ? this.fieldProtector.encrypt(facilitySignupPhoneLabel(challengeId), selfService.submitterPhone)
+    const signup = selfService?.signup;
+    const submitterPhone = signup
+      ? this.fieldProtector.encrypt(facilitySignupPhoneLabel(challengeId), signup.submitterPhone)
       : undefined;
     let recipient: string | null;
     let state: SelfServiceCodeStateRow | undefined;
@@ -183,14 +187,20 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
           );
           return { recipient: found.rows[0]?.recipient_email ?? null, state: undefined };
         }
-        const found = await client.query<{ recipient_email: string | null }>(
-          'select identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)'
-            + ' as recipient_email',
-          [registrationNumber, email, input.productCode, challengeId, this.hmac('otp', challengeId, code),
-            selfService.administratorName, selfService.organizationType,
-            JSON.stringify(selfService.facilityProfile), selfService.submitterRole, submitterPhone,
-            this.fieldProtector.keyVersion],
-        );
+        const found = signup
+          ? await client.query<{ recipient_email: string | null }>(
+            'select identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)'
+              + ' as recipient_email',
+            [registrationNumber, email, input.productCode, challengeId, this.hmac('otp', challengeId, code),
+              selfService.administratorName, selfService.organizationType,
+              JSON.stringify(signup.facilityProfile), signup.submitterRole, submitterPhone,
+              this.fieldProtector.keyVersion],
+          )
+          : await client.query<{ recipient_email: string | null }>(
+            'select identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7) as recipient_email',
+            [registrationNumber, email, input.productCode, challengeId, this.hmac('otp', challengeId, code),
+              selfService.administratorName, selfService.organizationType],
+          );
         // In the same transaction, so it sees this start's code, if any (R14).
         const current = await client.query<SelfServiceCodeStateRow>(
           'select * from identity.self_service_provider_code_state($1,$2,$3)',

@@ -46,12 +46,18 @@ describe('facility sign-up fields (0122)', () => {
     });
     expect(fields).toEqual([]);
     expect(instance.administratorPhone).toBe('+2348098765432');
-    expect(instance.facilityProfile.phone).toBe('+2348012345678');
-    expect(instance.facilityProfile.email).toBe('front.desk@clinic.invalid');
-    expect(instance.facilityProfile.medicalDirectorMdcn).toBe('MDCN/12345');
+    expect(instance.facilityProfile!.phone).toBe('+2348012345678');
+    expect(instance.facilityProfile!.email).toBe('front.desk@clinic.invalid');
+    expect(instance.facilityProfile!.medicalDirectorMdcn).toBe('MDCN/12345');
   });
 
-  it('refuses a sign-up without any one of the new fields (all required)', async () => {
+  it('still accepts the live website\'s sign-up with none of the new fields (release step, contract 37.0)', async () => {
+    expect((await errorsOf(StartProviderEnrollmentDto, signupBase)).fields).toEqual([]);
+    expect((await errorsOf(StartProviderEnrollmentDto, { ...signupBase, administratorRole: null,
+      administratorPhone: null, facilityProfile: null })).fields).toEqual([]);
+  });
+
+  it('refuses a sign-up with only some of the new fields (all or none)', async () => {
     for (const field of ['administratorRole', 'administratorPhone', 'facilityProfile']) {
       const value: Record<string, unknown> = { ...signupBase, ...signupCollectedFields() };
       delete value[field];
@@ -189,7 +195,13 @@ describe('the facility administrator\'s profile read and save (0122)', () => {
 });
 
 describe('the registration desk fields (0122)', () => {
-  it('requires the phone, the address and the Health ID question; the Health ID only when said', async () => {
+  it('still accepts the live website\'s body with none of the desk fields (release step, contract 37.0)', async () => {
+    expect((await errorsOf(ResolveNinDto, ninBase)).fields).toEqual([]);
+    expect((await errorsOf(ResolveNinDto, { ...ninBase, existingHealthId: 'HID-ABC234' })).fields)
+      .toContain('existingHealthId');
+  });
+
+  it('requires the phone, the address and the Health ID question together; the Health ID only when said', async () => {
     expect((await errorsOf(ResolveNinDto, { ...ninBase, ...deskCollectedFields() })).fields).toEqual([]);
     for (const field of ['phone', 'addressLine', 'city', 'stateCode', 'lga', 'hasExistingHealthId']) {
       const value: Record<string, unknown> = { ...ninBase, ...deskCollectedFields() };
@@ -206,6 +218,14 @@ describe('the registration desk fields (0122)', () => {
     expect(stated.instance.existingHealthId).toBe('HID-ABC234');
     expect((await errorsOf(ResolveNinDto, { ...ninBase, ...deskCollectedFields(), allergies: 'penicillin' }))
       .fields).toContain('allergies');
+  });
+
+  it('keeps the old body\'s digest, so a retry across the release replays', () => {
+    const old = ninBase as unknown as ResolveNinDto;
+    expect(ninResolutionRequestDigest({ ...old, phone: undefined } as ResolveNinDto, 'a'.repeat(64)))
+      .toBe(ninResolutionRequestDigest(old, 'a'.repeat(64)));
+    expect(ninResolutionRequestDigest({ ...old, ...deskCollectedFields() } as unknown as ResolveNinDto, 'a'.repeat(64)))
+      .not.toBe(ninResolutionRequestDigest(old, 'a'.repeat(64)));
   });
 
   it('makes a retry with another phone, address or stated Health ID a different request', () => {
@@ -231,7 +251,7 @@ describe('the registration desk fields (0122)', () => {
     });
     afterEach(() => jest.restoreAllMocks());
 
-    function setup(options: { ninMatch?: boolean; statedFound?: boolean } = {}) {
+    function setup(options: { ninMatch?: boolean; statedFound?: boolean; statedIsDemographicMatch?: boolean } = {}) {
       const statements: Array<{ sql: string; values: unknown[] }> = [];
       const client = {
         query: jest.fn(async (sql: string, values: unknown[] = []) => {
@@ -241,7 +261,11 @@ describe('the registration desk fields (0122)', () => {
             return { rows: options.ninMatch ? [{ patient_id: ninPatient, hid_code: 'HID-NINPAT' }] : [] };
           }
           if (sql.includes('upper(hid_code) = $1')) return { rows: options.statedFound ? [{ id: statedPatient }] : [] };
-          if (sql.includes('from identity.patients') && sql.includes('lower(first_name)')) return { rows: [] };
+          if (sql.includes('from identity.patients') && sql.includes('lower(first_name)')) {
+            // The stated patient is a candidate only when name and date of birth match the NIN.
+            return { rows: options.statedIsDemographicMatch ? [{ id: statedPatient, first_name: 'Amina',
+              last_name: 'Okafor', full_name: 'Amina Okafor', dob: '1990-01-02' }] : [] };
+          }
           if (sql.includes('insert into identity.registration_cases')) return { rows: [{ id: values[0] }] };
           if (sql.includes('where registration.id = $1 and registration.facility_id')) {
             return { rows: [{ id: 'case', status: options.ninMatch ? 'resolved_existing_identity' : 'review_required',
@@ -275,30 +299,69 @@ describe('the registration desk fields (0122)', () => {
       const insert = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_cases'))!;
       const caseId = insert.values[0] as string;
       expect(caseId).toMatch(caseIdPattern);
-      const [phone, address, keyVersion, statedHid] = insert.values.slice(20) as [Buffer, Buffer, string, null];
+      expect(insert.values).toHaveLength(20);
+      const contactRow = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_case_contacts'))!;
+      expect(contactRow.values[0]).toBe(caseId);
+      expect(contactRow.values.slice(6)).toEqual(['account', 'membership']);
+      const [phone, address, keyVersion, statedHid] = contactRow.values.slice(2, 6) as [Buffer, Buffer, string, null];
       expect(keyVersion).toBe('test-v1');
       expect(statedHid).toBeNull();
       const protector = new CollectedFieldProtector();
       expect(protector.decrypt(registrationCaseContactLabel(caseId, 'phone'), 'test-v1', phone)).toBe('+2348011112222');
       expect(JSON.parse(protector.decrypt(registrationCaseContactLabel(caseId, 'address'), 'test-v1', address)))
         .toEqual({ addressLine: '4 Example Close, Surulere', city: 'Lagos', stateCode: 'LA', lga: 'Surulere' });
-      const written = JSON.stringify([statements.filter(({ sql }) => !sql.startsWith('insert into identity.registration_cases'))
+      const written = JSON.stringify([statements.filter(({ sql }) => !sql.startsWith('insert into identity.registration_case_contacts'))
         .map(({ values }) => values.map((value) => Buffer.isBuffer(value) ? 'bytes' : value)),
       audit.recordWithClient.mock.calls]);
       for (const value of ['8011112222', 'Example Close', 'Surulere']) expect(written).not.toContain(value);
     });
 
-    it('adds the stated Health ID\'s patient as a review candidate (score 65, stated_hid)', async () => {
-      const { registrations, statements } = setup({ statedFound: true });
+    it.each([
+      ['belongs to a patient whose name and date of birth do not match the NIN', true],
+      ['belongs to no patient', false],
+    ])('never adds a review candidate for a stated Health ID that %s, and records the same outcome', async (_label,
+      statedFound) => {
+      const { registrations, statements, audit } = setup({ statedFound });
       await registrations.resolve(desk({ hasExistingHealthId: true, existingHealthId: 'HID-ABC234' }),
         'resolve-key-000000002', context);
       const insert = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_cases'))!;
-      expect(insert.values[4]).toBe('review_required');
-      expect(insert.values[23]).toBe('HID-ABC234');
-      const candidate = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_case_candidates'))!;
-      expect(candidate.values.slice(1)).toEqual([statedPatient, 65, JSON.stringify(['stated_hid'])]);
+      expect(insert.values[4]).toBe('pending_new_identity_approval');
+      const contactRow = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_case_contacts'))!;
+      expect(contactRow.values[5]).toBe('HID-ABC234');
+      expect(statements.some(({ sql }) => sql.startsWith('insert into identity.registration_case_candidates'))).toBe(false);
       const event = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_case_events'))!;
-      expect(JSON.parse(event.values[6] as string)).toMatchObject({ statedHealthId: 'candidate', contactRecorded: true });
+      // The same answer whether or not the Health ID exists: nothing tells staff.
+      expect(JSON.parse(event.values[6] as string)).toMatchObject({ statedHealthId: 'no_match', contactRecorded: true });
+      expect(JSON.stringify(audit.recordWithClient.mock.calls)).toContain('"statedHealthId":"no_match"');
+      expect(JSON.stringify(statements)).not.toContain(statedPatient.slice(0, 8) + '","score');
+    });
+
+    it('marks a candidate already matched by name and date of birth with stated_hid, and adds no other', async () => {
+      const { registrations, statements } = setup({ statedFound: true, statedIsDemographicMatch: true });
+      await registrations.resolve(desk({ hasExistingHealthId: true, existingHealthId: 'HID-ABC234' }),
+        'resolve-key-000000005', context);
+      const insert = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_cases'))!;
+      expect(insert.values[4]).toBe('review_required');
+      const candidates = statements.filter(({ sql }) => sql.startsWith('insert into identity.registration_case_candidates'));
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]!.values[1]).toBe(statedPatient);
+      expect(candidates[0]!.values[2]).not.toBe(65);
+      expect(JSON.parse(candidates[0]!.values[3] as string)).toContain('stated_hid');
+      expect(JSON.parse(candidates[0]!.values[3] as string).length).toBeGreaterThan(1);
+      const event = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_case_events'))!;
+      expect(JSON.parse(event.values[6] as string)).toMatchObject({ statedHealthId: 'matches' });
+    });
+
+    it('accepts the old body: no key needed, no contact stored or copied, contactRecorded false', async () => {
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NODE_ENV: 'test' } as environment.Environment);
+      const { registrations, statements } = setup({ ninMatch: true });
+      const old = { ...ninBase } as unknown as ResolveNinDto;
+      await registrations.resolve(old, 'resolve-key-000000006', context);
+      expect(statements.some(({ sql }) => sql.startsWith('insert into identity.registration_cases'))).toBe(true);
+      expect(statements.some(({ sql }) => sql.includes('registration_case_contacts ('))).toBe(false);
+      expect(statements.some(({ sql }) => sql.startsWith('insert into identity.patient_facility_contacts'))).toBe(false);
+      const event = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_case_events'))!;
+      expect(JSON.parse(event.values[6] as string)).toMatchObject({ contactRecorded: false, statedHealthId: 'none' });
     });
 
     it('lets a verified NIN match win over a different stated Health ID, and copies the contact to that patient', async () => {
@@ -309,7 +372,7 @@ describe('the registration desk fields (0122)', () => {
       expect(insert.values[4]).toBe('resolved_existing_identity');
       expect(statements.some(({ sql }) => sql.startsWith('insert into identity.registration_case_candidates'))).toBe(false);
       const event = statements.find(({ sql }) => sql.startsWith('insert into identity.registration_case_events'))!;
-      expect(JSON.parse(event.values[6] as string)).toMatchObject({ statedHealthId: 'differs' });
+      expect(JSON.parse(event.values[6] as string)).toMatchObject({ statedHealthId: 'no_match' });
       const copy = statements.find(({ sql }) => sql.startsWith('insert into identity.patient_facility_contacts'))!;
       expect(copy.values).toEqual([ninPatient, insert.values[0], 'account', 'membership']);
     });
@@ -341,7 +404,7 @@ describe('the registration desk fields (0122)', () => {
             nin_ciphertext: Buffer.alloc(40), nin_last4: '8901', nin_key_version: 'v1', verified_at: new Date(),
             verification_provider: 'synthetic', verification_reference: 'ref' }] };
         }
-        if (sql.includes('registration_case_candidates where case_id')) return { rows: [{ ok: 1 }], rowCount: 1 };
+        if (/registration_case_candidates\s+where case_id/.test(sql)) return { rows: [{ ok: 1 }], rowCount: 1 };
         if (sql.includes("identifier_type = 'nin'")) return { rows: [], rowCount: 0 };
         if (sql.includes('where registration.id = $1 and registration.facility_id')) {
           return { rows: [{ id: caseId, status: 'linked_existing', row_version: '2', resolved_patient_id: patientId,
@@ -361,6 +424,28 @@ describe('the registration desk fields (0122)', () => {
       expect(update).toBeGreaterThan(-1);
       expect(copy).toBeGreaterThan(update);
       expect(statements[copy]!.values).toEqual([patientId, caseId, 'account', 'membership']);
+    });
+
+    it('refuses to link a candidate whose only reason is the stated Health ID (D13)', async () => {
+      const statements: string[] = [];
+      const client = { query: jest.fn(async (sql: string) => {
+        statements.push(sql.replace(/\s+/g, ' ').trim());
+        if (/for update/i.test(sql)) return { rows: [{ id: caseId }] };
+        if (sql.includes('has_contact')) {
+          return { rows: [{ id: caseId, status: 'review_required', row_version: '1', resolved_patient_id: null,
+            resolved_hid_code: null, candidate_count: '1', has_contact: true, nin_lookup_hmac: 'h'.repeat(64) }] };
+        }
+        return { rows: [], rowCount: 0 };
+      }) };
+      const database = { withTransaction: jest.fn(async (_c: unknown, work: (c: unknown) => unknown) => work(client)) };
+      const registrations = new NinRegistrationService(database as never, { recordWithClient: jest.fn() } as never,
+        {} as never, {} as never, {} as never);
+      await expect(registrations.linkExisting(caseId, { patientId, expectedVersion: 1,
+        reason: 'Same person on review', purpose: 'healthcare-operations' } as never, 'link-key-0000000000002', context))
+        .rejects.toMatchObject({ status: 409, code: 'PATIENT_NOT_A_REVIEW_CANDIDATE' });
+      expect(statements.find((sql) => sql.startsWith('select 1 from identity.registration_case_candidates')))
+        .toContain(`match_reasons <> '["stated_hid"]'::jsonb`);
+      expect(statements.some((sql) => sql.startsWith('insert into identity.patient_identifiers'))).toBe(false);
     });
   });
 });

@@ -3598,8 +3598,11 @@ permission (it never answers null). The suite header lists them.
 Migration 0122 (`services/ehr-api/database/migrations/0122_collect_signup_fields.sql`), unsigned.
 
 Owner decisions: "don't remove them instead we need to collect those information" and
-"allow trading name, all fields required". Every field below is **required**, and the API refuses
-a request that is missing one (400 `VALIDATION_FAILED`, with `errors[].field`). These stay
+"allow trading name, all fields required". Every field below is required **on the website**,
+which must always send it. For the release step (37.0) the API accepts a sign-up or desk request
+that carries **none** of the new fields, and refuses one that carries only **some** of them
+(400 `VALIDATION_FAILED`, with `errors[].field`). A follow-up release makes them required in the
+API too. These stay
 **not collected** until the document bucket and its virus scanner exist: operating licence,
 CAC certificate, proof of address, and the facility logo. Hide them; do not grey them out (D5).
 Sending any of them (for example `logo`) is refused as an unknown field.
@@ -3609,16 +3612,18 @@ unknown field gets 400 `VALIDATION_FAILED`.
 
 ### 37.0. Release order (important)
 
-The new fields are required, so the backend refuses the **current** website's sign-up and
-NIN registration requests as soon as it is released. The website also cannot send the fields
-earlier, because today's backend refuses unknown fields. **Release both in the same window:**
-the backend first, then the re-pinned website straight after. Between the two releases,
-facility sign-up and NIN patient registration answer 400.
+Today's backend refuses unknown fields (`forbidNonWhitelisted`), so the website cannot send
+the new fields before this backend is live. This backend therefore accepts both bodies: the old
+one (none of the new fields) and the new one (all of them). A partial set is refused. Release in
+three steps:
+
+1. This backend (0122 and Identity). The live website keeps working unchanged.
+2. The website that always sends every new field (sign-up, setup wizard, every desk screen).
+3. A small follow-up backend release that makes the fields required in the API.
 
 Every screen that posts to `POST /api/v1/identity/nin/resolve` must send the desk fields in
-section 37.3, including the pharmacy `newHealthId.tsx` and the classic Registration screen. The
-plan had left those unchanged because the fields were going to be optional. With the owner's
-"all fields required", they must change too.
+section 37.3 before step 3, including the pharmacy `newHealthId.tsx`, the classic Registration
+screen and hid-system `apps/web/src/lib/patientRegistrationApi.ts`.
 
 ### 37.1. Shared shape: `FacilityProfile`
 
@@ -3655,7 +3660,7 @@ This object is used by facility sign-up (`facilityProfile`) and by the setup wiz
 
 ### 37.2. Facility sign-up: `POST /api/v1/identity/provider-enrollments` (start)
 
-The existing body gains three required fields:
+The existing body gains three fields, sent together (all or none, see 37.0):
 
 ```json
 {
@@ -3673,7 +3678,7 @@ The existing body gains three required fields:
 |---|---|
 | `administratorRole` | One of `owner`, `medical_director`, `administrator`, `other_authorised_representative` |
 | `administratorPhone` | Same phone rule as `FacilityProfile.phone`. It is stored encrypted (personal data, D4) and is never returned. |
-| `facilityProfile` | The object in section 37.1 (required) |
+| `facilityProfile` | The object in section 37.1 |
 
 The response is unchanged. The profile is stored with the emailed code that this request sends.
 When the application is activated (self-service activation, or a platform administrator's
@@ -3691,7 +3696,7 @@ Suggested website mapping: "Role at facility" is `administratorRole` and "Your p
 ### 37.3. Staff patient registration: `POST /api/v1/identity/nin/resolve`
 
 The existing body (`nin`, `firstName`, `lastName`, `dateOfBirth`, `gender?`, `purpose`) gains
-these required fields:
+these fields, sent together (all or none, see 37.0; `existingHealthId` follows its own rule):
 
 | Field | Type | Rule |
 |---|---|---|
@@ -3706,21 +3711,31 @@ these required fields:
 Not collected: allergies (D11, left to clinical records) and "provisional local identity" (D12, off).
 Sending `allergies` is refused as an unknown field.
 
-The phone and address are stored encrypted on the registration case. When the case resolves to
+The phone and address are stored encrypted with the registration case. When the case resolves to
 a patient (an existing NIN match, an approved new patient, or a linked existing patient), they
 are copied as a **facility-held, unverified** contact at the same moment. They are never used
 for sign-in or recovery and are never returned in plain text.
 
+Deletion rule (NDPA): this data is never changed and never deleted, except by **erasure**: the
+encrypted phone and address, their key version and the stated Health ID are set to null and the
+erasure time and reason are recorded. Erasure happens for every facility's copy when the
+patient's account deletion completes (0096), and on an NDPA erasure request, which Health ID
+support has run through the database owner (`identity.erase_patient_facility_contacts`). A
+case that never resolved to a patient is kept with the case.
+
 The Idempotency-Key is bound to all of these fields. A retry with a different phone, address or
 stated Health ID under the same key is refused (409 `IDEMPOTENCY_KEY_REUSED`).
 
-Stated Health ID (D13):
-- If no verified NIN match is found and the stated Health ID belongs to an active patient, that
-  patient becomes a review candidate (score 65, reason `stated_hid`). The case is then
-  `review_required`, and the existing review screen lists the candidate.
-- If the NIN matches a patient, the NIN match wins. A different stated Health ID is only noted
-  internally.
-- An unknown stated Health ID is noted internally and has no other effect.
+Stated Health ID (D13). It is a hint only. It never adds a review candidate, never shows
+staff a patient they could not otherwise see, and never bypasses the name and date-of-birth
+matching (a patient-lookup by Health ID needs the patient's consent; this route does not).
+- If the patient it names is already a review candidate (by name and date of birth against the
+  verified NIN details), that candidate gains the reason `stated_hid`. Nothing else changes.
+- If the NIN matches a patient, the NIN match wins.
+- Otherwise it is noted internally as `no_match`. Staff are never told whether the Health ID
+  exists.
+- link-existing refuses (409 `PATIENT_NOT_A_REVIEW_CANDIDATE`) a candidate whose only reason is
+  `stated_hid`.
 
 Response (`RegistrationCaseResult`) gains one field:
 
@@ -3728,6 +3743,9 @@ Response (`RegistrationCaseResult`) gains one field:
 { "caseId": "…", "status": "…", "version": 1, "candidateCount": 1,
   "contactRecorded": true, "patient": { "patientId": "…", "hid": "HID-…" } }
 ```
+
+`contactRecorded` is false when the request carried no desk fields (37.0) or the contact has
+been erased.
 
 The same `contactRecorded` field appears on `GET /api/v1/identity/registration-cases/:id`,
 approve-new and link-existing. No phone or address is ever returned.

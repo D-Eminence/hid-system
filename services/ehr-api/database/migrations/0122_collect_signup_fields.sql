@@ -5,8 +5,10 @@
 -- Owner decisions in chat (D-Eminence, relayed by the coordinator): "don't
 -- remove them instead we need to collect those information" and "allow
 -- trading name, all fields required". Every field of facility sign-up, the
--- setup wizard and staff patient registration is required (Identity's DTOs
--- refuse a request without one), except the three document uploads (operating
+-- setup wizard and staff patient registration is required (the website
+-- always sends them; Identity refuses a partial set, and, for the release
+-- step, still accepts a sign-up or desk request without any of the new
+-- fields; a follow-up makes them required), except the three document uploads (operating
 -- licence, CAC certificate, proof of address) and the facility logo, which
 -- stay deferred until the document bucket and its scanner exist (D5). The
 -- other decisions take the plan's recommended defaults:
@@ -34,9 +36,13 @@
 --       recovery;
 --   D11 allergies are NOT collected at the desk (left to clinical records);
 --   D12 "provisional local identity" stays off;
---   D13 an existing Health ID the patient states is recorded on the case and
---       Identity adds that patient as a review candidate (score 65, reason
---       stated_hid); a verified NIN match wins over it.
+--   D13 an existing Health ID the patient states is recorded with the case.
+--       It is a hint only: it never adds a review candidate and never
+--       bypasses matching. When the patient it names is already a candidate
+--       by name and date of birth, Identity adds the reason stated_hid to that
+--       candidate; otherwise it records only whether it matched ('matches' or
+--       'no_match', never whether the Health ID exists). A candidate whose
+--       only reason is stated_hid cannot be linked.
 --
 -- WHAT IT DOES
 --  1. identity.nigeria_states: the 36 states and the FCT (ISO 3166-2:NG
@@ -60,15 +66,26 @@
 --     self-service facility), with If-Match (row_version) and Idempotency-Key
 --     (auth.admin_command_idempotency); the audit row names the changed fields
 --     only, never a value.
---  6. Patient registration: four nullable columns on identity.registration_cases
---     (the encrypted phone and address, their key version, the stated Health
---     ID), unchangeable after insert, and identity.patient_facility_contacts,
+--  6. Patient registration: identity.registration_case_contacts (the case's
+--     encrypted phone and address, their key version, the stated Health ID),
+--     written once with the case, and identity.patient_facility_contacts,
 --     the facility-held contact Identity writes when the case resolves to a
---     patient (resolved at once, approved new, linked existing).
+--     patient (resolved at once, approved new, linked existing). Neither is
+--     ever deleted or changed, except by erasure (NDPA, 0084's rule): the
+--     owner-only identity.erase_patient_facility_contacts nulls the
+--     ciphertexts, key version and stated Health ID and records erased_at and
+--     the reason. A trigger on identity.patient_account_deletion_requests
+--     calls it when an account deletion completes ('account_deleted'); Health
+--     ID support has it run for an erasure request ('erasure_request').
+--     identity.registration_cases is not altered.
 --
--- BACKWARD COMPATIBLE: every new column is nullable; no existing function
--- body, policy or grant changes. Today's Identity calls the 7-argument begin
--- command and never reads the new objects.
+-- BACKWARD COMPATIBLE: no existing table gains a column; no existing
+-- function body, policy or grant changes. Today's Identity calls the
+-- 7-argument begin command and never reads the new objects. The new
+-- Identity accepts the old request bodies too (the new sign-up and desk
+-- fields are optional, all or none), so the release order is: this
+-- backend first, then the website that sends the fields, then a follow-up
+-- that makes them required.
 --
 -- A release applies only migrations, never runtime-grants.sql, so the grants
 -- are in this file, for roles that already exist, and in runtime-grants.sql,
@@ -84,7 +101,8 @@ declare
 begin
   if to_regclass('identity.facility_profiles') is not null
      or to_regclass('identity.nigeria_states') is not null
-     or to_regclass('identity.patient_facility_contacts') is not null then
+     or to_regclass('identity.patient_facility_contacts') is not null
+     or to_regclass('identity.registration_case_contacts') is not null then
     raise exception using errcode = '55000', message = '0122: already applied';
   end if;
   if to_regprocedure('identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)') is null
@@ -95,14 +113,14 @@ begin
      or to_regprocedure('auth.membership_has_permission(text,uuid,uuid,text)') is null
      or to_regprocedure('platform.reject_mutation()') is null
      or to_regclass('auth.admin_command_idempotency') is null
+     or to_regclass('identity.patient_account_deletion_requests') is null
+     or not exists (select 1 from pg_attribute
+                     where attrelid = 'identity.patient_account_deletion_requests'::regclass
+                       and attname = 'state' and not attisdropped)
      or to_regprocedure('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)') is null
      or not exists (select 1 from pg_attribute
                      where attrelid = 'identity.organization_profile_completion_challenges'::regclass
-                       and attname = 'requested_organization_type' and not attisdropped)
-     or exists (select 1 from pg_attribute
-                 where attrelid = 'identity.registration_cases'::regclass
-                   and attname in ('contact_phone_ciphertext', 'contact_address_ciphertext',
-                     'contact_key_version', 'stated_hid_code') and not attisdropped) then
+                       and attname = 'requested_organization_type' and not attisdropped) then
     raise exception using errcode = '55000', message = '0122: 0001-0108 must be applied first';
   end if;
   -- The applier will own the new tables, functions and the trigger on
@@ -110,7 +128,7 @@ begin
   -- owner of) the tables it alters or adds a trigger to.
   foreach table_name in array array['identity.organization_applications',
     'identity.organization_profile_completion_challenges', 'identity.registration_cases',
-    'identity.facilities', 'identity.patients'] loop
+    'identity.facilities', 'identity.patients', 'identity.patient_account_deletion_requests'] loop
     if not pg_has_role(applier, (select relowner from pg_class where oid = table_name::regclass), 'USAGE') then
       raise exception using errcode = '42501', message = format('0122: the applier must own %s', table_name);
     end if;
@@ -119,7 +137,7 @@ end
 $$;
 
 lock table identity.organization_applications, identity.organization_profile_completion_challenges,
-  identity.registration_cases in share row exclusive mode;
+  identity.registration_cases, identity.patient_account_deletion_requests in share row exclusive mode;
 
 -- 1. The states (D6). The FCT is "Federal Capital Territory" (the website's
 -- facility list says "FCT"; hid-system apps/web says "Abuja FCT").
@@ -603,67 +621,121 @@ end;
 $$;
 
 -- 6. Patient registration at the desk (D10, D13).
-alter table identity.registration_cases
-  add column contact_phone_ciphertext bytea
-    constraint registration_cases_contact_phone_ck check (contact_phone_ciphertext is null
-      or octet_length(contact_phone_ciphertext) between 30 and 2048),
-  add column contact_address_ciphertext bytea
-    constraint registration_cases_contact_address_ck check (contact_address_ciphertext is null
-      or octet_length(contact_address_ciphertext) between 30 and 4096),
-  add column contact_key_version text
-    constraint registration_cases_contact_key_version_ck check (contact_key_version is null
-      or length(contact_key_version) between 1 and 64),
-  add column stated_hid_code text
-    constraint registration_cases_stated_hid_ck check (stated_hid_code is null
-      or stated_hid_code ~ '^HID-[A-HJ-NP-Z2-9]{6,32}$'),
-  add constraint registration_cases_contact_all_ck check (
-    (contact_phone_ciphertext is null and contact_address_ciphertext is null and contact_key_version is null)
-    or (contact_phone_ciphertext is not null and contact_address_ciphertext is not null
-      and contact_key_version is not null));
+-- The phone and address the desk records, and the Health ID the patient
+-- states, live beside the case in identity.registration_case_contacts, not on
+-- identity.registration_cases: the case's write trigger (0011) allows only a
+-- reviewer's status change, and this data must stay erasable (NDPA; 0084's
+-- rule: a removed contact is erased, ciphertext and key version set to null).
+-- A row is written once by Identity in the transaction that creates its case;
+-- afterwards its only allowed change is erasure, and it is never deleted.
+create table identity.registration_case_contacts (
+  registration_case_id uuid primary key references identity.registration_cases(id) on delete restrict,
+  facility_id uuid not null references identity.facilities(id) on delete restrict,
+  phone_ciphertext bytea check (phone_ciphertext is null or octet_length(phone_ciphertext) between 30 and 2048),
+  address_ciphertext bytea check (address_ciphertext is null or octet_length(address_ciphertext) between 30 and 4096),
+  key_version text check (key_version is null or length(key_version) between 1 and 64),
+  stated_hid_code text check (stated_hid_code is null or stated_hid_code ~ '^HID-[A-HJ-NP-Z2-9]{6,32}$'),
+  created_by_account_id uuid not null references auth.accounts(id) on delete restrict,
+  created_by_membership_id uuid not null references identity.staff_facility_memberships(id) on delete restrict,
+  created_at timestamptz not null default clock_timestamp(),
+  erased_at timestamptz,
+  erasure_reason text check (erasure_reason is null or erasure_reason in ('account_deleted', 'erasure_request')),
+  constraint registration_case_contacts_state_ck check (
+    (erased_at is null and erasure_reason is null and phone_ciphertext is not null
+      and address_ciphertext is not null and key_version is not null)
+    or (erased_at is not null and erasure_reason is not null and phone_ciphertext is null
+      and address_ciphertext is null and key_version is null and stated_hid_code is null))
+);
 
--- What the desk recorded is never changed afterwards.
-create function identity.guard_registration_case_contact()
+-- The only change either contact table allows: erasure (the erasable columns
+-- become null, erased_at and erasure_reason are set, once). Never deleted.
+-- TG_ARGV lists the erasable columns.
+create function identity.guard_facility_contact_erasure()
 returns trigger
 language plpgsql
 set search_path = pg_catalog, pg_temp
 as $$
 begin
-  if new.contact_phone_ciphertext is distinct from old.contact_phone_ciphertext
-     or new.contact_address_ciphertext is distinct from old.contact_address_ciphertext
-     or new.contact_key_version is distinct from old.contact_key_version
-     or new.stated_hid_code is distinct from old.stated_hid_code then
-    raise exception using errcode = '42501', message = 'Registration case contact is unchangeable';
+  if tg_op = 'DELETE' then
+    raise exception using errcode = '42501', message = 'A facility-held contact is never deleted; erase it instead';
+  end if;
+  if old.erased_at is not null or new.erased_at is null
+     or (to_jsonb(new) - tg_argv) is distinct from (to_jsonb(old) - tg_argv) then
+    raise exception using errcode = '42501', message = 'A facility-held contact can only be erased';
   end if;
   return new;
 end;
 $$;
-revoke all on function identity.guard_registration_case_contact() from public;
-create trigger registration_cases_contact_immutable
-  before update on identity.registration_cases
-  for each row execute function identity.guard_registration_case_contact();
+revoke all on function identity.guard_facility_contact_erasure() from public;
+create trigger registration_case_contacts_erasure_only
+  before update or delete on identity.registration_case_contacts
+  for each row execute function identity.guard_facility_contact_erasure(
+    'phone_ciphertext', 'address_ciphertext', 'key_version', 'stated_hid_code', 'erased_at', 'erasure_reason');
+alter table identity.registration_case_contacts enable row level security;
+alter table identity.registration_case_contacts force row level security;
+create policy registration_case_contacts_staff_read on identity.registration_case_contacts
+  for select using (
+    facility_id = platform.current_facility_id()
+    and (
+      auth.membership_has_permission(platform.current_actor_subject(), platform.current_membership_id(),
+        facility_id, 'identity.registration.write')
+      or auth.membership_has_permission(platform.current_actor_subject(), platform.current_membership_id(),
+        facility_id, 'identity.registration.approve')
+    )
+  );
+-- Only the desk member who created the case, at its facility, while the case
+-- has not yet been reviewed.
+create policy registration_case_contacts_staff_create on identity.registration_case_contacts
+  for insert with check (
+    facility_id = platform.current_facility_id()
+    and erased_at is null
+    and created_by_membership_id = platform.current_membership_id()
+    and created_by_account_id = auth.account_id_for_subject(platform.current_actor_subject())
+    and auth.membership_has_permission(platform.current_actor_subject(), platform.current_membership_id(),
+      facility_id, 'identity.registration.write')
+    and exists (
+      select 1 from identity.registration_cases registration
+       where registration.id = registration_case_contacts.registration_case_id
+         and registration.facility_id = registration_case_contacts.facility_id
+         and registration.created_by_membership_id = registration_case_contacts.created_by_membership_id
+         and registration.created_by_account_id = registration_case_contacts.created_by_account_id
+         and registration.reviewed_by_account_id is null
+    )
+  );
+revoke all on identity.registration_case_contacts from public;
 
 -- The facility-held, unverified contact of a registered patient: the copy of
 -- the case's encrypted phone and address (ciphertext bound by Identity to
 -- identity:registration-case:<case id>:phone|address), written once when the
--- case resolves to a patient. Never used for sign-in or recovery.
+-- case resolves to a patient. Never used for sign-in or recovery. Erasable
+-- like the case's row; never deleted.
 create table identity.patient_facility_contacts (
   id uuid primary key default gen_random_uuid(),
   patient_id uuid not null references identity.patients(id) on delete restrict,
   facility_id uuid not null references identity.facilities(id) on delete restrict,
-  registration_case_id uuid not null unique references identity.registration_cases(id) on delete restrict,
-  phone_ciphertext bytea not null check (octet_length(phone_ciphertext) between 30 and 2048),
-  address_ciphertext bytea not null check (octet_length(address_ciphertext) between 30 and 4096),
-  key_version text not null check (length(key_version) between 1 and 64),
+  registration_case_id uuid not null unique
+    references identity.registration_case_contacts(registration_case_id) on delete restrict,
+  phone_ciphertext bytea check (phone_ciphertext is null or octet_length(phone_ciphertext) between 30 and 2048),
+  address_ciphertext bytea check (address_ciphertext is null or octet_length(address_ciphertext) between 30 and 4096),
+  key_version text check (key_version is null or length(key_version) between 1 and 64),
   source text not null default 'staff_registration' check (source = 'staff_registration'),
   verification_status text not null default 'unverified' check (verification_status = 'unverified'),
   created_by_account_id uuid not null references auth.accounts(id) on delete restrict,
   created_by_membership_id uuid not null references identity.staff_facility_memberships(id) on delete restrict,
-  created_at timestamptz not null default clock_timestamp()
+  created_at timestamptz not null default clock_timestamp(),
+  erased_at timestamptz,
+  erasure_reason text check (erasure_reason is null or erasure_reason in ('account_deleted', 'erasure_request')),
+  constraint patient_facility_contacts_state_ck check (
+    (erased_at is null and erasure_reason is null and phone_ciphertext is not null
+      and address_ciphertext is not null and key_version is not null)
+    or (erased_at is not null and erasure_reason is not null and phone_ciphertext is null
+      and address_ciphertext is null and key_version is null))
 );
 create index patient_facility_contacts_patient_idx on identity.patient_facility_contacts (patient_id, facility_id);
-create trigger patient_facility_contacts_no_mutation
+create trigger patient_facility_contacts_erasure_only
   before update or delete on identity.patient_facility_contacts
-  for each row execute function platform.reject_mutation();
+  for each row execute function identity.guard_facility_contact_erasure(
+    'phone_ciphertext', 'address_ciphertext', 'key_version', 'erased_at', 'erasure_reason');
 alter table identity.patient_facility_contacts enable row level security;
 alter table identity.patient_facility_contacts force row level security;
 create policy patient_facility_contacts_staff_read on identity.patient_facility_contacts
@@ -679,6 +751,7 @@ create policy patient_facility_contacts_staff_read on identity.patient_facility_
 create policy patient_facility_contacts_staff_create on identity.patient_facility_contacts
   for insert with check (
     facility_id = platform.current_facility_id()
+    and erased_at is null
     and created_by_membership_id = platform.current_membership_id()
     and created_by_account_id = auth.account_id_for_subject(platform.current_actor_subject())
     and (
@@ -689,15 +762,99 @@ create policy patient_facility_contacts_staff_create on identity.patient_facilit
     )
     and exists (
       select 1 from identity.registration_cases registration
+        join identity.registration_case_contacts contact on contact.registration_case_id = registration.id
        where registration.id = patient_facility_contacts.registration_case_id
          and registration.facility_id = patient_facility_contacts.facility_id
          and registration.resolved_patient_id = patient_facility_contacts.patient_id
-         and registration.contact_phone_ciphertext = patient_facility_contacts.phone_ciphertext
-         and registration.contact_address_ciphertext = patient_facility_contacts.address_ciphertext
-         and registration.contact_key_version = patient_facility_contacts.key_version
+         and contact.facility_id = patient_facility_contacts.facility_id
+         and contact.erased_at is null
+         and contact.phone_ciphertext = patient_facility_contacts.phone_ciphertext
+         and contact.address_ciphertext = patient_facility_contacts.address_ciphertext
+         and contact.key_version = patient_facility_contacts.key_version
     )
   );
 revoke all on identity.patient_facility_contacts from public;
+
+-- Erasure (NDPA). Only the owner of these tables (the applier) may erase, as
+-- 0084's erasure runs as its owner: the two owner policies below name it, and
+-- no runtime role holds UPDATE on either table.
+do $$
+begin
+  execute format('create policy registration_case_contacts_owner on identity.registration_case_contacts '
+    || 'for all using (current_user = %L) with check (current_user = %L)', current_user, current_user);
+  execute format('create policy patient_facility_contacts_owner on identity.patient_facility_contacts '
+    || 'for all using (current_user = %L) with check (current_user = %L)', current_user, current_user);
+end
+$$;
+
+-- identity.erase_patient_facility_contacts erases every facility's copy of a
+-- patient's phone and address (patient_facility_contacts) and what the desk
+-- recorded on the cases that resolved to the patient (registration_case_contacts,
+-- the stated Health ID included). Called by the account-deletion trigger
+-- below ('account_deleted') and, for an NDPA erasure request, by Health ID
+-- support through the owner ('erasure_request'). Never granted to a runtime
+-- role. Its audit row holds only the counts.
+create function identity.erase_patient_facility_contacts(requested_patient_id uuid, requested_reason text)
+returns table (facility_contacts integer, registration_contacts integer)
+language plpgsql security definer
+set search_path = pg_catalog, identity, audit, platform, pg_temp
+as $$
+declare
+  erased_facility integer;
+  erased_registration integer;
+  erased_moment timestamptz := clock_timestamp();
+begin
+  if requested_patient_id is null or requested_reason is null
+     or requested_reason not in ('account_deleted', 'erasure_request') then
+    raise exception using errcode = '22023', message = 'Invalid contact erasure request';
+  end if;
+  update identity.registration_case_contacts contact
+     set phone_ciphertext = null, address_ciphertext = null, key_version = null, stated_hid_code = null,
+         erased_at = erased_moment, erasure_reason = requested_reason
+   where contact.erased_at is null
+     and contact.registration_case_id in (
+       select copied.registration_case_id from identity.patient_facility_contacts copied
+        where copied.patient_id = requested_patient_id);
+  get diagnostics erased_registration = row_count;
+  update identity.patient_facility_contacts copied
+     set phone_ciphertext = null, address_ciphertext = null, key_version = null,
+         erased_at = erased_moment, erasure_reason = requested_reason
+   where copied.patient_id = requested_patient_id and copied.erased_at is null;
+  get diagnostics erased_facility = row_count;
+  insert into audit.events (
+    correlation_id, actor_type, patient_id, action, outcome, resource_type, resource_id,
+    purpose_of_use, provenance, source_system, details
+  ) values (
+    coalesce(platform.current_correlation_id(), gen_random_uuid()::text), 'system', requested_patient_id,
+    'identity.patient-facility-contact.erase', 'success', 'patient', requested_patient_id::text,
+    case when requested_reason = 'account_deleted' then 'patient-self' else 'healthcare-operations' end,
+    'application', 'identity-api',
+    jsonb_build_object('reason', requested_reason, 'facilityContacts', erased_facility,
+      'registrationContacts', erased_registration)
+  );
+  return query select erased_facility, erased_registration;
+end;
+$$;
+revoke all on function identity.erase_patient_facility_contacts(uuid, text) from public;
+
+-- Account deletion (0096) erases them when it completes, as it erases the
+-- patient's emergency contacts. No 0096 function body is replaced.
+create function identity.erase_facility_contacts_on_account_deletion()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, identity, pg_temp
+as $$
+begin
+  if new.state = 'completed' and old.state is distinct from 'completed' then
+    perform identity.erase_patient_facility_contacts(new.patient_id, 'account_deleted');
+  end if;
+  return null;
+end;
+$$;
+revoke all on function identity.erase_facility_contacts_on_account_deletion() from public;
+create trigger patient_account_deletion_requests_erase_facility_contacts
+  after update of state on identity.patient_account_deletion_requests
+  for each row execute function identity.erase_facility_contacts_on_account_deletion();
 
 -- 7. Grants (as runtime-grants.sql makes them for a role bootstrap).
 revoke all on function identity.facility_department_codes(),
@@ -713,6 +870,7 @@ begin
   foreach grantee in array array['hid_identity_runtime', 'hid_schema_test_runtime'] loop
     if exists (select 1 from pg_roles where rolname = grantee) then
       execute format('grant select on identity.nigeria_states to %I', grantee);
+      execute format('grant select, insert on identity.registration_case_contacts to %I', grantee);
       execute format('grant select, insert on identity.patient_facility_contacts to %I', grantee);
       execute format('grant execute on function '
         || 'identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text,jsonb,text,bytea,text), '
@@ -725,8 +883,12 @@ $$;
 
 comment on table identity.facility_profiles is
   '0122: a facility''s profile (sign-up and setup wizard fields); before activation, the one sent with an emailed sign-up code. Not shown publicly (D2).';
+comment on table identity.registration_case_contacts is
+  '0122: the phone and address a registration desk recorded for a case (encrypted) and the Health ID the patient stated; written once, erasable, never deleted.';
 comment on table identity.patient_facility_contacts is
-  '0122: a patient''s phone and address as a facility''s registration desk recorded them (encrypted, unverified, facility-held); never used for sign-in or recovery.';
+  '0122: a patient''s phone and address as a facility''s registration desk recorded them (encrypted, unverified, facility-held); never used for sign-in or recovery; erased on account deletion or an erasure request.';
+comment on function identity.erase_patient_facility_contacts(uuid, text) is
+  '0122: owner-only NDPA erasure of every facility-held contact of a patient (account deletion or an erasure request); audited with counts only.';
 comment on function identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text,jsonb,text,bytea,text) is
   '0122: 0086''s facility sign-up code, with the facility profile and the applicant''s role and encrypted phone stored with the code it sends.';
 comment on function identity.read_facility_profile() is

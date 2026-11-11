@@ -14,9 +14,13 @@
 --      profile, an unchanged save;
 --   3. a facility profile is never deleted; a code's profile goes with its
 --      code;
---   4. the desk's patient contact: the case's columns are all or none and
---      unchangeable; the facility contact copies the case exactly, at the
---      case's facility, for the case's patient, and is read only there.
+--   4. the desk's patient contact: the case contact is all or none and
+--      written by the desk only; the facility contact copies the case contact
+--      exactly, at the case's facility, for the case's patient, and is read
+--      only there; the runtime cannot change, erase or delete either;
+--   5. erasure (NDPA): only the owner erases; only the erasable values change,
+--      once; the row stays; an erased contact is never copied again; a
+--      completed account deletion erases the patient's contacts.
 begin;
 
 do $$
@@ -340,29 +344,35 @@ select pg_temp.as_admin(1, 'collect-desk-1');
 do $$
 declare phone bytea := decode(repeat('11', 40), 'hex'); address bytea := decode(repeat('22', 60), 'hex');
 begin
-  begin
-    insert into identity.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, status,
-      first_name, last_name, full_name, dob, nin_ciphertext, nin_lookup_hmac, nin_last4, nin_key_version,
-      verification_provider, verification_reference, verified_at, idempotency_key, request_sha256,
-      contact_phone_ciphertext)
-    values ('c1227000-0000-4000-8000-000000000009', current_setting('hid.test.c_facility_1')::uuid,
-      current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid,
-      'pending_new_identity_approval', 'Half', 'Contact', 'Half Contact', '1990-01-01', decode(repeat('00', 40), 'hex'),
-      encode(sha256('collect-nin-9'::bytea), 'hex'), '0009', 'v1', 'fixture', 'ref-9', clock_timestamp(),
-      'collect-case-key-0009', encode(sha256('collect-case-9'::bytea), 'hex'), phone);
-    raise exception 'A case with a phone but no address was stored';
-  exception when check_violation then null;
-  end;
   insert into identity.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, status,
     first_name, last_name, full_name, dob, nin_ciphertext, nin_lookup_hmac, nin_last4, nin_key_version,
-    verification_provider, verification_reference, verified_at, idempotency_key, request_sha256, resolved_patient_id,
-    contact_phone_ciphertext, contact_address_ciphertext, contact_key_version, stated_hid_code)
+    verification_provider, verification_reference, verified_at, idempotency_key, request_sha256, resolved_patient_id)
   values ('c1227000-0000-4000-8000-000000000001', current_setting('hid.test.c_facility_1')::uuid,
     current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid,
     'resolved_existing_identity', 'Collect', 'Patient', 'Collect Patient', '1990-01-01', decode(repeat('00', 40), 'hex'),
     encode(sha256('collect-nin-1'::bytea), 'hex'), '0001', 'v1', 'fixture', 'ref-1', clock_timestamp(),
-    'collect-case-key-0001', encode(sha256('collect-case-1'::bytea), 'hex'), 'c1220600-0000-4000-8000-000000000001',
-    phone, address, 'v1', 'HID-CLCTAB');
+    'collect-case-key-0001', encode(sha256('collect-case-1'::bytea), 'hex'), 'c1220600-0000-4000-8000-000000000001');
+  begin
+    insert into identity.registration_case_contacts (registration_case_id, facility_id, phone_ciphertext,
+      created_by_account_id, created_by_membership_id)
+    values ('c1227000-0000-4000-8000-000000000001', current_setting('hid.test.c_facility_1')::uuid, phone,
+      current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid);
+    raise exception 'A case contact with a phone but no address was stored';
+  exception when check_violation then null;
+  end;
+  begin
+    insert into identity.registration_case_contacts (registration_case_id, facility_id, phone_ciphertext,
+      address_ciphertext, key_version, created_by_account_id, created_by_membership_id, erased_at, erasure_reason)
+    values ('c1227000-0000-4000-8000-000000000001', current_setting('hid.test.c_facility_1')::uuid, null, null, null,
+      current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid,
+      clock_timestamp(), 'erasure_request');
+    raise exception 'The desk stored an already-erased case contact';
+  exception when insufficient_privilege then null;
+  end;
+  insert into identity.registration_case_contacts (registration_case_id, facility_id, phone_ciphertext,
+    address_ciphertext, key_version, stated_hid_code, created_by_account_id, created_by_membership_id)
+  values ('c1227000-0000-4000-8000-000000000001', current_setting('hid.test.c_facility_1')::uuid, phone, address,
+    'v1', 'HID-CLCTAB', current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid);
   begin
     insert into identity.patient_facility_contacts (patient_id, facility_id, registration_case_id, phone_ciphertext,
       address_ciphertext, key_version, created_by_account_id, created_by_membership_id)
@@ -386,23 +396,171 @@ begin
   values ('c1220600-0000-4000-8000-000000000001', current_setting('hid.test.c_facility_1')::uuid,
     'c1227000-0000-4000-8000-000000000001', phone, address, 'v1', current_setting('hid.test.c_account_1')::uuid,
     current_setting('hid.test.c_membership_1')::uuid);
-  if (select count(*) from identity.patient_facility_contacts) <> 1 then
+  if (select count(*) from identity.patient_facility_contacts) <> 1
+     or (select count(*) from identity.registration_case_contacts) <> 1 then
     raise exception 'The facility does not read its own contact';
   end if;
+  -- The runtime holds no UPDATE or DELETE on either table.
   begin
-    update identity.registration_cases set contact_key_version = 'v2', row_version = row_version + 1
-     where id = 'c1227000-0000-4000-8000-000000000001';
+    update identity.registration_case_contacts set key_version = 'v2'
+     where registration_case_id = 'c1227000-0000-4000-8000-000000000001';
     raise exception 'The case''s contact was changed';
   exception when insufficient_privilege then null;
   end;
+  begin
+    update identity.patient_facility_contacts set phone_ciphertext = null, address_ciphertext = null,
+      key_version = null, erased_at = clock_timestamp(), erasure_reason = 'erasure_request';
+    raise exception 'The runtime erased a facility contact';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    delete from identity.patient_facility_contacts;
+    raise exception 'The runtime deleted a facility contact';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform identity.erase_patient_facility_contacts('c1220600-0000-4000-8000-000000000001', 'erasure_request');
+    raise exception 'The runtime ran the owner-only erasure';
+  exception when insufficient_privilege then null;
+  end;
 end $$;
--- Another facility's administrator reads nothing.
+-- Another facility's administrator reads nothing, and cannot add a contact to
+-- facility 1's case.
 select pg_temp.as_admin(2, 'collect-desk-2');
 do $$ begin
-  if exists (select 1 from identity.patient_facility_contacts) then
+  if exists (select 1 from identity.patient_facility_contacts)
+     or exists (select 1 from identity.registration_case_contacts) then
     raise exception 'Another facility read the contact';
   end if;
 end $$;
 reset role;
+
+-- 5. Erasure (NDPA). As the owner: a change other than erasure, a second
+-- erasure and a delete are refused; erasure nulls the values and keeps the row.
+do $$
+declare erased record;
+begin
+  begin
+    update identity.patient_facility_contacts set key_version = 'v2';
+    raise exception 'A facility contact was changed without erasure';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    update identity.registration_case_contacts set stated_hid_code = 'HID-CLCTAC', erased_at = clock_timestamp(),
+      erasure_reason = 'erasure_request', phone_ciphertext = null, address_ciphertext = null, key_version = null;
+    raise exception 'An erasure kept the stated Health ID';
+  exception when check_violation then null;
+  end;
+  begin
+    update identity.patient_facility_contacts set patient_id = 'c1220600-0000-4000-8000-000000000002',
+      erased_at = clock_timestamp(), erasure_reason = 'erasure_request', phone_ciphertext = null,
+      address_ciphertext = null, key_version = null;
+    raise exception 'An erasure moved the contact to another patient';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    delete from identity.registration_case_contacts;
+    raise exception 'A case contact was deleted';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform identity.erase_patient_facility_contacts('c1220600-0000-4000-8000-000000000001', 'because');
+    raise exception 'An erasure with an unknown reason ran';
+  exception when invalid_parameter_value then null;
+  end;
+  select * into erased from identity.erase_patient_facility_contacts('c1220600-0000-4000-8000-000000000001',
+    'erasure_request');
+  if erased.facility_contacts <> 1 or erased.registration_contacts <> 1 then
+    raise exception 'The erasure did not reach both rows: %', row_to_json(erased);
+  end if;
+  if exists (select 1 from identity.patient_facility_contacts
+              where phone_ciphertext is not null or address_ciphertext is not null or key_version is not null
+                 or erased_at is null or erasure_reason <> 'erasure_request')
+     or exists (select 1 from identity.registration_case_contacts
+              where phone_ciphertext is not null or address_ciphertext is not null or key_version is not null
+                 or stated_hid_code is not null or erased_at is null)
+     or (select count(*) from identity.patient_facility_contacts) <> 1 then
+    raise exception 'The erasure left a value or removed the row';
+  end if;
+  if not exists (select 1 from audit.events where action = 'identity.patient-facility-contact.erase'
+                  and details = '{"reason": "erasure_request", "facilityContacts": 1, "registrationContacts": 1}'::jsonb) then
+    raise exception 'The erasure was not audited with counts only';
+  end if;
+  begin
+    update identity.patient_facility_contacts set erased_at = clock_timestamp();
+    raise exception 'An erased contact was changed again';
+  exception when insufficient_privilege then null;
+  end;
+  -- Nothing is left to erase: a second request erases nothing.
+  select * into erased from identity.erase_patient_facility_contacts('c1220600-0000-4000-8000-000000000001',
+    'erasure_request');
+  if erased.facility_contacts <> 0 or erased.registration_contacts <> 0 then
+    raise exception 'A second erasure changed rows';
+  end if;
+end $$;
+
+-- An erased case contact is never copied again.
+set local role hid_identity_api_runtime;
+select pg_temp.as_admin(1, 'collect-desk-3');
+do $$ begin
+  insert into identity.patient_facility_contacts (patient_id, facility_id, registration_case_id, phone_ciphertext,
+    address_ciphertext, key_version, created_by_account_id, created_by_membership_id)
+  values ('c1220600-0000-4000-8000-000000000001', current_setting('hid.test.c_facility_1')::uuid,
+    'c1227000-0000-4000-8000-000000000001', decode(repeat('11', 40), 'hex'), decode(repeat('22', 60), 'hex'), 'v1',
+    current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid);
+  raise exception 'An erased contact was copied again';
+exception when insufficient_privilege or unique_violation then null;
+end $$;
+-- A second case for the other patient, then that patient's account deletion
+-- completes: the trigger erases its contacts ('account_deleted').
+do $$
+declare phone bytea := decode(repeat('44', 40), 'hex'); address bytea := decode(repeat('55', 60), 'hex');
+begin
+  insert into identity.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, status,
+    first_name, last_name, full_name, dob, nin_ciphertext, nin_lookup_hmac, nin_last4, nin_key_version,
+    verification_provider, verification_reference, verified_at, idempotency_key, request_sha256, resolved_patient_id)
+  values ('c1227000-0000-4000-8000-000000000002', current_setting('hid.test.c_facility_1')::uuid,
+    current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid,
+    'resolved_existing_identity', 'Other', 'Patient', 'Other Patient', '1991-01-01', decode(repeat('00', 40), 'hex'),
+    encode(sha256('collect-nin-2'::bytea), 'hex'), '0002', 'v1', 'fixture', 'ref-2', clock_timestamp(),
+    'collect-case-key-0002', encode(sha256('collect-case-2'::bytea), 'hex'), 'c1220600-0000-4000-8000-000000000002');
+  insert into identity.registration_case_contacts (registration_case_id, facility_id, phone_ciphertext,
+    address_ciphertext, key_version, created_by_account_id, created_by_membership_id)
+  values ('c1227000-0000-4000-8000-000000000002', current_setting('hid.test.c_facility_1')::uuid, phone, address,
+    'v1', current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid);
+  insert into identity.patient_facility_contacts (patient_id, facility_id, registration_case_id, phone_ciphertext,
+    address_ciphertext, key_version, created_by_account_id, created_by_membership_id)
+  values ('c1220600-0000-4000-8000-000000000002', current_setting('hid.test.c_facility_1')::uuid,
+    'c1227000-0000-4000-8000-000000000002', phone, address, 'v1', current_setting('hid.test.c_account_1')::uuid,
+    current_setting('hid.test.c_membership_1')::uuid);
+end $$;
+reset role;
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('c1220000-0000-4000-8000-000000000009', 'synthetic:collect:patient2', 'patient2@collect.invalid',
+   'Other Patient', 'active');
+insert into identity.patient_account_deletion_requests (id, account_id, patient_id, requested_session_id, state,
+  confirmation_token_sha256, confirmation_expires_at, confirmation_consumed_at, confirmed_at, waiting_period,
+  scheduled_for, correlation_id)
+values ('c1229000-0000-4000-8000-000000000001', 'c1220000-0000-4000-8000-000000000009',
+  'c1220600-0000-4000-8000-000000000002', 'c1229100-0000-4000-8000-000000000001', 'pending',
+  encode(sha256('collect-deletion-1'::bytea), 'hex'), clock_timestamp() + interval '10 minutes', clock_timestamp(),
+  clock_timestamp(), interval '0', clock_timestamp(), 'collect-deletion-0001');
+do $$ begin
+  if (select count(*) from identity.patient_facility_contacts
+       where patient_id = 'c1220600-0000-4000-8000-000000000002' and erased_at is null) <> 1 then
+    raise exception 'A pending deletion erased the contact';
+  end if;
+end $$;
+update identity.patient_account_deletion_requests set state = 'completed', completed_at = clock_timestamp(),
+  row_version = row_version + 1 where id = 'c1229000-0000-4000-8000-000000000001';
+do $$ begin
+  if exists (select 1 from identity.patient_facility_contacts
+              where patient_id = 'c1220600-0000-4000-8000-000000000002'
+                and (erased_at is null or erasure_reason <> 'account_deleted' or phone_ciphertext is not null))
+     or exists (select 1 from identity.registration_case_contacts
+              where registration_case_id = 'c1227000-0000-4000-8000-000000000002' and erased_at is null) then
+    raise exception 'A completed account deletion did not erase the facility contacts';
+  end if;
+end $$;
 
 rollback;

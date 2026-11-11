@@ -1,6 +1,6 @@
 import { Transform, type TransformFnParams } from 'class-transformer';
 import { IsBoolean, IsDateString, IsIn, IsOptional, IsString, Length, Matches, registerDecorator,
-  type ValidationArguments } from 'class-validator';
+  ValidateIf, type ValidationArguments } from 'class-validator';
 import type { PurposeOfUse } from '../../common/request-context';
 import { COLLECTED_PHONE_E164, NIGERIA_STATE_CODES, toCollectedPhone } from './facility-profile.dto';
 
@@ -27,6 +27,18 @@ function HealthIdExactlyWhenStated() {
       },
     },
   });
+}
+
+/**
+ * 0122 release step (INTERFACE_CONTRACT 37.0): the desk fields come all
+ * together or not at all. The live website still sends the old body; a body
+ * with only some of them is refused. A follow-up makes them required.
+ */
+export const DESK_FIELDS = ['phone', 'addressLine', 'city', 'stateCode', 'lga', 'hasExistingHealthId'] as const;
+
+export function hasAnyDeskField(body: object): boolean {
+  const values = body as Partial<Record<typeof DESK_FIELDS[number], unknown>>;
+  return DESK_FIELDS.some((field) => values[field] !== undefined && values[field] !== null);
 }
 
 export class ResolveNinDto {
@@ -59,28 +71,35 @@ export class ResolveNinDto {
 
   // 0122 (owner: "all fields required"; D10): the patient's phone and address
   // as the desk records them. Facility-held and unverified, stored encrypted,
-  // never used for sign-in or recovery.
+  // never used for sign-in or recovery. All or none (DESK_FIELDS) until the
+  // website that always sends them is live.
 
   /** E.164 ("+" and 8-15 digits) or a Nigerian local number (0 and 10 digits). */
+  @ValidateIf(hasAnyDeskField)
   @Transform(toCollectedPhone) @IsString() @Matches(COLLECTED_PHONE_E164)
-  phone!: string;
+  phone?: string;
 
+  @ValidateIf(hasAnyDeskField)
   @Transform(trim) @IsString() @Length(5, 300)
-  addressLine!: string;
+  addressLine?: string;
 
+  @ValidateIf(hasAnyDeskField)
   @Transform(trim) @IsString() @Length(2, 100)
-  city!: string;
+  city?: string;
 
+  @ValidateIf(hasAnyDeskField)
   @IsIn(NIGERIA_STATE_CODES)
-  stateCode!: typeof NIGERIA_STATE_CODES[number];
+  stateCode?: typeof NIGERIA_STATE_CODES[number];
 
   /** Local government area, free text (D6). */
+  @ValidateIf(hasAnyDeskField)
   @Transform(trim) @IsString() @Length(2, 100)
-  lga!: string;
+  lga?: string;
 
   /** D13: does the patient say they already have a Health ID? */
+  @ValidateIf(hasAnyDeskField)
   @IsBoolean()
-  hasExistingHealthId!: boolean;
+  hasExistingHealthId?: boolean;
 
   /** D13: that Health ID, exactly when hasExistingHealthId is true. */
   @Transform(({ value }: TransformFnParams): unknown => typeof value === 'string' ? value.trim().toUpperCase() : value)
