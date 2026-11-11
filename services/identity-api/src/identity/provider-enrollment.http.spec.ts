@@ -1,3 +1,4 @@
+import { signupCollectedFields, TEST_FIELD_KEY_B64 } from '../../test/collected-fields.fixtures';
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
 import { type INestApplication, ValidationPipe } from '@nestjs/common';
@@ -26,6 +27,7 @@ const startBody = {
   productCode: 'pharmacy', organizationType: 'pharmacy', cacRegistrationNumber: 'rc 1234567',
   administratorName: 'Synthetic Provider Admin', administratorEmail: 'provider@example.invalid',
   turnstileAction: 'provider-enrollment', turnstileToken: 'opaque-proof',
+  ...signupCollectedFields(),
 };
 const verifyBody = { challengeId: '8ce75fc3-0bda-4300-b198-f5688df65d6c', code: '123456' };
 const controls = (row: Record<string, boolean>) => ({ rows: [row] });
@@ -49,6 +51,7 @@ describe('provider enrollment over HTTP', () => {
       AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
       AUTH_COOKIE_SECURE: 'true', QOREID_ENABLED: 'true',
       QOREID_CLIENT_ID: 'synthetic-client', QOREID_CLIENT_SECRET: 'synthetic-secret',
+      NIN_ENCRYPTION_KEY_B64: TEST_FIELD_KEY_B64,
     });
     delete process.env.PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP;
     resetEnvironmentForTests();

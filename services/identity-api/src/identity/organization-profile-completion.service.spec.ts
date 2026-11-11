@@ -1,3 +1,6 @@
+import { CollectedFieldProtector, facilitySignupPhoneLabel } from './collected-field-protector';
+import { facilityProfileInput, TEST_FIELD_KEY_B64 } from '../../test/collected-fields.fixtures';
+import { type FacilityProfileDto, facilityProfileForDatabase } from './dto/facility-profile.dto';
 import type { Response } from 'express';
 import * as passwordHash from '../auth/password-hash';
 import * as environment from '../config/environment';
@@ -33,10 +36,17 @@ interface AfterResponseLifecycle {
 const lifecycle = (service: OrganizationProfileCompletionService): AfterResponseLifecycle =>
   service as unknown as AfterResponseLifecycle;
 
+// 0114: the sign-up fields as ProviderEnrollmentService passes them.
+const collected = { signup: {
+  facilityProfile: facilityProfileForDatabase(facilityProfileInput() as unknown as FacilityProfileDto),
+  submitterRole: 'owner', submitterPhone: '+2348098765432',
+} };
+
 describe('organization applicant profile completion', () => {
   beforeEach(() => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({
       NODE_ENV: 'test', OTP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
+      NIN_ENCRYPTION_KEY_B64: TEST_FIELD_KEY_B64, NIN_KEY_VERSION: 'test-v1',
       CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_COOKIE_SECURE: true,
     } as environment.Environment);
   });
@@ -199,6 +209,7 @@ describe('facility self sign-up activation and its quota (P4)', () => {
   beforeEach(() => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({
       NODE_ENV: 'test', OTP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
+      NIN_ENCRYPTION_KEY_B64: TEST_FIELD_KEY_B64, NIN_KEY_VERSION: 'test-v1',
       CORS_ORIGINS: 'https://app.healthidentitydirectory.com', AUTH_COOKIE_SECURE: true,
     } as environment.Environment);
   });
@@ -370,18 +381,43 @@ describe('facility self sign-up activation and its quota (P4)', () => {
         resend_after_seconds: 60 }] });
     const { service: completion, database } = service(query);
     const started = await completion.start(input, '203.0.113.44', correlationId, { publicApplicationQuotaCharged: true,
-      selfService: { administratorName: 'Dr Ada Obi', organizationType: 'hospital' } });
+      selfService: { administratorName: 'Dr Ada Obi', organizationType: 'hospital', ...collected } });
     // The code and its state are read in one transaction (R14).
     expect(database.withSystemTransaction).toHaveBeenCalledTimes(1);
     expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[0]?.[0])
-      .toContain('identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7)');
+      .toContain('identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11)');
     expect(query.mock.calls[0]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr', started.challengeId,
-      expect.stringMatching(/^[a-f0-9]{64}$/), 'Dr Ada Obi', 'hospital']);
+      expect.stringMatching(/^[a-f0-9]{64}$/), 'Dr Ada Obi', 'hospital',
+      JSON.stringify(collected.signup.facilityProfile), 'owner', expect.any(Buffer), 'test-v1']);
+    // 0114: the applicant's phone is stored encrypted, bound to the code it was sent with.
+    const phone = query.mock.calls[0]?.[1]?.[9] as Buffer;
+    expect(phone.toString('latin1')).not.toContain('8098765432');
+    expect(new CollectedFieldProtector().decrypt(facilitySignupPhoneLabel(started.challengeId!), 'test-v1', phone))
+      .toBe('+2348098765432');
+    expect(() => new CollectedFieldProtector().decrypt(facilitySignupPhoneLabel('another-code'), 'test-v1', phone))
+      .toThrow(expect.objectContaining({ code: 'COLLECTED_FIELDS_UNAVAILABLE' }));
     expect(query.mock.calls[1]?.[0]).toContain('identity.self_service_provider_code_state($1,$2,$3)');
     expect(query.mock.calls[1]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr']);
     expect(started).toEqual({ accepted: true, codeSent: true, challengeId: expect.stringMatching(/^[0-9a-f-]{36}$/),
       expiresInSeconds: 600, resendAfterSeconds: 60 });
+    // 0114 release step (contract 43.0): a sign-up in the old shape (no new
+    // fields) keeps 0086's 7-argument command and needs no encryption key.
+    query.mockClear();
+    query.mockResolvedValueOnce({ rows: [{ recipient_email: 'admin@example.invalid' }] })
+      .mockResolvedValueOnce({ rows: [{ application_open: true, challenge_id: 'in-force', expires_in_seconds: 600,
+        resend_after_seconds: 60 }] });
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({
+      NODE_ENV: 'test', OTP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
+      CORS_ORIGINS: 'https://app.healthidentitydirectory.com', AUTH_COOKIE_SECURE: true,
+    } as environment.Environment);
+    const oldShape = await completion.start(input, '203.0.113.44', correlationId, { publicApplicationQuotaCharged: true,
+      selfService: { administratorName: 'Dr Ada Obi', organizationType: 'hospital' } });
+    expect(query.mock.calls[0]?.[0])
+      .toContain('identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7) as recipient_email');
+    expect(query.mock.calls[0]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr', oldShape.challengeId,
+      expect.stringMatching(/^[a-f0-9]{64}$/), 'Dr Ada Obi', 'hospital']);
+    expect(oldShape).toMatchObject({ accepted: true, codeSent: true });
     // The governed completion keeps 0056's command and its uniform answer.
     query.mockClear();
     query.mockResolvedValue({ rows: [{ recipient_email: null }] });
@@ -393,7 +429,7 @@ describe('facility self sign-up activation and its quota (P4)', () => {
   });
 
   describe('facility self sign-up\'s answer when no code is sent (R14)', () => {
-    const selfService = { administratorName: 'Dr Ada Obi', organizationType: 'hospital' as const };
+    const selfService = { administratorName: 'Dr Ada Obi', organizationType: 'hospital' as const, ...collected };
     const startWith = async (state: Record<string, unknown> | undefined, recipient: string | null = null) => {
       const query = jest.fn().mockResolvedValueOnce({ rows: [{ recipient_email: recipient }] })
         .mockResolvedValueOnce({ rows: state ? [state] : [] });
