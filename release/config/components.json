@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0122",
-    "count": 112,
+    "last": "0126",
+    "count": 114,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -545,6 +545,14 @@
       {
         "name": "0122_outreach_campaign_admins.sql",
         "sha256": "7c37eb73dbfe223abd93eba3b41451d7547cb31320940ce1a626899c4f4f68ba"
+      },
+      {
+        "name": "0125_outreach_organisers.sql",
+        "sha256": "a3e6554d88058c0bbdb2618f2b3bfb70a3ca29faeec93443e4e5f4c8fc542527"
+      },
+      {
+        "name": "0126_outreach_retention.sql",
+        "sha256": "35a61f1ae24b8470455a9ccfcfb6a7e92f7e467a0e2b00e655791e693d365f60"
       }
     ]
   },
