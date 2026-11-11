@@ -385,6 +385,9 @@ export function renderMarkdown(report, { resultsDir = '' } = {}) {
   if (report.partial) {
     lines.push(`**Partial run: only ${report.documents.total} documents were scored. This is not a launch result; a launch decision needs the full set.**`, '');
   }
+  if (report.handLabelled) {
+    lines.push('**Hand-labelled set: a first reading of accuracy, not a launch result. The launch pass is the kit\'s own 200-document set.**', '');
+  }
   if (report.mode && report.mode !== 'real') {
     lines.push(`**${report.mode === 'fake' ? 'Fake mode: these results come from the offline stand-ins, not from Textract and Claude' : 'These results have no real run records'}. This is not a launch result.**`, '');
   }
@@ -503,7 +506,10 @@ export function main(argv = process.argv.slice(2), log = (line) => process.stdou
   report.partial = Boolean(args.partial);
   report.mode = Object.keys(modes)[0] ?? 'none';
   report.thresholdsMet = report.pass;
-  report.launchResult = !report.partial && report.mode === 'real';
+  // A hand-labelled set (LABELLING.md, label.mjs seal) gives a first reading, never the launch pass: that is the
+  // kit's own 200-document set.
+  report.handLabelled = kit.manifest.handLabelled === true;
+  report.launchResult = !report.partial && report.mode === 'real' && !report.handLabelled;
   report.pass = report.thresholdsMet && report.launchResult;
   const jsonFile = path.resolve(args['out-json'] ?? path.join(resultsDir, 'score-report.json'));
   const mdFile = path.resolve(args['out-md'] ?? path.join(resultsDir, 'score-summary.md'));
@@ -511,7 +517,8 @@ export function main(argv = process.argv.slice(2), log = (line) => process.stdou
   writeFileSync(mdFile, renderMarkdown(report, { resultsDir: path.relative(process.cwd(), resultsDir) || '.' }));
   const m = report.launchMetrics;
   const why = [report.partial ? `partial run, ${keys.length} of ${kit.keys.length} documents` : null,
-    report.mode === 'real' ? null : report.mode === 'fake' ? 'fake mode' : 'no real run records'].filter(Boolean);
+    report.mode === 'real' ? null : report.mode === 'fake' ? 'fake mode' : 'no real run records',
+    report.handLabelled ? 'hand-labelled set' : null].filter(Boolean);
   log(`${verdict(report)}${!report.pass && report.thresholdsMet ? ` (${why.join('; ')}; thresholds met on what was scored)` : ''}`
     + `: medicines right after checking ${pct(m.medicineAccuracyAfterChecking.value)}`
     + ` (needs >= 99%), strict ${pct(m.medicineAccuracyStrict.value)}, unsupported items ${pct(m.unsupportedItems.value)}`

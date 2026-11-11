@@ -25,6 +25,7 @@ step, grounding and checks) on the documents and compares what comes out with th
 | `keys/manifest.json` | The sha256 fingerprint of every generated file for seed 20261103 (committed). |
 | `run.mjs` | Reads every document with the real pipeline and saves one result per document. |
 | `score.mjs` | Compares the results with the answer keys and writes the report. |
+| `label.mjs`, `LABELLING.md` | For a set of pages someone labels by hand: the label format with a worked example, a checker, and `seal`, which writes the set's manifest. A hand-labelled set gives a first reading, never the launch pass. |
 | `fonts/` | The fonts used to draw the documents, with their licences. |
 | `test/` | Automatic tests (they run offline). |
 
@@ -140,8 +141,8 @@ status, item counts and token usage (never any text from the document). Each doc
 
 If it stops (network, Ctrl-C, a failure), run the same command again: finished documents are skipped and only
 the rest are read. A document that failed is retried (it is uploaded and read by Textract again, which is
-paid for again). A finished result is only reused by a run with the same mode (fake or real), models, text
-reading features and facility; if the output directory holds results from any other run, the runner refuses
+paid for again). A finished result is only reused by a run with the same mode (fake or real), models, efforts,
+image re-read, hard-page read and zoom settings, text reading features and facility; if the output directory holds results from any other run, the runner refuses
 and asks for a new `--out` directory, so fake or differently made results are never mixed into a real run. `--limit 10` or `--only D001,D007` runs a few
 documents first; `--facility-id` sets the facility used for the AI switch (default: the first id in
 `OCR_AI_FACILITY_IDS`, otherwise a fixed test id).
