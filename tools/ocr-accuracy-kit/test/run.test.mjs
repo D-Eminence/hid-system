@@ -81,7 +81,8 @@ test('--fake end to end on 10 documents scores 100% and passes; the run is resum
     assert.equal(record.status, 'done');
     assert.equal(record.pages, key.pages);
     assert.ok(record.usage.inputTokens > 0 && record.usage.outputTokens > 0);
-    assert.ok(Object.keys(record.usageByModel).includes('claude-sonnet-5-5'));
+    // The worker's default model for every reading call (owner decision of 2026-11-05).
+    assert.ok(Object.keys(record.usageByModel).includes('claude-opus-5-5'));
   }
   noDocumentText(first.lines);
 

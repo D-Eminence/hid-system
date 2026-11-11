@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { estimate, formatEstimate, usageCost } from './lib/cost.mjs';
+import { DEFAULT_MODEL, estimate, formatEstimate, usageCost } from './lib/cost.mjs';
 import { FakePageModelClient, FakeTextractClient } from './lib/fake.mjs';
 import { DEFAULT_KEYS_DIR, DEFAULT_WORKER_DIR, KIT_DIR, KitError, loadKeys, parseArgs, readKitDocument } from './lib/kit.mjs';
 
@@ -56,7 +56,7 @@ export function workerConfig(worker, { fake, environment = process.env }) {
       AWS_REGION: 'eu-west-1', AWS_ACCESS_KEY_ID: 'fake-offline', AWS_SECRET_ACCESS_KEY: 'fake-offline',
       OCR_TEXTRACT_POLL_MS: '250', OCR_TEXTRACT_FEATURES: environment.OCR_TEXTRACT_FEATURES ?? 'text',
       OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'fake-offline-key-not-a-secret',
-      OCR_AI_GLOBAL_PROCESSING_APPROVED: 'true' });
+      OCR_AI_US_PROCESSING_APPROVED: 'true' });
   }
   // The worker's database settings are irrelevant here; NODE_ENV production would demand database TLS.
   return worker.config.readOcrWorkerConfig({ ...UNUSED_DATABASE, ...environment, NODE_ENV: 'development',
@@ -248,8 +248,8 @@ export async function main(argv = process.argv.slice(2), log = (line) => process
   const fake = Boolean(args.fake);
   const pages = keys.reduce((sum, key) => sum + key.pages, 0);
   const features = process.env.OCR_TEXTRACT_FEATURES === 'layout' && !fake ? 'layout' : 'text';
-  const cost = estimate({ pages, features, firstPassModel: process.env.OCR_AI_FIRST_PASS_MODEL || 'claude-sonnet-5-5',
-    rereadModel: process.env.OCR_AI_REREAD_MODEL || 'claude-opus-5-5' });
+  const cost = estimate({ pages, features, firstPassModel: process.env.OCR_AI_FIRST_PASS_MODEL || DEFAULT_MODEL,
+    rereadModel: process.env.OCR_AI_REREAD_MODEL || DEFAULT_MODEL });
   log(`${keys.length} fictional documents, ${pages} pages (seed ${kit.manifest.seed}).`);
   log(fake ? 'Fake mode: no AWS or Anthropic service is called; cost is $0.' : formatEstimate(cost));
   if (args['estimate-only']) return 0;
@@ -270,7 +270,7 @@ export async function main(argv = process.argv.slice(2), log = (line) => process
     return 2;
   }
   if (!fake && config.OCR_AI_MODE !== 'claude') {
-    log('refused: set OCR_AI_MODE=claude (with ANTHROPIC_API_KEY and OCR_AI_GLOBAL_PROCESSING_APPROVED=true)');
+    log('refused: set OCR_AI_MODE=claude (with ANTHROPIC_API_KEY and OCR_AI_US_PROCESSING_APPROVED=true)');
     return 2;
   }
   const facilityId = (args['facility-id'] ?? config.OCR_AI_FACILITY_IDS?.[0] ?? DEMO_FACILITY_ID).toLowerCase();

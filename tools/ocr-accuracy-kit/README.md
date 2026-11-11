@@ -127,7 +127,7 @@ Then run (the same environment variables the worker uses):
 ```bash
 export AWS_REGION=eu-west-1
 export OCR_AI_MODE=claude
-export OCR_AI_GLOBAL_PROCESSING_APPROVED=true
+export OCR_AI_US_PROCESSING_APPROVED=true   # the worker reads only with US processing (inference_geo "us")
 export OCR_TEXTRACT_FEATURES=text          # or layout (better reading order, costs more)
 export ANTHROPIC_API_KEY=...               # test key, from the secret store
 node run.mjs --i-confirm-fictional-documents --docs generated/documents --out results/real-1 \
@@ -259,22 +259,24 @@ by kind of document.
 ## Cost of a real run (200 documents, 392 pages)
 
 Planning prices: Textract `DetectDocumentText` about $1.50 per 1,000 pages (`layout` about $4 per 1,000);
-Claude Sonnet 5.5 (first pass) $2 / $10 per million input / output tokens; Claude Opus 5.5 (re-reads)
-$4 / $20. Cached prompt reads cost a tenth of input.
+Claude Opus 5.5 $4 / $20 per million input / output tokens. Cached prompt reads cost a tenth of input. The kit
+runs the worker with its own defaults: Opus 5.5 at high effort for the first pass (owner decision of
+2026-11-05), and two reads of the picture for every hard page (handwriting or low confidence).
 
 | Part | Estimate |
 |---|---|
 | Textract, 392 pages (`text`) | about $0.59 (`layout`: about $1.57) |
-| First pass, 392 pages, Sonnet 5.5 | about $16.50 |
-| Re-reads, Opus 5.5 (about 35% of pages) | about $14.30 |
-| **Expected total** | **about $31.50** |
-| Most it should cost (every page re-read) | about $58 |
+| First pass, 392 pages, Opus 5.5 | about $33 |
+| Hard pages, two reads each, Opus 5.5 (about 35% of pages) | about $49 |
+| **Expected total** | **about $82** |
+| Most it should cost (every page a hard page) | about $172 |
 
 Assumptions per page: about 2,000 cached prompt tokens and 900 page tokens in, about 4,000 tokens out on the
-first pass (thinking and the answer) and 5,000 on a re-read (`lib/cost.mjs`). `node run.mjs --estimate-only`
-prints the estimate, and every real run prints it again before starting and the measured cost (from the
-recorded token usage) at the end, in `run-summary.json`. Check the current AWS and Anthropic price pages
-before a large run.
+first pass (thinking and the answer); on a hard page two reads, each about 4,000 page and picture tokens in and
+8,000 out (`lib/cost.mjs`). The first live hard page (2026-11-10) cost about $0.45 for its two reads, a little
+above this estimate's $0.35, so allow for the upper end. `node run.mjs --estimate-only` prints the estimate,
+and every real run prints it again before starting and the measured cost (from the recorded token usage) at
+the end, in `run-summary.json`. Check the current AWS and Anthropic price pages before a large run.
 
 ## Tests
 
