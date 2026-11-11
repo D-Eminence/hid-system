@@ -25,8 +25,11 @@
 --      never leave the database whole: "Ada O." (first name and the last
 --      name's initial), "a***@gmail.com" (the account email's first character
 --      and its domain), "HID-7K…M9" (the first two and last two characters of
---      the code). An upload's file name keeps at most its first six
---      characters before the extension ("lab-re….pdf").
+--      the code). No part of an upload's file name leaves the database: only
+--      its kind, from the last extension on an allowlist (pdf -> "PDF"; jpg,
+--      jpeg, png, heic, tif, tiff -> "Image"; docx -> "Word"), and
+--      "Document" for anything else ("Ada.Okonkwo", "x.pdf.exe", no
+--      extension).
 --    - The sealed demo tenant (0098) is left out of every number and list,
 --      as admin_platform_overview does: demo patients, accounts and the four
 --      demo facilities.
@@ -60,6 +63,8 @@
 --   migrateAsk.answersWithSourcesPct  of those, % with at least one source
 --   daily[]                    per local day: patients created, and accounts
 --                              with a session issued or last used that day
+--                              (one grouped pass over each table, joined to
+--                              the days; see Cost)
 --   recentSignups[]            latest ten patients (not deleted); status
 --                              suspended (account locked/disabled or patient
 --                              inactive), verified (NIN_VERIFIED) or pending
@@ -70,12 +75,36 @@
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied): every
 --    table, column and helper read exists; not applied yet.
 -- 1. The permission and its one role grant.
--- 2. The read window: identity.admin_activity_read_windows, the helper
---    identity.admin_activity_read_open() and one SELECT policy, for the
---    applier role only, on each of the eleven FORCE row-level-security tables
---    the read counts (see section 2). No other policy, table or grant changes.
--- 3. The function, its two shorteners, their ACLs.
--- 4. Post-checks.
+-- 2. The read window: identity.admin_activity_read_windows and the helper
+--    identity.admin_activity_read_open() (see section 2).
+-- 3. The function, the name shortener and the file-kind label, their ACLs.
+-- 4. The eleven read-window policies: one SELECT policy, for the applier role
+--    only, on each FORCE row-level-security table the read counts, last, after
+--    their locks (see Locks). No other policy, table or grant changes.
+-- 5. Post-checks.
+--
+-- Locks: CREATE POLICY takes ACCESS EXCLUSIVE on its table, so section 4
+-- first takes all eleven in one LOCK TABLE ... IN ACCESS EXCLUSIVE MODE
+-- NOWAIT, in a fixed order (ehr.clinical_notes, ehr.diagnoses,
+-- ehr.document_scan_events, ehr.documents, ehr.encounters, ehr.lab_requests,
+-- ehr.prescriptions, ehr.staff_chat_messages, ehr.vitals, ocr.publications,
+-- outreach.registration_cases), retried every 10 ms for at most 5 seconds
+-- (then 55P03 "... stayed busy for 5 seconds; run the release again later",
+-- nothing applied). A NOWAIT attempt never queues, so a busy table never
+-- makes the release block the others' readers and writers, and a failed
+-- attempt releases what it took. Once held they are kept only for the
+-- eleven CREATE POLICY statements and the post-checks, to commit. Sections
+-- 0-3 take ROW EXCLUSIVE on auth.permissions and auth.role_permissions (two
+-- inserted rows) and catalog locks only. The measured locks and timings are in
+-- config/production-schema-compatibility.json.
+--
+-- Cost: every count is one pass over its table filtered on created_at (or the
+-- session's issued_at / last_used_at) since the period's start; daily[] groups
+-- each source by local day once and joins the result to the days, so days=90
+-- reads each table once, not once per day. No index is added: auth.sessions
+-- has none on issued_at or last_used_at and identity.patients and
+-- ehr.documents none on created_at alone, so these passes are sequential
+-- scans whose cost grows with the table, not with the days asked for.
 --
 -- Old services on this schema: nothing calls the new function until the
 -- Identity API image with the activity route is deployed; the existing
@@ -139,7 +168,7 @@ on conflict (role_code, permission_code) do nothing;
 -- staff_chat_messages, ocr.publications, outreach.registration_cases), so a
 -- SECURITY DEFINER owner that is neither superuser nor BYPASSRLS (production)
 -- would see none of their rows and every count would read 0. Each gains one
--- SELECT policy for the applier role only (no runtime role is a member of it,
+-- SELECT policy (section 4) for the applier role only (no runtime role is a member of it,
 -- so no runtime query ever evaluates it), true only while
 -- identity.admin_platform_activity holds a window open: a row of
 -- identity.admin_activity_read_windows for this backend and this transaction,
@@ -167,19 +196,6 @@ as $$
                     and read_window.transaction_id = pg_current_xact_id_if_assigned())
 $$;
 
-do $$
-declare
-  target text;
-begin
-  foreach target in array array['ehr.encounters', 'ehr.clinical_notes', 'ehr.vitals', 'ehr.diagnoses',
-    'ehr.prescriptions', 'ehr.lab_requests', 'ehr.documents', 'ehr.document_scan_events',
-    'ehr.staff_chat_messages', 'ocr.publications', 'outreach.registration_cases'] loop
-    execute format('create policy %I on %s as permissive for select to %I using (identity.admin_activity_read_open())',
-      (select relname from pg_class where oid = target::regclass) || '_admin_activity_read', target, current_user);
-  end loop;
-end
-$$;
-
 -- 3. The read.
 create function identity.admin_platform_activity(p_days integer)
 returns jsonb
@@ -198,6 +214,7 @@ declare
   demo_accounts uuid[] := coalesce(identity.sealed_demo_ids('account'), '{}');
   demo_facilities uuid[] := coalesce(identity.sealed_demo_ids('facility'), '{}');
   patient_total bigint;
+  active_total bigint;
   people jsonb;
   care jsonb;
   migrate_ask jsonb;
@@ -224,6 +241,34 @@ begin
   select count(*) into patient_total from identity.patients patient
    where patient.status <> 'deleted' and patient.id <> all (demo_patients);
 
+  -- Sessions touched in the period: one pass over auth.sessions, each session
+  -- giving the local day it was issued and the day it was last used (when in
+  -- the period). daily[] and activeInPeriod both come from this pass.
+  with touched as materialized (
+    select session_row.account_id, (touch.at_time at time zone 'Africa/Lagos')::date as day
+      from auth.sessions session_row
+      cross join lateral (values (session_row.issued_at), (session_row.last_used_at)) touch(at_time)
+     where (session_row.issued_at >= period_start or session_row.last_used_at >= period_start)
+       and touch.at_time >= period_start
+       and session_row.account_id <> all (demo_accounts)),
+  active_by_day as (
+    select touched.day, count(distinct touched.account_id) as active from touched group by touched.day),
+  signups_by_day as (
+    select (patient.created_at at time zone 'Africa/Lagos')::date as day, count(*) as signups
+      from identity.patients patient
+     where patient.created_at >= period_start and patient.status <> 'deleted'
+       and patient.id <> all (demo_patients)
+     group by 1)
+  select (select count(distinct touched.account_id) from touched),
+         coalesce(jsonb_agg(jsonb_build_object(
+           'date', to_char(day_row.day, 'YYYY-MM-DD'),
+           'signups', coalesce(signups_by_day.signups, 0),
+           'activeAccounts', coalesce(active_by_day.active, 0)) order by day_row.day), '[]'::jsonb)
+    into active_total, daily
+    from (select generate_series(first_day, local_today, interval '1 day')::date as day) day_row
+    left join signups_by_day on signups_by_day.day = day_row.day
+    left join active_by_day on active_by_day.day = day_row.day;
+
   select jsonb_build_object(
     'accounts', (select count(*) from auth.accounts account
                   where account.status <> 'deleted' and account.id <> all (demo_accounts)),
@@ -236,9 +281,7 @@ begin
       round(100.0 * (select count(*) from identity.patients patient
                      where patient.status <> 'deleted' and patient.id <> all (demo_patients)
                        and patient.profile_percent >= 100) / patient_total)::integer end,
-    'activeInPeriod', (select count(distinct session_row.account_id) from auth.sessions session_row
-                        where (session_row.issued_at >= period_start or session_row.last_used_at >= period_start)
-                          and session_row.account_id <> all (demo_accounts)),
+    'activeInPeriod', active_total,
     'sharedWithFacility', (select count(distinct share.patient_id) from identity.patient_consent_shares share
                             join identity.consent_grants grant_row on grant_row.id = share.consent_grant_id
                            where grant_row.status = 'active' and grant_row.revoked_at is null
@@ -293,21 +336,6 @@ begin
          where message.created_at >= period_start and message.reply ->> 'status' = 'ready'
            and (message.facility_id is null or message.facility_id <> all (demo_facilities))) answers;
 
-  select coalesce(jsonb_agg(jsonb_build_object(
-           'date', to_char(day_row.day, 'YYYY-MM-DD'),
-           'signups', (select count(*) from identity.patients patient
-                        where (patient.created_at at time zone 'Africa/Lagos')::date = day_row.day
-                          and patient.created_at >= period_start
-                          and patient.status <> 'deleted' and patient.id <> all (demo_patients)),
-           'activeAccounts', (select count(distinct session_row.account_id) from auth.sessions session_row
-                               where ((session_row.issued_at at time zone 'Africa/Lagos')::date = day_row.day
-                                      or (session_row.last_used_at at time zone 'Africa/Lagos')::date = day_row.day)
-                                 and (session_row.issued_at >= period_start or session_row.last_used_at >= period_start)
-                                 and session_row.account_id <> all (demo_accounts)))
-           order by day_row.day), '[]'::jsonb)
-    into daily
-    from (select generate_series(first_day, local_today, interval '1 day')::date as day) day_row;
-
   select coalesce(jsonb_agg(signup.item order by signup.created_at desc, signup.id), '[]'::jsonb)
     into recent_signups
     from (select patient.id, patient.created_at, jsonb_build_object(
@@ -329,7 +357,7 @@ begin
   select coalesce(jsonb_agg(upload.item order by upload.created_at desc, upload.id), '[]'::jsonb)
     into recent_uploads
     from (select document.id, document.created_at, jsonb_build_object(
-            'document', identity.admin_activity_short_file_name(document.original_file_name),
+            'document', identity.admin_activity_file_kind(document.original_file_name),
             'patient', identity.admin_activity_short_name(patient.first_name, patient.last_name, patient.full_name),
             'facility', facility.name,
             'sizeBytes', document.size_bytes,
@@ -366,7 +394,7 @@ begin
 end
 $$;
 
--- The two shorteners: pure, immutable, and granted to no role (the read
+-- The name shortener and the file-kind label: pure, immutable, and granted to no role (the read
 -- calls them as their owner).
 create function identity.admin_activity_short_name(first_name text, last_name text, full_name text)
 returns text
@@ -384,24 +412,25 @@ as $$
     else 'Unnamed' end
 $$;
 
-create function identity.admin_activity_short_file_name(file_name text)
+-- The upload's kind, never any part of its name: the last extension when it
+-- is on the allowlist, else "Document".
+create function identity.admin_activity_file_kind(file_name text)
 returns text
 language sql
 immutable
 set search_path = pg_catalog, pg_temp
 as $$
-  select case
-    when nullif(btrim(coalesce(file_name, '')), '') is null then 'document'
-    else (with parts as (
-            select coalesce(substring(btrim(file_name) from '^(.*?)(\.[A-Za-z0-9]{1,8})?$'), '') as base,
-                   coalesce(lower(substring(btrim(file_name) from '(\.[A-Za-z0-9]{1,8})$')), '') as extension)
-          select case when length(base) > 8 then left(base, 6) || '…' else base end || extension from parts)
-    end
+  select case lower(substring(btrim(coalesce(file_name, '')) from '\.([A-Za-z0-9]+)$'))
+    when 'pdf' then 'PDF'
+    when 'jpg' then 'Image' when 'jpeg' then 'Image' when 'png' then 'Image' when 'heic' then 'Image'
+    when 'tif' then 'Image' when 'tiff' then 'Image'
+    when 'docx' then 'Word'
+    else 'Document' end
 $$;
 
 revoke all on function identity.admin_platform_activity(integer),
   identity.admin_activity_short_name(text, text, text),
-  identity.admin_activity_short_file_name(text),
+  identity.admin_activity_file_kind(text),
   identity.admin_activity_read_open() from public;
 
 do $$
@@ -415,7 +444,44 @@ begin
 end
 $$;
 
--- 4. Post-checks.
+-- 4. The eleven read-window policies, last: their locks up front in one
+-- bounded NOWAIT attempt (see Locks), then the policies, then the checks.
+do $$
+declare attempt integer := 0;
+begin
+  loop
+    attempt := attempt + 1;
+    begin
+      lock table ehr.clinical_notes, ehr.diagnoses, ehr.document_scan_events, ehr.documents, ehr.encounters,
+        ehr.lab_requests, ehr.prescriptions, ehr.staff_chat_messages, ehr.vitals, ocr.publications,
+        outreach.registration_cases
+        in access exclusive mode nowait;
+      exit;
+    exception when lock_not_available then
+      if attempt >= 500 then
+        raise exception using errcode = '55P03',
+          message = '0123: a table that gets a read-window policy stayed busy for 5 seconds; run the release again later';
+      end if;
+      perform pg_sleep(0.01);
+    end;
+  end loop;
+end
+$$;
+
+do $$
+declare
+  target text;
+begin
+  foreach target in array array['ehr.clinical_notes', 'ehr.diagnoses', 'ehr.document_scan_events', 'ehr.documents',
+    'ehr.encounters', 'ehr.lab_requests', 'ehr.prescriptions', 'ehr.staff_chat_messages', 'ehr.vitals',
+    'ocr.publications', 'outreach.registration_cases'] loop
+    execute format('create policy %I on %s as permissive for select to %I using (identity.admin_activity_read_open())',
+      (select relname from pg_class where oid = target::regclass) || '_admin_activity_read', target, current_user);
+  end loop;
+end
+$$;
+
+-- 5. Post-checks.
 do $$
 declare
   applier oid := (select oid from pg_roles where rolname = current_user);
@@ -429,9 +495,9 @@ begin
     mismatch := 'identity.admin_platform_activity attributes';
   elsif exists (select 1 from pg_proc proc where proc.oid in (
                    'identity.admin_activity_short_name(text,text,text)'::regprocedure,
-                   'identity.admin_activity_short_file_name(text)'::regprocedure)
+                   'identity.admin_activity_file_kind(text)'::regprocedure)
                   and (proc.prosecdef or proc.provolatile <> 'i' or proc.proowner <> applier)) then
-    mismatch := 'the shorteners'' attributes';
+    mismatch := 'the name shortener''s or file-kind label''s attributes';
   elsif exists (select 1 from pg_proc proc where proc.oid = 'identity.admin_activity_read_open()'::regprocedure
                   and (proc.prosecdef or proc.proowner <> applier))
      or not exists (select 1 from pg_class relation
@@ -460,7 +526,7 @@ begin
   elsif exists (select 1 from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
                  where proc.oid in ('identity.admin_platform_activity(integer)'::regprocedure,
                                     'identity.admin_activity_short_name(text,text,text)'::regprocedure,
-                                    'identity.admin_activity_short_file_name(text)'::regprocedure,
+                                    'identity.admin_activity_file_kind(text)'::regprocedure,
                                     'identity.admin_activity_read_open()'::regprocedure)
                    and acl.grantee <> proc.proowner
                    and not (proc.oid = 'identity.admin_platform_activity(integer)'::regprocedure

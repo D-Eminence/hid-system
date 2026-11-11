@@ -3620,9 +3620,12 @@ audit row per view (`admin.overview.activity.read`, details `{"days": n}`).
 ```
 
 Days are calendar days in Africa/Lagos ending today. Names (`"Ada O."`),
-emails (`"a***@gmail.com"`), Health IDs (`"HID-7K…M9"`) and upload file names
-(at most six characters before the extension) are shortened in SQL; whole
-values never leave the database. The sealed demo tenant is left out of every
+emails (`"a***@gmail.com"`) and Health IDs (`"HID-7K…M9"`) are shortened in
+SQL; whole values never leave the database. No part of an upload's file name
+leaves it: `recentUploads.document` is the file's kind alone, from its last
+extension on an allowlist (`pdf` -> `"PDF"`; `jpg`, `jpeg`, `png`, `heic`,
+`tif`, `tiff` -> `"Image"`; `docx` -> `"Word"`), and `"Document"` for anything
+else (`Ada.Okonkwo`, `x.pdf.exe`, no extension). The sealed demo tenant is left out of every
 number and list. `recentSignups.status` is `suspended` (account locked or
 disabled, or patient inactive), `verified` (NIN verified) or `pending`;
 `recentUploads.scan` is `clean`, `refused` (rejected or failed scan, or a
@@ -3632,7 +3635,10 @@ longer counted. To count rows in tables with FORCE row-level security under
 production's non-BYPASSRLS owner, the function opens a read window
 (`identity.admin_activity_read_windows`, one row for its own backend and
 transaction) that eleven SELECT policies, for the applier role only, admit
-while it is open.
+while it is open. 0123 creates those policies last, after taking the eleven
+tables' ACCESS EXCLUSIVE locks in one bounded NOWAIT attempt (every 10 ms for
+at most 5 seconds, then `55P03`, nothing applied). `daily[]` reads
+`auth.sessions` and `identity.patients` once each, grouped by day.
 
 `GET /api/v1/admin/operations/health` (CloudWatch) and
 `GET /api/v1/admin/operations/errors` (a Sentry proxy whose read-only token

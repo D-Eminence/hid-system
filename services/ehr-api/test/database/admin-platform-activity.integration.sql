@@ -4,8 +4,8 @@
 -- platform super admin only), the days it accepts, the one audit row per
 -- call (details {"days": n} only), the numbers it moves (measured as the
 -- difference from a first call in the same transaction, so rows other suites
--- or the sealed demo leave do not matter), and that names, emails, Health IDs
--- and file names leave it shortened. Each case is recorded and the suite
+-- or the sealed demo leave do not matter), that names, emails and Health IDs
+-- leave it shortened, and that an upload leaves as its kind alone. Each case is recorded and the suite
 -- fails at the end listing every case whose outcome differs from the expected
 -- one.
 -- Run it also on a database whose migrations were applied by a role that is
@@ -185,8 +185,9 @@ select ('a1237000-0000-4000-8000-00000000000' || d.n)::uuid, 'a1234000-0000-4000
        'clinical/objects/a1237000-0000-4000-8000-00000000000' || d.n, 'activity-v' || d.n, 'application/pdf',
        2048 * d.n, repeat(d.n::text, 64), d.status, 'clinical_record',
        clock_timestamp() + d.n * interval '1 second', clock_timestamp()
-  from (values (1, 'Adaeze_Okafor_lab_result.PDF', 'uploaded'), (2, 'scan.pdf', 'uploaded'),
-               (3, 'xray.png', 'rejected')) d(n, file_name, status);
+  from (values (1, 'Adaeze_Okafor_lab_result.PDF', 'uploaded'), (2, 'HIVpos9.pdf', 'uploaded'),
+               (3, 'xray.png', 'rejected'), (4, 'Ada.Okonkwo', 'uploaded'), (5, 'x.pdf.exe', 'uploaded'),
+               (6, 'HIV_test.docx', 'uploaded')) d(n, file_name, status);
 insert into ehr.document_scan_events (id, document_id, patient_id, facility_id, created_by, event_type,
   detected_media_type, reason_code, scanner_engine, scanner_version, idempotency_key, correlation_id,
   object_version_id, object_sha256_hex, created_at)
@@ -221,6 +222,15 @@ select pg_temp.activity_case('5f last daily entry is today in Lagos', to_char((c
 select pg_temp.activity_case('5g today counts the two sign-ups', '2',
   ((select (d7 -> 'daily' -> 6 ->> 'signups')::integer from activity_after)
    - (select (d7 -> 'daily' -> 6 ->> 'signups')::integer from activity_before))::text);
+select pg_temp.activity_case('5i daily sign-ups add up to newInPeriod (7 and 30 days)', 'true|true',
+  (select concat_ws('|',
+     ((select sum((day_item ->> 'signups')::integer) from jsonb_array_elements(d7 -> 'daily') day_item)
+       = (d7 #>> '{people,newInPeriod}')::integer)::text,
+     ((select sum((day_item ->> 'signups')::integer) from jsonb_array_elements(d30 -> 'daily') day_item)
+       = (d30 #>> '{people,newInPeriod}')::integer)::text) from activity_after));
+select pg_temp.activity_case('5j today counts the active account once', '1',
+  ((select (d7 -> 'daily' -> 6 ->> 'activeAccounts')::integer from activity_after)
+   - (select (d7 -> 'daily' -> 6 ->> 'activeAccounts')::integer from activity_before))::text);
 select pg_temp.activity_case('5h at most ten sign-ups and uploads', 'true',
   (select (jsonb_array_length(d7 -> 'recentSignups') <= 10 and jsonb_array_length(d7 -> 'recentUploads') <= 10)::text
      from activity_after));
@@ -239,16 +249,25 @@ select pg_temp.activity_case('6d no whole name, email, Health ID or file name in
   (select (position('Okafor' in d7::text || d30::text) = 0 and position('adaeze.okafor' in d7::text || d30::text) = 0
        and position('7KQWERM9' in d7::text || d30::text) = 0 and position('Adeyemi' in d7::text || d30::text) = 0
        and position('Nnamdi' in d7::text || d30::text) = 0 and position('lab_result' in d7::text || d30::text) = 0
-       and position('Deleted' in d7::text || d30::text) = 0)::text from activity_after));
-select pg_temp.activity_case('6e uploads: file names shortened, scan state, size, facility',
-  'Adaeze….pdf|Adaeze O.|Activity Suite Clinic|2048|clean;scan.pdf|Adaeze O.|Activity Suite Clinic|4096|pending;xray.png|Adaeze O.|Activity Suite Clinic|6144|refused',
+       and position('Deleted' in d7::text || d30::text) = 0 and position('HIV' in d7::text || d30::text) = 0
+       and position('Okonkwo' in d7::text || d30::text) = 0 and position('xray' in d7::text || d30::text) = 0
+       and position('exe' in d7::text || d30::text) = 0)::text from activity_after));
+select pg_temp.activity_case('6e uploads: kind only (no part of the name), scan state, size, facility',
+  'PDF|Adaeze O.|Activity Suite Clinic|2048|clean;PDF|Adaeze O.|Activity Suite Clinic|4096|pending;'
+  || 'Image|Adaeze O.|Activity Suite Clinic|6144|refused;Document|Adaeze O.|Activity Suite Clinic|8192|pending;'
+  || 'Document|Adaeze O.|Activity Suite Clinic|10240|pending;Word|Adaeze O.|Activity Suite Clinic|12288|pending',
   (select string_agg(concat_ws('|', item ->> 'document', item ->> 'patient', item ->> 'facility', item ->> 'sizeBytes',
       item ->> 'scan'), ';' order by (item ->> 'sizeBytes')::integer)
      from activity_after, jsonb_array_elements(d7 -> 'recentUploads') item
     where item ->> 'facility' = 'Activity Suite Clinic'));
-select pg_temp.activity_case('6f shorteners on edge values', 'Unnamed|document|a.pdf|Ngozi',
-  concat_ws('|', identity.admin_activity_short_name(null, null, '  '), identity.admin_activity_short_file_name(''),
-    identity.admin_activity_short_file_name('a.pdf'), identity.admin_activity_short_name(' Ngozi ', '', null)));
+select pg_temp.activity_case('6f name shortener on edge values', 'Unnamed|Ngozi',
+  concat_ws('|', identity.admin_activity_short_name(null, null, '  '), identity.admin_activity_short_name(' Ngozi ', '', null)));
+select pg_temp.activity_case('6g file kind: allowlisted last extension only, never the name',
+  'PDF|PDF|PDF|Document|Document|Image|Image|Image|Image|Image|Image|Word|Document|Document|Document|Document|Document|Document',
+  (select string_agg(identity.admin_activity_file_kind(name), '|' order by position)
+     from unnest(array['HIV_test.pdf', 'HIVpos9.pdf', 'a.PDF', 'Ada.Okonkwo', 'x.pdf.exe', 'photo.jpg', 'photo.JPEG',
+       'scan.png', 'IMG_0001.heic', 'fax.tif', 'fax.tiff', 'letter.docx', 'letter.doc', 'scan.HIVpositive',
+       'no extension', '', null, 'pdf']) with ordinality as t(name, position)));
 
 -- Result.
 do $$
