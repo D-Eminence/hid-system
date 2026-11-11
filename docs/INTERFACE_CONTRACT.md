@@ -3890,7 +3890,9 @@ runs the trigger under an owner that does not bypass row-level security (on a
 superuser-migrated database it lends the function to such a role until the
 rollback) and fails on 0105 (a member's registration into a campaign and a
 member's resolution of a campaign-linked registration with `linkExisting`'s
-UPDATE are refused; a non-member's same UPDATE finds no row on both); the
+UPDATE are refused; a non-member's same UPDATE finds no row on both); it
+covers a campaign admin and a member who is not an admin (an enumerator, the
+campaign's volunteer), both refused on 0109 and kept with 0110; the
 outreach-api service tests cover the 403 and 409.
 
 ## 39. Publishing needs direct care: the refusal a records-processing caller sees
