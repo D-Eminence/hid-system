@@ -7,14 +7,16 @@
 -- 1. No Health ID check before a group's campaigns go Active ("Q38 no
 --    check", 2026-11-11 ~10:05 UTC): a new organiser may set a campaign
 --    Active at once. Support can still suspend a group, which stops
---    everything; the name blocklist stays; registrants are shown
+--    everything, and its organiser (by login or contact phone) cannot start
+--    another group; the name blocklist stays; registrants are shown
 --    "Unverified organiser" for every outreach group (Health ID has not
 --    verified them).
 -- 2. No per-organiser limits. Anti-bot protection stays: Turnstile (in
 --    Identity), the public application quota per network
 --    (platform.consume_public_application_quota, 0049) and a per-network cap
---    on sign-ups started here; the pending-invitation cap stays as an abuse
---    guard.
+--    on sign-ups started here, plus 3 sign-ups (code emails) per email a day.
+--    The invitation email guards (F) stay as abuse guards, not business
+--    limits: the email names the group, which the organiser chooses.
 -- 4. Joint-controller terms and the DPIA are approved: terms version
 --    '2026-11-01'.
 -- 5. A person who already has a Health ID staff login (a hospital worker)
@@ -45,9 +47,13 @@
 --    therefore hold hospital roles at hospitals and outreach roles at
 --    outreach groups, never a clinical role at a group nor a group role at a
 --    hospital.
--- F. Outreach invitations (identity.outreach_invitations and four commands):
+-- F. Outreach invitations (identity.outreach_invitations and five commands):
 --    only an outreach_organiser invites, the role is always
---    outreach_volunteer, at most 50 pending per group. Hospital staff
+--    outreach_volunteer. Abuse guards, because the email names the group:
+--    at most 50 pending and 30 made in 24 hours per group, cancelled ones
+--    included; sending pauses after 10 undeliverable emails in 24 hours; an
+--    address gets at most 3 outreach invitation emails in 24 hours from all
+--    groups (past that the invitation is made but not emailed). Hospital staff
 --    invitations (create_staff_invitation and its helpers) are not touched.
 -- G. Rules for outreach groups' data (trigger outreach_organiser_tenant_rules
 --    on outreach.registration_cases, campaigns, campaign_members and
@@ -180,13 +186,40 @@ insert into auth.role_permissions (role_code, permission_code) values
 create function identity.outreach_organiser_terms_version()
 returns text language sql immutable set search_path = pg_catalog as $$ select '2026-11-01'::text $$;
 
--- A group name may not suggest a hospital or a government body: words in any
--- case, acronyms in capitals (so "people who care" is fine, "WHO" is not).
+-- A group name may not suggest a hospital, a health agency or a government
+-- body. The name is first reduced to plain Latin letters: Unicode NFKD, then
+-- accents dropped (so Yoruba, Igbo and Hausa letters keep their base letter);
+-- anything left that is not a Latin letter, a digit, a space or . , ' ’ & ( )
+-- - / refuses the name, so look-alike letters from other scripts and
+-- invisible characters cannot hide a word. Words are then compared in any
+-- case, with single letters joined ("N.C.D.C" and "N C D C" read as "ncdc").
+-- "who" is refused only as the acronym (in capitals, or dotted), so "people
+-- who care" is fine. The same rule is in Identity
+-- (outreach-organiser-crypto.ts reservedOrganiserName).
 create function identity.outreach_group_name_allowed(candidate text)
-returns boolean language sql immutable set search_path = pg_catalog as $$
-  select candidate is not null
-    and lower(candidate) !~ '(^|[^a-z])(hospital|hospitals|ministry|government|federal)([^a-z]|$)'
-    and candidate !~ '(^|[^A-Za-z])(WHO|NCDC|LUTH|NHIS|NHIA)([^A-Za-z]|$)'
+returns boolean language plpgsql immutable set search_path = pg_catalog as $$
+declare
+  plain text;
+  cased text;
+  words text;
+begin
+  if candidate is null then
+    return false;
+  end if;
+  plain := regexp_replace(normalize(candidate, NFKD), '[\u0300-\u036f]', '', 'g');
+  if plain !~ '^[A-Za-z0-9 .,''\u2019&()/-]+$' then
+    return false;
+  end if;
+  cased := ' ' || btrim(regexp_replace(plain, '[^A-Za-z0-9]+', ' ', 'g')) || ' ';
+  cased := regexp_replace(cased, '(?<= [A-Za-z]) (?=[A-Za-z] )', '', 'g');
+  words := lower(cased);
+  return words !~ (' (hospitals?|hosp|ministry|ministries|government|govt|federal|commission|agency|agencies'
+      || '|unicef|unfpa|usaid|nafdac|ncdc|nphcda|nhis|nhia|luth|fmc|msf) ')
+    and words !~ (' (health organi[sz]ations?|world health|disease control|primary health ?care|health ?care boards?'
+      || '|medical cent(re|er)s?|health services?|state health|red cross|red crescent|doctors without borders'
+      || '|medecins sans frontieres) ')
+    and cased !~ ' WHO ';
+end
 $$;
 
 create function identity.outreach_text_valid(candidate text, minimum integer, maximum integer)
@@ -282,6 +315,7 @@ create table identity.outreach_organiser_signups (
 create index outreach_organiser_signups_email_idx on identity.outreach_organiser_signups (email)
   where status in ('pending', 'verified');
 create index outreach_organiser_signups_network_idx on identity.outreach_organiser_signups (network_digest, created_at);
+create index outreach_organiser_signups_email_created_idx on identity.outreach_organiser_signups (email, created_at);
 create index outreach_organiser_signups_created_idx on identity.outreach_organiser_signups (created_at);
 alter table identity.outreach_organiser_signups enable row level security;
 alter table identity.outreach_organiser_signups force row level security;
@@ -309,6 +343,10 @@ create table identity.outreach_invitations (
   status text not null default 'pending' check (status in ('pending', 'accepted', 'revoked', 'expired')),
   link_token_hmac char(64) not null check (link_token_hmac ~ '^[0-9a-f]{64}$'),
   failed_attempts integer not null default 0 check (failed_attempts between 0 and 10),
+  dispatched boolean not null default true,
+  delivery_outcome text not null default 'pending'
+    check (delivery_outcome in ('pending', 'accepted', 'definitive_failure', 'unknown', 'suppressed')),
+  delivery_outcome_at timestamptz,
   expires_at timestamptz not null,
   accepted_at timestamptz,
   accepted_account_id uuid references auth.accounts(id) on delete restrict,
@@ -326,11 +364,14 @@ create table identity.outreach_invitations (
     (status = 'accepted') = (accepted_at is not null and accepted_account_id is not null and accepted_membership_id is not null)),
   constraint outreach_invitations_revoked_ck check (
     (status = 'revoked') = (revoked_at is not null)
-    and (revoked_at is null) = (revoked_by_account_id is null))
+    and (revoked_at is null) = (revoked_by_account_id is null)),
+  constraint outreach_invitations_suppressed_ck check ((delivery_outcome = 'suppressed') = (not dispatched))
 );
 create unique index outreach_invitations_pending_email_uq
   on identity.outreach_invitations (facility_id, invitee_email) where status = 'pending';
 create index outreach_invitations_facility_idx on identity.outreach_invitations (facility_id, status, created_at);
+create index outreach_invitations_created_idx on identity.outreach_invitations (facility_id, created_at);
+create index outreach_invitations_recipient_idx on identity.outreach_invitations (invitee_email, created_at);
 alter table identity.outreach_invitations enable row level security;
 alter table identity.outreach_invitations force row level security;
 create policy outreach_invitations_command_read on identity.outreach_invitations for select using (true);
@@ -729,7 +770,10 @@ revoke all on function identity.create_outreach_group(uuid,uuid,text,text,text,c
 -- D. Public sign-up commands (Identity runtime, system:auth).
 -- Answers: 'started', 'email_registered' (sign in and use "Start an outreach
 -- group" instead), 'patient_login' (the email is a patient's Health ID login,
--- which cannot run an outreach group yet), 'name_not_allowed', 'rate_limited'. 55000
+-- which cannot run an outreach group yet), 'name_not_allowed', 'rate_limited'
+-- (5 sign-ups from the network today), 'email_rate_limited' (3 sign-ups, so 3
+-- code emails at least, for this email today), 'suspended' (the phone is a
+-- suspended group's contact phone). 55000
 -- PLATFORM_CONTROL_DISABLED:outreach_organiser_signup_enabled while the
 -- control is off; P4290 APPLICATION_QUOTA_EXCEEDED from the network quota;
 -- 22023 OUTREACH_ORGANISER_SIGNUP_INVALID for a malformed field.
@@ -776,6 +820,17 @@ begin
          and signup.created_at > clock_timestamp() - interval '24 hours') >= 5 then
     return 'rate_limited';
   end if;
+  perform pg_advisory_xact_lock(hashtextextended('outreach-signup-email:' || normalized_email, 0));
+  if (select count(*) from identity.outreach_organiser_signups signup
+       where signup.email = normalized_email
+         and signup.created_at > clock_timestamp() - interval '24 hours') >= 3 then
+    return 'email_rate_limited';
+  end if;
+  if exists (select 1 from identity.outreach_organisations organisation
+              where organisation.status = 'suspended'
+                and organisation.contact_phone_lookup_hmac = requested_phone_lookup_hmac) then
+    return 'suspended';
+  end if;
   update identity.outreach_organiser_signups signup
      set status = 'superseded', updated_at = clock_timestamp(), row_version = signup.row_version + 1
    where signup.email = normalized_email and signup.status in ('pending', 'verified');
@@ -790,13 +845,16 @@ begin
 end
 $$;
 
--- Answers: 'sent', 'too_soon' (wait a minute), 'too_many' (5 codes sent),
--- 'expired' (start again), 'denied'.
+-- Answers (result): 'sent', 'too_soon' (wait a minute), 'too_many' (5 codes
+-- sent), 'expired' (start again), 'denied'. email is the sign-up's email on
+-- 'sent' (Identity sends the new code there; it has no read of the table) and
+-- null otherwise.
 create function identity.resend_outreach_organiser_signup_code(
   requested_signup_id uuid, requested_token_hmac char(64), requested_code_hmac char(64)
-) returns text language plpgsql security definer
+) returns table (result text, email text) language plpgsql security definer
 set search_path = pg_catalog, identity, platform, pg_temp
 as $$
+#variable_conflict use_column
 declare
   signup identity.outreach_organiser_signups%rowtype;
 begin
@@ -808,23 +866,27 @@ begin
   select * into signup from identity.outreach_organiser_signups row
    where row.id = requested_signup_id for update;
   if not found or signup.token_hmac is distinct from requested_token_hmac then
-    return 'denied';
+    return query select 'denied'::text, null::text;
+    return;
   end if;
   if signup.status <> 'pending' or signup.expires_at <= clock_timestamp() then
-    return 'expired';
+    return query select 'expired'::text, null::text;
+    return;
   end if;
   if signup.code_send_count >= 5 then
-    return 'too_many';
+    return query select 'too_many'::text, null::text;
+    return;
   end if;
   if signup.code_last_sent_at > clock_timestamp() - interval '60 seconds' then
-    return 'too_soon';
+    return query select 'too_soon'::text, null::text;
+    return;
   end if;
   update identity.outreach_organiser_signups row
      set code_hmac = requested_code_hmac, code_expires_at = clock_timestamp() + interval '15 minutes',
          code_attempts = 0, code_send_count = row.code_send_count + 1, code_last_sent_at = clock_timestamp(),
          updated_at = clock_timestamp(), row_version = row.row_version + 1
    where row.id = signup.id;
-  return 'sent';
+  return query select 'sent'::text, signup.email;
 end
 $$;
 
@@ -876,6 +938,7 @@ $$;
 -- (email not verified, or the 24 hours passed); 22023
 -- OUTREACH_ORGANISER_PASSWORD_INVALID; 22023 OUTREACH_ORGANISER_TERMS_REQUIRED
 -- (not the current terms version); 22023 OUTREACH_ORGANISER_NAME_NOT_ALLOWED;
+-- P0001 OUTREACH_ORGANISER_SUSPENDED (the phone is a suspended group's);
 -- 23505 OUTREACH_ORGANISER_EMAIL_REGISTERED. A repeat after success answers
 -- the same ids with replayed = true.
 create function identity.activate_outreach_organiser(
@@ -923,6 +986,11 @@ begin
   if not identity.outreach_group_name_allowed(signup.group_name) then
     raise exception using errcode = '22023', message = 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED';
   end if;
+  if exists (select 1 from identity.outreach_organisations organisation
+              where organisation.status = 'suspended'
+                and organisation.contact_phone_lookup_hmac = signup.phone_lookup_hmac) then
+    raise exception using errcode = 'P0001', message = 'OUTREACH_ORGANISER_SUSPENDED';
+  end if;
   perform pg_advisory_xact_lock(hashtextextended('account-email:' || signup.email, 0));
   if identity.outreach_email_registered(signup.email) then
     raise exception using errcode = '23505', message = 'OUTREACH_ORGANISER_EMAIL_REGISTERED';
@@ -951,8 +1019,11 @@ $$;
 -- group: a second membership, at the new group, as outreach_organiser. The
 -- hospital memberships and roles are untouched. Context: the request's
 -- subject, a correlation ID and the healthcare-operations purpose of use.
--- Answers: 'started'; 'already_organiser' (the account already runs a group
--- that is not suspended; its ids are returned); 'name_not_allowed';
+-- Answers: 'started'; 'suspended' (the account organised a group that
+-- Health ID suspended, or the phone is a suspended group's contact phone: a
+-- suspension is not undone by starting again); 'already_organiser' (the
+-- account already runs a group that is not suspended; its ids are returned);
+-- 'name_not_allowed';
 -- 'patient_login' (a login with no staff record and no platform role, such as
 -- a patient's: it cannot run an outreach group yet); 'not_eligible' (an
 -- inactive or unverified staff record, a platform role, a locked or disabled
@@ -991,6 +1062,18 @@ begin
     raise exception using errcode = '22023', message = 'OUTREACH_ORGANISER_TERMS_REQUIRED';
   end if;
   perform pg_advisory_xact_lock(hashtextextended('outreach-organiser-account:' || actor_account::text, 0));
+  if exists (select 1 from identity.outreach_organisations organisation
+              where organisation.status = 'suspended'
+                and (organisation.organiser_account_id = actor_account
+                  or organisation.contact_phone_lookup_hmac = requested_phone_lookup_hmac
+                  or exists (select 1 from auth.account_roles assignment
+                              where assignment.account_id = actor_account
+                                and assignment.facility_id = organisation.facility_id
+                                and assignment.role_code = 'outreach_organiser'
+                                and assignment.revoked_at >= organisation.suspended_at))) then
+    return query select 'suspended'::text, null::uuid, null::uuid, null::uuid;
+    return;
+  end if;
   select organisation.organization_id, organisation.facility_id, membership.id as membership_id into existing
     from identity.outreach_organisations organisation
     join auth.account_roles assignment
@@ -1067,11 +1150,18 @@ $$;
 revoke all on function identity.outreach_organiser_actor() from public;
 
 -- Answers: 'created', 'already_member', 'already_invited', 'too_many_pending'
--- (50 pending invitations; an abuse guard). 22023 OUTREACH_INVITATION_INVALID.
--- The invitation lasts 7 days; Identity emails the link.
+-- (50 pending invitations), 'too_many_today' (30 invitations made by the
+-- group in 24 hours, cancelled ones included), 'sending_paused' (10 emails of
+-- the group's invitations could not be delivered in 24 hours). These are
+-- abuse guards: the email names the group, which the organiser chooses.
+-- 22023 OUTREACH_INVITATION_INVALID. The invitation lasts 7 days; Identity
+-- emails the link only when dispatch is true: false when the address already
+-- had 3 outreach invitation emails in 24 hours from any group (the invitation
+-- is made, its delivery_outcome is 'suppressed'). Identity then records the
+-- delivery with identity.record_outreach_invitation_delivery.
 create function identity.create_outreach_invitation(
   requested_invitation_id uuid, requested_name text, requested_email text, requested_link_token_hmac char(64)
-) returns table (result text, invitation_id uuid, expires_at timestamptz)
+) returns table (result text, invitation_id uuid, expires_at timestamptz, dispatch boolean)
 language plpgsql security definer
 set search_path = pg_catalog, identity, auth, audit, platform, pg_temp
 as $$
@@ -1080,6 +1170,7 @@ declare
   actor record;
   normalized_email text := lower(btrim(requested_email));
   new_expiry timestamptz := clock_timestamp() + interval '7 days';
+  will_dispatch boolean;
 begin
   select * into actor from identity.outreach_organiser_actor();
   if requested_invitation_id is null or not identity.outreach_text_valid(requested_name, 2, 80)
@@ -1096,32 +1187,76 @@ begin
                join auth.accounts account on account.id = membership.account_id
               where membership.facility_id = actor.actor_facility and membership.active
                 and lower(account.email) = normalized_email) then
-    return query select 'already_member'::text, null::uuid, null::timestamptz;
+    return query select 'already_member'::text, null::uuid, null::timestamptz, false;
     return;
   end if;
   if exists (select 1 from identity.outreach_invitations invitation
               where invitation.facility_id = actor.actor_facility and invitation.status = 'pending'
                 and invitation.invitee_email = normalized_email) then
-    return query select 'already_invited'::text, null::uuid, null::timestamptz;
+    return query select 'already_invited'::text, null::uuid, null::timestamptz, false;
     return;
   end if;
   if (select count(*) from identity.outreach_invitations invitation
        where invitation.facility_id = actor.actor_facility and invitation.status = 'pending') >= 50 then
-    return query select 'too_many_pending'::text, null::uuid, null::timestamptz;
+    return query select 'too_many_pending'::text, null::uuid, null::timestamptz, false;
     return;
   end if;
+  if (select count(*) from identity.outreach_invitations invitation
+       where invitation.facility_id = actor.actor_facility
+         and invitation.created_at > clock_timestamp() - interval '24 hours') >= 30 then
+    return query select 'too_many_today'::text, null::uuid, null::timestamptz, false;
+    return;
+  end if;
+  if (select count(*) from identity.outreach_invitations invitation
+       where invitation.facility_id = actor.actor_facility and invitation.delivery_outcome = 'definitive_failure'
+         and invitation.created_at > clock_timestamp() - interval '24 hours') >= 10 then
+    return query select 'sending_paused'::text, null::uuid, null::timestamptz, false;
+    return;
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('outreach-invitation-recipient:' || normalized_email, 0));
+  will_dispatch := (select count(*) from identity.outreach_invitations invitation
+                     where invitation.invitee_email = normalized_email and invitation.dispatched
+                       and invitation.created_at > clock_timestamp() - interval '24 hours') < 3;
   insert into identity.outreach_invitations (id, organization_id, facility_id, invited_by_account_id,
-    invited_by_membership_id, invitee_name, invitee_email, link_token_hmac, expires_at)
+    invited_by_membership_id, invitee_name, invitee_email, link_token_hmac, expires_at, dispatched, delivery_outcome)
   values (requested_invitation_id, actor.actor_organization, actor.actor_facility, actor.actor_account,
-    actor.actor_membership, requested_name, normalized_email, requested_link_token_hmac, new_expiry);
+    actor.actor_membership, requested_name, normalized_email, requested_link_token_hmac, new_expiry, will_dispatch,
+    case when will_dispatch then 'pending' else 'suppressed' end);
   insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
     organization_id, facility_id, action, outcome, resource_type, resource_id, purpose_of_use, provenance,
     source_system, details)
   values (platform.current_correlation_id(), 'staff', platform.current_actor_subject(), actor.actor_account,
     actor.actor_membership, actor.actor_organization, actor.actor_facility, 'identity.outreach-invitation.create',
     'success', 'outreach-invitation', requested_invitation_id::text, 'healthcare-operations', 'application',
-    'identity-api', jsonb_build_object('roleCode', 'outreach_volunteer'));
-  return query select 'created'::text, requested_invitation_id, new_expiry;
+    'identity-api', jsonb_build_object('roleCode', 'outreach_volunteer', 'dispatched', will_dispatch));
+  return query select 'created'::text, requested_invitation_id, new_expiry, will_dispatch;
+end
+$$;
+
+-- Records what the email service answered for an invitation's email
+-- ('accepted', 'definitive_failure' or 'unknown'), once, for an invitation of
+-- the organiser's group that was dispatched. Answers 'recorded' or
+-- 'not_found'. 22023 OUTREACH_INVITATION_INVALID for any other outcome.
+create function identity.record_outreach_invitation_delivery(requested_invitation_id uuid, requested_outcome text)
+returns text language plpgsql security definer
+set search_path = pg_catalog, identity, auth, platform, pg_temp
+as $$
+declare
+  actor record;
+begin
+  select * into actor from identity.outreach_organiser_actor();
+  if requested_outcome is null or requested_outcome not in ('accepted', 'definitive_failure', 'unknown') then
+    raise exception using errcode = '22023', message = 'OUTREACH_INVITATION_INVALID';
+  end if;
+  update identity.outreach_invitations invitation
+     set delivery_outcome = requested_outcome, delivery_outcome_at = clock_timestamp(),
+         updated_at = clock_timestamp(), row_version = invitation.row_version + 1
+   where invitation.id = requested_invitation_id and invitation.facility_id = actor.actor_facility
+     and invitation.dispatched and invitation.delivery_outcome = 'pending';
+  if not found then
+    return 'not_found';
+  end if;
+  return 'recorded';
 end
 $$;
 
@@ -1802,6 +1937,7 @@ revoke all on function
   identity.activate_outreach_organiser(uuid,char,text,text),
   identity.activate_outreach_organiser_for_account(text,text,text,text,char,bytea,text),
   identity.create_outreach_invitation(uuid,text,text,char), identity.revoke_outreach_invitation(uuid),
+  identity.record_outreach_invitation_delivery(uuid,text),
   identity.list_outreach_team(), identity.preview_outreach_invitation(uuid,char),
   identity.accept_outreach_invitation_with_password(uuid,char,text),
   identity.accept_outreach_invitation_for_account(uuid,char),
@@ -1820,6 +1956,7 @@ begin
       identity.activate_outreach_organiser(uuid,char,text,text),
       identity.activate_outreach_organiser_for_account(text,text,text,text,char,bytea,text),
       identity.create_outreach_invitation(uuid,text,text,char), identity.revoke_outreach_invitation(uuid),
+      identity.record_outreach_invitation_delivery(uuid,text),
       identity.list_outreach_team(), identity.preview_outreach_invitation(uuid,char),
       identity.accept_outreach_invitation_with_password(uuid,char,text),
       identity.accept_outreach_invitation_for_account(uuid,char),

@@ -548,11 +548,11 @@
       },
       {
         "name": "0114_outreach_organisers.sql",
-        "sha256": "567d868b051ede22b548abecf9eef81cab5d1d6616f515632f276399065376d8"
+        "sha256": "f988388573ec0f9d8e95c183b4db354c7f9a6d58c078c68ff21fe5023038f7df"
       },
       {
         "name": "0115_outreach_retention.sql",
-        "sha256": "51db6a6ae35104c7da005f7762efed8f03f678baee46a1c8fa213cc2b5bf8282"
+        "sha256": "9c632744a8015c892030e72ef997fccad575c4a817a96505a33a932e9eaadfc9"
       }
     ]
   },

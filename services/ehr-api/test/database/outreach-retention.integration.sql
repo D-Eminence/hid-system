@@ -65,6 +65,22 @@ insert into auth.account_roles (id, account_id, role_code, scope_type, membershi
    '0f030000-0000-4000-8000-000000000002', '0f000000-0000-4000-8000-000000000012', 'Synthetic retention suite role'),
   (gen_random_uuid(), '0f010000-0000-4000-8000-000000000003', 'platform_admin', 'platform', null, null,
    'Synthetic retention suite support role');
+-- Invitations of G never accepted: cancelled 40 days ago, expired 40 days
+-- ago (left pending, and marked expired), expired 5 days ago, and one still
+-- waiting.
+insert into identity.outreach_invitations (id, organization_id, facility_id, invited_by_account_id,
+  invited_by_membership_id, invitee_name, invitee_email, status, link_token_hmac, expires_at, revoked_at,
+  revoked_by_account_id, created_at)
+select ('0f090000-0000-4000-8000-00000000000' || n)::uuid, '0f000000-0000-4000-8000-000000000001',
+  '0f000000-0000-4000-8000-000000000002', '0f010000-0000-4000-8000-000000000001',
+  '0f030000-0000-4000-8000-000000000001', 'Invitee Person ' || n, 'invitee' || n || '@example.invalid', status,
+  repeat(n::text, 64), now() + expires, revoked, case when revoked is not null then '0f010000-0000-4000-8000-000000000001'::uuid end,
+  now() + expires - interval '7 days'
+from (values (1, 'revoked', interval '-40 days', now() - interval '40 days'),
+             (2, 'pending', interval '-40 days', null::timestamptz),
+             (3, 'expired', interval '-40 days', null),
+             (4, 'expired', interval '-5 days', null),
+             (5, 'pending', interval '5 days', null)) v(n, status, expires, revoked);
 create temporary table rt_campaigns (n integer primary key, facility uuid, member uuid, account uuid, status text,
   starts_at timestamptz, updated_at timestamptz, closed_at timestamptz) on commit drop;
 insert into rt_campaigns values
@@ -200,6 +216,12 @@ select pg_temp.rt_case('3f each redaction is recorded, and the sweep audited', '
   $s$select right(registration_case_id::text, 1) || ' ' || kind from outreach.registration_redactions
      union all select 'audit ' || count(*) from audit.events where action = 'outreach.registration.retention-sweep'
        and correlation_id = 'outreach-retention-suite' order by 1$s$);
+select pg_temp.rt_case('3f2 invitations never accepted go 30 days after they ended; the sweep records only counts',
+  '4 5 | {"redacted": 3, "deletedSignups": 0, "deletedInvitations": 3}', session_user::text, null, null, null, null,
+  $s$select (select string_agg(right(invitee_name, 1), ' ' order by invitee_name) from identity.outreach_invitations
+             where facility_id = '0f000000-0000-4000-8000-000000000002')
+     union all select details::text from audit.events where action = 'outreach.registration.retention-sweep'
+       and correlation_id = 'outreach-retention-suite'$s$);
 select pg_temp.sweeper('3g a second sweep finds nothing', '0', 'select identity.sweep_expired_outreach_registrations(100)');
 select pg_temp.organiser('3h the organiser still counts the redacted registrations', '5',
   $s$select count(*)::text from outreach.registration_cases where facility_id = '0f000000-0000-4000-8000-000000000002'$s$);

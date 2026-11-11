@@ -39,8 +39,10 @@
 -- 3. Commands, for the Identity runtime only (never the Outreach runtime):
 --    - identity.sweep_expired_outreach_registrations(limit): system:auth;
 --      redacts up to limit (1-5000) expired registrations, oldest first, and
---      deletes sign-ups never activated after 30 days. Identity runs it on a
---      schedule.
+--      deletes sign-ups never activated after 30 days and outreach
+--      invitations never accepted 30 days after they expired or were
+--      cancelled (the invitee's name and email go with them). Identity runs
+--      it on a schedule.
 --    - identity.admin_redact_outreach_registration(case, reason): support,
 --      on a person's request (helpline, voice call or message), with
 --      platform.admin.access, platform.facility.manage and
@@ -393,7 +395,9 @@ $$;
 revoke all on function outreach.redact_registration_case(uuid,text,text,uuid) from public;
 
 -- 3a. The sweeper (Identity, system:auth). Returns how many registrations
--- were redacted; also deletes sign-ups never activated after 30 days.
+-- were redacted; also deletes sign-ups never activated after 30 days and
+-- invitations never accepted, 30 days after they expired or were cancelled.
+-- The audit row records only the counts.
 create function identity.sweep_expired_outreach_registrations(requested_limit integer)
 returns integer language plpgsql security definer
 set search_path = pg_catalog, identity, outreach, audit, platform, pg_temp
@@ -402,6 +406,7 @@ declare
   candidate record;
   redacted integer := 0;
   deleted_signups integer;
+  deleted_invitations integer;
 begin
   if platform.current_actor_subject() is distinct from 'system:auth' or platform.current_correlation_id() is null then
     raise exception using errcode = '42501', message = 'OUTREACH_RETENTION_DENIED';
@@ -433,12 +438,20 @@ begin
                           where stale.status <> 'active' and stale.created_at < clock_timestamp() - interval '30 days'
                           order by stale.created_at limit 1000);
   get diagnostics deleted_signups = row_count;
-  if redacted > 0 or deleted_signups > 0 then
+  delete from identity.outreach_invitations invitation
+   where invitation.ctid in (select stale.ctid from identity.outreach_invitations stale
+                              where (stale.status = 'revoked' and stale.revoked_at < clock_timestamp() - interval '30 days')
+                                 or (stale.status in ('pending', 'expired')
+                                     and stale.expires_at < clock_timestamp() - interval '30 days')
+                              order by stale.created_at limit 1000);
+  get diagnostics deleted_invitations = row_count;
+  if redacted > 0 or deleted_signups > 0 or deleted_invitations > 0 then
     insert into audit.events (correlation_id, actor_type, action, outcome, resource_type, purpose_of_use,
       provenance, source_system, details)
     values (platform.current_correlation_id(), 'system', 'outreach.registration.retention-sweep', 'success',
       'outreach-registration', 'healthcare-operations', 'application', 'identity-api',
-      jsonb_build_object('redacted', redacted, 'deletedSignups', deleted_signups));
+      jsonb_build_object('redacted', redacted, 'deletedSignups', deleted_signups,
+        'deletedInvitations', deleted_invitations));
   end if;
   return redacted;
 end

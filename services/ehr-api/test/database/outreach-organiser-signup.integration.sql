@@ -184,6 +184,26 @@ select pg_temp.auth_case('1d a government acronym is refused', 'name_not_allowed
   pg_temp.start_signup('3', 'three@example.invalid', 'NCDC Volunteers'), false);
 select pg_temp.auth_case('1e an everyday "who" is fine', 'started',
   pg_temp.start_signup('4', 'four@example.invalid', 'People who care Yaba'), false);
+-- Names that once slipped past the blocklist: other words, other case, dots
+-- or spaces between letters, a Cyrillic letter, wide letters, an invisible
+-- space.
+select pg_temp.auth_case('1e2 names suggesting a health agency, hospital or government body are refused',
+  'name_not_allowed', format('select string_agg(distinct answer, %L) from (%s) answers(answer)', ',',
+    (select string_agg(pg_temp.start_signup('n' || n, 'name' || n || '@example.invalid', name), ' union all ')
+       from unnest(array['World Health Organization', 'Nigeria Centre for Disease Control', 'Ncdc Outreach',
+         'N.C.D.C Outreach', 'Lagos University Teaching Hosp', 'General H' || chr(1086) || 'spital Ikeja',
+         'Lagos State Primary Health Care Board', 'FMC Abeokuta', 'UNICEF Nigeria', 'Red Cross Nigeria',
+         'W.H.O. Friends', chr(65320) || 'ospital Friends', 'Hope' || chr(8203) || 'Group', 'Ikeja Medical Center Friends',
+         'Lagos Health Service', 'Lagos State Health Board']) with ordinality names(name, n))), false);
+select pg_temp.auth_case('1e3 accented letters and ordinary punctuation are fine', 'started',
+  pg_temp.start_signup('acc', 'accent@example.invalid', chr(7884) || 'm' || chr(7885) || ' Ol' || chr(7885) || 'run Friends (Ikeja) - 2'), false);
+-- A sign-up's codes to one email: 3 sign-ups a day at most (each sends a code).
+select pg_temp.auth_case('1e4 three sign-ups for one email in a day', 'started',
+  pg_temp.start_signup('cap1', 'capped@example.invalid', 'Capped Group'));
+select pg_temp.auth_case('1e5 a second', 'started', pg_temp.start_signup('cap2', 'capped@example.invalid', 'Capped Group'));
+select pg_temp.auth_case('1e6 a third', 'started', pg_temp.start_signup('cap3', 'capped@example.invalid', 'Capped Group'));
+select pg_temp.auth_case('1e7 a fourth for the same email is refused', 'email_rate_limited',
+  pg_temp.start_signup('cap4', 'CAPPED@example.invalid', 'Capped Group'), false);
 select pg_temp.auth_case('1f an email with a login is refused (sign in instead)', 'email_registered',
   pg_temp.start_signup('5', 'os-nurse@example.invalid', 'Nurses Who Walk'), false);
 select pg_temp.auth_case('1f2 a patient''s Health ID login is told it cannot run a group yet', 'patient_login',
@@ -196,6 +216,22 @@ select pg_temp.os_case('1h the Outreach runtime cannot start a sign-up',
 select pg_temp.auth_case('1i activate before the email is verified', '23514: OUTREACH_ORGANISER_SIGNUP_NOT_READY',
   format('select 1 from identity.activate_outreach_organiser(%L, %L, %L, %L)', pg_temp.id('signup1'),
     pg_temp.hex('token-1'), pg_temp.password_hash(), '2026-11-01'), false);
+select pg_temp.auth_case('1i2 a new code within the minute is refused', '(too_soon,)',
+  format('select identity.resend_outreach_organiser_signup_code(%L, %L, %L)', pg_temp.id('signup1'), pg_temp.hex('token-1'),
+    pg_temp.hex('code-1')));
+update identity.outreach_organiser_signups set code_last_sent_at = clock_timestamp() - interval '61 seconds'
+ where id = pg_temp.id('signup1')::uuid;
+select pg_temp.auth_case('1i3 after the minute a new code is sent, to the sign-up''s own email', '(sent,organiser.one@example.invalid)',
+  format('select identity.resend_outreach_organiser_signup_code(%L, %L, %L)', pg_temp.id('signup1'), pg_temp.hex('token-1'),
+    pg_temp.hex('code-1')));
+select pg_temp.os_case('1i3b the resend is counted (the runtime has no read of sign-ups)', '2 | 42501: permission denied for table outreach_organiser_signups',
+  session_user::text, null, null, null, null,
+  format($s$select (select code_send_count::text from identity.outreach_organiser_signups where id = %L)
+     union all select pg_temp.os_try('hid_identity_api_runtime', 'system:auth', null, null, null,
+       'select email from identity.outreach_organiser_signups', false, 'query')$s$, pg_temp.id('signup1')), false, 'query');
+select pg_temp.auth_case('1i4 a wrong cookie gets no email back', '(denied,)',
+  format('select identity.resend_outreach_organiser_signup_code(%L, %L, %L)', pg_temp.id('signup1'), pg_temp.hex('nope'),
+    pg_temp.hex('code-1')));
 select pg_temp.auth_case('1j a wrong code is counted', 'wrong_code',
   format('select identity.verify_outreach_organiser_email(%L, %L, %L)', pg_temp.id('signup1'), pg_temp.hex('token-1'),
     pg_temp.hex('wrong')));
@@ -489,12 +525,6 @@ select pg_temp.organiser1('7n the team panel', 'invitation:0 member:3',
       select entry_kind, count(*) as n from identity.list_outreach_team() group by entry_kind
       union all select 'invitation', 0 where not exists (select 1 from identity.list_outreach_team() where entry_kind = 'invitation')) t$s$,
   false);
-select pg_temp.organiser1('7o 50 pending invitations is the most (an abuse guard)', 'too_many_pending',
-  $s$select (select count(*) from (select identity.create_outreach_invitation(gen_random_uuid(), 'Helper Number',
-        'helper' || n || '@example.invalid', encode(sha256(convert_to('cap' || n, 'UTF8')), 'hex')) from generate_series(1, 50) n) made)::text
-      || (select result from identity.create_outreach_invitation(gen_random_uuid(), 'One Too Many', 'toomany@example.invalid',
-        encode(sha256(convert_to('cap-over', 'UTF8')), 'hex')))$s$, false);
-update os_cases set actual = regexp_replace(actual, '^50', '') where name = '7o 50 pending invitations is the most (an abuse guard)';
 -- A patient's Health ID login cannot help a group yet: every path says so.
 insert into os_ids values ('inv4', gen_random_uuid());
 select pg_temp.organiser1('7y the organiser invites a patient''s email', 'created',
@@ -508,6 +538,66 @@ select pg_temp.auth_case('7za no password is set for a patient login', 'patient_
 select pg_temp.staff_case('7zb nor can the signed-in patient login accept', 'patient_login', 'synthetic:os-patient',
   format('select result from identity.accept_outreach_invitation_for_account(%L, %L)', pg_temp.id('inv4'),
     pg_temp.hex('link-inv4')), false);
+
+-- Abuse guards (the email names the group, which the organiser chooses).
+select pg_temp.organiser1('7o 30 invitations a day is the most, cancelled ones included', '27 too_many_today',
+  $s$select (select count(*) from (select identity.create_outreach_invitation(gen_random_uuid(), 'Helper Number',
+        'helper' || n || '@example.invalid', encode(sha256(convert_to('cap' || n, 'UTF8')), 'hex')) from generate_series(1, 27) n) made)::text
+      || ' ' || (select result from identity.create_outreach_invitation(gen_random_uuid(), 'One Too Many', 'toomany@example.invalid',
+        encode(sha256(convert_to('cap-over', 'UTF8')), 'hex')))$s$, false);
+-- 49 invitations made two days ago, still waiting: with inv4, 50 pending.
+set local session_replication_role = replica;
+insert into identity.outreach_invitations (id, organization_id, facility_id, invited_by_account_id, invited_by_membership_id,
+  invitee_name, invitee_email, link_token_hmac, expires_at, created_at)
+select gen_random_uuid(), pg_temp.id('org1')::uuid, pg_temp.id('fac1')::uuid, pg_temp.id('acct1')::uuid,
+  pg_temp.id('mem1')::uuid, 'Older Helper', 'older' || n || '@example.invalid', pg_temp.hex('older-' || n),
+  clock_timestamp() + interval '5 days', clock_timestamp() - interval '2 days'
+from generate_series(1, 49) n;
+set local session_replication_role = origin;
+select pg_temp.organiser1('7o2 50 pending invitations is the most', 'too_many_pending',
+  $s$select result from identity.create_outreach_invitation(gen_random_uuid(), 'One Too Many', 'toomany@example.invalid',
+      encode(sha256(convert_to('cap-over', 'UTF8')), 'hex'))$s$, false);
+delete from identity.outreach_invitations where invitee_name = 'Older Helper';
+-- Invite, cancel, invite again: one address gets at most 3 invitation emails a day.
+create function pg_temp.invite_cancel_loop(times integer) returns text language plpgsql as $$
+declare
+  answers text := '';
+  made record;
+begin
+  for n in 1 .. times loop
+    select * into made from identity.create_outreach_invitation(gen_random_uuid(), 'Pat Recipient',
+      'pat.recipient@example.invalid', encode(sha256(convert_to('loop' || n, 'UTF8')), 'hex'));
+    answers := answers || made.result || ':' || made.dispatch || ' ';
+    perform identity.revoke_outreach_invitation(made.invitation_id);
+  end loop;
+  return btrim(answers);
+end $$;
+-- Ten emails that could not be delivered pause the group's invitations for the day.
+create function pg_temp.failed_deliveries(times integer) returns text language plpgsql as $$
+declare
+  made record;
+begin
+  for n in 1 .. times loop
+    select * into made from identity.create_outreach_invitation(gen_random_uuid(), 'Wrong Address',
+      'wrong' || n || '@example.invalid', encode(sha256(convert_to('bounce' || n, 'UTF8')), 'hex'));
+    perform identity.record_outreach_invitation_delivery(made.invitation_id, 'definitive_failure');
+  end loop;
+  return (select result from identity.create_outreach_invitation(gen_random_uuid(), 'After The Bounces',
+    'after.bounces@example.invalid', encode(sha256(convert_to('bounce-after', 'UTF8')), 'hex')));
+end $$;
+grant execute on function pg_temp.invite_cancel_loop(integer), pg_temp.failed_deliveries(integer) to public;
+select pg_temp.organiser1('7o3 a fourth invitation email to one address in a day is not sent',
+  'created:true created:true created:true created:false', 'select pg_temp.invite_cancel_loop(4)', false);
+select pg_temp.organiser1('7o4 sending pauses after 10 undeliverable emails', 'sending_paused',
+  'select pg_temp.failed_deliveries(10)', false);
+select pg_temp.organiser1('7o5 a delivery is recorded once', 'recorded not_found',
+  format($s$select identity.record_outreach_invitation_delivery(%L, 'accepted') || ' '
+      || identity.record_outreach_invitation_delivery(%L, 'accepted')$s$, pg_temp.id('inv4'), pg_temp.id('inv4')), false);
+select pg_temp.organiser1('7o6 an unknown outcome is refused', '22023: OUTREACH_INVITATION_INVALID',
+  format($s$select identity.record_outreach_invitation_delivery(%L, 'bounced')$s$, pg_temp.id('inv4')), false);
+select pg_temp.staff_case('7o7 a helper cannot record a delivery', '42501: OUTREACH_ORGANISER_PERMISSION_DENIED',
+  pg_temp.subject_of('acct3'), format($s$select identity.record_outreach_invitation_delivery(%L, 'accepted')$s$,
+    pg_temp.id('inv4')), false, 'query', pg_temp.id('fac1'), pg_temp.id('mem3'));
 
 -- 11. Support's campaign rescue (the nurse's group).
 insert into os_ids values ('camp2', gen_random_uuid());
@@ -532,7 +622,15 @@ select pg_temp.staff_case('8f a doctor cannot use support''s rescue', '42501: AD
 select pg_temp.os_case('8g no support run is left behind', '0', session_user::text, null, null, null, null,
   'select count(*)::text from outreach.privileged_runs', false, 'query');
 
--- 12. Suspension.
+-- 12. Suspension. A sign-up with the first group's contact phone is started
+-- and verified first.
+insert into os_ids select 'signupP', gen_random_uuid();
+select pg_temp.auth_case('9-1 a sign-up with the first group''s phone, before the suspension', 'started verified',
+  format($s$select identity.start_outreach_organiser_signup(%L::uuid, %L, 'late.starter@example.invalid', 'Late Starter',
+      'Late Starter Friends', 'individual', null, %L, decode(repeat('ab', 32), 'hex'), 'k1', %L, %L)
+      || ' ' || identity.verify_outreach_organiser_email(%L, %L, %L)$s$,
+    pg_temp.id('signupP'), pg_temp.hex('token-P'), pg_temp.hex('phone-1'), pg_temp.hex('network-P'), pg_temp.hex('code-P'),
+    pg_temp.id('signupP'), pg_temp.hex('token-P'), pg_temp.hex('code-P')));
 select pg_temp.staff_case('9a support suspends the first group', 'suspended 3', 'synthetic:os-support',
   format($s$select status || ' ' || revoked_roles from identity.admin_suspend_outreach_organiser(%L, 1,
     'Reported for collecting numbers under a false name')$s$, pg_temp.id('org1')));
@@ -546,8 +644,21 @@ select pg_temp.os_case('9d the doctor keeps the hospital role after the group''s
   session_user::text, null, null, null, null,
   $s$select string_agg(role_code, ',' order by role_code) from auth.account_roles
       where account_id = '0e010000-0000-4000-8000-000000000001' and revoked_at is null$s$, false, 'query');
-select pg_temp.staff_case('9e the suspended organiser may start a new group', 'started true', pg_temp.subject_of('acct1'),
+select pg_temp.staff_case('9e the suspended organiser cannot start a new group', 'suspended', pg_temp.subject_of('acct1'),
   pg_temp.start_for_account('Fresh Start Volunteers'), false);
+create function pg_temp.start_for_account_phone(group_name text, phone_label text) returns text language sql as $$
+  select format($s$select result || case when organization_id is not null then ' true' else '' end
+      from identity.activate_outreach_organiser_for_account(%L, 'individual', null, '2026-11-01', %L,
+        decode(repeat('cd', 32), 'hex'), 'k1')$s$, group_name, pg_temp.hex(phone_label)) $$;
+select pg_temp.staff_case('9f nor can another login with the suspended group''s phone', 'suspended', 'synthetic:os-doctor',
+  pg_temp.start_for_account_phone('Fresh Start Volunteers', 'phone-1'), false);
+select pg_temp.staff_case('9g a helper of the suspended group may start their own, with their own phone', 'started true',
+  'synthetic:os-doctor', pg_temp.start_for_account_phone('Ada Street Checks', 'phone-doctor'), false);
+select pg_temp.auth_case('9h the public sign-up refuses the suspended group''s phone', 'suspended',
+  pg_temp.start_signup('1', 'fresh.start@example.invalid', 'Fresh Start Volunteers'), false);
+select pg_temp.auth_case('9i a sign-up started earlier with that phone cannot be activated', 'P0001: OUTREACH_ORGANISER_SUSPENDED',
+  format('select 1 from identity.activate_outreach_organiser(%L, %L, %L, %L)', pg_temp.id('signupP'),
+    pg_temp.hex('token-P'), pg_temp.password_hash(), '2026-11-01'), false);
 
 -- 13. Result.
 do $$
