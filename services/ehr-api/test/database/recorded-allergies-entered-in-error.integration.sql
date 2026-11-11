@@ -4,22 +4,24 @@
 -- context ClinicalRepository sets (app.actor_subject, facility, membership,
 -- purpose, correlation). Synthetic values only; uuid prefix e124.
 --
--- The allergy check (prescription create and the allergy-check route) reads
--- the patient's recorded allergies with one query (allergy-reader.ts,
--- allergiesForCheck) and then matches the medicine against what it read
--- (allergy-match.ts). pg_temp.allergies_for_check below is that query, word
--- for word; allergies.service.spec.ts fails if the two ever differ. The
--- service matches a Penicillin allergy to 'Amoxicillin 500 mg' (penicillins);
--- allergies.service.spec.ts shows that, and that the warning stops once the
--- allergy is marked. This suite shows what the database gives the check:
+-- The allergy check (the allergy-check route, prescription create, and
+-- Activate, Resume and send of a draft) reads the patient's recorded
+-- allergies with one query (allergy-reader.ts, allergiesForCheck) and then
+-- matches the medicine against what it read (allergy-match.ts).
+-- pg_temp.allergies_for_check below is that query, word for word;
+-- allergies.service.spec.ts fails if the two ever differ.
+-- recorded-allergies.integration.sql (4i) already shows that, at the
+-- recording facility, a copy of that read leaves out an allergy once it is
+-- marked there. This suite adds, with the exact read:
 --   1. Penicillin (severe, anaphylaxis) recorded at facility F1: the check
 --      reads it at F1 and at F2 (allergies follow the patient), and nothing
 --      outside the doctor's context (it runs under row-level security); once
 --      F1 marks it entered in error, the check reads nothing at F1 or at F2,
---      and the allergy is still kept, as entered in error;
+--      though F2 still sees the allergy, marked;
 --   2. the same for Penicillin recorded at another facility, F2 (patient R,
 --      so that nothing from 1 is in the way): the check at F1 reads it; once
---      F2 marks it entered in error, the check at F1 reads nothing;
+--      F2 marks it entered in error, the check at F1 reads nothing, though F1
+--      still sees the allergy, marked;
 --   3. an active allergy beside one entered in error is still read, alone.
 begin;
 
@@ -34,9 +36,10 @@ $$;
 -- (not SECURITY DEFINER), so it runs as the caller: hid_ehr_api_runtime under
 -- forced row-level security.
 create function pg_temp.allergies_for_check(uuid)
-returns table (allergy_id uuid, allergy_substance text, allergy_reaction text, allergy_severity text)
+returns table (allergy_id uuid, allergy_substance text, allergy_reaction text, allergy_severity text,
+  allergy_facility_id uuid, allergy_created_at timestamptz)
 language sql as $$
-  select id, substance, reaction, severity from ehr.recorded_allergies
+  select id, substance, reaction, severity, facility_id, created_at from ehr.recorded_allergies
      where patient_id = $1 and status = 'active' order by created_at, id
 $$;
 -- What the check read, as 'substance (severity, reaction)' in its order, or '' for nothing.
@@ -154,10 +157,11 @@ begin
   if read <> '' then
     raise exception '1e: the check at F2 still reads an allergy marked entered in error at F1: "%"', read;
   end if;
-  -- 1f. The allergy is kept, marked: nothing was deleted.
-  if (select format('%s|%s', status, row_version) from ehr.recorded_allergies
-       where id = 'e1241000-0000-4000-8000-000000000001') is distinct from 'entered_in_error|2' then
-    raise exception '1f: the allergy is not kept as entered in error at version 2';
+  -- 1f. F2 still sees the allergy, marked: the check reads nothing because of the marking,
+  -- not because row-level security hides it.
+  if (select status from ehr.recorded_allergies where id = 'e1241000-0000-4000-8000-000000000001')
+       is distinct from 'entered_in_error' then
+    raise exception '1f: F2 does not see F1''s allergy as entered in error';
   end if;
 
   -- 2. Penicillin recorded for patient R at another facility, F2.
