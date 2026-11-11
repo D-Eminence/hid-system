@@ -124,7 +124,7 @@ const acceptedMigrations = new Map([
   ['0109_support_health_id_matches.sql', '83f5928e442dba7cf2751e77255aed2d035b4d356856159dc5bb52243a10dea2'],
   ['0110_outreach_campaign_registration_lock.sql', '0a56d7fb26ea5fd78030a7ec516ec3430491fc459f2251c1e6a77fdb35ee7835'],
   ['0111_outreach_campaign_admins.sql', '971da7bed817568c6184274e59bcb9d659851149cdc70e223e94123f2ddb09d1'],
-  ['0114_collect_signup_fields.sql', '4fcda6c492091b3cca2d7a51d477e5e95612a3d9e9a75cf966a726255464852e'],
+  ['0114_collect_signup_fields.sql', '9f3e842a08a9af68a3378647474d98e738f3687c29e2d26b10ea64a5b06937e0'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

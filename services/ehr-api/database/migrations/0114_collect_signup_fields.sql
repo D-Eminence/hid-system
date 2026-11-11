@@ -74,10 +74,17 @@
 --     ever deleted or changed, except by erasure (NDPA, 0084's rule): the
 --     owner-only identity.erase_patient_facility_contacts nulls the
 --     ciphertexts, key version and stated Health ID and records erased_at and
---     the reason. A trigger on identity.patient_account_deletion_requests
---     calls it when an account deletion completes ('account_deleted'); Health
---     ID support has it run for an erasure request ('erasure_request').
---     identity.registration_cases is not altered.
+--     the reason, and removes the patient's Health ID from any other case
+--     that stated it (that person's own phone and address stay). A trigger on
+--     identity.patient_account_deletion_requests calls it when an account
+--     deletion completes ('account_deleted'); Health ID support has it run
+--     for an erasure request ('erasure_request'). A case that never became a
+--     patient (rejected, cancelled, never reviewed) is erased by case with
+--     the owner-only identity.erase_registration_case_contact
+--     ('erasure_request'). Both refuse to run unless their caller is (a member
+--     of) the owner of both contact tables, so a later change of owner fails
+--     loudly instead of erasing nothing. identity.registration_cases is not
+--     altered.
 --
 -- BACKWARD COMPATIBLE: no existing table gains a column; no existing
 -- function body, policy or grant changes. Today's Identity calls the
@@ -650,7 +657,8 @@ create table identity.registration_case_contacts (
 );
 
 -- The only change either contact table allows: erasure (the erasable columns
--- become null, erased_at and erasure_reason are set, once). Never deleted.
+-- become null, erased_at and erasure_reason are set, once), and for a case
+-- contact the removal of its stated Health ID alone. Never deleted.
 -- TG_ARGV lists the erasable columns.
 create function identity.guard_facility_contact_erasure()
 returns trigger
@@ -660,6 +668,14 @@ as $$
 begin
   if tg_op = 'DELETE' then
     raise exception using errcode = '42501', message = 'A facility-held contact is never deleted; erase it instead';
+  end if;
+  -- A case contact may also lose only its stated Health ID, when the patient
+  -- that Health ID names has their contacts erased; the rest of the row stays.
+  if tg_table_name = 'registration_case_contacts'
+     and old.erased_at is null and new.erased_at is null
+     and (to_jsonb(old) ->> 'stated_hid_code') is not null and (to_jsonb(new) ->> 'stated_hid_code') is null
+     and (to_jsonb(new) - 'stated_hid_code') = (to_jsonb(old) - 'stated_hid_code') then
+    return new;
   end if;
   if old.erased_at is not null or new.erased_at is null
      or (to_jsonb(new) - tg_argv) is distinct from (to_jsonb(old) - tg_argv) then
@@ -705,6 +721,9 @@ create policy registration_case_contacts_staff_create on identity.registration_c
     )
   );
 revoke all on identity.registration_case_contacts from public;
+-- Erasure finds the cases that stated a patient's Health ID.
+create index registration_case_contacts_stated_hid_idx on identity.registration_case_contacts (stated_hid_code)
+  where stated_hid_code is not null;
 
 -- The facility-held, unverified contact of a registered patient: the copy of
 -- the case's encrypted phone and address (ciphertext bound by Identity to
@@ -778,38 +797,71 @@ create policy patient_facility_contacts_staff_create on identity.patient_facilit
 revoke all on identity.patient_facility_contacts from public;
 
 -- Erasure (NDPA). Only the owner of these tables (the applier) may erase, as
--- 0084's erasure runs as its owner: the two owner policies below name it, and
--- no runtime role holds UPDATE on either table.
-do $$
+-- 0084's erasure runs as its owner. The two owner policies below follow the
+-- table's owner at the time of each statement (not the role that applied
+-- this migration), and no runtime role holds UPDATE on either table.
+create policy registration_case_contacts_owner on identity.registration_case_contacts
+  for all using (pg_catalog.pg_has_role((select relation.relowner from pg_catalog.pg_class relation
+                   where relation.oid = 'identity.registration_case_contacts'::pg_catalog.regclass), 'USAGE'))
+  with check (pg_catalog.pg_has_role((select relation.relowner from pg_catalog.pg_class relation
+                   where relation.oid = 'identity.registration_case_contacts'::pg_catalog.regclass), 'USAGE'));
+create policy patient_facility_contacts_owner on identity.patient_facility_contacts
+  for all using (pg_catalog.pg_has_role((select relation.relowner from pg_catalog.pg_class relation
+                   where relation.oid = 'identity.patient_facility_contacts'::pg_catalog.regclass), 'USAGE'))
+  with check (pg_catalog.pg_has_role((select relation.relowner from pg_catalog.pg_class relation
+                   where relation.oid = 'identity.patient_facility_contacts'::pg_catalog.regclass), 'USAGE'));
+
+-- The erasure functions run as their owner. If that is not (a member of) the
+-- owner of both contact tables (an owner changed later), they refuse, so an
+-- erasure never reports nothing erased while the contacts stay.
+create function identity.assert_facility_contact_eraser()
+returns void
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
 begin
-  execute format('create policy registration_case_contacts_owner on identity.registration_case_contacts '
-    || 'for all using (current_user = %L) with check (current_user = %L)', current_user, current_user);
-  execute format('create policy patient_facility_contacts_owner on identity.patient_facility_contacts '
-    || 'for all using (current_user = %L) with check (current_user = %L)', current_user, current_user);
-end
+  if not pg_catalog.pg_has_role((select relation.relowner from pg_catalog.pg_class relation
+           where relation.oid = 'identity.registration_case_contacts'::pg_catalog.regclass), 'USAGE')
+     or not pg_catalog.pg_has_role((select relation.relowner from pg_catalog.pg_class relation
+           where relation.oid = 'identity.patient_facility_contacts'::pg_catalog.regclass), 'USAGE') then
+    raise exception using errcode = '42501',
+      message = 'Facility-held contacts can only be erased by the owner of their tables';
+  end if;
+end;
 $$;
+revoke all on function identity.assert_facility_contact_eraser() from public;
 
 -- identity.erase_patient_facility_contacts erases every facility's copy of a
 -- patient's phone and address (patient_facility_contacts) and what the desk
--- recorded on the cases that resolved to the patient (registration_case_contacts,
--- the stated Health ID included). Called by the account-deletion trigger
--- below ('account_deleted') and, for an NDPA erasure request, by Health ID
--- support through the owner ('erasure_request'). Never granted to a runtime
--- role. Its audit row holds only the counts.
+-- recorded on the cases that were copied to the patient
+-- (registration_case_contacts, the stated Health ID included). It also
+-- removes the patient's Health ID (current or earlier) from any other case
+-- that stated it, for example by a typo; that person's own phone and address
+-- stay. Every path that resolves a case to a patient writes the copy in the
+-- same transaction (resolved at once, approved new, linked existing), so the
+-- copies find every such case; identity.registration_cases is not read (its
+-- row-level security is forced and 0114 adds no policy to it). Called by the
+-- account-deletion trigger below ('account_deleted') and, for an NDPA
+-- erasure request, by Health ID support through the owner
+-- ('erasure_request'). Never granted to a runtime role. Its audit row holds
+-- only the counts.
 create function identity.erase_patient_facility_contacts(requested_patient_id uuid, requested_reason text)
-returns table (facility_contacts integer, registration_contacts integer)
+returns table (facility_contacts integer, registration_contacts integer, stated_health_ids integer)
 language plpgsql security definer
 set search_path = pg_catalog, identity, audit, platform, pg_temp
 as $$
 declare
   erased_facility integer;
   erased_registration integer;
+  removed_stated integer;
   erased_moment timestamptz := clock_timestamp();
+  patient_hid_codes text[];
 begin
   if requested_patient_id is null or requested_reason is null
      or requested_reason not in ('account_deleted', 'erasure_request') then
     raise exception using errcode = '22023', message = 'Invalid contact erasure request';
   end if;
+  perform identity.assert_facility_contact_eraser();
   update identity.registration_case_contacts contact
      set phone_ciphertext = null, address_ciphertext = null, key_version = null, stated_hid_code = null,
          erased_at = erased_moment, erasure_reason = requested_reason
@@ -823,6 +875,18 @@ begin
          erased_at = erased_moment, erasure_reason = requested_reason
    where copied.patient_id = requested_patient_id and copied.erased_at is null;
   get diagnostics erased_facility = row_count;
+  select coalesce(array_agg(distinct code), '{}'::text[]) into patient_hid_codes
+    from (
+      select upper(patient.hid_code) as code from identity.patients patient where patient.id = requested_patient_id
+      union all
+      select upper(identifier.public_value) from identity.patient_identifiers identifier
+       where identifier.patient_id = requested_patient_id and identifier.identifier_type = 'hid_code'
+         and identifier.public_value is not null
+    ) codes;
+  update identity.registration_case_contacts contact
+     set stated_hid_code = null
+   where contact.erased_at is null and contact.stated_hid_code = any (patient_hid_codes);
+  get diagnostics removed_stated = row_count;
   insert into audit.events (
     correlation_id, actor_type, patient_id, action, outcome, resource_type, resource_id,
     purpose_of_use, provenance, source_system, details
@@ -832,12 +896,63 @@ begin
     case when requested_reason = 'account_deleted' then 'patient-self' else 'healthcare-operations' end,
     'application', 'identity-api',
     jsonb_build_object('reason', requested_reason, 'facilityContacts', erased_facility,
+      'registrationContacts', erased_registration, 'statedHealthIds', removed_stated)
+  );
+  return query select erased_facility, erased_registration, removed_stated;
+end;
+$$;
+revoke all on function identity.erase_patient_facility_contacts(uuid, text) from public;
+
+-- identity.erase_registration_case_contact erases one case's contact by case:
+-- for a case that never became a patient (rejected, cancelled or never
+-- reviewed), which no patient erasure reaches. It also erases that case's
+-- facility copy, if one exists. Only for an NDPA erasure request
+-- ('erasure_request'), run by Health ID support through the owner. Never
+-- granted to a runtime role. Its audit row holds only the counts.
+create function identity.erase_registration_case_contact(requested_case_id uuid, requested_reason text)
+returns table (facility_contacts integer, registration_contacts integer)
+language plpgsql security definer
+set search_path = pg_catalog, identity, audit, platform, pg_temp
+as $$
+declare
+  erased_facility integer;
+  erased_registration integer;
+  erased_moment timestamptz := clock_timestamp();
+  case_facility uuid;
+  case_patient uuid;
+begin
+  if requested_case_id is null or requested_reason is distinct from 'erasure_request' then
+    raise exception using errcode = '22023', message = 'Invalid contact erasure request';
+  end if;
+  perform identity.assert_facility_contact_eraser();
+  select contact.facility_id into case_facility from identity.registration_case_contacts contact
+   where contact.registration_case_id = requested_case_id;
+  select copied.patient_id into case_patient from identity.patient_facility_contacts copied
+   where copied.registration_case_id = requested_case_id;
+  update identity.patient_facility_contacts copied
+     set phone_ciphertext = null, address_ciphertext = null, key_version = null,
+         erased_at = erased_moment, erasure_reason = requested_reason
+   where copied.registration_case_id = requested_case_id and copied.erased_at is null;
+  get diagnostics erased_facility = row_count;
+  update identity.registration_case_contacts contact
+     set phone_ciphertext = null, address_ciphertext = null, key_version = null, stated_hid_code = null,
+         erased_at = erased_moment, erasure_reason = requested_reason
+   where contact.registration_case_id = requested_case_id and contact.erased_at is null;
+  get diagnostics erased_registration = row_count;
+  insert into audit.events (
+    correlation_id, actor_type, facility_id, patient_id, action, outcome, resource_type, resource_id,
+    purpose_of_use, provenance, source_system, details
+  ) values (
+    coalesce(platform.current_correlation_id(), gen_random_uuid()::text), 'system', case_facility, case_patient,
+    'identity.registration-case-contact.erase', 'success', 'registration-case', requested_case_id::text,
+    'healthcare-operations', 'application', 'identity-api',
+    jsonb_build_object('reason', requested_reason, 'facilityContacts', erased_facility,
       'registrationContacts', erased_registration)
   );
   return query select erased_facility, erased_registration;
 end;
 $$;
-revoke all on function identity.erase_patient_facility_contacts(uuid, text) from public;
+revoke all on function identity.erase_registration_case_contact(uuid, text) from public;
 
 -- Account deletion (0096) erases them when it completes, as it erases the
 -- patient's emergency contacts. No 0096 function body is replaced.
@@ -890,7 +1005,9 @@ comment on table identity.registration_case_contacts is
 comment on table identity.patient_facility_contacts is
   '0114: a patient''s phone and address as a facility''s registration desk recorded them (encrypted, unverified, facility-held); never used for sign-in or recovery; erased on account deletion or an erasure request.';
 comment on function identity.erase_patient_facility_contacts(uuid, text) is
-  '0114: owner-only NDPA erasure of every facility-held contact of a patient (account deletion or an erasure request); audited with counts only.';
+  '0114: owner-only NDPA erasure of every facility-held contact of a patient (account deletion or an erasure request), and removal of the patient''s Health ID from other cases that stated it; audited with counts only.';
+comment on function identity.erase_registration_case_contact(uuid, text) is
+  '0114: owner-only NDPA erasure of one registration case''s contact and its facility copy, for a case that never became a patient (erasure request); audited with counts only.';
 comment on function identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text,jsonb,text,bytea,text) is
   '0114: 0086''s facility sign-up code, with the facility profile and the applicant''s role and encrypted phone stored with the code it sends.';
 comment on function identity.read_facility_profile() is

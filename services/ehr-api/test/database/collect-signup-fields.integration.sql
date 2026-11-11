@@ -20,7 +20,10 @@
 --      only there; the runtime cannot change, erase or delete either;
 --   5. erasure (NDPA): only the owner erases; only the erasable values change,
 --      once; the row stays; an erased contact is never copied again; a
---      completed account deletion erases the patient's contacts.
+--      completed account deletion erases the patient's contacts and removes
+--      their Health ID (and only that) from another person's case that
+--      stated it; a case that never became a patient is erased by case; an
+--      erasure function whose owner does not own the tables refuses.
 begin;
 
 do $$
@@ -423,6 +426,11 @@ begin
     raise exception 'The runtime ran the owner-only erasure';
   exception when insufficient_privilege then null;
   end;
+  begin
+    perform identity.erase_registration_case_contact('c1227000-0000-4000-8000-000000000001', 'erasure_request');
+    raise exception 'The runtime ran the owner-only erasure by case';
+  exception when insufficient_privilege then null;
+  end;
 end $$;
 -- Another facility's administrator reads nothing, and cannot add a contact to
 -- facility 1's case.
@@ -470,7 +478,7 @@ begin
   end;
   select * into erased from identity.erase_patient_facility_contacts('c1220600-0000-4000-8000-000000000001',
     'erasure_request');
-  if erased.facility_contacts <> 1 or erased.registration_contacts <> 1 then
+  if erased.facility_contacts <> 1 or erased.registration_contacts <> 1 or erased.stated_health_ids <> 0 then
     raise exception 'The erasure did not reach both rows: %', row_to_json(erased);
   end if;
   if exists (select 1 from identity.patient_facility_contacts
@@ -483,7 +491,7 @@ begin
     raise exception 'The erasure left a value or removed the row';
   end if;
   if not exists (select 1 from audit.events where action = 'identity.patient-facility-contact.erase'
-                  and details = '{"reason": "erasure_request", "facilityContacts": 1, "registrationContacts": 1}'::jsonb) then
+                  and details = '{"reason": "erasure_request", "facilityContacts": 1, "registrationContacts": 1, "statedHealthIds": 0}'::jsonb) then
     raise exception 'The erasure was not audited with counts only';
   end if;
   begin
@@ -494,7 +502,7 @@ begin
   -- Nothing is left to erase: a second request erases nothing.
   select * into erased from identity.erase_patient_facility_contacts('c1220600-0000-4000-8000-000000000001',
     'erasure_request');
-  if erased.facility_contacts <> 0 or erased.registration_contacts <> 0 then
+  if erased.facility_contacts <> 0 or erased.registration_contacts <> 0 or erased.stated_health_ids <> 0 then
     raise exception 'A second erasure changed rows';
   end if;
 end $$;
@@ -533,6 +541,21 @@ begin
   values ('c1220600-0000-4000-8000-000000000002', current_setting('hid.test.c_facility_1')::uuid,
     'c1227000-0000-4000-8000-000000000002', phone, address, 'v1', current_setting('hid.test.c_account_1')::uuid,
     current_setting('hid.test.c_membership_1')::uuid);
+  -- A third person's case, never reviewed (no patient), that stated the other
+  -- patient's Health ID (in lower case, as typed; Identity upper-cases it).
+  insert into identity.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, status,
+    first_name, last_name, full_name, dob, nin_ciphertext, nin_lookup_hmac, nin_last4, nin_key_version,
+    verification_provider, verification_reference, verified_at, idempotency_key, request_sha256)
+  values ('c1227000-0000-4000-8000-000000000003', current_setting('hid.test.c_facility_1')::uuid,
+    current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid,
+    'review_required', 'Third', 'Person', 'Third Person', '1992-01-01', decode(repeat('00', 40), 'hex'),
+    encode(sha256('collect-nin-3'::bytea), 'hex'), '0003', 'v1', 'fixture', 'ref-3', clock_timestamp(),
+    'collect-case-key-0003', encode(sha256('collect-case-3'::bytea), 'hex'));
+  insert into identity.registration_case_contacts (registration_case_id, facility_id, phone_ciphertext,
+    address_ciphertext, key_version, stated_hid_code, created_by_account_id, created_by_membership_id)
+  values ('c1227000-0000-4000-8000-000000000003', current_setting('hid.test.c_facility_1')::uuid,
+    decode(repeat('66', 40), 'hex'), decode(repeat('77', 60), 'hex'), 'v1', upper('hid-clctac'),
+    current_setting('hid.test.c_account_1')::uuid, current_setting('hid.test.c_membership_1')::uuid);
 end $$;
 reset role;
 insert into auth.accounts (id, subject, email, display_name, status) values
@@ -560,6 +583,87 @@ do $$ begin
      or exists (select 1 from identity.registration_case_contacts
               where registration_case_id = 'c1227000-0000-4000-8000-000000000002' and erased_at is null) then
     raise exception 'A completed account deletion did not erase the facility contacts';
+  end if;
+  -- The third person's case lost only the deleted patient's Health ID.
+  if not exists (select 1 from identity.registration_case_contacts
+                  where registration_case_id = 'c1227000-0000-4000-8000-000000000003'
+                    and stated_hid_code is null and erased_at is null and erasure_reason is null
+                    and phone_ciphertext = decode(repeat('66', 40), 'hex')
+                    and address_ciphertext = decode(repeat('77', 60), 'hex') and key_version = 'v1') then
+    raise exception 'The deleted patient''s Health ID stayed on another case, or that case lost more';
+  end if;
+  if not exists (select 1 from audit.events where action = 'identity.patient-facility-contact.erase'
+                  and patient_id = 'c1220600-0000-4000-8000-000000000002'
+                  and details = '{"reason": "account_deleted", "facilityContacts": 1, "registrationContacts": 1, "statedHealthIds": 1}'::jsonb) then
+    raise exception 'The account-deletion erasure was not audited with counts only';
+  end if;
+end $$;
+
+-- Only the stated Health ID alone may be removed; nothing else changes
+-- without erasure.
+do $$ begin
+  begin
+    update identity.registration_case_contacts set key_version = 'v9'
+     where registration_case_id = 'c1227000-0000-4000-8000-000000000003';
+    raise exception 'A case contact was changed without erasure';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+
+-- A case that never became a patient is erased by case (an erasure request
+-- only); a second run erases nothing.
+do $$
+declare erased record;
+begin
+  begin
+    perform identity.erase_registration_case_contact('c1227000-0000-4000-8000-000000000003', 'account_deleted');
+    raise exception 'An erasure by case ran for an account deletion';
+  exception when invalid_parameter_value then null;
+  end;
+  select * into erased from identity.erase_registration_case_contact('c1227000-0000-4000-8000-000000000003',
+    'erasure_request');
+  if erased.facility_contacts <> 0 or erased.registration_contacts <> 1 then
+    raise exception 'The erasure by case did not erase the case contact: %', row_to_json(erased);
+  end if;
+  if not exists (select 1 from identity.registration_case_contacts
+                  where registration_case_id = 'c1227000-0000-4000-8000-000000000003'
+                    and phone_ciphertext is null and address_ciphertext is null and key_version is null
+                    and stated_hid_code is null and erased_at is not null and erasure_reason = 'erasure_request') then
+    raise exception 'The erasure by case left a value or removed the row';
+  end if;
+  if not exists (select 1 from audit.events where action = 'identity.registration-case-contact.erase'
+                  and resource_id = 'c1227000-0000-4000-8000-000000000003' and patient_id is null
+                  and facility_id = current_setting('hid.test.c_facility_1')::uuid
+                  and details = '{"reason": "erasure_request", "facilityContacts": 0, "registrationContacts": 1}'::jsonb) then
+    raise exception 'The erasure by case was not audited with counts only';
+  end if;
+  select * into erased from identity.erase_registration_case_contact('c1227000-0000-4000-8000-000000000003',
+    'erasure_request');
+  if erased.facility_contacts <> 0 or erased.registration_contacts <> 0 then
+    raise exception 'A second erasure by case changed rows';
+  end if;
+end $$;
+
+-- An erasure function whose owner does not own the contact tables (an owner
+-- changed later) refuses instead of erasing nothing. Needs a superuser to
+-- change the owner; skipped otherwise.
+do $$
+declare refused boolean := false;
+begin
+  if not (select rolsuper from pg_roles where rolname = current_user) then
+    return;
+  end if;
+  create role hid_collect_suite_other_owner nologin;
+  grant usage on schema identity, audit, platform to hid_collect_suite_other_owner;
+  grant execute on function identity.assert_facility_contact_eraser() to hid_collect_suite_other_owner;
+  alter function identity.erase_registration_case_contact(uuid, text) owner to hid_collect_suite_other_owner;
+  begin
+    perform identity.erase_registration_case_contact('c1227000-0000-4000-8000-000000000001', 'erasure_request');
+  exception when insufficient_privilege then
+    refused := sqlerrm = 'Facility-held contacts can only be erased by the owner of their tables';
+  end;
+  if not refused then
+    raise exception 'An erasure run by a role that does not own the tables did not refuse';
   end if;
 end $$;
 

@@ -4013,8 +4013,13 @@ Deletion rule (NDPA): this data is never changed and never deleted, except by **
 encrypted phone and address, their key version and the stated Health ID are set to null and the
 erasure time and reason are recorded. Erasure happens for every facility's copy when the
 patient's account deletion completes (0096), and on an NDPA erasure request, which Health ID
-support has run through the database owner (`identity.erase_patient_facility_contacts`). A
-case that never resolved to a patient is kept with the case.
+support has run through the database owner (`identity.erase_patient_facility_contacts`). The
+same erasure removes the patient's Health ID from any other person's case that stated it (for
+example by a typo); that person's own phone and address stay. A case that never became a
+patient (rejected, cancelled or never reviewed) is erased by case on an NDPA erasure request
+(`identity.erase_registration_case_contact`, run through the database owner). Both erasures
+refuse to run, rather than erase nothing, if they are not run as the owner of the contact
+tables.
 
 The Idempotency-Key is bound to all of these fields. A retry with a different phone, address or
 stated Health ID under the same key is refused (409 `IDEMPOTENCY_KEY_REUSED`).

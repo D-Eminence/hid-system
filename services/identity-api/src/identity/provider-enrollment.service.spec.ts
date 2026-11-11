@@ -596,3 +596,38 @@ describe('a database refusal when the application is submitted', () => {
     }
   });
 });
+
+describe('the collected-field key at sign-up start (0114)', () => {
+  afterEach(() => jest.restoreAllMocks());
+  const oldBody = {
+    productCode: 'ehr' as const, organizationType: 'clinic' as const, cacRegistrationNumber: 'RC1234567',
+    administratorName: 'Synthetic Provider Admin', administratorEmail: 'provider@example.invalid',
+    turnstileAction: 'provider-enrollment' as const, turnstileToken: 'opaque-proof',
+  };
+  const verified = {
+    state: 'verified', providerReference: '990072', verifiedRegistrationNumber: 'RC1234567',
+    cacBinding: { registrationNumber: 'RC1234567', providerRegistrationNumber: '1234567',
+      companyName: 'Synthetic Clinic Ltd', entityType: 'Private Company Limited by Shares',
+      registrationDate: '2021-01-01', address: '1 Synthetic Registry Road, Lagos', registryStatus: 'ACTIVE' },
+  };
+
+  it('does not need the key for the old body (the live website keeps working without it)', async () => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue(testEnvironment({ NIN_ENCRYPTION_KEY_B64: undefined }));
+    const { service, completion, qoreid } = setup();
+    qoreid.verifyCac.mockResolvedValue(verified);
+    await expect(service.start(oldBody, request('203.0.113.44'))).resolves.toMatchObject({ accepted: true });
+    expect(completion.start).toHaveBeenCalledWith(expect.anything(), '203.0.113.44', 'provider-enrollment-test',
+      { publicApplicationQuotaCharged: true,
+        selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic' } });
+  });
+
+  it('refuses a body with the new fields 503 COLLECTED_FIELDS_UNAVAILABLE without the key, before anything is charged', async () => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue(testEnvironment({ NIN_ENCRYPTION_KEY_B64: undefined }));
+    const { service, query, completion, qoreid } = setup();
+    await expect(service.start(input, request('203.0.113.44')))
+      .rejects.toMatchObject({ status: 503, code: 'COLLECTED_FIELDS_UNAVAILABLE' });
+    expect(query).not.toHaveBeenCalled();
+    expect(qoreid.verifyCac).not.toHaveBeenCalled();
+    expect(completion.start).not.toHaveBeenCalled();
+  });
+});
