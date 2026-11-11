@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { DataAccessContext } from '../../common/request-context';
 import { OrderStatus } from '../shared/clinical.dto';
 import { PrescriptionsService } from '../prescriptions/prescriptions.service';
@@ -190,5 +192,125 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
     await service.create(context, patientId, encounterId, input, 'key-12345678');
     const result = await repository.executeCreate.mock.results[0]?.value;
     expect(result.details).toEqual({ idempotentReplay: false });
+  });
+});
+
+describe('an allergy marked entered in error stops warning (0124)', () => {
+  const otherAllergyId = '123e4567-e89b-42d3-a456-426614174011';
+  const otherMembershipId = '123e4567-e89b-42d3-a456-426614174098';
+  const otherContext = { ...context, facilityId: otherFacilityId, membershipId: otherMembershipId } as DataAccessContext;
+  const amoxicillin = { medicationDisplay: 'Amoxicillin 500 mg', frequency: 'Three times daily', instructions: 'After food',
+    status: OrderStatus.Active };
+  const prescriptionRow = { id: '123e4567-e89b-42d3-a456-426614174020', encounterId, patientId, facilityId };
+  const noRoutes = { summaries: async () => new Map(), summary: async () => null, crossFacilityOrdersEnabled: async () => false };
+  const checkRead = /^\s*select id, substance, reaction, severity from ehr\.recorded_allergies/;
+
+  /**
+   * A client that holds the patient's recorded allergies and answers the services' reads and
+   * their one update the way the database would. A read keeps only active allergies when its SQL
+   * says status = 'active', and every allergy otherwise, so if the allergy check stopped filtering
+   * on status these tests would see the allergy marked entered in error come back and fail.
+   */
+  function recordedAllergiesClient(rows: ReturnType<typeof allergyRow>[]) {
+    const calls: { sql: string; values: unknown[] }[] = [];
+    const query = jest.fn(async (sql: string, values: unknown[] = []) => {
+      calls.push({ sql, values });
+      if (/^\s*update ehr\.recorded_allergies/.test(sql)) {
+        const [by, reason, id, patient, facility, version] = values;
+        const row = rows.find((candidate) => candidate.id === id && candidate.patientId === patient
+          && candidate.facilityId === facility && Number(candidate.rowVersion) === version
+          && candidate.status === 'active');
+        if (!row) return { rows: [], rowCount: 0 };
+        Object.assign(row, { status: 'entered_in_error', enteredInErrorBy: by, enteredInErrorReason: reason,
+          enteredInErrorAt: new Date(), rowVersion: String(Number(row.rowVersion) + 1) });
+        return { rows: [{ ...row }], rowCount: 1 };
+      }
+      if (/from ehr\.recorded_allergies/.test(sql)) {
+        const byId = /where id = \$1 and patient_id = \$2/.test(sql);
+        const activeOnly = /status = 'active'/.test(sql);
+        const found = rows.filter((row) => (byId ? row.id === values[0] && row.patientId === values[1]
+          : row.patientId === values[0]) && (!activeOnly || row.status === 'active'));
+        return { rows: found.map((row) => ({ ...row })), rowCount: found.length };
+      }
+      if (/insert into ehr\.prescriptions/.test(sql)) return { rows: [prescriptionRow], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    return { client: { query }, calls };
+  }
+
+  function services(rows: ReturnType<typeof allergyRow>[]) {
+    const fake = recordedAllergiesClient(rows);
+    const repository = repositoryWith(fake.client);
+    return {
+      allergies: new AllergiesService(repository as never),
+      prescriptions: new PrescriptionsService(repository as never, {} as never, noRoutes as never),
+      calls: fake.calls,
+    };
+  }
+  const markedInError = { expectedRowVersion: 1, reason: 'Recorded on the wrong patient' };
+
+  it('warns for Amoxicillin 500 mg against a Penicillin allergy, and stops once it is marked entered in error here', async () => {
+    const { allergies, prescriptions, calls } = services([
+      allergyRow({ substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe' })]);
+    const before = await allergies.check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
+    expect(before.acknowledgementRequired).toBe(true);
+    expect(before.matches).toEqual([expect.objectContaining({ allergyId, substance: 'Penicillin', matchKind: 'same_class' })]);
+    await expect(prescriptions.create(context, patientId, encounterId, amoxicillin, 'key-12345678'))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED' });
+
+    const marked = await allergies.markEnteredInError(context, patientId, allergyId, markedInError);
+    expect(marked.status).toBe('entered_in_error');
+
+    const after = await allergies.check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
+    expect(after).toEqual({ matches: [], acknowledgementRequired: false });
+    await expect(prescriptions.create(context, patientId, encounterId, amoxicillin, 'key-12345679'))
+      .resolves.toMatchObject({ id: prescriptionRow.id });
+    expect(calls.some((call) => /prescription_allergy_acknowledgements/.test(call.sql))).toBe(false);
+  });
+
+  it('stops warning here once an allergy recorded at another facility is marked entered in error there', async () => {
+    const { allergies, prescriptions } = services([allergyRow({ id: otherAllergyId, facilityId: otherFacilityId,
+      createdByMembershipId: otherMembershipId, substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe' })]);
+    const before = await allergies.check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
+    expect(before.matches).toEqual([expect.objectContaining({ allergyId: otherAllergyId, substance: 'Penicillin' })]);
+    // This facility cannot mark it, so it keeps warning here.
+    await expect(allergies.markEnteredInError(context, patientId, otherAllergyId, markedInError))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_RECORDED_ELSEWHERE' });
+    expect((await allergies.check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' })).acknowledgementRequired)
+      .toBe(true);
+
+    await allergies.markEnteredInError(otherContext, patientId, otherAllergyId, markedInError);
+
+    const after = await allergies.check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
+    expect(after).toEqual({ matches: [], acknowledgementRequired: false });
+    await expect(prescriptions.create(context, patientId, encounterId, amoxicillin, 'key-12345678'))
+      .resolves.toMatchObject({ id: prescriptionRow.id });
+  });
+
+  it('keeps warning for an active allergy beside one entered in error, and names only the active one', async () => {
+    const { allergies } = services([
+      allergyRow({ substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe', status: 'entered_in_error',
+        enteredInErrorBy: accountId, enteredInErrorAt: new Date(), enteredInErrorReason: 'Recorded on the wrong patient',
+        rowVersion: '2' }),
+      allergyRow({ id: otherAllergyId, substance: 'Amoxicillin', reaction: 'Hives', severity: 'moderate' }),
+    ]);
+    const result = await allergies.check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
+    expect(result.matches.map((match) => match.allergyId)).toEqual([otherAllergyId]);
+  });
+
+  it('runs, in the database suite, the same read the check sends', async () => {
+    const { allergies, calls } = services([]);
+    await allergies.check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
+    const sent = calls.find((call) => checkRead.test(call.sql));
+    expect(sent?.values).toEqual([patientId]);
+    const words = (text: string) => text.replace(/\s+/g, ' ').trim();
+    // The database suite shows, under row-level security, that this read stops returning an
+    // allergy once it is marked entered in error; it must keep testing the read the code sends.
+    const suite = readFileSync(
+      join(__dirname, '../../../test/database/recorded-allergies-entered-in-error.integration.sql'), 'utf8');
+    const suiteRead = /create function pg_temp\.allergies_for_check\(uuid\)[\s\S]*?as \$\$([\s\S]*?)\$\$/
+      .exec(suite)?.[1];
+    expect(words(suiteRead ?? 'pg_temp.allergies_for_check is missing'))
+      .toBe(words(sent?.sql ?? 'no allergy read was sent'));
   });
 });
