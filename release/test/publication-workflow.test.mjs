@@ -220,7 +220,7 @@ test('forbidden workflow paths are rejected statically', () => {
     'Go set up before the audit': [(w) => { const steps = w.jobs.tooling.steps; move(steps, setupGo(steps), 'audit') }, BEFORE_AUDIT],
     'publisher Go cache turned on': [(w) => { setupGo(w.jobs.tooling.steps).with.cache = true }, /the publisher tooling job restores no Go cache/],
     'publisher Go cache input dropped': [(w) => { delete setupGo(w.jobs.tooling.steps).with.cache }, /the publisher tooling job restores no Go cache/],
-    'second publisher Go setup with a cache': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.indexOf(setupGo(steps)) + 1, 0, { uses: setupGo(steps).uses, with: { 'go-version': '1.26.10', cache: true } }) }, /the publisher tooling job restores no Go cache/],
+    'second publisher Go setup with a cache': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.indexOf(setupGo(steps)) + 1, 0, { uses: setupGo(steps).uses, with: { 'go-version': '1.26.11', cache: true } }) }, /the publisher tooling job restores no Go cache/],
     'npm cache restored for the tooling': [(w) => { setupNode(w.jobs.tooling.steps).with['package-manager-cache'] = true }, NPM_CACHE],
     'tooling checked out again after the audit': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.findIndex(s => s.id === 'audit') + 1, 0, structuredClone(checkout(steps))) }, ONE_CHECKOUT],
   }

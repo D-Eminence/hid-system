@@ -45,7 +45,7 @@ jobs:
           node release/scripts/npm-audit-with-exceptions.mjs infra/aws
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: 1.26.10
+          go-version: 1.26.11
           check-latest: false
           cache: false
       - name: Install locked tooling without cloud authority
