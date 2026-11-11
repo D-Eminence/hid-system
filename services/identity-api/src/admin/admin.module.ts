@@ -13,12 +13,17 @@ import { PublicPricingController } from './public-pricing.controller';
 import { AdminOrderRouteCommandsController, AdminOrderRouteReadsController } from './order-routes.controller';
 import { AdminOrderRoutesService } from './order-routes.service';
 import { HealthIdInUrlRefusalModule } from './health-id-in-url';
+import { AdminOcrUsageController } from './ocr-usage.controller';
+import { AdminOcrUsageService } from './ocr-usage.service';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IdentityModule, PatientSafetyModule, HealthIdInUrlRefusalModule],
   controllers: [AdminController, PublicPricingController, IntegrationAdminController,
     // Orders between facilities (P4c): support's summary, listing, lookup and close.
-    AdminOrderRouteReadsController, AdminOrderRouteCommandsController],
-  providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService, AdminOrderRoutesService],
+    AdminOrderRouteReadsController, AdminOrderRouteCommandsController,
+    // OCR page allowance and monthly use per facility (migration 0107).
+    AdminOcrUsageController],
+  providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService, AdminOrderRoutesService,
+    AdminOcrUsageService],
 })
 export class AdminModule {}

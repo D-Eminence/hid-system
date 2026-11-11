@@ -6,15 +6,15 @@
       "directory": "infra/aws",
       "id": "GHSA-g3hv-75wg-m249",
       "package": "minimatch",
-      "vulnerable_range": "<11.0.1",
+      "vulnerable_range": ">=7.0.0 <11.0.1",
       "severity": "moderate",
       "paths": [
         "node_modules/aws-cdk-lib/node_modules/minimatch"
       ],
       "justification": "Denial of service through crafted glob patterns (globparts amplification, CWE-405). This minimatch (10.2.5) is bundled inside aws-cdk-lib 2.273.0 and runs only while CDK synthesizes infra/aws, in three places: asset exclude patterns (IgnoreStrategy), the bundling-stacks context patterns (Stack.bundlingRequired) and construct-id selectors. The patterns come from this repository's source and CDK context, and the strings matched are this repository's construct paths and asset file paths, so no outside input reaches minimatch. infra/aws is not copied into any runtime image, its node_modules are not in the TUF publication tooling archive, and its one Lambda asset (runtime/workload-issuer) is two source files with no CDK code. The worst case is a slow synth on a developer or CI machine.",
       "fix_status": "No fix available. aws-cdk-lib 2.273.0 (pinned), 2.274.0 and 2.275.0 (latest on 2026-11-01) bundle minimatch ^10.2.5 or ^10.2.6, below the fixed 11.0.1, and npm overrides cannot replace a bundled dependency. Remove this entry when infra/aws moves to an aws-cdk-lib release that bundles minimatch 11.0.1 or later.",
-      "approved_by": "D-Eminence (in chat, 2026-11-01)",
-      "approved_at": "2026-11-01",
+      "approved_by": "D-Eminence (in chat, 2026-11-01; re-approved for the reworded range in chat, 2026-11-04: \"Q32 yes\")",
+      "approved_at": "2026-11-04",
       "expires_at": "2026-12-01"
     }
   ]

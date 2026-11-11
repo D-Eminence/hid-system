@@ -255,3 +255,202 @@ describe('DocumentService.complete: a replayed complete', () => {
       code: 'INVALID_DOCUMENT_TRANSITION', status: 409 });
   });
 });
+
+// The document scanner (0105): resolve, the work list and scan-events, through
+// the isolated workload pool, and what downstream serves after a clean scan
+// under the detected type (owner decision D3).
+describe('DocumentService: the document scanner', () => {
+  const scanner = { subject: 'hid:staging:document-scanner', accountId: 'd0c5ca40-0105-4000-8000-000000000001' };
+  const bucket = 'hid-staging-documents-a1b2c3';
+  const storageKey = 'clinical/objects/0c9e8a7b-6d5c-4b3a-9f8e-7d6c5b4a3f2e';
+  const target = { storageBucket: bucket, storageKey, objectVersionId };
+
+  function scannerHarness(rows: Record<string, unknown>[] = []) {
+    const events: string[] = [];
+    const client = { query: jest.fn(async (sql: string, params: unknown[]) => {
+      events.push(`query ${sql.includes('resolve_document_scan_target') ? 'resolve'
+        : sql.includes('list_documents_awaiting_scan') ? 'list' : 'append'}`);
+      void params;
+      return { rows, rowCount: rows.length };
+    }) };
+    const database = {
+      withWorkloadTransaction: jest.fn(async (_subject: string, _correlation: string,
+        operation: (value: typeof client) => Promise<unknown>) => {
+        events.push('begin');
+        try { return await operation(client); } finally { events.push('end'); }
+      }),
+    };
+    const storage = {
+      bucket: jest.fn(() => bucket),
+      readPrefix: jest.fn(async () => { events.push('readPrefix'); return Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]); }),
+    };
+    const service = new DocumentService(database as never, {} as never, {} as never, storage as never);
+    return { service, client, database, storage, events };
+  }
+  const resolvedRow = {
+    document_id: documentId, object_version_id: objectVersionId, sha256_hex: sha256Hex, status: 'uploaded',
+    declared_media_type: 'application/pdf', latest_event_type: null,
+  };
+
+  it('resolves through the scanner pool, then reads 1 KB of the bound version outside the transaction', async () => {
+    const { service, client, database, storage, events } = scannerHarness([resolvedRow]);
+    await expect(service.resolveScanTarget(target, scanner, 'gdmp-correlation-0001')).resolves.toStrictEqual({
+      documentId, objectVersionId, sha256Hex, status: 'uploaded', declaredMediaType: 'application/pdf',
+      latestEventType: null, sniffResult: 'supported', sniffedMediaType: 'image/jpeg',
+    });
+    expect(database.withWorkloadTransaction).toHaveBeenCalledWith(scanner.subject, 'gdmp-correlation-0001',
+      expect.any(Function));
+    expect(client.query.mock.calls[0]?.[1]).toEqual([bucket, storageKey, objectVersionId, 'gdmp-correlation-0001']);
+    expect(client.query.mock.calls[0]?.[0]).toMatch(/from ehr\.resolve_document_scan_target\(\$1, \$2, \$3, \$4\)/);
+    expect(storage.readPrefix).toHaveBeenCalledWith(storageKey, objectVersionId, 1024);
+    expect(events).toEqual(['begin', 'query resolve', 'end', 'readPrefix']);
+  });
+
+  it('says unsupported when the bytes are none of the four types, and unavailable when they cannot be read', async () => {
+    const first = scannerHarness([resolvedRow]);
+    first.storage.readPrefix.mockResolvedValueOnce(Uint8Array.from(Buffer.from('<html>')));
+    await expect(first.service.resolveScanTarget(target, scanner, 'gdmp-correlation-0001')).resolves
+      .toMatchObject({ sniffResult: 'unsupported', sniffedMediaType: null });
+    const second = scannerHarness([resolvedRow]);
+    second.storage.readPrefix.mockRejectedValueOnce(Object.assign(new Error('Access Denied'), { name: 'AccessDenied' }));
+    await expect(second.service.resolveScanTarget(target, scanner, 'gdmp-correlation-0001')).resolves
+      .toMatchObject({ sniffResult: 'unavailable', sniffedMediaType: null, documentId });
+  });
+
+  it('answers 404 for another bucket without a database call or a read', async () => {
+    const { service, database, storage } = scannerHarness([resolvedRow]);
+    await expect(service.resolveScanTarget({ ...target, storageBucket: 'someone-elses-bucket' }, scanner,
+      'gdmp-correlation-0001')).rejects.toMatchObject({ status: 404, code: 'DOCUMENT_NOT_FOUND' });
+    expect(database.withWorkloadTransaction).not.toHaveBeenCalled();
+    expect(storage.readPrefix).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['P0002', 'Document not found', 404, 'DOCUMENT_NOT_FOUND'],
+    ['55000', 'Only an uploaded document can be scanned', 409, 'DOCUMENT_NOT_UPLOADED'],
+    ['55000', 'Document is no longer awaiting a scan', 409, 'DOCUMENT_NOT_SCANNABLE'],
+    ['55000', 'Scan result does not match the current immutable document object', 409, 'OBJECT_VERSION_MISMATCH'],
+    ['55000', 'Document object scan has already reached a terminal result', 409, 'SCAN_ALREADY_TERMINAL'],
+    ['42501', 'Authorized document scanner context is required', 403, 'DOCUMENT_SCANNER_FORBIDDEN'],
+    ['22023', 'Invalid document scan target', 400, 'INVALID_SCAN_REQUEST'],
+  ])('answers a resolve refused with %s "%s" as %i %s, and reads nothing', async (sqlstate, message, status, code) => {
+    const { service, client, storage } = scannerHarness([resolvedRow]);
+    client.query.mockRejectedValueOnce(Object.assign(new Error(message), { code: sqlstate }));
+    await expect(service.resolveScanTarget(target, scanner, 'gdmp-correlation-0001')).rejects
+      .toMatchObject({ status, code });
+    expect(storage.readPrefix).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['23505', 'Scanner idempotency key payload mismatch', 409, 'SCAN_IDEMPOTENCY_CONFLICT'],
+    ['55000', 'Document object scan has already reached a terminal result', 409, 'SCAN_ALREADY_TERMINAL'],
+    ['55000', 'Only an uploaded document can be scanned', 409, 'DOCUMENT_NOT_UPLOADED'],
+    ['55000', 'Scan result does not match the current immutable document object', 409, 'OBJECT_VERSION_MISMATCH'],
+    ['P0002', 'Document not found', 404, 'DOCUMENT_NOT_FOUND'],
+    ['42501', 'Authorized document scanner context is required', 403, 'DOCUMENT_SCANNER_FORBIDDEN'],
+    ['22023', 'A supported detected media type is required for a clean scan', 400, 'INVALID_SCAN_REQUEST'],
+  ])('answers a scan event refused with %s "%s" as %i %s instead of 500', async (sqlstate, message, status, code) => {
+    const { service, client } = scannerHarness();
+    client.query.mockRejectedValueOnce(Object.assign(new Error(message), { code: sqlstate }));
+    await expect(service.recordScan({
+      documentId, objectVersionId, objectSha256Hex: sha256Hex, eventType: 'clean', detectedMediaType: 'image/jpeg',
+      scannerEngine: 'aws-guardduty-malware-protection-s3', scannerVersion: '1.0',
+      idempotencyKey: 'gdmp-0123456789abcdef0123456789abcdef0123456789abcdef',
+    }, scanner, 'gdmp-correlation-0001')).rejects.toMatchObject({ status, code });
+  });
+
+  it('keeps any other database failure a 500 (the original error)', async () => {
+    const { service, client } = scannerHarness();
+    const failure = Object.assign(new Error('terminating connection'), { code: '57P01' });
+    client.query.mockRejectedValueOnce(failure);
+    await expect(service.recordScan({
+      documentId, objectVersionId, objectSha256Hex: sha256Hex, eventType: 'scan_started',
+      scannerEngine: 'aws-guardduty-malware-protection-s3', scannerVersion: '1.0',
+      idempotencyKey: 'gdod-0123456789abcdef0123456789abcdef0123456789abcdef-1',
+    }, scanner, 'gdmp-correlation-0001')).rejects.toBe(failure);
+  });
+
+  it('records a scan event with the bridge\'s values and answers its event ID', async () => {
+    const { service, client } = scannerHarness([{ event_id: 'event-1' }]);
+    await expect(service.recordScan({
+      documentId, objectVersionId, objectSha256Hex: sha256Hex, eventType: 'clean', detectedMediaType: 'image/jpeg',
+      scannerEngine: 'aws-guardduty-malware-protection-s3', scannerVersion: '1.0',
+      idempotencyKey: 'gdmp-0123456789abcdef0123456789abcdef0123456789abcdef',
+    }, scanner, 'gdmp-correlation-0001')).resolves.toEqual({ eventId: 'event-1' });
+    expect(client.query.mock.calls[0]?.[1]).toEqual([documentId, objectVersionId, sha256Hex, 'clean', 'image/jpeg',
+      'aws-guardduty-malware-protection-s3', '1.0', null, 'gdmp-0123456789abcdef0123456789abcdef0123456789abcdef',
+      'gdmp-correlation-0001']);
+  });
+
+  it('lists the work list with ISO times and no patient or facility field', async () => {
+    const { service, client } = scannerHarness([{
+      document_id: documentId, storage_bucket: bucket, storage_key: storageKey, object_version_id: objectVersionId,
+      sha256_hex: sha256Hex, declared_media_type: 'image/png', updated_at: new Date('2026-10-31T09:00:00Z'),
+      latest_event_type: 'scan_started', scan_started_count: 1, last_scan_started_at: new Date('2026-10-31T10:00:00Z'),
+    }]);
+    const answer = await service.listScanTargets({ olderThanSeconds: 900, limit: 50 }, scanner, 'gdmp-correlation-0002');
+    expect(answer).toStrictEqual({ items: [{
+      documentId, storageBucket: bucket, storageKey, objectVersionId, sha256Hex, declaredMediaType: 'image/png',
+      updatedAt: '2026-10-31T09:00:00.000Z', latestEventType: 'scan_started', scanStartedCount: 1,
+      lastScanStartedAt: '2026-10-31T10:00:00.000Z',
+    }] });
+    expect(client.query.mock.calls[0]?.[1]).toEqual([900, 50, 'gdmp-correlation-0002']);
+    expect(JSON.stringify(answer)).not.toMatch(/patient|facility/i);
+  });
+});
+
+describe('DocumentService: downstream uses the detected media type (owner decision D3)', () => {
+  // A JPEG uploaded as image/png, scanned clean with detectedMediaType image/jpeg.
+  function cleanHarness(overrides: Record<string, unknown> = {}) {
+    const row = {
+      id: documentId, patient_id: patientId, facility_id: facilityId, created_by: uploaderAccountId,
+      storage_bucket: 'synthetic-bucket', storage_key: 'clinical/objects/synthetic', object_version_id: objectVersionId,
+      declared_media_type: 'image/png', detected_media_type: 'image/jpeg', original_file_name: 'Ward scan.png',
+      size_bytes: '1024', sha256_hex: sha256Hex, scan_status: 'clean', status: 'available', row_version: '3',
+      ...overrides,
+    };
+    const issued: string[] = [];
+    const client = { query: jest.fn(async (sql: string) => {
+      issued.push(sql);
+      return /from ehr\.documents_effective/.test(sql) ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 };
+    }) };
+    const database = { withTransaction: jest.fn(async (_c: unknown, operation: (value: typeof client) => unknown) =>
+      operation(client)) };
+    const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true }) };
+    const audit = { record: jest.fn().mockResolvedValue(undefined), recordWithClient: jest.fn().mockResolvedValue(undefined) };
+    const storage = { createDownload: jest.fn().mockResolvedValue({ url: 'https://s3.example/signed', expiresInSeconds: 60 }) };
+    const service = new DocumentService(database as never, identity as never, audit as never, storage as never);
+    return { service, storage, issued };
+  }
+
+  it('signs the download as the detected type, inline, under a name with its extension', async () => {
+    const { service, storage } = cleanHarness();
+    await service.createDownload(documentId, uploader);
+    expect(storage.createDownload).toHaveBeenCalledWith('clinical/objects/synthetic', objectVersionId, {
+      fileName: 'Ward_scan.jpg', mediaType: 'image/jpeg', disposition: 'inline',
+    });
+  });
+
+  it('refuses a download without a supported detected type', async () => {
+    const { service, storage } = cleanHarness({ detected_media_type: null });
+    await expect(service.createDownload(documentId, uploader)).rejects.toBeInstanceOf(ConflictException);
+    expect(storage.createDownload).not.toHaveBeenCalled();
+  });
+
+  it('gives OCR the detected type, never the declared one', async () => {
+    const { service } = cleanHarness();
+    await expect(service.getOcrSource(documentId, uploader)).resolves.toMatchObject({ mediaType: 'image/jpeg' });
+    const pending = cleanHarness({ detected_media_type: null, scan_status: null, status: 'uploaded' });
+    await expect(pending.service.getOcrSource(documentId, uploader)).resolves
+      .toMatchObject({ mediaType: null, scanStatus: 'pending' });
+  });
+
+  it('lists from ehr.documents_effective, the detected type first', async () => {
+    const { service, issued } = cleanHarness();
+    await service.list(patientId, '123e4567-e89b-42d3-a456-426614174099', uploader);
+    const listSql = issued.find(sql => /"fileName"/.test(sql)) ?? '';
+    expect(listSql).toMatch(/from ehr\.documents_effective document/);
+    expect(listSql).toMatch(/coalesce\(document\.detected_media_type, document\.declared_media_type\) as "mediaType"/);
+    expect(listSql).not.toMatch(/document_scan_events/);
+  });
+});

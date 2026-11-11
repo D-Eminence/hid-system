@@ -55,3 +55,41 @@ describe('Source-aware patient chat history',()=>{
   s.authorizeSelf.mockRejectedValue(new Error('revoked'));await expect(s.history.read(request)).rejects.toThrow('revoked');
  });
 });
+
+describe('citedBindings for the patient source viewer',()=>{
+ const two={status:'ready' as const,answer:'Medicine [1].',sources:[
+  {...binding(prescription),number:1,title:prescription.title,recordedAt:null,effectiveAt:null,provenance:prescription.provenance,quality:prescription.quality},
+  {...binding(note),number:2,title:note.title,recordedAt:null,effectiveAt:null,provenance:note.provenance,quality:note.quality}]};
+ it('keeps only the sources the answer cites, with version and hash from the stored bindings',async()=>{
+  const s=setup();await s.history.save(request,'generation-a','Which medicine?',two);
+  expect(JSON.stringify(s.rows[0]!.reply)).not.toContain('hash');
+  const {cited}=await s.history.citedBindings(request);
+  expect([...cited.entries()]).toEqual([[`prescription:${prescription.id}`,binding(prescription)]]);
+ });
+ it('gives the chat context the cited sources apart from every selected binding',async()=>{
+  const s=setup();await s.history.save(request,'generation-a','Which medicine?',two);
+  const context=await s.history.context(request,'generation-a');
+  expect(context.bindings).toEqual([binding(prescription),binding(note)]);
+  expect(context.cited).toEqual([binding(prescription)]);
+ });
+ it('handles rows saved before PR 1 that list every selected source',async()=>{
+  const s=setup();s.rows.push({id:'legacy',question:'Old',createdAt:new Date(),
+   reply:{...two,answer:'A visit note [2].',sources:two.sources.map(({hash:_h,...rest})=>rest)},sourceBindings:[binding(prescription),binding(note)]});
+  expect([...(await s.history.citedBindings(request)).cited.keys()]).toEqual([`note:${note.id}`]);
+ });
+ it('drops an exchange once any of its bound sources changes',async()=>{
+  const s=setup();await s.history.save(request,'generation-a','Which medicine?',two);
+  s.setRecords([evidence({...note,fields:{text:'Changed synthetic note'}}),prescription]);
+  expect((await s.history.citedBindings(request)).cited.size).toBe(0);
+ });
+ it('reads the documents named in saved history, so a cited document beyond the default limit resolves',async()=>{
+  const s=setup();const docId='55555555-5555-4555-8555-000000000001';
+  s.query.mockImplementation(async(sql:string)=>sql.includes('select source_bindings as bindings')
+   ?{rows:[{bindings:[{kind:'document',id:docId,version:'1',hash:'h'}]}]}:sql.includes('for update')?{rows:[{generation:'generation-a'}]}:{rows:[]});
+  const snapshot=(s.history as unknown as {evidence:{snapshot:jest.Mock}}).evidence.snapshot;
+  const result=await s.history.citedBindings(request,['55555555-5555-4555-8555-000000000002']);
+  expect(snapshot).toHaveBeenCalledTimes(1);
+  expect(snapshot).toHaveBeenCalledWith(request,undefined,[docId,'55555555-5555-4555-8555-000000000002']);
+  expect(result.records).toBeDefined();
+ });
+});

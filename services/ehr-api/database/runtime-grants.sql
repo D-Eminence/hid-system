@@ -445,6 +445,11 @@ grant usage on schema ehr to hid_document_scanner;
 grant execute on function ehr.append_document_scan_event(
   uuid, text, text, text, text, text, text, text, text, text
 ) to hid_document_scanner;
+-- 0105: the bridge's two read commands (an S3 object to its document, and the
+-- reconcile work list), as 0105 grants them: the scanner only, never PUBLIC
+-- (revoked below). Each rechecks the scanner role and correlation ID itself.
+grant execute on function ehr.resolve_document_scan_target(text, text, text, text),
+  ehr.list_documents_awaiting_scan(integer, integer, text) to hid_document_scanner;
 
 grant usage on schema platform, ocr to hid_ocr_runtime;
 grant select, insert, update on ocr.jobs to hid_ocr_runtime;
@@ -1398,6 +1403,61 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
 -- below call it as its owner) and of the CAC-result, approve and reject
 -- commands, which keep the Identity grants above. No grant changes.
 revoke all on function identity.organization_application_admin_account(text) from public;
+
+-- Records processing (0104): the patient's request list, recreated with its
+-- purpose column, keeps the same signature and its grant to the Identity
+-- runtime above. The access-request trigger function is granted to no role.
+-- has_active_consent_grant keeps its grants above (0104 replaces its body);
+-- the cover it calls (owner decision 34(1)) is read by Identity alone, to name
+-- the direct-care grant that covered a records-processing check.
+revoke all on function identity.access_requests_records_processing() from public;
+revoke all on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz) from public;
+grant execute on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)
+  to hid_identity_runtime;
+-- Support chat Health ID check (0109): which given Health IDs are issued,
+-- read by Identity's support route alone, for the support-api workload.
+revoke all on function identity.support_health_id_matches(text[]) from public;
+grant execute on function identity.support_health_id_matches(text[]) to hid_identity_runtime;
+-- Document scanning (0105): the scanner's resolve and work-list commands are
+-- granted to hid_document_scanner above and to no other role.
+revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
+  ehr.list_documents_awaiting_scan(integer, integer, text) from public;
+
+-- OCR page allowance (0107; 0106 before it changes no grant): the three
+-- tables are granted to no runtime role (row-level security forced, the
+-- owner's policy only); the OCR worker reads, records and pauses through its
+-- three commands, claims through the fair claim and records AI usage; the OCR
+-- API (hid_ocr_runtime, inherited by hid_ocr_api_runtime) and the Identity API
+-- admin console read a facility's allowance and monthly usage; only the
+-- Identity API sets a limit (platform super admin only, checked in the
+-- command). The shared reckoning ocr.facility_page_allowance_state and the
+-- replaced trigger function ocr.validate_job_write are granted to no role.
+-- 0107 makes the same grants.
+grant usage on schema ocr to hid_ocr_worker, hid_ocr_runtime, hid_identity_runtime;
+grant execute on function ocr.worker_page_allowance(uuid,uuid),
+  ocr.record_worker_pages(uuid,uuid,integer,text),
+  ocr.pause_worker_job_for_allowance(uuid,uuid,text),
+  ocr.claim_worker_job_fair(text,integer,integer),
+  ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text) to hid_ocr_worker;
+grant execute on function ocr.facility_page_allowance(uuid), ocr.facility_ocr_usage(uuid,date)
+  to hid_ocr_runtime, hid_identity_runtime;
+grant execute on function ocr.set_facility_page_limit(uuid,integer,text) to hid_identity_runtime;
+revoke all on function ocr.facility_page_allowance_state(uuid),
+  ocr.worker_page_allowance(uuid,uuid),
+  ocr.record_worker_pages(uuid,uuid,integer,text),
+  ocr.pause_worker_job_for_allowance(uuid,uuid,text),
+  ocr.facility_page_allowance(uuid),
+  ocr.set_facility_page_limit(uuid,integer,text),
+  ocr.claim_worker_job_fair(text,integer,integer),
+  ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text),
+  ocr.facility_ocr_usage(uuid,date) from public;
+revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public;
+-- Outreach campaign registration (0110): outreach.validate_registration_
+-- campaign_write, the SECURITY DEFINER trigger function 0110 replaces (owner
+-- and ACL kept), is granted to no role; a trigger needs no EXECUTE to fire.
+-- No grant changes: the Outreach runtime still has no UPDATE on
+-- outreach.campaign_members, so it can neither update nor lock a membership.
+revoke all on function outreach.validate_registration_campaign_write() from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.

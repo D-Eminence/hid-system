@@ -18,7 +18,7 @@ const MINIMATCH_PATH = 'node_modules/aws-cdk-lib/node_modules/minimatch'
 // Shaped like `npm --prefix infra/aws audit --json` on the 2026-11-01 lockfile.
 const minimatchAdvisory = (changes = {}) => ({ source: 1244012, name: 'minimatch', dependency: 'minimatch',
   title: 'minimatch has potential denial of service via globparts amplification', url: 'https://github.com/advisories/GHSA-g3hv-75wg-m249',
-  severity: 'moderate', cwe: ['CWE-405'], cvss: { score: 0, vectorString: null }, range: '<11.0.1', ...changes })
+  severity: 'moderate', cwe: ['CWE-405'], cvss: { score: 0, vectorString: null }, range: '>=7.0.0 <11.0.1', ...changes })
 function report(vulnerabilities) {
   const counts = Object.fromEntries(SEVERITIES.map(severity => [severity, 0]))
   for (const vulnerability of Object.values(vulnerabilities)) counts[vulnerability.severity] += 1
@@ -50,8 +50,8 @@ test('the reviewed exception covers the real infra/aws minimatch advisory', () =
   assert.equal(reviewed.exceptions.length, 1)
   assert.deepEqual({ directory: only.directory, id: only.id, package: only.package, vulnerable_range: only.vulnerable_range, severity: only.severity,
     paths: only.paths, approved_by: only.approved_by, approved_at: only.approved_at, expires_at: only.expires_at },
-  { directory: 'infra/aws', id: 'GHSA-g3hv-75wg-m249', package: 'minimatch', vulnerable_range: '<11.0.1', severity: 'moderate',
-    paths: [MINIMATCH_PATH], approved_by: 'D-Eminence (in chat, 2026-11-01)', approved_at: '2026-11-01', expires_at: '2026-12-01' })
+  { directory: 'infra/aws', id: 'GHSA-g3hv-75wg-m249', package: 'minimatch', vulnerable_range: '>=7.0.0 <11.0.1', severity: 'moderate',
+    paths: [MINIMATCH_PATH], approved_by: 'D-Eminence (in chat, 2026-11-01; re-approved for the reworded range in chat, 2026-11-04: "Q32 yes")', approved_at: '2026-11-04', expires_at: '2026-12-01' })
   // The only audited directory using the gate is the only one exceptions may name.
   assert.ok(reviewed.exceptions.every(item => AWS_AUDIT_GATE.endsWith(` ${item.directory}`)))
 })
@@ -74,7 +74,7 @@ test('advisories without a matching exception fail: new advisory, new path, chan
   }
   const elsewhere = evaluate(awsReport(), reviewed, NOW, 'infra/cloudflare')
   assert.equal(elsewhere.ok, false)
-  assert.match(failuresOf(elsewhere), /no reviewed exception: GHSA-g3hv-75wg-m249 minimatch <11\.0\.1 \(moderate\) at .* in infra\/cloudflare/)
+  assert.match(failuresOf(elsewhere), /no reviewed exception: GHSA-g3hv-75wg-m249 minimatch >=7\.0\.0 <11\.0\.1 \(moderate\) at .* in infra\/cloudflare/)
 })
 
 test('an expired exception fails from 00:00 UTC on expires_at, whichever directory it names', () => {
@@ -141,7 +141,7 @@ test('malformed exception files fail closed', () => {
     'impossible date': json(withEntries(entry({ expires_at: '2026-11-31' }))),
     'timestamp not date': json(withEntries(entry({ expires_at: '2026-12-01T00:00:00Z' }))),
     'expires before approval': json(withEntries(entry({ expires_at: '2026-10-31' }))),
-    'longer than the limit': json(withEntries(entry({ expires_at: '2027-02-02' }))),
+    'longer than the limit': json(withEntries(entry({ expires_at: '2027-02-05' }))),
     'approved in the future': json(withEntries(entry({ approved_at: '2026-11-20', expires_at: '2026-12-20' }))),
     'duplicate exception': json(withEntries(entry(), entry({ paths: ['node_modules/minimatch'] }))),
     'duplicate key': json(reviewed).replace('"expires_at": "2026-12-01"', '"expires_at": "2026-11-20",\n      "expires_at": "2026-12-01"'),
@@ -149,7 +149,7 @@ test('malformed exception files fail closed', () => {
     'no trailing newline': json(reviewed).trimEnd(),
   }
   for (const [name, text] of Object.entries(bad)) assert.throws(() => parseExceptions(text, NOW), AuditGateError, name)
-  assert.doesNotThrow(() => parseExceptions(json(withEntries(entry({ expires_at: '2027-02-01' }))), NOW))
+  assert.doesNotThrow(() => parseExceptions(json(withEntries(entry({ expires_at: '2027-02-04' }))), NOW))
   assert.doesNotThrow(() => parseExceptions(reviewedText, NOW))
 })
 
@@ -192,7 +192,7 @@ test('main audits the named directory with npm audit --json and fails closed', (
   const passed = run(['infra/aws'], { status: 1, stdout: JSON.stringify(awsReport()) })
   assert.equal(passed.code, 0, passed.err)
   assert.deepEqual(passed.calls, [['npm', '--prefix', resolve(REPOSITORY_ROOT, 'infra/aws'), 'audit', '--json']])
-  assert.match(passed.out, /covered: GHSA-g3hv-75wg-m249 minimatch <11\.0\.1 \(moderate\) at node_modules\/aws-cdk-lib\/node_modules\/minimatch; approved by D-Eminence/)
+  assert.match(passed.out, /covered: GHSA-g3hv-75wg-m249 minimatch >=7\.0\.0 <11\.0\.1 \(moderate\) at node_modules\/aws-cdk-lib\/node_modules\/minimatch; approved by D-Eminence/)
   assert.match(passed.out, /npm audit gate passed for infra\/aws/)
   const expired = run(['infra/aws'], { status: 1, stdout: JSON.stringify(awsReport()) }, reviewedText, new Date('2026-12-01T00:00:00Z'))
   assert.equal(expired.code, 1)

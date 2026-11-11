@@ -80,6 +80,12 @@ def assess(component, image, scan, directory, *, policy_file=None, author='HID s
     forbidden = ('strfmon', 'strfmon_l', '__strfmon_l', 'ns_printrr', 'ns_printrrf', 'fp_nquery')
     if any(name in forbidden for name in imports):
         raise RuntimeError('Affected glibc function entered the execution path')
+    # zlib gzFile open/write API: the CVE-2026-76844 gz_write() path. node
+    # bundles its own zlib and no reviewed ELF imports any of these.
+    zlib_gz_write = ('gzopen', 'gzopen64', 'gzopen_w', 'gzdopen', 'gzwrite', 'gzfwrite', 'gzputs',
+                     'gzputc', 'gzprintf', 'gzvprintf', 'gzflush', 'gzsetparams', 'gzclearerr')
+    if any(name.split('@')[0] in zlib_gz_write for name in imports):
+        raise RuntimeError('Affected zlib gzFile write function entered the execution path')
     statements = []
     reviewed = []
     for match in scan['matches']:

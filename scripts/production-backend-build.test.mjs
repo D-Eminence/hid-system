@@ -62,6 +62,8 @@ test('only verified not-affected VEX matches can pass; unknowns and changed pack
   assert.throws(()=>assertScan(report,{...assessment,expires_at:'invalid'}, {...policy,expires_at:'invalid'}));
   assert.throws(()=>assertScan(report,{...assessment,glibc_affected_imports:1},policy));
   assert.throws(()=>assertScan({...report,matches:[m]},assessment,policy));
+  const proposedOnly={...policy,findings:[],proposed_findings:{findings:policy.findings}};
+  assert.throws(()=>assertScan(report,assessment,proposedOnly),/Unassessed/);
 });
 
 test('production applicability cannot transfer between images, sources, components or raw reports',()=>{
