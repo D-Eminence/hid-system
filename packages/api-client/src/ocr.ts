@@ -44,7 +44,7 @@ export interface OcrJob {
 export interface OcrExtraction {
   id: string; version: number; attempt: number; provider: string; providerModel: string | null;
   /**
-   * true once the OCR worker deleted the source page and blanked the reading 24 hours after the job finished
+   * true once the OCR worker deleted the source page and blanked the reading 7 days after the job finished
    * (migration 0112); ocr-api says so from the document's status. rawText is then '' and structuredPayload {}.
    */
   contentDeleted: boolean;

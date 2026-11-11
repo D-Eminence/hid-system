@@ -85,11 +85,11 @@ const JOB_SELECT = `
     from ocr.jobs`;
 
 /**
- * ehr.documents.status while the OCR worker deletes the source and its reading 24 hours after the job finished, and
+ * ehr.documents.status while the OCR worker deletes the source and its reading 7 days after the job finished, and
  * once it did (migration 0112). From the first, nothing is reviewed, retried, published or read again.
  */
 const SOURCE_DELETION_STATUSES: ReadonlySet<string> = new Set(['source_deleting', 'source_deleted']);
-const sourceDeleted = () => new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 24 hours');
+const sourceDeleted = () => new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 7 days');
 
 /** Publication failure codes a later request may retry; any other failure is terminal. */
 const RETRYABLE_PUBLICATION_FAILURES = ['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'];
@@ -275,7 +275,7 @@ export class OcrService {
       );
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.extraction.list', job, source.patientId));
       // Each extraction is re-read through the contract: no stored key outside it, no raw model output. A source
-      // the OCR worker deleted after 24 hours (0112) is said so explicitly, from the document's status.
+      // the OCR worker deleted after 7 days (0112) is said so explicitly, from the document's status.
       const contentDeleted = SOURCE_DELETION_STATUSES.has(source.status);
       return { items: result.rows.map((row) => projectExtraction(row, contentDeleted)) };
     });
@@ -846,7 +846,7 @@ export class OcrService {
       throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
     }
     // Nothing is left to review, confirm, retry or publish once the source and its reading were deleted after
-    // 24 hours (migration 0112); reads still answer, with the content marked deleted.
+    // 7 days (migration 0112); reads still answer, with the content marked deleted.
     if (action === 'write_records' && SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
     return source;
   }
@@ -873,7 +873,7 @@ export class OcrService {
     }
     const authorization = await this.identity.authorize(source.patientId, 'write_records', context.purposeOfUse, context);
     if (authorization.allowed && !authorization.breakGlass) {
-      // Nothing is published once the source and its reading were deleted after 24 hours (migration 0112).
+      // Nothing is published once the source and its reading were deleted after 7 days (migration 0112).
       if (SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
       return source;
     }

@@ -23,7 +23,7 @@ async function bootstrap(): Promise<void> {
   const reading = new PaperReadingService(config,
     config.OCR_AI_MODE === 'claude' ? new ClaudePageClient(config) : null);
   const repository = new PostgresWorkerRepository(config);
-  // Source deletion 24 hours after the job finished (migration 0112); OCR_SOURCE_DELETION_ENABLED=false stops it.
+  // Source deletion 7 days after the job finished (migration 0112); OCR_SOURCE_DELETION_ENABLED=false stops it.
   const sourceDeletion = new SourceDeletionSweeper(repository, new S3SourceObjectEraser(config));
   const worker = new OcrWorker(config, repository, new S3ExactDocumentReader(config), provider, reading, sourceDeletion);
   process.once('SIGTERM', () => worker.stop());

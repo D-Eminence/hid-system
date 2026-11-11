@@ -31,7 +31,7 @@ describe('OcrApiClient browser contract', () => {
       purpose: 'direct-care' }, 'ocr-publication-key-1234')).rejects.toBeInstanceOf(OcrContractError);
   });
 
-  describe('extractions (migration 0112: a reading deleted after 24 hours)', () => {
+  describe('extractions (migration 0112: a reading deleted after 7 days)', () => {
     const extraction = { id: 'extraction-id', version: 1, attempt: 1, provider: 'textract', providerModel: null,
       contentDeleted: false, rawText: 'Fictional reading line', structuredPayload: { contract: 'hid-paper-reading-v2' },
       confidence: 0.9, provenance: {}, createdAt: '2026-11-10T10:00:00.000Z' };

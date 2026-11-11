@@ -456,13 +456,13 @@ describe('DocumentService: downstream uses the detected media type (owner decisi
   });
 });
 
-describe('DocumentService: a source the OCR worker deleted after 24 hours (migration 0112)', () => {
+describe('DocumentService: a source the OCR worker deleted after 7 days (migration 0112)', () => {
   function deletedHarness(status = 'source_deleted') {
     const row = {
       id: documentId, patient_id: patientId, facility_id: facilityId, created_by: uploaderAccountId,
       storage_bucket: 'synthetic-bucket', storage_key: 'clinical/objects/synthetic', object_version_id: objectVersionId,
       declared_media_type: 'application/pdf', detected_media_type: 'application/pdf',
-      original_file_name: 'Source page deleted after 24 hours', size_bytes: '1024', sha256_hex: sha256Hex,
+      original_file_name: 'Source page deleted after 7 days', size_bytes: '1024', sha256_hex: sha256Hex,
       scan_status: 'clean', status, row_version: '4',
     };
     const client = { query: jest.fn(async (sql: string) =>
@@ -476,13 +476,13 @@ describe('DocumentService: a source the OCR worker deleted after 24 hours (migra
     return { service, storage, identity, audit };
   }
 
-  it('answers a download 410 DOCUMENT_SOURCE_DELETED "Source page deleted after 24 hours", signing nothing', async () => {
+  it('answers a download 410 DOCUMENT_SOURCE_DELETED "Source page deleted after 7 days", signing nothing', async () => {
     const { service, storage, audit } = deletedHarness();
     const refusal = await service.createDownload(documentId, uploader).catch((error: unknown) => error);
     expect(refusal).toBeInstanceOf(DomainProblem);
     expect((refusal as DomainProblem).getStatus()).toBe(410);
     expect((refusal as DomainProblem).code).toBe('DOCUMENT_SOURCE_DELETED');
-    expect((refusal as DomainProblem).message).toBe('Source page deleted after 24 hours');
+    expect((refusal as DomainProblem).message).toBe('Source page deleted after 7 days');
     expect(storage.createDownload).not.toHaveBeenCalled();
     expect(audit.record).not.toHaveBeenCalled();
   });
@@ -506,11 +506,11 @@ describe('DocumentService: a source the OCR worker deleted after 24 hours (migra
       getRequest: () => ({ correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ', method: 'POST',
         route: { path: '/ehr/documents/:documentId/download' } }),
       getResponse: () => response }) };
-    new ProblemDetailsFilter().catch(new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 24 hours'),
+    new ProblemDetailsFilter().catch(new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 7 days'),
       host as never);
     expect(response.status).toHaveBeenCalledWith(410);
     expect(response.json.mock.calls[0]?.[0]).toMatchObject({ status: 410, title: 'GONE', code: 'DOCUMENT_SOURCE_DELETED',
-      detail: 'Source page deleted after 24 hours' });
+      detail: 'Source page deleted after 7 days' });
   });
 
   it('still gives the OCR API the source metadata (it authorizes the job read by its patient) with status source_deleted', async () => {

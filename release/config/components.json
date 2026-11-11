@@ -543,8 +543,8 @@
         "sha256": "0a56d7fb26ea5fd78030a7ec516ec3430491fc459f2251c1e6a77fdb35ee7835"
       },
       {
-        "name": "0112_ocr_source_deletion_24h.sql",
-        "sha256": "ecdc7ed21a32ceb0c227dda91a6a937744535ded85149380ce61e0e16d010eae"
+        "name": "0112_ocr_source_deletion_7d.sql",
+        "sha256": "bbc494dd7db3c221ca61f9a11312e59ca2cba8e5a6759c9c3ccc65b8390d1587"
       }
     ]
   },

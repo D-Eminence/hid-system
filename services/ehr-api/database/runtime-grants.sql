@@ -1459,7 +1459,7 @@ revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public
 -- outreach.campaign_members, so it can neither update nor lock a membership.
 revoke all on function outreach.validate_registration_campaign_write() from public;
 
--- OCR source deletion after 24 hours (0112): the OCR worker lists the
+-- OCR source deletion after 7 days (0112): the OCR worker lists the
 -- documents due, counts them (due, and overdue), claims each one
 -- (source_deleting) before deleting every S3 version of its source, then
 -- purges the document's OCR content. The shared reckoning

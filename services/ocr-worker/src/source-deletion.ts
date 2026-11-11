@@ -3,7 +3,7 @@ import { DeleteObjectCommand, ListObjectVersionsCommand, S3Client } from '@aws-s
 import type { OcrWorkerConfig } from './config';
 
 /**
- * Deletion of an OCR source 24 hours after its jobs finished (migration 0112; owner and coordinator decisions of
+ * Deletion of an OCR source 7 days after its jobs finished (migration 0112; owner and coordinator decisions of
  * 2026-11-11). Each round the worker lists the documents due (those already claimed first), and for each: claims it
  * (status source_deleting, under a row lock; from then the database refuses a new job, a retry or a legal hold),
  * deletes every S3 version and delete marker of its stored key, confirms none remain, and only then has the database
@@ -17,14 +17,14 @@ export interface SourceDeletionCandidate {
   facilityId: string;
   storageBucket: string;
   storageKey: string;
-  /** Seconds since the document became due (24 hours after its latest job finished). */
+  /** Seconds since the document became due (7 days after its latest job finished). */
   dueSeconds: number;
 }
 
 export interface SourceDeletionBacklog {
   /** Documents due now. */
   due: number;
-  /** Documents due for more than 2 hours (more than 26 hours after their job finished). */
+  /** Documents due for more than 2 hours (more than 7 days and 2 hours after their job finished). */
   overdue: number;
 }
 
