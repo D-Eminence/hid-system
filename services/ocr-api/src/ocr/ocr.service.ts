@@ -872,7 +872,11 @@ export class OcrService {
       throw error;
     }
     const authorization = await this.identity.authorize(source.patientId, 'write_records', context.purposeOfUse, context);
-    if (authorization.allowed && !authorization.breakGlass) return source;
+    if (authorization.allowed && !authorization.breakGlass) {
+      // Nothing is published once the source and its reading were deleted after 24 hours (migration 0112).
+      if (SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
+      return source;
+    }
     if (authorization.allowed) throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
     throw new DomainProblem(403, 'OCR_PUBLISH_NEEDS_DIRECT_CARE', OCR_PUBLISH_NEEDS_DIRECT_CARE_MESSAGE);
   }
