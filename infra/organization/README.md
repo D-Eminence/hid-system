@@ -28,6 +28,12 @@ remove them.
    aws organizations create-organization --feature-set ALL
    ```
 
+   This makes the account it is run from the organization's management account. AWS advises against running
+   workloads in the management account: the better layout is a separate, otherwise empty management account
+   with the HID application account (659225405023) as a member, which also lets this policy cover the
+   application account like any other. Decide this before creating the organization; moving the management
+   role to another account later means creating a new organization.
+
 2. **Enable the policy type once** on the root (Terraform stops with this command until it has been run):
 
    ```bash
@@ -53,7 +59,18 @@ remove them.
      --target-id <application account id>
    ```
 
-   The effective policy must show `"opt_out_policy": {"@@assign": "optOut"}` under `default`.
+   The effective policy (operators such as `@@assign` are left out of it) must show
+   `"opt_out_policy": "optOut"` under `default`, and no service listed with `optIn`.
+
+5. **Check that no other opt-out policy opts a service back in.** A policy attached to an OU or account that
+   names a service (`"textract": {...optIn...}`) overrides `default` for that service:
+
+   ```bash
+   aws organizations list-policies --filter AISERVICES_OPT_OUT_POLICY
+   ```
+
+   Only `hid-ai-services-opt-out` should be listed. If others are, read each (`describe-policy`) and remove any
+   `optIn` before relying on this one.
 
 ## Tests
 
