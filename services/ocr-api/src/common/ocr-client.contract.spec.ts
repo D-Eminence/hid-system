@@ -30,4 +30,44 @@ describe('OcrApiClient browser contract', () => {
       patientConfirmationId: 'confirmation-id', targetOperation: 'retain_validated_document',
       purpose: 'direct-care' }, 'ocr-publication-key-1234')).rejects.toBeInstanceOf(OcrContractError);
   });
+
+  describe('extractions (migration 0110: a reading deleted after 24 hours)', () => {
+    const extraction = { id: 'extraction-id', version: 1, attempt: 1, provider: 'textract', providerModel: null,
+      contentDeleted: false, rawText: 'Fictional reading line', structuredPayload: { contract: 'hid-paper-reading-v2' },
+      confidence: 0.9, provenance: {}, createdAt: '2026-11-10T10:00:00.000Z' };
+
+    it('parses a normal extraction with its text', async () => {
+      const client = new OcrApiClient({ transport: jest.fn().mockResolvedValue({ items: [extraction] }) });
+      await expect(client.listExtractions('job-id')).resolves.toEqual([extraction]);
+    });
+
+    it('parses an extraction ocr-api marks deleted to a clear content-deleted state, without text', async () => {
+      const deleted = { ...extraction, contentDeleted: true, rawText: '', structuredPayload: {} };
+      const client = new OcrApiClient({ transport: jest.fn().mockResolvedValue({ items: [deleted] }) });
+      await expect(client.listExtractions('job-id')).resolves.toEqual([{ ...deleted }]);
+      const withNull = new OcrApiClient({ transport: jest.fn().mockResolvedValue({ items: [{ ...deleted, rawText: null }] }) });
+      await expect(withNull.listExtractions('job-id')).resolves.toMatchObject([{ contentDeleted: true, rawText: '' }]);
+    });
+
+    it('still rejects an empty rawText on an extraction that is not marked deleted', async () => {
+      for (const item of [{ ...extraction, rawText: '' }, { ...extraction, contentDeleted: undefined, rawText: '' },
+        { ...extraction, rawText: null }]) {
+        const client = new OcrApiClient({ transport: jest.fn().mockResolvedValue({ items: [item] }) });
+        await expect(client.listExtractions('job-id')).rejects.toBeInstanceOf(OcrContractError);
+      }
+    });
+
+    it('rejects a malformed contentDeleted, or text on an extraction marked deleted', async () => {
+      for (const item of [{ ...extraction, contentDeleted: 'yes' }, { ...extraction, contentDeleted: true }]) {
+        const client = new OcrApiClient({ transport: jest.fn().mockResolvedValue({ items: [item] }) });
+        await expect(client.listExtractions('job-id')).rejects.toBeInstanceOf(OcrContractError);
+      }
+    });
+
+    it('accepts an extraction from an ocr-api built before 0110 (no contentDeleted field) as not deleted', async () => {
+      const { contentDeleted: _omitted, ...older } = extraction;
+      const client = new OcrApiClient({ transport: jest.fn().mockResolvedValue({ items: [older] }) });
+      await expect(client.listExtractions('job-id')).resolves.toEqual([{ ...older, contentDeleted: false }]);
+    });
+  });
 });

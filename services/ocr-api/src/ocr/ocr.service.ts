@@ -84,6 +84,9 @@ const JOB_SELECT = `
              where confirmation.job_id=ocr.jobs.id order by confirmation.confirmation_version desc limit 1) as confirmed_at
     from ocr.jobs`;
 
+/** ehr.documents.status once the OCR worker deleted the source and its reading after 24 hours (migration 0110). */
+const SOURCE_DELETED = 'source_deleted';
+
 /** Publication failure codes a later request may retry; any other failure is terminal. */
 const RETRYABLE_PUBLICATION_FAILURES = ['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'];
 
@@ -263,8 +266,10 @@ export class OcrService {
         [jobId],
       );
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.extraction.list', job, source.patientId));
-      // Each extraction is re-read through the contract: no stored key outside it, no raw model output.
-      return { items: result.rows.map(projectExtraction) };
+      // Each extraction is re-read through the contract: no stored key outside it, no raw model output. A source
+      // the OCR worker deleted after 24 hours (0110) is said so explicitly, from the document's status.
+      const contentDeleted = source.status === SOURCE_DELETED;
+      return { items: result.rows.map((row) => projectExtraction(row, contentDeleted)) };
     });
   }
 
@@ -831,6 +836,11 @@ export class OcrService {
     );
     if (!authorization.allowed || (action === 'write_records' && authorization.breakGlass)) {
       throw new DomainProblem(404, 'OCR_JOB_NOT_FOUND', 'OCR job was not found');
+    }
+    // Nothing is left to review, confirm, retry or publish once the source and its reading were deleted after
+    // 24 hours (migration 0110); reads still answer, with the content marked deleted.
+    if (action === 'write_records' && source.status === SOURCE_DELETED) {
+      throw new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 24 hours');
     }
     return source;
   }

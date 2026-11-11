@@ -43,6 +43,11 @@ export interface OcrJob {
 }
 export interface OcrExtraction {
   id: string; version: number; attempt: number; provider: string; providerModel: string | null;
+  /**
+   * true once the OCR worker deleted the source page and blanked the reading 24 hours after the job finished
+   * (migration 0110); ocr-api says so from the document's status. rawText is then '' and structuredPayload {}.
+   */
+  contentDeleted: boolean;
   rawText: string; structuredPayload: Record<string, unknown>; confidence: number | null;
   provenance: Record<string, unknown>; createdAt: string;
 }
@@ -197,10 +202,20 @@ function parseExtraction(payload: unknown): OcrExtraction {
       && (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence))) {
     throw new OcrContractError('OCR field confidence is invalid.');
   }
+  if (value.contentDeleted !== undefined && typeof value.contentDeleted !== 'boolean') {
+    throw new OcrContractError('OCR field contentDeleted is invalid.');
+  }
+  // Only an extraction ocr-api marks deleted may come without text; any other still needs its rawText.
+  const contentDeleted = value.contentDeleted === true;
+  if (contentDeleted && (value.rawText !== '' && value.rawText !== null && value.rawText !== undefined)) {
+    throw new OcrContractError('OCR field rawText is invalid.');
+  }
   return { id: string(value, 'id'), version: integer(value, 'version', 1),
     attempt: integer(value, 'attempt', 1),
     provider: string(value, 'provider'), providerModel: typeof value.providerModel === 'string' ? value.providerModel : null,
-    rawText: string(value, 'rawText'), structuredPayload: value.structuredPayload,
+    contentDeleted,
+    rawText: contentDeleted ? '' : string(value, 'rawText'),
+    structuredPayload: contentDeleted ? {} : value.structuredPayload,
     confidence: typeof value.confidence === 'number' ? value.confidence : null, provenance: value.provenance,
     createdAt: string(value, 'createdAt') };
 }
