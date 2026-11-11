@@ -1925,6 +1925,20 @@ begin
         and correlation_id = 'schema-test-pharmacy-import-batch') <> 2 then
     raise exception 'Two medicines from one review did not stay two records';
   end if;
+  -- One patient's imported medications, as pharmacy-api listImports reads
+  -- them (PATIENT_IMPORTS_QUERY): this facility, newest first, the single
+  -- record written before the batch last.
+  if (select array_agg(e.id order by e.created_at desc, e.id desc)
+      from pharmacy.imported_medication_evidence e
+      where e.patient_id = '50000000-0000-4000-8000-000000000001'
+        and e.facility_id = '10000000-0000-4000-8000-000000000002')
+     is distinct from ((select array_agg(id) from (
+       select id from pharmacy.imported_medication_evidence
+       where publication_id in ('d0000000-0000-5000-8000-000000000012',
+         'd0000000-0000-5000-8000-000000000011')
+       order by created_at desc, id desc) b) || import_id) then
+    raise exception 'A patient''s imported medications were not read newest first';
+  end if;
   begin
     insert into pharmacy.imported_medication_evidence (
       id, patient_id, facility_id, source_document_id, ocr_job_id,
@@ -1969,7 +1983,9 @@ begin
   perform set_config('app.membership_id', '40000000-0000-4000-8000-000000000002', true);
   if exists(select 1 from pharmacy.work_items where id = work_id)
      or exists(select 1 from pharmacy.dispensings where id = dispensing_id)
-     or exists(select 1 from pharmacy.imported_medication_evidence where id = import_id) then
+     or exists(select 1 from pharmacy.imported_medication_evidence where id = import_id)
+     or exists(select 1 from pharmacy.imported_medication_evidence
+       where patient_id = '50000000-0000-4000-8000-000000000001') then
     raise exception 'Facility B read Facility A Pharmacy evidence';
   end if;
   perform set_config('app.facility_id', '10000000-0000-4000-8000-000000000002', true);
