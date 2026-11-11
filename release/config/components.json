@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0126",
+    "last": "0115",
     "count": 114,
     "files": [
       {
@@ -547,12 +547,12 @@
         "sha256": "971da7bed817568c6184274e59bcb9d659851149cdc70e223e94123f2ddb09d1"
       },
       {
-        "name": "0125_outreach_organisers.sql",
-        "sha256": "969c19a7411701048bb2690f0d35abca1dec3883e8c490e2cf681dbb31d41fd6"
+        "name": "0114_outreach_organisers.sql",
+        "sha256": "41b88834ebbf2ab794ac1be05fce7b9183f582cd1d5a9688c949b82a3f7568c9"
       },
       {
-        "name": "0126_outreach_retention.sql",
-        "sha256": "35a61f1ae24b8470455a9ccfcfb6a7e92f7e467a0e2b00e655791e693d365f60"
+        "name": "0115_outreach_retention.sql",
+        "sha256": "77621b0f7d8808239000de5c698f66a8aa31f1a613d71301b84fcc27af0d82d5"
       }
     ]
   },

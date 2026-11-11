@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Outreach retention (0126): an outreach group's registrations never linked to
+-- Outreach retention (0115): an outreach group's registrations never linked to
 -- a Health ID are kept 1 year (closed_at + 365 days, or starts_at + 365 days
 -- for a campaign never closed), then redacted by the sweeper; support redacts
 -- one on request. Rollback-only. Fictional people and places only.
@@ -19,14 +19,14 @@ begin
      or has_function_privilege('hid_outreach_api_runtime', 'identity.sweep_expired_outreach_registrations(integer)', 'EXECUTE')
      or has_function_privilege('hid_outreach_api_runtime', 'identity.admin_redact_outreach_registration(uuid,text)', 'EXECUTE')
      or has_table_privilege('hid_outreach_api_runtime', 'outreach.privileged_runs', 'INSERT') then
-    raise exception 'the retention objects are not as 0126 makes them';
+    raise exception 'the retention objects are not as 0115 makes them';
   end if;
 end $$;
 
--- Fixtures. Outreach group G (0f00...02, reviewed) with organiser O (n=1);
+-- Fixtures. Outreach group G (0f00...02, active) with organiser O (n=1);
 -- hospital H (0f00...12) with doctor D (n=2); support S (n=3).
 -- Campaigns at G: 1 closed 400 days ago; 2 closed 10 days ago; 3 active,
--- started 400 days ago; 4 closed before 0126 (no closed_at), last changed 400
+-- started 400 days ago; 4 closed before 0115 (no closed_at), last changed 400
 -- days ago; 5 active, started yesterday. Campaign 6 at H closed 400 days ago.
 -- One unlinked registration in each (cases 1-6), with a guardian's name and
 -- an idempotency record.
@@ -54,10 +54,10 @@ insert into identity.staff_facility_memberships (id, staff_id, account_id, organ
    '0f000000-0000-4000-8000-000000000011', '0f000000-0000-4000-8000-000000000012', 'doctor', 'doctor', true, true);
 insert into identity.outreach_organisations (organization_id, facility_id, kind, display_name, organiser_account_id,
   contact_phone_lookup_hmac, contact_phone_ciphertext, contact_key_version, origin, terms_version, terms_accepted_at,
-  review_state, reviewed_by_account_id, reviewed_at) values
+  status) values
   ('0f000000-0000-4000-8000-000000000001', '0f000000-0000-4000-8000-000000000002', 'group', 'Retention Test Group',
    '0f010000-0000-4000-8000-000000000001', repeat('a', 64), decode(repeat('ab', 32), 'hex'), 'k1', 'existing_account',
-   '2026-11-01', clock_timestamp(), 'reviewed', '0f010000-0000-4000-8000-000000000003', clock_timestamp());
+   '2026-11-01', clock_timestamp(), 'active');
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
   (gen_random_uuid(), '0f010000-0000-4000-8000-000000000001', 'outreach_organiser', 'facility',
    '0f030000-0000-4000-8000-000000000001', '0f000000-0000-4000-8000-000000000002', 'Synthetic retention suite role'),

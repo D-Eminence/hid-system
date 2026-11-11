@@ -1462,12 +1462,12 @@ revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public
 -- No grant changes: the Outreach runtime still has no UPDATE on
 -- outreach.campaign_members, so it can neither update nor lock a membership.
 revoke all on function outreach.validate_registration_campaign_write() from public;
--- Outreach organisers (0125), as that migration grants them: the public
+-- Outreach organisers (0114), as that migration grants them: the public
 -- sign-up, the signed-in "Start an outreach group", outreach invitations and
 -- support's organiser commands to the Identity runtime; the consent rows, the
 -- organiser status and the support/retention run check (which the outreach
 -- policies call as the querying role) to the Outreach runtime. Everything
--- else 0125 adds is owner-only.
+-- else 0114 adds is owner-only.
 revoke all on function
   identity.outreach_organiser_terms_version(), identity.outreach_group_name_allowed(text),
   identity.outreach_text_valid(text,integer,integer), identity.outreach_email_valid(text),
@@ -1484,7 +1484,7 @@ revoke all on function
   identity.list_outreach_team(), identity.preview_outreach_invitation(uuid,char),
   identity.accept_outreach_invitation_with_password(uuid,char,text),
   identity.accept_outreach_invitation_for_account(uuid,char),
-  identity.admin_list_outreach_organisers(text), identity.admin_review_outreach_organiser(uuid,bigint,text,text),
+  identity.admin_list_outreach_organisers(text),
   identity.admin_suspend_outreach_organiser(uuid,bigint,text),
   identity.admin_close_outreach_campaign(uuid,bigint,text),
   identity.admin_appoint_outreach_campaign_admin(uuid,uuid,text),
@@ -1507,7 +1507,7 @@ grant execute on function
   identity.list_outreach_team(), identity.preview_outreach_invitation(uuid,char),
   identity.accept_outreach_invitation_with_password(uuid,char,text),
   identity.accept_outreach_invitation_for_account(uuid,char),
-  identity.admin_list_outreach_organisers(text), identity.admin_review_outreach_organiser(uuid,bigint,text,text),
+  identity.admin_list_outreach_organisers(text),
   identity.admin_suspend_outreach_organiser(uuid,bigint,text),
   identity.admin_close_outreach_campaign(uuid,bigint,text),
   identity.admin_appoint_outreach_campaign_admin(uuid,uuid,text)
@@ -1515,7 +1515,7 @@ grant execute on function
 grant select, insert on outreach.registration_consents to hid_outreach_runtime;
 grant execute on function outreach.privileged_run_active(text), outreach.organiser_status() to hid_outreach_runtime;
 grant execute on function outreach.privileged_run_active(text) to hid_schema_test_runtime;
--- Outreach retention (0126): the sweeper and support's redaction on request
+-- Outreach retention (0115): the sweeper and support's redaction on request
 -- to the Identity runtime only, never the Outreach runtime.
 revoke all on function outreach.stamp_campaign_closed_at(), outreach.registration_retain_until(outreach.campaigns),
   outreach.guard_command_idempotency_mutation(), outreach.redact_registration_case(uuid,text,text,uuid),

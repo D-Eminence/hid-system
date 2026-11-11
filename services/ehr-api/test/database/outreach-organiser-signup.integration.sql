@@ -1,7 +1,8 @@
 \set ON_ERROR_STOP on
--- Outreach organisers (0125): public sign-up, the signed-in "Start an
--- outreach group", the role fence, support's review before Active, consent,
--- outreach invitations, suspension and support's campaign rescue.
+-- Outreach organisers (0114): public sign-up, the signed-in "Start an
+-- outreach group", the role fence, campaigns going Active with no Health ID
+-- check (owner decision "Q38 no check", 2026-11-11), consent, outreach
+-- invitations, suspension and support's campaign rescue.
 -- Rollback-only. Fictional people, groups and places only.
 --
 -- A registration's consent is checked at commit (a deferred constraint
@@ -20,7 +21,7 @@
 -- outcome differs.
 begin;
 
--- 1. The objects as 0125 makes them.
+-- 1. The objects as 0114 makes them.
 do $$
 begin
   if to_regclass('identity.outreach_organisations') is null
@@ -29,7 +30,7 @@ begin
      or not exists (select 1 from auth.roles where code = 'outreach_organiser')
      or exists (select 1 from auth.role_permissions where role_code in ('outreach_organiser', 'outreach_volunteer')
                  and permission_code not like 'outreach.%') then
-    raise exception 'the outreach organiser objects are not as 0125 makes them';
+    raise exception 'the outreach organiser objects are not as 0114 makes them';
   end if;
 end $$;
 
@@ -218,9 +219,9 @@ select pg_temp.auth_case('1o a repeat answers the same group', 'true',
     pg_temp.id('org1'), pg_temp.id('signup1'), pg_temp.hex('token-1'), pg_temp.password_hash(), '2026-11-01'));
 
 -- The new group as stored.
-select pg_temp.os_case('1p the group is pending, its facility verified, the organiser holds outreach_organiser only',
-  'pending verified outreach_organiser outreach-organiser:', session_user::text, null, null, null, null,
-  format($s$select organisation.review_state || ' ' || facility.lifecycle_status || ' '
+select pg_temp.os_case('1p the group is active, its facility verified, the organiser holds outreach_organiser only',
+  'active verified outreach_organiser outreach-organiser:', session_user::text, null, null, null, null,
+  format($s$select organisation.status || ' ' || facility.lifecycle_status || ' '
       || (select string_agg(role_code, ',') from auth.account_roles where account_id = %L and revoked_at is null) || ' '
       || left(account.subject, 19)
       from identity.outreach_organisations organisation
@@ -231,7 +232,7 @@ create function pg_temp.subject_of(account_label text) returns text language sql
   select subject from auth.accounts where id = pg_temp.id(account_label)::uuid $$;
 grant execute on function pg_temp.subject_of(text) to public;
 
--- 5. Campaigns before and after support's review.
+-- 5. Campaigns: a new group's campaign goes Active at once (no Health ID check).
 insert into os_ids values ('camp1', gen_random_uuid());
 select pg_temp.outreach_case('2a the organiser creates a planned campaign and seeds themself as its admin', 'ok',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
@@ -241,32 +242,31 @@ select pg_temp.outreach_case('2a the organiser creates a planned campaign and se
       added_by_membership_id) values (%L, %L, %L, 'admin', %L, %L)$s$,
     pg_temp.id('camp1'), pg_temp.id('fac1'), pg_temp.id('acct1'), pg_temp.id('mem1'),
     pg_temp.id('camp1'), pg_temp.id('fac1'), pg_temp.id('mem1'), pg_temp.id('acct1'), pg_temp.id('mem1')), true);
-select pg_temp.outreach_case('2b Active before review is refused (update)', '55000: OUTREACH_ORGANISER_AWAITING_REVIEW',
+select pg_temp.outreach_case('2b a new group''s admin opens the campaign at once, with no check', 'rows 1',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
-  format($s$update outreach.campaigns set status = 'active', row_version = row_version + 1 where id = %L$s$, pg_temp.id('camp1')));
-select pg_temp.outreach_case('2c Active before review is refused (insert)', '55000: OUTREACH_ORGANISER_AWAITING_REVIEW',
+  format($s$update outreach.campaigns set status = 'active', row_version = row_version + 1 where id = %L$s$, pg_temp.id('camp1')),
+  true, 'count');
+select pg_temp.outreach_case('2c a new group may create a campaign already Active', 'ok',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
   format($s$insert into outreach.campaigns (facility_id, created_by_account_id, created_by_membership_id, name, services,
       status, starts_at) values (%L, %L, %L, 'Straight To Active', array['registration']::text[], 'active', clock_timestamp())$s$,
     pg_temp.id('fac1'), pg_temp.id('acct1'), pg_temp.id('mem1')));
-select pg_temp.outreach_case('2d a hospital campaign still opens without any review', 'rows 1',
+select pg_temp.outreach_case('2d a hospital campaign still opens as before', 'rows 1',
   'synthetic:os-doctor', '0e000000-0000-4000-8000-000000000002', '0e030000-0000-4000-8000-000000000001',
   $s$update outreach.campaigns set status = 'active', row_version = row_version + 1
       where id = '0e070000-0000-4000-8000-000000000001'$s$, true, 'count');
-select pg_temp.staff_case('2e an organiser cannot use support''s review', '42501: ADMIN_PERMISSION_DENIED',
-  pg_temp.subject_of('acct1'), format('select review_state from identity.admin_review_outreach_organiser(%L, 1)',
-    pg_temp.id('org1')), false);
-select pg_temp.staff_case('2f the check queue lists the group', 'Lagos Island Health Volunteers pending 1 0',
-  'synthetic:os-support', $s$select display_name || ' ' || review_state || ' ' || member_count || ' ' || active_campaign_count
-      from identity.admin_list_outreach_organisers('pending')$s$, false);
-select pg_temp.staff_case('2g one click: support reviews the group', 'reviewed', 'synthetic:os-support',
-  format('select review_state from identity.admin_review_outreach_organiser(%L, 1)', pg_temp.id('org1')));
-select pg_temp.staff_case('2h a second review is refused', '23514: OUTREACH_ORGANISER_NOT_PENDING', 'synthetic:os-support',
-  format('select review_state from identity.admin_review_outreach_organiser(%L, 2)', pg_temp.id('org1')), false);
-select pg_temp.outreach_case('2i after review the admin opens the campaign', 'rows 1',
-  pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
-  format($s$update outreach.campaigns set status = 'active', row_version = row_version + 1 where id = %L$s$, pg_temp.id('camp1')),
-  true, 'count');
+select pg_temp.os_case('2e there is no review: no review command, no review column', '0 0', session_user::text,
+  null, null, null, null,
+  $s$select (select count(*) from pg_proc where proname = 'admin_review_outreach_organiser') || ' '
+      || (select count(*) from pg_attribute where attrelid = 'identity.outreach_organisations'::regclass
+           and attname like 'review%' and not attisdropped)$s$, false, 'query');
+select pg_temp.staff_case('2f support''s list shows the group as active', 'Lagos Island Health Volunteers active 1 1',
+  'synthetic:os-support', $s$select display_name || ' ' || status || ' ' || member_count || ' ' || active_campaign_count
+      from identity.admin_list_outreach_organisers('active')$s$, false);
+select pg_temp.staff_case('2g the list has no ''pending'' state', '22023: OUTREACH_ORGANISER_STATE_INVALID',
+  'synthetic:os-support', $s$select 1 from identity.admin_list_outreach_organisers('pending')$s$, false);
+select pg_temp.staff_case('2h an organiser cannot use support''s list', '42501: ADMIN_PERMISSION_DENIED',
+  pg_temp.subject_of('acct1'), $s$select 1 from identity.admin_list_outreach_organisers('all')$s$, false);
 
 -- 6. Registrations at a group: campaign, notes cap, consent, no Health ID link.
 create function pg_temp.registration(case_id text, campaign text, age integer, notes text) returns text language sql as $$
@@ -339,7 +339,7 @@ select pg_temp.outreach_case('4d the organiser sees their own registration', 'Fu
   format('select full_name from outreach.registration_cases where id = %L', pg_temp.id('case1')), false, 'query');
 select pg_temp.os_case('4e the group never appears in the clinician directory', 'false', session_user::text, null, null, null, null,
   format('select identity.share_provider_eligible(%L)::text', pg_temp.id('mem1')), false, 'query');
-select pg_temp.outreach_case('4f outreach-api reads the organiser status', 'reviewed',
+select pg_temp.outreach_case('4f outreach-api reads the organiser status', 'active',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'), 'select outreach.organiser_status()', false, 'query');
 
 -- 8. The fence (as the table owner).
@@ -419,7 +419,7 @@ select pg_temp.os_case('7g the helper holds outreach_volunteer only', 'outreach_
 select pg_temp.staff_case('7h a helper cannot invite', '42501: OUTREACH_ORGANISER_PERMISSION_DENIED',
   pg_temp.subject_of('acct3'), pg_temp.invite('inv3', 'Someone Else', 'someone@example.invalid'), false, 'query',
   pg_temp.id('fac1'), pg_temp.id('mem3'));
--- A helper registers into a campaign they are a member of (0125's member-lock
+-- A helper registers into a campaign they are a member of (0114's member-lock
 -- policy lets their FOR SHARE through) but cannot create or change campaigns.
 select pg_temp.outreach_case('7p the organiser adds the helper to the campaign', 'ok',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
@@ -509,7 +509,7 @@ select pg_temp.staff_case('7zb nor can the signed-in patient login accept', 'pat
   format('select result from identity.accept_outreach_invitation_for_account(%L, %L)', pg_temp.id('inv4'),
     pg_temp.hex('link-inv4')), false);
 
--- 11. Support's campaign rescue (the nurse's group, not yet reviewed).
+-- 11. Support's campaign rescue (the nurse's group).
 insert into os_ids values ('camp2', gen_random_uuid());
 select pg_temp.outreach_case('8a the nurse creates a campaign in their group', 'ok',
   'synthetic:os-nurse', pg_temp.id('fac2'), pg_temp.id('mem2'),
@@ -534,7 +534,7 @@ select pg_temp.os_case('8g no support run is left behind', '0', session_user::te
 
 -- 12. Suspension.
 select pg_temp.staff_case('9a support suspends the first group', 'suspended 3', 'synthetic:os-support',
-  format($s$select review_state || ' ' || revoked_roles from identity.admin_suspend_outreach_organiser(%L, 2,
+  format($s$select status || ' ' || revoked_roles from identity.admin_suspend_outreach_organiser(%L, 1,
     'Reported for collecting numbers under a false name')$s$, pg_temp.id('org1')));
 select pg_temp.outreach_case('9b the organiser can no longer read or change anything', 'none',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'), 'select name from outreach.campaigns', false, 'query');

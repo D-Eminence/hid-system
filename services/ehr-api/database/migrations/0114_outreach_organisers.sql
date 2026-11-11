@@ -1,11 +1,15 @@
--- 0125 Outreach organisers: anybody can sign up on outreach. and run campaigns
+-- 0114 Outreach organisers: anybody can sign up on outreach. and run campaigns
 -- in their own small Outreach group (plan "Open sign-up on outreach.", PR-1).
--- The number is a placeholder: it is renumbered when it merges.
+-- Written as 0125; numbered 0114 on 2026-11-11 (production ends at 0110;
+-- 0111 campaign admins, 0112 and 0113 are queued before it).
 --
 -- Owner decisions (11 Nov 2026, final):
--- 1. Health ID support checks each organiser once before their first
---    campaign can go Active (review_state 'reviewed'); the admin queue makes
---    that one click.
+-- 1. No Health ID check before a group's campaigns go Active ("Q38 no
+--    check", 2026-11-11 ~10:05 UTC): a new organiser may set a campaign
+--    Active at once. Support can still suspend a group, which stops
+--    everything; the name blocklist stays; registrants are shown
+--    "Unverified organiser" for every outreach group (Health ID has not
+--    verified them).
 -- 2. No per-organiser limits. Anti-bot protection stays: Turnstile (in
 --    Identity), the public application quota per network
 --    (platform.consume_public_application_quota, 0049) and a per-network cap
@@ -26,7 +30,7 @@
 --    workforce.manage and no identity.consent.write.
 -- B. identity.outreach_organisations: one row per outreach group (its own
 --    organization and facility, lifecycle 'verified' so its members' sessions
---    work), with review_state pending | reviewed | suspended. Forced RLS, no
+--    work), with status active | suspended. Forced RLS, no
 --    runtime privilege: the commands below are the only path.
 -- C. identity.outreach_organiser_signups: a public sign-up (email code,
 --    phone as HMAC and ciphertext, group name, kind, optional CAC/IT number
@@ -49,8 +53,8 @@
 --    on outreach.registration_cases, campaigns, campaign_members and
 --    patient_mappings; acts only when the facility is an outreach group's):
 --    a registration needs a campaign; operational notes at most 280
---    characters; a campaign cannot become Active before support's review;
---    nothing changes while the group is suspended; no link to a Health ID.
+--    characters; nothing changes while the group is suspended; no link to a
+--    Health ID.
 -- H. outreach.registration_consents: one consent row per registration (text
 --    version, language, method, guardian name for under-18s, who captured
 --    it), immutable; a deferred check refuses a group's registration that
@@ -59,21 +63,21 @@
 --    replaces the control_settings key CHECK and platform.control_enabled
 --    (0086's body plus the new key).
 -- J. Support's commands (platform permissions, audited): list organisers,
---    review (optionally renaming), suspend (revokes the group's roles and
---    pending invitations), close a group's campaign, appoint a campaign
+--    suspend (revokes the group's roles and pending invitations), close a
+--    group's campaign, appoint a campaign
 --    admin. The last two run inside a "support run": a row in
 --    outreach.privileged_runs for the current transaction, which the
 --    support policies on outreach.campaigns and outreach.campaign_members and
---    the replaced outreach.validate_campaign_write() (replaces 0122's body)
+--    the replaced outreach.validate_campaign_write() (replaces 0111's body)
 --    recognise. Runtime roles cannot write that table.
 --
 -- PRECONDITIONS (catalog reads only; 55000 or 42501, nothing applied):
--- 0001-0122 applied (0122's outreach.campaign_staff(uuid) is the marker and
--- outreach.validate_campaign_write() has 0122's body, md5
--- 7d6caf5f570aa38e8d33c63b27d9282c); not applied yet; platform.control_enabled
+-- 0001-0113 applied (0111's outreach.campaign_staff(uuid) is the marker and
+-- outreach.validate_campaign_write() has 0111's body, md5
+-- ca793433b75b2be758cc70fb7a4779cc); not applied yet; platform.control_enabled
 -- has 0086's body (md5 ed17b9d8097417363c0a6343e52aa47f) and the key CHECK
 -- lists exactly 0086's ten keys; the two restrictive campaign member
--- policies are as 0122 made them; the applier may SET ROLE to the owner of
+-- policies are as 0111 made them; the applier may SET ROLE to the owner of
 -- the outreach and identity tables touched.
 --
 -- LOCKS: SHARE ROW EXCLUSIVE (blocks writes, not reads) on auth.account_roles,
@@ -88,26 +92,26 @@ declare
   outreach_owner oid;
   identity_owner oid;
 begin
-  -- a. Prerequisites.
+  -- a. Not applied yet (checked first: once applied, the bodies below differ).
+  if to_regclass('identity.outreach_organisations') is not null
+     or exists (select 1 from auth.roles where code in ('outreach_organiser', 'outreach_volunteer')) then
+    raise exception using errcode = '55000', message = '0114: already applied';
+  end if;
+  -- b. Prerequisites.
   if to_regprocedure('outreach.campaign_staff(uuid)') is null
      or to_regprocedure('outreach.validate_campaign_write()') is null
      or (select md5(proc.prosrc) from pg_proc proc where proc.oid = 'outreach.validate_campaign_write()'::regprocedure)
-        is distinct from '7d6caf5f570aa38e8d33c63b27d9282c'
+        is distinct from 'ca793433b75b2be758cc70fb7a4779cc'
      or to_regprocedure('identity.enforce_review_before_facility_role()') is null
      or to_regprocedure('platform.consume_public_application_quota(char)') is null
      or to_regprocedure('platform.require_control_enabled(text)') is null
      or to_regprocedure('identity.sealed_demo_account(uuid)') is null then
-    raise exception using errcode = '55000', message = '0125: 0001-0122 must be applied first';
-  end if;
-  -- b. Not applied yet.
-  if to_regclass('identity.outreach_organisations') is not null
-     or exists (select 1 from auth.roles where code in ('outreach_organiser', 'outreach_volunteer')) then
-    raise exception using errcode = '55000', message = '0125: already applied';
+    raise exception using errcode = '55000', message = '0114: 0001-0113 must be applied first';
   end if;
   -- c. The bodies replaced here.
   if (select md5(proc.prosrc) from pg_proc proc where proc.oid = 'platform.control_enabled(text)'::regprocedure)
      is distinct from 'ed17b9d8097417363c0a6343e52aa47f' then
-    raise exception using errcode = '55000', message = '0125: platform.control_enabled is not as 0086 left it';
+    raise exception using errcode = '55000', message = '0114: platform.control_enabled is not as 0086 left it';
   end if;
   if (select array_agg(match[1] order by match[1])
         from pg_constraint constraint_row,
@@ -118,18 +122,18 @@ begin
        'cross_facility_route_access_enabled', 'maintenance_mode', 'outreach_portal_enabled',
        'patient_portal_enabled', 'provider_portal_enabled', 'provider_self_service_enabled',
        'staff_invitations_enabled', 'uploads_enabled'] then
-    raise exception using errcode = '55000', message = '0125: the control key CHECK is not as 0086 left it';
+    raise exception using errcode = '55000', message = '0114: the control key CHECK is not as 0086 left it';
   end if;
   if (select count(*) from pg_policy policy_row
        where policy_row.polrelid = 'outreach.campaign_members'::regclass and not policy_row.polpermissive
          and policy_row.polname in ('outreach_campaign_members_admin_create', 'outreach_campaign_members_admin_delete')) <> 2 then
-    raise exception using errcode = '55000', message = '0125: the campaign member policies are not as 0122 made them';
+    raise exception using errcode = '55000', message = '0114: the campaign member policies are not as 0111 made them';
   end if;
   if not exists (select 1 from auth.permissions where code in ('outreach.campaign.read') and active)
      or not exists (select 1 from auth.permissions where code in ('outreach.campaign.write') and active)
      or not exists (select 1 from auth.permissions where code in ('outreach.registration.read') and active)
      or not exists (select 1 from auth.permissions where code in ('outreach.registration.write') and active) then
-    raise exception using errcode = '55000', message = '0125: the outreach permissions are missing';
+    raise exception using errcode = '55000', message = '0114: the outreach permissions are missing';
   end if;
   -- d. Who owns what this file changes.
   outreach_owner := (select relation.relowner from pg_class relation where relation.oid = 'outreach.campaigns'::regclass);
@@ -137,7 +141,7 @@ begin
   if not pg_has_role(current_user, outreach_owner, 'SET') or not pg_has_role(current_user, identity_owner, 'SET')
      or (select proc.proowner from pg_proc proc where proc.oid = 'outreach.validate_campaign_write()'::regprocedure) <> outreach_owner then
     raise exception using errcode = '42501', message = format(
-      '0125: the applier (%s) must be able to SET ROLE to the owners of outreach.campaigns (%s) and auth.account_roles (%s)',
+      '0114: the applier (%s) must be able to SET ROLE to the owners of outreach.campaigns (%s) and auth.account_roles (%s)',
       current_user, pg_get_userbyid(outreach_owner), pg_get_userbyid(identity_owner));
   end if;
   -- e. Locks, NOWAIT, at most 5 seconds.
@@ -151,7 +155,7 @@ begin
     exception when lock_not_available then
       if attempt >= 500 then
         raise exception using errcode = '55P03',
-          message = '0125: the outreach or role tables stayed busy for 5 seconds; run the release again later';
+          message = '0114: the outreach or role tables stayed busy for 5 seconds; run the release again later';
       end if;
       perform pg_sleep(0.01);
     end;
@@ -213,10 +217,7 @@ create table identity.outreach_organisations (
   signup_id uuid,
   terms_version text not null check (terms_version ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'),
   terms_accepted_at timestamptz not null,
-  review_state text not null default 'pending' check (review_state in ('pending', 'reviewed', 'suspended')),
-  reviewed_by_account_id uuid references auth.accounts(id) on delete restrict,
-  reviewed_at timestamptz,
-  review_note text check (review_note is null or length(btrim(review_note)) between 2 and 500),
+  status text not null default 'active' check (status in ('active', 'suspended')),
   suspended_by_account_id uuid references auth.accounts(id) on delete restrict,
   suspended_at timestamptz,
   suspension_reason text check (suspension_reason is null or length(btrim(suspension_reason)) between 8 and 500),
@@ -226,15 +227,12 @@ create table identity.outreach_organisations (
   constraint outreach_organisations_facility_fk foreign key (facility_id, organization_id)
     references identity.facilities(id, organization_id) on delete restrict,
   constraint outreach_organisations_origin_ck check ((origin = 'signup') = (signup_id is not null)),
-  constraint outreach_organisations_review_ck check (
-    (reviewed_at is null) = (reviewed_by_account_id is null)
-    and (review_state <> 'reviewed' or reviewed_at is not null)),
   constraint outreach_organisations_suspension_ck check (
-    (review_state = 'suspended') = (suspended_at is not null)
+    (status = 'suspended') = (suspended_at is not null)
     and (suspended_at is null) = (suspended_by_account_id is null)
     and (suspended_at is null) = (suspension_reason is null))
 );
-create index outreach_organisations_state_idx on identity.outreach_organisations (review_state, created_at);
+create index outreach_organisations_status_idx on identity.outreach_organisations (status, created_at);
 create index outreach_organisations_organiser_idx on identity.outreach_organisations (organiser_account_id);
 alter table identity.outreach_organisations enable row level security;
 alter table identity.outreach_organisations force row level security;
@@ -245,7 +243,7 @@ create policy outreach_organisations_command_update on identity.outreach_organis
 create policy outreach_organisations_command_delete on identity.outreach_organisations for delete using (true);
 revoke all on identity.outreach_organisations from public;
 comment on table identity.outreach_organisations is
-  '0125: an outreach group (its own organization and facility). review_state: pending until Health ID support checks it once; a campaign cannot go Active before that. Shown as "Unverified organiser" while pending.';
+  '0114: an outreach group (its own organization and facility). status: active, or suspended by Health ID support (which stops everything at the group). There is no check before its campaigns go Active; registrants are shown "Unverified organiser" for every group.';
 
 -- C. Public sign-ups.
 create table identity.outreach_organiser_signups (
@@ -384,23 +382,25 @@ begin
 end
 $$;
 
--- The review state of the outreach group that owns a facility, or null for
--- every other facility (hospitals, laboratories, pharmacies, the demo).
+-- The status of the outreach group that owns a facility ('active' or
+-- 'suspended'), or null for every other facility (hospitals, laboratories,
+-- pharmacies, the demo).
 create function outreach.organiser_tenant_state(target_facility_id uuid)
 returns text language sql stable security definer
 set search_path = pg_catalog, identity, pg_temp
 as $$
-  select organisation.review_state from identity.outreach_organisations organisation
+  select organisation.status from identity.outreach_organisations organisation
    where organisation.facility_id = target_facility_id
 $$;
 
--- The session facility's organiser state, for outreach-api's governance
--- endpoint: 'pending' | 'reviewed' | 'suspended', or null (not a group).
+-- The session facility's organiser status, for outreach-api's governance
+-- endpoint: 'active' | 'suspended', or null (not an outreach group, so no
+-- "Unverified organiser" label).
 create function outreach.organiser_status()
 returns text language sql stable security definer
 set search_path = pg_catalog, platform, identity, pg_temp
 as $$
-  select organisation.review_state from identity.outreach_organisations organisation
+  select organisation.status from identity.outreach_organisations organisation
    where organisation.facility_id = platform.current_facility_id()
 $$;
 
@@ -418,7 +418,7 @@ begin
   end if;
   if new.scope_type = 'facility' then
     -- FOR SHARE: a suspension in flight finishes first.
-    select organisation.review_state into tenant_state
+    select organisation.status into tenant_state
       from identity.outreach_organisations organisation
      where organisation.facility_id = new.facility_id
      for share;
@@ -476,11 +476,6 @@ begin
     if tg_op = 'UPDATE' and new.status = 'identity_resolved' then
       raise exception using errcode = '42501', message = 'OUTREACH_TENANT_NO_HEALTH_ID_LINK';
     end if;
-  elsif tg_table_name = 'campaigns' then
-    if new.status = 'active' and (tg_op = 'INSERT' or old.status is distinct from 'active')
-       and tenant_state <> 'reviewed' then
-      raise exception using errcode = '55000', message = 'OUTREACH_ORGANISER_AWAITING_REVIEW';
-    end if;
   end if;
   return new;
 end
@@ -520,7 +515,7 @@ create policy outreach_registration_consents_read on outreach.registration_conse
   using (outreach.context_allows(facility_id, 'outreach.registration.read'));
 -- A consent row is visible only when its registration is visible to the
 -- caller (the subquery runs under the caller's own policies, so 0045's
--- campaign-member rule applies), or inside a retention run (0126).
+-- campaign-member rule applies), or inside a retention run (0115).
 create policy outreach_registration_consents_campaign_read on outreach.registration_consents
   as restrictive for select
   using (outreach.privileged_run_active('retention')
@@ -551,7 +546,7 @@ begin
     new.captured_at := clock_timestamp();
     return new;
   end if;
-  -- Immutable, except that a retention run (0126) redacts the guardian's name.
+  -- Immutable, except that a retention run (0115) redacts the guardian's name.
   if tg_op = 'UPDATE' and outreach.privileged_run_active('retention')
      and new.registration_case_id = old.registration_case_id and new.facility_id = old.facility_id
      and new.consent_text_version = old.consent_text_version and new.language = old.language
@@ -614,7 +609,7 @@ begin
   on conflict do nothing;
   if not exists (select 1 from platform.control_settings
                   where control_key = 'outreach_organiser_signup_enabled' and not enabled) then
-    raise exception using errcode = '55000', message = '0125: the sign-up control is not seeded off';
+    raise exception using errcode = '55000', message = '0114: the sign-up control is not seeded off';
   end if;
   if was_forced then
     execute 'alter table platform.control_settings force row level security';
@@ -1003,7 +998,7 @@ begin
      and assignment.role_code = 'outreach_organiser' and assignment.scope_type = 'facility'
      and assignment.revoked_at is null
     join identity.staff_facility_memberships membership on membership.id = assignment.membership_id
-   where organisation.review_state <> 'suspended'
+   where organisation.status <> 'suspended'
    order by organisation.created_at
    limit 1;
   if existing.organization_id is not null then
@@ -1063,7 +1058,7 @@ begin
   end if;
   select organisation.organization_id into actor_organization
     from identity.outreach_organisations organisation
-   where organisation.facility_id = actor_facility and organisation.review_state <> 'suspended';
+   where organisation.facility_id = actor_facility and organisation.status <> 'suspended';
   if actor_organization is null then
     raise exception using errcode = '42501', message = 'OUTREACH_ORGANISER_PERMISSION_DENIED';
   end if;
@@ -1446,14 +1441,14 @@ as $$
 $$;
 revoke all on function identity.outreach_support_audit(uuid,uuid,uuid,text,text,text,text,jsonb) from public;
 
--- The queue: requested_state 'pending' (oldest first; the check queue),
--- 'reviewed', 'suspended' or 'all'. At most 500 rows. The contact phone is
--- returned as stored (ciphertext); Identity decrypts it for support.
+-- The list: requested_state 'active', 'suspended' or 'all', newest first.
+-- At most 500 rows. The contact phone is returned as stored (ciphertext);
+-- Identity decrypts it for support.
 create function identity.admin_list_outreach_organisers(requested_state text)
 returns table (organization_id uuid, facility_id uuid, row_version bigint, display_name text, kind text,
-  registration_number text, review_state text, origin text, organiser_account_id uuid, organiser_name text,
+  registration_number text, status text, origin text, organiser_account_id uuid, organiser_name text,
   organiser_email text, contact_phone_ciphertext bytea, contact_key_version text, terms_version text,
-  created_at timestamptz, reviewed_at timestamptz, review_note text, suspended_at timestamptz,
+  created_at timestamptz, suspended_at timestamptz,
   suspension_reason text, member_count integer, pending_invitation_count integer, campaign_count integer,
   active_campaign_count integer)
 language plpgsql volatile security definer
@@ -1462,16 +1457,16 @@ as $$
 #variable_conflict use_column
 begin
   perform identity.outreach_support_actor(false);
-  if requested_state is null or requested_state not in ('pending', 'reviewed', 'suspended', 'all') then
+  if requested_state is null or requested_state not in ('active', 'suspended', 'all') then
     raise exception using errcode = '22023', message = 'OUTREACH_ORGANISER_STATE_INVALID';
   end if;
   perform outreach.begin_privileged_run('support');
   return query
     select organisation.organization_id, organisation.facility_id, organisation.row_version, organisation.display_name,
-      organisation.kind, organisation.registration_number, organisation.review_state, organisation.origin,
+      organisation.kind, organisation.registration_number, organisation.status, organisation.origin,
       organisation.organiser_account_id, account.display_name, lower(account.email),
       organisation.contact_phone_ciphertext, organisation.contact_key_version, organisation.terms_version,
-      organisation.created_at, organisation.reviewed_at, organisation.review_note, organisation.suspended_at,
+      organisation.created_at, organisation.suspended_at,
       organisation.suspension_reason,
       (select count(*)::integer from identity.staff_facility_memberships membership
         where membership.facility_id = organisation.facility_id and membership.active),
@@ -1483,9 +1478,8 @@ begin
         where campaign.facility_id = organisation.facility_id and campaign.status = 'active')
       from identity.outreach_organisations organisation
       join auth.accounts account on account.id = organisation.organiser_account_id
-     where requested_state = 'all' or organisation.review_state = requested_state
-     order by case when requested_state = 'pending' then organisation.created_at end asc,
-       organisation.created_at desc, organisation.organization_id
+     where requested_state = 'all' or organisation.status = requested_state
+     order by organisation.created_at desc, organisation.organization_id
      limit 500;
   perform outreach.end_privileged_run();
   perform identity.outreach_support_audit(platform.current_account_id(), null, null, 'admin.outreach-organiser.list',
@@ -1493,64 +1487,15 @@ begin
 end
 $$;
 
--- One click: the group is checked. Optionally renames it (the group's
--- organization, facility and display name) and keeps a note. Refusals: 22023
--- OUTREACH_ORGANISER_REVIEW_INVALID; P0002 OUTREACH_ORGANISER_NOT_FOUND;
--- 40001 OUTREACH_ORGANISER_VERSION_CONFLICT; 23514
--- OUTREACH_ORGANISER_NOT_PENDING.
-create function identity.admin_review_outreach_organiser(target_organization_id uuid, expected_version bigint,
-  requested_display_name text default null, requested_note text default null)
-returns table (row_version bigint, review_state text)
-language plpgsql security definer
-set search_path = pg_catalog, identity, auth, audit, platform, pg_temp
-as $$
-#variable_conflict use_column
-declare
-  actor_account uuid := identity.outreach_support_actor(true);
-  organisation identity.outreach_organisations%rowtype;
-begin
-  if target_organization_id is null or expected_version is null
-     or (requested_display_name is not null and not identity.outreach_text_valid(requested_display_name, 2, 120))
-     or (requested_note is not null and length(btrim(requested_note)) not between 2 and 500) then
-    raise exception using errcode = '22023', message = 'OUTREACH_ORGANISER_REVIEW_INVALID';
-  end if;
-  select * into organisation from identity.outreach_organisations row
-   where row.organization_id = target_organization_id for update;
-  if not found then
-    raise exception using errcode = 'P0002', message = 'OUTREACH_ORGANISER_NOT_FOUND';
-  end if;
-  if organisation.row_version <> expected_version then
-    raise exception using errcode = '40001', message = 'OUTREACH_ORGANISER_VERSION_CONFLICT';
-  end if;
-  if organisation.review_state <> 'pending' then
-    raise exception using errcode = '23514', message = 'OUTREACH_ORGANISER_NOT_PENDING';
-  end if;
-  if requested_display_name is not null and requested_display_name <> organisation.display_name then
-    update identity.organizations row set name = requested_display_name, updated_at = clock_timestamp(),
-      row_version = row.row_version + 1 where row.id = organisation.organization_id;
-    update identity.facilities row set name = requested_display_name, updated_at = clock_timestamp(),
-      row_version = row.row_version + 1 where row.id = organisation.facility_id;
-  end if;
-  update identity.outreach_organisations row
-     set review_state = 'reviewed', reviewed_by_account_id = actor_account, reviewed_at = clock_timestamp(),
-         review_note = requested_note, display_name = coalesce(requested_display_name, row.display_name),
-         updated_at = clock_timestamp(), row_version = row.row_version + 1
-   where row.organization_id = organisation.organization_id;
-  perform identity.outreach_support_audit(actor_account, organisation.organization_id, organisation.facility_id,
-    'admin.outreach-organiser.review', 'outreach-organisation', organisation.organization_id::text, requested_note,
-    jsonb_build_object('renamed', requested_display_name is not null
-      and requested_display_name <> organisation.display_name));
-  return query select organisation.row_version + 1, 'reviewed'::text;
-end
-$$;
-
 -- Suspends a group: every active role at it is revoked and its pending
--- invitations end; its campaigns and registrations stay, read-only. Refusals
--- as review, with 22023 OUTREACH_ORGANISER_SUSPEND_INVALID (a reason of
--- 8-500 characters is required) and 23514 OUTREACH_ORGANISER_ALREADY_SUSPENDED.
+-- invitations end; its campaigns and registrations stay, read-only. Refusals:
+-- 22023 OUTREACH_ORGANISER_SUSPEND_INVALID (a reason of 8-500 characters is
+-- required); P0002 OUTREACH_ORGANISER_NOT_FOUND; 40001
+-- OUTREACH_ORGANISER_VERSION_CONFLICT; 23514
+-- OUTREACH_ORGANISER_ALREADY_SUSPENDED.
 create function identity.admin_suspend_outreach_organiser(target_organization_id uuid, expected_version bigint,
   requested_reason text)
-returns table (row_version bigint, review_state text, revoked_roles integer)
+returns table (row_version bigint, status text, revoked_roles integer)
 language plpgsql security definer
 set search_path = pg_catalog, identity, auth, audit, platform, pg_temp
 as $$
@@ -1572,11 +1517,11 @@ begin
   if organisation.row_version <> expected_version then
     raise exception using errcode = '40001', message = 'OUTREACH_ORGANISER_VERSION_CONFLICT';
   end if;
-  if organisation.review_state = 'suspended' then
+  if organisation.status = 'suspended' then
     raise exception using errcode = '23514', message = 'OUTREACH_ORGANISER_ALREADY_SUSPENDED';
   end if;
   update identity.outreach_organisations row
-     set review_state = 'suspended', suspended_at = clock_timestamp(), suspended_by_account_id = actor_account,
+     set status = 'suspended', suspended_at = clock_timestamp(), suspended_by_account_id = actor_account,
          suspension_reason = btrim(requested_reason), updated_at = clock_timestamp(), row_version = row.row_version + 1
    where row.organization_id = organisation.organization_id;
   update auth.account_roles assignment
@@ -1703,7 +1648,7 @@ $$;
 -- outreach_volunteer does not hold (a helper must not create campaigns). This
 -- policy lets a member of the campaign who may register pass; an actual
 -- UPDATE still needs outreach.campaign.write (0038's policy) and an admin of
--- the campaign (validate_campaign_write, 0122): a row lock checks USING only,
+-- the campaign (validate_campaign_write, 0111): a row lock checks USING only,
 -- and WITH CHECK (false) admits no new row through this policy.
 create policy outreach_campaigns_member_lock on outreach.campaigns for update
   using (outreach.context_allows(facility_id, 'outreach.registration.write')
@@ -1748,7 +1693,7 @@ alter policy outreach_campaign_members_admin_delete on outreach.campaign_members
                and admin_member.role = 'admin')
   );
 
--- 0122's body, with support's close first: only the status (to 'closed') and
+-- 0111's body, with support's close first: only the status (to 'closed') and
 -- the version change; nothing else.
 create or replace function outreach.validate_campaign_write()
 returns trigger language plpgsql security definer
@@ -1759,7 +1704,7 @@ declare
   actor_membership uuid := platform.current_membership_id();
   actor_facility uuid := platform.current_facility_id();
 begin
-  -- 0125: support closes an outreach group's campaign (identity.admin_close_outreach_campaign).
+  -- 0114: support closes an outreach group's campaign (identity.admin_close_outreach_campaign).
   if tg_op = 'UPDATE' and outreach.privileged_run_active('support') then
     if old.id is distinct from new.id or old.facility_id is distinct from new.facility_id
        or old.created_by_account_id is distinct from new.created_by_account_id
@@ -1791,7 +1736,7 @@ begin
        or new.row_version is distinct from old.row_version + 1 then
       raise exception using errcode='55000',message='Outreach campaign history cannot be overwritten';
     end if;
-    -- 0122 (ADR-045 option B): only this campaign's own admins change it.
+    -- 0111 (ADR-045 option B): only this campaign's own admins change it.
     if actor_membership is null or not exists (
          select 1 from outreach.campaign_members member
           where member.campaign_id = old.id and member.facility_id = old.facility_id
@@ -1804,7 +1749,7 @@ begin
 end $$;
 
 comment on function outreach.validate_campaign_write() is
-  '0077''s campaign checks, (0122, ADR-045 option B) on UPDATE the session''s membership must be an admin member of the campaign, and (0125) support''s close of an outreach group''s campaign inside a support run. A row lock fires no trigger, so a registration''s FOR SHARE of the campaign is unaffected.';
+  '0077''s campaign checks, (0111, ADR-045 option B) on UPDATE the session''s membership must be an admin member of the campaign, and (0114) support''s close of an outreach group''s campaign inside a support run. A row lock fires no trigger, so a registration''s FOR SHARE of the campaign is unaffected.';
 
 -- Ownership: every new function and table belongs to its schema's table owner
 -- (a no-op when the applier is that owner, as on every database built by one
@@ -1856,7 +1801,7 @@ revoke all on function
   identity.list_outreach_team(), identity.preview_outreach_invitation(uuid,char),
   identity.accept_outreach_invitation_with_password(uuid,char,text),
   identity.accept_outreach_invitation_for_account(uuid,char),
-  identity.admin_list_outreach_organisers(text), identity.admin_review_outreach_organiser(uuid,bigint,text,text),
+  identity.admin_list_outreach_organisers(text),
   identity.admin_suspend_outreach_organiser(uuid,bigint,text),
   identity.admin_close_outreach_campaign(uuid,bigint,text),
   identity.admin_appoint_outreach_campaign_admin(uuid,uuid,text)
@@ -1874,7 +1819,7 @@ begin
       identity.list_outreach_team(), identity.preview_outreach_invitation(uuid,char),
       identity.accept_outreach_invitation_with_password(uuid,char,text),
       identity.accept_outreach_invitation_for_account(uuid,char),
-      identity.admin_list_outreach_organisers(text), identity.admin_review_outreach_organiser(uuid,bigint,text,text),
+      identity.admin_list_outreach_organisers(text),
       identity.admin_suspend_outreach_organiser(uuid,bigint,text),
       identity.admin_close_outreach_campaign(uuid,bigint,text),
       identity.admin_appoint_outreach_campaign_admin(uuid,uuid,text)
@@ -1916,7 +1861,7 @@ begin
     mismatch := 'a new function is executable by PUBLIC';
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0125: not as this file makes it: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0114: not as this file makes it: %s', mismatch);
   end if;
 end
 $$;
