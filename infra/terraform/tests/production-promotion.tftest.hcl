@@ -152,7 +152,7 @@ run "cutover_uses_production_identity_and_approved_hosts" {
     support_faqs = {
       Help = {
         utterances = ["I need help", "How do I get help"]
-        answer     = "Public: https://www.staging.healthidentitydirectory.com/about Patient: https://staging.healthidentitydirectory.com/sign-in"
+        answer     = "Public: https://www.staging.healthidentitydirectory.com/about Patient: https://staging.healthidentitydirectory.com/sign-in Staff: https://ehr.staging.healthidentitydirectory.com/provider/recover Migrate: https://migrate.staging.healthidentitydirectory.com/provider/sign-in"
       }
     }
     rds_ca_bundle_base64     = "dGVzdC1jYS1idW5kbGU="
@@ -209,8 +209,8 @@ run "cutover_uses_production_identity_and_approved_hosts" {
     error_message = "Production public origins and a valid non-deferred NIN configuration must retain the permanent stack's issuer namespace for rolling-task compatibility."
   }
   assert {
-    condition     = local.runtime_support_faqs["Help"].answer == "Public: https://${var.production_hosts["public"]}/about Patient: https://${var.production_hosts["web"]}/sign-in"
-    error_message = "Production FAQ actions must use the approved public and patient hosts."
+    condition     = local.runtime_support_faqs["Help"].answer == "Public: https://${var.production_hosts["public"]}/about Patient: https://${var.production_hosts["web"]}/sign-in Staff: https://${var.production_hosts["ehr"]}/provider/recover Migrate: https://${var.production_hosts["ocr"]}/provider/sign-in"
+    error_message = "Production FAQ actions must use the approved public, patient and staff product hosts."
   }
   assert {
     condition = jsonencode(local.document_upload_origins) == jsonencode([

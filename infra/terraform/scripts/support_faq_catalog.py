@@ -9,8 +9,14 @@ CATALOG = ROOT / 'infra/terraform/support/health-id-faqs.json'
 ALLOWED_HOSTS = {
     'staging.healthidentitydirectory.com',
     'www.staging.healthidentitydirectory.com',
+    'ehr.staging.healthidentitydirectory.com',
+    'lab.staging.healthidentitydirectory.com',
+    'pharmacy.staging.healthidentitydirectory.com',
     'migrate.staging.healthidentitydirectory.com',
+    'outreach.staging.healthidentitydirectory.com',
 }
+# Lex itself takes many more; this keeps each intent reviewable.
+MAX_UTTERANCES = 20
 
 
 def load_catalog(path=CATALOG):
@@ -26,7 +32,7 @@ def load_catalog(path=CATALOG):
         if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{1,49}', name) or name in ('Fallback', 'FallbackIntent'):
             raise ValueError('INVALID_FAQ_NAME')
         utterances = faq['utterances']
-        if not isinstance(utterances, list) or not 2 <= len(utterances) <= 10:
+        if not isinstance(utterances, list) or not 2 <= len(utterances) <= MAX_UTTERANCES:
             raise ValueError('INVALID_FAQ_UTTERANCES')
         for utterance in utterances:
             if not isinstance(utterance, str) or not 3 <= len(utterance.strip()) <= 200:
