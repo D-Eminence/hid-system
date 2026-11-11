@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Outreach campaigns are managed by their own admins (0122, ADR-045 option B).
+-- Outreach campaigns are managed by their own admins (0111, ADR-045 option B).
 -- Rollback-only. Fictional staff, facilities and campaigns only.
 --
 -- Fixtures are inserted with session_replication_role = replica. Every case then
@@ -10,7 +10,7 @@
 -- listing every case whose outcome differs.
 begin;
 
--- 1. The function, policies and trigger as 0122 makes them.
+-- 1. The function, policies and trigger as 0111 makes them.
 do $$
 begin
   if to_regprocedure('outreach.campaign_staff(uuid)') is null
@@ -19,7 +19,7 @@ begin
             and polname in ('outreach_campaign_members_admin_create', 'outreach_campaign_members_admin_delete')) <> 2
      or not exists (select 1 from pg_proc where oid = 'outreach.validate_campaign_write()'::regprocedure
                      and prosrc like '%Outreach campaign admin is required%') then
-    raise exception 'the campaign admin rules are not as 0122 makes them';
+    raise exception 'the campaign admin rules are not as 0111 makes them';
   end if;
 end $$;
 

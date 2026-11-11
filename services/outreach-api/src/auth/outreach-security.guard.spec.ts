@@ -154,7 +154,7 @@ describe('Outreach route permissions', () => {
     const accepted = new Set([...(dto.match(/OUTREACH_PERMISSIONS = \[([^\]]*)\]/)?.[1] ?? '').matchAll(/'([^']+)'/g)]
       .map((match) => match[1]));
     expect(dto).toContain('@IsIn(OUTREACH_PERMISSIONS)');
-    // Since campaigns have their own admins (ADR-045 option B, migration 0122),
+    // Since campaigns have their own admins (ADR-045 option B, migration 0111),
     // Identity accepts outreach.campaign.write, so no route stays closed.
     expect(accepted.has('outreach.campaign.write')).toBe(true);
     const refused = handlers.filter(({ handler }) =>

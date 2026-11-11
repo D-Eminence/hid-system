@@ -16,8 +16,8 @@ export class OutreachController {
 
 
   /**
-   * How campaigns are governed here (0122, ADR-045 option B): a campaign's own admins open, close and staff it. A
-   * website asks this to learn that campaign management is served; a backend before 0122 answers 404.
+   * How campaigns are governed here (0111, ADR-045 option B): a campaign's own admins open, close and staff it. A
+   * website asks this to learn that campaign management is served; a backend before 0111 answers 404.
    */
   @Get('/campaigns/governance')
   @RequirePermissions('outreach.campaign.read')

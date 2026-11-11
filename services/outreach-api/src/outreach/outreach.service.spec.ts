@@ -190,7 +190,7 @@ describe('OutreachService', () => {
   });
 });
 
-// 0122 (ADR-045 option B): a campaign's own admins open, close and staff it. Fictional ids only.
+// 0111 (ADR-045 option B): a campaign's own admins open, close and staff it. Fictional ids only.
 describe('OutreachService campaign admins', () => {
   const audit = { recordWithClient: jest.fn() };
   const identity = { authorizeExistingPatient: jest.fn() };

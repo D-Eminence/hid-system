@@ -515,7 +515,7 @@ grant execute on function platform.current_actor_subject(), platform.current_acc
   auth.membership_has_permission(text, uuid, uuid, text),
   outreach.context_allows(uuid,text),
   outreach.registration_campaign_member(uuid,uuid) to hid_outreach_runtime;
--- Outreach campaigns (0122): a campaign's members by name, and to its admins
+-- Outreach campaigns (0111): a campaign's members by name, and to its admins
 -- who could be added; read by outreach-api alone.
 revoke all on function outreach.campaign_staff(uuid) from public;
 grant execute on function outreach.campaign_staff(uuid) to hid_outreach_runtime;
