@@ -143,6 +143,53 @@ export const readingSchema = z.strictObject({
   imageRereadFailedPages: z.array(z.number().int().min(1)).optional(),
 });
 
+/**
+ * Counts the worker adds to the extraction's provenance (provenance.reading.counts), so live readings can be
+ * measured from the database and not only from the logs (Phase 1 "measure, content-free"). Not part of the
+ * structured payload. Codes and non-negative integer counts only: every key of a map is a reason code (lower case,
+ * digits and "_"), never text from a page. Optional as a whole: payloads written before it, and any job where it
+ * could not be computed, carry no `counts`.
+ *
+ * - droppedByReason / droppedByReasonFirstPass: items dropped by reason code (items.ts DROP_REASONS, tidy.ts
+ *   TIDY_DROP_REASONS), from the reading each page ended with / from the first pass, as in ocr.job.completed.
+ * - hardPageAgreement: how far a hard page's two best-guess readings agreed, summed over hard pages
+ *   (fieldsCompared, fieldsAgreed: agree; fieldsCompared - fieldsAgreed: disagree; itemsPaired; itemsSingle:
+ *   one-sided; drugSplits; alternativesDropped).
+ * - zoomCalls / zoomLimited / zoomFailed: zoom crops returned, calls refused at the limit, calls failed.
+ * - hardPageDeadlineHits: hard pages where the page's deadline cut a read still running.
+ * - hardReadFailures: hard-page reads with no answer, by reason code ('deadline', 'max_tokens', 'api_error', ...).
+ * The re-read failures are already counted in provenance.reading.rereadFailedPages (a count).
+ */
+/**
+ * The only keys the counts may hold: the reader's drop reasons (items.ts DROP_REASONS and tidy.ts
+ * TIDY_DROP_REASONS) and hard-read failures (reader.ts HardReadFailure). A closed list, so no other word (a
+ * medicine or diagnosis) can ever be stored as a key; contract-codes.spec.ts keeps these equal to the reader's.
+ */
+export const READING_DROP_REASON_CODES = ['no_line_cited', 'line_not_on_page', 'empty_as_written', 'text_not_on_line',
+  'no_box', 'box_too_small', 'too_many_lines', 'too_many_lines_on_row', 'too_many_rows', 'rows_not_together',
+  'cited_lines_no_box', 'not_on_cited_line', 'area_too_large', 'side_overflow', 'covers_uncited_line',
+  'uncited_share', 'not_anchored', 'heading', 'duplicate_of_order'] as const;
+export const HARD_READ_FAILURE_CODES = ['max_tokens', 'parse_error', 'schema_error', 'refusal', 'zoom_loop',
+  'incomplete', 'deadline', 'api_error', 'api_rejected'] as const;
+const dropCode = z.enum(READING_DROP_REASON_CODES);
+const failureCode = z.enum(HARD_READ_FAILURE_CODES);
+const count = z.number().int().min(0);
+export const READING_COUNTS_VERSION = 1;
+export const readingCountsSchema = z.strictObject({
+  version: z.literal(READING_COUNTS_VERSION),
+  droppedByReason: z.partialRecord(dropCode, count),
+  droppedByReasonFirstPass: z.partialRecord(dropCode, count),
+  hardPageAgreement: z.strictObject({ fieldsCompared: count, fieldsAgreed: count, itemsPaired: count,
+    itemsSingle: count, drugSplits: count, alternativesDropped: count }),
+  zoomCalls: count,
+  zoomLimited: count,
+  zoomFailed: count,
+  hardPageDeadlineHits: count,
+  hardReadFailures: z.partialRecord(failureCode, count),
+});
+/** provenance.reading.listVersion (list-version.ts): 16 hex characters. */
+export const listVersionSchema = z.string().regex(/^[0-9a-f]{16}$/);
+
 export const paperReadingPayloadSchema = z.strictObject({
   contract: z.literal(PAPER_READING_CONTRACT),
   pages: z.array(pageSchema),
@@ -197,4 +244,5 @@ export type PaperItem = z.infer<typeof itemSchema>;
 export type ReadingStatus = (typeof READING_STATUSES)[number];
 export type ImageRereadSkipReason = (typeof IMAGE_REREAD_SKIP_REASONS)[number];
 export type PaperReading = z.infer<typeof readingSchema>;
+export type ReadingCounts = z.infer<typeof readingCountsSchema>;
 export type PaperReadingPayload = z.infer<typeof paperReadingPayloadSchema>;

@@ -462,7 +462,7 @@ describe('Lab work list with route-backed rows (C12)', () => {
     ordering_facility_id: routed ? sourceOrderId : facilityId, source_ehr_order_id: sourceOrderId, source_ehr_order_version: '1',
     source_encounter_id: sourceOrderId, status: 'accepted', priority: 'stat', accepted_by: 'a', accepted_at: new Date(),
     row_version: '1', created_at: new Date(), order_route_id: routed ? routeId : null, test_name: 'Hemoglobin', accession_id: null,
-    accession_number: null, specimen_statuses: [] });
+    accession_number: null, specimen_statuses: [], clinical_indication: 'Pale and tired for a month' });
   const local = 'd0000000-0000-4000-8000-000000000001';
 
   const build = (cards: unknown[] | Error, rows = [row(workItemId, true), row(local, false)],
@@ -522,7 +522,9 @@ describe('Lab work list with route-backed rows (C12)', () => {
       ordererName: 'Dr Ada Obi', ordererLicence: { body: 'MDCN', number: 'MDCN/12345' } },
       patient: { fullName: 'Ngozi Eze', sex: 'female', dateOfBirth: '1990-01-01', healthIdLast4: '2345' } });
     expect(routed).not.toHaveProperty('sourceEhrOrderId');
-    expect(own).toMatchObject({ id: local, sourceEhrOrderId: sourceOrderId });
+    // The clinical information is the route detail's (C8), only while the route allows a read: never on the row.
+    expect(routed).not.toHaveProperty('clinicalIndication');
+    expect(own).toMatchObject({ id: local, sourceEhrOrderId: sourceOrderId, clinicalIndication: 'Pale and tired for a month' });
     expect(own).not.toHaveProperty('orderRoute');
     expect(own).not.toHaveProperty('patient');
     expect(statements.filter((sql) => sql.includes('lab.order_route_cards'))).toHaveLength(1);
@@ -534,6 +536,7 @@ describe('Lab work list with route-backed rows (C12)', () => {
     expect(answer.items[0]).not.toHaveProperty('patient');
     expect(answer.items[0]).not.toHaveProperty('orderRoute');
     expect(answer.items[0]).not.toHaveProperty('sourceEhrOrderId');
+    expect(answer.items[0]).not.toHaveProperty('clinicalIndication');
     expect(statements).toContain('rollback to savepoint lab_order_route_cards');
   });
 

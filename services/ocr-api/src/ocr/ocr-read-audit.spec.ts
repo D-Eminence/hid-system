@@ -383,8 +383,10 @@ describe('listExtractions answers the contract view only', () => {
     expect(result.items.map((item) => item.paperReading.contract)).toEqual(
       ['hid-paper-reading-v2', 'hid-textract-v1', null]);
     expect(Object.keys(result.items[0]!).sort()).toEqual(['attempt', 'confidence', 'contentDeleted', 'createdAt', 'id',
-      'paperReading', 'provenance', 'provider', 'providerModel', 'rawText', 'structuredPayload', 'version']);
+      'paperReading', 'provenance', 'provider', 'providerModel', 'rawText', 'reviewLearning', 'structuredPayload', 'version']);
     expect(result.items.map((item) => item.contentDeleted)).toEqual([false, false, false]);
+    // The signal the website waits for before sending the optional review signals (section 15).
+    expect(result.items.every((item) => item.reviewLearning === true)).toBe(true);
     expect(Object.keys(result.items[0]!.paperReading).sort()).toEqual(['contract', 'identity', 'items', 'pages', 'reading']);
     expect(result.items[0]!.paperReading.items).toHaveLength(3);
     expect(result.items[1]!.paperReading.pages[0].text).toBe('Dx: Hypertension');

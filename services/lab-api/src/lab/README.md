@@ -35,6 +35,6 @@ verification or release, and no analyzer, instrument, reagent, calibration, or
 QC evidence is fabricated.
 # Result verification and release
 
-Manual result entry creates an immutable, unverified revision. Verification is an independent exact-version action (the entry actor cannot verify their own revision); release is a separate authenticated manual approval of that verified version. Neither action represents analyzer integration, calibration, QC, a cryptographic signature, or critical-result acknowledgement.
+Manual result entry creates an immutable, unverified revision. Verification is an independent exact-version action (the entry actor cannot verify their own revision, answered 409 `LAB_RESULT_VERIFIER_NOT_INDEPENDENT`); release is a separate authenticated manual approval of that verified version. Neither action represents analyzer integration, calibration, QC, a cryptographic signature, or critical-result acknowledgement.
 
-Corrections and amendments append a new unverified revision. A previously released revision remains immutable history, while the new head must be verified and released independently. Non-Lab EHR readers use the released-result history permission and do not receive an unreleased-only result.
+Corrections and amendments append a new unverified revision. A previously released revision remains immutable history, while the new head must be verified and released independently. Non-Lab EHR readers use the released-result history permission and do not receive an unreleased-only result; while a correction of a released result waits, they are told only that it does (`correctionPending`).
