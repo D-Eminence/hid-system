@@ -20,20 +20,21 @@ export function normalizeOutreachPhone(raw: string): string | undefined {
 }
 
 /**
- * Group names that suggest a hospital or a government body (plan PR-1). The
- * database refuses them too; Identity answers first so the person is told
+ * Group names that suggest a hospital or a government body (plan PR-1), the
+ * same rule as identity.outreach_group_name_allowed (0125): the words in any
+ * case, the acronyms only in capitals (so "Those who care" is not refused).
+ * The database refuses them too; Identity answers first so the person is told
  * before they choose a password.
  */
-const RESERVED_NAME = /\b(hospitals?|ministry|nhis|nhia|ncdc|luth|government|federal)\b/i;
-/** WHO only in capitals, so "Those who care" is not refused. */
-const RESERVED_ACRONYM = /\bW\.?H\.?O\b/;
+const RESERVED_NAME = /(^|[^a-z])(hospital|hospitals|ministry|government|federal)([^a-z]|$)/;
+const RESERVED_ACRONYM = /(^|[^A-Za-z])(WHO|NCDC|LUTH|NHIS|NHIA)([^A-Za-z]|$)/;
 
 export function reservedOrganiserName(name: string): boolean {
-  return RESERVED_NAME.test(name) || RESERVED_ACRONYM.test(name);
+  return RESERVED_NAME.test(name.toLowerCase()) || RESERVED_ACRONYM.test(name);
 }
 
 export function reservedNameProblem(): DomainProblem {
-  return new DomainProblem(422, 'OUTREACH_ORGANISER_NAME_RESERVED',
+  return new DomainProblem(422, 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED',
     'Your group name uses a word kept for hospitals or government bodies, such as "hospital", "ministry" or "federal". '
     + 'Choose another name. If you really are one of these, contact Health ID support.');
 }

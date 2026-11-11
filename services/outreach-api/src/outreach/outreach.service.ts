@@ -75,11 +75,13 @@ export class OutreachService {
         // The person's agreement, in the same transaction (plan PR-4): the
         // database refuses an outreach group's registration without it.
         if (normalized.consent) {
+          // 0125's policy: the capturer is the request's own account and membership.
           await client.query(`insert into outreach.registration_consents (
-            case_id,consent_text_version,language,method,guardian_name,captured_by_membership_id
-          ) values ($1,$2,$3,$4,$5,$6)`,
-          [row.id, normalized.consent.textVersion, normalized.consent.language, normalized.consent.method,
-            normalized.consent.guardianName ?? null, context.membershipId]);
+            registration_case_id,facility_id,consent_text_version,language,method,guardian_name,
+            captured_by_account_id,captured_by_membership_id
+          ) values ($1,$2,$3,$4,$5,$6,platform.current_account_id(),$7)`,
+          [row.id, context.facilityId, normalized.consent.textVersion, normalized.consent.language,
+            normalized.consent.method, normalized.consent.guardianName ?? null, context.membershipId]);
         }
         await this.audit.recordWithClient(client, context, 'outreach.registration-case.received', row.id);
         const value = registrationCase(row);
@@ -114,7 +116,7 @@ export class OutreachService {
         'Read the notice to the person and record how they agreed before registering them.');
     }
     if (input.ageYears < 18 && !input.consent.guardianName) {
-      throw new DomainProblem(422, 'OUTREACH_GUARDIAN_REQUIRED',
+      throw new DomainProblem(422, 'OUTREACH_CONSENT_GUARDIAN_REQUIRED',
         'This person is under 18. Enter the name of the parent or guardian who agreed.');
     }
     if (input.operationalNotes && input.operationalNotes.length > OUTREACH_NOTES_LIMIT) {
@@ -360,7 +362,8 @@ export class OutreachService {
     if (!isOutreachTenant(context)) return { rule: 'campaign_admins', organiserStatus: 'not_outreach_group' };
     try {
       const state = await this.database.withTransaction(context, async (client) =>
-        (await client.query<{ review_state: string }>('select review_state from outreach.organiser_status()')).rows[0]
+        // 0125's outreach.organiser_status() answers a scalar: 'pending', 'reviewed', 'suspended' or null.
+        (await client.query<{ review_state: string | null }>('select outreach.organiser_status() as review_state')).rows[0]
           ?.review_state, { readOnly: true });
       const organiserStatus = state === 'pending' ? 'unverified' as const
         : state === 'reviewed' ? 'reviewed' as const

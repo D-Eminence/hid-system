@@ -97,7 +97,8 @@ describe('Facility staff invitation email (P4b)', () => {
       expect(content.subject).toBe('Invitation to help Synthetic Community Health Volunteers on Health ID Outreach');
       expect(content.text).toContain('The organiser of Synthetic Community Health Volunteers has invited you to help');
       expect(content.text).toContain(`${outreachPage}#${invitationId}.${token}`);
-      expect(content.text).toContain('the code 482913');
+      expect(content.text).not.toContain('482913');
+      expect(content.text).toContain('copy all of it into your browser');
       expect(content.text).not.toContain('join the facility');
       expect(staffInvitationContent({ facilityName: null, roleCode: 'outreach_volunteer', invitationId, token,
         code: '482913', expiresAt: new Date(expiresAt), origin: 'https://outreach.healthidentitydirectory.com',

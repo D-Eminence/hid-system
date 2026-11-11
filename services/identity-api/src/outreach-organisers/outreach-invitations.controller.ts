@@ -1,16 +1,15 @@
-import { Body, Controller, Get, Headers, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { AuthService } from '../auth/auth.service';
 import type { LoginDto } from '../auth/dto/login.dto';
 import { setSessionCookies } from '../auth/session-cookies';
 import { TurnstileService } from '../auth/turnstile.service';
 import { AuditAction, AuditFailuresOnly, FacilityOptional, NoAudit, Public, RequirePermissions } from '../common/decorators';
-import { requireIdempotencyKey } from '../common/idempotency';
 import { assertAccountless, assertAllowedOrigin } from '../common/public-flow-guards';
 import { type HidRequest, requireRequestContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { accountOnlyContext } from '../identity/staff-invitations-signed-in.controller';
-import { AcceptOutreachInvitationDto, CreateOutreachInvitationDto,
+import { AcceptOutreachInvitationDto, CreateOutreachInvitationDto, OutreachInvitationProofDto,
   SignedInOutreachInvitationDto } from './dto/outreach-organiser.dto';
 import { OutreachInvitationsService } from './outreach-invitations.service';
 
@@ -31,15 +30,48 @@ export class OutreachInvitationsController {
     return this.invitations.list(requireRequestContext(request, 'healthcare-operations'));
   }
 
+  /**
+   * 201 { invitationId, expiresAt, deliveryOutcome }. 0125 keeps no
+   * idempotency record: the same invitation sent again answers 409
+   * OUTREACH_INVITATION_ALREADY_SENT, so a retry never sends a second email.
+   */
   @Post()
   @RequirePermissions('outreach.campaign.write')
   @AuditAction('identity.outreach-invitation.create')
-  async create(@Body() input: CreateOutreachInvitationDto, @Headers('idempotency-key') key: string | undefined,
-    @Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
-    const answer = await this.invitations.create(requireRequestContext(request, 'healthcare-operations'), input,
-      requireIdempotencyKey(key));
-    response.status(answer.status);
-    return answer.body;
+  create(@Body() input: CreateOutreachInvitationDto, @Req() request: HidRequest) {
+    return this.invitations.create(requireRequestContext(request, 'healthcare-operations'), input);
+  }
+
+  /** Cancels a pending invitation. */
+  @Post(':invitationId/revoke')
+  @HttpCode(200)
+  @RequirePermissions('outreach.campaign.write')
+  @AuditAction('identity.outreach-invitation.revoke')
+  revoke(@Param('invitationId', new ParseUUIDPipe({ version: '4' })) invitationId: string, @Req() request: HidRequest) {
+    return this.invitations.revoke(requireRequestContext(request, 'healthcare-operations'), invitationId);
+  }
+}
+
+/**
+ * What an invitation link shows before accepting (no sign-in): the group, who
+ * invited, and whether to set a password or sign in first. Origin, then the
+ * network's window, then the command (a wrong token counts against the link).
+ */
+@Controller('identity/outreach-invitations/preview')
+@Public()
+@AuditFailuresOnly()
+export class OutreachInvitationsPreviewController {
+  private readonly environment = getEnvironment();
+  private readonly allowedOrigins = new Set(this.environment.CORS_ORIGINS.split(',').map((origin) => origin.trim()));
+
+  constructor(private readonly invitations: OutreachInvitationsService) {}
+
+  @Post()
+  @HttpCode(200)
+  @AuditAction('identity.outreach-invitation.preview')
+  preview(@Body() input: OutreachInvitationProofDto, @Req() request: HidRequest) {
+    assertAllowedOrigin(request, this.allowedOrigins);
+    return this.invitations.preview(input, request.ip, request.correlationId);
   }
 }
 
@@ -77,7 +109,7 @@ export class OutreachInvitationsPublicController {
     );
     setSessionCookies(response, result, this.environment);
     response.setHeader('x-csrf-token', result.csrfToken);
-    return { accepted: true as const, facilityId: accepted.facilityId, facilityName: accepted.facilityName,
+    return { accepted: true as const, facilityId: accepted.facilityId, membershipId: accepted.membershipId,
       roleCode: accepted.roleCode, actor: result.actor, expiresAt: result.expiresAt.toISOString() };
   }
 }

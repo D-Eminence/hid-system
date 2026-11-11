@@ -1,6 +1,6 @@
 import { Transform } from 'class-transformer';
 import {
-  Equals, IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength, ValidateIf,
+  Equals, IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength,
 } from 'class-validator';
 import { OUTREACH_ORGANISER_TERMS_VERSION } from '../outreach-organiser-crypto';
 
@@ -46,8 +46,9 @@ export class StartOutreachOrganiserSignupDto extends OutreachGroupDetailsDto {
 }
 
 export class VerifyOutreachOrganiserEmailDto {
-  @IsUUID('4')
-  challengeId!: string;
+  /** The reference start answered; accepted and not needed (the cookie names the sign-up). */
+  @IsOptional() @IsUUID('4')
+  challengeId?: string;
 
   @Matches(/^[0-9]{6}$/, { message: 'Enter the 6-digit code from the email' })
   code!: string;
@@ -86,23 +87,13 @@ export class CreateOutreachInvitationDto {
   email!: string;
 }
 
-/** The link's invitation id and token, or the email address and the 6-digit code. */
+/** The invitation link's id and token (0125 accepts by link only). */
 export class OutreachInvitationProofDto {
-  @ValidateIf((object: OutreachInvitationProofDto) => object.email === undefined || object.invitationId !== undefined)
   @IsUUID('4')
-  invitationId?: string;
+  invitationId!: string;
 
-  @ValidateIf((object: OutreachInvitationProofDto) => object.invitationId !== undefined)
   @IsString() @Matches(/^[A-Za-z0-9_-]{43}$/, { message: 'The invitation link is not complete. Open it again from the email.' })
-  token?: string;
-
-  @ValidateIf((object: OutreachInvitationProofDto) => object.invitationId === undefined)
-  @Transform(trimLower) @IsEmail() @MaxLength(254)
-  email?: string;
-
-  @ValidateIf((object: OutreachInvitationProofDto) => object.invitationId === undefined)
-  @Matches(/^[0-9]{6}$/, { message: 'Enter the 6-digit code from the email' })
-  code?: string;
+  token!: string;
 }
 
 export class AcceptOutreachInvitationDto extends OutreachInvitationProofDto {
@@ -116,17 +107,5 @@ export class AcceptOutreachInvitationDto extends OutreachInvitationProofDto {
   turnstileToken?: string;
 }
 
-/** Signed in: the link, or the code sent to the account's own email. */
-export class SignedInOutreachInvitationDto {
-  @ValidateIf((object: SignedInOutreachInvitationDto) => object.code === undefined)
-  @IsUUID('4')
-  invitationId?: string;
-
-  @ValidateIf((object: SignedInOutreachInvitationDto) => object.code === undefined)
-  @IsString() @Matches(/^[A-Za-z0-9_-]{43}$/, { message: 'The invitation link is not complete. Open it again from the email.' })
-  token?: string;
-
-  @ValidateIf((object: SignedInOutreachInvitationDto) => object.invitationId === undefined)
-  @Matches(/^[0-9]{6}$/, { message: 'Enter the 6-digit code from the email' })
-  code?: string;
-}
+/** Signed in: the same link. */
+export class SignedInOutreachInvitationDto extends OutreachInvitationProofDto {}

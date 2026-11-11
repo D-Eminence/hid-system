@@ -34,7 +34,7 @@ export const CONSENT_METHODS = ['verbal_read_aloud', 'self_ticked', 'guardian'] 
  * A guardian's name is required for anyone under 18.
  */
 export class RegistrationConsentDto {
-  @IsString() @Matches(/^[a-z0-9][a-z0-9._-]{0,63}$/, { message: 'consent.textVersion must name the notice that was shown' })
+  @IsString() @Matches(/^[a-z0-9][a-z0-9.-]{2,63}$/, { message: 'Reload the page to see the current registration notice' })
   textVersion!: string;
 
   @IsIn(CONSENT_LANGUAGES, { message: 'Choose the language the notice was given in' })
@@ -45,7 +45,7 @@ export class RegistrationConsentDto {
 
   @IsOptional()
   @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') || undefined : value)
-  @IsString() @MinLength(2) @MaxLength(200)
+  @IsString() @MinLength(2) @MaxLength(120)
   guardianName?: string;
 }
 

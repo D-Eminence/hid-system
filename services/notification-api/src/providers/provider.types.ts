@@ -218,7 +218,8 @@ export function staffInvitationContent(input: {
 /**
  * An outreach organiser's invitation to a helper: the group's name when
  * Identity found it safe, otherwise "an outreach group". The link opens the
- * outreach site's invitation page; the code is the typed fallback.
+ * outreach site's invitation page. Outreach invitations are accepted by
+ * link only (0125), so no code is shown.
  */
 function outreachInvitationContent(input: {
   facilityName?: string | null;
@@ -236,7 +237,7 @@ function outreachInvitationContent(input: {
     text: 'Hello,\n\n'
       + `The organiser of ${group} has invited you to help register people at their outreach events on Health ID.\n\n`
       + `To accept, open this link:\n${page}#${input.invitationId}.${input.token}\n\n`
-      + `If the link does not open, go to ${page} and enter this email address and the code ${input.code}.\n\n`
+      + 'If the link does not open, copy all of it into your browser\'s address bar.\n\n'
       + `The invitation expires on ${alertTime(input.expiresAt)} (WAT). If you were not expecting it, you can ignore this email: `
       + 'nothing happens unless you accept. To report it, write to Health ID support at '
       + `${input.supportEmail} and quote reference ${staffInvitationReference(input.invitationId)}.`,

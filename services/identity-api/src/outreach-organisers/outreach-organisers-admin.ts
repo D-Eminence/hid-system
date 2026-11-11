@@ -1,6 +1,6 @@
-import { Body, Controller, Get, HttpCode, Injectable, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Injectable, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { Transform } from 'class-transformer';
-import { IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Min, MinLength } from 'class-validator';
 import type { QueryResultRow } from 'pg';
 import { requireAdminContext } from '../admin/admin-context';
 import { AuditAction, FacilityOptional, RequirePermissions } from '../common/decorators';
@@ -11,52 +11,70 @@ import { databaseCode, decryptOutreachPhone, hasRefusal, outreachKey } from './o
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value;
 
-/** The default note of a one-click review, so the queue needs no typing. */
-export const ONE_CLICK_REVIEW_REASON = 'Checked by Health ID support';
-
 export class ListOutreachOrganisersDto {
-  @IsOptional() @IsIn(['pending', 'reviewed', 'suspended'])
-  reviewState?: 'pending' | 'reviewed' | 'suspended';
+  /** pending (the check queue, oldest first), reviewed, suspended, or all (the default). */
+  @IsOptional() @IsIn(['pending', 'reviewed', 'suspended', 'all'])
+  reviewState?: 'pending' | 'reviewed' | 'suspended' | 'all';
 }
 
-export class ReviewOutreachOrganiserDto {
+/** The row version the page read, from If-Match (the admin console's convention) or the body. */
+export class OutreachAdminVersionDto {
+  @IsOptional() @IsInt() @Min(1)
+  version?: number;
+}
+
+export class ReviewOutreachOrganiserDto extends OutreachAdminVersionDto {
   /** Support may correct the group's shown name at review. */
   @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(120)
   @Matches(/^[\p{L}\p{M}0-9][\p{L}\p{M}0-9 .,'&()/-]*$/u, { message: 'Use letters, numbers and simple punctuation in the name' })
   displayName?: string;
 
-  @IsOptional() @Transform(trim) @IsString() @MinLength(8) @MaxLength(500)
+  @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(500)
+  note?: string;
+
+  /** The earlier name of `note`, still accepted. */
+  @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(500)
   reason?: string;
 }
 
-export class OutreachAdminReasonDto {
+export class OutreachAdminReasonDto extends OutreachAdminVersionDto {
   @Transform(trim) @IsString() @MinLength(8, { message: 'Write a short reason (at least 8 characters)' }) @MaxLength(500)
   reason!: string;
 }
 
-export class AppointCampaignAdminDto extends OutreachAdminReasonDto {
+export class AppointCampaignAdminDto {
+  @Transform(trim) @IsString() @MinLength(8, { message: 'Write a short reason (at least 8 characters)' }) @MaxLength(500)
+  reason!: string;
+
   @IsUUID('4')
   membershipId!: string;
 }
 
+/** identity.admin_list_outreach_organisers (0125). */
 interface OrganiserRow extends QueryResultRow {
   organization_id: string;
   facility_id: string;
+  row_version: string | number;
   display_name: string;
-  group_name: string;
   kind: string;
   registration_number: string | null;
-  organiser_name: string;
-  organiser_email: string;
-  phone_ciphertext: Buffer | null;
   review_state: string;
-  reviewed_at: Date | string | null;
-  suspended_at: Date | string | null;
-  created_at: Date | string;
+  origin: string;
+  organiser_account_id: string;
+  organiser_name: string | null;
+  organiser_email: string;
+  contact_phone_ciphertext: Buffer | null;
+  contact_key_version: string | null;
   terms_version: string;
-  campaign_count: string | number;
+  created_at: Date | string;
+  reviewed_at: Date | string | null;
+  review_note: string | null;
+  suspended_at: Date | string | null;
+  suspension_reason: string | null;
   member_count: string | number;
-  registration_count: string | number;
+  pending_invitation_count: string | number;
+  campaign_count: string | number;
+  active_campaign_count: string | number;
 }
 
 function iso(value: Date | string | null | undefined): string | null {
@@ -64,22 +82,36 @@ function iso(value: Date | string | null | undefined): string | null {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
 
-function adminProblem(error: unknown): DomainProblem {
+/** The version from If-Match (W/"3", "3" or 3), else the body's; 428 in plain English when neither is usable. */
+export function outreachAdminVersion(ifMatch: string | undefined, bodyVersion: number | undefined): number {
+  const normalized = ifMatch?.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
+  const version = normalized ? Number(normalized) : bodyVersion ?? Number.NaN;
+  if (!Number.isSafeInteger(version) || version < 1) {
+    throw new DomainProblem(428, 'OUTREACH_ADMIN_VERSION_REQUIRED', 'Reload the list, then try again.');
+  }
+  return version;
+}
+
+/** The refusals of 0125's support commands, in plain English. */
+export const OUTREACH_ADMIN_REFUSALS: Readonly<Record<string, readonly [number, string]>> = {
+  OUTREACH_ORGANISER_NOT_FOUND: [404, 'That outreach group was not found.'],
+  OUTREACH_ORGANISER_VERSION_CONFLICT: [409, 'Someone else changed this outreach group just now. Reload the list and try again.'],
+  OUTREACH_ORGANISER_NOT_PENDING: [409, 'This outreach group has already been checked or is paused. Reload the list.'],
+  OUTREACH_ORGANISER_ALREADY_SUSPENDED: [409, 'This outreach group is already paused.'],
+  OUTREACH_ORGANISER_REVIEW_INVALID: [422, 'Check the name and the note, then try again.'],
+  OUTREACH_ORGANISER_SUSPEND_INVALID: [422, 'Write a short reason (at least 8 characters) for pausing this group.'],
+  OUTREACH_ORGANISER_STATE_INVALID: [400, 'Choose which outreach groups to show.'],
+  OUTREACH_CAMPAIGN_NOT_FOUND: [404, 'That campaign was not found at an outreach group.'],
+  OUTREACH_CAMPAIGN_VERSION_CONFLICT: [409, 'Someone else changed this campaign just now. Reload and try again.'],
+  OUTREACH_CAMPAIGN_RESCUE_INVALID: [422, 'Write a short reason (at least 8 characters).'],
+  OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE: [422, 'That person is not an active member of this outreach group.'],
+  ADMIN_PERMISSION_DENIED: [403, 'You do not have permission to do this.'],
+};
+
+export function adminProblem(error: unknown): DomainProblem {
   if (error instanceof DomainProblem) return error;
-  if (hasRefusal(error, 'OUTREACH_ORGANISATION_NOT_FOUND')) {
-    return new DomainProblem(404, 'OUTREACH_ORGANISATION_NOT_FOUND', 'That outreach group was not found.');
-  }
-  if (hasRefusal(error, 'OUTREACH_ORGANISATION_SUSPENDED')) {
-    return new DomainProblem(409, 'OUTREACH_ORGANISATION_SUSPENDED', 'That outreach group is paused. It cannot be checked while paused.');
-  }
-  if (hasRefusal(error, 'OUTREACH_CAMPAIGN_NOT_FOUND')) {
-    return new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'That campaign was not found.');
-  }
-  if (hasRefusal(error, 'OUTREACH_CAMPAIGN_CLOSED')) {
-    return new DomainProblem(409, 'OUTREACH_CAMPAIGN_CLOSED', 'That campaign is already closed.');
-  }
-  if (hasRefusal(error, 'OUTREACH_STAFF_NOT_AVAILABLE')) {
-    return new DomainProblem(422, 'OUTREACH_STAFF_NOT_AVAILABLE', 'That person is not an active member of this outreach group.');
+  for (const [code, [status, detail]] of Object.entries(OUTREACH_ADMIN_REFUSALS)) {
+    if (hasRefusal(error, code)) return new DomainProblem(status, code, detail);
   }
   const code = databaseCode(error);
   if (code === '42501') return new DomainProblem(403, 'PERMISSION_DENIED', 'You do not have permission to do this.');
@@ -87,11 +119,17 @@ function adminProblem(error: unknown): DomainProblem {
   return new DomainProblem(503, 'ADMIN_OUTREACH_UNAVAILABLE', 'Outreach groups could not be loaded or changed right now. Please try again.');
 }
 
+function label(state: string): string {
+  return state === 'reviewed' ? 'Checked by Health ID' : state === 'suspended' ? 'Paused' : 'Unverified organiser';
+}
+
 /**
  * Support's tools for outreach groups (plan PR-3): the "Outreach organisers to
- * check" queue, the one-time check that lets a group's first campaign go live,
- * pausing a group, and the rescue of a campaign whose only admin has gone.
- * Every command is audited by the database; the HTTP row is the interceptor's.
+ * check" queue, the one-time check that lets a group's first campaign go live
+ * (owner decision 1: one click, with the version the list gave), pausing a
+ * group, and the rescue of a campaign whose only admin has gone. The commands
+ * are 0125's identity.admin_*; each writes its own audit row, and the list
+ * writes one too, so no transaction here is read-only.
  */
 @Injectable()
 export class OutreachOrganisersAdminService {
@@ -102,73 +140,80 @@ export class OutreachOrganisersAdminService {
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<OrganiserRow>('select * from identity.admin_list_outreach_organisers($1)',
-          [reviewState ?? null]);
+          [reviewState ?? 'all']);
         return { organisers: result.rows.map((row) => ({
-          organizationId: row.organization_id, facilityId: row.facility_id, displayName: row.display_name,
-          groupName: row.group_name, kind: row.kind, registrationNumber: row.registration_number,
-          organiserName: row.organiser_name, organiserEmail: row.organiser_email,
-          phone: key ? decryptOutreachPhone(key, row.phone_ciphertext) : null,
-          reviewState: row.review_state, label: row.review_state === 'reviewed' ? 'Checked by Health ID'
-            : row.review_state === 'suspended' ? 'Paused' : 'Unverified organiser',
-          reviewedAt: iso(row.reviewed_at), suspendedAt: iso(row.suspended_at), createdAt: iso(row.created_at),
-          termsVersion: row.terms_version, campaigns: Number(row.campaign_count), members: Number(row.member_count),
-          registrations: Number(row.registration_count),
+          organizationId: row.organization_id, facilityId: row.facility_id, version: Number(row.row_version),
+          displayName: row.display_name, groupName: row.display_name, kind: row.kind,
+          registrationNumber: row.registration_number, origin: row.origin,
+          organiserAccountId: row.organiser_account_id, organiserName: row.organiser_name,
+          organiserEmail: row.organiser_email,
+          phone: key ? decryptOutreachPhone(key, row.contact_phone_ciphertext) : null,
+          reviewState: row.review_state, label: label(row.review_state),
+          reviewedAt: iso(row.reviewed_at), reviewNote: row.review_note, suspendedAt: iso(row.suspended_at),
+          suspensionReason: row.suspension_reason, createdAt: iso(row.created_at), termsVersion: row.terms_version,
+          members: Number(row.member_count), pendingInvitations: Number(row.pending_invitation_count),
+          campaigns: Number(row.campaign_count), activeCampaigns: Number(row.active_campaign_count),
         })) };
-      }, { readOnly: true });
-    } catch (error) {
-      throw adminProblem(error);
-    }
-  }
-
-  async review(context: PlatformAdminContext, organizationId: string, input: ReviewOutreachOrganiserDto) {
-    try {
-      return await this.database.withPlatformTransaction(context, async (client) => {
-        const row = (await client.query<{ organization_id: string; review_state: string; display_name: string;
-          reviewed_at: Date | string }>('select * from identity.admin_review_outreach_organiser($1,$2,$3)',
-        [organizationId, input.displayName ?? null, input.reason ?? ONE_CLICK_REVIEW_REASON])).rows[0];
-        if (!row) throw adminProblem(undefined);
-        return { organizationId: row.organization_id, reviewState: row.review_state, displayName: row.display_name,
-          reviewedAt: iso(row.reviewed_at) };
       });
     } catch (error) {
       throw adminProblem(error);
     }
   }
 
-  async suspend(context: PlatformAdminContext, organizationId: string, reason: string) {
+  /** One click: the version from the list, nothing else required. */
+  async review(context: PlatformAdminContext, organizationId: string, version: number, input: ReviewOutreachOrganiserDto) {
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
-        const row = (await client.query<{ organization_id: string; review_state: string; suspended_at: Date | string }>(
-          'select * from identity.admin_suspend_outreach_organiser($1,$2)', [organizationId, reason])).rows[0];
+        const row = (await client.query<{ row_version: string | number; review_state: string }>(
+          'select * from identity.admin_review_outreach_organiser($1,$2,$3,$4)',
+          [organizationId, version, input.displayName ?? null, input.note ?? input.reason ?? null])).rows[0];
         if (!row) throw adminProblem(undefined);
-        return { organizationId: row.organization_id, reviewState: row.review_state, suspendedAt: iso(row.suspended_at) };
+        return { organizationId, version: Number(row.row_version), reviewState: row.review_state,
+          label: label(row.review_state) };
       });
     } catch (error) {
       throw adminProblem(error);
     }
   }
 
-  async closeCampaign(context: PlatformAdminContext, campaignId: string, reason: string) {
+  async suspend(context: PlatformAdminContext, organizationId: string, version: number, reason: string) {
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
-        const row = (await client.query<{ campaign_id: string; status: string; row_version: string | number }>(
-          'select * from outreach.admin_close_campaign($1,$2)', [campaignId, reason])).rows[0];
+        const row = (await client.query<{ row_version: string | number; review_state: string; revoked_roles: number }>(
+          'select * from identity.admin_suspend_outreach_organiser($1,$2,$3)', [organizationId, version, reason])).rows[0];
         if (!row) throw adminProblem(undefined);
-        return { campaignId: row.campaign_id, status: row.status, version: Number(row.row_version) };
+        return { organizationId, version: Number(row.row_version), reviewState: row.review_state,
+          label: label(row.review_state), revokedRoles: Number(row.revoked_roles) };
       });
     } catch (error) {
       throw adminProblem(error);
     }
   }
 
+  /** 'closed' or 'already_closed'. */
+  async closeCampaign(context: PlatformAdminContext, campaignId: string, version: number, reason: string) {
+    try {
+      return await this.database.withPlatformTransaction(context, async (client) => {
+        const result = (await client.query<{ result: string }>(
+          'select identity.admin_close_outreach_campaign($1,$2,$3) as result', [campaignId, version, reason])).rows[0]?.result;
+        if (result !== 'closed' && result !== 'already_closed') throw adminProblem(undefined);
+        return { campaignId, status: 'closed' as const, alreadyClosed: result === 'already_closed' };
+      });
+    } catch (error) {
+      throw adminProblem(error);
+    }
+  }
+
+  /** 'appointed' or 'already_admin'. */
   async appointCampaignAdmin(context: PlatformAdminContext, campaignId: string, input: AppointCampaignAdminDto) {
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
-        const row = (await client.query<{ campaign_id: string; membership_id: string; role: string }>(
-          'select * from outreach.admin_appoint_campaign_admin($1,$2,$3)',
-          [campaignId, input.membershipId, input.reason])).rows[0];
-        if (!row) throw adminProblem(undefined);
-        return { campaignId: row.campaign_id, membershipId: row.membership_id, role: row.role };
+        const result = (await client.query<{ result: string }>(
+          'select identity.admin_appoint_outreach_campaign_admin($1,$2,$3) as result',
+          [campaignId, input.membershipId, input.reason])).rows[0]?.result;
+        if (result !== 'appointed' && result !== 'already_admin') throw adminProblem(undefined);
+        return { campaignId, membershipId: input.membershipId, role: 'admin' as const,
+          alreadyAdmin: result === 'already_admin' };
       });
     } catch (error) {
       throw adminProblem(error);
@@ -189,23 +234,27 @@ export class OutreachOrganisersAdminController {
     return this.admin.list(requireAdminContext(request), query.reviewState);
   }
 
-  /** One click: an empty body marks the group checked, so its campaigns can go live. */
+  /** One click: the version the list gave (If-Match or body) marks the group checked, so its campaigns can go live. */
   @Post(':organizationId/review')
   @HttpCode(200)
-  @RequirePermissions('platform.facility.unlock')
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
   @AuditAction('admin.outreach-organiser.review')
   review(@Param('organizationId', new ParseUUIDPipe({ version: '4' })) organizationId: string,
-    @Body() input: ReviewOutreachOrganiserDto, @Req() request: HidRequest) {
-    return this.admin.review(requireAdminContext(request), organizationId, input);
+    @Headers('if-match') ifMatch: string | undefined, @Body() input: ReviewOutreachOrganiserDto,
+    @Req() request: HidRequest) {
+    return this.admin.review(requireAdminContext(request), organizationId, outreachAdminVersion(ifMatch, input.version),
+      input);
   }
 
   @Post(':organizationId/suspend')
   @HttpCode(200)
-  @RequirePermissions('platform.facility.manage')
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
   @AuditAction('admin.outreach-organiser.suspend')
   suspend(@Param('organizationId', new ParseUUIDPipe({ version: '4' })) organizationId: string,
-    @Body() input: OutreachAdminReasonDto, @Req() request: HidRequest) {
-    return this.admin.suspend(requireAdminContext(request), organizationId, input.reason);
+    @Headers('if-match') ifMatch: string | undefined, @Body() input: OutreachAdminReasonDto,
+    @Req() request: HidRequest) {
+    return this.admin.suspend(requireAdminContext(request), organizationId, outreachAdminVersion(ifMatch, input.version),
+      input.reason);
   }
 }
 
@@ -216,16 +265,17 @@ export class OutreachCampaignsAdminController {
 
   @Post(':campaignId/close')
   @HttpCode(200)
-  @RequirePermissions('platform.facility.manage')
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
   @AuditAction('admin.outreach-campaign.close')
-  close(@Param('campaignId', new ParseUUIDPipe()) campaignId: string, @Body() input: OutreachAdminReasonDto,
-    @Req() request: HidRequest) {
-    return this.admin.closeCampaign(requireAdminContext(request), campaignId, input.reason);
+  close(@Param('campaignId', new ParseUUIDPipe()) campaignId: string, @Headers('if-match') ifMatch: string | undefined,
+    @Body() input: OutreachAdminReasonDto, @Req() request: HidRequest) {
+    return this.admin.closeCampaign(requireAdminContext(request), campaignId, outreachAdminVersion(ifMatch, input.version),
+      input.reason);
   }
 
   @Post(':campaignId/admins')
   @HttpCode(200)
-  @RequirePermissions('platform.facility.manage')
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
   @AuditAction('admin.outreach-campaign.appoint-admin')
   appointAdmin(@Param('campaignId', new ParseUUIDPipe()) campaignId: string, @Body() input: AppointCampaignAdminDto,
     @Req() request: HidRequest) {

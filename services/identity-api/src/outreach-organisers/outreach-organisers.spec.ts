@@ -1,5 +1,7 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import type { Response } from 'express';
@@ -15,19 +17,20 @@ import { PlatformControlCommandDto } from '../admin/dto/admin-command.dto';
 import { IdentityController } from '../identity/identity.controller';
 import type { OrganizationProfileCompletionService } from '../identity/organization-profile-completion.service';
 import { ActivateOutreachOrganiserDto, StartOutreachOrganiserSignupDto } from './dto/outreach-organiser.dto';
-import { OutreachInvitationsService } from './outreach-invitations.service';
+import { OUTREACH_INVITATION_REFUSALS, OutreachInvitationsService } from './outreach-invitations.service';
 import { decryptOutreachPhone, domainHmac, encryptOutreachPhone, normalizeOutreachPhone, outreachKey,
   reservedOrganiserName } from './outreach-organiser-crypto';
 import { assertOutreachSignupOpen } from './outreach-organiser-gate';
 import { OUTREACH_SIGNUP_COOKIE, OutreachOrganiserController } from './outreach-organiser.controller';
-import { OutreachOrganiserService } from './outreach-organiser.service';
-import { ONE_CLICK_REVIEW_REASON, OutreachOrganisersAdminService } from './outreach-organisers-admin';
+import { OUTREACH_SIGNUP_REFUSALS, OutreachOrganiserService } from './outreach-organiser.service';
+import { OUTREACH_ADMIN_REFUSALS, OutreachOrganisersAdminService, outreachAdminVersion } from './outreach-organisers-admin';
+import { OUTREACH_RETENTION_SWEEP_BATCH, OutreachRetentionSweeper } from './outreach-retention.sweeper';
 
 // Fictional test data only.
 const origin = 'https://outreach.healthidentitydirectory.com';
 const correlationId = 'outreach-organiser-test';
 const signupId = '4b0b8f8e-3c56-4e1a-9d6b-1f2a3b4c5d6e';
-const challengeId = '5c1c9f9f-4d67-4f2b-8e7c-2a3b4c5d6e7f';
+const challengeId = '5c1c9f9f-4d67-4f2b-8e7c-2a3b4c5d6e7f'; // a delivery reference only
 const token = 'A'.repeat(43);
 const startInput = {
   organiserName: 'Ada Fictional', email: 'ada.organiser@example.test', phone: '0801 234 5678',
@@ -159,32 +162,48 @@ describe('OutreachOrganiserService', () => {
     db as unknown as DatabaseService, otp as unknown as NotificationOtpClient,
     completion as unknown as OrganizationProfileCompletionService);
 
-  it('starts a sign-up: quota and network window first, then the command with HMACs only, then the email', async () => {
-    // Answer with the ids the service sent.
-    const system = jest.fn(async (sql: string, values?: unknown[]) => sql.includes('start_outreach_organiser_signup')
-      ? { rows: [{ outcome: 'code_issued', signup_id: values?.[0], challenge_id: values?.[10], resend_after_seconds: 60 }] }
-      : { rows: [] });
+  it('starts a sign-up: the network window first, then 0125\'s 12-argument command with HMACs only, then the email', async () => {
+    const system = jest.fn(async (sql: string) => sql.includes('start_outreach_organiser_signup')
+      ? { rows: [{ outcome: 'started' }] } : { rows: [] });
     const db = database({ system });
     const otp = notification();
     const started = await make(db, otp).start(plainToInstance(StartOutreachOrganiserSignupDto, startInput), '203.0.113.10', correlationId);
     expect(started.cookie).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
-    expect(started.body).toMatchObject({ accepted: true, expiresInSeconds: 300, resendAfterSeconds: 60 });
+    expect(started.body).toMatchObject({ accepted: true, expiresInSeconds: 900, resendAfterSeconds: 60 });
     const sqls = system.mock.calls.map((call) => String(call[0]));
-    expect(sqls.some((sql) => sql.includes('platform.consume_public_application_quota'))).toBe(true);
+    // The command charges the public application quota itself (0125); Identity does not charge it twice.
+    expect(sqls.some((sql) => sql.includes('platform.consume_public_application_quota'))).toBe(false);
     const command = system.mock.calls.find((call) => String(call[0]).includes('start_outreach_organiser_signup')) as unknown[];
+    expect(String(command[0])).toBe('select identity.start_outreach_organiser_signup($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) as outcome');
     const values = command[1] as unknown[];
-    expect(values).toHaveLength(15);
+    expect(values).toHaveLength(12);
+    // (signup, token_hmac, email, organiser_name, group_name, kind, reg_no, phone_lookup, phone_ct, key_version, network, code_hmac)
+    expect(values[1]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-organiser-signup', 'cookie', started.cookie.split('.')[1] as string));
     expect(values[2]).toBe('ada.organiser@example.test');
-    expect(String(values[3])).toMatch(/^[0-9a-f]{64}$/);
-    expect(Buffer.isBuffer(values[4])).toBe(true);
+    expect(values[3]).toBe('Ada Fictional');
+    expect(values[4]).toBe('Synthetic Community Volunteers');
+    expect(values[5]).toBe('group');
+    expect(values[6]).toBeNull();
+    expect(String(values[7])).toMatch(/^[0-9a-f]{64}$/);
+    expect(Buffer.isBuffer(values[8])).toBe(true);
+    expect(values[9]).toBe('local-v1');
+    expect(values[10]).toBe('network-digest');
     expect(values.map(String).join('|')).not.toContain('2348012345678');
-    expect(values[6]).toBe('Synthetic Community Volunteers');
     expect(otp.deliver).toHaveBeenCalledWith(expect.objectContaining({ recipient: 'ada.organiser@example.test',
       purpose: 'SIGNUP_VERIFY', channel: 'email' }));
-    // The code the email carries is the one the database holds as an HMAC.
-    const code = (otp.deliver.mock.calls[0] as unknown as [{ code: string; challengeId: string }])[0];
-    expect(values[11]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-organiser-signup', 'otp',
-      String(values[0]), code.challengeId, code.code));
+    // The code the email carries is the one the database holds as an HMAC bound to the sign-up.
+    const code = (otp.deliver.mock.calls[0] as unknown as [{ code: string }])[0];
+    expect(values[11]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-organiser-signup', 'otp', String(values[0]), code.code));
+  });
+
+  it.each([['name_not_allowed', 422, 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED'], ['rate_limited', 429, 'OUTREACH_ORGANISER_SIGNUP_RATE_LIMITED'],
+    ['something_else', 503, 'OUTREACH_ORGANISER_SIGNUP_UNAVAILABLE']] as const)(
+    'answers the start outcome %s plainly and sends no email', async (outcome, status, code) => {
+    const system = jest.fn(async (sql: string) => sql.includes('start_outreach_organiser_signup') ? { rows: [{ outcome }] } : { rows: [] });
+    const otp = notification();
+    await expect(make(database({ system }), otp).start(plainToInstance(StartOutreachOrganiserSignupDto, startInput),
+      '203.0.113.10', correlationId)).rejects.toMatchObject({ status, code });
+    expect(otp.deliver).not.toHaveBeenCalled();
   });
 
   it('refuses an email that already has an account, telling the person to sign in and start a group', async () => {
@@ -207,7 +226,7 @@ describe('OutreachOrganiserService', () => {
   it('refuses a reserved group name and a bad phone before anything is charged', async () => {
     const db = database();
     await expect(make(db).start(plainToInstance(StartOutreachOrganiserSignupDto, { ...startInput, groupName: 'Ministry Helpers' }),
-      '203.0.113.10', correlationId)).rejects.toMatchObject({ status: 422, code: 'OUTREACH_ORGANISER_NAME_RESERVED' });
+      '203.0.113.10', correlationId)).rejects.toMatchObject({ status: 422, code: 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED' });
     await expect(make(db).start(plainToInstance(StartOutreachOrganiserSignupDto, { ...startInput, phone: '12345' }),
       '203.0.113.10', correlationId)).rejects.toMatchObject({ status: 400, code: 'OUTREACH_PHONE_INVALID' });
     expect(db.withSystemTransaction).not.toHaveBeenCalled();
@@ -215,47 +234,82 @@ describe('OutreachOrganiserService', () => {
 
   it('answers 429 when the network window or the public application quota is spent', async () => {
     const quota = jest.fn(async (sql: string) => {
-      if (sql.includes('consume_public_application_quota')) throw Object.assign(new Error('limited'), { code: 'P4290' });
+      if (sql.includes('start_outreach_organiser_signup')) throw Object.assign(new Error('APPLICATION_QUOTA_EXCEEDED'), { code: 'P4290' });
       return { rows: [] };
     });
     await expect(make(database({ system: quota })).start(plainToInstance(StartOutreachOrganiserSignupDto, startInput),
       '203.0.113.10', correlationId)).rejects.toMatchObject({ status: 429, code: 'OUTREACH_ORGANISER_SIGNUP_RATE_LIMITED' });
   });
 
-  it('verifies the code against the cookie and answers each result plainly', async () => {
+  it('verifies the code with 0125\'s 3 arguments and answers each result plainly', async () => {
     const cookie = `${signupId}.${token}`;
-    for (const [result, expected] of [['verified', { verified: true }], ['invalid_code', 'OTP_INVALID'], ['expired', 'OTP_EXPIRED'],
-      ['attempts_exhausted', 'OTP_ATTEMPTS_EXHAUSTED'], ['not_found', 'OUTREACH_ORGANISER_SIGNUP_SESSION_INVALID']] as const) {
+    for (const [result, expected] of [['verified', { verified: true }], ['wrong_code', 'OTP_INVALID'], ['code_expired', 'OTP_EXPIRED'],
+      ['locked', 'OTP_ATTEMPTS_EXHAUSTED'], ['expired', 'OUTREACH_ORGANISER_SIGNUP_EXPIRED'],
+      ['denied', 'OUTREACH_ORGANISER_SIGNUP_SESSION_INVALID']] as const) {
       const system = jest.fn(async () => ({ rows: [{ result }] }));
-      const call = make(database({ system })).verify(cookie, challengeId, '123456', correlationId);
+      const call = make(database({ system })).verify(cookie, '123456', correlationId);
       if (typeof expected === 'object') await expect(call).resolves.toEqual(expected);
       else await expect(call).rejects.toMatchObject({ code: expected });
-      const values = (system.mock.calls[0] as unknown as [string, unknown[]])[1];
-      expect(values[0]).toBe(signupId);
-      expect(values[1]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-organiser-signup', 'cookie', token));
+      const [sql, values] = system.mock.calls[0] as unknown as [string, unknown[]];
+      expect(sql).toBe('select identity.verify_outreach_organiser_email($1,$2,$3) as result');
+      expect(values).toEqual([signupId, domainHmac(outreachKey() as Buffer, 'outreach-organiser-signup', 'cookie', token),
+        domainHmac(outreachKey() as Buffer, 'outreach-organiser-signup', 'otp', signupId, '123456')]);
     }
-    await expect(make(database()).verify('not-a-cookie', challengeId, '123456', correlationId))
-      .rejects.toMatchObject({ status: 401 });
+    await expect(make(database()).verify('not-a-cookie', '123456', correlationId)).rejects.toMatchObject({ status: 401 });
   });
 
-  it('activates with an argon2 hash and the approved terms version', async () => {
-    const system = jest.fn(async () => ({ rows: [{ organization_id: 'org-1', facility_id: 'fac-1', account_id: 'acc-1',
-      membership_id: 'mem-1', email: 'ada.organiser@example.test' }] }));
+  it('sends a new code through 0125\'s resend command, to the sign-up\'s own email', async () => {
+    const cookie = `${signupId}.${token}`;
+    const system = jest.fn(async (sql: string) => sql.includes('resend_outreach_organiser_signup_code')
+      ? { rows: [{ outcome: 'sent' }] } : { rows: [{ email: 'ada.organiser@example.test' }] });
+    const otp = notification();
+    await expect(make(database({ system }), otp).resend(cookie, correlationId))
+      .resolves.toMatchObject({ sent: true, expiresInSeconds: 900, resendAfterSeconds: 60 });
+    const [sql, values] = system.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toBe('select identity.resend_outreach_organiser_signup_code($1,$2,$3) as outcome');
+    const sent = (otp.deliver.mock.calls[0] as unknown as [{ code: string; recipient: string }])[0];
+    expect(sent.recipient).toBe('ada.organiser@example.test');
+    expect(values[2]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-organiser-signup', 'otp', signupId, sent.code));
+    for (const [outcome, code] of [['too_soon', 'OTP_RESEND_COOLDOWN'], ['too_many', 'OTP_RESEND_LIMIT'],
+      ['expired', 'OUTREACH_ORGANISER_SIGNUP_EXPIRED'], ['denied', 'OUTREACH_ORGANISER_SIGNUP_SESSION_INVALID']] as const) {
+      const refused = notification();
+      await expect(make(database({ system: jest.fn(async () => ({ rows: [{ outcome }] })) }), refused).resend(cookie, correlationId))
+        .rejects.toMatchObject({ code });
+      expect(refused.deliver).not.toHaveBeenCalled();
+    }
+  });
+
+  it('activates with an argon2 hash and the approved terms version, then reads the login\'s email', async () => {
+    const system = jest.fn(async (sql: string) => sql.includes('activate_outreach_organiser(')
+      ? { rows: [{ organization_id: 'org-1', facility_id: 'fac-1', account_id: 'acc-1', membership_id: 'mem-1',
+        hid_subject: 'outreach-organiser:acc-1', replayed: false }] }
+      : { rows: [{ email: 'ada.organiser@example.test' }] });
     await expect(make(database({ system })).activate(`${signupId}.${token}`,
       plainToInstance(ActivateOutreachOrganiserDto, { termsVersion: '2026-11-01', acceptTerms: true,
         password: 'a-long-fictional-password' }), correlationId))
-      .resolves.toMatchObject({ organizationId: 'org-1', facilityId: 'fac-1', email: 'ada.organiser@example.test' });
+      .resolves.toMatchObject({ organizationId: 'org-1', facilityId: 'fac-1', email: 'ada.organiser@example.test', replayed: false });
     const values = (system.mock.calls[0] as unknown as [string, unknown[]])[1];
     expect(String(values[2])).toMatch(/^\$argon2id\$/);
     expect(values[3]).toBe('2026-11-01');
+    expect((system.mock.calls[1] as unknown as [string, unknown[]])[1]).toEqual(['acc-1']);
   });
 
   it('maps the database refusals of activation to plain problems', async () => {
     const service = make(database());
     expect(service.mapError({ code: 'P0001', message: 'OUTREACH_ORGANISER_EMAIL_REGISTERED' }))
       .toMatchObject({ status: 409, code: 'OUTREACH_ORGANISER_EMAIL_REGISTERED' });
-    expect(service.mapError({ code: 'P0001', message: 'OUTREACH_ORGANISER_NAME_RESERVED' }))
-      .toMatchObject({ status: 422 });
+    expect(service.mapError({ code: '22023', message: 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED' }))
+      .toMatchObject({ status: 422, code: 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED' });
+    expect(service.mapError({ code: '22023', message: 'OUTREACH_ORGANISER_TERMS_REQUIRED' }))
+      .toMatchObject({ status: 409, code: 'OUTREACH_ORGANISER_TERMS_REQUIRED' });
+    expect(service.mapError({ code: '22023', message: 'OUTREACH_ORGANISER_SIGNUP_INVALID' }))
+      .toMatchObject({ status: 400, code: 'OUTREACH_ORGANISER_SIGNUP_INVALID' });
+    expect(service.mapError({ code: '22023', message: 'OUTREACH_ORGANISER_PASSWORD_INVALID' }))
+      .toMatchObject({ status: 400, code: 'OUTREACH_ORGANISER_PASSWORD_INVALID' });
+    expect(service.mapError({ code: '23514', message: 'OUTREACH_ORGANISER_SIGNUP_NOT_READY' }))
+      .toMatchObject({ status: 409, code: 'OUTREACH_ORGANISER_SIGNUP_NOT_READY' });
+    expect(service.mapError({ code: 'P0001', message: 'OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP' }))
+      .toMatchObject({ status: 409, code: 'OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP' });
     expect(service.mapError({ code: '23505', message: 'duplicate key' })).toMatchObject({ status: 409 });
     expect(service.mapError({ code: '55000', message: 'PLATFORM_CONTROL_DISABLED:outreach_organiser_signup_enabled' }))
       .toMatchObject({ status: 423 });
@@ -263,22 +317,79 @@ describe('OutreachOrganiserService', () => {
   });
 
   it('starts an outreach group for a signed-in staff account as that account (owner decision 5)', async () => {
-    const actor = jest.fn(async () => ({ rows: [{ organization_id: 'org-2', facility_id: 'fac-2', membership_id: 'mem-2' }] }));
+    const actor = jest.fn(async () => ({ rows: [{ result: 'started', organization_id: 'org-2', facility_id: 'fac-2', membership_id: 'mem-2' }] }));
     const db = database({ actor });
     const context = staffContext(['doctor'], 'doctor@example.test');
-    await expect(make(db).startForAccount(context, { groupName: 'Synthetic Street Health', kind: 'individual',
-      phone: '08012345678', termsVersion: '2026-11-01', acceptTerms: true }))
+    const body = { groupName: 'Synthetic Street Health', kind: 'individual' as const, phone: '08012345678',
+      termsVersion: '2026-11-01', acceptTerms: true };
+    await expect(make(db).startForAccount(context, body))
       .resolves.toEqual({ started: true, organizationId: 'org-2', facilityId: 'fac-2', membershipId: 'mem-2', reviewState: 'pending' });
     expect(db.withTransaction).toHaveBeenCalledWith(context, expect.any(Function));
     const [sql, values] = actor.mock.calls[0] as unknown as [string, unknown[]];
-    expect(sql).toContain('identity.activate_outreach_organiser_for_account($1,$2,$3,$4,$5,$6)');
+    expect(sql).toContain('identity.activate_outreach_organiser_for_account($1,$2,$3,$4,$5,$6,$7)');
+    // (group_name, kind, reg_no, terms_version, phone_lookup, phone_ct, key_version)
     expect(values[0]).toBe('Synthetic Street Health');
-    expect(values[5]).toBe('2026-11-01');
-    await expect(make(db).startForAccount({ ...context, actor: { ...context.actor, kind: 'patient' } },
-      { groupName: 'X group', kind: 'individual', phone: '08012345678', termsVersion: '2026-11-01', acceptTerms: true }))
+    expect(values[1]).toBe('individual');
+    expect(values[2]).toBeNull();
+    expect(values[3]).toBe('2026-11-01');
+    expect(String(values[4])).toMatch(/^[0-9a-f]{64}$/);
+    expect(Buffer.isBuffer(values[5])).toBe(true);
+    expect(values[6]).toBe('local-v1');
+    await expect(make(db).startForAccount({ ...context, actor: { ...context.actor, kind: 'patient' } }, body))
       .rejects.toMatchObject({ status: 403 });
-    expect(make(db).mapError({ code: 'P0001', message: 'OUTREACH_ORGANISER_ALREADY_RUNNING' }))
-      .toMatchObject({ status: 409, code: 'OUTREACH_ORGANISER_ALREADY_RUNNING' });
+    for (const [result, status, code] of [['already_organiser', 409, 'OUTREACH_ORGANISER_ALREADY_RUNNING'],
+      ['name_not_allowed', 422, 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED'], ['not_eligible', 403, 'OUTREACH_ORGANISER_NOT_ELIGIBLE']] as const) {
+      // The result rows carry ids (already_organiser) or nulls: never read as a success.
+      const refused = database({ actor: jest.fn(async () => ({ rows: [{ result, organization_id: 'org-0', facility_id: 'fac-0',
+        membership_id: 'mem-0' }] })) });
+      await expect(make(refused).startForAccount(context, body)).rejects.toMatchObject({ status, code });
+    }
+  });
+});
+
+describe('The refusal codes match migration 0125', () => {
+  // 0125's raise messages that reach the sign-up, invitation and support
+  // commands (the db branch, services/ehr-api/database/migrations/
+  // 0125_outreach_organisers.sql). When the migration is in this tree it is
+  // read too.
+  const RAISED_BY_0125 = new Set(['ADMIN_PERMISSION_DENIED', 'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE',
+    'OUTREACH_CAMPAIGN_NOT_FOUND', 'OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_CAMPAIGN_RESCUE_INVALID',
+    'OUTREACH_CAMPAIGN_VERSION_CONFLICT', 'OUTREACH_CONSENT_CASE_INVALID', 'OUTREACH_CONSENT_GUARDIAN_REQUIRED',
+    'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_GROUP_ROLE_INVALID', 'OUTREACH_INVITATION_INVALID',
+    'OUTREACH_INVITATION_PASSWORD_INVALID', 'OUTREACH_NOTES_TOO_LONG', 'OUTREACH_ORGANISER_ACCOUNT_REQUIRED',
+    'OUTREACH_ORGANISER_ALREADY_SUSPENDED', 'OUTREACH_ORGANISER_AWAITING_REVIEW', 'OUTREACH_ORGANISER_EMAIL_REGISTERED',
+    'OUTREACH_ORGANISER_NAME_NOT_ALLOWED', 'OUTREACH_ORGANISER_NOT_FOUND', 'OUTREACH_ORGANISER_NOT_PENDING',
+    'OUTREACH_ORGANISER_PASSWORD_INVALID', 'OUTREACH_ORGANISER_PERMISSION_DENIED', 'OUTREACH_ORGANISER_REVIEW_INVALID',
+    'OUTREACH_ORGANISER_SIGNUP_DENIED', 'OUTREACH_ORGANISER_SIGNUP_INVALID', 'OUTREACH_ORGANISER_SIGNUP_NOT_READY',
+    'OUTREACH_ORGANISER_STATE_INVALID', 'OUTREACH_ORGANISER_SUSPENDED', 'OUTREACH_ORGANISER_SUSPEND_INVALID',
+    'OUTREACH_ORGANISER_TERMS_REQUIRED', 'OUTREACH_ORGANISER_VERSION_CONFLICT', 'OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP',
+    'OUTREACH_TENANT_NO_HEALTH_ID_LINK']);
+  const matched = [...OUTREACH_SIGNUP_REFUSALS.map(([code]) => code), ...OUTREACH_INVITATION_REFUSALS.map(([code]) => code),
+    ...Object.keys(OUTREACH_ADMIN_REFUSALS)];
+
+  it('matches only codes 0125 raises', () => {
+    expect(matched.filter((code) => !RAISED_BY_0125.has(code))).toEqual([]);
+  });
+
+  it('answers every sign-up, invitation and support refusal of 0125', () => {
+    const answered = new Set(matched);
+    for (const code of ['OUTREACH_ORGANISER_EMAIL_REGISTERED', 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED', 'OUTREACH_ORGANISER_SIGNUP_NOT_READY',
+      'OUTREACH_ORGANISER_TERMS_REQUIRED', 'OUTREACH_ORGANISER_PASSWORD_INVALID', 'OUTREACH_ORGANISER_SIGNUP_INVALID',
+      'OUTREACH_ORGANISER_SIGNUP_DENIED', 'OUTREACH_ORGANISER_ACCOUNT_REQUIRED', 'OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP',
+      'OUTREACH_GROUP_ROLE_INVALID', 'OUTREACH_ORGANISER_SUSPENDED', 'OUTREACH_ORGANISER_PERMISSION_DENIED',
+      'OUTREACH_INVITATION_INVALID', 'OUTREACH_INVITATION_PASSWORD_INVALID', 'OUTREACH_ORGANISER_NOT_FOUND',
+      'OUTREACH_ORGANISER_VERSION_CONFLICT', 'OUTREACH_ORGANISER_NOT_PENDING', 'OUTREACH_ORGANISER_ALREADY_SUSPENDED',
+      'OUTREACH_ORGANISER_REVIEW_INVALID', 'OUTREACH_ORGANISER_SUSPEND_INVALID', 'OUTREACH_ORGANISER_STATE_INVALID',
+      'OUTREACH_CAMPAIGN_NOT_FOUND', 'OUTREACH_CAMPAIGN_VERSION_CONFLICT', 'OUTREACH_CAMPAIGN_RESCUE_INVALID',
+      'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE', 'ADMIN_PERMISSION_DENIED']) {
+      expect(answered.has(code)).toBe(true);
+    }
+  });
+
+  const migration = join(__dirname, '../../../ehr-api/database/migrations/0125_outreach_organisers.sql');
+  (existsSync(migration) ? it : it.skip)('every code matched is raised by the migration in this tree', () => {
+    const raised = new Set([...readFileSync(migration, 'utf8').matchAll(/message\s*=\s*'([A-Z_]+)'/g)].map((m) => m[1]));
+    expect(matched.filter((code) => !raised.has(code))).toEqual([]);
   });
 });
 
@@ -330,60 +441,111 @@ describe('OutreachOrganiserController', () => {
 
 describe('OutreachInvitationsService', () => {
   beforeEach(() => setEnvironment());
-  const createRow = { invitation_id: 'inv-1', row_version: 1, send_id: 'send-1', expires_at: '2026-11-18T10:00:00.000Z',
-    replayed: false, dispatch: true, facility_name: 'Synthetic Community Volunteers', role_code: 'outreach_volunteer',
-    invitee_email: 'helper@example.test' };
+  const invitationId = '6d2d0a0a-5e78-4a3c-9f8d-3b4c5d6e7f80';
+  const linkHmac = () => domainHmac(outreachKey() as Buffer, 'outreach-invitation', 'link', invitationId, token);
 
-  it('lets only the organiser invite, and always as outreach_volunteer', async () => {
-    const actor = jest.fn(async (sql: string) => sql.includes('create_outreach_invitation') ? { rows: [createRow] } : { rows: [] });
+  it('lets only the organiser invite, with 0125\'s 4 arguments, and emails the link', async () => {
+    const actor = jest.fn(async (sql: string) => sql.includes('create_outreach_invitation')
+      ? { rows: [{ result: 'created', invitation_id: 'inv-1', expires_at: '2026-11-18T10:00:00.000Z' }] } : { rows: [] });
     const db = database({ actor });
     const notification = { deliverStaffInvitation: jest.fn(async () => ({ outcome: 'accepted' })) };
     const service = new OutreachInvitationsService(db as unknown as DatabaseService, notification as unknown as NotificationOtpClient);
-    await expect(service.create(staffContext(['outreach_volunteer']), { name: 'Bola Fictional', email: 'helper@example.test' }, 'key-1'))
+    await expect(service.create(staffContext(['outreach_volunteer']), { name: 'Bola Fictional', email: 'helper@example.test' }))
       .rejects.toMatchObject({ status: 403, code: 'OUTREACH_ORGANISER_REQUIRED' });
-    await expect(service.create(staffContext(['outreach_organiser']), { name: 'Bola Fictional', email: 'Helper@Example.test' }, 'key-1'))
-      .resolves.toMatchObject({ status: 201, body: { invitationId: 'inv-1', deliveryOutcome: 'accepted', replayed: false } });
+    await expect(service.create(staffContext(['outreach_organiser']), { name: 'Bola Fictional', email: 'Helper@Example.test' }))
+      .resolves.toEqual({ invitationId: 'inv-1', expiresAt: '2026-11-18T10:00:00.000Z', deliveryOutcome: 'accepted', replayed: false });
+    const [sql, values] = actor.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toBe('select * from identity.create_outreach_invitation($1,$2,$3,$4)');
+    expect(values).toHaveLength(4);
+    expect(values[1]).toBe('Bola Fictional');
+    expect(values[2]).toBe('helper@example.test');
+    expect(String(values[3])).toMatch(/^[0-9a-f]{64}$/);
+    expect(actor).toHaveBeenCalledTimes(1);
+    const sent = (notification.deliverStaffInvitation.mock.calls[0] as unknown as [{ token: string; invitationId: string }])[0];
     expect(notification.deliverStaffInvitation).toHaveBeenCalledWith(expect.objectContaining({ roleCode: 'outreach_volunteer',
-      recipient: 'helper@example.test', facilityName: 'Synthetic Community Volunteers' }));
-    expect(actor.mock.calls.some(([sql]) => String(sql).includes('record_outreach_invitation_delivery'))).toBe(true);
-    const values = (actor.mock.calls[0] as unknown as [string, unknown[]])[1];
-    expect(values[3]).toBe('helper@example.test');
+      recipient: 'helper@example.test', facilityName: 'Synthetic Community Volunteers', invitationId: 'inv-1' }));
+    expect(values[3]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-invitation', 'link', String(values[0]), sent.token));
   });
 
-  it('maps the pending cap and a paused group to plain problems', async () => {
-    for (const [message, code, status] of [['OUTREACH_INVITATION_PENDING_LIMIT', 'OUTREACH_INVITATION_PENDING_LIMIT', 429],
-      ['OUTREACH_ORGANISATION_SUSPENDED', 'OUTREACH_ORGANISATION_SUSPENDED', 423]] as const) {
+  it.each([['too_many_pending', 429, 'OUTREACH_INVITATION_PENDING_LIMIT'], ['already_member', 409, 'OUTREACH_INVITEE_ALREADY_MEMBER'],
+    ['already_invited', 409, 'OUTREACH_INVITATION_ALREADY_SENT']] as const)(
+    'answers the result %s plainly and sends no email', async (result, status, code) => {
+    const notification = { deliverStaffInvitation: jest.fn() };
+    const service = new OutreachInvitationsService(database({ actor: jest.fn(async () => ({ rows: [{ result,
+      invitation_id: null, expires_at: null }] })) }) as unknown as DatabaseService, notification as unknown as NotificationOtpClient);
+    await expect(service.create(staffContext(['outreach_organiser']), { name: 'Bola Fictional', email: 'helper@example.test' }))
+      .rejects.toMatchObject({ status, code });
+    expect(notification.deliverStaffInvitation).not.toHaveBeenCalled();
+  });
+
+  it('maps a paused group and a missing organiser role to plain problems', async () => {
+    for (const [message, code, status] of [['OUTREACH_ORGANISER_SUSPENDED', 'OUTREACH_ORGANISER_SUSPENDED', 423],
+      ['OUTREACH_ORGANISER_PERMISSION_DENIED', 'OUTREACH_ORGANISER_REQUIRED', 403]] as const) {
       const actor = jest.fn(async () => { throw Object.assign(new Error(message), { code: 'P0001' }); });
       const service = new OutreachInvitationsService(database({ actor }) as unknown as DatabaseService, {} as never);
-      await expect(service.create(staffContext(['outreach_organiser']), { name: 'Bola Fictional', email: 'helper@example.test' }, 'key-2'))
+      await expect(service.create(staffContext(['outreach_organiser']), { name: 'Bola Fictional', email: 'helper@example.test' }))
         .rejects.toMatchObject({ status, code });
     }
   });
 
-  it('accepts with a password by link, and answers a refused result plainly', async () => {
-    const system = jest.fn(async (sql: string) => sql.includes('accept_outreach_invitation_with_password')
-      ? { rows: [{ result: 'ready', email: 'helper@example.test', facility_id: 'fac-1', facility_name: 'Synthetic Community Volunteers',
-        role_code: 'outreach_volunteer', membership_id: 'mem-1' }] } : { rows: [] });
-    const service = new OutreachInvitationsService(database({ system }) as unknown as DatabaseService, {} as never);
-    await expect(service.acceptWithPassword({ invitationId: '6d2d0a0a-5e78-4a3c-9f8d-3b4c5d6e7f80', token,
-      password: 'a-long-fictional-password', turnstileAction: 'outreach-invitation' }, '203.0.113.10', correlationId))
-      .resolves.toEqual({ email: 'helper@example.test', facilityId: 'fac-1', facilityName: 'Synthetic Community Volunteers',
-        roleCode: 'outreach_volunteer' });
-    const refused = jest.fn(async (sql: string) => sql.includes('accept_outreach') ? { rows: [{ result: 'account_exists' }] } : { rows: [] });
-    await expect(new OutreachInvitationsService(database({ system: refused }) as unknown as DatabaseService, {} as never)
-      .acceptWithPassword({ email: 'helper@example.test', code: '123456', password: 'a-long-fictional-password',
-        turnstileAction: 'outreach-invitation' }, '203.0.113.10', correlationId))
-      .rejects.toMatchObject({ status: 409, code: 'OUTREACH_INVITATION_SIGN_IN_REQUIRED' });
+  it('lists the team from list_outreach_team()', async () => {
+    const actor = jest.fn(async () => ({ rows: [
+      { entry_kind: 'member', entry_id: 'mem-1', full_name: 'Ada Fictional', email: 'ada@example.test', role_code: 'outreach_organiser',
+        status: 'active', created_at: '2026-11-11T08:00:00.000Z', expires_at: null },
+      { entry_kind: 'invitation', entry_id: 'inv-1', full_name: 'Bola Fictional', email: 'helper@example.test', role_code: 'outreach_volunteer',
+        status: 'pending', created_at: '2026-11-11T09:00:00.000Z', expires_at: '2026-11-18T09:00:00.000Z' }] }));
+    const db = database({ actor });
+    await expect(new OutreachInvitationsService(db as unknown as DatabaseService, {} as never).list(staffContext(['outreach_organiser'])))
+      .resolves.toEqual({
+        members: [{ membershipId: 'mem-1', name: 'Ada Fictional', email: 'ada@example.test', roleCode: 'outreach_organiser',
+          status: 'active', joinedAt: '2026-11-11T08:00:00.000Z' }],
+        invitations: [{ invitationId: 'inv-1', name: 'Bola Fictional', email: 'helper@example.test', status: 'pending',
+          expiresAt: '2026-11-18T09:00:00.000Z', createdAt: '2026-11-11T09:00:00.000Z', acceptedAt: null }] });
+    expect(actor).toHaveBeenCalledWith('select * from identity.list_outreach_team()');
   });
 
-  it('accepts for a signed-in account that also works at a hospital (owner decision 5)', async () => {
-    const actor = jest.fn(async () => ({ rows: [{ result: 'ready', membership_id: 'mem-9', facility_id: 'fac-1',
-      facility_name: 'Synthetic Community Volunteers', role_code: 'outreach_volunteer' }] }));
+  it('previews and accepts with a password by link (3 arguments), then reads the new login\'s email', async () => {
+    const system = jest.fn(async (sql: string) => {
+      if (sql.includes('preview_outreach_invitation')) return { rows: [{ result: 'ready', group_name: 'Synthetic Community Volunteers',
+        inviter_name: 'Ada Fictional', invitee_name: 'Bola Fictional', invitee_email: 'helper@example.test', account_case: 'new',
+        expires_at: '2026-11-18T09:00:00.000Z' }] };
+      if (sql.includes('accept_outreach_invitation_with_password')) return { rows: [{ result: 'ready', account_id: 'acc-9',
+        membership_id: 'mem-9', facility_id: 'fac-1', hid_subject: 'outreach-volunteer:acc-9' }] };
+      if (sql.includes('auth.accounts')) return { rows: [{ email: 'helper@example.test' }] };
+      return { rows: [] };
+    });
+    const service = new OutreachInvitationsService(database({ system }) as unknown as DatabaseService, {} as never);
+    await expect(service.preview({ invitationId, token }, '203.0.113.10', correlationId)).resolves.toMatchObject({
+      groupName: 'Synthetic Community Volunteers', inviterName: 'Ada Fictional', accountCase: 'new' });
+    expect(system).toHaveBeenCalledWith('select * from identity.preview_outreach_invitation($1,$2)', [invitationId, linkHmac()]);
+    await expect(service.acceptWithPassword({ invitationId, token, password: 'a-long-fictional-password',
+      turnstileAction: 'outreach-invitation' }, '203.0.113.10', correlationId))
+      .resolves.toEqual({ email: 'helper@example.test', facilityId: 'fac-1', membershipId: 'mem-9', roleCode: 'outreach_volunteer' });
+    const accept = system.mock.calls.find(([sql]) => String(sql).includes('accept_outreach_invitation_with_password')) as unknown as [string, unknown[]];
+    expect(accept[0]).toBe('select * from identity.accept_outreach_invitation_with_password($1,$2,$3)');
+    expect(accept[1].slice(0, 2)).toEqual([invitationId, linkHmac()]);
+    expect(String(accept[1][2])).toMatch(/^\$argon2id\$/);
+    for (const [result, code] of [['sign_in_required', 'OUTREACH_INVITATION_SIGN_IN_REQUIRED'], ['invalid', 'OUTREACH_INVITATION_INVALID'],
+      ['used', 'OUTREACH_INVITATION_ALREADY_ACCEPTED'], ['expired', 'OUTREACH_INVITATION_EXPIRED'],
+      ['group_unavailable', 'OUTREACH_ORGANISER_SUSPENDED']] as const) {
+      const refused = jest.fn(async (sql: string) => sql.includes('accept_outreach') ? { rows: [{ result }] } : { rows: [] });
+      await expect(new OutreachInvitationsService(database({ system: refused }) as unknown as DatabaseService, {} as never)
+        .acceptWithPassword({ invitationId, token, password: 'a-long-fictional-password', turnstileAction: 'outreach-invitation' },
+          '203.0.113.10', correlationId)).rejects.toMatchObject({ code });
+    }
+  });
+
+  it('accepts by link for a signed-in account that also works at a hospital (owner decision 5)', async () => {
+    const actor = jest.fn(async () => ({ rows: [{ result: 'ready', membership_id: 'mem-9', facility_id: 'fac-1' }] }));
     const service = new OutreachInvitationsService(database({ actor }) as unknown as DatabaseService, {} as never);
-    await expect(service.acceptForAccount(staffContext(['doctor'], 'doctor@example.test'), { code: '654321' }))
-      .resolves.toMatchObject({ accepted: true, membershipId: 'mem-9', roleCode: 'outreach_volunteer' });
-    const values = (actor.mock.calls[0] as unknown as [string, unknown[]])[1];
-    expect(values[2]).toBe(domainHmac(outreachKey() as Buffer, 'outreach-invitation', 'email-code', 'doctor@example.test', '654321'));
+    await expect(service.acceptForAccount(staffContext(['doctor'], 'doctor@example.test'), { invitationId, token }))
+      .resolves.toEqual({ accepted: true, membershipId: 'mem-9', facilityId: 'fac-1', roleCode: 'outreach_volunteer' });
+    expect(actor).toHaveBeenCalledWith('select * from identity.accept_outreach_invitation_for_account($1,$2)', [invitationId, linkHmac()]);
+    for (const [result, code] of [['email_mismatch', 'OUTREACH_INVITATION_WRONG_ACCOUNT'], ['already_member', 'OUTREACH_INVITEE_ALREADY_MEMBER'],
+      ['not_eligible', 'OUTREACH_INVITATION_NOT_ELIGIBLE']] as const) {
+      await expect(new OutreachInvitationsService(database({ actor: jest.fn(async () => ({ rows: [{ result }] })) }) as unknown as DatabaseService,
+        {} as never).acceptForAccount(staffContext(['doctor']), { invitationId, token })).rejects.toMatchObject({ code });
+    }
   });
 });
 
@@ -393,44 +555,95 @@ describe('OutreachOrganisersAdminService', () => {
     subject: 'staff:support', accountId: 'support-1', roles: [], permissions: [], platformPermissions: ['platform.admin.access'],
     facilityIds: [], facilities: [], authenticationMethod: 'local' } };
 
-  it('lists the queue with the phone readable only here and the plain label', async () => {
+  it('lists the queue with its version, the phone readable only here and the plain label (not read-only: 0125 audits it)', async () => {
     const key = outreachKey() as Buffer;
-    const platform = jest.fn(async () => ({ rows: [{ organization_id: 'org-1', facility_id: 'fac-1', display_name: 'Synthetic Community Volunteers',
-      group_name: 'Synthetic Community Volunteers', kind: 'group', registration_number: null, organiser_name: 'Ada Fictional',
-      organiser_email: 'ada.organiser@example.test', phone_ciphertext: encryptOutreachPhone(key, '+2348012345678'),
-      review_state: 'pending', reviewed_at: null, suspended_at: null, created_at: '2026-11-11T08:00:00.000Z',
-      terms_version: '2026-11-01', campaign_count: '1', member_count: '3', registration_count: '0' }] }));
-    const service = new OutreachOrganisersAdminService(database({ platform }) as unknown as DatabaseService);
-    await expect(service.list(admin, 'pending')).resolves.toEqual({ organisers: [expect.objectContaining({
-      phone: '+2348012345678', label: 'Unverified organiser', campaigns: 1, members: 3, registrations: 0 })] });
+    const platform = jest.fn(async () => ({ rows: [{ organization_id: 'org-1', facility_id: 'fac-1', row_version: '3',
+      display_name: 'Synthetic Community Volunteers', kind: 'group', registration_number: null, review_state: 'pending',
+      origin: 'signup', organiser_account_id: 'acc-1', organiser_name: 'Ada Fictional', organiser_email: 'ada.organiser@example.test',
+      contact_phone_ciphertext: encryptOutreachPhone(key, '+2348012345678'), contact_key_version: 'local-v1',
+      terms_version: '2026-11-01', created_at: '2026-11-11T08:00:00.000Z', reviewed_at: null, review_note: null,
+      suspended_at: null, suspension_reason: null, member_count: 3, pending_invitation_count: 1, campaign_count: 1,
+      active_campaign_count: 0 }] }));
+    const db = database({ platform });
+    const service = new OutreachOrganisersAdminService(db as unknown as DatabaseService);
+    await expect(service.list(admin, 'pending')).resolves.toEqual({ organisers: [expect.objectContaining({ version: 3,
+      phone: '+2348012345678', label: 'Unverified organiser', campaigns: 1, activeCampaigns: 0, members: 3, pendingInvitations: 1 })] });
     expect(platform).toHaveBeenCalledWith('select * from identity.admin_list_outreach_organisers($1)', ['pending']);
+    expect(db.withPlatformTransaction.mock.calls[0]).toHaveLength(2);
+    await service.list(admin, undefined);
+    expect(platform).toHaveBeenLastCalledWith('select * from identity.admin_list_outreach_organisers($1)', ['all']);
   });
 
-  it('reviews in one click with a default note, and suspends, closes and appoints with a reason', async () => {
+  it('reviews in one click with the version, and suspends, closes and appoints with 0125\'s arguments', async () => {
     const platform = jest.fn(async (sql: string) => {
-      if (sql.includes('admin_review')) return { rows: [{ organization_id: 'org-1', review_state: 'reviewed', display_name: 'X', reviewed_at: new Date() }] };
-      if (sql.includes('admin_suspend')) return { rows: [{ organization_id: 'org-1', review_state: 'suspended', suspended_at: new Date() }] };
-      if (sql.includes('admin_close_campaign')) return { rows: [{ campaign_id: 'c-1', status: 'closed', row_version: '4' }] };
-      if (sql.includes('admin_appoint_campaign_admin')) return { rows: [{ campaign_id: 'c-1', membership_id: 'm-1', role: 'admin' }] };
+      if (sql.includes('admin_review')) return { rows: [{ row_version: '4', review_state: 'reviewed' }] };
+      if (sql.includes('admin_suspend')) return { rows: [{ row_version: '5', review_state: 'suspended', revoked_roles: 2 }] };
+      if (sql.includes('admin_close_outreach_campaign')) return { rows: [{ result: 'closed' }] };
+      if (sql.includes('admin_appoint_outreach_campaign_admin')) return { rows: [{ result: 'appointed' }] };
       return { rows: [] };
     });
     const service = new OutreachOrganisersAdminService(database({ platform }) as unknown as DatabaseService);
-    await expect(service.review(admin, 'org-1', {})).resolves.toMatchObject({ reviewState: 'reviewed' });
-    expect(platform).toHaveBeenCalledWith('select * from identity.admin_review_outreach_organiser($1,$2,$3)',
-      ['org-1', null, ONE_CLICK_REVIEW_REASON]);
-    await expect(service.suspend(admin, 'org-1', 'Reported for misuse')).resolves.toMatchObject({ reviewState: 'suspended' });
-    await expect(service.closeCampaign(admin, 'c-1', 'Only admin has left')).resolves.toEqual({ campaignId: 'c-1', status: 'closed', version: 4 });
+    await expect(service.review(admin, 'org-1', 3, {})).resolves.toEqual({ organizationId: 'org-1', version: 4,
+      reviewState: 'reviewed', label: 'Checked by Health ID' });
+    expect(platform).toHaveBeenCalledWith('select * from identity.admin_review_outreach_organiser($1,$2,$3,$4)',
+      ['org-1', 3, null, null]);
+    await expect(service.suspend(admin, 'org-1', 4, 'Reported for misuse')).resolves.toMatchObject({ reviewState: 'suspended',
+      version: 5, revokedRoles: 2 });
+    expect(platform).toHaveBeenCalledWith('select * from identity.admin_suspend_outreach_organiser($1,$2,$3)',
+      ['org-1', 4, 'Reported for misuse']);
+    await expect(service.closeCampaign(admin, 'c-1', 7, 'Only admin has left')).resolves.toEqual({ campaignId: 'c-1',
+      status: 'closed', alreadyClosed: false });
+    expect(platform).toHaveBeenCalledWith('select identity.admin_close_outreach_campaign($1,$2,$3) as result',
+      ['c-1', 7, 'Only admin has left']);
     await expect(service.appointCampaignAdmin(admin, 'c-1', { membershipId: 'm-1', reason: 'Only admin has left' }))
-      .resolves.toEqual({ campaignId: 'c-1', membershipId: 'm-1', role: 'admin' });
+      .resolves.toEqual({ campaignId: 'c-1', membershipId: 'm-1', role: 'admin', alreadyAdmin: false });
+    expect(platform).toHaveBeenCalledWith('select identity.admin_appoint_outreach_campaign_admin($1,$2,$3) as result',
+      ['c-1', 'm-1', 'Only admin has left']);
   });
 
-  it('answers a missing group with 404 and an unknown fault with 503', async () => {
-    const missing = jest.fn(async () => { throw Object.assign(new Error('OUTREACH_ORGANISATION_NOT_FOUND'), { code: 'P0002' }); });
-    await expect(new OutreachOrganisersAdminService(database({ platform: missing }) as unknown as DatabaseService).review(admin, 'org-x', {}))
-      .rejects.toMatchObject({ status: 404 });
+  it('takes the version from If-Match or the body, and asks for a reload without one', () => {
+    expect(outreachAdminVersion('W/"3"', undefined)).toBe(3);
+    expect(outreachAdminVersion('3', 9)).toBe(3);
+    expect(outreachAdminVersion(undefined, 2)).toBe(2);
+    expect(() => outreachAdminVersion(undefined, undefined)).toThrow(expect.objectContaining({ status: 428 }));
+  });
+
+  it('answers 0125\'s refusals plainly: missing 404, version conflict 409, unknown 503', async () => {
+    for (const [message, errcode, status] of [['OUTREACH_ORGANISER_NOT_FOUND', 'P0002', 404],
+      ['OUTREACH_ORGANISER_VERSION_CONFLICT', '40001', 409], ['OUTREACH_ORGANISER_NOT_PENDING', '23514', 409]] as const) {
+      const failing = jest.fn(async () => { throw Object.assign(new Error(message), { code: errcode }); });
+      await expect(new OutreachOrganisersAdminService(database({ platform: failing }) as unknown as DatabaseService).review(admin, 'org-x', 1, {}))
+        .rejects.toMatchObject({ status, code: message });
+    }
     const broken = jest.fn(async () => { throw new Error('down'); });
     await expect(new OutreachOrganisersAdminService(database({ platform: broken }) as unknown as DatabaseService).list(admin, undefined))
       .rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe('OutreachRetentionSweeper (owner decision 3: 1 year, then redacted)', () => {
+  beforeEach(() => setEnvironment());
+
+  it('calls 0126\'s identity.sweep_expired_outreach_registrations with a bounded batch as system:auth', async () => {
+    const system = jest.fn(async () => ({ rows: [{ redacted: '3' }] }));
+    const db = database({ system });
+    await expect(new OutreachRetentionSweeper(db as unknown as DatabaseService).runOnce()).resolves.toBe(3);
+    expect(system).toHaveBeenCalledWith('select identity.sweep_expired_outreach_registrations($1) as redacted',
+      [OUTREACH_RETENTION_SWEEP_BATCH]);
+    expect(OUTREACH_RETENTION_SWEEP_BATCH).toBeGreaterThanOrEqual(1);
+    expect(OUTREACH_RETENTION_SWEEP_BATCH).toBeLessThanOrEqual(5000);
+    expect(String(db.withSystemTransaction.mock.calls[0]?.[0])).toMatch(/^outreach-retention-/);
+  });
+
+  it('never throws: a failure answers null', async () => {
+    const db = database({ system: jest.fn(async () => { throw Object.assign(new Error('x'), { code: '42501' }); }) });
+    await expect(new OutreachRetentionSweeper(db as unknown as DatabaseService).runOnce()).resolves.toBeNull();
+  });
+
+  it('starts no timer under test', () => {
+    const sweeper = new OutreachRetentionSweeper({} as never);
+    sweeper.onApplicationBootstrap();
+    expect((sweeper as unknown as { timer?: unknown }).timer).toBeUndefined();
   });
 });
 

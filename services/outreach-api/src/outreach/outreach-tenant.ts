@@ -23,10 +23,17 @@ export function tenantNoHealthIdLink(): DomainProblem {
 }
 
 /**
- * The outreach group rules the database enforces (plan PR-1), answered in
- * plain English. The refusal code is matched in the error's message, so any
- * SQLSTATE works. Undefined for any other error.
+ * The outreach group rules the database enforces (plan PR-1, migration
+ * 0125), answered in plain English. The refusal code is matched in the
+ * error's message, so any SQLSTATE works. Undefined for any other error.
+ * OUTREACH_TENANT_RULE_CODES lists every code matched; a test compares it
+ * with 0125's raise messages.
  */
+/** The codes outreachRuleProblem matches, each raised by 0125. */
+export const OUTREACH_TENANT_RULE_CODES = ['OUTREACH_ORGANISER_AWAITING_REVIEW', 'OUTREACH_ORGANISER_SUSPENDED',
+  'OUTREACH_TENANT_NO_HEALTH_ID_LINK', 'OUTREACH_CONSENT_GUARDIAN_REQUIRED', 'OUTREACH_CONSENT_CASE_INVALID',
+  'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_NOTES_TOO_LONG'] as const;
+
 export function outreachRuleProblem(error: unknown): DomainProblem | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
   const message = String((error as { message?: unknown }).message ?? '');
@@ -36,14 +43,18 @@ export function outreachRuleProblem(error: unknown): DomainProblem | undefined {
       'Health ID checks every new outreach group once before its first campaign can start. '
       + 'You can keep setting up and practising. We aim to check groups the same day.');
   }
-  if (has('OUTREACH_ORGANISATION_SUSPENDED')) {
-    return new DomainProblem(423, 'OUTREACH_ORGANISATION_SUSPENDED',
+  if (has('OUTREACH_ORGANISER_SUSPENDED')) {
+    return new DomainProblem(423, 'OUTREACH_ORGANISER_SUSPENDED',
       'This outreach group has been paused by Health ID. Contact Health ID support.');
   }
   if (has('OUTREACH_TENANT_NO_HEALTH_ID_LINK')) return tenantNoHealthIdLink();
-  if (has('OUTREACH_GUARDIAN_REQUIRED')) {
-    return new DomainProblem(422, 'OUTREACH_GUARDIAN_REQUIRED',
+  if (has('OUTREACH_CONSENT_GUARDIAN_REQUIRED')) {
+    return new DomainProblem(422, 'OUTREACH_CONSENT_GUARDIAN_REQUIRED',
       'This person is under 18. Enter the name of the parent or guardian who agreed.');
+  }
+  if (has('OUTREACH_CONSENT_CASE_INVALID')) {
+    return new DomainProblem(422, 'OUTREACH_CONSENT_REQUIRED',
+      'Read the notice to the person and record how they agreed before registering them.');
   }
   if (has('OUTREACH_CONSENT_REQUIRED')) {
     return new DomainProblem(422, 'OUTREACH_CONSENT_REQUIRED',

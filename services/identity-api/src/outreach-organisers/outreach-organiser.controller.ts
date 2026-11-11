@@ -18,7 +18,7 @@ export const OUTREACH_SIGNUP_COOKIE_PATH = '/api/v1/identity/outreach-organisers
 
 /**
  * Open sign-up on outreach. (plan PR-3): start (details and Turnstile, then
- * the emailed code), verify-email and activate (terms and password, then the
+ * the emailed code), verify-email, resend-code and activate (terms and password, then the
  * organiser is signed in). Every route is closed with 423
  * OUTREACH_ORGANISER_SIGNUP_UNAVAILABLE while the control
  * outreach_organiser_signup_enabled is off.
@@ -69,8 +69,17 @@ export class OutreachOrganiserController {
   verifyEmail(@Body() input: VerifyOutreachOrganiserEmailDto, @Req() request: HidRequest) {
     this.assertOrigin(request);
     this.assertAccountless(request);
-    return this.organisers.verify(singleCookie(request, OUTREACH_SIGNUP_COOKIE), input.challengeId, input.code,
-      request.correlationId);
+    return this.organisers.verify(singleCookie(request, OUTREACH_SIGNUP_COOKIE), input.code, request.correlationId);
+  }
+
+  /** A new code for the sign-up the cookie names, after a minute, at most 5 in all. */
+  @Post('resend-code')
+  @HttpCode(200)
+  @AuditAction('identity.outreach-organiser.resend-code')
+  resendCode(@Req() request: HidRequest) {
+    this.assertOrigin(request);
+    this.assertAccountless(request);
+    return this.organisers.resend(singleCookie(request, OUTREACH_SIGNUP_COOKIE), request.correlationId);
   }
 
   /**

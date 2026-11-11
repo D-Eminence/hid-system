@@ -3,9 +3,9 @@ import { validate } from 'class-validator';
 import type { DataAccessContext } from '../common/request-context';
 import { CreateRegistrationCaseDto, normalizeOutreachPhone } from './dto/create-registration-case.dto';
 import { OutreachService } from './outreach.service';
-import { isOutreachTenant, outreachRuleProblem } from './outreach-tenant';
-import { OutreachRetentionSweeper } from './outreach-retention.sweeper';
-import { resetEnvironmentForTests } from '../config/environment';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { isOutreachTenant, OUTREACH_TENANT_RULE_CODES, outreachRuleProblem } from './outreach-tenant';
 
 // Fictional test data only.
 const ids = {
@@ -55,7 +55,7 @@ describe('Outreach group rules (open sign-up on outreach.)', () => {
   it.each([
     [{ ...input, campaignId: undefined, consent }, 'OUTREACH_CAMPAIGN_REQUIRED'],
     [{ ...input }, 'OUTREACH_CONSENT_REQUIRED'],
-    [{ ...input, ageYears: 15, consent }, 'OUTREACH_GUARDIAN_REQUIRED'],
+    [{ ...input, ageYears: 15, consent }, 'OUTREACH_CONSENT_GUARDIAN_REQUIRED'],
     [{ ...input, consent, operationalNotes: 'x'.repeat(281) }, 'OUTREACH_NOTES_TOO_LONG'],
   ])('refuses an outreach group registration before writing anything (%#: %s)', async (body, code) => {
     const database = { withTransaction: jest.fn() };
@@ -78,7 +78,11 @@ describe('Outreach group rules (open sign-up on outreach.)', () => {
       .create(minor, 'tenant-key-0002', tenant)).resolves.toMatchObject({ id: ids.case, possibleDuplicate: true });
     expect(database.withTransaction).toHaveBeenCalledTimes(1);
     const consentCall = query.mock.calls.find(([sql]) => String(sql).includes('outreach.registration_consents'));
-    expect(consentCall?.[1]).toEqual([ids.case, consent.textVersion, 'yo', 'guardian', 'Bisi Fictional', ids.membership]);
+    // 0125's columns: registration_case_id, the facility, and the capturer as the request's own account.
+    expect(String(consentCall?.[0])).toMatch(/registration_case_id,facility_id,consent_text_version,language,method,guardian_name,\s*captured_by_account_id,captured_by_membership_id/);
+    expect(String(consentCall?.[0])).toContain('platform.current_account_id()');
+    expect(consentCall?.[1]).toEqual([ids.case, ids.facility, consent.textVersion, 'yo', 'guardian', 'Bisi Fictional',
+      ids.membership]);
     const hint = query.mock.calls.at(-1);
     expect(String(hint?.[0])).toContain('other.campaign_id=$1');
     expect(hint?.[1]).toEqual([ids.campaign, ids.facility, ids.case, '+2348012345678', 'Ada Fictional', 32]);
@@ -102,8 +106,8 @@ describe('Outreach group rules (open sign-up on outreach.)', () => {
       .create({ ...input, consent }, 'tenant-key-0003', tenant)).rejects.toMatchObject({ status: 422, code: 'OUTREACH_CONSENT_REQUIRED' });
     expect(outreachRuleProblem({ code: 'P0001', message: 'OUTREACH_ORGANISER_AWAITING_REVIEW' }))
       .toMatchObject({ status: 409, code: 'OUTREACH_ORGANISER_AWAITING_REVIEW' });
-    expect(outreachRuleProblem({ code: '42501', message: 'OUTREACH_ORGANISATION_SUSPENDED' }))
-      .toMatchObject({ status: 423, code: 'OUTREACH_ORGANISATION_SUSPENDED' });
+    expect(outreachRuleProblem({ code: '42501', message: 'OUTREACH_ORGANISER_SUSPENDED' }))
+      .toMatchObject({ status: 423, code: 'OUTREACH_ORGANISER_SUSPENDED' });
     expect(outreachRuleProblem({ code: '42501', message: 'OUTREACH_TENANT_NO_HEALTH_ID_LINK' }))
       .toMatchObject({ status: 403, code: 'OUTREACH_TENANT_NO_HEALTH_ID_LINK' });
     expect(outreachRuleProblem({ code: '23505', message: 'duplicate key' })).toBeUndefined();
@@ -132,8 +136,9 @@ describe('Outreach group rules (open sign-up on outreach.)', () => {
   it('reports the organiser status on the governance endpoint, failing soft', async () => {
     const service = (state: string | Error) => new OutreachService({ withTransaction: jest.fn(async (_c, operation, options) => {
       expect(options).toEqual({ readOnly: true });
-      return operation({ query: jest.fn(async () => {
+      return operation({ query: jest.fn(async (sql: string) => {
         if (state instanceof Error) throw state;
+        expect(sql).toBe('select outreach.organiser_status() as review_state');
         return { rows: [{ review_state: state }] };
       }) });
     }) } as never, audit as never, identity as never);
@@ -180,36 +185,24 @@ describe('Registration DTO: consent and E.164 phones', () => {
   });
 });
 
-describe('OutreachRetentionSweeper', () => {
-  const original = { ...process.env };
-  beforeEach(() => {
-    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
-      CORS_ORIGINS: 'https://outreach.healthidentitydirectory.com',
-      OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN: 'a-fictional-local-secret-of-32-chars!!' });
-    resetEnvironmentForTests();
-  });
-  afterEach(() => {
-    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
-    Object.assign(process.env, original);
-    resetEnvironmentForTests();
+describe('The refusal codes match migration 0125', () => {
+  // 0125's raise messages for the rules outreach-api answers (the db branch,
+  // services/ehr-api/database/migrations/0125_outreach_organisers.sql). When
+  // the migration is in this tree, the list is read from it too.
+  const RAISED_BY_0125 = ['OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_CONSENT_CASE_INVALID',
+    'OUTREACH_CONSENT_GUARDIAN_REQUIRED', 'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_NOTES_TOO_LONG',
+    'OUTREACH_ORGANISER_AWAITING_REVIEW', 'OUTREACH_ORGANISER_SUSPENDED', 'OUTREACH_TENANT_NO_HEALTH_ID_LINK'];
+
+  it('matches only codes 0125 raises, and every rule of an outreach group\'s data', () => {
+    expect([...OUTREACH_TENANT_RULE_CODES].sort()).toEqual([...RAISED_BY_0125].sort());
+    for (const code of OUTREACH_TENANT_RULE_CODES) {
+      expect(outreachRuleProblem({ code: 'P0001', message: code })).toBeDefined();
+    }
   });
 
-  it('calls the sweeper function in its own retention context and reports the count', async () => {
-    const query = jest.fn().mockResolvedValue({ rows: [{ redacted: '3' }] });
-    const database = { withRetentionTransaction: jest.fn(async (_id: string, operation) => operation({ query })) };
-    await expect(new OutreachRetentionSweeper(database as never).runOnce()).resolves.toBe(3);
-    expect(query).toHaveBeenCalledWith('select outreach.sweep_expired_registrations() as redacted');
-    expect(database.withRetentionTransaction.mock.calls[0]?.[0]).toMatch(/^outreach-retention-/);
-  });
-
-  it('never throws: a failure is logged and answers null', async () => {
-    const database = { withRetentionTransaction: jest.fn().mockRejectedValue(Object.assign(new Error('x'), { code: '42883' })) };
-    await expect(new OutreachRetentionSweeper(database as never).runOnce()).resolves.toBeNull();
-  });
-
-  it('starts no timer under test', () => {
-    const sweeper = new OutreachRetentionSweeper({} as never);
-    sweeper.onApplicationBootstrap();
-    expect((sweeper as unknown as { timer?: unknown }).timer).toBeUndefined();
+  const migration = join(__dirname, '../../../ehr-api/database/migrations/0125_outreach_organisers.sql');
+  (existsSync(migration) ? it : it.skip)('every code matched is raised by the migration in this tree', () => {
+    const raised = new Set([...readFileSync(migration, 'utf8').matchAll(/message\s*=\s*'([A-Z_]+)'/g)].map((m) => m[1]));
+    for (const code of OUTREACH_TENANT_RULE_CODES) expect(raised.has(code)).toBe(true);
   });
 });

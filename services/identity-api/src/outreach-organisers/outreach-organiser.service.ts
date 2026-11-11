@@ -25,25 +25,26 @@ export const OUTREACH_SIGNUP_SESSION_SECONDS = 60 * 60;
 
 const HMAC_DOMAIN = 'outreach-organiser-signup';
 
-interface StartRow extends QueryResultRow {
-  outcome: string;
-  signup_id: string | null;
-  challenge_id: string | null;
-  resend_after_seconds: number | null;
-}
+/** 0125's fixed timings: a code lasts 15 minutes, a new one can be asked for after a minute. */
+export const OUTREACH_SIGNUP_CODE_SECONDS = 15 * 60;
+export const OUTREACH_SIGNUP_RESEND_SECONDS = 60;
 
+/** identity.activate_outreach_organiser (0125). */
 interface ActivateRow extends QueryResultRow {
   organization_id: string;
   facility_id: string;
   account_id: string;
   membership_id: string;
-  email: string;
+  hid_subject: string;
+  replayed: boolean;
 }
 
+/** identity.activate_outreach_organiser_for_account (0125). */
 interface ForAccountRow extends QueryResultRow {
-  organization_id: string;
-  facility_id: string;
-  membership_id: string;
+  result: string;
+  organization_id: string | null;
+  facility_id: string | null;
+  membership_id: string | null;
 }
 
 export function emailAlreadyRegistered(): DomainProblem {
@@ -55,6 +56,51 @@ function signupSessionInvalid(): DomainProblem {
   return new DomainProblem(401, 'OUTREACH_ORGANISER_SIGNUP_SESSION_INVALID',
     'Your sign-up has timed out or was opened in another browser. Please start again.');
 }
+
+function signupExpired(): DomainProblem {
+  return new DomainProblem(410, 'OUTREACH_ORGANISER_SIGNUP_EXPIRED',
+    'Your sign-up has expired. Please start again.');
+}
+
+function notEligible(): DomainProblem {
+  return new DomainProblem(403, 'OUTREACH_ORGANISER_NOT_ELIGIBLE',
+    'This account cannot start an outreach group. Use a staff account that is active and checked, or contact Health ID support.');
+}
+
+function newCode(): string {
+  return randomInt(0, 1_000_000).toString().padStart(6, '0');
+}
+
+/** The code as 0125 stores it: keyed, and bound to the sign-up. */
+function codeHmac(key: Buffer, signupId: string, code: string): string {
+  return domainHmac(key, HMAC_DOMAIN, 'otp', signupId, code);
+}
+
+/**
+ * The refusal codes 0125's sign-up commands raise, in plain English. A test
+ * compares this list with the migration's raise messages.
+ */
+export const OUTREACH_SIGNUP_REFUSALS: ReadonlyArray<readonly [string, () => DomainProblem]> = [
+  ['OUTREACH_ORGANISER_EMAIL_REGISTERED', emailAlreadyRegistered],
+  ['OUTREACH_ORGANISER_NAME_NOT_ALLOWED', reservedNameProblem],
+  ['OUTREACH_ORGANISER_SIGNUP_NOT_READY', () => new DomainProblem(409, 'OUTREACH_ORGANISER_SIGNUP_NOT_READY',
+    'Confirm your email with the 6-digit code before setting a password. If it has been more than a day, please start again.')],
+  ['OUTREACH_ORGANISER_TERMS_REQUIRED', () => new DomainProblem(409, 'OUTREACH_ORGANISER_TERMS_REQUIRED',
+    'The organiser terms have changed. Reload the page and accept the current terms.')],
+  ['OUTREACH_ORGANISER_PASSWORD_INVALID', () => new DomainProblem(400, 'OUTREACH_ORGANISER_PASSWORD_INVALID',
+    'That password could not be used. Choose another password of at least 12 characters.')],
+  ['OUTREACH_ORGANISER_SIGNUP_INVALID', () => new DomainProblem(400, 'OUTREACH_ORGANISER_SIGNUP_INVALID',
+    'Some of your details are not in the right form. Check your name, email, phone and group name, then try again.')],
+  ['OUTREACH_ORGANISER_SIGNUP_DENIED', signupSessionInvalid],
+  ['OUTREACH_ORGANISER_ACCOUNT_REQUIRED', () => new DomainProblem(401, 'OUTREACH_ORGANISER_ACCOUNT_REQUIRED',
+    'Sign in again, then choose "Start an outreach group".')],
+  ['OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP', () => new DomainProblem(409, 'OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP',
+    'Outreach roles can only be given at an outreach group, never at a hospital.')],
+  ['OUTREACH_GROUP_ROLE_INVALID', () => new DomainProblem(409, 'OUTREACH_GROUP_ROLE_INVALID',
+    'An outreach group can only have organisers and helpers, never clinical roles.')],
+  ['OUTREACH_ORGANISER_SUSPENDED', () => new DomainProblem(423, 'OUTREACH_ORGANISER_SUSPENDED',
+    'This outreach group has been paused by Health ID. Contact Health ID support.')],
+];
 
 /**
  * Open sign-up on outreach. (plan PR-3, owner decisions of 11 Nov 2026): a
@@ -97,8 +143,9 @@ export class OutreachOrganiserService {
 
   /**
    * Starts a sign-up and emails the code. Returns the cookie value
-   * (`<signupId>.<token>`) for the controller to set, and { challengeId,
-   * expiresInSeconds, resendAfterSeconds } for the page. A start for an email
+   * (`<signupId>.<token>`) for the controller to set, and { challengeId (the
+   * delivery's reference only), expiresInSeconds, resendAfterSeconds } for
+   * the page. A start for an email
    * that already has an account is refused (409): that person signs in and
    * uses "Start an outreach group".
    */
@@ -112,19 +159,15 @@ export class OutreachOrganiserService {
     if (reservedOrganiserName(input.groupName)) throw reservedNameProblem();
     const phoneLookup = createContactLookupHmac('phone', phone);
 
-    // Anti-bot: the network's own window, then the public application quota
-    // (0049) shared with every other public application, in one committed
-    // transaction so a refused start still costs quota.
+    // Anti-bot, besides Turnstile: the network's own hourly window, in its own
+    // committed transaction. The command then charges the public application
+    // quota (0049, shared with every other public application) and its own
+    // 5 sign-ups a day for the network, both under this digest.
+    const networkDigest = this.completion.publicApplicationNetworkDigest(network);
     let limited = false;
     try {
-      limited = await this.database.withSystemTransaction(correlationId, async (client) => {
-        const blocked = await consumeRateLimit(client, 'ip', domainHmac(key, HMAC_DOMAIN, 'network', network),
-          OUTREACH_SIGNUP_NETWORK_WINDOW);
-        if (blocked) return true;
-        await client.query('select platform.consume_public_application_quota($1)',
-          [this.completion.publicApplicationNetworkDigest(network)]);
-        return false;
-      });
+      limited = await this.database.withSystemTransaction(correlationId, (client) =>
+        consumeRateLimit(client, 'ip', domainHmac(key, HMAC_DOMAIN, 'network', network), OUTREACH_SIGNUP_NETWORK_WINDOW));
     } catch (error) {
       throw this.mapError(error);
     }
@@ -132,64 +175,110 @@ export class OutreachOrganiserService {
 
     const signupId = randomUUID();
     const token = randomBytes(32).toString('base64url');
-    const challengeId = randomUUID();
-    const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
-    let row: StartRow | undefined;
+    const code = newCode();
+    let outcome: string | undefined;
     try {
-      row = await this.database.withSystemTransaction(correlationId, async (client) => (await client.query<StartRow>(
-        'select * from identity.start_outreach_organiser_signup($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)',
-        [signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', token), input.email, phoneLookup,
-          encryptOutreachPhone(key, phone), input.organiserName, input.groupName, input.kind,
-          input.registrationNumber ?? null, domainHmac(key, HMAC_DOMAIN, 'network', network), challengeId,
-          domainHmac(key, HMAC_DOMAIN, 'otp', signupId, challengeId, code),
-          this.environment.OTP_HMAC_KEY_VERSION, this.environment.OTP_EXPIRY_SECONDS,
-          this.environment.OTP_MAX_ATTEMPTS])).rows[0]);
+      outcome = await this.database.withSystemTransaction(correlationId, async (client) => (await client.query<{ outcome: string }>(
+        'select identity.start_outreach_organiser_signup($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) as outcome',
+        [signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', token), input.email, input.organiserName, input.groupName,
+          input.kind, input.registrationNumber ?? null, phoneLookup, encryptOutreachPhone(key, phone),
+          String(this.environment.OTP_HMAC_KEY_VERSION), networkDigest, codeHmac(key, signupId, code)])).rows[0]?.outcome);
     } catch (error) {
       throw this.mapError(error);
     }
-    if (row?.outcome === 'email_registered') throw emailAlreadyRegistered();
-    if (row?.outcome === 'resend_wait') {
-      throw new DomainProblem(429, 'OTP_RESEND_COOLDOWN',
-        `We sent a code a moment ago. Wait ${row.resend_after_seconds ?? this.environment.OTP_RESEND_COOLDOWN_SECONDS} seconds before asking for another.`);
-    }
-    if (row?.outcome !== 'code_issued' || row.signup_id !== signupId || row.challenge_id !== challengeId) {
-      throw outreachSignupUnavailable();
-    }
+    if (outcome === 'email_registered') throw emailAlreadyRegistered();
+    if (outcome === 'name_not_allowed') throw reservedNameProblem();
+    if (outcome === 'rate_limited') throw this.rateLimited();
+    if (outcome !== 'started') throw outreachSignupUnavailable();
 
-    const delivered = await this.notification.deliver({ challengeId, recipient: input.email, code,
+    const challengeId = await this.sendCode(input.email, code, correlationId);
+    return {
+      cookie: `${signupId}.${token}`,
+      body: { accepted: true as const, challengeId, expiresInSeconds: OUTREACH_SIGNUP_CODE_SECONDS,
+        resendAfterSeconds: OUTREACH_SIGNUP_RESEND_SECONDS },
+    };
+  }
+
+  /**
+   * A new code for the sign-up the cookie names (after a minute, at most 5
+   * codes in all). The email is read back from the sign-up by the database,
+   * so the new code can only go where the first one went.
+   */
+  async resend(cookie: string | undefined, correlationId: string) {
+    await this.assertOpen();
+    const key = this.requireKey();
+    const session = this.parseCookie(cookie);
+    const code = newCode();
+    let answer: { outcome?: string; email?: string } = {};
+    try {
+      answer = await this.database.withSystemTransaction(correlationId, async (client) => {
+        const outcome = (await client.query<{ outcome: string }>(
+          'select identity.resend_outreach_organiser_signup_code($1,$2,$3) as outcome',
+          [session.signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', session.token), codeHmac(key, session.signupId, code)]))
+          .rows[0]?.outcome;
+        if (outcome !== 'sent') return { outcome };
+        const email = (await client.query<{ email: string }>(
+          'select signup.email from identity.outreach_organiser_signups signup where signup.id = $1',
+          [session.signupId])).rows[0]?.email;
+        return { outcome, email };
+      });
+    } catch (error) {
+      throw this.mapError(error);
+    }
+    switch (answer.outcome) {
+      case 'sent': break;
+      case 'too_soon': throw new DomainProblem(429, 'OTP_RESEND_COOLDOWN',
+        `We sent a code a moment ago. Wait ${OUTREACH_SIGNUP_RESEND_SECONDS} seconds before asking for another.`);
+      case 'too_many': throw new DomainProblem(429, 'OTP_RESEND_LIMIT',
+        'We have already sent 5 codes for this sign-up. Please start again.');
+      case 'expired': throw signupExpired();
+      case 'denied': throw signupSessionInvalid();
+      default: throw outreachSignupUnavailable();
+    }
+    if (!answer.email) throw outreachSignupUnavailable();
+    const challengeId = await this.sendCode(answer.email, code, correlationId);
+    return { sent: true as const, challengeId, expiresInSeconds: OUTREACH_SIGNUP_CODE_SECONDS,
+      resendAfterSeconds: OUTREACH_SIGNUP_RESEND_SECONDS };
+  }
+
+  /** Emails a code; the delivery id is returned to the page only as a reference. */
+  private async sendCode(email: string, code: string, correlationId: string): Promise<string> {
+    const challengeId = randomUUID();
+    const delivered = await this.notification.deliver({ challengeId, recipient: email, code,
       purpose: 'SIGNUP_VERIFY', channel: 'email', correlationId }).catch(() => ({ outcome: 'unknown' as const }));
     if (delivered.outcome === 'definitive_failure') {
       throw new DomainProblem(503, 'OTP_DELIVERY_UNAVAILABLE',
         'We could not send the code to that email just now. Check the address and try again in a few minutes.');
     }
-    return {
-      cookie: `${signupId}.${token}`,
-      body: { accepted: true as const, challengeId, expiresInSeconds: this.environment.OTP_EXPIRY_SECONDS,
-        resendAfterSeconds: this.environment.OTP_RESEND_COOLDOWN_SECONDS },
-    };
+    return challengeId;
   }
 
-  /** Checks the emailed code against the sign-up the cookie names: 200 { verified: true }. */
-  async verify(cookie: string | undefined, challengeId: string, code: string, correlationId: string) {
+  /**
+   * Checks the emailed code against the sign-up the cookie names: 200
+   * { verified: true }. A wrong code is counted by the database (5 wrong
+   * codes lock it until a new code is sent).
+   */
+  async verify(cookie: string | undefined, code: string, correlationId: string) {
     await this.assertOpen();
     const key = this.requireKey();
     const session = this.parseCookie(cookie);
     let result: string | undefined;
     try {
       result = await this.database.withSystemTransaction(correlationId, async (client) => (await client.query<{ result: string }>(
-        'select * from identity.verify_outreach_organiser_email($1,$2,$3,$4)',
-        [session.signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', session.token), challengeId,
-          domainHmac(key, HMAC_DOMAIN, 'otp', session.signupId, challengeId, code)])).rows[0]?.result);
+        'select identity.verify_outreach_organiser_email($1,$2,$3) as result',
+        [session.signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', session.token),
+          codeHmac(key, session.signupId, code)])).rows[0]?.result);
     } catch (error) {
       throw this.mapError(error);
     }
     switch (result) {
       case 'verified': return { verified: true as const };
-      case 'invalid_code': throw new DomainProblem(400, 'OTP_INVALID', 'That code is not right. Check the email and try again.');
-      case 'expired': throw new DomainProblem(410, 'OTP_EXPIRED', 'That code has expired. Ask for a new one.');
-      case 'attempts_exhausted': throw new DomainProblem(429, 'OTP_ATTEMPTS_EXHAUSTED',
+      case 'wrong_code': throw new DomainProblem(400, 'OTP_INVALID', 'That code is not right. Check the email and try again.');
+      case 'code_expired': throw new DomainProblem(410, 'OTP_EXPIRED', 'That code has expired. Ask for a new one.');
+      case 'locked': throw new DomainProblem(429, 'OTP_ATTEMPTS_EXHAUSTED',
         'Too many wrong codes. Ask for a new code and try again.');
-      case 'not_found': throw signupSessionInvalid();
+      case 'expired': throw signupExpired();
+      case 'denied': throw signupSessionInvalid();
       default: throw outreachSignupUnavailable();
     }
   }
@@ -205,18 +294,27 @@ export class OutreachOrganiserService {
     assertPasswordLength(input.password);
     const session = this.parseCookie(cookie);
     const passwordHash = await hashAccountPassword(input.password);
-    let row: ActivateRow | undefined;
+    let activated: { row: ActivateRow; email: string } | undefined;
     try {
-      row = await this.database.withSystemTransaction(correlationId, async (client) => (await client.query<ActivateRow>(
-        'select * from identity.activate_outreach_organiser($1,$2,$3,$4)',
-        [session.signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', session.token), passwordHash,
-          input.termsVersion])).rows[0]);
+      activated = await this.database.withSystemTransaction(correlationId, async (client) => {
+        const row = (await client.query<ActivateRow>(
+          'select * from identity.activate_outreach_organiser($1,$2,$3,$4)',
+          [session.signupId, domainHmac(key, HMAC_DOMAIN, 'cookie', session.token), passwordHash,
+            input.termsVersion])).rows[0];
+        if (!row) return undefined;
+        // The sign-in that follows needs the login's email; the command does not answer it.
+        const email = (await client.query<{ email: string }>(
+          'select lower(account.email) as email from auth.accounts account where account.id = $1',
+          [row.account_id])).rows[0]?.email;
+        return email ? { row, email } : undefined;
+      });
     } catch (error) {
       throw this.mapError(error);
     }
-    if (!row) throw signupSessionInvalid();
+    if (!activated) throw signupSessionInvalid();
+    const { row, email } = activated;
     return { organizationId: row.organization_id, facilityId: row.facility_id, accountId: row.account_id,
-      membershipId: row.membership_id, email: row.email };
+      membershipId: row.membership_id, email, replayed: row.replayed === true };
   }
 
   /**
@@ -238,13 +336,22 @@ export class OutreachOrganiserService {
     let row: ForAccountRow | undefined;
     try {
       row = await this.database.withTransaction(context, async (client) => (await client.query<ForAccountRow>(
-        'select * from identity.activate_outreach_organiser_for_account($1,$2,$3,$4,$5,$6)',
-        [input.groupName, input.kind, input.registrationNumber ?? null, createContactLookupHmac('phone', phone),
-          encryptOutreachPhone(key, phone), input.termsVersion])).rows[0]);
+        'select * from identity.activate_outreach_organiser_for_account($1,$2,$3,$4,$5,$6,$7)',
+        [input.groupName, input.kind, input.registrationNumber ?? null, input.termsVersion,
+          createContactLookupHmac('phone', phone), encryptOutreachPhone(key, phone),
+          String(this.environment.OTP_HMAC_KEY_VERSION)])).rows[0]);
     } catch (error) {
       throw this.mapError(error);
     }
-    if (!row) throw outreachSignupUnavailable();
+    switch (row?.result) {
+      case 'started': break;
+      case 'already_organiser': throw new DomainProblem(409, 'OUTREACH_ORGANISER_ALREADY_RUNNING',
+        'You already run an outreach group with this account. Choose it in the facility picker.');
+      case 'name_not_allowed': throw reservedNameProblem();
+      case 'not_eligible': throw notEligible();
+      default: throw outreachSignupUnavailable();
+    }
+    if (!row.organization_id || !row.facility_id || !row.membership_id) throw outreachSignupUnavailable();
     return { started: true as const, organizationId: row.organization_id, facilityId: row.facility_id,
       membershipId: row.membership_id, reviewState: 'pending' as const };
   }
@@ -274,28 +381,14 @@ export class OutreachOrganiserService {
     if (closed) return closed;
     const code = databaseCode(error);
     if (code === 'P4290') return this.rateLimited();
-    if (hasRefusal(error, 'OUTREACH_ORGANISER_EMAIL_REGISTERED')) return emailAlreadyRegistered();
-    if (hasRefusal(error, 'OUTREACH_ORGANISER_NAME_RESERVED')) return reservedNameProblem();
-    if (hasRefusal(error, 'OUTREACH_ORGANISER_NOT_VERIFIED')) {
-      return new DomainProblem(409, 'OUTREACH_ORGANISER_NOT_VERIFIED',
-        'Confirm your email with the 6-digit code before setting a password.');
+    for (const [refusal, problem] of OUTREACH_SIGNUP_REFUSALS) {
+      if (hasRefusal(error, refusal)) return problem();
     }
-    if (hasRefusal(error, 'OUTREACH_TERMS_VERSION_INVALID')) {
-      return new DomainProblem(409, 'OUTREACH_TERMS_VERSION_INVALID',
-        'The organiser terms have changed. Reload the page and accept the current terms.');
-    }
-    if (hasRefusal(error, 'OUTREACH_ORGANISER_ALREADY_RUNNING')) {
-      return new DomainProblem(409, 'OUTREACH_ORGANISER_ALREADY_RUNNING',
-        'You already run an outreach group with this account. Choose it in the facility picker.');
-    }
-    if (hasRefusal(error, 'OUTREACH_ORGANISER_SIGNUP_SESSION_INVALID')) return signupSessionInvalid();
     if (code === '23505') return emailAlreadyRegistered();
     if (code === '40001') {
       return new DomainProblem(409, 'VERSION_CONFLICT', 'Something changed while we were saving. Please try again.');
     }
-    if (code === '42501') {
-      return new DomainProblem(403, 'OUTREACH_ORGANISER_SIGNUP_DENIED', 'You cannot start an outreach group with this account.');
-    }
+    if (code === '42501') return notEligible();
     this.logger.warn(`Outreach organiser sign-up failed (event=outreach_organiser_signup_failed code=${code ?? 'none'})`);
     return outreachSignupUnavailable();
   }
