@@ -25,11 +25,11 @@ export const OUTREACH_SIGNUP_SESSION_SECONDS = 60 * 60;
 
 const HMAC_DOMAIN = 'outreach-organiser-signup';
 
-/** 0125's fixed timings: a code lasts 15 minutes, a new one can be asked for after a minute. */
+/** 0114's fixed timings: a code lasts 15 minutes, a new one can be asked for after a minute. */
 export const OUTREACH_SIGNUP_CODE_SECONDS = 15 * 60;
 export const OUTREACH_SIGNUP_RESEND_SECONDS = 60;
 
-/** identity.activate_outreach_organiser (0125). */
+/** identity.activate_outreach_organiser (0114). */
 interface ActivateRow extends QueryResultRow {
   organization_id: string;
   facility_id: string;
@@ -39,7 +39,7 @@ interface ActivateRow extends QueryResultRow {
   replayed: boolean;
 }
 
-/** identity.activate_outreach_organiser_for_account (0125). */
+/** identity.activate_outreach_organiser_for_account (0114). */
 interface ForAccountRow extends QueryResultRow {
   result: string;
   organization_id: string | null;
@@ -71,13 +71,13 @@ function newCode(): string {
   return randomInt(0, 1_000_000).toString().padStart(6, '0');
 }
 
-/** The code as 0125 stores it: keyed, and bound to the sign-up. */
+/** The code as 0114 stores it: keyed, and bound to the sign-up. */
 function codeHmac(key: Buffer, signupId: string, code: string): string {
   return domainHmac(key, HMAC_DOMAIN, 'otp', signupId, code);
 }
 
 /**
- * The refusal codes 0125's sign-up commands raise, in plain English. A test
+ * The refusal codes 0114's sign-up commands raise, in plain English. A test
  * compares this list with the migration's raise messages.
  */
 export const OUTREACH_SIGNUP_REFUSALS: ReadonlyArray<readonly [string, () => DomainProblem]> = [
@@ -111,7 +111,7 @@ export const OUTREACH_SIGNUP_REFUSALS: ReadonlyArray<readonly [string, () => Dom
  * a hospital worker) starts an outreach group for itself with the same login.
  *
  * The database is authoritative for every rule (the fence on roles, the
- * review before a first live campaign, consent and retention); Identity's
+ * name blocklist, pausing, consent and retention); Identity's
  * checks only answer earlier and in plain English. Secrets reach the database
  * only as HMACs; the phone as its contact lookup HMAC and a ciphertext.
  */
@@ -285,7 +285,8 @@ export class OutreachOrganiserService {
 
   /**
    * Accepts the terms, sets the password and creates the organiser's own
-   * Outreach organisation (review state pending). The controller then signs
+   * Outreach organisation, whose campaigns can go live at once (owner
+   * decision Q38: no Health ID check first). The controller then signs
    * the organiser in with that password.
    */
   async activate(cookie: string | undefined, input: ActivateOutreachOrganiserDto, correlationId: string) {
@@ -353,7 +354,7 @@ export class OutreachOrganiserService {
     }
     if (!row.organization_id || !row.facility_id || !row.membership_id) throw outreachSignupUnavailable();
     return { started: true as const, organizationId: row.organization_id, facilityId: row.facility_id,
-      membershipId: row.membership_id, reviewState: 'pending' as const };
+      membershipId: row.membership_id, organiserStatus: 'active' as const, label: 'Unverified organiser' as const };
   }
 
   private parseCookie(cookie: string | undefined): { signupId: string; token: string } {

@@ -3,12 +3,12 @@ import { type BeforeApplicationShutdown, Injectable, Logger, type OnApplicationB
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 
-/** Registrations redacted per sweep at most (0126 accepts 1-5000). */
+/** Registrations redacted per sweep at most (0115 accepts 1-5000). */
 export const OUTREACH_RETENTION_SWEEP_BATCH = 500;
 
 /**
  * The outreach retention sweeper (plan PR-2/PR-4, owner decision 3 of 11 Nov
- * 2026): every OUTREACH_RETENTION_SWEEP_SECONDS it calls 0126's
+ * 2026): every OUTREACH_RETENTION_SWEEP_SECONDS it calls 0115's
  * identity.sweep_expired_outreach_registrations(500) as system:auth, the only
  * context it accepts (EXECUTE is granted to Identity's runtime only). The
  * function redacts, never deletes, the registrations of outreach groups never

@@ -85,8 +85,9 @@ export class OutreachOrganiserController {
   /**
    * Creates the organiser's account and Outreach organisation and signs them
    * in as a staff sign-in does: the session cookies and the x-csrf-token
-   * header. The new organisation is "Unverified" until Health ID checks it
-   * once; until then campaigns can be set up and practised but not made live.
+   * header. The new organisation is shown as "Unverified organiser" (Health
+   * ID does not verify groups) and its campaigns can go live at once (owner
+   * decision Q38).
    */
   @Post('activate')
   @HttpCode(200)
@@ -113,7 +114,8 @@ export class OutreachOrganiserController {
       organizationId: activated.organizationId,
       facilityId: activated.facilityId,
       accountId: activated.accountId,
-      reviewState: 'pending' as const,
+      organiserStatus: 'active' as const,
+      label: 'Unverified organiser' as const,
       actor: result.actor,
       expiresAt: result.expiresAt.toISOString(),
     };

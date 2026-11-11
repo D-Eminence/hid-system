@@ -1,9 +1,10 @@
 # Open sign-up on outreach.: services (identity-api, outreach-api, notification-api)
 
-Plan PR-3 and PR-4, with the owner's decisions of 11 November 2026: a one-time Health ID check before an
-organiser's first live campaign, no per-organiser limits, unlinked registrations kept 1 year, joint-controller
+Plan PR-3 and PR-4, with the owner's decisions of 11 November 2026: no Health ID check before an organiser's
+campaigns go live (decision Q38: a new organiser may set a campaign Active at once; support can still pause a
+group, the name blocklist stays, and registrants see "Unverified organiser"), no per-organiser limits, unlinked registrations kept 1 year, joint-controller
 terms version `2026-11-01`, an existing account may start an outreach group with the same login, free for now.
-The database side (migrations 0125 "outreach organisers" and 0126 "outreach retention", branch
+The database side (migrations 0114 "outreach organisers" and 0115 "outreach retention", branch
 `wt-outreach-signup-db`) is a separate change; every rule below is enforced there too, and the calls listed at the
 end are its functions exactly. Identity and Outreach only answer earlier and in plain English.
 
@@ -25,9 +26,8 @@ identity-api (all under `/api/v1`):
 | `POST identity/outreach-invitations/preview` | anyone with the link | `{ invitationId, token }`: the group, who invited, `accountCase` new or existing |
 | `POST identity/outreach-invitations/accept` | signed out, Turnstile `outreach-invitation` | `{ invitationId, token, password }`; signs the helper in |
 | `POST identity/outreach-invitations/signed-in/accept` | a signed-in account | `{ invitationId, token }` |
-| `GET admin/outreach-organisers?reviewState=pending` | `platform.facility.read` | the queue (`pending`, `reviewed`, `suspended`, or `all` by default), each with its `version` and the phone |
-| `POST admin/outreach-organisers/:organizationId/review` | `platform.facility.manage` and `.unlock` | one click: the list's `version` as If-Match (or `{ version }`); `displayName` and `note` optional |
-| `POST admin/outreach-organisers/:organizationId/suspend` | `platform.facility.manage` and `.unlock` | If-Match version and `{ reason }` |
+| `GET admin/outreach-organisers?status=active` | `platform.facility.read` | the groups (`active`, `suspended`, or `all` by default), each with its `version`, the phone, `status` (`active`/`suspended`) and `label` ("Unverified organiser" or "Paused") |
+| `POST admin/outreach-organisers/:organizationId/suspend` | `platform.facility.manage` and `.unlock` | If-Match version and `{ reason }`; answers `{ status: 'suspended', label: 'Paused', version, revokedRoles }` |
 | `POST admin/outreach-campaigns/:campaignId/close` | `platform.facility.manage` and `.unlock` | the campaign's version as If-Match and `{ reason }` |
 | `POST admin/outreach-campaigns/:campaignId/admins` | `platform.facility.manage` and `.unlock` | `{ membershipId, reason }` |
 
@@ -38,18 +38,20 @@ in and use "Start an outreach group". Anti-bot: Turnstile, 10 starts a network a
 command the shared public application quota and 5 sign-ups a network a day. Outreach invitations are accepted by
 link only; the email shows no code. At most 50 invitations wait at once per group (an abuse guard). `POST identity/outreach/patient-authorization` refuses 403 `OUTREACH_TENANT_NO_HEALTH_ID_LINK`
 at an outreach group. A staff session signed in or refreshed from an `outreach.` origin idles out after
-`AUTH_OUTREACH_REFRESH_TTL_SECONDS` (default 900).
+`AUTH_OUTREACH_REFRESH_TTL_SECONDS` (default 900). Activation and "Start an outreach group" answer
+`organiserStatus: 'active'` and `label: 'Unverified organiser'`. There is no review route.
 
 outreach-api: `CreateRegistrationCaseDto` takes `consent { textVersion, language (en|yo|ha|ig|pcm), method
 (verbal_read_aloud|self_ticked|guardian), guardianName? }`, required at an outreach group with a campaign, a
 guardian's name under 18 and notes of 280 characters at most; the consent row is written in the same SERIALIZABLE
 transaction. Phones are normalised to E.164 (`0801...` is `+234801...`). A registration in a campaign answers
 `possibleDuplicate`. `link-existing` refuses 403 `OUTREACH_TENANT_NO_HEALTH_ID_LINK` at an outreach group. Database
-refusals answer 409 `OUTREACH_ORGANISER_AWAITING_REVIEW`, 423 `OUTREACH_ORGANISER_SUSPENDED` and 422 for consent
-(`OUTREACH_CONSENT_REQUIRED`), guardian (`OUTREACH_CONSENT_GUARDIAN_REQUIRED`), campaign and notes.
-`GET .../campaigns/governance` adds `organiserStatus` (`not_outreach_group|unverified|reviewed|suspended|unknown`).
+refusals answer 423 `OUTREACH_ORGANISER_SUSPENDED` and 422 for consent (`OUTREACH_CONSENT_REQUIRED`), guardian
+(`OUTREACH_CONSENT_GUARDIAN_REQUIRED`), campaign and notes. A new group's campaign goes Active with no check first.
+`GET .../campaigns/governance` adds `organiserStatus` (`not_outreach_group|unverified|suspended|unknown`):
+`unverified` is any outreach group that is not paused (Health ID never verifies one).
 
-Retention (owner decision 3): identity-api's `OutreachRetentionSweeper` calls 0126's
+Retention (owner decision 3): identity-api's `OutreachRetentionSweeper` calls 0115's
 `identity.sweep_expired_outreach_registrations(500)` as `system:auth` every `OUTREACH_RETENTION_SWEEP_SECONDS`
 (default 3600, 0 off). It redacts registrations never linked to a Health ID once `closed_at + 365 days` (or
 `starts_at + 365 days` for a campaign never closed) has passed. EXECUTE is granted to Identity's runtime only, so
@@ -64,10 +66,10 @@ A facility is an outreach group when the membership's roles include `outreach_or
 The database's fence on `auth.account_roles` keeps those roles at outreach groups only and keeps every clinical role
 out of them; the same account may hold hospital roles at hospital facilities.
 
-## The database calls the services make (0125 and 0126)
+## The database calls the services make (0114 and 0115)
 
 Positional arguments; refusals are matched by the code in the error's message (the specs compare the codes with
-0125's raise messages). P = a `system:auth` transaction, A = a transaction as the signed-in account (facility ''
+0114's raise messages). P = a `system:auth` transaction, A = a transaction as the signed-in account (facility ''
 when none, purpose `healthcare-operations`), ADM = a platform administrator's transaction.
 
 - P `identity.start_outreach_organiser_signup(signup_id, token_hmac, email, organiser_name, group_name, kind,
@@ -91,16 +93,18 @@ when none, purpose `healthcare-operations`), ADM = a platform administrator's tr
   `identity.accept_outreach_invitation_with_password(invitation_id, link_hmac, password_hash)` returns `(result,
   account_id, membership_id, facility_id, hid_subject)`; A `identity.accept_outreach_invitation_for_account(
   invitation_id, link_hmac)` returns `(result, membership_id, facility_id)`.
-- ADM `identity.admin_list_outreach_organisers(state)` (not read-only: it writes an audit row),
-  `identity.admin_review_outreach_organiser(organization_id, expected_version, display_name, note)`,
-  `identity.admin_suspend_outreach_organiser(organization_id, expected_version, reason)`,
+- ADM `identity.admin_list_outreach_organisers(state)` with `'active'`, `'suspended'` or `'all'` (not read-only: it
+  writes an audit row; Identity reads the row's `status`, or `suspended_at`, and no review column),
+  `identity.admin_suspend_outreach_organiser(organization_id, expected_version, reason)` (Identity reads
+  `row_version` and `revoked_roles`),
   `identity.admin_close_outreach_campaign(campaign_id, expected_version, reason)` and
   `identity.admin_appoint_outreach_campaign_admin(campaign_id, membership_id, reason)` (both return text).
 - P `identity.sweep_expired_outreach_registrations(requested_limit)` returns the number redacted.
 - outreach-api: `insert into outreach.registration_consents (registration_case_id, facility_id,
   consent_text_version, language, method, guardian_name, captured_by_account_id, captured_by_membership_id)` with
-  `platform.current_account_id()` as the capturer (0125's policy); `select outreach.organiser_status()`, a scalar
-  `pending|reviewed|suspended` or null for `app.facility_id`.
+  `platform.current_account_id()` as the capturer (0114's policy); `select outreach.organiser_status()`, a scalar
+  for `app.facility_id`: `active` or `suspended` (any other text is read as not paused), null when the facility is
+  not an outreach group.
 
 `services/identity-api/scripts/verify-outreach-organisers-runtime.mjs` runs these calls through the real services
-against a disposable Postgres 16 with 0125 and 0126 applied.
+against a disposable Postgres 16 with 0114 and 0115 applied.

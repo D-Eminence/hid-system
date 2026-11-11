@@ -130,7 +130,7 @@ const environmentSchema = z.object({
   // enabled (owner decision O9: every 60 s). Zero disables it.
   // The outreach retention sweeper (owner decision 3 of 11 Nov 2026:
   // outreach registrations never linked to a Health ID are kept 1 year, then
-  // redacted by 0126's sweep). 0 turns the timer off; never under NODE_ENV=test.
+  // redacted by 0115's sweep). 0 turns the timer off; never under NODE_ENV=test.
   OUTREACH_RETENTION_SWEEP_SECONDS: z.coerce.number().int().min(0).max(86_400).default(3_600),
   PATIENT_LIFECYCLE_SWEEP_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
   // Patient sharing (B4, migration 0095): a code default, on; production's

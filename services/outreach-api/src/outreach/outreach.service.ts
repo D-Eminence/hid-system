@@ -75,7 +75,7 @@ export class OutreachService {
         // The person's agreement, in the same transaction (plan PR-4): the
         // database refuses an outreach group's registration without it.
         if (normalized.consent) {
-          // 0125's policy: the capturer is the request's own account and membership.
+          // 0114's policy: the capturer is the request's own account and membership.
           await client.query(`insert into outreach.registration_consents (
             registration_case_id,facility_id,consent_text_version,language,method,guardian_name,
             captured_by_account_id,captured_by_membership_id
@@ -351,23 +351,24 @@ export class OutreachService {
 
   /**
    * The governance answer (#222's endpoint, plan PR-4): how campaigns are
-   * governed, and for an outreach group whether Health ID has checked it.
+   * governed, and for an outreach group whether it is paused.
    * organiserStatus: 'not_outreach_group' at a hospital's facility;
-   * 'unverified' (campaigns can be set up and practised, not made live),
-   * 'reviewed', 'suspended', or 'unknown' when it cannot be read just now.
+   * 'unverified' (an outreach group that is not paused: its campaigns can go
+   * live at once, and Health ID has not verified it, owner decision Q38),
+   * 'suspended' (paused by Health ID), or 'unknown' when it cannot be read.
    * Free for now and with no per-organiser limits (owner decisions 2 and 6).
    */
   async campaignGovernance(context: DataAccessContext): Promise<{ rule: 'campaign_admins';
-    organiserStatus: 'not_outreach_group' | 'unverified' | 'reviewed' | 'suspended' | 'unknown' }> {
+    organiserStatus: 'not_outreach_group' | 'unverified' | 'suspended' | 'unknown' }> {
     if (!isOutreachTenant(context)) return { rule: 'campaign_admins', organiserStatus: 'not_outreach_group' };
     try {
       const state = await this.database.withTransaction(context, async (client) =>
-        // 0125's outreach.organiser_status() answers a scalar: 'pending', 'reviewed', 'suspended' or null.
-        (await client.query<{ review_state: string | null }>('select outreach.organiser_status() as review_state')).rows[0]
-          ?.review_state, { readOnly: true });
-      const organiserStatus = state === 'pending' ? 'unverified' as const
-        : state === 'reviewed' ? 'reviewed' as const
-          : state === 'suspended' ? 'suspended' as const : 'unknown' as const;
+        // 0114's outreach.organiser_status() answers a scalar: 'suspended' for a paused group, another
+        // state for one that is not paused, or null when the facility is not an outreach group.
+        (await client.query<{ organiser_status: string | null }>('select outreach.organiser_status() as organiser_status'))
+          .rows[0]?.organiser_status, { readOnly: true });
+      const organiserStatus = state === 'suspended' ? 'suspended' as const
+        : typeof state === 'string' && state.length > 0 ? 'unverified' as const : 'unknown' as const;
       return { rule: 'campaign_admins', organiserStatus };
     } catch {
       return { rule: 'campaign_admins', organiserStatus: 'unknown' };

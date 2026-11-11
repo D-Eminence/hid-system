@@ -22,14 +22,14 @@ export const OUTREACH_INVITATION_ACCEPT_WINDOW = { windowSeconds: 3600, maxReque
 
 const HMAC_DOMAIN = 'outreach-invitation';
 
-/** identity.create_outreach_invitation (0125). */
+/** identity.create_outreach_invitation (0114). */
 interface CreateRow extends QueryResultRow {
   result: string;
   invitation_id: string | null;
   expires_at: Date | string | null;
 }
 
-/** identity.list_outreach_team (0125): the group's members, then its pending invitations. */
+/** identity.list_outreach_team (0114): the group's members, then its pending invitations. */
 interface TeamRow extends QueryResultRow {
   entry_kind: 'member' | 'invitation';
   entry_id: string;
@@ -41,7 +41,7 @@ interface TeamRow extends QueryResultRow {
   expires_at: Date | string | null;
 }
 
-/** identity.preview_outreach_invitation (0125). */
+/** identity.preview_outreach_invitation (0114). */
 interface PreviewRow extends QueryResultRow {
   result: string;
   group_name: string | null;
@@ -52,7 +52,7 @@ interface PreviewRow extends QueryResultRow {
   expires_at: Date | string | null;
 }
 
-/** identity.accept_outreach_invitation_with_password / _for_account (0125). */
+/** identity.accept_outreach_invitation_with_password / _for_account (0114). */
 interface AcceptRow extends QueryResultRow {
   result: string;
   account_id?: string | null;
@@ -75,7 +75,7 @@ export function isOutreachOrganiserAt(context: DataAccessContext): boolean {
   return context.actor.facility?.roles.includes('outreach_organiser') === true;
 }
 
-/** The answer for a link `result` other than 'ready', in plain English (0125's answers). */
+/** The answer for a link `result` other than 'ready', in plain English (0114's answers). */
 export function invitationResultProblem(result: string | undefined): DomainProblem {
   switch (result) {
     case 'invalid': return new DomainProblem(400, 'OUTREACH_INVITATION_INVALID',
@@ -98,7 +98,7 @@ export function invitationResultProblem(result: string | undefined): DomainProbl
   }
 }
 
-/** The refusal codes 0125's invitation commands raise, in plain English. */
+/** The refusal codes 0114's invitation commands raise, in plain English. */
 export const OUTREACH_INVITATION_REFUSALS: ReadonlyArray<readonly [string, () => DomainProblem]> = [
   ['OUTREACH_ORGANISER_PERMISSION_DENIED', organiserRequired],
   ['OUTREACH_ORGANISER_ACCOUNT_REQUIRED', () => new DomainProblem(401, 'OUTREACH_ORGANISER_ACCOUNT_REQUIRED',
@@ -135,9 +135,8 @@ function organiserRequired(): DomainProblem {
 }
 
 /**
- * Outreach invitations (plan PR-1/PR-3, migration 0125): an organiser invites
- * a helper by email as outreach_volunteer, before or after Health ID's check,
- * so a team can set up and practise. They are separate commands from facility
+ * Outreach invitations (plan PR-1/PR-3, migration 0114): an organiser invites
+ * a helper by email as outreach_volunteer. They are separate commands from facility
  * staff invitations, which are unchanged. The helper opens the emailed link:
  * a new person sets a password and is signed in; someone with a Health ID
  * account accepts while signed in. At most 50 invitations wait at once (an
@@ -309,7 +308,7 @@ export class OutreachInvitationsService {
   }
 
   /**
-   * Sends the email after commit. 0125 keeps no delivery record, so the
+   * Sends the email after commit. 0114 keeps no delivery record, so the
    * outcome is only answered to the organiser. The outreach email offers the
    * link only; the code field the shared staff-invitation route requires is
    * filled with an unused random value that the outreach email never shows.

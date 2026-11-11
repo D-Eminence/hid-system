@@ -22,27 +22,23 @@ export function tenantNoHealthIdLink(): DomainProblem {
     'Outreach groups cannot link people to a Health ID. The person can link their own Health ID later from their account.');
 }
 
-/**
- * The outreach group rules the database enforces (plan PR-1, migration
- * 0125), answered in plain English. The refusal code is matched in the
- * error's message, so any SQLSTATE works. Undefined for any other error.
- * OUTREACH_TENANT_RULE_CODES lists every code matched; a test compares it
- * with 0125's raise messages.
- */
-/** The codes outreachRuleProblem matches, each raised by 0125. */
-export const OUTREACH_TENANT_RULE_CODES = ['OUTREACH_ORGANISER_AWAITING_REVIEW', 'OUTREACH_ORGANISER_SUSPENDED',
+/** The codes outreachRuleProblem matches, each raised by 0114. */
+export const OUTREACH_TENANT_RULE_CODES = ['OUTREACH_ORGANISER_SUSPENDED',
   'OUTREACH_TENANT_NO_HEALTH_ID_LINK', 'OUTREACH_CONSENT_GUARDIAN_REQUIRED', 'OUTREACH_CONSENT_CASE_INVALID',
   'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_NOTES_TOO_LONG'] as const;
 
+/**
+ * The outreach group rules the database enforces (plan PR-1, migration
+ * 0114), answered in plain English. The refusal code is matched in the
+ * error's message, so any SQLSTATE works. Undefined for any other error.
+ * OUTREACH_TENANT_RULE_CODES lists every code matched; a test compares it
+ * with 0114's raise messages. There is no check before a campaign goes live
+ * (owner decision Q38, 11 Nov 2026); a paused group is refused everything.
+ */
 export function outreachRuleProblem(error: unknown): DomainProblem | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
   const message = String((error as { message?: unknown }).message ?? '');
   const has = (code: string) => message === code || message.includes(code);
-  if (has('OUTREACH_ORGANISER_AWAITING_REVIEW')) {
-    return new DomainProblem(409, 'OUTREACH_ORGANISER_AWAITING_REVIEW',
-      'Health ID checks every new outreach group once before its first campaign can start. '
-      + 'You can keep setting up and practising. We aim to check groups the same day.');
-  }
   if (has('OUTREACH_ORGANISER_SUSPENDED')) {
     return new DomainProblem(423, 'OUTREACH_ORGANISER_SUSPENDED',
       'This outreach group has been paused by Health ID. Contact Health ID support.');

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Open sign-up on outreach. (migrations 0125 and 0126, owner decisions of
+// Open sign-up on outreach. (migrations 0114 and 0115, owner decisions of
 // 11 November 2026) run through the real Identity and Outreach services
 // against a disposable Postgres 16 with the migrations applied. Every
 // Identity call runs as hid_identity_api_runtime and every Outreach call as
@@ -11,12 +11,12 @@
 //   email that already has a login refused, "Start an outreach group" for a
 //   signed-in hospital doctor (owner decision 5) and its repeat, outreach
 //   invitations (create, already invited, team list, preview, accept with a
-//   password, accept signed in by the hospital doctor), support's queue with
-//   versions, the one-click review (owner decision 1), a stale version
-//   refused, suspension, a campaign that cannot go Active before the check,
-//   a registration with consent at a checked group, the governance read,
-//   support's close and appoint, and the retention sweep (owner decision 3)
-//   redacting a registration kept past its year.
+//   password, accept signed in by the hospital doctor), support's list with
+//   versions, a stale version refused, a new group's campaign going Active at
+//   once (owner decision Q38: no Health ID check first), a registration with
+//   consent, the governance read ("unverified"), support's close and
+//   appoint, the retention sweep (owner decision 3) redacting a registration
+//   kept past its year, and suspension.
 //
 // Usage (a loopback test cluster only; the database is copied first):
 //   NODE_ENV=test HID_OUTREACH_RUNTIME_LOCAL_CLUSTER=loopback PGHOST=127.0.0.1 PGPORT=55461 \
@@ -99,7 +99,7 @@ try {
     CORS_ORIGINS: 'https://outreach.healthidentitydirectory.com', AUTH_MODE: 'local',
     AUTH_SIGNING_SECRET: randomBytes(32).toString('base64url'), AUTH_LOGIN_PEPPER: randomBytes(32).toString('base64url'),
     OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'), CONTACT_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
-    IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'public-synthetic-ehr-workload-token' });
+    IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: randomBytes(32).toString('base64url') });
   requireIdentity('ts-node').register({ project: join(identityRoot, 'tsconfig.json'), transpileOnly: true });
   requireIdentity('reflect-metadata');
   const loadIdentity = (path) => requireIdentity(join(identityRoot, 'src', path));
@@ -220,19 +220,30 @@ try {
     assert.equal(accepted.facilityId, organiser.facilityId);
   });
 
-  // 4. Support: the queue with versions, the one-click check, a stale version, suspension.
+  // 4. Support: the list with versions, a stale version, suspension (no check before going live, owner decision Q38).
   let queue;
-  await step('queue: pending groups with their versions (not a read-only transaction)', async () => {
-    queue = (await support.list(supportContext(), 'pending')).organisers;
+  await step('list: active groups with their versions and "Unverified organiser" (not a read-only transaction)', async () => {
+    queue = (await support.list(supportContext(), 'active')).organisers;
     const names = queue.map((row) => row.displayName).sort();
     assert.deepEqual(names, ['Ada Street Health', 'Verifier Community Volunteers']);
-    for (const row of queue) assert(Number.isSafeInteger(row.version) && row.version >= 1);
+    for (const row of queue) {
+      assert(Number.isSafeInteger(row.version) && row.version >= 1);
+      assert.equal(row.status, 'active');
+      assert.equal(row.label, 'Unverified organiser');
+    }
     assert.equal(queue.find((row) => row.organizationId === organiser.organizationId)?.phone, '+2348012345678');
+  });
+  await step('support: no review command is left (owner decision Q38)', async () => {
+    assert.equal(typeof support.review, 'undefined');
+    const leftover = await db.query(`select count(*)::int as count from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'identity' and procedure.proname = 'admin_review_outreach_organiser'`);
+    assert.equal(leftover.rows[0].count, 0);
   });
   const organiserCampaign = { id: null, version: null };
   // Outreach, as its runtime role.
   Object.assign(process.env, { DATABASE_URL: url(isolated, 'hid_outreach_api_runtime'),
-    OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN: 'a-fictional-local-secret-of-32-chars!!' });
+    OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN: randomBytes(32).toString('base64url') });
   const loadOutreach = (path) => requireOutreach(join(outreachRoot, 'src', path));
   const { DatabaseService: OutreachDatabase } = loadOutreach('database/database.service.ts');
   const { AuditService } = loadOutreach('audit/audit.service.ts');
@@ -256,34 +267,24 @@ try {
   const doctorFacility = { facilityId: doctorGroup.facilityId, membershipId: doctorGroup.membershipId,
     organizationId: doctorGroup.organizationId, name: 'Ada Street Health' };
 
-  await step('campaign: cannot go Active before Health ID\'s check (OUTREACH_ORGANISER_AWAITING_REVIEW)', async () => {
+  await step('campaign: a new group sets its campaign Active at once (owner decision Q38)', async () => {
     const context = () => outreachContext('synthetic:verifier-doctor', ids.doctor, doctorFacility, ['outreach_organiser']);
     const campaign = await outreach.createCampaign({ name: 'Ada Street Day', services: ['registration'],
       startsAt: new Date(Date.now() - 60_000).toISOString() }, context());
-    await refuses(outreach.updateCampaignStatus(campaign.id, { status: 'active', reason: 'Starting the street day' },
-      campaign.rowVersion, context()), { status: 409, code: 'OUTREACH_ORGANISER_AWAITING_REVIEW' });
+    const active = await outreach.updateCampaignStatus(campaign.id, { status: 'active', reason: 'Starting the street day' },
+      campaign.rowVersion, context());
+    assert.equal(active.status, 'active');
   });
-  await step('governance: an unchecked group reads "unverified"', async () => {
+  await step('governance: a group Health ID has not verified reads "unverified" (scalar organiser_status)', async () => {
     assert.equal((await outreach.campaignGovernance(atOrganiserGroup())).organiserStatus, 'unverified');
   });
-  await step('review: one click with the version (owner decision 1)', async () => {
+  await step('suspend: a stale version answers 409', async () => {
     const row = queue.find((entry) => entry.organizationId === organiser.organizationId);
-    const reviewed = await support.review(supportContext(), organiser.organizationId, row.version, {});
-    assert.equal(reviewed.reviewState, 'reviewed');
-    assert.equal(reviewed.version, row.version + 1);
-  });
-  await step('review: again answers "already checked" (409), a stale version on suspend answers 409', async () => {
-    const row = queue.find((entry) => entry.organizationId === organiser.organizationId);
-    await refuses(support.review(supportContext(), organiser.organizationId, row.version + 1, {}),
-      { status: 409, code: 'OUTREACH_ORGANISER_NOT_PENDING' });
-    await refuses(support.suspend(supportContext(), organiser.organizationId, row.version, 'Stale version on purpose'),
+    await refuses(support.suspend(supportContext(), organiser.organizationId, row.version + 5, 'Stale version on purpose'),
       { status: 409, code: 'OUTREACH_ORGANISER_VERSION_CONFLICT' });
   });
-  await step('governance: a checked group reads "reviewed" (scalar organiser_status)', async () => {
-    assert.equal((await outreach.campaignGovernance(atOrganiserGroup())).organiserStatus, 'reviewed');
-  });
   let registrationId;
-  await step('registration with consent at a checked group (0125\'s consent columns)', async () => {
+  await step('registration with consent at a new group (0114\'s consent columns)', async () => {
     const campaign = await outreach.createCampaign({ name: 'Verifier Health Day', services: ['registration'],
       startsAt: new Date(Date.now() - 60_000).toISOString() }, atOrganiserGroup());
     const active = await outreach.updateCampaignStatus(campaign.id, { status: 'active', reason: 'Starting the health day' },
@@ -327,9 +328,15 @@ try {
     assert.equal(await sweeper.runOnce(), 0);
   });
   await step('suspend: the doctor\'s group with its version; its outreach role ends, the hospital role stays', async () => {
-    const row = (await support.list(supportContext(), 'pending')).organisers.find((entry) => entry.organizationId === doctorGroup.organizationId);
+    const row = (await support.list(supportContext(), 'active')).organisers
+      .find((entry) => entry.organizationId === doctorGroup.organizationId);
     const suspended = await support.suspend(supportContext(), doctorGroup.organizationId, row.version, 'Reported for a fictional reason');
-    assert.equal(suspended.reviewState, 'suspended');
+    assert.equal(suspended.status, 'suspended');
+    assert.equal(suspended.label, 'Paused');
+    const paused = (await support.list(supportContext(), 'suspended')).organisers.map((entry) => entry.organizationId);
+    assert.deepEqual(paused, [doctorGroup.organizationId]);
+    assert.equal((await support.list(supportContext(), 'active')).organisers
+      .some((entry) => entry.organizationId === doctorGroup.organizationId), false);
     const roles = await db.query(`select role_code from auth.account_roles where account_id = $1 and revoked_at is null
       order by role_code`, [ids.doctor]);
     assert.deepEqual(roles.rows.map((entry) => entry.role_code), ['doctor', 'outreach_volunteer']);
@@ -338,6 +345,13 @@ try {
   await outreachDatabase.onApplicationShutdown?.();
 } finally {
   await db.end();
+  // The services' pools close their sockets after end() resolves; wait for them (up to 5 s) so the forced drop does
+  // not terminate a closing connection, which pg reports as an unhandled error.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const open = await adminPool.query('select count(*)::int as count from pg_stat_activity where datname = $1', [isolated]);
+    if (open.rows[0].count === 0) break;
+    await new Promise((settle) => { setTimeout(settle, 100); });
+  }
   await adminPool.query(`drop database if exists ${isolated} with (force)`).catch(() => undefined);
   await adminPool.end();
 }

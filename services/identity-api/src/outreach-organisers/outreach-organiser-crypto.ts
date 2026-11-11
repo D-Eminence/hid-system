@@ -21,7 +21,7 @@ export function normalizeOutreachPhone(raw: string): string | undefined {
 
 /**
  * Group names that suggest a hospital or a government body (plan PR-1), the
- * same rule as identity.outreach_group_name_allowed (0125): the words in any
+ * same rule as identity.outreach_group_name_allowed (0114): the words in any
  * case, the acronyms only in capitals (so "Those who care" is not refused).
  * The database refuses them too; Identity answers first so the person is told
  * before they choose a password.

@@ -23,7 +23,8 @@ import { decryptOutreachPhone, domainHmac, encryptOutreachPhone, normalizeOutrea
 import { assertOutreachSignupOpen } from './outreach-organiser-gate';
 import { OUTREACH_SIGNUP_COOKIE, OutreachOrganiserController } from './outreach-organiser.controller';
 import { OUTREACH_SIGNUP_REFUSALS, OutreachOrganiserService } from './outreach-organiser.service';
-import { OUTREACH_ADMIN_REFUSALS, OutreachOrganisersAdminService, outreachAdminVersion } from './outreach-organisers-admin';
+import { ListOutreachOrganisersDto, OUTREACH_ADMIN_REFUSALS, OutreachOrganisersAdminController, OutreachOrganisersAdminService,
+  outreachAdminVersion } from './outreach-organisers-admin';
 import { OUTREACH_RETENTION_SWEEP_BATCH, OutreachRetentionSweeper } from './outreach-retention.sweeper';
 
 // Fictional test data only.
@@ -162,7 +163,7 @@ describe('OutreachOrganiserService', () => {
     db as unknown as DatabaseService, otp as unknown as NotificationOtpClient,
     completion as unknown as OrganizationProfileCompletionService);
 
-  it('starts a sign-up: the network window first, then 0125\'s 12-argument command with HMACs only, then the email', async () => {
+  it('starts a sign-up: the network window first, then 0114\'s 12-argument command with HMACs only, then the email', async () => {
     const system = jest.fn(async (sql: string) => sql.includes('start_outreach_organiser_signup')
       ? { rows: [{ outcome: 'started' }] } : { rows: [] });
     const db = database({ system });
@@ -171,7 +172,7 @@ describe('OutreachOrganiserService', () => {
     expect(started.cookie).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
     expect(started.body).toMatchObject({ accepted: true, expiresInSeconds: 900, resendAfterSeconds: 60 });
     const sqls = system.mock.calls.map((call) => String(call[0]));
-    // The command charges the public application quota itself (0125); Identity does not charge it twice.
+    // The command charges the public application quota itself (0114); Identity does not charge it twice.
     expect(sqls.some((sql) => sql.includes('platform.consume_public_application_quota'))).toBe(false);
     const command = system.mock.calls.find((call) => String(call[0]).includes('start_outreach_organiser_signup')) as unknown[];
     expect(String(command[0])).toBe('select identity.start_outreach_organiser_signup($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) as outcome');
@@ -241,7 +242,7 @@ describe('OutreachOrganiserService', () => {
       '203.0.113.10', correlationId)).rejects.toMatchObject({ status: 429, code: 'OUTREACH_ORGANISER_SIGNUP_RATE_LIMITED' });
   });
 
-  it('verifies the code with 0125\'s 3 arguments and answers each result plainly', async () => {
+  it('verifies the code with 0114\'s 3 arguments and answers each result plainly', async () => {
     const cookie = `${signupId}.${token}`;
     for (const [result, expected] of [['verified', { verified: true }], ['wrong_code', 'OTP_INVALID'], ['code_expired', 'OTP_EXPIRED'],
       ['locked', 'OTP_ATTEMPTS_EXHAUSTED'], ['expired', 'OUTREACH_ORGANISER_SIGNUP_EXPIRED'],
@@ -258,7 +259,7 @@ describe('OutreachOrganiserService', () => {
     await expect(make(database()).verify('not-a-cookie', '123456', correlationId)).rejects.toMatchObject({ status: 401 });
   });
 
-  it('sends a new code through 0125\'s resend command, to the sign-up\'s own email', async () => {
+  it('sends a new code through 0114\'s resend command, to the sign-up\'s own email', async () => {
     const cookie = `${signupId}.${token}`;
     const system = jest.fn(async (sql: string) => sql.includes('resend_outreach_organiser_signup_code')
       ? { rows: [{ outcome: 'sent' }] } : { rows: [{ email: 'ada.organiser@example.test' }] });
@@ -323,7 +324,8 @@ describe('OutreachOrganiserService', () => {
     const body = { groupName: 'Synthetic Street Health', kind: 'individual' as const, phone: '08012345678',
       termsVersion: '2026-11-01', acceptTerms: true };
     await expect(make(db).startForAccount(context, body))
-      .resolves.toEqual({ started: true, organizationId: 'org-2', facilityId: 'fac-2', membershipId: 'mem-2', reviewState: 'pending' });
+      .resolves.toEqual({ started: true, organizationId: 'org-2', facilityId: 'fac-2', membershipId: 'mem-2',
+        organiserStatus: 'active', label: 'Unverified organiser' });
     expect(db.withTransaction).toHaveBeenCalledWith(context, expect.any(Function));
     const [sql, values] = actor.mock.calls[0] as unknown as [string, unknown[]];
     expect(sql).toContain('identity.activate_outreach_organiser_for_account($1,$2,$3,$4,$5,$6,$7)');
@@ -347,19 +349,19 @@ describe('OutreachOrganiserService', () => {
   });
 });
 
-describe('The refusal codes match migration 0125', () => {
-  // 0125's raise messages that reach the sign-up, invitation and support
+describe('The refusal codes match migration 0114', () => {
+  // 0114's raise messages that reach the sign-up, invitation and support
   // commands (the db branch, services/ehr-api/database/migrations/
-  // 0125_outreach_organisers.sql). When the migration is in this tree it is
+  // 0114_outreach_organisers.sql). When the migration is in this tree it is
   // read too.
-  const RAISED_BY_0125 = new Set(['ADMIN_PERMISSION_DENIED', 'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE',
+  const RAISED_BY_0114 = new Set(['ADMIN_PERMISSION_DENIED', 'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE',
     'OUTREACH_CAMPAIGN_NOT_FOUND', 'OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_CAMPAIGN_RESCUE_INVALID',
     'OUTREACH_CAMPAIGN_VERSION_CONFLICT', 'OUTREACH_CONSENT_CASE_INVALID', 'OUTREACH_CONSENT_GUARDIAN_REQUIRED',
     'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_GROUP_ROLE_INVALID', 'OUTREACH_INVITATION_INVALID',
     'OUTREACH_INVITATION_PASSWORD_INVALID', 'OUTREACH_NOTES_TOO_LONG', 'OUTREACH_ORGANISER_ACCOUNT_REQUIRED',
-    'OUTREACH_ORGANISER_ALREADY_SUSPENDED', 'OUTREACH_ORGANISER_AWAITING_REVIEW', 'OUTREACH_ORGANISER_EMAIL_REGISTERED',
-    'OUTREACH_ORGANISER_NAME_NOT_ALLOWED', 'OUTREACH_ORGANISER_NOT_FOUND', 'OUTREACH_ORGANISER_NOT_PENDING',
-    'OUTREACH_ORGANISER_PASSWORD_INVALID', 'OUTREACH_ORGANISER_PERMISSION_DENIED', 'OUTREACH_ORGANISER_REVIEW_INVALID',
+    'OUTREACH_ORGANISER_ALREADY_SUSPENDED', 'OUTREACH_ORGANISER_EMAIL_REGISTERED',
+    'OUTREACH_ORGANISER_NAME_NOT_ALLOWED', 'OUTREACH_ORGANISER_NOT_FOUND',
+    'OUTREACH_ORGANISER_PASSWORD_INVALID', 'OUTREACH_ORGANISER_PERMISSION_DENIED',
     'OUTREACH_ORGANISER_SIGNUP_DENIED', 'OUTREACH_ORGANISER_SIGNUP_INVALID', 'OUTREACH_ORGANISER_SIGNUP_NOT_READY',
     'OUTREACH_ORGANISER_STATE_INVALID', 'OUTREACH_ORGANISER_SUSPENDED', 'OUTREACH_ORGANISER_SUSPEND_INVALID',
     'OUTREACH_ORGANISER_TERMS_REQUIRED', 'OUTREACH_ORGANISER_VERSION_CONFLICT', 'OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP',
@@ -367,29 +369,35 @@ describe('The refusal codes match migration 0125', () => {
   const matched = [...OUTREACH_SIGNUP_REFUSALS.map(([code]) => code), ...OUTREACH_INVITATION_REFUSALS.map(([code]) => code),
     ...Object.keys(OUTREACH_ADMIN_REFUSALS)];
 
-  it('matches only codes 0125 raises', () => {
-    expect(matched.filter((code) => !RAISED_BY_0125.has(code))).toEqual([]);
+  it('matches only codes 0114 raises', () => {
+    expect(matched.filter((code) => !RAISED_BY_0114.has(code))).toEqual([]);
   });
 
-  it('answers every sign-up, invitation and support refusal of 0125', () => {
+  it('answers every sign-up, invitation and support refusal of 0114', () => {
     const answered = new Set(matched);
     for (const code of ['OUTREACH_ORGANISER_EMAIL_REGISTERED', 'OUTREACH_ORGANISER_NAME_NOT_ALLOWED', 'OUTREACH_ORGANISER_SIGNUP_NOT_READY',
       'OUTREACH_ORGANISER_TERMS_REQUIRED', 'OUTREACH_ORGANISER_PASSWORD_INVALID', 'OUTREACH_ORGANISER_SIGNUP_INVALID',
       'OUTREACH_ORGANISER_SIGNUP_DENIED', 'OUTREACH_ORGANISER_ACCOUNT_REQUIRED', 'OUTREACH_ROLE_ONLY_AT_OUTREACH_GROUP',
       'OUTREACH_GROUP_ROLE_INVALID', 'OUTREACH_ORGANISER_SUSPENDED', 'OUTREACH_ORGANISER_PERMISSION_DENIED',
       'OUTREACH_INVITATION_INVALID', 'OUTREACH_INVITATION_PASSWORD_INVALID', 'OUTREACH_ORGANISER_NOT_FOUND',
-      'OUTREACH_ORGANISER_VERSION_CONFLICT', 'OUTREACH_ORGANISER_NOT_PENDING', 'OUTREACH_ORGANISER_ALREADY_SUSPENDED',
-      'OUTREACH_ORGANISER_REVIEW_INVALID', 'OUTREACH_ORGANISER_SUSPEND_INVALID', 'OUTREACH_ORGANISER_STATE_INVALID',
+      'OUTREACH_ORGANISER_VERSION_CONFLICT', 'OUTREACH_ORGANISER_ALREADY_SUSPENDED',
+      'OUTREACH_ORGANISER_SUSPEND_INVALID', 'OUTREACH_ORGANISER_STATE_INVALID',
       'OUTREACH_CAMPAIGN_NOT_FOUND', 'OUTREACH_CAMPAIGN_VERSION_CONFLICT', 'OUTREACH_CAMPAIGN_RESCUE_INVALID',
       'OUTREACH_CAMPAIGN_ADMIN_NOT_ELIGIBLE', 'ADMIN_PERMISSION_DENIED']) {
       expect(answered.has(code)).toBe(true);
     }
   });
 
-  const migration = join(__dirname, '../../../ehr-api/database/migrations/0125_outreach_organisers.sql');
+  const migration = join(__dirname, '../../../ehr-api/database/migrations/0114_outreach_organisers.sql');
   (existsSync(migration) ? it : it.skip)('every code matched is raised by the migration in this tree', () => {
     const raised = new Set([...readFileSync(migration, 'utf8').matchAll(/message\s*=\s*'([A-Z_]+)'/g)].map((m) => m[1]));
     expect(matched.filter((code) => !raised.has(code))).toEqual([]);
+  });
+
+  it('answers no check before a campaign goes live (owner decision Q38)', () => {
+    for (const code of ['OUTREACH_ORGANISER_AWAITING_REVIEW', 'OUTREACH_ORGANISER_NOT_PENDING', 'OUTREACH_ORGANISER_REVIEW_INVALID']) {
+      expect(matched).not.toContain(code);
+    }
   });
 });
 
@@ -431,7 +439,8 @@ describe('OutreachOrganiserController', () => {
     const res = response();
     await expect(controller.activate({ termsVersion: '2026-11-01', acceptTerms: true, password: 'a-long-fictional-password' } as never,
       request({ cookie: `${OUTREACH_SIGNUP_COOKIE}=${signupId}.${token}` }), res as unknown as Response))
-      .resolves.toMatchObject({ activated: true, facilityId: 'fac-1', reviewState: 'pending' });
+      .resolves.toMatchObject({ activated: true, facilityId: 'fac-1', organiserStatus: 'active',
+        label: 'Unverified organiser' });
     expect(auth.login).toHaveBeenCalledWith({ email: 'ada.organiser@example.test', password: 'a-long-fictional-password' },
       expect.objectContaining({ origin }), 'staff');
     expect(res.setHeader).toHaveBeenCalledWith('x-csrf-token', 'csrf');
@@ -444,7 +453,7 @@ describe('OutreachInvitationsService', () => {
   const invitationId = '6d2d0a0a-5e78-4a3c-9f8d-3b4c5d6e7f80';
   const linkHmac = () => domainHmac(outreachKey() as Buffer, 'outreach-invitation', 'link', invitationId, token);
 
-  it('lets only the organiser invite, with 0125\'s 4 arguments, and emails the link', async () => {
+  it('lets only the organiser invite, with 0114\'s 4 arguments, and emails the link', async () => {
     const actor = jest.fn(async (sql: string) => sql.includes('create_outreach_invitation')
       ? { rows: [{ result: 'created', invitation_id: 'inv-1', expires_at: '2026-11-18T10:00:00.000Z' }] } : { rows: [] });
     const db = database({ actor });
@@ -555,40 +564,57 @@ describe('OutreachOrganisersAdminService', () => {
     subject: 'staff:support', accountId: 'support-1', roles: [], permissions: [], platformPermissions: ['platform.admin.access'],
     facilityIds: [], facilities: [], authenticationMethod: 'local' } };
 
-  it('lists the queue with its version, the phone readable only here and the plain label (not read-only: 0125 audits it)', async () => {
+  it('lists the groups with their version, the phone readable only here and the plain label (not read-only: 0114 audits it)', async () => {
     const key = outreachKey() as Buffer;
     const platform = jest.fn(async () => ({ rows: [{ organization_id: 'org-1', facility_id: 'fac-1', row_version: '3',
-      display_name: 'Synthetic Community Volunteers', kind: 'group', registration_number: null, review_state: 'pending',
+      display_name: 'Synthetic Community Volunteers', kind: 'group', registration_number: null, status: 'active',
       origin: 'signup', organiser_account_id: 'acc-1', organiser_name: 'Ada Fictional', organiser_email: 'ada.organiser@example.test',
       contact_phone_ciphertext: encryptOutreachPhone(key, '+2348012345678'), contact_key_version: 'local-v1',
-      terms_version: '2026-11-01', created_at: '2026-11-11T08:00:00.000Z', reviewed_at: null, review_note: null,
+      terms_version: '2026-11-01', created_at: '2026-11-11T08:00:00.000Z',
       suspended_at: null, suspension_reason: null, member_count: 3, pending_invitation_count: 1, campaign_count: 1,
-      active_campaign_count: 0 }] }));
+      active_campaign_count: 1 }, { organization_id: 'org-2', facility_id: 'fac-2', row_version: '6',
+      display_name: 'Synthetic Paused Group', kind: 'group', registration_number: null, status: 'suspended', origin: 'signup',
+      organiser_account_id: 'acc-2', organiser_name: 'Bayo Fictional', organiser_email: 'bayo.organiser@example.test',
+      contact_phone_ciphertext: null, contact_key_version: null, terms_version: '2026-11-01',
+      created_at: '2026-11-10T08:00:00.000Z', suspended_at: '2026-11-11T09:00:00.000Z', suspension_reason: 'Reported for misuse',
+      member_count: 1, pending_invitation_count: 0, campaign_count: 0, active_campaign_count: 0 }] }));
     const db = database({ platform });
     const service = new OutreachOrganisersAdminService(db as unknown as DatabaseService);
-    await expect(service.list(admin, 'pending')).resolves.toEqual({ organisers: [expect.objectContaining({ version: 3,
-      phone: '+2348012345678', label: 'Unverified organiser', campaigns: 1, activeCampaigns: 0, members: 3, pendingInvitations: 1 })] });
-    expect(platform).toHaveBeenCalledWith('select * from identity.admin_list_outreach_organisers($1)', ['pending']);
+    await expect(service.list(admin, 'active')).resolves.toMatchObject({ organisers: [expect.objectContaining({ version: 3,
+      phone: '+2348012345678', status: 'active', label: 'Unverified organiser', campaigns: 1, activeCampaigns: 1, members: 3,
+      pendingInvitations: 1 }), expect.anything()] });
+    expect(platform).toHaveBeenCalledWith('select * from identity.admin_list_outreach_organisers($1)', ['active']);
     expect(db.withPlatformTransaction.mock.calls[0]).toHaveLength(2);
-    await service.list(admin, undefined);
+    const all = await service.list(admin, undefined);
+    expect(all.organisers.map((row) => [row.organizationId, row.status, row.label]))
+      .toEqual([['org-1', 'active', 'Unverified organiser'], ['org-2', 'suspended', 'Paused']]);
+    expect(Object.keys(all.organisers[0] ?? {}).filter((key) => /review/i.test(key))).toEqual([]);
     expect(platform).toHaveBeenLastCalledWith('select * from identity.admin_list_outreach_organisers($1)', ['all']);
+    await service.list(admin, 'suspended');
+    expect(platform).toHaveBeenLastCalledWith('select * from identity.admin_list_outreach_organisers($1)', ['suspended']);
   });
 
-  it('reviews in one click with the version, and suspends, closes and appoints with 0125\'s arguments', async () => {
+  it('has no review command and no review route (owner decision Q38)', () => {
+    expect('review' in OutreachOrganisersAdminService.prototype).toBe(false);
+    expect('review' in OutreachOrganisersAdminController.prototype).toBe(false);
+  });
+
+  it('accepts only active, suspended or all as the list filter', async () => {
+    for (const [status, ok] of [['active', true], ['suspended', true], ['all', true], ['pending', false], ['reviewed', false]] as const) {
+      expect((await validate(plainToInstance(ListOutreachOrganisersDto, { status }))).length === 0).toBe(ok);
+    }
+  });
+
+  it('suspends, closes and appoints with 0114\'s arguments', async () => {
     const platform = jest.fn(async (sql: string) => {
-      if (sql.includes('admin_review')) return { rows: [{ row_version: '4', review_state: 'reviewed' }] };
-      if (sql.includes('admin_suspend')) return { rows: [{ row_version: '5', review_state: 'suspended', revoked_roles: 2 }] };
+      if (sql.includes('admin_suspend')) return { rows: [{ row_version: '5', revoked_roles: 2 }] };
       if (sql.includes('admin_close_outreach_campaign')) return { rows: [{ result: 'closed' }] };
       if (sql.includes('admin_appoint_outreach_campaign_admin')) return { rows: [{ result: 'appointed' }] };
       return { rows: [] };
     });
     const service = new OutreachOrganisersAdminService(database({ platform }) as unknown as DatabaseService);
-    await expect(service.review(admin, 'org-1', 3, {})).resolves.toEqual({ organizationId: 'org-1', version: 4,
-      reviewState: 'reviewed', label: 'Checked by Health ID' });
-    expect(platform).toHaveBeenCalledWith('select * from identity.admin_review_outreach_organiser($1,$2,$3,$4)',
-      ['org-1', 3, null, null]);
-    await expect(service.suspend(admin, 'org-1', 4, 'Reported for misuse')).resolves.toMatchObject({ reviewState: 'suspended',
-      version: 5, revokedRoles: 2 });
+    await expect(service.suspend(admin, 'org-1', 4, 'Reported for misuse')).resolves.toEqual({ organizationId: 'org-1',
+      status: 'suspended', label: 'Paused', version: 5, revokedRoles: 2 });
     expect(platform).toHaveBeenCalledWith('select * from identity.admin_suspend_outreach_organiser($1,$2,$3)',
       ['org-1', 4, 'Reported for misuse']);
     await expect(service.closeCampaign(admin, 'c-1', 7, 'Only admin has left')).resolves.toEqual({ campaignId: 'c-1',
@@ -608,11 +634,12 @@ describe('OutreachOrganisersAdminService', () => {
     expect(() => outreachAdminVersion(undefined, undefined)).toThrow(expect.objectContaining({ status: 428 }));
   });
 
-  it('answers 0125\'s refusals plainly: missing 404, version conflict 409, unknown 503', async () => {
+  it('answers 0114\'s refusals plainly: missing 404, version conflict 409, unknown 503', async () => {
     for (const [message, errcode, status] of [['OUTREACH_ORGANISER_NOT_FOUND', 'P0002', 404],
-      ['OUTREACH_ORGANISER_VERSION_CONFLICT', '40001', 409], ['OUTREACH_ORGANISER_NOT_PENDING', '23514', 409]] as const) {
+      ['OUTREACH_ORGANISER_VERSION_CONFLICT', '40001', 409], ['OUTREACH_ORGANISER_ALREADY_SUSPENDED', '23514', 409]] as const) {
       const failing = jest.fn(async () => { throw Object.assign(new Error(message), { code: errcode }); });
-      await expect(new OutreachOrganisersAdminService(database({ platform: failing }) as unknown as DatabaseService).review(admin, 'org-x', 1, {}))
+      await expect(new OutreachOrganisersAdminService(database({ platform: failing }) as unknown as DatabaseService)
+        .suspend(admin, 'org-x', 1, 'Reported for misuse'))
         .rejects.toMatchObject({ status, code: message });
     }
     const broken = jest.fn(async () => { throw new Error('down'); });
@@ -624,7 +651,7 @@ describe('OutreachOrganisersAdminService', () => {
 describe('OutreachRetentionSweeper (owner decision 3: 1 year, then redacted)', () => {
   beforeEach(() => setEnvironment());
 
-  it('calls 0126\'s identity.sweep_expired_outreach_registrations with a bounded batch as system:auth', async () => {
+  it('calls 0115\'s identity.sweep_expired_outreach_registrations with a bounded batch as system:auth', async () => {
     const system = jest.fn(async () => ({ rows: [{ redacted: '3' }] }));
     const db = database({ system });
     await expect(new OutreachRetentionSweeper(db as unknown as DatabaseService).runOnce()).resolves.toBe(3);

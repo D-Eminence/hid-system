@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Headers, HttpCode, Injectable, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { Transform } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Min, MinLength } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength } from 'class-validator';
 import type { QueryResultRow } from 'pg';
 import { requireAdminContext } from '../admin/admin-context';
 import { AuditAction, FacilityOptional, RequirePermissions } from '../common/decorators';
@@ -12,29 +12,15 @@ import { databaseCode, decryptOutreachPhone, hasRefusal, outreachKey } from './o
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value;
 
 export class ListOutreachOrganisersDto {
-  /** pending (the check queue, oldest first), reviewed, suspended, or all (the default). */
-  @IsOptional() @IsIn(['pending', 'reviewed', 'suspended', 'all'])
-  reviewState?: 'pending' | 'reviewed' | 'suspended' | 'all';
+  /** active (not paused), suspended (paused), or all (the default). */
+  @IsOptional() @IsIn(['active', 'suspended', 'all'])
+  status?: 'active' | 'suspended' | 'all';
 }
 
 /** The row version the page read, from If-Match (the admin console's convention) or the body. */
 export class OutreachAdminVersionDto {
   @IsOptional() @IsInt() @Min(1)
   version?: number;
-}
-
-export class ReviewOutreachOrganiserDto extends OutreachAdminVersionDto {
-  /** Support may correct the group's shown name at review. */
-  @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(120)
-  @Matches(/^[\p{L}\p{M}0-9][\p{L}\p{M}0-9 .,'&()/-]*$/u, { message: 'Use letters, numbers and simple punctuation in the name' })
-  displayName?: string;
-
-  @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(500)
-  note?: string;
-
-  /** The earlier name of `note`, still accepted. */
-  @IsOptional() @Transform(trim) @IsString() @MinLength(2) @MaxLength(500)
-  reason?: string;
 }
 
 export class OutreachAdminReasonDto extends OutreachAdminVersionDto {
@@ -50,7 +36,11 @@ export class AppointCampaignAdminDto {
   membershipId!: string;
 }
 
-/** identity.admin_list_outreach_organisers (0125). */
+/**
+ * identity.admin_list_outreach_organisers (0114). Owner decision Q38 (11 Nov
+ * 2026) removed Health ID's one-time check: a group is 'active' or
+ * 'suspended' (paused), and nothing else is read about its state.
+ */
 interface OrganiserRow extends QueryResultRow {
   organization_id: string;
   facility_id: string;
@@ -58,7 +48,7 @@ interface OrganiserRow extends QueryResultRow {
   display_name: string;
   kind: string;
   registration_number: string | null;
-  review_state: string;
+  status: string;
   origin: string;
   organiser_account_id: string;
   organiser_name: string | null;
@@ -67,8 +57,6 @@ interface OrganiserRow extends QueryResultRow {
   contact_key_version: string | null;
   terms_version: string;
   created_at: Date | string;
-  reviewed_at: Date | string | null;
-  review_note: string | null;
   suspended_at: Date | string | null;
   suspension_reason: string | null;
   member_count: string | number;
@@ -92,13 +80,11 @@ export function outreachAdminVersion(ifMatch: string | undefined, bodyVersion: n
   return version;
 }
 
-/** The refusals of 0125's support commands, in plain English. */
+/** The refusals of 0114's support commands, in plain English. */
 export const OUTREACH_ADMIN_REFUSALS: Readonly<Record<string, readonly [number, string]>> = {
   OUTREACH_ORGANISER_NOT_FOUND: [404, 'That outreach group was not found.'],
   OUTREACH_ORGANISER_VERSION_CONFLICT: [409, 'Someone else changed this outreach group just now. Reload the list and try again.'],
-  OUTREACH_ORGANISER_NOT_PENDING: [409, 'This outreach group has already been checked or is paused. Reload the list.'],
   OUTREACH_ORGANISER_ALREADY_SUSPENDED: [409, 'This outreach group is already paused.'],
-  OUTREACH_ORGANISER_REVIEW_INVALID: [422, 'Check the name and the note, then try again.'],
   OUTREACH_ORGANISER_SUSPEND_INVALID: [422, 'Write a short reason (at least 8 characters) for pausing this group.'],
   OUTREACH_ORGANISER_STATE_INVALID: [400, 'Choose which outreach groups to show.'],
   OUTREACH_CAMPAIGN_NOT_FOUND: [404, 'That campaign was not found at an outreach group.'],
@@ -119,57 +105,47 @@ export function adminProblem(error: unknown): DomainProblem {
   return new DomainProblem(503, 'ADMIN_OUTREACH_UNAVAILABLE', 'Outreach groups could not be loaded or changed right now. Please try again.');
 }
 
-function label(state: string): string {
-  return state === 'reviewed' ? 'Checked by Health ID' : state === 'suspended' ? 'Paused' : 'Unverified organiser';
+export type OutreachOrganiserStatus = 'active' | 'suspended';
+
+/** What people see: Health ID never verifies an outreach group, so an active one is always "Unverified organiser". */
+export function outreachOrganiserLabel(status: OutreachOrganiserStatus): string {
+  return status === 'suspended' ? 'Paused' : 'Unverified organiser';
 }
 
 /**
- * Support's tools for outreach groups (plan PR-3): the "Outreach organisers to
- * check" queue, the one-time check that lets a group's first campaign go live
- * (owner decision 1: one click, with the version the list gave), pausing a
- * group, and the rescue of a campaign whose only admin has gone. The commands
- * are 0125's identity.admin_*; each writes its own audit row, and the list
- * writes one too, so no transaction here is read-only.
+ * Support's tools for outreach groups (plan PR-3): the list of groups,
+ * pausing a group (which stops everything it does), and the rescue of a
+ * campaign whose only admin has gone. There is no check before a group's
+ * campaigns go live (owner decision Q38, 11 Nov 2026). The commands are
+ * 0114's identity.admin_*; each writes its own audit row, and the list writes
+ * one too, so no transaction here is read-only.
  */
 @Injectable()
 export class OutreachOrganisersAdminService {
   constructor(private readonly database: DatabaseService) {}
 
-  async list(context: PlatformAdminContext, reviewState: string | undefined) {
+  /** The outreach groups: 'active', 'suspended' (paused) or 'all' (the default). */
+  async list(context: PlatformAdminContext, status: 'active' | 'suspended' | 'all' | undefined) {
     const key = outreachKey();
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<OrganiserRow>('select * from identity.admin_list_outreach_organisers($1)',
-          [reviewState ?? 'all']);
-        return { organisers: result.rows.map((row) => ({
-          organizationId: row.organization_id, facilityId: row.facility_id, version: Number(row.row_version),
-          displayName: row.display_name, groupName: row.display_name, kind: row.kind,
-          registrationNumber: row.registration_number, origin: row.origin,
-          organiserAccountId: row.organiser_account_id, organiserName: row.organiser_name,
-          organiserEmail: row.organiser_email,
-          phone: key ? decryptOutreachPhone(key, row.contact_phone_ciphertext) : null,
-          reviewState: row.review_state, label: label(row.review_state),
-          reviewedAt: iso(row.reviewed_at), reviewNote: row.review_note, suspendedAt: iso(row.suspended_at),
-          suspensionReason: row.suspension_reason, createdAt: iso(row.created_at), termsVersion: row.terms_version,
-          members: Number(row.member_count), pendingInvitations: Number(row.pending_invitation_count),
-          campaigns: Number(row.campaign_count), activeCampaigns: Number(row.active_campaign_count),
-        })) };
-      });
-    } catch (error) {
-      throw adminProblem(error);
-    }
-  }
-
-  /** One click: the version from the list, nothing else required. */
-  async review(context: PlatformAdminContext, organizationId: string, version: number, input: ReviewOutreachOrganiserDto) {
-    try {
-      return await this.database.withPlatformTransaction(context, async (client) => {
-        const row = (await client.query<{ row_version: string | number; review_state: string }>(
-          'select * from identity.admin_review_outreach_organiser($1,$2,$3,$4)',
-          [organizationId, version, input.displayName ?? null, input.note ?? input.reason ?? null])).rows[0];
-        if (!row) throw adminProblem(undefined);
-        return { organizationId, version: Number(row.row_version), reviewState: row.review_state,
-          label: label(row.review_state) };
+          [status ?? 'all']);
+        return { organisers: result.rows.map((row) => {
+          const rowStatus: OutreachOrganiserStatus = row.status === 'suspended' || row.suspended_at ? 'suspended' : 'active';
+          return {
+            organizationId: row.organization_id, facilityId: row.facility_id, version: Number(row.row_version),
+            displayName: row.display_name, groupName: row.display_name, kind: row.kind,
+            registrationNumber: row.registration_number, origin: row.origin,
+            organiserAccountId: row.organiser_account_id, organiserName: row.organiser_name,
+            organiserEmail: row.organiser_email,
+            phone: key ? decryptOutreachPhone(key, row.contact_phone_ciphertext) : null,
+            status: rowStatus, label: outreachOrganiserLabel(rowStatus), suspendedAt: iso(row.suspended_at),
+            suspensionReason: row.suspension_reason, createdAt: iso(row.created_at), termsVersion: row.terms_version,
+            members: Number(row.member_count), pendingInvitations: Number(row.pending_invitation_count),
+            campaigns: Number(row.campaign_count), activeCampaigns: Number(row.active_campaign_count),
+          };
+        }) };
       });
     } catch (error) {
       throw adminProblem(error);
@@ -179,11 +155,11 @@ export class OutreachOrganisersAdminService {
   async suspend(context: PlatformAdminContext, organizationId: string, version: number, reason: string) {
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
-        const row = (await client.query<{ row_version: string | number; review_state: string; revoked_roles: number }>(
+        const row = (await client.query<{ row_version: string | number; revoked_roles: number }>(
           'select * from identity.admin_suspend_outreach_organiser($1,$2,$3)', [organizationId, version, reason])).rows[0];
         if (!row) throw adminProblem(undefined);
-        return { organizationId, version: Number(row.row_version), reviewState: row.review_state,
-          label: label(row.review_state), revokedRoles: Number(row.revoked_roles) };
+        return { organizationId, version: Number(row.row_version), status: 'suspended' as const,
+          label: outreachOrganiserLabel('suspended'), revokedRoles: Number(row.revoked_roles) };
       });
     } catch (error) {
       throw adminProblem(error);
@@ -226,24 +202,12 @@ export class OutreachOrganisersAdminService {
 export class OutreachOrganisersAdminController {
   constructor(private readonly admin: OutreachOrganisersAdminService) {}
 
-  /** The queue: ?reviewState=pending lists the groups waiting for their one-time check. */
+  /** The groups: ?status=active|suspended|all (all by default). */
   @Get()
   @RequirePermissions('platform.facility.read')
   @AuditAction('admin.outreach-organisers.list')
   list(@Query() query: ListOutreachOrganisersDto, @Req() request: HidRequest) {
-    return this.admin.list(requireAdminContext(request), query.reviewState);
-  }
-
-  /** One click: the version the list gave (If-Match or body) marks the group checked, so its campaigns can go live. */
-  @Post(':organizationId/review')
-  @HttpCode(200)
-  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
-  @AuditAction('admin.outreach-organiser.review')
-  review(@Param('organizationId', new ParseUUIDPipe({ version: '4' })) organizationId: string,
-    @Headers('if-match') ifMatch: string | undefined, @Body() input: ReviewOutreachOrganiserDto,
-    @Req() request: HidRequest) {
-    return this.admin.review(requireAdminContext(request), organizationId, outreachAdminVersion(ifMatch, input.version),
-      input);
+    return this.admin.list(requireAdminContext(request), query.status);
   }
 
   @Post(':organizationId/suspend')
