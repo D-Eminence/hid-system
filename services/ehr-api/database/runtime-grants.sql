@@ -1450,18 +1450,20 @@ revoke all on function ocr.facility_page_allowance_state(uuid),
 revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public;
 
 -- OCR source deletion after 24 hours (0110): the OCR worker lists the
--- documents due, counts them (due, and overdue by more than 2 hours) and,
--- after deleting every S3 version of a source, purges the document's OCR
--- content through its one command. The shared reckoning
+-- documents due, counts them (due, and overdue), claims each one
+-- (source_deleting) before deleting every S3 version of its source, then
+-- purges the document's OCR content. The shared reckoning
 -- ocr.source_deletion_due and the three replaced trigger functions are
 -- granted to no role. 0110 makes the same grants.
 grant usage on schema ocr to hid_ocr_worker;
 grant execute on function ocr.list_worker_source_deletions(integer),
   ocr.worker_source_deletion_backlog(),
+  ocr.claim_worker_source_deletion(uuid,text),
   ocr.purge_worker_source_document(uuid,integer,text) to hid_ocr_worker;
 revoke all on function ocr.source_deletion_due(uuid),
   ocr.list_worker_source_deletions(integer),
   ocr.worker_source_deletion_backlog(),
+  ocr.claim_worker_source_deletion(uuid,text),
   ocr.purge_worker_source_document(uuid,integer,text) from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API

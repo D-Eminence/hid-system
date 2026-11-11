@@ -457,13 +457,13 @@ describe('DocumentService: downstream uses the detected media type (owner decisi
 });
 
 describe('DocumentService: a source the OCR worker deleted after 24 hours (migration 0110)', () => {
-  function deletedHarness() {
+  function deletedHarness(status = 'source_deleted') {
     const row = {
       id: documentId, patient_id: patientId, facility_id: facilityId, created_by: uploaderAccountId,
       storage_bucket: 'synthetic-bucket', storage_key: 'clinical/objects/synthetic', object_version_id: objectVersionId,
       declared_media_type: 'application/pdf', detected_media_type: 'application/pdf',
       original_file_name: 'Source page deleted after 24 hours', size_bytes: '1024', sha256_hex: sha256Hex,
-      scan_status: 'clean', status: 'source_deleted', row_version: '4',
+      scan_status: 'clean', status, row_version: '4',
     };
     const client = { query: jest.fn(async (sql: string) =>
       /from ehr\.documents_effective/.test(sql) ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 }) };
@@ -485,6 +485,12 @@ describe('DocumentService: a source the OCR worker deleted after 24 hours (migra
     expect((refusal as DomainProblem).message).toBe('Source page deleted after 24 hours');
     expect(storage.createDownload).not.toHaveBeenCalled();
     expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('answers 410 too while the OCR worker is deleting it (source_deleting)', async () => {
+    const { service, storage } = deletedHarness('source_deleting');
+    await expect(service.createDownload(documentId, uploader)).rejects.toMatchObject({ code: 'DOCUMENT_SOURCE_DELETED' });
+    expect(storage.createDownload).not.toHaveBeenCalled();
   });
 
   it('checks read access first: a caller without it gets the 403, not the 410', async () => {

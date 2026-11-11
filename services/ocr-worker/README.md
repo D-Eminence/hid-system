@@ -1772,46 +1772,61 @@ version, and so do the Textract text and the AI reading. The source is not
 kept in the chart; what a person saved or published stays, with its
 provenance by job id.
 
-- **When a document is due.** It has at least one OCR job; every job is
-  finished (`awaiting_validation`, `validated`, `rejected`, `failed`,
-  `cancelled`) and the latest finish (`completed_at`, `failed_at`, or
-  `updated_at` for a cancelled job) is at least 24 hours ago; no publication of
-  its jobs is `pending` or `processing`, unless it was requested more than 24
-  hours ago (a stuck publication delays deletion by at most a further 24
-  hours); `legal_hold` is false; its status is `uploaded`.
+- **When a document is due.** Its status is `uploaded` and `legal_hold` is
+  false; it has at least one OCR job; every job is finished
+  (`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled`); and
+  the latest finish (`completed_at`, `failed_at`, or `updated_at` for a
+  cancelled job) is at least 24 hours ago, or at least 72 hours ago while a
+  publication of its jobs could still run (`pending`, `processing`, or
+  `failed` with a code ocr-api retries and attempts left). After 72 hours
+  nothing blocks any more. A blocked document is not due and not counted.
 - **A round.** One at start, then every `OCR_SOURCE_DELETION_INTERVAL_SECONDS`
   (default 900, 60-86,400). `OCR_SOURCE_DELETION_ENABLED` (default `true`;
   `false` stops it) is validated like the other settings. The worker counts
-  the documents due (`ocr.worker_source_deletion_backlog()`), lists up to 100,
-  oldest due first (`ocr.list_worker_source_deletions`), and for each:
-  1. lists the bucket's versions with `Prefix` = the document's stored
-     `storage_key` and keeps only versions and delete markers whose `Key` is
-     exactly that key (a key that only starts with it is never touched);
-  2. deletes each with `DeleteObject` and its `VersionId`;
-  3. lists again and fails the document (`SOURCE_VERSIONS_REMAIN`) if anything
+  the documents due (`ocr.worker_source_deletion_backlog()`), lists up to 100
+  (`ocr.list_worker_source_deletions`: documents already claimed first, then
+  oldest due first), and for each:
+  1. claims it (`ocr.claim_worker_source_deletion`): under a row lock the
+     database checks again that it is due, legal hold included, and sets
+     `source_deleting`. From then it refuses a new job on the document, a
+     failed -> queued retry of its jobs, a legal hold and any other change. A
+     refused claim (`not_due`) means no S3 call (`ocr.source_deletion.skipped`,
+     `SOURCE_NO_LONGER_DUE`);
+  2. lists the bucket's versions with `Prefix` = the claimed `storage_key` and
+     keeps only versions and delete markers whose `Key` is exactly that key (a
+     key that only starts with it is never touched);
+  3. deletes each with `DeleteObject` and its `VersionId`;
+  4. lists again and fails the document (`SOURCE_VERSIONS_REMAIN`) if anything
      is left;
-  4. only then calls `ocr.purge_worker_source_document(document, versions
-     deleted, correlation id)`, which checks again that the document is due,
-     marks it `source_deleted` with the neutral file name `Source page deleted
-     after 24 hours`, blanks the text, reading and review content of its OCR
-     rows and writes one audit row `ocr.source.deleted_after_24h` (ids and
-     counts only).
-  A storage failure skips the purge; the document stays due and the next round
-  retries it (a retry finds nothing left in S3 and purges with 0 versions).
-  Keys outside `clinical/objects/<id>` are refused (`SOURCE_KEY_OUTSIDE_LAYOUT`)
-  and never deleted. Upload keys and malware scanning are unchanged.
+  5. only then calls `ocr.purge_worker_source_document(document, versions
+     deleted, correlation id)`, which requires `source_deleting`, sets
+     `source_deleted` with the neutral file name `Source page deleted after 24
+     hours`, blanks the text, reading and review content of its OCR rows and
+     writes one audit row `ocr.source.deleted_after_24h` (ids and counts only;
+     `objectVersionsDeleted` adds up every round of this worker process for the
+     document, not only the last).
+  A storage failure leaves the document `source_deleting`; the next round lists
+  it first and finishes it. Any purge answer but `deleted` or `already_deleted`
+  is logged as `ocr.source_deletion.failed`. Keys outside
+  `clinical/objects/<id>` are refused (`SOURCE_KEY_OUTSIDE_LAYOUT`) and never
+  deleted. Upload keys and malware scanning are unchanged.
 - **Logs** (ids, codes and counts only; never a file name, key or text):
   - `ocr.source_deletion.done` per document: `documentId`, `outcome`
     (`deleted`, `already_deleted`, `not_due`), `objectVersionsDeleted`,
     `extractionsBlanked`, `validationsBlanked`, `confirmationsBlanked`,
     `dueSeconds`;
-  - `ocr.source_deletion.failed` with `stage` (`list`, `storage`, `purge`,
-    `round`) and `code` (an S3 stage code such as `SOURCE_LIST_FAILED`,
-    `SOURCE_DELETE_FAILED`, `SOURCE_VERSIONS_REMAIN`, or a PostgreSQL SQLSTATE);
+  - `ocr.source_deletion.failed` with `stage` (`list`, `claim`, `storage`,
+    `purge`, `round`) and `code` (an S3 stage code such as `SOURCE_LIST_FAILED`,
+    `SOURCE_DELETE_FAILED`, `SOURCE_VERSIONS_REMAIN`, `SOURCE_NOT_CLAIMED`, or a
+    PostgreSQL SQLSTATE);
+  - `ocr.source_deletion.skipped` (`SOURCE_NO_LONGER_DUE`) when a claim is
+    refused;
   - exactly one `{"event":"ocr.source_deletion.overdue","overdue":n,"due":m,"deleted":k}`
     per completed round, also when all are 0 (with `timestamp` and `level` like
-    every line): `overdue` = documents due for more than 2 hours (more than 26
-    hours after their job finished), `due` = due at the start of the round,
+    every line): `overdue` = documents due (or claimed) for more than 2 hours
+    (more than 26 hours after their job finished), plus documents with a job
+    stuck in `extracted` for more than 24 hours (counted, never deleted), `due`
+    = due or claimed at the start of the round,
     `deleted` = deleted this round. A round that cannot count or list logs
     `ocr.source_deletion.failed` (`stage: list`) instead and no overdue line,
     so the CloudWatch alarm (metric filter `{ $.event = "ocr.source_deletion.overdue" }`,

@@ -91,8 +91,9 @@ describe('OCR worker database privileges', () => {
       new RegExp(`\\b(${SCHEMAS})\\.([a-z_][a-z0-9_]*)\\s*\\(`, 'g'))]
       .map(([, schema, name]) => `${schema}.${name}`)));
     // Claims go only through the fair claim (0107); the unfair ocr.claim_worker_job stays granted but unused.
-    expect([...called].sort()).toEqual(['ocr.claim_worker_job_fair', 'ocr.complete_worker_job',
-      'ocr.fail_worker_job', 'ocr.list_worker_source_deletions', 'ocr.pause_worker_job_for_allowance',
+    expect([...called].sort()).toEqual(['ocr.claim_worker_job_fair', 'ocr.claim_worker_source_deletion',
+      'ocr.complete_worker_job', 'ocr.fail_worker_job', 'ocr.list_worker_source_deletions',
+      'ocr.pause_worker_job_for_allowance',
       'ocr.purge_worker_source_document', 'ocr.record_worker_ai_usage', 'ocr.record_worker_pages',
       'ocr.renew_worker_claim', 'ocr.worker_page_allowance', 'ocr.worker_queue_metrics',
       'ocr.worker_source_deletion_backlog']);
@@ -103,7 +104,7 @@ describe('OCR worker database privileges', () => {
 
   it('may execute the source-deletion commands (0110) but not their shared reckoning', () => {
     for (const name of ['ocr.list_worker_source_deletions', 'ocr.worker_source_deletion_backlog',
-      'ocr.purge_worker_source_document']) {
+      'ocr.claim_worker_source_deletion', 'ocr.purge_worker_source_document']) {
       expect(defined.has(name)).toBe(true);
       expect(executable.has(name)).toBe(true);
     }

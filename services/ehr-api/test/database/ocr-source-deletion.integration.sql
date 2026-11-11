@@ -13,14 +13,22 @@
 --   - which documents are due: every job finished (awaiting_validation,
 --     validated, rejected, failed, cancelled) and the latest finish at least
 --     24 hours ago; a document with a job still queued, finished less than
---     24 hours ago, with a publication pending for less than 24 hours, on
---     legal hold, with no job or not 'uploaded' is not due; a publication
---     active for more than 24 hours no longer blocks; due_seconds and the
---     backlog's due and overdue (more than 2 hours) counts;
---   - only an active ocr_worker subject may list, count or purge; bad input is
---     refused;
---   - the purge of a due document: status 'source_deleted', the neutral file
---     name and the next row_version (no ehr.record_versions row); extractions'
+--     24 hours ago, on legal hold, with no job or not 'uploaded' is not due; a
+--     publication pending, processing or failed with a retryable code and
+--     attempts left blocks until 72 hours after the finish (then it no longer
+--     blocks); a terminally failed one does not block; due_seconds and the
+--     backlog's due and overdue counts (due for more than 2 hours, plus a job
+--     stuck in 'extracted' for more than 24 hours, which is never listed);
+--   - only an active ocr_worker subject may list, count, claim or purge; bad
+--     input is refused;
+--   - the claim: a due document becomes 'source_deleting' (idempotent:
+--     'already_claimed'); a document not due is refused ('not_due'), also one
+--     put on legal hold before the claim; claimed documents are listed first;
+--     after the claim a new job, a failed -> queued retry and a legal hold
+--     are refused; the purge requires the claim ('not_claimed' otherwise);
+--   - the purge of a claimed document: status 'source_deleted', the neutral
+--     file name, row_version + 2 (claim and purge; no ehr.record_versions
+--     row); extractions'
 --     raw_text NULL and structured_payload {}; validations' payloads, fields
 --     and corrections emptied and the neutral reason; confirmations' neutral
 --     reason and no evidence reference; every other column unchanged; job
@@ -57,7 +65,9 @@ begin
       ('ocr.list_worker_source_deletions(integer)'::regprocedure,
        '{"search_path=pg_catalog, ocr, auth, platform, pg_temp"}'::text[]),
       ('ocr.worker_source_deletion_backlog()'::regprocedure,
-       '{"search_path=pg_catalog, ocr, auth, platform, pg_temp"}'::text[]),
+       '{"search_path=pg_catalog, ocr, ehr, auth, platform, pg_temp"}'::text[]),
+      ('ocr.claim_worker_source_deletion(uuid,text)'::regprocedure,
+       '{"search_path=pg_catalog, ocr, ehr, audit, auth, platform, pg_temp"}'::text[]),
       ('ocr.purge_worker_source_document(uuid,integer,text)'::regprocedure,
        '{"search_path=pg_catalog, ocr, ehr, audit, auth, platform, pg_temp"}'::text[]))
       expected(proc, config) on p.oid = expected.proc
@@ -75,11 +85,11 @@ begin
     left join pg_roles grantee on grantee.oid = privilege.grantee
    where p.pronamespace = 'ocr'::regnamespace
      and p.proname in ('source_deletion_due', 'list_worker_source_deletions', 'worker_source_deletion_backlog',
-       'purge_worker_source_document')
+       'claim_worker_source_deletion', 'purge_worker_source_document')
      and privilege.privilege_type = 'EXECUTE' and privilege.grantee <> p.proowner
      and (p.proname, coalesce(grantee.rolname, 'PUBLIC')) not in (
        ('list_worker_source_deletions', 'hid_ocr_worker'), ('worker_source_deletion_backlog', 'hid_ocr_worker'),
-       ('purge_worker_source_document', 'hid_ocr_worker'));
+       ('claim_worker_source_deletion', 'hid_ocr_worker'), ('purge_worker_source_document', 'hid_ocr_worker'));
   if mismatch is not null then
     raise exception 'unexpected EXECUTE grants on the 0110 commands: %', mismatch;
   end if;
@@ -87,7 +97,7 @@ begin
        where p.pronamespace = 'ocr'::regnamespace and privilege.privilege_type = 'EXECUTE'
          and privilege.grantee = 'hid_ocr_worker'::regrole
          and p.proname in ('list_worker_source_deletions', 'worker_source_deletion_backlog',
-           'purge_worker_source_document')) <> 3 then
+           'claim_worker_source_deletion', 'purge_worker_source_document')) <> 4 then
     raise exception 'the 0110 EXECUTE grants are incomplete';
   end if;
   -- The worker purges only through the command: no privilege on the rows.
@@ -134,11 +144,16 @@ insert into identity.patients (id, hid_code, first_name, last_name, full_name, s
 --   03 one job awaiting validation, finished 23 h ago                -> not due
 --   04 a job failed 30 h ago and a job still queued                  -> not due
 --   05 validated 30 h ago, a publication pending since 10 h ago      -> not due
---   06 validated 60 h ago, a publication processing since 30 h ago   -> due (the stuck publication no longer blocks)
+--   06 validated 80 h ago, a publication processing since 79 h ago   -> due (after 72 h nothing blocks)
 --   07 cancelled 30 h ago, on legal hold                              -> not due
 --   08 no OCR job                                                     -> not due
 --   09 rejected 30 h ago, status entered_in_error                     -> not due
 --   10 rejected 30 h ago                                              -> due
+--   11 validated 30 h ago, a publication failed retryably, 1 of 3     -> not due (blocked until 72 h)
+--   12 validated 30 h ago, a publication failed terminally            -> due
+--   13 a job stuck in 'extracted' since 30 h ago                      -> not due, but overdue
+--   14 failed 30 h ago (attempts left)                                -> due; claimed, then job, retry, hold refused
+--   15 rejected 30 h ago                                              -> due, then put on legal hold before its claim
 insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
   storage_bucket, storage_key, object_version_id, declared_media_type, size_bytes, sha256_hex, status,
   retention_class, legal_hold)
@@ -148,7 +163,7 @@ select ('c0116000-0000-4000-8000-0000000000' || n)::uuid, 'c0115000-0000-4000-80
        'clinical/objects/c0116000-0000-4000-8000-0000000000' || n, 'deletion-v' || n, 'application/pdf', 2048,
        repeat(right(n, 1), 64), case when n = '09' then 'entered_in_error' else 'uploaded' end, 'clinical_record',
        n = '07'
-  from unnest(array['01','02','03','04','05','06','07','08','09','10']) n;
+  from unnest(array['01','02','03','04','05','06','07','08','09','10','11','12','13','14','15']) n;
 insert into ehr.document_scan_events (document_id, patient_id, facility_id, created_by, event_type,
   detected_media_type, scanner_engine, scanner_version, idempotency_key, correlation_id, object_version_id,
   object_sha256_hex)
@@ -156,7 +171,7 @@ select ('c0116000-0000-4000-8000-0000000000' || n)::uuid, 'c0115000-0000-4000-80
        'c0110000-0000-4000-8000-00000000000a', 'c0111000-0000-4000-8000-000000000001', 'clean', 'application/pdf',
        'synthetic-scanner', '1.0', 'deletion-scan-00' || n || 'x', 'deletion-scan', 'deletion-v' || n,
        repeat(right(n, 1), 64)
-  from unnest(array['01','02','03','04','05','06','07','08','09','10']) n;
+  from unnest(array['01','02','03','04','05','06','07','08','09','10','11','12','13','14','15']) n;
 insert into ocr.jobs (id, facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex,
   idempotency_key, request_sha256, provider, max_attempts, created_by, created_by_membership_id, correlation_id,
   status, attempt_count, completed_at, failed_at, last_error_code, updated_at, row_version)
@@ -165,7 +180,7 @@ select ('c0117000-0000-4000-8000-0000000000' || job.n)::uuid, 'c0110000-0000-400
        'deletion-v' || job.document, repeat(right(job.document, 1), 64), 'deletion-fixture-00' || job.n,
        repeat('e', 64), 'deletion-provider', 3, 'c0111000-0000-4000-8000-000000000001',
        'c0113000-0000-4000-8000-000000000001', 'deletion-fixture', job.status, 1,
-       case when job.status in ('awaiting_validation', 'validated', 'rejected')
+       case when job.status in ('awaiting_validation', 'validated', 'rejected', 'extracted')
             then clock_timestamp() - job.age end,
        case when job.status = 'failed' then clock_timestamp() - job.age end,
        case when job.status = 'failed' then 'PROVIDER_THROTTLED' end,
@@ -176,10 +191,15 @@ select ('c0117000-0000-4000-8000-0000000000' || job.n)::uuid, 'c0110000-0000-400
                ('04', '04', 'failed', interval '30 hours'),
                ('14', '04', 'queued', interval '30 hours'),
                ('05', '05', 'validated', interval '30 hours'),
-               ('06', '06', 'validated', interval '60 hours'),
+               ('06', '06', 'validated', interval '80 hours'),
                ('07', '07', 'cancelled', interval '30 hours'),
                ('09', '09', 'rejected', interval '30 hours'),
-               ('10', '10', 'rejected', interval '30 hours')) job(n, document, status, age);
+               ('10', '10', 'rejected', interval '30 hours'),
+               ('11', '11', 'validated', interval '30 hours'),
+               ('12', '12', 'validated', interval '30 hours'),
+               ('13', '13', 'extracted', interval '30 hours'),
+               ('24', '14', 'failed', interval '30 hours'),
+               ('15', '15', 'rejected', interval '30 hours')) job(n, document, status, age);
 -- Reading and review content of jobs 01 (purged below) and 03 (not due).
 insert into ocr.extractions (id, job_id, facility_id, document_id, patient_id, extraction_version, attempt_no,
   provider, provider_model, provider_result_key, content_sha256, source_object_version_id, source_sha256_hex,
@@ -212,11 +232,13 @@ select ('c011a000-0000-4000-8000-0000000000' || n)::uuid, ('c0117000-0000-4000-8
        'Fictional folder 0000', 'Name on the fictional page matches', 'c0111000-0000-4000-8000-000000000001',
        'c0113000-0000-4000-8000-000000000001', 'deletion-confirm-' || n || 'xxxxxxx', repeat('c', 64)
   from unnest(array['01','03']) n;
--- Publications: 01 published, 05 pending since 10 h ago, 06 processing since 30 h ago.
+-- Publications: 01 published, 05 pending since 10 h ago, 06 processing since
+-- 79 h ago, 11 failed with a retryable code (attempt 1 of 3), 12 failed
+-- terminally.
 insert into ocr.publications (id, job_id, validation_id, validation_version, patient_confirmation_id, facility_id,
   patient_id, target_domain, target_operation, status, idempotency_key, request_sha256, requested_by,
   requested_by_membership_id, requested_at, completed_at, target_resource_type, target_resource_id,
-  processing_token, processing_expires_at, correlation_id)
+  processing_token, processing_expires_at, failed_at, failure_code, attempt_count, correlation_id)
 select ('c011b000-0000-4000-8000-0000000000' || p.n)::uuid, ('c0117000-0000-4000-8000-0000000000' || p.n)::uuid,
        ('c0119000-0000-4000-8000-0000000000' || p.n)::uuid, 1, ('c011a000-0000-4000-8000-0000000000' || p.n)::uuid,
        'c0110000-0000-4000-8000-00000000000a', 'c0115000-0000-4000-8000-000000000001', 'EHR',
@@ -227,10 +249,13 @@ select ('c011b000-0000-4000-8000-0000000000' || p.n)::uuid, ('c0117000-0000-4000
        case when p.status = 'published' then 'clinical_note' end,
        case when p.status = 'published' then 'c011c000-0000-4000-8000-000000000001'::uuid end,
        case when p.status = 'processing' then 'c011d000-0000-4000-8000-000000000006'::uuid end,
-       case when p.status = 'processing' then clock_timestamp() - interval '29 hours' end,
+       case when p.status = 'processing' then clock_timestamp() - interval '78 hours' end,
+       case when p.status = 'failed' then clock_timestamp() - p.age end, p.failure_code, p.attempts,
        'deletion-publication'
-  from (values ('01', 'published', interval '29 hours'), ('05', 'pending', interval '10 hours'),
-               ('06', 'processing', interval '30 hours')) p(n, status, age);
+  from (values ('01', 'published', interval '29 hours', null, 1), ('05', 'pending', interval '10 hours', null, 0),
+               ('06', 'processing', interval '79 hours', null, 1),
+               ('11', 'failed', interval '29 hours', 'OWNING_SERVICE_UNAVAILABLE', 1),
+               ('12', 'failed', interval '29 hours', 'EHR_VALIDATION_FAILED', 1)) p(n, status, age, failure_code, attempts);
 insert into ehr.ocr_import_provenance (id, clinical_resource_type, clinical_resource_id, facility_id, patient_id,
   document_id, ocr_job_id, extraction_id, validation_id, validation_version, publication_id, reviewed_by,
   published_by) values
@@ -358,6 +383,8 @@ select pg_temp.deletion_case('a subject without ocr_worker may not list', '42501
   'select * from ocr.list_worker_source_deletions(10)', false);
 select pg_temp.deletion_case('a subject without ocr_worker may not count', '42501',
   'select * from ocr.worker_source_deletion_backlog()', false);
+select pg_temp.deletion_case('a subject without ocr_worker may not claim', '42501',
+  $q$select * from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000001', 'deletion-suite-claim')$q$, false);
 select pg_temp.deletion_case('a subject without ocr_worker may not purge', '42501',
   $q$select * from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 1, 'deletion-suite-purge')$q$, false);
 select pg_temp.as_worker('workload:deletion-worker');
@@ -373,6 +400,10 @@ select pg_temp.deletion_case('a negative version count is refused', '22023',
   $q$select * from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', -1, 'deletion-suite-purge')$q$, false);
 select pg_temp.deletion_case('a short correlation id is refused', '22023',
   $q$select * from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 1, 'short')$q$, false);
+select pg_temp.deletion_case('a claim with a short correlation id is refused', '22023',
+  $q$select * from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000001', 'short')$q$, false);
+select pg_temp.deletion_case('an unknown document cannot be claimed', 'P0002',
+  $q$select * from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-0000000000ff', 'deletion-suite-claim')$q$, false);
 select pg_temp.deletion_case('an unknown document is not found', 'P0002',
   $q$select * from ocr.purge_worker_source_document('c0116000-0000-4000-8000-0000000000ff', 1, 'deletion-suite-purge')$q$, false);
 
@@ -389,7 +420,7 @@ begin
   end if;
   select string_agg(right(document_id::text, 2), ',' order by document_id) into listed
     from ocr.list_worker_source_deletions(500) where document_id::text like 'c0116000-%';
-  perform pg_temp.deletion_value('due: 01, 02, 06 and 10 only', '01,02,06,10', listed);
+  perform pg_temp.deletion_value('due: 01, 02, 06, 10, 12, 14 and 15 only', '01,02,06,10,12,14,15', listed);
   perform pg_temp.deletion_check('the listing gives the stored bucket and exact key',
     exists (select 1 from ocr.list_worker_source_deletions(500)
              where document_id = 'c0116000-0000-4000-8000-000000000001'
@@ -401,39 +432,63 @@ begin
   perform pg_temp.deletion_check('02 is due for about 1 hour',
     (select due_seconds between 3600 - 60 and 3600 + 60 from ocr.list_worker_source_deletions(500)
       where document_id = 'c0116000-0000-4000-8000-000000000002'));
-  perform pg_temp.deletion_check('06 is due 24 hours after its stuck publication was requested (about 6 hours)',
-    (select due_seconds between 6 * 3600 - 60 and 6 * 3600 + 60 from ocr.list_worker_source_deletions(500)
+  perform pg_temp.deletion_check('06 is due 72 hours after its finish despite its stuck publication (about 8 hours)',
+    (select due_seconds between 8 * 3600 - 60 and 8 * 3600 + 60 from ocr.list_worker_source_deletions(500)
       where document_id = 'c0116000-0000-4000-8000-000000000006'));
-  perform pg_temp.deletion_check('the listing is oldest due first and honours the limit',
+  perform pg_temp.deletion_check('the listing honours the limit',
     (select count(*) from ocr.list_worker_source_deletions(1)) = 1);
   select * into backlog from ocr.worker_source_deletion_backlog();
   perform pg_temp.deletion_check('the backlog counts every due document',
     backlog.due = (select count(*) from ocr.list_worker_source_deletions(500)));
-  perform pg_temp.deletion_check('the backlog counts as overdue those due for more than 2 hours (01, 06, 10, not 02)',
-    backlog.overdue = (select count(*) from ocr.list_worker_source_deletions(500) where due_seconds > 7200)
-    and backlog.overdue >= 3 and backlog.due >= 4);
+  perform pg_temp.deletion_check('overdue: due for more than 2 hours (01, 06, 10, 12, 14, 15; not 02), plus 13 stuck in extracted',
+    backlog.overdue = (select count(*) from ocr.list_worker_source_deletions(500) where due_seconds > 7200) + 1
+    and backlog.overdue >= 7 and backlog.due >= 7);
 
-  -- Not due: refused, nothing changed.
+  -- Not due: the claim refuses and nothing changes.
   for purge in select * from (values ('03', 'finished less than 24 hours ago'), ('04', 'a job still queued'),
-      ('05', 'a publication pending for less than 24 hours'), ('07', 'on legal hold'), ('08', 'no OCR job'),
-      ('09', 'not uploaded')) x(n, why)
+      ('05', 'a publication pending'), ('07', 'on legal hold'), ('08', 'no OCR job'),
+      ('09', 'not uploaded'), ('11', 'a publication failed retryably with attempts left'),
+      ('13', 'a job stuck in extracted')) x(n, why)
   loop
-    perform pg_temp.deletion_value('not due (' || purge.why || ')', 'not_due,0,0,0',
-      (select concat_ws(',', outcome, extractions, validations, confirmations)
-         from ocr.purge_worker_source_document(('c0116000-0000-4000-8000-0000000000' || purge.n)::uuid, 1,
-           'deletion-suite-purge')));
+    perform pg_temp.deletion_value('not due (' || purge.why || ')', 'not_due',
+      (select outcome from ocr.claim_worker_source_deletion(('c0116000-0000-4000-8000-0000000000' || purge.n)::uuid,
+         'deletion-suite-claim')));
   end loop;
 
-  -- The purge of 01, after the worker deleted 2 S3 versions.
+  -- The purge requires the claim.
+  perform pg_temp.deletion_value('a purge without a claim changes nothing', 'not_claimed,0,0,0',
+    (select concat_ws(',', outcome, extractions, validations, confirmations)
+       from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 2, 'deletion-suite-purge')));
+
+  -- Claim, then (the worker deletes 2 S3 versions), then purge.
+  perform pg_temp.deletion_value('the claim of 01', 'claimed,synthetic-bucket,clinical/objects/c0116000-0000-4000-8000-000000000001',
+    (select concat_ws(',', outcome, storage_bucket, storage_key)
+       from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000001', 'deletion-suite-claim')));
+  perform pg_temp.deletion_value('a second claim of 01 is idempotent', 'already_claimed',
+    (select outcome from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000001',
+       'deletion-suite-claim-2')));
+  perform pg_temp.deletion_check('a claimed document is listed first',
+    (select document_id from ocr.list_worker_source_deletions(1)) = 'c0116000-0000-4000-8000-000000000001');
+  perform pg_temp.deletion_check('a claimed document still counts as due and overdue',
+    (select due from ocr.worker_source_deletion_backlog()) = backlog.due
+    and (select overdue from ocr.worker_source_deletion_backlog()) = backlog.overdue);
   perform pg_temp.deletion_value('the purge of 01', 'deleted,1,1,1',
     (select concat_ws(',', outcome, extractions, validations, confirmations)
        from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 2, 'deletion-suite-purge')));
   perform pg_temp.deletion_value('a second purge of 01 changes nothing', 'already_deleted,0,0,0',
     (select concat_ws(',', outcome, extractions, validations, confirmations)
        from ocr.purge_worker_source_document('c0116000-0000-4000-8000-000000000001', 0, 'deletion-suite-purge-2')));
+  perform pg_temp.deletion_value('a claim of a deleted document', 'already_deleted',
+    (select outcome from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000001',
+       'deletion-suite-claim-3')));
   perform pg_temp.deletion_check('01 is no longer listed',
     not exists (select 1 from ocr.list_worker_source_deletions(500)
                  where document_id = 'c0116000-0000-4000-8000-000000000001'));
+
+  -- 14: claimed, and its S3 deletion has not finished (no purge yet).
+  perform pg_temp.deletion_value('the claim of 14', 'claimed',
+    (select outcome from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000014',
+       'deletion-suite-claim')));
 end $$;
 reset role;
 
@@ -441,9 +496,23 @@ reset role;
 do $$
 begin
   if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_check('a refused claim changes nothing, and writes no audit row',
+    (select count(*) from ehr.documents where status = 'uploaded' and id in (
+       'c0116000-0000-4000-8000-000000000003', 'c0116000-0000-4000-8000-000000000004',
+       'c0116000-0000-4000-8000-000000000005', 'c0116000-0000-4000-8000-000000000007',
+       'c0116000-0000-4000-8000-000000000008', 'c0116000-0000-4000-8000-000000000011',
+       'c0116000-0000-4000-8000-000000000013')) = 7
+    and not exists (select 1 from audit.events where action like 'ocr.source.%'
+                     and resource_id::text like 'c0116000-%' and resource_id not in (
+                       'c0116000-0000-4000-8000-000000000001', 'c0116000-0000-4000-8000-000000000014')));
+  perform pg_temp.deletion_check('14 is source_deleting with its name, nothing blanked yet',
+    (select status = 'source_deleting' and original_file_name = 'Fictional Example scan 14.pdf'
+       from ehr.documents where id = 'c0116000-0000-4000-8000-000000000014')
+    and (select count(*) from audit.events where action = 'ocr.source.deletion_claimed'
+          and resource_id = 'c0116000-0000-4000-8000-000000000014') = 1);
   perform pg_temp.deletion_check('the document is source_deleted with the neutral name and the next version',
     (select status = 'source_deleted' and original_file_name = 'Source page deleted after 24 hours'
-            and row_version = (select (kept ->> 'row_version')::bigint + 1 from deletion_before
+            and row_version = (select (kept ->> 'row_version')::bigint + 2 from deletion_before
                                 where kind = 'document-version')
        from ehr.documents where id = 'c0116000-0000-4000-8000-000000000001'));
   perform pg_temp.deletion_check('ehr.documents_effective shows source_deleted',
@@ -490,6 +559,7 @@ begin
       = (select kept from deletion_before where kind = 'usage'));
   perform pg_temp.deletion_check('the not-due documents and their rows are untouched',
     (select count(*) from ehr.documents where id::text like 'c0116000-%' and status = 'source_deleted') = 1
+    and (select count(*) from ehr.documents where id::text like 'c0116000-%' and status = 'source_deleting') = 1
     and (select raw_text from ocr.extractions where id = 'c0118000-0000-4000-8000-000000000003')
       = 'Fictional reading line for Test Patient Chidi Example');
   perform pg_temp.deletion_check('exactly one audit row, ids and counts only',
@@ -504,8 +574,60 @@ begin
               and position('Fictional' in details::text) = 0 and position('Example' in details::text) = 0
               and reason is null
          from audit.events where action = 'ocr.source.deleted_after_24h'
-          and resource_id = 'c0116000-0000-4000-8000-000000000001'));
+          and resource_id = 'c0116000-0000-4000-8000-000000000001')
+    and (select count(*) from audit.events where action = 'ocr.source.deletion_claimed'
+          and resource_id = 'c0116000-0000-4000-8000-000000000001') = 1);
+
+  -- 15: put on legal hold (by staff) before its claim: no longer due.
+  perform pg_temp.as_staff();
+  update ehr.documents set legal_hold = true where id = 'c0116000-0000-4000-8000-000000000015';
+  perform pg_temp.as_worker('workload:deletion-worker');
 end $$;
+
+-- 2b. After a claim: a legal hold set before it makes the document not due;
+-- on the claimed document 14 a new job, a retry and a legal hold are refused.
+set local role hid_ocr_worker;
+select pg_temp.as_worker('workload:deletion-worker');
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_value('a document put on legal hold before its claim is not due', 'not_due',
+    (select outcome from ocr.claim_worker_source_deletion('c0116000-0000-4000-8000-000000000015',
+       'deletion-suite-claim')));
+end $$;
+reset role;
+select pg_temp.as_staff();
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_case('a claimed document cannot be put on legal hold', '55000',
+    $q$update ehr.documents set legal_hold = true where id = 'c0116000-0000-4000-8000-000000000014'$q$, false);
+  perform pg_temp.deletion_case('a deleted document cannot be put on legal hold', '55000',
+    $q$update ehr.documents set legal_hold = true where id = 'c0116000-0000-4000-8000-000000000001'$q$, false);
+  perform pg_temp.deletion_case('no new job on a claimed document', '55000',
+    $q$insert into ocr.jobs (facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex,
+         idempotency_key, request_sha256, provider, created_by, created_by_membership_id, correlation_id)
+       values ('c0110000-0000-4000-8000-00000000000a', 'c0116000-0000-4000-8000-000000000014',
+         'c0115000-0000-4000-8000-000000000001', 'deletion-v14', repeat('4', 64), 'deletion-new-job-14xxxx',
+         repeat('e', 64), 'deletion-provider', 'c0111000-0000-4000-8000-000000000001',
+         'c0113000-0000-4000-8000-000000000001', 'deletion-suite-staff')$q$, false);
+  perform pg_temp.deletion_case('no new job on a deleted document', '55000',
+    $q$insert into ocr.jobs (facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex,
+         idempotency_key, request_sha256, provider, created_by, created_by_membership_id, correlation_id)
+       values ('c0110000-0000-4000-8000-00000000000a', 'c0116000-0000-4000-8000-000000000001',
+         'c0115000-0000-4000-8000-000000000001', 'deletion-v01', repeat('1', 64), 'deletion-new-job-01xxxx',
+         repeat('e', 64), 'deletion-provider', 'c0111000-0000-4000-8000-000000000001',
+         'c0113000-0000-4000-8000-000000000001', 'deletion-suite-staff')$q$, false);
+  perform pg_temp.deletion_case('no failed -> queued retry on a claimed document', '55000',
+    $q$update ocr.jobs set status = 'queued', failed_at = null, next_attempt_at = clock_timestamp(),
+         row_version = row_version + 1 where id = 'c0117000-0000-4000-8000-000000000024'$q$, false);
+  perform pg_temp.deletion_case('a failed job of a claimed document may still be cancelled', 'ok',
+    $q$update ocr.jobs set status = 'cancelled', row_version = row_version + 1
+       where id = 'c0117000-0000-4000-8000-000000000024'$q$, false);
+end $$;
+select pg_temp.deletion_case('a failed -> queued retry on a document not claimed still works', 'ok',
+  $q$update ocr.jobs set status = 'queued', failed_at = null, last_error_code = null, next_attempt_at = clock_timestamp(),
+       row_version = row_version + 1 where id = 'c0117000-0000-4000-8000-000000000004'$q$, false);
 
 -- 3. A confirmation added after the purge is blanked by the next call.
 do $$
@@ -603,25 +725,41 @@ reset role;
 -- the purge's exact change itself, which the purge function relies on.)
 set local role hid_ocr_worker;
 select pg_temp.as_worker('workload:deletion-worker');
-select pg_temp.deletion_case('the worker may not update a document outside the purge command', '42501',
-  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
-   where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('the worker may not update a document outside its commands', '42501',
+  $q$update ehr.documents set status = 'source_deleting' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
 reset role;
-select pg_temp.deletion_case('a worker-actor change of another shape is refused', '55000',
-  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours',
-     retention_class = 'changed' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
-select pg_temp.deletion_case('a worker-actor change keeping the file name is refused', '55000',
-  $q$update ehr.documents set status = 'source_deleted' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
-select pg_temp.deletion_case('a document on legal hold is never moved to source_deleted', '55000',
-  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
-   where id = 'c0116000-0000-4000-8000-000000000007'$q$, false);
-select pg_temp.deletion_case('the owner, in a worker session, may make the exact change (as the purge does)', 'ok',
+select pg_temp.deletion_case('uploaded straight to source_deleted is refused (no claim)', '55000',
   $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
    where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a claim of another shape is refused', '55000',
+  $q$update ehr.documents set status = 'source_deleting', retention_class = 'changed'
+   where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a document on legal hold is never claimed', '55000',
+  $q$update ehr.documents set status = 'source_deleting' where id = 'c0116000-0000-4000-8000-000000000007'$q$, false);
+select pg_temp.deletion_case('the owner, in a worker session, may make the exact claim (as the claim does)', 'ok',
+  $q$update ehr.documents set status = 'source_deleting' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_case('a purge step keeping the file name is refused', '55000',
+    $q$update ehr.documents set status = 'source_deleted' where id = 'c0116000-0000-4000-8000-000000000014'$q$, false);
+  perform pg_temp.deletion_case('a claimed document is never restored', '55000',
+    $q$update ehr.documents set status = 'uploaded' where id = 'c0116000-0000-4000-8000-000000000014'$q$, false);
+  perform pg_temp.deletion_case('the owner, in a worker session, may make the exact purge step', 'ok',
+    $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
+     where id = 'c0116000-0000-4000-8000-000000000014'$q$, false);
+end $$;
 select pg_temp.as_staff();
-select pg_temp.deletion_case('a staff session may not delete a source', '55000',
-  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
-   where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('a staff session may not claim a source', '55000',
+  $q$update ehr.documents set status = 'source_deleting' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
+select pg_temp.deletion_case('an insert with status source_deleting is refused', '55000',
+  $q$insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
+       storage_bucket, storage_key, declared_media_type, status, retention_class)
+     values ('c0116000-0000-4000-8000-0000000000ab', 'c0115000-0000-4000-8000-000000000001',
+       'c0110000-0000-4000-8000-00000000000a', 'c0111000-0000-4000-8000-000000000001',
+       'c0113000-0000-4000-8000-000000000001', 'Fictional Example scan.pdf', 'synthetic-bucket',
+       'clinical/objects/c0116000-0000-4000-8000-0000000000ab', 'application/pdf', 'source_deleting',
+       'clinical_record')$q$, false);
 select pg_temp.deletion_case('an insert with status source_deleted is refused', '55000',
   $q$insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
        storage_bucket, storage_key, declared_media_type, status, retention_class)
@@ -648,8 +786,7 @@ reset role;
 grant insert, select on deletion_ehr_attempt to public;
 set local role hid_ehr_api_runtime;
 insert into deletion_ehr_attempt select pg_temp.deletion_try(
-  $q$update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours'
-   where id = 'c0116000-0000-4000-8000-000000000003'$q$, true);
+  $q$update ehr.documents set status = 'source_deleting' where id = 'c0116000-0000-4000-8000-000000000003'$q$, true);
 reset role;
 select pg_temp.deletion_check('the EHR API runtime role cannot delete a source',
   (select outcome in ('55000', '42501') or (outcome = 'ok'

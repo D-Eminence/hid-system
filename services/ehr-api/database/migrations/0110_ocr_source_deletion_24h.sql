@@ -24,46 +24,63 @@
 --
 -- It applies after 0108 (0109 is not part of this change). It needs: the
 -- ehr.documents, ocr.jobs, ocr.extractions, ocr.validations (with 0016's
--- columns), ocr.patient_confirmations and ocr.publications tables; the three
--- trigger functions it replaces exactly as 0004, 0009 and 0016 left them (md5
--- pinned in section 0); the session and permission helpers it calls, whose
--- bodies are pinned the same way; and the runtime roles. If a later migration
--- replaces one of the pinned bodies, section 0 stops 0110 with nothing
--- applied and the pins must be renewed against that body.
+-- columns), ocr.patient_confirmations and ocr.publications tables; the four
+-- trigger functions it replaces exactly as 0004, 0009, 0016 and 0107 left them
+-- (md5 pinned in section 0); the session and permission helpers it calls,
+-- whose bodies are pinned the same way; and the runtime roles. If a later
+-- migration replaces one of the pinned bodies, section 0 stops 0110 with
+-- nothing applied and the pins must be renewed against that body.
 --
 -- What it adds.
--- 1. ehr.documents.status may be 'source_deleted' (documents_status_check
---    re-created with that one value added; every other rule unchanged). The
---    view ehr.documents_effective passes it through unchanged (its CASE maps
+-- 1. ehr.documents.status may be 'source_deleting' (claimed by the OCR worker,
+--    S3 deletion under way) and 'source_deleted' (documents_status_check
+--    re-created with those two values added; every other rule unchanged). The
+--    view ehr.documents_effective passes both through unchanged (its CASE maps
 --    only uploaded+clean to available and a rejected scan to rejected).
--- 2. A document is due for deletion when: it has at least one OCR job; every
---    one of its jobs is finished (awaiting_validation, validated, rejected,
---    failed or cancelled); the latest finish (completed_at, failed_at for a
---    failed job, updated_at for a cancelled one, updated_at when the column
---    is empty) is at least 24 hours ago; no publication of its jobs is
---    pending or processing, except one requested more than 24 hours ago (a
---    stuck publication delays deletion by at most a further 24 hours);
---    legal_hold is false; and its status is 'uploaded'. due_at is the later
---    of latest finish + 24 h and the latest blocking publication's
---    requested_at + 24 h.
+-- 2. A document is due for deletion when: its status is 'uploaded';
+--    legal_hold is false; it has at least one OCR job; every one of its jobs
+--    is finished (awaiting_validation, validated, rejected, failed or
+--    cancelled); and the latest finish (completed_at, failed_at for a failed
+--    job, updated_at for a cancelled one, updated_at when the column is empty)
+--    is at least 24 hours ago, or at least 72 hours ago while a publication
+--    of its jobs could still run: pending, processing, or failed with a
+--    retryable code (OWNING_SERVICE_UNAVAILABLE, REQUEST_IN_PROGRESS, the codes
+--    ocr-api retries) and attempts left. 72 hours after the latest finish
+--    nothing blocks any more (a hard cap). due_at is latest finish + 24 h, or
+--    + 72 h while blocked; a blocked document is not due, so it is not counted
+--    as due or overdue. A document already 'source_deleting' is always
+--    listed (first), so a claim whose S3 deletion failed is retried.
 --    - ocr.source_deletion_due(document or NULL for all) -> (document_id,
---      facility_id, patient_id, storage_bucket, storage_key, job_count,
---      due_at): the shared reckoning (SECURITY INVOKER, granted to no role,
---      called only by the functions below as their owner).
+--      facility_id, patient_id, storage_bucket, storage_key, status,
+--      job_count, due_at): the shared reckoning (SECURITY INVOKER, granted to
+--      no role, called only by the functions below as their owner).
 --    - ocr.list_worker_source_deletions(limit 1-500) -> (document_id,
---      facility_id, storage_bucket, storage_key, due_seconds), oldest due
---      first; hid_ocr_worker.
---    - ocr.worker_source_deletion_backlog() -> (due, overdue): documents due
---      now, and those due for more than 2 hours (the CloudWatch overdue alarm);
+--      facility_id, storage_bucket, storage_key, due_seconds):
+--      'source_deleting' documents first, then oldest due first;
 --      hid_ocr_worker.
--- 3. ocr.purge_worker_source_document(document, S3 versions deleted 0-100000,
+--    - ocr.worker_source_deletion_backlog() -> (due, overdue): documents due
+--      or 'source_deleting' now; overdue = those of them due for more than 2
+--      hours, plus documents still 'uploaded' with a job stuck in 'extracted'
+--      for more than 24 hours (never deleted, only surfaced to the CloudWatch
+--      overdue alarm); hid_ocr_worker.
+-- 3. ocr.claim_worker_source_deletion(document, correlation id) -> (outcome,
+--    storage_bucket, storage_key); hid_ocr_worker. Under a row lock on the
+--    document and its jobs: 'claimed' when the document is due (checked
+--    again, legal_hold included), moving it to 'source_deleting' (one audit
+--    row ocr.source.deletion_claimed); 'already_claimed' when it is
+--    'source_deleting' (a retry); 'already_deleted'; 'not_due' (nothing
+--    changed). Only after 'claimed' or 'already_claimed' does the worker
+--    delete every S3 version and delete marker of the stored key. From the
+--    claim on, the database refuses a new job on the document, a failed ->
+--    queued retry of its jobs (ocr.validate_job_write) and every change to
+--    the document, legal_hold included, except the purge.
+-- 4. ocr.purge_worker_source_document(document, S3 versions deleted 0-100000,
 --    correlation id) -> (outcome, extractions, validations, confirmations);
---    hid_ocr_worker. The worker calls it only after it deleted every S3
---    version and delete marker of the document's storage key and confirmed
---    none remain. Under a row lock on the document and its jobs it checks
---    again that the document is due ('not_due', nothing changed, otherwise),
---    sets the document's status to 'source_deleted' and original_file_name to
---    'Source page deleted after 24 hours' (row_version + 1), then blanks:
+--    hid_ocr_worker. The worker calls it only after the S3 deletion was
+--    confirmed. It requires 'source_deleting' ('not_claimed', nothing
+--    changed, for any other status but 'source_deleted'), sets the status to
+--    'source_deleted' and original_file_name to 'Source page deleted after 24
+--    hours' (row_version + 1), then blanks:
 --    - ocr.extractions: raw_text -> NULL, structured_payload -> '{}';
 --    - ocr.validations: validated_payload -> '{}', accepted_fields -> '{}',
 --      rejected_fields -> '[]', corrections -> '[]', reason -> 'Content
@@ -71,8 +88,9 @@
 --    - ocr.patient_confirmations: reason -> 'Content deleted after 24 hours',
 --      evidence_reference -> NULL;
 --    and writes one audit.events row ocr.source.deleted_after_24h (workload
---    actor, resource the document; details: job count, S3 versions deleted,
---    rows blanked per table, seconds past due; ids and counts only).
+--    actor, resource the document; details: job count, S3 versions deleted
+--    (the worker's count across its rounds for the document), rows blanked
+--    per table, seconds past due; ids and counts only).
 --    Idempotent: for a document already 'source_deleted' it blanks whatever
 --    still holds content (none, unless a row was added after the purge),
 --    answers 'already_deleted', and writes an audit row only when it blanked
@@ -81,15 +99,17 @@
 --    extraction provenance, confidence and content hash (versions, models,
 --    counts; no text), validation provenance ({source, extractionId}),
 --    ocr.publications, ehr.ocr_import_provenance, ocr.page_usage,
---    ocr.ai_usage and every EHR row a person published.
--- 4. Narrow replacements of three trigger functions (bodies otherwise as
+--    ocr.ai_usage and every EHR row a person published. ehr.record_versions
+--    keeps the document's earlier states, original file name included (it is
+--    append-only and is not touched).
+-- 5. Narrow replacements of four trigger functions (bodies otherwise as
 --    before; owner, ACL and attributes kept):
 --    - ocr.reject_immutable_change() (0016; the append-only trigger of
 --      ocr.job_events, ocr.extractions, ocr.validations,
 --      ocr.patient_confirmations and ehr.ocr_import_provenance) still raises
 --      55000 on every DELETE and every UPDATE, except an UPDATE of
 --      ocr.extractions, ocr.validations or ocr.patient_confirmations that
---      changes only the content columns listed in 3, to exactly the values
+--      changes only the content columns listed in 4, to exactly the values
 --      listed there, made by the OCR functions' owner (current_user; the
 --      trigger function is SECURITY INVOKER, so that is true only inside a
 --      SECURITY DEFINER function it owns, never for a runtime role), on a row
@@ -97,35 +117,38 @@
 --      already 'source_deleted'. No session setting is consulted. job_events
 --      and ehr.ocr_import_provenance get no exception.
 --    - ehr.reject_document_object_rebinding() (0009; BEFORE UPDATE on
---      ehr.documents, SECURITY INVOKER) also refuses (55000) any update of a
---      document that is 'source_deleted', and a change to 'source_deleted'
---      unless it is made by the OCR functions' owner from 'uploaded', with
---      legal_hold false, original_file_name set to the neutral value, and no
---      other column but row_version and updated_at changed.
+--      ehr.documents, SECURITY INVOKER) also refuses (55000) every update
+--      into, within or out of 'source_deleting' and 'source_deleted' except
+--      the two the OCR functions' owner makes: the claim (uploaded ->
+--      source_deleting, legal_hold false, nothing else changed) and the purge
+--      (source_deleting -> source_deleted with the neutral file name, nothing
+--      else changed). So legal_hold cannot be set once a document is claimed.
 --    - ehr.capture_record_version() (0004; versioning trigger of every
---      clinical table) refuses an insert with status 'source_deleted'; and for
---      the purge's own change to ehr.documents (status uploaded ->
---      source_deleted, the neutral file name, nothing else) made in a session
---      whose actor is an active ocr_worker account with a correlation id, it
---      bumps row_version and updated_at and writes no ehr.record_versions row
---      (that table requires a staff membership; the audit row above records
---      the change). Every other call runs the 0004 body unchanged.
+--      clinical table) refuses an insert with either status; and for those
+--      two changes, made in a session whose actor is an active ocr_worker
+--      account with a correlation id, bumps row_version and updated_at and
+--      writes no ehr.record_versions row (that table requires a staff
+--      membership; the audit rows record the changes). Every other call runs
+--      the 0004 body unchanged.
+--    - ocr.validate_job_write() (0107's body) refuses (55000, 'Source page
+--      deleted after 24 hours') an insert of a job, and any update to queued
+--      or processing, on a document that is 'source_deleting' or
+--      'source_deleted'. 0107 lets a failed -> queued retry pass without the
+--      document check; this closes it for such documents only.
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): the tables present; not applied yet; md5 of
---    pg_proc.prosrc of the three replaced functions, the session helpers,
---    auth.account_id_for_subject, auth.account_has_active_role and
---    ocr.validate_job_write (0107's body: the purge relies on it refusing a
---    job's later state change on a document that is not 'uploaded'); the
+--    pg_proc.prosrc of the four replaced functions, the session helpers,
+--    auth.account_id_for_subject and auth.account_has_active_role; the
 --    triggers that call the replaced functions; documents_status_check as
 --    0004 created it; the role ocr_worker; the runtime roles hid_ocr_worker,
 --    where it exists, neither superuser nor BYPASSRLS; ocr.jobs, ehr.documents,
---    the OCR evidence tables and the three replaced functions share one owner,
+--    the OCR evidence tables and the four replaced functions share one owner,
 --    which may create in schema ocr, and the applier is it or a member that
 --    inherits it and may SET ROLE to it.
--- 5. Grants are made here too, since a release applies only migrations;
+-- 6. Grants are made here too, since a release applies only migrations;
 --    runtime-grants.sql gains the same 0110 block for a role bootstrap.
--- 6. Post-checks: the replaced bodies by md5, owners, ACLs and attributes,
+-- 7. Post-checks: the replaced bodies by md5, owners, ACLs and attributes,
 --    the new functions' attributes and EXECUTE, and the status constraint.
 --
 -- Row-level security. Like every OCR worker command, the functions run as
@@ -134,8 +157,8 @@
 -- ocr.set_facility_page_limit, 0107); ehr.documents has no policy a workload
 -- session satisfies, so under an owner that neither is a superuser nor
 -- bypasses row-level security (release checklist P8) the list is empty and
--- the purge answers 'not_found' (P0002), exactly as the OCR worker claim then
--- sees no job.
+-- the claim and the purge answer P0002 (document not found), exactly as the
+-- OCR worker claim then sees no job.
 --
 -- Locks: ACCESS EXCLUSIVE on ehr.documents for the constraint swap (added NOT
 -- VALID, then validated in the same transaction, which reads the table once);
@@ -145,7 +168,7 @@
 --
 -- Old services on this schema: nothing changes for them until a document is
 -- purged; ocr-api, ehr-api and ocr-worker images built before 0110 keep
--- working (they never write 'source_deleted'). After a purge, the old ehr-api
+-- working (they never write either new status). After a purge, the old ehr-api
 -- answers a download of the document with its generic 409 and the old ocr-api
 -- shows an empty reading.
 -- Applied migrations 0001 through 0108 are immutable.
@@ -169,6 +192,7 @@ begin
      or to_regprocedure('ocr.list_worker_source_deletions(integer)') is not null
      or to_regprocedure('ocr.worker_source_deletion_backlog()') is not null
      or to_regprocedure('ocr.purge_worker_source_document(uuid,integer,text)') is not null
+     or to_regprocedure('ocr.claim_worker_source_deletion(uuid,text)') is not null
      or exists (select 1 from pg_constraint where conrelid = 'ehr.documents'::regclass
                   and conname = 'documents_status_check'
                   and pg_get_constraintdef(oid) like '%source_deleted%') then
@@ -195,13 +219,15 @@ begin
   if mismatch is null and (select count(*) from pg_proc proc
         join pg_language language_row on language_row.oid = proc.prolang
        where language_row.lanname = 'plpgsql' and proc.provolatile = 'v' and not proc.proisstrict
-         and ((proc.oid = 'ocr.reject_immutable_change()'::regprocedure and not proc.prosecdef
+         and ((proc.oid = 'ocr.validate_job_write()'::regprocedure and proc.prosecdef
+               and proc.proconfig = '{"search_path=ocr, ehr, identity, auth, platform, pg_temp"}'::text[])
+           or (proc.oid = 'ocr.reject_immutable_change()'::regprocedure and not proc.prosecdef
                and proc.proconfig = '{"search_path=ocr, pg_temp"}'::text[])
            or (proc.oid = 'ehr.reject_document_object_rebinding()'::regprocedure and not proc.prosecdef
                and proc.proconfig = '{"search_path=ehr, pg_temp"}'::text[])
            or (proc.oid = 'ehr.capture_record_version()'::regprocedure and proc.prosecdef
-               and proc.proconfig = '{"search_path=ehr, auth, identity, platform, pg_temp"}'::text[]))) <> 3 then
-    mismatch := 'attributes of the three replaced trigger functions';
+               and proc.proconfig = '{"search_path=ehr, auth, identity, platform, pg_temp"}'::text[]))) <> 4 then
+    mismatch := 'attributes of the four replaced trigger functions';
   end if;
   -- The triggers that call them, enabled, as 0004, 0009, 0013 and 0016 created them.
   if mismatch is null and (select count(*) from pg_trigger trigger_row
@@ -214,8 +240,9 @@ begin
             ('ehr.ocr_import_provenance', 'ehr_ocr_import_provenance_immutable', 'CREATE TRIGGER ehr_ocr_import_provenance_immutable BEFORE DELETE OR UPDATE ON ehr.ocr_import_provenance FOR EACH ROW EXECUTE FUNCTION ocr.reject_immutable_change()'),
             ('ehr.documents', 'documents_reject_object_rebinding', 'CREATE TRIGGER documents_reject_object_rebinding BEFORE UPDATE ON ehr.documents FOR EACH ROW EXECUTE FUNCTION ehr.reject_document_object_rebinding()'),
             ('ehr.documents', 'documents_versioned', 'CREATE TRIGGER documents_versioned BEFORE INSERT OR UPDATE ON ehr.documents FOR EACH ROW EXECUTE FUNCTION ehr.capture_record_version()'),
-            ('ehr.documents', 'documents_no_delete', 'CREATE TRIGGER documents_no_delete BEFORE DELETE ON ehr.documents FOR EACH ROW EXECUTE FUNCTION platform.reject_mutation()'))) <> 8 then
-    mismatch := 'the append-only triggers of the OCR evidence tables or the ehr.documents triggers';
+            ('ehr.documents', 'documents_no_delete', 'CREATE TRIGGER documents_no_delete BEFORE DELETE ON ehr.documents FOR EACH ROW EXECUTE FUNCTION platform.reject_mutation()'),
+            ('ocr.jobs', 'ocr_jobs_validate', 'CREATE TRIGGER ocr_jobs_validate BEFORE INSERT OR UPDATE ON ocr.jobs FOR EACH ROW EXECUTE FUNCTION ocr.validate_job_write()'))) <> 9 then
+    mismatch := 'the append-only triggers of the OCR evidence tables, the ehr.documents triggers or ocr_jobs_validate';
   end if;
   -- The trigger function is used by no other trigger than those five.
   if mismatch is null and (select count(*) from pg_trigger
@@ -243,6 +270,7 @@ begin
   select string_agg(distinct pg_get_userbyid(owner_row.owner_oid), ', ') into mismatch
     from (select proc.proowner as owner_oid from pg_proc proc
            where proc.oid in ('ocr.reject_immutable_change()'::regprocedure,
+             'ocr.validate_job_write()'::regprocedure,
              'ehr.reject_document_object_rebinding()'::regprocedure,
              'ehr.capture_record_version()'::regprocedure,
              'ocr.claim_worker_job_fair(text,integer,integer)'::regprocedure)
@@ -273,20 +301,20 @@ $$;
 create temporary table ocr_source_deletion_0110_acl on commit drop as
   select proc.oid as function_oid, proc.proowner, proc.proacl, proc.prosecdef, proc.proconfig
     from pg_proc proc
-   where proc.oid in ('ocr.reject_immutable_change()'::regprocedure,
+   where proc.oid in ('ocr.reject_immutable_change()'::regprocedure, 'ocr.validate_job_write()'::regprocedure,
      'ehr.reject_document_object_rebinding()'::regprocedure, 'ehr.capture_record_version()'::regprocedure);
 
--- 1. The status value.
+-- 1. The status values.
 alter table ehr.documents drop constraint documents_status_check;
 alter table ehr.documents add constraint documents_status_check check (
-  status in ('initiated', 'uploaded', 'rejected', 'entered_in_error', 'source_deleted')) not valid;
+  status in ('initiated', 'uploaded', 'rejected', 'entered_in_error', 'source_deleting', 'source_deleted')) not valid;
 alter table ehr.documents validate constraint documents_status_check;
 
--- 2. Which documents are due. Granted to no role; the callers below run it
--- as its owner.
+-- 2. Which documents are due (and those already claimed). Granted to no
+-- role; the callers below run it as its owner.
 create function ocr.source_deletion_due(requested_document_id uuid)
 returns table (document_id uuid, facility_id uuid, patient_id uuid, storage_bucket text, storage_key text,
-  job_count integer, due_at timestamptz)
+  status text, job_count integer, due_at timestamptz)
 language sql stable
 set search_path = pg_catalog, ocr, ehr, pg_temp
 as $$
@@ -302,26 +330,32 @@ as $$
      where requested_document_id is null or job.document_id = requested_document_id
      group by job.document_id
   ), blocking as (
-    select job.document_id, max(publication.requested_at) as requested_at
+    -- A publication that could still run: pending, processing, or failed with
+    -- a code ocr-api retries and attempts left.
+    select distinct job.document_id
       from ocr.publications publication join ocr.jobs job on job.id = publication.job_id
-     where publication.status in ('pending', 'processing')
+     where (publication.status in ('pending', 'processing')
+         or (publication.status = 'failed'
+           and publication.failure_code in ('OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS')
+           and publication.attempt_count < publication.max_attempts))
        and (requested_document_id is null or job.document_id = requested_document_id)
-     group by job.document_id
+  ), reckoned as (
+    select per_document.*,
+           per_document.finished_at + case when blocking.document_id is null then interval '24 hours'
+                                           else interval '72 hours' end as due_at
+      from per_document left join blocking on blocking.document_id = per_document.document_id
   )
   select document.id, document.facility_id, document.patient_id, document.storage_bucket, document.storage_key,
-         per_document.job_count,
-         greatest(per_document.finished_at + interval '24 hours',
-                  coalesce(blocking.requested_at + interval '24 hours', '-infinity'::timestamptz))
-    from per_document
-    join ehr.documents document on document.id = per_document.document_id
-    left join blocking on blocking.document_id = per_document.document_id
-   where per_document.finished
-     and document.status = 'uploaded' and not document.legal_hold
-     and per_document.finished_at <= clock_timestamp() - interval '24 hours'
-     and (blocking.requested_at is null or blocking.requested_at <= clock_timestamp() - interval '24 hours')
+         document.status, reckoned.job_count, reckoned.due_at
+    from reckoned
+    join ehr.documents document on document.id = reckoned.document_id
+   where document.status = 'source_deleting'
+      or (document.status = 'uploaded' and not document.legal_hold and reckoned.finished
+          and reckoned.due_at <= clock_timestamp())
 $$;
 
--- The worker lists the documents due, oldest due first.
+-- The worker lists the documents to delete: those already claimed first (a
+-- retry), then oldest due first.
 create function ocr.list_worker_source_deletions(requested_limit integer)
 returns table (document_id uuid, facility_id uuid, storage_bucket text, storage_key text, due_seconds bigint)
 language plpgsql volatile security definer
@@ -340,16 +374,18 @@ begin
     select due.document_id, due.facility_id, due.storage_bucket, due.storage_key,
            greatest(0, floor(extract(epoch from clock_timestamp() - due.due_at)))::bigint
       from ocr.source_deletion_due(null) due
-     order by due.due_at, due.document_id
+     order by (due.status = 'source_deleting') desc, due.due_at, due.document_id
      limit requested_limit;
 end
 $$;
 
--- The worker counts the documents due now and those due for more than 2 hours.
+-- The worker counts the documents due now (claimed ones included) and those
+-- overdue: due for more than 2 hours, or still uploaded with a job stuck in
+-- 'extracted' for more than 24 hours (counted, never deleted).
 create function ocr.worker_source_deletion_backlog()
 returns table (due integer, overdue integer)
 language plpgsql volatile security definer
-set search_path = pg_catalog, ocr, auth, platform, pg_temp
+set search_path = pg_catalog, ocr, ehr, auth, platform, pg_temp
 as $$
 declare
   actor_account uuid := auth.account_id_for_subject(platform.current_actor_subject());
@@ -360,11 +396,74 @@ begin
   return query
     select count(*)::integer,
            (count(*) filter (where due_row.due_at < clock_timestamp() - interval '2 hours'))::integer
+           + (select count(distinct job.document_id)::integer
+                from ocr.jobs job join ehr.documents document on document.id = job.document_id
+               where job.status = 'extracted' and document.status = 'uploaded'
+                 and coalesce(job.completed_at, job.updated_at) < clock_timestamp() - interval '24 hours')
       from ocr.source_deletion_due(null) due_row;
 end
 $$;
 
--- 3. The purge, after the worker deleted every S3 version of the source.
+-- 3. The claim, before any S3 call: a due document becomes 'source_deleting'
+-- under a row lock, so no job, retry or legal hold can come after the check.
+create function ocr.claim_worker_source_deletion(requested_document_id uuid, requested_correlation_id text)
+returns table (outcome text, storage_bucket text, storage_key text)
+language plpgsql volatile security definer
+set search_path = pg_catalog, ocr, ehr, audit, auth, platform, pg_temp
+as $$
+declare
+  actor_subject text := platform.current_actor_subject();
+  actor_account uuid := auth.account_id_for_subject(actor_subject);
+  document_row record;
+  due_job_count integer;
+  due_since timestamptz;
+begin
+  if actor_account is null or not auth.account_has_active_role(actor_account, 'ocr_worker') then
+    raise exception using errcode = '42501', message = 'Authorized OCR workload context is required';
+  end if;
+  if requested_document_id is null or requested_correlation_id is null
+     or length(requested_correlation_id) not between 8 and 128 then
+    raise exception using errcode = '22023', message = 'Invalid OCR source deletion request';
+  end if;
+  select document.id, document.facility_id, document.patient_id, document.status, document.storage_bucket,
+         document.storage_key
+    into document_row from ehr.documents document where document.id = requested_document_id for update;
+  if document_row.id is null then
+    raise exception using errcode = 'P0002', message = 'Document not found';
+  end if;
+  -- The jobs, too: a retry or a new state of one waits for this claim, then
+  -- finds the document claimed and is refused.
+  perform 1 from ocr.jobs job where job.document_id = document_row.id order by job.id for update;
+  if document_row.status = 'source_deleting' then
+    return query select 'already_claimed'::text, document_row.storage_bucket, document_row.storage_key;
+    return;
+  end if;
+  if document_row.status = 'source_deleted' then
+    return query select 'already_deleted'::text, null::text, null::text;
+    return;
+  end if;
+  select due.job_count, due.due_at into due_job_count, due_since
+    from ocr.source_deletion_due(document_row.id) due where due.status = 'uploaded';
+  if due_job_count is null then
+    return query select 'not_due'::text, null::text, null::text;
+    return;
+  end if;
+  update ehr.documents set status = 'source_deleting', row_version = row_version + 1 where id = document_row.id;
+  insert into audit.events (
+    correlation_id, actor_type, actor_subject, actor_account_id, facility_id,
+    patient_id, action, outcome, resource_type, resource_id, provenance, details
+  ) values (
+    requested_correlation_id, 'workload', actor_subject, actor_account,
+    document_row.facility_id, document_row.patient_id, 'ocr.source.deletion_claimed', 'success',
+    'document', document_row.id::text, 'application',
+    jsonb_build_object('jobCount', due_job_count,
+      'secondsPastDue', greatest(0, floor(extract(epoch from clock_timestamp() - due_since)))::bigint)
+  );
+  return query select 'claimed'::text, document_row.storage_bucket, document_row.storage_key;
+end
+$$;
+
+-- 4. The purge, after the worker deleted every S3 version of the claimed source.
 create function ocr.purge_worker_source_document(
   requested_document_id uuid, requested_deleted_versions integer, requested_correlation_id text
 ) returns table (outcome text, extractions integer, validations integer, confirmations integer)
@@ -396,16 +495,16 @@ begin
   if document_row.id is null then
     raise exception using errcode = 'P0002', message = 'Document not found';
   end if;
-  -- The jobs, too: a retry or a new state of one waits for this purge.
   perform 1 from ocr.jobs job where job.document_id = document_row.id order by job.id for update;
   already_deleted := document_row.status = 'source_deleted';
   if not already_deleted then
-    select due.job_count, due.due_at into due_job_count, due_since
-      from ocr.source_deletion_due(document_row.id) due;
-    if due_job_count is null then
-      return query select 'not_due'::text, 0, 0, 0;
+    -- Only a document this worker claimed (the S3 deletion ran under the claim).
+    if document_row.status is distinct from 'source_deleting' then
+      return query select 'not_claimed'::text, 0, 0, 0;
       return;
     end if;
+    select due.job_count, due.due_at into due_job_count, due_since
+      from ocr.source_deletion_due(document_row.id) due;
     update ehr.documents set status = 'source_deleted', original_file_name = 'Source page deleted after 24 hours',
       row_version = row_version + 1
      where id = document_row.id;
@@ -445,7 +544,7 @@ begin
         'objectVersionsDeleted', requested_deleted_versions,
         'extractionsBlanked', blanked_extractions, 'validationsBlanked', blanked_validations,
         'confirmationsBlanked', blanked_confirmations, 'alreadyDeleted', already_deleted,
-        'secondsPastDue', case when already_deleted then null
+        'secondsPastDue', case when due_since is null then null
           else greatest(0, floor(extract(epoch from clock_timestamp() - due_since)))::bigint end)
     );
   end if;
@@ -454,7 +553,7 @@ begin
 end
 $$;
 
--- 4. The append-only trigger (0016's body) with one exception: the purge's
+-- 5. The append-only trigger (0016's body) with one exception: the purge's
 -- blanking, by the OCR functions' owner, of a row whose document is already
 -- 'source_deleted', changing only the content columns to exactly the purge
 -- values.
@@ -496,9 +595,9 @@ begin
 end
 $$;
 
--- The document object guard (0009's body), plus: a 'source_deleted' document
--- is never changed again, and only the purge, as the OCR functions' owner,
--- moves an uploaded document there.
+-- The document object guard (0009's body), plus: a document claimed for
+-- deletion or deleted changes only by the OCR functions' owner's two exact
+-- steps (the claim, then the purge); nothing else, legal_hold included.
 create or replace function ehr.reject_document_object_rebinding()
 returns trigger
 language plpgsql
@@ -514,16 +613,18 @@ begin
        and old.object_version_id is distinct from new.object_version_id) then
     raise exception using errcode = '55000', message = 'Document object identity and declared integrity metadata are immutable';
   end if;
-  if old.status = 'source_deleted'
-     or (new.status = 'source_deleted'
-       and (old.status is distinct from 'uploaded' or old.legal_hold
-         or new.original_file_name is distinct from 'Source page deleted after 24 hours'
-         or current_user is distinct from (select pg_catalog.pg_get_userbyid(class_row.relowner)
-                                             from pg_catalog.pg_class class_row
-                                            where class_row.oid = 'ocr.jobs'::pg_catalog.regclass)
-         or (pg_catalog.to_jsonb(new) - array['status', 'original_file_name', 'row_version', 'updated_at'])
-            is distinct from (pg_catalog.to_jsonb(old) - array['status', 'original_file_name', 'row_version', 'updated_at']))) then
-    raise exception using errcode = '55000', message = 'Only the OCR source purge may delete a document source, once';
+  if (old.status in ('source_deleting', 'source_deleted') or new.status in ('source_deleting', 'source_deleted'))
+     and not (current_user = (select pg_catalog.pg_get_userbyid(class_row.relowner) from pg_catalog.pg_class class_row
+                               where class_row.oid = 'ocr.jobs'::pg_catalog.regclass)
+       and ((old.status = 'uploaded' and not old.legal_hold and new.status = 'source_deleting'
+             and (pg_catalog.to_jsonb(new) - array['status', 'row_version', 'updated_at'])
+               = (pg_catalog.to_jsonb(old) - array['status', 'row_version', 'updated_at']))
+         or (old.status = 'source_deleting' and new.status = 'source_deleted'
+             and new.original_file_name = 'Source page deleted after 24 hours'
+             and (pg_catalog.to_jsonb(new) - array['status', 'original_file_name', 'row_version', 'updated_at'])
+               = (pg_catalog.to_jsonb(old) - array['status', 'original_file_name', 'row_version', 'updated_at'])))) then
+    raise exception using errcode = '55000',
+      message = 'The document''s source is being or has been deleted after 24 hours; it cannot be changed or put on legal hold';
   end if;
   return new;
 end;
@@ -551,14 +652,17 @@ declare
   new_state jsonb;
 begin
   if tg_table_schema = 'ehr' and tg_table_name = 'documents'
-     and to_jsonb(new)->>'status' = 'source_deleted' then
+     and to_jsonb(new)->>'status' in ('source_deleting', 'source_deleted') then
     if tg_op <> 'UPDATE' or actor_account_id is null or correlation is null
        or not auth.account_has_active_role(actor_account_id, 'ocr_worker')
-       or to_jsonb(old)->>'status' is distinct from 'uploaded'
-       or to_jsonb(new)->>'original_file_name' is distinct from 'Source page deleted after 24 hours'
-       or (to_jsonb(new) - array['status', 'original_file_name', 'row_version', 'updated_at'])
-          is distinct from (to_jsonb(old) - array['status', 'original_file_name', 'row_version', 'updated_at']) then
-      raise exception using errcode = '55000', message = 'Only the OCR source purge may delete a document source, once';
+       or not ((to_jsonb(old)->>'status' = 'uploaded' and to_jsonb(new)->>'status' = 'source_deleting'
+                and (to_jsonb(new) - array['status', 'row_version', 'updated_at'])
+                  = (to_jsonb(old) - array['status', 'row_version', 'updated_at']))
+            or (to_jsonb(old)->>'status' = 'source_deleting' and to_jsonb(new)->>'status' = 'source_deleted'
+                and to_jsonb(new)->>'original_file_name' = 'Source page deleted after 24 hours'
+                and (to_jsonb(new) - array['status', 'original_file_name', 'row_version', 'updated_at'])
+                  = (to_jsonb(old) - array['status', 'original_file_name', 'row_version', 'updated_at']))) then
+      raise exception using errcode = '55000', message = 'Only the OCR source deletion may claim or delete a document source';
     end if;
     new.row_version := old.row_version + 1;
     new.updated_at := clock_timestamp();
@@ -643,6 +747,91 @@ begin
 end;
 $$;
 
+-- The OCR job trigger (0107's body), plus: on a document claimed for
+-- deletion or deleted, no job is created and none goes back to queued or on
+-- to processing.
+create or replace function ocr.validate_job_write()
+returns trigger language plpgsql security definer
+set search_path = ocr, ehr, identity, auth, platform, pg_temp as $$
+declare document_row record; latest_scan record; scan_found boolean; binds_source boolean;
+  leaves_play boolean;
+begin
+  select document.id, document.patient_id, document.facility_id, document.object_version_id,
+         document.sha256_hex, document.status into document_row
+    from ehr.documents document where document.id = new.document_id;
+  select scan.event_type, scan.object_version_id, scan.object_sha256_hex,
+         scan.binding_migration_hold_reason into latest_scan
+    from ehr.document_scan_events scan where scan.document_id = new.document_id
+   order by scan.created_at desc, scan.id desc limit 1;
+  scan_found := found;
+  -- 0110: no job, retry or new reading once the source is claimed for
+  -- deletion or deleted (0107 lets failed -> queued pass without the
+  -- document check below).
+  if document_row.status in ('source_deleting', 'source_deleted')
+     and (tg_op = 'INSERT' or new.status in ('queued', 'processing')) then
+    raise exception using errcode = '55000', message = 'Source page deleted after 24 hours';
+  end if;
+  binds_source := tg_op = 'INSERT';
+  if tg_op = 'UPDATE' then
+    binds_source := new.document_id is distinct from old.document_id
+      or new.source_object_version_id is distinct from old.source_object_version_id
+      or new.source_sha256_hex is distinct from old.source_sha256_hex
+      or (new.status = 'processing' and old.status is distinct from 'processing');
+  end if;
+  leaves_play := tg_op = 'UPDATE' and not binds_source
+    and (new.status in ('failed', 'cancelled') or (old.status = 'failed' and new.status = 'queued'));
+  if not leaves_play and (document_row.id is null or document_row.facility_id is distinct from new.facility_id
+     or document_row.object_version_id is distinct from new.source_object_version_id
+     or document_row.sha256_hex is distinct from new.source_sha256_hex
+     or document_row.status is distinct from 'uploaded'
+     or (binds_source and not scan_found)
+     or (scan_found and (latest_scan.event_type is distinct from 'clean'
+       or latest_scan.object_version_id is distinct from new.source_object_version_id
+       or latest_scan.object_sha256_hex is distinct from new.source_sha256_hex
+       or latest_scan.binding_migration_hold_reason is not null))) then
+    raise exception using errcode = '23514', message = 'OCR requires exact clean immutable document evidence';
+  end if;
+  if new.patient_id is not null and new.patient_id is distinct from document_row.patient_id then
+    raise exception using errcode = '23514', message = 'OCR patient association must match the canonical document patient';
+  end if;
+  if tg_op = 'UPDATE' then
+    if new.facility_id is distinct from old.facility_id or new.document_id is distinct from old.document_id
+       or new.patient_id is distinct from old.patient_id
+       or new.source_object_version_id is distinct from old.source_object_version_id
+       or new.source_sha256_hex is distinct from old.source_sha256_hex
+       or new.operation is distinct from old.operation
+       or new.idempotency_key is distinct from old.idempotency_key
+       or new.request_sha256 is distinct from old.request_sha256
+       or new.provider is distinct from old.provider or new.created_by is distinct from old.created_by
+       or new.created_by_membership_id is distinct from old.created_by_membership_id
+       or new.row_version is distinct from old.row_version + 1 then
+      raise exception using errcode = '55000', message = 'OCR job identity is immutable and updates require the next version';
+    end if;
+    if not ((old.status = 'queued' and new.status in ('processing', 'cancelled'))
+      or (old.status = 'processing' and new.status in ('extracted', 'failed'))
+      or (old.status = 'extracted' and new.status = 'awaiting_validation')
+      or (old.status = 'awaiting_validation' and new.status in ('validated', 'rejected'))
+      or (old.status = 'failed' and new.status in ('queued', 'cancelled'))
+      or (old.status = 'processing' and new.status = 'processing'
+        and old.claim_token is not null and old.claim_expires_at > clock_timestamp()
+        and new.claim_expires_at > old.claim_expires_at
+        and new.claim_expires_at <= clock_timestamp() + interval '3600 seconds'
+        and (to_jsonb(new) - array['claim_expires_at', 'row_version', 'updated_at'])
+          = (to_jsonb(old) - array['claim_expires_at', 'row_version', 'updated_at']))
+      or (old.status = 'queued' and new.status = 'queued'
+        and old.last_error_code is not distinct from 'OCR_PAGE_ALLOWANCE_USED_UP'
+        and new.next_attempt_at < old.next_attempt_at
+        and new.next_attempt_at >= clock_timestamp() - interval '1 minute'
+        and (to_jsonb(new) - array['next_attempt_at', 'correlation_id', 'row_version', 'updated_at'])
+          = (to_jsonb(old) - array['next_attempt_at', 'correlation_id', 'row_version', 'updated_at']))) then
+      raise exception using errcode = '23514', message = 'Invalid OCR job state transition';
+    end if;
+    new.updated_at := clock_timestamp();
+  end if;
+  return new;
+end
+$$;
+
 -- Owner, ACLs. New functions belong to the OCR functions' owner (the
 -- applier, or the owner it acts as).
 do $$
@@ -653,6 +842,7 @@ begin
     execute format('alter function ocr.source_deletion_due(uuid) owner to %I', ocr_owner);
     execute format('alter function ocr.list_worker_source_deletions(integer) owner to %I', ocr_owner);
     execute format('alter function ocr.worker_source_deletion_backlog() owner to %I', ocr_owner);
+    execute format('alter function ocr.claim_worker_source_deletion(uuid,text) owner to %I', ocr_owner);
     execute format('alter function ocr.purge_worker_source_document(uuid,integer,text) owner to %I', ocr_owner);
   end if;
 end
@@ -661,18 +851,21 @@ $$;
 revoke all on function ocr.source_deletion_due(uuid),
   ocr.list_worker_source_deletions(integer),
   ocr.worker_source_deletion_backlog(),
+  ocr.claim_worker_source_deletion(uuid,text),
   ocr.purge_worker_source_document(uuid,integer,text) from public;
 
 comment on function ocr.source_deletion_due(uuid) is
-  '0110: documents due for deletion of their OCR source (every job finished at least 24 hours ago, no publication active for less than 24 hours, no legal hold, status uploaded), with due_at. Granted to no role.';
+  '0110: documents due for deletion of their OCR source (status uploaded, no legal hold, every job finished at least 24 hours ago, or 72 hours while a publication could still run), and those already source_deleting, with due_at. Granted to no role.';
 comment on function ocr.list_worker_source_deletions(integer) is
-  '0110: the OCR worker lists documents due for source deletion (ids, bucket, key, seconds past due), oldest due first.';
+  '0110: the OCR worker lists documents to delete (ids, bucket, key, seconds past due): source_deleting first, then oldest due first.';
 comment on function ocr.worker_source_deletion_backlog() is
-  '0110: the OCR worker counts documents due for source deletion now, and those due for more than 2 hours.';
+  '0110: the OCR worker counts documents due for source deletion now, and the overdue ones (due for more than 2 hours, or a job stuck in extracted for more than 24 hours).';
+comment on function ocr.claim_worker_source_deletion(uuid,text) is
+  '0110: the OCR worker claims a due document (status source_deleting, under a row lock) before deleting its S3 versions; from then no job, retry or legal hold.';
 comment on function ocr.purge_worker_source_document(uuid,integer,text) is
-  '0110: after the OCR worker deleted every S3 version of a due document, marks it source_deleted and blanks the reading and review content of its OCR rows (owner decisions of 2026-11-11). Idempotent.';
+  '0110: after the OCR worker deleted every S3 version of a claimed (source_deleting) document, marks it source_deleted and blanks the reading and review content of its OCR rows (owner decisions of 2026-11-11). Idempotent.';
 
--- 5. Grants (the same in runtime-grants.sql's 0110 block). A release applies
+-- 6. Grants (the same in runtime-grants.sql's 0110 block). A release applies
 -- only migrations, so the role that already exists gets them here; on a
 -- fresh database the role bootstrap makes them.
 do $$
@@ -683,7 +876,8 @@ begin
     select * from (values
       ('hid_ocr_worker', 'usage on schema ocr'),
       ('hid_ocr_worker', 'execute on function ocr.list_worker_source_deletions(integer), '
-        || 'ocr.worker_source_deletion_backlog(), ocr.purge_worker_source_document(uuid,integer,text)'))
+        || 'ocr.worker_source_deletion_backlog(), ocr.claim_worker_source_deletion(uuid,text), '
+        || 'ocr.purge_worker_source_document(uuid,integer,text)'))
       grant_row(grantee, privilege)
      where exists (select 1 from pg_roles where rolname = grant_row.grantee)
   loop
@@ -692,7 +886,7 @@ begin
 end
 $$;
 
--- 6. Post-checks.
+-- 7. Post-checks.
 do $$
 declare
   mismatch text;
@@ -702,8 +896,9 @@ begin
     into mismatch
     from (values
       ('ocr.reject_immutable_change()', '2b0476d4cfb42c39182899e0ab9c6302'),
-      ('ehr.reject_document_object_rebinding()', '1f6c250657df1b09a7a3c2e6a2c5e2a6'),
-      ('ehr.capture_record_version()', '77887743439d9416bc8de68c7e22b482'))
+      ('ehr.reject_document_object_rebinding()', '75a7b8c8a48049b899a7dde46b58ad97'),
+      ('ehr.capture_record_version()', '5abc424b632f44b163ecd9c0c0320630'),
+      ('ocr.validate_job_write()', 'ab6b7fd54a17cb82846dee5f505d4120'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
    where md5(proc.prosrc) is distinct from expected.digest;
@@ -722,6 +917,7 @@ begin
       from pg_proc proc
      where proc.oid in ('ocr.list_worker_source_deletions(integer)'::regprocedure,
          'ocr.worker_source_deletion_backlog()'::regprocedure,
+         'ocr.claim_worker_source_deletion(uuid,text)'::regprocedure,
          'ocr.purge_worker_source_document(uuid,integer,text)'::regprocedure)
        and (not proc.prosecdef or proc.proowner <> ocr_owner or proc.proconfig is null
             or proc.proconfig[1] not like 'search_path=pg_catalog, ocr, %');
@@ -739,17 +935,17 @@ begin
       left join pg_roles grantee on grantee.oid = privilege.grantee
      where proc.pronamespace = 'ocr'::regnamespace
        and proc.proname in ('source_deletion_due', 'list_worker_source_deletions',
-         'worker_source_deletion_backlog', 'purge_worker_source_document')
+         'worker_source_deletion_backlog', 'claim_worker_source_deletion', 'purge_worker_source_document')
        and privilege.grantee <> proc.proowner
        and (proc.proname, coalesce(grantee.rolname, 'PUBLIC')) not in (
          ('list_worker_source_deletions', 'hid_ocr_worker'), ('worker_source_deletion_backlog', 'hid_ocr_worker'),
-         ('purge_worker_source_document', 'hid_ocr_worker'));
+         ('claim_worker_source_deletion', 'hid_ocr_worker'), ('purge_worker_source_document', 'hid_ocr_worker'));
     if mismatch is not null then mismatch := 'unexpected EXECUTE: ' || mismatch; end if;
   end if;
   if mismatch is null and not exists (
        select 1 from pg_constraint where conrelid = 'ehr.documents'::regclass
           and conname = 'documents_status_check' and convalidated
-          and pg_get_constraintdef(oid) = 'CHECK ((status = ANY (ARRAY[''initiated''::text, ''uploaded''::text, ''rejected''::text, ''entered_in_error''::text, ''source_deleted''::text])))') then
+          and pg_get_constraintdef(oid) = 'CHECK ((status = ANY (ARRAY[''initiated''::text, ''uploaded''::text, ''rejected''::text, ''entered_in_error''::text, ''source_deleting''::text, ''source_deleted''::text])))') then
     mismatch := 'the constraint documents_status_check';
   end if;
   if mismatch is not null then

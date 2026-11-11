@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg';
 import type { OcrWorkerConfig } from './config';
 import type { AiUsageRecord, ClaimedOcrJob, CompletedExtraction, PageAllowance, SafeWorkerFailure, WorkerRepository } from './types';
-import type { SourceDeletionBacklog, SourceDeletionCandidate, SourceDeletionRepository,
+import type { SourceClaimResult, SourceDeletionBacklog, SourceDeletionCandidate, SourceDeletionRepository,
   SourcePurgeResult } from './source-deletion';
 
 interface ClaimRow extends QueryResultRow {
@@ -159,12 +159,26 @@ export class PostgresWorkerRepository implements WorkerRepository, SourceDeletio
       storageKey: row.storage_key, dueSeconds: Number(row.due_seconds) })));
   }
 
+  // The claim (source_deleting under a row lock) comes before any S3 call.
+  async claimSourceDeletion(documentId: string, correlationId: string): Promise<SourceClaimResult> {
+    return this.transaction(correlationId, async (client) => {
+      const row = (await client.query<{ outcome: string; storage_bucket: string | null; storage_key: string | null }>(
+        'select outcome, storage_bucket, storage_key from ocr.claim_worker_source_deletion($1, $2)',
+        [documentId, correlationId])).rows[0];
+      if (!row || !['claimed', 'already_claimed', 'already_deleted', 'not_due'].includes(row.outcome)) {
+        throw new Error('OCR source deletion claim returned an invalid row');
+      }
+      return { outcome: row.outcome as SourceClaimResult['outcome'], storageBucket: row.storage_bucket,
+        storageKey: row.storage_key };
+    });
+  }
+
   async purgeSourceDocument(documentId: string, deletedVersions: number, correlationId: string): Promise<SourcePurgeResult> {
     return this.transaction(correlationId, async (client) => {
       const row = (await client.query<{ outcome: string; extractions: number; validations: number; confirmations: number }>(
         'select outcome, extractions, validations, confirmations from ocr.purge_worker_source_document($1, $2, $3)',
         [documentId, deletedVersions, correlationId])).rows[0];
-      if (!row || !['deleted', 'already_deleted', 'not_due'].includes(row.outcome)) {
+      if (!row || !['deleted', 'already_deleted', 'not_claimed'].includes(row.outcome)) {
         throw new Error('OCR source purge returned an invalid row');
       }
       return { outcome: row.outcome as SourcePurgeResult['outcome'], extractions: Number(row.extractions),

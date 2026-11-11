@@ -1,7 +1,8 @@
 import { DeleteObjectCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
 import type { OcrWorkerConfig } from './config';
 import type { PaperReadingService } from './reading/reader';
-import { S3SourceObjectEraser, SourceDeletionError, SourceDeletionSweeper, type SourceDeletionCandidate,
+import { S3SourceObjectEraser, SourceDeletionError, SourceDeletionSweeper, type SourceClaimResult,
+  type SourcePurgeResult, type SourceDeletionCandidate,
   type SourceDeletionRepository, type SourceObjectEraser } from './source-deletion';
 import type { DocumentReader, WorkerOcrProvider, WorkerRepository } from './types';
 import { OcrWorker } from './worker';
@@ -75,10 +76,10 @@ describe('S3SourceObjectEraser', () => {
     expect(sent.filter((call) => call.name === 'DeleteObject')).toHaveLength(0);
   });
 
-  it('fails when a version is still there after the deletes', async () => {
+  it('fails when a version is still there after the deletes, with how many it deleted', async () => {
     const { client } = s3([[{ IsTruncated: false, Versions: [{ Key: KEY, VersionId: 'v1' }] }]]);
     await expect(new S3SourceObjectEraser(config, client).eraseAllVersions('synthetic-bucket', KEY,
-      new AbortController().signal)).rejects.toMatchObject({ code: 'SOURCE_VERSIONS_REMAIN' });
+      new AbortController().signal)).rejects.toMatchObject({ code: 'SOURCE_VERSIONS_REMAIN', deleted: 1 });
   });
 
   it('refuses a key outside clinical/objects/ without calling S3', async () => {
@@ -97,7 +98,7 @@ describe('S3SourceObjectEraser', () => {
     const deleteFailure = s3([[{ IsTruncated: false, Versions: [{ Key: KEY, VersionId: 'v1' }] }]],
       { deleteError: new Error('AccessDenied') });
     await expect(new S3SourceObjectEraser(config, deleteFailure.client).eraseAllVersions('synthetic-bucket', KEY,
-      new AbortController().signal)).rejects.toEqual(new SourceDeletionError('SOURCE_DELETE_FAILED'));
+      new AbortController().signal)).rejects.toMatchObject({ code: 'SOURCE_DELETE_FAILED', deleted: 0 });
   });
 });
 
@@ -107,33 +108,39 @@ const candidate = (n: number): SourceDeletionCandidate => ({
   dueSeconds: n * 3600 });
 
 function sweeperMocks() {
+  const order: string[] = [];
   const repository: jest.Mocked<SourceDeletionRepository> = {
     sourceDeletionBacklog: jest.fn().mockResolvedValue({ due: 2, overdue: 1 }),
     listSourceDeletions: jest.fn().mockResolvedValue([candidate(1), candidate(3)]),
-    purgeSourceDocument: jest.fn().mockResolvedValue({ outcome: 'deleted', extractions: 1, validations: 1, confirmations: 1 }),
+    claimSourceDeletion: jest.fn(async (documentId: string, _correlationId: string) => {
+      order.push(`claim ${documentId}`);
+      return { outcome: 'claimed', storageBucket: 'synthetic-bucket', storageKey: `clinical/objects/${documentId}` } as SourceClaimResult;
+    }),
+    purgeSourceDocument: jest.fn(async (documentId: string, versions: number, _correlationId: string) => {
+      order.push(`purge ${documentId} ${versions}`);
+      return { outcome: 'deleted', extractions: 1, validations: 1, confirmations: 1 } as SourcePurgeResult;
+    }),
   };
-  const eraser: jest.Mocked<SourceObjectEraser> = { eraseAllVersions: jest.fn().mockResolvedValue(2) };
+  const eraser: jest.Mocked<SourceObjectEraser> = { eraseAllVersions: jest.fn(async (_bucket: string, key: string, _signal: AbortSignal) => {
+    order.push(`erase ${key}`);
+    return 2;
+  }) };
   const lines: Record<string, unknown>[] = [];
   const log = jest.fn((level: string, event: string, fields: Readonly<Record<string, unknown>>) => {
     lines.push({ level, event, ...fields });
   });
-  return { repository, eraser, log, lines, sweeper: new SourceDeletionSweeper(repository, eraser, log) };
+  return { repository, eraser, log, lines, order, sweeper: new SourceDeletionSweeper(repository, eraser, log) };
 }
 
 describe('SourceDeletionSweeper', () => {
-  it('deletes the S3 versions first, then purges with the count, and ends the round with one overdue line', async () => {
-    const { repository, eraser, lines, sweeper } = sweeperMocks();
-    const order: string[] = [];
-    eraser.eraseAllVersions.mockImplementation(async (_bucket, key) => { order.push(`erase ${key}`); return 2; });
-    repository.purgeSourceDocument.mockImplementation(async (documentId, versions) => {
-      order.push(`purge ${documentId} ${versions}`);
-      return { outcome: 'deleted', extractions: 1, validations: 1, confirmations: 1 };
-    });
+  it('claims each document before any S3 call, then deletes, then purges with the count; one overdue line', async () => {
+    const { repository, eraser, lines, order, sweeper } = sweeperMocks();
     await expect(sweeper.runRound(new AbortController().signal))
       .resolves.toEqual({ due: 2, overdue: 1, deleted: 2, failed: 0 });
-    expect(order).toEqual([`erase ${candidate(1).storageKey}`, `purge ${candidate(1).documentId} 2`,
-      `erase ${candidate(3).storageKey}`, `purge ${candidate(3).documentId} 2`]);
-    expect(eraser.eraseAllVersions).toHaveBeenCalledWith('synthetic-bucket', candidate(1).storageKey, expect.anything());
+    const [one, three] = [candidate(1), candidate(3)];
+    expect(order).toEqual([`claim ${one.documentId}`, `erase ${one.storageKey}`, `purge ${one.documentId} 2`,
+      `claim ${three.documentId}`, `erase ${three.storageKey}`, `purge ${three.documentId} 2`]);
+    expect(eraser.eraseAllVersions).toHaveBeenCalledWith('synthetic-bucket', one.storageKey, expect.anything());
     expect(repository.listSourceDeletions).toHaveBeenCalledWith(100, expect.stringMatching(/^ocr-source-deletion-/));
     expect(lines.filter((line) => line.event === 'ocr.source_deletion.done')).toHaveLength(2);
     expect(lines.at(-1)).toEqual({ level: 'info', event: 'ocr.source_deletion.overdue', overdue: 1, due: 2, deleted: 2 });
@@ -147,36 +154,81 @@ describe('SourceDeletionSweeper', () => {
     expect(lines).toEqual([{ level: 'info', event: 'ocr.source_deletion.overdue', overdue: 0, due: 0, deleted: 0 }]);
   });
 
-  it('skips the purge when S3 fails, and retries the document next round', async () => {
+  it('makes no S3 call when the claim is refused (a job, retry or legal hold came after the listing)', async () => {
     const { repository, eraser, lines, sweeper } = sweeperMocks();
-    eraser.eraseAllVersions.mockRejectedValueOnce(new SourceDeletionError('SOURCE_DELETE_FAILED'));
+    repository.listSourceDeletions.mockResolvedValue([candidate(1)]);
+    repository.claimSourceDeletion.mockResolvedValue({ outcome: 'not_due', storageBucket: null, storageKey: null });
+    await expect(sweeper.runRound(new AbortController().signal)).resolves.toMatchObject({ deleted: 0, failed: 0 });
+    expect(eraser.eraseAllVersions).not.toHaveBeenCalled();
+    expect(repository.purgeSourceDocument).not.toHaveBeenCalled();
+    expect(lines).toContainEqual(expect.objectContaining({ event: 'ocr.source_deletion.skipped',
+      code: 'SOURCE_NO_LONGER_DUE' }));
+  });
+
+  it('makes no S3 call when the claim fails', async () => {
+    const { repository, eraser, lines, sweeper } = sweeperMocks();
+    repository.listSourceDeletions.mockResolvedValue([candidate(1)]);
+    repository.claimSourceDeletion.mockRejectedValue(Object.assign(new Error('timeout'), { code: '57014' }));
+    await expect(sweeper.runRound(new AbortController().signal)).resolves.toMatchObject({ failed: 1 });
+    expect(eraser.eraseAllVersions).not.toHaveBeenCalled();
+    expect(repository.purgeSourceDocument).not.toHaveBeenCalled();
+    expect(lines).toContainEqual(expect.objectContaining({ event: 'ocr.source_deletion.failed', stage: 'claim',
+      code: '57014' }));
+  });
+
+  it('skips the purge when S3 fails, and next round finishes the claimed document with the cumulative count', async () => {
+    const { repository, eraser, lines, sweeper } = sweeperMocks();
+    repository.listSourceDeletions.mockResolvedValue([candidate(1)]);
+    eraser.eraseAllVersions.mockRejectedValueOnce(new SourceDeletionError('SOURCE_DELETE_FAILED', 1));
     await expect(sweeper.runRound(new AbortController().signal))
-      .resolves.toEqual({ due: 2, overdue: 1, deleted: 1, failed: 1 });
-    expect(repository.purgeSourceDocument).toHaveBeenCalledTimes(1);
-    expect(repository.purgeSourceDocument).toHaveBeenCalledWith(candidate(3).documentId, 2, expect.any(String));
+      .resolves.toEqual({ due: 2, overdue: 1, deleted: 0, failed: 1 });
+    expect(repository.purgeSourceDocument).not.toHaveBeenCalled();
     expect(lines).toContainEqual(expect.objectContaining({ event: 'ocr.source_deletion.failed',
       documentId: candidate(1).documentId, stage: 'storage', code: 'SOURCE_DELETE_FAILED' }));
-    expect(lines.at(-1)).toMatchObject({ event: 'ocr.source_deletion.overdue', deleted: 1 });
+    expect(lines.at(-1)).toMatchObject({ event: 'ocr.source_deletion.overdue', deleted: 0 });
 
-    // Next round: the same document is listed again and this time deleted.
-    repository.listSourceDeletions.mockResolvedValue([candidate(1)]);
-    await sweeper.runRound(new AbortController().signal);
+    // Next round: the document is listed again (claimed documents first) and its claim is already held.
+    repository.claimSourceDeletion.mockResolvedValueOnce({ outcome: 'already_claimed', storageBucket: 'synthetic-bucket',
+      storageKey: candidate(1).storageKey });
+    eraser.eraseAllVersions.mockResolvedValueOnce(1);
+    await expect(sweeper.runRound(new AbortController().signal)).resolves.toMatchObject({ deleted: 1, failed: 0 });
     expect(repository.purgeSourceDocument).toHaveBeenLastCalledWith(candidate(1).documentId, 2, expect.any(String));
   });
 
-  it('is idempotent: a purge that failed after S3 succeeded is retried with 0 versions; an already-deleted answer is not counted', async () => {
+  it('keeps the count when the purge fails after S3 succeeded, and retries with it', async () => {
     const { repository, eraser, lines, sweeper } = sweeperMocks();
     repository.listSourceDeletions.mockResolvedValue([candidate(1)]);
     repository.purgeSourceDocument.mockRejectedValueOnce(Object.assign(new Error('connection lost'), { code: '57P01' }));
     await sweeper.runRound(new AbortController().signal);
     expect(lines).toContainEqual(expect.objectContaining({ event: 'ocr.source_deletion.failed', stage: 'purge',
       code: '57P01', objectVersionsDeleted: 2 }));
-    eraser.eraseAllVersions.mockResolvedValue(0);
+    repository.claimSourceDeletion.mockResolvedValueOnce({ outcome: 'already_claimed', storageBucket: 'synthetic-bucket',
+      storageKey: candidate(1).storageKey });
+    eraser.eraseAllVersions.mockResolvedValueOnce(0);
     await sweeper.runRound(new AbortController().signal);
-    expect(repository.purgeSourceDocument).toHaveBeenLastCalledWith(candidate(1).documentId, 0, expect.any(String));
+    expect(repository.purgeSourceDocument).toHaveBeenLastCalledWith(candidate(1).documentId, 2, expect.any(String));
+  });
+
+  it('logs a purge that is not done (not_claimed) as failed, never as done', async () => {
+    const { repository, lines, sweeper } = sweeperMocks();
+    repository.listSourceDeletions.mockResolvedValue([candidate(1)]);
+    repository.purgeSourceDocument.mockResolvedValue({ outcome: 'not_claimed', extractions: 0, validations: 0,
+      confirmations: 0 });
+    await expect(sweeper.runRound(new AbortController().signal)).resolves.toMatchObject({ deleted: 0, failed: 1 });
+    expect(lines).toContainEqual(expect.objectContaining({ event: 'ocr.source_deletion.failed', stage: 'purge',
+      code: 'SOURCE_NOT_CLAIMED' }));
+    expect(lines.filter((line) => line.event === 'ocr.source_deletion.done')).toEqual([]);
+  });
+
+  it('is idempotent: an already deleted document gets no S3 call, only the purge (residual blanking), not counted', async () => {
+    const { repository, eraser, lines, sweeper } = sweeperMocks();
+    repository.listSourceDeletions.mockResolvedValue([candidate(1)]);
+    repository.claimSourceDeletion.mockResolvedValue({ outcome: 'already_deleted', storageBucket: null, storageKey: null });
     repository.purgeSourceDocument.mockResolvedValue({ outcome: 'already_deleted', extractions: 0, validations: 0,
       confirmations: 0 });
     await expect(sweeper.runRound(new AbortController().signal)).resolves.toMatchObject({ deleted: 0, failed: 0 });
+    expect(eraser.eraseAllVersions).not.toHaveBeenCalled();
+    expect(repository.purgeSourceDocument).toHaveBeenCalledWith(candidate(1).documentId, 0, expect.any(String));
     expect(lines.at(-1)).toEqual({ level: 'info', event: 'ocr.source_deletion.overdue', overdue: 1, due: 2, deleted: 0 });
   });
 
@@ -189,6 +241,7 @@ describe('SourceDeletionSweeper', () => {
       await expect(sweeper.runRound(new AbortController().signal)).resolves.toBeNull();
       expect(lines).toEqual([expect.objectContaining({ level: 'error', event: 'ocr.source_deletion.failed',
         stage: 'list', code: '42501' })]);
+      expect(repository.claimSourceDeletion).not.toHaveBeenCalled();
       expect(eraser.eraseAllVersions).not.toHaveBeenCalled();
     }
   });
