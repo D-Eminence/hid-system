@@ -1,14 +1,121 @@
 import { z } from 'zod';
 import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, VITAL_MEASURES } from './contract';
+import { FIELD_UNREAD } from './grounding';
+import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './signs';
 
 /**
  * The frozen system prompt and output schema for one page of a paper record.
  * Any change to either is a new PROMPT_VERSION / MODEL_SCHEMA_VERSION: they
  * are recorded in provenance, and an unchanged prefix is what lets the prompt
  * cache hit across pages and documents. Nothing here may vary per request.
+ *
+ * PROMPT_VERSION also changes when how a document is read changes without the
+ * prompt text changing, so the OCR HTTP service, which reuses a reading only
+ * under the current version, never reuses one made the older way. Version 3:
+ * the re-read routing of the owner decision of 2026-11-05 (flagged pages get
+ * the image re-read, with the text re-read only for failed or declined pages
+ * and as a fallback). The prompt text, the answer schema and every request
+ * body are byte for byte as under version 2; the label is not sent. Version 5:
+ * hard pages (flagged handwriting or low_confidence, re-read with the picture)
+ * get two best-guess readings (HARD_PAGE_PROMPT_VERSION; owner decision of
+ * 2026-11-05 about 18:40 UTC). The text-only request is still byte for byte
+ * as under version 2. Version 6: a hard page's best-guess reading grounds
+ * diagnosis and lab test names to lists (ICD-11 titles and our own synonyms,
+ * our own lab test names), uses the NAFDAC-sourced brand table, and reads
+ * handwritten signs (HARD_PAGE_PROMPT_VERSION 3; owner decision of
+ * 2026-11-05 about 21:00 UTC). SYSTEM_PROMPT, the text-only request and the
+ * image request are byte for byte unchanged. Version 7: hard pages' best-guess
+ * reads may zoom into the picture (zoom.ts; owner decision of 2026-11-05 about
+ * 18:45 UTC; HARD_PAGE_PROMPT_VERSION 4), so a reading made before cannot be
+ * reused; the text-only request and the ordinary image re-read request are
+ * unchanged. Version 8: hard pages are read in the clean, chat-like style the
+ * owner asked for on 2026-11-06 (about 10:13 UTC: "i want the output clean ...
+ * doctor no get time"; HARD_PAGE_PROMPT_VERSION 8, or 7 without zoom): a best
+ * guess for every word with "?" after each uncertain one, "[?]" only where no
+ * letter shapes can be made out, two disagreeing reads shown "A? (or B?)",
+ * unlisted drug names kept as read, crossed-out writing on its item, partial
+ * words ("Am…") and field placeholders ("[dose?]"), and the plain reading built
+ * from the reading itself, annotated in place (hard-page.ts). Not yet released
+ * when the display and the hard-page prompt were revised the same day, so it
+ * stays 8. The text-only request and
+ * the ordinary image re-read request are byte for byte unchanged. Version 9: the hard-page bounds of the
+ * coordinator's decision of 2026-11-10 (production job 5419047a: one hard page took 13 minutes and about $3.60): at
+ * most 4 zoom calls per read, so rule J's text says 4 where it said 8 (HARD_PAGE_PROMPT_VERSION 9); turns after a zoom
+ * at OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT; a per-read output-token cap; and a deadline for the page after which a read
+ * still running is dropped. A reading made the older way is not reused. The text-only request and the ordinary image
+ * re-read request are still byte for byte unchanged. Version 10: rule J asks for all the zooms a read needs in one turn
+ * (HARD_PAGE_PROMPT_VERSION 10; coordinator's decision of 2026-11-10, a follow-up to version 9: production showed about
+ * 4 turns per read, each thinking again). A reading made the older way is not reused. The text-only request, the
+ * ordinary image re-read request and the hard-page text without zoom are byte for byte unchanged. Version 11: a hard
+ * read that has not answered when its tokens or time run short (or whose turn stopped without an answer, the turn
+ * after its zoom calls ran out included) is sent one answer-only turn with a new user message (claude.client.ts
+ * FORCED_ANSWER_INSTRUCTION, or FORCED_ANSWER_INSTRUCTION_NO_ZOOM for a read never offered zoom;
+ * HARD_PAGE_PROMPT_VERSION 11; coordinator 2026-11-10 after job 566c38bf). A reading made the older way is not reused.
+ * The text-only request and the ordinary image re-read request are byte for byte unchanged. Version 12 (coordinator and
+ * owner cleanups of 2026-11-10, about 20:30 UTC, after the first live run with versions 11): the hard-page rule A asks
+ * for page headings, section titles and form labels to be left out (HARD_PAGE_PROMPT_VERSION 12, and 12-no-zoom), and
+ * the reading changes in code: at most one other option per field, two items where a hard page's two readings name
+ * different drugs, and headings and notes repeating an order left out of every page (hard-page.ts, tidy.ts). A
+ * reading made the older way is not reused. SYSTEM_PROMPT, the text-only request and the ordinary image re-read
+ * request are byte for byte unchanged (the first pass is not seen to give headings as items, and its request is
+ * pinned by hash).
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-2';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-12';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
+/**
+ * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
+ * They are used only for a flagged page re-read with its picture, so SYSTEM_PROMPT, MODEL_OUTPUT_JSON_SCHEMA and
+ * the text-only page message, and with them MODEL_SCHEMA_VERSION, are unchanged by it. Recorded in provenance
+ * when a page was read from its picture. Version 3: the message no longer says the page was hard to read; it says
+ * the first reading needs checking, for any page flag. Version 4: cite every scanned line the item's box covers
+ * (fragments on the same row included), and read from the picture where the scanned text of hard handwriting is
+ * wrong or nonsense. Version 5: the same instructions and schema, now used only for flagged pages that are not hard
+ * pages (a hard page, flagged handwriting or low_confidence, gets the hard-page prompt instead, when that is on).
+ */
+export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
+/**
+ * The hard-page prompt (hardPageMessage) and its output schema (MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA): best-guess
+ * readings for a hard page only (owner decision of 2026-11-05, about 18:40 UTC). Recorded in provenance when used.
+ * Version 3: rule I, handwritten signs (signs.ts: a sign read is written as its meaning and "(sign)", any other
+ * "[sign?]"), and "mane" among the frequencies (owner decision of 2026-11-05, about 21:00 UTC). Version 4: with zoom
+ * on (OCR_AI_HARD_PAGE_ZOOM, the default), the message adds rule J, which offers the zoom tool (zoom.ts); with zoom
+ * off it is the version 3 text. Version 6 (zoom offered) and 5 (no zoom; the same text without rule J): the clean
+ * reading of 2026-11-06 (see PROMPT_VERSION 8): best guess for every word with "?", "[?]" only for writing with no
+ * letter shapes, a question mark on the paper as "(? on paper)", fields that are the reading and never a description
+ * of it, instructions in words as notes, crossed-out writing as "(crossed out: X)" on its item ("crossedOut" in the
+ * schema), a free-text frequency, and "plain" left empty (built in code). Version 8 (zoom offered) and 7 (no zoom;
+ * the same text without rule J), the same day after the owner's two chat transcripts: rule B also asks for a word cut
+ * short as the letters seen and "…" ("Am…", with a guess for the whole word only in brackets with "?": "Pl…
+ * (Plasil?)"), a field that is written but cannot be made out as its placeholder ("[route?]", "[drug?]", "[dose?]",
+ * "[freq?]") so the rest of the line is kept, and a mark that may be either of two things as "IV? (or ✓?)"; rule E
+ * names a field read from where it sits or what is typical as basis "context". Versions 5 and 6 were never released.
+ * Version 9 (zoom offered; the text without rule J is unchanged, still version 7): rule J allows at most 4 zoom calls
+ * where version 8 allowed 8 (OCR_AI_ZOOM_MAX_CALLS now 0 to 4, default 4; coordinator 2026-11-10). The count is part
+ * of the text, so a setting below 4 also changes it, as before. Version 10 (zoom offered; the text without rule J is
+ * still version 7): rule J asks the model to decide every place it needs a closer look at and request all those zooms
+ * together in one response (several zoom calls at once), then answer from what they show, zooming again only if a
+ * crop is still unclear and calls are left (coordinator 2026-11-10, follow-up to version 9: fewer thinking turns per
+ * read). The cap of 4 and everything else are unchanged. Version 11 (coordinator 2026-11-10, after job 566c38bf: both
+ * reads used everything and gave no answer): the first message is the version 10 text, unchanged; once the zoom calls
+ * are used up the next turn is an ordinary follow-up turn with the zoom tool no longer offered (tool_choice none); a
+ * read that has not answered when its tokens or time run short, or whose turn stopped without an answer, is sent one
+ * answer-only turn: claude.client.ts FORCED_ANSWER_INSTRUCTION as a new user message (the -11-no-zoom reads:
+ * FORCED_ANSWER_INSTRUCTION_NO_ZOOM, without the sentence about the zoom tool), the zoom tool not offered, at low
+ * effort (README "A hard read always ends with an answer"). Version 12 (coordinator and owner cleanups of 2026-11-10,
+ * about 20:30 UTC): rule A adds that page headings, section titles and form labels ("Treatment sheet", "Immediate
+ * management", "Plan") are not items and are left out, the writing under them listed; the text without rule J
+ * changes the same way (12-no-zoom, new hash pin). Everything else is the version 11 text.
+ */
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-12';
+/**
+ * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
+ * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
+ * calls, which is the version 12 text without rule J (pinned by hash in hard-page.spec.ts; the version 8 to 11 text
+ * without rule J before rule A's heading sentence), and, since version 11, the same answer-only turn as with zoom when
+ * the read's tokens or time run short or its turn stops without an answer (it was
+ * 'hid-paper-reading-hard-page-prompt-7' before, then '-11-no-zoom').
+ */
+export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-12-no-zoom';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -120,6 +227,34 @@ export const MODEL_OUTPUT_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
   },
 };
 
+const itemJsonSchema = (MODEL_OUTPUT_JSON_SCHEMA.properties as { items: { items: {
+  required: readonly string[]; properties: Record<string, unknown> } } }).items.items;
+const pixelNumber = { type: 'number' } as const;
+
+/**
+ * The image re-read's output: the text schema with one more required field per item, "box", the item's own place
+ * in the picture as absolute pixel coordinates {x1, y1, x2, y2} (top-left and bottom-right corners) of the picture
+ * as the model sees it. Claude works best with pixel coordinates and not with normalised ones
+ * (platform.claude.com/docs/en/build-with-claude/vision-coordinates, read 2026-11-05); the client turns them into
+ * page fractions. Used only for requests that carry the picture.
+ */
+export const MODEL_OUTPUT_IMAGE_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
+  ...MODEL_OUTPUT_JSON_SCHEMA,
+  properties: {
+    ...(MODEL_OUTPUT_JSON_SCHEMA.properties as Record<string, unknown>),
+    items: {
+      type: 'array',
+      items: {
+        ...itemJsonSchema,
+        required: [...itemJsonSchema.required, 'box'],
+        properties: { ...itemJsonSchema.properties, box: { type: 'object', additionalProperties: false,
+          required: ['x1', 'y1', 'x2', 'y2'],
+          properties: { x1: pixelNumber, y1: pixelNumber, x2: pixelNumber, y2: pixelNumber } } },
+      },
+    },
+  },
+};
+
 const field = z.string().max(2_000);
 export const modelItemSchema = z.strictObject({
   kind: z.enum(ITEM_KINDS),
@@ -142,13 +277,291 @@ export const modelPageSchema = z.strictObject({
     lineIds: z.array(z.string().max(40)).max(60) }),
   items: z.array(modelItemSchema).max(300),
 });
-export type ModelItem = z.infer<typeof modelItemSchema>;
-export type ModelPage = z.infer<typeof modelPageSchema>;
+const finite = z.number().finite();
+/** The model's box: pixels of the picture as it sees it (after the API's resize). */
+export const modelPixelBoxSchema = z.strictObject({ x1: finite, y1: finite, x2: finite, y2: finite });
+export const modelImageItemSchema = modelItemSchema.extend({ box: modelPixelBoxSchema });
+export const modelImagePageSchema = modelPageSchema.extend({ items: z.array(modelImageItemSchema).max(300) });
+export type ModelPixelBox = z.infer<typeof modelPixelBoxSchema>;
+/** A box as page fractions (left, top, width, height), measured from the top-left corner. */
+export interface ModelFractionBox { left: number; top: number; width: number; height: number }
+/**
+ * An item as the reader checks it; "box" only in an answer read from the picture, already turned from the model's
+ * pixels into page fractions by the client.
+ */
+export type ModelItem = z.infer<typeof modelItemSchema> & { box?: ModelFractionBox; hard?: HardItemExtras };
+export type ModelPage = Omit<z.infer<typeof modelPageSchema>, 'items'> & { items: ModelItem[] };
 
-/** The user turn for one page: lines without their boxes. */
+/** The user turn for one page, text only: lines without their boxes. Unchanged by the image re-read. */
 export function pageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
   handwritten: boolean }[]): string {
   return `Page ${page} of a paper record. Its lines, as JSON:\n${JSON.stringify(lines.map((line) => ({
     id: line.id, text: line.text, confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
+  })))}`;
+}
+
+/** A page-fraction box as whole pixels {x1, y1, x2, y2} of a picture of this size. */
+export function toPixelBox(box: ModelFractionBox, size: { width: number; height: number }): ModelPixelBox {
+  return { x1: Math.round(box.left * size.width), y1: Math.round(box.top * size.height),
+    x2: Math.round((box.left + box.width) * size.width), y2: Math.round((box.top + box.height) * size.height) };
+}
+
+/** The model's pixel box as page fractions of a picture of this size (corners in either order). */
+export function toFractionBox(box: ModelPixelBox, size: { width: number; height: number }): ModelFractionBox {
+  const left = Math.min(box.x1, box.x2) / size.width;
+  const top = Math.min(box.y1, box.y2) / size.height;
+  return { left, top, width: Math.max(box.x1, box.x2) / size.width - left,
+    height: Math.max(box.y1, box.y2) / size.height - top };
+}
+
+/**
+ * The user turn's text for one page re-read WITH its picture (the picture is the block before this one). `size` is
+ * the picture as the model sees it (after the API's resize, before padding): the lines carry their boxes in its
+ * pixels, and the model answers in them. The instructions here take the place of rules 2 and 3 for this page only.
+ */
+export function imagePageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
+  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number }): string {
+  return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
+${size.height} pixels high. The first reading of this page, from its text alone, needs checking: the text may be \
+misread (handwriting or low confidence), an item may have been missed or left out, or the reading was unsure. \
+So this time read the writing from the picture itself. Rules 2 and 3 change for this page only, as follows; every \
+other rule stays.
+
+A. Read each item from the picture. "asWritten" is the item as you read it in the picture, letter for letter, \
+with its spelling and abbreviations; it may differ from the line text below where the service misread the writing. \
+On hard handwriting the line text below may be wrong or even nonsense: read the item from the picture, not from \
+that text.
+
+B. Cite in "lineIds" the ids of the lines below that the item sits on in the picture: every line whose box your \
+item's box covers, including small fragments of the same row that the service split off. Cite only ids from this \
+list.
+
+C. Give the item's own place in the picture in "box" as absolute pixel coordinates: x1 and y1 the top-left \
+corner, x2 and y2 the bottom-right corner, with x from the left edge and y from the top edge of the picture, \
+around the writing of this item only.
+
+D. Never invent anything. Where part of the writing cannot be read, write "[unreadable]" in its place and set \
+"unsure" to true; never guess a word, number or dose. A number is filled only where you can read it in the picture.
+
+E. Leave out writing that is not on one of the lines below.
+
+The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
+${JSON.stringify(lines.map((line) => ({
+    id: line.id, text: line.text,
+    box: line.box ? toPixelBox(line.box, size) : null,
+    confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
+  })))}`;
+}
+
+/**
+ * How often, on a hard page: the codes a best-guess frequency is normalised to ("8 hourly" is "8hrly"). Since
+ * hard-page prompt version 5/6 a frequency written otherwise is kept as read, with "?" (hard-page.ts
+ * normaliseFrequency). A "?" after one marks it uncertain.
+ */
+export const HARD_PAGE_FREQUENCIES = ['od', 'bd', 'tds', 'qds', '6hrly', '8hrly', '12hrly', 'nocte', 'mane', 'stat',
+  'prn'] as const;
+/**
+ * The old hard-page token for a word that could not be read even as a guess (hard-page prompt versions 2 to 4).
+ * The model is no longer asked for it; where it still writes it, hard-page.ts turns it into NO_LETTERS.
+ */
+export const UNREADABLE = '[unreadable]';
+/**
+ * Clean hard-page reading tokens (owner decision of 2026-11-06, about 10:13 UTC). The reading's own uncertainty is
+ * a "?" straight after a word or number ("Ceftriaxone? 1g? 8hrly?").
+ * - NO_LETTERS "[?]": writing is there but no letter or digit shapes can be made out (the only token that stands
+ *   for a word not guessed). Under hard-page prompt versions 2 to 4 "[?]" was a question mark written on the paper.
+ * - PAPER_QUERY "(? on paper)": a question mark written on the paper itself (a clinical query, "?TB").
+ * - "(or B?)" after a field: a second reading read B there (ALTERNATIVE_OPEN).
+ * - "(crossed out: X?)": writing struck through on the paper (CROSSED_OUT_OPEN).
+ */
+export const NO_LETTERS = '[?]';
+export const PAPER_QUERY = '(? on paper)';
+/**
+ * A word cut short or with only its first letters readable ("Am…"; hard-page prompt 7/8): the letters seen and this
+ * ellipsis. Never matched to a list or completed in code; a guess for the whole word may follow in brackets with "?"
+ * ("Pl… (Plasil?)"), and code marks such a guess "?" where the model left it unmarked.
+ */
+export const PARTIAL_WORD = '…';
+export { FIELD_UNREAD };
+export const ALTERNATIVE_OPEN = '(or ';
+export const CROSSED_OUT_OPEN = '(crossed out: ';
+/** Where a field of a hard-page item came from: the letter shapes, what is usual on such a sheet, or nothing. */
+export const FIELD_BASES = ['letters', 'context', 'empty'] as const;
+/** The fields of a hard-page item that carry a basis; "other" covers every remaining field of the item. */
+export const BASIS_FIELDS = ['name', 'dose', 'unit', 'route', 'frequency', 'duration', 'value', 'other'] as const;
+export type FieldBasis = (typeof FIELD_BASES)[number];
+export type BasisField = (typeof BASIS_FIELDS)[number];
+const imageItemJsonSchema = (MODEL_OUTPUT_IMAGE_JSON_SCHEMA.properties as { items: { items: {
+  required: readonly string[]; properties: Record<string, unknown> } } }).items.items;
+
+/**
+ * The hard-page answer: the image schema with, per item, the medicine dose as a number ("dose") and its unit
+ * ("doseUnit"), the writing crossed out on the item ("crossedOut", "" where none), and "basis": for each of
+ * BASIS_FIELDS whether it was read from the letters, filled from context, or left empty. The frequency is free text
+ * (hard-page.ts normalises the usual codes). Used only for hard-page requests; the text-only and the image request
+ * schemas are unchanged.
+ */
+export const MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
+  ...MODEL_OUTPUT_IMAGE_JSON_SCHEMA,
+  properties: {
+    ...(MODEL_OUTPUT_IMAGE_JSON_SCHEMA.properties as Record<string, unknown>),
+    items: {
+      type: 'array',
+      items: {
+        ...imageItemJsonSchema,
+        required: [...imageItemJsonSchema.required, 'dose', 'doseUnit', 'crossedOut', 'basis'],
+        properties: { ...imageItemJsonSchema.properties,
+          dose: text, doseUnit: text, crossedOut: text,
+          basis: { type: 'object', additionalProperties: false, required: [...BASIS_FIELDS],
+            properties: Object.fromEntries(BASIS_FIELDS.map((key) => [key, { type: 'string', enum: [...FIELD_BASES] }])) } },
+      },
+    },
+  },
+};
+
+const basisOf = z.enum(FIELD_BASES);
+const basisSchema = z.strictObject({ name: basisOf, dose: basisOf, unit: basisOf, route: basisOf, frequency: basisOf,
+  duration: basisOf, value: basisOf, other: basisOf });
+export const modelHardItemSchema = modelImageItemSchema.extend({
+  dose: field, doseUnit: field, crossedOut: field, basis: basisSchema,
+});
+export const modelHardPageSchema = modelPageSchema.extend({ items: z.array(modelHardItemSchema).max(300) });
+/** What a hard-page answer adds to an item, kept beside it (never stored as such; see reader.ts). */
+export interface HardItemExtras {
+  dose: string; doseUnit: string; basis: Record<BasisField, FieldBasis>;
+  /** The writing crossed out on the item, as read ("" where none; absent in answers made before it). */
+  crossedOut?: string;
+  /** Some text looks like a description of the writing (hard-page.ts isDescription): flagged, never changed. */
+  described?: boolean;
+  /** For a medicine, after the drug list (hard-page.ts): the listed generic its name matched, or null. */
+  generic?: string | null;
+  /** For a medicine matched to the list: whether the name was a listed name as written (not respelled). */
+  nameExact?: boolean;
+  /** For a medicine: the name the model proposed, normalised (drug-list.ts normaliseDrugName), for comparing readings. */
+  proposedName?: string;
+  /** For a medicine: the name the model proposed as read, with its "?" marks, for finding it in asWritten. */
+  writtenName?: string;
+  /**
+   * For a medicine (hard-page.ts): how its name is shown where it stands in asWritten: `replace` the words read (a
+   * list respelling, a look-alike pair), `after` added straight after them (a listed brand's generic), `guess` marked.
+   */
+  nameShown?: { replace?: string; after?: string; guess: boolean };
+  /**
+   * The words asWritten marks a guess ("?") that no field carries (hard-page.ts carryMarks), as word keys: finish
+   * checks each is shown with its "?", else marks every shown field a guess.
+   */
+  uncarriedGuesses?: string[];
+}
+
+/**
+ * Rule I of the hard-page message: the sign table (signs.ts). Built once from the table, so it is the same for every
+ * page. Signs go in the hard-page prompt only: they are read from the picture, which only the image re-reads see;
+ * the first pass reads the text service's lines, where a sign is lost or garbled, and the image re-read of a page
+ * that is not a hard page keeps rule D (never guess), so SYSTEM_PROMPT and that message are unchanged.
+ */
+export const SIGNS_RULE = `I. Signs. Doctors write some signs that stand for words. Read a mark as a sign only when it \
+is one of these, and write it as its meaning followed by "${SIGN_READ_MARK}", in "asWritten" and in the field, for \
+example "alternate ${SIGN_READ_MARK} days", "with ${SIGN_READ_MARK} food" or "diagnosis ${SIGN_READ_MARK}: malaria":
+${SIGN_TABLE.map((sign) => `- ${sign.looks}: ${sign.meaning}`).join('\n')}
+Where a mark may be a sign but is not one of these, or you are not sure which sign it is or what it means here, \
+write "${SIGN_UNSURE}" in its place: never guess a word for a sign. Abbreviations written in letters and numbers \
+are not signs: copy them as written (rule B), never with "${SIGN_READ_MARK}". What they mean, to help you read them: \
+${ABBREVIATION_TABLE.map(([written, meaning]) => `${written} ${meaning}`).join('; ')}.`;
+
+/**
+ * The user turn's text for a HARD page re-read with its picture (flagged handwriting or low_confidence): the owner
+ * decision of 2026-11-05 (about 18:40 UTC) allows tentative best-guess readings here only, and that of 2026-11-06
+ * (about 10:13 UTC) asks for them clean, as a chat reading: every word guessed, "?" after each uncertain one. The same request is sent
+ * twice and the two answers are compared in code (hard-page.ts), so this asks for the single best reading, not
+ * for alternatives. Rule 1 (never fill a gap from what is usual) is relaxed only where a field is marked basis
+ * "context"; never inventing an item, citing lines and giving the box stay. Nothing here varies but the page.
+ *
+ * Zoom (owner decision of 2026-11-05, about 18:45 UTC): with `zoomCalls` over 0 the message adds rule J, which
+ * offers the zoom tool (zoom.ts) for at most that many calls; without it the message is the version 5 text (rule J
+ * is the only difference between versions 5 and 6).
+ */
+export function hardPageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
+  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number },
+  zoomCalls = 0): string {
+  return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
+${size.height} pixels high. It is hard to read: hard handwriting or writing the text service could not read with \
+confidence. A busy doctor will check every item against the paper, so give a clean reading of what is written, as \
+you would read it out to a colleague: your best guess for every word, marked where you are not sure. Rules 2, 3 and \
+4 change for this page as follows, and rule 1 changes only where rule F says so; every other rule stays.
+
+A. Read the page line by line from the picture, top to bottom, and list every item written on it, including \
+instructions and plans written in words (such as "Transfer to the ward", "Review in 2 days" or "Switch to IV \
+Ceftriaxone 1g"): an order for a medicine is a "medicine", any other instruction or plan is a "note". Page \
+headings, section titles and form labels (such as "Treatment sheet", "Immediate management" or "Plan") are not \
+items: leave them out, as you would printed form text, and list the writing under them. Read each item from the \
+picture itself, not from the line text below: on hard handwriting that text may be wrong or nonsense.
+
+B. "asWritten" is the item as you read it in the picture, word for word in the order written, with its spelling \
+and abbreviations. Give your best guess for every word and number, and put "?" straight after each one you are not \
+sure of (for example "IV Flagyl? 500mg? 8hrly?"); a word you are sure of has no "?". Write "${NO_LETTERS}" only where \
+there is writing but no letter or digit shapes you can make out at all; never leave out writing because it is hard \
+to read. Where only the first letters of a word can be made out and the rest trails off, write the letters you see \
+followed by "${PARTIAL_WORD}" (for example "Am${PARTIAL_WORD}"), never a word completed from what is usual (text cut off \
+at the edge of the picture is still left out, rule G); if you have a guess \
+for the whole word, add it in brackets with "?" straight after it (for example "Pl${PARTIAL_WORD} (Plasil?)"). Where \
+one part of an otherwise readable item is written but cannot be made out at all, write "${FIELD_UNREAD.route}", \
+"${FIELD_UNREAD.name}", "${FIELD_UNREAD.dose}" or "${FIELD_UNREAD.frequency}" in its place, in "asWritten" and in \
+that field, so the rest of the item is kept (for example "IV Cefuroxime? ${FIELD_UNREAD.dose} 8hrly?"). Where a mark \
+may be either of two things (such as "IV" or a tick in the margin), write your first reading with "?" and the other \
+after it as "(or X?)" (for example "IV? (or ✓?)"). A question mark written on the paper itself (a clinical query, such as "?TB" or "TB?" for a suspected \
+diagnosis) is written "${PAPER_QUERY}" where it stands, in "asWritten" and in the field (for example \
+"Dx ${PAPER_QUERY} TB"); a "?" straight after a word is only ever your own uncertainty, never the paper's.
+
+C. Every field is the reading itself, never a description of it. Give your best reading of every field of the \
+item, with "?" after each uncertain word or number; use "" only for a field the item does not have, and \
+"${NO_LETTERS}" for one it has that shows no letter shapes. Never write a sentence about the writing (such as \
+"handwritten entry that cannot be read", "illegible" or "check the paper") in "asWritten" or in any field. Leave \
+"plain" as "": the plain reading is built from your reading and your fields.
+
+D. A medicine is read as: route (such as po, iv, im, pr, sc, or "" where none is written), drug name, dose, unit, \
+how often. "dose" is the number only (such as "500" or "0.5"); "doseUnit" is its unit (such as mg, g, mcg, ml, iu, \
+tab); "strength" is the dose and unit together as written. "frequency" is how often, as one of: od, bd, tds, qds, \
+6hrly, 8hrly, 12hrly, nocte, mane, stat, prn where it is one of these, else as you read it, with "?" after it if you \
+are not sure. Read the drug name from its letters as written, a brand as the brand. For any item that is not a \
+medicine, "dose", "doseUnit" and "frequency" are "".
+
+E. For every item, "basis" says where each field came from: "letters" where you read it from the shapes of the \
+letters or digits on the page, "context" where you inferred it from what is usual on such a sheet rather than \
+from the writing (such as a frequency read from where a squiggle sits or what is typical, not from its letters), \
+"empty" where the field is "" for this item. "name", "dose", "unit", "route", "frequency", \
+"duration" and "value" are those fields ("unit" is "doseUnit" for a medicine and "unit" otherwise); "other" is \
+the item's remaining fields together ("context" if any of them came from context).
+
+F. You may fill a field from context only when its basis says "context". Never invent an item that is not written \
+on the page: every item is writing you can see. A common medicine is not more likely just because it is common; \
+if the letters point to a rarer medicine, read the letters.
+
+G. Ignore writing that shows through from the back of the sheet, and text cut off at the edges of the picture. \
+Writing crossed out on the paper (struck through) is never an item of its own and never part of a field: write it \
+in "asWritten" where it stands as "(crossed out: X)", X read as in rule B (for example "IV Flagyl 500mg (crossed \
+out: 400mg?) 8hrly"), and put X, with its "?" marks, in "crossedOut" ("" where nothing on the item is crossed \
+out). An item crossed out as a whole is a "note" whose "asWritten" is "(crossed out: X)".
+
+H. Cite in "lineIds" the ids of the lines below that the item sits on in the picture: every line whose box your \
+item's box covers, including small fragments of the same row that the service split off. Cite only ids from this \
+list. Give the item's own place in the picture in "box" as absolute pixel coordinates: x1 and y1 the top-left \
+corner, x2 and y2 the bottom-right corner, with x from the left edge and y from the top edge of the picture, \
+around the writing of this item only. Leave out writing that is not on one of the lines below.
+
+${SIGNS_RULE}
+
+${zoomCalls > 0 ? `J. You can use the zoom tool to look closer at hard-to-read writing before you answer: give page ${page}, a box \
+around the writing in this picture's pixels (the same pixels as the line boxes and the boxes in your answer) and a \
+scale from 1 to 4. It returns that part of the picture enlarged. You may zoom at most ${zoomCalls} times for this \
+page; use it where a closer look can settle a word or number, not for every line. First decide every place where \
+a closer look would help, and ask for all of those zooms together in one response (several zoom calls at once), not \
+one at a time. Then answer from what they show; zoom again only if a crop is still unclear and you have calls left. \
+Every box in your answer stays in the full picture's pixels.
+
+` : ''}The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
+${JSON.stringify(lines.map((line) => ({
+    id: line.id, text: line.text,
+    box: line.box ? toPixelBox(line.box, size) : null,
+    confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
   })))}`;
 }

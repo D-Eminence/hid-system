@@ -65,7 +65,7 @@ export interface CompletedExtraction {
   provenance: Readonly<Record<string, unknown>>;
 }
 
-/** A facility's page allowance for the current Africa/Lagos calendar month (migration 0110). */
+/** A facility's page allowance for the current Africa/Lagos calendar month (migration 0107). */
 export interface PageAllowance {
   pagesUsed: number;
   pagesLimit: number;
@@ -74,7 +74,7 @@ export interface PageAllowance {
   paused: boolean;
 }
 
-/** One model's Claude API use for one attempt of one job (counts only; ocr.record_worker_ai_usage, 0110). */
+/** One model's Claude API use for one attempt of one job (counts only; ocr.record_worker_ai_usage, 0107). */
 export interface AiUsageRecord {
   model: string;
   requests: number;

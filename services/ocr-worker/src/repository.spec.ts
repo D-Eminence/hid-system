@@ -38,7 +38,7 @@ describe('PostgresWorkerRepository queue metrics', () => {
   });
 });
 
-describe('PostgresWorkerRepository page allowance (migration 0110)', () => {
+describe('PostgresWorkerRepository page allowance (migration 0107)', () => {
   const job = { jobId: '00000000-0000-4000-8000-000000000001', claimToken: '00000000-0000-4000-8000-000000000002',
     correlationId: 'ocr-worker-correlation' } as ClaimedOcrJob;
   const row = { pages_used: 12, pages_limit: 500, resets_on: '2026-12-01', paused: false };
@@ -93,7 +93,7 @@ describe('PostgresWorkerRepository page allowance (migration 0110)', () => {
   });
 });
 
-describe('PostgresWorkerRepository fair claim and AI use (migration 0110)', () => {
+describe('PostgresWorkerRepository fair claim and AI use (migration 0107)', () => {
   const job = { jobId: '00000000-0000-4000-8000-000000000001', claimToken: '00000000-0000-4000-8000-000000000002',
     correlationId: 'ocr-worker-correlation' } as ClaimedOcrJob;
   beforeEach(() => {

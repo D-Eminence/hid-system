@@ -3,6 +3,7 @@ import { AuditService } from '../audit/audit.service';
 import type { DataAccessContext, PurposeOfUse } from '../common/request-context';
 import type {
   AuthorizationDecision,
+  AuthorizationPrecheck,
   IdentityPatient,
   IdentityProvider,
   RecordAccessScope,
@@ -120,6 +121,46 @@ export class IdentityService {
     // after the answer, never failing it. consentStatus does not note.
     this.notices?.afterAuthorization(context, patientId, decision);
     return decision;
+  }
+
+  /**
+   * The same decision as authorize, for a caller that must refuse early and
+   * then authorize for real (OCR create asks about the named patient before
+   * it reads the document). It opens nothing, so it notes nothing: no
+   * "Your records were opened" notice and no identity.authorization.check
+   * row, only a neutral identity.authorization.precheck audit row that the
+   * patient's access history does not list. It answers whether access would
+   * be allowed, never the grant behind it.
+   */
+  async precheck(
+    patientId: string,
+    scope: RecordAccessScope,
+    purpose: PurposeOfUse,
+    context: DataAccessContext,
+  ): Promise<AuthorizationPrecheck> {
+    let decision: AuthorizationDecision;
+    try {
+      decision = await this.provider.authorize({ patientId, scope, purpose, context });
+    } catch (error) {
+      await this.record(context, 'identity.authorization.precheck', 'failure', patientId, purpose, {
+        scope,
+        dependency: 'identity-provider',
+      });
+      throw error;
+    }
+    await this.record(context, 'identity.authorization.precheck', 'success', patientId, purpose, {
+      scope,
+      allowed: decision.allowed,
+    });
+    return {
+      allowed: decision.allowed,
+      patientId: decision.patientId,
+      facilityId: decision.facilityId,
+      membershipId: decision.membershipId,
+      scope: decision.scope,
+      purpose: decision.purpose,
+      breakGlass: decision.breakGlass,
+    };
   }
 
   async consentStatus(

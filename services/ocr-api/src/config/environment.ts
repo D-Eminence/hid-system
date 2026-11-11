@@ -53,6 +53,10 @@ const environmentSchema = z.object({
   // On unless set to 'false': the owner turned OCR publication on in production on 2026-10-31 ("turn on ocr
   // publishing"). OCR_PUBLICATION_ENABLED=false still pauses it (503 OCR_PUBLICATION_PAUSED).
   OCR_PUBLICATION_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  // Mirrors the OCR worker's OCR_AI_MODE (off | claude; off by default). This API never calls Claude: the
+  // flag only tells job creation whether a reading made with AI off ('ai_off') or one whose AI step failed
+  // ('ai_failed') may be reused. With 'claude' such a reading is never reused, so a new job reads it again.
+  OCR_AI_MODE: z.enum(['off', 'claude']).default('off'),
 }).superRefine((environment, context) => {
   const modes = [
     ['IDENTITY_SERVICE_IDENTITY_MODE', 'IDENTITY_OCR_INTERNAL_SERVICE_TOKEN', 'IDENTITY_OCR_WORKLOAD_TOKEN_FILE'],

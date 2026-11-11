@@ -3,6 +3,9 @@
  * here is invented ("Test Patient Adaeze Example", folder TEST-0001); none
  * comes from a real patient. Used only by *.spec.ts files.
  */
+import * as jpeg from 'jpeg-js';
+import { crc32 } from 'node:zlib';
+import { PNG } from 'pngjs';
 import type { ReadLine, ReadPage } from '../types';
 import type { ModelItem, ModelPage } from './prompt';
 
@@ -40,3 +43,168 @@ export const CLINIC_PAGE = readPage(1, [
   'Amlodipine 5mg od, Metformin 500mg bd',
   'Seen by Dr Test Prescriber 03/04/2026',
 ]);
+
+/** Deterministic filler bytes, so a fixture picture's base64 is long and distinctive (never a real picture). */
+function filler(length: number, seed: number): number[] {
+  const bytes: number[] = [];
+  let state = seed;
+  for (let index = 0; index < length; index += 1) {
+    state = (state * 1_103_515_245 + 12_345) % 2_147_483_648;
+    bytes.push(state >> 16 & 0xff);
+  }
+  return bytes;
+}
+
+/** One PNG chunk: length, type, data and its CRC (over type and data). */
+export function pngChunk(type: string, data: Uint8Array | readonly number[] = []): Buffer {
+  const body = Buffer.concat([Buffer.from(type, 'latin1'), Buffer.from(data)]);
+  const out = Buffer.alloc(8 + body.length);
+  out.writeUInt32BE(body.length - 4, 0);
+  body.copy(out, 4);
+  out.writeUInt32BE(crc32(body), 4 + body.length);
+  return out;
+}
+
+/** An IHDR chunk. */
+export function pngIhdr(width: number, height: number, bitDepth = 8, colourType = 2, interlace = 0): Buffer {
+  const data = Buffer.alloc(13);
+  data.writeUInt32BE(width, 0);
+  data.writeUInt32BE(height, 4);
+  data[8] = bitDepth; data[9] = colourType; data[12] = interlace;
+  return pngChunk('IHDR', data);
+}
+
+/** The PNG signature and these chunks, as they are (no checks: tests build bad ones on purpose). */
+export function pngFromChunks(...chunks: Uint8Array[]): Uint8Array {
+  return new Uint8Array(Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ...chunks]));
+}
+
+/** The bytes a fixture PNG adds to its filler: signature, IHDR, the IDAT's length, type and CRC, and IEND. */
+export const FIXTURE_PNG_OVERHEAD = 8 + 25 + 12 + 12;
+
+/**
+ * A fixture PNG: the signature, an IHDR chunk of the given size (8-bit RGB), one IDAT chunk of filler and IEND,
+ * every CRC correct. Its chunks walk cleanly, but it is not a decodable picture (the IDAT is not a zlib stream).
+ */
+export function fixturePng(width: number, height: number, fillerBytes = 3_000): Uint8Array {
+  return pngFromChunks(pngIhdr(width, height), pngChunk('IDAT', filler(fillerBytes, 7)), pngChunk('IEND'));
+}
+
+/** A fixture EXIF APP1 segment holding one Orientation entry, in either TIFF byte order. */
+export function fixtureExifSegment(orientation: number, order: 'II' | 'MM' = 'MM'): number[] {
+  const little = order === 'II';
+  const u16 = (value: number) => little ? [value & 0xff, value >> 8 & 0xff] : [value >> 8 & 0xff, value & 0xff];
+  const u32 = (value: number) => little ? [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff]
+    : [value >>> 24 & 0xff, value >>> 16 & 0xff, value >>> 8 & 0xff, value & 0xff];
+  const tiff = [...(little ? [0x49, 0x49] : [0x4d, 0x4d]), ...u16(42), ...u32(8),
+    ...u16(1), ...u16(0x0112), ...u16(3), ...u32(1), ...u16(orientation), 0, 0, ...u32(0)];
+  const body = [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff];
+  return [0xff, 0xe1, (body.length + 2) >> 8 & 0xff, (body.length + 2) & 0xff, ...body];
+}
+
+/**
+ * A fixture JPEG: SOI, an APP0 segment, an optional EXIF APP1 segment, a baseline SOF0 frame header of the given
+ * size, then SOS and filler.
+ */
+export function fixtureJpeg(width: number, height: number, fillerBytes = 3_000, exif: number[] = []): Uint8Array {
+  const u16 = (value: number) => [value >> 8 & 0xff, value & 0xff];
+  return new Uint8Array([0xff, 0xd8, 0xff, 0xe0, ...u16(16), 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0,
+    ...exif,
+    0xff, 0xc0, ...u16(17), 8, ...u16(height), ...u16(width), 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1,
+    0xff, 0xda, ...u16(12), 3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3f, 0, ...filler(fillerBytes, 11), 0xff, 0xd9]);
+}
+
+/**
+ * A decodable synthetic picture (no real page): a white sheet with dark vertical bars every 16 px and a grey band
+ * in the middle third, as RGBA. Generated in the test; no file is read.
+ */
+export function syntheticRgba(width: number, height: number): Uint8Array {
+  const data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const at = (y * width + x) * 4;
+      const value = x % 16 < 4 ? 20 : y > height / 3 && y < (2 * height) / 3 ? 128 : 250;
+      data[at] = value; data[at + 1] = value; data[at + 2] = value; data[at + 3] = 255;
+    }
+  }
+  return data;
+}
+
+/**
+ * syntheticRgba as a real PNG (8-bit RGBA). Filter type 0 only: pngjs's default (every filter tried on every row)
+ * is about a hundred times slower under jest.
+ */
+export function syntheticPng(width: number, height: number): Uint8Array {
+  const png = new PNG({ width, height });
+  png.data = Buffer.from(syntheticRgba(width, height));
+  return new Uint8Array(PNG.sync.write(png, { filterType: 0 }));
+}
+
+/** syntheticRgba as a real baseline JPEG. */
+export function syntheticJpeg(width: number, height: number, quality = 90): Uint8Array {
+  return new Uint8Array(jpeg.encode({ width, height, data: Buffer.from(syntheticRgba(width, height)) }, quality).data);
+}
+
+/** A JPEG marker segment: 0xFF, the marker, the length (2 + body) and the body. */
+export function jpegSegment(marker: number, body: readonly number[]): number[] {
+  return [0xff, marker, (body.length + 2) >> 8 & 0xff, (body.length + 2) & 0xff, ...body];
+}
+
+/**
+ * A structural JPEG fixture (not decodable): SOI, the given segments, then EOI. `frame` and `scan` build an SOF
+ * segment and an SOS segment with its entropy-coded bytes. For the structure checks only.
+ */
+export function jpegFromParts(...parts: number[][]): Uint8Array {
+  return new Uint8Array([0xff, 0xd8, ...parts.flat(), 0xff, 0xd9]);
+}
+export function jpegFrame(width: number, height: number, components = 3, marker = 0xc0, precision = 8): number[] {
+  const body = [precision, height >> 8 & 0xff, height & 0xff, width >> 8 & 0xff, width & 0xff, components];
+  for (let id = 1; id <= components; id += 1) body.push(id, id === 1 ? 0x22 : 0x11, 0);
+  return jpegSegment(marker, body);
+}
+export function jpegScan(ids: readonly number[], entropy: readonly number[] = [0x12, 0x34, 0x56]): number[] {
+  return [...jpegSegment(0xda, [ids.length, ...ids.flatMap((id) => [id, 0x00]), 0, 0x3f, 0]), ...entropy];
+}
+
+/**
+ * A real JPEG with its (first) scan repeated so it has `scans` scans in all: jpeg-js decodes each again (a baseline
+ * scan overwrites the same blocks), so the result still decodes, as `scans` passes over every block.
+ */
+export function withRepeatedScan(bytes: Uint8Array, scans: number): Uint8Array {
+  let at = 2;
+  while (!(bytes[at] === 0xff && bytes[at + 1] === 0xda)) at += 2 + ((bytes[at + 2]! << 8) | bytes[at + 3]!);
+  const end = bytes.length - 2;
+  if (bytes[end] !== 0xff || bytes[end + 1] !== 0xd9) throw new Error('fixture JPEG must end with its scan and EOI');
+  const scan = bytes.subarray(at, end);
+  const out = new Uint8Array(at + scan.length * scans + 2);
+  out.set(bytes.subarray(0, at), 0);
+  for (let index = 0; index < scans; index += 1) out.set(scan, at + index * scan.length);
+  out.set([0xff, 0xd9], out.length - 2);
+  return out;
+}
+
+/**
+ * The reviewer's desync layout, synthetic: a checked baseline frame of `visible` pixels (3 components, all-zero
+ * entropy data), then after the scan a restart marker, 0x00 0xE0 and a distance that sends jpeg-js's "malformed APP"
+ * recovery into the contents of a later COM segment, which hold a second SOF of `hidden` pixels and
+ * `hiddenComponents` components. The marker walk sees one frame; jpeg-js, unguarded, parses and allocates both.
+ */
+export function desyncJpeg(visible: { width: number; height: number }, hidden: { width: number; height: number },
+  hiddenComponents: number): Uint8Array {
+  const sof = (width: number, height: number, components: number) => {
+    const body = [8, height >> 8 & 0xff, height & 0xff, width >> 8 & 0xff, width & 0xff, components];
+    for (let id = 1; id <= components; id += 1) body.push(id, 0x11, 0);
+    return jpegSegment(0xc0, body);
+  };
+  const dqt = jpegSegment(0xdb, [0, ...new Array<number>(64).fill(1)]);
+  const counts = [1, ...new Array<number>(15).fill(0)];
+  const dht = jpegSegment(0xc4, [0x00, ...counts, 0, 0x10, ...counts, 0x00]);
+  const sos = jpegSegment(0xda, [3, 1, 0, 2, 0, 3, 0, 0, 63, 0]);
+  const mcus = Math.ceil(visible.width / 8) * Math.ceil(visible.height / 8);
+  const entropy = new Array<number>(Math.ceil(mcus * 3 * 2 / 8) + 4).fill(0);
+  const pad = 10;
+  const distance = 2 + pad + 4;
+  return jpegFromParts(dqt, dht, sof(visible.width, visible.height, 3), sos, entropy,
+    [0xff, 0xd0, 0x00, 0xe0, distance >> 8, distance & 0xff, ...new Array<number>(pad).fill(0)],
+    jpegSegment(0xfe, sof(hidden.width, hidden.height, hiddenComponents)));
+}

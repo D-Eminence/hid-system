@@ -37,7 +37,7 @@ export class PostgresWorkerRepository implements WorkerRepository {
 
   async checkReadiness(): Promise<void> { await this.pool.query('select 1'); }
 
-  // Fair claim (migration 0110): the same rules as ocr.claim_worker_job, but a facility already holding
+  // Fair claim (migration 0107): the same rules as ocr.claim_worker_job, but a facility already holding
   // maxInFlightPerFacility live claims is skipped and the facility with the fewest goes first.
   async claim(provider: string, leaseSeconds: number, maxInFlightPerFacility: number,
     correlationId: string): Promise<ClaimedOcrJob | null> {
@@ -87,7 +87,7 @@ export class PostgresWorkerRepository implements WorkerRepository {
     });
   }
 
-  // Page allowance (migration 0110): each command runs as the worker subject in
+  // Page allowance (migration 0107): each command runs as the worker subject in
   // the claim's correlation, like every other worker command.
   async pageAllowance(job: ClaimedOcrJob): Promise<PageAllowance> {
     return this.transaction(job.correlationId, async (client) => mapAllowance((await client.query<AllowanceRow>(
@@ -115,7 +115,7 @@ export class PostgresWorkerRepository implements WorkerRepository {
     });
   }
 
-  /** Counts only (migration 0110); idempotent per job, attempt and model (a replay replaces the totals). */
+  /** Counts only (migration 0107); idempotent per job, attempt and model (a replay replaces the totals). */
   async recordAiUsage(job: ClaimedOcrJob, usage: AiUsageRecord): Promise<void> {
     await this.transaction(job.correlationId, async (client) => {
       await client.query('select ocr.record_worker_ai_usage($1,$2,$3,$4,$5,$6,$7,$8,$9)',

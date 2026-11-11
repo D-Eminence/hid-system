@@ -220,7 +220,11 @@ subjects and eleven allowed caller/audience bindings, listed in the
 audience; IAM request context supplies its identity. Only the issuer Lambda can
 sign with the exact KMS key, using `ECDSA_SHA_256`. Tasks receive no KMS signing
 authority. The issuer signs ES256 JWTs with a 300-second lifetime, and receivers
-enforce the configured issuer, JWKS, subject, and audience.
+enforce the configured issuer, JWKS, subject, and audience. (Production runs
+on the Terraform stack on `dev`: its issuer accepts up to eight callers and,
+with document scanning on, maps a seventh, the document scan bridge Lambda's
+role, to `hid:staging:document-scanner` for `hid-identity-api` only; see the
+[IAM matrix](AWS_IAM_MATRIX.md#workload-identity).)
 
 The six agents run as UID/GID 65532 with read-only root filesystems, validate
 the returned JWT signature and claims, and atomically replace mode-0600 files

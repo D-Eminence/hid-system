@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
 import { paperReadingPayloadSchema } from './reading/contract';
-import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingOutcome } from './reading/reader';
+import { HARD_PAGE_PROMPT_VERSION, HARD_PAGE_PROMPT_VERSION_NO_ZOOM, IMAGE_PROMPT_VERSION } from './reading/prompt';
+import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type HardReadUsage, type PassUsageRecord,
+  type ReadingOutcome } from './reading/reader';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
-  type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
+  type DocumentReader, type TextReading, type VerifiedDocument, type WorkerOcrProvider, type WorkerRepository } from './types';
 
 const MAX_RECORDED_PAGES = 200;
 
@@ -22,6 +24,13 @@ export class OcrWorker {
       acceptingClaims: true, concurrency: this.config.OCR_WORKER_CONCURRENCY,
       maxInFlightPerFacility: this.config.OCR_WORKER_MAX_INFLIGHT_PER_FACILITY,
       aiMaxConcurrentRequests: this.config.OCR_AI_MAX_CONCURRENT_REQUESTS,
+      aiImageReread: this.config.OCR_AI_IMAGE_REREAD, aiImageMaskedPages: this.config.OCR_AI_IMAGE_MASKED_PAGES,
+      // The hard-page bounds in force (settings only), so a staging comparison of efforts can be read from the logs.
+      aiHardPageReads: this.config.OCR_AI_HARD_PAGE_READS, aiHardPageEffort: this.config.OCR_AI_HARD_PAGE_EFFORT,
+      aiHardPageFollowupEffort: this.config.OCR_AI_HARD_PAGE_FOLLOWUP_EFFORT,
+      aiHardPageMaxTokens: this.config.OCR_AI_HARD_PAGE_MAX_TOKENS,
+      aiHardPageDeadlineMs: this.config.OCR_AI_HARD_PAGE_DEADLINE_MS, aiZoomMaxCalls: this.config.OCR_AI_ZOOM_MAX_CALLS,
+      aiLastResortSeconds: this.config.OCR_AI_LAST_RESORT_SECONDS,
       textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
     await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
     await this.repository.close();
@@ -61,9 +70,12 @@ export class OcrWorker {
       const text = await this.extractText(job, document);
       // Every read is counted, even with AI reading off; a document reads as at least one page.
       const after = await this.repository.recordPages(job, Math.max(1, text.pageCount));
-      const outcome = await this.readItems(job, text);
+      const outcome = await this.readItems(job, text, document);
       // Before completion, so the job is still held; a failure to record never fails the job.
-      await this.recordAiUsage(job, outcome.summary.modelUsage);
+      await this.recordAiUsage(job, outcome.summary.modelUsage, outcome.summary.pagesSent, outcome.summary.passUsage,
+        outcome.summary.hardPageReadUsage);
+      // The warn lines come before the contract check and completion, so they are written however the job ends.
+      this.logReadFailures(job, outcome.summary);
       const completion = buildCompletion(text, outcome);
       const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
       if (!checked.success) {
@@ -73,13 +85,38 @@ export class OcrWorker {
       }
       await this.repository.complete(job, completion);
       const summary = outcome.summary;
-      this.log('info', 'ocr.job.completed', { jobId: job.jobId, correlationId: job.correlationId,
-        provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: text.pageCount,
+      // documentId: the opaque document UUID (never its name, key or content), so a job's lines can be found from the
+      // document the owner names; README "Logs carry only ids, counts, codes ...".
+      this.log('info', 'ocr.job.completed', { jobId: job.jobId, documentId: job.documentId,
+        correlationId: job.correlationId, provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: text.pageCount,
         retryCount: Math.max(0, job.attemptNo - 1), readingStatus: summary.status,
         firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel, aiRequests: summary.requests,
         aiRefusals: summary.refusals, rereadPages: summary.rereadPages.length,
+        imageRereadPages: summary.imageRereadPages.length, imageRereadSkippedPages: summary.imageRereadSkipped.length,
+        imageRereadFailedPages: summary.imageRereadFailedPages.length,
         rereadFailedPages: summary.rereadFailedPages, itemCount: summary.itemCount,
-        droppedUngrounded: summary.droppedUngrounded, flaggedPages: summary.flaggedPages,
+        droppedUngrounded: summary.droppedUngrounded, droppedByReason: summary.droppedByReason,
+        flaggedPages: summary.flaggedPages,
+        // Hard pages' best-guess reads (two per page): codes and counts only.
+        hardPages: summary.hardPages.length, hardPageReads: summary.hardPageReads,
+        hardPageAgreement: { ...summary.hardPageAgreement },
+        // Zoom in the hard-page reads: crops returned, calls refused at the limit, calls failed. Numbers only.
+        zoomCalls: summary.zoomCalls, zoomLimited: summary.zoomLimited, zoomFailed: summary.zoomFailed,
+        // Hard pages where OCR_AI_HARD_PAGE_DEADLINE_MS cut a read still running (a count only).
+        hardPageDeadlineHits: summary.hardPageDeadlinePages.length,
+        // Hard-page reads whose outputTokens is a lower bound (an attempt cut mid-answer): outputTokens below
+        // under-counts by their unreported thinking (README "Hard-page time and cost bounds").
+        hardPageReadsOutputIncomplete: summary.hardPageReadUsage.filter((read) => read.outputTokensIncomplete).length,
+        // Hard-page reads with no answer, and reads sent the answer-only turn, by reason code (README "A hard read
+        // always ends with an answer"); pages whose reading in some pass gave nothing; the first pass's items.
+        hardReadFailures: countBy(summary.hardPageReadUsage.map((read) => read.failure)),
+        hardReadForcedAnswers: countBy(summary.hardPageReadUsage.map((read) =>
+          read.forcedAnswer === null ? null : `forced_answer_${read.forcedAnswer}`)),
+        pageReadFailures: summary.pageReadFailures.length, firstPassItemCount: summary.firstPassItemCount,
+        // The last resort (README "Last resort"): pages sent it, those whose answer was not usable, and those that
+        // needed it but were not sent it (no time left, or no picture). Counts only.
+        lastResortReads: summary.lastResortPages.length, lastResortFailed: summary.lastResortFailedPages.length,
+        lastResortSkipped: summary.lastResortSkipped.length,
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
         cacheReadInputTokens: summary.usage.cacheReadInputTokens,
         cacheCreationInputTokens: summary.usage.cacheCreationInputTokens,
@@ -116,8 +153,10 @@ export class OcrWorker {
   }
 
   /** The AI step. A transient failure retries the job, except on its last attempt, which completes without items. */
-  private async readItems(job: ClaimedOcrJob, text: TextReading): Promise<ReadingOutcome> {
-    const input = { facilityId: job.facilityId, sourceSha256Hex: job.sourceSha256Hex, pages: text.pages };
+  private async readItems(job: ClaimedOcrJob, text: TextReading, document: VerifiedDocument): Promise<ReadingOutcome> {
+    // The verified bytes and their detected media type, for the image re-read of a flagged page (never logged).
+    const input = { facilityId: job.facilityId, sourceSha256Hex: job.sourceSha256Hex, pages: text.pages,
+      document: { mediaType: document.mediaType, bytes: document.bytes } };
     let outcome: ReadingOutcome;
     try {
       outcome = await this.reading.read(input, this.shutdown.signal);
@@ -145,8 +184,43 @@ export class OcrWorker {
     return outcome;
   }
 
-  /** One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. */
-  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[]): Promise<void> {
+  /**
+   * One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. The
+   * ocr.reading.usage log has one line per model and pass (first_pass, reread, image_reread, hard_page_read) when the reading
+   * gives that split, and one per model otherwise (a reading stopped before it finished). Hard-page reads get one line
+   * per read instead of one for their pass (`page`, `read` 1 or 2, time, turns, zoom counts, effort, endedBy), so the
+   * lines still add up to the reading's use.
+   */
+  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[], pagesSent?: number,
+    passUsage?: readonly PassUsageRecord[], hardReads: readonly HardReadUsage[] = []): Promise<void> {
+    // Counts only, never text: lets the cost per page, and per pass, be seen in the logs.
+    const logLines: ReadonlyArray<AiUsageRecord & { pass?: string; zoomCalls?: number }> = passUsage ?? usage;
+    for (const entry of logLines) {
+      if (entry.pass === 'hard_page_read' && hardReads.length > 0) {
+        // In the pass's place: one line per read of that model instead (they add up to the pass line they replace).
+        for (const read of hardReads.filter((candidate) => candidate.model === entry.model)) {
+          this.log('info', 'ocr.reading.usage', { jobId: job.jobId, correlationId: job.correlationId,
+            attempt: job.attemptNo, model: read.model, pass: 'hard_page_read', page: read.page, read: read.read,
+            requests: read.requests, turns: read.turns, inputTokens: read.inputTokens, outputTokens: read.outputTokens,
+            cacheReadTokens: read.cacheReadTokens, cacheWriteTokens: read.cacheWriteTokens, durationMs: read.durationMs,
+            zoomCalls: read.zoomCalls, zoomLimited: read.zoomLimited, effort: read.effort,
+            followupEffort: read.followupEffort, forcedEffort: read.forcedEffort, zoomClosed: read.zoomClosed,
+            endedBy: read.endedBy,
+            outputTokensIncomplete: read.outputTokensIncomplete, failure: read.failure,
+            forcedAnswer: read.forcedAnswer === null ? null : `forced_answer_${read.forcedAnswer}`,
+            ...(pagesSent === undefined ? {} : { pagesSent }) });
+        }
+        continue;
+      }
+      if (entry.requests <= 0) continue;
+      this.log('info', 'ocr.reading.usage', { jobId: job.jobId, correlationId: job.correlationId,
+        attempt: job.attemptNo, model: entry.model, ...(entry.pass === undefined ? {} : { pass: entry.pass }),
+        requests: entry.requests, inputTokens: entry.inputTokens,
+        outputTokens: entry.outputTokens, cacheReadTokens: entry.cacheReadTokens,
+        cacheWriteTokens: entry.cacheWriteTokens, ...(pagesSent === undefined ? {} : { pagesSent }),
+        // The hard-page reads' zoom crops (a count only; no crop is ever logged).
+        ...(entry.pass === 'hard_page_read' ? { zoomCalls: entry.zoomCalls ?? 0 } : {}) });
+    }
     for (const entry of usage) {
       if (entry.requests <= 0) continue;
       try {
@@ -155,6 +229,36 @@ export class OcrWorker {
         this.log('error', 'ocr.reading.usage_record_failed', { jobId: job.jobId, correlationId: job.correlationId,
           model: entry.model, code: safeErrorCode(error) });
       }
+    }
+  }
+
+  /**
+   * One warn line per hard-page read that gave no answer (ocr.reading.hard_read_failed), per read sent the
+   * answer-only turn (ocr.reading.hard_read_forced_answer, whether that turn answered or not), and per page whose
+   * reading in a pass gave nothing usable (ocr.reading.page_read_failed). Codes and counts only: never item text, page
+   * content or the picture (README "A hard read always ends with an answer").
+   */
+  private logReadFailures(job: ClaimedOcrJob, summary: ReadingOutcome['summary']): void {
+    for (const read of summary.hardPageReadUsage) {
+      const counts = { page: read.page, read: read.read, turns: read.turns, requests: read.requests,
+        outputTokens: read.outputTokens, outputTokensIncomplete: read.outputTokensIncomplete, zoomCalls: read.zoomCalls,
+        zoomLimited: read.zoomLimited, durationMs: read.durationMs };
+      if (read.forcedAnswer !== null) {
+        this.log('warn', 'ocr.reading.hard_read_forced_answer', { jobId: job.jobId, correlationId: job.correlationId,
+          attempt: job.attemptNo, reason: `forced_answer_${read.forcedAnswer}`, answered: read.failure === null,
+          ...counts });
+      }
+      if (read.failure !== null) {
+        this.log('warn', 'ocr.reading.hard_read_failed', { jobId: job.jobId, correlationId: job.correlationId,
+          attempt: job.attemptNo, reason: read.failure, ...(read.errorCode === null ? {} : { code: read.errorCode }),
+          forcedAnswer: read.forcedAnswer === null ? null : `forced_answer_${read.forcedAnswer}`, ...counts });
+      }
+    }
+    for (const failure of summary.pageReadFailures) {
+      this.log('warn', 'ocr.reading.page_read_failed', { jobId: job.jobId, correlationId: job.correlationId,
+        attempt: job.attemptNo, page: failure.page, pass: failure.pass, reason: failure.reason,
+        ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
+        ...(failure.detail === undefined ? {} : { detail: failure.detail }) });
     }
   }
 
@@ -172,7 +276,8 @@ export class OcrWorker {
             });
             return undefined;
           });
-          this.log('info', 'ocr.job.claimed', { jobId: job.jobId, correlationId: job.correlationId,
+          this.log('info', 'ocr.job.claimed', { jobId: job.jobId, documentId: job.documentId,
+            correlationId: job.correlationId,
             provider: this.provider.name, attempt: job.attemptNo, claimedJobs: 1,
             ...(metrics ? { queueDepth: metrics.queueDepth,
               oldestQueueAgeSeconds: metrics.oldestQueueAgeSeconds } : {}) });
@@ -213,6 +318,13 @@ export class OcrWorker {
     const line = JSON.stringify({ timestamp: new Date().toISOString(), level, event, ...fields });
     (level === 'error' ? process.stderr : process.stdout).write(line + '\n');
   }
+}
+
+/** Counts per code, codes in sorted order; nulls not counted. */
+function countBy(codes: readonly (string | null)[]): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const code of codes) if (code !== null) counts.set(code, (counts.get(code) ?? 0) + 1);
+  return Object.fromEntries([...counts.entries()].sort(([a], [b]) => a.localeCompare(b)));
 }
 
 function safeErrorCode(error: unknown): string {
@@ -258,6 +370,28 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         pagesSent: summary.pagesSent,
         rereadPages: summary.rereadPages,
         rereadFailedPages: summary.rereadFailedPages,
+        imageRereadPages: summary.imageRereadPages,
+        imageRereadSkipped: summary.imageRereadSkipped,
+        imageRereadFailedPages: summary.imageRereadFailedPages,
+        // The image re-read prompt only where a page read from its picture was not a hard page, or was read by the
+        // last resort (the ordinary image re-read request).
+        imagePromptVersion: summary.imageRereadPages.some((page) => !summary.hardPages.includes(page)
+          || (summary.lastResortPages.includes(page) && !summary.lastResortFailedPages.includes(page)))
+          ? IMAGE_PROMPT_VERSION : null,
+        hardPages: summary.hardPages,
+        hardPageReads: summary.hardPageReads,
+        hardPageSingleReadPages: summary.hardPageSingleReadPages,
+        // Version 4 only where a hard page's reads were offered zoom; without it they sent the version 3 text.
+        hardPagePromptVersion: summary.hardPages.length === 0 ? null
+          : summary.hardPageZoomPages.length > 0 ? HARD_PAGE_PROMPT_VERSION : HARD_PAGE_PROMPT_VERSION_NO_ZOOM,
+        hardPageZoomPages: summary.hardPageZoomPages,
+        // Hard pages where the page's deadline cut a read (OCR_AI_HARD_PAGE_DEADLINE_MS); page numbers only.
+        hardPageDeadlinePages: summary.hardPageDeadlinePages,
+        // The last resort (README "Last resort"): page numbers and codes only. Its failures are also in
+        // imageRereadFailedPages (a picture was sent and gave nothing usable).
+        lastResortPages: summary.lastResortPages,
+        lastResortFailedPages: summary.lastResortFailedPages,
+        lastResortSkipped: summary.lastResortSkipped,
         droppedUngrounded: summary.droppedUngrounded,
         droppedUngroundedFirstPass: summary.droppedUngroundedFirstPass,
         itemCount: summary.itemCount,

@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0110",
-    "count": 105,
+    "last": "0108",
+    "count": 109,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -515,8 +515,24 @@
         "sha256": "24d9ccd4dfa18aad5cf1c3d9268ff043bd001c4d5b41660b00af01c4aadfca8f"
       },
       {
-        "name": "0110_ocr_page_allowance.sql",
-        "sha256": "a9418f2784372357e8d88005e1b611fdf3f21ca87100d642a98a2981ee631d91"
+        "name": "0104_records_processing_purpose.sql",
+        "sha256": "44bd0ca33b4554071c380851726deb547f71942e660fc234d61e380041d11571"
+      },
+      {
+        "name": "0105_document_scanner.sql",
+        "sha256": "bf68aaaca9e773fce6022a5241f32f35a9937cd9b496e04445b75022a43788c8"
+      },
+      {
+        "name": "0106_ocr_worker_account.sql",
+        "sha256": "a78f979774aed619c656990d0f0bc531c5eb00fd4998c5b7f00337ba156414d2"
+      },
+      {
+        "name": "0107_ocr_page_allowance.sql",
+        "sha256": "3379f5e388f83bd1179d7fbcbe886ed57717a933e40a51f58b23116e5d46cf60"
+      },
+      {
+        "name": "0108_records_processing_cover_lifetime.sql",
+        "sha256": "1562c606256f18555054423b4e632bb863cf3aae6b0776bee87c30e660983ed6"
       }
     ]
   },

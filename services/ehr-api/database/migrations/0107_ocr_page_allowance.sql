@@ -1,18 +1,25 @@
--- 0110 OCR page allowance (Migrate AI reading, Session B; owner decision of
+-- 0107 OCR page allowance (Migrate AI reading, Session B; owner decision of
 -- 2026-11-02/03, D-Eminence, coordination notes "owner-decisions.md" (7):
 -- "allowance 500 pages/facility/month (Textract+AI), only super admin raises,
 -- 100% pauses reading but not review/manual entry"). The declaration is
 -- signed separately (reviewed_by is empty until the owner signs).
 --
--- Written on 0103 (the latest migration on this branch). In the release,
--- 0104-0109 (records processing, virus scanner, support check, Session C's
--- items/checking/publishing) are expected to be applied before 0110, but 0110
--- uses none of their objects and its preconditions ask for none of them: it
--- needs only ocr.jobs, the 0077 bodies named in section 0, the session and
--- permission helpers it calls, and the runtime roles. If a migration between
--- 0103 and 0110 replaces one of the pinned bodies (for example
--- ocr.validate_job_write or ocr.fail_worker_job), section 0 stops 0110 with
--- nothing applied and the pins must be renewed against that body.
+-- Numbered 0107, the next free number after staging's 0106 (coordinator
+-- decision: numbers follow release order; OCR goes before patient chat part
+-- 2). Drafted as 0110 on 0103; renumbered after 0104-0106 reached staging,
+-- with its number in messages, comments and temporary names changed, the
+-- claim pin renewed against the body 0105 gave ocr.claim_worker_job, the fair
+-- claim brought to that body (it returns the detected media type of the clean
+-- scan, 0105's owner decision D3), and the pause taking the page-limit lock.
+-- It applies after 0106. It needs: ocr.jobs and the 0077 worker commands;
+-- ocr.claim_worker_job exactly as 0105 left it (the fair claim copies it;
+-- the md5 is pinned in section 0, so 0105 must be applied); the session and
+-- permission helpers it calls, whose bodies 0104-0106 did not change (0104
+-- replaces only identity.has_active_consent_grant and adds its own objects,
+-- 0106 inserts two rows); and the runtime roles. It uses nothing 0104 or
+-- 0106 add. If a later migration replaces one of the pinned bodies, section
+-- 0 stops 0107 with nothing applied and the pins must be renewed against
+-- that body.
 --
 -- What it adds. Pages read are counted per facility per calendar month in
 -- Africa/Lagos (Textract and the AI reading count together, one number per
@@ -63,7 +70,13 @@
 --      fail_worker_job's retry path, with attempt_count restored to
 --      attempt_count - 1 (a pause never uses an attempt), last_error_code
 --      OCR_PAGE_ALLOWANCE_USED_UP, next_attempt_at = the resume time; audit
---      ocr.worker.paused_for_allowance; hid_ocr_worker.
+--      ocr.worker.paused_for_allowance; hid_ocr_worker. It takes the
+--      facility's page-limit lock (the transaction advisory lock
+--      ocr.set_facility_page_limit takes, key hashtextextended(
+--      'hid.ocr.page-limit:' || facility, 0)) before it reads the allowance,
+--      so a raise above use racing a pause never leaves the job parked: the
+--      pause either sees the new limit and parks nothing, or parks first and
+--      the raise, waiting on the lock, then resumes it.
 --    - ocr.facility_page_allowance(facility) -> the same row, for ocr-api
 --      (hid_ocr_runtime, which hid_ocr_api_runtime inherits) and the
 --      Identity API admin console (hid_identity_runtime): a session that names
@@ -94,8 +107,9 @@
 --      as their owner).
 --    - ocr.claim_worker_job_fair(provider, lease seconds, max in flight per
 --      facility 1-16) -> the row ocr.claim_worker_job returns; its
---      authorization, validation, lease recovery and eligibility (the 0014
---      body as 0015 resolves its columns, copied), plus: a facility with that
+--      authorization, validation, lease recovery, eligibility and result
+--      (the body 0105 gave it, copied: media_type is the detected type of
+--      the clean scan bound to the job's source), plus: a facility with that
 --      many jobs processing under an unexpired lease is skipped, and the
 --      least busy facility's job is taken first (then next_attempt_at,
 --      queued_at, id). SKIP LOCKED as before; the candidate's facility is
@@ -129,10 +143,11 @@
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): ocr.jobs, identity.facilities, auth.accounts,
---    audit.events present; not applied yet (none of 0110's objects, and
+--    audit.events present; not applied yet (none of 0107's objects, and
 --    validate_job_write not already this file's body); md5 of pg_proc.prosrc
 --    of ocr.validate_job_write, ocr.fail_worker_job, ocr.claim_worker_job,
---    ocr.record_job_event (0077/0014/0015 bodies), the platform session
+--    ocr.record_job_event (0077 bodies; the claim as 0105 left it), the
+--    platform session
 --    helpers, auth.account_id_for_subject, auth.account_has_active_role,
 --    auth.account_has_platform_permission, auth.membership_has_permission,
 --    identity.has_active_membership and audit.authorize_platform_event; the
@@ -146,14 +161,15 @@
 --    which may create in schema ocr, and the applier is it or a member that
 --    inherits it and may SET ROLE to it.
 -- 4. Grants are made here too, since a release applies only migrations;
---    runtime-grants.sql gains the same 0110 block for a role bootstrap.
+--    runtime-grants.sql gains the same 0107 block for a role bootstrap.
 -- 5. Post-checks: the bodies (ocr.validate_job_write and
 --    ocr.claim_worker_job_fair by md5, ocr.claim_worker_job still one of its
 --    two accepted bodies), attributes, owners, ACLs, row-level security, the
 --    absence of any table privilege for a runtime role and of any foreign key
 --    from the usage tables to ocr.jobs.
 --
--- Locks (measured with pg_locks before commit on a 0103 copy): beyond
+-- Locks (measured with pg_locks before commit on a 0103 copy, and again on
+-- a 0106 copy): beyond
 -- ACCESS SHARE, only the three new tables and their indexes, the session's own
 -- temporary table and schema, and SHARE ROW EXCLUSIVE on identity.facilities
 -- (the two foreign keys); no lock on ocr.jobs, auth.accounts or audit.events
@@ -167,9 +183,9 @@
 --
 -- Old services on this schema: no existing function changes behaviour except
 -- the one extra allowed job transition, which no current service performs
--- (ocr.claim_worker_job keeps its body; its md5 is checked again after);
--- today's ocr-api, ocr-worker and identity-api images run unchanged. Applied
--- migrations 0001 through 0103 are immutable.
+-- (ocr.claim_worker_job keeps its 0105 body; its md5 is checked again
+-- after); today's ocr-api, ocr-worker and identity-api images run unchanged.
+-- Applied migrations 0001 through 0106 are immutable.
 
 do $$
 declare
@@ -177,14 +193,15 @@ declare
   applier oid := (select oid from pg_roles where rolname = current_user);
   ocr_owner oid;
 begin
-  -- a. Prerequisites (what 0110 itself needs; no 0104-0109 marker).
+  -- a. Prerequisites (what 0107 itself needs; 0105 is required through the
+  -- claim's md5 in c, and nothing 0104 or 0106 adds is read).
   if to_regclass('ocr.jobs') is null
      or to_regclass('identity.facilities') is null
      or to_regclass('auth.accounts') is null
      or to_regclass('audit.events') is null
      or to_regprocedure('ocr.fail_worker_job(uuid,uuid,text,text,boolean,integer,text)') is null
      or to_regprocedure('ocr.validate_job_write()') is null then
-    raise exception using errcode = '55000', message = '0110: ocr.jobs and the 0077 OCR worker commands must be applied first';
+    raise exception using errcode = '55000', message = '0107: ocr.jobs and the 0077 OCR worker commands must be applied first';
   end if;
   -- b. Not applied yet (nor partly present).
   if to_regclass('ocr.facility_page_limits') is not null
@@ -201,20 +218,19 @@ begin
      or to_regprocedure('ocr.facility_ocr_usage(uuid,date)') is not null
      or (select md5(proc.prosrc) from pg_proc proc where proc.oid = 'ocr.validate_job_write()'::regprocedure)
         = '58ff61a5b9b95685f6a6d3f938b8481f' then
-    raise exception using errcode = '55000', message = '0110: already applied';
+    raise exception using errcode = '55000', message = '0107: already applied';
   end if;
-  -- c. The bodies replaced and relied on, as 0001-0103 left them. The claim
-  -- command has two accepted bodies: 0014's with 0015's function setting, and
-  -- the one database/rds-compat/0015 writes on Amazon RDS (with
-  -- #variable_conflict in the body); 0110 relies only on its claim condition
-  -- (queued, next_attempt_at reached, attempts left), which both share.
+  -- c. The bodies replaced and relied on, as 0001-0106 left them. The claim
+  -- command has one accepted body, the one 0105 writes on every target (the
+  -- RDS form, #variable_conflict in the body, returning the clean scan's
+  -- detected media type); the fair claim below copies it.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
       ('ocr.validate_job_write()', array['e9ea263ec9f29355eb9a6a81fd2d7b37']),
       ('ocr.fail_worker_job(uuid,uuid,text,text,boolean,integer,text)', array['2e677d5ec17ae5de9702cf0083f22004']),
       ('ocr.claim_worker_job(text,integer)',
-       array['1572865c10fcfb673293e83776d6cf50', '59a60b466df9b8effeb3519939fc54a2']),
+       array['25b7ebb837fc93a4af52e555ffdac576']),
       ('ocr.record_job_event()', array['5c972a4dc0443e217cf8db2c0b14d552']),
       ('platform.current_account_id()', array['b715ffe72856836d13ab16656fa6e94a']),
       ('platform.current_actor_subject()', array['cf14c2d4a16d44a79ea9dbef9dc79c2b']),
@@ -295,7 +311,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0110: an object this migration relies on differs from 0001-0103: %s', mismatch);
+      message = format('0107: an object this migration relies on differs from 0001-0106: %s', mismatch);
   end if;
   -- d. One owner for ocr.jobs and the OCR worker commands; it may create in
   -- schema ocr; the applier is it, or a member that inherits it and may SET
@@ -310,24 +326,24 @@ begin
   ocr_owner := (select relowner from pg_class where oid = 'ocr.jobs'::regclass);
   if mismatch is distinct from pg_get_userbyid(ocr_owner) then
     raise exception using errcode = '55000',
-      message = format('0110: ocr.jobs and the OCR worker commands must share one owner (found %s)', mismatch);
+      message = format('0107: ocr.jobs and the OCR worker commands must share one owner (found %s)', mismatch);
   end if;
   if not has_schema_privilege(ocr_owner, 'ocr', 'CREATE') then
     raise exception using errcode = '55000',
-      message = format('0110: %s may not create in schema ocr', pg_get_userbyid(ocr_owner));
+      message = format('0107: %s may not create in schema ocr', pg_get_userbyid(ocr_owner));
   end if;
   if applier <> ocr_owner
      and not (pg_has_role(applier, ocr_owner, 'USAGE') and pg_has_role(applier, ocr_owner, 'SET')) then
     raise exception using errcode = '42501',
-      message = format('0110: %s is not %s and may not act as it (INHERIT and SET)', current_user,
+      message = format('0107: %s is not %s and may not act as it (INHERIT and SET)', current_user,
         pg_get_userbyid(ocr_owner));
   end if;
-  raise notice '0110: owners checked: ocr.jobs=%, applier=%', pg_get_userbyid(ocr_owner), current_user;
+  raise notice '0107: owners checked: ocr.jobs=%, applier=%', pg_get_userbyid(ocr_owner), current_user;
 end;
 $$;
 
 -- The ACL of the replaced trigger function, for the post-check.
-create temporary table ocr_page_allowance_0110_acl on commit drop as
+create temporary table ocr_page_allowance_0107_acl on commit drop as
   select proc.oid as function_oid, proc.proowner, proc.proacl
     from pg_proc proc where proc.oid = 'ocr.validate_job_write()'::regprocedure;
 
@@ -356,9 +372,9 @@ alter table ocr.page_usage force row level security;
 revoke all on ocr.facility_page_limits, ocr.page_usage from public;
 
 comment on table ocr.facility_page_limits is
-  '0110: a platform super admin''s monthly OCR page allowance for one facility (default 500 when no row). Only the 0110 SECURITY DEFINER functions touch it.';
+  '0107: a platform super admin''s monthly OCR page allowance for one facility (default 500 when no row). Only the 0107 SECURITY DEFINER functions touch it.';
 comment on table ocr.page_usage is
-  '0110: pages read (Textract and AI together) per OCR job, counted in the Africa/Lagos month of the first recording. No patient text; no foreign key to ocr.jobs so the count outlives the job''s working data. Only the 0110 SECURITY DEFINER functions touch it.';
+  '0107: pages read (Textract and AI together) per OCR job, counted in the Africa/Lagos month of the first recording. No patient text; no foreign key to ocr.jobs so the count outlives the job''s working data. Only the 0107 SECURITY DEFINER functions touch it.';
 
 -- 2. The shared reckoning: the facility's limit (500 without a row), the
 -- pages it used this Africa/Lagos month, the first day of next month, and
@@ -501,6 +517,12 @@ begin
      or job_row.claim_expires_at <= clock_timestamp() then
     raise exception using errcode = '55000', message = 'OCR claim is not active';
   end if;
+  -- The lock ocr.set_facility_page_limit takes for the facility, before the
+  -- allowance is read: a limit set concurrently either committed before this
+  -- read (and is seen here, so a raise above use parks nothing) or waits for
+  -- this transaction and then resumes the job parked here.
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('hid.ocr.page-limit:' || job_row.facility_id::text, 0));
   select * into state from ocr.facility_page_allowance_state(job_row.facility_id);
   -- Not used up (a limit raised since the worker read it), or this job's
   -- pages already counted: nothing changes and the worker reads the job.
@@ -657,9 +679,10 @@ end
 $$;
 
 -- 2b. The fair claim: ocr.claim_worker_job's authorization, validation, lease
--- recovery and eligibility (its 0014 body with the column resolution 0015
--- gives it, written as the rds-compat body does, in the function), plus a
--- per-facility cap. Among eligible queued jobs it skips a facility that
+-- recovery, eligibility and result as 0105 left it (the RDS form, with
+-- #variable_conflict in the function; media_type is the detected type of the
+-- clean scan bound to the job's source version and SHA-256, owner decision D3
+-- of 2026-10-31, not the declared type), plus a per-facility cap. Among eligible queued jobs it skips a facility that
 -- already has requested_max_in_flight_per_facility (1-16) jobs processing
 -- under an unexpired lease (any provider), and takes the job of the facility
 -- with the fewest such jobs first, then next_attempt_at, queued_at, id, so one
@@ -796,7 +819,13 @@ begin
 
   return query select job.id, job.facility_id, job.document_id, job.patient_id,
     document.storage_bucket, document.storage_key, job.source_object_version_id,
-    job.source_sha256_hex::text, document.size_bytes, document.declared_media_type,
+    job.source_sha256_hex::text, document.size_bytes,
+    (select clean_scan.detected_media_type from ehr.document_scan_events clean_scan
+      where clean_scan.document_id = job.document_id and clean_scan.event_type = 'clean'
+        and clean_scan.object_version_id = job.source_object_version_id
+        and clean_scan.object_sha256_hex = job.source_sha256_hex
+        and clean_scan.binding_migration_hold_reason is null
+      order by clean_scan.created_at desc, clean_scan.id desc limit 1),
     job.provider, job.attempt_count, job.max_attempts, job.claim_token,
     job.claim_expires_at, job.correlation_id
    from ocr.jobs job join ehr.documents document on document.id = job.document_id
@@ -826,7 +855,7 @@ alter table ocr.ai_usage enable row level security;
 alter table ocr.ai_usage force row level security;
 revoke all on ocr.ai_usage from public;
 comment on table ocr.ai_usage is
-  '0110: AI reading usage (requests and token counts) per OCR job attempt and Claude model, in the Africa/Lagos month of the first recording. Counts only, no patient or page text; no foreign key to ocr.jobs so it outlives the job''s working data. Only the 0110 SECURITY DEFINER functions touch it.';
+  '0107: AI reading usage (requests and token counts) per OCR job attempt and Claude model, in the Africa/Lagos month of the first recording. Counts only, no patient or page text; no foreign key to ocr.jobs so it outlives the job''s working data. Only the 0107 SECURITY DEFINER functions touch it.';
 
 -- The worker records the AI usage of the attempt it holds, per model.
 -- Idempotent per (job, current attempt, model): the given totals replace the
@@ -1062,23 +1091,23 @@ revoke all on function ocr.facility_page_allowance_state(uuid),
   ocr.facility_ocr_usage(uuid,date) from public;
 
 comment on function ocr.worker_page_allowance(uuid,uuid) is
-  '0110: the OCR worker reads the page allowance of the facility of the job it holds (pages used this Africa/Lagos month, limit, next reset, paused).';
+  '0107: the OCR worker reads the page allowance of the facility of the job it holds (pages used this Africa/Lagos month, limit, next reset, paused).';
 comment on function ocr.record_worker_pages(uuid,uuid,integer,text) is
-  '0110: the OCR worker records the pages read for the job it holds; idempotent per job (the larger count is kept).';
+  '0107: the OCR worker records the pages read for the job it holds; idempotent per job (the larger count is kept).';
 comment on function ocr.pause_worker_job_for_allowance(uuid,uuid,text) is
-  '0110: the OCR worker parks the job it holds until the facility''s allowance resets (00:00 Africa/Lagos on resets_on) without using an attempt; NULL and nothing changed unless the allowance is used up and the job''s pages are not yet counted.';
+  '0107: the OCR worker parks the job it holds until the facility''s allowance resets (00:00 Africa/Lagos on resets_on) without using an attempt; NULL and nothing changed unless the allowance is used up and the job''s pages are not yet counted.';
 comment on function ocr.facility_page_allowance(uuid) is
-  '0110: the facility''s OCR page allowance for its staff holding ocr.job.read, or a platform administrator in a platform-scoped session.';
+  '0107: the facility''s OCR page allowance for its staff holding ocr.job.read, or a platform administrator in a platform-scoped session.';
 comment on function ocr.set_facility_page_limit(uuid,integer,text) is
-  '0110: a platform super admin (platform_super_admin only) sets a facility''s monthly OCR page limit; raising it above this month''s use resumes the facility''s parked jobs.';
+  '0107: a platform super admin (platform_super_admin only) sets a facility''s monthly OCR page limit; raising it above this month''s use resumes the facility''s parked jobs.';
 comment on function ocr.claim_worker_job_fair(text,integer,integer) is
-  '0110: ocr.claim_worker_job with a per-facility cap (1-16 jobs processing under an unexpired lease) and the least busy facility first; the facility is taken with a transaction advisory lock, so the cap is exact among fair claimers.';
+  '0107: ocr.claim_worker_job with a per-facility cap (1-16 jobs processing under an unexpired lease) and the least busy facility first; the facility is taken with a transaction advisory lock, so the cap is exact among fair claimers.';
 comment on function ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text) is
-  '0110: the OCR worker records the AI reading usage (requests and tokens) of the attempt it holds, per Claude model; the totals given replace the stored ones.';
+  '0107: the OCR worker records the AI reading usage (requests and tokens) of the attempt it holds, per Claude model; the totals given replace the stored ones.';
 comment on function ocr.facility_ocr_usage(uuid,date) is
-  '0110: a facility''s OCR usage in one Africa/Lagos month: one row per Claude model and one row textract with the pages; the callers of ocr.facility_page_allowance.';
+  '0107: a facility''s OCR usage in one Africa/Lagos month: one row per Claude model and one row textract with the pages; the callers of ocr.facility_page_allowance.';
 
--- 4. Grants (the same in runtime-grants.sql's 0110 block). A release applies
+-- 4. Grants (the same in runtime-grants.sql's 0107 block). A release applies
 -- only migrations, so the roles that already exist get them here; on a fresh
 -- database (no runtime roles yet, as 0082 and 0097) the role bootstrap makes
 -- them.
@@ -1117,7 +1146,7 @@ begin
     mismatch := 'the body of ocr.validate_job_write()';
   end if;
   if mismatch is null and exists (
-       select 1 from ocr_page_allowance_0110_acl before_row
+       select 1 from ocr_page_allowance_0107_acl before_row
          left join pg_proc proc on proc.oid = before_row.function_oid
         where proc.oid is null or proc.proowner <> before_row.proowner
            or proc.proacl::text is distinct from before_row.proacl::text
@@ -1125,16 +1154,16 @@ begin
            or proc.proconfig is distinct from '{"search_path=ocr, ehr, identity, auth, platform, pg_temp"}'::text[]) then
     mismatch := 'the owner, ACL or attributes of ocr.validate_job_write()';
   end if;
-  -- The fair claim's body (its md5 here; ocr.claim_worker_job untouched).
+  -- The fair claim's body (its md5 here; ocr.claim_worker_job keeps 0105's).
   if mismatch is null
      and (select md5(prosrc) from pg_proc where oid = 'ocr.claim_worker_job_fair(text,integer,integer)'::regprocedure)
-         is distinct from 'b4e08bc13b9f0a38ed52c0e84f73ff6c' then
+         is distinct from '49b95651106e0aaa6f8bf6c8adcdb696' then
     mismatch := 'the body of ocr.claim_worker_job_fair(text,integer,integer)';
   end if;
   if mismatch is null
      and (select md5(prosrc) from pg_proc where oid = 'ocr.claim_worker_job(text,integer)'::regprocedure)
-         <> all (array['1572865c10fcfb673293e83776d6cf50', '59a60b466df9b8effeb3519939fc54a2']) then
-    mismatch := 'the body of ocr.claim_worker_job(text,integer) (must stay unchanged)';
+         is distinct from '25b7ebb837fc93a4af52e555ffdac576' then
+    mismatch := 'the body of ocr.claim_worker_job(text,integer) (must stay the body 0105 gave it)';
   end if;
   -- The eight commands: SECURITY DEFINER, pinned search_path, the OCR owner.
   if mismatch is null then
@@ -1186,17 +1215,17 @@ begin
           and (select count(*) from pg_policy policy_row where policy_row.polrelid = class_row.oid) = 1
           and not exists (select 1 from aclexplode(coalesce(class_row.relacl, acldefault('r', class_row.relowner))) privilege
                            where privilege.grantee <> class_row.relowner)) <> 3 then
-    mismatch := 'the owner, row-level security, policy or ACL of the 0110 tables';
+    mismatch := 'the owner, row-level security, policy or ACL of the 0107 tables';
   end if;
   -- ocr.ai_usage and ocr.page_usage have no foreign key to ocr.jobs.
   if mismatch is null and exists (
        select 1 from pg_constraint constraint_row
         where constraint_row.conrelid in ('ocr.ai_usage'::regclass, 'ocr.page_usage'::regclass)
           and constraint_row.contype = 'f' and constraint_row.confrelid = 'ocr.jobs'::regclass) then
-    mismatch := 'a foreign key from a 0110 usage table to ocr.jobs';
+    mismatch := 'a foreign key from a 0107 usage table to ocr.jobs';
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0110: post-check failed: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0107: post-check failed: %s', mismatch);
   end if;
 end;
 $$;

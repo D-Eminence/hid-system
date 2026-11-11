@@ -180,7 +180,7 @@ for (const app of apps) {
     `API-only gateway must not package the Cloudflare-hosted ${app} frontend`)
 }
 assert.match(gatewayDockerfile, /USER 101/, 'gateway must run as the unprivileged Nginx user')
-assert.match(gatewayDockerfile, /USER 0[\s\S]*RUN apk del --no-cache curl\s+\\\s+&& apk add --no-cache 'pcre2=10\.49-r0' 'libexpat=2\.10\.0-r0' 'zlib=1\.3\.2-r1' 'libx11=1\.8\.14-r0' 'brotli-libs=1\.2\.1-r0'/,
+assert.match(gatewayDockerfile, /USER 0[\s\S]*RUN apk del --no-cache curl\s+\\\s+&& apk add --no-cache 'pcre2=10\.49-r0' 'libexpat=2\.10\.0-r0' 'zlib=1\.4-r0' 'libx11=1\.8\.14-r0' 'brotli-libs=1\.2\.1-r0'\s+\\\s+'musl=1\.2\.6-r3' 'musl-utils=1\.2\.6-r3'/,
   'gateway must install the exact security patch from its signed Alpine repository')
 assert.doesNotMatch(gatewayDockerfile, /apk upgrade|--allow-untrusted|--no-check-certificate/,
   'gateway must not broadly upgrade packages or bypass package trust')
@@ -208,6 +208,10 @@ for (const [route, upstream] of [
     `production gateway ownership mismatch for ${route}`)
 }
 assert.doesNotMatch(gatewayConfig, /3010|EVENT_DISPATCHER/, 'dispatcher must not be browser-routed')
+// The document scanner's routes are served by the internal load balancer only.
+const ehrGateway = /location \^~ \/api\/v1\/ehr\/ \{([\s\S]*?)\n  \}/.exec(gatewayConfig)?.[1] ?? ''
+assert.match(ehrGateway, /if \(\$uri ~\* "\^\/api\/v1\/ehr\/documents\/scan-\(events\|targets\)"\) \{ return 404; \}\n(?:\s*#.*\n)*\s*include \/etc\/nginx\/hid-proxy-headers\.conf;\n\s*proxy_pass \$hid_ehr_upstream;/,
+  'the public gateway must refuse the document scanner routes before the EHR proxy')
 for (const [app, base] of Object.entries(bases).filter(([name]) => name !== 'web')) {
   const route = base.slice(0, -1).replaceAll('/', '\\/')
   assert.doesNotMatch(gatewayConfig, new RegExp(`location ${route}\\/`),

@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- 0110: the OCR page allowance. Rollback-only. Every person, facility and
+-- 0107: the OCR page allowance. Rollback-only. Every person, facility and
 -- document here is made up (Test Patient Adaeze Example, Allowance Test
 -- Clinic A/B/C/D, folder numbers that do not exist).
 --
@@ -18,7 +18,12 @@
 --   - a pause under the limit is refused and changes nothing; at 500 the
 --     pause parks the job queued until 00:00 Africa/Lagos on resets_on with
 --     its attempt restored (2 -> 1, 1 -> 0), the reason code on the job
---     events, an audit row, and the claim does not pick it up;
+--     events, an audit row, and the claim does not pick it up; the pause
+--     holds the facility's page-limit lock (the advisory lock
+--     ocr.set_facility_page_limit takes), so a raise racing a pause runs
+--     wholly before it (the pause then sees the new limit and parks nothing,
+--     shown after the raise) or wholly after it (the raise resumes the job
+--     the pause parked, shown for J2 and J3);
 --   - staff holding ocr.job.read at the facility read it; another facility,
 --     a membership without ocr.job.read, an inactive membership and a session
 --     without a membership are refused; a platform administrator reads it in
@@ -49,7 +54,9 @@
 --     any provider with an unexpired lease count, an expired lease does
 --     not), the least busy facility goes first, then next_attempt_at; bad
 --     caps are refused; it recovers expired leases as ocr.claim_worker_job;
---     only hid_ocr_worker may call it; ocr.claim_worker_job is unchanged.
+--     only hid_ocr_worker may call it; it returns the detected media type of
+--     the clean scan, not the declared one (as 0105's ocr.claim_worker_job);
+--     ocr.claim_worker_job keeps the body 0105 gave it.
 -- Under an owner that does not bypass row-level security (release checklist
 -- P8) the worker commands cannot see ocr.jobs, like every OCR worker command;
 -- the worker cases then expect 55000 and the job-state checks are skipped.
@@ -85,7 +92,7 @@ begin
       expected(proc, config) on p.oid = expected.proc
    where not p.prosecdef or p.proconfig is distinct from expected.config or p.proowner <> ocr_owner;
   if mismatch is not null then
-    raise exception '0110 command security properties differ: %', mismatch;
+    raise exception '0107 command security properties differ: %', mismatch;
   end if;
   if (select count(*) from pg_proc where oid in ('ocr.worker_page_allowance(uuid,uuid)'::regprocedure,
         'ocr.record_worker_pages(uuid,uuid,integer,text)'::regprocedure,
@@ -95,7 +102,7 @@ begin
         'ocr.claim_worker_job_fair(text,integer,integer)'::regprocedure,
         'ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text)'::regprocedure,
         'ocr.facility_ocr_usage(uuid,date)'::regprocedure)) <> 8 then
-    raise exception 'a 0110 command is missing';
+    raise exception 'a 0107 command is missing';
   end if;
   if exists (select 1 from pg_proc where oid = 'ocr.facility_page_allowance_state(uuid)'::regprocedure
                and (prosecdef or proowner <> ocr_owner)) then
@@ -118,7 +125,7 @@ begin
        ('facility_ocr_usage', 'hid_ocr_runtime'), ('facility_ocr_usage', 'hid_identity_runtime'),
        ('set_facility_page_limit', 'hid_identity_runtime'));
   if mismatch is not null then
-    raise exception 'unexpected EXECUTE grants on the 0110 commands: %', mismatch;
+    raise exception 'unexpected EXECUTE grants on the 0107 commands: %', mismatch;
   end if;
   if (select count(*) from pg_proc p, aclexplode(p.proacl) privilege
        where p.pronamespace = 'ocr'::regnamespace and privilege.privilege_type = 'EXECUTE'
@@ -129,7 +136,7 @@ begin
            ('facility_page_allowance', 'hid_ocr_runtime'), ('facility_page_allowance', 'hid_identity_runtime'),
            ('facility_ocr_usage', 'hid_ocr_runtime'), ('facility_ocr_usage', 'hid_identity_runtime'),
            ('set_facility_page_limit', 'hid_identity_runtime'))) <> 10 then
-    raise exception 'the 0110 EXECUTE grants are incomplete';
+    raise exception 'the 0107 EXECUTE grants are incomplete';
   end if;
   -- No table privilege for any runtime role (or PUBLIC); forced row-level
   -- security with only the owner's policy.
@@ -141,14 +148,14 @@ begin
      and not pg_has_role(role_row.oid, (select relowner from pg_class where oid = table_name::regclass), 'MEMBER')
      and has_table_privilege(role_row.oid, table_name, privilege);
   if mismatch is not null then
-    raise exception 'a runtime role has a privilege on a 0110 table: %', mismatch;
+    raise exception 'a runtime role has a privilege on a 0107 table: %', mismatch;
   end if;
   if (select count(*) from pg_class c
        where c.oid in ('ocr.facility_page_limits'::regclass, 'ocr.page_usage'::regclass, 'ocr.ai_usage'::regclass)
          and c.relrowsecurity and c.relforcerowsecurity and c.relacl is not null
          and not exists (select 1 from aclexplode(c.relacl) a where a.grantee <> c.relowner)
          and (select count(*) from pg_policy p where p.polrelid = c.oid) = 1) <> 3 then
-    raise exception 'the 0110 tables must force row-level security, grant nothing and have one owner policy';
+    raise exception 'the 0107 tables must force row-level security, grant nothing and have one owner policy';
   end if;
   -- Nothing in the two tables can hold text from a page.
   if exists (select 1 from information_schema.columns
@@ -156,7 +163,7 @@ begin
                 and data_type in ('text', 'jsonb', 'json', 'bytea', 'character varying')
                 and not (table_name = 'facility_page_limits' and column_name = 'reason')
                 and not (table_name = 'ai_usage' and column_name = 'model')) then
-    raise exception 'a 0110 table has a free-text column beyond the limit reason and the model name';
+    raise exception 'a 0107 table has a free-text column beyond the limit reason and the model name';
   end if;
   -- ocr.ai_usage: the key, and no foreign key to ocr.jobs (Session C's
   -- 24-hour deletion never waits on it or removes it).
@@ -167,9 +174,9 @@ begin
           where conrelid = 'ocr.ai_usage'::regclass and contype = 'p') <> 'PRIMARY KEY (job_id, attempt_no, model)' then
     raise exception 'ocr.ai_usage must be keyed by (job_id, attempt_no, model) with no foreign key to ocr.jobs';
   end if;
-  -- ocr.claim_worker_job keeps its 0014/0015 (or rds-compat) body.
+  -- ocr.claim_worker_job keeps the body 0105 gave it.
   if (select md5(prosrc) from pg_proc where oid = 'ocr.claim_worker_job(text,integer)'::regprocedure)
-     <> all (array['1572865c10fcfb673293e83776d6cf50', '59a60b466df9b8effeb3519939fc54a2']) then
+     is distinct from '25b7ebb837fc93a4af52e555ffdac576' then
     raise exception 'ocr.claim_worker_job changed';
   end if;
 end $$;
@@ -299,7 +306,8 @@ select ('b1170000-0000-4000-8000-00000000000' || job.n)::uuid,
 --     C f1 processing, f2 processing under provider allowance-fair-other,
 --     f3 processing under provider allowance-fair-stale with an expired
 --     lease, f4-f6 queued (due 10, 9, 8 minutes ago); at clinic D f7-f9
---     queued (due 5, 4, 1 minutes ago).
+--     queued (due 5, 4, 1 minutes ago). f7 is declared application/pdf and
+--     its clean scan detected image/png (0105's owner decision D3).
 insert into ehr.documents (id, patient_id, facility_id, created_by, created_by_membership_id, original_file_name,
   storage_bucket, storage_key, object_version_id, declared_media_type, size_bytes, sha256_hex, status,
   retention_class)
@@ -322,7 +330,8 @@ insert into ehr.document_scan_events (document_id, patient_id, facility_id, crea
   detected_media_type, scanner_engine, scanner_version, idempotency_key, correlation_id, object_version_id,
   object_sha256_hex)
 select document.id, document.patient_id, document.facility_id, 'b1110000-0000-4000-8000-000000000001', 'clean',
-       'application/pdf', 'synthetic-scanner', '1.0', 'allowance-scan-' || right(document.id::text, 2),
+       case when right(document.id::text, 2) = 'f7' then 'image/png' else 'application/pdf' end,
+       'synthetic-scanner', '1.0', 'allowance-scan-' || right(document.id::text, 2),
        'allowance-scan', document.object_version_id, document.sha256_hex
   from ehr.documents document
  where document.id::text like 'b1160000-0000-4000-8000-0000000000__' and right(document.id::text, 2) ~ '^[df][1-9]$';
@@ -779,6 +788,17 @@ begin
       (select array_agg(to_status order by job_version) = array['failed', 'queued']
               and bool_and(reason_code = 'OCR_PAGE_ALLOWANCE_USED_UP')
          from ocr.job_events where job_id = 'b1170000-0000-4000-8000-000000000002'));
+    -- The pauses above took clinic A's page-limit lock, the transaction
+    -- advisory lock ocr.set_facility_page_limit takes for the facility (the
+    -- same key), and hold it to commit: a raise of clinic A waits for them.
+    perform pg_temp.allowance_check('the pause holds the page-limit lock set_facility_page_limit takes',
+      (select count(*) = 1 from pg_locks lock_row,
+              (select pg_catalog.hashtextextended('hid.ocr.page-limit:b1100000-0000-4000-8000-00000000000a', 0)
+                 as lock_key) wanted
+        where lock_row.locktype = 'advisory' and lock_row.pid = pg_backend_pid() and lock_row.granted
+          and lock_row.mode = 'ExclusiveLock' and lock_row.objsubid = 1
+          and lock_row.classid::text::bigint = ((wanted.lock_key >> 32) & 4294967295)
+          and lock_row.objid::text::bigint = (wanted.lock_key & 4294967295)));
     perform pg_temp.allowance_check('one paused_for_allowance audit row for J2',
       (select count(*) = 1 and min(details->>'pagesUsed') = '500' and min(details->>'pagesLimit') = '500'
               and min(details->>'resetsOn') = current_setting('ocr_allowance.resets_on')
@@ -1037,6 +1057,34 @@ begin
     current_setting('app.facility_id', true) = '');
 end $$;
 
+-- A raise that committed before a pause read the allowance: the pause sees
+-- the new limit (500 of 1200) and parks nothing. With the shared lock this
+-- and J2/J3 above (pause first, then the raise resumes them) are the only
+-- two outcomes of a raise racing a pause; neither leaves a job parked under
+-- a limit above use.
+set local role hid_ocr_worker;
+select pg_temp.as_worker('workload:allowance-worker-b');
+select pg_temp.worker_case('after the raise, pausing J4 (pages not recorded) answers NULL', 'ok', $s$
+  do $d$ begin
+    if ocr.pause_worker_job_for_allowance('b1170000-0000-4000-8000-000000000004',
+         'b1180000-0000-4000-8000-000000000004', 'allowance-suite-pause-j4') is not null then
+      raise exception 'a pause after a raise above use parked the job';
+    end if;
+  end $d$ $s$, true);
+reset role;
+do $$
+begin
+  if current_setting('ocr_allowance.owner_sees_jobs')::boolean then
+    perform pg_temp.allowance_check('J4 still processing under worker B after the pause that followed the raise',
+      (select status = 'processing' and claimed_by_subject = 'workload:allowance-worker-b'
+              and last_error_code is null and next_attempt_at <= clock_timestamp()
+         from ocr.jobs where id = 'b1170000-0000-4000-8000-000000000004'));
+    perform pg_temp.allowance_check('no paused_for_allowance audit row for J4',
+      not exists (select 1 from audit.events where action = 'ocr.worker.paused_for_allowance'
+                   and resource_id = 'b1170000-0000-4000-8000-000000000004'));
+  end if;
+end $$;
+
 -- The resumed J2 is claimed as attempt 2 of 3: the pause used no attempt.
 set local role hid_ocr_worker;
 select pg_temp.as_worker('workload:allowance-worker-b');
@@ -1170,6 +1218,7 @@ declare claimed record;
 begin
   select * into claimed from ocr.claim_worker_job_fair(provider, 60, cap);
   if claimed.job_id is null then return 'none'; end if;
+  perform set_config('ocr_allowance.fair_media_type_' || right(claimed.job_id::text, 2), claimed.media_type, true);
   return right(claimed.job_id::text, 2) || '@' || claimed.attempt_no;
 end $$;
 grant execute on function pg_temp.fair_claim(integer, text) to public;
@@ -1227,6 +1276,9 @@ begin
       (select count(*) = 7 and bool_and(details ? 'maxInFlightPerFacility' and details ? 'inFlightBefore'
               and (details->>'inFlightBefore')::integer < (details->>'maxInFlightPerFacility')::integer)
          from audit.events where action = 'ocr.worker.claim' and resource_id ~ '^b1170000-0000-4000-8000-0000000000f[3-9]$'));
+    perform pg_temp.allowance_check('the fair claim returns the detected media type (f7 image/png, declared PDF)',
+      current_setting('ocr_allowance.fair_media_type_f7', true) = 'image/png'
+      and current_setting('ocr_allowance.fair_media_type_f4', true) = 'application/pdf');
     perform pg_temp.allowance_check('f3''s lease recovery was audited',
       (select count(*) = 1 from audit.events where action = 'ocr.worker.lease_recovered'
           and resource_id = 'b1170000-0000-4000-8000-0000000000f3'));
