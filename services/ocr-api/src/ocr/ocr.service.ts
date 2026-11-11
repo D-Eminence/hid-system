@@ -15,7 +15,7 @@ import type { RetryOcrJobDto } from './dto/retry-ocr-job.dto';
 import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
 import { assertCandidateClassification, assertPublishableCandidate, clinicalNoteCandidate,
   expectedPublicationOperation, importedLabCandidate,
-  importedMedicationCandidates, type ImportedMedicationEntry } from './ocr-publication-policy';
+  importedMedicationCandidates, paperRecordDraftNote, type ImportedMedicationEntry, type OcrTargetDomain } from './ocr-publication-policy';
 import { lagosToday } from './paper-date';
 import { LabApiService } from '../integrations/lab-api.service';
 import { OcrPublicationSwitch } from './ocr-publication-switch';
@@ -577,8 +577,19 @@ export class OcrService {
       let resourceType: string;
       let resourceId: string;
       let auditDetails: Record<string, unknown> = {};
-      if (claimed.target_domain === 'EHR' && claimed.target_operation === 'create_imported_clinical_note') {
-        const { encounterId, ...note } = clinicalNoteCandidate(evidence.validation.accepted_fields);
+      const draftOfAnotherKind = evidence.authority.basis === 'records_processing_grant'
+        && claimed.target_domain !== 'EHR';
+      if (draftOfAnotherKind
+        || (claimed.target_domain === 'EHR' && claimed.target_operation === 'create_imported_clinical_note')) {
+        // A Lab, Pharmacy or document-only reading under the dedicated grant is
+        // a draft note too, labelled by kind (EHR shows "From a paper record
+        // (Migrate): Lab results"); structured Lab and Pharmacy records need
+        // direct care.
+        const candidate: { encounterId?: string; noteType: string; title: string; content: string } = draftOfAnotherKind
+          ? paperRecordDraftNote(claimed.target_domain as OcrTargetDomain, evidence.validation.accepted_fields,
+            lagosToday(new Date(evidence.validation.created_at)))
+          : clinicalNoteCandidate(evidence.validation.accepted_fields);
+        const { encounterId, ...note } = candidate;
         // Under the dedicated grant the reading becomes a draft in the
         // patient's "Imported paper records" encounter: no visit is sent, and
         // EHR checks the same grant again. Under direct care a reading that
@@ -877,8 +888,7 @@ export class OcrService {
    * Publishing needs the publisher's own direct-care write_records grant on
    * the patient (the request's purpose, always direct-care), for every
    * target, or (0112, owner decision of 2026-11-11) the patient's dedicated
-   * records-processing grant, which publishes only a clinical-note reading,
-   * as a draft. In order:
+   * records-processing grant, which publishes any reading as a draft note. In order:
    * - the source is read under the request's purpose; when Identity allows a
    *   write there without break-glass: direct_care, as before; with
    *   break-glass only: 404, as before;
@@ -886,8 +896,11 @@ export class OcrService {
    *   job's patient (the source's, or the confirmed one when the source is
    *   hidden under direct care), in this transaction, for the session's own
    *   subject, membership and facility; with a grant, the source is read again
-   *   under healthcare-operations and must be that patient's: for an EHR
-   *   reading, records_processing_grant; for any other target, 403;
+   *   under healthcare-operations and must be that patient's: then
+   *   records_processing_grant, for every target: a clinical-note reading as
+   *   it is, a Lab, Pharmacy or document-only reading as a draft note
+   *   labelled by kind (paperRecordDraftNote), never a structured Lab or
+   *   Pharmacy record;
    * - otherwise 403 OCR_PUBLISH_NEEDS_DIRECT_CARE to a caller who can read
    *   the job, and 404 OCR_JOB_NOT_FOUND to one who cannot, as #221.
    * Shares, Access PINs and approvals (the cover) never reach the draft path:
@@ -918,10 +931,7 @@ export class OcrService {
       if (grantId) {
         const recordsProcessing: DataAccessContext = { ...context, purposeOfUse: 'healthcare-operations' };
         const draftSource = await readSource(recordsProcessing);
-        if (draftSource && draftSource.patientId === patientId) {
-          if (targetDomain !== 'EHR') {
-            throw new DomainProblem(403, 'OCR_PUBLISH_NEEDS_DIRECT_CARE', OCR_PUBLISH_NEEDS_DIRECT_CARE_MESSAGE);
-          }
+        if (draftSource && draftSource.patientId === patientId && targetDomain !== 'UNCLASSIFIED') {
           return { source: draftSource, basis: 'records_processing_grant', grantId, context: recordsProcessing };
         }
       }

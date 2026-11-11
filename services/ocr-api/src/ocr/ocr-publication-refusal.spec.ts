@@ -47,7 +47,10 @@ const targets = {
   LAB: { operation: 'create_imported_lab_evidence', candidate_type: 'lab_document',
     accepted_fields: { observations: [{ testName: 'Haemoglobin', value: '12.5', unit: 'g/dL' }] } },
   PHARMACY: { operation: 'create_imported_medication_evidence', candidate_type: 'medication_list',
-    accepted_fields: { medicationName: 'Paracetamol' } },
+    accepted_fields: { medications: [
+      { medicationText: 'Paracetamol', strengthText: '500 mg', frequencyText: 'tds', page: 1,
+        historicalContext: 'Paracetamol 500mg tds x 3/7' },
+      { medicationText: 'Amoxicillin', doseText: '1 cap', page: 1, historicalContext: 'Amoxil 1 cap bd' }] } },
   DOCUMENT_ONLY: { operation: 'retain_validated_document', candidate_type: 'document_only',
     accepted_fields: { note: 'Fictional text' } },
 } as const;
@@ -72,6 +75,8 @@ interface Access {
   draftSource?: 'visible' | 'another patient' | 404;
   /** The validated reading names no visit. */
   noVisit?: boolean;
+  /** A document-only reading with no typed text. */
+  noText?: boolean;
 }
 
 type Rows = { rows: unknown[]; rowCount: number };
@@ -83,7 +88,8 @@ function harness(domain: Domain, access: Access) {
     extraction_id: '80000000-0000-4000-8000-000000000001', validation_version: 1, disposition: 'validated',
     target_domain: domain, candidate_type: target.candidate_type,
     accepted_fields: access.noVisit && domain === 'EHR'
-      ? { noteType: 'progress', title: 'Imported note', content: 'Fictional clinical text' } : target.accepted_fields,
+      ? { noteType: 'progress', title: 'Imported note', content: 'Fictional clinical text' }
+      : access.noText ? {} : target.accepted_fields,
     rejected_fields: [], corrections: [], reason: 'Reviewed', validated_by: context.actor.accountId,
     created_at: new Date('2026-10-09T10:05:00Z'), document_id: documentId, patient_id: null, job_status: 'validated' };
   const publication = { id: publicationId, job_id: jobId, validation_id: validationId, validation_version: 1,
@@ -143,8 +149,10 @@ function harness(domain: Domain, access: Access) {
     const answer = writeChecks > 1 && access.attemptWrite ? access.attemptWrite : access.write;
     return { allowed: answer.allowed, breakGlass: answer.breakGlass ?? false };
   }) };
-  const labApi = { createOcrImport: jest.fn() };
-  const pharmacyApi = { createOcrImport: jest.fn(), createOcrImportBatch: jest.fn() };
+  const labApi = { createOcrImport: jest.fn(async () => ({ id: 'f0000000-0000-4000-8000-000000000001' })) };
+  const pharmacyApi = { createOcrImport: jest.fn(async () => ({ id: 'f0000000-0000-4000-8000-000000000002' })),
+    createOcrImportBatch: jest.fn(async () => ({ id: 'f0000000-0000-4000-8000-000000000003',
+      items: [{ id: 'f0000000-0000-4000-8000-000000000004' }, { id: 'f0000000-0000-4000-8000-000000000005' }], count: 2 })) };
   const audit = { recordWithClient: jest.fn(async () => undefined) };
   const service = new OcrService(database, identity as unknown as IdentityApiService,
     audit as unknown as AuditService, ehrApi as unknown as EhrApiService,
@@ -169,7 +177,7 @@ function harness(domain: Domain, access: Access) {
   const auditDetails = (action: string) => audit.recordWithClient.mock.calls
     .map((call) => (call as unknown[])[1] as { action: string; details?: Record<string, unknown>; purposeOfUse?: string })
     .find((event) => event.action === action);
-  return { publish, ehrApi, identity, audit, sql, nothingWritten, grantQueries, auditDetails };
+  return { publish, ehrApi, labApi, pharmacyApi, identity, audit, sql, nothingWritten, grantQueries, auditDetails };
 }
 
 async function refusal(run: () => Promise<unknown>): Promise<DomainProblem> {
@@ -274,13 +282,44 @@ describe('OCR publication under the dedicated records-processing grant', () => {
     expect(run.ehrApi.createOcrClinicalNote.mock.calls[0]![2]).toMatchObject({ purposeOfUse: 'healthcare-operations' });
   });
 
-  it.each(['LAB', 'PHARMACY', 'DOCUMENT_ONLY'] as const)(
-    'refuses %s under the dedicated grant with 403 OCR_PUBLISH_NEEDS_DIRECT_CARE (no draft state)', async (domain) => {
+  it.each([
+    ['LAB', 'Lab results', '- Haemoglobin: 12.5 g/dL'],
+    ['PHARMACY', 'Medicines',
+      '- Paracetamol 500 mg tds\n  As written: Paracetamol 500mg tds x 3/7\n- Amoxicillin 1 cap\n  As written: Amoxil 1 cap bd'],
+    ['DOCUMENT_ONLY', 'Document', 'note: Fictional text'],
+  ] as const)('publishes a %s reading under the dedicated grant as a labelled draft note, never a structured record',
+    async (domain, title, content) => {
       const run = harness(domain, { source: 404, write: { allowed: false }, grant: grantId });
-      const problem = await refusal(run.publish);
-      expect([problem.getStatus(), problem.code]).toEqual([403, 'OCR_PUBLISH_NEEDS_DIRECT_CARE']);
-      run.nothingWritten();
+      await expect(run.publish()).resolves.toMatchObject({ status: 'published', targetResourceId: noteId,
+        targetResourceType: 'clinical-note' });
+      const [patient, input, call] = run.ehrApi.createOcrClinicalNote.mock.calls[0]!;
+      expect(patient).toBe(patientId);
+      expect(call).toMatchObject({ purposeOfUse: 'healthcare-operations' });
+      expect(input).not.toHaveProperty('encounterId');
+      expect(input).toMatchObject({ noteType: 'imported_paper_record', title, content, publicationId,
+        documentId, validationId, confirmedBy: confirmer });
+      expect(run.labApi.createOcrImport).not.toHaveBeenCalled();
+      expect(run.pharmacyApi.createOcrImport).not.toHaveBeenCalled();
+      expect(run.pharmacyApi.createOcrImportBatch).not.toHaveBeenCalled();
+      expect(run.auditDetails('ocr.publication.succeed')?.details).toMatchObject({ basis: 'records_processing_grant',
+        grantId, targetResourceType: 'clinical-note' });
     });
+
+  it.each(['LAB', 'PHARMACY'] as const)('a %s reading under direct care is still the structured record, not a note',
+    async (domain) => {
+      const run = harness(domain, { source: 'visible', write: { allowed: true } });
+      await expect(run.publish()).resolves.toMatchObject({ status: 'published' });
+      expect(run.ehrApi.createOcrClinicalNote).not.toHaveBeenCalled();
+      const structured = domain === 'LAB' ? run.labApi.createOcrImport : run.pharmacyApi.createOcrImportBatch;
+      expect(structured).toHaveBeenCalledTimes(1);
+    });
+
+  it('a document-only reading with no typed text says so, and no text is made up', async () => {
+    const run = harness('DOCUMENT_ONLY', { source: 404, write: { allowed: false }, grant: grantId, noText: true });
+    await run.publish();
+    expect(run.ehrApi.createOcrClinicalNote.mock.calls[0]![1]).toMatchObject({
+      content: 'A paper record kept as a document; the reviewer typed no text from it.' });
+  });
 
   it('refuses when the source read under records processing names another patient', async () => {
     const run = harness('EHR', { source: 404, write: { allowed: false }, grant: grantId, draftSource: 'another patient' });

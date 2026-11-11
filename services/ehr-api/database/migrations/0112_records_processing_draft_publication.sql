@@ -34,11 +34,11 @@
 --   read-only approvals, which the owner excluded ("Never through shares or
 --   PINs").
 -- - "the staff permission should cover publish to patient profile/health
---   ID" is read as the patient's record (the EHR clinical-note target): the
---   dedicated grant publishes a clinical-note reading into it as a draft.
---   Lab, medication and document-only readings have no draft state and stay
---   direct care (ocr-api answers 403 OCR_PUBLISH_NEEDS_DIRECT_CARE, as #221);
---   that reading is the coordinator's and is listed for the owner.
+--   ID" is read as the patient's record: the dedicated grant publishes any
+--   reading into it as a draft clinical note. A Lab, medication or
+--   document-only reading becomes a draft note titled by kind, built in
+--   ocr-api from the reviewed fields; structured Lab and Pharmacy records
+--   still need direct care and are never written under the grant.
 --
 -- D1 Who: identity.records_processing_write_grant(patient, subject,
 --    membership, facility) returns the dedicated grant's id or NULL (sql,

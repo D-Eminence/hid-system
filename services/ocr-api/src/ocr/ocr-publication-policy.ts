@@ -291,6 +291,59 @@ export function clinicalNoteCandidate(fields: Record<string, unknown>) {
     content };
 }
 
+/** The note type of a reading that is not a clinical note, published as a draft under the dedicated grant (0112). */
+export const PAPER_RECORD_NOTE_TYPE = 'imported_paper_record';
+
+/**
+ * A Lab, Pharmacy or document-only reading published under the dedicated
+ * records-processing grant (0112): not a structured Lab or Pharmacy record
+ * (those still need direct care) but a draft note in the patient's "Imported
+ * paper records" encounter, titled by kind (EHR puts "From a paper record
+ * (Migrate): " before it, and its own note type), for a clinician to sign. The
+ * text is the reviewed fields only, checked by the same candidate check as
+ * direct care, in reading order; nothing is added or inferred.
+ */
+export function paperRecordDraftNote(domain: OcrTargetDomain, fields: Record<string, unknown>, today: string) {
+  const join = (parts: Array<string | undefined>, separator = ' ') => parts.filter((part) => part).join(separator);
+  let title: string;
+  let lines: string[];
+  if (domain === 'LAB') {
+    const lab = importedLabCandidate(fields, today);
+    title = 'Lab results';
+    lines = [
+      ...(lab.externalLabName ? [`Laboratory: ${lab.externalLabName}`] : []),
+      ...(lab.externalReference ? [`Reference: ${lab.externalReference}`] : []),
+      ...(lab.collectedAt ? [`Collected: ${lab.collectedAt}`] : []),
+      ...(lab.reportedAt ? [`Reported: ${lab.reportedAt}`] : []),
+      ...lab.observations.map((item) => `- ${item.testName}: ${join([
+        join([item.value, item.unit]), item.valueText,
+        item.referenceRange ? `(reference ${item.referenceRange})` : undefined,
+        item.abnormalFlag ? `[${item.abnormalFlag}]` : undefined,
+        item.reportedAt ? `reported ${item.reportedAt}` : undefined])}`),
+    ];
+  } else if (domain === 'PHARMACY') {
+    const { items } = importedMedicationCandidates(fields);
+    title = 'Medicines';
+    lines = items.map((item) => {
+      const medicine = `- ${join([item.medicationText, item.strengthText, item.doseText, item.frequencyText])}`;
+      return item.historicalContext ? `${medicine}\n  As written: ${item.historicalContext}` : medicine;
+    });
+  } else if (domain === 'DOCUMENT_ONLY') {
+    title = 'Document';
+    const typed = Object.entries(fields).filter((entry): entry is [string, string] =>
+      typeof entry[1] === 'string' && entry[1].trim().length > 0);
+    lines = typed.length > 0 ? typed.map(([name, value]) => `${name}: ${value.trim()}`)
+      : ['A paper record kept as a document; the reviewer typed no text from it.'];
+  } else {
+    throw new DomainProblem(409, 'OCR_TARGET_UNAVAILABLE', 'The owning domain does not support this publication operation');
+  }
+  const content = lines.join('\n');
+  if (content.length > 100_000) {
+    throw new DomainProblem(400, 'OCR_INVALID_CLINICAL_NOTE', 'Validated clinical-note candidate is incomplete or invalid');
+  }
+  return { noteType: PAPER_RECORD_NOTE_TYPE, title, content };
+}
+
 /**
  * Runs the owning domain's candidate check that publication runs on the same
  * accepted fields. Publication stores its refusal as terminal, and a validated

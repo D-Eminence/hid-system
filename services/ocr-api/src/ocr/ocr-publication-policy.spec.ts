@@ -1,7 +1,7 @@
 import { DomainProblem } from '../common/problem';
 import { assertCandidateClassification, assertPublishableCandidate, clinicalNoteCandidate,
   expectedPublicationOperation, importedLabCandidate, importedMedicationCandidate,
-  importedMedicationCandidates, MAX_IMPORTED_MEDICATIONS, publicationCanRetry } from './ocr-publication-policy';
+  importedMedicationCandidates, MAX_IMPORTED_MEDICATIONS, paperRecordDraftNote, publicationCanRetry } from './ocr-publication-policy';
 
 describe('governed OCR publication policy', () => {
   it('keeps validation and publication separate and blocks unclassified candidates', () => {
@@ -276,5 +276,37 @@ describe('clinicalNoteCandidate visit (0112)', () => {
   });
   it.each(['not-a-visit', 42, null])('refuses a visit that is not a uuid (%p)', (encounterId) => {
     expect(() => clinicalNoteCandidate({ ...fields, encounterId })).toThrow('Validated clinical-note candidate is incomplete or invalid');
+  });
+});
+
+// 0112: a Lab, Pharmacy or document-only reading under the dedicated grant is a
+// draft note labelled by kind, built from the reviewed fields only.
+describe('paperRecordDraftNote', () => {
+  it('writes every Lab field that was reviewed, in reading order, and nothing else', () => {
+    const note = paperRecordDraftNote('LAB', { externalLabName: 'Example Lab', collectedAt: '2026-10-01',
+      observations: [
+        { testName: 'Haemoglobin', value: '12.5', unit: 'g/dL', referenceRange: '12-16', abnormalFlag: 'N' },
+        { testName: 'Malaria parasite', valueText: 'Not seen' }] }, '2026-11-11');
+    expect(note).toEqual({ noteType: 'imported_paper_record', title: 'Lab results',
+      content: 'Laboratory: Example Lab\nCollected: 2026-10-01\n'
+        + '- Haemoglobin: 12.5 g/dL (reference 12-16) [N]\n- Malaria parasite: Not seen' });
+  });
+
+  it('keeps the as-written line of each medicine and never merges two', () => {
+    const note = paperRecordDraftNote('PHARMACY', { medicationText: 'Paracetamol', strengthText: '500 mg' }, '2026-11-11');
+    expect(note).toMatchObject({ title: 'Medicines', content: '- Paracetamol 500 mg' });
+  });
+
+  it('refuses a Lab or Pharmacy reading the structured check refuses, with the same code', () => {
+    expect(() => paperRecordDraftNote('LAB', { observations: [] }, '2026-11-11'))
+      .toThrow(expect.objectContaining({ code: 'OCR_INVALID_LAB_EVIDENCE' }));
+    expect(() => paperRecordDraftNote('PHARMACY', {}, '2026-11-11')).toThrow(DomainProblem);
+  });
+
+  it('is never used for a clinical note or an unclassified reading', () => {
+    for (const domain of ['EHR', 'UNCLASSIFIED'] as const) {
+      expect(() => paperRecordDraftNote(domain, {}, '2026-11-11'))
+        .toThrow(expect.objectContaining({ code: 'OCR_TARGET_UNAVAILABLE' }));
+    }
   });
 });

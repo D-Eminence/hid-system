@@ -43,10 +43,13 @@ section 40) a caller without direct-care write who holds the patient's
 dedicated records-processing grant (an approved `healthcare-operations`
 `write_records` access request; never a share, an Access PIN or an approval of
 direct care: `identity.records_processing_write_grant`, asked in the
-publication's transaction) publishes an EHR clinical-note reading as a draft:
-EHR is called under `healthcare-operations` without a visit and puts the draft
-note into the patient's "Imported paper records" encounter at the facility. Lab,
-medication and document-only readings stay direct care (403). A reading may
+publication's transaction) publishes any reading as a draft note: EHR is
+called under `healthcare-operations` without a visit and puts the draft note
+into the patient's "Imported paper records" encounter at the facility. A
+clinical-note reading goes as it is; a Lab, medication or document-only reading
+becomes a draft note titled "Lab results", "Medicines" or "Document" from its
+reviewed fields (`paperRecordDraftNote`), never a structured Lab or Pharmacy
+record (those stay direct care). A reading may
 name no visit (`encounterId` optional); a direct-care publisher of such a
 reading also lands it there. The publication audit events carry `basis`,
 `grantId`, `confirmedBy` and `publishedBy` (ids only).

@@ -3811,11 +3811,16 @@ Dated note, 2026-11-11, amending the owner decisions recorded in 0104 D7 and
 same note): publishing into the chart still needs the publisher's own
 direct-care write grant, and the cover (sections 32.1 and 36: approval, Access
 PIN, any share) still never publishes. The one exception: the holder of the
-patient's dedicated records-processing grant may publish an EHR clinical-note
-reading as a DRAFT note. "Patient profile/health ID" is read as the patient's
-record (the EHR target); Lab, medication and `DOCUMENT_ONLY` readings have no
-draft state and stay direct care (403 `OCR_PUBLISH_NEEDS_DIRECT_CARE`). That
-reading is the coordinator's and is open for the owner.
+patient's dedicated records-processing grant may publish any reading as a
+DRAFT note. "Patient profile/health ID" is read as the patient's record: an EHR
+clinical-note reading is published as it is; a Lab, medication or
+`DOCUMENT_ONLY` reading becomes a draft note of the same kind in the same
+encounter, built from the reviewed fields only (ocr-api
+`paperRecordDraftNote`), titled "Lab results", "Medicines" or "Document" (EHR
+shows "From a paper record (Migrate): Lab results"). Structured Lab and
+Pharmacy records (Lab imported evidence, Pharmacy imported medications) still
+need direct care: under the grant they are never written, and the publication's
+`targetResourceType` is `clinical-note`. A clinician signs the draft later.
 
 **The dedicated grant.** `identity.records_processing_write_grant(patient,
 subject, membership, facility)` returns its id or NULL (SECURITY DEFINER, for
