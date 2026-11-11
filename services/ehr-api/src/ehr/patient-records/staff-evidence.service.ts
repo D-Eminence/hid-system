@@ -7,7 +7,7 @@ import { LabApiService } from '../../integrations/lab-api.service';
 import { AuditService } from '../../audit/audit.service';
 import { STAFF_EVIDENCE_QUERY } from './patient-evidence.query';
 import { PatientAttachmentTextService, attachmentTextQuery } from './patient-attachment-text.service';
-import { evidence, evidenceKey, originLabel, type Evidence, type EvidenceBinding, type EvidenceSnapshot, type SourceKind } from './patient-evidence.types';
+import { DOCUMENTS_UNAVAILABLE, LAB_UNAVAILABLE, PERMISSIONS_LIMITED, evidence, evidenceKey, originLabel, type Evidence, type EvidenceBinding, type EvidenceSnapshot, type SourceKind } from './patient-evidence.types';
 import type { AttachmentAccess } from './chat-access';
 import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scope.service';
 
@@ -65,7 +65,7 @@ export class StaffEvidenceService {
         try { await this.attachments.prepare(request, signal, this.documents(scope)); return []; }
         catch (error) {
           if (signal.aborted || (error instanceof DomainProblem && error.getStatus() < 500)) throw error;
-          return ['Document extraction unavailable; some attachment contents are not included'];
+          return [DOCUMENTS_UNAVAILABLE];
         }
       },
       snapshot: (request: HidRequest, signal?: AbortSignal, ids?: readonly string[]) => this.snapshot(scope, request, signal, ids),
@@ -116,7 +116,7 @@ export class StaffEvidenceService {
       return { records, complete };
     });
     const unavailable: string[] = [];
-    if (allowed.length < Object.keys(STAFF_SOURCE_PERMISSIONS).length) unavailable.push('Some record categories are outside your current read permissions.');
+    if (allowed.length < Object.keys(STAFF_SOURCE_PERMISSIONS).length) unavailable.push(PERMISSIONS_LIMITED);
     if(scope.allows('profile')) {
       const profile=await this.identity.staffPatientProfile(scope.patientId,scope.context);
       if(profile.patientId!==scope.patientId)throw new DomainProblem(403,'CHAT_ACCESS_DENIED','Patient profile authorization changed');
@@ -141,7 +141,7 @@ export class StaffEvidenceService {
       } catch (error) {
         if (signal?.aborted || (error instanceof DomainProblem && [401, 403].includes(error.getStatus()))) throw error;
         local.records = local.records.filter(r => r.kind !== 'lab_result');
-        unavailable.push('Laboratory service unavailable; result coverage is unknown.');
+        unavailable.push(LAB_UNAVAILABLE);
       }
     }
     const documents = scope.allows('attachment') && scope.allows('document')

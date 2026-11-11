@@ -13,6 +13,23 @@ it('routes the minimal patient-PIN verification notice through the same patient 
   expect(parseSqsEvent(JSON.stringify({ detail: pinAccess }))).toEqual(pinAccess);
   expect(WORKFLOW_BY_EVENT.PatientAccessPinVerified).toBe('patient-update-v1');
 });
+it.each(['write_records', 'read_records'])('routes a patient-PIN notice that names its grant\'s scope (%s, 0120)', (scope) => {
+  const pinAccess = { ...event, type: 'PatientAccessPinVerified', payload: { ...event.payload, scope } };
+  expect(parseSqsEvent(JSON.stringify({ detail: pinAccess }))).toEqual(pinAccess);
+});
+it.each([
+  { payload: { ...event.payload, scope: 'break_glass' } },
+  { payload: { ...event.payload, scope: null } },
+  { payload: { consentGrantId: event.payload.consentGrantId, scope: 'write_records' } },
+  { payload: { ...event.payload, scope: 'write_records', reviewRequired: false } },
+])('rejects an invalid patient-PIN notice %j', (change) => {
+  expect(() => parseSqsEvent(JSON.stringify({ detail: { ...event, type: 'PatientAccessPinVerified', ...change } })))
+    .toThrow('INVALID_PATIENT_PIN_NOTIFICATION_CONTRACT');
+});
+it('rejects an emergency notice that names a scope', () => {
+  expect(() => parseSqsEvent(JSON.stringify({ detail: { ...event, payload: { ...event.payload, scope: 'write_records' } } })))
+    .toThrow('INVALID_EMERGENCY_NOTIFICATION_CONTRACT');
+});
 it.each([
   { producer: 'lab' },
   { payload: { ...event.payload, reason: 'Sensitive emergency reason' } },

@@ -1,4 +1,14 @@
 import { IsDateString, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { MinTrimmedLength } from '../../common/validation';
+
+/**
+ * The fewest characters Lab keeps in a check, release or correction reason,
+ * not counting spaces at either end: the database keeps 3 to 500
+ * (lab.result_verifications, lab.result_releases, 0021; the correction reason
+ * of lab.result_revisions, 0020), and the website asks for as many
+ * (REASON_MIN). A shorter reason is refused 400 here, never 500 there.
+ */
+export const REASON_MIN = 3;
 
 export class StartExecutionDto {
  @IsInt() @Min(1) expectedSpecimenVersion!:number;
@@ -22,11 +32,11 @@ export class EnterResultDto {
 }
 export class CorrectResultDto extends EnterResultDto {
  @IsInt() @Min(1) expectedResultVersion!:number;
-  @IsString() @MaxLength(500) reason!:string;
+  @IsString() @MinTrimmedLength(REASON_MIN) @MaxLength(500) reason!:string;
   @IsOptional() @IsIn(['correction','amendment']) revisionKind?:'correction'|'amendment';
 }
 export class GovernResultDto {
  @IsInt() @Min(1) expectedResultVersion!:number;
  @IsDateString() occurredAt!:string;
- @IsString() @MaxLength(500) reason!:string;
+ @IsString() @MinTrimmedLength(REASON_MIN) @MaxLength(500) reason!:string;
 }

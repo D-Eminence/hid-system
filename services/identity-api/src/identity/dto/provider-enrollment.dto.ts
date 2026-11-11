@@ -1,8 +1,26 @@
-import { Transform } from 'class-transformer';
-import { IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsDefined, IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength, ValidateIf,
+  ValidateNested } from 'class-validator';
+import { COLLECTED_PHONE_E164, FacilityProfileDto, toCollectedPhone } from './facility-profile.dto';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 const products = ['ehr', 'migrate', 'laboratory', 'pharmacy'] as const;
+
+/** The applicant's role at the facility (0114). */
+export const SIGNUP_SUBMITTER_ROLES = ['owner', 'medical_director', 'administrator',
+  'other_authorised_representative'] as const;
+
+/**
+ * 0114 release step (INTERFACE_CONTRACT 43.0): the sign-up fields come all
+ * together or not at all, so the live website's body still works. A follow-up
+ * makes them required.
+ */
+export const SIGNUP_FIELDS = ['administratorRole', 'administratorPhone', 'facilityProfile'] as const;
+
+export function hasAnySignupField(body: object): boolean {
+  const values = body as Partial<Record<typeof SIGNUP_FIELDS[number], unknown>>;
+  return SIGNUP_FIELDS.some((field) => values[field] !== undefined && values[field] !== null);
+}
 
 export class StartProviderEnrollmentDto {
   @IsIn(products)
@@ -21,6 +39,21 @@ export class StartProviderEnrollmentDto {
 
   @Transform(trim) @IsEmail() @MaxLength(254)
   administratorEmail!: string;
+
+  /** 0114 (owner: "all fields required"): the applicant's role at the facility. All or none. */
+  @ValidateIf(hasAnySignupField)
+  @IsIn(SIGNUP_SUBMITTER_ROLES)
+  administratorRole?: typeof SIGNUP_SUBMITTER_ROLES[number];
+
+  /** 0114: the applicant's own phone, E.164 or a Nigerian local number; stored encrypted (D4). */
+  @ValidateIf(hasAnySignupField)
+  @Transform(toCollectedPhone) @IsString() @Matches(COLLECTED_PHONE_E164)
+  administratorPhone?: string;
+
+  /** 0114: the facility's profile; the CAC legal name stays as QoreID reads it (D1). */
+  @ValidateIf(hasAnySignupField)
+  @IsDefined() @ValidateNested() @Type(() => FacilityProfileDto)
+  facilityProfile?: FacilityProfileDto;
 
   @IsIn(['provider-enrollment'])
   turnstileAction!: 'provider-enrollment';

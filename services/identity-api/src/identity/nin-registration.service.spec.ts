@@ -1,3 +1,4 @@
+import { deskCollectedFields } from '../../test/collected-fields.fixtures';
 import { ninResolutionRequestDigest, scoreRegistrationCandidate, similarity } from './nin-registration.service';
 
 describe('NIN duplicate candidate matching', () => {
@@ -41,6 +42,7 @@ describe('NIN duplicate candidate matching', () => {
       lastName: 'Okafor',
       dateOfBirth: '1990-01-02',
       purpose: 'healthcare-operations' as const,
+      ...deskCollectedFields(),
     };
     const lookupHmac = 'a'.repeat(64);
 

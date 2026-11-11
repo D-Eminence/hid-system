@@ -108,7 +108,7 @@ describe('own-work patient cards: off (the default)', () => {
         [id(3), false], [id(4), true], [id(5), false]]);
       expect(Object.keys(page.items[0]!)).toEqual(['id', 'patientId', 'facilityId', 'sourceEhrOrderVersion', 'status',
         'priority', 'acceptedAt', 'version', 'sourceEhrOrderId', 'testName', 'accessionId', 'accessionNumber',
-        'specimenStatuses']);
+        'specimenStatuses', 'openWork', 'clinicalIndication']);
       // Only the routed row's patient is audited, as before.
       expect(audited().map((event) => [event.action, event.patientId, event.details])).toEqual([
         ['lab.work-item.list', amaka, { basis: 'order-route', workItemIds: [id(4)], orderRouteIds: [routeId] }]]);

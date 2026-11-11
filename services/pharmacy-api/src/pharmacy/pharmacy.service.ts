@@ -85,7 +85,7 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
  * work items' read policy, the consent test and the snapshot table's read
  * policy once (the reader joins the snapshot by its key, so the prescription
  * history does not add to it): 1.0-1.7 s for 200 rows, against 0.4-0.7 s for
- * reading the same rows under row-level security (INTERFACE_CONTRACT.md §44).
+ * reading the same rows under row-level security (INTERFACE_CONTRACT.md §46).
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null as open_work) o
