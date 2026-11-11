@@ -1,6 +1,6 @@
-import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsDateString, IsIn, IsOptional, IsString, IsUUID,
-  MaxLength, ValidateNested } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID,
+  Max, MaxLength, Min, ValidateNested } from 'class-validator';
 
 export class ImportedLabObservationDto {
   @IsOptional() @IsString() @MaxLength(120) testCode?: string;
@@ -25,4 +25,23 @@ export class CreateLabImportDto {
   @IsArray() @ArrayMinSize(1) @ArrayMaxSize(200)
   @ValidateNested({ each: true }) @Type(() => ImportedLabObservationDto)
   observations!: ImportedLabObservationDto[];
+}
+
+/** Page size bounds for GET lab/imports?patientId=… (each import holds at most 200 observations). */
+export const LAB_IMPORT_PAGE_DEFAULT = 20;
+export const LAB_IMPORT_PAGE_MAX = 50;
+
+/**
+ * GET lab/imports: one patient's imported Lab evidence, newest received
+ * first. The cursor is the id of the last import of the previous page. Query
+ * values arrive as strings (implicit conversion is off), so limit is parsed
+ * only when it is plain digits; anything else fails IsInt.
+ */
+export class ListLabImportsQueryDto {
+  @IsUUID('4') patientId!: string;
+  @IsOptional() @IsUUID('4') cursor?: string;
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' && /^[0-9]{1,3}$/.test(value) ? Number(value) : value))
+  @IsInt() @Min(1) @Max(LAB_IMPORT_PAGE_MAX)
+  limit?: number;
 }

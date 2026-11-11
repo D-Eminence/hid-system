@@ -47,7 +47,7 @@ const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility
  *
  * A work item is open until every test it asks for has a result whose current
  * version is released and not marked entered in error (the same released truth
- * the patient and the chat read, PATIENT_LAB_QUERY); a work item without a
+ * staff and the staff chat read, STAFF_LAB_QUERY); a work item without a
  * requested test is open. Every relation is read under the session's
  * row-level security, so a member sees only what the list itself may show.
  * An execution's requested test always belongs to its accession's work item

@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Header, HttpCode, Param, ParseUUIDPipe, Put, Req } from '@nestjs/common';
 import { AuditFailuresOnly, FacilityOptional, PatientAllowed, RequirePermissions } from '../../common/decorators';
-import { requireRequestContext, type HidRequest } from '../../common/request-context';
+import type { HidRequest } from '../../common/request-context';
+import { patientRecordContext } from '../shared/clinical-context';
 import { SaveHealthProfileDto } from './health-profile.dto';
 import { HealthProfileService } from './health-profile.service';
 
@@ -36,6 +37,6 @@ export class HealthProfileController {
   @Header('Cache-Control', 'no-store')
   @RequirePermissions('ehr.note.read')
   reported(@Param('patientId', new ParseUUIDPipe()) patientId: string, @Req() request: HidRequest) {
-    return this.profiles.reported(patientId, requireRequestContext(request));
+    return this.profiles.reported(patientId, patientRecordContext(request));
   }
 }

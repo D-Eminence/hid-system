@@ -1,5 +1,4 @@
-import { LOCAL_EVIDENCE_QUERY } from './patient-evidence.query';
-import { STAFF_EVIDENCE_QUERY } from './staff-evidence.service';
+import { PATIENT_EVIDENCE_QUERY, STAFF_EVIDENCE_QUERY } from './patient-evidence.query';
 import { ORIGINS, SOURCE_KINDS, evidence, evidenceOrigin, originLabel, type EvidenceOrigin, type SourceKind } from './patient-evidence.types';
 
 // Owner decision 25: the chat says where each fact came from. The origin is
@@ -63,12 +62,12 @@ describe('Where a chat source came from', () => {
   });
 });
 
-describe('The evidence query reads each row\'s origin', () => {
-  const branches = LOCAL_EVIDENCE_QUERY.split('union all');
+describe.each([['patient', PATIENT_EVIDENCE_QUERY], ['staff', STAFF_EVIDENCE_QUERY]])('The %s evidence query reads each row\'s origin', (_audience, query) => {
+  const branches = query.split('union all');
 
   it('adds origin_hint to every branch and to the answer, leaving the hashed columns as they were', () => {
     expect(branches).toHaveLength(9);
-    expect(LOCAL_EVIDENCE_QUERY).toContain('select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint from sources');
+    expect(query).toContain('select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint,patient_id from sources');
     expect(branches[0]).toContain("then 'scanned_paper' end origin_hint");
     // Imports carry their recorded origin (CHECK in 0061); no other branch claims one.
     expect(branches.find((b) => b.includes("'import',r.id"))).toMatch(/\),r\.origin\n from ehr\.imported_medical_records r/);
@@ -83,8 +82,11 @@ describe('The evidence query reads each row\'s origin', () => {
     expect(branches[0]).toContain("r.revision_no=1 and r.change_reason='OCR import from human-validated source evidence'");
   });
 
+});
+
+describe('The staff evidence query keeps its own filters', () => {
   it('gives staff chat the same origin, with its own filters still applied', () => {
-    expect(STAFF_EVIDENCE_QUERY).toContain('origin_hint from sources');
+    expect(STAFF_EVIDENCE_QUERY).toContain('origin_hint,patient_id from sources');
     expect(STAFF_EVIDENCE_QUERY).toContain('where patient_id=$1 and kind=any($4::text[]) and (kind');
     expect(STAFF_EVIDENCE_QUERY).toContain("e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed'");
     expect(STAFF_EVIDENCE_QUERY).toContain('from ehr.vitals v join ehr.encounters e');

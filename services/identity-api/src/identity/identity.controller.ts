@@ -72,6 +72,26 @@ export class IdentityController {
     return this.identity.authorize(input.patientId, input.scope, input.purpose, context);
   }
 
+  // The same check without its side effects, for a service that refuses early
+  // and then calls service/authorization/check before it opens anything (OCR
+  // create). A read only: it never notes the access or authorizes a write.
+  @Post('service/authorization/precheck')
+  @DelegatedBrowserRequest()
+  @RequirePermissions('identity.authorization.check')
+  @AuditAction('identity.service.authorization.precheck.request')
+  async precheckService(@Body() input: AuthorizationCheckDto, @Req() request: HidRequest) {
+    await this.workloadAuth.authenticateService(
+      request.header('x-hid-internal-caller'),
+      request.header('x-hid-service-authorization'),
+      request.header('x-hid-service-token'),
+    );
+    if (input.scope !== 'read_records') {
+      throw new DomainProblem(400, 'PRECHECK_READ_ONLY', 'An authorization precheck covers a records read only');
+    }
+    const context = requireRequestContext(request, input.purpose);
+    return this.identity.precheck(input.patientId, input.scope, input.purpose, context);
+  }
+
   @Post('service/workloads/document-scanner/authorize')
   @Public()
   @AuditAction('identity.service.document-scanner.authorization.request')

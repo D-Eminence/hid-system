@@ -110,6 +110,12 @@ export interface PharmacyImportedMedicationEvidence {
   createdAt: string;
 }
 
+export interface PharmacyImportBatch {
+  id: string;
+  count: number;
+  items: PharmacyImportedMedicationEvidence[];
+}
+
 export interface CreatePharmacyDispensingInput {
   expectedWorkItemVersion: number;
   quantityDispensed: number;
@@ -164,6 +170,27 @@ export class PharmacyApiClient {
       'ocr-api',
       signal,
     );
+  }
+
+  /**
+   * Several medicines from one OCR review. Pharmacy stores each as its own
+   * record in one transaction (all or none) and answers every record, in the
+   * order sent; `id` is the first one.
+   */
+  async createOcrImportBatch(
+    input: unknown,
+    context: PharmacyRequestContext,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<PharmacyImportBatch> {
+    const result = await this.request('/api/v1/pharmacy/imports/from-ocr/batch', 'POST', input, context,
+      idempotencyKey, 'ocr-api', signal);
+    const value = record(result, 'Imported medication evidence batch');
+    if (!Array.isArray(value.items) || value.items.length < 1) throw new PharmacyApiProblem(502, result);
+    const items = value.items.map(parseImport);
+    const count = integer(value, 'count');
+    if (count !== items.length || text(value, 'id') !== items[0]?.id) throw new PharmacyApiProblem(502, result);
+    return { id: items[0].id, count, items };
   }
 
   get(path: string, context: PharmacyRequestContext, signal?: AbortSignal): Promise<unknown> {

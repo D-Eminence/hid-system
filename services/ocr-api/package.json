@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@hid/api-client": "file:../../packages/api-client",
+    "@hid/server-telemetry": "file:../../packages/server-telemetry",
     "@nestjs/common": "^11.1.0",
     "@nestjs/core": "^11.1.0",
     "@nestjs/platform-express": "^11.1.0",

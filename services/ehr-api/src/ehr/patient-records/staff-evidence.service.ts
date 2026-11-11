@@ -1,21 +1,46 @@
 import { Injectable } from '@nestjs/common';
+import type { PoolClient } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { AuditService } from '../../audit/audit.service';
-import { LOCAL_EVIDENCE_QUERY } from './patient-evidence.query';
-import { PatientAttachmentTextService, ATTACHMENT_TEXT_QUERY } from './patient-attachment-text.service';
+import { STAFF_EVIDENCE_QUERY } from './patient-evidence.query';
+import { PatientAttachmentTextService, attachmentTextQuery } from './patient-attachment-text.service';
 import { evidence, evidenceKey, originLabel, type Evidence, type EvidenceBinding, type EvidenceSnapshot, type SourceKind } from './patient-evidence.types';
 import type { AttachmentAccess } from './chat-access';
 import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scope.service';
 
-// RLS retains facility/consent filtering; the source permission filter is applied
-// inside SQL before any evidence content can leave the database operation.
-export const STAFF_EVIDENCE_QUERY = LOCAL_EVIDENCE_QUERY
-  .replace('where patient_id=$1 and (kind', 'where patient_id=$1 and kind=any($4::text[]) and (kind')
-  .replace("from ehr.diagnoses d where d.verification_status<>'entered_in_error'", "from ehr.diagnoses d where d.verification_status<>'entered_in_error' and exists(select 1 from ehr.encounters e where e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed')")
-  .replace('from ehr.vitals v left join', "from ehr.vitals v join ehr.encounters e on e.id=v.encounter_id and e.patient_id=v.patient_id and e.facility_id=v.facility_id and e.status='completed' left join");
+// RLS retains facility/consent filtering; the source permission filter ($4) is
+// applied inside SQL before any evidence content can leave the database
+// operation. The staff chat gets no patient-chat policy: it keeps refuted
+// diagnoses with their notes, request reasons, the correction reason, cancelled
+// items (labelled by their status), restricted documents, file names, and the
+// patient's name and date of birth.
+export { STAFF_EVIDENCE_QUERY };
+/** The staff document query: staff extraction tables, completed visits, every classification. */
+export const STAFF_ATTACHMENT_TEXT_QUERY = attachmentTextQuery('staff');
+
+/** One patient per chat: any row for a different patient refuses the whole read. */
+function denyOtherPatient(): never {
+  throw new DomainProblem(403, 'CHAT_ACCESS_DENIED', 'This chat can only read the patient whose record is open');
+}
+function assertOnePatient(rows: readonly { patient_id?: unknown }[], patientId: string) {
+  for (const row of rows) if (row.patient_id !== patientId) denyOtherPatient();
+}
+
+/** A client whose every returned row that names a patient must name the chat's one patient. */
+function onePatientClient(client: PoolClient, patientId: string): PoolClient {
+  return new Proxy(client, { get(target, key) {
+    const value = Reflect.get(target, key, target);
+    if (key !== 'query') return typeof value === 'function' ? value.bind(target) : value;
+    return async (...args: unknown[]) => {
+      const result = await (value as (...a: unknown[]) => Promise<{ rows?: unknown }>).apply(target, args);
+      if (Array.isArray(result?.rows)) assertOnePatient((result.rows as Record<string, unknown>[]).filter(r => r && typeof r === 'object' && 'patient_id' in r), patientId);
+      return result;
+    };
+  } });
+}
 
 @Injectable()
 export class StaffEvidenceService {
@@ -23,10 +48,10 @@ export class StaffEvidenceService {
     private readonly audit: AuditService,private readonly identity:IdentityApiService) {}
 
   private documents(scope: StaffChatScope): AttachmentAccess {
-    return { ...scope, query: ATTACHMENT_TEXT_QUERY
-      .replaceAll('ehr.patient_attachment_extractions', 'ehr.staff_attachment_extractions')
-      .replaceAll('ehr.patient_document_extractions', 'ehr.staff_document_extractions')
-      .replace("where d.patient_id=$1 and d.status='available'", "where d.patient_id=$1 and d.status='available' and exists(select 1 from ehr.encounters e where e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed')"),
+    return { ...scope, query: STAFF_ATTACHMENT_TEXT_QUERY,
+      // Every document row read for this chat must be for the chat's one patient.
+      transaction: (auth, correlationId, operation) => scope.transaction(auth, correlationId, client =>
+        operation(onePatientClient(client, scope.patientId))),
       table: kind => {
         if (kind === 'attachment') return 'ehr.staff_attachment_extractions';
         if (kind === 'document') return 'ehr.staff_document_extractions';
@@ -69,12 +94,15 @@ export class StaffEvidenceService {
   }
   private async snapshot(scope: StaffChatScope, request: HidRequest, signal?: AbortSignal, ids?: readonly string[]): Promise<EvidenceSnapshot> {
     const auth = await scope.authorize(request);
+    if (auth.patientId !== scope.patientId) denyOtherPatient();
     const allowed = (Object.keys(STAFF_SOURCE_PERMISSIONS) as SourceKind[]).filter(kind => scope.allows(kind));
     const local = await scope.transaction(auth, request.correlationId, async client => {
       const records: Evidence[] = []; let kind = '', id = '', complete = false;
       for (let page = 0; page < 10; page++) {
         signal?.throwIfAborted();
         const rows = (await client.query(STAFF_EVIDENCE_QUERY, [scope.patientId, kind, id, allowed])).rows;
+        // Defence behind RLS and the $1 filter: a row for any other patient refuses the read.
+        assertOnePatient(rows, scope.patientId);
         for (const r of rows.slice(0, 200)) records.push(evidence({ kind: r.kind, id: r.id, version: r.version,
           title: r.title, recordedAt: r.recorded_at ? new Date(r.recorded_at).toISOString() : null,
           effectiveAt: r.effective_at ? new Date(r.effective_at).toISOString() : null,

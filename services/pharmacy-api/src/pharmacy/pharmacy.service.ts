@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
@@ -9,7 +9,7 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
 import type { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
-import type { OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
+import type { OcrMedicationImportBatchDto, OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
 import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
@@ -449,6 +449,74 @@ export class PharmacyService {
     }, { isolationLevel: 'SERIALIZABLE' });
   }
 
+  /**
+   * Several medicines from one OCR review, each stored as its own row in one
+   * SERIALIZABLE transaction: every row is written, or none is.
+   *
+   * pharmacy.imported_medication_evidence keeps publication_id unique (0023),
+   * so a batch row stores a per-medicine id derived from the OCR publication
+   * (batchPublicationId) and the idempotency key `<key>:mNN`. For batch rows,
+   * publication_id is therefore not the ocr.publications id; validation_id,
+   * which is one-to-one with the OCR publication, links every row of the batch.
+   */
+  async createImportBatch(context: DataAccessContext, input: OcrMedicationImportBatchDto, key: string) {
+    await this.authorize(input.patientId, context, 'write_records');
+    if (key.length > MAX_BATCH_KEY_LENGTH) {
+      throw new DomainProblem(400, 'IDEMPOTENCY_KEY_REQUIRED',
+        `Idempotency-Key for a batch must contain at most ${MAX_BATCH_KEY_LENGTH} characters`);
+    }
+    const digest = requestDigest('pharmacy.imported-medication-evidence.create-batch', input);
+    const keys = input.medications.map((_item, index) => batchItemKey(key, index));
+    const publicationIds = input.medications.map((_item, index) => batchPublicationId(input.publicationId, index));
+    return this.database.withTransaction(context, async (client) => {
+      const existing = (await client.query<ImportRow>(`select * from pharmacy.imported_medication_evidence
+        where (facility_id=$1 and created_by=$2 and idempotency_key = any($3::text[]))
+           or publication_id = any($4::uuid[]) or publication_id=$5
+        order by idempotency_key`,
+      [context.facilityId, context.actor.accountId, keys, publicationIds, input.publicationId])).rows;
+      if (existing.length > 0) {
+        const replay = existing.length === keys.length
+          && existing.every((row, index) => row.request_sha256 === digest && row.idempotency_key === keys[index]
+            && row.publication_id === publicationIds[index]);
+        if (!replay) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
+          'Idempotency-Key or publication was used for different imported medication evidence');
+        return this.projectBatch(existing);
+      }
+      const rows: ImportRow[] = [];
+      for (const [index, item] of input.medications.entries()) {
+        const inserted = await client.query<ImportRow>(`insert into pharmacy.imported_medication_evidence (
+          id,patient_id,facility_id,source_document_id,ocr_job_id,extraction_id,validation_id,
+          validation_version,publication_id,medication_text,strength_text,dose_text,frequency_text,
+          historical_context,reviewed_by,created_by,created_by_membership_id,idempotency_key,
+          request_sha256,correlation_id
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+        returning *`, [randomUUID(), input.patientId, context.facilityId, input.sourceDocumentId,
+          input.ocrJobId, input.extractionId, input.validationId, input.validationVersion,
+          publicationIds[index], item.medicationText, item.strengthText ?? null, item.doseText ?? null,
+          item.frequencyText ?? null, item.historicalContext ?? null, input.reviewedBy,
+          context.actor.accountId, context.membershipId, keys[index], digest, context.correlationId]);
+        const row = inserted.rows[0];
+        if (!row) throw new DomainProblem(503, 'PHARMACY_IMPORT_NOT_CREATED',
+          'Imported medication evidence could not be created');
+        await this.outbox(client, 'PharmacyImportedMedicationEvidenceCreated',
+          'imported-medication-evidence', row.id, row.facility_id, row.patient_id, context.correlationId,
+          { importedMedicationEvidenceId: row.id, sourceType: 'IMPORTED_MEDICATION_EVIDENCE',
+            activityStatus: 'unknown' });
+        await this.audit.recordWithClient(client, context, 'pharmacy.import.create', {
+          patientId: row.patient_id, resourceType: 'pharmacy-imported-medication-evidence', resourceId: row.id,
+        }, { publicationId: input.publicationId, validationId: row.validation_id, sourceType: row.source_type,
+          activityStatus: row.activity_status, batchIndex: index + 1, batchSize: input.medications.length });
+        rows.push(row);
+      }
+      return this.projectBatch(rows);
+    }, { isolationLevel: 'SERIALIZABLE' });
+  }
+
+  private projectBatch(rows: readonly ImportRow[]) {
+    const items = rows.map((row) => this.projectImport(row));
+    return { id: items[0]?.id, count: items.length, items };
+  }
+
   async getImport(context: DataAccessContext, id: string) {
     return this.database.withTransaction(context, async (client) => {
       const row = (await client.query<ImportRow>(
@@ -532,6 +600,32 @@ export class PharmacyService {
       validationVersion: row.validation_version, publicationId: row.publication_id,
       version: Number(row.row_version), createdAt: row.created_at };
   }
+}
+
+/** Leaves room for ':mNN' within the 128 characters the idempotency_key CHECK allows (0023). */
+export const MAX_BATCH_KEY_LENGTH = 120;
+
+/** The idempotency key of medicine `index` (0-based) of a batch: `<key>:m01` ... `<key>:m50`. */
+export function batchItemKey(key: string, index: number): string {
+  return `${key}:m${String(index + 1).padStart(2, '0')}`;
+}
+
+/** Fixed namespace for the per-medicine publication ids of a batch. Never change it. */
+const BATCH_PUBLICATION_NAMESPACE = '6f3b0c52-9d1e-4f7a-b8c2-5e4d3a2b1c0f';
+
+/**
+ * The publication_id stored on medicine `index` (0-based) of a batch: a UUID
+ * version 5 (RFC 9562, SHA-1) of `<publicationId>:<NN>` in a fixed namespace,
+ * so a replay derives the same ids.
+ */
+export function batchPublicationId(publicationId: string, index: number): string {
+  const namespace = Buffer.from(BATCH_PUBLICATION_NAMESPACE.replace(/-/g, ''), 'hex');
+  const name = Buffer.from(`${publicationId.toLowerCase()}:${String(index + 1).padStart(2, '0')}`, 'utf8');
+  const bytes = createHash('sha1').update(Buffer.concat([namespace, name])).digest().subarray(0, 16);
+  bytes.writeUInt8((bytes.readUInt8(6) & 0x0f) | 0x50, 6);
+  bytes.writeUInt8((bytes.readUInt8(8) & 0x3f) | 0x80, 8);
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function workItemNotFound(): DomainProblem {
