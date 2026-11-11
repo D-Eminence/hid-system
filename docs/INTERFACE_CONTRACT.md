@@ -4697,6 +4697,12 @@ validation the app installs globally, so each new field answers 400
 `VALIDATION_FAILED`, `"property priority should not exist"`, word for word;
 no statement names the new columns, and no answer or list carries a new key.
 
+`infra/aws` passes the setting to ehr-api and pharmacy-api only, from
+`HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED` at synth: `false` unless that
+is `true` (production's environment switches are made in `dev`'s Terraform).
+It switches both services at once, so set it to `true` only after 0122 is
+applied (the ehr-api setting needs the schema, below).
+
 While `PRESCRIPTION_DISPENSING_DETAILS_ENABLED` is `true` in pharmacy-api, a
 work item that is this facility's own work (it has
 `sourceEhrPrescriptionId`, and no `orderRoute`) carries, each only when there

@@ -784,7 +784,8 @@ export class HidRegionalStack extends Stack {
           EHR_WORKLOAD_AUDIENCE: 'hid-ehr-api', EHR_OCR_CALLER_SUBJECT: subjects.ocr,
           OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE: 'jwt', OUTREACH_CALLER_SUBJECT: subjects.outreach,
           WORKLOAD_DATABASE_POOL_MAX: '3', STORAGE_MODE: 's3', S3_REGION: Aws.REGION, S3_BUCKET: this.documentBucket.bucketName,
-          S3_FORCE_PATH_STYLE: 'false', S3_KMS_KEY_ID: documentKey.keyArn };
+          S3_FORCE_PATH_STYLE: 'false', S3_KMS_KEY_ID: documentKey.keyArn,
+          PRESCRIPTION_DISPENSING_DETAILS_ENABLED: this.configuration.prescriptionDispensingDetailsEnabled ? 'true' : 'false' };
       case 'lab-api':
         return { ...commonApi, ...base, PORT: '3003', IDENTITY_API_URL: urls['identity-api']!,
           IDENTITY_SERVICE_IDENTITY_MODE: 'jwt', LAB_SERVICE_IDENTITY_MODE: 'jwt',
@@ -797,7 +798,8 @@ export class HidRegionalStack extends Stack {
           PHARMACY_WORKLOAD_ISSUER_URL: issuer, PHARMACY_WORKLOAD_JWKS_URL: jwks,
           PHARMACY_WORKLOAD_AUDIENCE: 'hid-pharmacy-api', PHARMACY_EHR_CALLER_SUBJECT: subjects.ehr,
           PHARMACY_OCR_CALLER_SUBJECT: subjects.ocr,
-          OWN_WORK_PATIENT_CARD_ENABLED: this.configuration.ownWorkPatientCardEnabled ? 'true' : 'false' };
+          OWN_WORK_PATIENT_CARD_ENABLED: this.configuration.ownWorkPatientCardEnabled ? 'true' : 'false',
+          PRESCRIPTION_DISPENSING_DETAILS_ENABLED: this.configuration.prescriptionDispensingDetailsEnabled ? 'true' : 'false' };
       case 'ocr-api':
         return { ...commonApi, ...base, PORT: '3005', IDENTITY_API_URL: urls['identity-api']!,
           EHR_API_URL: urls['ehr-api']!, LAB_API_URL: urls['lab-api']!, PHARMACY_API_URL: urls['pharmacy-api']!,

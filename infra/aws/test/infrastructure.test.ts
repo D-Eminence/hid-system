@@ -50,6 +50,11 @@ const ownWorkPatientCardRegional = Template.fromStack(new HidRegionalStack(ownWo
   'OwnWorkPatientCardRegionalTest', {
     configuration: environmentConfig('staging', 'economy', undefined, 'true'),
   })).toJSON() as typeof regional;
+const prescriptionDispensingDetailsApplication = new App();
+const prescriptionDispensingDetailsRegional = Template.fromStack(new HidRegionalStack(prescriptionDispensingDetailsApplication,
+  'PrescriptionDispensingDetailsRegionalTest', {
+    configuration: environmentConfig('staging', 'economy', undefined, undefined, 'true'),
+  })).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
   return Object.entries(template.Resources).filter(([, resource]) => resource.Type === type);
@@ -86,6 +91,18 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.equal(environmentConfig('production', undefined, undefined, 'true').ownWorkPatientCardEnabled, true);
   assert.equal(environmentConfig('staging', 'economy', undefined, 'true').qoreIdEnabled, false);
   assert.equal(environmentConfig('staging', 'economy', 'true').ownWorkPatientCardEnabled, false);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, 'enabled'),
+    /HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED must be true or false when supplied/);
+  assert.throws(() => environmentConfig('production', undefined, undefined, undefined, 'TRUE'),
+    /HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED/);
+  assert.equal(environmentConfig('staging', 'economy').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('production').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'false').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').prescriptionDispensingDetailsEnabled, true);
+  assert.equal(environmentConfig('production', undefined, undefined, undefined, 'true').prescriptionDispensingDetailsEnabled, true);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', 'true', 'true').prescriptionDispensingDetailsEnabled, false);
   assert.equal(environmentConfig('staging', 'economy').publicApiSubdomain, 'api.staging');
   assert.deepEqual(environmentConfig('staging', 'economy').browserSubdomains, [
     'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'admin.staging',
@@ -542,6 +559,39 @@ test('own-work patient cards are passed to lab-api and pharmacy-api only, false 
     const carrying = tasks.filter(task => JSON.stringify(task.ContainerDefinitions).includes('OWN_WORK_PATIENT_CARD_ENABLED'));
     assert.equal(carrying.length, carriers.length);
   }
+});
+
+test('prescription dispensing details are passed to ehr-api and pharmacy-api only, false unless explicitly enabled', () => {
+  const carriers = ['ehr-api', 'pharmacy-api'];
+  const cases: Array<[typeof regional, string]> = [
+    [regional, 'false'], [stagingRegional, 'false'], [fidelityRegional, 'false'], [sleepRegional, 'false'],
+    [qoreIdStagingRegional, 'false'], [ownWorkPatientCardRegional, 'false'], [prescriptionDispensingDetailsRegional, 'true'],
+  ];
+  function environmentOf(tasks: Array<Record<string, unknown>>, name: string) {
+    const task = tasks.find(item => JSON.stringify(item.Family).includes(name));
+    assert.ok(task, `missing ${name}`);
+    const api = (task.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+      .find(item => item.Name === name)!;
+    return Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+  }
+  for (const [template, expected] of cases) {
+    const tasks = properties(template, 'AWS::ECS::TaskDefinition');
+    for (const name of carriers) {
+      assert.equal(environmentOf(tasks, name).PRESCRIPTION_DISPENSING_DETAILS_ENABLED, expected, `${name} should carry ${expected}`);
+    }
+    const others = tasks.filter(task => !carriers.some(name => JSON.stringify(task.Family).includes(name)));
+    assert.ok(others.length > 0);
+    for (const task of others) {
+      assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /PRESCRIPTION_DISPENSING_DETAILS_ENABLED/,
+        `${JSON.stringify(task.Family)} should not carry PRESCRIPTION_DISPENSING_DETAILS_ENABLED`);
+    }
+    const carrying = tasks.filter(task => JSON.stringify(task.ContainerDefinitions).includes('PRESCRIPTION_DISPENSING_DETAILS_ENABLED'));
+    assert.equal(carrying.length, carriers.length);
+  }
+  // Switching it on changes no other setting.
+  const tasks = properties(prescriptionDispensingDetailsRegional, 'AWS::ECS::TaskDefinition');
+  assert.equal(environmentOf(tasks, 'identity-api').QOREID_ENABLED, 'false');
+  for (const name of ['lab-api', 'pharmacy-api']) assert.equal(environmentOf(tasks, name).OWN_WORK_PATIENT_CARD_ENABLED, 'false');
 });
 
 test('staging email OTP injects only its SES sender while ordinary delivery retains Novu', () => {
