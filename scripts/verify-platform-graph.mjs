@@ -262,7 +262,9 @@ for (const directory of requiredBackendDirectories) {
   const manifest = JSON.parse(await readFile(join(repository, 'services', directory, 'package.json'), 'utf8'))
   const internalRuntimeDependencies = Object.keys(manifest.dependencies ?? {})
     .filter((dependency) => dependency.startsWith('@hid/'))
-  assert.deepEqual(internalRuntimeDependencies.filter((dependency) => dependency !== '@hid/api-client'), [],
+  // @hid/server-telemetry is a shared, service-agnostic error-reporting library, not an owning service.
+  assert.deepEqual(internalRuntimeDependencies.filter((dependency) =>
+    dependency !== '@hid/api-client' && dependency !== '@hid/server-telemetry'), [],
     `${directory} imports another owning service package`)
 }
 

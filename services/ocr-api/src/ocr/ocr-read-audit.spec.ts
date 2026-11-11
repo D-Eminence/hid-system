@@ -1,3 +1,4 @@
+import { extractionRow, v2Payload } from './reading/test-fixtures';
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
@@ -8,6 +9,7 @@ import type { IdentityApiService } from '../integrations/identity-api.service';
 import type { LabApiService } from '../integrations/lab-api.service';
 import type { PharmacyApiService } from '../integrations/pharmacy-api.service';
 import type { OcrPublicationSwitch } from './ocr-publication-switch';
+import type { OcrReadingSwitch } from './ocr-reading-switch';
 import { OcrService } from './ocr.service';
 
 const context = {
@@ -53,6 +55,10 @@ interface Options {
   allowed?: boolean;
   auditFails?: boolean;
   reusable?: boolean;
+  /** OCR_AI_MODE=claude as the API sees it. */
+  aiReadingOn?: boolean;
+  /** Rows the extraction list returns. */
+  extractionRows?: Record<string, unknown>[];
   outboxError?: Error;
   publicationPaused?: boolean;
   publishLost?: boolean;
@@ -98,7 +104,7 @@ function harness(options: Options = {}) {
       if (options.attemptReadError && validationReads > 1) throw options.attemptReadError;
       return rows([validationRow]);
     }
-    if (sql.includes('from ocr.extractions where job_id')) { order.push('select extractions'); return rows([]); }
+    if (sql.includes('from ocr.extractions where job_id')) { order.push('select extractions'); return rows(options.extractionRows ?? []); }
     if (sql.includes('from ocr.patient_confirmations where facility_id = $1')) return rows([]);
     if (sql.includes('coalesce(max(confirmation_version),0)+1')) return rows([{ version: 1 }]);
     if (sql.includes('insert into ocr.patient_confirmations')) return rows([confirmation]);
@@ -153,7 +159,8 @@ function harness(options: Options = {}) {
   }) } as unknown as AuditService;
   const service = new OcrService(database, identity, audit, ehrApi,
     (options.labApi ?? {}) as LabApiService, {} as PharmacyApiService,
-    { enabled: options.publicationPaused !== true } as OcrPublicationSwitch);
+    { enabled: options.publicationPaused !== true } as OcrPublicationSwitch,
+    { aiReadingOn: options.aiReadingOn === true } as OcrReadingSwitch);
   return { service, clients, database, audit, identity, ehrApi, order };
 }
 
@@ -321,5 +328,68 @@ describe('OCR publication switch', () => {
     await service.confirmPatient(jobId, { patientId, expectedJobVersion: 5, method: 'source_document',
       reason: 'Matches the source document', purpose: 'healthcare-operations' }, 'ocr-confirm-key-000003', context);
     expect(auditEvents(audit).map(([, event]) => event.action)).toEqual(['ocr.patient.confirm']);
+  });
+});
+
+describe('extraction reuse follows the paper-reading contract and prompt version', () => {
+  const create = (service: OcrService, key: string) => service.createJob({ documentId, provider: 'textract',
+    purpose: 'healthcare-operations' }, key, context);
+  function reuseQuery(clients: PoolClient[]) {
+    const calls = clients.flatMap((client) => (client.query as jest.Mock).mock.calls as [string, unknown[]][]);
+    const call = calls.find(([sql]) => sql.includes('ocr.extractions extraction'));
+    if (!call) throw new Error('no reuse query');
+    return call;
+  }
+
+  it('reuses only a hid-textract-v2 / hid-paper-reading-v2 extraction with the current prompt', async () => {
+    const { service, clients } = harness();
+    await create(service, 'ocr-create-key-000010');
+    const [sql, params] = reuseQuery(clients);
+    expect(sql).toMatch(/extraction\.provenance ->> 'processingContract' = \$6/);
+    expect(sql).toMatch(/extraction\.structured_payload ->> 'contract' = \$7/);
+    expect(sql).toMatch(/extraction\.provenance #>> '\{reading,promptVersion\}' = \$8/);
+    expect(sql).toMatch(/coalesce\(extraction\.provenance #>> '\{reading,status\}', ''\) = any\(\$9::text\[\]\)/);
+    expect(params.slice(5)).toEqual(['hid-textract-v2', 'hid-paper-reading-v2', 'hid-paper-reading-prompt-13', []]);
+  });
+
+  it('never reuses an ai_off or ai_failed reading while AI reading is on', async () => {
+    const { service, clients } = harness({ aiReadingOn: true });
+    await create(service, 'ocr-create-key-000011');
+    expect(reuseQuery(clients)[1][8]).toEqual(['ai_off', 'ai_failed']);
+  });
+
+  it('creates a new job when nothing is reusable and reuses when something is', async () => {
+    const fresh = harness({ aiReadingOn: true });
+    await create(fresh.service, 'ocr-create-key-000012');
+    expect(auditEvents(fresh.audit).map(([, event]) => event.action)).toEqual(['ocr.job.create']);
+    const reused = harness({ aiReadingOn: true, reusable: true });
+    await create(reused.service, 'ocr-create-key-000013');
+    expect(auditEvents(reused.audit).map(([, event]) => event.action)).toEqual(['ocr.job.reuse']);
+  });
+});
+
+describe('listExtractions answers the contract view only', () => {
+  it('projects v2 and v1 rows and drops anything outside the contract', async () => {
+    const v2 = extractionRow({ ...v2Payload() });
+    const v1 = { ...extractionRow({ pages: [{ page: 1, text: 'Dx: Hypertension', confidence: 0.9 }] },
+      { processingContract: 'hid-textract-v1', adapter: 'amazon-textract' }), id: '80000000-0000-4000-8000-000000000002',
+    version: 2 };
+    const broken = { ...extractionRow({ ...v2Payload(), rawModelOutput: 'model said' }),
+      id: '80000000-0000-4000-8000-000000000003', version: 3 };
+    const { service, audit } = harness({ extractionRows: [v2, v1, broken] });
+
+    const result = await service.listExtractions(jobId, context) as { items: Array<Record<string, any>> };
+
+    expect(result.items.map((item) => item.paperReading.contract)).toEqual(
+      ['hid-paper-reading-v2', 'hid-textract-v1', null]);
+    expect(Object.keys(result.items[0]!).sort()).toEqual(['attempt', 'confidence', 'createdAt', 'id', 'paperReading',
+      'provenance', 'provider', 'providerModel', 'rawText', 'structuredPayload', 'version']);
+    expect(Object.keys(result.items[0]!.paperReading).sort()).toEqual(['contract', 'identity', 'items', 'pages', 'reading']);
+    expect(result.items[0]!.paperReading.items).toHaveLength(3);
+    expect(result.items[1]!.paperReading.pages[0].text).toBe('Dx: Hypertension');
+    const json = JSON.stringify(result);
+    expect(json).not.toMatch(/model said|rawModelOutput|usage|inferenceGeo|requests|refusals/);
+    // The audit event carries counts and ids only, never extracted text.
+    expect(JSON.stringify(auditEvents(audit))).not.toMatch(/Hypertension|Adaeze/);
   });
 });

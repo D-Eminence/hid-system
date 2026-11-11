@@ -33,7 +33,7 @@ export interface PharmacyMedicationReference {
  * The patient on a work item: name, sex, date of birth and the last 4
  * characters of the Health ID. On this facility's own work it is sent while
  * pharmacy-api's OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read
- * the work (0113); absent otherwise.
+ * the work (0121); absent otherwise.
  */
 export interface PharmacyWorkItemPatient {
   fullName: string;
@@ -132,6 +132,25 @@ export interface PharmacyImportedMedicationEvidence {
   createdAt: string;
 }
 
+export interface PharmacyImportBatch {
+  id: string;
+  count: number;
+  items: PharmacyImportedMedicationEvidence[];
+}
+
+/** One page of a patient's imported medication records, newest first. */
+export interface PharmacyImportedMedicationPage {
+  items: PharmacyImportedMedicationEvidence[];
+  /** Pass as `cursor` for the next page; null on the last page. */
+  nextCursor: string | null;
+}
+
+export interface ListPharmacyImportedMedicationsOptions {
+  /** 1-100; Pharmacy answers 50 when it is left out. */
+  limit?: number;
+  cursor?: string;
+}
+
 export interface CreatePharmacyDispensingInput {
   expectedWorkItemVersion: number;
   quantityDispensed: number;
@@ -188,6 +207,27 @@ export class PharmacyApiClient {
     );
   }
 
+  /**
+   * Several medicines from one OCR review. Pharmacy stores each as its own
+   * record in one transaction (all or none) and answers every record, in the
+   * order sent; `id` is the first one.
+   */
+  async createOcrImportBatch(
+    input: unknown,
+    context: PharmacyRequestContext,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<PharmacyImportBatch> {
+    const result = await this.request('/api/v1/pharmacy/imports/from-ocr/batch', 'POST', input, context,
+      idempotencyKey, 'ocr-api', signal);
+    const value = record(result, 'Imported medication evidence batch');
+    if (!Array.isArray(value.items) || value.items.length < 1) throw new PharmacyApiProblem(502, result);
+    const items = value.items.map(parseImport);
+    const count = integer(value, 'count');
+    if (count !== items.length || text(value, 'id') !== items[0]?.id) throw new PharmacyApiProblem(502, result);
+    return { id: items[0].id, count, items };
+  }
+
   get(path: string, context: PharmacyRequestContext, signal?: AbortSignal): Promise<unknown> {
     return this.request(path, 'GET', undefined, context, undefined, undefined, signal);
   }
@@ -230,6 +270,27 @@ export class PharmacyApiClient {
     signal?: AbortSignal): Promise<PharmacyImportedMedicationEvidence> {
     return parseImport(await this.get(
       `/api/v1/pharmacy/imports/${encodeURIComponent(importId)}`, context, signal));
+  }
+
+  /** One patient's imported medication records at the request's facility, newest first (GET pharmacy/imports). */
+  async listImportedMedicationEvidence(patientId: string, context: PharmacyRequestContext,
+    options: ListPharmacyImportedMedicationsOptions = {}, signal?: AbortSignal): Promise<PharmacyImportedMedicationPage> {
+    const query = new URLSearchParams({ patientId });
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    const value = record(await this.get(`/api/v1/pharmacy/imports?${query.toString()}`, context, signal),
+      'Imported medication evidence page');
+    if (!Array.isArray(value.items)) throw new PharmacyApiProblem(502, value);
+    if (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !value.nextCursor)) {
+      throw new PharmacyApiProblem(502, value);
+    }
+    // Never pass on more than a page, or a record of another patient, to the chart.
+    if (value.items.length > 100) throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+    const items = value.items.map(parseImport);
+    if (items.some((item) => item.patientId !== patientId)) {
+      throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+    }
+    return { items, nextCursor: value.nextCursor };
   }
 
   private async resourceCommand(

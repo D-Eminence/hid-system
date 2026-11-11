@@ -47,7 +47,7 @@ export interface WorkItemOrderRoute {
 /**
  * The patient of a work row: on a route-backed row only while the route allows
  * a read (P10.5); on this facility's own row only while
- * OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read it (0113).
+ * OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read it (0121).
  */
 export interface WorkItemRoutePatient {
   fullName: string;

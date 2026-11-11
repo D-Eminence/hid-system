@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
@@ -9,7 +9,8 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
 import type { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
-import type { OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
+import { IMPORT_PAGE_DEFAULT, type ListImportedMedicationsQueryDto, type OcrMedicationImportBatchDto,
+  type OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
 import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
@@ -72,10 +73,10 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
  * dispensing (0023), so the joins add no rows. Exported for the tests.
  *
  * Cost. With OWN_WORK_PATIENT_CARD_ENABLED on, each list load also calls
- * pharmacy.work_item_patient_cards (0113) once for its own rows, at most 200,
+ * pharmacy.work_item_patient_cards (0121) once for its own rows, at most 200,
  * as a statement of its own. Under a NOBYPASSRLS owner, as in production,
  * each of those rows pays the work items' read policy and then the same
- * consent test again (0113's header, D5): 0.6-1.0 s for 200 rows, against
+ * consent test again (0121's header, D5): 0.6-1.0 s for 200 rows, against
  * about 0.6 s for this query (PostgreSQL 16, a shared 4-CPU 2.8 GHz Xeon). So
  * the setting roughly doubles the list's database time. With
  * PRESCRIPTION_DISPENSING_DETAILS_ENABLED on, it also calls
@@ -84,12 +85,26 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
  * work items' read policy, the consent test and the snapshot table's read
  * policy once (the reader joins the snapshot by its key, so the prescription
  * history does not add to it): 1.0-1.7 s for 200 rows, against 0.4-0.7 s for
- * reading the same rows under row-level security (INTERFACE_CONTRACT.md §33).
+ * reading the same rows under row-level security (INTERFACE_CONTRACT.md §42).
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null as open_work) o
   order by o.open_work desc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
   case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
+
+/**
+ * One patient's imported medication records at this facility, newest first:
+ * $1 patient, $2 facility, $3 cursor (the last record id of the previous page,
+ * or null), $4 rows to read. Row-level security (pharmacy_imports_read, 0023)
+ * applies as well; the facility filter matches the
+ * pharmacy_imported_medication_patient_idx index. A cursor that is not one of
+ * this patient's records here answers an empty page. Exported for the tests.
+ */
+export const PATIENT_IMPORTS_QUERY = `select e.* from pharmacy.imported_medication_evidence e
+  where e.patient_id=$1 and e.facility_id=$2
+    and ($3::uuid is null or (e.created_at,e.id) < (select c.created_at,c.id
+      from pharmacy.imported_medication_evidence c where c.id=$3 and c.patient_id=$1 and c.facility_id=$2))
+  order by e.created_at desc,e.id desc limit $4`;
 
 const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
   from pharmacy.dispensings d left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
@@ -242,7 +257,7 @@ export class PharmacyService {
    * is unchanged. A route-backed row carries its route card and,
    * while the route allows a read, its patient (C18). This facility's own row
    * carries its patient while OWN_WORK_PATIENT_CARD_ENABLED is on and the
-   * member may read it (0113); off, it carries none. While
+   * member may read it (0121); off, it carries none. While
    * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on, an own row also carries
    * the prescriber's priority, strength, form, duration and quantity to
    * dispense (0114; no audit row: no new person is shown). To a member who may
@@ -281,7 +296,7 @@ export class PharmacyService {
    * (ids only, §12) and basis 'order-route', in the list's transaction (no
    * answer without its audit). Rows without a patient on the card name no
    * one; the collection row above stays as it was. Own work whose patient is
-   * shown (0113) gets the same: one row per patient, with the work items (ids
+   * shown (0121) gets the same: one row per patient, with the work items (ids
    * only) and basis 'consent', which the patient's access log shows as a view;
    * none while OWN_WORK_PATIENT_CARD_ENABLED is off.
    */
@@ -324,7 +339,7 @@ export class PharmacyService {
         patientId: row.patient_id, resourceType: 'pharmacy-work-item', resourceId: row.id,
       }, basisDetails(basis));
       const cards = row.order_route_id ? await this.routeCards.cards(client, [row.id], context.correlationId) : undefined;
-      // Own work (0113, OWN_WORK_PATIENT_CARD_ENABLED): its patient, read after
+      // Own work (0121, OWN_WORK_PATIENT_CARD_ENABLED): its patient, read after
       // the read row above, which already names the patient.
       const own = row.order_route_id ? undefined
         : await this.ownPatients.patients(client, [row.id], context.correlationId);
@@ -468,6 +483,74 @@ export class PharmacyService {
     }, { isolationLevel: 'SERIALIZABLE' });
   }
 
+  /**
+   * Several medicines from one OCR review, each stored as its own row in one
+   * SERIALIZABLE transaction: every row is written, or none is.
+   *
+   * pharmacy.imported_medication_evidence keeps publication_id unique (0023),
+   * so a batch row stores a per-medicine id derived from the OCR publication
+   * (batchPublicationId) and the idempotency key `<key>:mNN`. For batch rows,
+   * publication_id is therefore not the ocr.publications id; validation_id,
+   * which is one-to-one with the OCR publication, links every row of the batch.
+   */
+  async createImportBatch(context: DataAccessContext, input: OcrMedicationImportBatchDto, key: string) {
+    await this.authorize(input.patientId, context, 'write_records');
+    if (key.length > MAX_BATCH_KEY_LENGTH) {
+      throw new DomainProblem(400, 'IDEMPOTENCY_KEY_REQUIRED',
+        `Idempotency-Key for a batch must contain at most ${MAX_BATCH_KEY_LENGTH} characters`);
+    }
+    const digest = requestDigest('pharmacy.imported-medication-evidence.create-batch', input);
+    const keys = input.medications.map((_item, index) => batchItemKey(key, index));
+    const publicationIds = input.medications.map((_item, index) => batchPublicationId(input.publicationId, index));
+    return this.database.withTransaction(context, async (client) => {
+      const existing = (await client.query<ImportRow>(`select * from pharmacy.imported_medication_evidence
+        where (facility_id=$1 and created_by=$2 and idempotency_key = any($3::text[]))
+           or publication_id = any($4::uuid[]) or publication_id=$5
+        order by idempotency_key`,
+      [context.facilityId, context.actor.accountId, keys, publicationIds, input.publicationId])).rows;
+      if (existing.length > 0) {
+        const replay = existing.length === keys.length
+          && existing.every((row, index) => row.request_sha256 === digest && row.idempotency_key === keys[index]
+            && row.publication_id === publicationIds[index]);
+        if (!replay) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
+          'Idempotency-Key or publication was used for different imported medication evidence');
+        return this.projectBatch(existing);
+      }
+      const rows: ImportRow[] = [];
+      for (const [index, item] of input.medications.entries()) {
+        const inserted = await client.query<ImportRow>(`insert into pharmacy.imported_medication_evidence (
+          id,patient_id,facility_id,source_document_id,ocr_job_id,extraction_id,validation_id,
+          validation_version,publication_id,medication_text,strength_text,dose_text,frequency_text,
+          historical_context,reviewed_by,created_by,created_by_membership_id,idempotency_key,
+          request_sha256,correlation_id
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+        returning *`, [randomUUID(), input.patientId, context.facilityId, input.sourceDocumentId,
+          input.ocrJobId, input.extractionId, input.validationId, input.validationVersion,
+          publicationIds[index], item.medicationText, item.strengthText ?? null, item.doseText ?? null,
+          item.frequencyText ?? null, item.historicalContext ?? null, input.reviewedBy,
+          context.actor.accountId, context.membershipId, keys[index], digest, context.correlationId]);
+        const row = inserted.rows[0];
+        if (!row) throw new DomainProblem(503, 'PHARMACY_IMPORT_NOT_CREATED',
+          'Imported medication evidence could not be created');
+        await this.outbox(client, 'PharmacyImportedMedicationEvidenceCreated',
+          'imported-medication-evidence', row.id, row.facility_id, row.patient_id, context.correlationId,
+          { importedMedicationEvidenceId: row.id, sourceType: 'IMPORTED_MEDICATION_EVIDENCE',
+            activityStatus: 'unknown' });
+        await this.audit.recordWithClient(client, context, 'pharmacy.import.create', {
+          patientId: row.patient_id, resourceType: 'pharmacy-imported-medication-evidence', resourceId: row.id,
+        }, { publicationId: input.publicationId, validationId: row.validation_id, sourceType: row.source_type,
+          activityStatus: row.activity_status, batchIndex: index + 1, batchSize: input.medications.length });
+        rows.push(row);
+      }
+      return this.projectBatch(rows);
+    }, { isolationLevel: 'SERIALIZABLE' });
+  }
+
+  private projectBatch(rows: readonly ImportRow[]) {
+    const items = rows.map((row) => this.projectImport(row));
+    return { id: items[0]?.id, count: items.length, items };
+  }
+
   async getImport(context: DataAccessContext, id: string) {
     return this.database.withTransaction(context, async (client) => {
       const row = (await client.query<ImportRow>(
@@ -479,6 +562,30 @@ export class PharmacyService {
         patientId: row.patient_id, resourceType: 'pharmacy-imported-medication-evidence', resourceId: row.id,
       });
       return this.projectImport(row);
+    });
+  }
+
+  /**
+   * One patient's imported medication records (OCR provenance included),
+   * newest first, one bounded page. The same authorization as getImport:
+   * Identity `read_records` for this patient at this facility under the
+   * request's purpose, checked before any read, so a refusal reads and audits
+   * nothing. One audit row naming the patient, with ids and counts only.
+   */
+  async listImports(context: DataAccessContext, query: ListImportedMedicationsQueryDto) {
+    const limit = query.limit ?? IMPORT_PAGE_DEFAULT;
+    await this.authorize(query.patientId, context, 'read_records');
+    return this.database.withTransaction(context, async (client) => {
+      const rows = (await client.query<ImportRow>(PATIENT_IMPORTS_QUERY,
+        [query.patientId, context.facilityId, query.cursor ?? null, limit + 1])).rows;
+      const page = rows.filter((row) => row.patient_id === query.patientId && row.facility_id === context.facilityId)
+        .slice(0, limit);
+      const nextCursor = rows.length > limit && page.length === limit ? page[page.length - 1]!.id : null;
+      await this.audit.recordWithClient(client, context, 'pharmacy.import.list', {
+        patientId: query.patientId, resourceType: 'pharmacy-imported-medication-evidence-collection',
+        resourceId: query.patientId,
+      }, { returnedCount: page.length, importIds: page.map((row) => row.id), paged: Boolean(query.cursor) });
+      return { items: page.map((row) => this.projectImport(row)), nextCursor };
     });
   }
 
@@ -505,7 +612,7 @@ export class PharmacyService {
    * A work item as Pharmacy answers it. A route-backed one (P4c) never carries
    * the other facility's prescription or encounter id (PRIV P4.3); it carries
    * its route card, and its patient only while the route allows a read. This
-   * facility's own one carries its patient when 0113's reader gave one
+   * facility's own one carries its patient when 0121's reader gave one
    * (OWN_WORK_PATIENT_CARD_ENABLED on, and the member may read it), where a
    * route-backed one carries its card. The list and a single work item pass
    * an own row's prescription details (0114, PRESCRIPTION_DISPENSING_DETAILS_ENABLED
@@ -562,6 +669,32 @@ export class PharmacyService {
       validationVersion: row.validation_version, publicationId: row.publication_id,
       version: Number(row.row_version), createdAt: row.created_at };
   }
+}
+
+/** Leaves room for ':mNN' within the 128 characters the idempotency_key CHECK allows (0023). */
+export const MAX_BATCH_KEY_LENGTH = 120;
+
+/** The idempotency key of medicine `index` (0-based) of a batch: `<key>:m01` ... `<key>:m50`. */
+export function batchItemKey(key: string, index: number): string {
+  return `${key}:m${String(index + 1).padStart(2, '0')}`;
+}
+
+/** Fixed namespace for the per-medicine publication ids of a batch. Never change it. */
+const BATCH_PUBLICATION_NAMESPACE = '6f3b0c52-9d1e-4f7a-b8c2-5e4d3a2b1c0f';
+
+/**
+ * The publication_id stored on medicine `index` (0-based) of a batch: a UUID
+ * version 5 (RFC 9562, SHA-1) of `<publicationId>:<NN>` in a fixed namespace,
+ * so a replay derives the same ids.
+ */
+export function batchPublicationId(publicationId: string, index: number): string {
+  const namespace = Buffer.from(BATCH_PUBLICATION_NAMESPACE.replace(/-/g, ''), 'hex');
+  const name = Buffer.from(`${publicationId.toLowerCase()}:${String(index + 1).padStart(2, '0')}`, 'utf8');
+  const bytes = createHash('sha1').update(Buffer.concat([namespace, name])).digest().subarray(0, 16);
+  bytes.writeUInt8((bytes.readUInt8(6) & 0x0f) | 0x50, 6);
+  bytes.writeUInt8((bytes.readUInt8(8) & 0x3f) | 0x80, 8);
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function workItemNotFound(): DomainProblem {

@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { InternalCaller, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
 import { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
-import { OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
+import { ListImportedMedicationsQueryDto, OcrMedicationImportBatchDto, OcrMedicationImportDto }
+  from './dto/ocr-medication-import.dto';
 import { PharmacyService } from './pharmacy.service';
 
 @Controller('pharmacy')
@@ -66,6 +67,26 @@ export class PharmacyController {
   createImport(@Body() input: OcrMedicationImportDto, @Headers('idempotency-key') key: string | undefined,
     @Req() request: HidRequest) {
     return this.pharmacy.createImport(requireRequestContext(request), input, requireIdempotencyKey(key));
+  }
+
+  /** Several medicines from one OCR review: every one is stored, or none. Same guards as the single route. */
+  @Post('imports/from-ocr/batch')
+  @HttpCode(201)
+  @InternalCaller('ocr-api')
+  @RequirePermissions('pharmacy.import.write')
+  createImportBatch(@Body() input: OcrMedicationImportBatchDto,
+    @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
+    return this.pharmacy.createImportBatch(requireRequestContext(request), input, requireIdempotencyKey(key));
+  }
+
+  /**
+   * One patient's imported medication records at this facility, newest first,
+   * paged (`limit` 1-100, `cursor`). Same guards as GET imports/:importId.
+   */
+  @Get('imports')
+  @RequirePermissions('pharmacy.import.read')
+  listImports(@Query() query: ListImportedMedicationsQueryDto, @Req() request: HidRequest) {
+    return this.pharmacy.listImports(requireRequestContext(request), query);
   }
 
   @Get('imports/:importId')

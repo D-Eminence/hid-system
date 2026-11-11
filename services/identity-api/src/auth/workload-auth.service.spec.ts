@@ -84,6 +84,51 @@ describe('WorkloadAuthService Outreach caller', () => {
       expect(jwtVerify).not.toHaveBeenCalled();
     });
 
+    // The GuardDuty bridge (0105): the issuer mints sub hid:staging:document-scanner
+    // in production (the promoted staging stack), aud hid-identity-api.
+    describe('the document scanner', () => {
+      const scannerSubject = 'hid:staging:document-scanner';
+      const scannerAccount = 'd0c5ca40-0105-4000-8000-000000000001';
+      const database = (rows: { account_id: string }[]) => ({ query: jest.fn().mockResolvedValue({ rows }) });
+
+      it('accepts the bridge\'s token when its sub is an active account holding document_scanner', async () => {
+        jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: scannerSubject, aud: 'hid-identity-api',
+          token_use: 'workload' } } as never);
+        const db = database([{ account_id: scannerAccount }]);
+        await expect(new WorkloadAuthService(db as never).authenticateScanner('Bearer signed-token')).resolves
+          .toEqual({ subject: scannerSubject, accountId: scannerAccount });
+        expect(jwtVerify).toHaveBeenCalledWith('signed-token', expect.any(Function), {
+          issuer: 'https://issuer.test', audience: 'hid-identity-api', algorithms: ['RS256', 'ES256'],
+        });
+        const [sql, params] = db.query.mock.calls[0] as [string, unknown[]];
+        expect(params).toEqual([scannerSubject]);
+        expect(sql).toMatch(/account\.subject = \$1/);
+        expect(sql).toMatch(/account\.status = 'active'/);
+        expect(sql).toMatch(/auth\.account_has_active_role\(account\.id, 'document_scanner'\)/);
+      });
+
+      it('refuses the token when no active scanner account holds its sub (401, the kill switch)', async () => {
+        jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: scannerSubject } } as never);
+        await expect(new WorkloadAuthService(database([]) as never).authenticateScanner('Bearer signed-token'))
+          .rejects.toMatchObject({ status: 401 });
+      });
+
+      it('refuses the same token presented as a service caller (403)', async () => {
+        jest.mocked(jwtVerify).mockResolvedValue({ payload: { sub: scannerSubject } } as never);
+        await expect(new WorkloadAuthService(database([]) as never).authenticateService(
+          'ehr-api', 'Bearer signed-token', undefined,
+        )).rejects.toMatchObject({ status: 403 });
+      });
+
+      it('refuses a token JOSE rejects (another audience, issuer or key) before any database read', async () => {
+        jest.mocked(jwtVerify).mockRejectedValue(new Error('unexpected "aud" claim value'));
+        const db = database([{ account_id: scannerAccount }]);
+        await expect(new WorkloadAuthService(db as never).authenticateScanner('Bearer signed-token'))
+          .rejects.toMatchObject({ status: 401 });
+        expect(db.query).not.toHaveBeenCalled();
+      });
+    });
+
     it.each(['invalid signature', 'expired token', 'wrong audience'])(
       'fails closed when JOSE rejects an %s',
       async () => {

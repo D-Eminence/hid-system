@@ -29,7 +29,7 @@ export interface LabWorkItemResult {
   /**
    * Its patient: on a route-backed work item only while the route allows a
    * read (P10.5); on this facility's own work item only while
-   * OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read it (0113).
+   * OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read it (0121).
    */
   patient?: import('./order-route-cards').WorkItemRoutePatient;
 }

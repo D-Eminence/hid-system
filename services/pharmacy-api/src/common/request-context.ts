@@ -50,7 +50,13 @@ export interface DataAccessContext {
   origin?: string;
 }
 
-const PURPOSES = new Set<PurposeOfUse>(['direct-care', 'emergency', 'healthcare-operations']);
+/**
+ * The purposes a Pharmacy route takes. healthcare-operations is the purpose of
+ * a records-processing grant (0104), which lets OCR read a patient's paper
+ * documents and never opens Pharmacy data; no Pharmacy route uses it, and
+ * OCR's medication import runs at publication under direct care.
+ */
+const PURPOSES = new Set<PurposeOfUse>(['direct-care', 'emergency']);
 
 export function requireRequestContext(request: HidRequest): DataAccessContext {
   if (!request.actor || !request.facilityId || !request.correlationId) {
@@ -64,10 +70,9 @@ export function requireRequestContext(request: HidRequest): DataAccessContext {
     throw new Error('Validated authorization is required for Pharmacy data access');
   }
   // The purpose comes from the header, which the guard does not check, so a
-  // missing or unknown one is the client's error.
+  // missing, unknown or records-processing one is the client's error.
   if (!candidate || !PURPOSES.has(candidate as PurposeOfUse)) {
-    throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED',
-      'X-Purpose-Of-Use must be direct-care, emergency or healthcare-operations');
+    throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED', 'X-Purpose-Of-Use must be direct-care or emergency');
   }
   request.purposeOfUse = candidate as PurposeOfUse;
   return {

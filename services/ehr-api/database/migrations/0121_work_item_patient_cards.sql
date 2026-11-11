@@ -1,12 +1,14 @@
--- 0113 Patient details on this facility's own lab and pharmacy work (owner
+-- 0121 Patient details on this facility's own lab and pharmacy work (owner
 -- decision 25 of 2026-11-01, D-Eminence: "all recommended except D5", on the
 -- Akos handover backend plan, item 3a; D8: an emergency session sees the
 -- patient details with the work; decision 23 of the same evening: labs and
 -- pharmacies run as stand-alone products for the whole facility, so their
 -- staff cannot rely on the EHR to tell them who the patient is). The
 -- declaration is signed separately.
--- Written on 0103 (34d69557). It does not use or need anything 0104-0112
--- add, so it applies on 0103 alone or on 0103 + any of them.
+-- Written on 0103 (34d69557) as 0113; released as 0121, after 0120. It
+-- relies on one body 0104 replaced: identity.has_active_consent_grant as 0104
+-- left it (0108 kept it), so its records-processing cover counts here as it
+-- does in the work items' read policy. It uses nothing else 0104-0120 add.
 --
 -- The gap: a lab or pharmacy work row shows its patient's name, sex, date of
 -- birth and Health ID ending only when it came from another facility's order
@@ -76,11 +78,12 @@
 --    and nothing is applied): 0001-0103 applied (0103's
 --    identity.organization_application_admin_account body the marker, and
 --    the tables read); not applied yet (neither function exists); the bodies
---    relied on are the ones 0001-0103 left (md5 of pg_proc.prosrc): the
---    consent test and the membership and permission checks it and D2 call,
---    the four session readers, both work_item_allows (byte-identical bodies,
---    so their attributes and search_paths too) and the route branch they
---    call; the work items' read policies (the only ones a SELECT applies),
+--    relied on are the ones 0001-0104 left (md5 of pg_proc.prosrc): the
+--    consent test (0104's body) and the membership and permission checks it
+--    and D2 call, the four session readers, both work_item_allows
+--    (byte-identical bodies, so their attributes and search_paths too) and
+--    the route branch they call; the work items' read policies (the only
+--    ones a SELECT applies),
 --    the own-row CHECK work_items_route_facility_ck on both tables, forced
 --    row-level security on both and identity.patients' row-level security
 --    not forced; the types and NOT NULLs of the columns read; the applying
@@ -115,12 +118,12 @@
 -- Old services on this schema: nothing calls the new functions; today's
 -- lab-api and pharmacy-api images answer exactly as before, and so do the
 -- new images while OWN_WORK_PATIENT_CARD_ENABLED is off. Applied migrations
--- 0001 through 0103 are immutable.
+-- 0001 through 0120 are immutable.
 
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
 -- PUBLIC), ignoring a superuser's bypass (0097's, 0099's and 0100's helper).
-create function pg_temp.work_item_patient_cards_0113_holds(holder oid, object_owner oid, object_acl aclitem[],
+create function pg_temp.work_item_patient_cards_0121_holds(holder oid, object_owner oid, object_acl aclitem[],
   object_type "char", wanted text)
 returns boolean
 language sql stable
@@ -151,22 +154,22 @@ begin
      or to_regclass('identity.patients') is null
      or to_regclass('lab.work_items') is null
      or to_regclass('pharmacy.work_items') is null then
-    raise exception using errcode = '55000', message = '0113: 0001-0103 must be applied first';
+    raise exception using errcode = '55000', message = '0121: 0001-0103 must be applied first';
   end if;
   -- b. Not applied yet.
   if exists (select 1 from pg_proc proc
               where proc.proname = 'work_item_patient_cards'
                 and proc.pronamespace in ('lab'::regnamespace, 'pharmacy'::regnamespace)) then
-    raise exception using errcode = '55000', message = '0113: already applied';
+    raise exception using errcode = '55000', message = '0121: already applied';
   end if;
-  -- c. The bodies relied on, as 0001-0103 left them: the consent test
-  -- (0012) and the membership (0008) and permission (0010) checks, the four
-  -- session readers (0001), both work items' read-policy functions (0086 H8)
-  -- and their route branch (0086 H7).
+  -- c. The bodies relied on, as 0001-0104 left them: the consent test
+  -- (0012, as 0104 replaced it; 0108 kept it) and the membership (0008) and
+  -- permission (0010) checks, the four session readers (0001), both work
+  -- items' read-policy functions (0086 H8) and their route branch (0086 H7).
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
-      ('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)', '8b12ce866ee75cce411a2721795ffb92'),
+      ('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)', '732d11892dd4e27e1ff9093ae3b7de5a'),
       ('identity.has_active_membership(text,uuid,uuid)', 'bb52953ef1cd08527db61230a671859e'),
       ('auth.membership_has_permission(text,uuid,uuid,text)', '65e3eaff93fe729fd5c5b986b80c9dd6'),
       ('platform.current_actor_subject()', 'cf14c2d4a16d44a79ea9dbef9dc79c2b'),
@@ -239,7 +242,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0113: an object this migration relies on differs from 0001-0103: %s', mismatch);
+      message = format('0121: an object this migration relies on differs from 0001-0104: %s', mismatch);
   end if;
   -- d. The columns read.
   select string_agg(format('%s.%s', expected.relation_name, expected.column_name), '; ') into mismatch
@@ -265,7 +268,7 @@ begin
                         and attribute_row.attnotnull = expected.not_null);
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0113: a column this migration relies on differs from 0001-0103: %s', mismatch);
+      message = format('0121: a column this migration relies on differs from 0001-0103: %s', mismatch);
   end if;
   -- e. Ownership and privileges, never through a superuser's bypass
   -- (production's migrator has none). The new functions will belong to
@@ -285,13 +288,13 @@ begin
                      (patients_owner, 'identity', 'USAGE'), (patients_owner, 'auth', 'USAGE'),
                      (patients_owner, 'platform', 'USAGE')) wanted(holder, schema_name, privilege)
         join pg_namespace namespace on namespace.nspname = wanted.schema_name
-       where not pg_temp.work_item_patient_cards_0113_holds(wanted.holder, namespace.nspowner, namespace.nspacl, 'n',
+       where not pg_temp.work_item_patient_cards_0121_holds(wanted.holder, namespace.nspowner, namespace.nspacl, 'n',
                wanted.privilege)
       union all
       select format('%s lacks SELECT on %s', pg_get_userbyid(patients_owner), relation.oid::regclass)
         from pg_class relation
        where relation.oid in ('identity.patients'::regclass, 'lab.work_items'::regclass, 'pharmacy.work_items'::regclass)
-         and not pg_temp.work_item_patient_cards_0113_holds(patients_owner, relation.relowner, relation.relacl, 'r',
+         and not pg_temp.work_item_patient_cards_0121_holds(patients_owner, relation.relowner, relation.relacl, 'r',
                'SELECT')
       union all
       select format('%s lacks EXECUTE on %s', pg_get_userbyid(patients_owner), proc.oid::regprocedure)
@@ -302,12 +305,12 @@ begin
                      ('lab.work_item_allows(uuid,uuid,uuid,text)'),
                      ('pharmacy.work_item_allows(uuid,uuid,uuid,text)')) wanted(proc_name)
         join pg_proc proc on proc.oid = wanted.proc_name::regprocedure
-       where not pg_temp.work_item_patient_cards_0113_holds(patients_owner, proc.proowner, proc.proacl, 'f',
+       where not pg_temp.work_item_patient_cards_0121_holds(patients_owner, proc.proowner, proc.proacl, 'f',
                'EXECUTE')) missing;
   if mismatch is not null then
-    raise exception using errcode = '42501', message = format('0113: missing privileges: %s', mismatch);
+    raise exception using errcode = '42501', message = format('0121: missing privileges: %s', mismatch);
   end if;
-  raise notice '0113: owners checked: identity.patients=%, lab.work_items=%, pharmacy.work_items=%, applier=%',
+  raise notice '0121: owners checked: identity.patients=%, lab.work_items=%, pharmacy.work_items=%, applier=%',
     pg_get_userbyid(patients_owner),
     (select pg_get_userbyid(relation.relowner) from pg_class relation where relation.oid = 'lab.work_items'::regclass),
     (select pg_get_userbyid(relation.relowner) from pg_class relation where relation.oid = 'pharmacy.work_items'::regclass),
@@ -460,7 +463,7 @@ begin
           where proc.proname = 'work_item_patient_cards'
             and proc.pronamespace in ('lab'::regnamespace, 'pharmacy'::regnamespace)) <> 2 then
     raise exception using errcode = '55000',
-      message = format('0113: the functions are not as this file makes them: %s', coalesce(mismatch, 'count'));
+      message = format('0121: the functions are not as this file makes them: %s', coalesce(mismatch, 'count'));
   end if;
   select string_agg(granted.what, '; ') into mismatch
     from (
@@ -486,7 +489,7 @@ begin
                             and acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE')) granted;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0113: the functions'' ACLs are not section 2''s: %s', mismatch);
+      message = format('0121: the functions'' ACLs are not section 2''s: %s', mismatch);
   end if;
 end
 $$;

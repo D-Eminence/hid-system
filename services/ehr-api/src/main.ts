@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { ErrorReportingInterceptor, initErrorReporting } from '@hid/server-telemetry';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -12,6 +13,7 @@ import { preventResponseCaching } from './common/response-security.middleware';
 import { getEnvironment } from './config/environment';
 
 async function bootstrap(): Promise<void> {
+  initErrorReporting({ service: 'ehr-api' });
   const environment = getEnvironment();
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
@@ -66,6 +68,7 @@ async function bootstrap(): Promise<void> {
   });
   app.useGlobalPipes(createValidationPipe());
   app.useGlobalFilters(new ProblemDetailsFilter());
+  app.useGlobalInterceptors(new ErrorReportingInterceptor());
 app.enableShutdownHooks();
 
 await app.listen(environment.PORT, '0.0.0.0');

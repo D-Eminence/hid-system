@@ -11,6 +11,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getEnvironment } from '../config/environment';
 import type {
+  DownloadPresentation,
   PresignedUpload,
   StorageProvider,
   StoredObjectMetadata,
@@ -124,13 +125,32 @@ export class S3StorageProvider implements StorageProvider {
     return { versionId, sizeBytes: result.ContentLength, mediaType: result.ContentType ?? 'application/octet-stream', sha256Hex: checksum.toString('hex') };
   }
 
-  async createDownload(key: string, versionId: string, attachment?: { fileName: string; mediaType: string }): Promise<{ url: string; expiresInSeconds: number }> {
+  /**
+   * Bytes 0 to maxBytes - 1 of exactly versionId: a ranged GetObject pinned to
+   * the version, which S3 decrypts with the task's existing read rights. The
+   * answer must name the same version; at most maxBytes bytes are returned.
+   */
+  async readPrefix(key: string, versionId: string, maxBytes: number, signal?: AbortSignal): Promise<Uint8Array> {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 65_536) {
+      throw new RangeError('A prefix read takes 1 to 65536 bytes');
+    }
+    const result = await this.client.send(new GetObjectCommand({
+      Bucket: this.bucket(), Key: key, VersionId: versionId, Range: `bytes=0-${maxBytes - 1}`,
+    }), { abortSignal: AbortSignal.any([AbortSignal.timeout(5000), ...(signal ? [signal] : [])]) });
+    if (result.VersionId !== versionId || !result.Body) {
+      throw new ServiceUnavailableException('Stored object version is unavailable');
+    }
+    const bytes = await result.Body.transformToByteArray();
+    return bytes.subarray(0, maxBytes);
+  }
+
+  async createDownload(key: string, versionId: string, presentation?: DownloadPresentation): Promise<{ url: string; expiresInSeconds: number }> {
     const expiresInSeconds = 60;
     const url = await getSignedUrl(this.client, new GetObjectCommand({
       Bucket: this.bucket(), Key: key, VersionId: versionId,
-      ...(attachment ? {
-        ResponseContentDisposition: `attachment; filename="${attachment.fileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'attachment'}"`,
-        ResponseContentType: attachment.mediaType,
+      ...(presentation ? {
+        ResponseContentDisposition: `${presentation.disposition ?? 'attachment'}; filename="${presentation.fileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'attachment'}"`,
+        ResponseContentType: presentation.mediaType,
         ResponseCacheControl: 'private, no-store',
       } : {}),
     }), { expiresIn: expiresInSeconds });

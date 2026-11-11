@@ -1894,6 +1894,75 @@ begin
     jsonb_build_object('importId', import_id,
       'sourceType', 'IMPORTED_MEDICATION_EVIDENCE')
   );
+  -- Several medicines from one OCR review (pharmacy-api createImportBatch):
+  -- each is its own row for the same validation, with its own publication_id
+  -- (derived per medicine) and idempotency key, written in one session.
+  insert into pharmacy.imported_medication_evidence (
+    id, patient_id, facility_id, source_document_id, ocr_job_id,
+    extraction_id, validation_id, validation_version, publication_id,
+    medication_text, strength_text, frequency_text, historical_context,
+    reviewed_by, created_by, created_by_membership_id, idempotency_key,
+    request_sha256, correlation_id
+  )
+  select gen_random_uuid(), '50000000-0000-4000-8000-000000000001',
+    '10000000-0000-4000-8000-000000000002',
+    '90000000-0000-4000-8000-000000000001',
+    'd0000000-0000-4000-8000-000000000001',
+    'd0000000-0000-4000-8000-000000000002',
+    'd0000000-0000-4000-8000-000000000003', 1, batch.publication_id,
+    batch.medication_text, batch.strength_text, 'once daily',
+    'From a paper record, page 2. As written: ' || batch.medication_text,
+    '20000000-0000-4000-8000-000000000001',
+    '20000000-0000-4000-8000-000000000001',
+    '40000000-0000-4000-8000-000000000001',
+    batch.idempotency_key, repeat('d', 64), 'schema-test-pharmacy-import-batch'
+  from (values
+    ('d0000000-0000-5000-8000-000000000011'::uuid, 'Amlodipine', '5mg', 'schema-pharmacy-import-0002:m01'),
+    ('d0000000-0000-5000-8000-000000000012'::uuid, 'Amlodipine', '5mg', 'schema-pharmacy-import-0002:m02')
+  ) as batch(publication_id, medication_text, strength_text, idempotency_key);
+  if (select count(*) from pharmacy.imported_medication_evidence
+      where validation_id = 'd0000000-0000-4000-8000-000000000003'
+        and correlation_id = 'schema-test-pharmacy-import-batch') <> 2 then
+    raise exception 'Two medicines from one review did not stay two records';
+  end if;
+  -- One patient's imported medications, as pharmacy-api listImports reads
+  -- them (PATIENT_IMPORTS_QUERY): this facility, newest first, the single
+  -- record written before the batch last.
+  if (select array_agg(e.id order by e.created_at desc, e.id desc)
+      from pharmacy.imported_medication_evidence e
+      where e.patient_id = '50000000-0000-4000-8000-000000000001'
+        and e.facility_id = '10000000-0000-4000-8000-000000000002')
+     is distinct from ((select array_agg(id) from (
+       select id from pharmacy.imported_medication_evidence
+       where publication_id in ('d0000000-0000-5000-8000-000000000012',
+         'd0000000-0000-5000-8000-000000000011')
+       order by created_at desc, id desc) b) || import_id) then
+    raise exception 'A patient''s imported medications were not read newest first';
+  end if;
+  begin
+    insert into pharmacy.imported_medication_evidence (
+      id, patient_id, facility_id, source_document_id, ocr_job_id,
+      extraction_id, validation_id, validation_version, publication_id,
+      medication_text, reviewed_by, created_by, created_by_membership_id,
+      idempotency_key, request_sha256, correlation_id
+    ) values (
+      gen_random_uuid(), '50000000-0000-4000-8000-000000000001',
+      '10000000-0000-4000-8000-000000000002',
+      '90000000-0000-4000-8000-000000000001',
+      'd0000000-0000-4000-8000-000000000001',
+      'd0000000-0000-4000-8000-000000000002',
+      'd0000000-0000-4000-8000-000000000003', 1,
+      'd0000000-0000-5000-8000-000000000011', 'Metformin',
+      '20000000-0000-4000-8000-000000000001',
+      '20000000-0000-4000-8000-000000000001',
+      '40000000-0000-4000-8000-000000000001',
+      'schema-pharmacy-import-0002:m03', repeat('d', 64),
+      'schema-test-pharmacy-import-batch'
+    );
+    raise exception 'A publication id was stored twice';
+  exception when unique_violation then null;
+  end;
+
   if not exists(select 1 from pharmacy.imported_medication_evidence
       where id = import_id and activity_status = 'unknown')
      or exists(select 1 from pharmacy.dispensings where id = import_id)
@@ -1914,7 +1983,9 @@ begin
   perform set_config('app.membership_id', '40000000-0000-4000-8000-000000000002', true);
   if exists(select 1 from pharmacy.work_items where id = work_id)
      or exists(select 1 from pharmacy.dispensings where id = dispensing_id)
-     or exists(select 1 from pharmacy.imported_medication_evidence where id = import_id) then
+     or exists(select 1 from pharmacy.imported_medication_evidence where id = import_id)
+     or exists(select 1 from pharmacy.imported_medication_evidence
+       where patient_id = '50000000-0000-4000-8000-000000000001') then
     raise exception 'Facility B read Facility A Pharmacy evidence';
   end if;
   perform set_config('app.facility_id', '10000000-0000-4000-8000-000000000002', true);

@@ -228,7 +228,7 @@ export function verifyPublicationWorkflow(source) {
   assert.equal(workflow.concurrency?.group, '${{ fromJSON(inputs.plan_json).environment }}'.replace(/^/, 'tuf-publication-'))
   assert.equal(workflow.concurrency?.['cancel-in-progress'], false, 'never cancel a live publication for a newer run')
   const { tooling, publish } = workflow.jobs
-  assert.equal(tooling.steps.find(step => step.uses?.startsWith('actions/setup-go@'))?.with['go-version'], '1.26.10')
+  assert.equal(tooling.steps.find(step => step.uses?.startsWith('actions/setup-go@'))?.with['go-version'], '1.26.11')
   // setup-go takes a missing cache input as true. The tooling job restores no Go cache.
   for (const step of tooling.steps.filter(step => step.uses?.startsWith('actions/setup-go@'))) assert.equal(step.with?.cache, false, 'the publisher tooling job restores no Go cache')
   assert.ok(tooling.steps.some(step => step.id === 'go_audit' && step.run.includes('verify-production-toolchain.mjs') && step.run.includes('go-vulnerability-gate.mjs')))

@@ -1,4 +1,4 @@
-import {PatientResultsService} from './patient-results.service';
+import {PatientResultsService,PATIENT_SELF_LAB_QUERY,STAFF_LAB_QUERY} from './patient-results.service';
 jest.mock('@hid/api-client',()=>({IdentityApiClient:jest.fn().mockImplementation(()=>({authorizePatientSelf:authorize,authorizeStaffRecordRead:authorizeStaff})),IdentityApiProblem:class extends Error{}}));
 jest.mock('../config/environment',()=>({getEnvironment:()=>({IDENTITY_API_URL:'https://identity.example.test'})}));
 const authorize=jest.fn(),authorizeStaff=jest.fn();
@@ -15,6 +15,7 @@ it('derives the patient from fresh Identity authorization and uses exact release
  const s=setup();expect((await s.service.read(s.request)).records).toHaveLength(1);
  expect(s.query.mock.calls[0][1]).toEqual(['patient-a','']);
  expect(s.query.mock.calls[0][0]).toContain('result_invalidations');expect(s.query.mock.calls[0][0]).toContain('result_verifications');
+ expect(s.query.mock.calls[0][0]).toBe(PATIENT_SELF_LAB_QUERY);
 });
 it('rejects a mismatched authorization before querying results',async()=>{
  const s=setup();authorize.mockResolvedValue({...auth,patientId:'other-patient'});
@@ -38,6 +39,7 @@ it('reads exact current released results under the delegated staff facility and 
  const s=staffSetup();const result=await s.service.readStaff(s.request,'patient-a');
  expect(result.records[0].fields.numericValue).toBe('20.05');expect(s.query.mock.calls[0][1]).toEqual(['patient-a','']);
  expect(s.transaction.mock.calls[0]![0]).toMatchObject({facilityId:'facility-a',membershipId:'membership-a',purposeOfUse:'direct-care'});
+ expect(s.query.mock.calls[0][0]).toBe(STAFF_LAB_QUERY);
 });
 it.each([{allowed:false},{breakGlass:true},{membershipId:'other'},{patientId:'other'}])('withholds Lab results after a denied or mismatched staff decision %j',async patch=>{
  const s=staffSetup();authorizeStaff.mockResolvedValue({allowed:true,breakGlass:false,patientId:'patient-a',facilityId:'facility-a',membershipId:'membership-a',...patch});

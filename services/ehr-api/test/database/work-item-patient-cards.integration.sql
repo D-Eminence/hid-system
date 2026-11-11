@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Patient details on this facility's own lab and pharmacy work (0113, owner
+-- Patient details on this facility's own lab and pharmacy work (0121, owner
 -- decision 25 of 2026-11-01, D-Eminence: "all recommended except D5"; the
 -- Akos handover backend plan, item 3a; D8 emergency included).
 -- Rollback-only.
@@ -11,7 +11,7 @@
 -- session's facility and the read consent test of the work items' read
 -- policy. The cases, through the exact Lab and Pharmacy API runtime roles in
 -- the session lab-api and pharmacy-api set (DatabaseService.withTransaction):
---   1. structure: each body is 0113's (md5), SECURITY DEFINER, STABLE,
+--   1. structure: each body is 0121's (md5), SECURITY DEFINER, STABLE,
 --      plpgsql, not STRICT, search_path pg_catalog, pg_temp, owned by
 --      identity.patients' owner; EXECUTE for its own runtime and the schema
 --      test runtime only (no PUBLIC, no other runtime);
@@ -76,7 +76,7 @@ begin
       or not proc.prosecdef or proc.provolatile <> 's' or language_row.lanname <> 'plpgsql' or proc.proisstrict
       or proc.proconfig is distinct from '{"search_path=pg_catalog, pg_temp"}'::text[];
   if mismatch is not null then
-    raise exception 'work item patient cards: the functions are not 0113''s: %', mismatch;
+    raise exception 'work item patient cards: the functions are not 0121''s: %', mismatch;
   end if;
   select string_agg(format('%s %s', proc.oid::regprocedure, acl.grantee::regrole), '; ') into mismatch
     from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl

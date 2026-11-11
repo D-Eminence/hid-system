@@ -29,6 +29,16 @@ describe('OCR environment', () => {
     delete process.env.OCR_PUBLICATION_ENABLED;
   });
 
+  it('mirrors the worker OCR_AI_MODE, off unless set to claude', () => {
+    delete process.env.OCR_AI_MODE;
+    expect(getEnvironment().OCR_AI_MODE).toBe('off');
+    process.env.OCR_AI_MODE = 'claude'; resetEnvironmentForTests();
+    expect(getEnvironment().OCR_AI_MODE).toBe('claude');
+    process.env.OCR_AI_MODE = 'on'; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/OCR_AI_MODE/);
+    delete process.env.OCR_AI_MODE;
+  });
+
   it('fails closed when a local downstream workload secret is absent', () => {
     delete process.env.EHR_INTERNAL_SERVICE_TOKEN;
     expect(() => getEnvironment()).toThrow(/EHR_INTERNAL_SERVICE_TOKEN/);

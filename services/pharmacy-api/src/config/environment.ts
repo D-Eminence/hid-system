@@ -45,7 +45,7 @@ const environmentSchema = z.object({
   PHARMACY_WORKLOAD_JWKS_URL: optionalUrl,
   PHARMACY_EHR_CALLER_SUBJECT: optionalString,
   PHARMACY_OCR_CALLER_SUBJECT: optionalString,
-  // The patient on this facility's own work (0113): off by default, off is exactly as before.
+  // The patient on this facility's own work (0121): off by default, off is exactly as before.
   OWN_WORK_PATIENT_CARD_ENABLED: booleanString,
   // The prescriber's priority, strength, form, duration and quantity on own work (0114): off by default, off is exactly as before.
   PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,

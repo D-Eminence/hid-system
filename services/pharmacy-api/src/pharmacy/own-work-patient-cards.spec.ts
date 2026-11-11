@@ -14,7 +14,7 @@ import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-w
 import { PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
 
 /*
- * The patient on this facility's own work (0113, owner decision 25 of
+ * The patient on this facility's own work (0121, owner decision 25 of
  * 2026-11-01, "all recommended except D5"): behind OWN_WORK_PATIENT_CARD_ENABLED.
  * Off, nothing is read and the answers and audit rows are exactly as before.
  * On, own rows carry the patient pharmacy.work_item_patient_cards gives, read

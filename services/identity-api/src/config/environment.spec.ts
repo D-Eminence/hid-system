@@ -36,6 +36,16 @@ describe('Identity production database transport', () => {
     expect(() => getEnvironment()).toThrow(/cannot be disabled globally/);
   });
 
+  it('keeps the support Health ID caller optional in production and refuses its local secret there (0109)', () => {
+    production(); resetEnvironmentForTests();
+    expect(getEnvironment().IDENTITY_SUPPORT_CALLER_SUBJECT).toBeUndefined();
+    production(); process.env.IDENTITY_SUPPORT_CALLER_SUBJECT = 'hid:staging:support-api'; resetEnvironmentForTests();
+    expect(getEnvironment().IDENTITY_SUPPORT_CALLER_SUBJECT).toBe('hid:staging:support-api');
+    production(); process.env.IDENTITY_SUPPORT_INTERNAL_SERVICE_TOKEN = 'support-local-development-secret-0123456789';
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/Local service tokens are forbidden in production/);
+  });
+
   it('rejects a production cookie domain and missing Turnstile secret', () => {
     production(); process.env.AUTH_COOKIE_DOMAIN = '.healthidentitydirectory.com'; resetEnvironmentForTests();
     expect(() => getEnvironment()).toThrow(/host-only cookies/);

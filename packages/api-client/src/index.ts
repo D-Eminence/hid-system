@@ -107,9 +107,12 @@ export type {
 export { PharmacyApiClient, PharmacyApiProblem } from './pharmacy';
 export type {
   CreatePharmacyDispensingInput,
+  ListPharmacyImportedMedicationsOptions,
   PharmacyDispensing,
   PharmacyDispensingReversal,
   PharmacyImportedMedicationEvidence,
+  PharmacyImportedMedicationPage,
+  PharmacyImportBatch,
   PharmacyClientOptions,
   PharmacyInternalCaller,
   PharmacyMedicationReference,
@@ -144,6 +147,7 @@ export { IdentityApiClient, IdentityApiProblem } from './identity';
 export type {
   IdentityActorContext,
   IdentityAuthorizationDecision,
+  IdentityAuthorizationPrecheck,
   IdentityClientOptions,
   IdentityDelegatedContext,
   IdentityFacilityAssignment,

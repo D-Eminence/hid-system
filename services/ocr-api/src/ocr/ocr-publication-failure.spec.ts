@@ -11,6 +11,7 @@ import type { PharmacyApiService } from '../integrations/pharmacy-api.service';
 import type { CreateOcrPublicationDto } from './dto/create-ocr-publication.dto';
 import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
 import type { OcrPublicationSwitch } from './ocr-publication-switch';
+import type { OcrReadingSwitch } from './ocr-reading-switch';
 import { OcrService } from './ocr.service';
 
 const context = {
@@ -65,6 +66,9 @@ interface Options {
   validationRow?: Record<string, unknown>;
   publicationRow?: Record<string, unknown>;
   labApi?: Partial<LabApiService>;
+  pharmacyApi?: Partial<PharmacyApiService>;
+  /** structured_payload of the reviewed extraction, read when a review lists several medicines. */
+  extractionPayload?: unknown;
   ehrNote?: jest.Mock;
   /** Thrown by the validation read of the claimed attempt (the second one). */
   attemptReadError?: Error;
@@ -100,6 +104,9 @@ function harness(options: Options = {}) {
       validationReads += 1;
       if (options.attemptReadError && validationReads > 1) throw options.attemptReadError;
       return rows([validationRow]);
+    }
+    if (sql.includes('from ocr.extractions where id = $1 and job_id = $2')) {
+      return rows(options.extractionPayload === undefined ? [] : [{ structured_payload: options.extractionPayload }]);
     }
     if (sql.includes('from ocr.extractions where job_id')) { order.push('select extractions'); return rows([]); }
     if (sql.includes('from ocr.patient_confirmations where facility_id = $1')) return rows([]);
@@ -155,8 +162,8 @@ function harness(options: Options = {}) {
     if (options.auditFails) throw new Error('audit insert failed');
   }) } as unknown as AuditService;
   const service = new OcrService(database, identity, audit, ehrApi,
-    (options.labApi ?? {}) as LabApiService, {} as PharmacyApiService,
-    { enabled: options.publicationPaused !== true } as OcrPublicationSwitch);
+    (options.labApi ?? {}) as LabApiService, (options.pharmacyApi ?? {}) as PharmacyApiService,
+    { enabled: options.publicationPaused !== true } as OcrPublicationSwitch, { aiReadingOn: false } as OcrReadingSwitch);
   return { service, clients, database, audit, identity, ehrApi, order };
 }
 
@@ -456,5 +463,241 @@ describe('OCR publication switch', () => {
     expect((failure as DomainProblem).getStatus()).toBe(503);
     expect(database.withTransaction).not.toHaveBeenCalled();
     expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+});
+
+// Fictional test data only: medicines read from a paper record of patient "Ada Test".
+const itemId = (index: number) => `it-${index.toString(16).padStart(16, '0')}`;
+const keptMedicine = (index: number, overrides: Record<string, unknown> = {}) => ({
+  itemId: itemId(index), page: 2, medicationText: index % 2 ? 'Amlodipine' : 'Metformin',
+  strengthText: index % 2 ? '5mg' : '500mg', frequencyText: index % 2 ? 'once daily' : 'twice daily',
+  historicalContext: `From a paper record, page 2. As written: medicine ${index}. Dated 12/03/2019`, ...overrides });
+const readingOf = (count: number, overrides: Record<string, unknown> = {}) => ({
+  contract: 'hid-paper-reading-v2',
+  items: Array.from({ length: count }, (_v, index) => ({ id: itemId(index + 1), kind: 'medicine', page: 2,
+    ...overrides })),
+});
+
+describe('OCR publication of several medicines from one paper', () => {
+  const validatedJob = { ...job, status: 'validated', row_version: '5' };
+  const pharmacyValidation = (acceptedFields: Record<string, unknown>) => ({ ...validation,
+    target_domain: 'PHARMACY', candidate_type: 'historical_medication_evidence', accepted_fields: acceptedFields });
+  const pharmacyPublication = { ...publication, target_domain: 'PHARMACY',
+    target_operation: 'create_imported_medication_evidence' };
+  const ownerKey = `ocr-publication:${publicationId}`;
+  const publish = (service: OcrService) => service.createPublication(validationId,
+    { validationVersion: 1, patientConfirmationId: confirmationId,
+      targetOperation: 'create_imported_medication_evidence', purpose: 'direct-care' },
+    'ocr-publish-key-000201', context);
+  const sqlCalls = (clients: PoolClient[]) => clients
+    .flatMap((client) => (client.query as unknown as jest.Mock).mock.calls as [string, unknown[]][]);
+  const provenance = { patientId, sourceDocumentId: documentId, ocrJobId: jobId,
+    extractionId: validation.extraction_id, validationId, validationVersion: 1, publicationId,
+    reviewedBy: context.actor.accountId };
+
+  it('sends a list of one medicine through the single route, exactly as the legacy shape', async () => {
+    const single = { medicationText: 'Amlodipine', strengthText: '5mg', frequencyText: 'once daily',
+      historicalContext: keptMedicine(1).historicalContext };
+    const legacyCall = jest.fn().mockResolvedValue({ id: 'e0000000-0000-4000-8000-000000000001' });
+    await publish(harness({ jobRow: validatedJob, validationRow: pharmacyValidation(single),
+      publicationRow: pharmacyPublication, pharmacyApi: { createOcrImport: legacyCall } }).service);
+    const listCall = jest.fn().mockResolvedValue({ id: 'e0000000-0000-4000-8000-000000000001' });
+    const createOcrImportBatch = jest.fn();
+    await expect(publish(harness({ jobRow: validatedJob,
+      validationRow: pharmacyValidation({ items: {}, medications: [keptMedicine(1)] }),
+      publicationRow: pharmacyPublication, pharmacyApi: { createOcrImport: listCall, createOcrImportBatch } }).service))
+      .resolves.toMatchObject({ status: 'published' });
+    expect(createOcrImportBatch).not.toHaveBeenCalled();
+    expect(listCall.mock.calls[0]?.[1]).toEqual(legacyCall.mock.calls[0]?.[1]);
+    expect(listCall.mock.calls[0]?.[2]).toBe(ownerKey);
+    expect(JSON.stringify(listCall.mock.calls[0]?.[1])).not.toMatch(/itemId|"page"/);
+  });
+
+  it('sends several medicines in one batch call and records every created record', async () => {
+    const medications = [keptMedicine(1), keptMedicine(2), keptMedicine(3, { medicationText: 'Amlodipine' })];
+    const created = ['e0000000-0000-4000-8000-000000000001', 'e0000000-0000-4000-8000-000000000002',
+      'e0000000-0000-4000-8000-000000000003'];
+    const createOcrImportBatch = jest.fn().mockResolvedValue({ id: created[0], count: 3,
+      items: created.map((id) => ({ id })) });
+    const createOcrImport = jest.fn();
+    const { service, clients, audit } = harness({ jobRow: validatedJob,
+      validationRow: pharmacyValidation({ items: {}, medications }), publicationRow: pharmacyPublication,
+      pharmacyApi: { createOcrImport, createOcrImportBatch } });
+    await expect(publish(service)).resolves.toMatchObject({ status: 'published' });
+    expect(createOcrImport).not.toHaveBeenCalled();
+    expect(createOcrImportBatch).toHaveBeenCalledTimes(1);
+    expect(createOcrImportBatch.mock.calls[0]?.[2]).toBe(ownerKey);
+    expect(createOcrImportBatch.mock.calls[0]?.[1]).toEqual({ ...provenance,
+      medications: medications.map(({ itemId: _id, page: _page, ...item }) => ({ doseText: undefined, ...item })) });
+    const published = sqlCalls(clients).find(([sql]) => sql.includes("update ocr.publications set status='published'"));
+    expect(published?.[1]).toEqual(expect.arrayContaining(['pharmacy-imported-medication-evidence', created[0]]));
+    const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.succeed')?.[1];
+    expect(event?.details).toMatchObject({ targetResourceIds: created, medicationCount: 3 });
+    const outbox = sqlCalls(clients).find(([sql, params]) => sql.includes('insert into ocr.outbox_events')
+      && params[0] === 'OcrPublicationSucceeded');
+    // The dispatcher allows only these keys in an OCR event payload (event-contracts.ts).
+    expect(Object.keys(JSON.parse(String(outbox?.[1][4]))).sort())
+      .toEqual(['jobId', 'publicationId', 'targetResourceId', 'targetResourceType']);
+  });
+
+  it('publishes medicines typed from the page (no item id) as separate records in one batch', async () => {
+    const medications = [keptMedicine(1, { itemId: undefined }), keptMedicine(2, { itemId: undefined, page: 1 }),
+      keptMedicine(3, { itemId: undefined, medicationText: 'Amlodipine' })];
+    const createOcrImportBatch = jest.fn().mockResolvedValue({ id: 'e0000000-0000-4000-8000-000000000001', count: 3,
+      items: [1, 2, 3].map((n) => ({ id: `e0000000-0000-4000-8000-00000000000${n}` })) });
+    const { service } = harness({ jobRow: validatedJob, validationRow: pharmacyValidation({ medications }),
+      publicationRow: pharmacyPublication, pharmacyApi: { createOcrImportBatch } });
+    await expect(publish(service)).resolves.toMatchObject({ status: 'published' });
+    const sent = createOcrImportBatch.mock.calls[0]?.[1] as { medications: unknown[] };
+    expect(sent.medications).toHaveLength(3);
+    expect(JSON.stringify(sent)).not.toMatch(/itemId|"page"/);
+  });
+
+  it('stores a Pharmacy refusal of the batch as terminal, so nothing is published', async () => {
+    const error = new DomainProblem(400, 'VALIDATION_FAILED', 'medications.1.medicationText is too long');
+    const createOcrImportBatch = jest.fn().mockRejectedValue(error);
+    const { service, clients } = harness({ jobRow: validatedJob,
+      validationRow: pharmacyValidation({ medications: [keptMedicine(1), keptMedicine(2)] }),
+      publicationRow: pharmacyPublication, pharmacyApi: { createOcrImportBatch } });
+    await expect(publish(service)).rejects.toBe(error);
+    expect(sqlCalls(clients).some(([sql]) => sql.includes("update ocr.publications set status='published'"))).toBe(false);
+    const failed = sqlCalls(clients).find(([sql]) => sql.includes("update ocr.publications set status='failed'"));
+    expect(failed?.[1].slice(2)).toEqual(['VALIDATION_FAILED', 'Publication was rejected by the owning domain', false]);
+  });
+});
+
+describe('OCR validation of several medicines', () => {
+  const body = (acceptedFields: Record<string, unknown>): ValidateOcrJobDto => ({
+    extractionId: validation.extraction_id, expectedVersion: 4, validatedPayload: {}, disposition: 'validated',
+    targetDomain: 'PHARMACY', candidateType: 'historical_medication_evidence', acceptedFields,
+    rejectedFields: [], corrections: [], reason: 'Reviewed against the source', purpose: 'healthcare-operations' });
+  const writes = (clients: PoolClient[]) => clients.flatMap((client) => (client.query as unknown as jest.Mock).mock.calls)
+    .map(([sql]) => String(sql))
+    .filter((sql) => sql.includes('insert into ocr.validations') || sql.includes('update ocr.jobs'));
+
+  it('stores a review of two medicines that were read from the paper', async () => {
+    const { service, clients, audit } = harness({ extractionPayload: readingOf(2) });
+    await service.validate(jobId, body({ items: {}, medications: [keptMedicine(1), keptMedicine(2)] }),
+      'ocr-validate-key-000201', context);
+    expect(writes(clients)).toHaveLength(2);
+    expect(auditEvents(audit).map(([, event]) => event.action)).toEqual(['ocr.validation.accept']);
+  });
+
+  // AI reading is off by default (OCR_AI_MODE 'off'): the reading has pages but no items.
+  const pagesOnly = (pages: number, status = 'ai_off') => ({ contract: 'hid-paper-reading-v2',
+    pages: Array.from({ length: pages }, (_v, index) => ({ page: index + 1, flagged: false, flagReasons: [],
+      lines: [] })), items: [], reading: { status, itemCount: 0 } });
+  const typed = (index: number, overrides: Record<string, unknown> = {}) =>
+    keptMedicine(index, { itemId: undefined, ...overrides });
+
+  it.each([['ai_off'], ['ai_declined'], ['ai_failed']])(
+    'stores a review of three medicines typed from a paper read with AI reading %s', async (status) => {
+      const { service, clients, audit } = harness({ extractionPayload: pagesOnly(2, status) });
+      await service.validate(jobId, body({ medications: [typed(1), typed(2, { page: 1 }), typed(3)] }),
+        'ocr-validate-key-000205', context);
+      expect(writes(clients)).toHaveLength(2);
+      expect(auditEvents(audit).map(([, event]) => event.action)).toEqual(['ocr.validation.accept']);
+    });
+
+  it('stores a typed medicine the AI reading missed, next to the ones it read', async () => {
+    const { service, clients } = harness({ extractionPayload: { ...readingOf(2), pages: [{ page: 1 }, { page: 2 }] } });
+    await service.validate(jobId, body({ medications: [keptMedicine(1), keptMedicine(2), typed(3)] }),
+      'ocr-validate-key-000206', context);
+    expect(writes(clients)).toHaveLength(2);
+  });
+
+  it('stores typed medicines from an older extraction (hid-textract-v1) that lists its pages', async () => {
+    const { service, clients } = harness({ extractionPayload: { pages: [{ page: 1, text: 'x', confidence: 0.9 },
+      { page: 2, text: 'y', confidence: 0.9 }] } });
+    await service.validate(jobId, body({ medications: [typed(1), typed(2)] }), 'ocr-validate-key-000207', context);
+    expect(writes(clients)).toHaveLength(2);
+  });
+
+  it.each([
+    ['a page the paper does not have', pagesOnly(1)],
+    ['an extraction that cannot be found', undefined],
+  ])('refuses a typed medicine on %s with 400 and writes nothing', async (_name, payload) => {
+    const { service, clients } = harness({ extractionPayload: payload });
+    await expect(service.validate(jobId, body({ medications: [typed(1, { page: 1 }), typed(2, { page: 2 })] }),
+      'ocr-validate-key-000208', context)).rejects.toMatchObject({ code: 'OCR_MEDICATION_PAGE_NOT_FOUND' });
+    expect(writes(clients)).toEqual([]);
+  });
+
+  it('still refuses an item id the reading did not find, even with AI reading off', async () => {
+    const { service, clients } = harness({ extractionPayload: pagesOnly(2) });
+    await expect(service.validate(jobId, body({ medications: [typed(1), keptMedicine(2)] }),
+      'ocr-validate-key-000209', context)).rejects.toMatchObject({ code: 'OCR_MEDICATION_NOT_READ' });
+    expect(writes(clients)).toEqual([]);
+  });
+
+  it.each([
+    ['a medicine the reading did not find', readingOf(1)],
+    ['a medicine on another page', readingOf(2, { page: 3 })],
+    ['an item that is not a medicine', readingOf(2, { kind: 'diagnosis' })],
+    ['a reading without items', { contract: 'hid-textract-v1', pages: [] }],
+  ])('refuses %s with 400 and writes nothing', async (_name, payload) => {
+    const { service, clients } = harness({ extractionPayload: payload });
+    await expect(service.validate(jobId, body({ medications: [keptMedicine(1), keptMedicine(2)] }),
+      'ocr-validate-key-000202', context)).rejects.toMatchObject({ code: 'OCR_MEDICATION_NOT_READ' });
+    expect(writes(clients)).toEqual([]);
+  });
+
+  it.each([
+    ['51 medicines', { medications: Array.from({ length: 51 }, (_v, index) => keptMedicine(index + 1)) }],
+    ['one medicine too long', { medications: [keptMedicine(1), keptMedicine(2, { medicationText: 'A'.repeat(501) })] }],
+    ['both shapes', { medicationText: 'Amlodipine', medications: [keptMedicine(1), keptMedicine(2)] }],
+  ])('refuses the whole review for %s and writes nothing', async (_name, fields) => {
+    const { service, clients } = harness({ extractionPayload: readingOf(51) });
+    await expect(service.validate(jobId, body(fields), 'ocr-validate-key-000203', context))
+      .rejects.toMatchObject({ code: 'OCR_INVALID_MEDICATION_EVIDENCE' });
+    expect(writes(clients)).toEqual([]);
+  });
+
+  it('refuses a view-only share of typed medicines before reading the candidate', async () => {
+    const { service, clients } = harness({ allowed: false, extractionPayload: pagesOnly(2) });
+    await expect(service.validate(jobId, body({ medications: [typed(1), typed(2)] }),
+      'ocr-validate-key-000210', context)).rejects.toMatchObject({ code: 'OCR_JOB_NOT_FOUND' });
+    expect(writes(clients)).toEqual([]);
+  });
+
+  it('refuses a view-only share before reading the candidate', async () => {
+    const { service, clients } = harness({ allowed: false, extractionPayload: readingOf(2) });
+    await expect(service.validate(jobId, body({ medications: [keptMedicine(1), keptMedicine(2)] }),
+      'ocr-validate-key-000204', context)).rejects.toMatchObject({ code: 'OCR_JOB_NOT_FOUND' });
+    expect(writes(clients)).toEqual([]);
+  });
+});
+
+describe('OCR publication of a lab result dated on paper', () => {
+  const validatedJob = { ...job, status: 'validated', row_version: '5' };
+  const labPublication = { ...publication, target_domain: 'LAB', target_operation: 'create_imported_lab_evidence' };
+  const labReview = (acceptedFields: Record<string, unknown>) => ({ ...validation, target_domain: 'LAB',
+    candidate_type: 'lab_document', accepted_fields: acceptedFields });
+  const publish = (service: OcrService) => service.createPublication(validationId,
+    { validationVersion: 1, patientConfirmationId: confirmationId, targetOperation: 'create_imported_lab_evidence',
+      purpose: 'direct-care' }, 'ocr-publish-key-000301', context);
+
+  it('publishes a review dated "Mar 2025" with the date left out, instead of failing at Lab', async () => {
+    const createOcrImport = jest.fn().mockResolvedValue({ id: 'd0000000-0000-4000-8000-000000000001' });
+    const { service } = harness({ jobRow: validatedJob, publicationRow: labPublication,
+      labApi: { createOcrImport }, validationRow: labReview({ reportedAtAsWritten: 'Mar 2025',
+        observations: [{ testName: 'Haemoglobin', value: '12.5', unit: 'g/dL', reportedAt: 'Mar 2025',
+          page: 1, itemId: 'it-00000000000000aa' }] }) });
+    await expect(publish(service)).resolves.toMatchObject({ status: 'published' });
+    const sent = JSON.parse(JSON.stringify(createOcrImport.mock.calls[0]?.[1])) as Record<string, unknown>;
+    expect(sent.reportedAt).toBeUndefined();
+    expect(sent.observations).toEqual([{ testName: 'Haemoglobin', value: '12.5', unit: 'g/dL' }]);
+    expect(JSON.stringify(sent)).not.toMatch(/AsWritten|itemId|"page"/);
+  });
+
+  it('sends the real date of an unambiguous paper date, judged on the day the review was stored', async () => {
+    const createOcrImport = jest.fn().mockResolvedValue({ id: 'd0000000-0000-4000-8000-000000000001' });
+    const { service } = harness({ jobRow: validatedJob, publicationRow: labPublication,
+      labApi: { createOcrImport }, validationRow: { ...labReview({ collectedAtAsWritten: '08/10/2026',
+        observations: [{ testName: 'Sodium', value: '140', unit: 'mmol/L', reportedAtAsWritten: '9th Oct 2026' }] }),
+      created_at: new Date('2026-10-09T10:05:00Z') } });
+    await expect(publish(service)).resolves.toMatchObject({ status: 'published' });
+    expect(createOcrImport.mock.calls[0]?.[1]).toMatchObject({ collectedAt: '2026-10-08T00:00:00.000Z',
+      observations: [expect.objectContaining({ reportedAt: '2026-10-09T00:00:00.000Z' })] });
   });
 });

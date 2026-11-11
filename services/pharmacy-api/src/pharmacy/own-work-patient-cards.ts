@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { CARD_BATCH, day, type WorkItemRoutePatient } from './order-route-cards';
 
-/** A row of `pharmacy.work_item_patient_cards` (0113). */
+/** A row of `pharmacy.work_item_patient_cards` (0121). */
 export interface OwnWorkPatientCardRow {
   work_item_id: string;
   patient_full_name: string | null;
@@ -19,7 +19,7 @@ export function ownWorkPatient(row: OwnWorkPatientCardRow): WorkItemRoutePatient
 }
 
 /**
- * The patient on this facility's own work (0113; owner decision 25 of
+ * The patient on this facility's own work (0121; owner decision 25 of
  * 2026-11-01, D-Eminence: "all recommended except D5", D8 emergency
  * included): name, sex, date of birth and Health ID ending, as a route-backed
  * row already shows them, so staff of a stand-alone pharmacy can match a
@@ -31,7 +31,7 @@ export function ownWorkPatient(row: OwnWorkPatientCardRow): WorkItemRoutePatient
  * (the session's own rows the member may read: pharmacy.work-item.read here and
  * the read consent test of the work items' read policy) in the caller's
  * transaction, in a savepoint, at most 200 ids a statement: a failure (a
- * schema without 0113, a refusal) leaves the rows without a patient and never
+ * schema without 0121, a refusal) leaves the rows without a patient and never
  * fails the answer.
  */
 export class PharmacyOwnWorkPatientCards {

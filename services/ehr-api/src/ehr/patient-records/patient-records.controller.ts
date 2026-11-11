@@ -2,24 +2,25 @@ import { Body, Controller, Delete, Get, Header, Param, ParseUUIDPipe, Post, Req 
 import { AuditFailuresOnly, FacilityOptional, PatientAllowed, RequirePermissions } from '../../common/decorators';
 import { DomainProblem } from '../../common/problem';
 import { requireRequestContext, type HidRequest } from '../../common/request-context';
+import { patientRecordContext } from '../shared/clinical-context';
 import { PatientRecordsService } from './patient-records.service';
 import { ImportedAttachmentService } from './imported-attachment.service';
 import { PatientChatService } from './patient-chat.service';
 import { PatientChatDto } from './patient-chat.dto';
 import { PatientChatHistoryService } from './patient-chat-history.service';
-import { PatientEvidenceService } from './patient-evidence.service';
+import { PatientChatSourceService } from './patient-chat-source.service';
 
 @Controller('ehr')
 @AuditFailuresOnly()
 export class PatientRecordsController {
   constructor(private readonly records: PatientRecordsService, private readonly attachments: ImportedAttachmentService,
     private readonly chat: PatientChatService, private readonly history: PatientChatHistoryService,
-    private readonly evidence:PatientEvidenceService) {}
+    private readonly sources:PatientChatSourceService) {}
 
   @Get('me/chat/sources/:kind/:sourceId')
   @Header('Cache-Control','no-store') @FacilityOptional() @PatientAllowed()
   source(@Param('kind') kind:string,@Param('sourceId',new ParseUUIDPipe()) id:string,@Req() request:HidRequest) {
-    return this.evidence.source(request,kind,id);
+    return this.sources.view(request,kind,id);
   }
 
   @Get('me/chat/history')
@@ -35,6 +36,7 @@ export class PatientRecordsController {
   clearChatHistory(@Req() request: HidRequest) { return this.history.clear(request); }
 
   @Post('me/chat')
+  @Header('Cache-Control', 'no-store')
   @FacilityOptional()
   @PatientAllowed()
   chatSelf(@Body() body: PatientChatDto, @Req() request: HidRequest) {
@@ -52,7 +54,7 @@ export class PatientRecordsController {
   @RequirePermissions('ehr.note.read','ehr.document.read')
   downloadStaff(@Param('patientId', new ParseUUIDPipe()) patientId: string,
     @Param('fileId', new ParseUUIDPipe()) fileId: string, @Req() request: HidRequest) {
-    return this.attachments.staff(patientId, fileId, requireRequestContext(request));
+    return this.attachments.staff(patientId, fileId, patientRecordContext(request));
   }
 
   @Get('me/records')
@@ -63,7 +65,7 @@ export class PatientRecordsController {
   @Get('patients/:patientId/imported-records')
   @RequirePermissions('ehr.note.read')
   imported(@Param('patientId', new ParseUUIDPipe()) patientId: string, @Req() request: HidRequest) {
-    return this.records.imported(patientId, requireRequestContext(request));
+    return this.records.imported(patientId, patientRecordContext(request));
   }
 
   @Get('patients/:patientId/emergency-records')
