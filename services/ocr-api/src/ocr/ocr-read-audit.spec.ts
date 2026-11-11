@@ -409,6 +409,26 @@ describe('A source the OCR worker deleted after 24 hours (migration 0110)', () =
     expect(auditEvents(built.audit).map(([, event]) => event.action)).toEqual(['ocr.extraction.list']);
   });
 
+  it('creating a job on a document being deleted or deleted answers 410 and writes nothing', async () => {
+    for (const status of ['source_deleting', 'source_deleted']) {
+      const built = harness({ aiReadingOn: true });
+      (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValue({ ...source, status });
+      await expect(built.service.createJob({ documentId, provider: 'textract', purpose: 'healthcare-operations' },
+        'ocr-create-key-000099', context)).rejects.toMatchObject({ code: 'DOCUMENT_SOURCE_DELETED' });
+      const statements = built.clients.flatMap((client) => (client.query as jest.Mock).mock.calls.map(([sql]) => String(sql)));
+      expect(statements.filter((sql) => /^\s*(insert|update)\b/i.test(sql))).toEqual([]);
+    }
+  });
+
+  it('treats a document being deleted (source_deleting) as deleted: no text, and writes refused', async () => {
+    const built = harness({ extractionRows: [extractionRow({ ...v2Payload() })] });
+    (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValue({ ...source, status: 'source_deleting' });
+    const result = await built.service.listExtractions(jobId, context) as { items: Array<Record<string, any>> };
+    expect(result.items[0]).toMatchObject({ contentDeleted: true, rawText: '' });
+    await expect(built.service.retry(jobId, { expectedVersion: 4, reason: 'Provider timeout',
+      purpose: 'healthcare-operations' }, context)).rejects.toMatchObject({ code: 'DOCUMENT_SOURCE_DELETED' });
+  });
+
   it('marks a row deleted by its document even if text were still there', async () => {
     const built = harness({ extractionRows: [extractionRow({ ...v2Payload() })] });
     (built.ehrApi.getOcrDocumentSource as jest.Mock).mockResolvedValue(deletedSource);

@@ -30,6 +30,11 @@ test('a source_deleted document is not previewed, and shows both sentences inste
     { loadPreview: false, sourceNotice: SOURCE_DELETED_MESSAGE, contentNotice: CONTENT_DELETED_MESSAGE })
 })
 
+test('a document being deleted (source_deleting) is treated the same way', () => {
+  assert.deepEqual(ocrReviewVisibility({ status: 'source_deleting' }, { contentDeleted: true }),
+    { loadPreview: false, sourceNotice: SOURCE_DELETED_MESSAGE, contentNotice: CONTENT_DELETED_MESSAGE })
+})
+
 test('an extraction ocr-api marks deleted shows the content sentence instead of the review', () => {
   assert.equal(ocrReviewVisibility({ status: 'available' }, { contentDeleted: true }).contentNotice,
     CONTENT_DELETED_MESSAGE)

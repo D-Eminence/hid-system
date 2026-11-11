@@ -84,8 +84,12 @@ const JOB_SELECT = `
              where confirmation.job_id=ocr.jobs.id order by confirmation.confirmation_version desc limit 1) as confirmed_at
     from ocr.jobs`;
 
-/** ehr.documents.status once the OCR worker deleted the source and its reading after 24 hours (migration 0110). */
-const SOURCE_DELETED = 'source_deleted';
+/**
+ * ehr.documents.status while the OCR worker deletes the source and its reading 24 hours after the job finished, and
+ * once it did (migration 0110). From the first, nothing is reviewed, retried, published or read again.
+ */
+const SOURCE_DELETION_STATUSES: ReadonlySet<string> = new Set(['source_deleting', 'source_deleted']);
+const sourceDeleted = () => new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 24 hours');
 
 /** Publication failure codes a later request may retry; any other failure is terminal. */
 const RETRYABLE_PUBLICATION_FAILURES = ['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'];
@@ -164,6 +168,8 @@ export class OcrService {
       }
 
       const source = await this.ehrApi.getOcrDocumentSource(input.documentId, context);
+      // The database refuses a job on such a document too (0110, ocr.validate_job_write).
+      if (SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
       if (source.status !== 'available' || source.scanStatus !== 'clean'
           || !source.objectVersionId || !source.sha256Hex) {
         throw new DomainProblem(409, 'OCR_SOURCE_NOT_ELIGIBLE', 'OCR source must have exact clean immutable object evidence');
@@ -268,7 +274,7 @@ export class OcrService {
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.extraction.list', job, source.patientId));
       // Each extraction is re-read through the contract: no stored key outside it, no raw model output. A source
       // the OCR worker deleted after 24 hours (0110) is said so explicitly, from the document's status.
-      const contentDeleted = source.status === SOURCE_DELETED;
+      const contentDeleted = SOURCE_DELETION_STATUSES.has(source.status);
       return { items: result.rows.map((row) => projectExtraction(row, contentDeleted)) };
     });
   }
@@ -839,9 +845,7 @@ export class OcrService {
     }
     // Nothing is left to review, confirm, retry or publish once the source and its reading were deleted after
     // 24 hours (migration 0110); reads still answer, with the content marked deleted.
-    if (action === 'write_records' && source.status === SOURCE_DELETED) {
-      throw new DomainProblem(410, 'DOCUMENT_SOURCE_DELETED', 'Source page deleted after 24 hours');
-    }
+    if (action === 'write_records' && SOURCE_DELETION_STATUSES.has(source.status)) throw sourceDeleted();
     return source;
   }
 
