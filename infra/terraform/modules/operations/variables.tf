@@ -51,11 +51,6 @@ variable "notification_queue_names" {
   type    = map(string)
   default = {}
 }
-variable "ocr_worker_log_group" {
-  type        = string
-  default     = ""
-  description = "The OCR worker's log group; empty creates no OCR source deletion alarm."
-}
 variable "provider_log_groups" {
   type    = map(string)
   default = {}
@@ -78,7 +73,7 @@ variable "notify_stopped_tasks" {
   default     = false
 }
 variable "ocr_worker_log_group" {
-  description = "The OCR worker's log group; its queue-age and loop-error lines feed the OCR alarms. Null turns those alarms off."
+  description = "The OCR worker's log group; its queue-age, loop-error and source-deletion lines feed the OCR alarms. Null turns those alarms off."
   type        = string
   default     = null
 }

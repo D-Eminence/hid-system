@@ -105,11 +105,6 @@ output "operational_target_dimensions" {
   } }) : {}
 }
 
-output "ocr_worker_log_group" {
-  description = "The OCR worker's log group (the 7-day deletion sweeper logs ocr.source_deletion.overdue there); empty without the runtime."
-  value       = var.enable_runtime && contains(keys(local.runtime_workloads), "ocr-worker") ? aws_cloudwatch_log_group.workload["ocr-worker"].name : ""
-}
-
 output "provider_log_groups" {
   value = var.enable_runtime ? {
     for name in ["notification-api", "notification-worker"] : name => aws_cloudwatch_log_group.workload[name].name

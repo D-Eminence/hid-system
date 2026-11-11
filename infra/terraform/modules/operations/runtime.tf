@@ -98,7 +98,7 @@ resource "aws_cloudwatch_metric_alarm" "provider_failure" {
 # fires when any is overdue, and also when no round has been logged (missing
 # data is breaching): a stopped sweeper is as bad as a failing one.
 resource "aws_cloudwatch_log_metric_filter" "ocr_source_deletion_overdue" {
-  count          = var.ocr_worker_log_group == "" ? 0 : 1
+  count          = var.ocr_worker_log_group == null ? 0 : 1
   name           = "${var.name_prefix}-ocr-source-deletion-overdue"
   log_group_name = var.ocr_worker_log_group
   pattern        = "{ $.event = \"ocr.source_deletion.overdue\" }"
@@ -110,7 +110,7 @@ resource "aws_cloudwatch_log_metric_filter" "ocr_source_deletion_overdue" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "ocr_source_deletion_overdue" {
-  count               = var.ocr_worker_log_group == "" ? 0 : 1
+  count               = var.ocr_worker_log_group == null ? 0 : 1
   alarm_name          = "${var.name_prefix}-ocr-source-deletion-overdue"
   alarm_description   = "OCR sources are still stored more than 7 days and 2 hours after their job finished, or the deletion sweeper has not reported for an hour."
   namespace           = "HID/${var.environment}/OCR"
