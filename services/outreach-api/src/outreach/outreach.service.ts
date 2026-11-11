@@ -13,6 +13,7 @@ import type { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import type { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import type { OutreachCampaign, CampaignMember, CampaignRole, CampaignStaff } from './campaign.types';
 import { registrationCase, type OutreachRegistrationCase, type RegistrationRow } from './outreach.types';
+import { isOutreachTenant, OUTREACH_NOTES_LIMIT, outreachRuleProblem, tenantNoHealthIdLink } from './outreach-tenant';
 
 interface IdempotencyRow { request_sha256: string; registration_case_id: string }
 
@@ -42,6 +43,8 @@ export class OutreachService {
     context: DataAccessContext): Promise<OutreachRegistrationCase> {
     const normalized = { ...input, fullName: input.fullName.trim(),
       phone: input.phone?.trim() || null, operationalNotes: input.operationalNotes?.trim() || null };
+    const tenant = isOutreachTenant(context);
+    if (tenant) this.assertTenantRegistration(normalized);
     const digest = requestDigest('outreach.registration-case.create', normalized);
     try {
       return await this.database.withTransaction(context, async (client) => {
@@ -69,8 +72,19 @@ export class OutreachService {
         await this.outbox(client, 'OutreachRegistrationCaseCreated', row.id, 1, context, null,
           { registrationCaseId: row.id, temporaryPatientId: row.temporary_patient_id,
             campaignId: row.campaign_id, status: 'identity_resolution_pending' });
+        // The person's agreement, in the same transaction (plan PR-4): the
+        // database refuses an outreach group's registration without it.
+        if (normalized.consent) {
+          await client.query(`insert into outreach.registration_consents (
+            case_id,consent_text_version,language,method,guardian_name,captured_by_membership_id
+          ) values ($1,$2,$3,$4,$5,$6)`,
+          [row.id, normalized.consent.textVersion, normalized.consent.language, normalized.consent.method,
+            normalized.consent.guardianName ?? null, context.membershipId]);
+        }
         await this.audit.recordWithClient(client, context, 'outreach.registration-case.received', row.id);
-        return registrationCase(row);
+        const value = registrationCase(row);
+        if (!row.campaign_id) return value;
+        return { ...value, possibleDuplicate: await this.possibleDuplicate(client, row) };
       }, { isolationLevel: 'SERIALIZABLE' });
     } catch (error) {
       // Outside the transaction: a duplicate of a concurrent identical request
@@ -78,8 +92,50 @@ export class OutreachService {
       this.translateConflict(error, 'OUTREACH_REGISTRATION_CONFLICT',
         'This local Outreach registration was already received');
       this.translateCampaignRefusal(error);
+      const rule = outreachRuleProblem(error);
+      if (rule) throw rule;
       throw error;
     }
+  }
+
+  /**
+   * What an outreach group's registration needs before anything is written
+   * (plan PR-1/PR-4; the database checks the same): a campaign, the person's
+   * agreement, a parent's or guardian's name for anyone under 18, and short
+   * notes with no diagnoses.
+   */
+  private assertTenantRegistration(input: Omit<CreateRegistrationCaseDto, 'phone' | 'operationalNotes'>
+    & { operationalNotes: string | null }): void {
+    if (!input.campaignId) {
+      throw new DomainProblem(422, 'OUTREACH_CAMPAIGN_REQUIRED', 'Choose the campaign this person is being registered in.');
+    }
+    if (!input.consent) {
+      throw new DomainProblem(422, 'OUTREACH_CONSENT_REQUIRED',
+        'Read the notice to the person and record how they agreed before registering them.');
+    }
+    if (input.ageYears < 18 && !input.consent.guardianName) {
+      throw new DomainProblem(422, 'OUTREACH_GUARDIAN_REQUIRED',
+        'This person is under 18. Enter the name of the parent or guardian who agreed.');
+    }
+    if (input.operationalNotes && input.operationalNotes.length > OUTREACH_NOTES_LIMIT) {
+      throw new DomainProblem(422, 'OUTREACH_NOTES_TOO_LONG',
+        `Keep notes to ${OUTREACH_NOTES_LIMIT} characters, and do not write diagnoses.`);
+    }
+  }
+
+  /**
+   * A hint, never a refusal (field critique): another registration in the
+   * same campaign has the same phone, or the same name and age. Read as the
+   * caller, so it sees only what the caller may see.
+   */
+  private async possibleDuplicate(client: PoolClient, row: RegistrationRow): Promise<boolean> {
+    const result = await client.query<{ found: boolean }>(`select exists (
+        select 1 from outreach.registration_cases other
+         where other.campaign_id=$1 and other.facility_id=$2 and other.id<>$3
+           and ((other.phone is not null and other.phone=$4)
+             or (lower(btrim(other.full_name))=lower(btrim($5)) and other.age_years=$6))
+      ) as found`, [row.campaign_id, row.facility_id, row.id, row.phone, row.full_name, row.age_years]);
+    return result.rows[0]?.found === true;
   }
 
   async list(context: DataAccessContext): Promise<readonly OutreachRegistrationCase[]> {
@@ -103,6 +159,10 @@ export class OutreachService {
 
   async linkExisting(id: string, input: LinkExistingPatientDto, idempotencyKey: string,
     context: DataAccessContext): Promise<OutreachRegistrationCase> {
+    // An outreach group never links anyone to a Health ID (plan PR-4); the
+    // person does it later from their own account. Identity and the database
+    // refuse it too.
+    if (isOutreachTenant(context)) throw tenantNoHealthIdLink();
     await this.identity.authorizeExistingPatient(input.canonicalPatientId, context);
     const normalized = { ...input, reason: input.reason.trim() };
     const digest = requestDigest('outreach.registration-case.link-existing', { id, ...normalized });
@@ -159,6 +219,8 @@ export class OutreachService {
     } catch (error) {
       this.translateConflict(error, 'OUTREACH_RESOLUTION_CONFLICT',
         'The Outreach registration has a conflicting patient resolution');
+      const rule = outreachRuleProblem(error);
+      if (rule) throw rule;
       throw error;
     }
   }
@@ -180,7 +242,7 @@ export class OutreachService {
     if (input.endsAt && new Date(input.endsAt).getTime() <= new Date(input.startsAt).getTime()) {
       throw new DomainProblem(400, 'OUTREACH_CAMPAIGN_DATES_INVALID', 'An Outreach campaign must end after it starts');
     }
-    return this.database.withTransaction(context, async (client) => {
+    return this.withRules(() => this.database.withTransaction(context, async (client) => {
       const result = await client.query(`insert into outreach.campaigns
         (facility_id,created_by_account_id,created_by_membership_id,name,services,starts_at,ends_at)
         values ($1,$2,$3,$4,$5,$6,$7) returning id,facility_id as "facilityId",name,services,status,
@@ -207,11 +269,20 @@ export class OutreachService {
       return { ...row, rowVersion: Number(row.rowVersion), startsAt: new Date(row.startsAt).toISOString(),
         endsAt: row.endsAt ? new Date(row.endsAt).toISOString() : null,
         createdAt: new Date(row.createdAt).toISOString(), updatedAt: new Date(row.updatedAt).toISOString() };
-    }, { isolationLevel: 'SERIALIZABLE' });
+    }, { isolationLevel: 'SERIALIZABLE' }));
+  }
+
+  /** Runs a command and answers an outreach group's database rules in plain English. */
+  private async withRules<Result>(operation: () => Promise<Result>): Promise<Result> {
+    try {
+      return await operation();
+    } catch (error) {
+      throw outreachRuleProblem(error) ?? error;
+    }
   }
 
   async updateCampaignStatus(id: string, input: UpdateCampaignStatusDto, expectedVersion: number, context: DataAccessContext): Promise<OutreachCampaign> {
-    return this.database.withTransaction(context, async (client) => {
+    return this.withRules(() => this.database.withTransaction(context, async (client) => {
       const current = (await client.query(`select * from outreach.campaigns where id=$1 and facility_id=$2 for update`, [id, context.facilityId])).rows[0];
       if (!current) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
       // 0122 (ADR-045 option B): only this campaign's own admins open or close it.
@@ -231,7 +302,7 @@ export class OutreachService {
       return { id: updated.id, facilityId: updated.facility_id, name: updated.name, services: updated.services,
         status: updated.status, startsAt: new Date(updated.starts_at).toISOString(), endsAt: updated.ends_at ? new Date(updated.ends_at).toISOString() : null,
         rowVersion: Number(updated.row_version), createdAt: new Date(updated.created_at).toISOString(), updatedAt: new Date(updated.updated_at).toISOString() };
-    });
+    }));
   }
 
   async listCampaignMembers(id: string, context: DataAccessContext): Promise<readonly CampaignMember[]> {
@@ -245,7 +316,7 @@ export class OutreachService {
   }
 
   async addCampaignMember(id: string, input: AddCampaignMemberDto, context: DataAccessContext): Promise<CampaignMember> {
-    return this.database.withTransaction(context, async (client) => {
+    return this.withRules(() => this.database.withTransaction(context, async (client) => {
       const campaign = await client.query(`select 1 from outreach.campaigns where id=$1 and facility_id=$2`, [id, context.facilityId]);
       if (!campaign.rowCount) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
       // 0122 (ADR-045 option B): only this campaign's own admins add members, and only active staff at the facility.
@@ -273,7 +344,31 @@ export class OutreachService {
         }
         throw adminRefusal(error, 'add members');
       }
-    }, { isolationLevel: 'SERIALIZABLE' });
+    }, { isolationLevel: 'SERIALIZABLE' }));
+  }
+
+  /**
+   * The governance answer (#222's endpoint, plan PR-4): how campaigns are
+   * governed, and for an outreach group whether Health ID has checked it.
+   * organiserStatus: 'not_outreach_group' at a hospital's facility;
+   * 'unverified' (campaigns can be set up and practised, not made live),
+   * 'reviewed', 'suspended', or 'unknown' when it cannot be read just now.
+   * Free for now and with no per-organiser limits (owner decisions 2 and 6).
+   */
+  async campaignGovernance(context: DataAccessContext): Promise<{ rule: 'campaign_admins';
+    organiserStatus: 'not_outreach_group' | 'unverified' | 'reviewed' | 'suspended' | 'unknown' }> {
+    if (!isOutreachTenant(context)) return { rule: 'campaign_admins', organiserStatus: 'not_outreach_group' };
+    try {
+      const state = await this.database.withTransaction(context, async (client) =>
+        (await client.query<{ review_state: string }>('select review_state from outreach.organiser_status()')).rows[0]
+          ?.review_state, { readOnly: true });
+      const organiserStatus = state === 'pending' ? 'unverified' as const
+        : state === 'reviewed' ? 'reviewed' as const
+          : state === 'suspended' ? 'suspended' as const : 'unknown' as const;
+      return { rule: 'campaign_admins', organiserStatus };
+    } catch {
+      return { rule: 'campaign_admins', organiserStatus: 'unknown' };
+    }
   }
 
   /**

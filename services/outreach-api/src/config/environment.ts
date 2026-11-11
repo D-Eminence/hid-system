@@ -38,6 +38,10 @@ const environmentSchema = z.object({
   OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,
   OUTREACH_IDENTITY_WORKLOAD_TOKEN_FILE: optionalString,
+  // How often the retention sweeper runs (owner decision 3 of 11 Nov 2026:
+  // registrations never linked to a Health ID are kept 1 year, then
+  // redacted). 0 turns the timer off; it never runs under NODE_ENV=test.
+  OUTREACH_RETENTION_SWEEP_SECONDS: z.coerce.number().int().min(0).max(86_400).default(3_600),
 }).superRefine((environment, context) => {
   if (environment.OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE === 'local-secret'
       && !environment.OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN) {

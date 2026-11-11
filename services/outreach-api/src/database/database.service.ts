@@ -113,6 +113,27 @@ export class DatabaseService implements OnApplicationShutdown {
     } finally { client.release(); }
   }
 
+  /**
+   * One transaction as the retention sweeper (app.actor_subject
+   * 'system:outreach-retention', no facility and no membership): the only
+   * context outreach.sweep_expired_registrations() accepts.
+   */
+  async withRetentionTransaction<Result>(correlationId: string,
+    operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`select set_config('app.actor_subject','system:outreach-retention',true),
+        set_config('app.correlation_id',$1,true)`, [correlationId]);
+      const result = await operation(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
+
   async healthCheck(): Promise<void> { await this.pool.query('select 1'); }
   async onApplicationShutdown(): Promise<void> { await this.pool.end(); }
 }

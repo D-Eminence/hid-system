@@ -17,12 +17,13 @@ export class OutreachController {
 
   /**
    * How campaigns are governed here (0122, ADR-045 option B): a campaign's own admins open, close and staff it. A
-   * website asks this to learn that campaign management is served; a backend before 0122 answers 404.
+   * website asks this to learn that campaign management is served; a backend before 0122 answers 404. At an
+   * outreach group's facility it also says whether Health ID has checked the group (organiserStatus).
    */
   @Get('/campaigns/governance')
   @RequirePermissions('outreach.campaign.read')
-  campaignGovernance() {
-    return { rule: 'campaign_admins' as const };
+  campaignGovernance(@Req() request: HidRequest) {
+    return this.outreach.campaignGovernance(requireRequestContext(request));
   }
 
   @Get('/campaigns')
