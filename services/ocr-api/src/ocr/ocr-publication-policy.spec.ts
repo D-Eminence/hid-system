@@ -1,7 +1,7 @@
 import { DomainProblem } from '../common/problem';
 import { assertCandidateClassification, assertPublishableCandidate, clinicalNoteCandidate,
   expectedPublicationOperation, importedLabCandidate, importedMedicationCandidate,
-  importedMedicationCandidates, MAX_IMPORTED_MEDICATIONS, publicationCanRetry } from './ocr-publication-policy';
+  importedMedicationCandidates, MAX_IMPORTED_MEDICATIONS, paperRecordDraftNote, publicationCanRetry } from './ocr-publication-policy';
 
 describe('governed OCR publication policy', () => {
   it('keeps validation and publication separate and blocks unclassified candidates', () => {
@@ -262,5 +262,72 @@ describe('dates written on paper lab results', () => {
     expect(() => lab({ observations: [observation({ reportedAtAsWritten: 'A'.repeat(121) })] })).toThrow(invalid);
     expect(() => lab({ observations: [observation({ page: 0 })] })).toThrow(invalid);
     expect(() => lab({ observations: [observation({ itemId: 'lab-1' })] })).toThrow(invalid);
+  });
+});
+
+describe('clinicalNoteCandidate visit (0113)', () => {
+  const fields = { noteType: 'progress', title: 'Clinic card', content: 'Fictional clinical text' };
+  it('accepts a reading that names no visit (the imported paper records take it as a draft)', () => {
+    expect(clinicalNoteCandidate(fields)).toEqual(fields);
+  });
+  it('keeps a named visit', () => {
+    expect(clinicalNoteCandidate({ ...fields, encounterId: 'c0000000-0000-4000-8000-000000000001' }))
+      .toEqual({ ...fields, encounterId: 'c0000000-0000-4000-8000-000000000001' });
+  });
+  it.each(['not-a-visit', 42, null])('refuses a visit that is not a uuid (%p)', (encounterId) => {
+    expect(() => clinicalNoteCandidate({ ...fields, encounterId })).toThrow('Validated clinical-note candidate is incomplete or invalid');
+  });
+});
+
+// 0113: a Lab, Pharmacy or document-only reading under the dedicated grant is a
+// draft note labelled by kind, built from the reviewed fields only.
+describe('paperRecordDraftNote', () => {
+  it('writes every Lab field that was reviewed, in reading order, and nothing else', () => {
+    const note = paperRecordDraftNote('LAB', { externalLabName: 'Example Lab', collectedAt: '2026-10-01',
+      observations: [
+        { testName: 'Haemoglobin', value: '12.5', unit: 'g/dL', referenceRange: '12-16', abnormalFlag: 'N' },
+        { testName: 'Malaria parasite', valueText: 'Not seen' }] }, '2026-11-11');
+    expect(note).toEqual({ noteType: 'imported_paper_record', title: 'Lab results',
+      content: 'Laboratory: Example Lab\nCollected: 2026-10-01\n'
+        + '- Haemoglobin: 12.5 g/dL (reference 12-16) [N]\n- Malaria parasite: Not seen' });
+  });
+
+  it('writes every paper date as written, never a converted date or a time that is not on the paper', () => {
+    const note = paperRecordDraftNote('LAB', { collectedAtAsWritten: '05/06/2024', reportedAtAsWritten: 'Jun 2024',
+      observations: [{ testName: 'PCV', testCode: 'PCV-1', value: '36', unit: '%', reportedAtAsWritten: '6/6/24' }] },
+    '2026-11-11');
+    expect(note.content).toBe('Collected: 05/06/2024\nReported: Jun 2024\n- PCV (PCV-1): 36 % reported 6/6/24');
+    expect(note.content).not.toMatch(/T00:00/);
+  });
+
+  it('a document-only reading keeps every reviewed value; the fixed sentence only when none was kept', () => {
+    expect(paperRecordDraftNote('DOCUMENT_ONLY', { note: ' Seen ', pages: 2, flags: ['a'] }, '2026-11-11').content)
+      .toBe('note: Seen\npages: 2\nflags: ["a"]');
+    expect(paperRecordDraftNote('DOCUMENT_ONLY', { note: '  ', other: null }, '2026-11-11').content)
+      .toBe('A paper record kept as a document; the reviewer typed none of its text.');
+  });
+
+  it('refuses at validation a document-only reading too long for a draft note', () => {
+    expect(() => assertPublishableCandidate('DOCUMENT_ONLY', { note: 'x'.repeat(100_001) }))
+      .toThrow(expect.objectContaining({ code: 'OCR_INVALID_CLINICAL_NOTE' }));
+    expect(() => assertPublishableCandidate('DOCUMENT_ONLY', { note: 'Fictional text' })).not.toThrow();
+  });
+
+  it('keeps the as-written line of each medicine and never merges two', () => {
+    const note = paperRecordDraftNote('PHARMACY', { medicationText: 'Paracetamol', strengthText: '500 mg' }, '2026-11-11');
+    expect(note).toMatchObject({ title: 'Medicines', content: '- Paracetamol 500 mg' });
+  });
+
+  it('refuses a Lab or Pharmacy reading the structured check refuses, with the same code', () => {
+    expect(() => paperRecordDraftNote('LAB', { observations: [] }, '2026-11-11'))
+      .toThrow(expect.objectContaining({ code: 'OCR_INVALID_LAB_EVIDENCE' }));
+    expect(() => paperRecordDraftNote('PHARMACY', {}, '2026-11-11')).toThrow(DomainProblem);
+  });
+
+  it('is never used for a clinical note or an unclassified reading', () => {
+    for (const domain of ['EHR', 'UNCLASSIFIED'] as const) {
+      expect(() => paperRecordDraftNote(domain, {}, '2026-11-11'))
+        .toThrow(expect.objectContaining({ code: 'OCR_TARGET_UNAVAILABLE' }));
+    }
   });
 });

@@ -524,6 +524,8 @@ try {
     reportedHealthProfile: expectProblem(await chart(doctor, '/reported-health-profile', RECORDS), 400,
       'PURPOSE_OF_USE_REQUIRED', 'reported health profile'),
     encounters: expectProblem(await chart(doctor, '/encounters', RECORDS), 400, 'PURPOSE_OF_USE_REQUIRED', 'encounters'),
+    // Since 0113 the internal OCR note import takes records processing, but only as a draft in the imported paper
+    // records: naming a visit is refused before anything is read or written (INTERFACE_CONTRACT section 42).
     ocrNoteImport: await (async () => {
       const publicationId = randomUUID();
       return expectProblem(await http(ehr, 'POST', `/ehr/internal/ocr/patients/${patient.id}/clinical-notes`, {
@@ -531,7 +533,8 @@ try {
         key: `ocr-publication:${publicationId}`, headers: { 'x-hid-internal-caller': 'ocr-api', 'x-hid-service-token': tokens.ehr },
         body: { encounterId: randomUUID(), noteType: 'imported', title: 'Synthetic imported note', content: 'Synthetic content',
           publicationId, documentId: document, ocrJobId: randomUUID(), extractionId: randomUUID(), validationId: randomUUID(),
-          validationVersion: 1, reviewedBy: 'Synthetic reviewer' } }), 400, 'PURPOSE_OF_USE_REQUIRED', 'OCR note import');
+          validationVersion: 1, reviewedBy: 'Synthetic reviewer' } }), 400, 'OCR_DRAFT_ENCOUNTER_NOT_CHOSEN',
+        'OCR note import into a chosen visit');
     })(),
     labWorkItems: expectProblem(await call(lab, labStaff, 'GET', '/lab/work-items', undefined, { purpose: RECORDS }), 400,
       'PURPOSE_OF_USE_REQUIRED', 'lab work items'),
