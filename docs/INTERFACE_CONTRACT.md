@@ -1543,6 +1543,9 @@ Read endpoints:
 ```text
 GET /api/v1/admin/session
 GET /api/v1/admin/overview
+GET /api/v1/admin/overview/activity?days=7|30|90      (0123; platform.dashboard.read)
+GET /api/v1/admin/operations/health                   (platform.dashboard.read; 503 not_configured)
+GET /api/v1/admin/operations/errors                   (platform.dashboard.read; 503 not_configured)
 GET /api/v1/admin/facilities?page=&pageSize=&status=&query=
 GET /api/v1/admin/facilities/:facilityId
 GET /api/v1/admin/principals?query=&page=&pageSize=&status=
@@ -3592,3 +3595,54 @@ grant's scope test alone or its `break_glass` test alone (a consent_grants
 CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
+
+## 37. Admin dashboard activity (0123)
+
+Unsigned until the owner signs (`reviewed_by` empty in
+`config/production-schema-compatibility.json`).
+
+`GET /api/v1/admin/overview/activity?days=7|30|90` (30 when `days` is absent;
+any other value is `400 ADMIN_INVALID_DAYS`) needs `platform.admin.access` and
+`platform.dashboard.read`, a permission 0123 grants to `platform_super_admin`
+alone. It calls `identity.admin_platform_activity(days)`, which checks the
+permission again (`403 PERMISSION_DENIED` otherwise) and writes one platform
+audit row per view (`admin.overview.activity.read`, details `{"days": n}`).
+
+```text
+{ days, generatedAt,
+  people: { accounts, verifiedPct|null, profilesCompletePct|null, activeInPeriod,
+            sharedWithFacility, accessPins, newInPeriod, prevNewInPeriod },
+  care: { healthRecords, visits, labRequests, prescriptions, emergencyAccess, outreachSignups },
+  migrateAsk: { pagesRead, recordsMoved, questionsAnswered, answersWithSourcesPct|null },
+  daily: [ { date, signups, activeAccounts } ],
+  recentSignups: [ { name, email|null, healthId, profilePct, status, createdAt } ],   // at most 10
+  recentUploads: [ { document, patient, facility, sizeBytes, scan, createdAt } ] }   // at most 10
+```
+
+Days are calendar days in Africa/Lagos ending today. Names (`"Ada O."`),
+emails (`"a***@gmail.com"`) and Health IDs (`"HID-7K…M9"`) are shortened in
+SQL; whole values never leave the database. No part of an upload's file name
+leaves it: `recentUploads.document` is the file's kind alone, from its last
+extension on an allowlist (`pdf` -> `"PDF"`; `jpg`, `jpeg`, `png`, `heic`,
+`tif`, `tiff` -> `"Image"`; `docx` -> `"Word"`), and `"Document"` for anything
+else (`Ada.Okonkwo`, `x.pdf.exe`, no extension). The sealed demo tenant is left out of every
+number and list. `recentSignups.status` is `suspended` (account locked or
+disabled, or patient inactive), `verified` (NIN verified) or `pending`;
+`recentUploads.scan` is `clean`, `refused` (rejected or failed scan, or a
+rejected document) or `pending`. `questionsAnswered` counts saved "Ask about
+this patient" answers that are ready; a cleared conversation's answers are no
+longer counted. To count rows in tables with FORCE row-level security under
+production's non-BYPASSRLS owner, the function opens a read window
+(`identity.admin_activity_read_windows`, one row for its own backend and
+transaction) that eleven SELECT policies, for the applier role only, admit
+while it is open. 0123 creates those policies last, after taking the eleven
+tables' ACCESS EXCLUSIVE locks in one bounded NOWAIT attempt (every 10 ms for
+at most 5 seconds, then `55P03`, nothing applied). `daily[]` reads
+`auth.sessions` and `identity.patients` once each, grouped by day.
+
+`GET /api/v1/admin/operations/health` (CloudWatch) and
+`GET /api/v1/admin/operations/errors` (a Sentry proxy whose read-only token
+would come from the AWS Secrets Manager ARN in `SENTRY_READ_TOKEN_SECRET_ARN`)
+need the same permission and answer `503` with `code: "not_configured"` in this
+release: the Identity API has no AWS SDK client or IAM permission for
+CloudWatch or Secrets Manager yet. The console shows "Not set up yet".

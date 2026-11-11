@@ -6,7 +6,7 @@ import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { requireAdminContext } from './admin-context';
 import { AdminOperationsService } from './admin-operations.service';
-import { AdminService } from './admin.service';
+import { ADMIN_ACTIVITY_DAYS, type AdminActivityDays, AdminService } from './admin.service';
 import { PricingService } from './pricing.service';
 import { PricePricingCommandDto, ProductPricingCommandDto } from './dto/pricing-command.dto';
 import { AccountStatusCommandDto, EmergencyContactOptOutCommandDto, FacilityAlertPhoneCommandDto,
@@ -30,6 +30,32 @@ export class AdminController {
   @RequirePermissions('platform.admin.access')
   @AuditAction('admin.overview.read.request')
   overview(@Req() request: HidRequest) { return this.admin.overview(requireAdminContext(request)); }
+
+  /** The super admin dashboard (0123): ?days=7, 30 or 90 (30 when absent); anything else is 400. */
+  @Get('overview/activity')
+  @RequirePermissions('platform.dashboard.read')
+  @AuditAction('admin.overview.activity.read.request')
+  activity(@Query('days') days: unknown, @Req() request: HidRequest) {
+    return this.admin.activity(requireAdminContext(request), this.activityDays(days));
+  }
+
+  /** The dashboard's System health card: 503 not_configured until CloudWatch is read. */
+  @Get('operations/health')
+  @RequirePermissions('platform.dashboard.read')
+  @AuditAction('admin.operations.health.request')
+  operationsHealth(@Req() request: HidRequest) {
+    requireAdminContext(request);
+    return this.operations.health();
+  }
+
+  /** The dashboard's Errors card: 503 not_configured until the Sentry read proxy is set up. */
+  @Get('operations/errors')
+  @RequirePermissions('platform.dashboard.read')
+  @AuditAction('admin.operations.errors.request')
+  operationsErrors(@Req() request: HidRequest) {
+    requireAdminContext(request);
+    return this.operations.errors();
+  }
 
 
   @Get('controls')
@@ -205,6 +231,15 @@ export class AdminController {
     @Req() request: HidRequest) {
     return this.pricing.updatePrice(requireAdminContext(request), slug, priceContext,
       this.expectedVersion(ifMatch), input, requireIdempotencyKey(key));
+  }
+
+  private activityDays(value: unknown): AdminActivityDays {
+    if (value === undefined) return 30;
+    const days = typeof value === 'string' && /^[0-9]{1,3}$/.test(value) ? Number(value) : Number.NaN;
+    if (!(ADMIN_ACTIVITY_DAYS as readonly number[]).includes(days)) {
+      throw new DomainProblem(400, 'ADMIN_INVALID_DAYS', 'days must be 7, 30 or 90');
+    }
+    return days as AdminActivityDays;
   }
 
   private expectedVersion(value: string | undefined): number {

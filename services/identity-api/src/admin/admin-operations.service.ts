@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { PlatformAdminContext } from '../common/request-context';
+import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 
 interface ServiceTarget { name: string; url?: string }
@@ -23,6 +24,29 @@ export class AdminOperationsService {
     services.push({ service: 'OCR Worker', live: null, ready: null, state: 'not_observable',
       checkedAt, code: 'NO_STATUS_ENDPOINT' });
     return { checkedAt, services };
+  }
+
+  /**
+   * The dashboard's System health card (contract endpoint 2). CloudWatch is
+   * not read yet: the Identity API has no AWS SDK client and no IAM read
+   * permission for it, so this answers "not set up" (503 not_configured),
+   * which the console shows as a calm "Not set up yet" card.
+   */
+  health(): never {
+    throw new DomainProblem(503, 'not_configured', 'System health is not set up yet');
+  }
+
+  /**
+   * The dashboard's Errors card (contract endpoint 3), a Sentry proxy whose
+   * read-only token lives in AWS Secrets Manager (SENTRY_READ_TOKEN_SECRET_ARN).
+   * Without the ARN it is not set up. With it, it is still not set up: reading
+   * the secret needs a Secrets Manager client and IAM permission the Identity
+   * API does not have yet, and no token is ever taken from anywhere else.
+   */
+  errors(): never {
+    throw new DomainProblem(503, 'not_configured', this.environment.SENTRY_READ_TOKEN_SECRET_ARN
+      ? 'Error reporting is not set up yet: the Sentry read proxy is not enabled in this release'
+      : 'Error reporting is not set up yet');
   }
 
   async events(context: PlatformAdminContext) {
