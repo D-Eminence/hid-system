@@ -2865,7 +2865,8 @@ What the screens show after the seed (every row demo, written once):
   FOR SHARE, which forced row-level security refuses an owner without
   BYPASSRLS (`outreach.campaign_members` has no UPDATE policy). The same check
   runs for outreach-api, so a live registration into a campaign may meet the
-  same refusal; 0102 reports it and changes nothing.
+  same refusal; 0102 reports it and changes nothing. 0110 fixes it (§38); the demo
+  registrations stay unlinked.
 
 Nothing is sent: the order commands' inbox notices are marked read in the same
 transaction (no web push is due), the services' outbox rows for results and
@@ -3697,3 +3698,65 @@ x-hid-service-authorization: Bearer <workload JWT, sub = IDENTITY_SUPPORT_CALLER
    releases and the apply are in, the new support-api answers 503 to every
    message.
 3. Only then health #200 and #61.
+
+## 38. Outreach: registering a person into a campaign (0110)
+
+Migration 0110 (`0110_outreach_campaign_registration_lock.sql`; coordinator of
+2026-11-04, "0120 first (prove it, then fix)"; first numbered 0120 and
+renumbered 0110 on 2026-11-11 so the release list stays contiguous after 0109;
+signed by the owner on 2026-11-11) is written on 0105 and uses nothing
+0106-0109 add. It applies after 0109 (its marker,
+`identity.support_health_id_matches(text[])`, is a precondition): none of
+0106-0109 touches an object 0110 reads, pins or replaces.
+
+The gap: every registration into a campaign was refused in production. The
+campaign trigger `outreach.validate_registration_campaign_write` (0045,
+SECURITY DEFINER) ran as its owner, the migration login, which is neither a
+superuser nor BYPASSRLS, and locked the campaign and the registering staff
+member's campaign membership (`FOR SHARE OF campaign, member`).
+`outreach.campaign_members` forces row-level security and has no UPDATE
+policy, and a locking read must also pass the UPDATE policies, so the lock
+found no row and the trigger raised 42501 `Exact Outreach campaign membership
+is required` for a member of an active campaign; outreach-api answered 500.
+Resolving a campaign-linked registration was blocked too: the trigger also
+runs on UPDATE, so `linkExisting`'s resolve UPDATE met the same 42501 for a
+member. Registrations without a campaign were not affected. CI and the
+acceptance runner migrate as a superuser, so their suites did not see it.
+
+The change:
+
+- The trigger's body only (signature, language, volatility, SECURITY DEFINER,
+  search_path, owner, ACL and the trigger unchanged): it locks the campaign
+  row only and reads the membership in the same query without a lock. Every
+  check and message is 0045's: 55000 `Outreach registration campaign
+  association cannot be overwritten`, 42501 `Exact Outreach campaign
+  membership is required`, and on insert 23514 `Outreach campaign is not
+  accepting registrations`.
+- The campaign lock still serializes a registration with a status change
+  (`updateCampaignStatus` locks the campaign FOR UPDATE and waits for the
+  registration). A membership is no longer locked: no API command changes or
+  deletes one, and a membership removed while a registration is being
+  written orders after it.
+- No grant, policy, row-level security or FORCE change. The Outreach runtime
+  still has no UPDATE on `outreach.campaign_members`, so it can neither
+  update nor lock a membership (42501 `permission denied for table
+  campaign_members`).
+- outreach-api: `POST` registration (`create()`) answers a refusal that still
+  comes from the trigger, after its own check passed, as that check does:
+  42501 `Exact Outreach campaign membership is required` is 403
+  `OUTREACH_CAMPAIGN_ACCESS_DENIED`, and 23514 `Outreach campaign is not
+  accepting registrations` is 409
+  `OUTREACH_CAMPAIGN_NOT_ACCEPTING_REGISTRATIONS`. Any other database error is
+  unchanged.
+
+Applying 0110 replaces one function body and takes no lock on an application
+table to commit. It has no down migration. Today's outreach-api image works
+on it unchanged (its registration into a campaign now succeeds; a late
+trigger refusal stays a 500 until the new image). Tests:
+`services/ehr-api/test/database/outreach-campaign-registration.integration.sql`
+runs the trigger under an owner that does not bypass row-level security (on a
+superuser-migrated database it lends the function to such a role until the
+rollback) and fails on 0105 (a member's registration into a campaign and a
+member's resolution of a campaign-linked registration with `linkExisting`'s
+UPDATE are refused; a non-member's same UPDATE finds no row on both); the
+outreach-api service tests cover the 403 and 409.
