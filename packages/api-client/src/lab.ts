@@ -28,6 +28,27 @@ export interface PatientLabPage {
   nextCursor: string | null;
 }
 
+/** One imported (OCR or external) Lab report with its transcribed observations, as GET /api/v1/lab/imports returns it. */
+export interface LabImportedEvidence {
+  id: string; patientId: string; facilityId: string; sourceType: 'IMPORTED_EXTERNAL'; status: string;
+  externalLabName: string | null; externalReference: string | null;
+  collectedAt: string | null; reportedAt: string | null; receivedAt: string;
+  sourceDocumentId: string; ocrJobId: string | null; extractionId: string | null;
+  validationId: string | null; validationVersion: number | null; publicationId: string | null;
+  version: number; createdAt: string;
+  observations: Array<{ id: string; ordinal: number; testCode: string | null; testName: string; value: string | null;
+    valueText: string | null; unit: string | null; referenceRange: string | null; abnormalFlag: string;
+    reportedAt: string | null; status: string; createdAt: string }>;
+}
+
+export interface LabImportedEvidencePage {
+  records: LabImportedEvidence[];
+  nextCursor: string | null;
+}
+
+/** GET /api/v1/lab/imports page size bounds (lab-api ListLabImportsQueryDto). */
+export const LAB_IMPORT_PAGE_MAX = 50;
+
 export class LabApiProblem extends Error {
   constructor(readonly status: number, readonly payload: unknown) {
     super(typeof payload === 'object' && payload !== null && 'detail' in payload
@@ -82,6 +103,27 @@ export class LabApiClient {
       throw new LabApiProblem(502, result);
     }
     return result as LabResourceReference;
+  }
+
+  /**
+   * One patient's imported Lab evidence, newest received first. A staff read
+   * (lab.import.read and the patient's read_records decision), sent with the
+   * user's credentials and no internal caller.
+   */
+  async patientImports(patientId: string, context: LabRequestContext,
+    page: { cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<LabImportedEvidencePage> {
+    const query = new URLSearchParams({ patientId });
+    if (page.cursor) query.set('cursor', page.cursor);
+    if (page.limit !== undefined) query.set('limit', String(page.limit));
+    const value = await this.request('/api/v1/lab/imports?' + query.toString(), 'GET', undefined, context,
+      undefined, undefined, signal) as LabImportedEvidencePage;
+    if (!value || !Array.isArray(value.records) || value.records.length > LAB_IMPORT_PAGE_MAX
+      || (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !/^[a-f0-9-]{36}$/i.test(value.nextCursor)))
+      || value.records.some((record) => !record || typeof record.id !== 'string' || record.patientId !== patientId
+        || !Array.isArray(record.observations))) {
+      throw new LabApiProblem(502, { code: 'INVALID_LAB_IMPORT_RESPONSE' });
+    }
+    return value;
   }
 
   get(path: string, context: LabRequestContext, signal?: AbortSignal): Promise<unknown> {
