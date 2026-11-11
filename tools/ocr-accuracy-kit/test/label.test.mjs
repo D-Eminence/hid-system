@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -38,13 +38,53 @@ test('the worked example in LABELLING.md passes the check, seals, and loads as a
   assert.match(manifest.files[example.file], /^[0-9a-f]{64}$/);
 });
 
-test('a hand-labelled set is never reported as the launch pass, even when complete, real and above the thresholds', async () => {
-  const { scoreRun } = await import('../score.mjs');
+test('a hand-labelled set (one image, one two-page PDF) runs and scores 100% offline, and is never the launch pass', async () => {
+  const { main: run } = await import('../run.mjs');
+  const { main: score } = await import('../score.mjs');
   const example = workedExample();
-  const report = scoreRun([example], new Map());
-  assert.equal(typeof report.pass, 'boolean');
-  const source = readFileSync(path.join(KIT_DIR, 'score.mjs'), 'utf8');
-  assert.match(source, /report\.launchResult = !report\.partial && report\.mode === 'real' && !report\.handLabelled;/);
+  // The same page as a two-page PDF: page 2 holds the medicines (items keep their own lines on page 2).
+  const pdf = structuredClone(example);
+  Object.assign(pdf, { docId: 'L002', file: 'L002-prescription.pdf', mediaType: 'application/pdf', pages: 2 });
+  pdf.text = [{ page: 1, lines: example.text[0].lines.slice(0, 6) },
+    { page: 2, lines: example.text[0].lines.slice(6).map((line, index) => ({ ...line, n: index + 1 })) }];
+  pdf.items = pdf.items.map((item) => ({ ...item, id: item.id.replace('L001', 'L002'),
+    ...(item.lines[0] > 6 ? { page: 2, lines: item.lines.map((n) => n - 6) } : {}) }));
+  const set = handSet([example, pdf]);
+  assert.equal(main(['seal', '--keys', set.keys, '--docs', set.docs, '--name', 'two-docs'], quiet().log), 0);
+  const out = path.join(path.dirname(set.keys), 'results');
+  assert.equal(await run(['--i-confirm-fictional-documents', '--fake', '--keys', set.keys, '--docs', set.docs,
+    '--out', out], quiet().log), 0);
+  const fake = quiet();
+  assert.equal(score(['--results', out, '--keys', set.keys], fake.log), 3);
+  assert.match(fake.lines[0], /^NOT A LAUNCH RESULT \(fake mode; hand-labelled set; thresholds met/);
+  const report = JSON.parse(readFileSync(path.join(out, 'score-report.json'), 'utf8'));
+  assert.equal(report.launchMetrics.medicineAccuracyAfterChecking.value, 1);
+  assert.equal(report.launchMetrics.medicineAccuracyAfterChecking.expected, 6);
+  assert.equal(report.launchMetrics.unsupportedItems.value, 0);
+  // Even with every record said to be real and the thresholds met, a hand-labelled set is not the launch pass.
+  for (const name of readdirSync(out).filter((file) => file.endsWith('.run.json'))) {
+    const record = JSON.parse(readFileSync(path.join(out, name), 'utf8'));
+    writeFileSync(path.join(out, name), JSON.stringify({ ...record, mode: 'real' }));
+  }
+  const real = quiet();
+  assert.equal(score(['--results', out, '--keys', set.keys], real.log), 3);
+  assert.match(real.lines[0], /^NOT A LAUNCH RESULT \(hand-labelled set; thresholds met/);
+  const realReport = JSON.parse(readFileSync(path.join(out, 'score-report.json'), 'utf8'));
+  assert.equal(realReport.handLabelled, true);
+  assert.equal(realReport.launchResult, false);
+  assert.equal(realReport.pass, false);
+});
+
+test('a page entry without its page number, an unknown severity and a non-list status are refused', () => {
+  const example = workedExample();
+  const broken = structuredClone(example);
+  delete broken.text[0].page;
+  broken.items[2].fields.severity = 'Severe';
+  broken.items[5].fields.status = 'ongoing';
+  const { problems } = checkLabels(JSON.stringify(broken), null);
+  const text = problems.join('\n');
+  for (const code of ['TEXT_PAGE', 'VALUE']) assert.match(text, new RegExp(code));
+  assert.equal(problems.filter((problem) => problem.includes('VALUE')).length, 2);
 });
 
 test('the check names each mistake by document, code and place, never the text, and seals nothing', () => {

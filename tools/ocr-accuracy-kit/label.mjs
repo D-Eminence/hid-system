@@ -20,7 +20,8 @@ export const FIELDS = {
 };
 /** Fields that take one of a fixed set of values (null allowed where the paper says nothing). */
 export const VALUES = {
-  'medicine.status': ['current', 'new', 'past', 'stopped'],
+  'medicine.status': ['current', 'new', 'past', 'stopped', 'unknown'],
+  'allergy.severity': ['mild', 'moderate', 'severe', 'unknown', null],
   'diagnosis.status': ['confirmed', 'suspected', 'ruled_out', 'history', 'family_history'],
   'vital.measure': ['blood_pressure', 'pulse', 'temperature', 'respiratory_rate', 'oxygen_saturation', 'weight', 'height'],
   'lab_result.flag': ['H', 'L', null],
@@ -51,6 +52,7 @@ export function checkLabels(keysText, docsDir) {
     if (!Number.isInteger(key.pages) || key.pages < 1) bad('PAGES');
     if (!Array.isArray(key.text) || key.text.length !== key.pages) { bad('TEXT', 'one entry per page'); continue; }
     const lineNumbers = key.text.map((page, pageIndex) => {
+      if (page?.page !== pageIndex + 1) bad('TEXT_PAGE', `entry ${pageIndex + 1} needs "page": ${pageIndex + 1}`);
       if (!Array.isArray(page?.lines) || page.lines.length === 0) { bad('TEXT', `page ${pageIndex + 1} has no lines`); return new Set(); }
       page.lines.forEach((entry, lineIndex) => {
         if (entry?.n !== lineIndex + 1) bad('LINE_NUMBER', `page ${pageIndex + 1} line ${lineIndex + 1}: n must count from 1`);

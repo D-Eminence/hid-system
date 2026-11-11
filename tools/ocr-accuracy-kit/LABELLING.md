@@ -21,7 +21,8 @@ my-set/
 ## 2. Write one line of labels per document in `keys/keys.jsonl`
 
 Each document is **one line** of JSON (shown spread out below to read it; in the file it must be on one line).
-For each page you copy **every line of writing, in reading order** into `text`, numbered from 1. Each item then
+For each page you copy **every line of writing, in reading order** into `text` (one entry per page, with its
+`"page"` number), the lines numbered from 1. Each item then
 says which page and which of those lines it was read from. You write each item the way the reader's output
 writes it: the same kinds and the same fields.
 
@@ -54,11 +55,11 @@ Its line in `keys.jsonl` (spread out here):
   "mediaType": "image/jpeg",
   "pages": 1,
   "documentKind": "prescription",
-  "difficulty": "handwriting",
+  "difficulty": "handwritten",
   "fictional": true,
   "identity": { "page": 1, "lines": [2], "nameAsWritten": "Ada Example", "dateOfBirthAsWritten": "34yrs",
                 "folderNumberAsWritten": "DH-TEST-0042", "sexAsWritten": "F" },
-  "text": [ { "lines": [
+  "text": [ { "page": 1, "lines": [
     { "n": 1, "text": "DEMO HOSPITAL - OUTPATIENT" },
     { "n": 2, "text": "Name: Ada Example   Age: 34yrs   Sex: F   Folder No: DH-TEST-0042" },
     { "n": 3, "text": "Dx: ?Malaria" },
@@ -113,14 +114,15 @@ Its line in `keys.jsonl` (spread out here):
   | --- | --- |
   | `medicine` | `name`, `strength`, `form`, `route`, `frequency`, `duration`, `status` |
   | `diagnosis` | `name`, `status` |
-  | `allergy` | `substance`, `reaction`, `severity`, `noKnownAllergies` (true for "NKDA" / "Nil known", else false) |
+  | `allergy` | `substance`, `reaction`, `severity` (`mild`, `moderate`, `severe`, `unknown` or null), `noKnownAllergies` (true for "NKDA" / "Nil known", else false) |
   | `lab_result` | `test`, `value`, `unit`, `referenceRange`, `flag` (`"H"`, `"L"` or null) |
   | `vital` | `measure`, `value`, `unit` |
   | `note` | `text` |
 
 - **Fixed values:**
   - medicine `status`: `new` (started on this page), `current` (continuing), `stopped` (stopped, "D/C", crossed
-    out), `past` (history only);
+    out), `past` (history only), `unknown` (the page does not say);
+  - allergy `severity`: lower case, from the words on the paper ("severe rash" is `severe`), else null;
   - diagnosis `status`: `confirmed`, `suspected` ("?", "query", "r/o"), `ruled_out` ("no evidence of"),
     `history` ("Hx", "past history"), `family_history` ("FHx");
   - vital `measure`: `blood_pressure`, `pulse`, `temperature`, `respiratory_rate`, `oxygen_saturation`, `weight`,
@@ -131,7 +133,10 @@ Its line in `keys.jsonl` (spread out here):
   patient's details as written (`null` if the page has none); `prescription` (prescriber and date) is optional on
   a medicine.
 - `documentKind` and `difficulty` are your own words (for example `prescription`, `lab_result`, `clinic_note`;
-  `typed`, `handwriting`, `faint_photo`); the report breaks results down by them.
+  `typed`, `handwritten`, `faint_photo`); the report breaks results down by them. Start `difficulty` with
+  `handwritten` for a handwritten page (the offline test mode treats those pages as handwriting).
+- Lines need no position. Without one, a medicine read wrongly but marked "check carefully" is paired only by its
+  name, not by where it sits on the page, so a hand-labelled set can score slightly lower than the kit's own set.
 - `docId` and every item `id` must be unique; `fictional` must be `true`.
 
 ## 3. Check and seal
