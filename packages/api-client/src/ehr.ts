@@ -32,7 +32,8 @@ export interface EhrOcrDocumentSource {
 }
 
 export interface EhrOcrClinicalNoteImport {
-  encounterId: string;
+  /** Absent: the patient's "Imported paper records" encounter at the facility (0112). */
+  encounterId?: string;
   noteType: string;
   title: string;
   content: string;
@@ -43,6 +44,8 @@ export interface EhrOcrClinicalNoteImport {
   validationId: string;
   validationVersion: number;
   reviewedBy: string;
+  /** The account that confirmed the job's patient (audit only). */
+  confirmedBy?: string;
 }
 
 export interface EhrResourceReference { id: string; }

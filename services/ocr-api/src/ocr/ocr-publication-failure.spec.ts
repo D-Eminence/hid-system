@@ -221,7 +221,7 @@ describe('OCR publication failure classification', () => {
       summary: `Owning clinical service is temporarily unavailable (${error.code})`, retryable: true });
     const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.fail')?.[1];
     expect(event?.details).toEqual({ publicationId, failureCode: 'OWNING_SERVICE_UNAVAILABLE',
-      ownerFailureCode: error.code, retryable: true });
+      ownerFailureCode: error.code, retryable: true, basis: 'direct_care', publishedBy: context.actor.accountId });
     // The dispatcher allows only these keys in an OCR event payload (event-contracts.ts).
     expect(failedEvent(clients)).toEqual({ jobId, publicationId, failureCode: 'OWNING_SERVICE_UNAVAILABLE',
       retryable: true });
@@ -237,7 +237,7 @@ describe('OCR publication failure classification', () => {
       summary: 'Publication was rejected by the owning domain', retryable: false });
     const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.fail')?.[1];
     expect(event?.details).toEqual({ publicationId, failureCode: error.code, ownerFailureCode: error.code,
-      retryable: false });
+      retryable: false, basis: 'direct_care', publishedBy: context.actor.accountId });
   });
 
   it('stores an EHR outage during the attempt evidence read as a retryable failure', async () => {
@@ -316,7 +316,7 @@ describe('OCR publication failure classification', () => {
       summary: 'Owning clinical service is temporarily unavailable (LAB_SERVICE_UNAVAILABLE)', retryable: true });
     const event = auditEvents(audit).find(([, item]) => item.action === 'ocr.publication.fail')?.[1];
     expect(event?.details).toEqual({ publicationId, failureCode: 'OWNING_SERVICE_UNAVAILABLE',
-      ownerFailureCode: 'LAB_SERVICE_UNAVAILABLE', retryable });
+      ownerFailureCode: 'LAB_SERVICE_UNAVAILABLE', retryable, basis: 'direct_care', publishedBy: context.actor.accountId });
     expect(failedEvent(clients)).toEqual({ jobId, publicationId, failureCode: 'OWNING_SERVICE_UNAVAILABLE', retryable });
   });
 
@@ -382,7 +382,7 @@ describe('OCR validation refuses a candidate that publication would refuse', () 
 
   it.each([
     { targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: {}, code: 'OCR_INVALID_CLINICAL_NOTE' },
-    { targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: { ...note, encounterId: undefined },
+    { targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: { ...note, encounterId: 'not-a-visit' },
       code: 'OCR_INVALID_CLINICAL_NOTE' },
     { targetDomain: 'EHR', candidateType: 'clinical_note', acceptedFields: { ...note, content: ' ' },
       code: 'OCR_INVALID_CLINICAL_NOTE' },

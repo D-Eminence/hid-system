@@ -278,13 +278,17 @@ export function clinicalNoteCandidate(fields: Record<string, unknown>) {
   const noteType = fields.noteType;
   const title = fields.title;
   const content = fields.content;
-  if (typeof encounterId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(encounterId)
+  // The visit is optional (0112): a reading without one is published as a
+  // draft into the patient's "Imported paper records" encounter.
+  if ((encounterId !== undefined && (typeof encounterId !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(encounterId)))
     || typeof noteType !== 'string' || noteType.trim().length < 1 || noteType.length > 80
     || typeof title !== 'string' || title.trim().length < 1 || title.length > 240
     || typeof content !== 'string' || content.trim().length < 1 || content.length > 100_000) {
     throw new DomainProblem(400, 'OCR_INVALID_CLINICAL_NOTE', 'Validated clinical-note candidate is incomplete or invalid');
   }
-  return { encounterId, noteType: noteType.trim(), title: title.trim(), content };
+  return { ...(typeof encounterId === 'string' ? { encounterId } : {}), noteType: noteType.trim(), title: title.trim(),
+    content };
 }
 
 /**

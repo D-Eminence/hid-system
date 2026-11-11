@@ -57,9 +57,14 @@ export class PatientRecordsService {
   private async read(client: PoolClient, patientId: string, facilityId?: string) {
     const values = facilityId ? [patientId, facilityId] : [patientId];
     const facility = facilityId ? ' and facility_id=$2' : '';
+    // 0112: the "Imported paper records" encounter is labelled; the patient
+    // (no facility: the patient-self read) sees it only once it holds a signed
+    // note, which the patient-self row-level security policy also requires.
+    const importedHidden = facilityId ? ''
+      : ' and (not imported_paper_records or ehr.imported_paper_records_signed(id,patient_id,facility_id))';
     const encounters = await client.query(`select id,facility_id as "facilityId",encounter_type as "encounterType",
-      status,started_at as "startedAt",ended_at as "endedAt" from ehr.encounters
-      where patient_id=$1 and status='completed'${facility} order by started_at desc,id desc limit 50`,values);
+      status,started_at as "startedAt",ended_at as "endedAt",imported_paper_records as "importedPaperRecords" from ehr.encounters
+      where patient_id=$1 and status='completed'${facility}${importedHidden} order by started_at desc,id desc limit 50`,values);
     const notes = await client.query(`select n.id,n.encounter_id as "encounterId",n.facility_id as "facilityId",
       n.note_type as "noteType",n.title,n.status,n.current_revision_no as "revisionNo",r.content,n.signed_at as "signedAt"
       from ehr.clinical_notes n join ehr.clinical_note_revisions r

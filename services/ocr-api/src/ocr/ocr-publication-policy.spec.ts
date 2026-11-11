@@ -264,3 +264,17 @@ describe('dates written on paper lab results', () => {
     expect(() => lab({ observations: [observation({ itemId: 'lab-1' })] })).toThrow(invalid);
   });
 });
+
+describe('clinicalNoteCandidate visit (0112)', () => {
+  const fields = { noteType: 'progress', title: 'Clinic card', content: 'Fictional clinical text' };
+  it('accepts a reading that names no visit (the imported paper records take it as a draft)', () => {
+    expect(clinicalNoteCandidate(fields)).toEqual(fields);
+  });
+  it('keeps a named visit', () => {
+    expect(clinicalNoteCandidate({ ...fields, encounterId: 'c0000000-0000-4000-8000-000000000001' }))
+      .toEqual({ ...fields, encounterId: 'c0000000-0000-4000-8000-000000000001' });
+  });
+  it.each(['not-a-visit', 42, null])('refuses a visit that is not a uuid (%p)', (encounterId) => {
+    expect(() => clinicalNoteCandidate({ ...fields, encounterId })).toThrow('Validated clinical-note candidate is incomplete or invalid');
+  });
+});

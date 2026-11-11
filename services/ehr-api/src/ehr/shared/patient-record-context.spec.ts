@@ -96,10 +96,11 @@ describe('records processing reaches the documents but not the chart', () => {
       call: (request: HidRequest) => recordRoutes.downloadStaff(patientId, id, request) },
     { route: 'GET /ehr/patients/:patientId/reported-health-profile', service: profiles.reported,
       call: (request: HidRequest) => profileRoutes.reported(patientId, request) },
-    { route: 'POST /ehr/internal/ocr/patients/:patientId/clinical-notes', service: clinicalNotes.createImportedFromOcr,
-      call: (request: HidRequest) => ocrRoutes.importClinicalNote(patientId,
-        { publicationId } as ImportOcrClinicalNoteDto, `ocr-publication:${publicationId}`, request) },
   ];
+  const ocrImport = { route: 'POST /ehr/internal/ocr/patients/:patientId/clinical-notes',
+    service: clinicalNotes.createImportedFromOcr,
+    call: (request: HidRequest) => ocrRoutes.importClinicalNote(patientId,
+      { publicationId } as ImportOcrClinicalNoteDto, `ocr-publication:${publicationId}`, request) };
 
   it.each(chart)('$route refuses healthcare-operations before any work', ({ call }) => {
     const problem = refusal(() => call(guardedRequest('healthcare-operations')));
@@ -107,13 +108,23 @@ describe('records processing reaches the documents but not the chart', () => {
     for (const method of services) expect(method).not.toHaveBeenCalled();
   });
 
-  it.each(chart.flatMap((route) => ['direct-care', 'emergency'].map((purpose) => ({ ...route, purpose }))))(
+  it.each([...chart, ocrImport].flatMap((route) => ['direct-care', 'emergency'].map((purpose) => ({ ...route, purpose }))))(
     '$route still serves $purpose', ({ call, service, purpose }) => {
       call(guardedRequest(purpose));
       expect(service).toHaveBeenCalledTimes(1);
       expect(service.mock.calls[0]).toEqual(expect.arrayContaining([expect.objectContaining({ purposeOfUse: purpose })]));
     },
   );
+
+  // 0112 (owner decision of 2026-11-11): the OCR note import takes
+  // healthcare-operations to the service, which publishes only a draft into
+  // the imported paper records and only under the dedicated records-processing
+  // grant (clinical-notes.ocr-import.spec.ts).
+  it('the OCR note import passes healthcare-operations to the service (the draft path)', () => {
+    ocrImport.call(guardedRequest('healthcare-operations'));
+    expect(clinicalNotes.createImportedFromOcr).toHaveBeenCalledTimes(1);
+    expect(clinicalNotes.createImportedFromOcr.mock.calls[0][0]).toMatchObject({ purposeOfUse: 'healthcare-operations' });
+  });
 
   it.each([
     { route: 'POST /ehr/documents/upload-intents', service: documents.createUploadIntent,

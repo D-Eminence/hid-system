@@ -104,3 +104,14 @@ describe('Review fixes: test requests coded in LOINC (S4)', () => {
     expect(STAFF_EVIDENCE_QUERY).not.toContain('loinc');
   });
 });
+
+describe('the imported paper records encounter (0112)', () => {
+  it('the patient query shows it only once it holds a signed note, named as such', () => {
+    expect(PATIENT_EVIDENCE_QUERY).toContain("from ehr.encounters e where e.status='completed' and (not e.imported_paper_records "
+      + 'or ehr.imported_paper_records_signed(e.id,e.patient_id,e.facility_id))');
+    expect(PATIENT_EVIDENCE_QUERY).toContain("case when e.imported_paper_records then 'Imported paper records (Migrate)'");
+  });
+  it('the staff query is unchanged by it', () => {
+    expect(STAFF_EVIDENCE_QUERY).not.toContain('imported_paper_records');
+  });
+});
