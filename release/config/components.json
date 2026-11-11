@@ -548,7 +548,7 @@
       },
       {
         "name": "0125_outreach_organisers.sql",
-        "sha256": "a3e6554d88058c0bbdb2618f2b3bfb70a3ca29faeec93443e4e5f4c8fc542527"
+        "sha256": "969c19a7411701048bb2690f0d35abca1dec3883e8c490e2cf681dbb31d41fd6"
       },
       {
         "name": "0126_outreach_retention.sql",

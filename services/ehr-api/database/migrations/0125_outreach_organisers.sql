@@ -518,6 +518,13 @@ alter table outreach.registration_consents enable row level security;
 alter table outreach.registration_consents force row level security;
 create policy outreach_registration_consents_read on outreach.registration_consents for select
   using (outreach.context_allows(facility_id, 'outreach.registration.read'));
+-- A consent row is visible only when its registration is visible to the
+-- caller (the subquery runs under the caller's own policies, so 0045's
+-- campaign-member rule applies), or inside a retention run (0126).
+create policy outreach_registration_consents_campaign_read on outreach.registration_consents
+  as restrictive for select
+  using (outreach.privileged_run_active('retention')
+    or exists (select 1 from outreach.registration_cases case_row where case_row.id = registration_case_id));
 create policy outreach_registration_consents_create on outreach.registration_consents for insert
   with check (outreach.context_allows(facility_id, 'outreach.registration.write')
     and captured_by_account_id = platform.current_account_id()
@@ -665,6 +672,21 @@ as $$
       or exists (select 1 from identity.staff staff where lower(staff.email) = lower(target_email))
 $$;
 
+-- An email whose live login has no staff record and no platform role: in
+-- practice a patient's Health ID login (0092). Such a login cannot run or help
+-- an outreach group yet, so the screens say so instead of sending the person
+-- to sign in and use "Start an outreach group".
+create function identity.outreach_patient_login(target_email text)
+returns boolean language sql stable set search_path = pg_catalog, identity, auth, pg_temp
+as $$
+  select exists (select 1 from auth.accounts account
+                  where lower(account.email) = lower(target_email) and account.status <> 'deleted'
+                    and not exists (select 1 from identity.staff staff where staff.account_id = account.id)
+                    and not exists (select 1 from auth.account_roles assignment
+                                     where assignment.account_id = account.id and assignment.scope_type = 'platform'
+                                       and assignment.revoked_at is null))
+$$;
+
 -- Creates the group's organization, facility, the organiser's membership and
 -- role, the group row and the audit row. Returns the new ids.
 create function identity.create_outreach_group(
@@ -711,7 +733,8 @@ revoke all on function identity.create_outreach_group(uuid,uuid,text,text,text,c
 
 -- D. Public sign-up commands (Identity runtime, system:auth).
 -- Answers: 'started', 'email_registered' (sign in and use "Start an outreach
--- group" instead), 'name_not_allowed', 'rate_limited'. 55000
+-- group" instead), 'patient_login' (the email is a patient's Health ID login,
+-- which cannot run an outreach group yet), 'name_not_allowed', 'rate_limited'. 55000
 -- PLATFORM_CONTROL_DISABLED:outreach_organiser_signup_enabled while the
 -- control is off; P4290 APPLICATION_QUOTA_EXCEEDED from the network quota;
 -- 22023 OUTREACH_ORGANISER_SIGNUP_INVALID for a malformed field.
@@ -747,6 +770,9 @@ begin
     return 'name_not_allowed';
   end if;
   perform platform.consume_public_application_quota(requested_network_digest);
+  if identity.outreach_patient_login(normalized_email) then
+    return 'patient_login';
+  end if;
   if identity.outreach_email_registered(normalized_email) then
     return 'email_registered';
   end if;
@@ -932,8 +958,10 @@ $$;
 -- subject, a correlation ID and the healthcare-operations purpose of use.
 -- Answers: 'started'; 'already_organiser' (the account already runs a group
 -- that is not suspended; its ids are returned); 'name_not_allowed';
--- 'not_eligible' (no active, verified staff record, a platform role, a
--- locked or disabled account, or a demo login). 42501
+-- 'patient_login' (a login with no staff record and no platform role, such as
+-- a patient's: it cannot run an outreach group yet); 'not_eligible' (an
+-- inactive or unverified staff record, a platform role, a locked or disabled
+-- account, or a demo login). 42501
 -- OUTREACH_ORGANISER_ACCOUNT_REQUIRED without a signed-in account; 22023
 -- OUTREACH_ORGANISER_SIGNUP_INVALID or OUTREACH_ORGANISER_TERMS_REQUIRED.
 create function identity.activate_outreach_organiser_for_account(
@@ -987,6 +1015,12 @@ begin
     return;
   end if;
   select staff.* into staff_row from identity.staff staff where staff.account_id = actor_account;
+  if staff_row.id is null and not exists (select 1 from auth.account_roles assignment
+                                           where assignment.account_id = actor_account
+                                             and assignment.scope_type = 'platform' and assignment.revoked_at is null) then
+    return query select 'patient_login'::text, null::uuid, null::uuid, null::uuid;
+    return;
+  end if;
   if staff_row.id is null or not staff_row.active
      or lower(staff_row.verification_status) not in ('verified', 'approved', 'active')
      or not exists (select 1 from auth.accounts account where account.id = actor_account and account.status = 'active'
@@ -1232,7 +1266,8 @@ $$;
 revoke all on function identity.attach_outreach_volunteer(identity.outreach_invitations,uuid,uuid,text) from public;
 
 -- What a link shows before accepting (system:auth). account_case: 'new' (set
--- a password here) or 'existing' (sign in first). Answers: 'ready',
+-- a password here), 'existing' (sign in first) or 'patient_login' (the email
+-- is a patient's Health ID login, which cannot help an outreach group yet). Answers: 'ready',
 -- 'invalid', 'expired', 'used', 'group_unavailable'.
 create function identity.preview_outreach_invitation(requested_invitation_id uuid, requested_link_token_hmac char(64))
 returns table (result text, group_name text, inviter_name text, invitee_name text, invitee_email text,
@@ -1253,7 +1288,9 @@ begin
   return query
     select 'ready'::text, organisation.display_name, inviter.display_name, (found_link.invitation).invitee_name,
       (found_link.invitation).invitee_email,
-      case when identity.outreach_email_registered((found_link.invitation).invitee_email) then 'existing' else 'new' end,
+      case when identity.outreach_patient_login((found_link.invitation).invitee_email) then 'patient_login'
+           when identity.outreach_email_registered((found_link.invitation).invitee_email) then 'existing'
+           else 'new' end,
       (found_link.invitation).expires_at
       from identity.outreach_organisations organisation
       join auth.accounts inviter on inviter.id = (found_link.invitation).invited_by_account_id
@@ -1262,8 +1299,9 @@ end
 $$;
 
 -- A new helper sets a password (system:auth): the link proves the email.
--- Answers as preview, plus 'sign_in_required' (the email already has a
--- login: sign in and accept there). 22023 OUTREACH_INVITATION_PASSWORD_INVALID.
+-- Answers as preview, plus 'patient_login' (the email is a patient's Health
+-- ID login, which cannot help an outreach group yet) and 'sign_in_required'
+-- (the email already has a staff login: sign in and accept there). 22023 OUTREACH_INVITATION_PASSWORD_INVALID.
 create function identity.accept_outreach_invitation_with_password(
   requested_invitation_id uuid, requested_link_token_hmac char(64), requested_password_hash text
 ) returns table (result text, account_id uuid, membership_id uuid, facility_id uuid, hid_subject text)
@@ -1288,6 +1326,10 @@ begin
     return;
   end if;
   perform pg_advisory_xact_lock(hashtextextended('account-email:' || (found_link.invitation).invitee_email, 0));
+  if identity.outreach_patient_login((found_link.invitation).invitee_email) then
+    return query select 'patient_login'::text, null::uuid, null::uuid, null::uuid, null::text;
+    return;
+  end if;
   if identity.outreach_email_registered((found_link.invitation).invitee_email) then
     return query select 'sign_in_required'::text, null::uuid, null::uuid, null::uuid, null::text;
     return;
@@ -1310,7 +1352,8 @@ $$;
 
 -- A signed-in staff login (for example a hospital worker) accepts with the
 -- same login. Context as activate_outreach_organiser_for_account. Answers as
--- preview, plus 'email_mismatch', 'already_member', 'not_eligible'.
+-- preview, plus 'email_mismatch', 'already_member', 'patient_login' (as
+-- activate_outreach_organiser_for_account) and 'not_eligible'.
 create function identity.accept_outreach_invitation_for_account(
   requested_invitation_id uuid, requested_link_token_hmac char(64)
 ) returns table (result text, membership_id uuid, facility_id uuid)
@@ -1345,6 +1388,12 @@ begin
     return;
   end if;
   select staff.* into staff_row from identity.staff staff where staff.account_id = actor_account;
+  if staff_row.id is null and not exists (select 1 from auth.account_roles assignment
+                                           where assignment.account_id = actor_account
+                                             and assignment.scope_type = 'platform' and assignment.revoked_at is null) then
+    return query select 'patient_login'::text, null::uuid, null::uuid;
+    return;
+  end if;
   if staff_row.id is null or not staff_row.active
      or lower(staff_row.verification_status) not in ('verified', 'approved', 'active')
      or not exists (select 1 from auth.accounts account where account.id = actor_account and account.status = 'active')
@@ -1653,12 +1702,13 @@ $$;
 -- the UPDATE policies. 0038's policy asks for outreach.campaign.write, which
 -- outreach_volunteer does not hold (a helper must not create campaigns). This
 -- policy lets a member of the campaign who may register pass; an actual
--- UPDATE still needs an admin of the campaign (validate_campaign_write, 0122).
+-- UPDATE still needs outreach.campaign.write (0038's policy) and an admin of
+-- the campaign (validate_campaign_write, 0122): a row lock checks USING only,
+-- and WITH CHECK (false) admits no new row through this policy.
 create policy outreach_campaigns_member_lock on outreach.campaigns for update
   using (outreach.context_allows(facility_id, 'outreach.registration.write')
     and outreach.registration_campaign_member(id, facility_id))
-  with check (outreach.context_allows(facility_id, 'outreach.registration.write')
-    and outreach.registration_campaign_member(id, facility_id));
+  with check (false);
 
 -- J (policies and trigger). Support runs on the campaign tables.
 create policy outreach_campaigns_support_read on outreach.campaigns for select
@@ -1796,6 +1846,7 @@ revoke all on function
   outreach.privileged_run_active(text), outreach.begin_privileged_run(text), outreach.end_privileged_run(),
   outreach.organiser_tenant_state(uuid), outreach.organiser_status(),
   identity.outreach_signup_context(), identity.outreach_email_registered(text),
+  identity.outreach_patient_login(text),
   identity.start_outreach_organiser_signup(uuid,char,text,text,text,text,text,char,bytea,text,char,char),
   identity.resend_outreach_organiser_signup_code(uuid,char,char),
   identity.verify_outreach_organiser_email(uuid,char,char),

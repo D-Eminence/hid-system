@@ -180,7 +180,7 @@ select pg_temp.rt_case('1e the sweeper refuses any caller but Identity''s system
 
 -- 2. When a registration expires.
 select pg_temp.rt_case('2a retain until: closed + 365 days, legacy close, start + 365 days', '1 t | 2 f | 3 t | 4 t | 5 f | 6 t',
-  'pgrun', null, null, null, null,
+  session_user::text, null, null, null, null,
   $s$select right(campaign.name, 1) || ' ' || (outreach.registration_retain_until(campaign) <= now())::text::char
       from outreach.campaigns campaign where campaign.name like 'Retention Campaign %' order by campaign.name$s$);
 
@@ -188,28 +188,28 @@ select pg_temp.rt_case('2a retain until: closed + 365 days, legacy close, start 
 select pg_temp.sweeper('3a the sweeper redacts the three expired registrations of the group', '3',
   'select identity.sweep_expired_outreach_registrations(100)');
 select pg_temp.rt_case('3b what is left of an expired registration', '[redacted]/-/-/female/15/[redacted]/0000',
-  'pgrun', null, null, null, null, 'select pg_temp.state(1)');
+  session_user::text, null, null, null, null, 'select pg_temp.state(1)');
 select pg_temp.rt_case('3c a registration whose campaign never closed, after a year', '[redacted]/-/-/female/15/[redacted]/0000',
-  'pgrun', null, null, null, null, 'select pg_temp.state(3)');
+  session_user::text, null, null, null, null, 'select pg_temp.state(3)');
 select pg_temp.rt_case('3d a recent registration is untouched', 'Lola Person 2/+2348000000002/Checked blood pressure/female/15/Mama Person 2/ffff',
-  'pgrun', null, null, null, null, 'select pg_temp.state(2)');
+  session_user::text, null, null, null, null, 'select pg_temp.state(2)');
 select pg_temp.rt_case('3e a hospital''s registration is untouched', 'Lola Person 6/+2348000000006/Checked blood pressure/female/15/Mama Person 6/ffff',
-  'pgrun', null, null, null, null, 'select pg_temp.state(6)');
+  session_user::text, null, null, null, null, 'select pg_temp.state(6)');
 select pg_temp.rt_case('3f each redaction is recorded, and the sweep audited', '1 retention | 3 retention | 4 retention | audit 1',
-  'pgrun', null, null, null, null,
+  session_user::text, null, null, null, null,
   $s$select right(registration_case_id::text, 1) || ' ' || kind from outreach.registration_redactions
      union all select 'audit ' || count(*) from audit.events where action = 'outreach.registration.retention-sweep'
        and correlation_id = 'outreach-retention-suite' order by 1$s$);
 select pg_temp.sweeper('3g a second sweep finds nothing', '0', 'select identity.sweep_expired_outreach_registrations(100)');
 select pg_temp.organiser('3h the organiser still counts the redacted registrations', '5',
   $s$select count(*)::text from outreach.registration_cases where facility_id = '0f000000-0000-4000-8000-000000000002'$s$);
-select pg_temp.rt_case('3i no retention run is left behind', '0', 'pgrun', null, null, null, null,
+select pg_temp.rt_case('3i no retention run is left behind', '0', session_user::text, null, null, null, null,
   'select count(*)::text from outreach.privileged_runs');
 
 -- 4. On request.
 select pg_temp.support('4a support redacts one registration on the person''s request', 'redacted', 'synthetic:rt-support',
   $s$select identity.admin_redact_outreach_registration('0f080000-0000-4000-8000-000000000002', 'Caller asked us to delete her details')$s$);
-select pg_temp.rt_case('4b it is gone', '[redacted]/-/-/female/15/[redacted]/0000', 'pgrun', null, null, null, null,
+select pg_temp.rt_case('4b it is gone', '[redacted]/-/-/female/15/[redacted]/0000', session_user::text, null, null, null, null,
   'select pg_temp.state(2)');
 select pg_temp.support('4c again: nothing left to redact', 'not_redactable', 'synthetic:rt-support',
   $s$select identity.admin_redact_outreach_registration('0f080000-0000-4000-8000-000000000002', 'Caller asked us again')$s$);
@@ -218,7 +218,7 @@ select pg_temp.support('4d a hospital registration is not redacted here', 'not_r
 select pg_temp.support('4e a doctor cannot use support''s redaction', '42501: ADMIN_PERMISSION_DENIED', 'synthetic:rt-doctor',
   $s$select identity.admin_redact_outreach_registration('0f080000-0000-4000-8000-000000000005', 'Not support at all')$s$, false);
 select pg_temp.rt_case('4f the request is recorded with who asked', '2 request 0f010000-0000-4000-8000-000000000003',
-  'pgrun', null, null, null, null,
+  session_user::text, null, null, null, null,
   $s$select right(registration_case_id::text, 1) || ' ' || kind || ' ' || requested_by_account_id
        from outreach.registration_redactions where kind = 'request'$s$);
 
@@ -232,7 +232,7 @@ select pg_temp.organiser('5b closed_at is the moment it closed, not the date the
 select pg_temp.organiser('5c reopening clears closed_at', 'rows 1',
   $s$update outreach.campaigns set status = 'active', row_version = row_version + 1
       where id = '0f070000-0000-4000-8000-000000000005'$s$, true, 'count');
-select pg_temp.rt_case('5d closed_at is null while open', 'null', 'pgrun', null, null, null, null,
+select pg_temp.rt_case('5d closed_at is null while open', 'null', session_user::text, null, null, null, null,
   $s$select coalesce(closed_at::text, 'null') from outreach.campaigns where id = '0f070000-0000-4000-8000-000000000005'$s$);
 
 -- 6. Result.

@@ -185,6 +185,8 @@ select pg_temp.auth_case('1e an everyday "who" is fine', 'started',
   pg_temp.start_signup('4', 'four@example.invalid', 'People who care Yaba'), false);
 select pg_temp.auth_case('1f an email with a login is refused (sign in instead)', 'email_registered',
   pg_temp.start_signup('5', 'os-nurse@example.invalid', 'Nurses Who Walk'), false);
+select pg_temp.auth_case('1f2 a patient''s Health ID login is told it cannot run a group yet', 'patient_login',
+  pg_temp.start_signup('5p', 'OS-Patient@example.invalid', 'Dayo Walks'), false);
 select pg_temp.auth_case('1g a malformed email is refused', '22023: OUTREACH_ORGANISER_SIGNUP_INVALID',
   pg_temp.start_signup('6', 'not-an-email', 'Some Group'), false);
 select pg_temp.os_case('1h the Outreach runtime cannot start a sign-up',
@@ -217,7 +219,7 @@ select pg_temp.auth_case('1o a repeat answers the same group', 'true',
 
 -- The new group as stored.
 select pg_temp.os_case('1p the group is pending, its facility verified, the organiser holds outreach_organiser only',
-  'pending verified outreach_organiser outreach-organiser:', 'pgrun', null, null, null, null,
+  'pending verified outreach_organiser outreach-organiser:', session_user::text, null, null, null, null,
   format($s$select organisation.review_state || ' ' || facility.lifecycle_status || ' '
       || (select string_agg(role_code, ',') from auth.account_roles where account_id = %L and revoked_at is null) || ' '
       || left(account.subject, 19)
@@ -295,6 +297,10 @@ select pg_temp.outreach_case('3e a registration with consent is kept', 'ok',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
   pg_temp.registration(pg_temp.id('case1'), pg_temp.id('camp1'), 15, 'Blood pressure check') || '; '
     || pg_temp.consent(pg_temp.id('case1'), 'guardian', 'Kemi Example') || '; set constraints outreach.outreach_registration_consent_required immediate; set constraints outreach.outreach_registration_consent_required deferred', true);
+select pg_temp.outreach_case('3e2 the campaign''s admin reads the consent', 'guardian Kemi Example',
+  pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
+  format('select method || %L || guardian_name from outreach.registration_consents where registration_case_id = %L',
+    ' ', pg_temp.id('case1')), false, 'query');
 select pg_temp.outreach_case('3f consent cannot be changed', '42501: permission denied for table registration_consents',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
   format('update outreach.registration_consents set language = %L where registration_case_id = %L', 'en', pg_temp.id('case1')));
@@ -331,7 +337,7 @@ select pg_temp.outreach_case('4c the organiser claiming the hospital as session 
 select pg_temp.outreach_case('4d the organiser sees their own registration', 'Funke Example',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
   format('select full_name from outreach.registration_cases where id = %L', pg_temp.id('case1')), false, 'query');
-select pg_temp.os_case('4e the group never appears in the clinician directory', 'false', 'pgrun', null, null, null, null,
+select pg_temp.os_case('4e the group never appears in the clinician directory', 'false', session_user::text, null, null, null, null,
   format('select identity.share_provider_eligible(%L)::text', pg_temp.id('mem1')), false, 'query');
 select pg_temp.outreach_case('4f outreach-api reads the organiser status', 'reviewed',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'), 'select outreach.organiser_status()', false, 'query');
@@ -365,7 +371,7 @@ insert into os_ids select 'mem2', membership.id from identity.staff_facility_mem
 select pg_temp.staff_case('6b again: already an organiser', 'already_organiser true', 'synthetic:os-nurse',
   pg_temp.start_for_account('Another Group'), false);
 select pg_temp.os_case('6c the nurse keeps the hospital role and gains the outreach role', 'nurse,outreach_organiser',
-  'pgrun', null, null, null, null,
+  session_user::text, null, null, null, null,
   $s$select string_agg(role_code, ',' order by role_code) from auth.account_roles
       where account_id = '0e010000-0000-4000-8000-000000000002' and revoked_at is null$s$, false, 'query');
 select pg_temp.owner_case('6d a nurse role at the nurse''s own group is refused', 'P0001: OUTREACH_GROUP_ROLE_INVALID',
@@ -374,7 +380,7 @@ select pg_temp.owner_case('6d a nurse role at the nurse''s own group is refused'
     pg_temp.id('mem2'), pg_temp.id('fac2')));
 select pg_temp.staff_case('6e a support (platform) login is not eligible', 'not_eligible', 'synthetic:os-support',
   pg_temp.start_for_account('Support Group'), false);
-select pg_temp.staff_case('6f an account without a staff record is not eligible', 'not_eligible', 'synthetic:os-patient',
+select pg_temp.staff_case('6f a patient login (no staff record) is told it cannot run a group yet', 'patient_login', 'synthetic:os-patient',
   pg_temp.start_for_account('Patient Group'), false);
 select pg_temp.staff_case('6g a hospital-sounding name is refused here too', 'name_not_allowed', 'synthetic:os-doctor',
   pg_temp.start_for_account('Federal Medical Outreach'), false);
@@ -407,7 +413,7 @@ select pg_temp.auth_case('7e the helper sets a password and joins', 'rows 2',
 select pg_temp.auth_case('7f the link cannot be used twice', 'used',
   format('select result from identity.accept_outreach_invitation_with_password(%L, %L, %L)',
     pg_temp.id('inv1'), pg_temp.hex('link-inv1'), pg_temp.password_hash()), false);
-select pg_temp.os_case('7g the helper holds outreach_volunteer only', 'outreach_volunteer', 'pgrun', null, null, null, null,
+select pg_temp.os_case('7g the helper holds outreach_volunteer only', 'outreach_volunteer', session_user::text, null, null, null, null,
   format('select string_agg(role_code, %L) from auth.account_roles where account_id = %L and revoked_at is null', ',',
     pg_temp.id('acct3')), false, 'query');
 select pg_temp.staff_case('7h a helper cannot invite', '42501: OUTREACH_ORGANISER_PERMISSION_DENIED',
@@ -436,6 +442,25 @@ select pg_temp.outreach_case('7r the helper cannot create a campaign',
 select pg_temp.outreach_case('7s the helper cannot close the campaign', '42501: Outreach campaign admin is required',
   pg_temp.subject_of('acct3'), pg_temp.id('fac1'), pg_temp.id('mem3'),
   format($s$update outreach.campaigns set status = 'closed', row_version = row_version + 1 where id = %L$s$, pg_temp.id('camp1')));
+select pg_temp.outreach_case('7v the organiser makes the helper an admin of the campaign', 'ok',
+  pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
+  format($s$delete from outreach.campaign_members where campaign_id = %L and membership_id = %L;
+    insert into outreach.campaign_members (campaign_id, facility_id, membership_id, role, added_by_account_id,
+      added_by_membership_id) values (%L, %L, %L, 'admin', %L, %L)$s$,
+    pg_temp.id('camp1'), pg_temp.id('mem3'),
+    pg_temp.id('camp1'), pg_temp.id('fac1'), pg_temp.id('mem3'), pg_temp.id('acct1'), pg_temp.id('mem1')), true);
+select pg_temp.outreach_case('7w a helper who is a campaign admin still cannot change the campaign',
+  '42501: new row violates row-level security policy for table "campaigns"',
+  pg_temp.subject_of('acct3'), pg_temp.id('fac1'), pg_temp.id('mem3'),
+  format($s$update outreach.campaigns set name = 'Renamed By Helper', status = 'closed', row_version = row_version + 1
+     where id = %L$s$, pg_temp.id('camp1')));
+insert into os_ids values ('case4', gen_random_uuid());
+select pg_temp.outreach_case('7x the helper admin still registers a person with consent', 'ok',
+  pg_temp.subject_of('acct3'), pg_temp.id('fac1'), pg_temp.id('mem3'),
+  replace(replace(pg_temp.registration(pg_temp.id('case4'), pg_temp.id('camp1'), 35, null), pg_temp.id('acct1'), pg_temp.id('acct3')),
+    pg_temp.id('mem1'), pg_temp.id('mem3')) || '; '
+  || replace(replace(pg_temp.consent(pg_temp.id('case4'), 'self_ticked', null), pg_temp.id('acct1'), pg_temp.id('acct3')),
+    pg_temp.id('mem1'), pg_temp.id('mem3')) || '; set constraints outreach.outreach_registration_consent_required immediate; set constraints outreach.outreach_registration_consent_required deferred');
 select pg_temp.organiser1('7i the organiser invites the hospital doctor', 'created',
   pg_temp.invite('inv2', 'Ada Doctor', 'os-doctor@example.invalid'));
 select pg_temp.auth_case('7j a password cannot be set for an email that has a login', 'sign_in_required',
@@ -447,8 +472,16 @@ select pg_temp.staff_case('7k another login cannot accept it', 'email_mismatch',
 select pg_temp.staff_case('7l the doctor accepts with the same login', 'ready', 'synthetic:os-doctor',
   format('select result from identity.accept_outreach_invitation_for_account(%L, %L)', pg_temp.id('inv2'),
     pg_temp.hex('link-inv2')));
+insert into os_ids select 'memdoc', membership.id from identity.staff_facility_memberships membership
+ where membership.account_id = '0e010000-0000-4000-8000-000000000001' and membership.facility_id = pg_temp.id('fac1')::uuid;
+select pg_temp.outreach_case('7t a group member outside the campaign sees no registration', 'none',
+  'synthetic:os-doctor', pg_temp.id('fac1'), pg_temp.id('memdoc'),
+  'select full_name from outreach.registration_cases', false, 'query');
+select pg_temp.outreach_case('7u nor any consent row (guardian names stay hidden)', 'none',
+  'synthetic:os-doctor', pg_temp.id('fac1'), pg_temp.id('memdoc'),
+  'select registration_case_id::text || guardian_name || method from outreach.registration_consents', false, 'query');
 select pg_temp.os_case('7m the doctor keeps the hospital role and helps the group', 'doctor,outreach_volunteer',
-  'pgrun', null, null, null, null,
+  session_user::text, null, null, null, null,
   $s$select string_agg(role_code, ',' order by role_code) from auth.account_roles
       where account_id = '0e010000-0000-4000-8000-000000000001' and revoked_at is null$s$, false, 'query');
 select pg_temp.organiser1('7n the team panel', 'invitation:0 member:3',
@@ -462,6 +495,19 @@ select pg_temp.organiser1('7o 50 pending invitations is the most (an abuse guard
       || (select result from identity.create_outreach_invitation(gen_random_uuid(), 'One Too Many', 'toomany@example.invalid',
         encode(sha256(convert_to('cap-over', 'UTF8')), 'hex')))$s$, false);
 update os_cases set actual = regexp_replace(actual, '^50', '') where name = '7o 50 pending invitations is the most (an abuse guard)';
+-- A patient's Health ID login cannot help a group yet: every path says so.
+insert into os_ids values ('inv4', gen_random_uuid());
+select pg_temp.organiser1('7y the organiser invites a patient''s email', 'created',
+  pg_temp.invite('inv4', 'Dayo Patient', 'os-patient@example.invalid'));
+select pg_temp.auth_case('7z the link tells a patient login it cannot help yet', 'ready patient_login',
+  format($s$select result || ' ' || account_case from identity.preview_outreach_invitation(%L, %L)$s$,
+    pg_temp.id('inv4'), pg_temp.hex('link-inv4')));
+select pg_temp.auth_case('7za no password is set for a patient login', 'patient_login',
+  format('select result from identity.accept_outreach_invitation_with_password(%L, %L, %L)',
+    pg_temp.id('inv4'), pg_temp.hex('link-inv4'), pg_temp.password_hash()), false);
+select pg_temp.staff_case('7zb nor can the signed-in patient login accept', 'patient_login', 'synthetic:os-patient',
+  format('select result from identity.accept_outreach_invitation_for_account(%L, %L)', pg_temp.id('inv4'),
+    pg_temp.hex('link-inv4')), false);
 
 -- 11. Support's campaign rescue (the nurse's group, not yet reviewed).
 insert into os_ids values ('camp2', gen_random_uuid());
@@ -483,7 +529,7 @@ select pg_temp.staff_case('8e a hospital campaign is not support''s to close her
     'Not an outreach group campaign')$s$, false);
 select pg_temp.staff_case('8f a doctor cannot use support''s rescue', '42501: ADMIN_PERMISSION_DENIED', 'synthetic:os-doctor',
   format($s$select identity.admin_close_outreach_campaign(%L, 1, 'Not support at all')$s$, pg_temp.id('camp2')), false);
-select pg_temp.os_case('8g no support run is left behind', '0', 'pgrun', null, null, null, null,
+select pg_temp.os_case('8g no support run is left behind', '0', session_user::text, null, null, null, null,
   'select count(*)::text from outreach.privileged_runs', false, 'query');
 
 -- 12. Suspension.
@@ -497,7 +543,7 @@ select pg_temp.owner_case('9c no role can be granted at a suspended group', 'P00
     values (gen_random_uuid(), %L, 'outreach_volunteer', 'facility', %L, %L, 'Synthetic forbidden grant')$s$,
     pg_temp.id('acct3'), pg_temp.id('mem3'), pg_temp.id('fac1')));
 select pg_temp.os_case('9d the doctor keeps the hospital role after the group''s suspension', 'doctor',
-  'pgrun', null, null, null, null,
+  session_user::text, null, null, null, null,
   $s$select string_agg(role_code, ',' order by role_code) from auth.account_roles
       where account_id = '0e010000-0000-4000-8000-000000000001' and revoked_at is null$s$, false, 'query');
 select pg_temp.staff_case('9e the suspended organiser may start a new group', 'started true', pg_temp.subject_of('acct1'),

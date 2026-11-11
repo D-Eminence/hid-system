@@ -1474,6 +1474,7 @@ revoke all on function
   outreach.privileged_run_active(text), outreach.begin_privileged_run(text), outreach.end_privileged_run(),
   outreach.organiser_tenant_state(uuid), outreach.organiser_status(),
   identity.outreach_signup_context(), identity.outreach_email_registered(text),
+  identity.outreach_patient_login(text),
   identity.start_outreach_organiser_signup(uuid,char,text,text,text,text,text,char,bytea,text,char,char),
   identity.resend_outreach_organiser_signup_code(uuid,char,char),
   identity.verify_outreach_organiser_email(uuid,char,char),
