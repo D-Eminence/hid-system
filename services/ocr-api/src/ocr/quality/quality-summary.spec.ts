@@ -18,6 +18,16 @@ const request = (platformPermissions: string[], kind: 'staff' | 'patient' = 'sta
   actor: actor(platformPermissions, kind), facilityId, correlationId: 'ocr-quality-correlation',
   header: () => undefined, method: 'GET' }) as unknown as HidRequest;
 
+// A fictional manager of facility A (workforce.manage there), optionally also a records clerk at facility B.
+const otherFacilityId = '10000000-0000-4000-8000-000000000002';
+const managerAt = (id: string, permissions: string[]) => ({ ...assignment, id, permissions,
+  membershipId: id === facilityId ? assignment.membershipId : '40000000-0000-4000-8000-000000000002' });
+const managerRequest = (bound: string, memberships: ReturnType<typeof managerAt>[]) => ({
+  actor: { ...actor([]), facilities: memberships, facilityIds: memberships.map((m) => m.id),
+    facility: memberships.find((m) => m.id === bound), permissions: memberships.find((m) => m.id === bound)?.permissions ?? [] },
+  facilityId: bound, correlationId: 'ocr-quality-correlation', header: () => undefined, method: 'GET' }) as unknown as HidRequest;
+const managerOfA = managerAt(facilityId, ['workforce.manage', 'ocr.job.read']);
+
 // A fictional reading and review, computed into a stored outcome.
 const box = { left: 0.1, top: 0.1, width: 0.5, height: 0.02 };
 const items = [1, 2].map((n) => ({ id: `it-000000000000000${n}`, kind: 'medicine', asWritten: 'Zentoprilax 5mg',
@@ -96,6 +106,9 @@ describe('OCR quality summary', () => {
       ['an administrator without platform.operations.read', request(['platform.admin.access'])],
       ['an operations reader without platform.admin.access', request(['platform.operations.read'])],
       ['a patient', request(['platform.admin.access', 'platform.operations.read'], 'patient')],
+      ['a manager of facility A reading facility B, where they are not a member', managerRequest(otherFacilityId, [managerOfA])],
+      ['a manager of facility A reading facility B, where they hold no workforce.manage',
+        managerRequest(otherFacilityId, [managerOfA, managerAt(otherFacilityId, ['ocr.job.read', 'ocr.validation.write'])])],
     ])('refuses %s with 403 and reads nothing', async (_name, req) => {
       const { controller, database } = harness();
       expect(() => controller.summary({}, req)).toThrow(expect.objectContaining({ code: 'PERMISSION_DENIED' }));
@@ -118,6 +131,15 @@ describe('OCR quality summary', () => {
         expect(JSON.stringify(answer)).not.toContain(text);
         if (text !== 'staff:fictional') expect(JSON.stringify(event?.details)).not.toContain(text);
       }
+    });
+
+    it('answers the manager of the bound facility with that facility only', async () => {
+      const { controller, database, audit } = harness();
+      const answer = await controller.summary({ from: '2026-11-02', to: '2026-11-08' }, managerRequest(facilityId, [managerOfA]));
+      expect(answer).toMatchObject({ scope: 'bound_facility', truncated: false });
+      expect((database.withTransaction as jest.Mock).mock.calls[0]?.[0]).toMatchObject({ facilityId });
+      const event = ((audit.recordWithClient as jest.Mock).mock.calls as [PoolClient, Record<string, unknown>][])[0]?.[1];
+      expect(event).toMatchObject({ action: 'ocr.quality.summary.read', facilityId });
     });
 
     it('widens the range to whole ISO weeks so a one-day difference cannot be subtracted', async () => {

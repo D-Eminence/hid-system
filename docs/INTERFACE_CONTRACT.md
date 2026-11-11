@@ -1421,9 +1421,12 @@ be left out. Each extraction on `GET /api/v1/ocr/jobs/:jobId/extractions`
 carries `reviewLearning: true` on a server that accepts them; a client sends
 them only when it sees it (an older server answers them 400).
 
-`GET /api/v1/ocr/quality/summary` (platform administrators only: platform
-permissions `platform.admin.access` and `platform.operations.read`, staff
-actor; anyone else 403 `PERMISSION_DENIED`) sums stored review outcomes by ISO
+`GET /api/v1/ocr/quality/summary` (staff actors only: a platform
+administrator, holding platform permissions `platform.admin.access` and
+`platform.operations.read`, or the manager of the facility named by
+`X-Facility-ID`, whose membership at that facility holds `workforce.manage`; a
+manager's permission at another facility never counts; anyone else 403
+`PERMISSION_DENIED`) sums stored review outcomes by ISO
 week, facility, item kind and prompt version (`itemGroups`) and by ISO week,
 facility and prompt version (`reviewGroups`) for `from`..`to` (UTC days,
 inclusive, default the last 28 days, at most 92; else 400

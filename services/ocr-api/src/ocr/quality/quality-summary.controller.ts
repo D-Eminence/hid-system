@@ -10,8 +10,9 @@ export class OcrQualityController {
 
   /**
    * Review outcomes summed by ISO week, facility, item kind and prompt version; groups under 20 suppressed.
-   * Platform administrators only (platform.admin.access and platform.operations.read); X-Facility-ID names the
-   * facility read (row-level security), at which the administrator must be active.
+   * Platform administrators (platform.admin.access and platform.operations.read), or the facility's own manager
+   * (workforce.manage at that facility); X-Facility-ID names the facility read (row-level security), at which the
+   * reader must be active.
    */
   @Get('summary')
   @AuditAction('ocr.quality.summary.request')

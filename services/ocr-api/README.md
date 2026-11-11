@@ -70,15 +70,18 @@ The 7-day source purge (0112) blanks `validated_payload`, `accepted_fields`,
 outcomes outlive the content they were computed from.
 
 `GET /api/v1/ocr/quality/summary?from=&to=` is for platform administrators
-(`platform.admin.access` and `platform.operations.read`): it sums review
+(`platform.admin.access` and `platform.operations.read`) and for a facility's
+own manager (`workforce.manage` in their membership at the facility named by
+`X-Facility-ID`, never at another facility): it sums review
 outcomes by ISO week, facility, kind and prompt version, widens the range to
 whole ISO weeks, returns groups under 20 items as suppressed, leaves out reason
 counts under 5 inside shown groups (`smallCellsHidden`), and has no per-reviewer
 figures. At a facility with one reviewer the figures are in effect that
-reviewer's; the route is for platform administrators only. `ocr.validations`
+reviewer's; the route is for platform administrators and that facility's
+manager only. `ocr.validations`
 row-level security admits only `platform.current_facility_id()`, and the
 runtime role has no cross-facility policy, so the summary covers the facility
-named by `X-Facility-ID`, where the administrator must be active. A
+named by `X-Facility-ID`, where the reader (administrator or manager) must be active. A
 cross-facility summary would need an aggregate-only `SECURITY DEFINER` function
 (as 0027's admin audit read) and is not part of this phase.
 
