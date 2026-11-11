@@ -68,20 +68,24 @@ describe('the allergy acknowledgement through the ValidationPipe (0124)', () => 
   const run = (metatype: new () => object, body: Record<string, unknown>, allergyAcknowledgement: unknown) =>
     pipe.transform({ ...body, allergyAcknowledgement }, { type: 'body', metatype });
 
-  it.each(bodies)('%p refuses a blank, short, wordless or too long reason, a missing or malformed token, and a non-object',
-    async (metatype, body) => {
-      for (const acknowledgement of [
-        { reason: '   ', warningToken }, { reason: 'ok', warningToken }, { reason: '  ok  ', warningToken },
-        { reason: 'yes', warningToken }, { reason: '...........', warningToken }, { reason: 'ok ok ok ok', warningToken },
-        { reason: '1234567890', warningToken }, { reason: 'x'.repeat(501), warningToken },
-        { reason: 'Tolerated\u0007 before', warningToken },
-        { reason: 'Tolerated amoxicillin in 2024' }, { reason: 'Tolerated amoxicillin in 2024', warningToken: 'not-a-token' },
-        { reason: 'Tolerated amoxicillin in 2024', warningToken: 'A'.repeat(64) },
-        {}, 'yes',
-      ]) {
-        await expect(run(metatype, body, acknowledgement)).rejects.toMatchObject({ status: 400 });
-      }
-    });
+  it.each(bodies)('%p refuses only a non-object or non-string parts; the reason and token rules answer the 409', async (metatype, body) => {
+    for (const acknowledgement of [
+      'yes', 7, [], { reason: 7, warningToken }, { reason: 'Tolerated amoxicillin in 2024', warningToken: 7 },
+      { reason: null, warningToken }, { reason: 'Tolerated amoxicillin in 2024', warningToken: null },
+      { reason: 'x'.repeat(2001), warningToken }, { reason: 'Tolerated amoxicillin in 2024', warningToken: 'a'.repeat(201) },
+      { reason: 'Tolerated amoxicillin in 2024', warningToken, extra: true },
+    ]) {
+      await expect(run(metatype, body, acknowledgement)).rejects.toMatchObject({ status: 400 });
+    }
+    // Reaches the allergy check at prescribing, which names what failed (prescription-allergy-gate.ts).
+    for (const acknowledgement of [
+      {}, { reason: '   ', warningToken }, { reason: 'ok', warningToken }, { reason: '1234567890', warningToken },
+      { reason: 'x'.repeat(501), warningToken }, { reason: 'Tolerated amoxicillin in 2024' },
+      { reason: 'Tolerated amoxicillin in 2024', warningToken: 'not-a-token' },
+    ]) {
+      await expect(run(metatype, body, acknowledgement)).resolves.toMatchObject({ allergyAcknowledgement: expect.any(Object) });
+    }
+  });
 
   it.each(bodies)('%p trims the reason and keeps a two-line reason', async (metatype, body) => {
     await expect(run(metatype, body, { reason: '  Tolerated before  ', warningToken }))

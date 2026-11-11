@@ -71,6 +71,46 @@ export async function patientReportedAllergies(client: PoolClient, patientId: st
   return { text: row?.allergies ?? null, updatedAt: row?.updated_at ?? null };
 }
 
+/**
+ * The allergies the emergency (break-glass) read answers, read-only and
+ * labelled by source: the active recorded allergies (any facility; the
+ * clinician's emergency access at the current facility, RLS through
+ * ehr.imported_record_read_context, which admits the reasoned break-glass
+ * grant for read_records) and the patient's own text. Most serious first.
+ */
+export interface EmergencyAllergies {
+  recorded: {
+    source: 'recorded';
+    id: string;
+    substance: string;
+    reaction: string | null;
+    severity: string;
+    recordedHere: boolean;
+    recordedOn: Date;
+  }[];
+  patientReported: { source: 'patient_reported'; allergies: string | null; updatedAt: Date | null };
+}
+
+export async function emergencyAllergies(
+  client: PoolClient, patientId: string, facilityId: string,
+): Promise<EmergencyAllergies> {
+  const recorded = await client.query<{ id: string; substance: string; reaction: string | null; severity: string;
+    facilityId: string; createdAt: Date }>(
+    `select id, substance, reaction, severity, facility_id as "facilityId", created_at as "createdAt"
+       from ehr.recorded_allergies where patient_id = $1 and status = 'active'
+      order by array_position(array['severe', 'unknown', 'moderate', 'mild'], severity), created_at desc, id desc
+      limit 200`,
+    [patientId],
+  );
+  const reported = await patientReportedAllergies(client, patientId);
+  return {
+    recorded: recorded.rows.map((row) => ({ source: 'recorded' as const, id: row.id, substance: row.substance,
+      reaction: row.reaction, severity: row.severity, recordedHere: row.facilityId === facilityId,
+      recordedOn: row.createdAt })),
+    patientReported: { source: 'patient_reported', allergies: reported.text, updatedAt: reported.updatedAt },
+  };
+}
+
 export async function checkMedicineAgainstAllergies(
   client: PoolClient, patientId: string, facilityId: string, medicine: { display: string; code?: string | null },
 ): Promise<AllergyMatch[]> {

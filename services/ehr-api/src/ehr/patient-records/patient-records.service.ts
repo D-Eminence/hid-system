@@ -6,6 +6,7 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { emergencyAllergies } from '../allergies/allergy-reader';
 import { readImportedRecords, readImportedHealthProfile } from './imported-records.query';
 
 @Injectable()
@@ -44,7 +45,14 @@ export class PatientRecordsService {
   emergency(patientId: string, context: DataAccessContext) {
     return this.clinical.run(context, patientId, 'read_records', {
       action: 'ehr.emergency.records.read', resourceType: 'patient-record-summary', breakGlassOnly: true,
-    }, async (client) => ({ value: await this.read(client, patientId, context.facilityId) }));
+    }, async (client) => {
+      const value = await this.read(client, patientId, context.facilityId);
+      // 0124: the allergies, read-only and labelled by source. The audit carries counts only.
+      const allergies = await emergencyAllergies(client, patientId, context.facilityId);
+      return { value: { ...value, allergies },
+        details: { recordedAllergyCount: allergies.recorded.length,
+          patientReportedAllergies: allergies.patientReported.allergies !== null } };
+    });
   }
 
   imported(patientId: string, context: DataAccessContext) {

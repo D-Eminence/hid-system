@@ -268,7 +268,7 @@ describe('allergy matching (0124)', () => {
     expect(matchAllergies({ display: 'Amoxicillin 500 mg capsules' }, [{ ...severe, severity: 'mild', reaction: 'Rash' }])[0]?.message)
       .toBe('Penicillin allergy: mild (Rash). This medicine is one of the penicillins, the same group.');
     expect(matchAllergies({ display: 'Amoxicillin 500 mg' }, [{ ...severe, severity: 'unknown', reaction: null }])[0]?.message)
-      .toBe('Penicillin allergy: severity not recorded. This medicine is one of the penicillins, the same group.');
+      .toBe('Penicillin allergy: severity not known. This medicine is one of the penicillins, the same group.');
     expect(matchAllergies({ display: 'Ceftriaxone 1 g' }, [severe])[0]?.message)
       .toBe('Penicillin allergy: SEVERE (Anaphylaxis). This medicine is a cephalosporin. Some people allergic to penicillins '
         + 'also react to cephalosporins: a risk, not a certainty.');

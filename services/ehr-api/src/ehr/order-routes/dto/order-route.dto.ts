@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { Equals, IsIn, IsInt, IsString, IsUUID, Matches, MaxLength, Min, ValidateNested } from 'class-validator';
+import { Equals, IsIn, IsInt, IsObject, IsString, IsUUID, Matches, MaxLength, Min, ValidateNested } from 'class-validator';
 import { IsOptionalButNotNull } from '../../../common/validation';
 import { AllergyAcknowledgementDto } from '../../allergies/allergies.dto';
 
@@ -31,6 +31,7 @@ export class SendOrderRouteDto {
    * prescriber's reason and the warning's token. Ignored for a lab request.
    */
   @IsOptionalButNotNull()
+  @IsObject()
   @ValidateNested()
   @Type(() => AllergyAcknowledgementDto)
   allergyAcknowledgement?: AllergyAcknowledgementDto;

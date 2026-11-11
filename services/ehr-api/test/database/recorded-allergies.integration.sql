@@ -20,7 +20,14 @@
 --   5. acknowledgements: written at the prescription's facility with a
 --      match, a stage and a reason of 10 to 500 characters; one or more
 --      per prescription, each with its stage, and the patient's own terms
---      that matched; append-only; a row with nothing matched is refused.
+--      that matched; append-only; a row with nothing matched is refused;
+--   7. the emergency (break-glass) read: with a reasoned break-glass grant
+--      for P at F2 and purpose emergency, an emergency doctor E (membership
+--      at F2, no direct-care grant) reads the recorded
+--      allergies (every facility's) and the patient's own text, through
+--      the same read policies as direct care; without the grant nothing;
+--      the grant writes nothing (no allergy, no marking, no acknowledgement)
+--      and reads no acknowledgement; E under direct care reads nothing.
 begin;
 
 create function pg_temp.as_staff(subject text, membership text, facility text, purpose text, correlation text)
@@ -402,5 +409,93 @@ begin
     raise exception '6: the allergy''s versions are not the recording and the marking';
   end if;
 end $$;
+
+-- 7. The emergency (break-glass) read. A second active allergy for P at F1, the patient's own text,
+-- and the emergency purpose (0085 seeds it; other suites may have changed it).
+insert into identity.purpose_of_use_codes (code, display, source_system) values
+  ('emergency', 'Emergency treatment', 'allergy-test') on conflict (code) do update set active = true;
+insert into auth.accounts (id, subject, email, display_name, status, source_system) values
+  ('a124a000-0000-4000-8000-000000000005', 'staff:a124-er', 'a124-er@example.invalid', 'Emergency Doctor', 'active', 'hid');
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
+  ('a124e000-0000-4000-8000-000000000003', 'a124a000-0000-4000-8000-000000000005', 'Emergency Doctor',
+   'a124-er@example.invalid', 'verified', 'doctor');
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+  membership_role, app_role, is_primary, active) values
+  ('a124f000-0000-4000-8000-000000000005', 'a124e000-0000-4000-8000-000000000003', 'a124a000-0000-4000-8000-000000000005',
+   'a124d000-0000-4000-8000-000000000001', 'a124d000-0000-4000-8000-000000000003', 'doctor', 'doctor', true, true);
+insert into ehr.patient_reported_health_profiles (patient_id, allergies, updated_by_account_id)
+values ('a124b000-0000-4000-8000-000000000001', 'sulfa drugs', 'a124a000-0000-4000-8000-000000000002');
+set local role hid_ehr_api_runtime;
+do $$
+begin
+  perform pg_temp.as_staff('staff:a124-doctor', 'a124f000-0000-4000-8000-000000000001',
+    'a124d000-0000-4000-8000-000000000002', 'direct-care', 'a124-emergency-0001');
+  insert into ehr.recorded_allergies (id, patient_id, facility_id, created_by, created_by_membership_id, substance,
+    reaction, severity)
+  values ('a1241000-0000-4000-8000-000000000002', 'a124b000-0000-4000-8000-000000000001',
+    'a124d000-0000-4000-8000-000000000002', 'a124a000-0000-4000-8000-000000000001',
+    'a124f000-0000-4000-8000-000000000001', 'Latex', null, 'unknown');
+  -- 7a. Before any break-glass grant, the emergency purpose at F2 reads nothing.
+  perform pg_temp.as_staff('staff:a124-er', 'a124f000-0000-4000-8000-000000000005',
+    'a124d000-0000-4000-8000-000000000003', 'emergency', 'a124-emergency-0002');
+  if exists (select 1 from ehr.recorded_allergies) or exists (select 1 from ehr.patient_reported_health_profiles) then
+    raise exception '7a: the emergency purpose reads allergies without a break-glass grant';
+  end if;
+end $$;
+reset role;
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope,
+  purpose_of_use, status, reason, starts_at, expires_at, break_glass, correlation_id, source_system) values
+  ('a124c000-0000-4000-8000-000000000005', 'a124b000-0000-4000-8000-000000000001', 'a124e000-0000-4000-8000-000000000003',
+   'a124a000-0000-4000-8000-000000000005', 'a124f000-0000-4000-8000-000000000005', 'a124d000-0000-4000-8000-000000000003',
+   'break_glass', 'emergency', 'active', 'Unconscious on arrival; allergy test', clock_timestamp() - interval '1 minute',
+   clock_timestamp() + interval '1 hour', true, 'a124-grant-0005', 'hid');
+set local role hid_ehr_api_runtime;
+do $$
+declare answer text;
+begin
+  perform pg_temp.as_staff('staff:a124-er', 'a124f000-0000-4000-8000-000000000005',
+    'a124d000-0000-4000-8000-000000000003', 'emergency', 'a124-emergency-0003');
+  -- 7b. The emergency read's queries (allergy-reader.ts emergencyAllergies): the active recorded allergies
+  -- of every facility, most serious first, and the patient's own text.
+  if (select string_agg(format('%s:%s:%s', substance, severity, facility_id = platform.current_facility_id()), ','
+        order by array_position(array['severe', 'unknown', 'moderate', 'mild'], severity), created_at desc, id desc)
+        from ehr.recorded_allergies where patient_id = 'a124b000-0000-4000-8000-000000000001' and status = 'active')
+     is distinct from 'Latex:unknown:f' then
+    raise exception '7b: the break-glass read does not see F1''s active allergy: %',
+      (select string_agg(format('%s:%s', substance, status), ',') from ehr.recorded_allergies);
+  end if;
+  if (select count(*) from ehr.recorded_allergies where patient_id = 'a124b000-0000-4000-8000-000000000001') <> 2 then
+    raise exception '7b: the break-glass read does not see every recorded allergy';
+  end if;
+  if (select allergies from ehr.patient_reported_health_profiles
+       where patient_id = 'a124b000-0000-4000-8000-000000000001') is distinct from 'sulfa drugs' then
+    raise exception '7c: the break-glass read does not see the patient''s own allergy text';
+  end if;
+  -- 7d. Another patient: nothing.
+  if exists (select 1 from ehr.recorded_allergies where patient_id <> 'a124b000-0000-4000-8000-000000000001') then
+    raise exception '7d: the break-glass read sees another patient';
+  end if;
+  -- 7e. Read-only: no allergy, no marking, no acknowledgement; no acknowledgement read.
+  answer := pg_temp.sqlstate_of($q$insert into ehr.recorded_allergies (patient_id, facility_id, created_by,
+      created_by_membership_id, substance, severity) values ('a124b000-0000-4000-8000-000000000001',
+      'a124d000-0000-4000-8000-000000000003', 'a124a000-0000-4000-8000-000000000005',
+      'a124f000-0000-4000-8000-000000000005', 'Iodine', 'mild')$q$);
+  if answer not like '42501%' then raise exception '7e: recorded an allergy under break-glass: %', answer; end if;
+  perform set_config('app.change_reason', 'Wrong patient', true);
+  update ehr.recorded_allergies set status = 'entered_in_error',
+      entered_in_error_by = 'a124a000-0000-4000-8000-000000000005', entered_in_error_reason = 'Wrong patient'
+   where id = 'a1241000-0000-4000-8000-000000000002';
+  if found then raise exception '7e: marked an allergy under break-glass'; end if;
+  if exists (select 1 from ehr.prescription_allergy_acknowledgements) then
+    raise exception '7e: read an acknowledgement under break-glass';
+  end if;
+  -- 7f. E under direct care (no direct-care grant) reads nothing.
+  perform pg_temp.as_staff('staff:a124-er', 'a124f000-0000-4000-8000-000000000005',
+    'a124d000-0000-4000-8000-000000000003', 'direct-care', 'a124-emergency-0004');
+  if exists (select 1 from ehr.recorded_allergies) or exists (select 1 from ehr.patient_reported_health_profiles) then
+    raise exception '7f: the break-glass grant was used for direct care';
+  end if;
+end $$;
+reset role;
 
 rollback;

@@ -67,6 +67,8 @@ describe.each(cases)('$label list paging', ({ list, column, field, cursorParamet
     expect(decodeTimelineCursor(first.nextCursor ?? undefined, scope)).toEqual({ sortAt: microseconds, id: ids[1] });
 
     await page(repository, { limit: 2, cursor: first.nextCursor ?? undefined } as TimelineQueryDto);
-    expect(statements[1]?.values.slice(cursorParameter - 1, cursorParameter + 1)).toEqual([microseconds, ids[1]]);
+    // The page reads only (prescriptions also read their allergy acknowledgements, 0124).
+    const pageReads = statements.filter((statement) => statement.sql.includes('"cursorAt"'));
+    expect(pageReads[1]?.values.slice(cursorParameter - 1, cursorParameter + 1)).toEqual([microseconds, ids[1]]);
   });
 });

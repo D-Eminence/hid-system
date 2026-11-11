@@ -207,8 +207,36 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
     await expect(service.create(context, patientId, encounterId, input, 'key-12345678'))
       .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
         errors: [{ field: 'allergyAcknowledgement', messages: [expect.stringContaining('penicillins')] },
-          { field: 'allergyAcknowledgement.warningToken', messages: [tokenFor([{ id: allergyId, substance: 'Penicillin' }])] }] });
+          { field: 'allergyAcknowledgement.warningToken', messages: [tokenFor([{ id: allergyId, substance: 'Penicillin' }])] },
+          { field: 'allergyAcknowledgement.rejected', code: 'ALLERGY_ACKNOWLEDGEMENT_MISSING', messages: [expect.any(String)] }] });
     expect(calls.some((call) => /insert into ehr\.prescriptions/.test(call.sql))).toBe(false);
+  });
+
+  it.each([
+    [{ warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_MISSING']],
+    [{ reason: '   ', warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_MISSING']],
+    [{ reason: 'ok', warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID']],
+    [{ reason: '1234567890', warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID']],
+    [{ reason: 'x'.repeat(501), warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID']],
+    [{ reason: 'Tolerated\u0007 before', warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID']],
+    [{ reason: 'Tolerated amoxicillin in 2024' }, ['ALLERGY_WARNING_TOKEN_INVALID']],
+    [{ reason: 'Tolerated amoxicillin in 2024', warningToken: 'A'.repeat(64) }, ['ALLERGY_WARNING_TOKEN_INVALID']],
+    [{ reason: 'Tolerated amoxicillin in 2024', warningToken: 'b'.repeat(64) }, ['ALLERGY_WARNING_TOKEN_STALE']],
+    [{ reason: 'ok', warningToken: 'b'.repeat(64) }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID', 'ALLERGY_WARNING_TOKEN_STALE']],
+    [{}, ['ALLERGY_ACKNOWLEDGEMENT_REASON_MISSING', 'ALLERGY_WARNING_TOKEN_INVALID']],
+  ])('names what failed in the acknowledgement %j: %j, and writes nothing', async (sent, codes) => {
+    const { service, calls } = setup([penicillin], null);
+    const current = tokenFor([{ id: allergyId, substance: 'Penicillin' }]);
+    const acknowledgement = { ...sent, ...('warningToken' in sent && sent.warningToken === 'CURRENT' ? { warningToken: current } : {}) };
+    const refusal = await service.create(context, patientId, encounterId, { ...input, allergyAcknowledgement: acknowledgement },
+      'key-12345678').catch((error: unknown) => error) as { status: number; code: string; errors: { field: string; code?: string }[] };
+    expect(refusal).toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED' });
+    expect(refusal.errors.filter((entry) => entry.field === 'allergyAcknowledgement.rejected').map((entry) => entry.code))
+      .toEqual(codes);
+    // The current warning and its token are still answered, once.
+    expect(refusal.errors.filter((entry) => entry.field === 'allergyAcknowledgement.warningToken')).toEqual(
+      [{ field: 'allergyAcknowledgement.warningToken', messages: [current] }]);
+    expect(calls.some((call) => /insert into/.test(call.sql))).toBe(false);
   });
 
   it('refuses a reason given for another warning (a new allergy recorded meanwhile) and writes nothing', async () => {
@@ -222,7 +250,8 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
       .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED', errors: expect.arrayContaining([
         { field: 'allergyAcknowledgement', messages: [expect.stringContaining('Amoxicillin allergy: SEVERE (Anaphylaxis).')] },
         { field: 'allergyAcknowledgement.warningToken',
-          messages: [tokenFor([{ id: laterAllergyId, substance: 'Amoxicillin' }], 'penicillin')] }]) });
+          messages: [tokenFor([{ id: laterAllergyId, substance: 'Amoxicillin' }], 'penicillin')] },
+        { field: 'allergyAcknowledgement.rejected', code: 'ALLERGY_WARNING_TOKEN_STALE', messages: [expect.any(String)] }]) });
     expect(calls.some((call) => /insert into/.test(call.sql))).toBe(false);
   });
 
@@ -409,5 +438,63 @@ describe('PrescriptionsService allergy check on Activate and Resume (0124)', () 
     const { service, calls } = setup(OrderStatus.Active, [penicillin]);
     await service.update(context, patientId, encounterId, prescriptionId, { expectedRowVersion: 1, changeReason: 'Waiting for results', status: OrderStatus.OnHold });
     expect(calls.some((call) => /recorded_allergies/.test(call.sql))).toBe(false);
+  });
+});
+
+describe('the prescription reads answer its stored allergy acknowledgements (0124)', () => {
+  const prescriptionId = '123e4567-e89b-42d3-a456-426614174020';
+  const otherPrescriptionId = '123e4567-e89b-42d3-a456-426614174021';
+  const createdAt = new Date('2026-11-10T09:00:00Z');
+  const stored = { id: '123e4567-e89b-42d3-a456-426614174030', prescriptionId, stage: 'create',
+    reason: 'Tolerated amoxicillin in 2024; observe 30 minutes', createdBy: accountId, createdByMembershipId: membershipId,
+    createdAt, matchedRecordedAllergyIds: [allergyId], patientReportedMatched: true, patientReportedTerms: ['penicillin'] };
+  const noRoutes = { summaries: async () => new Map(), summary: async () => null, crossFacilityOrdersEnabled: async () => false };
+  const row = (id: string) => ({ id, encounterId, patientId, facilityId, status: 'draft', cursorAt: '2026-11-10T09:00:00.000000Z' });
+
+  function setup(rows: unknown[], acknowledgements: unknown[]) {
+    const fake = fakeClient([
+      [/from ehr\.prescription_allergy_acknowledgements/, acknowledgements],
+      [/from ehr\.prescriptions/, rows],
+    ]);
+    let details: unknown;
+    const repository = repositoryWith(fake.client);
+    repository.run.mockImplementation(async (_c, _p, _a, _e, operation) => {
+      const result = await operation(fake.client);
+      details = result.details;
+      return result.value;
+    });
+    const service = new PrescriptionsService(repository as never, {} as never, noRoutes as never);
+    return { service, calls: fake.calls, details: () => details };
+  }
+
+  it('answers the stage, reason, who, when and what each covered on GET, and audits only the count', async () => {
+    const { service, calls, details } = setup([row(prescriptionId)], [stored]);
+    const result = await service.get(context, patientId, encounterId, prescriptionId) as unknown as Record<string, unknown>;
+    const { prescriptionId: _omitted, ...answered } = stored;
+    expect(result.allergyAcknowledgements).toEqual([answered]);
+    expect(details()).toEqual({ allergyAcknowledgementCount: 1 });
+    expect(JSON.stringify(details())).not.toContain('Tolerated');
+    const read = calls.find((call) => /from ehr\.prescription_allergy_acknowledgements/.test(call.sql));
+    // Bound to the prescription, the patient and this facility (RLS checks the facility's read access too).
+    expect(read?.values).toEqual([[prescriptionId], patientId, facilityId]);
+    expect(read?.sql).toMatch(/order by created_at, id/);
+  });
+
+  it('answers an empty list for a prescription without an acknowledgement', async () => {
+    const { service, details } = setup([row(prescriptionId)], []);
+    const result = await service.get(context, patientId, encounterId, prescriptionId) as unknown as Record<string, unknown>;
+    expect(result.allergyAcknowledgements).toEqual([]);
+    expect(details()).toEqual({ allergyAcknowledgementCount: 0 });
+  });
+
+  it('answers each listed prescription with its own acknowledgements, and audits the total count', async () => {
+    const { service, details } = setup([row(prescriptionId), row(otherPrescriptionId)],
+      [stored, { ...stored, id: '123e4567-e89b-42d3-a456-426614174031', stage: 'activate' }]);
+    const page = await service.list(context, patientId, encounterId, { limit: 20 } as never);
+    const items = page.items as unknown as { id: string; allergyAcknowledgements: { stage: string }[] }[];
+    expect(items.find((item) => item.id === prescriptionId)?.allergyAcknowledgements.map((item) => item.stage))
+      .toEqual(['create', 'activate']);
+    expect(items.find((item) => item.id === otherPrescriptionId)?.allergyAcknowledgements).toEqual([]);
+    expect(details()).toEqual({ resultCount: 2, allergyAcknowledgementCount: 2 });
   });
 });
