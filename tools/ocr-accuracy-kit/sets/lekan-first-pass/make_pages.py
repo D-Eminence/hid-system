@@ -59,6 +59,8 @@ class Doc:
         self.default_role = default_role
         self.items = []
         self.identity = None
+        # The date the page gives for the items written next (LABELLING.md "Dates"); None where it gives none.
+        self.date = None
 
     def line(self, page, text, role=None):
         if text == FOOTER:
@@ -67,7 +69,7 @@ class Doc:
         self.roles[page - 1].append(role or self.default_role)
         return len(self.pages[page - 1])
 
-    def item(self, kind, page, lines, as_written, prescription=None, trap=None, **kw):
+    def item(self, kind, page, lines, as_written, prescription=None, trap=None, date=..., **kw):
         joined = '\n'.join(self.pages[page - 1][n - 1] for n in lines)
         assert as_written in joined, (self.doc_id, as_written, joined)
         f = fields(kind, **kw)
@@ -84,7 +86,8 @@ class Doc:
             assert prescription is None, (self.doc_id, as_written, 'no prescription on a stopped medicine')
         self.items.append({'id': f'{self.doc_id}-i{len(self.items) + 1:02d}', 'kind': kind, 'page': page,
                            'lines': lines, 'asWritten': as_written, 'fields': f,
-                           'prescription': prescription, 'trap': trap})
+                           'prescription': prescription,
+                           'dateAsWritten': self.date if date is ... else date, 'trap': trap})
 
     # Shorthands: add a line and the items read from it.
     def li(self, page, line_text, kind, as_written=None, role=None, **kw):
@@ -98,6 +101,10 @@ class Doc:
                          'folderNumberAsWritten': folder, 'sexAsWritten': sex}
 
     def key(self):
+        for item in self.items:
+            # As label.mjs checks: an item's date is copied from its own page.
+            date = item['dateAsWritten']
+            assert date is None or any(date in t for t in self.pages[item['page'] - 1]), (item['id'], date)
         traps = sorted({item['trap'].split(':')[0] for item in self.items if item['trap']})
         return {
             'docId': self.doc_id, 'file': self.file, 'mediaType': self.media, 'pages': len(self.pages),
@@ -130,6 +137,7 @@ TABLE_HEAD = 'Test          Result   Unit       Ref. range   Flag'
 
 def build_l001():
     d = Doc('L001', 'L001-outpatient_card.png', 'image/png', 'outpatient_card', 'handwritten', 1, 'hand')
+    d.date = '11/11/2026'  # the visit and prescription date (signature line)
     rx = {'prescriberAsWritten': 'Dr A. Example', 'dateAsWritten': '11/11/2026'}
     d.line(1, 'DEMO CLINIC - OUTPATIENT CARD', 'title')
     n = d.line(1, 'Name: Bola Testperson   Age: 52yrs   Sex: M   Folder No: DH-TEST-0153')
@@ -205,6 +213,7 @@ def draw_l001(d, path):
 
 def build_l002():
     d = Doc('L002', 'L002-lab_report.jpg', 'image/jpeg', 'lab_report', 'clean_typed', 1)
+    d.date = '09/11/2026'  # the request line's date ("Received"), as the kit's lab reports
     d.line(1, 'DEMO HOSPITAL - LABORATORY')
     d.line(1, 'HAEMATOLOGY AND PARASITOLOGY REPORT')
     n1 = d.line(1, 'Name: Ada Example   DOB: 14/03/1991   Sex: Female')
@@ -282,10 +291,12 @@ def build_l003():
     n = d.line(1, 'Name: Chidi Testperson   DOB: 02/07/1968   Sex: Male   Folder No: DH-TEST-0318')
     d.set_identity(1, [n], 'Chidi Testperson', '02/07/1968', 'DH-TEST-0318', 'Male')
     d.line(1, 'Admitted: 01/11/2026   Discharged: 08/11/2026   Ward: Male Medical')
+    d.date = '08/11/2026'  # discharged: the final diagnoses
     n = d.line(1, 'Diagnosis: Community-acquired pneumonia')
     d.item('diagnosis', 1, [n], 'Community-acquired pneumonia', name='Community-acquired pneumonia', status='confirmed')
     n = d.line(1, 'Secondary: T2DM (poorly controlled)')
     d.item('diagnosis', 1, [n], 'T2DM (poorly controlled)', name='T2DM', status='confirmed')
+    d.date = '01/11/2026'  # admitted: what was found on admission
     n = d.line(1, 'FHx: Hypertension (father)')
     d.item('diagnosis', 1, [n], 'FHx: Hypertension (father)', name='Hypertension', status='family_history')
     n = d.line(1, 'Allergy: Ceftriaxone - anaphylaxis (severe)')
@@ -297,6 +308,7 @@ def build_l003():
     d.item('vital', 1, [n], 'T 39.1C', measure='temperature', value='39.1', unit='C')
     d.item('vital', 1, [n], 'RR 28/min', measure='respiratory_rate', value='28', unit='/min')
     d.item('vital', 1, [n], 'SpO2 89%', measure='oxygen_saturation', value='89', unit='%')
+    d.date = None  # investigations: the page does not say when
     n = d.line(1, 'CXR: right lower lobe consolidation')
     d.item('note', 1, [n], 'CXR: right lower lobe consolidation', text='CXR: right lower lobe consolidation')
     n = d.line(1, 'WBC: 15.8 x10^9/L (4.0-11.0) H')
@@ -307,6 +319,7 @@ def build_l003():
            referenceRange='3.9-6.1', flag='H')
     d.line(1, FOOTER)
 
+    d.date = '08/11/2026'  # page 2: discharge medicines and follow-up, the date on its signature line
     d.line(2, 'DEMO HOSPITAL - DISCHARGE SUMMARY (continued) - page 2 of 2')
     d.line(2, 'Name: Chidi Testperson   Folder No: DH-TEST-0318')
     d.line(2, 'Discharge medication:')
@@ -367,6 +380,7 @@ def draw_l003(d, path):
 def build_l004():
     """Handwritten prescription; look-alike chlorpromazine / chlorpropamide; NKDA."""
     d = Doc('L004', 'L004-prescription.png', 'image/png', 'prescription', 'handwritten', 1, 'hand')
+    d.date = '03/11/2026'
     rx = {'prescriberAsWritten': 'Dr F. Sample', 'dateAsWritten': '03/11/2026'}
     look = 'lookalike:chlorpromazine/chlorpropamide'
     d.line(1, 'DEMO CLINIC', 'title')
@@ -395,6 +409,7 @@ def build_l004():
 def build_l005():
     """Handwritten, noisy outpatient card; strength trap amlodipine 5mg / losartan 50mg; FHx, past history, D/C."""
     d = Doc('L005', 'L005-outpatient_card.jpg', 'image/jpeg', 'outpatient_card', 'handwritten_noisy', 1, 'hand')
+    d.date = '05/11/2026'
     rx = {'prescriberAsWritten': 'Dr O. Demo', 'dateAsWritten': '05/11/2026'}
     st = 'strength:5mg/50mg'
     d.line(1, 'DEMO HOSPITAL', 'title')
@@ -429,6 +444,7 @@ def build_l005():
 def build_l006():
     """Typed prescription; look-alike carbamazepine / carbimazole; Nil known allergies."""
     d = Doc('L006', 'L006-prescription.png', 'image/png', 'prescription', 'clean_typed', 1)
+    d.date = '06/11/2026'
     rx = {'prescriberAsWritten': 'Dr N. Testdoctor', 'dateAsWritten': '06/11/2026'}
     look = 'lookalike:carbamazepine/carbimazole'
     d.line(1, 'DEMO HOSPITAL', 'title')
@@ -460,6 +476,7 @@ def build_l006():
 def build_l007():
     """Faint scan of a typed clinic note; Query, r/o, No evidence of; 8hrly; D/C."""
     d = Doc('L007', 'L007-outpatient_card.jpg', 'image/jpeg', 'outpatient_card', 'faint_scan', 1)
+    d.date = '07/11/2026'
     rx = {'prescriberAsWritten': 'Dr P. Testperson', 'dateAsWritten': '07/11/2026'}
     d.line(1, 'DEMO CLINIC', 'title')
     d.line(1, 'GENERAL OUTPATIENT CLINIC NOTE', 'heading')
@@ -495,6 +512,7 @@ def build_l007():
 def build_l008():
     """Handwritten, faint prescription with NO patient identity on the page; stat, prn, 8hrly."""
     d = Doc('L008', 'L008-prescription.jpg', 'image/jpeg', 'prescription', 'handwritten_faint', 1, 'hand')
+    d.date = '08/11/2026'
     rx = {'prescriberAsWritten': 'Dr S. Example', 'dateAsWritten': '08/11/2026'}
     d.line(1, 'DEMO CLINIC - EMERGENCY ROOM', 'title')
     d.line(1, 'Date: 08/11/2026')
@@ -522,6 +540,7 @@ def build_l008():
 def build_l009():
     """Skewed, darkened scan of a typed card; strength trap folic acid 5mg / atenolol 50mg; NKDA; r/o."""
     d = Doc('L009', 'L009-outpatient_card.jpg', 'image/jpeg', 'outpatient_card', 'skewed_noisy_scan', 1)
+    d.date = '09/11/2026'
     rx = {'prescriberAsWritten': 'Dr M. Demo', 'dateAsWritten': '09/11/2026'}
     st = 'strength:5mg/50mg'
     d.line(1, 'DEMO HOSPITAL', 'title')
@@ -560,6 +579,7 @@ def build_l009():
 def build_l010():
     """Typed parasitology report: MP, species, density, mRDT, PCV."""
     d = Doc('L010', 'L010-lab_report.png', 'image/png', 'lab_report', 'clean_typed', 1)
+    d.date = '10/11/2026'
     d.line(1, 'DEMO LABORATORY', 'title')
     d.line(1, 'PARASITOLOGY REPORT', 'heading')
     n1 = d.line(1, 'Name: Tunde Example   Age: 8yrs   Sex: M')
@@ -589,6 +609,7 @@ def build_l010():
 def build_l011():
     """Faint scan: Widal and an FBC table (whole-row asWritten); ?Typhoid in clinical details."""
     d = Doc('L011', 'L011-lab_report.jpg', 'image/jpeg', 'lab_report', 'faint_scan', 1)
+    d.date = '10/11/2026'
     d.line(1, 'DEMO HOSPITAL - LABORATORY', 'title')
     d.line(1, 'SEROLOGY AND HAEMATOLOGY REPORT', 'heading')
     n1 = d.line(1, 'Name: Blessing Demo   DOB: 30/01/1999   Sex: Female')
@@ -617,6 +638,7 @@ def build_l011():
 def build_l012():
     """Typed chemistry report (born-digital PDF): E/U/Cr table and blood sugars."""
     d = Doc('L012', 'L012-lab_report.pdf', 'application/pdf', 'lab_report', 'clean_typed', 1)
+    d.date = '10/11/2026'
     d.line(1, 'DEMO LABORATORY', 'title')
     d.line(1, 'CLINICAL CHEMISTRY REPORT', 'heading')
     n = d.line(1, 'Name: Yusuf Testperson   DOB: 12/12/1958   Sex: M   Folder No: DH-TEST-1240')
@@ -645,6 +667,7 @@ def build_l012():
 def build_l013():
     """Handwritten side-lab result slip: PCV, MP, mRDT, urine, blood group, RBS (no ranges written)."""
     d = Doc('L013', 'L013-lab_report.png', 'image/png', 'lab_report', 'handwritten', 1, 'hand')
+    d.date = '10/11/2026'
     d.line(1, 'DEMO CLINIC - SIDE LABORATORY', 'title')
     d.line(1, 'LAB RESULT SLIP', 'heading')
     n1 = d.line(1, 'Name: Amaka Testperson   Age: 24yrs   Sex: F')
@@ -670,6 +693,7 @@ def build_l013():
 def build_l014():
     """Skewed, noisy two-page scanned lab report (PDF): FBC table, MP, E/U/Cr table, FBS."""
     d = Doc('L014', 'L014-lab_report.pdf', 'application/pdf', 'lab_report', 'skewed_noisy_scan', 2)
+    d.date = '10/11/2026'  # the request date on page 1; page 2 gives the same date on its scientist line
     d.line(1, 'DEMO HOSPITAL - LABORATORY', 'title')
     d.line(1, 'LABORATORY REPORT', 'heading')
     n1 = d.line(1, 'Name: Femi Example   DOB: 04/04/1975   Sex: Male')
@@ -714,8 +738,10 @@ def build_l015():
     n = d.line(1, 'Name: Kemi Demo   DOB: 18/08/1990   Sex: Female   Folder No: DH-TEST-1515')
     d.set_identity(1, [n], 'Kemi Demo', '18/08/1990', 'DH-TEST-1515', 'Female')
     d.line(1, 'Admitted: 02/11/2026   Discharged: 06/11/2026   Ward: Female Medical')
+    d.date = '06/11/2026'  # discharged: the final diagnosis
     d.li(1, 'Diagnosis: Severe malaria (cerebral)', 'diagnosis', 'Severe malaria (cerebral)', name='Severe malaria',
          status='confirmed')
+    d.date = '02/11/2026'  # admitted: what was found on admission
     d.li(1, 'No evidence of meningitis (CSF normal)', 'diagnosis', 'No evidence of meningitis', name='meningitis',
          status='ruled_out')
     d.li(1, 'Past history of PTB (treated 2019)', 'diagnosis', 'Past history of PTB', name='PTB', status='history')
@@ -726,6 +752,7 @@ def build_l015():
     d.item('vital', 1, [n], 'T 39.8C', measure='temperature', value='39.8', unit='C')
     d.item('vital', 1, [n], 'BP 96/58', measure='blood_pressure', value='96/58', unit=None)
     d.item('vital', 1, [n], 'PR 122/min', measure='pulse', value='122', unit='/min')
+    d.date = None  # investigations and treatment given
     d.line(1, 'Investigations:', 'heading')
     d.li(1, 'MP: Seen (++++)', 'lab_result', test='MP', value='Seen (++++)', unit=None, referenceRange=None, flag=None)
     d.li(1, 'mRDT: Positive', 'lab_result', test='mRDT', value='Positive', unit=None, referenceRange=None, flag=None)
@@ -738,6 +765,7 @@ def build_l015():
     d.li(1, 'Transfused 1 unit packed cells', 'note', text='Transfused 1 unit packed cells')
     d.line(1, FOOTER)
 
+    d.date = '06/11/2026'  # page 2: discharge medicines and follow-up, the date on its signature line
     d.line(2, 'DEMO HOSPITAL - DISCHARGE SUMMARY (continued) - page 2 of 2', 'title')
     d.line(2, 'Name: Kemi Demo   Folder No: DH-TEST-1515')
     d.line(2, 'Discharge medication:', 'heading')
@@ -765,17 +793,20 @@ def build_l016():
     n2 = d.line(1, 'Folder No: DH-TEST-1616')
     d.set_identity(1, [n1, n2], 'Sola Testperson', '23/02/1955', 'DH-TEST-1616', 'Male')
     d.line(1, 'Admitted: 28/10/2026   Discharged: 07/11/2026   Ward: Male Medical')
+    d.date = '07/11/2026'  # discharged: the final diagnoses
     d.li(1, 'Diagnosis: Diabetic ketoacidosis', 'diagnosis', 'Diabetic ketoacidosis', name='Diabetic ketoacidosis',
          status='confirmed')
     d.li(1, 'Secondary: Type 2 diabetes mellitus', 'diagnosis', 'Type 2 diabetes mellitus',
          name='Type 2 diabetes mellitus', status='confirmed')
     d.li(1, 'Secondary: Hypertension', 'diagnosis', 'Hypertension', name='Hypertension', status='confirmed')
+    d.date = '28/10/2026'  # admitted
     d.li(1, 'Query diabetic nephropathy', 'diagnosis', name='diabetic nephropathy', status='suspected')
     d.li(1, 'FHx: T2DM (both parents)', 'diagnosis', name='T2DM', status='family_history')
     d.li(1, 'Allergy: Cotrimoxazole - Stevens-Johnson syndrome (severe)', 'allergy', substance='Cotrimoxazole',
          reaction='Stevens-Johnson syndrome', severity='severe', noKnownAllergies=False)
     d.line(1, FOOTER)
 
+    d.date = None  # page 2 gives no date
     d.line(2, 'DEMO HOSPITAL - DISCHARGE SUMMARY (continued) - page 2 of 3', 'title')
     d.line(2, 'Name: Sola Testperson   Folder No: DH-TEST-1616')
     d.li(2, 'Presenting complaint: polyuria, vomiting, drowsiness x3/7', 'note',
@@ -803,6 +834,7 @@ def build_l016():
         frequency='od', duration='x5/7', status='past')
     d.line(2, FOOTER)
 
+    d.date = '07/11/2026'  # page 3: discharge medicines and follow-up, the date on its signature line
     d.line(3, 'DEMO HOSPITAL - DISCHARGE SUMMARY (continued) - page 3 of 3', 'title')
     d.line(3, 'Name: Sola Testperson   Folder No: DH-TEST-1616')
     d.line(3, 'Discharge medication:', 'heading')
@@ -836,25 +868,30 @@ def build_l017():
     n = d.line(1, 'Name: Ruth Example   Age: 31yrs   Folder: DH-TEST-1717')
     d.set_identity(1, [n], 'Ruth Example', '31yrs', 'DH-TEST-1717', None)
     d.line(1, 'Adm: 01/11/2026   D/C: 07/11/2026')
+    d.date = '07/11/2026'  # discharged ("D/C"): the final diagnosis
     d.li(1, 'Dx: Severe pre-eclampsia', 'diagnosis', 'Severe pre-eclampsia', name='Severe pre-eclampsia',
          status='confirmed')
-    d.li(1, 'Delivered by C/S 02/11/2026', 'note', text='Delivered by C/S 02/11/2026')
+    d.li(1, 'Delivered by C/S 02/11/2026', 'note', text='Delivered by C/S 02/11/2026', date='02/11/2026')
+    d.date = '01/11/2026'  # admitted
     d.li(1, 'r/o HELLP syndrome', 'diagnosis', name='HELLP syndrome', status='suspected')
     d.li(1, 'NKDA', 'allergy', substance=None, reaction=None, severity=None, noKnownAllergies=True)
     n = d.line(1, 'On adm: BP 178/112   P 96')
     d.item('vital', 1, [n], 'BP 178/112', measure='blood_pressure', value='178/112', unit=None)
     d.item('vital', 1, [n], 'P 96', measure='pulse', value='96', unit=None)
+    d.date = None  # investigation
     d.li(1, 'Urine protein: +++', 'lab_result', test='Urine protein', value='+++', unit=None, referenceRange=None,
          flag=None)
     d.line(1, FOOTER)
 
     d.line(2, 'DEMO HOSPITAL - MATERNITY   page 2', 'title')
     d.line(2, 'Name: Ruth Example   Folder: DH-TEST-1717')
+    d.date = None  # treatment given on the ward
     d.line(2, 'Given on ward:')
     med(d, 2, 'Inj MgSO4 4g IV stat', name='MgSO4', strength='4g', form='Inj', route='IV', frequency='stat',
         duration=None, status='past')
     med(d, 2, 'Inj Hydralazine 5mg IV stat', name='Hydralazine', strength='5mg', form='Inj', route='IV',
         frequency='stat', duration=None, status='past')
+    d.date = '07/11/2026'  # discharge drugs, BP at discharge, review (signature line date)
     d.line(2, 'Discharge drugs:')
     med(d, 2, 'Tab Methyldopa 500mg tds - continue', name='Methyldopa', strength='500mg', form='Tab', route=None,
         frequency='tds', duration=None, status='current')
@@ -865,7 +902,8 @@ def build_l017():
     med(d, 2, 'Tab Aspirin 75mg od (stopped)', name='Aspirin', strength='75mg', form='Tab', route=None,
         frequency='od', duration=None, status='stopped')
     d.li(2, 'At D/C: BP 138/88', 'vital', 'BP 138/88', measure='blood_pressure', value='138/88', unit=None)
-    d.li(2, 'PCV: 30%', 'lab_result', test='PCV', value='30', unit='%', referenceRange=None, flag=None)
+    d.li(2, 'PCV: 30%', 'lab_result', test='PCV', value='30', unit='%', referenceRange=None, flag=None,
+         date=None)  # an investigation
     d.li(2, 'Review PNC 1/52', 'note', text='Review PNC 1/52')
     d.line(2, 'Dr E. Testperson   07/11/2026')
     d.line(2, FOOTER)
@@ -875,6 +913,7 @@ def build_l017():
 def build_l018():
     """Typed one-page referral letter: Query; Past history of; Nil known; current meds; stopped."""
     d = Doc('L018', 'L018-referral_letter.png', 'image/png', 'referral_letter', 'clean_typed', 1)
+    d.date = '10/11/2026'
     d.line(1, 'DEMO CLINIC', 'title')
     d.line(1, 'REFERRAL LETTER', 'heading')
     d.line(1, 'Date: 10/11/2026')
@@ -884,7 +923,7 @@ def build_l018():
     d.line(1, 'Dear Colleague,')
     d.li(1, 'Kindly see the above named with insomnia and low mood x3/12.', 'note', 'insomnia and low mood x3/12',
          text='insomnia and low mood x3/12')
-    d.li(1, 'Working diagnosis: Depression', 'diagnosis', 'Depression', name='Depression', status='confirmed')
+    d.li(1, 'Working diagnosis: Depression', 'diagnosis', name='Depression', status='suspected')
     d.li(1, 'Query bipolar affective disorder', 'diagnosis', name='bipolar affective disorder', status='suspected')
     d.li(1, 'Past history of seizures', 'diagnosis', name='seizures', status='history')
     d.li(1, 'Allergies: Nil known', 'allergy', substance=None, reaction=None, severity=None, noKnownAllergies=True)
@@ -908,6 +947,7 @@ def build_l018():
 def build_l019():
     """Skewed two-page scanned referral (PDF): look-alike carbimazole / carbamazepine (current); No evidence of; FHx."""
     d = Doc('L019', 'L019-referral_letter.pdf', 'application/pdf', 'referral_letter', 'skewed_noisy_scan', 2)
+    d.date = '09/11/2026'  # the letter date on page 1; page 2 gives no date
     look = 'lookalike:carbamazepine/carbimazole'
     d.line(1, 'DEMO HOSPITAL', 'title')
     d.line(1, 'REFERRAL LETTER', 'heading')
@@ -918,8 +958,7 @@ def build_l019():
     d.line(1, 'Dear Colleague,')
     d.li(1, 'Kindly review with weight loss, palpitations, heat intolerance x4/12.', 'note',
          'weight loss, palpitations, heat intolerance x4/12', text='weight loss, palpitations, heat intolerance x4/12')
-    d.li(1, 'Working diagnosis: Thyrotoxicosis', 'diagnosis', 'Thyrotoxicosis', name='Thyrotoxicosis',
-         status='confirmed')
+    d.li(1, 'Working diagnosis: Thyrotoxicosis', 'diagnosis', name='Thyrotoxicosis', status='suspected')
     d.li(1, 'No evidence of heart failure', 'diagnosis', name='heart failure', status='ruled_out')
     d.li(1, 'FHx: Thyroid disease (sister)', 'diagnosis', name='Thyroid disease', status='family_history')
     d.li(1, 'Allergy: Aspirin - wheeze', 'allergy', substance='Aspirin', reaction='wheeze', severity=None,
@@ -933,6 +972,7 @@ def build_l019():
         frequency='tds', duration=None, status='current')
     d.line(1, FOOTER)
 
+    d.date = None  # page 2 gives no date
     d.line(2, 'DEMO HOSPITAL - REFERRAL (continued) - page 2 of 2', 'title')
     d.line(2, 'Name: Peter Demo   Folder No: DH-TEST-1919')
     d.line(2, 'Recent vitals:', 'heading')
@@ -958,6 +998,7 @@ def build_l019():
 def build_l020():
     """Handwritten vital signs chart: one vital per span, units only where written."""
     d = Doc('L020', 'L020-vitals_chart.jpg', 'image/jpeg', 'vitals_chart', 'handwritten', 1, 'hand')
+    d.date = '10/11/2026'
     d.line(1, 'DEMO HOSPITAL', 'title')
     d.line(1, 'OBSERVATION / VITAL SIGNS CHART', 'heading')
     n1 = d.line(1, 'Name: Ngozi Testperson   Age: 40yrs   Sex: F')
