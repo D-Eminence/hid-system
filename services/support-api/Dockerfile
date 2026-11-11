@@ -1,14 +1,23 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
-COPY services/support-api/package.json services/support-api/package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
-COPY services/support-api/src ./dist
+# Shared privacy-scrubbed error reporting (@hid/server-telemetry) with its own lockfile.
+# It is compiled with its development dependencies, then reinstalled production-only.
+COPY packages/server-telemetry/package.json packages/server-telemetry/package-lock.json packages/server-telemetry/tsconfig.json ./packages/server-telemetry/
+COPY packages/server-telemetry/src ./packages/server-telemetry/src
+RUN cd packages/server-telemetry && npm ci && npm run build \
+  && rm -rf node_modules && npm ci --omit=dev && npm cache clean --force
+COPY services/support-api/package.json services/support-api/package-lock.json ./services/support-api/
+RUN cd services/support-api && npm ci --omit=dev && npm cache clean --force
+COPY services/support-api/src ./services/support-api/dist
 
 FROM gcr.io/distroless/nodejs22-debian13@sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812 AS runtime
 ENV NODE_ENV=production
-WORKDIR /app
-COPY --chown=65532:65532 --from=build /app/node_modules ./node_modules
-COPY --chown=65532:65532 --from=build /app/dist ./dist
+WORKDIR /app/services/support-api
+COPY --chown=65532:65532 --from=build /app/packages/server-telemetry/package.json /app/packages/server-telemetry/package.json
+COPY --chown=65532:65532 --from=build /app/packages/server-telemetry/node_modules /app/packages/server-telemetry/node_modules
+COPY --chown=65532:65532 --from=build /app/packages/server-telemetry/dist /app/packages/server-telemetry/dist
+COPY --chown=65532:65532 --from=build /app/services/support-api/node_modules ./node_modules
+COPY --chown=65532:65532 --from=build /app/services/support-api/dist ./dist
 USER 65532:65532
 EXPOSE 3011
 STOPSIGNAL SIGTERM

@@ -1,12 +1,12 @@
 import type { ChatAccess,ChatAudience } from './chat-access';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import { getEnvironment } from '../../config/environment';
 import { DatabaseService } from '../../database/database.service';
 import { BedrockAiService } from './bedrock-ai.service';
-import { ClaudeAiService, type ConversationExchange } from './claude-ai.service';
+import { ClaudeAiService, ClaudeCallError, type ConversationExchange } from './claude-ai.service';
 import { PatientRecordsService } from './patient-records.service';
 import { PatientEvidenceService } from './patient-evidence.service';
 import { binding,chunks,evidenceKey,originLabel,type Coverage,type Evidence,type EvidenceBinding } from './patient-evidence.types';
@@ -22,9 +22,30 @@ const LOCAL_KINDS = ['note','encounter','diagnosis','prescription','investigatio
 const LOCAL_PAGE_LIMIT = 2000;
 /** A search question about the patient's age or sex, answered from the age-and-sex profile. */
 const AGE_OR_SEX = /\b(?:age|aged|old|older|born|birthday|sex|gender|male|female|man|woman|boy|girl)\b/i;
+/**
+ * The whole turn's time limit. Staff stay under the gateway's 50-second read timeout for their chat
+ * route, so a slow turn ends here, with this service's own answer and a logged reason, not at the gateway.
+ */
+const TURN_LIMIT_MS: Record<ChatAudience, number> = { patient: 60_000, staff: 48_000 };
+
+/**
+ * Why a turn failed, as fixed words only: never the error's message, the question, record text, the
+ * model's words or any identifier, because a message from a model, a parser or the database can carry them.
+ */
+export function chatFailure(error: unknown): { category: string; exceptionType: string; providerStatus?: number } {
+  // Read by shape, not instanceof: a timeout is a DOMException, which may come from another realm.
+  const object = typeof error === 'object' && error !== null ? error as { name?: unknown; constructor?: { name?: unknown } } : undefined;
+  const exceptionType = typeof object?.constructor?.name === 'string' && object.constructor.name ? object.constructor.name : 'UnknownException';
+  if (error instanceof ClaudeCallError) {
+    return { category: `model_${error.category}`, exceptionType, ...(error.status ? { providerStatus: error.status } : {}) };
+  }
+  if (object?.name === 'TimeoutError' || object?.name === 'AbortError') return { category: 'timeout', exceptionType };
+  return { category: 'other', exceptionType };
+}
 
 @Injectable()
 export class PatientChatService {
+  private readonly logger = new Logger(PatientChatService.name);
   // Per-task admission limit plus gateway limits bound staging requests. This
   // is not a distributed billing limit; multiple replicas have separate quotas.
   private readonly admissions = new Map<string, { until: number; count: number; busy: boolean }>();
@@ -47,6 +68,9 @@ export class PatientChatService {
       throw new DomainProblem(400, 'INVALID_QUESTION', 'A question of 1 to 500 characters is required');
     }
     const audience = this.audienceOf(access);
+    // The whole turn counts against its limit, authorization and history included, so a staff turn
+    // that is slow before the model is asked still ends inside the gateway's 50 seconds.
+    const signal = AbortSignal.timeout(TURN_LIMIT_MS[audience]);
     const authorization = await access.authorize(request);
     // One patient per turn: every later authorization must be for the same patient.
     const turn: ChatAccess = { ...access, authorize: async current => {
@@ -67,7 +91,8 @@ export class PatientChatService {
       // A removed identifier can be longer than what it replaces; the question stays within its 500-character limit.
       const question = clean(typed).slice(0, 500);
       const context = { ...saved, exchanges: saved.exchanges.map(e => ({ ...e, question: clean(e.question), answer: clean(e.answer) })) };
-      const signal = AbortSignal.timeout(60_000);
+      // Authorization, history and cleaning take no signal; stop here if they used up the turn.
+      signal.throwIfAborted();
       const plan = await this.claude.plan(question, context.exchanges, signal, audience);
       let reply: ChatReply; let selected: EvidenceBinding[] = [];
       if (plan.intent === 'conversation') {
@@ -85,6 +110,9 @@ export class PatientChatService {
       return { ...reply,sources:reply.sources.map(source=>{const {hash:_hash,...safe}=source as unknown as Record<string,unknown>;return safe;}) };
     } catch (error) {
       if (error instanceof DomainProblem) throw error;
+      // The failure category only, so a 503 can be told apart (time limit, a cut-off or invalid answer,
+      // the provider refusing) without patient data reaching the log.
+      this.logger.warn({ message: 'Record chat unavailable', ...chatFailure(error), audience, correlationId: request.correlationId });
       throw unavailable();
     } finally { release(); }
   }

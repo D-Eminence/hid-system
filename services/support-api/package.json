@@ -10,6 +10,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@aws-sdk/client-lex-runtime-v2": "^3.1139.0"
+    "@aws-sdk/client-lex-runtime-v2": "^3.1139.0",
+    "@hid/server-telemetry": "file:../../packages/server-telemetry"
   }
 }

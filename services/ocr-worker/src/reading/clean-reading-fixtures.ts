@@ -182,7 +182,8 @@ export const CLEAN_READING_ROWS: readonly CleanReadingRow[] = [
       dose: '40?', doseUnit: 'mg' },
     readB: { item: medicine('PO? Omeprazole? 40mg? [freq?]', { route: 'PO?', name: 'Omeprazole?', frequency: '[freq?]' }),
       dose: '40?', doseUnit: 'mg' },
-    plain: 'PO? (or [route?]) Omeprazole? 40mg? [freq?]',
+    // Before the second cleanup round of 2026-11-10: "PO? (or [route?]) …"; a placeholder option adds nothing.
+    plain: 'PO? Omeprazole? 40mg? [freq?]',
     reasons: ['readings_disagree', 'unsure_from_letters'],
   },
   {
