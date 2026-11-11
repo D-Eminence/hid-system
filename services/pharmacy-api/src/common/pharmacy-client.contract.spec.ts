@@ -47,4 +47,29 @@ describe('PharmacyApiClient transport contract', () => {
       .rejects.toMatchObject<Partial<PharmacyApiProblem>>({ status: 409, payload });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('reads one patient\'s imported medications as a browser GET with patientId, limit and cursor in the query', async () => {
+    const record = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-e89b-42d3-a456-426614174004',
+      facilityId: context.facilityId, sourceType: 'IMPORTED_MEDICATION_EVIDENCE', activityStatus: 'unknown',
+      medicationText: 'Fictional medicine', strengthText: null, doseText: null, frequencyText: null,
+      historicalContext: null, sourceDocumentId: '123e4567-e89b-42d3-a456-426614174005',
+      ocrJobId: '123e4567-e89b-42d3-a456-426614174006', extractionId: '123e4567-e89b-42d3-a456-426614174007',
+      validationId: '123e4567-e89b-42d3-a456-426614174008', validationVersion: 1,
+      publicationId: '123e4567-e89b-42d3-a456-426614174009', version: 1, createdAt: '2026-11-05T10:00:00.000Z' };
+    const fetchMock = jest.fn().mockResolvedValue(new Response(JSON.stringify({ items: [record], nextCursor: record.id }),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+    global.fetch = fetchMock;
+    const client = new PharmacyApiClient({ baseUrl: 'https://pharmacy.test' });
+    await expect(client.listImportedMedicationEvidence(record.patientId, context, { limit: 20, cursor: record.id }))
+      .resolves.toEqual({ items: [record], nextCursor: record.id });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(`https://pharmacy.test/api/v1/pharmacy/imports?patientId=${
+      record.patientId}&limit=20&cursor=${record.id}`);
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(request.method).toBe('GET');
+    expect(request.headers).not.toHaveProperty('x-hid-internal-caller');
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ items: [record] }),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+    await expect(client.listImportedMedicationEvidence(record.patientId, context))
+      .rejects.toMatchObject({ status: 502 });
+  });
 });
