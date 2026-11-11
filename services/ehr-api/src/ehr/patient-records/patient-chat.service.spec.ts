@@ -573,3 +573,38 @@ describe('Second review: a server line is found as a sentence of its own, with a
    .toBe(`${HB} Eat well.\n\n${RESULT_LINE}`);
  });
 });
+
+describe('Record chat answers: dated questions and no dashes',()=>{
+ const EM='\u2014';
+ const dx=(n:number,date:string,condition:string)=>evidence({kind:'diagnosis',id:`55555555-5555-4555-8555-${String(n).padStart(12,'0')}`,version:'1',
+  title:condition,recordedAt:date,effectiveAt:date,provenance:'Clinician recorded condition',quality:'confirmed',fields:{condition,verificationStatus:'confirmed'}});
+ it('answers "first diagnosis" from the earliest diagnoses in the authorized snapshot, even when the search finds nothing',async()=>{
+  const records=[dx(1,'2026-09-21T00:00:00Z','Iron deficiency anaemia'),dx(2,'2018-04-02T00:00:00Z','Synthetic asthma'),item('note',3,{text:'Visit'})];
+  const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'earliest diagnosis'});
+  s.query.mockImplementation(async()=>({rows:[]}));
+  s.answer.mockResolvedValue('**The earliest recorded diagnosis is Synthetic asthma, 2 April 2018.** [1]');
+  await s.service.answer(request,'what was my first diagnosis');
+  const sources=s.answer.mock.calls[0][1] as Evidence[];
+  expect(sources[0]!.id).toBe(records[1]!.id);expect(sources.map(r=>r.id)).toContain(records[0]!.id);
+  expect(s.answer.mock.calls[0][6]).toBe('earliest');
+  // Only what the snapshot (the reader's access) holds is ever sent.
+  expect(sources.every(r=>records.some(x=>x.id===r.id))).toBe(true);
+ });
+ it('never adds records outside the staff member\'s permitted snapshot',async()=>{
+  const permitted=[dx(1,'2020-01-01T00:00:00Z','Synthetic condition A')];
+  const s=setup([dx(2,'2001-01-01T00:00:00Z','Hidden condition'),...permitted]);
+  s.plan.mockResolvedValue({intent:'records',recordIntent:'condition',query:'diagnosis'});
+  s.answer.mockResolvedValue('**Synthetic condition A.** [1]');
+  await s.service.answer(request,'first diagnosis of this patient',staffAccess(s,permitted));
+  expect((s.answer.mock.calls[0][1] as Evidence[]).map(r=>r.id)).toEqual([permitted[0]!.id]);
+ });
+ it('removes dashes from staff and patient answers before saving and returning them',async()=>{
+  const s=setup([RX]);s.answer.mockResolvedValue(`**A prescribed medicine ${EM} recorded 2025\u20132026.** [1]`);
+  const staff=await s.service.answer(request,'Latest medicine',staffAccess(s,[RX]));
+  expect(staff.answer).toBe('**A prescribed medicine, recorded 2025 to 2026.** [1]');
+  expect(s.save.mock.calls[0][3].answer).toBe(staff.answer);
+  const p=setup();p.plan.mockResolvedValue({intent:'conversation',answer:`Hello ${EM} ask me about your record.`});
+  const reply=await p.service.answer(request,'Hello');
+  expect(reply.answer).not.toMatch(/[\u2013\u2014\u2015]/);expect(p.save.mock.calls[0][3].answer).toBe(reply.answer);
+ });
+});

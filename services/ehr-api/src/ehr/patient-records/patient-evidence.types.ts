@@ -62,6 +62,16 @@ export interface EvidenceReference extends EvidenceBinding {
   /** Sent by this backend on every new answer's sources; absent on answers saved before. */
   origin?: EvidenceOrigin; originLabel?: string;
 }
+/**
+ * Coverage gaps shown under an answer, in plain words. A Lab outage is recognised by isLabUnavailable,
+ * which also knows the wording used before, as a snapshot is read in the same release that changes it.
+ */
+export const LAB_UNAVAILABLE = 'The lab service could not be reached, so lab results may be missing from this answer.';
+export const DOCUMENTS_UNAVAILABLE = 'Some documents could not be read right now, so what they say is not included.';
+export const PERMISSIONS_LIMITED = 'Some parts of this record are outside what you are allowed to read, so they are not included.';
+export function isLabUnavailable(note: string): boolean {
+  return note === LAB_UNAVAILABLE || note.startsWith('Laboratory service unavailable');
+}
 export interface Coverage { complete: boolean; unavailable: string[]; pendingDocuments: number; recordCount: number; selectedCount: number }
 export interface EvidenceSnapshot { records: Evidence[]; coverage: Coverage }
 function canonical(value: unknown): string {
