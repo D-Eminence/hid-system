@@ -146,16 +146,20 @@ export class PrescriptionsService {
           );
           const row = this.single(result.rows[0]);
           if (matches.length > 0 && input.allergyAcknowledgement) {
+            const matchedRecordedAllergyIds = [...new Set(matches.flatMap((match) => match.allergyId ? [match.allergyId] : []))];
+            const patientReportedMatched = matches.some((match) => match.source === 'patient_reported');
             await client.query(
               `insert into ehr.prescription_allergy_acknowledgements (
                  prescription_id, patient_id, facility_id, created_by, created_by_membership_id,
                  reason, matched_recorded_allergy_ids, patient_reported_matched
                ) values ($1, $2, $3, $4, $5, $6, $7::uuid[], $8)`,
               [row.id, patientId, context.facilityId, context.actor.accountId, context.membershipId,
-                input.allergyAcknowledgement.reason,
-                [...new Set(matches.flatMap((match) => match.allergyId ? [match.allergyId] : []))],
-                matches.some((match) => match.source === 'patient_reported')],
+                input.allergyAcknowledgement.reason, matchedRecordedAllergyIds, patientReportedMatched],
             );
+            // The audit says the prescriber went ahead after a warning: flags and counts only,
+            // never the substance or the reason text.
+            return { value: row, id: row.id, details: { allergyOverride: true,
+              matchedRecordedCount: matchedRecordedAllergyIds.length, patientReportedMatched } };
           }
           return { value: row, id: row.id };
         },

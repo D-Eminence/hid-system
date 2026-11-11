@@ -68,6 +68,42 @@ describe('allergy matching (0124)', () => {
       .toMatchObject({ matchKind: 'same_medicine' });
   });
 
+  it('reads hyphenated combination names as their parts', () => {
+    expect(matchAllergies({ display: 'Amoxicillin-clavulanate 625 mg' }, [recorded('Amoxicillin')])[0])
+      .toMatchObject({ matchKind: 'same_medicine' });
+    expect(matchAllergies({ display: 'Amoxicillin-clavulanate 625 mg' }, [recorded('Penicillin')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'penicillins' });
+    expect(matchAllergies({ display: 'Sulfamethoxazole-trimethoprim 960mg' }, [recorded('Sulfa drugs')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'sulfonamide antibiotics' });
+    expect(matchAllergies({ display: 'Co-amoxiclav 625 mg' }, [recorded('Penicillin')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'penicillins' });
+    expect(matchAllergies({ display: 'Co-trimoxazole 480 mg' }, [recorded('co-trimoxazole')])[0])
+      .toMatchObject({ matchKind: 'same_medicine' });
+  });
+
+  it('reads "X-induced" and "X-sensitive" allergy notes as naming X', () => {
+    expect(matchAllergies({ display: 'Amoxicillin 500mg' }, [recorded('Amoxicillin-induced rash')])[0])
+      .toMatchObject({ matchKind: 'same_medicine' });
+    expect(matchAllergies({ display: 'Ibuprofen 400mg' }, [recorded('Aspirin-sensitive asthma')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'NSAIDs (anti-inflammatory painkillers)' });
+    expect(matchAllergies({ display: 'Diclofenac 50 mg' }, [recorded('Non-steroidal anti-inflammatory drugs')])[0])
+      .toMatchObject({ matchKind: 'same_class' });
+    expect(matchAllergies({ display: 'Paracetamol 500 mg' }, [recorded('Aspirin-induced rash')])).toEqual([]);
+  });
+
+  it('recognises Penicillin V and Penicillin G as penicillins', () => {
+    expect(matchAllergies({ display: 'Penicillin V 250mg' }, [recorded('Penicillins')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'penicillins' });
+    expect(matchAllergies({ display: 'Penicillin V' }, [recorded('Amoxicillin')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'penicillins' });
+    expect(matchAllergies({ display: 'Penicillin V 250mg' }, [recorded('Cefalexin')])[0])
+      .toMatchObject({ matchKind: 'cross_reactivity', className: 'penicillins' });
+    expect(matchAllergies({ display: 'Penicillin G 1.2 MU injection' }, [recorded('Penicillins')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'penicillins' });
+    expect(matchAllergies({ display: 'Phenoxymethylpenicillin 250mg' }, [recorded('Cefalexin')])[0])
+      .toMatchObject({ matchKind: 'cross_reactivity' });
+  });
+
   it('allergyTerms drops blank and none-like terms', () => {
     expect(allergyTerms('Penicillin / Sulfa\nnone; ')).toEqual(['Penicillin', 'Sulfa']);
   });

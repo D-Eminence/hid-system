@@ -3615,7 +3615,8 @@ reason text.
 (mild | moderate | severe | unknown), status (active | entered_in_error), enteredInErrorBy, enteredInErrorAt,
 enteredInErrorReason, rowVersion, createdAt, updatedAt, recordedHere`. Recorded allergies follow the patient: a
 clinician with read access at any facility sees those recorded at every facility; only the recording facility
-(`recordedHere: true`) may mark one entered in error (else 409 `ALLERGY_RECORDED_ELSEWHERE`).
+(`recordedHere: true`) may mark one entered in error (else 409 `ALLERGY_RECORDED_ELSEWHERE`, decided from a plain
+read before the row is locked, because under forced RLS a locking read at another facility sees no row).
 
 Create body: `{ substance (1-200, one line), reaction? (1-500, one line), severity }`.
 Entered in error body: `{ expectedRowVersion, reason (3-500) }`; 412 `VERSION_CONFLICT`, 409
@@ -3625,7 +3626,8 @@ Entered in error body: `{ expectedRowVersion, reason (3-500) }`; 412 `VERSION_CO
 reaction, severity, matchKind (same_medicine | same_class | cross_reactivity), className?, message` (one
 plain-English sentence). The medicine's display text and code are compared with each allergy (the patient's text is
 split into terms on commas, semicolons, slashes, new lines and "and"; "none", "nil", "NKDA" and the like are
-ignored): the same medicine by name; the same class (penicillins, cephalosporins, sulfonamide antibiotics, NSAIDs,
+ignored; a hyphen separates words, so "Amoxicillin-clavulanate" names amoxicillin and "Aspirin-sensitive asthma"
+names aspirin): the same medicine by name; the same class (penicillins, cephalosporins, sulfonamide antibiotics, NSAIDs,
 by class words, generic and common brand names); and penicillin/cephalosporin cross-reactivity, both ways. No match
 never means "safe".
 
@@ -3634,5 +3636,7 @@ its transaction. With a match and no `allergyAcknowledgement`, nothing is writte
 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED` with one `errors[]` entry per match (`field: allergyAcknowledgement`, the match's
 message). Sending `allergyAcknowledgement: { reason (3-500) }` creates the prescription and one
 `ehr.prescription_allergy_acknowledgements` row (the reason, the matched recorded allergy ids, whether the
-patient-reported text matched). An acknowledgement sent when nothing matches is ignored. A client must only send
+patient-reported text matched). The `ehr.prescription.create` audit of such a create adds
+`allergyOverride: true, matchedRecordedCount, patientReportedMatched` (counts and a flag, never the substance or the
+reason). An acknowledgement sent when nothing matches is ignored. A client must only send
 `allergyAcknowledgement` after a warning: an ehr-api without 0124 refuses the unknown property.

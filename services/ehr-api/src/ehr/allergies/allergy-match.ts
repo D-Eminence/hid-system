@@ -49,6 +49,9 @@ export const DRUG_CLASSES: readonly DrugClass[] = [
     classWords: ['penicillin', 'penicillins'],
     members: ['amoxicillin', 'amoxycillin', 'ampicillin', 'cloxacillin', 'flucloxacillin', 'dicloxacillin',
       'oxacillin', 'nafcillin', 'piperacillin', 'ticarcillin', 'benzylpenicillin', 'phenoxymethylpenicillin',
+      // The plain name, as written on "Penicillin V 250mg" or "Penicillin G": the medicine side
+      // recognises a class only by members and prefixes, so the name itself must be a member.
+      'penicillin', 'penicillin v', 'penicillin g', 'pen v', 'pen g', 'phenoxymethyl',
       'benzathine', 'procaine penicillin', 'co-amoxiclav', 'co amoxiclav', 'coamoxiclav', 'augmentin', 'ampiclox', 'amoxil',
       'tazocin', 'pivmecillinam', 'temocillin'],
   },
@@ -86,12 +89,19 @@ const CROSS_REACTIVE: readonly (readonly [DrugClass['key'], DrugClass['key']])[]
 const NOT_AN_ALLERGY = new Set(['none', 'nil', 'no', 'nkda', 'nka', 'n/a', 'na', 'unknown', 'not known',
   'no known allergies', 'no known drug allergies', 'no allergies', 'none known']);
 const FILLER = new Set(['allergy', 'allergies', 'allergic', 'to', 'drug', 'drugs', 'medicine', 'medicines',
-  'antibiotic', 'antibiotics', 'tablet', 'tablets', 'injection', 'class', 'group', 'and', 'or', 'the', 'of', 'a', 'an']);
+  'antibiotic', 'antibiotics', 'tablet', 'tablets', 'injection', 'class', 'group', 'and', 'or', 'the', 'of', 'a', 'an',
+  // How allergy notes describe a reaction ("Amoxicillin-induced rash", "Aspirin-sensitive asthma").
+  'induced', 'sensitive', 'sensitivity', 'intolerance', 'intolerant', 'reaction', 'related']);
 
-/** Lower case, letters, digits and hyphens kept; everything else one space. */
+/**
+ * Lower case, letters and digits kept; everything else, hyphens included, one
+ * space. A hyphen separates words: "Amoxicillin-clavulanate" is two medicines
+ * and "Amoxicillin-induced rash" names amoxicillin. List entries go through
+ * the same function, so "co-amoxiclav" is "co amoxiclav" on both sides.
+ */
 export function normalizeMedicineText(value: string): string {
   return ` ${value.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
-    .replace(/[^a-z0-9-]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
+    .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
 }
 
 function hasWord(normalized: string, word: string): boolean {

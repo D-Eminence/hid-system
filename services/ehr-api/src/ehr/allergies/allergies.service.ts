@@ -82,11 +82,14 @@ export class AllergiesService {
       context, patientId, 'write_records',
       { action: 'ehr.allergy.entered-in-error', resourceType: 'allergy', resourceId: allergyId },
       async (client) => {
-        const current = single(await find(client, patientId, allergyId, true));
-        if (current.facilityId !== context.facilityId) {
+        // Read before locking: under forced RLS, FOR UPDATE applies the update policy, which hides
+        // another facility's rows, so a locking read alone would answer 404 instead of 409 here.
+        const visible = single(await find(client, patientId, allergyId));
+        if (visible.facilityId !== context.facilityId) {
           throw new DomainProblem(409, 'ALLERGY_RECORDED_ELSEWHERE',
             'Only the facility that recorded this allergy can mark it as entered in error.');
         }
+        const current = single(await find(client, patientId, allergyId, true));
         if (current.status !== 'active') {
           throw new DomainProblem(409, 'ALLERGY_ALREADY_ENTERED_IN_ERROR', 'This allergy is already marked as entered in error.');
         }

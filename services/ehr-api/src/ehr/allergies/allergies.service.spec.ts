@@ -43,7 +43,7 @@ function repositoryWith(client: unknown) {
     }),
     executeCreate: jest.fn(async (_client, _c, _p, _k, _o, _d, _r, create) => {
       const created = await create();
-      return { value: created.value, resourceId: created.id };
+      return { value: created.value, resourceId: created.id, details: { ...created.details, idempotentReplay: false } };
     }),
     setChangeReason: jest.fn(async () => undefined),
     encounterExists: jest.fn(async () => true),
@@ -72,11 +72,17 @@ describe('AllergiesService (0124)', () => {
     expect(calls[0]?.values).toEqual([patientId, facilityId, accountId, membershipId, 'Penicillin', 'Hives', 'severe']);
   });
 
-  it('refuses to mark an allergy recorded at another facility', async () => {
-    const { client } = fakeClient([[/from ehr\.recorded_allergies/, [allergyRow({ facilityId: otherFacilityId })]]]);
+  it('refuses to mark an allergy recorded at another facility, before any locking read', async () => {
+    // Under forced RLS a FOR UPDATE read of another facility's row returns nothing (the update
+    // policy applies), so the facility check must come from the plain read.
+    const { client, calls } = fakeClient([
+      [/for update/, []],
+      [/from ehr\.recorded_allergies/, [allergyRow({ facilityId: otherFacilityId })]],
+    ]);
     const service = new AllergiesService(repositoryWith(client) as never);
     await expect(service.markEnteredInError(context, patientId, allergyId, { expectedRowVersion: 1, reason: 'Wrong patient' }))
       .rejects.toMatchObject({ status: 409, code: 'ALLERGY_RECORDED_ELSEWHERE' });
+    expect(calls.some((call) => /for update/.test(call.sql))).toBe(false);
   });
 
   it('refuses a stale version and an allergy already marked', async () => {
@@ -137,8 +143,9 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
       [/from ehr\.recorded_allergies/, recorded],
       [/patient_reported_health_profiles/, reported === null ? [] : [{ allergies: reported, updated_at: null }]],
     ]);
-    const service = new PrescriptionsService(repositoryWith(fake.client) as never, {} as never, noRoutes as never);
-    return { service, calls: fake.calls };
+    const repository = repositoryWith(fake.client);
+    const service = new PrescriptionsService(repository as never, {} as never, noRoutes as never);
+    return { service, calls: fake.calls, repository };
   }
 
   it('refuses a matching prescription without an acknowledgement and writes nothing', async () => {
@@ -159,11 +166,29 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
       'Tolerated amoxicillin last year; monitoring', [allergyId], true]);
   });
 
+  it('marks a create that went ahead after a warning in the audit, with counts and flags only', async () => {
+    const { service, repository } = setup([{ id: allergyId, substance: 'Penicillin', reaction: null, severity: 'severe' }],
+      'penicillin');
+    await service.create(context, patientId, encounterId,
+      { ...input, allergyAcknowledgement: { reason: 'Tolerated amoxicillin last year; monitoring' } }, 'key-12345678');
+    const result = await repository.executeCreate.mock.results[0]?.value;
+    expect(result.details).toEqual({ allergyOverride: true, matchedRecordedCount: 1, patientReportedMatched: true,
+      idempotentReplay: false });
+    expect(JSON.stringify(result.details)).not.toMatch(/penicillin|amoxicillin|monitoring/i);
+  });
+
   it('creates a prescription with no match without any acknowledgement row', async () => {
     const { service, calls } = setup([{ id: allergyId, substance: 'Peanuts', reaction: null, severity: 'mild' }], 'None');
     await service.create(context, patientId, encounterId,
       { ...input, allergyAcknowledgement: { reason: 'Not needed but sent' } }, 'key-12345678');
     expect(calls.some((call) => /prescription_allergy_acknowledgements/.test(call.sql))).toBe(false);
     expect(calls.some((call) => /insert into ehr\.prescriptions/.test(call.sql))).toBe(true);
+  });
+
+  it('adds no override details to the audit of a create with no match', async () => {
+    const { service, repository } = setup([], null);
+    await service.create(context, patientId, encounterId, input, 'key-12345678');
+    const result = await repository.executeCreate.mock.results[0]?.value;
+    expect(result.details).toEqual({ idempotentReplay: false });
   });
 });

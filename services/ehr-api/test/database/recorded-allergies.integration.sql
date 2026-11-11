@@ -213,6 +213,16 @@ begin
    where id = 'a1241000-0000-4000-8000-000000000001';
   get diagnostics row_count = row_count;
   if row_count <> 0 then raise exception '4a: marked from a facility with read access only'; end if;
+  -- 4a2. At F2 a plain read sees the row but a locking read (FOR UPDATE, which applies the
+  -- update policy) does not. The EHR therefore reads first and answers "recorded elsewhere"
+  -- (409) from the plain read, and locks only at the recording facility.
+  if (select facility_id from ehr.recorded_allergies where id = 'a1241000-0000-4000-8000-000000000001')
+       is distinct from 'a124d000-0000-4000-8000-000000000002'::uuid then
+    raise exception '4a2: the plain read at F2 does not show F1''s allergy';
+  end if;
+  if exists (select 1 from ehr.recorded_allergies where id = 'a1241000-0000-4000-8000-000000000001' for update) then
+    raise exception '4a2: a locking read at F2 returned F1''s allergy; the service''s read-then-lock order is unneeded';
+  end if;
   perform pg_temp.as_staff('staff:a124-doctor', 'a124f000-0000-4000-8000-000000000001',
     'a124d000-0000-4000-8000-000000000002', 'direct-care', 'a124-error-0002');
   -- 4b. Without a change reason.
