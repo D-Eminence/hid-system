@@ -48,7 +48,7 @@ describe('HID event envelope v1', () => {
     expect(() => eventEnvelope({ ...pinAccess, payload: { ...pinAccess.payload, pin: '1234' } }))
       .toThrow(/outside its producer contract/);
   });
-  it('allows the PIN notice to name its grant\'s scope (0121), and nothing else', () => {
+  it('allows the PIN notice to name its grant\'s scope (0120), and nothing else', () => {
     const pinAccess = { ...event, eventType: 'PatientAccessPinVerified', aggregateType: 'identity-consent-grant', aggregateVersion: 1,
       payload: { consentGrantId: event.aggregateId, reviewRequired: true, scope: 'write_records' } };
     expect(eventEnvelope(pinAccess)).toMatchObject({ type: 'PatientAccessPinVerified', payload: pinAccess.payload });

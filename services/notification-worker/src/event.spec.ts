@@ -13,7 +13,7 @@ it('routes the minimal patient-PIN verification notice through the same patient 
   expect(parseSqsEvent(JSON.stringify({ detail: pinAccess }))).toEqual(pinAccess);
   expect(WORKFLOW_BY_EVENT.PatientAccessPinVerified).toBe('patient-update-v1');
 });
-it.each(['write_records', 'read_records'])('routes a patient-PIN notice that names its grant\'s scope (%s, 0121)', (scope) => {
+it.each(['write_records', 'read_records'])('routes a patient-PIN notice that names its grant\'s scope (%s, 0120)', (scope) => {
   const pinAccess = { ...event, type: 'PatientAccessPinVerified', payload: { ...event.payload, scope } };
   expect(parseSqsEvent(JSON.stringify({ detail: pinAccess }))).toEqual(pinAccess);
 });

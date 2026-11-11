@@ -60,16 +60,16 @@ export function eventEnvelope(event: ClaimedEvent): HidEventEnvelopeV1 {
     throw new EventContractFailure('EVENT_PAYLOAD_POLICY_REJECTED', 'Event payload violates the delivery size or shape policy');
   }
   for (const key of Object.keys(event.payload)) {
-    // "scope" is allowed on the PIN notice only (database 0121), not on any
+    // "scope" is allowed on the PIN notice only (database 0120), not on any
     // other identity event.
     if (!ALLOWED_PAYLOAD_KEYS[event.producer].has(key)
         && !(key === 'scope' && event.eventType === 'PatientAccessPinVerified')) {
       throw new EventContractFailure('EVENT_PAYLOAD_POLICY_REJECTED', 'Event payload contains a field outside its producer contract');
     }
   }
-  // A PIN notice may name its grant's scope (database 0121: read and write for
+  // A PIN notice may name its grant's scope (database 0120: read and write for
   // up to 24 hours); an emergency notice never does. Both shapes of the PIN
-  // notice pass, so this code can run before 0121 applies.
+  // notice pass, so this code can run before 0120 applies.
   const pinScope = event.eventType === 'PatientAccessPinVerified' && Object.keys(event.payload).length === 3
     ? event.payload.scope : undefined;
   if ((event.eventType === 'EmergencyAccessActivated' || event.eventType === 'PatientAccessPinVerified')
