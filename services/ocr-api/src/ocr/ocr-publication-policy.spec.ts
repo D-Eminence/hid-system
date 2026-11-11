@@ -304,7 +304,7 @@ describe('paperRecordDraftNote', () => {
     expect(paperRecordDraftNote('DOCUMENT_ONLY', { note: ' Seen ', pages: 2, flags: ['a'] }, '2026-11-11').content)
       .toBe('note: Seen\npages: 2\nflags: ["a"]');
     expect(paperRecordDraftNote('DOCUMENT_ONLY', { note: '  ', other: null }, '2026-11-11').content)
-      .toBe('A paper record kept as a document; the reviewer typed no text from it.');
+      .toBe('A paper record kept as a document; the reviewer typed none of its text.');
   });
 
   it('refuses at validation a document-only reading too long for a draft note', () => {

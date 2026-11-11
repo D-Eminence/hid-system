@@ -357,7 +357,7 @@ describe('OCR publication under the dedicated records-processing grant', () => {
     const run = harness('DOCUMENT_ONLY', { source: 404, write: { allowed: false }, grant: grantId, noText: true });
     await run.publish();
     expect(run.ehrApi.createOcrClinicalNote.mock.calls[0]![1]).toMatchObject({
-      content: 'A paper record kept as a document; the reviewer typed no text from it.' });
+      content: 'A paper record kept as a document; the reviewer typed none of its text.' });
   });
 
   it('refuses when the source read under records processing names another patient', async () => {

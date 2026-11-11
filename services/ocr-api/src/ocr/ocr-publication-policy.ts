@@ -348,7 +348,7 @@ export function paperRecordDraftNote(domain: OcrTargetDomain, fields: Record<str
       && !(typeof value === 'string' && value.trim().length === 0));
     lines = kept.length > 0
       ? kept.map(([name, value]) => `${name}: ${typeof value === 'string' ? value.trim() : JSON.stringify(value)}`)
-      : ['A paper record kept as a document; the reviewer typed no text from it.'];
+      : ['A paper record kept as a document; the reviewer typed none of its text.'];
   } else {
     throw new DomainProblem(409, 'OCR_TARGET_UNAVAILABLE', 'The owning domain does not support this publication operation');
   }
