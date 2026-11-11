@@ -9,8 +9,9 @@ import { BedrockAiService } from './bedrock-ai.service';
 import { ClaudeAiService, ClaudeCallError, type ConversationExchange } from './claude-ai.service';
 import { PatientRecordsService } from './patient-records.service';
 import { PatientEvidenceService } from './patient-evidence.service';
-import { binding,chunks,evidenceKey,originLabel,type Coverage,type Evidence,type EvidenceBinding } from './patient-evidence.types';
-import { selectEvidence,answerCoverage,boundEvidence } from './patient-evidence.selection';
+import { binding,chunks,evidenceKey,isLabUnavailable,originLabel,type Coverage,type Evidence,type EvidenceBinding } from './patient-evidence.types';
+import { selectEvidence,answerCoverage,boundEvidence,withTemporalEvidence } from './patient-evidence.selection';
+import { removeDashesWithin } from './chat-format';
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
 import { citedNumbers,conversationLines,patientLines,withPatientLines } from './patient-chat-safety';
 import { redactIdentifiers } from './patient-evidence.policy';
@@ -103,6 +104,8 @@ export class PatientChatService {
       } else {
         ({ reply, selected } = await this.answerAuthorized(request, question, plan.query, context.exchanges, environment, signal,plan.recordIntent,turn));
       }
+      // No answer, patient or staff, conversation or record, carries an en or em dash, saved or returned.
+      reply = { ...reply, answer: removeDashesWithin(reply.answer, 4000) };
       // Patients see only cited sources, but saved history stays bound to every selected one,
       // so the exchange is hidden once any of them changes or is withdrawn.
       await turn.history.save(request, generation, question, reply, [...context.bindings, ...selected]);
@@ -173,10 +176,14 @@ export class PatientChatService {
     if(extractionWarnings.length)snapshot.coverage.complete=false;
     let selection=selectEvidence(snapshot.records,recordIntent,searchQuestion);
     if(recordIntent==='search'&&snapshot.records.length)selection=await this.semantic(request,snapshot.records,searchQuestion,environment,signal,access,snapshot.coverage);
+    // A dated question (first, earliest, latest, history) also reads the earliest and latest records of
+    // the kinds it asks about, from the same authorized snapshot: never more than the reader may see.
+    const dated=withTemporalEvidence(snapshot.records,selection.sources,question,selection.partial,searchQuestion);
+    selection={sources:dated.sources,partial:dated.partial};
     const coverage=answerCoverage(snapshot.coverage,selection.sources.length,selection.partial);
     await access.authorize(request);signal.throwIfAborted();
     // Who reads the answer decides the origin wording ("You added this" to the patient, "Added by the patient" to staff).
-    const generated=await this.claude.answer(question,selection.sources,history,signal,coverage,audience);
+    const generated=await this.claude.answer(question,selection.sources,history,signal,coverage,audience,dated.order);
     const citations=[...generated.matchAll(/\[(\d+)\]/g)].map(match=>Number(match[1]));
     const valid=selection.sources.length?citations.length>0&&citations.every(n=>n>=1&&n<=selection.sources.length):citations.length===0;
     // Currentness/authorization is checked before save and return; an index is
@@ -270,7 +277,7 @@ export class PatientChatService {
     const unavailable=coverage?.unavailable??[];
     const local=all.filter(r=>LOCAL_KINDS.includes(r.kind)&&r.kind!=='profile').length;
     const complete=[...(coverage&&local<LOCAL_PAGE_LIMIT?LOCAL_KINDS:['profile']),
-      ...(coverage&&!unavailable.some(u=>u.startsWith('Laboratory'))?['lab_result']:[])];
+      ...(coverage&&!unavailable.some(isLabUnavailable)?['lab_result']:[])];
     const auth=await access.authorize(request);
     await access.transaction(auth,request.correlationId,client=>client.query(`delete from ${access.chunksTable} where patient_id=$1 and
       not(source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($2::text[])) and
