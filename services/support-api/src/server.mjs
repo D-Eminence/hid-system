@@ -21,7 +21,9 @@ async function noHealthIdCheck() {
 // Lex reads at most 1024 characters; each replaced Health ID becomes a fixed placeholder.
 const MAX_CHECKED_TEXT = 1024;
 
-export function supportServer(recognize, { timeoutMs = 5500, supportContact = '', checkHealthIds = noHealthIdCheck } = {}) {
+export function supportServer(recognize, {
+  timeoutMs = 5500, supportContact = '', checkHealthIds = noHealthIdCheck, onError = () => {},
+} = {}) {
   const sessions = new Map();
   let inFlight = 0;
   const server = createServer(async (request, response) => {
@@ -89,7 +91,8 @@ export function supportServer(recognize, { timeoutMs = 5500, supportContact = ''
         sessionId,
         messages: messages.length ? messages : [`I could not answer that. Contact Health ID support${supportContact ? ': ' + supportContact : '.'}`],
       });
-    } catch {
+    } catch (error) {
+      try { onError(error); } catch { /* reporting must never change the response */ }
       respond(response, 503, { code: 'SUPPORT_BOT_UNAVAILABLE' });
     }
   });
