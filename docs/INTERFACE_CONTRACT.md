@@ -1434,9 +1434,13 @@ database; unlinkable to a person or across requests, never returned or
 logged). Fewer than 3 distinct reviewers in the (widened) range answers `{
 schema, from, to, scope, available: false, reason: 'too_few_reviewers' }` with
 no counts; otherwise any group to which fewer than 3 distinct reviewers
-contributed is suppressed like a small group, so no week, kind or prompt
-version shows one or two people's work. Platform administrators get every group
-over the minimum size. When figures are returned (`available:
+contributed is suppressed like a small group (the rule counts distinct
+reviewers; it does not weigh how much each did). A manager's range also ends at
+the last finished ISO week (the answer's `to`; asking only about the current
+week answers `too_few_reviewers`), so a group shown never changes later, and
+when more than 50,000 reviews match, the last, cut-off week is left out.
+Platform administrators get every group over the minimum size, current week
+included. When figures are returned (`available:
 true`) the route sums stored review outcomes by ISO
 week, facility, item kind and prompt version (`itemGroups`) and by ISO week,
 facility and prompt version (`reviewGroups`) for `from`..`to` (UTC days,

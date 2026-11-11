@@ -4,7 +4,7 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import type { DatabaseService } from '../../database/database.service';
 import { OcrQualityController } from './quality-summary.controller';
 import {
-  aggregateReviewOutcomes, MIN_CELL_SIZE, MIN_GROUP_SIZE, MIN_REVIEWERS_FOR_MANAGER, OcrQualityService,
+  aggregateReviewOutcomes, finishedWeeks, MIN_CELL_SIZE, MIN_GROUP_SIZE, MIN_REVIEWERS_FOR_MANAGER, OcrQualityService,
 } from './quality-summary.service';
 import { computeReviewOutcome } from './review-outcome';
 
@@ -92,6 +92,25 @@ describe('OCR quality summary', () => {
     expect((itemGroups[0] as { checkReasons: Record<string, Record<string, number>> }).checkReasons.constructor)
       .toMatchObject({ kept_unchanged: 20, removed: 20 });
     expect((Object as unknown as Record<string, unknown>).removed).toBeUndefined();
+  });
+
+  it('with a reviewer minimum, suppresses a group 2 reviewers did and shows one 3 did', () => {
+    const keyed = (n: number) => Array.from({ length: 20 }, (_, i) => ({ ...row(), reviewer_key: `k${i % n}` }));
+    expect(aggregateReviewOutcomes(keyed(2), 3).reviewGroups).toEqual([{ week: '2026-W45', facilityId,
+      promptVersion: 'hid-paper-reading-prompt-13', suppressed: true }]);
+    expect(aggregateReviewOutcomes(keyed(2), 3).itemGroups).toEqual([expect.objectContaining({ suppressed: true })]);
+    expect(aggregateReviewOutcomes(keyed(3), 3).reviewGroups).toEqual([expect.objectContaining({ reviews: 20 })]);
+    // Without a minimum (platform administrators) the keys are ignored.
+    expect(aggregateReviewOutcomes(keyed(1)).reviewGroups).toEqual([expect.objectContaining({ reviews: 20 })]);
+  });
+
+  it('ends a manager\'s range at the last finished ISO week', () => {
+    const wednesday = new Date('2026-11-11T09:00:00Z');
+    expect(finishedWeeks({ from: '2026-10-19', to: '2026-11-15' }, wednesday)).toEqual({ from: '2026-10-19', to: '2026-11-08' });
+    expect(finishedWeeks({ from: '2026-10-19', to: '2026-11-01' }, wednesday)).toEqual({ from: '2026-10-19', to: '2026-11-01' });
+    expect(finishedWeeks({ from: '2026-11-09', to: '2026-11-15' }, wednesday)).toBeNull();
+    expect(finishedWeeks({ from: '2026-11-02', to: '2026-11-15' }, new Date('2026-11-09T00:00:00Z'))).toEqual({ from: '2026-11-02', to: '2026-11-08' });
+    expect(finishedWeeks({ from: '2026-11-02', to: '2026-11-15' }, new Date('2026-11-15T23:59:00Z'))).toEqual({ from: '2026-11-02', to: '2026-11-08' });
   });
 
   describe('route', () => {
@@ -197,6 +216,36 @@ describe('OCR quality summary', () => {
         request(['platform.admin.access', 'platform.operations.read'])) as { reviewGroups: unknown[] };
       expect(all.reviewGroups).toEqual([expect.objectContaining({ week: '2026-W44', reviews: 20 }),
         expect.objectContaining({ week: '2026-W45', reviews: 20 })]);
+    });
+
+    it('suppresses, for a manager, a kind that fewer than 3 reviewers read while the week is shown', async () => {
+      const lab = { ...outcome, buckets: outcome.buckets.map((bucket) => ({ ...bucket, kind: 'lab_result' })) };
+      const rows = [...Array.from({ length: 20 }, () => row()),
+        ...Array.from({ length: 20 }, () => ({ week: '2026-W45', facility_id: facilityId, outcome: lab, reviewer_key: 'key-solo' }))];
+      const { controller } = harness(rows, 3);
+      const answer = await controller.summary({ from: '2026-11-02', to: '2026-11-08' },
+        managerRequest(facilityId, [managerOfA])) as { itemGroups: unknown[]; reviewGroups: unknown[] };
+      expect(answer.reviewGroups).toEqual([expect.objectContaining({ reviews: 40 })]);
+      expect(answer.itemGroups).toEqual(expect.arrayContaining([
+        { week: '2026-W45', facilityId, kind: 'lab_result', promptVersion: 'hid-paper-reading-prompt-13', suppressed: true },
+        expect.objectContaining({ kind: 'medicine', items: 40 })]));
+    });
+
+    it('answers a manager asking only about the current week "too few reviewers" without reading', async () => {
+      const { controller, query } = harness();
+      const today = new Date().toISOString().slice(0, 10);
+      const answer = await controller.summary({ from: today, to: today }, managerRequest(facilityId, [managerOfA]));
+      expect(answer).toMatchObject({ available: false, reason: 'too_few_reviewers' });
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('leaves a cut-off last week out of a manager\'s answer', async () => {
+      const rows = [...Array.from({ length: 30_000 }, () => row('2026-W44')), ...Array.from({ length: 20_001 }, () => row('2026-W45'))];
+      const { controller } = harness(rows, 3);
+      const answer = await controller.summary({ from: '2026-10-26', to: '2026-11-08' },
+        managerRequest(facilityId, [managerOfA])) as { truncated: boolean; reviewGroups: { week: string }[] };
+      expect(answer.truncated).toBe(true);
+      expect(answer.reviewGroups.map((group) => group.week)).toEqual(['2026-W44']);
     });
 
     it('never applies the reviewer minimum to a platform administrator', async () => {

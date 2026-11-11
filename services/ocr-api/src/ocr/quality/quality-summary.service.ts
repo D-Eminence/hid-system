@@ -216,6 +216,18 @@ function range(from: string | undefined, to: string | undefined, now: Date): { f
   return { from: day(monday), to: day(sunday) };
 }
 
+/**
+ * A manager sees finished ISO weeks only: the range ends at the Sunday before the current week, so a group shown
+ * never changes later (two reads of a week still filling up would differ by one shift's work). Null when no finished
+ * week is left in the range.
+ */
+export function finishedWeeks(window: { from: string; to: string }, now: Date): { from: string; to: string } | null {
+  const todayMs = Date.parse(`${now.toISOString().slice(0, 10)}T00:00:00Z`);
+  const lastSunday = new Date(todayMs - (((new Date(todayMs).getUTCDay() + 6) % 7) + 1) * DAY_MS).toISOString().slice(0, 10);
+  const to = window.to < lastSunday ? window.to : lastSunday;
+  return window.from <= to ? { from: window.from, to } : null;
+}
+
 @Injectable()
 export class OcrQualityService {
   constructor(private readonly database: DatabaseService, private readonly audit: AuditService) {}
@@ -228,11 +240,19 @@ export class OcrQualityService {
    */
   async summary(query: { from?: string; to?: string }, context: DataAccessContext, reader: QualityReader,
     now = new Date()) {
-    const window = range(query.from, query.to, now);
+    const manager = reader === 'facility_manager';
+    const asked = range(query.from, query.to, now);
+    const finished = manager ? finishedWeeks(asked, now) : asked;
+    const window = finished ?? asked;
     return this.database.withTransaction(context, async (client) => {
+      const tooFew = async () => {
+        await this.audit.recordWithClient(client, this.auditEvent(context, window, { reader, available: false }));
+        return { schema: 'hid.ocr.quality-summary/v1', from: window.from, to: window.to, scope: 'bound_facility',
+          available: false as const, reason: 'too_few_reviewers' as const };
+      };
+      if (!finished) return tooFew();
       // A manager's read keys each reviewer with a fresh random key: rows can be counted per group, never linked to
       // a person or across requests, and the keys never leave this method.
-      const manager = reader === 'facility_manager';
       const result = await client.query<OutcomeRow>(
         `select to_char(validation.created_at at time zone 'UTC', 'IYYY-"W"IW') as week,
                 validation.facility_id::text as facility_id,
@@ -244,17 +264,16 @@ export class OcrQualityService {
           order by validation.created_at limit $4`,
         [window.from, window.to, REVIEW_OUTCOME_SCHEMA, MAX_REVIEWS + 1,
           ...(manager ? [randomBytes(32).toString('hex')] : [])]);
-      if (manager && new Set(result.rows.map((row) => row.reviewer_key)).size < MIN_REVIEWERS_FOR_MANAGER) {
-        await this.audit.recordWithClient(client, this.auditEvent(context, window, { reader, available: false }));
-        return { schema: 'hid.ocr.quality-summary/v1', from: window.from, to: window.to, scope: 'bound_facility',
-          available: false as const, reason: 'too_few_reviewers' as const };
-      }
       const truncated = result.rows.length > MAX_REVIEWS;
-      const { itemGroups, reviewGroups } = aggregateReviewOutcomes(result.rows.slice(0, MAX_REVIEWS),
-        manager ? MIN_REVIEWERS_FOR_MANAGER : 0);
+      let rows = result.rows.slice(0, MAX_REVIEWS);
+      // Cut off inside its last week, a manager's answer leaves that week out, so two ranges ending in the same week
+      // cannot be subtracted.
+      if (manager && truncated) rows = rows.filter((row) => row.week !== rows.at(-1)?.week);
+      if (manager && new Set(rows.map((row) => row.reviewer_key)).size < MIN_REVIEWERS_FOR_MANAGER) return tooFew();
+      const { itemGroups, reviewGroups } = aggregateReviewOutcomes(rows, manager ? MIN_REVIEWERS_FOR_MANAGER : 0);
       const suppressed = [...itemGroups, ...reviewGroups].filter((group) => 'suppressed' in group).length;
       await this.audit.recordWithClient(client, this.auditEvent(context, window, { reader, available: true,
-        reviews: Math.min(result.rows.length, MAX_REVIEWS), truncated, itemGroups: itemGroups.length,
+        reviews: rows.length, truncated, itemGroups: itemGroups.length,
         reviewGroups: reviewGroups.length, suppressedGroups: suppressed }));
       return { schema: 'hid.ocr.quality-summary/v1', from: window.from, to: window.to,
         scope: 'bound_facility', available: true as const, minGroupSize: MIN_GROUP_SIZE, truncated, itemGroups, reviewGroups };

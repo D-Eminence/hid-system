@@ -14,7 +14,7 @@ export class OcrQualityController {
    * (workforce.manage at that facility, not awaiting support's review); X-Facility-ID names the facility read
    * (row-level security), at which the reader must be active. A manager gets { available: false, reason:
    * 'too_few_reviewers' } unless at least 3 distinct reviewers contributed in the range, and a manager's groups with
-   * fewer than 3 reviewers are suppressed (no staff monitoring).
+   * fewer than 3 reviewers are suppressed; a manager sees finished ISO weeks only (no staff monitoring).
    */
   @Get('summary')
   @AuditAction('ocr.quality.summary.request')
