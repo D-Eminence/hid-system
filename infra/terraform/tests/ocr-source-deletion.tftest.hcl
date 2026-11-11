@@ -53,7 +53,7 @@ mock_provider "aws" {
 mock_provider "awscc" {}
 
 
-# 24-hour deletion of OCR sources (owner condition before the first real
+# 7-day deletion of OCR sources (owner condition before the first real
 # patient): the OCR worker may list and delete the versions of uploaded
 # documents (clinical/objects/) and nothing else; an alarm on the shared alerts
 # topic fires when a source is overdue or the sweeper has stopped reporting.
