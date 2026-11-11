@@ -9,7 +9,8 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
 import type { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
-import type { OcrMedicationImportBatchDto, OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
+import { IMPORT_PAGE_DEFAULT, type ListImportedMedicationsQueryDto, type OcrMedicationImportBatchDto,
+  type OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
 import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
@@ -81,6 +82,20 @@ export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null as open_work) o
   order by o.open_work desc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
   case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
+
+/**
+ * One patient's imported medication records at this facility, newest first:
+ * $1 patient, $2 facility, $3 cursor (the last record id of the previous page,
+ * or null), $4 rows to read. Row-level security (pharmacy_imports_read, 0023)
+ * applies as well; the facility filter matches the
+ * pharmacy_imported_medication_patient_idx index. A cursor that is not one of
+ * this patient's records here answers an empty page. Exported for the tests.
+ */
+export const PATIENT_IMPORTS_QUERY = `select e.* from pharmacy.imported_medication_evidence e
+  where e.patient_id=$1 and e.facility_id=$2
+    and ($3::uuid is null or (e.created_at,e.id) < (select c.created_at,c.id
+      from pharmacy.imported_medication_evidence c where c.id=$3 and c.patient_id=$1 and c.facility_id=$2))
+  order by e.created_at desc,e.id desc limit $4`;
 
 const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
   from pharmacy.dispensings d left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
@@ -528,6 +543,30 @@ export class PharmacyService {
         patientId: row.patient_id, resourceType: 'pharmacy-imported-medication-evidence', resourceId: row.id,
       });
       return this.projectImport(row);
+    });
+  }
+
+  /**
+   * One patient's imported medication records (OCR provenance included),
+   * newest first, one bounded page. The same authorization as getImport:
+   * Identity `read_records` for this patient at this facility under the
+   * request's purpose, checked before any read, so a refusal reads and audits
+   * nothing. One audit row naming the patient, with ids and counts only.
+   */
+  async listImports(context: DataAccessContext, query: ListImportedMedicationsQueryDto) {
+    const limit = query.limit ?? IMPORT_PAGE_DEFAULT;
+    await this.authorize(query.patientId, context, 'read_records');
+    return this.database.withTransaction(context, async (client) => {
+      const rows = (await client.query<ImportRow>(PATIENT_IMPORTS_QUERY,
+        [query.patientId, context.facilityId, query.cursor ?? null, limit + 1])).rows;
+      const page = rows.filter((row) => row.patient_id === query.patientId && row.facility_id === context.facilityId)
+        .slice(0, limit);
+      const nextCursor = rows.length > limit && page.length === limit ? page[page.length - 1]!.id : null;
+      await this.audit.recordWithClient(client, context, 'pharmacy.import.list', {
+        patientId: query.patientId, resourceType: 'pharmacy-imported-medication-evidence-collection',
+        resourceId: query.patientId,
+      }, { returnedCount: page.length, importIds: page.map((row) => row.id), paged: Boolean(query.cursor) });
+      return { items: page.map((row) => this.projectImport(row)), nextCursor };
     });
   }
 

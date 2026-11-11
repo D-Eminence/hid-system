@@ -107,9 +107,11 @@ export type {
 export { PharmacyApiClient, PharmacyApiProblem } from './pharmacy';
 export type {
   CreatePharmacyDispensingInput,
+  ListPharmacyImportedMedicationsOptions,
   PharmacyDispensing,
   PharmacyDispensingReversal,
   PharmacyImportedMedicationEvidence,
+  PharmacyImportedMedicationPage,
   PharmacyImportBatch,
   PharmacyClientOptions,
   PharmacyInternalCaller,

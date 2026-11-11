@@ -1182,6 +1182,7 @@ GET  /api/v1/pharmacy/dispensings/:dispensingId
 POST /api/v1/pharmacy/dispensings/:dispensingId/reversals
 POST /api/v1/pharmacy/imports/from-ocr                  # internal OCR caller
 POST /api/v1/pharmacy/imports/from-ocr/batch            # internal OCR caller, 2-50 medicines
+GET  /api/v1/pharmacy/imports?patientId=<uuid>[&limit=1-100][&cursor=<id>]
 GET  /api/v1/pharmacy/imports/:importId
 ```
 
@@ -1223,6 +1224,22 @@ records; a partial or different replay, or a publication already stored through
 the single route, answers 409 `IDEMPOTENCY_CONFLICT`. The answer is
 `{ id, count, items }`, where `items` are the records in array order and `id`
 is the first.
+
+`GET /api/v1/pharmacy/imports?patientId=` answers one patient's imported
+medication records at the request's facility (single and batch alike), newest
+first (`created_at`, then `id`), as `{ items, nextCursor }`: each item is the
+same projection as `GET imports/:importId`, OCR provenance ids included
+(`sourceDocumentId`, `ocrJobId`, `extractionId`, `validationId`,
+`validationVersion`, `publicationId`). `limit` is 1-100 (default 50);
+`nextCursor` is the last record's id when more may follow, else `null`, and is
+passed back as `cursor` (a cursor that is not one of this patient's records
+here answers an empty page). It has the guards of `GET imports/:importId`:
+browser route, `pharmacy.import.read`, Identity `read_records` for that patient
+at that facility under `X-Purpose-Of-Use` (break-glass may read), checked
+before any read, so a refusal reads and audits nothing; row-level security
+(`pharmacy_imports_read`) applies as well. One audit row
+`pharmacy.import.list` names the patient, with the returned ids and count only.
+Any other query parameter, `healthId` among them, is refused 400.
 
 ## 14. OCR
 
