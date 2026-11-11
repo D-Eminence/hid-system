@@ -38,6 +38,38 @@ source read is now this 404 too, rather than EHR's own code). A refusal at an
 execution attempt (a grant gone after the request) fails the publication with
 `OCR_PUBLISH_NEEDS_DIRECT_CARE` in place of `OCR_JOB_NOT_FOUND`.
 
+## Review outcomes (phase 1: measure)
+
+So the reading can learn from live reviews without keeping patient text, every
+validation stores a content-free comparison of the AI reading and the review in
+`ocr.validations.provenance.reviewOutcome` (schema
+`hid.ocr.review-outcome/v1`) and in the `ocr.validation.accept` / `.reject`
+audit details (`src/ocr/quality/review-outcome.ts`; contract in
+`docs/INTERFACE_CONTRACT.md` section 15). Counts are bucketed by item kind,
+decision, AI confidence, hard page, `readBy`, check-reason code and field-change
+class. Field comparisons use `src/ocr/quality/normalise.ts`, a port of the OCR
+accuracy kit's `lib/normalise.mjs` (`normalise.spec.ts` carries its test
+vectors; keep the two in step). Reviews saved as whole text (EHR notes, the
+legacy single medicine, medicine or lab lists without `itemId`) are marked
+`estimated`. The extraction is read inside a savepoint and the computation is
+wrapped, so a failure stores `{ schema, error: 'summary_failed' }` and the review
+is saved anyway; the log line `ocr.review_outcome.failed` carries a code and the
+job id only.
+
+The 7-day source purge (0112) blanks `validated_payload`, `accepted_fields`,
+`rejected_fields`, `corrections` and `reason`; it keeps `provenance`, so review
+outcomes outlive the content they were computed from.
+
+`GET /api/v1/ocr/quality/summary?from=&to=` is for platform administrators
+(`platform.admin.access` and `platform.operations.read`): it sums review
+outcomes by ISO week, facility, kind and prompt version, returns groups under
+20 items as suppressed, and has no per-reviewer figures. `ocr.validations`
+row-level security admits only `platform.current_facility_id()`, and the
+runtime role has no cross-facility policy, so the summary covers the facility
+named by `X-Facility-ID`, where the administrator must be active. A
+cross-facility summary would need an aggregate-only `SECURITY DEFINER` function
+(as 0027's admin audit read) and is not part of this phase.
+
 ## Paper readings (`hid-paper-reading-v2`)
 
 The worker writes `provenance.processingContract` `hid-textract-v2` and a

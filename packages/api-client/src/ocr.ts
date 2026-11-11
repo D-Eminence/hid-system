@@ -16,6 +16,13 @@ export interface OcrValidationInput {
   candidateType: OcrCandidateType; acceptedFields: Record<string, unknown>;
   rejectedFields: Record<string, unknown>[]; corrections: Record<string, unknown>[];
   reason: string; purpose: 'healthcare-operations';
+  /** Optional review signals, stored as counts in the review outcome (INTERFACE_CONTRACT section 15). */
+  reviewConfirmed?: boolean;
+  missedItems?: number;
+  removedItems?: { itemId: string;
+    removalReason: 'not_on_paper' | 'duplicate' | 'not_needed' | 'unreadable' | 'other_patient' }[];
+  rejectionReasonCode?: 'wrong_patient' | 'wrong_document' | 'unreadable' | 'duplicate_document' | 'pages_missing'
+    | 'reading_unusable' | 'not_clinical' | 'other';
 }
 export interface OcrPatientConfirmationInput {
   patientId: string; expectedJobVersion: number;

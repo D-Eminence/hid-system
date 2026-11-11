@@ -21,6 +21,8 @@ import { LabApiService } from '../integrations/lab-api.service';
 import { OcrPublicationSwitch } from './ocr-publication-switch';
 import { PharmacyApiService } from '../integrations/pharmacy-api.service';
 import { OcrReadingSwitch } from './ocr-reading-switch';
+import { REVIEW_OUTCOME_SCHEMA, safeReviewOutcome, type ReviewOutcome,
+  type ReviewOutcomeFailure } from './quality/review-outcome';
 import { projectExtraction, type ExtractionRow } from './reading/extraction-view';
 import { PAPER_READING_CONTRACT } from './reading/paper-reading.contract';
 import { OCR_PROCESSING_CONTRACT, PROMPT_VERSION, READINGS_REDONE_WHEN_AI_ON } from './reading/reading-versions';
@@ -296,7 +298,17 @@ export class OcrService {
   async validate(jobId: string, input: ValidateOcrJobDto, idempotencyHeader: string | undefined, context: DataAccessContext) {
     const idempotencyKey = requireIdempotencyKey(idempotencyHeader);
     assertCandidateClassification(input);
-    const digest = requestDigest('ocr.validation.create', { jobId, ...input });
+    if (input.rejectionReasonCode !== undefined && input.disposition !== 'rejected') {
+      throw new DomainProblem(400, 'OCR_REJECTION_REASON_NOT_ALLOWED',
+        'A rejection reason code is sent only with a rejected review');
+    }
+    // The optional review signals (reviewConfirmed, missedItems, removedItems, rejectionReasonCode,
+    // corrections[].fields/changeReason) join the digest when sent: they are stored in the review outcome, so the
+    // same key with different signals is a different request (409). Absent, the digest is as before: the DTO
+    // instance defines every declared field (ES2022 class fields), so keys left undefined are dropped here, and a
+    // request from an existing client hashes exactly as it did before these fields existed.
+    const digest = requestDigest('ocr.validation.create', { jobId,
+      ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) });
     return this.database.withTransaction(context, async (client) => {
       // Every command of the job locks the job row first, so they queue in one
       // order. Validations and confirmations are insert-only (0013, 0016
@@ -338,6 +350,7 @@ export class OcrService {
         [jobId],
       );
       const validationVersion = Number(versionResult.rows[0]?.version ?? 1);
+      const reviewOutcome = await this.reviewOutcome(client, jobId, input);
       const validationResult = await client.query<{ id: string }>(
         `insert into ocr.validations (
            job_id, facility_id, extraction_id, validation_version, validated_payload,
@@ -350,7 +363,8 @@ export class OcrService {
           JSON.stringify(input.validatedPayload), JSON.stringify(input.corrections),
           input.reason, context.actor.accountId, context.membershipId, input.disposition,
           input.targetDomain, input.candidateType, JSON.stringify(input.acceptedFields),
-          JSON.stringify(input.rejectedFields), JSON.stringify({ source: 'human_review', extractionId: input.extractionId }),
+          JSON.stringify(input.rejectedFields), JSON.stringify({ source: 'human_review', extractionId: input.extractionId,
+            reviewOutcome }),
           idempotencyKey, digest],
       );
       const validationId = validationResult.rows[0]?.id;
@@ -368,7 +382,7 @@ export class OcrService {
       if (!row) throw new DomainProblem(412, 'OCR_VERSION_CONFLICT', 'OCR job changed during validation');
       await this.audit.recordWithClient(client, this.auditEvent(context,
         input.disposition === 'validated' ? 'ocr.validation.accept' : 'ocr.validation.reject', row,
-        source.patientId, { validationId, validationVersion, targetDomain: input.targetDomain }));
+        source.patientId, { validationId, validationVersion, targetDomain: input.targetDomain, reviewOutcome }));
       return { ...this.project(row), validationId, validationVersion,
         disposition: input.disposition, targetDomain: input.targetDomain, candidateType: input.candidateType };
     }, { isolationLevel: 'SERIALIZABLE' });
@@ -669,6 +683,41 @@ export class OcrService {
    * its insert), so a publish or failure transaction that held the row first
    * and then waited for the job deadlocked with it (Phase 4 Stage 9).
    */
+  /**
+   * The review outcome (quality/review-outcome.ts): counts and codes comparing the reviewed extraction's reading
+   * with what the reviewer kept. Telemetry only: it never stops the review being saved. The extraction is read
+   * inside a savepoint, so a failed read leaves the transaction usable; any failure stores
+   * { schema, error: 'summary_failed' } and the save goes on.
+   */
+  private async reviewOutcome(client: PoolClient, jobId: string,
+    input: ValidateOcrJobDto): Promise<ReviewOutcome | ReviewOutcomeFailure> {
+    let extraction: { structured_payload?: unknown; provenance?: unknown } | undefined;
+    try {
+      await client.query('savepoint ocr_review_outcome');
+      try {
+        const result = await client.query<{ structured_payload: unknown; provenance: unknown }>(
+          `select structured_payload, provenance from ocr.extractions where id = $1 and job_id = $2`,
+          [input.extractionId, jobId]);
+        extraction = result?.rows?.[0];
+        await client.query('release savepoint ocr_review_outcome');
+      } catch (error) {
+        await client.query('rollback to savepoint ocr_review_outcome');
+        throw error;
+      }
+    } catch {
+      this.logger.warn(JSON.stringify({ event: 'ocr.review_outcome.failed', code: 'extraction_read_failed', jobId }));
+      return { schema: REVIEW_OUTCOME_SCHEMA, error: 'summary_failed' };
+    }
+    const outcome = safeReviewOutcome({ disposition: input.disposition, targetDomain: input.targetDomain,
+      acceptedFields: input.acceptedFields, corrections: input.corrections, reviewConfirmed: input.reviewConfirmed,
+      missedItems: input.missedItems, removedItems: input.removedItems, rejectionReasonCode: input.rejectionReasonCode,
+      structuredPayload: extraction?.structured_payload, extractionProvenance: extraction?.provenance });
+    if ('error' in outcome) {
+      this.logger.warn(JSON.stringify({ event: 'ocr.review_outcome.failed', code: outcome.error, jobId }));
+    }
+    return outcome;
+  }
+
   private async lockJobKey(client: PoolClient, jobId: string) {
     await client.query('select id from ocr.jobs where id = $1 for key share', [jobId]);
   }

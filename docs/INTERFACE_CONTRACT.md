@@ -1245,6 +1245,7 @@ GET  /api/v1/ocr/jobs/:jobId/validations
 POST /api/v1/ocr/jobs/:jobId/patient-confirmation
 POST /api/v1/ocr/validations/:validationId/publications
 GET  /api/v1/ocr/validations/:validationId/publications
+GET  /api/v1/ocr/quality/summary?from=YYYY-MM-DD&to=YYYY-MM-DD
 ```
 
 The document-scoped job lookup returns the latest authorized job as
@@ -1371,6 +1372,56 @@ other side's time, that day-only date is not sent (its as-written text stays in
 the stored review) rather than refusing or inventing a time; two times in the
 wrong order answer 400 `OCR_LAB_DATE_ORDER`. The as-written keys, `page` and
 `itemId` are never sent to Lab.
+
+Review outcome (phase 1, measurement only; no migration). Every validation,
+validated or rejected, stores `provenance.reviewOutcome` in
+`ocr.validations` (beside `source` and `extractionId`) and the same object in
+the `details.reviewOutcome` of its `ocr.validation.accept` /
+`ocr.validation.reject` audit event. It compares the reviewed extraction's
+reading (`structured_payload` items and `provenance.reading`) with what the
+reviewer kept, as counts and codes only: schema `hid.ocr.review-outcome/v1`,
+`promptVersion`, `processingContract`, `readingStatus`, `linkage`
+(`item_ids` | `estimated` | `none`), `estimated`, `totals`, `buckets` (per item
+kind x decision x AI confidence x hard page x `readBy`, each with check-reason
+code counts and field-change class counts) and `reviewer` (counts of the
+optional signals below). Decisions: `kept_unchanged`, `kept_changed`,
+`removed`, `added_by_reviewer` (entries linked by `itemId`, or typed),
+`unlinked` (whole text saved without item links: an EHR note, the legacy
+single medicine, a list with no `itemId`; the summary is then `estimated` and
+carries `estimate.foundInSavedText` / `notFoundInSavedText` instead of per-item
+decisions), `not_in_target` and `rejected_with_document`. "Changed" uses the
+OCR accuracy kit's normalisers (name, strength, frequency for medicines; name,
+value, unit and date for lab results), so spacing, case and spellings such as
+"5 mg"/"5mg" or "bd"/"twice daily" are not changes. It never holds a name,
+value, text, item id or reviewer identifier. Computing it never blocks a save:
+on any failure the stored value is `{ schema, error: 'summary_failed' }`.
+
+Optional review signals on the validation body (all optional; existing clients
+are unaffected): `reviewConfirmed` (boolean), `missedItems` (integer 0-200),
+`removedItems` (up to 200 `{ itemId, removalReason }`, reason
+`not_on_paper` | `duplicate` | `not_needed` | `unreadable` | `other_patient`),
+`rejectionReasonCode` (only with `rejected`, else 400
+`OCR_REJECTION_REASON_NOT_ALLOWED`: `wrong_patient`, `wrong_document`,
+`unreadable`, `duplicate_document`, `pages_missing`, `reading_unusable`,
+`not_clinical`, `other`), and on any `corrections[]` entry `itemId`, `fields`
+(1-9 distinct of `name`, `strength`, `dose`, `frequency`, `route`, `duration`,
+`date`, `value`, `unit`) and `changeReason` (`misread` | `clinical_update`).
+They enter the review outcome as counts only. When sent they join the request
+digest (the same `Idempotency-Key` with different signals answers 409
+`IDEMPOTENCY_CONFLICT`); when absent the digest is exactly as before.
+
+`GET /api/v1/ocr/quality/summary` (platform administrators only: platform
+permissions `platform.admin.access` and `platform.operations.read`, staff
+actor; anyone else 403 `PERMISSION_DENIED`) sums stored review outcomes by ISO
+week, facility, item kind and prompt version (`itemGroups`) and by ISO week,
+facility and prompt version (`reviewGroups`) for `from`..`to` (UTC days,
+inclusive, default the last 28 days, at most 92; else 400
+`OCR_QUALITY_RANGE_INVALID`). A group with fewer than 20 items (reviews, for a
+review group) is returned as `{ ...keys, suppressed: true }` with no counts.
+There are no per-reviewer figures. The read is audited as
+`ocr.quality.summary.read` with the range and counts only. Row-level security
+limits it to the facility named by `X-Facility-ID` (`scope: 'bound_facility'`);
+a cross-facility read needs a database change that is not part of this phase.
 
 Patient confirmation is a separate idempotent command bound to the canonical
 Identity patient already governing the source document. The server rechecks
