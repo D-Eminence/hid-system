@@ -1465,20 +1465,6 @@ backends do not send it, so clients treat it as optional. Pharmacy sends no
 such field: its items already carry `dispensing` (null while open; a reversed
 dispensing counts as done), which is the same rule.
 
-Each same-facility Lab work item also carries `clinicalIndication` (string or
-null): the clinical information the EHR sent with the lab request, stored as
-`clinical_indication` on `lab.work_items` when Lab accepted it. It is null when
-the request had none. Both work-item reads send it: each item of
-`GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/{id}`. It is read
-in the same statement and under the same row-level security as the rest of
-the row, so only a member who may already read the work item gets it, and it
-adds no audit row (the single read's `lab.work-item.read` row is unchanged).
-A work item from another facility's order route never carries it: that
-route's detail gives the same text as `clinicalInformation`, and only while
-the route allows a read. The answer to `accept-ehr-order` is unchanged.
-Earlier backends do not send it, so clients treat it as optional. No
-migration.
-
 Known limit of the Lab list (no schema change in this step). Every row the
 list reads from a Lab table pays its own row-level security check, mostly the
 member's consent check, over a millisecond each. The list reads each Lab
@@ -1494,6 +1480,26 @@ work item, kept by the database), which is a separate owner decision.
 `services/ehr-api/scripts/lab-work-list-runtime-checks.mjs` (run by
 `test-patient-evidence-runtime.mjs`) checks 1,050 work items within the
 limit and counts the checks.
+
+### Clinical information on Lab work items
+
+Each same-facility Lab work item carries `clinicalIndication` (string or
+null): the clinical information on the version of the EHR lab request that Lab
+accepted (`sourceEhrOrderVersion`), stored as `clinical_indication` on
+`lab.work_items`. It is null when that version had none. Lab keeps the version
+it accepted: if the doctor later changes the request's clinical information,
+the EHR is told `already_accepted` and Lab still sends the earlier text. A
+client therefore shows it as the text sent with the request, not as the
+request's current text. Both work-item reads send it: each item of
+`GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/{id}`. It is read
+in the same statement and under the same row-level security as the rest of
+the row, so only a member who may already read the work item gets it, and it
+adds no audit row (the single read's `lab.work-item.read` row is unchanged).
+A work item from another facility's order route never carries it: that
+route's detail gives the same text as `clinicalInformation`, and only while
+the route allows a read. The answer to `accept-ehr-order` is unchanged.
+Earlier backends do not send it, so clients treat it as optional. No
+migration.
 
 ### Lab results: check, release and correction
 
