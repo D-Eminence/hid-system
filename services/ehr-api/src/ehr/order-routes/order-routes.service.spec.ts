@@ -1,6 +1,8 @@
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import { requestDigest } from '../../common/idempotency';
 import { OrderRoutesService } from './order-routes.service';
+import { matchAllergies } from '../allergies/allergy-match';
+import { warningToken } from '../allergies/allergy-reader';
 
 const patientId = '123e4567-e89b-42d3-a456-426614174001';
 const facilityId = '123e4567-e89b-42d3-a456-426614174002';
@@ -150,6 +152,63 @@ describe('OrderRoutesService send (C1)', () => {
     await expect(service.send(context(), 'prescription', patientId, encounterId, requestId,
       { ...sendInput, attestationTextVersion: 'order-route-prescription-attestation-v2' }, key))
       .rejects.toMatchObject({ status: 503, code: 'ORDER_ROUTE_UNAVAILABLE' });
+  });
+});
+
+describe('OrderRoutesService send of a prescription: the allergy check (0124)', () => {
+  const prescriptionInput = { ...sendInput, attestationTextVersion: 'order-route-prescription-attestation-v1' };
+  const allergyId = '123e4567-e89b-42d3-a456-426614174010';
+  const penicillin = { id: allergyId, substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe' };
+  const token = warningToken(matchAllergies({ display: 'Amoxicillin 500 mg' }, [{ source: 'recorded', ...penicillin }]));
+
+  /** The harness, answering the prescription read, the allergy reads and the send. */
+  function sendHarness(status: string, recorded: unknown[], replayed = false) {
+    const parts = harness();
+    parts.client.query.mockImplementation(async (sql: string, values: unknown[] = []) => {
+      parts.statements.push({ sql, values });
+      if (/send_order_route/.test(sql)) return { rows: [{ ...sendRow, replayed }] };
+      if (/from ehr\.prescriptions/.test(sql)) {
+        return { rows: [{ status, medicationDisplay: 'Amoxicillin 500 mg', medicationCode: null }] };
+      }
+      if (/from ehr\.recorded_allergies/.test(sql)) return { rows: recorded };
+      return { rows: [] };
+    });
+    return parts;
+  }
+
+  it('refuses to send a draft that matches an allergy without a reason, before the send', async () => {
+    const { service, statements } = sendHarness('draft', [penicillin]);
+    await expect(service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
+        errors: expect.arrayContaining([{ field: 'allergyAcknowledgement.warningToken', messages: [token] }]) });
+    expect(statements.some((statement) => /send_order_route/.test(statement.sql))).toBe(false);
+  });
+
+  it('sends a draft with the reason and stores it for the send stage, after the send', async () => {
+    const { service, statements, audits } = sendHarness('draft', [penicillin]);
+    await service.send(context(), 'prescription', patientId, encounterId, requestId,
+      { ...prescriptionInput, allergyAcknowledgement: { reason: 'No alternative; observe 30 minutes', warningToken: token } }, key);
+    const sendAt = statements.findIndex((statement) => /send_order_route/.test(statement.sql));
+    const ackAt = statements.findIndex((statement) => /insert into ehr\.prescription_allergy_acknowledgements/.test(statement.sql));
+    expect(ackAt).toBeGreaterThan(sendAt);
+    expect(statements[ackAt]?.values.slice(5)).toEqual(['No alternative; observe 30 minutes', [allergyId], false, 'send']);
+    expect(audits[0]?.details).toMatchObject({ allergyOverride: true, matchedRecordedCount: 1 });
+  });
+
+  it('does not check an active prescription (checked when it became active), nor store a reason on a replay', async () => {
+    const active = sendHarness('active', [penicillin]);
+    await active.service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key);
+    expect(active.statements.some((statement) => /recorded_allergies/.test(statement.sql))).toBe(false);
+    const replay = sendHarness('draft', [penicillin], true);
+    await replay.service.send(context(), 'prescription', patientId, encounterId, requestId,
+      { ...prescriptionInput, allergyAcknowledgement: { reason: 'No alternative; observe 30 minutes', warningToken: token } }, key);
+    expect(replay.statements.some((statement) => /insert into/.test(statement.sql))).toBe(false);
+  });
+
+  it('does not read allergies for a lab request', async () => {
+    const { service, statements } = sendHarness('draft', [penicillin]);
+    await service.send(context(), 'lab_request', patientId, encounterId, requestId, sendInput, key);
+    expect(statements.map((statement) => statement.sql)).toEqual(['select * from ehr.send_order_route($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)']);
   });
 });
 

@@ -2,6 +2,8 @@ import type { DataAccessContext } from '../../common/request-context';
 import { OrderStatus } from '../shared/clinical.dto';
 import { PrescriptionsService } from '../prescriptions/prescriptions.service';
 import { AllergiesService } from './allergies.service';
+import { matchAllergies } from './allergy-match';
+import { warningToken } from './allergy-reader';
 
 const patientId = '123e4567-e89b-42d3-a456-426614174001';
 const facilityId = '123e4567-e89b-42d3-a456-426614174002';
@@ -10,6 +12,13 @@ const accountId = '123e4567-e89b-42d3-a456-426614174003';
 const membershipId = '123e4567-e89b-42d3-a456-426614174004';
 const allergyId = '123e4567-e89b-42d3-a456-426614174010';
 const encounterId = '123e4567-e89b-42d3-a456-426614174006';
+const laterAllergyId = '123e4567-e89b-42d3-a456-426614174011';
+const penicillin = { id: allergyId, substance: 'Penicillin', reaction: null, severity: 'severe' };
+/** The token of the warning a prescriber sees for Amoxicillin with these recorded allergies and patient text. */
+const tokenFor = (recorded: { id: string; substance: string }[], reported?: string) => warningToken(matchAllergies(
+  { display: 'Amoxicillin 500 mg' },
+  [...recorded.map((row) => ({ source: 'recorded' as const, ...row })),
+    ...(reported ? [{ source: 'patient_reported' as const, substance: reported }] : [])]));
 
 const context = { correlationId: 'correlation-123456', facilityId, membershipId, purposeOfUse: 'direct-care',
   authorization: 'Bearer user', actor: { id: accountId, subject: 'staff:test', accountId, authenticationMethod: 'local',
@@ -72,6 +81,24 @@ describe('AllergiesService (0124)', () => {
     expect(calls[0]?.values).toEqual([patientId, facilityId, accountId, membershipId, 'Penicillin', 'Hives', 'severe']);
   });
 
+  it('refuses "NKDA" and other "no known allergies" as a substance, writing nothing', async () => {
+    for (const substance of ['NKDA', 'No known allergies', 'none']) {
+      const { client, calls } = fakeClient([[/insert into ehr\.recorded_allergies/, [allergyRow()]]]);
+      const repository = repositoryWith(client);
+      expect(() => new AllergiesService(repository as never).create(context, patientId, { substance, severity: 'unknown' },
+        'key-12345678')).toThrow(expect.objectContaining({ status: 400, code: 'ALLERGY_NOT_A_SUBSTANCE' }));
+      expect(repository.run).not.toHaveBeenCalled();
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it('lists active allergies most serious first: severe, then not known, moderate, mild', async () => {
+    const { client, calls } = fakeClient([[/from ehr\.recorded_allergies/, []]]);
+    await new AllergiesService(repositoryWith(client) as never).list(context, patientId, false);
+    expect(calls[0]?.sql.replace(/\s+/g, ' ')).toContain(
+      "order by (status = 'active') desc, array_position(array['severe', 'unknown', 'moderate', 'mild'], severity), created_at desc, id desc");
+  });
+
   it('refuses to mark an allergy recorded at another facility, before any locking read', async () => {
     // Under forced RLS a FOR UPDATE read of another facility's row returns nothing (the update
     // policy applies), so the facility check must come from the plain read.
@@ -126,7 +153,30 @@ describe('AllergiesService (0124)', () => {
       .check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
     expect(result.acknowledgementRequired).toBe(true);
     expect(result.matches).toHaveLength(1);
+    expect(result.warningToken).toBe(tokenFor([{ id: allergyId, substance: 'Penicillin' }]));
+    expect(result.warningToken).toMatch(/^[a-f0-9]{64}$/);
     expect(details).toEqual({ matchCount: 1 });
+  });
+
+  it('does not warn for an allergy marked entered in error', async () => {
+    const { client } = fakeClient([
+      [/from ehr\.recorded_allergies[\s\S]*status = 'active'/, []],
+      [/from ehr\.recorded_allergies/, [{ id: allergyId, substance: 'Penicillin', reaction: null, severity: 'severe' }]],
+    ]);
+    const result = await new AllergiesService(repositoryWith(client) as never)
+      .check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
+    expect(result.matches).toEqual([]);
+  });
+
+  it('says where and when each allergy was recorded', async () => {
+    const { client } = fakeClient([
+      [/from ehr\.recorded_allergies/, [
+        { ...penicillin, facility_id: otherFacilityId, created_at: new Date('2026-03-03T10:00:00Z') }]],
+    ]);
+    const result = await new AllergiesService(repositoryWith(client) as never)
+      .check(context, patientId, { medicationDisplay: 'Amoxicillin 500 mg' });
+    expect(result.matches[0]).toMatchObject({ recordedHere: false });
+    expect(result.matches[0]?.message).toContain('Recorded by a clinician at another facility on 3 Mar 2026.');
   });
 });
 
@@ -136,8 +186,9 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
   const prescriptionRow = { id: '123e4567-e89b-42d3-a456-426614174020', encounterId, patientId, facilityId };
   const noRoutes = { summaries: async () => new Map(), summary: async () => null, crossFacilityOrdersEnabled: async () => false };
 
-  function setup(recorded: unknown[], reported: string | null) {
+  function setup(recorded: unknown[], reported: string | null, extra: [RegExp, unknown[]][] = []) {
     const fake = fakeClient([
+      ...extra,
       [/insert into ehr\.prescriptions/, [prescriptionRow]],
       [/insert into ehr\.prescription_allergy_acknowledgements/, [{}]],
       [/from ehr\.recorded_allergies/, recorded],
@@ -152,25 +203,43 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
     const { service, calls } = setup([{ id: allergyId, substance: 'Penicillin', reaction: null, severity: 'severe' }], null);
     await expect(service.create(context, patientId, encounterId, input, 'key-12345678'))
       .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
-        errors: [{ field: 'allergyAcknowledgement', messages: [expect.stringContaining('penicillins')] }] });
+        errors: [{ field: 'allergyAcknowledgement', messages: [expect.stringContaining('penicillins')] },
+          { field: 'allergyAcknowledgement.warningToken', messages: [tokenFor([{ id: allergyId, substance: 'Penicillin' }])] }] });
     expect(calls.some((call) => /insert into ehr\.prescriptions/.test(call.sql))).toBe(false);
+  });
+
+  it('refuses a reason given for another warning (a new allergy recorded meanwhile) and writes nothing', async () => {
+    // The prescriber saw only the patient's text "penicillin"; a nurse then recorded "Amoxicillin", severe.
+    const shown = tokenFor([], 'penicillin');
+    const { service, calls } = setup([{ id: laterAllergyId, substance: 'Amoxicillin', reaction: 'Anaphylaxis', severity: 'severe' }],
+      'penicillin');
+    await expect(service.create(context, patientId, encounterId,
+      { ...input, allergyAcknowledgement: { reason: 'Took amoxicillin in 2024 with no reaction', warningToken: shown } },
+      'key-12345678'))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED', errors: expect.arrayContaining([
+        { field: 'allergyAcknowledgement', messages: [expect.stringContaining('Amoxicillin allergy: SEVERE (Anaphylaxis).')] },
+        { field: 'allergyAcknowledgement.warningToken',
+          messages: [tokenFor([{ id: laterAllergyId, substance: 'Amoxicillin' }], 'penicillin')] }]) });
+    expect(calls.some((call) => /insert into/.test(call.sql))).toBe(false);
   });
 
   it('creates the prescription and records the acknowledgement with the matched allergies', async () => {
     const { service, calls } = setup([{ id: allergyId, substance: 'Penicillin', reaction: null, severity: 'severe' }],
       'penicillin');
     await service.create(context, patientId, encounterId,
-      { ...input, allergyAcknowledgement: { reason: 'Tolerated amoxicillin last year; monitoring' } }, 'key-12345678');
+      { ...input, allergyAcknowledgement: { reason: 'Tolerated amoxicillin last year; monitoring',
+        warningToken: tokenFor([{ id: allergyId, substance: 'Penicillin' }], 'penicillin') } }, 'key-12345678');
     const acknowledgement = calls.find((call) => /prescription_allergy_acknowledgements/.test(call.sql));
     expect(acknowledgement?.values).toEqual([prescriptionRow.id, patientId, facilityId, accountId, membershipId,
-      'Tolerated amoxicillin last year; monitoring', [allergyId], true]);
+      'Tolerated amoxicillin last year; monitoring', [allergyId], true, 'create']);
   });
 
   it('marks a create that went ahead after a warning in the audit, with counts and flags only', async () => {
     const { service, repository } = setup([{ id: allergyId, substance: 'Penicillin', reaction: null, severity: 'severe' }],
       'penicillin');
     await service.create(context, patientId, encounterId,
-      { ...input, allergyAcknowledgement: { reason: 'Tolerated amoxicillin last year; monitoring' } }, 'key-12345678');
+      { ...input, allergyAcknowledgement: { reason: 'Tolerated amoxicillin last year; monitoring',
+        warningToken: tokenFor([{ id: allergyId, substance: 'Penicillin' }], 'penicillin') } }, 'key-12345678');
     const result = await repository.executeCreate.mock.results[0]?.value;
     expect(result.details).toEqual({ allergyOverride: true, matchedRecordedCount: 1, patientReportedMatched: true,
       idempotentReplay: false });
@@ -180,7 +249,7 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
   it('creates a prescription with no match without any acknowledgement row', async () => {
     const { service, calls } = setup([{ id: allergyId, substance: 'Peanuts', reaction: null, severity: 'mild' }], 'None');
     await service.create(context, patientId, encounterId,
-      { ...input, allergyAcknowledgement: { reason: 'Not needed but sent' } }, 'key-12345678');
+      { ...input, allergyAcknowledgement: { reason: 'Not needed but sent', warningToken: 'a'.repeat(64) } }, 'key-12345678');
     expect(calls.some((call) => /prescription_allergy_acknowledgements/.test(call.sql))).toBe(false);
     expect(calls.some((call) => /insert into ehr\.prescriptions/.test(call.sql))).toBe(true);
   });
@@ -190,5 +259,84 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
     await service.create(context, patientId, encounterId, input, 'key-12345678');
     const result = await repository.executeCreate.mock.results[0]?.value;
     expect(result.details).toEqual({ idempotentReplay: false });
+  });
+});
+
+describe('PrescriptionsService allergy check on Activate and Resume (0124)', () => {
+  const prescriptionId = '123e4567-e89b-42d3-a456-426614174020';
+  const current = (status: OrderStatus) => ({ id: prescriptionId, encounterId, patientId, facilityId, status, rowVersion: '1',
+    medicationDisplay: 'Amoxicillin 500 mg', medicationCode: null });
+  const noRoutes = { summaries: async () => new Map(), summary: async () => null, crossFacilityOrdersEnabled: async () => false };
+
+  function setup(status: OrderStatus, recorded: unknown[], stored: unknown[] = []) {
+    const fake = fakeClient([
+      [/for update/, [current(status)]],
+      [/^\s*update ehr\.prescriptions/, [{ ...current(OrderStatus.Active), rowVersion: '2' }]],
+      [/insert into ehr\.prescription_allergy_acknowledgements/, [{}]],
+      [/from ehr\.prescription_allergy_acknowledgements/, stored],
+      [/from ehr\.recorded_allergies/, recorded],
+    ]);
+    const repository = repositoryWith(fake.client);
+    repository.run.mockImplementation(async (_c, _p, _a, _e, operation) => operation(fake.client));
+    const service = new PrescriptionsService(repository as never, {} as never, noRoutes as never);
+    return { service, calls: fake.calls };
+  }
+  const activate = { expectedRowVersion: 1, changeReason: 'Ready to give', status: OrderStatus.Active };
+
+  it('refuses Activate of a draft when an allergy was recorded after it was saved', async () => {
+    // 09:00 draft of Amoxicillin, no allergies; 09:10 the nurse records Penicillin; 09:15 Activate.
+    const { service, calls } = setup(OrderStatus.Draft, [penicillin]);
+    await expect(service.update(context, patientId, encounterId, prescriptionId, activate))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED' });
+    expect(calls.some((call) => /^\s*update ehr\.prescriptions/.test(call.sql))).toBe(false);
+  });
+
+  it('refuses Resume of a prescription on hold in the same way', async () => {
+    const { service } = setup(OrderStatus.OnHold, [penicillin]);
+    await expect(service.update(context, patientId, encounterId, prescriptionId, activate))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED' });
+  });
+
+  it('activates with the reason for the warning shown and stores it for the activate stage', async () => {
+    const { service, calls } = setup(OrderStatus.Draft, [penicillin]);
+    const result = await service.update(context, patientId, encounterId, prescriptionId, { ...activate,
+      allergyAcknowledgement: { reason: 'Reviewed with the patient; observe 30 minutes',
+        warningToken: tokenFor([{ id: allergyId, substance: 'Penicillin' }]) } }) as unknown as { details: unknown };
+    const acknowledgement = calls.find((call) => /insert into ehr\.prescription_allergy_acknowledgements/.test(call.sql));
+    expect(acknowledgement?.values).toEqual([prescriptionId, patientId, facilityId, accountId, membershipId,
+      'Reviewed with the patient; observe 30 minutes', [allergyId], false, 'activate']);
+    expect(result.details).toEqual({ rowVersion: '2', allergyOverride: true, matchedRecordedCount: 1,
+      patientReportedMatched: false });
+  });
+
+  it('stores a Resume reason for the resume stage', async () => {
+    const { service, calls } = setup(OrderStatus.OnHold, [penicillin]);
+    await service.update(context, patientId, encounterId, prescriptionId, { ...activate,
+      allergyAcknowledgement: { reason: 'Reviewed with the patient; observe 30 minutes',
+        warningToken: tokenFor([{ id: allergyId, substance: 'Penicillin' }]) } });
+    const acknowledgement = calls.find((call) => /insert into ehr\.prescription_allergy_acknowledgements/.test(call.sql));
+    expect(acknowledgement?.values.at(-1)).toBe('resume');
+  });
+
+  it('needs no new reason when a stored one already covers every match', async () => {
+    const { service, calls } = setup(OrderStatus.Draft, [penicillin],
+      [{ matchedRecordedAllergyIds: [allergyId], patientReportedMatched: false }]);
+    await service.update(context, patientId, encounterId, prescriptionId, activate);
+    expect(calls.some((call) => /insert into ehr\.prescription_allergy_acknowledgements/.test(call.sql))).toBe(false);
+    expect(calls.some((call) => /^\s*update ehr\.prescriptions/.test(call.sql))).toBe(true);
+  });
+
+  it('asks again when an allergy recorded since is not covered by the stored reason', async () => {
+    const { service } = setup(OrderStatus.Draft,
+      [penicillin, { id: laterAllergyId, substance: 'Amoxicillin', reaction: 'Anaphylaxis', severity: 'severe' }],
+      [{ matchedRecordedAllergyIds: [allergyId], patientReportedMatched: false }]);
+    await expect(service.update(context, patientId, encounterId, prescriptionId, activate))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED' });
+  });
+
+  it('does not check other changes (Hold, instructions)', async () => {
+    const { service, calls } = setup(OrderStatus.Active, [penicillin]);
+    await service.update(context, patientId, encounterId, prescriptionId, { expectedRowVersion: 1, changeReason: 'Waiting for results', status: OrderStatus.OnHold });
+    expect(calls.some((call) => /recorded_allergies/.test(call.sql))).toBe(false);
   });
 });

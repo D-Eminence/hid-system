@@ -4,8 +4,9 @@ import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { requestDigest } from '../shared/clinical-context';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { isNoKnownAllergy } from './allergy-match';
 import { checkMedicineAgainstAllergies, patientReportedAllergies, RECORDED_ALLERGY_COLUMNS,
-  type RecordedAllergyRow } from './allergy-reader';
+  type RecordedAllergyRow, warningToken } from './allergy-reader';
 import type { AllergyCheckDto, CreateAllergyDto, MarkAllergyEnteredInErrorDto } from './allergies.dto';
 
 /** A recorded allergy as the routes answer it; recordedHere tells the website whether it may mark it entered in error. */
@@ -32,7 +33,9 @@ export class AllergiesService {
         const recorded = await client.query<RecordedAllergyRow>(
           `select ${RECORDED_ALLERGY_COLUMNS} from ehr.recorded_allergies
            where patient_id = $1 and ($2::boolean or status = 'active')
-           order by (status = 'active') desc, created_at desc, id desc limit 200`,
+           order by (status = 'active') desc,
+             array_position(array['severe', 'unknown', 'moderate', 'mild'], severity), created_at desc, id desc
+           limit 200`,
           [patientId, includeEnteredInError],
         );
         const reported = await patientReportedAllergies(client, patientId);
@@ -49,6 +52,10 @@ export class AllergiesService {
   }
 
   create(context: DataAccessContext, patientId: string, input: CreateAllergyDto, key: string) {
+    if (isNoKnownAllergy(input.substance)) {
+      throw new DomainProblem(400, 'ALLERGY_NOT_A_SUBSTANCE',
+        'Record the medicine or substance the patient reacts to. "No known allergies" is not recorded as an allergy.');
+    }
     const operation = 'allergy.create';
     const digest = requestDigest(operation, { patientId, input });
     return this.repository.run(
@@ -113,15 +120,18 @@ export class AllergiesService {
     );
   }
 
-  /** The warning the prescribing form shows before it sends the prescription. */
+  /**
+   * The warning the prescribing form shows before it sends the prescription,
+   * with the warningToken the prescriber's acknowledgement must carry.
+   */
   check(context: DataAccessContext, patientId: string, input: AllergyCheckDto) {
     return this.repository.run(
       context, patientId, 'read_records',
       { action: 'ehr.allergy.check', resourceType: 'allergy', resourceId: patientId },
       async (client) => {
-        const matches = await checkMedicineAgainstAllergies(client, patientId,
+        const matches = await checkMedicineAgainstAllergies(client, patientId, context.facilityId,
           { display: input.medicationDisplay, code: input.medicationCode ?? null });
-        return { value: { matches, acknowledgementRequired: matches.length > 0 },
+        return { value: { matches, acknowledgementRequired: matches.length > 0, warningToken: warningToken(matches) },
           details: { matchCount: matches.length } };
       },
     );

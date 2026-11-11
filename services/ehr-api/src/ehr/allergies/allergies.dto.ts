@@ -7,6 +7,8 @@ const trim = ({ value }: TransformFnParams): unknown => typeof value === 'string
 const ONE_LINE = /^[^\u0000-\u001f\u007f]*$/u;
 /** Newlines allowed in a reason; no other control character. */
 const REASON_TEXT = /^[^\u0000-\u0009\u000b-\u001f\u007f]*$/u;
+/** A reason to go ahead after an allergy warning: at least three letters in a row (a real word); no control character but newlines. */
+export const ACK_REASON = /^(?=[\s\S]*\p{L}{3})[^\u0000-\u0009\u000b-\u001f\u007f]*$/u;
 
 export const ALLERGY_SEVERITIES = ['mild', 'moderate', 'severe', 'unknown'] as const;
 export type AllergySeverity = typeof ALLERGY_SEVERITIES[number];
@@ -41,8 +43,15 @@ export class AllergyCheckDto {
   medicationCode?: string;
 }
 
-/** On a prescription: the prescriber's reason to go ahead after an allergy warning (0124). */
+/**
+ * On a prescription: the prescriber's reason to go ahead after an allergy
+ * warning (0124), and the warningToken of the warning they were shown (from
+ * the allergy check or the 409); a reason for another warning is refused.
+ */
 export class AllergyAcknowledgementDto {
-  @Transform(trim) @IsString() @Length(3, 500) @Matches(REASON_TEXT)
+  @Transform(trim) @IsString() @Length(10, 500) @Matches(ACK_REASON)
   reason!: string;
+
+  @IsString() @Matches(/^[a-f0-9]{64}$/)
+  warningToken!: string;
 }

@@ -10,7 +10,7 @@ import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
 import { calendarDate } from '../shared/calendar-date';
-import { checkMedicineAgainstAllergies } from '../allergies/allergy-reader';
+import { checkPrescriptionAllergies, recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -121,15 +121,11 @@ export class PrescriptionsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'prescription',
         async () => {
-          // 0124: the allergy check. A match needs the prescriber's acknowledgement with a reason;
-          // without it nothing is written (the whole transaction, idempotency key included, rolls back).
-          const matches = await checkMedicineAgainstAllergies(client, patientId,
-            { display: input.medicationDisplay, code: input.medicationCode ?? null });
-          if (matches.length > 0 && !input.allergyAcknowledgement) {
-            throw new DomainProblem(409, 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
-              'This medicine may match an allergy on the patient\'s record. Check the allergies and give a reason to go ahead.',
-              matches.map((match) => ({ field: 'allergyAcknowledgement', messages: [match.message] })));
-          }
+          // 0124: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
+          // the warning they were shown (its warningToken); without it nothing is written (the whole
+          // transaction, idempotency key included, rolls back).
+          const matches = await checkPrescriptionAllergies(client, context, patientId,
+            { display: input.medicationDisplay, code: input.medicationCode ?? null }, input.allergyAcknowledgement);
           const result = await client.query<PrescriptionRow>(
             `insert into ehr.prescriptions (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
@@ -146,20 +142,11 @@ export class PrescriptionsService {
           );
           const row = this.single(result.rows[0]);
           if (matches.length > 0 && input.allergyAcknowledgement) {
-            const matchedRecordedAllergyIds = [...new Set(matches.flatMap((match) => match.allergyId ? [match.allergyId] : []))];
-            const patientReportedMatched = matches.some((match) => match.source === 'patient_reported');
-            await client.query(
-              `insert into ehr.prescription_allergy_acknowledgements (
-                 prescription_id, patient_id, facility_id, created_by, created_by_membership_id,
-                 reason, matched_recorded_allergy_ids, patient_reported_matched
-               ) values ($1, $2, $3, $4, $5, $6, $7::uuid[], $8)`,
-              [row.id, patientId, context.facilityId, context.actor.accountId, context.membershipId,
-                input.allergyAcknowledgement.reason, matchedRecordedAllergyIds, patientReportedMatched],
-            );
             // The audit says the prescriber went ahead after a warning: flags and counts only,
             // never the substance or the reason text.
-            return { value: row, id: row.id, details: { allergyOverride: true,
-              matchedRecordedCount: matchedRecordedAllergyIds.length, patientReportedMatched } };
+            const details = await recordAllergyAcknowledgement(client, context, patientId, row.id, 'create', matches,
+              input.allergyAcknowledgement.reason);
+            return { value: row, id: row.id, details };
           }
           return { value: row, id: row.id };
         },
@@ -188,6 +175,14 @@ export class PrescriptionsService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
         }
+        // 0124: Activate (draft) and Resume (on hold) check the allergies again: one may have been
+        // recorded since the prescription was saved. A match already covered by a stored reason for
+        // this prescription needs none.
+        const activating = input.status === OrderStatus.Active && current.status !== OrderStatus.Active;
+        const matches = activating
+          ? await checkPrescriptionAllergies(client, context, patientId,
+            { display: current.medicationDisplay, code: current.medicationCode }, input.allergyAcknowledgement, current.id)
+          : [];
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<PrescriptionRow>(
           `update ehr.prescriptions set
@@ -202,6 +197,11 @@ export class PrescriptionsService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Prescription changed since it was loaded');
+        if (matches.length > 0 && input.allergyAcknowledgement) {
+          const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
+            current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement.reason);
+          return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion, ...override } };
+        }
         return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),

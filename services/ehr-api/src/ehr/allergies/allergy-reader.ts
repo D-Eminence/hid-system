@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
-import { allergyTerms, matchAllergies, type AllergyForCheck, type AllergyMatch } from './allergy-match';
+import { allergyTerms, matchAllergies, normalizeMedicineText, type AllergyForCheck,
+  type AllergyMatch } from './allergy-match';
 
 export interface RecordedAllergyRow extends QueryResultRow {
   id: string;
@@ -35,18 +37,26 @@ export interface PatientReportedAllergies {
 /**
  * Everything the allergy check reads, inside the caller's transaction (forced
  * RLS: the clinician's access to the patient at the current facility): the
- * active recorded allergies (any facility) and the patient's own allergy text.
+ * active recorded allergies (any facility, with where and when each was
+ * recorded) and the patient's own allergy text.
  */
-export async function allergiesForCheck(client: PoolClient, patientId: string): Promise<AllergyForCheck[]> {
-  const recorded = await client.query<{ id: string; substance: string; reaction: string | null; severity: string }>(
-    `select id, substance, reaction, severity from ehr.recorded_allergies
+export async function allergiesForCheck(
+  client: PoolClient, patientId: string, facilityId: string,
+): Promise<AllergyForCheck[]> {
+  const recorded = await client.query<{
+    id: string; substance: string; reaction: string | null; severity: string;
+    facility_id?: string; created_at?: Date | string;
+  }>(
+    `select id, substance, reaction, severity, facility_id, created_at from ehr.recorded_allergies
      where patient_id = $1 and status = 'active' order by created_at, id`,
     [patientId],
   );
   const reported = await patientReportedAllergies(client, patientId);
   return [
     ...recorded.rows.map((row) => ({ source: 'recorded' as const, id: row.id, substance: row.substance,
-      reaction: row.reaction, severity: row.severity })),
+      reaction: row.reaction, severity: row.severity,
+      ...(row.facility_id ? { facilityId: row.facility_id, recordedHere: row.facility_id === facilityId } : {}),
+      ...(row.created_at ? { recordedOn: new Date(row.created_at) } : {}) })),
     ...(reported.text && allergyTerms(reported.text).length > 0
       ? [{ source: 'patient_reported' as const, substance: reported.text }] : []),
   ];
@@ -62,7 +72,22 @@ export async function patientReportedAllergies(client: PoolClient, patientId: st
 }
 
 export async function checkMedicineAgainstAllergies(
-  client: PoolClient, patientId: string, medicine: { display: string; code?: string | null },
+  client: PoolClient, patientId: string, facilityId: string, medicine: { display: string; code?: string | null },
 ): Promise<AllergyMatch[]> {
-  return matchAllergies(medicine, await allergiesForCheck(client, patientId));
+  return matchAllergies(medicine, await allergiesForCheck(client, patientId, facilityId));
+}
+
+/**
+ * Names exactly the warning a prescriber was shown: the sha256 (hex) of the
+ * sorted allergies that matched (a recorded allergy by id, the patient's own
+ * text by its normalized term). A reason given for one warning is refused for
+ * another (a new allergy recorded meanwhile, or a changed medicine).
+ */
+export function warningToken(matches: readonly AllergyMatch[]): string {
+  const pairs = matches.flatMap((match) => match.source === 'recorded'
+    ? (match.allergyIds ?? (match.allergyId ? [match.allergyId] : [])).map((id) => [match.source, id])
+    : [[match.source, normalizeMedicineText(match.substance).trim()]]);
+  // JSON.stringify of the sorted pairs.
+  const sorted = pairs.map((pair) => JSON.stringify(pair)).sort();
+  return createHash('sha256').update(`[${sorted.join(',')}]`).digest('hex');
 }

@@ -1,5 +1,7 @@
+import { ValidationPipe } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { SendOrderRouteDto } from '../order-routes/dto/order-route.dto';
 import {
   CreateDiagnosisDto,
   CreateEncounterDto,
@@ -31,9 +33,9 @@ const OPTIONAL_FIELDS: readonly [DtoConstructor, readonly string[]][] = [
   [UpdateDiagnosisDto, ['clinicalStatus', 'verificationStatus', 'abatementAt', 'notes']],
   [CreatePrescriptionDto, [
     'medicationCodeSystem', 'medicationCode', 'doseQuantity', 'doseUnit',
-    'routeCode', 'startsOn', 'endsOn',
+    'routeCode', 'startsOn', 'endsOn', 'allergyAcknowledgement',
   ]],
-  [UpdatePrescriptionDto, ['status', 'frequency', 'instructions', 'endsOn']],
+  [UpdatePrescriptionDto, ['status', 'frequency', 'instructions', 'endsOn', 'allergyAcknowledgement']],
   [CreateLabRequestDto, ['priority', 'specimenTypeCode', 'clinicalInformation', 'externalOrderReference']],
   [UpdateLabRequestDto, ['priority', 'status', 'clinicalInformation']],
 ];
@@ -50,5 +52,41 @@ describe('clinical DTO optional-field semantics', () => {
   it('continues to accept absent optional fields', async () => {
     const instance = plainToInstance(VitalMeasurementsDto, {});
     expect(await validate(instance)).toHaveLength(0);
+  });
+});
+
+describe('the allergy acknowledgement through the ValidationPipe (0124)', () => {
+  const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, forbidUnknownValues: true, transform: true });
+  const warningToken = 'a'.repeat(64);
+  const bodies: [new () => object, Record<string, unknown>][] = [
+    [CreatePrescriptionDto, { medicationDisplay: 'Amoxicillin 500 mg', frequency: 'Three times daily', instructions: 'After food',
+      status: 'active' }],
+    [UpdatePrescriptionDto, { expectedRowVersion: 1, changeReason: 'Ready to give', status: 'active' }],
+    [SendOrderRouteDto, { expectedRowVersion: 1, receivingFacilityId: '123e4567-e89b-42d3-a456-426614174007',
+      patientAgreed: true, attestationTextVersion: 'order-route-prescription-attestation-v1' }],
+  ];
+  const run = (metatype: new () => object, body: Record<string, unknown>, allergyAcknowledgement: unknown) =>
+    pipe.transform({ ...body, allergyAcknowledgement }, { type: 'body', metatype });
+
+  it.each(bodies)('%p refuses a blank, short, wordless or too long reason, a missing or malformed token, and a non-object',
+    async (metatype, body) => {
+      for (const acknowledgement of [
+        { reason: '   ', warningToken }, { reason: 'ok', warningToken }, { reason: '  ok  ', warningToken },
+        { reason: 'yes', warningToken }, { reason: '...........', warningToken }, { reason: 'ok ok ok ok', warningToken },
+        { reason: '1234567890', warningToken }, { reason: 'x'.repeat(501), warningToken },
+        { reason: 'Tolerated\u0007 before', warningToken },
+        { reason: 'Tolerated amoxicillin in 2024' }, { reason: 'Tolerated amoxicillin in 2024', warningToken: 'not-a-token' },
+        { reason: 'Tolerated amoxicillin in 2024', warningToken: 'A'.repeat(64) },
+        {}, 'yes',
+      ]) {
+        await expect(run(metatype, body, acknowledgement)).rejects.toMatchObject({ status: 400 });
+      }
+    });
+
+  it.each(bodies)('%p trims the reason and keeps a two-line reason', async (metatype, body) => {
+    await expect(run(metatype, body, { reason: '  Tolerated before  ', warningToken }))
+      .resolves.toMatchObject({ allergyAcknowledgement: { reason: 'Tolerated before', warningToken } });
+    await expect(run(metatype, body, { reason: 'Tolerated amoxicillin in 2024.\nObserve 30 minutes.', warningToken }))
+      .resolves.toMatchObject({ allergyAcknowledgement: { reason: 'Tolerated amoxicillin in 2024.\nObserve 30 minutes.' } });
   });
 });

@@ -375,7 +375,8 @@ export class CreatePrescriptionDto {
 
   /**
    * 0124: sent only after an allergy warning (409 ALLERGY_ACKNOWLEDGEMENT_REQUIRED
-   * or the allergy check), with the prescriber's reason to go ahead.
+   * or the allergy check), with the prescriber's reason to go ahead and the
+   * warning's token.
    */
   @IsOptionalButNotNull()
   @ValidateNested()
@@ -403,6 +404,16 @@ export class UpdatePrescriptionDto extends VersionedUpdateDto {
   @IsOptionalButNotNull()
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   endsOn?: string;
+
+  /**
+   * 0124: on Activate or Resume, sent only after an allergy warning (409
+   * ALLERGY_ACKNOWLEDGEMENT_REQUIRED or the allergy check), with the
+   * prescriber's reason and the warning's token.
+   */
+  @IsOptionalButNotNull()
+  @ValidateNested()
+  @Type(() => AllergyAcknowledgementDto)
+  allergyAcknowledgement?: AllergyAcknowledgementDto;
 }
 
 export class AcceptPrescriptionForPharmacyDto {
