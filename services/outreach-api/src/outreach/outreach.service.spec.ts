@@ -124,6 +124,42 @@ describe('OutreachService', () => {
     expect(query).toHaveBeenCalledTimes(2);
   });
 
+  // The trigger's refusals at the insert (0045, 0110), after the service's own
+  // check passed: the same 403 and 409 as that check, not 500.
+  const activeCampaign = { rows: [{ status: 'active', services: ['registration'],
+    starts_at: new Date(Date.now() - 60_000), ends_at: null }] };
+  const triggerRefusal = (code: string, message: string) => Object.assign(new Error(message), { code });
+
+  it('answers 403 when the registration trigger refuses the campaign membership (0110)', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(activeCampaign)
+      .mockRejectedValueOnce(triggerRefusal('42501', 'Exact Outreach campaign membership is required'));
+    const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    await expect(new OutreachService(database as never, audit as never, identity as never)
+      .create({ ...input, campaignId: ids.campaign }, 'campaign-idempotency-key', context))
+      .rejects.toMatchObject({ status: 403, code: 'OUTREACH_CAMPAIGN_ACCESS_DENIED' });
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 when the registration trigger finds the campaign no longer accepting', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(activeCampaign)
+      .mockRejectedValueOnce(triggerRefusal('23514', 'Outreach campaign is not accepting registrations'));
+    const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    await expect(new OutreachService(database as never, audit as never, identity as never)
+      .create({ ...input, campaignId: ids.campaign }, 'campaign-idempotency-key', context))
+      .rejects.toMatchObject({ status: 409, code: 'OUTREACH_CAMPAIGN_NOT_ACCEPTING_REGISTRATIONS' });
+  });
+
+  it('leaves any other database refusal of a registration as it is', async () => {
+    const other = triggerRefusal('42501', 'Valid Outreach registration context is required');
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce(activeCampaign)
+      .mockRejectedValueOnce(other);
+    const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    await expect(new OutreachService(database as never, audit as never, identity as never)
+      .create({ ...input, campaignId: ids.campaign }, 'campaign-idempotency-key', context))
+      .rejects.toBe(other);
+  });
+
   it('denies registration after a campaign closes', async () => {
     const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{
       status: 'closed', services: ['registration'], starts_at: new Date(Date.now() - 60_000),

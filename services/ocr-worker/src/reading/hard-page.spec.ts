@@ -229,8 +229,9 @@ describe('two readings of a hard page', () => {
     const { check } = merge(modelPage([medicine(1, 'Flagyl', '400', 'mg', 'tds')]),
       modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]));
     expect(fieldsOf(check.items[0]!).name).toBe('Flagyl (metronidazole)');
-    // The same medicine, but the readings read different words on the paper: both shown, and said to disagree.
-    expect(check.items[0]!.plain).toBe('Flagyl? (metronidazole) (or Metronidazole?) 400 mg tds (three times a day)');
+    // The same medicine, read as different words on the paper: said to disagree. The generic is shown already, so
+    // "(or Metronidazole?)" would add nothing and is left out (cleanup of 2026-11-10, second round).
+    expect(check.items[0]!.plain).toBe('Flagyl? (metronidazole) 400 mg tds (three times a day)');
     expect(check.items[0]!.checkReasons).toContain('readings_disagree');
   });
 
@@ -610,7 +611,7 @@ describe('hard-page prompt versions', () => {
   it('keeps the prompt versions consistent: zoom 12, no zoom 12-no-zoom, reading 12', () => {
     expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-12');
     expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-12-no-zoom');
-    expect(PROMPT_VERSION).toBe('hid-paper-reading-prompt-12');
+    expect(PROMPT_VERSION).toBe('hid-paper-reading-prompt-13');
   });
 });
 

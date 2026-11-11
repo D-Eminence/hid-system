@@ -448,10 +448,11 @@ select pg_temp.outreach_case('runtime', 'campaign update: ' || session_name
 -- create, link-existing, campaign creation and campaign status commands, each
 -- statement in order. Not run here: the audit insert of each command
 -- (services/outreach-api/src/audit/audit.service.ts:9-17), which no Outreach
--- guard reads; campaign-linked capture, whose check
--- (assertCampaignAcceptsRegistration, outreach.service.ts:263-271) locks
--- outreach.campaign_members FOR SHARE, which needs an UPDATE privilege the
--- Outreach runtime does not have (42501, a separate release blocker); and
+-- guard reads; campaign-linked capture, which
+-- test/database/outreach-campaign-registration.integration.sql covers (0110:
+-- assertCampaignAcceptsRegistration locks only the campaign, and since 0110 so
+-- does the registration trigger; the runtime still cannot lock
+-- outreach.campaign_members); and
 -- addCampaignMember (lines 224-248), which writes only outreach.campaign_members
 -- and outreach.campaign_events, tables no 0077 guard covers. The SELECT ... FOR
 -- UPDATE locks of linkExisting and updateCampaignStatus run: the runtime may

@@ -77,6 +77,7 @@ export class OutreachService {
       // is retried and replayed; only a conflict that remains is a 409.
       this.translateConflict(error, 'OUTREACH_REGISTRATION_CONFLICT',
         'This local Outreach registration was already received');
+      this.translateCampaignRefusal(error);
       throw error;
     }
   }
@@ -317,9 +318,12 @@ export class OutreachService {
    * locks it FOR UPDATE, so it waits for the registration, or the registration
    * for it. The membership row is read, not locked. The runtime role cannot
    * lock campaign_members (no UPDATE, 42501), and no API command changes or
-   * deletes a membership; a membership deleted after this check is caught by
-   * the registration trigger, which locks the campaign and the membership as
-   * its owner (Phase 4 Stage 9). The campaign lock needs the campaign UPDATE
+   * deletes a membership. The registration trigger checks the membership
+   * again at the insert, reading it as its owner and locking only the campaign
+   * (0110: campaign_members forces row-level security and has no UPDATE
+   * policy, so before 0110 its membership lock refused every campaign
+   * registration under a migration owner without BYPASSRLS); its refusal
+   * answers 403 like this check. The campaign lock needs the campaign UPDATE
    * policy, so it relies on every role with outreach.registration.write also
    * holding outreach.campaign.write (runtime-command-privileges.integration.sql
    * checks this); without it the lock returns no row and the request is refused.
@@ -360,6 +364,25 @@ export class OutreachService {
       event_type,aggregate_id,aggregate_version,facility_id,patient_id,correlation_id,payload
     ) values ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
     [eventType, id, version, context.facilityId, patientId, context.correlationId, JSON.stringify(payload)]);
+  }
+
+  /**
+   * The registration trigger (outreach.validate_registration_campaign_write,
+   * 0045, 0110) checks the campaign again at the insert. Its refusals answer as
+   * this service's own check does, not 500: a membership removed after the
+   * check, or a campaign that stopped accepting registrations in between.
+   */
+  private translateCampaignRefusal(error: unknown): void {
+    if (typeof error !== 'object' || error === null) return;
+    const { code, message } = error as { code?: unknown; message?: unknown };
+    if (code === '42501' && message === 'Exact Outreach campaign membership is required') {
+      throw new DomainProblem(403, 'OUTREACH_CAMPAIGN_ACCESS_DENIED',
+        'Exact membership in this Outreach campaign is required');
+    }
+    if (code === '23514' && message === 'Outreach campaign is not accepting registrations') {
+      throw new DomainProblem(409, 'OUTREACH_CAMPAIGN_NOT_ACCEPTING_REGISTRATIONS',
+        'This Outreach campaign is not accepting registrations');
+    }
   }
 
   private translateConflict(error: unknown, problemCode: string, detail: string): void {

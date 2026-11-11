@@ -1,7 +1,12 @@
 -- 0122 Outreach campaigns are managed by their own admins (ADR-045 option B).
 -- Written on staging-novu-ci-20261005 at c9b59eff (migrations 0001-0108
--- applied). Its number is the next free one when it merges (open PRs hold
--- 0109-0111 and 0113-0121), so it may be renumbered then.
+-- applied) and brought up to staging at 13d5b518, after 0109 (support Health
+-- ID matches) and 0110 (campaign registration lock) went live: it now applies
+-- after 0110. 0122 is taken by another change (#223), so this takes the next
+-- free number when it merges and is renumbered then. It uses nothing 0109 and
+-- 0110 add: 0110 replaces the registration trigger's body
+-- (validate_registration_campaign_write), not the campaign trigger replaced
+-- here, and changes no policy, grant or row-level security setting.
 --
 -- Decision (relayed by the user in chat, 2026-11-11, answering which rule
 -- campaign management should follow): "Campaign admins only". Any staff member
@@ -21,7 +26,8 @@
 --    requires the session's membership to be an `admin` member of that
 --    campaign: else 42501 "Outreach campaign admin is required". A row lock
 --    fires no trigger, so a member registering a person into the campaign
---    (0045's FOR SHARE of the campaign) is unaffected.
+--    (the registration trigger's FOR SHARE of the campaign, 0045 and 0110) is
+--    unaffected.
 -- 2. Two RESTRICTIVE policies on outreach.campaign_members:
 --    - insert: the session's membership is an `admin` member of that campaign,
 --      or the row is the campaign's creator seeding themself as its first
@@ -45,8 +51,8 @@
 -- campaign reads and registrations are unchanged.
 --
 -- PRECONDITIONS (catalog reads only; 55000 or 42501, nothing applied):
--- 0001-0108 applied (0108's records-processing cover body md5
--- 6928763d3b69f0e4b4acf96a6a255736 is the marker); not applied yet (else
+-- 0001-0110 applied (0110's outreach.validate_registration_campaign_write()
+-- body md5 69469315f04554d2639dfa9f83591d4d is the marker); not applied yet (else
 -- "0122: already applied"); validate_campaign_write's body is 0077's (md5
 -- 1ac1e424e645378ab6e88a45542fccf9), SECURITY DEFINER with its search_path;
 -- outreach.campaigns and outreach.campaign_members force row-level security
@@ -59,18 +65,18 @@ do $$
 declare
   table_owner oid;
 begin
-  -- a. Prerequisites (0001-0108; 0108's cover body is the marker).
+  -- a. Prerequisites (0001-0110; 0110's registration trigger body is the marker).
   if to_regclass('outreach.campaigns') is null
      or to_regclass('outreach.campaign_members') is null
      or to_regclass('identity.staff') is null
      or to_regclass('identity.staff_facility_memberships') is null
      or to_regprocedure('outreach.validate_campaign_write()') is null
      or to_regprocedure('outreach.context_allows(uuid,text)') is null
-     or to_regprocedure('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)') is null
+     or to_regprocedure('outreach.validate_registration_campaign_write()') is null
      or (select md5(proc.prosrc) from pg_proc proc
-          where proc.oid = to_regprocedure('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)'))
-        is distinct from '6928763d3b69f0e4b4acf96a6a255736' then
-    raise exception using errcode = '55000', message = '0122: 0001-0108 must be applied first';
+          where proc.oid = to_regprocedure('outreach.validate_registration_campaign_write()'))
+        is distinct from '69469315f04554d2639dfa9f83591d4d' then
+    raise exception using errcode = '55000', message = '0122: 0001-0110 must be applied first';
   end if;
   -- b. Not applied yet.
   if to_regprocedure('outreach.campaign_staff(uuid)') is not null then

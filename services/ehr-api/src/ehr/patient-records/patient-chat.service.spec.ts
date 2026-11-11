@@ -1,5 +1,7 @@
 import type {PoolClient} from 'pg';
 import {withPatientLines} from './patient-chat-safety';
+import {Logger} from '@nestjs/common';
+import {ClaudeCallError} from './claude-ai.service';
 import {PatientChatService} from './patient-chat.service';
 import {evidence,binding,type Evidence} from './patient-evidence.types';
 import {patientEvidence} from './patient-evidence.policy';
@@ -283,6 +285,68 @@ describe('B5 one patient per turn',()=>{
   const s=setup();const access={...(staffAccess(s,[RX]) as object),audience:'patient'} as never;
   await expect(s.service.answer(request,'Medicine',access)).rejects.toMatchObject({code:'PATIENT_CHAT_UNAVAILABLE'});
   expect(s.plan).not.toHaveBeenCalled();
+ });
+});
+
+describe('A failed turn logs its category only',()=>{
+ afterEach(()=>jest.restoreAllMocks());
+ const staffAccess=(s:ReturnType<typeof setup>)=>({audience:'staff',audit:{actorType:'staff'},authorize:async()=>auth,admissionKey:'staff:staff-a:facility-a',
+  history:{start:async()=>'generation',context:s.context,save:s.save}}) as never;
+ it('logs the model failure category and the audience, never the question, the error text or the record, and still answers 503',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  const s=setup();s.plan.mockRejectedValue(new ClaudeCallError('answer_cut_off','Claude answer cut off'));
+  await expect(s.service.answer(request,'Summarise Adaeze Okafor\'s history',staffAccess(s))).rejects.toMatchObject({code:'PATIENT_CHAT_UNAVAILABLE'});
+  expect(warn).toHaveBeenCalledTimes(1);
+  expect(warn.mock.calls[0]?.[0]).toEqual({message:'Record chat unavailable',category:'model_answer_cut_off',exceptionType:'ClaudeCallError',
+   audience:'staff',correlationId:'synthetic-chat'});
+  expect(JSON.stringify(warn.mock.calls)).not.toMatch(/Adaeze|Summarise|cut off/);
+ });
+ it('gives the provider status for a refused request, "timeout" for the time limit, and "other" without the message for anything else',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  const s=setup();
+  s.plan.mockRejectedValueOnce(new ClaudeCallError('request_failed','Claude request failed',529));
+  await expect(s.service.answer(request,'Medicine')).rejects.toMatchObject({status:503});
+  s.plan.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout','TimeoutError'));
+  await expect(s.service.answer(request,'Medicine')).rejects.toMatchObject({status:503});
+  // A database or parser message can carry patient data; only its class name is logged.
+  s.plan.mockRejectedValueOnce(new Error('duplicate key for Adaeze Okafor, 1990-03-12'));
+  await expect(s.service.answer(request,'Medicine')).rejects.toMatchObject({status:503});
+  expect(warn.mock.calls.map(c=>c[0])).toEqual([
+   {message:'Record chat unavailable',category:'model_request_failed',exceptionType:'ClaudeCallError',providerStatus:529,audience:'patient',correlationId:'synthetic-chat'},
+   {message:'Record chat unavailable',category:'timeout',exceptionType:'DOMException',audience:'patient',correlationId:'synthetic-chat'},
+   {message:'Record chat unavailable',category:'other',exceptionType:'Error',audience:'patient',correlationId:'synthetic-chat'}]);
+  expect(JSON.stringify(warn.mock.calls)).not.toMatch(/Adaeze|1990|duplicate/);
+ });
+ it('does not log a refusal the user is told about (a DomainProblem)',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  await expect(setup().service.answer(request,'')).rejects.toMatchObject({status:400});
+  expect(warn).not.toHaveBeenCalled();
+ });
+ it('ends a staff turn at 48 seconds, under the gateway\'s 50, and keeps 60 for patients',async()=>{
+  const timeout=jest.spyOn(AbortSignal,'timeout');
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'I can summarise this patient\'s records.'});
+  await s.service.answer(request,'Hello',staffAccess(s));
+  expect(timeout).toHaveBeenCalledWith(48_000);
+  timeout.mockClear();
+  await s.service.answer(request,'Hello');
+  expect(timeout).toHaveBeenCalledWith(60_000);
+ });
+ it('starts the turn timer before authorization, so authorization and history count against it',async()=>{
+  const timeout=jest.spyOn(AbortSignal,'timeout');
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'I can summarise this patient\'s records.'});
+  const authorize=jest.fn(async()=>auth);
+  await s.service.answer(request,'Hello',{...(staffAccess(s) as object),authorize} as never);
+  const turnTimer=timeout.mock.calls.findIndex(call=>call[0]===48_000);
+  expect(turnTimer).toBeGreaterThanOrEqual(0);
+  expect(timeout.mock.invocationCallOrder[turnTimer]!).toBeLessThan(authorize.mock.invocationCallOrder[0]!);
+ });
+ it('stops a turn whose authorization and history used up its time, before asking the model',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  jest.spyOn(AbortSignal,'timeout').mockReturnValue(AbortSignal.abort(new DOMException('The operation timed out.','TimeoutError')));
+  const s=setup();
+  await expect(s.service.answer(request,'Hello',staffAccess(s))).rejects.toMatchObject({code:'PATIENT_CHAT_UNAVAILABLE'});
+  expect(s.plan).not.toHaveBeenCalled();expect(s.save).not.toHaveBeenCalled();
+  expect(warn.mock.calls[0]?.[0]).toMatchObject({category:'timeout',audience:'staff'});
  });
 });
 
