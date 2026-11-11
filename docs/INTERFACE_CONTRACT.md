@@ -1262,6 +1262,7 @@ GET  /api/v1/ocr/jobs/:jobId/validations
 POST /api/v1/ocr/jobs/:jobId/patient-confirmation
 POST /api/v1/ocr/validations/:validationId/publications
 GET  /api/v1/ocr/validations/:validationId/publications
+GET  /api/v1/ocr/quality/summary?from=YYYY-MM-DD&to=YYYY-MM-DD
 ```
 
 The document-scoped job lookup returns the latest authorized job as
@@ -1388,6 +1389,93 @@ other side's time, that day-only date is not sent (its as-written text stays in
 the stored review) rather than refusing or inventing a time; two times in the
 wrong order answer 400 `OCR_LAB_DATE_ORDER`. The as-written keys, `page` and
 `itemId` are never sent to Lab.
+
+Review outcome (phase 1, measurement only; no migration). Every validation,
+validated or rejected, stores `provenance.reviewOutcome` in
+`ocr.validations` (beside `source` and `extractionId`) and the same object in
+the `details.reviewOutcome` of its `ocr.validation.accept` /
+`ocr.validation.reject` audit event. It compares the reviewed extraction's
+reading (`structured_payload` items and `provenance.reading`) with what the
+reviewer kept, as counts and codes only: schema `hid.ocr.review-outcome/v1`,
+`promptVersion`, `processingContract`, `readingStatus`, `linkage`
+(`item_ids` | `estimated` | `none`), `estimated`, `totals`, `buckets` (per item
+kind x decision x AI confidence x hard page x `readBy`, each with check-reason
+code counts and field-change class counts) and `reviewer` (counts of the
+optional signals below). Decisions: `kept_unchanged`, `kept_changed`,
+`removed`, `added_by_reviewer` (entries linked by `itemId`, or typed),
+`unlinked` (whole text saved without item links: an EHR note, the legacy
+single medicine, a list with no `itemId`; the summary is then `estimated` and
+carries `estimate.foundInSavedText` / `notFoundInSavedText` / `notChecked`
+instead of per-item decisions; at most 300 items are checked, within a fixed
+allowance of 1,000,000 word comparisons and 2,000,000 edit-distance cells, the
+rest are `notChecked`), `not_in_target` and
+`rejected_with_document`. When nothing was read of the kept kinds, typed
+entries are `added_by_reviewer` and `linkage` is `none`. "Changed" uses the
+OCR accuracy kit's normalisers (name, strength, frequency for medicines; name,
+value, unit and date for lab results), so spacing, case and spellings such as
+"5 mg"/"5mg" or "bd"/"twice daily" are not changes. It never holds a name,
+value, text, item id or reviewer identifier. It is kept to 16,384 bytes
+serialised: past that every bucket's check-reason counts are emptied and
+`checkReasonsDropped: true` is added, and if it is still larger the stored value
+is `{ schema, error: 'summary_too_large' }`. Computing it never blocks a save:
+on any failure the stored value is `{ schema, error: 'summary_failed' }`.
+
+Optional review signals on the validation body (all optional; existing clients
+are unaffected): `reviewConfirmed` (boolean), `missedItems` (integer 0-200),
+`removedItems` (up to 200 `{ itemId, removalReason? }`, the reason optional:
+`not_on_paper` | `duplicate` | `not_needed` | `unreadable` | `other_patient`),
+`rejectionReasonCode` (only with `rejected`, else 400
+`OCR_REJECTION_REASON_NOT_ALLOWED`: `wrong_patient`, `wrong_document`,
+`unreadable`, `duplicate_document`, `pages_missing`, `reading_unusable`,
+`not_clinical`, `other`), and on any `corrections[]` entry `itemId`, `fields`
+(1-9 distinct of `name`, `strength`, `dose`, `frequency`, `route`, `duration`,
+`date`, `value`, `unit`) and `changeReason` (`misread` | `clinical_update`).
+They enter the review outcome as counts only. When sent they join the request
+digest (the same `Idempotency-Key` with different signals answers 409
+`IDEMPOTENCY_CONFLICT`); when absent the digest is exactly as before. None is
+ever required from staff (owner decision Q43): every one, and every reason, may
+be left out. Each extraction on `GET /api/v1/ocr/jobs/:jobId/extractions`
+carries `reviewLearning: true` on a server that accepts them; a client sends
+them only when it sees it (an older server answers them 400).
+
+`GET /api/v1/ocr/quality/summary` (staff actors only: a platform
+administrator, holding platform permissions `platform.admin.access` and
+`platform.operations.read`, or the manager of the facility named by
+`X-Facility-ID`, whose membership at that facility holds `workforce.manage`, at
+a facility not awaiting Health ID support's review; a manager's permission at
+another facility never counts; anyone else, including the administrator of a
+self-signed-up facility still awaiting review, 403 `PERMISSION_DENIED`). Every
+answer carries `available`. No staff monitoring: for a manager, each review is
+read with its reviewer keyed by a fresh random per-request key (SHA-256 in the
+database; unlinkable to a person or across requests, never returned or
+logged). Fewer than 3 distinct reviewers in the (widened) range answers `{
+schema, from, to, scope, available: false, reason: 'too_few_reviewers' }` with
+no counts; otherwise any group to which fewer than 3 distinct reviewers
+contributed is suppressed like a small group (the rule counts distinct
+reviewers; it does not weigh how much each did). A manager's range also ends at
+the last finished ISO week (the answer's `to`; asking only about the current
+week answers `too_few_reviewers`), so a group shown never changes later, and
+when more than 50,000 reviews match, the last, cut-off week is left out.
+Platform administrators get every group over the minimum size, current week
+included. When figures are returned (`available:
+true`) the route sums stored review outcomes by ISO
+week, facility, item kind and prompt version (`itemGroups`) and by ISO week,
+facility and prompt version (`reviewGroups`) for `from`..`to` (UTC days,
+inclusive, default the last 28 days, at most 92; else 400
+`OCR_QUALITY_RANGE_INVALID`), widened to whole ISO weeks (Monday to Sunday;
+the answer's `from`/`to` are the widened days) so two ranges a day apart cannot
+be subtracted. A group with fewer than 20 items (reviews, for a review group) is
+returned as `{ ...keys, suppressed: true }` with no counts. Inside a group that
+is shown, reason, check-reason and field-class counts under 5 are left out and
+counted in `smallCellsHidden` (a hidden count can still be worked out from the
+group's totals; the hidden code cannot). `summaryFailed` counts both
+`summary_failed` and `summary_too_large`; an outcome stored with
+`checkReasonsDropped` adds no check-reason counts.
+There are no per-reviewer figures. The read is audited as
+`ocr.quality.summary.read` with the range, the reader kind
+(`platform_admin` or `facility_manager`), `available` and counts only. Row-level security
+limits it to the facility named by `X-Facility-ID` (`scope: 'bound_facility'`);
+a cross-facility read needs a database change that is not part of this phase.
 
 Patient confirmation is a separate idempotent command bound to the canonical
 Identity patient already governing the source document. The server rechecks
