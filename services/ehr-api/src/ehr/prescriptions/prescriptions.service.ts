@@ -10,6 +10,7 @@ import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
 import { calendarDate } from '../shared/calendar-date';
+import { checkMedicineAgainstAllergies } from '../allergies/allergy-reader';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -120,6 +121,15 @@ export class PrescriptionsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'prescription',
         async () => {
+          // 0124: the allergy check. A match needs the prescriber's acknowledgement with a reason;
+          // without it nothing is written (the whole transaction, idempotency key included, rolls back).
+          const matches = await checkMedicineAgainstAllergies(client, patientId,
+            { display: input.medicationDisplay, code: input.medicationCode ?? null });
+          if (matches.length > 0 && !input.allergyAcknowledgement) {
+            throw new DomainProblem(409, 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
+              'This medicine may match an allergy on the patient\'s record. Check the allergies and give a reason to go ahead.',
+              matches.map((match) => ({ field: 'allergyAcknowledgement', messages: [match.message] })));
+          }
           const result = await client.query<PrescriptionRow>(
             `insert into ehr.prescriptions (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
@@ -135,6 +145,18 @@ export class PrescriptionsService {
             ],
           );
           const row = this.single(result.rows[0]);
+          if (matches.length > 0 && input.allergyAcknowledgement) {
+            await client.query(
+              `insert into ehr.prescription_allergy_acknowledgements (
+                 prescription_id, patient_id, facility_id, created_by, created_by_membership_id,
+                 reason, matched_recorded_allergy_ids, patient_reported_matched
+               ) values ($1, $2, $3, $4, $5, $6, $7::uuid[], $8)`,
+              [row.id, patientId, context.facilityId, context.actor.accountId, context.membershipId,
+                input.allergyAcknowledgement.reason,
+                [...new Set(matches.flatMap((match) => match.allergyId ? [match.allergyId] : []))],
+                matches.some((match) => match.source === 'patient_reported')],
+            );
+          }
           return { value: row, id: row.id };
         },
         (id) => this.findById(client, context, patientId, id),

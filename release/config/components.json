@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0108",
-    "count": 109,
+    "last": "0124",
+    "count": 110,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -533,6 +533,10 @@
       {
         "name": "0108_records_processing_cover_lifetime.sql",
         "sha256": "1562c606256f18555054423b4e632bb863cf3aae6b0776bee87c30e660983ed6"
+      },
+      {
+        "name": "0124_recorded_allergies.sql",
+        "sha256": "5b49322cc14550791a5fdbdd593acf0e602a0affb2bc4511b6154aafe8030978"
       }
     ]
   },

@@ -3592,3 +3592,47 @@ grant's scope test alone or its `break_glass` test alone (a consent_grants
 CHECK ties them), the request's patient, membership, facility or purpose
 test (the exact-request foreign key), and `coalesce(..., true)` on the
 permission (it never answers null). The suite header lists them.
+
+## Allergies and the allergy check at prescribing (0124)
+
+Two sources, always kept apart and labelled on screens:
+
+- **Recorded** (`ehr.recorded_allergies`, 0124): what a clinician recorded at a facility.
+- **Reported by the patient** (`ehr.patient_reported_health_profiles.allergies`, 0094): free text the patient typed.
+
+All routes are direct care only (`X-Purpose-Of-Use: direct-care`), go through `ClinicalRepository.run` (Identity's
+authorization, then forced RLS) and are audited by action, resource and counts, never by substance, reaction or
+reason text.
+
+| Route | Permission | Answer |
+| --- | --- | --- |
+| `GET ehr/patients/:patientId/allergies[?includeEnteredInError=true]` | `ehr.note.read` | `{ recorded: RecordedAllergy[], patientReported: { allergies: string \| null, updatedAt } }` |
+| `POST ehr/patients/:patientId/allergies` (`Idempotency-Key`) | `ehr.note.write` | 201 `RecordedAllergy` |
+| `POST ehr/patients/:patientId/allergies/:allergyId/entered-in-error` | `ehr.note.write` | 200 `RecordedAllergy` |
+| `POST ehr/patients/:patientId/allergy-check` | `ehr.prescription.write` | `{ matches: AllergyMatch[], acknowledgementRequired }` |
+
+`RecordedAllergy`: `id, patientId, facilityId, createdBy, createdByMembershipId, substance, reaction, severity
+(mild | moderate | severe | unknown), status (active | entered_in_error), enteredInErrorBy, enteredInErrorAt,
+enteredInErrorReason, rowVersion, createdAt, updatedAt, recordedHere`. Recorded allergies follow the patient: a
+clinician with read access at any facility sees those recorded at every facility; only the recording facility
+(`recordedHere: true`) may mark one entered in error (else 409 `ALLERGY_RECORDED_ELSEWHERE`).
+
+Create body: `{ substance (1-200, one line), reaction? (1-500, one line), severity }`.
+Entered in error body: `{ expectedRowVersion, reason (3-500) }`; 412 `VERSION_CONFLICT`, 409
+`ALLERGY_ALREADY_ENTERED_IN_ERROR`. Nothing is ever deleted.
+
+**The check.** `AllergyMatch`: `source (recorded | patient_reported), allergyId? (recorded only), substance,
+reaction, severity, matchKind (same_medicine | same_class | cross_reactivity), className?, message` (one
+plain-English sentence). The medicine's display text and code are compared with each allergy (the patient's text is
+split into terms on commas, semicolons, slashes, new lines and "and"; "none", "nil", "NKDA" and the like are
+ignored): the same medicine by name; the same class (penicillins, cephalosporins, sulfonamide antibiotics, NSAIDs,
+by class words, generic and common brand names); and penicillin/cephalosporin cross-reactivity, both ways. No match
+never means "safe".
+
+**At prescribing.** `POST ehr/patients/:patientId/encounters/:encounterId/prescriptions` runs the same check inside
+its transaction. With a match and no `allergyAcknowledgement`, nothing is written and the answer is 409
+`ALLERGY_ACKNOWLEDGEMENT_REQUIRED` with one `errors[]` entry per match (`field: allergyAcknowledgement`, the match's
+message). Sending `allergyAcknowledgement: { reason (3-500) }` creates the prescription and one
+`ehr.prescription_allergy_acknowledgements` row (the reason, the matched recorded allergy ids, whether the
+patient-reported text matched). An acknowledgement sent when nothing matches is ignored. A client must only send
+`allergyAcknowledgement` after a warning: an ehr-api without 0124 refuses the unknown property.

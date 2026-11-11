@@ -17,6 +17,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsOptionalButNotNull } from '../../common/validation';
+import { AllergyAcknowledgementDto } from '../allergies/allergies.dto';
 
 const trim = ({ value }: TransformFnParams): unknown => typeof value === 'string' ? value.trim() : value;
 
@@ -371,6 +372,15 @@ export class CreatePrescriptionDto {
 
   @IsEnum(OrderStatus)
   status!: OrderStatus;
+
+  /**
+   * 0124: sent only after an allergy warning (409 ALLERGY_ACKNOWLEDGEMENT_REQUIRED
+   * or the allergy check), with the prescriber's reason to go ahead.
+   */
+  @IsOptionalButNotNull()
+  @ValidateNested()
+  @Type(() => AllergyAcknowledgementDto)
+  allergyAcknowledgement?: AllergyAcknowledgementDto;
 }
 
 export class UpdatePrescriptionDto extends VersionedUpdateDto {
