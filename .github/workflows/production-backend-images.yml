@@ -71,6 +71,10 @@ jobs:
         shell: bash
         run: |
           npm --prefix "services/$COMPONENT" ci
+          npm --prefix packages/server-telemetry ci
+          npm --prefix packages/server-telemetry run typecheck
+          npm --prefix packages/server-telemetry test
+          npm --prefix packages/server-telemetry run build
           if [ -x "services/$COMPONENT/node_modules/.bin/tsc" ]; then
             "services/$COMPONENT/node_modules/.bin/tsc" -p packages/api-client/tsconfig.json
           fi
@@ -83,6 +87,8 @@ jobs:
           npm --prefix services/ehr-api ci
           npm --prefix services/lab-api ci
           services/ehr-api/node_modules/.bin/tsc -p packages/api-client/tsconfig.json
+          npm --prefix packages/server-telemetry ci
+          npm --prefix packages/server-telemetry run build
           node services/ehr-api/scripts/test-notification-recipient.mjs
           node services/ehr-api/scripts/test-platform-administration.mjs
           npm --prefix services/ehr-api run build

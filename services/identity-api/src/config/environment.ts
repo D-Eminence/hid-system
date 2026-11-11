@@ -193,6 +193,8 @@ const environmentSchema = z.object({
   IDENTITY_PHARMACY_INTERNAL_SERVICE_TOKEN: optionalSecret,
   IDENTITY_OCR_INTERNAL_SERVICE_TOKEN: optionalSecret,
   OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,
+  // Local development only: support-api's secret for the support Health ID check (0109).
+  IDENTITY_SUPPORT_INTERNAL_SERVICE_TOKEN: optionalSecret,
   WORKLOAD_ISSUER_URL: optionalUrl,
   WORKLOAD_AUDIENCE: z.string().trim().min(3).default('hid-identity-api'),
   WORKLOAD_JWKS_URL: optionalUrl,
@@ -201,6 +203,9 @@ const environmentSchema = z.object({
   IDENTITY_PHARMACY_CALLER_SUBJECT: optionalString,
   IDENTITY_OCR_CALLER_SUBJECT: optionalString,
   OUTREACH_CALLER_SUBJECT: optionalString,
+  // The one workload subject the support Health ID check accepts (support-api). Set by Terraform only while the
+  // support bot exists; without it the check answers 503, so support-api sends nothing to Lex.
+  IDENTITY_SUPPORT_CALLER_SUBJECT: optionalString,
   ADMIN_IDENTITY_STATUS_URL: optionalUrl,
   ADMIN_EHR_STATUS_URL: optionalUrl,
   ADMIN_LAB_STATUS_URL: optionalUrl,
@@ -284,7 +289,7 @@ const environmentSchema = z.object({
     for (const key of ['WORKLOAD_ISSUER_URL', 'WORKLOAD_JWKS_URL', 'IDENTITY_EHR_CALLER_SUBJECT', 'IDENTITY_LAB_CALLER_SUBJECT', 'IDENTITY_PHARMACY_CALLER_SUBJECT', 'IDENTITY_OCR_CALLER_SUBJECT', 'OUTREACH_CALLER_SUBJECT'] as const) {
       if (!environment[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
     }
-    for (const key of ['IDENTITY_EHR_INTERNAL_SERVICE_TOKEN', 'IDENTITY_LAB_INTERNAL_SERVICE_TOKEN', 'IDENTITY_PHARMACY_INTERNAL_SERVICE_TOKEN', 'IDENTITY_OCR_INTERNAL_SERVICE_TOKEN', 'OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN'] as const) {
+    for (const key of ['IDENTITY_EHR_INTERNAL_SERVICE_TOKEN', 'IDENTITY_LAB_INTERNAL_SERVICE_TOKEN', 'IDENTITY_PHARMACY_INTERNAL_SERVICE_TOKEN', 'IDENTITY_OCR_INTERNAL_SERVICE_TOKEN', 'OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN', 'IDENTITY_SUPPORT_INTERNAL_SERVICE_TOKEN'] as const) {
       if (environment[key]) context.addIssue({ code: 'custom', path: [key], message: 'Local service tokens are forbidden in production' });
     }
     for (const url of ['WORKLOAD_ISSUER_URL', 'WORKLOAD_JWKS_URL', 'OIDC_ISSUER_URL', 'OIDC_JWKS_URL'] as const) {
