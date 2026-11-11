@@ -47,8 +47,9 @@ test('a hand-labelled set (one image, one two-page PDF) runs and scores 100% off
   Object.assign(pdf, { docId: 'L002', file: 'L002-prescription.pdf', mediaType: 'application/pdf', pages: 2 });
   pdf.text = [{ page: 1, lines: example.text[0].lines.slice(0, 6) },
     { page: 2, lines: example.text[0].lines.slice(6).map((line, index) => ({ ...line, n: index + 1 })) }];
+  // Page 1 now gives no date (the date is on page 2), so its items' date is null.
   pdf.items = pdf.items.map((item) => ({ ...item, id: item.id.replace('L001', 'L002'),
-    ...(item.lines[0] > 6 ? { page: 2, lines: item.lines.map((n) => n - 6) } : {}) }));
+    ...(item.lines[0] > 6 ? { page: 2, lines: item.lines.map((n) => n - 6) } : { dateAsWritten: null }) }));
   const set = handSet([example, pdf]);
   assert.equal(main(['seal', '--keys', set.keys, '--docs', set.docs, '--name', 'two-docs'], quiet().log), 0);
   const out = path.join(path.dirname(set.keys), 'results');
@@ -115,4 +116,49 @@ test('a missing file, a wrong media type, a duplicate id and a page without line
     path.join(os.tmpdir(), 'no-such-folder'));
   const text = problems.join('\n');
   for (const code of ['FILE_MISSING', 'MEDIA_TYPE', 'DUPLICATE_DOC_ID', 'TEXT']) assert.match(text, new RegExp(code));
+});
+
+test('the rules for Lekan\'s questions are checked: traps, dates, handwriting, names, tests and prescriptions', () => {
+  const example = workedExample();
+  const broken = structuredClone(example);
+  broken.text[0].lines[2].handwritten = 'yes';
+  broken.traps = ['negation', 'strength'];
+  broken.items[0].fields.name = '?Malaria';
+  broken.items[1].trap = null;
+  broken.items[3].trap = 'misread';
+  broken.items[4].dateAsWritten = '11/10/2026';
+  broken.items[5].fields.frequency = 'tds';
+  broken.items[7].prescription = { prescriberAsWritten: 'Dr T. Testperson', dateAsWritten: '10/11/2026' };
+  broken.items[8].fields.test = 'FBC: MP';
+  broken.items[9].asWritten = 'Review in 2 days';
+  const { problems } = checkLabels(JSON.stringify(broken), null);
+  const text = problems.join('\n');
+  for (const code of ['LINE_HANDWRITTEN', 'TRAPS', 'NAME_HAS_STATUS_CUE', 'TRAP_NEGATION', 'TRAP \\(', 'DATE_NOT_ON_PAGE',
+    'VALUE_NOT_ON_LINES \\(L001-i06: frequency', 'PRESCRIPTION_NOT_TAKEN', 'TEST_HAS_PREFIX', 'AS_WRITTEN_NOT_ON_LINES']) {
+    assert.match(text, new RegExp(code), code);
+  }
+  assert.doesNotMatch(text, /Malaria|Review in/);
+  const qualified = structuredClone(example);
+  qualified.text[0].lines[3].text = 'FHx: Hypertension (father)';
+  Object.assign(qualified.items[1], { asWritten: 'FHx: Hypertension (father)',
+    fields: { name: 'Hypertension (father)', status: 'family_history' } });
+  assert.match(checkLabels(JSON.stringify(qualified), null).problems.join('\n'), /NAME_HAS_QUALIFIER/);
+  qualified.items[1].fields.name = 'Hypertension';
+  assert.deepEqual(checkLabels(JSON.stringify(qualified), null).problems, []);
+});
+
+test('the kit\'s own 200 keys pass every labelling rule', () => {
+  assert.deepEqual(checkLabels(readFileSync(path.join(KIT_DIR, 'keys', 'keys.jsonl'), 'utf8'), null).problems, []);
+});
+
+test('handwriting in the offline stand-in: the per-line flag, else the document difficulty', async () => {
+  const { handwritingOf } = await import('../lib/fake.mjs');
+  const example = workedExample();
+  const lines = example.text[0].lines;
+  const flagged = handwritingOf(example);
+  assert.deepEqual(lines.map(flagged), lines.map((line) => line.handwritten));
+  const unflagged = structuredClone(example);
+  for (const line of unflagged.text[0].lines) delete line.handwritten;
+  assert.ok(unflagged.text[0].lines.every(handwritingOf(unflagged)), 'difficulty "handwritten": every line');
+  assert.ok(!unflagged.text[0].lines.some(handwritingOf({ ...unflagged, difficulty: 'typed' })));
 });

@@ -13,7 +13,7 @@
     "D010-lab_report.pdf": "86f39357821d7ae6bf75c018a67db5e5a1d1038d9d69a035944c5d5ddfbff370",
     "D011-referral_letter.png": "6887ca185ff7bc2cbf57d7d62892ae6754a0b1c3fe20474b3dbe2a9056a86281",
     "D012-vitals_chart.png": "5dbb08946732452eb4411ff5ec45a91f60432a5d714178101715f41953ab0807",
-    "D013-outpatient_card.pdf": "4267c4cc44927a461111e6513821be6267ef79d16356bc1b0c5dafa654012201",
+    "D013-outpatient_card.pdf": "453f00eb16ca388cbf9738c3394de25bb6add3b5875e97e2917e68b4fd217723",
     "D014-prescription.pdf": "314d66f964bd5b9f11166f2b3ba6226ca07f5f1a0ffbf0784c8d12fba60a3c38",
     "D015-discharge_summary.pdf": "7efedd6713d9497f3cd86a421d6516b957d8469fd3c0423fd28e66587dd3f06d",
     "D016-lab_report.pdf": "0363b5fa81b68d93a8da13cb6b109284f9a35cfb34f2920e8a17e51889b679a3",
@@ -206,7 +206,7 @@
     "pillow": "12.3.0",
     "reportlab": "5.0.1"
   },
-  "keysSha256": "39fd22132827b9f99e686bdf8491ba618923e4da447c6bdebdd396eec6ebac41",
+  "keysSha256": "3c1147e4cf2a9fc17deeafa5dcd7a6e1ac931f0cf7eaf6c2357f3507b1131bfd",
   "kitVersion": "hid-ocr-accuracy-kit-1",
   "seed": 20261103
 }

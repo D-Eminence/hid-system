@@ -79,12 +79,58 @@ test('every person and place is fictional', () => {
   }
 });
 
-test('traps are present: look-alike names, look-alike strengths and negations', () => {
+test('traps are present: look-alike names and strengths, negations, allergy conflicts and a future date', () => {
   const traps = new Set(keys.flatMap((key) => key.items.map((item) => item.trap?.split(':')[0]).filter(Boolean)));
-  assert.deepEqual([...traps].sort(), ['lookalike', 'negation', 'strength']);
+  assert.deepEqual([...traps].sort(), ['allergy_conflict', 'future_date', 'lookalike', 'negation', 'strength']);
+  for (const key of keys) {
+    assert.deepEqual(key.traps, [...new Set(key.items.map((item) => item.trap?.split(':')[0]).filter(Boolean))].sort(),
+      key.docId);
+  }
+  const byId = new Map(keys.map((key) => [key.docId, key]));
+  for (const docId of ['D005', 'D019', 'D025']) assert.ok(byId.get(docId).traps.includes('allergy_conflict'), docId);
+  assert.ok(byId.get('D013').traps.includes('future_date'));
   const statuses = new Set(keys.flatMap((key) => key.items.filter((item) => item.kind === 'diagnosis')
     .map((item) => item.fields.status)));
   for (const status of ['confirmed', 'suspected', 'ruled_out', 'history', 'family_history']) assert.ok(statuses.has(status), status);
   assert.ok(keys.some((key) => key.items.some((item) => item.kind === 'allergy' && item.fields.noKnownAllergies)));
   assert.ok(keys.some((key) => key.items.some((item) => item.kind === 'medicine' && item.fields.status === 'stopped')));
+});
+
+test('a working diagnosis is suspected (provisional), never confirmed', () => {
+  let working = 0;
+  for (const key of keys) {
+    for (const item of key.items) {
+      const line = key.text[item.page - 1].lines[item.lines[0] - 1].text;
+      if (item.kind !== 'diagnosis' || !line.startsWith('Working diagnosis:')) continue;
+      working += 1;
+      assert.equal(item.fields.status, 'suspected', item.id);
+    }
+  }
+  assert.equal(working, keys.filter((key) => key.documentKind === 'referral_letter').length);
+});
+
+test('every item carries the date its page gives for it, written on that page', () => {
+  let dated = 0;
+  for (const key of keys) {
+    for (const item of key.items) {
+      assert.ok('dateAsWritten' in item, item.id);
+      if (item.dateAsWritten === null) continue;
+      dated += 1;
+      assert.ok(key.text[item.page - 1].lines.some((line) => line.text.includes(item.dateAsWritten)), item.id);
+      if (item.prescription) assert.equal(item.dateAsWritten, item.prescription.dateAsWritten, item.id);
+    }
+    if (['outpatient_card', 'prescription', 'vitals_chart'].includes(key.documentKind)) {
+      assert.ok(key.items.every((item) => item.dateAsWritten !== null), `${key.docId}: every page has its date`);
+    }
+  }
+  assert.ok(dated > 2500, `${dated} dated items`);
+});
+
+test('every diagnosis that is not confirmed and every stopped medicine carries the negation trap', () => {
+  for (const key of keys) {
+    for (const item of key.items) {
+      if ((item.kind === 'diagnosis' && item.fields.status !== 'confirmed')
+        || (item.kind === 'medicine' && item.fields.status === 'stopped')) assert.equal(item.trap, 'negation', item.id);
+    }
+  }
 });

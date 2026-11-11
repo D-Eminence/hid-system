@@ -88,6 +88,8 @@ FACILITIES = [
 ]
 REFERRAL_TARGETS = ['Demo Teaching Hospital', 'Example Specialist Hospital', 'Sample Federal Medical Centre']
 FOOTER = 'FICTIONAL TEST DOCUMENT - NOT A REAL PATIENT'
+# The day the set was made (as in its PDFs): a date written after it is a future-date trap.
+SET_DATE = (2026, 11, 3)
 
 # ---------------------------------------------------------------------------------------------------------------
 # Medicines (Nigerian Essential Medicines List). (name, strength, form, route, frequency, duration)
@@ -176,6 +178,17 @@ ALLERGIES = [
     ('Allergy: Ibuprofen - facial swelling', 'Ibuprofen', 'facial swelling', None, False),
 ]
 
+# Allergy warnings: an active medicine (new or current) the documented allergy should warn about. The generator
+# picks allergies and medicines independently, so these pairs happen by chance; the key lists them as
+# 'allergy_conflict' traps because they make good allergy-warning test cases.
+ALLERGY_CONFLICTS = {
+    'Penicillin': ['Amoxicillin', 'Amoxicillin-clavulanate'],
+    'Sulphonamides': ['Cotrimoxazole'],
+    'Aspirin': ['Ibuprofen', 'Diclofenac'],      # NSAID cross-reactivity
+    'Ibuprofen': ['Ibuprofen', 'Diclofenac'],
+}
+TRAPS = ['allergy_conflict', 'future_date', 'lookalike', 'negation', 'strength']
+
 
 @dataclass
 class Line:
@@ -191,6 +204,9 @@ class Page:
     number: int
     lines: list = field(default_factory=list)
     items: list = field(default_factory=list)
+    # The date this page gives for the items written next (a visit, prescription, letter, report or chart day, or
+    # the admitted / discharged date of a discharge summary); None where the page gives no date for them.
+    date: str | None = None
 
     def add(self, text, role='body', indent=0, gap=0) -> int:
         self.lines.append(Line(text, role, indent, gap))
@@ -201,7 +217,8 @@ class Page:
         if as_written not in text:
             raise AssertionError(f'asWritten not on its line: {as_written!r} / {text!r}')
         self.items.append({'kind': kind, 'asWritten': as_written, 'page': self.number, 'lines': [line_no],
-                           'fields': fields, 'prescription': prescription, 'trap': trap})
+                           'fields': fields, 'prescription': prescription, 'trap': trap,
+                           'dateAsWritten': self.date})
 
 
 class Doc:
@@ -239,11 +256,14 @@ class Doc:
         month = self.month + (day - 1) // 28
         day = (day - 1) % 28 + 1
         style = self.rng.random()
+        # A date that would fall after the set was made is written a year later, so it stays a future date for
+        # the life of the kit (the future_date trap; only D013 has one, and no other document changes).
+        year = 2027 if (2026, month, day) > SET_DATE else 2026
         if style < 0.6:
-            return f'{day:02d}/{month:02d}/2026'
+            return f'{day:02d}/{month:02d}/{year}'
         if style < 0.85:
-            return f'{day}/{month}/26'
-        return f'{day:02d}-{month:02d}-2026'
+            return f'{day}/{month}/{year % 100}'
+        return f'{day:02d}-{month:02d}-{year}'
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -327,7 +347,9 @@ def write_two_medicines(doc: Doc, page: Page, k1: str, k2: str, status: str, tra
     page.item('medicine', a2, n, {**f2, 'status': status}, trap=trap)
 
 
-def write_diagnosis(doc: Doc, page: Page, name: str, status: str, label='Dx:', trap=None):
+def write_diagnosis(doc: Doc, page: Page, name: str, status: str, label='Dx:', trap=None, key_status=None):
+    """key_status: the status the key gives when the label itself is the status cue ("Working diagnosis:" is
+    provisional, so 'suspected'); asWritten then keeps the label, as it keeps "?" or "PMH:"."""
     templates = {
         'confirmed': [f'{label} {name}'],
         'suspected': [f'?{name}', f'Query {name.lower() if name.isupper() is False else name}'],
@@ -338,9 +360,9 @@ def write_diagnosis(doc: Doc, page: Page, name: str, status: str, label='Dx:', t
     text = doc.rng.choice(templates[status])
     if status == 'suspected' and text.startswith('Query '):
         name = text[len('Query '):]
-    as_written = text[len(label) + 1:] if status == 'confirmed' else text
+    as_written = text[len(label) + 1:] if status == 'confirmed' and key_status is None else text
     n = page.add(text, doc.body_role, indent=0 if status == 'confirmed' else 1)
-    page.item('diagnosis', as_written, n, {'name': name, 'status': status}, trap=trap)
+    page.item('diagnosis', as_written, n, {'name': name, 'status': key_status or status}, trap=trap)
 
 
 def write_allergy(doc: Doc, page: Page):
@@ -473,7 +495,8 @@ def negations(doc: Doc, page: Page, cond: str):
 
 def clinic_visit(doc: Doc, page: Page, visit: int):
     r = doc.rng
-    page.add(f'Date: {doc.date(visit * 14)}   Clinic: {r.choice(["GOPD", "MOPD", "Medical OPD"])}', doc.body_role, gap=10)
+    page.date = doc.date(visit * 14)
+    page.add(f'Date: {page.date}   Clinic: {r.choice(["GOPD", "MOPD", "Medical OPD"])}', doc.body_role, gap=10)
     cond = pick_conditions(doc)[0]
     names, _, labs, complaint = CONDITIONS[cond]
     write_note(doc, page, complaint, label='C/O')
@@ -516,6 +539,7 @@ def prescription(doc: Doc, page: Page):
         continuation_identity(doc, page)
     date = doc.date((page.number - 1) * 30)
     page.add(f'Date: {date}', doc.body_role)
+    page.date = date
     cond = pick_conditions(doc)[0]
     write_diagnosis(doc, page, doc.rng.choice(CONDITIONS[cond][0]), 'confirmed', label='Diagnosis:')
     if page.number == 1:
@@ -545,11 +569,22 @@ def discharge_summary(doc: Doc, page: Page):
     names, meds, labs, complaint = CONDITIONS[cond]
     sections = discharge_sections(doc)
     for section in sections[page.number - 1]:
+        # Only the page with the admitted and discharged dates gives a date: the admitted date for what was found
+        # on admission, the discharged date for the discharge medicines and follow-up, none for the treatment
+        # given or the investigations (the page does not say when).
+        if section in ('treatment', 'labs'):
+            page.date = None
+        elif section in ('discharge_meds', 'followup') and 'discharged' in doc.__dict__ and page.number == 1:
+            page.date = doc.discharged
         if section == 'admission':
-            page.add(f'Admitted: {doc.date(0)}   Discharged: {doc.date(5)}', doc.body_role)
+            doc.admitted, doc.discharged = doc.date(0), doc.date(5)
+            page.add(f'Admitted: {doc.admitted}   Discharged: {doc.discharged}', doc.body_role)
+            page.date = doc.admitted
             write_note(doc, page, f'{complaint}', label='Presenting complaint:')
             write_allergy(doc, page)
+            page.date = doc.discharged  # the final diagnosis is the one made at discharge
             write_diagnosis(doc, page, r.choice(names), 'confirmed', label='Final diagnosis:')
+            page.date = doc.admitted
             negations(doc, page, cond)
         elif section == 'vitals':
             page.add('Vitals on admission:', 'heading')
@@ -601,7 +636,8 @@ def lab_report(doc: Doc, page: Page):
     letterhead(doc, page, 'LABORATORY REPORT')
     if page.number == 1:
         identity_block(doc, page)
-        page.add(f'Requested by: {doc.prescriber}   Date: {doc.date(0)}', doc.body_role)
+        page.date = doc.date(0)
+        page.add(f'Requested by: {doc.prescriber}   Date: {page.date}', doc.body_role)
         write_note(doc, page, r.choice(['fever x5/7', 'routine check', 'pre-op screening', '?anaemia']),
                    label='Clinical details:')
     else:
@@ -631,14 +667,18 @@ def referral_letter(doc: Doc, page: Page):
     cond = doc.__dict__.setdefault('main_cond', pick_conditions(doc)[0])
     names, meds, labs, complaint = CONDITIONS[cond]
     if page.number == 1:
-        page.add(f'Date: {doc.date(0)}', doc.body_role)
+        page.date = doc.date(0)
+        page.add(f'Date: {page.date}', doc.body_role)
         target = r.choice(REFERRAL_TARGETS)
         page.add(f'To: The Consultant, {target}', doc.body_role)
         identity_block(doc, page)
         page.add('Dear Colleague,', doc.body_role, gap=6)
         n = page.add(f'Kindly see the above named patient with {complaint}.', doc.body_role)
         page.item('note', complaint, n, {'text': complaint})
-        write_diagnosis(doc, page, r.choice(names), 'confirmed', label='Working diagnosis:')
+        # A working diagnosis is provisional: 'suspected' in the reader's statuses (there is no 'provisional'), and,
+        # like every diagnosis that is not confirmed, a negation trap.
+        write_diagnosis(doc, page, r.choice(names), 'confirmed', label='Working diagnosis:', key_status='suspected',
+                        trap='negation')
         negations(doc, page, cond)
         write_allergy(doc, page)
         page.add('Currently on:', doc.body_role)
@@ -686,7 +726,8 @@ def vitals_chart(doc: Doc, page: Page):
         page.add(f'Ward: {r.choice(["Female Medical", "Male Medical", "Paediatrics", "Ward 4"])}', doc.body_role)
     else:
         continuation_identity(doc, page)
-    page.add(f'Day {page.number}: {doc.date(page.number - 1)}', 'heading', gap=6)
+    page.date = doc.date(page.number - 1)
+    page.add(f'Day {page.number}: {page.date}', 'heading', gap=6)
     for hour in r.sample(['06:00', '10:00', '14:00', '18:00', '22:00', '02:00'], r.randint(3, 5)):
         measures = ['blood_pressure', 'pulse', 'temperature', 'respiratory_rate']
         if r.random() < 0.5:
@@ -950,6 +991,11 @@ def build_document(seed: int, index: int):
     for page in pages:
         for item in page.items:
             items.append({'id': f'{doc_id}-i{len(items) + 1:02d}', **item})
+    mark_allergy_conflicts(items)
+    mark_future_dates(items)
+    traps = sorted({item['trap'].split(':')[0] for item in items if item['trap']})
+    if not set(doc.traps) <= set(traps):
+        raise AssertionError(f'{doc_id}: a trap the writers planted is on no item')
     hand = difficulty.startswith('handwritten')
     key = {
         'docId': doc_id,
@@ -958,7 +1004,7 @@ def build_document(seed: int, index: int):
         'pages': n_pages,
         'documentKind': kind,
         'difficulty': difficulty,
-        'traps': sorted(set(doc.traps)),
+        'traps': traps,
         'fictional': True,
         'identity': doc.identity,
         'text': [{'page': page.number, 'lines': [
@@ -967,6 +1013,41 @@ def build_document(seed: int, index: int):
         'items': items,
     }
     return key, file_name, data
+
+
+def mark_allergy_conflicts(items: list) -> None:
+    """The allergy and each active medicine it should warn about carry 'allergy_conflict:<substance>/<medicine>'
+    (replacing a strength trap; another trap is kept)."""
+    active = [item for item in items if item['kind'] == 'medicine' and item['fields']['status'] in ('new', 'current')]
+    for allergy in (item for item in items if item['kind'] == 'allergy'):
+        substance = allergy['fields']['substance']
+        clashes = [m for m in active if m['fields']['name'] in ALLERGY_CONFLICTS.get(substance, [])]
+        if not clashes:
+            continue
+        names = '+'.join(dict.fromkeys(m['fields']['name'].lower() for m in clashes))
+        trap = f'allergy_conflict:{substance.lower()}/{names}'
+        allergy['trap'] = trap
+        for medicine in clashes:
+            # One trap per item: the allergy warning wins over a look-alike strength (the larger harm).
+            medicine['trap'] = trap if medicine['trap'] in (None,) or medicine['trap'].startswith('strength:') \
+                else medicine['trap']
+
+
+def parse_date(text: str | None):
+    """(year, month, day) of a date as the generator writes it (dd/mm/yyyy, d/m/yy, dd-mm-yyyy), else None."""
+    if not text:
+        return None
+    day, month, year = (int(part) for part in text.replace('-', '/').split('/'))
+    return (year + 2000 if year < 100 else year, month, day)
+
+
+def mark_future_dates(items: list) -> None:
+    """Items dated after the set was made carry 'future_date' (an item that already carries a trap keeps it)."""
+    future = [item for item in items if (parse_date(item['dateAsWritten']) or (0,)) > SET_DATE]
+    for item in future:
+        item['trap'] = item['trap'] or 'future_date'
+    if future and not any(item['trap'] == 'future_date' for item in future):
+        raise AssertionError('a future-dated page with no item free to carry the trap')
 
 
 def sha256(data: bytes) -> str:

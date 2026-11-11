@@ -8,6 +8,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, sha256Hex } from './lib/kit.mjs';
+import { onPage as writtenOn } from './lib/normalise.mjs';
 
 /** The fields of each kind, as in keys/keys.jsonl and the reading contract hid-paper-reading-v2. */
 export const FIELDS = {
@@ -23,9 +24,18 @@ export const VALUES = {
   'medicine.status': ['current', 'new', 'past', 'stopped', 'unknown'],
   'allergy.severity': ['mild', 'moderate', 'severe', 'unknown', null],
   'diagnosis.status': ['confirmed', 'suspected', 'ruled_out', 'history', 'family_history'],
-  'vital.measure': ['blood_pressure', 'pulse', 'temperature', 'respiratory_rate', 'oxygen_saturation', 'weight', 'height'],
+  'vital.measure': ['blood_pressure', 'pulse', 'temperature', 'respiratory_rate', 'oxygen_saturation', 'weight', 'height',
+    'blood_glucose'],
   'lab_result.flag': ['H', 'L', null],
 };
+/** Item `trap` values ("type" or "type:detail") and the document's `traps` (the sorted set of item trap types). */
+export const TRAP_TYPES = ['lookalike', 'strength', 'negation', 'allergy_conflict', 'future_date'];
+/** Free-text fields whose value must be written on the item's own lines (LABELLING.md "Values as on the paper"). */
+const TEXT_FIELDS = { medicine: ['name', 'strength', 'form', 'route', 'frequency', 'duration'], diagnosis: ['name'],
+  allergy: ['substance', 'reaction'], lab_result: ['test', 'value', 'unit', 'referenceRange', 'flag'],
+  vital: ['value', 'unit'], note: ['text'] };
+/** Words that give a diagnosis's status: they belong in asWritten, not in the name. */
+const STATUS_CUE = /^\s*(?:\?|query\b|q\.|hx\b|h\/o\b|pmh\b|fhx\b|past history|history of|no evidence|r\/o\b|rule out|possible\b|working diagnosis)/i;
 const REQUIRED = { medicine: ['name', 'status'], diagnosis: ['name', 'status'], lab_result: ['test', 'value'],
   vital: ['measure', 'value'], note: ['text'], allergy: [] };
 const MEDIA_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.pdf': 'application/pdf' };
@@ -57,6 +67,9 @@ export function checkLabels(keysText, docsDir) {
       page.lines.forEach((entry, lineIndex) => {
         if (entry?.n !== lineIndex + 1) bad('LINE_NUMBER', `page ${pageIndex + 1} line ${lineIndex + 1}: n must count from 1`);
         if (typeof entry?.text !== 'string' || !entry.text.trim()) bad('LINE_TEXT', `page ${pageIndex + 1} line ${lineIndex + 1}`);
+        if (entry?.handwritten !== undefined && typeof entry.handwritten !== 'boolean') {
+          bad('LINE_HANDWRITTEN', `page ${pageIndex + 1} line ${lineIndex + 1}: true or false`);
+        }
       });
       return new Set(page.lines.map((entry) => entry?.n));
     });
@@ -68,6 +81,9 @@ export function checkLabels(keysText, docsDir) {
     if (key.identity !== null && key.identity !== undefined) onPage(key.identity.page, key.identity.lines, 'identity');
     if (!Array.isArray(key.items)) { bad('ITEMS'); continue; }
     const itemIds = new Set();
+    const itemTraps = new Set();
+    const linesOf = (item) => (Array.isArray(item.lines) ? item.lines : [])
+      .map((n) => key.text[item.page - 1]?.lines?.[n - 1]?.text).filter((text) => typeof text === 'string');
     key.items.forEach((item, itemIndex) => {
       const where = typeof item?.id === 'string' ? item.id : `item ${itemIndex + 1}`;
       if (typeof item?.id !== 'string' || itemIds.has(item.id)) bad('ITEM_ID', where);
@@ -91,7 +107,50 @@ export function checkLabels(keysText, docsDir) {
         && (typeof item.prescription !== 'object' || Object.keys(item.prescription).some((name) => !['prescriberAsWritten', 'dateAsWritten'].includes(name)))) {
         bad('PRESCRIPTION', where);
       }
+      const cited = linesOf(item);
+      if (cited.length === 0) return;
+      // asWritten and every text field are copied from the item's own lines.
+      if (typeof item.asWritten === 'string' && item.asWritten.trim() && !cited.join(' ').includes(item.asWritten)
+        && !cited.some((text) => text.includes(item.asWritten))) bad('AS_WRITTEN_NOT_ON_LINES', where);
+      for (const name of TEXT_FIELDS[item.kind]) {
+        const value = fields[name];
+        if (typeof value === 'string' && value.trim() && !writtenOn(value, cited, cited.length)) {
+          bad('VALUE_NOT_ON_LINES', `${where}: ${name}`);
+        }
+      }
+      if (item.kind === 'diagnosis' && typeof fields.name === 'string') {
+        if (STATUS_CUE.test(fields.name)) bad('NAME_HAS_STATUS_CUE', `${where}: the cue goes in asWritten and status, not the name`);
+        if (/\(.*\)/.test(fields.name)) bad('NAME_HAS_QUALIFIER', `${where}: a qualifier in brackets stays in asWritten`);
+      }
+      if (item.kind === 'lab_result' && typeof fields.test === 'string' && /^[^():]+:\s*\S/.test(fields.test)) {
+        bad('TEST_HAS_PREFIX', `${where}: no panel prefix in the test name`);
+      }
+      if (item.kind === 'medicine' && item.prescription && ['stopped', 'past'].includes(fields.status)) {
+        bad('PRESCRIPTION_NOT_TAKEN', `${where}: a ${fields.status} medicine has prescription null`);
+      }
+      if (item.kind !== 'medicine' && item.prescription) bad('PRESCRIPTION', `${where}: only a medicine has one`);
+      // The date the page gives for the item, copied from that page (optional; null when the page gives none).
+      if (item.dateAsWritten !== undefined && item.dateAsWritten !== null) {
+        if (typeof item.dateAsWritten !== 'string' || !item.dateAsWritten.trim()) bad('DATE', `${where}: text or null`);
+        else if (!(key.text[item.page - 1]?.lines ?? []).some((line) => String(line?.text).includes(item.dateAsWritten))) {
+          bad('DATE_NOT_ON_PAGE', where);
+        }
+      }
+      // Traps: one value per item ("type" or "type:detail"), null when none.
+      if (item.trap !== undefined && item.trap !== null) {
+        const type = typeof item.trap === 'string' ? item.trap.split(':')[0] : '';
+        if (!TRAP_TYPES.includes(type)) bad('TRAP', `${where}: one of ${TRAP_TYPES.join(', ')}`);
+        else itemTraps.add(type);
+      }
+      const negation = (item.kind === 'diagnosis' && VALUES['diagnosis.status'].includes(fields.status) && fields.status !== 'confirmed')
+        || (item.kind === 'medicine' && fields.status === 'stopped');
+      if (negation && item.trap !== 'negation') bad('TRAP_NEGATION', `${where}: a ${fields.status} ${item.kind} carries trap "negation"`);
     });
+    const listed = key.traps ?? [];
+    const wanted = [...itemTraps].sort();
+    if (!Array.isArray(listed) || listed.length !== wanted.length || listed.some((type, index) => type !== wanted[index])) {
+      bad('TRAPS', `the document's traps must be the sorted trap types of its items: [${wanted.join(', ')}]`);
+    }
   }
   return { problems, count: lines.length };
 }

@@ -53,13 +53,40 @@ export function boxOverlap(a, b) {
   return smaller > 0 ? (width * height) / smaller : 0;
 }
 
+/**
+ * A mixture's measured dose ("Mist. Magnesium trisilicate 10 ml tds"): the key writes the 10 ml as its strength,
+ * but it is the dose taken, and the reader has no dose field, so a reading that leaves the strength empty is
+ * accepted too. Only for a mixture ("Mist") whose strength is a volume in ml.
+ */
+export function mixtureDose(expected) {
+  const form = normText(expected.fields.form);
+  const isMixture = form.startsWith('mist') || (!form && /^\W*mist\b/i.test(expected.asWritten ?? ''));
+  return isMixture && /^\d+(?:\.\d+)?ml$/.test(normStrength(expected.fields.strength));
+}
+
+function strengthAgrees(produced, expected) {
+  return normStrength(produced.fields.strength) === normStrength(expected.fields.strength)
+    || (blank(produced.fields.strength) && mixtureDose(expected));
+}
+
 /** Medicine "exact": the same name, strength and how often, after normalisation (see README). */
 export function medicineExact(produced, expected) {
   return normName(produced.fields.name) === normName(expected.fields.name)
     && normName(expected.fields.name) !== ''
-    && normStrength(produced.fields.strength) === normStrength(expected.fields.strength)
+    && strengthAgrees(produced, expected)
     && normFrequency(produced.fields.frequency) === normFrequency(expected.fields.frequency);
 }
+
+/** Spellings of "inhaled" a reader may give as the route of an inhaler whose route is not written. */
+const INHALED_ROUTES = new Set(['inhaled', 'inhalation', 'by inhalation', 'inh', 'inhal']);
+const INHALER_FORMS = ['Inh', 'Inhaler'];
+/** The key medicine is an inhaler with no route written: route "inhaled" is a reading of its form, not an addition. */
+function inhalerWithoutRoute(expected) {
+  if (!blank(expected.fields.route)) return false;
+  return /^inh/.test(normText(expected.fields.form)) || /(?:^|\s)inh(?:aler)?\b/i.test(expected.asWritten ?? '');
+}
+const routeAgrees = (produced, expected) => sameOptional(produced.fields.route, expected.fields.route)
+  || (INHALED_ROUTES.has(normText(produced.fields.route)) && inhalerWithoutRoute(expected));
 
 /**
  * Whether a medicine's status says the same thing as the key's: taking it (new or current), not taking it
@@ -93,6 +120,7 @@ export function pairScore(produced, expected) {
       if (Boolean(p.noKnownAllergies) !== Boolean(k.noKnownAllergies)) return 0;
       return k.noKnownAllergies ? 1 : similarity(normText(p.substance), normText(k.substance));
     case 'lab_result':
+      if (sameTestCore(p.test, k.test)) return 1;
       return Math.max(similarity(normText(p.test), normText(k.test)), overlap(p.test, k.test));
     case 'vital':
       if (p.measure !== k.measure) return 0;
@@ -105,6 +133,14 @@ export function pairScore(produced, expected) {
 }
 
 const compactValue = (value) => normText(value).replace(/\s+/g, '');
+/**
+ * A lab test's name without a known method in brackets at its end: "MP (thick film)" and "MP" are the same test.
+ * Only these method words; any other bracket ("FBS (random)") names a different test. The generator writes none.
+ */
+const TEST_METHODS = ['thick film', 'thin film', 'smear', 'thick smear', 'thin smear', 'hrp2', 'hrp-2'];
+const testCore = (value) => normText(String(value ?? '').replace(/\s*\(([^()]*)\)\s*$/,
+  (bracket, inside) => (TEST_METHODS.includes(normText(inside)) ? '' : bracket)));
+const sameTestCore = (a, b) => testCore(a) !== '' && testCore(a) === testCore(b);
 const sameOptional = (a, b, normalise = normText) => normalise(a ?? '') === normalise(b ?? '');
 
 /** Whether every field the key gives was read the same (normalised). */
@@ -114,14 +150,15 @@ export function fieldsCorrect(produced, expected) {
   switch (expected.kind) {
     case 'medicine':
       return medicineExact(produced, expected) && sameOptional(p.duration, k.duration, normDuration)
-        && sameOptional(p.route, k.route) && p.status === k.status;
+        && routeAgrees(produced, expected) && p.status === k.status;
     case 'diagnosis':
       return similarity(normText(p.name), normText(k.name)) >= 0.9 && p.status === k.status;
     case 'allergy':
       return Boolean(p.noKnownAllergies) === Boolean(k.noKnownAllergies)
         && (k.noKnownAllergies || sameOptional(p.substance, k.substance)) && (p.severity ?? null) === (k.severity ?? null);
     case 'lab_result':
-      return similarity(normText(p.test), normText(k.test)) >= 0.9 && compactValue(p.value) === compactValue(k.value)
+      return (similarity(normText(p.test), normText(k.test)) >= 0.9 || sameTestCore(p.test, k.test))
+        && compactValue(p.value) === compactValue(k.value)
         && sameOptional(p.unit, k.unit, compactValue) && sameOptional(p.flag, k.flag);
     case 'vital':
       return p.measure === k.measure && compactValue(p.value) === compactValue(k.value)
@@ -171,6 +208,9 @@ const EVERYDAY_WORD_SPELLINGS = new Set(['on', 'now']);
  * is also an everyday word ("on" for nocte) counts only on the same line as, and after, the medicine's name.
  */
 export function supported(name, value, lines, medicineName = '') {
+  // Route "inhaled" for an inhaler: the line shows the inhaler form word right before the medicine's name.
+  if (name === 'route' && INHALED_ROUTES.has(normText(value)) && tokens(medicineName).length > 0
+    && INHALER_FORMS.some((form) => onPage(`${form} ${medicineName}`, lines, 1))) return true;
   if (name !== 'frequency') return onPage(value, lines);
   const spellings = [value, ...(FREQUENCY_TABLE[normFrequency(value)] ?? [])];
   return spellings.some((spelling) => {
@@ -185,8 +225,60 @@ function sameName(a, b) {
 }
 
 function emptyKindCounts() {
-  return Object.fromEntries(KINDS.map((kind) => [kind, { expected: 0, produced: 0, matched: 0, fieldsCorrect: 0 }]));
+  return Object.fromEntries(KINDS.map((kind) => [kind,
+    { expected: 0, produced: 0, matched: 0, fieldsCorrect: 0, producedMatched: 0 }]));
 }
+
+// ----- Dates (the contract's item dateAsWritten; a prescription's date counts as the item's date too) -----
+
+/** {year, month, day} of a date written d/m/y (/, - or .; 2- or 4-digit year) or y-m-d, else null. */
+export function parseDate(value) {
+  const text = normText(value);
+  let match = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/.exec(text);
+  if (match) {
+    const year = Number(match[3]);
+    return { day: Number(match[1]), month: Number(match[2]), year: year < 100 ? 2000 + year : year };
+  }
+  match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(text);
+  return match ? { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) } : null;
+}
+const itemDate = (item) => (blank(item.dateAsWritten) ? (blank(item.prescription?.dateAsWritten) ? null
+  : item.prescription.dateAsWritten) : item.dateAsWritten);
+const sameDay = (a, b) => a !== null && b !== null && a.year === b.year && a.month === b.month && a.day === b.day;
+
+/**
+ * How a read date compares with the key's: 'same' (as written), 'same_date_other_spelling', 'day_month_swapped',
+ * 'other_date_on_page' (a date the page gives for other items, such as the admitted date for a discharge medicine),
+ * 'wrong', 'missing' (the key has one, the reading none), 'extra' (the reading has one, the key none), or null when
+ * neither has a date.
+ */
+export function compareDate(producedDate, keyDate, pageDates = []) {
+  if (blank(keyDate) && blank(producedDate)) return null;
+  if (blank(producedDate)) return 'missing';
+  if (blank(keyDate)) return 'extra';
+  if (compactValue(producedDate) === compactValue(keyDate)) return 'same';
+  const got = parseDate(producedDate);
+  const want = parseDate(keyDate);
+  if (sameDay(got, want)) return 'same_date_other_spelling';
+  if (got && want && want.day !== want.month && sameDay(got, { ...want, day: want.month, month: want.day })) {
+    return 'day_month_swapped';
+  }
+  if (pageDates.some((date) => compactValue(date) === compactValue(producedDate) || sameDay(got, parseDate(date)))) {
+    return 'other_date_on_page';
+  }
+  return 'wrong';
+}
+export const DATE_OUTCOMES = ['same', 'same_date_other_spelling', 'day_month_swapped', 'other_date_on_page', 'wrong',
+  'missing', 'given_as_note', 'extra'];
+
+/** A note that only gives a date ("Date: 03/04/2026"), as its compact text, else null. */
+function dateOnlyNote(item) {
+  const text = normText(item.fields?.text ?? item.asWritten).replace(/^(?:date|dated)\s*:?\s*/, '');
+  return parseDate(text) ? compactValue(text) : null;
+}
+
+/** IV fluids written as treatment ("IV fluids 0.9% saline 1L 8hrly"): a note in the key. */
+const IV_FLUIDS = /\b(?:iv ?fluids?|ivf|saline|dextrose|ringer'?s?|hartmann'?s?)\b/i;
 
 /** Scores one document. payload is null when the run produced none for it. */
 export function scoreDocument(key, payload) {
@@ -222,6 +314,33 @@ export function scoreDocument(key, payload) {
   });
   const pairs = [...exactPairs.map((pair) => ({ ...pair, exact: true })), ...pairUp(rest).map((pair) => ({ ...pair, exact: false }))];
 
+  // 3. Accepted other readings (README "Other readings accepted"). IV fluids written as treatment are a note in
+  //    the key; a reading of them as a past or stopped medicine is accepted, never as a medicine being taken.
+  const alternatives = { ivFluidsAsPastMedicine: 0, prescriptionDateAsNote: 0 };
+  const isPaired = (side, index) => pairs.some((pair) => pair[side] === index);
+  expected.forEach((k, ki) => {
+    if (k.kind !== 'note' || isPaired('k', ki) || !IV_FLUIDS.test(k.fields.text ?? k.asWritten)) return;
+    const pi = produced.findIndex((p, index) => !isPaired('p', index) && p.kind === 'medicine' && p.page === k.page
+      && ['past', 'stopped'].includes(p.fields?.status) && (overlap(p.asWritten, k.asWritten) >= 0.5
+        || (tokens(p.fields?.name).length > 0 && onPage(p.fields.name, [k.asWritten]))));
+    if (pi < 0) return;
+    pairs.push({ p: pi, k: ki, score: 1, exact: false, alternative: true });
+    alternatives.ivFluidsAsPastMedicine += 1;
+  });
+  //    A prescription's date read as a note of its own is accepted (the key gives the date on the medicines).
+  const acceptedP = new Set();
+  const notedDates = new Set();
+  produced.forEach((p, pi) => {
+    if (p.kind !== 'note' || isPaired('p', pi)) return;
+    const date = dateOnlyNote(p);
+    const prescribed = expected.some((k) => k.kind === 'medicine' && k.page === p.page
+      && !blank(k.prescription?.dateAsWritten) && compactValue(k.prescription.dateAsWritten) === date);
+    if (date === null || !prescribed) return;
+    acceptedP.add(pi);
+    notedDates.add(`${p.page}|${date}`);
+    alternatives.prescriptionDateAsNote += 1;
+  });
+
   const medicines = { expected: 0, exact: 0, caughtByCheck: 0, missedAfterChecking: 0, statusDisagreements: 0,
     traps: {}, missedIds: [], caughtIds: [] };
   const byK = new Map(pairs.map((pair) => [pair.k, pair]));
@@ -229,7 +348,7 @@ export function scoreDocument(key, payload) {
     const pair = byK.get(ki);
     if (pair) {
       kinds[k.kind].matched += 1;
-      if (fieldsCorrect(produced[pair.p], k)) kinds[k.kind].fieldsCorrect += 1;
+      if (pair.alternative || fieldsCorrect(produced[pair.p], k)) kinds[k.kind].fieldsCorrect += 1;
     }
     if (k.kind !== 'medicine') return;
     medicines.expected += 1;
@@ -281,10 +400,28 @@ export function scoreDocument(key, payload) {
     sex: normText(got.sexAsWritten).slice(0, 1) !== '' && normText(got.sexAsWritten).slice(0, 1) === normText(want.sexAsWritten).slice(0, 1),
   } : null;
 
+  // Dates: each paired item's date against the key's. Reported on its own; not part of the two launch measures.
+  const dates = { ...Object.fromEntries(DATE_OUTCOMES.map((outcome) => [outcome, 0])), swappedIds: [], wrongIds: [] };
+  for (const pair of pairs) {
+    const k = expected[pair.k];
+    const keyDate = itemDate(k);
+    const pageDates = [...new Set(expected.filter((other) => other.page === k.page).map(itemDate).filter(Boolean))];
+    let outcome = compareDate(itemDate(produced[pair.p]), keyDate, pageDates);
+    if (outcome === 'missing' && notedDates.has(`${k.page}|${compactValue(keyDate)}`)) outcome = 'given_as_note';
+    if (outcome === null) continue;
+    dates[outcome] += 1;
+    if (outcome === 'day_month_swapped') dates.swappedIds.push(k.id);
+    if (outcome === 'wrong') dates.wrongIds.push(k.id);
+  }
+
+  produced.forEach((p, pi) => {
+    if (kinds[p.kind] && (isPaired('p', pi) || acceptedP.has(pi))) kinds[p.kind].producedMatched += 1;
+  });
   const otherMissed = expected.filter((k, ki) => k.kind !== 'medicine' && !byK.has(ki)).length;
-  const extra = produced.filter((_, pi) => !pairs.some((pair) => pair.p === pi)).length;
+  const extra = produced.filter((_, pi) => !isPaired('p', pi) && !acceptedP.has(pi)).length;
   return { docId: key.docId, documentKind: key.documentKind, difficulty: key.difficulty, pages: key.pages,
-    traps: key.traps, status, kinds, medicines, unsupported, identity, otherMissed, extraItems: extra };
+    traps: key.traps, status, kinds, medicines, unsupported, identity, dates, alternatives, otherMissed,
+    extraItems: extra };
 }
 
 const share = (part, whole) => (whole === 0 ? null : part / whole);
@@ -296,6 +433,8 @@ export function scoreRun(keys, payloads) {
   const traps = {};
   const unsupported = { produced: 0, unsupported: 0, unsupportedVsOcr: 0, byValue: {} };
   const identity = { documents: 0, name: 0, dateOfBirth: 0, folderNumber: 0, sex: 0 };
+  const dates = { ...Object.fromEntries(DATE_OUTCOMES.map((outcome) => [outcome, 0])), swappedIds: [], wrongIds: [] };
+  const alternatives = { ivFluidsAsPastMedicine: 0, prescriptionDateAsNote: 0 };
   const byDifficulty = {};
   const byDocumentKind = {};
   for (const doc of documents) {
@@ -305,6 +444,10 @@ export function scoreRun(keys, payloads) {
       const total = (traps[trap] ??= { expected: 0, credited: 0, exact: 0 });
       total.expected += counts.expected; total.credited += counts.credited; total.exact += counts.exact;
     }
+    for (const outcome of DATE_OUTCOMES) dates[outcome] += doc.dates[outcome];
+    dates.swappedIds.push(...doc.dates.swappedIds);
+    dates.wrongIds.push(...doc.dates.wrongIds);
+    for (const name of Object.keys(alternatives)) alternatives[name] += doc.alternatives[name];
     unsupported.produced += doc.unsupported.produced;
     unsupported.unsupported += doc.unsupported.unsupported;
     unsupported.unsupportedVsOcr += doc.unsupported.unsupportedVsOcr;
@@ -330,7 +473,7 @@ export function scoreRun(keys, payloads) {
   const passUnsupported = unsupported.produced > 0 && unsupportedShare < THRESHOLDS.unsupportedShareBelow;
   const perKind = Object.fromEntries(KINDS.map((kind) => {
     const k = kinds[kind];
-    return [kind, { ...k, precision: share(k.matched, k.produced), recall: share(k.matched, k.expected),
+    return [kind, { ...k, precision: share(k.producedMatched, k.produced), recall: share(k.matched, k.expected),
       fieldsCorrectShare: share(k.fieldsCorrect, k.matched) }];
   }));
   const problem = (doc) => doc.medicines.missedAfterChecking * 1000 + doc.unsupported.unsupported * 100
@@ -355,6 +498,8 @@ export function scoreRun(keys, payloads) {
     },
     medicineStatusDisagreements: med.statusDisagreements,
     traps,
+    dates,
+    alternatives,
     perKind,
     identity,
     byDifficulty,
@@ -406,7 +551,9 @@ export function renderMarkdown(report, { resultsDir = '' } = {}) {
   if (Object.keys(report.traps).length > 0) {
     lines.push('## Look-alike traps', '');
     lines.push('| Trap | Medicines | Right after checking | Exactly right |', '|---|---|---|---|');
-    const names = { lookalike: 'Look-alike names (e.g. hydroxyzine / hydralazine)', strength: 'Look-alike strengths (5 mg / 50 mg)', negation: 'Stopped medicines' };
+    const names = { lookalike: 'Look-alike names (e.g. hydroxyzine / hydralazine)', strength: 'Look-alike strengths (5 mg / 50 mg)',
+      negation: 'Stopped medicines', allergy_conflict: 'Medicines the documented allergy should warn about',
+      future_date: 'Medicines on a page dated after the set was made' };
     for (const [trap, t] of Object.entries(report.traps)) {
       lines.push(`| ${names[trap] ?? trap} | ${t.expected} | ${pct(t.credited / t.expected)} | ${pct(t.exact / t.expected)} |`);
     }
@@ -420,6 +567,18 @@ export function renderMarkdown(report, { resultsDir = '' } = {}) {
     lines.push(`| ${label[kind]} | ${k.expected} | ${k.produced} | ${pct(k.recall)} | ${pct(k.fieldsCorrectShare)} | ${pct(k.precision === null ? null : 1 - k.precision)} |`);
   }
   lines.push('');
+  const d = report.dates;
+  if (d && DATE_OUTCOMES.some((outcome) => d[outcome] > 0)) {
+    lines.push('## Dates', '');
+    lines.push('Each item found is compared with the date the page gives for it (not part of the two launch measures).', '');
+    lines.push('| Same as written | Same date, other spelling | Day and month swapped | Another date on the page | Wrong | Not read | Read as a separate note | Date where the key has none |', '|---|---|---|---|---|---|---|---|');
+    lines.push(`| ${DATE_OUTCOMES.map((outcome) => d[outcome]).join(' | ')} |`, '');
+    if (d.swappedIds.length > 0) lines.push(`Day and month swapped: ${d.swappedIds.join(', ')}.`, '');
+  }
+  const alt = report.alternatives;
+  if (alt && (alt.ivFluidsAsPastMedicine || alt.prescriptionDateAsNote)) {
+    lines.push(`Other readings accepted: IV fluids read as a past medicine ${alt.ivFluidsAsPastMedicine}, prescription date read as a separate note ${alt.prescriptionDateAsNote}.`, '');
+  }
   const id = report.identity;
   if (id.documents > 0) {
     lines.push(`Patient details read right: name ${pct(id.name / id.documents)}, date of birth or age ${pct(id.dateOfBirth / id.documents)}, folder number ${pct(id.folderNumber / id.documents)}, sex ${pct(id.sex / id.documents)}.`, '');

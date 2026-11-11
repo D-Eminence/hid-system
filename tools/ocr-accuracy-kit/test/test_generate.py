@@ -107,7 +107,23 @@ class GeneratorTest(unittest.TestCase):
     def test_document_traps_list_every_trap_its_items_carry(self):
         for key in self.committed_keys:
             item_traps = {item['trap'].split(':')[0] for item in key['items'] if item.get('trap')}
-            self.assertTrue(item_traps <= set(key['traps']), f"{key['docId']}: {sorted(item_traps)} vs {key['traps']}")
+            self.assertEqual(sorted(item_traps), key['traps'], key['docId'])
+            for item in key['items']:
+                if item.get('trap'):
+                    self.assertIn(item['trap'].split(':')[0], generate.TRAPS, item['id'])
+
+    def test_future_dates_and_allergy_conflicts_are_traps(self):
+        self.assertEqual(generate.parse_date('19/11/26'), (2026, 11, 19))
+        self.assertEqual(generate.parse_date('03-04-2026'), (2026, 4, 3))
+        for key in self.committed_keys:
+            for item in key['items']:
+                if (generate.parse_date(item['dateAsWritten']) or (0,)) > generate.SET_DATE:
+                    self.assertIn('future_date', key['traps'], item['id'])
+            allergies = {i['fields']['substance'] for i in key['items'] if i['kind'] == 'allergy'}
+            clash = any(i['kind'] == 'medicine' and i['fields']['status'] in ('new', 'current')
+                        and i['fields']['name'] in generate.ALLERGY_CONFLICTS.get(a, [])
+                        for i in key['items'] for a in allergies)
+            self.assertEqual(clash, 'allergy_conflict' in key['traps'], key['docId'])
 
     def test_every_document_is_independent_of_the_count(self):
         key_a, name_a, data_a = generate.build_document(20261103, 5)
