@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isValidAcknowledgementReason } from './allergies.dto';
 import type { DataAccessContext } from '../../common/request-context';
 import { OrderStatus } from '../shared/clinical.dto';
 import { PrescriptionsService } from '../prescriptions/prescriptions.service';
@@ -221,6 +222,7 @@ describe('PrescriptionsService allergy check at create (0124)', () => {
     [{ reason: '1234567890', warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID']],
     [{ reason: 'x'.repeat(501), warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID']],
     [{ reason: 'Tolerated\u0007 before', warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID']],
+    [{ reason: 'Nil \u{1F600}\u{1F600}\u{1F600}', warningToken: 'CURRENT' }, ['ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID']],
     [{ reason: 'Tolerated amoxicillin in 2024' }, ['ALLERGY_WARNING_TOKEN_INVALID']],
     [{ reason: 'Tolerated amoxicillin in 2024', warningToken: 'A'.repeat(64) }, ['ALLERGY_WARNING_TOKEN_INVALID']],
     [{ reason: 'Tolerated amoxicillin in 2024', warningToken: 'b'.repeat(64) }, ['ALLERGY_WARNING_TOKEN_STALE']],
@@ -616,5 +618,13 @@ describe('the prescription reads answer its stored allergy acknowledgements (012
       .toEqual(['create', 'activate']);
     expect(items.find((item) => item.id === otherPrescriptionId)?.allergyAcknowledgements).toEqual([]);
     expect(details()).toEqual({ resultCount: 2, allergyAcknowledgementCount: 2 });
+  });
+});
+
+describe('isValidAcknowledgementReason', () => {
+  it('counts characters as the database does, so emoji count once', () => {
+    expect(isValidAcknowledgementReason('Nil \u{1F600}\u{1F600}\u{1F600}')).toBe(false);
+    expect(isValidAcknowledgementReason('Ok because ' + '\u{1F600}'.repeat(250))).toBe(true);
+    expect(isValidAcknowledgementReason('Ok because ' + '\u{1F600}'.repeat(490))).toBe(false);
   });
 });
