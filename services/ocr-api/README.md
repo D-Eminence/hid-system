@@ -52,8 +52,12 @@ accuracy kit's `lib/normalise.mjs` (`normalise.spec.ts` carries its test
 vectors; keep the two in step). Reviews saved as whole text (EHR notes, the
 legacy single medicine, medicine or lab lists without `itemId`) are marked
 `estimated`. That estimate runs inside the save transaction, so its work is
-bounded: the saved text is tokenised once, at most 300 items and 100,000 word
-comparisons are checked (the rest count `notChecked`). The stored outcome is
+bounded: the saved text is tokenised once, a word found nowhere in it settles
+an item at once, word-pair results are cached, and at most 300 items are
+checked within 1,000,000 word comparisons and 2,000,000 edit-distance cells
+(the rest count `notChecked`; worst case a few hundred milliseconds).
+`onPrepared` follows the kit's `onPage` rule with two deliberate differences: a
+value with no words is not found, and it can answer "not checked". The stored outcome is
 kept under 16 KB (the audit details row has a 64 KB check): check-reason counts
 are dropped first (`checkReasonsDropped`), then `summary_too_large`. The
 extraction is read inside a savepoint and the computation is wrapped, so a

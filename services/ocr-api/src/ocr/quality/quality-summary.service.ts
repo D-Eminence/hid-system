@@ -56,12 +56,19 @@ type Suppressed<Group, Keys extends keyof Group> = Pick<Group, Keys> & { suppres
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
-const add = (counts: Counts, key: string, by = 1) => { counts[key] = (counts[key] ?? 0) + by; };
-const addAll = (counts: Counts, from: unknown) => {
-  if (!isRecord(from)) return;
-  for (const [key, value] of Object.entries(from)) if (typeof value === 'number' && value > 0) add(counts, key, value);
+/** Count maps have no prototype: a stored code such as "constructor" is an ordinary key. */
+const counts = (): Counts => Object.create(null) as Counts;
+const add = (into: Counts, key: string, by = 1) => {
+  into[key] = (Object.hasOwn(into, key) ? into[key] as number : 0) + by;
 };
-const nested = (record: Record<string, Counts>, key: string): Counts => (record[key] ??= {});
+const addAll = (into: Counts, from: unknown) => {
+  if (!isRecord(from)) return;
+  for (const [key, value] of Object.entries(from)) if (typeof value === 'number' && value > 0) add(into, key, value);
+};
+const nested = (record: Record<string, Counts>, key: string): Counts => {
+  if (!Object.hasOwn(record, key)) record[key] = counts();
+  return record[key] as Counts;
+};
 
 /** Removes counts under MIN_CELL_SIZE from a reason / field-class map in place; returns how many were removed. */
 function hideSmall(counts: Counts): number {
@@ -102,8 +109,8 @@ export function aggregateReviewOutcomes(rows: readonly OutcomeRow[]) {
     let review = reviews.get(reviewKey);
     if (!review) {
       review = { week: row.week, facilityId: row.facility_id, promptVersion, reviews: 0, validated: 0, rejected: 0,
-        estimated: 0, summaryFailed: 0, reviewConfirmed: 0, missedItems: 0, rejectionReasons: {}, removalReasons: {},
-        changeReasons: {}, correctionFields: {} };
+        estimated: 0, summaryFailed: 0, reviewConfirmed: 0, missedItems: 0, rejectionReasons: counts(),
+        removalReasons: counts(), changeReasons: counts(), correctionFields: counts() };
       reviews.set(reviewKey, review);
     }
     review.reviews += 1;
@@ -125,7 +132,9 @@ export function aggregateReviewOutcomes(rows: readonly OutcomeRow[]) {
       let group = items.get(key);
       if (!group) {
         group = { week: row.week, facilityId: row.facility_id, kind: bucket.kind, promptVersion, items: 0,
-          decisions: {}, byConfidence: {}, byReadBy: {}, hardPage: {}, fieldChanges: {}, checkReasons: {} };
+          decisions: counts(), byConfidence: counts() as unknown as Record<string, Counts>,
+          byReadBy: counts() as unknown as Record<string, Counts>, hardPage: counts() as unknown as Record<string, Counts>,
+          fieldChanges: counts(), checkReasons: counts() as unknown as Record<string, Counts> };
         items.set(key, group);
       }
       group.items += bucket.items;

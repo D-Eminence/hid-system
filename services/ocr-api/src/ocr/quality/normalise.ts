@@ -157,38 +157,74 @@ export function overlap(a: unknown, b: unknown): number {
   return shared / (left.size + right.size - shared);
 }
 
-/** Longest word compared with edit distance; longer words must match exactly (keeps each comparison bounded). */
-const MAX_FUZZY_WORD = 40;
+/**
+ * A comparison allowance shared by many onPrepared calls; when it runs out the answer is "not checked".
+ * `left` counts token comparisons (1 each, cached or not); `editCells` counts edit-distance work (the product of
+ * the two word lengths) for word pairs not compared before. `seen` caches pair results: a note repeats words.
+ */
+export interface MatchBudget { left: number; editCells: number; seen?: Map<string, boolean> }
 
-/** A comparison allowance shared by many onPrepared calls; when it runs out the answer is "not checked". */
-export interface MatchBudget { left: number }
+/** Saved text tokenised once: every window's flat tokens, and the distinct words of the whole text. */
+export interface PreparedLines { windows: string[][]; vocabulary: string[]; words: Set<string> }
 
 /**
  * The lines tokenised once, as the flat token list of every window of up to `windowSize` consecutive lines, so
  * many values can be looked for in one text without tokenising it again for each.
  */
-export function prepareLines(pageLines: readonly string[], windowSize = 3): string[][] {
+export function prepareLines(pageLines: readonly string[], windowSize = 3): PreparedLines {
   const lineTokens = pageLines.map((line) => tokens(line));
-  return lineTokens.map((_, start) => lineTokens.slice(start, start + windowSize).flat());
+  const words = new Set(lineTokens.flat());
+  return { windows: lineTokens.map((_, start) => lineTokens.slice(start, start + windowSize).flat()),
+    vocabulary: [...words], words };
+}
+
+function budgetedMatch(want: string, have: string, budget: MatchBudget): boolean | null {
+  if (budget.left <= 0) return null;
+  budget.left -= 1;
+  if (want === have) return true;
+  if (/\d/.test(want) || /\d/.test(have)) return false;
+  const allowed = want.length >= 8 ? 2 : want.length >= 4 ? 1 : 0;
+  if (allowed === 0 || Math.abs(want.length - have.length) > allowed) return false;
+  const seen = (budget.seen ??= new Map());
+  const key = `${want}\u0000${have}`;
+  const cached = seen.get(key);
+  if (cached !== undefined) return cached;
+  const cost = want.length * have.length;
+  if (budget.editCells < cost) return null;
+  budget.editCells -= cost;
+  const result = levenshtein(want, have) <= allowed;
+  seen.set(key, result);
+  return result;
 }
 
 /**
- * onPage over prepareLines output, counting every token comparison against `budget`. A value with no tokens is
- * not found (it cannot be evidence). Returns null when the budget ran out before an answer.
+ * onPage (same rule: tokenMatches) over prepareLines output, against `budget`. Two deliberate differences from
+ * onPage and the kit: a value with no tokens is not found (it cannot be evidence), and null is returned when the
+ * budget ran out before an answer.
  */
-export function onPrepared(want: readonly string[], windows: readonly string[][],
+export function onPrepared(want: readonly string[], prepared: PreparedLines,
   budget: MatchBudget): boolean | null {
   if (want.length === 0) return false;
-  for (const have of windows) {
+  // A word that matches nowhere in the text settles it at once (most values not on the page stop here).
+  for (const token of new Set(want)) {
+    if (prepared.words.has(token)) continue;
+    let anywhere = false;
+    for (const word of prepared.vocabulary) {
+      const match = budgetedMatch(token, word, budget);
+      if (match === null) return null;
+      if (match) { anywhere = true; break; }
+    }
+    if (!anywhere) return false;
+  }
+  for (const have of prepared.windows) {
     let position = 0;
     let ok = true;
     for (const token of want) {
-      while (position < have.length) {
-        if (budget.left <= 0) return null;
-        budget.left -= 1;
-        const candidate = have[position] as string;
-        if (token === candidate || (token.length <= MAX_FUZZY_WORD && candidate.length <= MAX_FUZZY_WORD
-          && tokenMatches(token, candidate))) break;
+      for (;;) {
+        if (position >= have.length) break;
+        const match = budgetedMatch(token, have[position] as string, budget);
+        if (match === null) return null;
+        if (match) break;
         position += 1;
       }
       if (position >= have.length) { ok = false; break; }

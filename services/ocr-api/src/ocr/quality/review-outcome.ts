@@ -119,8 +119,12 @@ const VERSION = /^[A-Za-z0-9][A-Za-z0-9._+:-]{0,119}$/;
 const MAX_CODES_PER_BUCKET = 40;
 /** Reading items the estimate looks for in saved whole text; the rest are counted notChecked. */
 export const MAX_ESTIMATE_ITEMS = 300;
-/** Token comparisons the whole estimate may make (it runs inside the save transaction); then notChecked. */
-export const MAX_ESTIMATE_COMPARISONS = 100_000;
+/**
+ * The estimate's allowance (it runs inside the save transaction): token comparisons, and edit-distance work in
+ * word-length products for word pairs not compared before. Past either, items count notChecked.
+ */
+export const MAX_ESTIMATE_COMPARISONS = 1_000_000;
+export const MAX_ESTIMATE_EDIT_CELLS = 2_000_000;
 /**
  * The largest serialised outcome stored. It goes into the audit details too, which 0003 caps at 64 KB together with
  * the other keys, so it stays well under that.
@@ -336,10 +340,13 @@ export function computeReviewOutcome(input: ReviewOutcomeInput): ReviewOutcome {
       // The saved text is tokenised once; every comparison counts against one allowance (bounded work while the
       // job row is locked).
       const windows = prepareLines(kept.wholeText);
-      const budget = { left: MAX_ESTIMATE_COMPARISONS };
+      const budget = { left: MAX_ESTIMATE_COMPARISONS, editCells: MAX_ESTIMATE_EDIT_CELLS };
       targetItems.forEach((item, index) => {
         add(item.kind, 'unlinked', item, item.page);
-        if (index >= MAX_ESTIMATE_ITEMS || budget.left <= 0) { counts.notChecked += 1; return; }
+        if (index >= MAX_ESTIMATE_ITEMS || budget.left <= 0 || budget.editCells <= 0) {
+          counts.notChecked += 1;
+          return;
+        }
         const probe = item.kind === 'medicine' ? item.fields.name ?? item.asWritten
           : item.kind === 'lab_result' ? item.fields.test ?? item.asWritten : item.asWritten;
         let found = onPrepared(tokens(probe), windows, budget);

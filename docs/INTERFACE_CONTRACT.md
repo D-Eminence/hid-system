@@ -1389,8 +1389,9 @@ optional signals below). Decisions: `kept_unchanged`, `kept_changed`,
 `unlinked` (whole text saved without item links: an EHR note, the legacy
 single medicine, a list with no `itemId`; the summary is then `estimated` and
 carries `estimate.foundInSavedText` / `notFoundInSavedText` / `notChecked`
-instead of per-item decisions; at most 300 items and 100,000 word comparisons
-are checked, the rest are `notChecked`), `not_in_target` and
+instead of per-item decisions; at most 300 items are checked, within a fixed
+allowance of 1,000,000 word comparisons and 2,000,000 edit-distance cells, the
+rest are `notChecked`), `not_in_target` and
 `rejected_with_document`. When nothing was read of the kept kinds, typed
 entries are `added_by_reviewer` and `linkage` is `none`. "Changed" uses the
 OCR accuracy kit's normalisers (name, strength, frequency for medicines; name,
@@ -1427,7 +1428,10 @@ the answer's `from`/`to` are the widened days) so two ranges a day apart cannot
 be subtracted. A group with fewer than 20 items (reviews, for a review group) is
 returned as `{ ...keys, suppressed: true }` with no counts. Inside a group that
 is shown, reason, check-reason and field-class counts under 5 are left out and
-counted in `smallCellsHidden`.
+counted in `smallCellsHidden` (a hidden count can still be worked out from the
+group's totals; the hidden code cannot). `summaryFailed` counts both
+`summary_failed` and `summary_too_large`; an outcome stored with
+`checkReasonsDropped` adds no check-reason counts.
 There are no per-reviewer figures. The read is audited as
 `ocr.quality.summary.read` with the range and counts only. Row-level security
 limits it to the facility named by `X-Facility-ID` (`scope: 'bound_facility'`);

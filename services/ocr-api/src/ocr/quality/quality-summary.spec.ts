@@ -72,6 +72,15 @@ describe('OCR quality summary', () => {
     expect(JSON.stringify(reviewGroups)).not.toContain('wrong_patient');
   });
 
+  it('counts a stored code named like an Object property as an ordinary code', () => {
+    const odd = { ...outcome, buckets: outcome.buckets.map((bucket) => ({ ...bucket, checkReasons: { constructor: 1 } })) };
+    const { itemGroups } = aggregateReviewOutcomes(Array.from({ length: 20 }, () => ({ week: '2026-W45',
+      facility_id: facilityId, outcome: odd })));
+    expect((itemGroups[0] as { checkReasons: Record<string, Record<string, number>> }).checkReasons.constructor)
+      .toMatchObject({ kept_unchanged: 20, removed: 20 });
+    expect((Object as unknown as Record<string, unknown>).removed).toBeUndefined();
+  });
+
   describe('route', () => {
     const harness = (outcomeRows: unknown[] = Array.from({ length: 20 }, () => row())) => {
       const query = jest.fn(async () => ({ rows: outcomeRows, rowCount: outcomeRows.length }));
