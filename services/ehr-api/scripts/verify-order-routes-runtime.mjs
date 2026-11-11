@@ -241,6 +241,23 @@ const maintenance = new Pool({ host: socket, port, user: pgUser, database: 'post
 await maintenance.query(`create database ${isolated} template ${process.env.PGDATABASE}`);
 const owner = new Pool({ host: socket, port, user: pgUser, database: isolated, max: 3 });
 const one = async (sql, values = []) => (await owner.query(sql, values)).rows[0];
+// 0114: the sign-up fields Health ID collects (fictional values), and the
+// synthetic key Identity encrypts the applicant's phone with in this run.
+const signupCollectedFields = (label) => ({
+  administratorRole: 'owner',
+  administratorPhone: '+2348000000101',
+  facilityProfile: {
+    tradingName: `Verifier ${label} Clinic`, ownership: 'private', careLevel: 'secondary',
+    addressLine: '1 Synthetic Site Road, Ikeja', city: 'Lagos', stateCode: 'LA', lga: 'Ikeja',
+    gpsLatitude: 6.6018, gpsLongitude: 3.3515, phone: '+2348000000102', email: 'front.desk@verifier.invalid',
+    bedCount: 10, operatingHours: 'Mon-Sun 24 hours', emergency24h: true,
+    departments: ['general_outpatient', 'laboratory'], servicesOffered: 'Synthetic outpatient and laboratory care',
+    smohLicenceNumber: 'LSMOH/VERIFIER/0001', hasRegistryId: false, registryId: null,
+    hasNhiaAccreditation: false, nhiaAccreditationNumber: null, medicalDirectorName: 'Dr Verifier Example',
+    medicalDirectorMdcn: 'MDCN/00001', expectedStaff: 5, migratingRecords: false, needsInteroperability: false,
+  },
+});
+const collectedFieldsKey = randomBytes(32).toString('base64');
 const all = async (sql, values = []) => (await owner.query(sql, values)).rows;
 const temporary = await mkdtemp(join(tmpdir(), 'hid-order-routes-'));
 const evidence = { steps };
@@ -272,6 +289,7 @@ try {
     boot('identity-api', join(services, 'identity-api'), { ...common, DATABASE_URL: databaseUrl('hid_identity_api_runtime'),
       AUTH_MODE: 'local', AUTH_SIGNING_SECRET: process.env.AUTH_SIGNING_SECRET, AUTH_LOGIN_PEPPER: process.env.AUTH_LOGIN_PEPPER,
       OTP_HMAC_KEY_B64: process.env.OTP_HMAC_KEY_B64, AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'production',
+      NIN_ENCRYPTION_KEY_B64: collectedFieldsKey, NIN_KEY_VERSION: 'verifier-v1',
       NIN_PROVIDER_MODE: 'unavailable', TURNSTILE_MODE: 'disabled', QOREID_ENABLED: 'true',
       QOREID_CLIENT_ID: 'example-qoreid-client', QOREID_CLIENT_SECRET: 'example-qoreid-secret',
       IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: tokens.identityEhr,
@@ -344,7 +362,8 @@ try {
     const network = `198.51.140.${signUps}`;
     const started = await http(identity, 'POST', '/identity/provider-enrollments', { origin: appOrigin, forwardedFor: network,
       body: { cacRegistrationNumber: cac, administratorEmail: email, organizationType, productCode, administratorName,
-        turnstileAction: 'provider-enrollment', turnstileToken: 'disabled-in-this-run' } });
+        turnstileAction: 'provider-enrollment', turnstileToken: 'disabled-in-this-run',
+        ...signupCollectedFields(label) } });
     expectStatus(started, 200, `sign-up start ${label}`);
     const deadline = Date.now() + 15_000;
     while (!otpCodes.has(started.body.challengeId)) {
@@ -357,6 +376,11 @@ try {
     const activated = await http(identity, 'POST', '/identity/provider-enrollments/activate', { origin: appOrigin,
       cookie: verified.cookies.find(value => value.startsWith('hid_provider_enrollment=')), body: { password } });
     expectStatus(activated, 200, `sign-up activation ${label}`);
+    // 0114: the profile sent with the confirmed code is the facility's now.
+    const profile = await one(`select trading_name, submitter_role, submitter_phone_ciphertext is not null as phone_kept
+      from identity.facility_profiles where facility_id=$1`, [activated.body.facilityId]);
+    assert.deepEqual(profile, { trading_name: `Verifier ${label} Clinic`, submitter_role: 'owner', phone_kept: true },
+      `facility profile ${label}`);
     const facility = await one(`select facility.name, application.id as application_id
       from identity.facilities facility join identity.organization_applications application
         on application.organization_id = facility.organization_id where facility.id=$1`, [activated.body.facilityId]);

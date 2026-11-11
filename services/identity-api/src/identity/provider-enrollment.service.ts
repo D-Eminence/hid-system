@@ -7,7 +7,9 @@ import { IntegrationRuntimeService } from '../integrations/integration-runtime.s
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import { matchingCacIncompleteProfile, verifiedCacBinding } from './organization-applications.service';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
-import type { StartProviderEnrollmentDto } from './dto/provider-enrollment.dto';
+import { hasAnySignupField, type StartProviderEnrollmentDto } from './dto/provider-enrollment.dto';
+import { facilityProfileForDatabase } from './dto/facility-profile.dto';
+import { CollectedFieldProtector } from './collected-field-protector';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { selfServiceClosed, selfServiceDailyCap, selfServiceGateRefusal } from './provider-self-service-gate';
@@ -164,6 +166,10 @@ export class ProviderEnrollmentService {
     if (!environment.QOREID_ENABLED) {
       throw new DomainProblem(503, 'QOREID_DISABLED', 'External verification is not enabled');
     }
+    // 0114: the applicant's phone is stored encrypted; without the key
+    // nothing is written or charged. Only a body that sends the new fields
+    // needs the key: the old body (the live website) keeps working without it.
+    if (hasAnySignupField(input)) new CollectedFieldProtector().assertConfigured();
     const platformDailyLimit = selfServiceDailyCap(environment);
     if (platformDailyLimit === null) throw selfServiceClosed();
     // Derived from the server-observed address before anything is written:
@@ -348,7 +354,17 @@ export class ProviderEnrollmentService {
       turnstileToken: input.turnstileToken,
     }, request.ip, request.correlationId, {
       publicApplicationQuotaCharged: true,
-      selfService: { administratorName: input.administratorName, organizationType: input.organizationType },
+      selfService: {
+        administratorName: input.administratorName, organizationType: input.organizationType,
+        // 0114: all or none (the DTO refuses a partial set); the old body
+        // sends none and keeps 0086's 7-argument command (contract 43.0).
+        ...(input.facilityProfile && input.administratorRole && input.administratorPhone ? {
+          signup: {
+            facilityProfile: facilityProfileForDatabase(input.facilityProfile),
+            submitterRole: input.administratorRole, submitterPhone: input.administratorPhone,
+          },
+        } : {}),
+      },
     });
   }
 }
