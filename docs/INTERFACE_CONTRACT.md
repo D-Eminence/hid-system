@@ -4606,25 +4606,39 @@ severity and reaction recorded more than once is one line with every id in `alle
 facilities"). The medicine's display text and code are compared with each allergy (the patient's text is split into
 terms on commas, semicolons, slashes, new lines and "and"; "none", "nil", "NKDA" and the like are ignored; a hyphen
 separates words, so "Amoxicillin-clavulanate" names amoxicillin; "sulph" is read as "sulf"; brand and other names are
-read as their generics, e.g. Flagyl as metronidazole and Augmentin as amoxicillin with clavulanic acid; one-letter
+read as their generics, both ways, e.g. Flagyl as metronidazole, Augmentin as amoxicillin with clavulanic acid, Keflex
+as cefalexin, Tramal as tramadol, Ciprotab as ciprofloxacin, Panadol as paracetamol and co-codamol as codeine with
+paracetamol, and acetaminophen and paracetamol (or cefalexin and cephalexin) as one medicine; one-letter
 misspellings and plurals of names of 8 letters or more match; salts, forms and strengths such as "sodium",
 "sulfate", "capsules" or "500mg" do not name a medicine on their own): the same medicine; the same class
 (`className`: "penicillins", "cephalosporins", "carbapenems", "sulfonamides (“sulfa” medicines)", "NSAIDs, the
-anti-inflammatory painkillers"; by class words, members, prefixes and name patterns); and cross-reactivity between
-penicillins, cephalosporins and carbapenems, both ways, and between ceftazidime and aztreonam (`className` is then the
-medicine's name). No match never means "safe".
+anti-inflammatory painkillers", "fluoroquinolones" (also named "quinolones"; any "-floxacin") or "macrolides" (any
+"-thromycin"); by class words, members, prefixes and name patterns; quinine, chloroquine and the other quinolines are
+not quinolones); and cross-reactivity between penicillins, cephalosporins and carbapenems, both ways, and between
+ceftazidime and aztreonam (`className` is then the medicine's name). No match never means "safe".
 
 `warningToken` names exactly the warning shown: the sha256 (hex) of the medicine (its normalized display text and
 code) and every matched allergy with how it matched. The prescriber's acknowledgement must carry it.
 
-**At prescribing.** The check runs, inside the transaction that writes the prescription and under a per-patient lock
-shared with recording an allergy, whenever a prescription is written as or becomes active:
-`POST ehr/patients/:patientId/encounters/:encounterId/prescriptions` (create), `PATCH …/prescriptions/:id` with
-`status: active` from draft (Activate) or on hold (Resume), and `POST …/prescriptions/:id/order-routes` (send) of a
-draft, which makes it active. On Activate, Resume and send, a match already covered by an acknowledgement stored for
-the prescription (its recorded allergy ids, and each of the patient's own terms) needs no new one. Otherwise, with a
-match and no accepted `allergyAcknowledgement`, nothing is written and the answer is 409
-`ALLERGY_ACKNOWLEDGEMENT_REQUIRED` with, in `errors[]`:
+**At prescribing, at the send and at the hand-off.** The check runs, inside the transaction that writes the
+prescription (or the route, or the hand-off's eligibility audit) and under a per-patient lock shared with recording an
+allergy, whenever a prescription is written as or becomes active, and again before it goes to a pharmacy, because an
+allergy may have been recorded since it became active:
+
+- `POST ehr/patients/:patientId/encounters/:encounterId/prescriptions` (create);
+- `PATCH …/prescriptions/:id` with `status: active` from draft (Activate) or on hold (Resume);
+- `POST …/prescriptions/:id/order-routes` (send to another facility) of a draft, which the send makes active, or of
+  an active prescription: every status `ehr.send_order_route` accepts (0098: draft and active). A prescription in any
+  other status is not checked, so the send's own 409 `ORDER_ROUTE_ORDER_NOT_ELIGIBLE` (or its 404) answers;
+- `POST …/prescriptions/:id/pharmacy-work-item` (the hand-off to this facility's pharmacy, permission
+  `pharmacy.work-item.accept`), after its own checks, which answer first: 412 `PRESCRIPTION_VERSION_CONFLICT`, 409
+  `PRESCRIPTION_NOT_ELIGIBLE` (not active) and 409 `PRESCRIPTION_ROUTED`. Its 409 answers before pharmacy-api is
+  called, so nothing is written in the EHR or in Pharmacy.
+
+On Activate, Resume, send and hand-off, a match already covered by an acknowledgement stored for the prescription (at
+any stage: its recorded allergy ids, and each of the patient's own terms) needs no new one. Otherwise, with a match and
+no accepted `allergyAcknowledgement`, nothing is written and the answer is 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED` with,
+in `errors[]`:
 
 - one entry per match: `{ field: "allergyAcknowledgement", messages: [the match's message] }`;
 - one entry `{ field: "allergyAcknowledgement.warningToken", messages: [the current warning's token] }`;
@@ -4641,28 +4655,36 @@ match and no accepted `allergyAcknowledgement`, nothing is written and the answe
 
 The `detail` is "The allergy warning changed since it was shown. Check the allergies again and give a reason to go
 ahead." when the token is stale; "The reason to go ahead after the allergy warning was not accepted. …" for a reason
-or token problem otherwise; and "This medicine may match an allergy on the patient's record. …" when none was sent.
-A client reads `errors[].code` on the `allergyAcknowledgement.rejected` entries, not the detail. The create, PATCH and
-send bodies take `allergyAcknowledgement: { reason, warningToken }`, an object; the request validation only refuses
-(400) a non-object, a non-string or null `reason` or `warningToken`, a `reason` over 2000 or a `warningToken` over 200
-characters, or another property. The reason's rules (10-500 after trimming, at least one word of three letters, no
-control character but new lines) and the token are checked by the allergy check, so their refusals are the 409 above
-with the current warning, never a 400. A valid acknowledgement writes the prescription (or the change, or the route)
-and one `ehr.prescription_allergy_acknowledgements` row with its stage (`create | activate | resume | send`), the
-reason, the matched recorded allergy ids and the patient's own terms that matched. The audit of that create, update
-or send adds `allergyOverride: true, matchedRecordedCount, patientReportedMatched` (counts and a flag, never the
-substance or the reason). An acknowledgement sent when nothing needs one is ignored, whatever it holds. A client must
-only send `allergyAcknowledgement` after a warning: an ehr-api without 0117 refuses the unknown property.
+or token problem otherwise; and "This medicine may match an allergy on the patient's record. …" when none was sent. A
+client reads `errors[].code` on the `allergyAcknowledgement.rejected` entries, not the detail. The create, PATCH,
+send and hand-off bodies take `allergyAcknowledgement: { reason, warningToken }`, an object; the request validation
+only refuses (400) a non-object, a non-string or null `reason` or `warningToken`, a `reason` over 2000 or a
+`warningToken` over 200 characters, or another property. The reason's rules (10-500 after trimming, at least one word
+of three letters, no control character but new lines) and the token are checked by the allergy check, so their
+refusals are the 409 above with the current warning, never a 400. A valid acknowledgement writes the prescription (or
+the change, or the route, or lets the hand-off go on) and one `ehr.prescription_allergy_acknowledgements` row with
+its stage (`create | activate | resume | send | handoff`), the reason, the matched recorded allergy ids and the
+patient's own terms that matched. The audit of that create, update, send or hand-off
+(`ehr.prescription.pharmacy-handoff.eligibility-checked`) adds `allergyOverride: true, matchedRecordedCount,
+patientReportedMatched` (counts and a flag, never the substance or the reason). The hand-off stores its row in the
+EHR transaction that ends before pharmacy-api is called, as it does its audit row, so a refusal by Pharmacy after
+that keeps the row, and a retry finds the match covered. A send's replay (the same key and body) is checked like the
+first send: it answers the stored route unless an allergy recorded since matches and no stored reason covers it, and
+then the 409; a reason given on a replay is not stored, since the route was already sent. An acknowledgement sent
+when nothing needs one is ignored, whatever it holds. A client must only send `allergyAcknowledgement` after a
+warning: an ehr-api without 0117 refuses the unknown property (on the hand-off body, so does an ehr-api from before
+the hand-off check).
 
 **The stored acknowledgements on the prescription reads.** `GET …/encounters/:encounterId/prescriptions/:id` and each
 item of `GET …/encounters/:encounterId/prescriptions` carry `allergyAcknowledgements:
-PrescriptionAllergyAcknowledgement[]` (oldest first; `[]` when none), so a second clinician activating, resuming or
-sending a draft sees the earlier reason. `PrescriptionAllergyAcknowledgement`: `id, stage (create | activate | resume |
-send), reason, createdBy (account id), createdByMembershipId, createdAt, matchedRecordedAllergyIds (uuid[]: the
-recorded allergies it covered; `GET …/allergies?includeEnteredInError=true` names them), patientReportedMatched,
-patientReportedTerms (string[]: the patient's own terms it covered, normalized)`. Same permission
-(`ehr.prescription.read`), authorization and RLS as before (acknowledgements are read at their own facility with
-read access); the read's audit adds `allergyAcknowledgementCount` (the list: the page's total), never the reason.
+PrescriptionAllergyAcknowledgement[]` (oldest first; `[]` when none), so a second clinician activating, resuming,
+sending or handing it off sees the earlier reason. `PrescriptionAllergyAcknowledgement`: `id, stage (create |
+activate | resume | send | handoff), reason, createdBy (account id), createdByMembershipId, createdAt,
+matchedRecordedAllergyIds (uuid[]: the recorded allergies it covered; `GET …/allergies?includeEnteredInError=true`
+names them), patientReportedMatched, patientReportedTerms (string[]: the patient's own terms it covered,
+normalized)`. Same permission (`ehr.prescription.read`), authorization and RLS as before (acknowledgements are read
+at their own facility with read access); the read's audit adds `allergyAcknowledgementCount` (the list: the page's
+total), never the reason.
 
 **Severity in the messages.** `severe` reads "SEVERE", `moderate` "moderate", `mild` "mild" and `unknown` "severity
 not known" (the clinician's choice "Not known" in the form): "Latex allergy: severity not known."
