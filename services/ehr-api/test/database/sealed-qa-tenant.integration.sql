@@ -646,6 +646,18 @@ select pg_temp.assert('nobody but the owner may move them',
 select pg_temp.assert('the move moves the two demo patient logins',
   identity.demo_patient_logins_move() = 2);
 select pg_temp.assert('a second call moves nothing', identity.demo_patient_logins_move() = 0);
+-- After the move a live email contact (to a new address) does not make a later call refuse.
+savepoint after_move;
+set local session_replication_role = replica;
+insert into identity.patient_emergency_contacts (id, patient_id, created_by_account_id, relationship, channel,
+  contact_ciphertext, contact_key_version, destination_hmac, notify_on_emergency_access, status)
+values ('a1230010-0000-4000-8000-000000000043', '98d00009-0000-4000-8000-000000000001',
+  '98d00008-0000-4000-8000-000000000001', 'sibling', 'email', decode(repeat('ab', 40), 'hex'), 'sealed-test-v1',
+  repeat('6', 64), true, 'unverified');
+set local session_replication_role = origin;
+select pg_temp.assert('after the move a new-address contact does not make a later call refuse',
+  identity.demo_patient_logins_move() = 0);
+rollback to savepoint after_move;
 select pg_temp.assert('the demo patient logins are at patientdemo1@ and patientdemo2@; nothing else of them changed',
   (select array_agg(account.email order by account.id) from auth.accounts account
     where account.id in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002'))

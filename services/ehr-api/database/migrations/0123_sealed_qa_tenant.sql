@@ -2912,13 +2912,18 @@ begin
   -- patient's could only be operations@, patient1@ or patient2@, and the
   -- database holds only its HMAC) and no pending share invitation to an old
   -- address. The owner removes or cancels them in the app first, and may add
-  -- the contacts again afterwards with the new addresses.
-  if exists (select 1 from identity.patient_emergency_contacts contact
+  -- the contacts again afterwards with the new addresses. Checked only while
+  -- a demo login is still on an old address, so a later call moves nothing.
+  if exists (select 1 from auth.accounts account
+               join jsonb_to_recordset(demo_logins) login(id uuid, old_email text)
+                 on login.id = account.id and lower(account.email) = login.old_email
+              where account.status <> 'deleted' and identity.sealed_demo_account(account.id))
+     and (exists (select 1 from identity.patient_emergency_contacts contact
               where contact.channel = 'email' and contact.status <> 'deactivated'
                 and identity.sealed_demo_patient(contact.patient_id))
      or exists (select 1 from identity.patient_share_invitations invitation
                   join jsonb_to_recordset(demo_logins) login(old_email text) on invitation.invitee_email = login.old_email
-                 where invitation.status = 'pending' and identity.sealed_demo_patient(invitation.patient_id)) then
+                 where invitation.status = 'pending' and identity.sealed_demo_patient(invitation.patient_id))) then
     raise exception using errcode = '55000', message = '0123: DEMO_PATIENT_OLD_ADDRESS_IN_USE';
   end if;
 
