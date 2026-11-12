@@ -4183,6 +4183,19 @@ worker command sees no job. 0112 has no down migration; the declaration is
 signed separately. Suite:
 `services/ehr-api/test/database/ocr-source-deletion.integration.sql`.
 
+Expected owner attributes (release checklist P8; recorded 2026-11-12 from the
+triage of the suites under a migration login that is neither a superuser nor
+BYPASSRLS): the owner of the OCR tables and of their SECURITY DEFINER commands
+(`ocr.jobs`, `ocr.validations`, `ocr.job_events`) bypasses row-level security,
+as every OCR write needs (`ocr.job_events` has no INSERT policy, so a
+non-bypass owner refuses every job insert and status change); the owner of the
+outreach tables (`outreach.campaign_members`) does not (0110 fixed the campaign
+check for that owner). The owner confirms both with the read-only owner
+attributes query in 0123's pre-sign header. The suites treat that owner, the
+migration login, as not a runtime role whatever its name, and
+`ocr-source-deletion` runs the cases that need an owner who sees the source
+document only when it does.
+
 ## 42. Records processing: publishing a reading as a draft (0113)
 
 Owner decision (D-Eminence, 2026-11-11), verbatim: "Option B: allow drafts,
