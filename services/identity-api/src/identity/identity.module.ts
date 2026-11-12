@@ -38,6 +38,8 @@ import { SelfServiceFacilitiesService } from './self-service-facilities.service'
 import { AdminFacilityStaffController } from './admin-facility-staff.controller';
 import { FacilityStaffController } from './facility-staff.controller';
 import { FacilityStaffService } from './facility-staff.service';
+import { FacilityProfileController } from './facility-profile.controller';
+import { FacilityProfileService } from './facility-profile.service';
 import { StaffInvitationsPublicController } from './staff-invitations-public.controller';
 import { StaffInvitationsSignedInController } from './staff-invitations-signed-in.controller';
 import { StaffInvitationsService } from './staff-invitations.service';
@@ -60,6 +62,8 @@ import { SupportHealthIdService } from './support-health-id.service';
     // :invitationId/revoke.
     StaffInvitationsSignedInController, StaffInvitationsPublicController, FacilityStaffController,
     AdminFacilityStaffController,
+    // The facility profile collected at sign-up and in the setup wizard (0114).
+    FacilityProfileController,
     // The directory of laboratories and pharmacies an order can go to (P4c).
     OrderDestinationsController,
     // The support chat's server Health ID check (0109), for support-api's workload alone.
@@ -69,6 +73,7 @@ import { SupportHealthIdService } from './support-health-id.service';
     SupportHealthIdService,
     RecordAccessNoticeService,
     NinRegistrationService,
+    FacilityProfileService,
     NinIdentifierProtector,
     HidCodeGenerator,
     DeterministicTestNinVerificationProvider,
@@ -114,6 +119,8 @@ import { SupportHealthIdService } from './support-health-id.service';
       },
     },
   ],
-  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter],
+  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter,
+    // The public application quota digest, shared with open sign-up on outreach.
+    OrganizationProfileCompletionService],
 })
 export class IdentityModule {}

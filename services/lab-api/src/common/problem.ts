@@ -52,9 +52,10 @@ const SQLSTATE = /^[0-9A-Z]{5}$/;
 /**
  * The filter maps no database error: one that reaches it is `500` with a fixed
  * detail. A command that knows what one of its own refusals means maps it to
- * its own problem (only EHR-order acceptance does, lab-work-items.service.ts),
- * so every other command keeps answering `500`, which OCR stores for its Lab
- * import as retryable.
+ * its own problem (EHR-order acceptance, lab-work-items.service.ts; a release
+ * on a closed route and a check by the person who entered the result,
+ * lab-executions.service.ts), so every other refusal keeps answering `500`,
+ * which OCR stores for its Lab import as retryable.
  */
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {

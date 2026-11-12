@@ -98,8 +98,8 @@ Each claimed job runs, in order:
    the reading each page ended with, plus `heading` and `duplicate_of_order`
    for the items the last step leaves out, which are not ungrounded and not
    in `droppedUngrounded`; see "Cleanups of 2026-11-10") go in the
-   `ocr.job.completed` log only,
-   never in the payload or provenance. The same log carries, codes and counts only,
+   `ocr.job.completed` log and, since "Measuring readings: provenance counts
+   and listVersion", in provenance `reading.counts`; never in the payload. The same log carries, codes and counts only,
    `hardPages` (hard pages sent for best-guess readings), `hardPageReads`
    (best-guess requests sent, two per page), `hardPageAgreement`
    (`fieldsCompared`, `fieldsAgreed`, `itemsPaired`, `itemsSingle`) and the
@@ -1671,6 +1671,59 @@ with `reading.status: "ai_failed"` and no items so staff can enter the record
 by hand. A rejected request (key, permission, model) also completes as
 `ai_failed` and logs only the code. With AI off the job completes as `ai_off`;
 a document with no text as `no_text`.
+
+## Measuring readings: provenance counts and listVersion
+
+Phase 1 of learning from live reading is to measure, content-free. Beside
+`promptVersion`, the worker stores in the extraction's provenance
+(`ocr.extractions.provenance.reading`, written by `buildCompletion` in
+`worker.ts`) two more fields. Both are validated against the contract
+(`contract.ts` `readingCountsSchema`, `listVersionSchema`) before they are
+written; the structured payload is unchanged.
+
+* `listVersion`: 16 hex characters, the start of the SHA-256 of a canonical
+  JSON serialisation (object keys sorted at every level, arrays in order) of
+  the reader's reference lists and tables (`list-version.ts` `READER_LISTS`):
+  the NAFDAC/curated brand rows (`brand-names.ts`), the NEML generics, drug
+  synonyms and unlisted look-alikes (`drug-list.ts`), the ICD-11 titles,
+  diagnosis synonyms, ungrounded abbreviations and look-alikes
+  (`diagnosis-list.ts`), the lab test names and look-alikes (`lab-list.ts`),
+  the signs and abbreviation tables (`signs.ts`) and the hard-page
+  `FREQUENCY_WORDS` (`hard-page.ts`). Computed once at module load from the
+  lists' contents only, so every worker built from the same source writes the
+  same value, and any edit to any of these lists changes it. It covers these
+  named lists only: other reference data the reader uses (the heading prefixes
+  and titles in `tidy.ts`, the status and instruction word patterns in
+  `hard-page.ts`, the brand-row source filter) is versioned by `promptVersion`
+  or the code, not by `listVersion`. It is recorded for tracing only and is not
+  part of the reuse match (coordinator decision of 2026-11-11: list updates
+  apply to new readings, no forced re-reads). Also in the `ocr.job.completed`
+  log line (`listVersion`, `null` when unavailable).
+* `counts` (version 1), codes and non-negative integer counts only; every map
+  key is one of a closed list of reason codes (`contract.ts`
+  `READING_DROP_REASON_CODES`, `HARD_READ_FAILURE_CODES`, kept equal to the
+  reader's own lists by `contract-codes.spec.ts`), so no other word can be
+  stored as a key:
+  * `droppedByReason`, `droppedByReasonFirstPass`: dropped items by reason
+    code, as in the completion log (see "Reading paper records").
+  * `hardPageAgreement`: `fieldsCompared`, `fieldsAgreed` (agree;
+    `fieldsCompared - fieldsAgreed` disagree), `itemsPaired`, `itemsSingle`
+    (one-sided), `drugSplits`, `alternativesDropped`, summed over hard pages.
+  * `zoomCalls`, `zoomLimited`, `zoomFailed`: hard-page zoom calls.
+  * `hardPageDeadlineHits`: hard pages where the page's deadline cut a read
+    (the page numbers stay in `hardPageDeadlinePages`).
+  * `hardReadFailures`: hard-page reads with no answer, by reason code
+    (`deadline`, `max_tokens`, `parse_error`, `api_error`, ...).
+  Re-read failures were already stored as the count `rereadFailedPages`.
+
+Neither ever fails a reading: if `listVersion` cannot be computed, or the
+counts throw or are not in the contract's shape, that field is left out and
+the worker logs `ocr.reading.provenance_field_omitted` with a code
+(`LIST_VERSION_UNAVAILABLE`, `READING_COUNTS_FAILED`,
+`READING_COUNTS_INVALID`). Older extractions carry neither field. The OCR
+HTTP service passes neither to the check screen (`publicProvenance` keeps a
+fixed list of scalar keys) and still matches readings for reuse on
+`reading.promptVersion` only.
 
 ## Fair claiming and call limits
 

@@ -247,6 +247,7 @@ describe('TurnstileService', () => {
 
   // The whole table, pinned: every host and every action it accepts there.
   const STAFF_SITE = ['staff-reset', 'staff-invitation', 'provider-enrollment'];
+  const OUTREACH_SITE = ['outreach-organiser-signup', 'outreach-invitation'];
   const EXPECTED_ACTIONS = {
     production: {
       'app.healthidentitydirectory.com': ['patient-login', 'patient-reset-start', 'staff-reset', 'legacy-recovery',
@@ -259,7 +260,7 @@ describe('TurnstileService', () => {
       'lab.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE],
       'pharmacy.healthidentitydirectory.com': ['pharmacy-login', ...STAFF_SITE],
       'migrate.healthidentitydirectory.com': ['ocr-login', ...STAFF_SITE],
-      'outreach.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE],
+      'outreach.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE, ...OUTREACH_SITE],
       'admin.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
     },
     staging: {
@@ -271,14 +272,14 @@ describe('TurnstileService', () => {
       'lab.staging.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE],
       'pharmacy.staging.healthidentitydirectory.com': ['pharmacy-login', ...STAFF_SITE],
       'migrate.staging.healthidentitydirectory.com': ['ocr-login', ...STAFF_SITE],
-      'outreach.staging.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE],
+      'outreach.staging.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE, ...OUTREACH_SITE],
       'admin.staging.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
     },
   } as const;
   // Every action there is: the compile-time check below fails if one is added without being listed here.
   const ALL_ACTIONS = [...LOGIN_TURNSTILE_ACTIONS, 'patient-reset-start', 'staff-reset', 'admin-reset', 'legacy-recovery',
     'book-demo', 'organization-application', 'organization-completion', 'patient-enrollment', 'provider-enrollment',
-    'staff-invitation'] as const satisfies readonly TurnstileAction[];
+    'staff-invitation', 'outreach-organiser-signup', 'outreach-invitation'] as const satisfies readonly TurnstileAction[];
   const everyActionListed: [Exclude<TurnstileAction, typeof ALL_ACTIONS[number]>] extends [never] ? true : never = true;
 
   it('pins the whole table of hosts and the actions each accepts', () => {

@@ -1,3 +1,4 @@
+import { deskCollectedFields } from '../../test/collected-fields.fixtures';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Global, Module, ValidationPipe, type INestApplication } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -157,7 +158,8 @@ describe('explicitly deferred staging NIN', () => {
     const reserve = jest.spyOn(module.get(HidCodeGenerator), 'reserve');
     const response = await request(app!.getHttpServer()).post('/api/v1/identity/nin/resolve')
       .set('idempotency-key', `deferred:${randomUUID()}`)
-      .send({ nin: '12345678901', firstName: 'Synthetic', lastName: 'Patient', dateOfBirth: '1990-01-02', purpose: 'healthcare-operations' });
+      .send({ nin: '12345678901', firstName: 'Synthetic', lastName: 'Patient', dateOfBirth: '1990-01-02', purpose: 'healthcare-operations',
+        ...deskCollectedFields() });
     expect(response.status).toBe(503);
     expect(response.body.code).toBe('NIN_PROVIDER_DEFERRED');
     expect(JSON.stringify(response.body)).not.toContain('12345678901');

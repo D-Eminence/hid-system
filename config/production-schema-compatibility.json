@@ -7,6 +7,6 @@
   "files": {
     "services/ehr-api/database/migrations/0118_ocr_correction_observations.sql": "048bca4bed5261b686249a97a5edd2336807eb4cf7ccf15e145d7bb684a8ae45",
     "services/ehr-api/database/migrations/0119_ocr_learning_rules.sql": "1dbbd507f487c67b697f742f70b04736705666eea56c50c5b3eabc584e852928",
-    "services/ehr-api/database/runtime-grants.sql": "78bd720700df0382ecc38d593fd0c0e67255ca8459e6f7a165faa1fc428e3640"
+    "services/ehr-api/database/runtime-grants.sql": "159c1349e2ac144edd63b676ad8d547750eca9661ce450d35de3eb2fc8f4dc67"
   }
 }

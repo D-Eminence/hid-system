@@ -20,7 +20,9 @@
 -- outreach.context_allows), to which the function is lent until the ROLLBACK.
 -- Before 0110 (on 0109) the member's registration below is refused, and so is the member's
 -- resolution of a campaign-linked registration (linkExisting's UPDATE, which
--- the same trigger checks); with 0110 both are kept. Section 1 also stops
+-- the same trigger checks); with 0110 both are kept. That holds for a member
+-- who is not an admin too (D, a nurse the admin added as an enumerator: the
+-- campaign's volunteer): on 0109 D's registration was refused as well. Section 1 also stops
 -- before 0110: the trigger must lock the campaign only.
 --
 -- Fixtures are inserted with session_replication_role = replica (no triggers
@@ -45,6 +47,9 @@ begin
     grant usage on schema outreach, platform, auth, identity to outreach_0110_suite_owner;
     grant select, update on outreach.campaigns, outreach.campaign_members to outreach_0110_suite_owner;
     grant execute on function outreach.context_allows(uuid, text) to outreach_0110_suite_owner;
+    -- Since 0115/0116 the campaign policies and this trigger also call these.
+    grant execute on function outreach.privileged_run_active(text), outreach.registration_campaign_member(uuid, uuid)
+      to outreach_0110_suite_owner;
     alter function outreach.validate_registration_campaign_write() owner to outreach_0110_suite_owner;
     raise notice 'outreach-campaign-registration: the trigger is lent to outreach_0110_suite_owner (owner % bypasses RLS)',
       owner_role::regrole;
@@ -75,7 +80,7 @@ begin
      or position('of campaign, member' in pg_get_functiondef('outreach.validate_registration_campaign_write()'::regprocedure)) > 0
      or (select md5(prosrc) from pg_proc
           where oid = 'outreach.validate_registration_campaign_write()'::regprocedure)
-        <> '69469315f04554d2639dfa9f83591d4d' then
+        <> '8812e9009aed4841b99fae04d5525d7b' then  -- 0116 (outreach retention) let a redaction through; was 0110's 69469315f04554d2639dfa9f83591d4d
     raise exception 'outreach.validate_registration_campaign_write must lock the campaign only (FOR SHARE OF campaign), not the membership';
   end if;
   if (select count(*) from pg_trigger
@@ -105,9 +110,10 @@ begin
 end $$;
 
 -- 2. Fictional fixtures: one organization; Clinic One (F1) with doctors A
--- (a campaign member) and B (not a member); Clinic Two (F2) with doctor C.
--- Campaigns: K1 active registration at F1 (A admin), K2 active registration at
--- F2 (C admin), K3 planned at F1 (A admin). R1 is a pending registration A
+-- (a campaign member) and B (not a member) and nurse D (a member, not an
+-- admin); Clinic Two (F2) with doctor C.
+-- Campaigns: K1 active registration at F1 (A admin, D enumerator), K2 active
+-- registration at F2 (C admin), K3 planned at F1 (A admin). R1 is a pending registration A
 -- captured into K1 earlier (kept, local command e128...02), and P1 the
 -- existing patient it is resolved to.
 set local session_replication_role = replica;
@@ -124,14 +130,18 @@ insert into auth.accounts (id, subject, email, display_name, status) values
   ('e1210000-0000-4000-8000-000000000002', 'synthetic:outreach-0110-b', 'outreach-0110-b@example.invalid',
    'Outreach 0110 B', 'active'),
   ('e1210000-0000-4000-8000-000000000003', 'synthetic:outreach-0110-c', 'outreach-0110-c@example.invalid',
-   'Outreach 0110 C', 'active');
+   'Outreach 0110 C', 'active'),
+  ('e1210000-0000-4000-8000-000000000004', 'synthetic:outreach-0110-d', 'outreach-0110-d@example.invalid',
+   'Outreach 0110 D', 'active');
 insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
   ('e1220000-0000-4000-8000-000000000001', 'e1210000-0000-4000-8000-000000000001', 'Outreach 0110 A',
    'outreach-0110-a@example.invalid', 'verified', 'doctor'),
   ('e1220000-0000-4000-8000-000000000002', 'e1210000-0000-4000-8000-000000000002', 'Outreach 0110 B',
    'outreach-0110-b@example.invalid', 'verified', 'doctor'),
   ('e1220000-0000-4000-8000-000000000003', 'e1210000-0000-4000-8000-000000000003', 'Outreach 0110 C',
-   'outreach-0110-c@example.invalid', 'verified', 'doctor');
+   'outreach-0110-c@example.invalid', 'verified', 'doctor'),
+  ('e1220000-0000-4000-8000-000000000004', 'e1210000-0000-4000-8000-000000000004', 'Outreach 0110 D',
+   'outreach-0110-d@example.invalid', 'verified', 'nurse');
 insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
   membership_role, app_role) values
   ('e1230000-0000-4000-8000-000000000001', 'e1220000-0000-4000-8000-000000000001',
@@ -142,14 +152,19 @@ insert into identity.staff_facility_memberships (id, staff_id, account_id, organ
    'e1200000-0000-4000-8000-000000000002', 'doctor', 'doctor'),
   ('e1230000-0000-4000-8000-000000000003', 'e1220000-0000-4000-8000-000000000003',
    'e1210000-0000-4000-8000-000000000003', 'e1200000-0000-4000-8000-000000000001',
-   'e1200000-0000-4000-8000-000000000003', 'doctor', 'doctor');
+   'e1200000-0000-4000-8000-000000000003', 'doctor', 'doctor'),
+  ('e1230000-0000-4000-8000-000000000004', 'e1220000-0000-4000-8000-000000000004',
+   'e1210000-0000-4000-8000-000000000004', 'e1200000-0000-4000-8000-000000000001',
+   'e1200000-0000-4000-8000-000000000002', 'nurse', 'nurse');
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
   ('e1240000-0000-4000-8000-000000000001', 'e1210000-0000-4000-8000-000000000001', 'doctor', 'facility',
    'e1230000-0000-4000-8000-000000000001', 'e1200000-0000-4000-8000-000000000002', 'Synthetic 0110 suite role'),
   ('e1240000-0000-4000-8000-000000000002', 'e1210000-0000-4000-8000-000000000002', 'doctor', 'facility',
    'e1230000-0000-4000-8000-000000000002', 'e1200000-0000-4000-8000-000000000002', 'Synthetic 0110 suite role'),
   ('e1240000-0000-4000-8000-000000000003', 'e1210000-0000-4000-8000-000000000003', 'doctor', 'facility',
-   'e1230000-0000-4000-8000-000000000003', 'e1200000-0000-4000-8000-000000000003', 'Synthetic 0110 suite role');
+   'e1230000-0000-4000-8000-000000000003', 'e1200000-0000-4000-8000-000000000003', 'Synthetic 0110 suite role'),
+  ('e1240000-0000-4000-8000-000000000004', 'e1210000-0000-4000-8000-000000000004', 'nurse', 'facility',
+   'e1230000-0000-4000-8000-000000000004', 'e1200000-0000-4000-8000-000000000002', 'Synthetic 0110 suite role');
 insert into outreach.campaigns (id, facility_id, created_by_account_id, created_by_membership_id, name, services,
   status, starts_at, ends_at) values
   ('e1250000-0000-4000-8000-000000000001', 'e1200000-0000-4000-8000-000000000002',
@@ -171,6 +186,9 @@ insert into outreach.campaign_members (id, campaign_id, facility_id, membership_
    'e1210000-0000-4000-8000-000000000003', 'e1230000-0000-4000-8000-000000000003'),
   ('e1260000-0000-4000-8000-000000000003', 'e1250000-0000-4000-8000-000000000003',
    'e1200000-0000-4000-8000-000000000002', 'e1230000-0000-4000-8000-000000000001', 'admin',
+   'e1210000-0000-4000-8000-000000000001', 'e1230000-0000-4000-8000-000000000001'),
+  ('e1260000-0000-4000-8000-000000000004', 'e1250000-0000-4000-8000-000000000001',
+   'e1200000-0000-4000-8000-000000000002', 'e1230000-0000-4000-8000-000000000004', 'enumerator',
    'e1210000-0000-4000-8000-000000000001', 'e1230000-0000-4000-8000-000000000001');
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, status) values
   ('e1290000-0000-4000-8000-000000000001', 'HID-E2ZPATA2', 'Outreach', 'Patient', 'Outreach 0110 Patient', 'active');
@@ -189,7 +207,7 @@ create temporary table outreach_0110_cases (
 grant select on outreach_0110_cases to public;
 
 -- Runs one statement as hid_outreach_api_runtime with the member's session
--- (A, B or C at their own clinic). keep: the row stays (later cases read it);
+-- (A, B, C or D at their own clinic). keep: the row stays (later cases read it);
 -- otherwise the statement is undone. expected_rows: rows it must process.
 create function pg_temp.outreach_0110_try(member text, statement text, keep boolean, expected_rows integer)
 returns text language plpgsql as $$
@@ -204,6 +222,7 @@ begin
             set_config('app.correlation_id', 'outreach-0110-suite', true),
             set_config('app.membership_id', case member when 'a' then 'e1230000-0000-4000-8000-000000000001'
                                              when 'b' then 'e1230000-0000-4000-8000-000000000002'
+                                             when 'd' then 'e1230000-0000-4000-8000-000000000004'
                                              else 'e1230000-0000-4000-8000-000000000003' end, true),
             set_config('app.purpose_of_use', 'direct-care', true);
     set local role hid_outreach_api_runtime;
@@ -242,9 +261,9 @@ language sql as $$
         ) values (%L,%L,%L,%L,%L,%L,%L,%s,%L,%L,%L) returning *$i$,
     case member when 'c' then 'e1200000-0000-4000-8000-000000000003' else 'e1200000-0000-4000-8000-000000000002' end,
     case member when 'a' then 'e1210000-0000-4000-8000-000000000001' when 'b' then 'e1210000-0000-4000-8000-000000000002'
-      else 'e1210000-0000-4000-8000-000000000003' end,
+      when 'd' then 'e1210000-0000-4000-8000-000000000004' else 'e1210000-0000-4000-8000-000000000003' end,
     case member when 'a' then 'e1230000-0000-4000-8000-000000000001' when 'b' then 'e1230000-0000-4000-8000-000000000002'
-      else 'e1230000-0000-4000-8000-000000000003' end,
+      when 'd' then 'e1230000-0000-4000-8000-000000000004' else 'e1230000-0000-4000-8000-000000000003' end,
     format('e1270000-0000-4000-8000-%s', lpad(command::text, 12, '0')),
     format('tmp_e1270000-0000-4000-8000-%s', lpad(command::text, 12, '0')),
     'Outreach 0110 Person ' || command, 'unknown', 30, null, null, campaign)
@@ -273,9 +292,9 @@ language sql as $$
           where id=%L and row_version=%s returning *$u$,
     'e1290000-0000-4000-8000-000000000001',
     case member when 'a' then 'e1210000-0000-4000-8000-000000000001' when 'b' then 'e1210000-0000-4000-8000-000000000002'
-      else 'e1210000-0000-4000-8000-000000000003' end,
+      when 'd' then 'e1210000-0000-4000-8000-000000000004' else 'e1210000-0000-4000-8000-000000000003' end,
     case member when 'a' then 'e1230000-0000-4000-8000-000000000001' when 'b' then 'e1230000-0000-4000-8000-000000000002'
-      else 'e1230000-0000-4000-8000-000000000003' end,
+      when 'd' then 'e1230000-0000-4000-8000-000000000004' else 'e1230000-0000-4000-8000-000000000003' end,
     'Matched the existing patient record by Health ID in person',
     'e1280000-0000-4000-8000-000000000001',
     (select row_version from outreach.registration_cases where id = 'e1280000-0000-4000-8000-000000000001'))
@@ -296,6 +315,22 @@ select pg_temp.outreach_0110_case('member A: the K1 registration is listed', 'ok
         and outreach.registration_campaign_member(campaign_id, facility_id)$s$);
 select pg_temp.outreach_0110_case('member A registers without a campaign', 'ok', 'a',
   pg_temp.outreach_0110_register('a', null, 2));
+-- A member who is not an admin (D, K1's enumerator: the campaign's
+-- volunteer) registers the same way: the service's check finds K1, the
+-- insert is kept and listed (it was 42501 before 0110, as for A).
+select pg_temp.outreach_0110_case('enumerator D: the service check finds K1', 'ok', 'd',
+  pg_temp.outreach_0110_service_check('e1250000-0000-4000-8000-000000000001', 'e1230000-0000-4000-8000-000000000004'));
+select pg_temp.outreach_0110_case('enumerator D registers into active K1', 'ok', 'd',
+  pg_temp.outreach_0110_register('d', 'e1250000-0000-4000-8000-000000000001', 7), true);
+select pg_temp.outreach_0110_case('enumerator D: the K1 registration is listed', 'ok', 'd',
+  $s$select * from outreach.registration_cases
+      where facility_id='e1200000-0000-4000-8000-000000000002'
+        and campaign_id='e1250000-0000-4000-8000-000000000001'
+        and local_command_id='e1270000-0000-4000-8000-000000000007'
+        and outreach.registration_campaign_member(campaign_id, facility_id)$s$);
+select pg_temp.outreach_0110_case('enumerator D registers into planned K3 (not a member)',
+  '42501: Exact Outreach campaign membership is required', 'd',
+  pg_temp.outreach_0110_register('d', 'e1250000-0000-4000-8000-000000000003', 8));
 -- The campaign association still cannot be overwritten.
 select pg_temp.outreach_0110_case('member A moves the K1 registration out of K1',
   '55000: Outreach registration campaign association cannot be overwritten', 'a',
@@ -324,12 +359,14 @@ select pg_temp.outreach_0110_case('member C registers into K2 at clinic Two', 'o
 -- (it was 42501 before 0110); the non-member's same UPDATE finds no row.
 select pg_temp.outreach_0110_case('non-member B resolves K1''s R1 (no row)', 'ok', 'b',
   pg_temp.outreach_0110_link_existing('b'), false, 0);
+select pg_temp.outreach_0110_case('enumerator D resolves K1''s R1', 'ok', 'd',
+  pg_temp.outreach_0110_link_existing('d'));
 select pg_temp.outreach_0110_case('member A resolves K1''s R1', 'ok', 'a',
   pg_temp.outreach_0110_link_existing('a'), true);
 -- The runtime still cannot update or lock a campaign membership; it can read
 -- its own clinic's.
-select pg_temp.outreach_0110_case('runtime reads the K1 membership', 'ok', 'a',
-  $s$select * from outreach.campaign_members where campaign_id='e1250000-0000-4000-8000-000000000001'$s$);
+select pg_temp.outreach_0110_case('runtime reads the K1 memberships (A and D)', 'ok', 'a',
+  $s$select * from outreach.campaign_members where campaign_id='e1250000-0000-4000-8000-000000000001'$s$, false, 2);
 select pg_temp.outreach_0110_case('runtime locks the K1 membership FOR SHARE',
   '42501: permission denied for table campaign_members', 'a',
   $s$select * from outreach.campaign_members where campaign_id='e1250000-0000-4000-8000-000000000001' for share$s$);
@@ -360,18 +397,19 @@ begin
   raise notice 'Outreach campaign registration suite: % cases passed', total;
 end $$;
 
--- 6. Kept: exactly the member's K1 registration (and C's undone K2 case), and
--- R1 resolved by member A.
+-- 6. Kept: exactly the K1 registrations of member A and enumerator D (and
+-- C's undone K2 case), and R1 resolved by member A.
 do $$
 begin
   if (select count(*) from outreach.registration_cases
-       where local_command_id::text like 'e1270000-0000-4000-8000-%') <> 1
-     or not exists (select 1 from outreach.registration_cases
-                     where local_command_id = 'e1270000-0000-4000-8000-000000000001'
-                       and campaign_id = 'e1250000-0000-4000-8000-000000000001'
-                       and created_by_membership_id = 'e1230000-0000-4000-8000-000000000001'
-                       and status = 'identity_resolution_pending') then
-    raise exception 'outreach-campaign-registration: the kept registration is not exactly member A''s K1 case';
+       where local_command_id::text like 'e1270000-0000-4000-8000-%') <> 2
+     or (select count(*) from outreach.registration_cases
+          where (local_command_id, created_by_membership_id) in (
+                  ('e1270000-0000-4000-8000-000000000001', 'e1230000-0000-4000-8000-000000000001'),
+                  ('e1270000-0000-4000-8000-000000000007', 'e1230000-0000-4000-8000-000000000004'))
+            and campaign_id = 'e1250000-0000-4000-8000-000000000001'
+            and status = 'identity_resolution_pending') <> 2 then
+    raise exception 'outreach-campaign-registration: the kept registrations are not exactly A''s and D''s K1 cases';
   end if;
   if not exists (select 1 from outreach.registration_cases
                   where id = 'e1280000-0000-4000-8000-000000000001'

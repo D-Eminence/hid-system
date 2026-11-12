@@ -65,7 +65,8 @@ const harness = (rows: (typeof stored)[], insertError?: Error, later?: { stateme
       if (rows.some((row) => row.source_ehr_order_id === values[4])) {
         throw uniqueViolation('work_items', 'work_items_source_ehr_order_id_key');
       }
-      return { rows: [{ ...stored, source_ehr_order_version: String(values[5]), priority: values[7] }] };
+      return { rows: [{ ...stored, source_ehr_order_version: String(values[5]), priority: values[7],
+        clinical_indication: values[11] ?? null }] };
     }
     if (later?.statement.test(sql)) throw later.error;
     return { rows: [], rowCount: 1 };
@@ -102,8 +103,10 @@ describe('LabWorkItemsService.acceptEhrOrder', () => {
 
   it('replays the same version of the same order without writing', async () => {
     const { service, queries } = harness([stored]);
-    await expect(service.acceptEhrOrder(context, command(1))).resolves.toMatchObject({ id: workItemId,
-      sourceEhrOrderId: orderId, sourceEhrOrderVersion: 1, status: 'accepted' });
+    const answer = await service.acceptEhrOrder(context, command(1));
+    expect(answer).toMatchObject({ id: workItemId, sourceEhrOrderId: orderId, sourceEhrOrderVersion: 1, status: 'accepted' });
+    // The acceptance answer is unchanged: the clinical information is on the work-item reads only.
+    expect(answer).not.toHaveProperty('clinicalIndication');
     expect(inserts(queries)).toEqual([]);
   });
 
@@ -116,7 +119,10 @@ describe('LabWorkItemsService.acceptEhrOrder', () => {
 
   it('accepts a new order, reading it without a lock', async () => {
     const { service, queries } = harness([]);
-    await expect(service.acceptEhrOrder(context, command(1))).resolves.toMatchObject({ sourceEhrOrderVersion: 1 });
+    const answer = await service.acceptEhrOrder(context, command(1));
+    expect(answer).toMatchObject({ sourceEhrOrderVersion: 1 });
+    // The acceptance answer is unchanged: the clinical information is on the work-item reads only.
+    expect(answer).not.toHaveProperty('clinicalIndication');
     expect(inserts(queries).filter((sql) => /insert into lab\.work_items\b/.test(sql))).toHaveLength(1);
     expect(queries.filter((sql) => /\bfor\s+(update|share|no key update|key share)\b/i.test(sql))).toEqual([]);
   });
@@ -229,11 +235,12 @@ describe('LabWorkItemsService.acceptEhrOrder database refusals', () => {
  */
 describe('LabWorkItemsService.list order: open work first', () => {
   const RECEIVES = 'select lab.order_route_receives_here() as receives, lab.order_routes_here() as routes_here';
-  const row = (n: number) => ({ id: `61000000-0000-4000-8000-${String(n).padStart(12, '0')}`, patient_id: patientId,
+  const row = (n: number, open_work = true) => ({ id: `61000000-0000-4000-8000-${String(n).padStart(12, '0')}`, patient_id: patientId,
     facility_id: facilityId, ordering_facility_id: facilityId, source_ehr_order_id: orderId, source_ehr_order_version: '1',
     source_encounter_id: '70000000-0000-4000-8000-000000000001', status: 'accepted', priority: 'routine', accepted_by: accountId,
     accepted_at: new Date(Date.UTC(2026, 0, 1, 0, n)), row_version: '1', created_at: new Date(Date.UTC(2026, 0, 1, 0, n)),
-    order_route_id: null, test_name: `Test ${n}`, accession_id: null, accession_number: null, specimen_statuses: null });
+    order_route_id: null, test_name: `Test ${n}`, accession_id: null, accession_number: null, open_work, specimen_statuses: null,
+    clinical_indication: null as string | null });
   const build = (rows: ReturnType<typeof row>[]) => {
     const statements: string[] = [];
     const workListValues: unknown[][] = [];
@@ -300,9 +307,9 @@ describe('LabWorkItemsService.list order: open work first', () => {
     // What Postgres answers for 250 work items of which 30 are open (indexes 0-9, 120-129, 240-249):
     // the 30 open oldest first, then the 170 newest done.
     const openRows = [...Array.from({ length: 10 }, (_, i) => i), ...Array.from({ length: 10 }, (_, i) => 120 + i),
-      ...Array.from({ length: 10 }, (_, i) => 240 + i)].map(row);
+      ...Array.from({ length: 10 }, (_, i) => 240 + i)].map((n) => row(n));
     const doneRows = Array.from({ length: 250 }, (_, i) => i).filter((i) => !(i < 10 || (i >= 120 && i < 130) || i >= 240))
-      .reverse().slice(0, 170).map(row);
+      .reverse().slice(0, 170).map((n) => row(n, false));
     const { service, statements, workListValues, audit } = build([...openRows, ...doneRows]);
     const answer = await service.list(reader);
     expect(answer.items).toHaveLength(200);
@@ -314,10 +321,111 @@ describe('LabWorkItemsService.list order: open work first', () => {
     expect(statements.filter((sql) => sql.includes('from lab.work_items w'))).toEqual([WORK_LIST_QUERY]);
     expect(workListValues).toEqual([[facilityId]]);
     expect(Object.keys(answer.items[0]!)).toEqual(['id', 'patientId', 'facilityId', 'sourceEhrOrderVersion', 'status',
-      'priority', 'acceptedAt', 'version', 'sourceEhrOrderId', 'testName', 'accessionId', 'accessionNumber', 'specimenStatuses']);
+      'priority', 'acceptedAt', 'version', 'sourceEhrOrderId', 'testName', 'accessionId', 'accessionNumber', 'specimenStatuses',
+      'openWork', 'clinicalIndication']);
     expect(Object.keys(answer)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
     // Same-facility rows name no patient on the list, as before: no audit row.
     expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  // The list worked out open_work only to order itself and never said it, so the website could not tell finished work
+  // from work waiting for a test, and nothing ever reached its Done stage (lab-flow step 10).
+  it('list answers openWork from open_work', async () => {
+    // The answered rows carry the open_work the 200 were chosen by, and each item says it.
+    expect(flat.slice(cut)).toMatch(/^ limit 200\) select .*\ba\.accession_number,w\.open_work,array_remove\(.* from shown w /);
+    const { service } = build([row(1), row(2, false)]);
+    const answer = await service.list(reader);
+    expect(answer.items.map((item) => [item.id, (item as { openWork?: unknown }).openWork]))
+      .toEqual([[row(1).id, true], [row(2).id, false]]);
+  });
+
+  // Lab saw only the test, priority and sample number, and asked the scientist to type 'Why the test' again, though the
+  // doctor's clinical information was stored on the work item (local full-visit rehearsal, 11 Nov).
+  it('list answers clinicalIndication from clinical_indication, and null when the request had none', async () => {
+    // The 200 rows are chosen with the column, and the answered rows carry it.
+    expect(flat.slice(0, cut)).toMatch(/select w\.id,.*,w\.test_name,w\.clinical_indication, not bool_and\(/);
+    expect(flat.slice(cut)).toMatch(/^ limit 200\) select .*,w\.test_name,w\.clinical_indication, a\.id::text as accession_id,/);
+    expect(flat).toMatch(/ group by w\.id,.*,w\.test_name,w\.clinical_indication,w\.open_work,a\.id,a\.accession_number order by /);
+    const said = 'Fever 3 days, 38.6 °C. No antimalarial taken yet.';
+    const { service, audit } = build([{ ...row(1), clinical_indication: said }, row(2, false)]);
+    const answer = await service.list(reader);
+    expect(answer.items.map((item) => [item.id, (item as { clinicalIndication?: unknown }).clinicalIndication]))
+      .toEqual([[row(1).id, said], [row(2).id, null]]);
+    // Read under the same row-level security as the rest of the row: no new statement and no audit row.
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * GET /api/v1/lab/work-items/:id answers the request's clinical information on
+ * a same-facility work item the member may read, from the same row-level
+ * secured read; never on a route-backed one (its route's detail, C8, gives it
+ * while the route allows a read).
+ */
+describe('LabWorkItemsService.get: clinicalIndication', () => {
+  const said = 'Fever 3 days, 38.6 °C. No antimalarial taken yet.';
+  const routeId = 'b0000000-0000-4000-8000-000000000001';
+  const item = (fields: Record<string, unknown> = {}) => ({ id: workItemId, patient_id: patientId, facility_id: facilityId,
+    ordering_facility_id: facilityId, source_ehr_order_id: orderId, source_ehr_order_version: '1',
+    source_encounter_id: '70000000-0000-4000-8000-000000000001', status: 'accepted', priority: 'routine', accepted_by: accountId,
+    accepted_at: new Date('2026-10-01T09:00:01Z'), row_version: '1', created_at: new Date('2026-10-01T09:00:01Z'),
+    order_route_id: null, clinical_indication: said, ...fields });
+  /** The row row-level security shows (none when it hides it), C11's outcome and Identity's decision. */
+  const build = (rows: ReturnType<typeof item>[], outcome: { outcome: string; route_id: string | null },
+    allowed = true) => {
+    const statements: string[] = [];
+    const client = { query: jest.fn(async (sql: string) => {
+      statements.push(sql);
+      if (sql.includes('lab.order_route_access_for')) return { rows: [{ work_item_id: workItemId, ...outcome }] };
+      if (/from lab\.work_items where id=\$1/.test(sql)) return { rows };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const database = { withTransaction: async <T>(_c: DataAccessContext, fn: (c: PoolClient) => Promise<T>) => fn(client),
+      query: jest.fn().mockRejectedValue(new Error('no pool here')) } as unknown as DatabaseService;
+    const identity = { authorize: jest.fn().mockResolvedValue({ allowed, breakGlass: false }) } as unknown as IdentityService;
+    const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
+    const service = new LabWorkItemsService(database, identity, audit as unknown as AuditService,
+      new LabOrderRouteAccess(identity), new LabOrderRouteCards(database));
+    return { service, statements, audit };
+  };
+  const reader = { ...context, actor: { ...context.actor, permissions: ['lab.work-item.read'] } };
+
+  it('answers the clinical information of a same-facility work item the member may read', async () => {
+    const { service, statements, audit } = build([item()], { outcome: 'none', route_id: null });
+    const answer = await service.get(reader, workItemId);
+    expect(answer).toMatchObject({ id: workItemId, sourceEhrOrderId: orderId, clinicalIndication: said });
+    // One read of the row, which selects the column; its audit row is as before.
+    const reads = statements.filter((sql) => /from lab\.work_items\b/.test(sql));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatch(/,clinical_indication from lab\.work_items where id=\$1$/);
+    expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(audit.recordWithClient.mock.calls)).not.toContain(said);
+  });
+
+  it('answers null when the request had no clinical information', async () => {
+    const { service } = build([item({ clinical_indication: null })], { outcome: 'none', route_id: null });
+    await expect(service.get(reader, workItemId)).resolves.toMatchObject({ clinicalIndication: null });
+  });
+
+  it('leaves it out of a route-backed work item', async () => {
+    const { service } = build([item({ order_route_id: routeId, ordering_facility_id: routeId })],
+      { outcome: 'allowed', route_id: routeId });
+    const answer = await service.get(reader, workItemId);
+    expect(answer).toMatchObject({ id: workItemId });
+    expect(answer).not.toHaveProperty('clinicalIndication');
+    expect(JSON.stringify(answer)).not.toContain(said);
+  });
+
+  it('gives no clinical information to a member who may not read the work item', async () => {
+    // Identity refuses the consent check: 403, as before.
+    const refused = build([item()], { outcome: 'none', route_id: null }, false);
+    await expect(refused.service.get(reader, workItemId)).rejects.toMatchObject({ status: 403,
+      code: 'LAB_WORK_ITEM_ACCESS_DENIED' });
+    // Row-level security hides the row: 404, as before.
+    const hidden = build([], { outcome: 'none', route_id: null });
+    const problem = await hidden.service.get(reader, workItemId).catch((error: unknown) => error);
+    expect(problem).toMatchObject({ status: 404, code: 'LAB_WORK_ITEM_NOT_FOUND' });
+    expect(JSON.stringify(problem)).not.toContain(said);
   });
 });
 

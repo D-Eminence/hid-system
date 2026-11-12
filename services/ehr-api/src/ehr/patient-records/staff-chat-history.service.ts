@@ -5,7 +5,8 @@ import { DomainProblem } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import { AuditService } from '../../audit/audit.service';
 import type { ChatReply, ContextBinding } from './patient-chat-history.service';
-import { binding, evidenceKey, type Evidence, type EvidenceBinding } from './patient-evidence.types';
+import { binding, evidenceKey, isLabUnavailable, type Evidence, type EvidenceBinding } from './patient-evidence.types';
+import { removeDashesWithin } from './chat-format';
 import type { StaffChatScope } from './staff-chat-scope.service';
 import { StaffEvidenceService } from './staff-evidence.service';
 
@@ -81,7 +82,7 @@ export class StaffChatHistoryService {
     const ids = [...new Set([...stored.flatMap(r => r.bindings as EvidenceBinding[]), ...extra]
       .filter(b => ['document', 'attachment'].includes(b.kind)).map(b => b.id))];
     const snapshot = await this.evidence.bind(scope).snapshot(request, undefined, ids);
-    if (snapshot.coverage.unavailable.some(s => s.startsWith('Laboratory service unavailable'))
+    if (snapshot.coverage.unavailable.some(isLabUnavailable)
       && stored.some(row => (row.bindings as EvidenceBinding[]).some(b => b.kind === 'lab_result'))) {
       throw new DomainProblem(503, 'CHAT_HISTORY_SOURCE_UNAVAILABLE', 'Saved conversation evidence is temporarily unavailable. Please try again.');
     }
@@ -106,7 +107,7 @@ export class StaffChatHistoryService {
     const map = new Map(records.map(r => [evidenceKey(r), r]));
     return rows.filter(row => Array.isArray(row.sourceBindings) && row.sourceBindings.every(b => {
       const r = map.get(evidenceKey(b)); return r && r.version === b.version && r.hash === b.hash;
-    })).reverse();
+    })).map(row => ({ ...row, reply: { ...row.reply, answer: removeDashesWithin(row.reply.answer, 4000) } })).reverse();
   }
   private async run<T>(scope: StaffChatScope, request: HidRequest, action: string, work: (client: PoolClient) => Promise<T>) {
     const auth = await scope.authorize(request);

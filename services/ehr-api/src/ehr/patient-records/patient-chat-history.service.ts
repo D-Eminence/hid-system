@@ -9,6 +9,7 @@ import { PatientRecordsService } from './patient-records.service';
 
 import { PatientEvidenceService } from './patient-evidence.service';
 import { citedFromExchanges } from './patient-chat-safety';
+import { removeDashesWithin } from './chat-format';
 import { binding,evidenceKey,type Evidence,type EvidenceBinding,type EvidenceReference,type Coverage } from './patient-evidence.types';
 
 type Authorization = Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>;
@@ -139,7 +140,7 @@ export class PatientChatHistoryService {
     if(unavailable.length && result.rows.some(row=>row.sourceBindings.some(b=>'kind' in b&&b.kind==='lab_result')))
       throw new DomainProblem(503,'CHAT_HISTORY_SOURCE_UNAVAILABLE','Saved conversation evidence is temporarily unavailable. Please try again.');
     return result.rows.filter(row=>Array.isArray(row.sourceBindings)&&row.sourceBindings.every(b=>this.resolve(b,current)))
-      .map(row=>({...row,sourceBindings:row.sourceBindings.map(b=>this.resolve(b,current)!)})).reverse();
+      .map(row=>({...row,reply:{...row.reply,answer:removeDashesWithin(row.reply.answer,4000)},sourceBindings:row.sourceBindings.map(b=>this.resolve(b,current)!)})).reverse();
   }
   /**
    * The last four ready exchanges, and the bindings of every source they

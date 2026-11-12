@@ -2,7 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import { getEnvironment } from '../../config/environment';
 import { originLabel,type RecordIntent,type Coverage,type OriginAudience } from './patient-evidence.types';
-import { labComparisons } from './patient-evidence.selection';
+import { labComparisons,type TemporalOrder } from './patient-evidence.selection';
+import { pendingDocumentsNote,removeDashes } from './chat-format';
 import type { Evidence } from './patient-evidence.types';
 import type { ChatAudience } from './chat-access';
 import { PATIENT_ANSWER_LIMIT } from './patient-chat-safety';
@@ -15,7 +16,7 @@ const jsonPlanSchema = { type: 'object', additionalProperties: false,
   properties: { intent: { type: 'string', enum: ['conversation', 'records'] },
     answer: { type: 'string' }, query: { type: 'string' },recordIntent:{type:'string',enum:['summary','medications','condition','labs','search']} }, required: ['intent', 'answer', 'query','recordIntent'] };
 const answerSchema=z.object({blocks:z.array(z.object({kind:z.enum(['record','explanation']),
-  text:z.string().trim().min(1).max(2000),references:z.array(z.number().int().min(1).max(60)).max(60)}).strict()).min(1).max(8)}).strict();
+  text:z.string().trim().min(1).max(2000),references:z.array(z.number().int().min(1).max(60)).max(60)}).strict()).min(1).max(12)}).strict();
 const jsonAnswerSchema={type:'object',additionalProperties:false,properties:{blocks:{type:'array',items:{type:'object',additionalProperties:false,
   properties:{kind:{type:'string',enum:['record','explanation']},text:{type:'string'},references:{type:'array',items:{type:'integer'}}},required:['kind','text','references']}}},required:['blocks']};
 const PURPOSE = 'You are the Health ID patient record assistant. Speak naturally and briefly. '
@@ -67,6 +68,32 @@ const STAFF_RULES = '\nThis conversation is about one patient only, the patient 
   + `Keep the whole answer under ${STAFF_ANSWER_TARGET} characters, however long the record is: give the most recent and most relevant `
   + 'entries first, group similar entries instead of listing each one, and say that the rest can be read in the record.';
 const rules = (audience: ChatAudience) => audience === 'patient' ? PATIENT_RULES : STAFF_RULES;
+/**
+ * How every answer reads, for the patient and for staff: a short bold direct answer first, then short
+ * parts with a heading only when it helps, lists for several items, and plain words. The server also
+ * removes any en or em dash the model still writes (chat-format.ts).
+ */
+export const FORMAT_RULES = '\nHow to write the answer: plain English, short sentences, no jargon without a plain explanation. '
+  + 'Start with the direct answer in one or two sentences, in bold (wrap them in **). '
+  + 'Then add more only if it helps, in short paragraphs. When it helps, use a short heading on its own line starting with "### ", '
+  + 'for example "### What the record shows", "### Dates and sources" or "### What is missing". '
+  + 'When there are several items, list them one per line, each line starting with "- ", and give each item its date and where it was recorded. '
+  + 'Never use the en dash or em dash characters: write "to" for a range of dates or numbers, and use a comma, a full stop or a colon between parts of a sentence.';
+/** For a conversation answer (a greeting, what the assistant can do): plain and short, no layout needed. */
+export const CONVERSATION_FORMAT = '\nWrite a conversation answer in plain English and keep it short. If it lists several things, put them one per line starting with "- ". '
+  + 'Never use the en dash or em dash characters: write "to" for a range, and use a comma, a full stop or a colon between parts of a sentence.';
+/** For the record answer: how the blocks carry that layout. */
+const BLOCK_FORMAT = ' Layout in blocks: the first block is the bold direct answer. A heading is its own kind=explanation block holding only the heading line. '
+  + 'A list is one block whose every line starts with "- ". Keep each block short.';
+const ORDER_RULES: Record<TemporalOrder, string> = {
+  earliest: ' The question asks for the first or earliest item. Records are supplied in date order by their own date, earliest first, and records without a date come last; still check each record\'s date. '
+    + 'Name the earliest recorded item that answers it, with its date and where it came from, as the direct answer. '
+    + 'Say plainly that this is the earliest one in Health ID, and that older history may exist outside Health ID.',
+  latest: ' The question asks for the latest or current item. Records are supplied in date order by their own date, newest first, and records without a date come last; still check each record\'s date. '
+    + 'Name the most recent recorded item that answers it, with its date and where it came from, as the direct answer.',
+  timeline: ' The question asks about a history over time. Give the items in date order with their dates, '
+    + 'and say plainly that older history may exist outside Health ID when coverage.complete is false.',
+};
 
 @Injectable()
 export class ClaudeAiService {
@@ -86,13 +113,15 @@ export class ClaudeAiService {
       + 'Choose recordIntent=summary for overall history; medications for prior/latest medication; condition for a named condition timeline; labs for results/trends; search for other record questions. '
       + 'Resolve references such as "that" using recent conversation and write a standalone search question in query; leave answer empty. '
       + 'For a condition timeline, query must contain the condition name resolved from conversation, without generic filler. For conversation use recordIntent=search. '
+      + 'For the first, earliest, latest or most recent diagnosis or condition without a named condition, use recordIntent=condition with query "diagnosis". '
       + 'Do not assume records exist. Even a request about unavailable records still uses intent=records.'
       + (audience === 'patient' ? ' A question about what an earlier result or diagnosis means uses intent=records, never conversation.' : '')
-      + rules(audience),
+      + rules(audience) + CONVERSATION_FORMAT,
     this.messages(question, history), signal, audience, jsonPlanSchema);
     const result = parseOutput(planSchema, text);
-    if (result.intent === 'conversation' && result.answer.trim() && !result.query.trim()
-      && !/\[\d+\]/.test(result.answer) && (audience !== 'patient' || result.answer.trim().length <= PATIENT_ANSWER_LIMIT)) return { intent: 'conversation', answer: result.answer.trim() };
+    const said = removeDashes(result.answer.trim());
+    if (result.intent === 'conversation' && said && !result.query.trim()
+      && !/\[\d+\]/.test(said) && (audience !== 'patient' || said.length <= PATIENT_ANSWER_LIMIT)) return { intent: 'conversation', answer: said };
     if (result.intent === 'records' && result.query.trim() && !result.answer.trim()) {
       return { intent: 'records', query: result.query.trim(),...(result.recordIntent?{recordIntent:result.recordIntent}:{}) };
     }
@@ -100,7 +129,7 @@ export class ClaudeAiService {
   }
 
   async answer(question: string, sources: readonly (Pick<Evidence,'title'|'content'> & Partial<Evidence>)[],
-    history: readonly ConversationExchange[], signal: AbortSignal,coverage?:Coverage,audience:OriginAudience='patient'): Promise<string> {
+    history: readonly ConversationExchange[], signal: AbortSignal,coverage?:Coverage,audience:OriginAudience='patient',order:TemporalOrder|null=null): Promise<string> {
     if (sources.length > 60 || sources.reduce((sum,s)=>sum+s.content.length,0)>90_000 || sources.some(source => source.title.length > 1000)) {
       throw new Error('Invalid record context size');
     }
@@ -115,7 +144,7 @@ export class ClaudeAiService {
     messages[messages.length - 1]!.content = JSON.stringify({ question, authorizedRecords: evidence,
       currentDate:new Date().toISOString().slice(0,10),
       relatedEvidence:sources.flatMap((s,i)=>'encounterId' in s&&s.encounterId?sources.flatMap((other,j)=>j>i&&'encounterId' in other&&other.encounterId===s.encounterId?[{references:[i+1,j+1],relation:'same recorded encounter; does not prove causation'}]:[]):[]),
-      coverage:coverage??null,
+      coverage:coverage?{...coverage,...(pendingDocumentsNote(coverage.pendingDocuments)?{note:pendingDocumentsNote(coverage.pendingDocuments)}:{})}:null,
       labComparisons:labComparisons(sources.filter((s):s is Evidence=>'kind' in s)),
       availability: sources.length ? 'Current authorized patient evidence retrieved.' : 'NONE: No matching readable authorized evidence was retrieved; do not assume no records exist.' });
     const result=await this.invoke(PURPOSE
@@ -134,17 +163,22 @@ export class ClaudeAiService {
       + 'Use only the given origin; never guess, merge or upgrade it. Something the patient added, or read from a scanned paper record, is not a health worker\'s confirmed finding. '
       + 'If evidence is NONE, acknowledge the question naturally and explain what you cannot verify; '
       + 'you can explain what you would be able to do with released notes. Do not use citations when no evidence exists. '
+      + 'With NONE evidence, never state or repeat patient facts from earlier replies as if they were in the record; '
+      + 'say in bold that nothing matching was found this time, then suggest one or two short things to try, '
+      + 'such as naming the condition or medicine, giving a year, or asking for a summary of the record. '
+      + 'When coverage is incomplete, say what is missing in plain words (coverage.note gives the wording for documents still being read). '
       + (sources.length?' Return JSON blocks: kind=record for every paragraph with patient facts, with current source references. kind=explanation must contain no patient facts and no references. Do not embed citation markers in block text. ':'')
       + 'Do not repeat the same stock warning on every turn. When records cannot answer a question, say so.'
-      + rules(audience),
+      + (sources.length&&order?ORDER_RULES[order]:'')
+      + rules(audience) + FORMAT_RULES + (sources.length?BLOCK_FORMAT:''),
     messages, signal, audience, sources.length?jsonAnswerSchema:undefined);
-    if(!sources.length){if(audience==='patient'&&result.length>PATIENT_ANSWER_LIMIT)throw new ClaudeCallError('answer_too_long','Invalid answer size');return result;}
+    if(!sources.length){const text=removeDashes(result);if(audience==='patient'&&text.length>PATIENT_ANSWER_LIMIT)throw new ClaudeCallError('answer_too_long','Invalid answer size');return text;}
     const output=parseOutput(answerSchema,result);
     const paragraphs=output.blocks.map(block=>{
       const references=[...new Set(block.references)];
       if(references.some(n=>n>sources.length)||/\[\d+\]/.test(block.text)
         ||(block.kind==='record'&&!references.length)||(block.kind==='explanation'&&references.length))throw new ClaudeCallError('output_invalid','Invalid grounded answer references');
-      return block.text+(references.length?' '+references.map(n=>'['+n+']').join(' '):'');
+      return removeDashes(block.text)+(references.length?' '+references.map(n=>'['+n+']').join(' '):'');
     });
     const answer=paragraphs.join('\n\n');if(answer.length>(audience==='patient'?PATIENT_ANSWER_LIMIT:4000))throw new ClaudeCallError('answer_too_long','Invalid grounded answer size');
     return answer;
