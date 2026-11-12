@@ -127,7 +127,7 @@ const acceptedMigrations = new Map([
   ['0112_ocr_source_deletion_7d.sql', 'bbc494dd7db3c221ca61f9a11312e59ca2cba8e5a6759c9c3ccc65b8390d1587'],
   ['0113_records_processing_draft_publication.sql', 'af6d1df7e9e7e1761a38ac9164807e2e559394baf2db2e99672264a77808214b'],
   ['0114_collect_signup_fields.sql', '9f3e842a08a9af68a3378647474d98e738f3687c29e2d26b10ea64a5b06937e0'],
-  ['0121_patient_access_pin_day_read_write.sql', '99e41325c7a7a69fb18378714eaab2f13ee48032a1f005608866acf00c4846fe'],
+  ['0120_patient_access_pin_day_read_write.sql', '1d6e491576e4bf052b66f250b1787176347c579080ff000a4a46e543e6811365'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

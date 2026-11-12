@@ -25,7 +25,7 @@ export class VerifyPatientAccessPinDto {
   /**
    * The duration asked, 5 to 1440 minutes (the database command checks the
    * same range). Left out, the service asks for 1440. Whatever is asked, the
-   * database command (0121) always gives exactly 1440 minutes (24 hours) of
+   * database command (0120) always gives exactly 1440 minutes (24 hours) of
    * read and write access, the owner's decision of 10 Nov 2026.
    */
   @IsOptional()

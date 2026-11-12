@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0121",
+    "last": "0120",
     "count": 116,
     "files": [
       {
@@ -559,8 +559,8 @@
         "sha256": "9f3e842a08a9af68a3378647474d98e738f3687c29e2d26b10ea64a5b06937e0"
       },
       {
-        "name": "0121_patient_access_pin_day_read_write.sql",
-        "sha256": "99e41325c7a7a69fb18378714eaab2f13ee48032a1f005608866acf00c4846fe"
+        "name": "0120_patient_access_pin_day_read_write.sql",
+        "sha256": "1d6e491576e4bf052b66f250b1787176347c579080ff000a4a46e543e6811365"
       }
     ]
   },

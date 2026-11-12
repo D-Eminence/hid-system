@@ -563,14 +563,14 @@ select pg_temp.assert('a second call changes nothing and answers zero counts',
 
 -- 8. The PIN at Demo Hospital, as the EHR asks it (the demo login's doctor
 -- membership, direct care): the test PIN opens Adaeze's record to read and
--- add to (write_records, 0121) for 24 hours, though 30 minutes were asked (a
--- PIN always gives exactly 24 hours since 0121); a wrong one does not.
--- Chinedu's opens for 24 hours too, as the website asks since 0121.
+-- add to (write_records, 0120) for 24 hours, though 30 minutes were asked (a
+-- PIN always gives exactly 24 hours since 0120); a wrong one does not.
+-- Chinedu's opens for 24 hours too, as the website asks since 0120.
 set local role hid_identity_api_runtime;
 select pg_temp.as_demo_staff(1);
 select pg_temp.assert('a wrong PIN is refused',
   (select not verified from identity.access_patient_with_pin('HID-ZDEMAAA2', '1111', 30)));
-select pg_temp.assert('the test PIN opens Adaeze''s record (a read and write grant by PIN, 0121)',
+select pg_temp.assert('the test PIN opens Adaeze''s record (a read and write grant by PIN, 0120)',
   (select verified and grant_status = 'active' from identity.access_patient_with_pin('HID-ZDEMAAA2', '9157', 30)));
 reset role;
 select pg_temp.assert('the grant is the PIN''s, at Demo Hospital, for direct care, for 24 hours though 30 minutes were asked',

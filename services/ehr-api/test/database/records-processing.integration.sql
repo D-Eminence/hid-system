@@ -429,7 +429,7 @@ select pg_temp.as_staff(2, 'direct-care');
 select set_config('records_processing.pin', pg_temp.try($q$select consent_grant_id::text
   from identity.access_patient_with_pin('HID-RPADLT', '2468', 15)$q$), true);
 reset role;
--- 0121: a PIN grant is read and write (write_records).
+-- 0120: a PIN grant is read and write (write_records).
 select pg_temp.expect('7b PIN under direct care', 'direct-care write_records patient_access_pin',
   (select format('%s %s %s', purpose_of_use, scope, authorization_method) from identity.consent_grants
     where id::text = current_setting('records_processing.pin')));
@@ -729,7 +729,7 @@ select pg_temp.expect('10l a second before the grant ends', 'rp read=t rp write=
 select pg_temp.expect('10m when the grant ends', 'rp read=f rp write=f dc read=f dc write=f',
   pg_temp.cover_answers('doctor', 7, (select expires_at from identity.consent_grants
     where id::text = current_setting('records_processing.cover_g1'))));
--- Requests and PIN grants (since 0121) last at most 24 hours; a grant
+-- Requests and PIN grants (since 0120) last at most 24 hours; a grant
 -- made to last three days (as the owner) shows the cover lasting as long as
 -- the grant, past 24 hours from its start.
 update identity.consent_grants set starts_at = now() - interval '2 hours', expires_at = now() + interval '3 days'
@@ -763,7 +763,7 @@ set local role hid_ehr_api_runtime;
 select pg_temp.expect('10q2 P7''s document after the revocation', 'hidden', pg_temp.cover_document('doctor', 'healthcare-operations'));
 reset role;
 
--- 10r-10v. The Access PIN (direct care, read and write, at most 24 hours since 0121) covers it
+-- 10r-10v. The Access PIN (direct care, read and write, at most 24 hours since 0120) covers it
 -- too, read and write; it ends with the PIN grant.
 set local role hid_identity_api_runtime;
 select pg_temp.as_cover_patient(7);

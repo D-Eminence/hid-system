@@ -470,7 +470,7 @@ describe('ConsentService', () => {
     );
   });
 
-  it('asks for 24 hours (1440 minutes) when the caller gives no duration (0121)', async () => {
+  it('asks for 24 hours (1440 minutes) when the caller gives no duration (0120)', async () => {
     query.mockResolvedValueOnce({
       rows: [{
         verified: true,
@@ -493,7 +493,7 @@ describe('ConsentService', () => {
     );
   });
 
-  it.each([60, 1440])('passes %i minutes unchanged; the database always gives 1440 (0121)', async (durationMinutes) => {
+  it.each([60, 1440])('passes %i minutes unchanged; the database always gives 1440 (0120)', async (durationMinutes) => {
     query.mockResolvedValueOnce({
       rows: [{
         verified: true,

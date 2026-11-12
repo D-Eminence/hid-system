@@ -69,7 +69,7 @@ implementation:
   patient, current consent-directive checks, and a requested duration of
   5–1440 minutes. It creates only a direct-care write_records grant, which
   also lets its holder read, for exactly 24 hours whatever duration is asked
-  (0121, owner decision of 10 Nov 2026: exactly 24 hours, read and write; it
+  (0120, owner decision of 10 Nov 2026: exactly 24 hours, read and write; it
   was 5–60 minutes as asked and read_records before).
 - The command records immutable attempt evidence, semantic audit information,
   and a minimal outbox notification atomically with the governed request/grant.

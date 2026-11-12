@@ -124,7 +124,7 @@ select set_config('app.correlation_id', 'pin-integration-valid-0001', true);
 do $$
 declare granted record;
 begin
-  -- 0121: at most 1440 minutes (24 hours); 1441 is refused before any check.
+  -- 0120: at most 1440 minutes (24 hours); 1441 is refused before any check.
   begin
     perform identity.access_patient_with_pin('HID-PNACCE55', '2468', 1441);
     raise exception 'A PIN grant longer than 24 hours was accepted';
@@ -143,7 +143,7 @@ begin
     ) then
     raise exception 'PIN grant did not authorize its exact read context';
   end if;
-  -- 0121: the PIN grant also lets the staff member add to the record.
+  -- 0120: the PIN grant also lets the staff member add to the record.
   if not identity.has_active_consent_grant(
       granted.subject_patient_id, 'staff:pin-integration',
       'b4000000-0000-4000-8000-000000000001',
@@ -165,7 +165,7 @@ begin
 end
 $$;
 reset role;
--- 0121: the grant and its request are write_records, direct care, by PIN, and
+-- 0120: the grant and its request are write_records, direct care, by PIN, and
 -- last exactly 1440 minutes (24 hours).
 do $$
 begin
@@ -227,7 +227,7 @@ begin
 end
 $$;
 reset role;
--- 0121: the replay returns the same write grant, keeps its 24 hours and
+-- 0120: the replay returns the same write grant, keeps its 24 hours and
 -- audits its scope and 1440 minutes, though it asked 60.
 do $$
 begin
@@ -319,7 +319,7 @@ end $$;
 reset role;
 rollback to savepoint before_pin_directive;
 
--- 0121: a deny of writing only, and a deny of every action, stop the PIN too
+-- 0120: a deny of writing only, and a deny of every action, stop the PIN too
 -- (the grant is write_records). A deny for another purpose does not.
 create function pg_temp.pin_directive(directive_no integer, denied_actions text[], denied_purposes text[])
 returns void language sql as $f$
@@ -372,7 +372,7 @@ end $$;
 reset role;
 rollback to savepoint before_pin_write_directive;
 
--- 0121: a 60-minute read_records PIN grant made before 0121 is not reused;
+-- 0120: a 60-minute read_records PIN grant made before 0120 is not reused;
 -- the next correct PIN makes a new write_records grant and the old one runs
 -- out by itself.
 savepoint before_pin_old_read_grant;
@@ -423,7 +423,7 @@ do $$ begin
 end $$;
 rollback to savepoint before_pin_old_read_grant;
 
--- 0121 (owner decision, 10 Nov 2026): a PIN always gives exactly 24 hours
+-- 0120 (owner decision, 10 Nov 2026): a PIN always gives exactly 24 hours
 -- (1440 minutes), whatever duration is asked. A call asking 60 minutes and a
 -- call asking 5 each get a 1440-minute write_records grant, the access request
 -- stores 1440, and the audit says 1440.
@@ -499,7 +499,7 @@ do $$ begin
 end $$;
 rollback to savepoint before_pin_asked_5;
 
--- 0121: the duration asked is still checked as 5 to 1440 minutes; a value
+-- 0120: the duration asked is still checked as 5 to 1440 minutes; a value
 -- outside it (4, 1441) or a missing one is refused before any check.
 set local role hid_identity_api_runtime;
 select set_config('app.correlation_id', 'pin-integration-out-of-range', true);
@@ -517,7 +517,7 @@ begin
 end $$;
 reset role;
 
--- 0121: the constraints admit a PIN row of read_records or write_records only,
+-- 0120: the constraints admit a PIN row of read_records or write_records only,
 -- still direct care and never break-glass; the PIN notice's payload is the two
 -- keys, or the two keys and a read_records or write_records scope.
 do $$
@@ -571,7 +571,7 @@ begin
 end
 $$;
 
--- 0121: through the insert policy a PIN notice must name its grant's own
+-- 0120: through the insert policy a PIN notice must name its grant's own
 -- scope; a read_records payload for a write grant is refused.
 set local role hid_identity_api_runtime;
 select set_config('app.correlation_id', 'pin-integration-policy-0001', true);

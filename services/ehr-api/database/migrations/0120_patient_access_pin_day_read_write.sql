@@ -1,16 +1,16 @@
--- 0121 Access PIN: 24 hours, read and write. A patient's Access PIN now gives
+-- 0120 Access PIN: 24 hours, read and write. A patient's Access PIN now gives
 -- the staff member who enters it read AND write access to all of that
 -- patient's records for exactly 24 hours (1440 minutes), whatever duration is
 -- asked, instead of read-only access for up to 60 minutes. Written on staging-novu-ci-20261005 at bf4ea233
--- (migrations 0001-0108 applied there). Numbered 0121, the next number after
--- every migration on staging and on every open branch (0109-0120); the
--- coordinator renumbers it at merge.
+-- (migrations 0001-0108 applied there) as 0121; renumbered 0120 by the release
+-- order on 2026-11-11, on staging 51d6937a (migrations 0001-0114 applied
+-- there). 0115-0119 are other branches' and are not on staging yet.
 --
 -- Owner decision (10 Nov 2026, relayed by Ola, clinical owner): "a PIN gives
 -- exactly 24 hours of read AND write access to all records, with no separate
 -- 'Ask for more access'", for the same staff roles as today. The declaration
 -- in config/production-schema-compatibility.json is unsigned: its reviewed_by
--- stays empty until the owner signs it.
+-- stays empty until the owner signs it under 0120.
 --
 -- Today the PIN is held to 60 minutes and read_records in four places: the two
 -- CHECK constraints of 0033 (access_requests_pin_scope_ck and
@@ -85,9 +85,9 @@
 -- check the PIN notice's payload: their change to accept both the two-key and
 -- the three-key payload is in its own pull request (hid-system#206, branch
 -- claude/fervent-galileo-datz4t-pin-notice-scope, no migration), which must be
--- merged and released before this file (then this file and identity-api,
--- hid-system#208, renumbered at merge; then the websites, hid-system#207 and
--- health#197). A release that carries a migration
+-- merged and released before this file (it is live since 2026-11-11; then
+-- this file and identity-api, hid-system#208, written as 0121 and renumbered
+-- 0120; then the websites, hid-system#207 and health#197). A release that carries a migration
 -- applies it before it rolls out the services (scripts/production_deployment.py),
 -- so the two cannot safely go in one release. If this file applied first, a PIN
 -- notice raised in between would be refused by the old check and not retried
@@ -98,7 +98,7 @@
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): the objects this file touches exist; not applied
---    yet (the function's body is not already this file's, else "0121: already
+--    yet (the function's body is not already this file's, else "0120: already
 --    applied"); the bodies replaced and relied on are those 0001-0108 gave
 --    them (md5 of pg_proc.prosrc): access_patient_with_pin (0098's), the
 --    session readers and auth.account_id_for_subject it calls,
@@ -137,12 +137,12 @@
 -- read_records) and narrows the two constraints again. It must first end or
 -- let run out every write_records PIN grant (at most 24 hours), or the
 -- narrowed constraints would not validate. The outbox constraint and policy
--- can stay widened. Applied migrations 0001 through 0120 are immutable.
+-- can stay widened. Applied migrations 0001 through 0119 are immutable.
 
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
 -- PUBLIC), ignoring a superuser's bypass (0104's helper).
-create function pg_temp.pin_0121_holds(holder oid, object_owner oid, object_acl aclitem[],
+create function pg_temp.pin_0120_holds(holder oid, object_owner oid, object_acl aclitem[],
   object_type "char", wanted text)
 returns boolean
 language sql stable
@@ -178,13 +178,13 @@ begin
      or not exists (select 1 from pg_policy policy_row
                      where policy_row.polrelid = 'identity.outbox_events'::regclass
                        and policy_row.polname = 'identity_outbox_patient_access_pin_insert') then
-    raise exception using errcode = '55000', message = '0121: 0001-0108 must be applied first';
+    raise exception using errcode = '55000', message = '0120: 0001-0108 must be applied first';
   end if;
   -- b. Not applied yet.
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'identity.access_patient_with_pin(text,text,integer)'::regprocedure)
      = 'e17e8bb85b755866bb0f1a03b5555c23' then
-    raise exception using errcode = '55000', message = '0121: already applied';
+    raise exception using errcode = '55000', message = '0120: already applied';
   end if;
   -- c. The body replaced (0098's) and the bodies it and the checks rely on.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
@@ -222,7 +222,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0121: a function this migration relies on differs from 0001-0108: %s', mismatch);
+      message = format('0120: a function this migration relies on differs from 0001-0108: %s', mismatch);
   end if;
   -- d. The constraints and the policy, exactly as 0033 made them.
   select string_agg(expected.what, '; ') into mismatch
@@ -252,7 +252,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0121: a constraint or policy this migration replaces differs from 0033: %s', mismatch);
+      message = format('0120: a constraint or policy this migration replaces differs from 0033: %s', mismatch);
   end if;
   -- e. The column the new deny check reads, and the outbox's row-level security.
   if not exists (select 1 from pg_attribute attribute_row
@@ -261,12 +261,12 @@ begin
                     and format_type(attribute_row.atttypid, attribute_row.atttypmod) = 'text[]'
                     and attribute_row.attnotnull) then
     raise exception using errcode = '55000',
-      message = '0121: identity.consent_directive_versions.actions is not text[] NOT NULL';
+      message = '0120: identity.consent_directive_versions.actions is not text[] NOT NULL';
   end if;
   if not (select relation.relrowsecurity and relation.relforcerowsecurity from pg_class relation
            where relation.oid = 'identity.outbox_events'::regclass) then
     raise exception using errcode = '55000',
-      message = '0121: identity.outbox_events does not force row-level security as 0025 made it';
+      message = '0120: identity.outbox_events does not force row-level security as 0025 made it';
   end if;
   -- f. Ownership, never through a superuser's bypass (production's migrator
   -- has none).
@@ -289,17 +289,17 @@ begin
       select format('%s lacks %s on schema %s', pg_get_userbyid(table_owner), wanted.privilege, namespace.nspname)
         from (values ('identity', 'CREATE'), ('identity', 'USAGE')) wanted(schema_name, privilege)
         join pg_namespace namespace on namespace.nspname = wanted.schema_name
-       where not pg_temp.pin_0121_holds(table_owner, namespace.nspowner, namespace.nspacl, 'n', wanted.privilege)) missing;
+       where not pg_temp.pin_0120_holds(table_owner, namespace.nspowner, namespace.nspacl, 'n', wanted.privilege)) missing;
   if mismatch is not null then
-    raise exception using errcode = '42501', message = format('0121: missing privileges: %s', mismatch);
+    raise exception using errcode = '42501', message = format('0120: missing privileges: %s', mismatch);
   end if;
-  raise notice '0121: owners checked: identity.consent_grants=%, applier=%', pg_get_userbyid(table_owner), current_user;
+  raise notice '0120: owners checked: identity.consent_grants=%, applier=%', pg_get_userbyid(table_owner), current_user;
 end
 $$;
 
 -- Every attribute but the body of the function before this file, and the
 -- policy's command and roles, for section 4 (they must not change).
-create temporary table pin_0121_before as
+create temporary table pin_0120_before as
 select proc.oid::regprocedure::text as signature,
        concat_ws(' | ', proc.proowner::regrole::text, proc.prolang::text, proc.procost::text, proc.prorows::text,
          proc.provariadic::text, proc.prosupport::text, proc.prokind::text, proc.prosecdef::text,
@@ -377,8 +377,9 @@ alter policy identity_outbox_patient_access_pin_insert on identity.outbox_events
     )
   );
 
--- 3. The function (b): 0098's body with the four changes marked "0121" or
--- named in the header, and its comment.
+-- 3. The function (b): 0098's body with the four changes marked "0121" (the
+-- number this file was written under: the body is kept byte for byte, so the
+-- md5 pinned in 0 and 4 still holds) or named in the header, and its comment.
 create or replace function identity.access_patient_with_pin(
   requested_hid text,
   requested_pin text,
@@ -732,7 +733,7 @@ end;
 $$;
 
 comment on function identity.access_patient_with_pin(text,text,integer) is
-  '0121: a verified patient Access PIN gives the staff member direct-care read and write access (write_records) to the patient for exactly 24 hours (1440 minutes), whatever duration is asked (5 to 1440 is still checked); a still-valid write_records PIN grant is reused; a deny directive for reading or writing stops it; audit details and the PatientAccessPinVerified payload carry the scope.';
+  '0120: a verified patient Access PIN gives the staff member direct-care read and write access (write_records) to the patient for exactly 24 hours (1440 minutes), whatever duration is asked (5 to 1440 is still checked); a still-valid write_records PIN grant is reused; a deny directive for reading or writing stops it; audit details and the PatientAccessPinVerified payload carry the scope.';
 
 -- 4. Post-checks.
 do $$
@@ -742,10 +743,10 @@ begin
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'identity.access_patient_with_pin(text,text,integer)'::regprocedure)
      is distinct from 'e17e8bb85b755866bb0f1a03b5555c23' then
-    raise exception using errcode = '55000', message = '0121: the function body is not this file''s';
+    raise exception using errcode = '55000', message = '0120: the function body is not this file''s';
   end if;
   select string_agg(before_row.signature, '; ') into mismatch
-    from pin_0121_before before_row
+    from pin_0120_before before_row
    where before_row.attributes is distinct from (
      case when before_row.signature = 'policy' then
        (select concat_ws(' | ', policy_row.polcmd::text, policy_row.polpermissive::text,
@@ -764,7 +765,7 @@ begin
           from pg_proc proc where proc.oid = before_row.signature::regprocedure)
      end);
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0121: attributes changed: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0120: attributes changed: %s', mismatch);
   end if;
   select string_agg(expected.what, '; ') into mismatch
     from (values
@@ -805,9 +806,9 @@ begin
      where md5(proc.prosrc) is distinct from expected.digest;
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0121: not as this file makes it: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0120: not as this file makes it: %s', mismatch);
   end if;
 end
 $$;
 
-drop table pin_0121_before;
+drop table pin_0120_before;

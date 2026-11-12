@@ -136,7 +136,7 @@ begin
     ) then
     raise exception 'PIN grant did not authorize its exact read context';
   end if;
-  -- 0121: a PIN grant is read and write (write_records), at its facility only.
+  -- 0120: a PIN grant is read and write (write_records), at its facility only.
   if not identity.has_active_consent_grant(
       granted.subject_patient_id, 'staff:pin-integration',
       'b4000000-0000-4000-8000-000000000001',

@@ -3303,8 +3303,8 @@ covers when all of these hold, and only then:
 - The check's time is from the grant's `starts_at`, before `least(expires_at,
   starts_at + 24 hours)`: never past the grant's end, and never more than 24
   hours from its start (requests last at most 24 hours and PIN grants at most
-  60 minutes today, so today the grant's end comes first; until 0121: since
-  0121 a PIN grant is write_records for exactly 24 hours, section 47). (0108 D-a: from
+  60 minutes today, so today the grant's end comes first; until 0120: since
+  0120 a PIN grant is write_records for exactly 24 hours, section 47). (0108 D-a: from
   `starts_at` before `expires_at`, with no 24-hour bound.)
 - The patient is 18 or over on that day's Africa/Lagos date and has a date of
   birth on record (the request trigger's rule, at each check, since no request
@@ -3318,11 +3318,11 @@ covers when all of these hold, and only then:
 
 Within the cover both `read_records` and `write_records` are allowed for
 records processing, also under a PIN grant, which is read only for direct care
-(until 0121; since 0121 a PIN grant is write_records for exactly 24 hours,
+(until 0120; since 0120 a PIN grant is write_records for exactly 24 hours,
 section 47):
 bringing in paper records means creating, validating, confirming and retrying
 OCR jobs. Direct care itself is unchanged: the PIN still opens the chart for
-reading only (until 0121; since 0121 the PIN opens the chart to read and
+reading only (until 0120; since 0120 the PIN opens the chart to read and
 write, section 47), and publishing into the chart still needs the publisher's own
 direct-care write grant.
 
@@ -3412,7 +3412,7 @@ nothing; unexpired grants (and covers) work again if the code is reactivated. Wh
 Unchanged: `create_access_request`, `approve_access_request` and every other
 function body but `has_active_consent_grant`'s (32.1; their md5 pins stay
 true), policy, role, permission and grant; break-glass (emergency only), the
-PIN command (direct care, read only (until 0121; since 0121 read and write
+PIN command (direct care, read only (until 0120; since 0120 read and write
 for exactly 24 hours, section 47); its grant covers records processing as
 32.1 says) and patient shares (direct care, never covering records
 processing; since 0108 an active share covers it, section 36). A pending request is
@@ -4568,23 +4568,24 @@ The website's facility list says "FCT". Show "Federal Capital Territory (FCT)" a
   `GET /identity/facility-profile`.
 - The QoreID state, LGA, city and company email are not captured for pre-fill yet (plan A.5).
 
-## 47. Access PIN: 24 hours, read and write (0121)
+## 47. Access PIN: 24 hours, read and write (0120)
 
 Owner decision (10 Nov 2026, relayed by Ola, clinical owner): a patient's
 Access PIN gives the staff member who enters it read AND write access to all
 of that patient's records for exactly 24 hours (1440 minutes), whatever
 duration is asked, for the same staff roles as today, with no separate "Ask
-for more access". 0121 is unsigned until the
-owner signs its declaration (`reviewed_by` stays empty). The number is the
-next after every migration on staging and on the open branches (0109-0120);
-the coordinator renumbers it at merge.
+for more access". 0120 is unsigned until the
+owner signs its declaration (`reviewed_by` stays empty). Written as 0121 and
+renumbered 0120 by the release order on 2026-11-11, on staging 51d6937a
+(0001-0114); 0115-0119 are other branches' and are not on staging yet. This
+section's number (47) is set for now; the coordinator renumbers it at landing.
 
 Route, unchanged in shape: `POST /identity/standard-access/pin`
 (permission `identity.patient-access-pin.verify`, purpose `direct-care`), body
 `{ hid, pin, durationMinutes? }`, answer
 `{ accessRequestId, consentGrantId, patientId, status, expiresAt, existingGrant }`.
 
-| | Before | From 0121 |
+| | Before | From 0120 |
 |---|---|---|
 | `durationMinutes` accepted | 5 to 60 | 5 to 1440 (still checked; outside it, or missing in the database call, is refused as before) |
 | `durationMinutes` left out | 15 | 1440 (24 hours) |
@@ -4603,8 +4604,10 @@ with or without `scope` (`read_records` or `write_records`); the insert policy
 and requires the payload's `scope`, when present, to be the grant's.
 `identity.access_patient_with_pin` body md5 is now
 `e17e8bb85b755866bb0f1a03b5555c23` (0098's was
-`830c1baa4bca3df57cc02b7b002a8831`); its signature, result, owner, SECURITY
-DEFINER, search_path and ACL are unchanged. Every other rule is kept: the
+`830c1baa4bca3df57cc02b7b002a8831`; two comments inside the body still say
+"0121", the number it was written under, so that md5 holds after the
+renumber); its signature, result, owner, SECURITY DEFINER, search_path and ACL
+are unchanged. Every other rule is kept: the
 permission, direct care only, the exact active membership, the failure
 windows and locks (0075), the sealed demo boundary (0098), the denial answers
 (`verified: false`) and their audit rows.
@@ -4620,14 +4623,14 @@ Order of release:
    three-key PIN notice (they also accept the two-key one). It is in its own
    pull request (hid-system#206, branch
    `claude/fervent-galileo-datz4t-pin-notice-scope`, no migration) and must be
-   merged and released before 0121. It cannot share a
-   release with 0121: a release that carries a migration applies it before it
+   merged and released before 0120 (it is live since 2026-11-11). It cannot share a
+   release with 0120: a release that carries a migration applies it before it
    rolls out the services (`scripts/production_deployment.py`), so a PIN
    notice raised in between would be refused by the old check and not
    retried.
-2. 0121 with identity-api (hid-system#208; the coordinator renumbers 0121 at
-   merge).
-3. The websites, after 0121 is live: hid-system's own `apps/web`
+2. 0120 with identity-api (hid-system#208; written as 0121, renumbered 0120
+   by the release order).
+3. The websites, after 0120 is live: hid-system's own `apps/web`
    (hid-system#207; its doctor portal sends 60 and its patient portal says
    "read-only" today) and health's staff site (health#197). They send 1440
    and say "see and add to records for 24 hours". Until each is changed, a

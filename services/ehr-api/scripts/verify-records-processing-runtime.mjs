@@ -647,7 +647,7 @@ try {
         ocrCreate: expectProblem(await createJob(doctor, careDocument), 404, null, 'OCR create after the care revocation'),
         consentStatus: (await statusOf(doctor, carePatient, RECORDS)).readAllowed ? 'allowed' : 'none' };
       assert.equal(afterRevoke.consentStatus, 'none');
-      // The Access PIN: the patient sets one, the doctor opens the record with it (direct care, read and write since 0121).
+      // The Access PIN: the patient sets one, the doctor opens the record with it (direct care, read and write since 0120).
       expectStatus(await careCall('POST', '/identity/me/access-pin', { pin: '246813' }), 200, 'the patient sets an Access PIN');
       const pinned = expectStatus(await call(identity, doctor, 'POST', '/identity/standard-access/pin',
         { hid: carePatient.hid, pin: '246813', durationMinutes: 30 }, { purpose: 'direct-care' }), 200, 'the doctor uses the PIN');
