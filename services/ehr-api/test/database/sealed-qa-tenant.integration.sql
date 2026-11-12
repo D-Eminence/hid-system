@@ -381,12 +381,30 @@ begin
               'identity.admin_platform_overview()'::regprocedure,
               'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure)
         and position('sealed_qa_' in proc.prosrc) > 0 and position('sealed_demo_' in proc.prosrc) > 0) = 9);
+  perform pg_temp.assert('the nine replaced bodies are 0123''s, byte for byte',
+    (select count(*) from (values
+      ('identity.create_access_request(text,text,text,integer)', '2745e91d666f16a6ad79019d31f0380a'),
+      ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c'),
+      ('identity.access_patient_with_pin(text,text,integer)', 'e9efafc9b624940931cb47838c38ac5a'),
+      ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '0c2def2b530bcb3d68537ade52787b6b'),
+      ('identity.search_order_destinations(text,text)', 'da222fe1b63db757a1ddb93fdc9eabf0'),
+      ('identity.search_share_providers(text,uuid,text)', '26ca190255ddc1ff30adb2fb5f0ee347'),
+      ('identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)',
+       'f7659b71a9240050c36d67f41ddf0890'),
+      ('identity.admin_platform_overview()', 'c38a354bb38bd4e60f293dd69165506c'),
+      ('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)', 'f7bd015c0053621e2e18689abe886139'))
+        pinned(signature, digest)
+      join pg_proc proc on proc.oid = pinned.signature::regprocedure and md5(proc.prosrc) = pinned.digest) = 9);
   perform pg_temp.assert('the QA recipient: the owner''s domain, plus-addresses, any case, outer blanks trimmed',
     identity.sealed_qa_recipient('operations+qa-x@healthidentitydirectory.com')
     and identity.sealed_qa_recipient('Operations+QA-X@HealthIdentityDirectory.COM')
     and identity.sealed_qa_recipient('  patient1+qa@healthidentitydirectory.com  ')
     and identity.sealed_qa_recipient('patient1@healthidentitydirectory.com')
     and identity.sealed_qa_recipient('operations@healthidentitydirectory.com'));
+  perform pg_temp.assert('the QA recipient: printable ASCII only, no percent sign',
+    not identity.sealed_qa_recipient('a@healthİdentitydirectory.com')
+    and not identity.sealed_qa_recipient('ops+qа@healthidentitydirectory.com')
+    and not identity.sealed_qa_recipient('x%evil.example@healthidentitydirectory.com'));
   perform pg_temp.assert('the QA recipient: no other domain, subdomain, lookalike, list, empty or null',
     not identity.sealed_qa_recipient('qa.suite.someone@gmail.com')
     and not identity.sealed_qa_recipient('a@sub.healthidentitydirectory.com')

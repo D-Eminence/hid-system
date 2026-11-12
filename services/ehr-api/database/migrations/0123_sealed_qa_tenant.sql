@@ -99,8 +99,9 @@
 --    hid_schema_test_runtime, which identity.patients' policy calls them
 --    as); identity.sealed_qa_patient(id) and identity.sealed_qa_account(id),
 --    the owner's; identity.sealed_qa_recipient(address), immutable SQL:
---    true exactly for an address whose domain is healthidentitydirectory.com
---    (any case, outer blanks trimmed, plus-addresses allowed, no subdomain);
+--    true exactly for a printable-ASCII address whose domain is
+--    healthidentitydirectory.com (any case, outer blanks trimmed,
+--    plus-addresses allowed, no subdomain);
 --    identity.sealed_qa_install(), the seed (section 10), the owner's.
 -- 4. Nine triggers, each BEFORE, FOR EACH ROW, the function SECURITY
 --    DEFINER and the owner's, beside 0098's:
@@ -439,14 +440,16 @@ as $$
 $$;
 
 -- The owner's domain: an address @healthidentitydirectory.com, plus-addresses
--- allowed, no subdomain, any case, outer blanks trimmed. The local part is
--- the characters Identity's address checks accept that a mailbox name uses.
+-- allowed, no subdomain, any case, outer blanks trimmed. Printable ASCII only,
+-- checked before lower() (a locale's lower() may fold a non-ASCII letter into
+-- an ASCII one); the local part is letters, digits, '.', '_', '+' and '-'.
 create function identity.sealed_qa_recipient(requested_address text)
 returns boolean
 language sql immutable
 set search_path = pg_catalog, pg_temp
 as $$
-  select coalesce(lower(btrim(requested_address)) ~ '^[a-z0-9][a-z0-9._%+-]{0,63}@healthidentitydirectory\.com$', false)
+  select coalesce(btrim(requested_address) ~ '^[\x21-\x7e]+$'
+    and lower(btrim(requested_address)) ~ '^[a-z0-9][a-z0-9._+-]{0,63}@healthidentitydirectory\.com$', false)
 $$;
 
 -- 4. The QA seal's triggers, beside 0098's.
@@ -2436,7 +2439,20 @@ begin
       or proc.proacl is distinct from recorded.proacl or proc.prorettype <> recorded.prorettype
       or proc.proretset <> recorded.proretset or proc.proargtypes <> recorded.proargtypes
       or proc.proargnames is distinct from recorded.proargnames or proc.prolang <> recorded.prolang
-      or position('sealed_qa_' in proc.prosrc) = 0;
+      -- Each body is section 5's, byte for byte (0098's plus the QA clause).
+      or md5(proc.prosrc) is distinct from (select pin.digest from (values
+           ('identity.create_access_request(text,text,text,integer)', '2745e91d666f16a6ad79019d31f0380a'),
+           ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c'),
+           ('identity.access_patient_with_pin(text,text,integer)', 'e9efafc9b624940931cb47838c38ac5a'),
+           ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)',
+            '0c2def2b530bcb3d68537ade52787b6b'),
+           ('identity.search_order_destinations(text,text)', 'da222fe1b63db757a1ddb93fdc9eabf0'),
+           ('identity.search_share_providers(text,uuid,text)', '26ca190255ddc1ff30adb2fb5f0ee347'),
+           ('identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)',
+            'f7659b71a9240050c36d67f41ddf0890'),
+           ('identity.admin_platform_overview()', 'c38a354bb38bd4e60f293dd69165506c'),
+           ('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)', 'f7bd015c0053621e2e18689abe886139')
+         ) pin(signature, digest) where pin.signature::regprocedure = recorded.function_oid);
   if problem is not null or (select count(*) from sealed_qa_0123_replaced) <> 9 then
     raise exception using errcode = '55000', message = '0123: a replaced function changed beyond its body: '
       || coalesce(problem, 'one is missing');

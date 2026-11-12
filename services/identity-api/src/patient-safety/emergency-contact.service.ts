@@ -110,8 +110,8 @@ export class EmergencyContactService {
     try {
       const row = await this.asPatient(request, actor, async (client) => {
         await requireNoRecentRecoveryHold(client, actor.accountId, EMERGENCY_CONTACT_CHANGES);
-        // 0098: a sealed demo patient adds only an email to one of the owner's demo mailboxes, so no alert or
-        // code ever reaches anyone else. The database holds only ciphertext and an HMAC of the destination, so
+        // 0098: a sealed demo patient adds only an email to one of the owner's demo mailboxes, and 0123: a sealed QA
+        // patient only an email to the owner's domain, so no alert or code ever reaches anyone else. The database holds only ciphertext and an HMAC of the destination, so
         // Identity asks with the normalized one and its HMAC; true for every real patient. For a demo patient
         // the database records that HMAC for this transaction and refuses the add below without it (G7).
         // Nothing is added otherwise.
@@ -121,7 +121,7 @@ export class EmergencyContactService {
         );
         if (sealed.rows[0]?.allowed !== true) {
           throw new DomainProblem(400, 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED',
-            'A demo account can only add the demo mailboxes.');
+            'A demo or QA test account can only add the Health ID test mailboxes.');
         }
         await client.query(
           'select identity.add_my_emergency_contact($1, $2, $3, $4, $5, $6, $7, $8, $9)',
@@ -318,7 +318,7 @@ function translate(error: unknown): unknown {
       // 0098 G7: the database's own refusal of a sealed demo patient's contact outside the demo mailboxes.
       if (message === 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED') {
         return new DomainProblem(400, 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED',
-          'A demo account can only add the demo mailboxes.');
+          'A demo or QA test account can only add the Health ID test mailboxes.');
       }
       return new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
     case 'P0001':

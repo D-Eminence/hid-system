@@ -251,7 +251,7 @@ describe('EmergencyContactService', () => {
       });
       await expect(service.add(patientRequest, emailContact)).rejects.toMatchObject({
         code: 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED', status: 400,
-        message: 'A demo account can only add the demo mailboxes.' });
+        message: 'A demo or QA test account can only add the Health ID test mailboxes.' });
       // Thrown inside the transaction callback: nothing is added and nothing is sent.
       await expect(withSystemTransaction.mock.results[0]?.value).rejects.toMatchObject({ status: 400 });
       expect(contactCommands(query)).toEqual([]);
