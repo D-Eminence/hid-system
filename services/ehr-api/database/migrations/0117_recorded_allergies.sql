@@ -1,13 +1,15 @@
--- 0117 Allergies a facility records, and the prescriber's acknowledgement of
--- an allergy warning (EHR clinical safety).
+-- 0117 Allergies a facility records, and the acknowledgement of an allergy
+-- warning before a prescription goes ahead (EHR clinical safety).
 --
 -- Today a clinician cannot record an allergy, and nothing checks allergies
 -- when a prescription is written. The patient may have typed allergies into
 -- their own health information (0094, ehr.patient_reported_health_profiles,
 -- "reported by the patient"); that stays apart and unchanged. This migration
 -- adds the clinician's record and the acknowledgement; ehr-api does the
--- matching (generic name and a small class map) when a prescription is
--- created and asks the prescriber to acknowledge a match with a reason.
+-- matching (generic and brand names and a small class map) when a
+-- prescription is created, activated, resumed, sent to another facility or
+-- handed to this facility's pharmacy, and asks for a reason to go ahead when
+-- an allergy matches.
 --
 -- 0. Preconditions (catalog reads only; 55000, nothing applied): the tables
 --    and functions this migration refers to exist (0004, 0005, 0061, 0094);
@@ -18,16 +20,24 @@
 --    (mild, moderate, severe or unknown), who recorded it (account and
 --    membership, at the row's facility) and when. Status active or
 --    entered_in_error; marking it entered in error records who, when and
---    why (3-500 characters). Nothing else ever changes and no row is
---    deleted. Each insert and the one allowed update are versioned by 0004's
+--    why (3-500 characters after trimming, no control character but new
+--    lines). Nothing else ever changes and no row is deleted. Each insert
+--    and the one allowed update are versioned by 0004's
 --    ehr.capture_record_version (the change reason is the entered-in-error
 --    reason), like every other clinical table.
--- 2. ehr.prescription_allergy_acknowledgements: append-only; per
---    prescription created after an allergy warning, the prescriber's reason
---    (3-500 characters), the ids of the recorded allergies that matched and
---    whether the patient-reported allergies matched. Attribution checked by
---    0005's ehr.validate_append_only_clinical_actor; never updated or
---    deleted.
+-- 2. ehr.prescription_allergy_acknowledgements: append-only; the reason
+--    given to go ahead with a prescription after an allergy warning, one
+--    row each time one is given, with its stage: create (the prescription
+--    is written), activate (a draft is activated), resume (one on hold is
+--    resumed), send (a draft or active prescription is sent to another
+--    facility) or handoff (an active one is handed to this facility's
+--    pharmacy). Each row holds the reason (10-500 characters after
+--    trimming, no control character but new lines), the ids of the recorded
+--    allergies that matched and the patient's own terms that matched (at
+--    most 50 of each, no null), and whether the patient-reported allergies
+--    matched (a row needs that or at least one recorded allergy id).
+--    Attribution checked by 0005's ehr.validate_append_only_clinical_actor;
+--    never updated or deleted.
 -- 3. Row-level security, forced on both tables, as the other clinical
 --    tables (0005): the recorded allergies are read by the patient in a
 --    patient-self transaction or by a clinician whose access to the patient
@@ -171,9 +181,10 @@ create table ehr.prescription_allergy_acknowledgements (
   -- adds later is not taken as already acknowledged.
   patient_reported_terms text[] not null default '{}'
     check (cardinality(patient_reported_terms) <= 50 and array_position(patient_reported_terms, null) is null),
-  -- When the reason was given: at create, on Activate (draft) or Resume (on hold), or on sending
-  -- a draft to another facility. A prescription carries one or more, each with its stage.
-  stage text not null check (stage in ('create', 'activate', 'resume', 'send')),
+  -- When the reason was given: at create, on Activate (draft) or Resume (on hold), on sending a
+  -- draft or active prescription to another facility, or on handing an active one to this
+  -- facility's pharmacy (handoff). A prescription carries one or more, each with its stage.
+  stage text not null check (stage in ('create', 'activate', 'resume', 'send', 'handoff')),
   created_at timestamptz not null default clock_timestamp(),
   foreign key (prescription_id, patient_id, facility_id)
     references ehr.prescriptions(id, patient_id, facility_id) on delete restrict,
@@ -193,7 +204,7 @@ create trigger prescription_allergy_acknowledgements_no_mutation
   for each row execute function platform.reject_mutation();
 
 comment on table ehr.prescription_allergy_acknowledgements is
-  '0117: the prescriber''s reason for going ahead with a prescription after an allergy warning (at create, Activate, Resume or send), with the allergies that matched. Append-only.';
+  '0117: the reason given for going ahead with a prescription after an allergy warning (at create, Activate, Resume, send to another facility or hand-off to this facility''s pharmacy), with the allergies that matched. Append-only.';
 
 -- 3. Row-level security.
 alter table ehr.recorded_allergies enable row level security;

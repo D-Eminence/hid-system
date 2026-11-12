@@ -5,8 +5,12 @@ import type { AllergyMatch } from './allergy-match';
 import { checkMedicineAgainstAllergies, lockPatientAllergies, patientReportedTerm, warningToken } from './allergy-reader';
 import { type AllergyAcknowledgementDto, isValidAcknowledgementReason, WARNING_TOKEN } from './allergies.dto';
 
-/** When the prescriber gave the reason: at create, on Activate (draft), on Resume (on hold) or on sending a draft elsewhere. */
-export type AllergyAcknowledgementStage = 'create' | 'activate' | 'resume' | 'send';
+/**
+ * When the reason was given: at create, on Activate (draft), on Resume (on
+ * hold), on sending a draft or active prescription to another facility, or
+ * on handing an active one to this facility's pharmacy (the hand-off).
+ */
+export type AllergyAcknowledgementStage = 'create' | 'activate' | 'resume' | 'send' | 'handoff';
 
 /**
  * What failed in the acknowledgement, as one `errors[]` entry each
@@ -79,10 +83,12 @@ export function allergyAcknowledgementRequired(
 }
 
 /**
- * The allergy check before a prescription is written as, or becomes, active
- * (0117). Answers the matches the prescriber's reason covers (empty: nothing
- * to record). A match already covered by a reason stored for this
- * prescription (`prescriptionId`, on Activate, Resume or send) needs none.
+ * The allergy check before a prescription is written as, or becomes, active,
+ * and before it leaves the prescriber (sent to another facility or handed to
+ * this facility's pharmacy) (0117). Answers the matches the reason covers
+ * (empty: nothing to record). A match already covered by a reason stored for
+ * this prescription (`prescriptionId`, on Activate, Resume, send or hand-off)
+ * needs none.
  * Otherwise the request must carry an acknowledgement with a valid reason
  * whose warningToken is the one of the current warning; if not, 409 with the
  * current warning and what failed. With no match, an acknowledgement is

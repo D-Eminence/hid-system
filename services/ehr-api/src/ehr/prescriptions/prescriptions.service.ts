@@ -258,10 +258,21 @@ export class PrescriptionsService {
           throw new DomainProblem(409, 'PRESCRIPTION_ROUTED',
             'This prescription has been sent to another pharmacy; withdraw it there first');
         }
+        // 0117 (the review of PR 218): an allergy may have been recorded since the prescription
+        // became active, so it is checked before this facility's pharmacy takes it. A match already
+        // covered by a reason stored for it needs none. Otherwise the 409 answers here, before
+        // Pharmacy is called, and the transaction writes nothing. An accepted reason is stored for
+        // the handoff stage; the audit says so with flags and counts, never the substance or reason.
+        const matches = await checkPrescriptionAllergies(client, context, patientId,
+          { display: current.medicationDisplay, code: current.medicationCode }, input.allergyAcknowledgement, current.id);
+        const allergyOverride = matches.length > 0 && input.allergyAcknowledgement
+          ? await recordAllergyAcknowledgement(client, context, patientId, current.id, 'handoff', matches,
+            input.allergyAcknowledgement)
+          : {};
         return {
           value: current,
           resourceId: prescriptionId,
-          details: { prescriptionVersion: Number(current.rowVersion) },
+          details: { prescriptionVersion: Number(current.rowVersion), ...allergyOverride },
         };
       },
       (client) => this.repository.exists(

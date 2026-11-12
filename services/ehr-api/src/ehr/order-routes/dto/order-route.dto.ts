@@ -26,8 +26,8 @@ export class SendOrderRouteDto {
   attestationTextVersion!: string;
 
   /**
-   * 0117: sending a draft prescription makes it active, so it is checked
-   * against the allergies; sent only after an allergy warning, with the
+   * 0117: a draft or active prescription is checked against the allergies
+   * before it is sent; sent only after an allergy warning, with the
    * prescriber's reason and the warning's token. Ignored for a lab request.
    */
   @IsOptionalButNotNull()

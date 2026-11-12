@@ -64,6 +64,9 @@ const ATTESTATION_KIND: Readonly<Record<OrderRouteKind, string>> = {
   prescription: 'prescription',
 };
 
+/** The prescription statuses ehr.send_order_route accepts (0098; any other is ORDER_ROUTE_ORDER_NOT_ELIGIBLE). */
+const SENDABLE_PRESCRIPTION_STATUSES: ReadonlySet<string> = new Set(['draft', 'active']);
+
 /**
  * The ordering facility's side of cross-facility orders (P4c, SPEC-FINAL
  * §9.1, §10.1) and the patient's list and Stop (§5).
@@ -118,7 +121,7 @@ export class OrderRoutesService {
       },
     }, async (client) => {
       const allergyMatches = kind === 'prescription'
-        ? await this.checkDraftPrescriptionAllergies(client, context, patientId, encounterId, orderId, input)
+        ? await this.checkSendablePrescriptionAllergies(client, context, patientId, encounterId, orderId, input)
         : [];
       const row = await this.single<SendRow>(client,
         'select * from ehr.send_order_route($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
@@ -163,11 +166,15 @@ export class OrderRoutesService {
   }
 
   /**
-   * 0117: sending a draft prescription makes it active (ehr.send_order_route),
-   * so it is checked against the allergies as Activate is. An active one was
-   * checked when it became active; one not found is left to the send's own 404.
+   * 0117: every prescription the send can accept is checked against the
+   * allergies before it leaves for another facility's pharmacy: a draft (the
+   * send makes it active, as Activate does) and an active one (an allergy
+   * may have been recorded since it became active; the review of PR 218).
+   * A match already covered by a reason stored for this prescription needs
+   * none. Any other status, or a prescription not found, is not checked, so
+   * the send's own refusal answers (ORDER_ROUTE_ORDER_NOT_ELIGIBLE, 404).
    */
-  private async checkDraftPrescriptionAllergies(client: PoolClient, context: DataAccessContext, patientId: string,
+  private async checkSendablePrescriptionAllergies(client: PoolClient, context: DataAccessContext, patientId: string,
     encounterId: string, prescriptionId: string, input: SendOrderRouteDto): Promise<AllergyMatch[]> {
     const result = await client.query<{ status: string; medicationDisplay: string; medicationCode: string | null }>(
       `select status, medication_display as "medicationDisplay", medication_code as "medicationCode"
@@ -175,7 +182,7 @@ export class OrderRoutesService {
       [prescriptionId, encounterId, patientId, context.facilityId],
     );
     const prescription = result.rows[0];
-    if (!prescription || prescription.status !== 'draft') return [];
+    if (!prescription || !SENDABLE_PRESCRIPTION_STATUSES.has(prescription.status)) return [];
     return checkPrescriptionAllergies(client, context, patientId,
       { display: prescription.medicationDisplay, code: prescription.medicationCode }, input.allergyAcknowledgement,
       prescriptionId);

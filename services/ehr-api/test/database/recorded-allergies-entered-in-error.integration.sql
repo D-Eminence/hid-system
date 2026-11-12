@@ -4,8 +4,9 @@
 -- context ClinicalRepository sets (app.actor_subject, facility, membership,
 -- purpose, correlation). Synthetic values only; uuid prefix e124.
 --
--- The allergy check (the allergy-check route, prescription create, and
--- Activate, Resume and send of a draft) reads the patient's recorded
+-- The allergy check (the allergy-check route, prescription create,
+-- Activate, Resume, the send of a draft or active prescription, and the
+-- hand-off to this facility's pharmacy) reads the patient's recorded
 -- allergies with one query (allergy-reader.ts, allergiesForCheck) and then
 -- matches the medicine against what it read (allergy-match.ts).
 -- pg_temp.allergies_for_check below is that query, word for word;

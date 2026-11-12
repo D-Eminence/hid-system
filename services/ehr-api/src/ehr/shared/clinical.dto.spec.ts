@@ -3,6 +3,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { SendOrderRouteDto } from '../order-routes/dto/order-route.dto';
 import {
+  AcceptPrescriptionForPharmacyDto,
   CreateDiagnosisDto,
   CreateEncounterDto,
   CreateLabRequestDto,
@@ -36,6 +37,7 @@ const OPTIONAL_FIELDS: readonly [DtoConstructor, readonly string[]][] = [
     'routeCode', 'startsOn', 'endsOn', 'allergyAcknowledgement',
   ]],
   [UpdatePrescriptionDto, ['status', 'frequency', 'instructions', 'endsOn', 'allergyAcknowledgement']],
+  [AcceptPrescriptionForPharmacyDto, ['allergyAcknowledgement']],
   [CreateLabRequestDto, ['priority', 'specimenTypeCode', 'clinicalInformation', 'externalOrderReference']],
   [UpdateLabRequestDto, ['priority', 'status', 'clinicalInformation']],
 ];
@@ -64,6 +66,7 @@ describe('the allergy acknowledgement through the ValidationPipe (0117)', () => 
     [UpdatePrescriptionDto, { expectedRowVersion: 1, changeReason: 'Ready to give', status: 'active' }],
     [SendOrderRouteDto, { expectedRowVersion: 1, receivingFacilityId: '123e4567-e89b-42d3-a456-426614174007',
       patientAgreed: true, attestationTextVersion: 'order-route-prescription-attestation-v1' }],
+    [AcceptPrescriptionForPharmacyDto, { expectedRowVersion: 1, reason: 'Reviewed for Pharmacy acceptance' }],
   ];
   const run = (metatype: new () => object, body: Record<string, unknown>, allergyAcknowledgement: unknown) =>
     pipe.transform({ ...body, allergyAcknowledgement }, { type: 'body', metatype });
