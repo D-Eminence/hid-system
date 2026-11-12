@@ -4,6 +4,7 @@ import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsObject, IsString, IsUU
 import { IsOptionalButNotNull } from '../../common/validation';
 import type { PurposeOfUse } from '../../common/request-context';
 import { ITEM_ID } from '../reading/paper-reading.contract';
+import { LEARNING_FIELDS, type LearningField } from '../learning/learning';
 import { CHANGE_REASONS, FIELD_CLASSES, REJECTION_REASON_CODES, REMOVAL_REASONS,
   type RejectionReasonCode, type RemovalReason } from '../quality/review-outcome';
 
@@ -19,6 +20,27 @@ export class RemovedItemDto {
   @IsOptionalButNotNull()
   @IsIn(REMOVAL_REASONS)
   removalReason?: RemovalReason;
+}
+
+/**
+ * A learning suggestion (0119) the website displayed beside an item's field while the reviewer worked: "Possibly X?
+ * Check the paper". Only these are recorded as shown (taken when the saved value is the suggestion), and only their
+ * fields are kept out of the evidence; a rule switched on or off between opening and saving changes nothing.
+ */
+export class ShownSuggestionDto {
+  @IsString()
+  @Matches(ITEM_ID)
+  itemId!: string;
+
+  @IsUUID()
+  ruleId!: string;
+
+  @IsIn(LEARNING_FIELDS)
+  field!: LearningField;
+
+  @IsString()
+  @Length(1, 120)
+  value!: string;
 }
 
 /**
@@ -110,6 +132,14 @@ export class ValidateOcrJobDto {
   @ValidateNested({ each: true })
   @Type(() => RemovedItemDto)
   removedItems?: RemovedItemDto[];
+
+  /** The learning suggestions displayed on this reading (0119); absent: none was displayed. */
+  @IsOptionalButNotNull()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @ValidateNested({ each: true })
+  @Type(() => ShownSuggestionDto)
+  shownSuggestions?: ShownSuggestionDto[];
 
   /** Why a document was rejected; only with disposition 'rejected'. */
   @IsOptionalButNotNull()

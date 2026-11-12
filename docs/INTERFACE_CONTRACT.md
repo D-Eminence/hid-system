@@ -4594,9 +4594,9 @@ nor joined to a validation without the key.
 These are not sent:
 - a field saved unchanged (neither support nor conflict), including another
   spelling of the same list entry (a synonym);
-- a field where a suggestion was shown: an accepted suggestion is recorded as a
-  showing, never as new evidence, so a rule cannot re-arm from its own
-  suggestions.
+- a field where a suggestion was shown (`shownSuggestions`, below): an
+  accepted suggestion is recorded as a showing, never as new evidence, so a
+  rule cannot re-arm from its own suggestions.
 
 Two items with one key saved to different values are one conflict. Nothing
 is learned from:
@@ -4604,12 +4604,16 @@ is learned from:
 - unlinked entries;
 - rejections;
 - any document whose reading holds a sensitive item or page line. The classes
-  are ARVs and HIV, TB, psychiatric and sickle cell, with words, regimens and
-  tests; `services/ocr-api/src/ocr/learning/sensitive-classes.ts` is the
-  versioned list, `hid.ocr.sensitive/v1`;
+  are ARVs and HIV (PrEP and PEP included), TB, psychiatric and sickle cell,
+  with generic and brand names, words, regimens and tests;
+  `services/ocr-api/src/ocr/learning/sensitive-classes.ts` is the versioned
+  list, `hid.ocr.sensitive/v2` (v2 added the brand names, PrEP and PEP);
 - any review that saves a sensitive value.
 
-A suggestion of a sensitive value is never shown, whatever a rule holds.
+A suggestion of a sensitive value is never shown, whatever a rule holds. The
+database checks too: `ocr.record_correction_observations` refuses (22023) a
+`suggestValue` that `ocr.learning_value_sensitive` (0118, the same list, kept
+identical to ocr-api's by a spec) marks sensitive.
 
 The staff key is HMAC-SHA-256(account id) under a 32-byte key that 0118 creates
 inside the database (`ocr.learning_key`). The owner of the OCR functions alone
@@ -4662,6 +4666,16 @@ Retention:
 - There is no suggestion for a deleted source, for a sensitive reading, or when
   the lookup fails.
 
+**What was shown** comes from the validation request, never from the rules
+found at save time (review of 2026-11-12): `POST /api/v1/ocr/jobs/:jobId/validate`
+takes an optional `shownSuggestions`, up to 200
+`{ itemId, ruleId, field, value }`, the suggestions the website displayed
+while the reviewer worked (as it received them, one per item). Only these are
+recorded as showings (taken when the saved value equals `value`; a rule
+retired meanwhile is still judged), and only their fields are kept out of the
+evidence. Absent, nothing was shown: no showing is recorded and every
+corrected field is evidence. A sensitive `value` is ignored.
+
 The website shows `text` as a plain hint beside the field: no click, no dismiss,
 and never prefilled. The saved value is whatever the reviewer leaves. The
 client sends nothing back: at validation ocr-api works out whether each
@@ -4693,6 +4707,14 @@ worker logs `ocr.learning.purged { removed }` or `ocr.learning.purge_failed { co
   - a group under 20 is `{ ...keys, suppressed: true }`.
 - Codes outside `^[a-z][a-z0-9_]{0,63}$` count as `other`.
 - The read is audited as `admin.ocr.quality-summary.read`, with counts only.
+- `ocr.validations` forces row-level security, and its staff policy admits only
+  the session facility's rows. So the summary reads every facility's
+  validations inside a "summary run": a row in `ocr.quality_summary_runs` for its
+  own transaction, written just before the read and deleted just after. The
+  policy `ocr_validations_quality_summary` admits the OCR functions' owner, and
+  no other role, only while such a row exists (review of 2026-11-12; production's
+  migration owner is neither superuser nor BYPASSRLS, and without the policy
+  the summary read nothing).
 
 `GET /api/v1/admin/ocr/learning` (`platform.admin.access`) answers
 `{ ruleSets: [{ scope, facilityId, enabled, activeRules, retiredRules, showingsLast180Days, notTakenLast180Days }] }`.

@@ -24,23 +24,54 @@ describe('OCR learning service', () => {
   it('records the observations in one savepoint after an accepted review with no suggestion', async () => {
     const db = client();
     await new OcrLearningService().learnFromReview(db.client, review(reading('Amoxicilin')));
-    const [, observations] = db.query.mock.calls[2] as unknown as [string, [string, string]];
+    const [, observations] = db.query.mock.calls[1] as unknown as [string, [string, string]];
     expect(JSON.parse(observations[1])).toEqual([{ field: 'name', readDigest: readDigest('name', 'amoxicilin'),
       suggestValue: 'Amoxicillin' }]);
   });
 
-  it('records a suggestion taken as a showing, not as new evidence', async () => {
-    const rule = { field_class: 'name', read_digest: readDigest('name', 'amoxicilin'), rule_id: 'r1', scope: 'facility',
-      suggest_value: 'Amoxicillin' };
-    const db = client((sql) => ({ rows: sql.includes('reading_suggestions') ? [rule] : [] }));
-    await new OcrLearningService().learnFromReview(db.client, review(reading('Amoxicilin')));
-    expect(db.sqls()).toEqual(['savepoint ocr_learning_review', expect.stringContaining('ocr.reading_suggestions'),
+  const displayed = (value: string) => [{ itemId: id(1), ruleId: '22222222-2222-4222-8222-222222222222',
+    field: 'name' as const, value }];
+
+  it('records a displayed suggestion taken as a showing, not as new evidence', async () => {
+    const db = client();
+    await new OcrLearningService().learnFromReview(db.client,
+      { ...review(reading('Amoxicilin')), shownSuggestions: displayed('Amoxicillin') });
+    expect(db.sqls()).toEqual(['savepoint ocr_learning_review',
       'select ocr.record_correction_observations($1, $2::jsonb)', 'select ocr.learning_after_validation($1, $2::jsonb)',
       'release savepoint ocr_learning_review']);
-    const [, observations] = db.query.mock.calls[2] as unknown as [string, [string, string]];
+    const [, observations] = db.query.mock.calls[1] as unknown as [string, [string, string]];
     expect(JSON.parse(observations[1])).toEqual([]);
-    const [, showings] = db.query.mock.calls[3] as unknown as [string, [string, string]];
-    expect(JSON.parse(showings[1])).toEqual([{ ruleId: 'r1', outcome: 'accepted' }]);
+    const [, showings] = db.query.mock.calls[2] as unknown as [string, [string, string]];
+    expect(JSON.parse(showings[1])).toEqual([{ ruleId: '22222222-2222-4222-8222-222222222222', outcome: 'accepted' }]);
+  });
+
+  it('records a displayed suggestion not taken as rejected', async () => {
+    const db = client();
+    await new OcrLearningService().learnFromReview(db.client,
+      { ...review(reading('Amoxicilin')), shownSuggestions: displayed('Ampicillin') });
+    const [, showings] = db.query.mock.calls[2] as unknown as [string, [string, string]];
+    expect(JSON.parse(showings[1])).toEqual([{ ruleId: '22222222-2222-4222-8222-222222222222', outcome: 'rejected' }]);
+  });
+
+  it('judges only what was displayed: a rule active at save time but not shown is no showing, its field is evidence',
+    async () => {
+      const rule = { field_class: 'name', read_digest: readDigest('name', 'amoxicilin'), rule_id: 'r1',
+        scope: 'facility', suggest_value: 'Amoxicillin' };
+      const db = client((sql) => ({ rows: sql.includes('reading_suggestions') ? [rule] : [] }));
+      await new OcrLearningService().learnFromReview(db.client, review(reading('Amoxicilin')));
+      expect(db.sqls().some((sql) => sql.includes('reading_suggestions'))).toBe(false);
+      const [, observations] = db.query.mock.calls[1] as unknown as [string, [string, string]];
+      expect(JSON.parse(observations[1])).toHaveLength(1);
+      const [, showings] = db.query.mock.calls[2] as unknown as [string, [string, string]];
+      expect(JSON.parse(showings[1])).toEqual([]);
+    });
+
+  it('never counts a sensitive value as displayed', async () => {
+    const db = client();
+    await new OcrLearningService().learnFromReview(db.client,
+      { ...review(reading('Amoxicilin')), shownSuggestions: displayed('Truvada') });
+    const [, showings] = db.query.mock.calls[2] as unknown as [string, [string, string]];
+    expect(JSON.parse(showings[1])).toEqual([]);
   });
 
   it('does nothing for a rejection, a sensitive reading, a sensitive value saved, or an unlinked review', async () => {

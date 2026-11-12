@@ -5,7 +5,7 @@ import {
   itemSuggestions, linkedFieldPairs, listValue, observationsFor, pairsAreSensitive, readDigest, readingMayLearn,
   readKey, showingsFor, suggestionKeys,
 } from './learning';
-import { itemIsSensitive, SENSITIVE_CLASSES_VERSION, valueIsSensitive } from './sensitive-classes';
+import { itemIsSensitive, SENSITIVE_BRANDS, SENSITIVE_CLASSES_VERSION, valueIsSensitive } from './sensitive-classes';
 
 // Fictional fixtures only: invented ids; real medicine and test names from the lists.
 const id = (n: number) => `it-${n.toString(16).padStart(16, '0')}`;
@@ -169,6 +169,25 @@ describe('sensitive classes', () => {
   it('leaves ordinary items alone', () => {
     expect(readingMayLearn(payload([medicine(1, { name: 'Amoxicillin', strength: '500mg' }),
       lab(2, { test: 'FBC' }), { id: id(3), kind: 'diagnosis', asWritten: 'Malaria', fields: {} }]))).toBe(true);
-    expect(SENSITIVE_CLASSES_VERSION).toBe('hid.ocr.sensitive/v1');
+    expect(SENSITIVE_CLASSES_VERSION).toBe('hid.ocr.sensitive/v2');
+  });
+  it.each(['Atripla', 'Truvada 1 tab daily', 'TRUVADA', 'Kaletra 2 tabs bd', 'Aluvia', 'Descovy', 'Biktarvy',
+    'Triumeq', 'Combivir', 'Trizivir', 'Symfi Lo', 'Odefsey', 'Genvoya', 'Stribild', 'Juluca', 'Dovato', 'Duovir-N',
+    'Duovir N', 'PrEP', 'on PrEP since March', 'PEP x 28 days', 'post-exposure prophylaxis', 'Rifinah', 'Rifafour',
+    'Sirturo', 'Largactil 100mg nocte', 'Haldol', 'Prozac', 'Hydrea', 'Siklos', 'Niprisan', 'Ciklavit'])(
+    'marks the brand or word %s sensitive (v2)', (value) => {
+      expect(valueIsSensitive(value)).toBe(true);
+      expect(itemIsSensitive(medicine(1, { name: value }))).toBe(true);
+      expect(readingMayLearn({ ...payload([medicine(1, { name: 'Paracetamol' })]),
+        pages: [{ page: 1, lines: [{ id: 'p1-l1', text: `Plan: ${value}` }] }] })).toBe(false);
+    });
+  it('marks every listed brand sensitive, in any case', () => {
+    for (const brand of Object.values(SENSITIVE_BRANDS).flat()) {
+      expect([brand, brand.toUpperCase()].map(valueIsSensitive)).toEqual([true, true]);
+    }
+  });
+  it.each(['Augmentin', 'Panadol', 'Coartem', 'Flagyl', 'Amoxil', 'Lonart', 'Emzor paracetamol', 'Preparation H',
+    'Pepsi', 'Peptic ulcer disease', 'Truvadax'])('leaves %s alone (whole words only)', (value) => {
+    expect(valueIsSensitive(value)).toBe(false);
   });
 });

@@ -500,6 +500,39 @@ select gen_random_uuid(), gen_random_uuid(),
        'rules-summary-' || n || 'xxxxxxxxx', repeat('b', 64)
   from generate_series(1, 28) n;
 set local session_replication_role = origin;
+-- The summary runs as an owner that is neither superuser nor BYPASSRLS, as in
+-- production, where ocr.validations' staff policy admits no row to a platform
+-- session and only 0119's summary-run policy lets the read through (review of
+-- 2026-11-12). Where the OCR owner bypasses row-level security (CI and the
+-- acceptance runner migrate as a superuser) the function is lent, until the
+-- ROLLBACK, to a role made here with the privileges the owner uses in it, and
+-- 0119's two policies name that role too (their expressions unchanged).
+do $$
+declare
+  owner_role oid := (select proowner from pg_proc where oid = 'ocr.review_outcome_summary(date,date)'::regprocedure);
+begin
+  if (select rolsuper or rolbypassrls from pg_roles where oid = owner_role) then
+    create role ocr_0119_suite_owner nologin nosuperuser nobypassrls noinherit;
+    grant usage on schema ocr, audit, auth, platform, identity to ocr_0119_suite_owner;
+    grant select on ocr.validations to ocr_0119_suite_owner;
+    grant select, insert, delete on ocr.quality_summary_runs to ocr_0119_suite_owner;
+    grant insert on audit.events to ocr_0119_suite_owner;
+    grant execute on all functions in schema platform, auth to ocr_0119_suite_owner;
+    execute format('alter policy ocr_validations_quality_summary on ocr.validations to %I, ocr_0119_suite_owner',
+      owner_role::regrole);
+    execute format('alter policy quality_summary_runs_owner on ocr.quality_summary_runs to %I, ocr_0119_suite_owner',
+      owner_role::regrole);
+    alter function ocr.review_outcome_summary(date,date) owner to ocr_0119_suite_owner;
+    raise notice 'ocr-learning-rules: the summary is lent to ocr_0119_suite_owner (owner % bypasses RLS)',
+      owner_role::regrole;
+  else
+    raise notice 'ocr-learning-rules: the summary runs as its owner %', owner_role::regrole;
+  end if;
+  if (select rolsuper or rolbypassrls from pg_roles
+       where oid = (select proowner from pg_proc where oid = 'ocr.review_outcome_summary(date,date)'::regprocedure)) then
+    raise exception 'the summary must run under an owner that does not bypass RLS';
+  end if;
+end $$;
 set local role hid_identity_api_runtime;
 select pg_temp.as_platform(9);
 create temporary table rules_summary on commit drop as
@@ -538,6 +571,44 @@ select pg_temp.as_staff(1, 'a');
 select pg_temp.rules_try('a facility session', $q$select * from ocr.review_outcome_summary(current_date - 7, current_date)$q$,
   '42501');
 reset role;
+
+-- The summary run: no row outlives the read; outside a run the summary's owner
+-- reads no validation from a platform session; a run row admits that owner
+-- only, never a runtime role, which still reads its own facility's rows only.
+select pg_temp.rules_check('no summary run row outlives the read',
+  not exists (select 1 from ocr.quality_summary_runs));
+select pg_temp.rules_check('no runtime role may touch the summary runs',
+  not exists (select 1 from pg_roles role_row cross join (values ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) p(privilege)
+               where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+                 and role_row.oid <> (select relowner from pg_class where oid = 'ocr.quality_summary_runs'::regclass)
+                 and has_table_privilege(role_row.oid, 'ocr.quality_summary_runs', p.privilege)));
+select set_config('hid.test.summary_owner',
+  (select proowner::regrole::text from pg_proc where oid = 'ocr.review_outcome_summary(date,date)'::regprocedure), true);
+do $$
+declare
+  outside_run bigint;
+  inside_run bigint;
+begin
+  execute format('set local role %s', current_setting('hid.test.summary_owner'));
+  perform set_config('app.facility_id', '', true);
+  perform set_config('app.membership_id', '', true);
+  select count(*) into outside_run from ocr.validations where idempotency_key like 'rules-summary-%';
+  insert into ocr.quality_summary_runs (transaction_id) values (pg_current_xact_id());
+  select count(*) into inside_run from ocr.validations where idempotency_key like 'rules-summary-%';
+  delete from ocr.quality_summary_runs where transaction_id = pg_current_xact_id();
+  reset role;
+  perform pg_temp.rules_check('the summary''s owner reads nothing outside a run, all 28 inside one',
+    outside_run = 0 and inside_run = 28);
+end $$;
+insert into ocr.quality_summary_runs (transaction_id) values (pg_current_xact_id());
+set local role hid_ocr_api_runtime;
+select pg_temp.as_staff(1, 'a');
+create temporary table rules_runtime_read on commit drop as
+  select facility_id from ocr.validations where idempotency_key like 'rules-summary-%';
+reset role;
+delete from ocr.quality_summary_runs where transaction_id = pg_current_xact_id();
+select pg_temp.rules_check('a runtime role in a run still reads its own facility''s rows only',
+  (select count(*) = 25 and bool_and(facility_id = 'd1190000-0000-4000-8000-00000000000a') from rules_runtime_read));
 
 do $$
 declare

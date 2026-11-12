@@ -420,7 +420,7 @@ export class OcrService {
       const validationId = validationResult.rows[0]?.id;
       if (!validationId) throw new DomainProblem(503, 'OCR_VALIDATION_NOT_CREATED', 'OCR validation could not be created');
       learningReview = { jobId, validationId, disposition: input.disposition, targetDomain: input.targetDomain,
-        acceptedFields: input.acceptedFields, payload: reviewedPayload };
+        acceptedFields: input.acceptedFields, payload: reviewedPayload, shownSuggestions: input.shownSuggestions };
       const updated = await client.query<OcrJobRow>(
         `update ocr.jobs set status = $5, completed_at = clock_timestamp(),
                 correlation_id = $4, row_version = row_version + 1

@@ -292,6 +292,20 @@ select pg_temp.learning_try('a suggested value of 121 characters',
   format($q$select ocr.record_correction_observations('d1189000-0000-4000-8000-000000000001',
     '[{"field":"name","readDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","suggestValue":"%s"}]')$q$,
     repeat('a', 121)), '22023');
+-- The database's own sensitive-class check (hid.ocr.sensitive/v2), behind ocr-api's.
+select pg_temp.learning_try('a sensitive generic as the suggested value',
+  $q$select ocr.record_correction_observations('d1189000-0000-4000-8000-000000000001',
+    '[{"field":"name","readDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","suggestValue":"Lamivudine"}]')$q$, '22023');
+select pg_temp.learning_try('an ARV brand as the suggested value, any case',
+  $q$select ocr.record_correction_observations('d1189000-0000-4000-8000-000000000001',
+    '[{"field":"name","readDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","suggestValue":"TRUVADA"}]')$q$, '22023');
+select pg_temp.learning_try('a sensitive test name as the suggested value',
+  $q$select ocr.record_correction_observations('d1189000-0000-4000-8000-000000000001',
+    '[{"field":"test","readDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","suggestValue":"Hb genotype"}]')$q$, '22023');
+select pg_temp.learning_try('PrEP among ordinary values refuses the whole list',
+  $q$select ocr.record_correction_observations('d1189000-0000-4000-8000-000000000001',
+    '[{"field":"name","readDigest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","suggestValue":"Amoxicillin"},
+      {"field":"name","readDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","suggestValue":"PrEP"}]')$q$, '22023');
 select pg_temp.learning_try('a numeric suggested value',
   $q$select ocr.record_correction_observations('d1189000-0000-4000-8000-000000000001',
     '[{"field":"name","readDigest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","suggestValue":5}]')$q$, '22023');
@@ -397,6 +411,21 @@ select pg_temp.learning_try('a staff subject cannot purge',
 reset role;
 select pg_temp.learning_check('the 179-day row is kept',
   (select count(*) = 1 from ocr.correction_observations where observed_at < clock_timestamp() - interval '178 days'));
+
+-- The database's sensitive check (as the owner, who alone may run it): whole words for brands and words, generics
+-- anywhere, nothing for null; no runtime role may run it.
+reset role;
+select pg_temp.learning_check('the sensitive check is whole-word for brands and words, generics anywhere',
+  (select bool_and(not ocr.learning_value_sensitive(v)) from unnest(array['Truvadax', 'Peptic ulcer',
+    'Preparation H', 'Amoxicillin', 'Panadol', 'Coartem']) v)
+  and (select bool_and(ocr.learning_value_sensitive(v)) from unnest(array['Duovir N', 'Duovir-N', 'PEP',
+    'Niprisan', 'Haldol 5mg', 'Tab lamivudine']) v)
+  and not coalesce(ocr.learning_value_sensitive(null), false));
+select pg_temp.learning_check('no runtime role may run the sensitive check',
+  not exists (select 1 from pg_roles role_row where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+               and role_row.oid <> (select proowner from pg_proc
+                                     where oid = 'ocr.learning_value_sensitive(text)'::regprocedure)
+               and has_function_privilege(role_row.oid, 'ocr.learning_value_sensitive(text)', 'EXECUTE')));
 
 do $$
 declare

@@ -1,10 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import {
-  acceptedFieldsAreSensitive, itemSuggestions, linkedFieldPairs, observationsFor, pairsAreSensitive, readingMayLearn,
-  showingsFor,
-  suggestionKeys,
-  type ItemSuggestion, type LearningField, type RuleSuggestion,
+  acceptedFieldsAreSensitive, displayedSuggestions, itemSuggestions, linkedFieldPairs, observationsFor,
+  pairsAreSensitive, readingMayLearn, showingsFor, suggestionKeys,
+  type ItemSuggestion, type LearningField, type RuleSuggestion, type ShownSuggestion,
 } from './learning';
 
 /** The SQLSTATE of a database error, or a fixed code: the only thing ever logged (no text, no values). */
@@ -40,19 +39,20 @@ export class OcrLearningService {
 
   /**
    * After an accepted review committed, in its own READ COMMITTED transaction (OcrService.validate): records its
-   * corrected fields (0118), whether each suggestion shown was taken, and lets the database retire and switch rules on
-   * (0119). Nothing for a rejection, a sensitive reading or a review saving a sensitive value. Learning never shares
-   * the validation's SERIALIZABLE transaction, so it can neither abort nor delay the save.
+   * corrected fields (0118), whether each suggestion the website displayed was taken, and lets the database retire
+   * and switch rules on (0119). The suggestions shown are what the request says the reviewer was shown, never the
+   * rules found at save time. Nothing for a rejection, a sensitive reading or a review saving a sensitive value.
+   * Learning never shares the validation's SERIALIZABLE transaction, so it can neither abort nor delay the save.
    */
   async learnFromReview(client: PoolClient, review: { jobId: string; validationId: string; disposition: string;
-    targetDomain: string; acceptedFields: unknown; payload: unknown }): Promise<void> {
+    targetDomain: string; acceptedFields: unknown; payload: unknown;
+    shownSuggestions?: readonly ShownSuggestion[] }): Promise<void> {
     if (review.disposition !== 'validated' || !readingMayLearn(review.payload)) return;
     const pairs = linkedFieldPairs(review.targetDomain, review.acceptedFields, review.payload);
     if (pairs.length === 0 || pairsAreSensitive(pairs) || acceptedFieldsAreSensitive(review.acceptedFields)) return;
     try {
       await this.inSavepoint(client, 'ocr_learning_review', async () => {
-        const keys = suggestionKeys(review.payload);
-        const shown = itemSuggestions(keys, keys.length ? await this.lookUp(client, keys) : []);
+        const shown = displayedSuggestions(review.shownSuggestions ?? []);
         await client.query('select ocr.record_correction_observations($1, $2::jsonb)',
           [review.validationId, JSON.stringify(observationsFor(pairs, shown))]);
         await client.query('select ocr.learning_after_validation($1, $2::jsonb)',

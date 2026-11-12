@@ -10,13 +10,14 @@
  * Medicines are grouped by WHO ATC class: HIV agents J05AE, J05AF, J05AG, J05AJ, J05AR, J05AX; TB J04A (with
  * clofazimine); psychiatric N05A antipsychotics, N05AN lithium, N05B anxiolytics, N05C hypnotics, N06A
  * antidepressants, N06B psychostimulants; sickle cell disease: hydroxycarbamide, voxelotor, crizanlizumab,
- * L-glutamine. Diagnoses by ICD-11 code: HIV 1C60-1C62, TB 1B10-1B14, chapter 06 (mental, behavioural or
+ * L-glutamine; and their brand names in common use (v2, review of 2026-11-12: a reading that says only "Truvada 1 tab
+ * daily" names no generic). Diagnoses by ICD-11 code: HIV 1C60-1C62, TB 1B10-1B14, chapter 06 (mental, behavioural or
  * neurodevelopmental), sickle cell 3A51.
  */
 import { matchDiagnosisName, ICD11_TITLES } from './lists/diagnosis-list';
 import { matchDrugName } from './lists/drug-list';
 
-export const SENSITIVE_CLASSES_VERSION = 'hid.ocr.sensitive/v1';
+export const SENSITIVE_CLASSES_VERSION = 'hid.ocr.sensitive/v2';
 
 export type SensitiveClass = 'hiv' | 'tb' | 'psychiatric' | 'sickle_cell';
 
@@ -39,6 +40,29 @@ export const SENSITIVE_GENERICS: Readonly<Record<SensitiveClass, readonly string
   sickle_cell: ['hydroxycarbamide', 'hydroxyurea', 'voxelotor', 'crizanlizumab', 'l-glutamine'],
 };
 
+/**
+ * Brand names (lower case) in each class, matched as whole words anywhere in an item, a value or a page line: the
+ * originator and the common generic-maker brands of the generics above (WHO prequalified, and those sold in Nigeria).
+ */
+export const SENSITIVE_BRANDS: Readonly<Record<SensitiveClass, readonly string[]>> = {
+  hiv: ['atripla', 'truvada', 'descovy', 'kaletra', 'aluvia', 'biktarvy', 'triumeq', 'combivir', 'trizivir', 'symfi',
+    'symfi lo', 'odefsey', 'genvoya', 'stribild', 'juluca', 'dovato', 'complera', 'eviplera', 'epzicom', 'kivexa',
+    'epivir', 'retrovir', 'viread', 'vemlidy', 'emtriva', 'ziagen', 'sustiva', 'stocrin', 'viramune', 'isentress',
+    'tivicay', 'prezista', 'prezcobix', 'reyataz', 'evotaz', 'norvir', 'intelence', 'edurant', 'selzentry',
+    'celsentri', 'fuzeon', 'rukobia', 'cabenuva', 'vocabria', 'apretude', 'delstrigo', 'pifeltro', 'symtuza',
+    'cimduo', 'temixys', 'triomune', 'duovir', 'duovir-n', 'lamivir', 'viraday', 'teevir', 'acriptega', 'avonza',
+    'tenvir', 'tenvir-em', 'ricovir', 'ricovir-em'],
+  tb: ['rifinah', 'rifater', 'rimactane', 'rifadin', 'myambutol', 'sirturo', 'deltyba', 'priftin', 'mycobutin',
+    'akurit', 'akurit-4', 'forecox', 'voractiv', 'rimstar', 'rifafour', 'dovprela', 'lamprene', 'trecator'],
+  psychiatric: ['largactil', 'haldol', 'serenace', 'modecate', 'zyprexa', 'risperdal', 'seroquel', 'abilify',
+    'clozaril', 'stelazine', 'depixol', 'fluanxol', 'clopixol', 'invega', 'geodon', 'orap', 'melleril', 'priadel',
+    'camcolit', 'valium', 'ativan', 'xanax', 'lexotan', 'librium', 'rivotril', 'klonopin', 'mogadon', 'restoril',
+    'stilnox', 'ambien', 'imovane', 'tryptizol', 'elavil', 'tofranil', 'anafranil', 'prozac', 'zoloft', 'paxil',
+    'seroxat', 'celexa', 'cipramil', 'lexapro', 'cipralex', 'luvox', 'faverin', 'remeron', 'effexor', 'cymbalta',
+    'desyrel', 'ritalin', 'concerta', 'strattera'],
+  sickle_cell: ['hydrea', 'siklos', 'droxia', 'oxbryta', 'adakveo', 'endari', 'niprisan', 'nicosan', 'ciklavit'],
+};
+
 /** ICD-11 code prefixes in each class (codes from the diagnosis list's ICD11_TITLES). */
 export const SENSITIVE_ICD_PREFIXES: Readonly<Record<SensitiveClass, readonly string[]>> = {
   hiv: ['1C60', '1C61', '1C62'],
@@ -51,13 +75,25 @@ export const SENSITIVE_ICD_PREFIXES: Readonly<Record<SensitiveClass, readonly st
  * Words and abbreviations that mark a document sensitive wherever they appear in an item (name, as written, plain
  * text or any field): regimens written as abbreviations (TDF/3TC/DTG, RHZE), the conditions, and their tests.
  */
-const SENSITIVE_WORDS = new RegExp(String.raw`(?<![a-z0-9])(?:` + [
+/**
+ * The word patterns (regular-expression fragments, matched as whole words in any case). 0118's
+ * ocr.learning_value_sensitive holds the same three lists (generics, brands, these), checked by a spec.
+ */
+export const SENSITIVE_WORD_PATTERNS: readonly string[] = [
   'hiv', 'aids', 'plhiv', 'pvh', 'retroviral', 'rvs', 'r[/-]?v[/-]?d', 'haart', 'art', 'arvs?', 'cd4', 'viral load',
+  'prep', 'pep', 'pre-exposure', 'post-exposure',
   'tdf', '3tc', 'dtg', 'efv', 'nvp', 'azt', 'lpv', 'atv', 'tld', 'tle', 'ftc',
   'tb', 'ptb', 'eptb', 'tuberculo[a-z]*', 'genexpert', 'gene xpert', 'afb', 'acid[- ]fast', 'mantoux', 'tuberculin',
   'rhze', 'rhz', 'rh', 'inh', 'dots',
   'psych[a-z]*', 'schizo[a-z]*', 'bipolar', 'depressi[a-z]*', 'mania', 'manic', 'anxiety', 'ssri', 'antipsychotic[a-z]*',
   'sickle[a-z]*', 'scd', 'sca', 'hbss', 'hb ss', 'genotype', 'electrophoresis',
+];
+
+/** A brand as a pattern: its space or hyphen optional ("Duovir-N", "Duovir N", "DuovirN"). */
+const brandPattern = (brand: string): string => brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[ -]/g, '[ -]?');
+
+const SENSITIVE_WORDS = new RegExp(String.raw`(?<![a-z0-9])(?:` + [
+  ...SENSITIVE_WORD_PATTERNS, ...Object.values(SENSITIVE_BRANDS).flat().map(brandPattern),
 ].join('|') + String.raw`)(?![a-z0-9])`, 'i');
 
 const ALL_GENERICS = new Map<string, SensitiveClass>(

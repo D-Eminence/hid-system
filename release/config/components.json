@@ -568,11 +568,11 @@
       },
       {
         "name": "0118_ocr_correction_observations.sql",
-        "sha256": "048bca4bed5261b686249a97a5edd2336807eb4cf7ccf15e145d7bb684a8ae45"
+        "sha256": "4c4b194a93f717fff5f55efb710e807780450b139e0e10544ef87b20a0354ae3"
       },
       {
         "name": "0119_ocr_learning_rules.sql",
-        "sha256": "1dbbd507f487c67b697f742f70b04736705666eea56c50c5b3eabc584e852928"
+        "sha256": "b49691c636752387f709087c81fdd958f292fd6cf6ad589cc990de4b06de2652"
       }
     ]
   },

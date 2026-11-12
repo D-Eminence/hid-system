@@ -1575,7 +1575,7 @@ grant usage on schema ocr to hid_ocr_runtime, hid_ocr_worker;
 grant execute on function ocr.record_correction_observations(uuid,jsonb) to hid_ocr_runtime;
 grant execute on function ocr.purge_correction_observations(integer) to hid_ocr_worker;
 revoke all on function ocr.record_correction_observations(uuid,jsonb),
-  ocr.purge_correction_observations(integer) from public;
+  ocr.purge_correction_observations(integer), ocr.learning_value_sensitive(text) from public;
 revoke all on ocr.learning_key, ocr.correction_observations from public;
 
 -- OCR learning rules (0119, owner decision Q43 of 2026-11-11): the OCR API

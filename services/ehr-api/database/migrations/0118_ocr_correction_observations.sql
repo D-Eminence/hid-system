@@ -63,6 +63,13 @@
 --      column) (else 22023, nothing written). The read digest and the
 --      validation id are stored as HMACs under the key. It also deletes up to 1000 rows
 --      older than 180 days (any facility).
+--      A suggestValue that ocr.learning_value_sensitive marks is refused
+--      (22023) too.
+--    - ocr.learning_value_sensitive(value) -> boolean (immutable SQL,
+--      SECURITY INVOKER, granted to no role): ocr-api's sensitive-class list
+--      (hid.ocr.sensitive/v2: generic names anywhere, brand and word patterns
+--      as whole words, any case), the database's own check behind ocr-api's
+--      (review of 2026-11-12).
 --    - ocr.purge_correction_observations(limit 1-100000) -> integer, for the
 --      OCR worker (hid_ocr_worker), which calls it with its 7-day source
 --      sweep: deletes up to that many rows older than 180 days, oldest first.
@@ -114,7 +121,8 @@ begin
   if to_regclass('ocr.learning_key') is not null
      or to_regclass('ocr.correction_observations') is not null
      or to_regprocedure('ocr.record_correction_observations(uuid,jsonb)') is not null
-     or to_regprocedure('ocr.purge_correction_observations(integer)') is not null then
+     or to_regprocedure('ocr.purge_correction_observations(integer)') is not null
+     or to_regprocedure('ocr.learning_value_sensitive(text)') is not null then
     raise exception using errcode = '55000', message = '0118: already applied';
   end if;
   -- c. The bodies relied on (as 0107 pins them).
@@ -209,6 +217,61 @@ comment on table ocr.correction_observations is
   '0118: one corrected field of a linked OCR reading item: a digest of the value read (never the text), the closed-list value saved (NULL: something else was saved, a conflict) and an HMAC of the staff account. Kept 180 days. Only the 0118/0119 SECURITY DEFINER functions touch it.';
 
 -- 2. Functions.
+-- Whether a value stands for a sensitive class (ARVs and HIV, TB, psychiatric,
+-- sickle cell; ocr-api's hid.ocr.sensitive/v2): one of the generic names
+-- anywhere in it, or a brand or word pattern as a whole word, any case. The
+-- three lists are ocr-api's (services/ocr-api/src/ocr/learning/
+-- sensitive-classes.ts), kept identical by a spec there. ocr-api already
+-- sends no such value; this is the database's own check. Granted to no role.
+create function ocr.learning_value_sensitive(requested_value text)
+returns boolean
+language sql immutable
+set search_path = pg_catalog, pg_temp
+as $$
+  select coalesce(
+    exists (select 1 from unnest(array[ -- generics
+    'abacavir', 'atazanavir', 'bictegravir', 'cabotegravir', 'darunavir', 'didanosine', 'dolutegravir',
+    'efavirenz', 'emtricitabine', 'etravirine', 'lamivudine', 'lopinavir', 'nevirapine', 'raltegravir',
+    'rilpivirine', 'ritonavir', 'stavudine', 'tenofovir', 'tenofovir disoproxil', 'tenofovir alafenamide',
+    'zidovudine', 'doravirine', 'fostemsavir', 'maraviroc', 'enfuvirtide', 'indinavir', 'saquinavir', 'nelfinavir',
+    'fosamprenavir', 'isoniazid', 'rifampicin', 'rifampin', 'rifapentine', 'rifabutin', 'pyrazinamide',
+    'ethambutol', 'streptomycin', 'bedaquiline', 'delamanid', 'pretomanid', 'cycloserine', 'terizidone',
+    'ethionamide', 'prothionamide', 'para-aminosalicylic acid', 'aminosalicylic acid', 'capreomycin', 'kanamycin',
+    'clofazimine', 'thioacetazone', 'haloperidol', 'chlorpromazine', 'fluphenazine', 'olanzapine', 'risperidone',
+    'quetiapine', 'aripiprazole', 'clozapine', 'trifluoperazine', 'flupentixol', 'zuclopenthixol', 'sulpiride',
+    'amisulpride', 'paliperidone', 'ziprasidone', 'pimozide', 'perphenazine', 'thioridazine', 'lithium',
+    'lithium carbonate', 'diazepam', 'lorazepam', 'alprazolam', 'bromazepam', 'chlordiazepoxide', 'clonazepam',
+    'nitrazepam', 'temazepam', 'zolpidem', 'zopiclone', 'amitriptyline', 'imipramine', 'clomipramine',
+    'nortriptyline', 'fluoxetine', 'sertraline', 'paroxetine', 'citalopram', 'escitalopram', 'fluvoxamine',
+    'mirtazapine', 'venlafaxine', 'duloxetine', 'trazodone', 'methylphenidate', 'atomoxetine', 'hydroxycarbamide',
+    'hydroxyurea', 'voxelotor', 'crizanlizumab', 'l-glutamine'
+      ]::text[]) generic where position(generic in lower(requested_value)) > 0)
+    or lower(requested_value) ~ ('(^|[^a-z0-9])(' || array_to_string(array[ -- words
+    'hiv', 'aids', 'plhiv', 'pvh', 'retroviral', 'rvs', 'r[/-]?v[/-]?d', 'haart', 'art', 'arvs?', 'cd4',
+    'viral load', 'prep', 'pep', 'pre-exposure', 'post-exposure', 'tdf', '3tc', 'dtg', 'efv', 'nvp', 'azt', 'lpv',
+    'atv', 'tld', 'tle', 'ftc', 'tb', 'ptb', 'eptb', 'tuberculo[a-z]*', 'genexpert', 'gene xpert', 'afb',
+    'acid[- ]fast', 'mantoux', 'tuberculin', 'rhze', 'rhz', 'rh', 'inh', 'dots', 'psych[a-z]*', 'schizo[a-z]*',
+    'bipolar', 'depressi[a-z]*', 'mania', 'manic', 'anxiety', 'ssri', 'antipsychotic[a-z]*', 'sickle[a-z]*', 'scd',
+    'sca', 'hbss', 'hb ss', 'genotype', 'electrophoresis'
+      ]::text[] || array(select regexp_replace(brand, '[ -]', '[ -]?', 'g') from unnest(array[ -- brands
+    'atripla', 'truvada', 'descovy', 'kaletra', 'aluvia', 'biktarvy', 'triumeq', 'combivir', 'trizivir', 'symfi',
+    'symfi lo', 'odefsey', 'genvoya', 'stribild', 'juluca', 'dovato', 'complera', 'eviplera', 'epzicom', 'kivexa',
+    'epivir', 'retrovir', 'viread', 'vemlidy', 'emtriva', 'ziagen', 'sustiva', 'stocrin', 'viramune', 'isentress',
+    'tivicay', 'prezista', 'prezcobix', 'reyataz', 'evotaz', 'norvir', 'intelence', 'edurant', 'selzentry',
+    'celsentri', 'fuzeon', 'rukobia', 'cabenuva', 'vocabria', 'apretude', 'delstrigo', 'pifeltro', 'symtuza',
+    'cimduo', 'temixys', 'triomune', 'duovir', 'duovir-n', 'lamivir', 'viraday', 'teevir', 'acriptega', 'avonza',
+    'tenvir', 'tenvir-em', 'ricovir', 'ricovir-em', 'rifinah', 'rifater', 'rimactane', 'rifadin', 'myambutol',
+    'sirturo', 'deltyba', 'priftin', 'mycobutin', 'akurit', 'akurit-4', 'forecox', 'voractiv', 'rimstar',
+    'rifafour', 'dovprela', 'lamprene', 'trecator', 'largactil', 'haldol', 'serenace', 'modecate', 'zyprexa',
+    'risperdal', 'seroquel', 'abilify', 'clozaril', 'stelazine', 'depixol', 'fluanxol', 'clopixol', 'invega',
+    'geodon', 'orap', 'melleril', 'priadel', 'camcolit', 'valium', 'ativan', 'xanax', 'lexotan', 'librium',
+    'rivotril', 'klonopin', 'mogadon', 'restoril', 'stilnox', 'ambien', 'imovane', 'tryptizol', 'elavil',
+    'tofranil', 'anafranil', 'prozac', 'zoloft', 'paxil', 'seroxat', 'celexa', 'cipramil', 'lexapro', 'cipralex',
+    'luvox', 'faverin', 'remeron', 'effexor', 'cymbalta', 'desyrel', 'ritalin', 'concerta', 'strattera', 'hydrea',
+    'siklos', 'droxia', 'oxbryta', 'adakveo', 'endari', 'niprisan', 'nicosan', 'ciklavit'
+      ]::text[]) brand), '|') || ')($|[^a-z0-9])'), false)
+$$;
+
 create function ocr.record_correction_observations(requested_validation_id uuid, requested_observations jsonb)
 returns integer
 language plpgsql volatile security definer
@@ -250,7 +313,8 @@ begin
            or jsonb_typeof(entry -> 'suggestValue') not in ('string', 'null')
            or (jsonb_typeof(entry -> 'suggestValue') = 'string'
                and (length(entry ->> 'suggestValue') not between 1 and 120
-                    or entry ->> 'suggestValue' !~ '^[A-Za-z0-9][A-Za-z0-9 .,+/%()''-]*$'))) then
+                    or entry ->> 'suggestValue' !~ '^[A-Za-z0-9][A-Za-z0-9 .,+/%()''-]*$'
+                    or ocr.learning_value_sensitive(entry ->> 'suggestValue')))) then
     raise exception using errcode = '22023', message = 'Invalid OCR correction observations';
   end if;
   select key_row.key into strict learning_key from ocr.learning_key key_row where key_row.id = 1;
@@ -307,6 +371,7 @@ begin
     execute format('alter table ocr.correction_observations owner to %I', ocr_owner);
     execute format('alter function ocr.record_correction_observations(uuid,jsonb) owner to %I', ocr_owner);
     execute format('alter function ocr.purge_correction_observations(integer) owner to %I', ocr_owner);
+    execute format('alter function ocr.learning_value_sensitive(text) owner to %I', ocr_owner);
   end if;
   execute format('create policy learning_key_owner on ocr.learning_key for all '
     || 'using (current_user = %L) with check (current_user = %L)', ocr_owner, ocr_owner);
@@ -316,10 +381,12 @@ end
 $$;
 
 revoke all on function ocr.record_correction_observations(uuid,jsonb),
-  ocr.purge_correction_observations(integer) from public;
+  ocr.purge_correction_observations(integer), ocr.learning_value_sensitive(text) from public;
 
 comment on function ocr.record_correction_observations(uuid,jsonb) is
   '0118: ocr-api records the corrected fields of one validation (digest of the value read, closed-list value saved or NULL, staff HMAC), after the validation committed, in its own transaction; purges rows older than 180 days.';
+comment on function ocr.learning_value_sensitive(text) is
+  '0118: whether a value stands for a sensitive class (ARVs and HIV, TB, psychiatric, sickle cell; ocr-api''s list hid.ocr.sensitive/v2: generic names anywhere, brand and word patterns as whole words). record_correction_observations refuses such a suggestValue. Granted to no role.';
 comment on function ocr.purge_correction_observations(integer) is
   '0118: the OCR worker deletes correction observations older than 180 days, oldest first, up to the limit.';
 
@@ -357,13 +424,20 @@ begin
      and (not proc.prosecdef or proc.proowner <> ocr_owner or proc.proconfig is null
           or proc.proconfig[1] not like 'search_path=pg_catalog, ocr, %');
   if mismatch is not null then mismatch := 'attributes of ' || mismatch; end if;
+  if mismatch is null and not exists (
+       select 1 from pg_proc proc where proc.oid = 'ocr.learning_value_sensitive(text)'::regprocedure
+          and not proc.prosecdef and proc.proowner = ocr_owner and proc.provolatile = 'i'
+          and proc.proconfig = array['search_path=pg_catalog, pg_temp']) then
+    mismatch := 'attributes of ocr.learning_value_sensitive(text)';
+  end if;
   if mismatch is null then
     select string_agg(format('%s to %s', proc.oid::regprocedure, coalesce(grantee.rolname, 'PUBLIC')), '; ')
       into mismatch
       from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) privilege
       left join pg_roles grantee on grantee.oid = privilege.grantee
      where proc.pronamespace = 'ocr'::regnamespace
-       and proc.proname in ('record_correction_observations', 'purge_correction_observations')
+       and proc.proname in ('record_correction_observations', 'purge_correction_observations',
+         'learning_value_sensitive')
        and privilege.grantee <> proc.proowner
        and (proc.proname, coalesce(grantee.rolname, 'PUBLIC')) not in (
          ('record_correction_observations', 'hid_ocr_runtime'),

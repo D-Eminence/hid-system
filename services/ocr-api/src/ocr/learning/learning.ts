@@ -164,7 +164,7 @@ export function pairsAreSensitive(pairs: readonly FieldPair[]): boolean {
  * different values (or one to a value off the lists) are one conflict.
  */
 export function observationsFor(pairs: readonly FieldPair[],
-  shown: ReadonlyMap<string, ItemSuggestion> = new Map()): Observation[] {
+  shown: ReadonlyMap<string, Pick<ShownSuggestion, 'field'>> = new Map()): Observation[] {
   const byKey = new Map<string, Observation>();
   for (const pair of pairs) {
     if (shown.get(pair.itemId)?.field === pair.field) continue;
@@ -229,11 +229,27 @@ export function itemSuggestions(keys: readonly SuggestionKey[], rules: readonly 
   return shown;
 }
 
+/** A suggestion the website displayed beside one item's field (the validation request's shownSuggestions). */
+export interface ShownSuggestion { itemId: string; ruleId: string; field: LearningField; value: string }
+
+/**
+ * The displayed suggestions by item id (the first per item, as the website shows one per item); a sensitive value is
+ * dropped, as it is never shown.
+ */
+export function displayedSuggestions(list: readonly ShownSuggestion[]): Map<string, ShownSuggestion> {
+  const byItem = new Map<string, ShownSuggestion>();
+  for (const suggestion of list.slice(0, 200)) {
+    if (!byItem.has(suggestion.itemId) && !valueIsSensitive(suggestion.value)) byItem.set(suggestion.itemId, suggestion);
+  }
+  return byItem;
+}
+
 /**
  * Whether staff took each suggestion that was shown on a linked item: taken when the saved value is the suggested
  * list value. One outcome per rule (not taken wins: the database records one showing per rule and validation).
  */
-export function showingsFor(pairs: readonly FieldPair[], shown: ReadonlyMap<string, ItemSuggestion>):
+export function showingsFor(pairs: readonly FieldPair[],
+  shown: ReadonlyMap<string, Pick<ShownSuggestion, 'ruleId' | 'field' | 'value'>>):
   { ruleId: string; outcome: 'accepted' | 'rejected' }[] {
   const outcomes = new Map<string, 'accepted' | 'rejected'>();
   for (const pair of pairs) {

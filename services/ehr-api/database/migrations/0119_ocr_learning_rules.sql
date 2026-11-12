@@ -31,6 +31,21 @@
 --    - ocr.learning_switches (scope facility | platform, facility_id (NULL
 --      exactly for platform), enabled, reason, set_by_account_id, set_at;
 --      unique per scope and facility). No row: on.
+--    - ocr.quality_summary_runs (transaction_id xid8 primary key,
+--      started_at): a platform quality-summary read in progress. Only
+--      ocr.review_outcome_summary writes it, one row for its own transaction,
+--      inserted just before its read of ocr.validations and deleted just
+--      after; so no row outlives that read (a rollback removes it too).
+--    And one SELECT policy on ocr.validations,
+--    ocr_validations_quality_summary, for the OCR functions' owner only
+--    (TO that role): a row is visible while this transaction holds a summary
+--    run. ocr.validations forces row-level security and its staff policy
+--    admits only the session facility's rows, so without it the platform
+--    summary, which runs as that owner in a platform session (no facility),
+--    read nothing where the owner is neither superuser nor BYPASSRLS, as in
+--    production (review of 2026-11-12, the same class as 0110). Every other
+--    function of that owner still reads only the session facility's rows:
+--    no other function writes a run row.
 -- 2. Functions (SECURITY DEFINER, search_path pinned, owned by the OCR
 --    functions' owner, EXECUTE revoked from PUBLIC):
 --    - ocr.learning_evaluate(field, digest): the switch-on reckoning for one
@@ -88,7 +103,8 @@
 --      week, facility and prompt version. A group under 20 items (reviews)
 --      is one row with measure 'suppressed' and value 0. Codes outside
 --      ^[a-z][a-z0-9_]{0,63}$ count as 'other'. One platform audit row
---      admin.ocr.quality-summary.read with the range and counts.
+--      admin.ocr.quality-summary.read with the range and counts. It reads
+--      every facility's validations inside a summary run (section 1).
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): 0118 applied (its two command bodies by md5);
@@ -107,8 +123,11 @@
 --    exist, and in runtime-grants.sql, which gains the same 0119 block).
 -- 4. Post-checks: attributes, owners, ACLs, row-level security.
 --
--- Locks: beyond ACCESS SHARE, only the three new tables and their indexes and
--- SHARE ROW EXCLUSIVE on identity.facilities (the foreign keys); no row of an
+-- Locks: beyond ACCESS SHARE, only the four new tables and their indexes,
+-- SHARE ROW EXCLUSIVE on identity.facilities (the foreign keys) and, for the
+-- new policy, ACCESS EXCLUSIVE on ocr.validations, taken NOWAIT every 10 ms
+-- for at most 5 seconds (else 55P03, nothing applied) just before the policy
+-- and held to the end of this migration's transaction; no row of an
 -- existing table is read or written.
 --
 -- Old services on this schema: nothing existing changes; today's ocr-api and
@@ -125,7 +144,7 @@ begin
   if to_regclass('ocr.correction_observations') is null or to_regclass('ocr.learning_key') is null
      or (select md5(prosrc) from pg_proc
           where oid = to_regprocedure('ocr.record_correction_observations(uuid,jsonb)'))
-        is distinct from 'f5659670a058931986dfe23a8a4b8268'
+        is distinct from '911db547172c01a416044e1b5cd545a9'
      or (select md5(prosrc) from pg_proc
           where oid = to_regprocedure('ocr.purge_correction_observations(integer)'))
         is distinct from '496b287474cd30e3a0eeca5ff24ce7ca'
@@ -136,6 +155,7 @@ begin
   if to_regclass('ocr.learning_rules') is not null
      or to_regclass('ocr.learning_rule_showings') is not null
      or to_regclass('ocr.learning_switches') is not null
+     or to_regclass('ocr.quality_summary_runs') is not null
      or to_regprocedure('ocr.learning_evaluate(text,bytea)') is not null
      or to_regprocedure('ocr.learning_after_validation(uuid,jsonb)') is not null
      or to_regprocedure('ocr.reading_suggestions(jsonb)') is not null
@@ -207,6 +227,20 @@ begin
     raise exception using errcode = '55000',
       message = format('0119: an object this migration relies on differs from what it expects: %s', mismatch);
   end if;
+  -- ocr.validations' row-level security is 0013's: forced, and exactly its staff
+  -- read and insert policies (the summary's policy is added beside them).
+  if not (select relrowsecurity and relforcerowsecurity from pg_class where oid = 'ocr.validations'::regclass)
+     or (select array_agg(policy_row.polname::text || ':' || policy_row.polcmd::text || ':'
+                          || coalesce(pg_get_expr(policy_row.polqual, policy_row.polrelid), '')
+                          || ':' || coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '')
+                          order by policy_row.polname)
+           from pg_policy policy_row where policy_row.polrelid = 'ocr.validations'::regclass)
+        is distinct from array[
+          'ocr_validations_staff:r:(facility_id = platform.current_facility_id()):',
+          'ocr_validations_staff_insert:a::(facility_id = platform.current_facility_id())'] then
+    raise exception using errcode = '55000',
+      message = '0119: ocr.validations'' row-level security is not 0013''s';
+  end if;
   -- d. One owner for ocr.jobs, ocr.validations and the 0118 tables.
   ocr_owner := (select relowner from pg_class where oid = 'ocr.jobs'::regclass);
   if exists (select 1 from pg_class where oid in ('ocr.validations'::regclass,
@@ -275,18 +309,30 @@ create table ocr.learning_switches (
 create unique index ocr_learning_switches_key on ocr.learning_switches
   (scope, coalesce(facility_id, '00000000-0000-0000-0000-000000000000'::uuid));
 
+-- A platform quality-summary read in progress (one row per transaction, for
+-- the length of that read only).
+create table ocr.quality_summary_runs (
+  transaction_id xid8 primary key,
+  started_at timestamptz not null default clock_timestamp()
+);
+
+alter table ocr.quality_summary_runs enable row level security;
+alter table ocr.quality_summary_runs force row level security;
 alter table ocr.learning_rules enable row level security;
 alter table ocr.learning_rules force row level security;
 alter table ocr.learning_rule_showings enable row level security;
 alter table ocr.learning_rule_showings force row level security;
 alter table ocr.learning_switches enable row level security;
 alter table ocr.learning_switches force row level security;
-revoke all on ocr.learning_rules, ocr.learning_rule_showings, ocr.learning_switches from public;
+revoke all on ocr.learning_rules, ocr.learning_rule_showings, ocr.learning_switches, ocr.quality_summary_runs
+  from public;
 
 comment on table ocr.learning_rules is
   '0119: an OCR correction rule (key: field class and a digest of the value read; suggestion: a closed-list value). Switched on by learning_evaluate only (>= 5 identical corrections, >= 3 staff, no conflict; platform: >= 2 facilities); retired after 3 of its last 10 showings were not taken.';
 comment on table ocr.learning_rule_showings is
   '0119: whether staff took a rule''s suggestion (saved value = suggestion) on one validation. Kept 180 days.';
+comment on table ocr.quality_summary_runs is
+  '0119: a platform quality-summary read in progress, one row for its transaction, written by ocr.review_outcome_summary just before its read of ocr.validations and deleted just after. The policy ocr_validations_quality_summary admits the OCR owner to every facility''s validations only while such a row exists.';
 comment on table ocr.learning_switches is
   '0119: the owner kill switch of each rule set (the platform''s, each facility''s). No row: on.';
 
@@ -648,6 +694,9 @@ begin
   if to_regclass('pg_temp.review_outcome_summary_rows') is not null then
     drop table pg_temp.review_outcome_summary_rows;
   end if;
+  -- The read of every facility's validations happens inside a summary run
+  -- (the policy ocr_validations_quality_summary), ended right after it.
+  insert into ocr.quality_summary_runs (transaction_id) values (pg_current_xact_id());
   create temporary table review_outcome_rows on commit drop as
     select to_char(validation.created_at at time zone 'UTC', 'IYYY-"W"IW') as week, validation.facility_id,
            validation.provenance -> 'reviewOutcome' as outcome
@@ -656,6 +705,7 @@ begin
        and validation.created_at < (requested_to + 1)::timestamp at time zone 'UTC'
        and validation.provenance -> 'reviewOutcome' ->> 'schema' = 'hid.ocr.review-outcome/v1'
      order by validation.created_at limit 50001;
+  delete from ocr.quality_summary_runs run where run.transaction_id = pg_current_xact_id();
   select count(*) into reviews_read from review_outcome_rows;
   truncated := reviews_read > 50000;
   if truncated then
@@ -774,6 +824,7 @@ begin
     execute format('alter table ocr.learning_rules owner to %I', ocr_owner);
     execute format('alter table ocr.learning_rule_showings owner to %I', ocr_owner);
     execute format('alter table ocr.learning_switches owner to %I', ocr_owner);
+    execute format('alter table ocr.quality_summary_runs owner to %I', ocr_owner);
     execute format('alter function ocr.learning_evaluate(text,bytea) owner to %I', ocr_owner);
     execute format('alter function ocr.learning_after_validation(uuid,jsonb) owner to %I', ocr_owner);
     execute format('alter function ocr.reading_suggestions(jsonb) owner to %I', ocr_owner);
@@ -788,8 +839,38 @@ begin
     || 'using (current_user = %L) with check (current_user = %L)', ocr_owner, ocr_owner);
   execute format('create policy learning_switches_owner on ocr.learning_switches for all '
     || 'using (current_user = %L) with check (current_user = %L)', ocr_owner, ocr_owner);
+  execute format('create policy quality_summary_runs_owner on ocr.quality_summary_runs for all to %I '
+    || 'using (true) with check (true)', ocr_owner);
 end
 $$;
+
+-- The summary's read of ocr.validations: for the OCR owner only, while this
+-- transaction holds a summary run. ACCESS EXCLUSIVE for the policy, bounded.
+do $$
+declare
+  ocr_owner name := (select pg_get_userbyid(relowner) from pg_class where oid = 'ocr.jobs'::regclass);
+  attempt integer := 0;
+begin
+  loop
+    attempt := attempt + 1;
+    begin
+      lock table ocr.validations in access exclusive mode nowait;
+      exit;
+    exception when lock_not_available then
+      if attempt >= 500 then
+        raise exception using errcode = '55P03',
+          message = '0119: ocr.validations stayed busy for 5 seconds; run the release again later';
+      end if;
+      perform pg_sleep(0.01);
+    end;
+  end loop;
+  execute format('create policy ocr_validations_quality_summary on ocr.validations for select to %I '
+    || 'using (exists (select 1 from ocr.quality_summary_runs run '
+    || 'where run.transaction_id = pg_current_xact_id_if_assigned()))', ocr_owner);
+end
+$$;
+comment on policy ocr_validations_quality_summary on ocr.validations is
+  '0119: the OCR functions'' owner reads every facility''s validations only while this transaction holds a row in ocr.quality_summary_runs, which only ocr.review_outcome_summary writes, for its read alone.';
 
 revoke all on function ocr.learning_evaluate(text,bytea), ocr.learning_after_validation(uuid,jsonb),
   ocr.reading_suggestions(jsonb), ocr.set_learning_switch(text,uuid,boolean,text), ocr.learning_overview(),
@@ -872,12 +953,29 @@ begin
   end if;
   if mismatch is null and (select count(*) from pg_class class_row
         where class_row.oid in ('ocr.learning_rules'::regclass, 'ocr.learning_rule_showings'::regclass,
-                                'ocr.learning_switches'::regclass)
+                                'ocr.learning_switches'::regclass, 'ocr.quality_summary_runs'::regclass)
           and class_row.relowner = ocr_owner and class_row.relrowsecurity and class_row.relforcerowsecurity
           and (select count(*) from pg_policy policy_row where policy_row.polrelid = class_row.oid) = 1
           and not exists (select 1 from aclexplode(coalesce(class_row.relacl, acldefault('r', class_row.relowner))) privilege
-                           where privilege.grantee <> class_row.relowner)) <> 3 then
+                           where privilege.grantee <> class_row.relowner)) <> 4 then
     mismatch := 'the owner, row-level security, policy or ACL of the 0119 tables';
+  end if;
+  if mismatch is null and (
+       (select count(*) from pg_policy policy_row where policy_row.polrelid = 'ocr.validations'::regclass) <> 3
+       or not exists (select 1 from pg_policy policy_row
+                       where policy_row.polrelid = 'ocr.validations'::regclass
+                         and policy_row.polname = 'ocr_validations_quality_summary'
+                         and policy_row.polcmd = 'r' and policy_row.polpermissive
+                         and policy_row.polroles = array[ocr_owner] and policy_row.polwithcheck is null
+                         and pg_get_expr(policy_row.polqual, policy_row.polrelid) =
+                           '(EXISTS ( SELECT 1
+   FROM ocr.quality_summary_runs run
+  WHERE (run.transaction_id = pg_current_xact_id_if_assigned())))')
+       or not exists (select 1 from pg_policy policy_row
+                       where policy_row.polrelid = 'ocr.quality_summary_runs'::regclass
+                         and policy_row.polname = 'quality_summary_runs_owner' and policy_row.polcmd = '*'
+                         and policy_row.polroles = array[ocr_owner])) then
+    mismatch := 'the policy ocr_validations_quality_summary or quality_summary_runs_owner';
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000', message = format('0119: post-check failed: %s', mismatch);
