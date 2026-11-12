@@ -15,6 +15,12 @@ export interface OutreachRegistrationCase {
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set on a new registration in a campaign: another registration in the same
+   * campaign has the same phone, or the same name and age. A hint to check,
+   * never a refusal.
+   */
+  possibleDuplicate?: boolean;
 }
 
 export interface RegistrationRow {

@@ -119,6 +119,8 @@ import { SupportHealthIdService } from './support-health-id.service';
       },
     },
   ],
-  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter],
+  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter,
+    // The public application quota digest, shared with open sign-up on outreach.
+    OrganizationProfileCompletionService],
 })
 export class IdentityModule {}

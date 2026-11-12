@@ -7,6 +7,7 @@ import { ConsentStatusDto } from './dto/consent-status.dto';
 import { PatientLookupDto } from './dto/patient-lookup.dto';
 import { IdentityService } from './identity.service';
 import { WorkloadAuthService } from '../auth/workload-auth.service';
+import { OUTREACH_TENANT_ROLES } from '../outreach-organisers/outreach-invitations.service';
 import { DomainProblem } from '../common/problem';
 
 @Controller('identity')
@@ -140,6 +141,14 @@ export class IdentityController {
       request.header('x-hid-service-token'),
     );
     const context = requireRequestContext(request, input.purpose);
+    // Open sign-up on outreach. (plan PR-3): an outreach organisation's
+    // organisers and helpers never link anyone to a Health ID. The person
+    // links their own Health ID later, from their own account. Its roles
+    // exist only at outreach organisations (the database's fence).
+    if (context.actor.facility?.roles.some((role) => OUTREACH_TENANT_ROLES.has(role))) {
+      throw new DomainProblem(403, 'OUTREACH_TENANT_NO_HEALTH_ID_LINK',
+        'Outreach groups cannot link people to a Health ID. The person can link their own Health ID later from their account.');
+    }
     return this.identity.authorize(input.patientId, input.scope, input.purpose, context);
   }
 

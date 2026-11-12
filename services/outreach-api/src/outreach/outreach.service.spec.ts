@@ -104,11 +104,11 @@ describe('OutreachService', () => {
       ends_at: new Date(Date.now() + 60_000),
     }] }).mockResolvedValueOnce({ rows: [{ ...row, campaign_id: ids.campaign }] })
       .mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ found: false }] });
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
     await expect(new OutreachService(database as never, audit as never, identity as never)
       .create(campaignInput, 'campaign-idempotency-key', context))
-      .resolves.toMatchObject({ id: ids.case, campaignId: ids.campaign });
+      .resolves.toMatchObject({ id: ids.case, campaignId: ids.campaign, possibleDuplicate: false });
     expect(query.mock.calls[1][0]).toContain('member.membership_id=$3');
     expect(query.mock.calls[1][1]).toEqual([ids.campaign, ids.facility, ids.membership]);
     expect(query.mock.calls[2][1][10]).toBe(ids.campaign);
