@@ -210,16 +210,20 @@ begin
 end $$;
 
 -- Case 4: a campaign-linked Outreach registration share-locks its campaign,
--- which passes only the campaign UPDATE policy (outreach.campaign.write). A role
--- that may register without that permission would have every campaign-linked
--- registration refused, so every such role must hold it.
+-- which passes only a campaign UPDATE policy: 0038's (outreach.campaign.write)
+-- or, since 0115, outreach_campaigns_member_lock (a member of the campaign who
+-- holds outreach.registration.write). A role that may register without
+-- campaign.write needs that policy; outreach_volunteer (0115) is the only one.
 do $$
 declare missing text := (
   select string_agg(registration.role_code, ', ' order by registration.role_code)
     from auth.role_permissions registration
    where registration.permission_code = 'outreach.registration.write'
      and not exists (select 1 from auth.role_permissions campaign
-       where campaign.role_code = registration.role_code and campaign.permission_code = 'outreach.campaign.write'));
+       where campaign.role_code = registration.role_code and campaign.permission_code = 'outreach.campaign.write')
+     and not (registration.role_code = 'outreach_volunteer'
+       and exists (select 1 from pg_policy where polrelid = 'outreach.campaigns'::regclass
+                    and polname = 'outreach_campaigns_member_lock' and polcmd = 'w' and polpermissive)));
 begin
   if missing is not null then
     raise exception 'Roles with outreach.registration.write but not outreach.campaign.write: %', missing;

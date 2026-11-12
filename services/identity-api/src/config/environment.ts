@@ -76,6 +76,11 @@ const environmentSchema = z.object({
   // lifetime is capped at it (TokenService), never refused at boot.
   AUTH_PATIENT_REFRESH_TTL_SECONDS: z.coerce.number().int().min(900).max(604800).default(604800),
   AUTH_PATIENT_ABSOLUTE_TTL_SECONDS: z.coerce.number().int().min(3600).max(2592000).default(2592000),
+  // Staff sessions used from an outreach. site (plan PR-3, field critique): a
+  // short idle lock, 15 minutes by default, because volunteers share phones
+  // and laptops at events. Applied at sign-in and at every refresh whose
+  // Origin is an outreach. host; the absolute lifetime is the staff one.
+  AUTH_OUTREACH_REFRESH_TTL_SECONDS: z.coerce.number().int().min(300).max(28800).default(900),
   AUTH_LOGIN_PEPPER: optionalString,
   AUTH_LOGIN_PEPPER_VERSION: z.coerce.number().int().min(1).max(32767).default(1),
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('hid_access'),
@@ -123,6 +128,10 @@ const environmentSchema = z.object({
   EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS: pilotAccountIds,
   // Interval for dispatching emergency-contact notifications while delivery is
   // enabled (owner decision O9: every 60 s). Zero disables it.
+  // The outreach retention sweeper (owner decision 3 of 11 Nov 2026:
+  // outreach registrations never linked to a Health ID are kept 1 year, then
+  // redacted by 0116's sweep). 0 turns the timer off; never under NODE_ENV=test.
+  OUTREACH_RETENTION_SWEEP_SECONDS: z.coerce.number().int().min(0).max(86_400).default(3_600),
   PATIENT_LIFECYCLE_SWEEP_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
   // Patient sharing (B4, migration 0095): a code default, on; production's
   // task definitions set no new key. While false, the patient and staff share

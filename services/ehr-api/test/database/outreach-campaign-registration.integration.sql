@@ -47,6 +47,9 @@ begin
     grant usage on schema outreach, platform, auth, identity to outreach_0110_suite_owner;
     grant select, update on outreach.campaigns, outreach.campaign_members to outreach_0110_suite_owner;
     grant execute on function outreach.context_allows(uuid, text) to outreach_0110_suite_owner;
+    -- Since 0115/0116 the campaign policies and this trigger also call these.
+    grant execute on function outreach.privileged_run_active(text), outreach.registration_campaign_member(uuid, uuid)
+      to outreach_0110_suite_owner;
     alter function outreach.validate_registration_campaign_write() owner to outreach_0110_suite_owner;
     raise notice 'outreach-campaign-registration: the trigger is lent to outreach_0110_suite_owner (owner % bypasses RLS)',
       owner_role::regrole;
@@ -77,7 +80,7 @@ begin
      or position('of campaign, member' in pg_get_functiondef('outreach.validate_registration_campaign_write()'::regprocedure)) > 0
      or (select md5(prosrc) from pg_proc
           where oid = 'outreach.validate_registration_campaign_write()'::regprocedure)
-        <> '69469315f04554d2639dfa9f83591d4d' then
+        <> '8812e9009aed4841b99fae04d5525d7b' then  -- 0116 (outreach retention) let a redaction through; was 0110's 69469315f04554d2639dfa9f83591d4d
     raise exception 'outreach.validate_registration_campaign_write must lock the campaign only (FOR SHARE OF campaign), not the membership';
   end if;
   if (select count(*) from pg_trigger

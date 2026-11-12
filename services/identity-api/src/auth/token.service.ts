@@ -32,6 +32,20 @@ export interface SessionEventMetadata {
   userAgent?: string;
   principalHmac?: string;
   pepperVersion?: number;
+  /** The browser's Origin, when it sent one: an outreach. origin gets the short idle lock. */
+  origin?: string;
+}
+
+/** Whether an Origin is an outreach. site (production, staging or a sub-environment). */
+export function isOutreachOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  try {
+    const url = new URL(origin);
+    return url.protocol === 'https:' && url.hostname.startsWith('outreach.')
+      && url.hostname.endsWith('healthidentitydirectory.com');
+  } catch {
+    return false;
+  }
 }
 
 @Injectable()
@@ -69,7 +83,7 @@ export class TokenService {
     const refreshToken = this.newRefreshToken(sessionId, authenticationMethod);
     const csrfToken = this.deriveRefreshCsrf(refreshToken);
     const now = new Date();
-    const lifetimes = this.lifetimes(actor.kind ?? 'staff');
+    const lifetimes = this.lifetimes(actor.kind ?? 'staff', event.origin);
     const expiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
     const absoluteExpiresAt = new Date(now.getTime() + lifetimes.absoluteSeconds * 1_000);
     // Never past the family's absolute expiry (auth.sessions CHECK, 0002).
@@ -187,7 +201,7 @@ export class TokenService {
     const csrfToken = this.deriveRefreshCsrf(newRefreshToken);
     const accessExpiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
     const refreshExpiresAt = new Date(Math.min(
-      now.getTime() + this.lifetimes(actor.kind ?? 'staff').refreshSeconds * 1_000,
+      now.getTime() + this.lifetimes(actor.kind ?? 'staff', event.origin).refreshSeconds * 1_000,
       oldSession.absolute_expires_at.getTime(),
     ));
     const accessToken = await this.signAccessToken(
@@ -495,14 +509,19 @@ export class TokenService {
    * A session's idle (refresh) and absolute lifetimes by its kind. Patients:
    * 7 days idle, 30 days at most (owner decision of 2026-10-28); staff and
    * platform sessions keep their own pair (8 hours and 24 hours by default).
-   * The access token's lifetime is the same for both.
+   * The access token's lifetime is the same for both. A staff session
+   * signed in or refreshed from an outreach. site idles out after
+   * AUTH_OUTREACH_REFRESH_TTL_SECONDS (15 minutes by default) instead.
    */
-  private lifetimes(kind: 'staff' | 'patient'): { refreshSeconds: number; absoluteSeconds: number } {
-    return kind === 'patient'
-      ? { refreshSeconds: this.environment.AUTH_PATIENT_REFRESH_TTL_SECONDS,
-          absoluteSeconds: this.environment.AUTH_PATIENT_ABSOLUTE_TTL_SECONDS }
-      : { refreshSeconds: this.environment.AUTH_REFRESH_TTL_SECONDS,
-          absoluteSeconds: this.environment.AUTH_ABSOLUTE_TTL_SECONDS };
+  private lifetimes(kind: 'staff' | 'patient', origin?: string): { refreshSeconds: number; absoluteSeconds: number } {
+    if (kind === 'patient') {
+      return { refreshSeconds: this.environment.AUTH_PATIENT_REFRESH_TTL_SECONDS,
+        absoluteSeconds: this.environment.AUTH_PATIENT_ABSOLUTE_TTL_SECONDS };
+    }
+    const refreshSeconds = isOutreachOrigin(origin)
+      ? Math.min(this.environment.AUTH_OUTREACH_REFRESH_TTL_SECONDS, this.environment.AUTH_REFRESH_TTL_SECONDS)
+      : this.environment.AUTH_REFRESH_TTL_SECONDS;
+    return { refreshSeconds, absoluteSeconds: this.environment.AUTH_ABSOLUTE_TTL_SECONDS };
   }
 
   private newRefreshToken(sessionId: string, method: 'local' | 'oidc'): string {
