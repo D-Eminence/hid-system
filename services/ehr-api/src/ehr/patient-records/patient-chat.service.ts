@@ -1,16 +1,17 @@
 import type { ChatAccess,ChatAudience } from './chat-access';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import { getEnvironment } from '../../config/environment';
 import { DatabaseService } from '../../database/database.service';
 import { BedrockAiService } from './bedrock-ai.service';
-import { ClaudeAiService, type ConversationExchange } from './claude-ai.service';
+import { ClaudeAiService, ClaudeCallError, type ConversationExchange } from './claude-ai.service';
 import { PatientRecordsService } from './patient-records.service';
 import { PatientEvidenceService } from './patient-evidence.service';
-import { binding,chunks,evidenceKey,originLabel,type Coverage,type Evidence,type EvidenceBinding } from './patient-evidence.types';
-import { selectEvidence,answerCoverage,boundEvidence } from './patient-evidence.selection';
+import { binding,chunks,evidenceKey,isLabUnavailable,originLabel,type Coverage,type Evidence,type EvidenceBinding } from './patient-evidence.types';
+import { selectEvidence,answerCoverage,boundEvidence,withTemporalEvidence } from './patient-evidence.selection';
+import { removeDashesWithin } from './chat-format';
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
 import { citedNumbers,conversationLines,patientLines,withPatientLines } from './patient-chat-safety';
 import { redactIdentifiers } from './patient-evidence.policy';
@@ -22,9 +23,30 @@ const LOCAL_KINDS = ['note','encounter','diagnosis','prescription','investigatio
 const LOCAL_PAGE_LIMIT = 2000;
 /** A search question about the patient's age or sex, answered from the age-and-sex profile. */
 const AGE_OR_SEX = /\b(?:age|aged|old|older|born|birthday|sex|gender|male|female|man|woman|boy|girl)\b/i;
+/**
+ * The whole turn's time limit. Staff stay under the gateway's 50-second read timeout for their chat
+ * route, so a slow turn ends here, with this service's own answer and a logged reason, not at the gateway.
+ */
+const TURN_LIMIT_MS: Record<ChatAudience, number> = { patient: 60_000, staff: 48_000 };
+
+/**
+ * Why a turn failed, as fixed words only: never the error's message, the question, record text, the
+ * model's words or any identifier, because a message from a model, a parser or the database can carry them.
+ */
+export function chatFailure(error: unknown): { category: string; exceptionType: string; providerStatus?: number } {
+  // Read by shape, not instanceof: a timeout is a DOMException, which may come from another realm.
+  const object = typeof error === 'object' && error !== null ? error as { name?: unknown; constructor?: { name?: unknown } } : undefined;
+  const exceptionType = typeof object?.constructor?.name === 'string' && object.constructor.name ? object.constructor.name : 'UnknownException';
+  if (error instanceof ClaudeCallError) {
+    return { category: `model_${error.category}`, exceptionType, ...(error.status ? { providerStatus: error.status } : {}) };
+  }
+  if (object?.name === 'TimeoutError' || object?.name === 'AbortError') return { category: 'timeout', exceptionType };
+  return { category: 'other', exceptionType };
+}
 
 @Injectable()
 export class PatientChatService {
+  private readonly logger = new Logger(PatientChatService.name);
   // Per-task admission limit plus gateway limits bound staging requests. This
   // is not a distributed billing limit; multiple replicas have separate quotas.
   private readonly admissions = new Map<string, { until: number; count: number; busy: boolean }>();
@@ -47,6 +69,9 @@ export class PatientChatService {
       throw new DomainProblem(400, 'INVALID_QUESTION', 'A question of 1 to 500 characters is required');
     }
     const audience = this.audienceOf(access);
+    // The whole turn counts against its limit, authorization and history included, so a staff turn
+    // that is slow before the model is asked still ends inside the gateway's 50 seconds.
+    const signal = AbortSignal.timeout(TURN_LIMIT_MS[audience]);
     const authorization = await access.authorize(request);
     // One patient per turn: every later authorization must be for the same patient.
     const turn: ChatAccess = { ...access, authorize: async current => {
@@ -67,7 +92,8 @@ export class PatientChatService {
       // A removed identifier can be longer than what it replaces; the question stays within its 500-character limit.
       const question = clean(typed).slice(0, 500);
       const context = { ...saved, exchanges: saved.exchanges.map(e => ({ ...e, question: clean(e.question), answer: clean(e.answer) })) };
-      const signal = AbortSignal.timeout(60_000);
+      // Authorization, history and cleaning take no signal; stop here if they used up the turn.
+      signal.throwIfAborted();
       const plan = await this.claude.plan(question, context.exchanges, signal, audience);
       let reply: ChatReply; let selected: EvidenceBinding[] = [];
       if (plan.intent === 'conversation') {
@@ -78,6 +104,8 @@ export class PatientChatService {
       } else {
         ({ reply, selected } = await this.answerAuthorized(request, question, plan.query, context.exchanges, environment, signal,plan.recordIntent,turn));
       }
+      // No answer, patient or staff, conversation or record, carries an en or em dash, saved or returned.
+      reply = { ...reply, answer: removeDashesWithin(reply.answer, 4000) };
       // Patients see only cited sources, but saved history stays bound to every selected one,
       // so the exchange is hidden once any of them changes or is withdrawn.
       await turn.history.save(request, generation, question, reply, [...context.bindings, ...selected]);
@@ -85,6 +113,9 @@ export class PatientChatService {
       return { ...reply,sources:reply.sources.map(source=>{const {hash:_hash,...safe}=source as unknown as Record<string,unknown>;return safe;}) };
     } catch (error) {
       if (error instanceof DomainProblem) throw error;
+      // The failure category only, so a 503 can be told apart (time limit, a cut-off or invalid answer,
+      // the provider refusing) without patient data reaching the log.
+      this.logger.warn({ message: 'Record chat unavailable', ...chatFailure(error), audience, correlationId: request.correlationId });
       throw unavailable();
     } finally { release(); }
   }
@@ -145,10 +176,14 @@ export class PatientChatService {
     if(extractionWarnings.length)snapshot.coverage.complete=false;
     let selection=selectEvidence(snapshot.records,recordIntent,searchQuestion);
     if(recordIntent==='search'&&snapshot.records.length)selection=await this.semantic(request,snapshot.records,searchQuestion,environment,signal,access,snapshot.coverage);
+    // A dated question (first, earliest, latest, history) also reads the earliest and latest records of
+    // the kinds it asks about, from the same authorized snapshot: never more than the reader may see.
+    const dated=withTemporalEvidence(snapshot.records,selection.sources,question,selection.partial,searchQuestion);
+    selection={sources:dated.sources,partial:dated.partial};
     const coverage=answerCoverage(snapshot.coverage,selection.sources.length,selection.partial);
     await access.authorize(request);signal.throwIfAborted();
     // Who reads the answer decides the origin wording ("You added this" to the patient, "Added by the patient" to staff).
-    const generated=await this.claude.answer(question,selection.sources,history,signal,coverage,audience);
+    const generated=await this.claude.answer(question,selection.sources,history,signal,coverage,audience,dated.order);
     const citations=[...generated.matchAll(/\[(\d+)\]/g)].map(match=>Number(match[1]));
     const valid=selection.sources.length?citations.length>0&&citations.every(n=>n>=1&&n<=selection.sources.length):citations.length===0;
     // Currentness/authorization is checked before save and return; an index is
@@ -242,7 +277,7 @@ export class PatientChatService {
     const unavailable=coverage?.unavailable??[];
     const local=all.filter(r=>LOCAL_KINDS.includes(r.kind)&&r.kind!=='profile').length;
     const complete=[...(coverage&&local<LOCAL_PAGE_LIMIT?LOCAL_KINDS:['profile']),
-      ...(coverage&&!unavailable.some(u=>u.startsWith('Laboratory'))?['lab_result']:[])];
+      ...(coverage&&!unavailable.some(isLabUnavailable)?['lab_result']:[])];
     const auth=await access.authorize(request);
     await access.transaction(auth,request.correlationId,client=>client.query(`delete from ${access.chunksTable} where patient_id=$1 and
       not(source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($2::text[])) and

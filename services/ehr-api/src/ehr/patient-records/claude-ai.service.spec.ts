@@ -158,3 +158,116 @@ describe('Direct Claude generation contract', () => {
     await expect(new ClaudeAiService().plan('Hello', [], AbortSignal.timeout(1000), 'patient')).rejects.toThrow();
   });
 });
+
+describe('Staff answers get room for a whole-record question; patient limits stay', () => {
+  let fetchMock: jest.SpyInstance;
+  beforeEach(() => { mockEnvironment.ANTHROPIC_PROCESSING_APPROVED = true; fetchMock = jest.spyOn(globalThis, 'fetch'); });
+  afterEach(() => jest.restoreAllMocks());
+  const source = [{ title: 'Synthetic note', content: 'Synthetic' }];
+  // Eight cited paragraphs: about 3,900 characters to read, but over 4,000 as the model's JSON.
+  const eightBlocks = JSON.stringify({ blocks: Array.from({ length: 8 }, (_, i) => ({ kind: 'record', text: String(i).repeat(480), references: [1] })) });
+
+  it('asks staff answers to stay under 3000 characters, and gives patients no such line', async () => {
+    fetchMock.mockResolvedValue(payload(JSON.stringify({ blocks: [{ kind: 'record', text: 'Fact.', references: [1] }] })));
+    await new ClaudeAiService().answer('Summarise', source, [], AbortSignal.timeout(1000), undefined, 'staff');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).system).toContain('Keep the whole answer under 3000 characters');
+    fetchMock.mockResolvedValue(payload(JSON.stringify({ blocks: [{ kind: 'record', text: 'Fact.', references: [1] }] })));
+    await new ClaudeAiService().answer('Summarise', source, [], AbortSignal.timeout(1000), undefined, 'patient');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).system).not.toContain('Keep the whole answer under');
+  });
+  it('sends 2000 output tokens and a 40-second limit for staff, and keeps 1200 and the configured 20 seconds for patients', async () => {
+    const timeout = jest.spyOn(AbortSignal, 'timeout');
+    fetchMock.mockResolvedValue(payload(JSON.stringify({ intent: 'conversation', answer: 'Hello.', query: '' })));
+    await new ClaudeAiService().plan('Hello', [], new AbortController().signal, 'staff');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).max_tokens).toBe(2000);
+    expect(timeout).toHaveBeenLastCalledWith(40_000);
+    fetchMock.mockResolvedValue(payload(JSON.stringify({ intent: 'conversation', answer: 'Hello.', query: '' })));
+    await new ClaudeAiService().plan('Hello', [], new AbortController().signal, 'patient');
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).max_tokens).toBe(1200);
+    expect(timeout).toHaveBeenLastCalledWith(20_000);
+  });
+  it('accepts a staff JSON answer over 4000 raw characters whose answer is within 4000, and still refuses one over 8000', async () => {
+    expect(eightBlocks.length).toBeGreaterThan(4000);
+    fetchMock.mockResolvedValue(payload(eightBlocks));
+    const answer = await new ClaudeAiService().answer('Summarise', source, [], AbortSignal.timeout(1000), undefined, 'staff');
+    expect(answer.length).toBeLessThanOrEqual(4000);
+    fetchMock.mockResolvedValue(payload(JSON.stringify({ blocks: Array.from({ length: 5 }, () => ({ kind: 'record', text: 'w'.repeat(1700), references: [1] })) })));
+    await expect(new ClaudeAiService().answer('Summarise', source, [], AbortSignal.timeout(1000), undefined, 'staff'))
+      .rejects.toMatchObject({ category: 'answer_too_long' });
+    // A plain-text answer (no evidence) keeps the 4000 limit.
+    fetchMock.mockResolvedValue(payload('t'.repeat(4001)));
+    await expect(new ClaudeAiService().answer('Hello', [], [], AbortSignal.timeout(1000), undefined, 'staff'))
+      .rejects.toMatchObject({ category: 'answer_too_long' });
+  });
+  it('keeps the patient answer limit when the raw JSON may be longer', async () => {
+    fetchMock.mockResolvedValue(payload(eightBlocks));
+    await expect(new ClaudeAiService().answer('Summarise', source, [], AbortSignal.timeout(1000), undefined, 'patient'))
+      .rejects.toMatchObject({ category: 'answer_too_long' });
+  });
+  it('names each failure with a fixed category and no model or provider text', async () => {
+    fetchMock.mockResolvedValue(payload('Partial text about a fictional patient', 'max_tokens'));
+    const cut = await new ClaudeAiService().answer('Q', [], [], AbortSignal.timeout(1000), undefined, 'staff').catch(e => e);
+    expect(cut).toMatchObject({ category: 'answer_cut_off' });
+    expect(cut.message).not.toContain('fictional patient');
+    fetchMock.mockResolvedValue(new Response('overloaded: private provider detail', { status: 529 }));
+    const refused = await new ClaudeAiService().plan('Hello', [], AbortSignal.timeout(1000), 'staff').catch(e => e);
+    expect(refused).toMatchObject({ category: 'request_failed', status: 529 });
+    expect(refused.message).not.toContain('private provider detail');
+    fetchMock.mockResolvedValue(payload('{"blocks": [{"kind": "record", "text": "Adaeze Okafor'));
+    const invalid = await new ClaudeAiService().answer('Q', source, [], AbortSignal.timeout(1000), undefined, 'staff').catch(e => e);
+    expect(invalid).toMatchObject({ category: 'output_invalid' });
+    expect(invalid.message).not.toContain('Adaeze');
+  });
+  describe('answer layout and dashes', () => {
+    const EM = '\u2014'; const EN = '\u2013';
+    const diagnosis = evidence({ kind: 'diagnosis', id: '22222222-2222-4222-8222-222222222301', version: '1', title: 'Iron deficiency anaemia',
+      recordedAt: '2026-09-21T00:00:00Z', effectiveAt: '2026-09-21T00:00:00Z', provenance: 'Clinician recorded condition', quality: 'confirmed',
+      fields: { condition: 'Iron deficiency anaemia' } });
+    it.each(['patient', 'staff'] as const)('asks the %s answer for a bold direct answer, headings, lists and no dashes', async audience => {
+      fetchMock.mockResolvedValue(payload(JSON.stringify({ blocks: [{ kind: 'record', text: 'Fact.', references: [1] }] })));
+      await new ClaudeAiService().answer('What was the first diagnosis?', [diagnosis], [], AbortSignal.timeout(1000), undefined, audience, 'earliest');
+      const system: string = JSON.parse(fetchMock.mock.calls[0][1].body).system;
+      expect(system).toContain('Start with the direct answer in one or two sentences, in bold');
+      expect(system).toContain('"### What the record shows"');
+      expect(system).toContain('each line starting with "- "');
+      expect(system).toContain('Never use the en dash or em dash characters');
+      expect(system).toContain('A heading is its own kind=explanation block');
+      expect(system).toContain('older history may exist outside Health ID');
+      expect(system).not.toMatch(/[\u2013\u2014]/);
+      // The safety rules are still there.
+      expect(system).toContain('Do not diagnose');
+      expect(system).toContain('Never invent patient findings');
+    });
+    it('keeps the plan prompt plain and sends a first-diagnosis question to the condition timeline', async () => {
+      fetchMock.mockResolvedValue(payload(JSON.stringify({ intent: 'conversation', answer: `Hello ${EM} how can I help?`, query: '' })));
+      const plan = await new ClaudeAiService().plan('Hello', [], AbortSignal.timeout(1000), 'patient');
+      expect(plan).toEqual({ intent: 'conversation', answer: 'Hello, how can I help?' });
+      const system: string = JSON.parse(fetchMock.mock.calls[0][1].body).system;
+      expect(system).toContain('Never use the en dash or em dash characters');
+      expect(system).toContain('use recordIntent=condition with query "diagnosis"');
+    });
+    it('removes dashes from record blocks and keeps citations', async () => {
+      fetchMock.mockResolvedValue(payload(JSON.stringify({ blocks: [
+        { kind: 'record', text: `**Iron deficiency anaemia ${EM} recorded 21 September 2026.**`, references: [1] },
+        { kind: 'explanation', text: '### What is missing', references: [] },
+        { kind: 'record', text: `- Seen 2025${EN}2026 by a health worker`, references: [1] }] })));
+      const answer = await new ClaudeAiService().answer('First diagnosis?', [diagnosis], [], AbortSignal.timeout(1000), undefined, 'staff');
+      expect(answer).toBe('**Iron deficiency anaemia, recorded 21 September 2026.** [1]\n\n### What is missing\n\n- Seen 2025 to 2026 by a health worker [1]');
+    });
+    it('tells the model not to reuse earlier replies when nothing was found, and removes dashes from that answer', async () => {
+      fetchMock.mockResolvedValue(payload(`**Nothing matching was found** ${EM} try naming the condition.`));
+      const answer = await new ClaudeAiService().answer('First diagnosis?', [], [{ question: 'Q', answer: 'Earlier answer.' }], AbortSignal.timeout(1000), undefined, 'patient');
+      expect(answer).toBe('**Nothing matching was found**, try naming the condition.');
+      const system: string = JSON.parse(fetchMock.mock.calls[0][1].body).system;
+      expect(system).toContain('never state or repeat patient facts from earlier replies as if they were in the record');
+      expect(system).toContain('suggest one or two short things to try');
+    });
+    it('gives the model the plain coverage note for documents still being read', async () => {
+      fetchMock.mockResolvedValue(payload(JSON.stringify({ blocks: [{ kind: 'record', text: 'Fact.', references: [1] }] })));
+      await new ClaudeAiService().answer('Q', [diagnosis], [], AbortSignal.timeout(1000),
+        { complete: false, unavailable: [], pendingDocuments: 1, recordCount: 1, selectedCount: 1 }, 'patient');
+      const content = JSON.parse(JSON.parse(fetchMock.mock.calls[0][1].body).messages.at(-1).content);
+      expect(content.coverage.note).toBe('1 document is still being read or could not be read, so this answer may be missing something.');
+    });
+  });
+});

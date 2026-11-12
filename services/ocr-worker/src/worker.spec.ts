@@ -1,13 +1,18 @@
 import type { OcrWorkerConfig } from './config';
 import { AiInterruptedError, AiTransientError, type PageModelClient } from './reading/claude.client';
 import { paperReadingPayloadSchema, type PaperReadingPayload } from './reading/contract';
-import { PaperReadingService, type ReadingConfig } from './reading/reader';
+import { readingCountsSchema } from './reading/contract';
+import { LIST_VERSION } from './reading/list-version';
+import { PaperReadingService, type ReadingConfig, type ReadingOutcome } from './reading/reader';
 import { fixturePng, modelItem, modelPage, readPage, syntheticJpeg, withRepeatedScan } from './reading/test-fixtures';
 import { ZOOM_JPEG_MAX_SCANS } from './reading/zoom';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
 import { Semaphore } from './semaphore';
-import { OcrWorker } from './worker';
+import { buildCompletion, OcrWorker, readingProvenanceExtras } from './worker';
+
+const parseLines = (written: readonly string[]) => written.flatMap((line) => line.split('\n')).filter(Boolean)
+  .map((line) => JSON.parse(line) as Record<string, unknown>);
 
 const config = {
   OCR_WORKER_CONCURRENCY: 1, OCR_WORKER_LEASE_SECONDS: 60, OCR_WORKER_POLL_MS: 100,
@@ -114,23 +119,80 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-12', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-13', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
   });
 
-  it('logs the dropped items by reason code on completion, and keeps the map out of the payload and provenance', async () => {
+  it('logs the dropped items by reason code on completion, keeps the map out of the payload, and stores it in provenance counts', async () => {
     const { repository, reader, provider, reading } = mocks();
     await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
     const line = logs().find((entry) => entry.includes('ocr.job.completed'))!;
-    const logged = JSON.parse(line) as { droppedUngrounded: number; droppedByReason: Record<string, number> };
+    const logged = JSON.parse(line) as { droppedUngrounded: number; droppedByReason: Record<string, number>; listVersion: string };
     expect(logged.droppedByReason).toEqual({ text_not_on_line: 1 });
     expect(Object.values(logged.droppedByReason).reduce((sum, count) => sum + count, 0)).toBe(logged.droppedUngrounded);
     expect(line).not.toContain('Inventedcillin');
+    expect(logged.listVersion).toBe(LIST_VERSION);
     const result = completed(repository);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('droppedByReason');
-    expect(JSON.stringify(result.provenance)).not.toContain('droppedByReason');
+    // Phase 1 "measure, content-free": the same counts are stored in provenance.reading.counts.
+    const stored = result.provenance.reading as Record<string, unknown>;
+    expect(stored.listVersion).toBe(LIST_VERSION);
+    expect(stored.listVersion).toMatch(/^[0-9a-f]{16}$/);
+    const counts = readingCountsSchema.parse(stored.counts);
+    expect(counts).toEqual({ version: 1, droppedByReason: logged.droppedByReason,
+      droppedByReasonFirstPass: { text_not_on_line: 1 },
+      hardPageAgreement: { fieldsCompared: 0, fieldsAgreed: 0, itemsPaired: 0, itemsSingle: 0, drugSplits: 0,
+        alternativesDropped: 0 },
+      zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageDeadlineHits: 0, hardReadFailures: {} });
+    expect(parseLines(logs()).filter((entry) => entry.event === 'ocr.reading.provenance_field_omitted')).toEqual([]);
+    const provenance = JSON.stringify(result.provenance);
+    for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Fictionalmab', 'Inventedcillin', 'Zebulon',
+      'Ultramarine', 'TEST-9907']) expect(provenance).not.toContain(secret);
+  });
+
+  it('completes the job without counts, and logs a code, when the counts cannot be computed or are not in shape', async () => {
+    for (const [breakSummary, code] of [
+      [(summary: ReadingOutcome['summary']) => { summary.droppedByReason = { 'Fictionalmab 437mg': 1 }; }, 'READING_COUNTS_INVALID'],
+      [(summary: ReadingOutcome['summary']) => { summary.zoomCalls = -1; }, 'READING_COUNTS_INVALID'],
+      [(summary: ReadingOutcome['summary']) => {
+        // Only the counts read this map (the completion log does not): an error while copying it.
+        summary.droppedByReasonFirstPass = new Proxy({}, { ownKeys: () => { throw new Error('Fictionalmab boom'); } });
+      }, 'READING_COUNTS_FAILED'],
+    ] as const) {
+      stdout.mockClear();
+      const { repository, reader, provider, reading } = mocks();
+      const read = reading.read.bind(reading);
+      jest.spyOn(reading, 'read').mockImplementation(async (...args) => {
+        const outcome = await read(...args);
+        breakSummary(outcome.summary);
+        return outcome;
+      });
+      await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+      expect(repository.fail).not.toHaveBeenCalled();
+      const result = completed(repository);
+      const stored = result.provenance.reading as Record<string, unknown>;
+      expect(stored).not.toHaveProperty('counts');
+      expect(stored.listVersion).toBe(LIST_VERSION);
+      expect(stored.promptVersion).toBe('hid-paper-reading-prompt-13');
+      const omitted = parseLines(logs()).filter((entry) => entry.event === 'ocr.reading.provenance_field_omitted');
+      expect(omitted.map((entry) => entry.code)).toEqual([code]);
+      expect(parseLines(logs()).some((entry) => entry.event === 'ocr.job.completed')).toBe(true);
+      expect(logs().join('\n')).not.toContain('Fictionalmab boom');
+      expect(JSON.stringify(result.provenance)).not.toContain('Fictionalmab');
+    }
+  });
+
+  it('leaves listVersion out when it could not be computed, and still completes', () => {
+    const { summary, payload } = new PaperReadingService(readingConfig, { readPage: jest.fn() })
+      .withoutItems({ facilityId: job.facilityId, sourceSha256Hex: job.sourceSha256Hex, pages: [page] }, 'ai_off');
+    const extras = readingProvenanceExtras(summary, null);
+    expect(extras).toMatchObject({ omitted: ['LIST_VERSION_UNAVAILABLE'] });
+    expect(extras.counts).toBeDefined();
+    const completion = buildCompletion(textReading, { summary, payload }, extras);
+    expect(completion.provenance.reading).not.toHaveProperty('listVersion');
+    expect(readingProvenanceExtras(summary, 'not-hex').omitted).toEqual(['LIST_VERSION_UNAVAILABLE']);
   });
 
   it('never logs line text, items, names or SDK error details across a full job', async () => {
@@ -532,7 +594,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
       // Zoom off: the reads sent the version 7 hard-page text (version 8 without rule J), and provenance says so.
       hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-12-no-zoom', hardPageZoomPages: [], imagePromptVersion: null,
-      promptVersion: 'hid-paper-reading-prompt-12' });
+      promptVersion: 'hid-paper-reading-prompt-13' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
     // One line per hard-page read (read 1 and 2), in the pass's place; together they are the pass's use.
@@ -563,8 +625,17 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(done).toMatchObject({ hardPages: 1, hardPageReads: 2,
       hardPageAgreement: { itemsPaired: 1, itemsSingle: 0, fieldsCompared: expect.any(Number), fieldsAgreed: expect.any(Number) } });
     expect(Object.values(done.hardPageAgreement as Record<string, unknown>).every((value) => typeof value === 'number')).toBe(true);
+    // The same counts are stored in provenance (contract.ts readingCountsSchema), equal to the logged ones.
+    const counts = readingCountsSchema.parse((result.provenance.reading as Record<string, unknown>).counts);
+    expect(counts.hardPageAgreement).toEqual(done.hardPageAgreement);
+    expect(counts.hardPageAgreement.itemsPaired).toBe(1);
+    expect(counts).toMatchObject({ zoomCalls: done.zoomCalls, zoomLimited: done.zoomLimited, zoomFailed: done.zoomFailed,
+      hardPageDeadlineHits: done.hardPageDeadlineHits, hardReadFailures: done.hardReadFailures,
+      droppedByReason: done.droppedByReason });
+    expect(done.listVersion).toBe((result.provenance.reading as Record<string, unknown>).listVersion);
     const logs = written.join('\n');
     for (const secret of ['Pyrimethamine', 'Fictionalmab', 'Ultramarine', 'rng']) expect(logs).not.toContain(secret);
+    expect(JSON.stringify(result.provenance)).not.toMatch(/Pyrimethamine|Fictionalmab|Ultramarine/);
     const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');
     for (const chunk of chunks) expect(everything).not.toContain(chunk);
   });
@@ -627,6 +698,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(done).toMatchObject({ itemCount: 1, firstPassItemCount: 1, rereadFailedPages: 1, imageRereadFailedPages: 1,
       hardReadFailures: { max_tokens: 1, parse_error: 1 }, hardReadForcedAnswers: { forced_answer_max_tokens: 1 },
       pageReadFailures: 1 });
+    expect(completed(repository).provenance.reading).toMatchObject({ rereadFailedPages: 1,
+      counts: { hardReadFailures: { max_tokens: 1, parse_error: 1 }, hardPageDeadlineHits: 0 } });
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read');
     expect(usageLines.map((line) => [line.read, line.failure, line.forcedAnswer])).toEqual([
       [1, 'max_tokens', 'forced_answer_max_tokens'], [2, 'parse_error', null]]);
@@ -802,6 +875,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
       expect.objectContaining({ read: 2, requests: 2, zoomCalls: 2, zoomLimited: 0 })]);
     const done = lines.find((line) => line.event === 'ocr.job.completed')!;
     expect(done).toMatchObject({ zoomCalls: 4, zoomLimited: 0, zoomFailed: 2 });
+    expect((result.provenance.reading as Record<string, unknown>).counts)
+      .toMatchObject({ zoomCalls: 4, zoomLimited: 0, zoomFailed: 2 });
     const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');
     const pictureBase64 = Buffer.from(synthetic).toString('base64');
     for (const crop of [...crops, pictureBase64]) {

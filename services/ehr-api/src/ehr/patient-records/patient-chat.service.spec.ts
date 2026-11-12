@@ -1,5 +1,7 @@
 import type {PoolClient} from 'pg';
 import {withPatientLines} from './patient-chat-safety';
+import {Logger} from '@nestjs/common';
+import {ClaudeCallError} from './claude-ai.service';
 import {PatientChatService} from './patient-chat.service';
 import {evidence,binding,type Evidence} from './patient-evidence.types';
 import {patientEvidence} from './patient-evidence.policy';
@@ -286,6 +288,68 @@ describe('B5 one patient per turn',()=>{
  });
 });
 
+describe('A failed turn logs its category only',()=>{
+ afterEach(()=>jest.restoreAllMocks());
+ const staffAccess=(s:ReturnType<typeof setup>)=>({audience:'staff',audit:{actorType:'staff'},authorize:async()=>auth,admissionKey:'staff:staff-a:facility-a',
+  history:{start:async()=>'generation',context:s.context,save:s.save}}) as never;
+ it('logs the model failure category and the audience, never the question, the error text or the record, and still answers 503',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  const s=setup();s.plan.mockRejectedValue(new ClaudeCallError('answer_cut_off','Claude answer cut off'));
+  await expect(s.service.answer(request,'Summarise Adaeze Okafor\'s history',staffAccess(s))).rejects.toMatchObject({code:'PATIENT_CHAT_UNAVAILABLE'});
+  expect(warn).toHaveBeenCalledTimes(1);
+  expect(warn.mock.calls[0]?.[0]).toEqual({message:'Record chat unavailable',category:'model_answer_cut_off',exceptionType:'ClaudeCallError',
+   audience:'staff',correlationId:'synthetic-chat'});
+  expect(JSON.stringify(warn.mock.calls)).not.toMatch(/Adaeze|Summarise|cut off/);
+ });
+ it('gives the provider status for a refused request, "timeout" for the time limit, and "other" without the message for anything else',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  const s=setup();
+  s.plan.mockRejectedValueOnce(new ClaudeCallError('request_failed','Claude request failed',529));
+  await expect(s.service.answer(request,'Medicine')).rejects.toMatchObject({status:503});
+  s.plan.mockRejectedValueOnce(new DOMException('The operation was aborted due to timeout','TimeoutError'));
+  await expect(s.service.answer(request,'Medicine')).rejects.toMatchObject({status:503});
+  // A database or parser message can carry patient data; only its class name is logged.
+  s.plan.mockRejectedValueOnce(new Error('duplicate key for Adaeze Okafor, 1990-03-12'));
+  await expect(s.service.answer(request,'Medicine')).rejects.toMatchObject({status:503});
+  expect(warn.mock.calls.map(c=>c[0])).toEqual([
+   {message:'Record chat unavailable',category:'model_request_failed',exceptionType:'ClaudeCallError',providerStatus:529,audience:'patient',correlationId:'synthetic-chat'},
+   {message:'Record chat unavailable',category:'timeout',exceptionType:'DOMException',audience:'patient',correlationId:'synthetic-chat'},
+   {message:'Record chat unavailable',category:'other',exceptionType:'Error',audience:'patient',correlationId:'synthetic-chat'}]);
+  expect(JSON.stringify(warn.mock.calls)).not.toMatch(/Adaeze|1990|duplicate/);
+ });
+ it('does not log a refusal the user is told about (a DomainProblem)',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  await expect(setup().service.answer(request,'')).rejects.toMatchObject({status:400});
+  expect(warn).not.toHaveBeenCalled();
+ });
+ it('ends a staff turn at 48 seconds, under the gateway\'s 50, and keeps 60 for patients',async()=>{
+  const timeout=jest.spyOn(AbortSignal,'timeout');
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'I can summarise this patient\'s records.'});
+  await s.service.answer(request,'Hello',staffAccess(s));
+  expect(timeout).toHaveBeenCalledWith(48_000);
+  timeout.mockClear();
+  await s.service.answer(request,'Hello');
+  expect(timeout).toHaveBeenCalledWith(60_000);
+ });
+ it('starts the turn timer before authorization, so authorization and history count against it',async()=>{
+  const timeout=jest.spyOn(AbortSignal,'timeout');
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'I can summarise this patient\'s records.'});
+  const authorize=jest.fn(async()=>auth);
+  await s.service.answer(request,'Hello',{...(staffAccess(s) as object),authorize} as never);
+  const turnTimer=timeout.mock.calls.findIndex(call=>call[0]===48_000);
+  expect(turnTimer).toBeGreaterThanOrEqual(0);
+  expect(timeout.mock.invocationCallOrder[turnTimer]!).toBeLessThan(authorize.mock.invocationCallOrder[0]!);
+ });
+ it('stops a turn whose authorization and history used up its time, before asking the model',async()=>{
+  const warn=jest.spyOn(Logger.prototype,'warn').mockImplementation(()=>undefined);
+  jest.spyOn(AbortSignal,'timeout').mockReturnValue(AbortSignal.abort(new DOMException('The operation timed out.','TimeoutError')));
+  const s=setup();
+  await expect(s.service.answer(request,'Hello',staffAccess(s))).rejects.toMatchObject({code:'PATIENT_CHAT_UNAVAILABLE'});
+  expect(s.plan).not.toHaveBeenCalled();expect(s.save).not.toHaveBeenCalled();
+  expect(warn.mock.calls[0]?.[0]).toMatchObject({category:'timeout',audience:'staff'});
+ });
+});
+
 describe('B6 stale patient vectors are purged',()=>{
  const purges=(s:ReturnType<typeof setup>)=>s.query.mock.calls.filter(([sql])=>/^delete from ehr\.(patient|staff)_evidence_chunks/.test(String(sql).trim()));
  function indexed(records:Evidence[],coverage:Record<string,unknown>={}) {
@@ -507,5 +571,40 @@ describe('Second review: a server line is found as a sentence of its own, with a
    expect([copy,withPatientLines(`${HB}\n\n${copy}`,[RESULT_LINE])]).toEqual([copy,`${HB}\n\n${RESULT_LINE}`]);
   expect(withPatientLines(`${HB} Talk to your doctor\nabout what this result means. Eat well.`,[RESULT_LINE]))
    .toBe(`${HB} Eat well.\n\n${RESULT_LINE}`);
+ });
+});
+
+describe('Record chat answers: dated questions and no dashes',()=>{
+ const EM='\u2014';
+ const dx=(n:number,date:string,condition:string)=>evidence({kind:'diagnosis',id:`55555555-5555-4555-8555-${String(n).padStart(12,'0')}`,version:'1',
+  title:condition,recordedAt:date,effectiveAt:date,provenance:'Clinician recorded condition',quality:'confirmed',fields:{condition,verificationStatus:'confirmed'}});
+ it('answers "first diagnosis" from the earliest diagnoses in the authorized snapshot, even when the search finds nothing',async()=>{
+  const records=[dx(1,'2026-09-21T00:00:00Z','Iron deficiency anaemia'),dx(2,'2018-04-02T00:00:00Z','Synthetic asthma'),item('note',3,{text:'Visit'})];
+  const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'earliest diagnosis'});
+  s.query.mockImplementation(async()=>({rows:[]}));
+  s.answer.mockResolvedValue('**The earliest recorded diagnosis is Synthetic asthma, 2 April 2018.** [1]');
+  await s.service.answer(request,'what was my first diagnosis');
+  const sources=s.answer.mock.calls[0][1] as Evidence[];
+  expect(sources[0]!.id).toBe(records[1]!.id);expect(sources.map(r=>r.id)).toContain(records[0]!.id);
+  expect(s.answer.mock.calls[0][6]).toBe('earliest');
+  // Only what the snapshot (the reader's access) holds is ever sent.
+  expect(sources.every(r=>records.some(x=>x.id===r.id))).toBe(true);
+ });
+ it('never adds records outside the staff member\'s permitted snapshot',async()=>{
+  const permitted=[dx(1,'2020-01-01T00:00:00Z','Synthetic condition A')];
+  const s=setup([dx(2,'2001-01-01T00:00:00Z','Hidden condition'),...permitted]);
+  s.plan.mockResolvedValue({intent:'records',recordIntent:'condition',query:'diagnosis'});
+  s.answer.mockResolvedValue('**Synthetic condition A.** [1]');
+  await s.service.answer(request,'first diagnosis of this patient',staffAccess(s,permitted));
+  expect((s.answer.mock.calls[0][1] as Evidence[]).map(r=>r.id)).toEqual([permitted[0]!.id]);
+ });
+ it('removes dashes from staff and patient answers before saving and returning them',async()=>{
+  const s=setup([RX]);s.answer.mockResolvedValue(`**A prescribed medicine ${EM} recorded 2025\u20132026.** [1]`);
+  const staff=await s.service.answer(request,'Latest medicine',staffAccess(s,[RX]));
+  expect(staff.answer).toBe('**A prescribed medicine, recorded 2025 to 2026.** [1]');
+  expect(s.save.mock.calls[0][3].answer).toBe(staff.answer);
+  const p=setup();p.plan.mockResolvedValue({intent:'conversation',answer:`Hello ${EM} ask me about your record.`});
+  const reply=await p.service.answer(request,'Hello');
+  expect(reply.answer).not.toMatch(/[\u2013\u2014\u2015]/);expect(p.save.mock.calls[0][3].answer).toBe(reply.answer);
  });
 });

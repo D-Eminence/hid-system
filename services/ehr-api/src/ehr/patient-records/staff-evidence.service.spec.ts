@@ -3,7 +3,7 @@ import { STAFF_ATTACHMENT_TEXT_QUERY, STAFF_EVIDENCE_QUERY, StaffEvidenceService
 import { PATIENT_EVIDENCE_QUERY } from './patient-evidence.query';
 import { attachmentTextQuery } from './patient-attachment-text.service';
 import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scope.service';
-import { binding, type SourceKind } from './patient-evidence.types';
+import { LAB_UNAVAILABLE, binding, type SourceKind } from './patient-evidence.types';
 import { DomainProblem } from '../../common/problem';
 const patientId='11111111-1111-4111-8111-111111111111',sourceId='22222222-2222-4222-8222-222222222222';
 function setup() {
@@ -46,7 +46,7 @@ it('discards partial Lab pages after an outage and propagates revoked Lab author
   s.lab.staffReleasedResults.mockResolvedValueOnce({records:[{id:sourceId,version:'1',title:'Synthetic result',recordedAt:new Date().toISOString(),effectiveAt:null,fields:{numericValue:'20.05'}}],nextCursor:sourceId} as never)
     .mockRejectedValueOnce(new DomainProblem(503,'LAB_SERVICE_UNAVAILABLE','Unavailable'));
   const snapshot=await s.service.bind(s.scope).snapshot(s.request);
-  expect(snapshot.records.some(r=>r.kind==='lab_result')).toBe(false);expect(snapshot.coverage.unavailable).toContain('Laboratory service unavailable; result coverage is unknown.');
+  expect(snapshot.records.some(r=>r.kind==='lab_result')).toBe(false);expect(snapshot.coverage.unavailable).toContain(LAB_UNAVAILABLE);
   s.lab.staffReleasedResults.mockRejectedValue(new DomainProblem(403,'PERMISSION_DENIED','Revoked'));
   await expect(s.service.bind(s.scope).snapshot(s.request)).rejects.toThrow('Revoked');
 });

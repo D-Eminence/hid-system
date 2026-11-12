@@ -98,8 +98,8 @@ Each claimed job runs, in order:
    the reading each page ended with, plus `heading` and `duplicate_of_order`
    for the items the last step leaves out, which are not ungrounded and not
    in `droppedUngrounded`; see "Cleanups of 2026-11-10") go in the
-   `ocr.job.completed` log only,
-   never in the payload or provenance. The same log carries, codes and counts only,
+   `ocr.job.completed` log and, since "Measuring readings: provenance counts
+   and listVersion", in provenance `reading.counts`; never in the payload. The same log carries, codes and counts only,
    `hardPages` (hard pages sent for best-guess readings), `hardPageReads`
    (best-guess requests sent, two per page), `hardPageAgreement`
    (`fieldsCompared`, `fieldsAgreed`, `itemsPaired`, `itemsSingle`) and the
@@ -560,6 +560,24 @@ Each claimed job runs, in order:
        completion log (`hardPageAgreement.alternativesDropped`, a count only,
        never text; no payload change). The dropped option itself is not
        stored anywhere (the payload contract is unchanged).
+     - *No option that adds nothing* (`dropEmptyOptions`; coordinator,
+       second cleanup round of 2026-11-10; PROMPT_VERSION 13). An `(or X?)`
+       is never shown, in the shown text, `asWritten` of a pair or any field,
+       inside `(crossed out: …)` too, where X is only a placeholder or `[?]`
+       (`500mg? (or [dose?])`); or is the same as the one to four words
+       straight before it, compared without case, `?`, `…` or brackets and
+       with spacing as in `bare` ("500 mg" is "500mg", "1 5mg" is not
+       "15mg"); or is a one-word name with the same listed generic as the
+       word straight before it (`Pl… (Plasil?) (or Plasil?)`, `Flagyl?
+       (metronidazole) (or Metronidazole?)`); or is a listed one-word drug
+       name straight after a dose (a word with a digit, so it cannot be that
+       word's option) with the generic of that order's own name, the nearest word before the dose (`(crossed out:
+       Ceftriaxone? 1g? (or Ceftriaxone?))`). Anything else is kept: a route,
+       frequency, dose, vitamin letter or second drug repeated further back
+       (`IV Ceftriaxone 1g IM? (or IV?)`, `Vit K? 1mg Vit C? (or Vit K?)`), and
+       the same generic in another form (`Hydrocortisone? (or Hydrocortisone
+       cream?)`). Options left out of the shown text are counted in
+       `alternativesDropped`; the item keeps `readings_disagree`.
      - *Two drugs, two items* (`sameDrug`, `splitPair`). Where two items
        paired by place are medicines whose reads name different drugs, they
        are two items, one per read, each with its own fields, `asWritten` and
@@ -1654,6 +1672,59 @@ by hand. A rejected request (key, permission, model) also completes as
 `ai_failed` and logs only the code. With AI off the job completes as `ai_off`;
 a document with no text as `no_text`.
 
+## Measuring readings: provenance counts and listVersion
+
+Phase 1 of learning from live reading is to measure, content-free. Beside
+`promptVersion`, the worker stores in the extraction's provenance
+(`ocr.extractions.provenance.reading`, written by `buildCompletion` in
+`worker.ts`) two more fields. Both are validated against the contract
+(`contract.ts` `readingCountsSchema`, `listVersionSchema`) before they are
+written; the structured payload is unchanged.
+
+* `listVersion`: 16 hex characters, the start of the SHA-256 of a canonical
+  JSON serialisation (object keys sorted at every level, arrays in order) of
+  the reader's reference lists and tables (`list-version.ts` `READER_LISTS`):
+  the NAFDAC/curated brand rows (`brand-names.ts`), the NEML generics, drug
+  synonyms and unlisted look-alikes (`drug-list.ts`), the ICD-11 titles,
+  diagnosis synonyms, ungrounded abbreviations and look-alikes
+  (`diagnosis-list.ts`), the lab test names and look-alikes (`lab-list.ts`),
+  the signs and abbreviation tables (`signs.ts`) and the hard-page
+  `FREQUENCY_WORDS` (`hard-page.ts`). Computed once at module load from the
+  lists' contents only, so every worker built from the same source writes the
+  same value, and any edit to any of these lists changes it. It covers these
+  named lists only: other reference data the reader uses (the heading prefixes
+  and titles in `tidy.ts`, the status and instruction word patterns in
+  `hard-page.ts`, the brand-row source filter) is versioned by `promptVersion`
+  or the code, not by `listVersion`. It is recorded for tracing only and is not
+  part of the reuse match (coordinator decision of 2026-11-11: list updates
+  apply to new readings, no forced re-reads). Also in the `ocr.job.completed`
+  log line (`listVersion`, `null` when unavailable).
+* `counts` (version 1), codes and non-negative integer counts only; every map
+  key is one of a closed list of reason codes (`contract.ts`
+  `READING_DROP_REASON_CODES`, `HARD_READ_FAILURE_CODES`, kept equal to the
+  reader's own lists by `contract-codes.spec.ts`), so no other word can be
+  stored as a key:
+  * `droppedByReason`, `droppedByReasonFirstPass`: dropped items by reason
+    code, as in the completion log (see "Reading paper records").
+  * `hardPageAgreement`: `fieldsCompared`, `fieldsAgreed` (agree;
+    `fieldsCompared - fieldsAgreed` disagree), `itemsPaired`, `itemsSingle`
+    (one-sided), `drugSplits`, `alternativesDropped`, summed over hard pages.
+  * `zoomCalls`, `zoomLimited`, `zoomFailed`: hard-page zoom calls.
+  * `hardPageDeadlineHits`: hard pages where the page's deadline cut a read
+    (the page numbers stay in `hardPageDeadlinePages`).
+  * `hardReadFailures`: hard-page reads with no answer, by reason code
+    (`deadline`, `max_tokens`, `parse_error`, `api_error`, ...).
+  Re-read failures were already stored as the count `rereadFailedPages`.
+
+Neither ever fails a reading: if `listVersion` cannot be computed, or the
+counts throw or are not in the contract's shape, that field is left out and
+the worker logs `ocr.reading.provenance_field_omitted` with a code
+(`LIST_VERSION_UNAVAILABLE`, `READING_COUNTS_FAILED`,
+`READING_COUNTS_INVALID`). Older extractions carry neither field. The OCR
+HTTP service passes neither to the check screen (`publicProvenance` keeps a
+fixed list of scalar keys) and still matches readings for reuse on
+`reading.promptVersion` only.
+
 ## Fair claiming and call limits
 
 - **Fair claim** (migration 0107). Claim loops call `ocr.claim_worker_job_fair`
@@ -1763,3 +1834,108 @@ IAM for the worker role:
   asynchronous PDF/TIFF reads Textract needs `s3:GetObjectVersion` and
   `kms:Decrypt` on the document bucket and its key.
 - HTTPS egress to `api.anthropic.com` when AI reading is on.
+
+## Source deletion after 7 days
+
+Owner and coordinator decisions of 2026-11-11 (migration 0112): 7 days after
+an OCR job finishes, saved or not, the uploaded page goes with every S3
+version, and so do the Textract text and the AI reading (the decisions said
+24 hours; owner decision Q36, "make it 7days (signed)", made it 7 days). The
+source is not kept in the chart; what a person saved or published stays, with
+its provenance by job id.
+
+- **When a document is due.** Its status is `uploaded` and `legal_hold` is
+  false; it has at least one OCR job; every job is finished
+  (`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled`); and
+  the latest finish (`completed_at`, `failed_at`, or `updated_at` for a
+  cancelled job) is at least 7 days ago. A publication of its jobs that could
+  still run (`pending`, `processing`, or `failed` with a code ocr-api retries
+  and attempts left) blocks until 72 hours after the finish and no longer
+  after that (a hard cap), so with 7 days it no longer delays deletion. A
+  blocked document is not due and not counted.
+- **A round.** One at start, then every `OCR_SOURCE_DELETION_INTERVAL_SECONDS`
+  (default 900, 60-86,400). `OCR_SOURCE_DELETION_ENABLED` (default `true`;
+  `false` stops it) is validated like the other settings. The worker counts
+  the documents due (`ocr.worker_source_deletion_backlog()`), lists up to 100
+  (`ocr.list_worker_source_deletions`: documents already claimed first, then
+  oldest due first), and for each:
+  1. claims it (`ocr.claim_worker_source_deletion`): under a row lock the
+     database checks again that it is due, legal hold included, and sets
+     `source_deleting`. From then it refuses a new job on the document, a
+     failed -> queued retry of its jobs, a legal hold and any other change. A
+     refused claim (`not_due`) means no S3 call (`ocr.source_deletion.skipped`,
+     `SOURCE_NO_LONGER_DUE`);
+  2. lists the bucket's versions with `Prefix` = the claimed `storage_key` and
+     keeps only versions and delete markers whose `Key` is exactly that key (a
+     key that only starts with it is never touched);
+  3. deletes each with `DeleteObject` and its `VersionId`;
+  4. lists again and fails the document (`SOURCE_VERSIONS_REMAIN`) if anything
+     is left;
+  5. only then calls `ocr.purge_worker_source_document(document, versions
+     deleted, correlation id)`, which requires `source_deleting`, sets
+     `source_deleted` with the neutral file name `Source page deleted after 7
+     days`, blanks the text, reading and review content of its OCR rows and
+     writes one audit row `ocr.source.deleted_after_7d` (ids and counts only;
+     `objectVersionsDeleted` adds up every round of this worker process for the
+     document, not only the last).
+  A storage failure leaves the document `source_deleting`; the next round lists
+  it first and finishes it. Claimed documents go least recently attempted
+  first and take at most half of a batch while due documents wait, so claims
+  that keep failing never stop new deletions. Any purge answer but `deleted` or `already_deleted`
+  is logged as `ocr.source_deletion.failed`. Keys outside
+  `clinical/objects/<id>` are refused (`SOURCE_KEY_OUTSIDE_LAYOUT`) and never
+  deleted. Upload keys and malware scanning are unchanged.
+- **Logs** (ids, codes and counts only; never a file name, key or text):
+  - `ocr.source_deletion.done` per document: `documentId`, `outcome`
+    (`deleted`, `already_deleted`, `not_due`), `objectVersionsDeleted`,
+    `extractionsBlanked`, `validationsBlanked`, `confirmationsBlanked`,
+    `dueSeconds`;
+  - `ocr.source_deletion.failed` with `stage` (`list`, `claim`, `storage`,
+    `purge`, `round`) and `code` (an S3 stage code such as `SOURCE_LIST_FAILED`,
+    `SOURCE_DELETE_FAILED`, `SOURCE_VERSIONS_REMAIN`, `SOURCE_NOT_CLAIMED`, or a
+    PostgreSQL SQLSTATE);
+  - `ocr.source_deletion.skipped` (`SOURCE_NO_LONGER_DUE`) when a claim is
+    refused;
+  - exactly one `{"event":"ocr.source_deletion.overdue","overdue":n,"due":m,"deleted":k}`
+    per completed round, also when all are 0 (with `timestamp` and `level` like
+    every line): `overdue` = documents due (or claimed) for more than 2 hours
+    (more than 7 days and 2 hours after their job finished), plus documents with a job
+    stuck in `extracted` for more than 24 hours (counted, never deleted), `due`
+    = due or claimed at the start of the round,
+    `deleted` = deleted this round. A round that cannot count or list logs
+    `ocr.source_deletion.failed` (`stage: list`) instead and no overdue line,
+    so the CloudWatch alarm (metric filter `{ $.event = "ocr.source_deletion.overdue" }`,
+    value `$.overdue`, missing data breaching) also fires when the sweep stops.
+- **A claim that keeps failing** stays `source_deleting`: there is no unclaim,
+  on purpose (a partly deleted source must not go back into use). It keeps
+  counting as overdue, so the alarm stays on. An operator checks, for the
+  `documentId` in the `ocr.source_deletion.failed` lines:
+  - the `code`: `SOURCE_DELETE_FAILED` or `SOURCE_LIST_FAILED` (IAM: the
+    worker role's `s3:ListBucketVersions` and `s3:DeleteObjectVersion`; bucket
+    policy; Object Lock retention or MFA delete; KMS is not needed to delete),
+    `SOURCE_VERSIONS_REMAIN` (a version reappeared or a delete was not
+    applied), `SOURCE_KEY_OUTSIDE_LAYOUT` (the stored key is not
+    `clinical/objects/<id>`; it is never deleted by the worker), or a SQLSTATE
+    from the purge;
+  - `ocr.source_deletion_attempts` (attempt count and last attempt) as the
+    database owner;
+  - once the cause is fixed, the next round finishes the document by itself.
+- **Overdue also counts stuck jobs** (never deleted): an `uploaded` document
+  with a job in `extracted` for more than 24 hours, or in `queued` or
+  `processing` for more than 48 hours (a job parked by the page allowance until
+  its reset does not count).
+- **A late publication.** A publication requested near the 72-hour cap may
+  run its attempt after the document was claimed or purged: ocr-api reads the
+  source again for the attempt, answers 410 `DOCUMENT_SOURCE_DELETED` and
+  records a terminal failure before calling the owning domain, so nothing is
+  published (and a blanked validation would fail the candidate check anyway).
+- **IAM** for the worker's task role, on the documents bucket only:
+  `s3:ListBucketVersions` on the bucket with the condition
+  `s3:prefix` like `clinical/objects/*`, and `s3:DeleteObjectVersion` on
+  `arn:aws:s3:::<bucket>/clinical/objects/*`. The worker never calls
+  `DeleteObjects` or an unversioned `DeleteObject`. Object Lock retention or
+  MFA delete on the bucket would make every deletion fail (`SOURCE_DELETE_FAILED`).
+- **Not in reach of this worker.** Textract keeps an asynchronous job's
+  results on its side for its own retention period (the worker sets no
+  `OutputConfig`); nothing is written to S3 by Textract. The Claude API keeps
+  no reading (no data retention was requested).

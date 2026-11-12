@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Length, Min,
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Length, Max, Min,
   ValidateNested } from 'class-validator';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
@@ -45,4 +45,27 @@ export class OcrMedicationImportBatchDto {
   @IsArray() @ArrayMinSize(2) @ArrayMaxSize(50) @ValidateNested({ each: true })
   @Type(() => OcrMedicationImportItemDto)
   medications!: OcrMedicationImportItemDto[];
+}
+
+/** The most imported medication records one page of GET pharmacy/imports answers, and the default. */
+export const IMPORT_PAGE_MAX = 100;
+export const IMPORT_PAGE_DEFAULT = 50;
+
+/** A query value of digits only becomes a number; anything else stays as sent, for IsInt to refuse. */
+const pageSize = ({ value }: { value: unknown }) => typeof value === 'string' && /^\d{1,4}$/.test(value)
+  ? Number(value) : value;
+
+/**
+ * GET pharmacy/imports: one patient's imported medication records at this
+ * facility, newest first. `cursor` is the `nextCursor` of the previous page
+ * (a record id); `limit` is 1-100, 50 by default.
+ */
+export class ListImportedMedicationsQueryDto {
+  @IsUUID('4') patientId!: string;
+
+  @IsOptional() @Transform(pageSize) @IsInt() @Min(1) @Max(IMPORT_PAGE_MAX)
+  limit?: number;
+
+  @IsOptional() @IsUUID('4')
+  cursor?: string;
 }

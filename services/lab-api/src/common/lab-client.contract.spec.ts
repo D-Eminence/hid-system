@@ -66,4 +66,22 @@ describe('LabApiClient transport contract', () => {
       .rejects.toMatchObject<Partial<LabApiProblem>>({ status: 503, payload: undefined });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+  it('reads one patient\'s imported Lab evidence with user evidence only, and refuses a page for another patient', async () => {
+    const patientId = '123e4567-e89b-42d3-a456-426614174010';
+    const page = { records: [{ id: '123e4567-e89b-42d3-a456-426614174011', patientId, observations: [] }], nextCursor: null };
+    const fetchMock = jest.fn().mockImplementation(async () => new Response(JSON.stringify(page),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+    global.fetch = fetchMock;
+    const client = new LabApiClient({ baseUrl: 'https://lab.test', internalServiceToken: 'local-lab-service-token-123456' });
+    await expect(client.patientImports(patientId, bearerContext, { cursor: page.records[0]!.id, limit: 10 }))
+      .resolves.toEqual(page);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://lab.test/api/v1/lab/imports?patientId=${patientId}&cursor=${page.records[0]!.id}&limit=10`);
+    const headers = (fetchMock.mock.calls[0]?.[1] as RequestInit).headers;
+    expect(headers).toMatchObject({ authorization: 'Bearer propagated-user', 'x-purpose-of-use': 'direct-care' });
+    expect(headers).not.toHaveProperty('x-hid-internal-caller');
+    expect(headers).not.toHaveProperty('x-hid-service-token');
+    await expect(client.patientImports('123e4567-e89b-42d3-a456-426614174099', bearerContext))
+      .rejects.toMatchObject({ status: 502, payload: { code: 'INVALID_LAB_IMPORT_RESPONSE' } });
+  });
 });

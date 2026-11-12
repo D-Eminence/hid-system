@@ -46,7 +46,8 @@ export interface ClinicalNoteRevisionRow extends QueryResultRow {
 }
 
 export interface OcrClinicalNoteImport {
-  encounterId: string;
+  /** The visit a direct-care publisher chose; absent: the "Imported paper records" encounter (0113). */
+  encounterId?: string;
   noteType: string;
   title: string;
   content: string;
@@ -57,7 +58,25 @@ export interface OcrClinicalNoteImport {
   validationId: string;
   validationVersion: number;
   reviewedBy: string;
+  /** The account that confirmed the patient of the OCR job (audit only). */
+  confirmedBy?: string;
 }
+
+/** The note type and title prefix of a reading published as a draft into the imported encounter (0113). */
+export const PAPER_RECORD_NOTE_TYPE = 'From a paper record (Migrate)';
+const PAPER_RECORD_TITLE_PREFIX = 'From a paper record (Migrate): ';
+
+/**
+ * Who may publish an OCR reading, and how (0113, owner decision of
+ * 2026-11-11): under direct care with a chosen visit, as before; under direct
+ * care with no visit, or under records processing (healthcare-operations)
+ * with the patient's dedicated records-processing grant, as a draft in the
+ * patient's one "Imported paper records" encounter at the facility. A
+ * records-processing caller never names a visit, and nobody else publishes
+ * under records processing: the cover (approval, Access PIN, share) does not
+ * count, only identity.records_processing_write_grant.
+ */
+export type OcrImportBasis = 'direct_care' | 'records_processing_grant';
 
 const NOTE_COLUMNS = `
   id, encounter_id as "encounterId", patient_id as "patientId", facility_id as "facilityId",
@@ -164,13 +183,18 @@ export class ClinicalNotesService {
         'clinical-note',
         async () => {
           const signed = input.status === NoteStatus.Signed;
+          // $4 (the author) is used twice. Without the casts PostgreSQL types the
+          // CASE branch `$4 else null` as text before it types the created_by
+          // value as uuid, and refuses the whole statement with 42P08
+          // ("inconsistent types deduced for parameter $4"). That refusal made
+          // every staff visit-note save fail with a 500 (production, 5 Nov 2026).
           const result = await client.query<ClinicalNoteRow>(
             `insert into ehr.clinical_notes (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
                note_type, title, status, signed_at, signed_by
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8,
-               case when $9 then clock_timestamp() else null end,
-               case when $9 then $4 else null end)
+             ) values ($1, $2, $3, $4::uuid, $5, $6, $7, $8,
+               case when $9::boolean then clock_timestamp() else null end,
+               case when $9::boolean then $4::uuid else null end)
              returning ${NOTE_COLUMNS}`,
             [
               encounterId,
@@ -208,47 +232,80 @@ export class ClinicalNotesService {
     const operation = 'clinical-note.import-ocr';
     const idempotencyKey = `ocr-publication:${input.publicationId}`;
     const digest = requestDigest(operation, { patientId, ...input });
+    const basis: OcrImportBasis = context.purposeOfUse === 'healthcare-operations'
+      ? 'records_processing_grant' : 'direct_care';
+    if (basis === 'records_processing_grant' && input.encounterId !== undefined) {
+      return Promise.reject(new DomainProblem(400, 'OCR_DRAFT_ENCOUNTER_NOT_CHOSEN',
+        'A reading published under records processing goes to the imported paper records, not to a chosen visit'));
+    }
+    const imported = input.encounterId === undefined;
     return this.repository.run(
       context,
       patientId,
       'write_records',
       { action: 'ehr.note.import-ocr', resourceType: 'clinical-note',
-        details: { publicationId: input.publicationId, documentId: input.documentId } },
-      (client) => this.repository.executeCreate(
-        client, context, patientId, idempotencyKey, operation, digest, 'clinical-note',
-        async () => {
-          const result = await client.query<ClinicalNoteRow>(
-            `insert into ehr.clinical_notes (
-               encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
-               note_type, title, status
-             ) values ($1,$2,$3,$4,$5,$6,$7,'draft') returning ${NOTE_COLUMNS}`,
-            [input.encounterId, patientId, context.facilityId, context.actor.accountId,
-              context.membershipId, input.noteType, input.title],
-          );
-          const note = this.singleNote(result.rows[0]);
-          await client.query(
-            `insert into ehr.clinical_note_revisions (
-               clinical_note_id, patient_id, facility_id, revision_no, content,
-               change_reason, supersedes_revision_no, created_by, created_by_membership_id
-             ) values ($1,$2,$3,1,$4,'OCR import from human-validated source evidence',null,$5,$6)`,
-            [note.id, patientId, context.facilityId, input.content,
-              context.actor.accountId, context.membershipId],
-          );
-          await client.query(
-            `insert into ehr.ocr_import_provenance (
-               clinical_resource_type, clinical_resource_id, facility_id, patient_id,
-               document_id, ocr_job_id, extraction_id, validation_id, validation_version,
-               publication_id, reviewed_by, published_by
-             ) values ('clinical_note',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-            [note.id, context.facilityId, patientId, input.documentId, input.ocrJobId,
-              input.extractionId, input.validationId, input.validationVersion,
-              input.publicationId, input.reviewedBy, context.actor.accountId],
-          );
-          return { value: note, id: note.id };
-        },
-        (id) => this.findNoteById(client, context, patientId, id),
-      ),
-      (client) => this.repository.encounterExists(client, input.encounterId, patientId, context.facilityId),
+        details: { publicationId: input.publicationId, documentId: input.documentId, basis,
+          publishedBy: context.actor.accountId, ...(input.confirmedBy ? { confirmedBy: input.confirmedBy } : {}) } },
+      async (client) => {
+        // Records processing: the dedicated grant, checked in this transaction
+        // with the session's own subject, membership and facility.
+        let grantId: string | undefined;
+        if (basis === 'records_processing_grant') {
+          const grant = await client.query<{ id: string | null }>(
+            `select identity.records_processing_write_grant($1, $2, $3, $4)::text as id`,
+            [patientId, context.actor.subject, context.membershipId, context.facilityId]);
+          grantId = grant.rows[0]?.id ?? undefined;
+          if (!grantId) {
+            throw new DomainProblem(403, 'OCR_PUBLISH_NEEDS_DIRECT_CARE',
+              'Ask a clinician with access to this patient to publish it.');
+          }
+        }
+        const created = await this.repository.executeCreate(
+          client, context, patientId, idempotencyKey, operation, digest, 'clinical-note',
+          async () => {
+            const encounterId = imported
+              ? (await client.query<{ id: string }>(
+                `select ehr.imported_paper_records_encounter($1)::text as id`, [patientId])).rows[0]?.id
+              : input.encounterId;
+            if (!encounterId) throw new DomainProblem(404, 'CLINICAL_RESOURCE_NOT_FOUND', 'Clinical resource was not found');
+            const noteType = imported ? PAPER_RECORD_NOTE_TYPE : input.noteType;
+            const title = imported ? `${PAPER_RECORD_TITLE_PREFIX}${input.title}`.slice(0, 240) : input.title;
+            const result = await client.query<ClinicalNoteRow>(
+              `insert into ehr.clinical_notes (
+                 encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+                 note_type, title, status
+               ) values ($1,$2,$3,$4,$5,$6,$7,'draft') returning ${NOTE_COLUMNS}`,
+              [encounterId, patientId, context.facilityId, context.actor.accountId,
+                context.membershipId, noteType, title],
+            );
+            const note = this.singleNote(result.rows[0]);
+            await client.query(
+              `insert into ehr.clinical_note_revisions (
+                 clinical_note_id, patient_id, facility_id, revision_no, content,
+                 change_reason, supersedes_revision_no, created_by, created_by_membership_id
+               ) values ($1,$2,$3,1,$4,'OCR import from human-validated source evidence',null,$5,$6)`,
+              [note.id, patientId, context.facilityId, input.content,
+                context.actor.accountId, context.membershipId],
+            );
+            await client.query(
+              `insert into ehr.ocr_import_provenance (
+                 clinical_resource_type, clinical_resource_id, facility_id, patient_id,
+                 document_id, ocr_job_id, extraction_id, validation_id, validation_version,
+                 publication_id, reviewed_by, published_by
+               ) values ('clinical_note',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+              [note.id, context.facilityId, patientId, input.documentId, input.ocrJobId,
+                input.extractionId, input.validationId, input.validationVersion,
+                input.publicationId, input.reviewedBy, context.actor.accountId],
+            );
+            return { value: note, id: note.id };
+          },
+          (id) => this.findNoteById(client, context, patientId, id),
+        );
+        return { ...created, details: { ...created.details, importedPaperRecords: imported,
+          ...(grantId ? { grantId } : {}) } };
+      },
+      imported ? undefined
+        : (client) => this.repository.encounterExists(client, input.encounterId as string, patientId, context.facilityId),
     );
   }
 

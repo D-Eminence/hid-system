@@ -2,7 +2,7 @@ import type { OcrExtraction, OcrJob, OcrPublicationResult } from '@hid/api-clien
 import { extractionSummary, publicationTruth, retryAllowed } from './presentation'
 
 const job: OcrJob = { id: 'j', facilityId: 'f', documentId: 'd', patientId: null, status: 'failed', provider: 'provider-neutral', attemptCount: 1, maxAttempts: 3, version: 2, createdAt: '2026-08-11', patientConfirmation: null }
-const extraction: OcrExtraction = { id: 'e', version: 2, attempt: 1, provider: 'provider-neutral', providerModel: null, rawText: 'protected OCR text', structuredPayload: { protected: true }, confidence: 0.9, provenance: {}, createdAt: '2026-08-11' }
+const extraction: OcrExtraction = { id: 'e', version: 2, attempt: 1, provider: 'provider-neutral', providerModel: null, contentDeleted: false, rawText: 'protected OCR text', structuredPayload: { protected: true }, confidence: 0.9, provenance: {}, createdAt: '2026-08-11' }
 
 describe('OCR operational presentation', () => {
   it('allows authorized online retry for a failed job', () => expect(retryAllowed(job, true, ['ocr.job.write'])).toBe(true))

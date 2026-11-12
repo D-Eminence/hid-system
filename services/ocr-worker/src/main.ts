@@ -1,14 +1,17 @@
+import { captureServerError, flushErrorReporting, initErrorReporting } from '@hid/server-telemetry';
 import { readOcrWorkerConfig } from './config';
 import { ClaudePageClient } from './reading/claude.client';
 import { PaperReadingService } from './reading/reader';
 import { PostgresWorkerRepository } from './repository';
 import { S3ExactDocumentReader } from './s3-document-reader';
+import { S3SourceObjectEraser, SourceDeletionSweeper } from './source-deletion';
 import { TestOcrProvider } from './test.provider';
 import { TextractOcrProvider } from './textract.provider';
 import type { WorkerOcrProvider } from './types';
 import { OcrWorker } from './worker';
 
 async function bootstrap(): Promise<void> {
+  initErrorReporting({ service: 'ocr-worker' });
   const config = readOcrWorkerConfig();
   if (config.OCR_PROVIDER === 'disabled') {
     throw new Error('OCR worker is explicitly disabled and will not accept claims');
@@ -19,8 +22,10 @@ async function bootstrap(): Promise<void> {
   // OCR_AI_MAX_CONCURRENT_REQUESTS) are shared by every claim loop.
   const reading = new PaperReadingService(config,
     config.OCR_AI_MODE === 'claude' ? new ClaudePageClient(config) : null);
-  const worker = new OcrWorker(config, new PostgresWorkerRepository(config),
-    new S3ExactDocumentReader(config), provider, reading);
+  const repository = new PostgresWorkerRepository(config);
+  // Source deletion 7 days after the job finished (migration 0112); OCR_SOURCE_DELETION_ENABLED=false stops it.
+  const sourceDeletion = new SourceDeletionSweeper(repository, new S3SourceObjectEraser(config));
+  const worker = new OcrWorker(config, repository, new S3ExactDocumentReader(config), provider, reading, sourceDeletion);
   process.once('SIGTERM', () => worker.stop());
   process.once('SIGINT', () => worker.stop());
   await worker.run();
@@ -32,4 +37,6 @@ void bootstrap().catch((error: unknown) => {
   process.stderr.write(JSON.stringify({ timestamp: new Date().toISOString(), level: 'error',
     event: 'ocr.worker.startup_failed', code, acceptingClaims: false }) + '\n');
   process.exitCode = 1;
+  captureServerError(error);
+  void flushErrorReporting();
 });

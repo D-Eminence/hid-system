@@ -28,6 +28,84 @@ validated OCR evidence into EHR, Lab or Pharmacy. It answers
 default since the owner turned OCR publication on in production (2026-10-31);
 job, validation and patient confirmation do not depend on it.
 
+Publishing needs the publisher's own direct-care `write_records` grant on the
+patient, for every target (`docs/INTERFACE_CONTRACT.md` section 39). A caller
+who can read the job but has no such grant (for example under the
+records-processing cover) gets `403 OCR_PUBLISH_NEEDS_DIRECT_CARE` ("Ask a
+clinician with access to this patient to publish it."); one who cannot read the
+job, and a break-glass write, get `404 OCR_JOB_NOT_FOUND` (an EHR 403 on the
+source read is now this 404 too, rather than EHR's own code). A refusal at an
+execution attempt (a grant gone after the request) fails the publication with
+`OCR_PUBLISH_NEEDS_DIRECT_CARE` in place of `OCR_JOB_NOT_FOUND`.
+
+## Review outcomes (phase 1: measure)
+
+So the reading can learn from live reviews without keeping patient text, every
+validation stores a content-free comparison of the AI reading and the review in
+`ocr.validations.provenance.reviewOutcome` (schema
+`hid.ocr.review-outcome/v1`) and in the `ocr.validation.accept` / `.reject`
+audit details (`src/ocr/quality/review-outcome.ts`; contract in
+`docs/INTERFACE_CONTRACT.md` section 15). Counts are bucketed by item kind,
+decision, AI confidence, hard page, `readBy`, check-reason code and field-change
+class. Field comparisons use `src/ocr/quality/normalise.ts`, a port of the OCR
+accuracy kit's `lib/normalise.mjs` (`normalise.spec.ts` carries its test
+vectors; keep the two in step). Reviews saved as whole text (EHR notes, the
+legacy single medicine, medicine or lab lists without `itemId`) are marked
+`estimated`. That estimate runs inside the save transaction, so its work is
+bounded: the saved text is tokenised once, a word found nowhere in it settles
+an item at once, word-pair results are cached, and at most 300 items are
+checked within 1,000,000 word comparisons and 2,000,000 edit-distance cells
+(the rest count `notChecked`; worst case a few hundred milliseconds).
+`onPrepared` follows the kit's `onPage` rule with two deliberate differences: a
+value with no words is not found, and it can answer "not checked". The stored outcome is
+kept under 16 KB (the audit details row has a 64 KB check): check-reason counts
+are dropped first (`checkReasonsDropped`), then `summary_too_large`. The
+extraction is read inside a savepoint and the computation is wrapped, so a
+failure stores `{ schema, error: 'summary_failed' }` and the review is saved
+anyway; the log line `ocr.review_outcome.failed` carries a code and the
+job id only.
+
+The 7-day source purge (0112) blanks `validated_payload`, `accepted_fields`,
+`rejected_fields`, `corrections` and `reason`; it keeps `provenance`, so review
+outcomes outlive the content they were computed from.
+
+`GET /api/v1/ocr/quality/summary?from=&to=` is for platform administrators
+(`platform.admin.access` and `platform.operations.read`) and for a facility's
+own manager (`workforce.manage` in their membership at the facility named by
+`X-Facility-ID`, never at another facility, and not while the facility awaits
+Health ID support's review). A manager gets `{ available: false, reason:
+'too_few_reviewers' }` unless at least 3 distinct reviewers contributed in the
+range, any group with fewer than 3 distinct reviewers is suppressed, and the
+range ends at the last finished ISO week (a cut-off last week is left out);
+reviewers are counted by a random per-request key, never by id. It sums review
+outcomes by ISO week, facility, kind and prompt version, widens the range to
+whole ISO weeks, returns groups under 20 items as suppressed, leaves out reason
+counts under 5 inside shown groups (`smallCellsHidden`), and has no per-reviewer
+figures. Figures from one or two reviewers would in effect be theirs, so a
+manager never sees a group with fewer than 3 distinct reviewers, nor a week
+still filling up (no staff monitoring); platform administrators do. `ocr.validations`
+row-level security admits only `platform.current_facility_id()`, and the
+runtime role has no cross-facility policy, so the summary covers the facility
+named by `X-Facility-ID`, where the reader (administrator or manager) must be active. A
+cross-facility summary would need an aggregate-only `SECURITY DEFINER` function
+(as 0027's admin audit read) and is not part of this phase.
+
+Since 0113 (owner decision of 2026-11-11, `docs/INTERFACE_CONTRACT.md`
+section 42) a caller without direct-care write who holds the patient's
+dedicated records-processing grant (an approved `healthcare-operations`
+`write_records` access request; never a share, an Access PIN or an approval of
+direct care: `identity.records_processing_write_grant`, asked in the
+publication's transaction) publishes any reading as a draft note: EHR is
+called under `healthcare-operations` without a visit and puts the draft note
+into the patient's "Imported paper records" encounter at the facility. A
+clinical-note reading goes as it is; a Lab, medication or document-only reading
+becomes a draft note titled "Lab results", "Medicines" or "Document" from its
+reviewed fields (`paperRecordDraftNote`), never a structured Lab or Pharmacy
+record (those stay direct care). A reading may
+name no visit (`encounterId` optional); a direct-care publisher of such a
+reading also lands it there. The publication audit events carry `basis`,
+`grantId`, `confirmedBy` and `publishedBy` (ids only).
+
 ## Paper readings (`hid-paper-reading-v2`)
 
 The worker writes `provenance.processingContract` `hid-textract-v2` and a

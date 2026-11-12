@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true, "rootDir": ".", "types": ["node", "jest"], "experimentalDecorators": true, "emitDecoratorMetadata": true },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": []
+}
