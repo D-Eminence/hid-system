@@ -7,6 +7,7 @@ import { PrescriptionsService } from '../prescriptions/prescriptions.service';
 import { AllergiesService } from './allergies.service';
 import { matchAllergies } from './allergy-match';
 import { warningToken } from './allergy-reader';
+import { requireAllergyReadAccess } from './prescription-allergy-gate';
 
 const patientId = '123e4567-e89b-42d3-a456-426614174001';
 const facilityId = '123e4567-e89b-42d3-a456-426614174002';
@@ -36,12 +37,17 @@ const allergyRow = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-/** A client that answers each query by the first matching pattern. */
+/**
+ * A client that answers each query by the first matching pattern; the
+ * allergy check's read-access question (ehr.context_allows) is answered
+ * allowed unless a pattern answers it first.
+ */
 function fakeClient(answers: [RegExp, unknown[]][]) {
   const calls: { sql: string; values: unknown[] }[] = [];
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
     calls.push({ sql, values });
-    const answer = answers.find(([pattern]) => pattern.test(sql));
+    const answer = [...answers, [/ehr\.context_allows\(/, [{ allowed: true }]] as [RegExp, unknown[]]]
+      .find(([pattern]) => pattern.test(sql));
     return { rows: answer ? answer[1] : [], rowCount: answer ? answer[1].length : 0 };
   });
   return { client: { query }, calls };
@@ -445,6 +451,78 @@ describe('PrescriptionsService allergy check on Activate and Resume (0117)', () 
   });
 });
 
+describe('the allergy check without read access to the patient\'s records (0117, fails closed)', () => {
+  // A facility that may write but not read the patient's records: its write_records grant covers
+  // reading, but a deny directive of the patient's names read_records alone. The allergy reads run
+  // under RLS (read_records) and would see no allergy, so the check refuses before reading or writing.
+  const prescriptionId = '123e4567-e89b-42d3-a456-426614174020';
+  const noRoutes = { summaries: async () => new Map(), summary: async () => null, crossFacilityOrdersEnabled: async () => false };
+  const readDenied: [RegExp, unknown[]] = [/ehr\.context_allows\(/, [{ allowed: false }]];
+  const amoxicillin = { medicationDisplay: 'Amoxicillin 500 mg', frequency: 'Three times daily', instructions: 'After food',
+    status: OrderStatus.Active };
+  const acknowledgement = { reason: 'Tolerated amoxicillin last year; monitoring',
+    warningToken: tokenFor([{ id: allergyId, substance: 'Penicillin' }]) };
+  const current = (status: OrderStatus) => ({ id: prescriptionId, encounterId, patientId, facilityId, status, rowVersion: '1',
+    medicationDisplay: 'Amoxicillin 500 mg', medicationCode: null });
+  // What RLS answers that facility: no allergy, no patient text, no stored reason.
+  const hidden: [RegExp, unknown[]][] = [[/recorded_allergies|patient_reported_health_profiles|prescription_allergy_acknowledgements/, []]];
+  const readsOrWrites = (calls: { sql: string }[]) => calls.filter((call) =>
+    /recorded_allergies|patient_reported_health_profiles|prescription_allergy_acknowledgements|insert into|^\s*update /
+      .test(call.sql));
+
+  it('asks the database in the caller\'s transaction, for this patient at this facility, and goes on only on true', async () => {
+    for (const rows of [[{ allowed: false }], [{ allowed: null }], []]) {
+      const { client, calls } = fakeClient([[/ehr\.context_allows\(/, rows]]);
+      await expect(requireAllergyReadAccess(client as never, context, patientId))
+        .rejects.toMatchObject({ status: 403, code: 'CONSENT_REQUIRED' });
+      expect(calls).toEqual([{ sql: `select ehr.context_allows($1::uuid, $2::uuid, 'read_records') as allowed`,
+        values: [patientId, facilityId] }]);
+    }
+    const { client } = fakeClient([[/ehr\.context_allows\(/, [{ allowed: true }]]]);
+    await expect(requireAllergyReadAccess(client as never, context, patientId)).resolves.toBeUndefined();
+  });
+
+  it('refuses a create with 403 CONSENT_REQUIRED and writes nothing, even with an acknowledgement', async () => {
+    const { client, calls } = fakeClient([readDenied, ...hidden,
+      [/insert into ehr\.prescriptions/, [{ id: prescriptionId, encounterId, patientId, facilityId }]]]);
+    const repository = repositoryWith(client);
+    const service = new PrescriptionsService(repository as never, {} as never, noRoutes as never);
+    await expect(service.create(context, patientId, encounterId, { ...amoxicillin, allergyAcknowledgement: acknowledgement },
+      'key-12345678')).rejects.toMatchObject({ status: 403, code: 'CONSENT_REQUIRED' });
+    expect(readsOrWrites(calls)).toEqual([]);
+    expect(repository.setChangeReason).not.toHaveBeenCalled();
+  });
+
+  it.each([OrderStatus.Draft, OrderStatus.OnHold])(
+    'refuses Activate or Resume of a prescription %s with 403 CONSENT_REQUIRED and changes nothing', async (status) => {
+      const { client, calls } = fakeClient([readDenied, ...hidden, [/for update/, [current(status)]],
+        [/^\s*update ehr\.prescriptions/, [{ ...current(OrderStatus.Active), rowVersion: '2' }]]]);
+      const repository = repositoryWith(client);
+      repository.run.mockImplementation(async (_c, _p, _a, _e, operation) => operation(client));
+      const service = new PrescriptionsService(repository as never, {} as never, noRoutes as never);
+      await expect(service.update(context, patientId, encounterId, prescriptionId, { expectedRowVersion: 1,
+        changeReason: 'Ready to give', status: OrderStatus.Active, allergyAcknowledgement: acknowledgement }))
+        .rejects.toMatchObject({ status: 403, code: 'CONSENT_REQUIRED' });
+      expect(readsOrWrites(calls)).toEqual([]);
+      expect(repository.setChangeReason).not.toHaveBeenCalled();
+    });
+
+  it('with read access, asks after the patient\'s allergy lock and right before the allergy reads, and goes on as before',
+    async () => {
+      const { client, calls } = fakeClient([[/insert into ehr\.prescriptions/, [{ id: prescriptionId, encounterId, patientId,
+        facilityId }]], [/insert into ehr\.prescription_allergy_acknowledgements/, [{}]],
+      [/from ehr\.recorded_allergies/, [penicillin]]]);
+      const service = new PrescriptionsService(repositoryWith(client) as never, {} as never, noRoutes as never);
+      await expect(service.create(context, patientId, encounterId, { ...amoxicillin, allergyAcknowledgement: acknowledgement },
+        'key-12345678')).resolves.toMatchObject({ id: prescriptionId });
+      const at = (pattern: RegExp) => calls.findIndex((call) => pattern.test(call.sql));
+      expect(at(/pg_advisory_xact_lock/)).toBe(0);
+      expect(at(/ehr\.context_allows\(/)).toBe(1);
+      expect(at(/from ehr\.recorded_allergies/)).toBe(2);
+      expect(at(/insert into ehr\.prescription_allergy_acknowledgements/)).toBeGreaterThan(at(/insert into ehr\.prescriptions/));
+    });
+});
+
 describe('an allergy marked entered in error, across facilities and beside an active one (0117)', () => {
   // "does not warn for an allergy marked entered in error" above shows the check's read leaves out an
   // allergy marked here. These add: an allergy recorded at another facility keeps warning here until
@@ -488,6 +566,7 @@ describe('an allergy marked entered in error, across facilities and beside an ac
           rowCount: found.length };
       }
       if (/insert into ehr\.prescriptions/.test(sql)) return { rows: [prescriptionRow], rowCount: 1 };
+      if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: true }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     });
     return { client: { query }, calls };

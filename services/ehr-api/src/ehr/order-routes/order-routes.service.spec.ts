@@ -37,7 +37,8 @@ function harness(answers: Record<string, unknown[] | Error> = {}) {
     query: jest.fn(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql, values });
       const name = /from\s+([a-z_]+\.[a-z_]+)\(/i.exec(sql)?.[1] ?? sql;
-      const answer = answers[name];
+      // 0117: the allergy check's read-access question; the facility may read unless a test says otherwise.
+      const answer = answers[name] ?? (/ehr\.context_allows\(/.test(sql) ? [{ allowed: true }] : undefined);
       if (answer instanceof Error) throw answer;
       return { rows: answer ?? [] };
     }),
@@ -163,15 +164,22 @@ describe('OrderRoutesService send of a prescription: the allergy check (0117)', 
     { display: 'Amoxicillin 500 mg' });
 
   /**
-   * The harness, answering the prescription read, the allergy reads, the
+   * The harness, answering whether the facility may read the patient's
+   * records (`readAllowed`), the prescription read, the allergy reads, the
    * acknowledgements already stored for the prescription (`stored`) and the
-   * send (or its refusal).
+   * send (or its refusal). Without read access, RLS hides the prescription,
+   * the allergies and the stored reasons (their read policies need
+   * read_records), while the send, which checks only write_records, goes on
+   * (as it does under an owner of ehr.send_order_route that bypasses RLS).
    */
   function sendHarness(status: string, recorded: unknown[], replayed = false, stored: unknown[] = [],
-    send: Error | null = null) {
+    send: Error | null = null, readAllowed = true) {
     const parts = harness();
     parts.client.query.mockImplementation(async (sql: string, values: unknown[] = []) => {
       parts.statements.push({ sql, values });
+      if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: readAllowed }] };
+      if (!readAllowed && /from ehr\.(prescriptions|recorded_allergies|prescription_allergy_acknowledgements)\b|patient_reported_health_profiles/
+        .test(sql)) return { rows: [] };
       if (/send_order_route/.test(sql)) {
         if (send) throw send;
         return { rows: [{ ...sendRow, replayed }] };
@@ -269,6 +277,7 @@ describe('OrderRoutesService send of a prescription: the allergy check (0117)', 
     const { service, statements, client } = sendHarness('active', [penicillin]);
     client.query.mockImplementation(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql, values });
+      if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: true }] };
       if (/send_order_route/.test(sql)) throw databaseError('P0002', 'ORDER_NOT_FOUND');
       return { rows: [] };
     });
@@ -276,6 +285,36 @@ describe('OrderRoutesService send of a prescription: the allergy check (0117)', 
       .rejects.toMatchObject({ status: 404, code: 'ORDER_NOT_FOUND' });
     expect(statements.some((statement) => /recorded_allergies/.test(statement.sql))).toBe(false);
   });
+
+  // A facility that may write but not read the patient's records: a write_records grant, and a deny
+  // directive of the patient's naming only read_records. RLS then hides the prescription and the
+  // allergies, while ehr.send_order_route checks only write_records; the read access is asked first,
+  // so a prescription hidden from the check is never sent unchecked.
+  it.each(['draft', 'active'])(
+    'refuses to send a %s prescription with 403 CONSENT_REQUIRED when the facility may not read the patient\'s records',
+    async (status) => {
+      const { service, statements, audits } = sendHarness(status, [penicillin], false, [], null, false);
+      await expect(service.send(context(), 'prescription', patientId, encounterId, requestId,
+        { ...prescriptionInput, allergyAcknowledgement: acknowledgement }, key))
+        .rejects.toMatchObject({ status: 403, code: 'CONSENT_REQUIRED' });
+      // Only the question was asked: no prescription read, no allergy read, no send, no reason stored.
+      expect(statements).toEqual([{ sql: expect.stringMatching(/ehr\.context_allows\(\$1::uuid, \$2::uuid, 'read_records'\)/),
+        values: [patientId, facilityId] }]);
+      expect(wrote(statements)).toEqual([]);
+      expect(audits).toEqual([]);
+    });
+
+  it('asks whether the facility may read the patient\'s records before it reads the prescription, then sends as before',
+    async () => {
+      const { service, statements } = sendHarness('active', [penicillin], false,
+        [{ matchedRecordedAllergyIds: [allergyId], patientReportedTerms: [] }]);
+      await expect(service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key))
+        .resolves.toMatchObject({ replayed: false, route: { id: routeId } });
+      const at = (pattern: RegExp) => statements.findIndex((statement) => pattern.test(statement.sql));
+      expect(at(/ehr\.context_allows\(/)).toBe(0);
+      expect(at(/from ehr\.prescriptions/)).toBeGreaterThan(0);
+      expect(at(/send_order_route/)).toBeGreaterThan(at(/from ehr\.recorded_allergies/));
+    });
 
   it('does not read allergies for a lab request, whatever its status', async () => {
     for (const status of ['draft', 'active']) {

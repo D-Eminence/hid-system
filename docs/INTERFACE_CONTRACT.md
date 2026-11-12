@@ -4635,6 +4635,11 @@ allergy may have been recorded since it became active:
   `PRESCRIPTION_NOT_ELIGIBLE` (not active) and 409 `PRESCRIPTION_ROUTED`. Its 409 answers before pharmacy-api is
   called, so nothing is written in the EHR or in Pharmacy.
 
+The check reads the allergies under forced RLS, which needs `read_records`, so when the facility may write but not
+read the patient's records (a deny directive of the patient's naming only `read_records`) it refuses with 403
+`CONSENT_REQUIRED`, as a missing consent is refused everywhere else, before it reads or writes anything (the send asks
+before it reads the prescription), so a prescription is never written, activated, resumed, sent or handed on unchecked.
+
 On Activate, Resume, send and hand-off, a match already covered by an acknowledgement stored for the prescription (at
 any stage: its recorded allergy ids, and each of the patient's own terms) needs no new one. Otherwise, with a match and
 no accepted `allergyAcknowledgement`, nothing is written and the answer is 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED` with,

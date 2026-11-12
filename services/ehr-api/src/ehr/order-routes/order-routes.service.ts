@@ -8,7 +8,8 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
-import { checkPrescriptionAllergies, recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
+import { checkPrescriptionAllergies, recordAllergyAcknowledgement,
+  requireAllergyReadAccess } from '../allergies/prescription-allergy-gate';
 import type { AllergyMatch } from '../allergies/allergy-match';
 import type { SendOrderRouteDto, WithdrawOrderRouteDto } from './dto/order-route.dto';
 import {
@@ -173,9 +174,16 @@ export class OrderRoutesService {
    * A match already covered by a reason stored for this prescription needs
    * none. Any other status, or a prescription not found, is not checked, so
    * the send's own refusal answers (ORDER_ROUTE_ORDER_NOT_ELIGIBLE, 404).
+   * Read access comes first (403 CONSENT_REQUIRED without it): the read
+   * below runs under RLS, which hides the prescription from a facility that
+   * may write but not read the patient's records, and ehr.send_order_route
+   * checks only write_records (whether its own read then finds the order
+   * depends on whether its owner bypasses RLS), so "not found" here must
+   * never skip the check.
    */
   private async checkSendablePrescriptionAllergies(client: PoolClient, context: DataAccessContext, patientId: string,
     encounterId: string, prescriptionId: string, input: SendOrderRouteDto): Promise<AllergyMatch[]> {
+    await requireAllergyReadAccess(client, context, patientId);
     const result = await client.query<{ status: string; medicationDisplay: string; medicationCode: string | null }>(
       `select status, medication_display as "medicationDisplay", medication_code as "medicationCode"
          from ehr.prescriptions where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4`,

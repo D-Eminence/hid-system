@@ -52,15 +52,17 @@ describe('PrescriptionsService Pharmacy handoff', () => {
   });
 
   /**
-   * The hand-off with a client answering the locked prescription, the
+   * The hand-off with a client answering the locked prescription, whether
+   * the facility may read the patient's records (`readAllowed`), the
    * patient's recorded allergies and the acknowledgements already stored for
    * the prescription; the repository records the audit details as
    * ClinicalRepository.run merges them.
    */
-  const serviceFor = (row: PrescriptionRow, recorded: unknown[] = [], stored: unknown[] = []) => {
+  const serviceFor = (row: PrescriptionRow, recorded: unknown[] = [], stored: unknown[] = [], readAllowed = true) => {
     const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
       calls.push({ sql, values });
       log.push(`tx: ${sql.trim().split(/\s+/).slice(0, 3).join(' ')}`);
+      if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: readAllowed }] };
       if (/from ehr\.prescriptions/.test(sql)) return { rows: [row] };
       if (/from ehr\.recorded_allergies/.test(sql)) return { rows: recorded };
       if (/from ehr\.prescription_allergy_acknowledgements/.test(sql)) return { rows: stored };
@@ -197,6 +199,22 @@ describe('PrescriptionsService Pharmacy handoff', () => {
         { ...handoff, allergyAcknowledgement: acknowledgement }, 'handoff-key-1234');
       expect(inserts()).toEqual([]);
       expect(pharmacyApi.acceptEhrPrescription).toHaveBeenCalledTimes(1);
+    });
+
+    // A facility that may write but not read the patient's records (a deny directive naming only
+    // read_records): under RLS the allergy reads would see nothing, so the check refuses first.
+    it('refuses with 403 CONSENT_REQUIRED when the facility may not read the patient\'s records, before Pharmacy', async () => {
+      const service = serviceFor(prescription(OrderStatus.Active), [], [], false);
+      await expect(service.acceptForPharmacy(context, patientId, encounterId, prescriptionId,
+        { ...handoff, allergyAcknowledgement: acknowledgement }, 'handoff-key-1234'))
+        .rejects.toMatchObject({ status: 403, code: 'CONSENT_REQUIRED' });
+      expect(pharmacyApi.acceptEhrPrescription).not.toHaveBeenCalled();
+      expect(log).not.toContain('pharmacy');
+      expect(inserts()).toEqual([]);
+      expect(audits).toEqual([]);
+      expect(calls.find((call) => /ehr\.context_allows\(/.test(call.sql))?.values).toEqual([patientId, facilityId]);
+      expect(calls.some((call) => /recorded_allergies|patient_reported_health_profiles|prescription_allergy_acknowledgements/
+        .test(call.sql))).toBe(false);
     });
 
     it('answers a version conflict or a prescription not active first, without reading the allergies', async () => {

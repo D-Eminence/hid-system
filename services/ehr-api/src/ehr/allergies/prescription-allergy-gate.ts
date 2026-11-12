@@ -83,6 +83,29 @@ export function allergyAcknowledgementRequired(
 }
 
 /**
+ * The allergy check reads the allergies under forced RLS, which admits only
+ * read access (`read_records`) to the patient at the current facility. Write
+ * access does not always bring it: a write_records grant covers reading, but a
+ * patient's deny directive may name read_records alone. The reads would then
+ * see no allergy and the check no match, so the check fails closed: it asks
+ * the database, in the caller's transaction, whether this facility may read
+ * the patient's records, and if not refuses as ClinicalRepository.run refuses
+ * a missing consent (403 CONSENT_REQUIRED), before anything is written.
+ */
+export async function requireAllergyReadAccess(
+  client: PoolClient, context: DataAccessContext, patientId: string,
+): Promise<void> {
+  const result = await client.query<{ allowed: boolean | null }>(
+    `select ehr.context_allows($1::uuid, $2::uuid, 'read_records') as allowed`,
+    [patientId, context.facilityId],
+  );
+  if (result.rows[0]?.allowed !== true) {
+    throw new DomainProblem(403, 'CONSENT_REQUIRED',
+      'Active consent to read the patient\'s records is required to check their allergies');
+  }
+}
+
+/**
  * The allergy check before a prescription is written as, or becomes, active,
  * and before it leaves the prescriber (sent to another facility or handed to
  * this facility's pharmacy) (0117). Answers the matches the reason covers
@@ -92,7 +115,9 @@ export function allergyAcknowledgementRequired(
  * Otherwise the request must carry an acknowledgement with a valid reason
  * whose warningToken is the one of the current warning; if not, 409 with the
  * current warning and what failed. With no match, an acknowledgement is
- * ignored, whatever it holds.
+ * ignored, whatever it holds. Without read access to the patient's records at
+ * this facility, 403 CONSENT_REQUIRED (requireAllergyReadAccess): no match
+ * found under RLS never stands for "no allergy".
  */
 export async function checkPrescriptionAllergies(
   client: PoolClient,
@@ -104,6 +129,9 @@ export async function checkPrescriptionAllergies(
 ): Promise<AllergyMatch[]> {
   // Serialized with recording an allergy for this patient, in the transaction that writes the prescription.
   await lockPatientAllergies(client, patientId);
+  // After the lock, right before the reads it guards: the check takes no lock (the lock order is
+  // unchanged), and under READ COMMITTED no lock wait lies between it and the reads.
+  await requireAllergyReadAccess(client, context, patientId);
   const matches = await checkMedicineAgainstAllergies(client, patientId, context.facilityId, medicine);
   if (matches.length === 0) return [];
   if (prescriptionId && await allCovered(client, context, patientId, prescriptionId, matches)) return [];
