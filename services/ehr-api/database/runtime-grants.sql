@@ -1462,6 +1462,72 @@ revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public
 -- No grant changes: the Outreach runtime still has no UPDATE on
 -- outreach.campaign_members, so it can neither update nor lock a membership.
 revoke all on function outreach.validate_registration_campaign_write() from public;
+-- Outreach organisers (0115), as that migration grants them: the public
+-- sign-up, the signed-in "Start an outreach group", outreach invitations and
+-- support's organiser commands to the Identity runtime; the consent rows, the
+-- organiser status and the support/retention run check (which the outreach
+-- policies call as the querying role) to the Outreach runtime. Everything
+-- else 0115 adds is owner-only.
+revoke all on function
+  identity.outreach_organiser_terms_version(), identity.outreach_group_name_allowed(text),
+  identity.outreach_text_valid(text,integer,integer), identity.outreach_email_valid(text),
+  outreach.privileged_run_active(text), outreach.begin_privileged_run(text), outreach.end_privileged_run(),
+  outreach.organiser_tenant_state(uuid), outreach.organiser_status(),
+  identity.outreach_signup_context(), identity.outreach_email_registered(text),
+  identity.outreach_patient_login(text),
+  identity.start_outreach_organiser_signup(uuid,char,text,text,text,text,text,char,bytea,text,char,char),
+  identity.resend_outreach_organiser_signup_code(uuid,char,char),
+  identity.verify_outreach_organiser_email(uuid,char,char),
+  identity.activate_outreach_organiser(uuid,char,text,text),
+  identity.activate_outreach_organiser_for_account(text,text,text,text,char,bytea,text),
+  identity.create_outreach_invitation(uuid,text,text,char), identity.revoke_outreach_invitation(uuid),
+  identity.record_outreach_invitation_delivery(uuid,text),
+  identity.list_outreach_team(), identity.preview_outreach_invitation(uuid,char),
+  identity.accept_outreach_invitation_with_password(uuid,char,text),
+  identity.accept_outreach_invitation_for_account(uuid,char),
+  identity.admin_list_outreach_organisers(text),
+  identity.admin_suspend_outreach_organiser(uuid,bigint,text),
+  identity.admin_close_outreach_campaign(uuid,bigint,text),
+  identity.admin_appoint_outreach_campaign_admin(uuid,uuid,text),
+  identity.enforce_outreach_tenant_roles(), outreach.enforce_organiser_tenant_rules(),
+  outreach.validate_registration_consent(), outreach.require_registration_consent(),
+  identity.create_outreach_group(uuid,uuid,text,text,text,char,bytea,text,text,text,uuid,boolean),
+  identity.outreach_organiser_actor(), identity.outreach_invitation_for_link(uuid,char),
+  identity.attach_outreach_volunteer(identity.outreach_invitations,uuid,uuid,text),
+  identity.outreach_support_actor(boolean), identity.outreach_support_audit(uuid,uuid,uuid,text,text,text,text,jsonb)
+  from public;
+revoke all on identity.outreach_organisations, identity.outreach_organiser_signups, identity.outreach_invitations,
+  outreach.privileged_runs, outreach.registration_consents from public;
+grant execute on function
+  identity.start_outreach_organiser_signup(uuid,char,text,text,text,text,text,char,bytea,text,char,char),
+  identity.resend_outreach_organiser_signup_code(uuid,char,char),
+  identity.verify_outreach_organiser_email(uuid,char,char),
+  identity.activate_outreach_organiser(uuid,char,text,text),
+  identity.activate_outreach_organiser_for_account(text,text,text,text,char,bytea,text),
+  identity.create_outreach_invitation(uuid,text,text,char), identity.revoke_outreach_invitation(uuid),
+  identity.record_outreach_invitation_delivery(uuid,text),
+  identity.list_outreach_team(), identity.preview_outreach_invitation(uuid,char),
+  identity.accept_outreach_invitation_with_password(uuid,char,text),
+  identity.accept_outreach_invitation_for_account(uuid,char),
+  identity.admin_list_outreach_organisers(text),
+  identity.admin_suspend_outreach_organiser(uuid,bigint,text),
+  identity.admin_close_outreach_campaign(uuid,bigint,text),
+  identity.admin_appoint_outreach_campaign_admin(uuid,uuid,text)
+  to hid_identity_runtime;
+grant select, insert on outreach.registration_consents to hid_outreach_runtime;
+grant execute on function outreach.privileged_run_active(text), outreach.organiser_status() to hid_outreach_runtime;
+grant execute on function outreach.privileged_run_active(text) to hid_schema_test_runtime;
+-- Outreach retention (0116): the sweeper, and support's search and redaction on
+-- request, to the Identity runtime only, never the Outreach runtime.
+revoke all on function outreach.stamp_campaign_closed_at(), outreach.registration_retain_until(outreach.campaigns),
+  outreach.guard_command_idempotency_mutation(), outreach.redact_registration_case(uuid,text,text,uuid),
+  identity.sweep_expired_outreach_registrations(integer), identity.admin_redact_outreach_registration(uuid,text),
+  identity.admin_find_outreach_registrations(uuid,text,text), outreach.registration_phone_key(text)
+  from public;
+revoke all on outreach.registration_redactions from public;
+grant execute on function identity.sweep_expired_outreach_registrations(integer),
+  identity.admin_redact_outreach_registration(uuid,text), identity.admin_find_outreach_registrations(uuid,text,text)
+  to hid_identity_runtime;
 
 -- OCR source deletion after 7 days (0112): the OCR worker lists the
 -- documents due, counts them (due, and overdue), claims each one
