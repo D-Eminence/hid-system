@@ -1482,6 +1482,46 @@ select pg_temp.assert('G9q: an invitation moved to another domain is refused',
     where invitee_email = 'operations+qa-volunteer@healthidentitydirectory.com'$q$) = '22023 OUTREACH_INVITATION_INVALID');
 select pg_temp.assert('G9q: a real group still invites any address',
   pg_temp.outreach_invite('a1230003-0000-4000-8000-000000000001', 'volunteer@example.invalid') = 'ok');
+-- Acceptance across sides, through the command a signed-in login uses (identity.accept_outreach_invitation_for_account):
+-- a QA login accepting a real group's invitation, and a real login accepting a QA group's, are both refused (G2q).
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('a1230003-0000-4000-8000-000000000051', 'synthetic:qa-suite:real-volunteer',
+   'operations+real-volunteer@healthidentitydirectory.com', 'Real Volunteer', 'active');
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
+  ('a1230004-0000-4000-8000-000000000051', 'a1230003-0000-4000-8000-000000000051', 'Real Volunteer',
+   'operations+real-volunteer@healthidentitydirectory.com', 'verified', 'nurse');
+select pg_temp.assert('a real group invites the QA lab login; the QA group invites a real login (owner SQL)',
+  pg_temp.outreach_invite('a1230003-0000-4000-8000-000000000001', 'lab@healthidentitydirectory.com') = 'ok'
+  and pg_temp.outreach_invite('c0a00003-0000-4000-8000-000000000007', 'operations+real-volunteer@healthidentitydirectory.com')
+    = 'ok');
+select set_config('hid.test.invite_qa_lab', (select id::text from identity.outreach_invitations
+  where invitee_email = 'lab@healthidentitydirectory.com'), true);
+select set_config('hid.test.invite_real', (select id::text from identity.outreach_invitations
+  where invitee_email = 'operations+real-volunteer@healthidentitydirectory.com'), true);
+create function pg_temp.accept_outreach(subject text, invitation text) returns text language plpgsql as $f$
+begin
+  perform pg_temp.as_staff(subject, null, null, 'healthcare-operations');
+  return pg_temp.try(format('select * from identity.accept_outreach_invitation_for_account(%L, %L)',
+    invitation, repeat('b', 64)));
+end
+$f$;
+grant execute on function pg_temp.accept_outreach(text, text) to hid_identity_api_runtime;
+set local role hid_identity_api_runtime;
+select pg_temp.assert('QA to real: the QA lab login cannot join a real outreach group by accepting its invitation',
+  pg_temp.accept_outreach('sealed-qa:c0a00003-0000-4000-8000-000000000003', current_setting('hid.test.invite_qa_lab'))
+    = '42501 SEALED_QA_MEMBERSHIP_REFUSED');
+select pg_temp.assert('real to QA: a real login cannot join the QA outreach group by accepting its invitation',
+  pg_temp.accept_outreach('synthetic:qa-suite:real-volunteer', current_setting('hid.test.invite_real'))
+    = '42501 SEALED_QA_MEMBERSHIP_REFUSED');
+reset role;
+select pg_temp.assert('neither acceptance left a membership or an accepted invitation',
+  not exists (select 1 from identity.staff_facility_memberships membership
+               where membership.account_id in ('c0a00003-0000-4000-8000-000000000003', 'a1230003-0000-4000-8000-000000000051')
+                 and membership.facility_id in (select facility_id from identity.outreach_organisations))
+  and not exists (select 1 from identity.outreach_invitations
+                   where invitee_email in ('lab@healthidentitydirectory.com',
+                                           'operations+real-volunteer@healthidentitydirectory.com')
+                     and status = 'accepted'));
 rollback to savepoint outreach_invitations_qa;
 set local role hid_identity_api_runtime;
 select pg_temp.as_platform_admin();
