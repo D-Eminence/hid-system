@@ -3,8 +3,9 @@
  * warns when the medicine's name (display text and code) names the same
  * medicine as an allergy (brand names read as their generics, one-letter
  * misspellings of long names allowed), a medicine of the same class
- * (penicillins, cephalosporins, carbapenems, sulfonamides, NSAIDs), or a class
- * with known cross-reactivity (the beta-lactams; ceftazidime and aztreonam).
+ * (penicillins, cephalosporins, carbapenems, sulfonamides, NSAIDs,
+ * fluoroquinolones, macrolides), or a class with known cross-reactivity (the
+ * beta-lactams; ceftazidime and aztreonam).
  * It is a safety prompt, not a full drug-interaction database: no match never
  * means "safe".
  */
@@ -45,7 +46,8 @@ export interface AllergyMatch {
   message: string;
 }
 
-type ClassKey = 'penicillins' | 'cephalosporins' | 'carbapenems' | 'sulfonamides' | 'nsaids';
+type ClassKey = 'penicillins' | 'cephalosporins' | 'carbapenems' | 'sulfonamides' | 'nsaids' | 'fluoroquinolones'
+  | 'macrolides';
 
 interface DrugClass {
   key: ClassKey;
@@ -86,7 +88,7 @@ export const DRUG_CLASSES: readonly DrugClass[] = [
     classWords: ['cephalosporin', 'cephalosporins', ...BETA_LACTAM_WORDS],
     members: ['cefalexin', 'cephalexin', 'cefadroxil', 'cefazolin', 'cefaclor', 'cefuroxime', 'cefprozil',
       'cefixime', 'cefpodoxime', 'cefdinir', 'cefotaxime', 'ceftriaxone', 'ceftazidime', 'cefepime',
-      'ceftaroline', 'cefoxitin', 'zinnat', 'rocephin'],
+      'ceftaroline', 'cefoxitin', 'zinnat', 'rocephin', 'keflex'],
     prefixes: ['cef', 'ceph'],
   },
   {
@@ -113,6 +115,20 @@ export const DRUG_CLASSES: readonly DrugClass[] = [
       'indometacin', 'ketoprofen', 'meloxicam', 'celecoxib', 'etoricoxib', 'mefenamic', 'ketorolac',
       'aceclofenac', 'flurbiprofen', 'nabumetone', 'etodolac', 'voltaren', 'brufen', 'cataflam', 'felvin',
       'ponstan', 'feldene', 'celebrex', 'indocid', 'toradol', 'mobic', 'arcoxia', 'nurofen', 'naprosyn', 'asa'],
+  },
+  {
+    key: 'fluoroquinolones', label: 'fluoroquinolones',
+    classWords: ['quinolone', 'quinolones', 'fluoroquinolone', 'fluoroquinolones'],
+    members: ['ciprofloxacin', 'levofloxacin', 'ofloxacin', 'moxifloxacin', 'norfloxacin'],
+    // "-floxacin". Quinine is not a quinolone (nor are chloroquine and the other quinolines): no word of it.
+    patterns: [/floxacin/],
+  },
+  {
+    key: 'macrolides', label: 'macrolides',
+    classWords: ['macrolide', 'macrolides'],
+    members: ['erythromycin', 'clarithromycin', 'azithromycin', 'roxithromycin'],
+    // "-thromycin", never the wider "-mycin" (gentamicin, vancomycin, clindamycin are not macrolides).
+    patterns: [/thromycin/],
   },
 ];
 
@@ -156,6 +172,9 @@ const ALIASES: Readonly<Record<string, string>> = {
   'tazocin': 'piperacillin tazobactam',
   'zinnat': 'cefuroxime',
   'rocephin': 'ceftriaxone',
+  'keflex': 'cefalexin',
+  'cefalexin': 'cephalexin',
+  'cephalexin': 'cefalexin',
   'brufen': 'ibuprofen',
   'nurofen': 'ibuprofen',
   'voltaren': 'diclofenac',
@@ -165,6 +184,14 @@ const ALIASES: Readonly<Record<string, string>> = {
   'ponstan': 'mefenamic',
   'celebrex': 'celecoxib',
   'indocid': 'indomethacin',
+  'ciprotab': 'ciprofloxacin',
+  'tramal': 'tramadol',
+  'panadol': 'paracetamol',
+  'acetaminophen': 'paracetamol',
+  'paracetamol': 'acetaminophen',
+  // Codeine with paracetamol: an allergy to either warns on it, and an allergy to it warns on either.
+  'co codamol': 'codeine paracetamol',
+  'cocodamol': 'codeine paracetamol',
   'phytomenadione': 'vitamin k',
   'vitamin k1': 'vitamin k',
   'konakion': 'vitamin k',

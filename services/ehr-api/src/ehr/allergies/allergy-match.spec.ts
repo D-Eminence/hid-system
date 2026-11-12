@@ -202,9 +202,12 @@ describe('allergy matching (0117)', () => {
     expect(matchAllergies({ display: 'Tetracycline 250 mg' }, [recorded('Tetracyclines')])[0])
       .toMatchObject({ matchKind: 'same_medicine' });
     for (const [display, allergy] of [['Prednisolone 5 mg', 'Prednisone'], ['Clonazepam 0.5 mg', 'Lorazepam'],
-      ['Hydroxychloroquine 200 mg', 'Chloroquine'], ['Ciprofloxacin 500 mg', 'Levofloxacin']] as const) {
+      ['Hydroxychloroquine 200 mg', 'Chloroquine']] as const) {
       expect(matchAllergies({ display }, [recorded(allergy)])).toEqual([]);
     }
+    // Two fluoroquinolones: the same group, never taken for one medicine misspelled.
+    expect(matchAllergies({ display: 'Ciprofloxacin 500 mg' }, [recorded('Levofloxacin')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'fluoroquinolones' });
     expect(near('amoxicilin', 'amoxicillin')).toBe(true);
     expect(near('metronidazole', 'metrondiazole')).toBe(true);
     expect(near('amoxicillin', 'ampicillin')).toBe(false);
@@ -316,6 +319,101 @@ describe('allergy matching (0117)', () => {
   });
 
   /**
+   * The pairs the review of PR 218 found silent (Medium 2): each warns now,
+   * as the same medicine, the same group or a cross-reactive group.
+   */
+  it.each([
+    ['Cephalexin', 'Keflex 500', 'same_medicine', undefined],
+    ['Penicillin', 'Keflex 500', 'cross_reactivity', 'cephalosporins'],
+    ['Tramadol', 'Tramal 50mg', 'same_medicine', undefined],
+    ['Ciprofloxacin', 'Ciprotab 500', 'same_medicine', undefined],
+    ['Paracetamol', 'Panadol extra', 'same_medicine', undefined],
+    ['Acetaminophen', 'Paracetamol 1g', 'same_medicine', undefined],
+    ['Codeine', 'Co-codamol 30/500', 'same_medicine', undefined],
+    ['Quinolones', 'Levofloxacin 500mg', 'same_class', 'fluoroquinolones'],
+    ['Macrolides', 'Azithromycin 500mg', 'same_class', 'macrolides'],
+  ] as const)('an allergy to %s warns on %s (%s)', (allergy, display, matchKind, className) => {
+    const [match] = matchAllergies({ display }, [recorded(allergy)]);
+    expect(match).toMatchObject({ matchKind, ...(className ? { className } : {}) });
+    expect(matchAllergies({ display }, [reported(allergy.toLowerCase())])[0]).toMatchObject({ matchKind });
+  });
+
+  it('says why Keflex warns on a penicillin allergy, and which group a fluoroquinolone or macrolide is in', () => {
+    expect(matchAllergies({ display: 'Keflex 500' }, [recorded('Penicillin')])[0]?.message)
+      .toBe('Penicillin allergy: moderate (Rash). This medicine is a cephalosporin. Some people allergic to penicillins '
+        + 'also react to cephalosporins: a risk, not a certainty.');
+    expect(matchAllergies({ display: 'Levofloxacin 500mg' }, [recorded('Quinolones')])[0]?.message)
+      .toBe('Quinolones allergy: moderate (Rash). This medicine is one of the fluoroquinolones, the same group.');
+    expect(matchAllergies({ display: 'Azithromycin 500mg' }, [recorded('Macrolides')])[0]?.message)
+      .toBe('Macrolides allergy: moderate (Rash). This medicine is one of the macrolides, the same group.');
+  });
+
+  /** One row per brand or other name added for the review of PR 218: it reads as the medicine it names, both ways. */
+  it.each([
+    ['Keflex', 'Cefalexin 500 mg', 'Cefalexin', 'Keflex 500'],
+    ['Cefalexin', 'Cephalexin 250 mg', 'Cephalexin', 'Cefalexin 250 mg'],
+    ['Tramal', 'Tramadol 50 mg', 'Tramadol', 'Tramal 50mg'],
+    ['Ciprotab', 'Ciprofloxacin 500 mg', 'Ciprofloxacin', 'Ciprotab 500'],
+    ['Panadol', 'Paracetamol 500 mg', 'Paracetamol', 'Panadol extra'],
+    ['Acetaminophen', 'Paracetamol 1g', 'Paracetamol', 'Acetaminophen 500 mg'],
+    ['Co-codamol', 'Codeine phosphate 30 mg', 'Codeine', 'Co-codamol 30/500'],
+    ['Cocodamol', 'Paracetamol 500 mg', 'Paracetamol', 'Cocodamol 8/500'],
+  ])('%s reads as the medicine it names, both ways', (alias, namedMedicine, generic, aliasMedicine) => {
+    expect(matchAllergies({ display: namedMedicine }, [recorded(alias)])[0]).toMatchObject({ matchKind: 'same_medicine' });
+    expect(matchAllergies({ display: aliasMedicine }, [recorded(generic)])[0]).toMatchObject({ matchKind: 'same_medicine' });
+  });
+
+  it('reads Panadol, paracetamol, acetaminophen and co-codamol as naming one another\'s paracetamol', () => {
+    const same = (display: string, allergy: string) =>
+      expect(matchAllergies({ display }, [recorded(allergy)])[0]).toMatchObject({ matchKind: 'same_medicine' });
+    same('Acetaminophen 500 mg', 'Panadol');
+    same('Panadol 500 mg', 'Acetaminophen');
+    same('Co-codamol 30/500', 'Acetaminophen');
+    same('Co-codamol 30/500', 'Panadol');
+    same('Co-codamol 8/500', 'Paracetamol');
+    same('Paracetamol 1 g', 'Co-codamol');
+    same('Panadol extra', 'Co-codamol');
+  });
+
+  it('recognises other fluoroquinolones and macrolides by "-floxacin" and "-thromycin"', () => {
+    expect(matchAllergies({ display: 'Gemifloxacin 320 mg' }, [recorded('Fluoroquinolones')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'fluoroquinolones' });
+    expect(matchAllergies({ display: 'Ciprofloxacin eye drops' }, [recorded('Ofloxacin')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'fluoroquinolones' });
+    expect(matchAllergies({ display: 'Telithromycin 400 mg' }, [recorded('Macrolide')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'macrolides' });
+    expect(matchAllergies({ display: 'Clarithromycin 500 mg' }, [recorded('Erythromycin')])[0])
+      .toMatchObject({ matchKind: 'same_class', className: 'macrolides' });
+  });
+
+  it('adds no warning for look-alike names or unrelated groups (quinine is not a quinolone)', () => {
+    const silent = (display: string, allergy: string) =>
+      expect(matchAllergies({ display }, [recorded(allergy)])).toEqual([]);
+    silent('Erythropoietin 4000 IU', 'Erythromycin');
+    silent('Cetirizine 10 mg', 'Ciprofloxacin');
+    silent('Pantoprazole 40 mg', 'Panadol');
+    silent('Co-amoxiclav 625 mg', 'Codeine');
+    silent('Metronidazole 400 mg', 'Macrolides');
+    silent('Quinine 300 mg', 'Quinolones');
+    silent('Quinine sulphate 300 mg', 'Fluoroquinolones');
+    silent('Ciprofloxacin 500 mg', 'Quinine');
+    silent('Chloroquine 250 mg', 'Quinolones');
+    silent('Flucloxacillin 500 mg', 'Quinolones');
+    silent('Floxapen 500 mg', 'Ciprofloxacin');
+    silent('Gentamicin 80 mg', 'Macrolides');
+    silent('Clindamycin 300 mg', 'Erythromycin');
+    silent('Vancomycin 1 g', 'Azithromycin');
+    silent('Azithromycin 500 mg', 'Penicillin');
+    silent('Ciprofloxacin 500 mg', 'Penicillin');
+    silent('Azithromycin 500 mg', 'Quinolones');
+    silent('Ciprofloxacin 500 mg', 'Macrolides');
+    silent('Tramadol 50 mg', 'Paracetamol');
+    silent('Codeine phosphate 30 mg', 'Paracetamol');
+    silent('Paracetamol 500 mg', 'Codeine');
+    silent('Keflex 500', 'Sulfa');
+  });
+
+  /**
    * Every class member, written out by hand (not built from DRUG_CLASSES, so
    * removing a member fails its row). Each warns as the same group against the
    * class's own name, which proves the class membership and not a shared word.
@@ -353,6 +451,11 @@ describe('allergy matching (0117)', () => {
     ['felvin', 'NSAIDs'], ['ponstan', 'NSAIDs'], ['feldene', 'NSAIDs'], ['celebrex', 'NSAIDs'], ['indocid', 'NSAIDs'],
     ['toradol', 'NSAIDs'], ['mobic', 'NSAIDs'], ['arcoxia', 'NSAIDs'], ['nurofen', 'NSAIDs'], ['naprosyn', 'NSAIDs'],
     ['asa', 'NSAIDs'],
+    ['keflex', 'Cephalosporins'],
+    ['ciprofloxacin', 'Quinolones'], ['levofloxacin', 'Quinolones'], ['ofloxacin', 'Quinolones'],
+    ['moxifloxacin', 'Fluoroquinolones'], ['norfloxacin', 'Fluoroquinolones'],
+    ['erythromycin', 'Macrolides'], ['clarithromycin', 'Macrolides'], ['azithromycin', 'Macrolides'],
+    ['roxithromycin', 'Macrolide'],
   ];
   it.each(MEMBERS)('%s warns against %s', (member, allergy) =>
     expect(matchAllergies({ display: `${member} 500 mg` }, [recorded(allergy)])[0])
