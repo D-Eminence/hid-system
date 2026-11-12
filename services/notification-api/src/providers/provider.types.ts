@@ -133,17 +133,25 @@ export const STAFF_ROLE_LABELS = {
   pharmacist: 'pharmacist',
   receptionist: 'receptionist',
 } as const;
-export type StaffInvitationRole = keyof typeof STAFF_ROLE_LABELS;
-export const STAFF_INVITATION_ROLES = Object.keys(STAFF_ROLE_LABELS) as readonly StaffInvitationRole[];
+export type FacilityStaffInvitationRole = keyof typeof STAFF_ROLE_LABELS;
+/**
+ * The role an outreach organiser's invitation grants (open sign-up on
+ * outreach.): a helper in the organiser's own outreach group. Its email has
+ * its own words and opens on outreach.
+ */
+export const OUTREACH_VOLUNTEER_ROLE = 'outreach_volunteer' as const;
+export type StaffInvitationRole = FacilityStaffInvitationRole | typeof OUTREACH_VOLUNTEER_ROLE;
+export const STAFF_INVITATION_ROLES = [...Object.keys(STAFF_ROLE_LABELS), OUTREACH_VOLUNTEER_ROLE] as readonly StaffInvitationRole[];
 
 /** The staff sites a link in a staff email opens on: each is a product's own site. */
-export type StaffSite = 'ehr' | 'lab' | 'pharmacy';
+export type StaffSite = 'ehr' | 'lab' | 'pharmacy' | 'outreach';
 
 const STAFF_SITE_ORIGINS: Readonly<Record<'staging' | 'production', Readonly<Record<StaffSite, string>>>> = Object.freeze({
   production: Object.freeze({ ehr: 'https://ehr.healthidentitydirectory.com', lab: 'https://lab.healthidentitydirectory.com',
-    pharmacy: 'https://pharmacy.healthidentitydirectory.com' }),
+    pharmacy: 'https://pharmacy.healthidentitydirectory.com', outreach: 'https://outreach.healthidentitydirectory.com' }),
   staging: Object.freeze({ ehr: 'https://ehr.staging.healthidentitydirectory.com',
-    lab: 'https://lab.staging.healthidentitydirectory.com', pharmacy: 'https://pharmacy.staging.healthidentitydirectory.com' }),
+    lab: 'https://lab.staging.healthidentitydirectory.com', pharmacy: 'https://pharmacy.staging.healthidentitydirectory.com',
+    outreach: 'https://outreach.staging.healthidentitydirectory.com' }),
 });
 
 /**
@@ -153,6 +161,7 @@ const STAFF_SITE_ORIGINS: Readonly<Record<'staging' | 'production', Readonly<Rec
  * accepted there, and the new member signs in there.
  */
 export function staffSiteForRole(role: StaffInvitationRole): StaffSite {
+  if (role === OUTREACH_VOLUNTEER_ROLE) return 'outreach';
   return role === 'lab' ? 'lab' : role === 'pharmacist' ? 'pharmacy' : 'ehr';
 }
 
@@ -191,14 +200,44 @@ export function staffInvitationContent(input: {
   origin: string;
   supportEmail: string;
 }): MessageContent {
+  if (input.roleCode === OUTREACH_VOLUNTEER_ROLE) return outreachInvitationContent(input);
   const facility = input.facilityName || 'a facility';
   const page = `${input.origin}/provider/invitation`;
   return {
     subject: `Invitation to join ${facility} on Health ID`,
     text: 'Hello,\n\n'
-      + `The administrator of ${facility} has invited you to join the facility on Health ID as a ${STAFF_ROLE_LABELS[input.roleCode]}.\n\n`
+      + `The administrator of ${facility} has invited you to join the facility on Health ID as a ${STAFF_ROLE_LABELS[input.roleCode as FacilityStaffInvitationRole]}.\n\n`
       + `To accept, open this link:\n${page}#${input.invitationId}.${input.token}\n\n`
       + `If the link does not open, go to ${page} and enter this email address and the code ${input.code}.\n\n`
+      + `The invitation expires on ${alertTime(input.expiresAt)} (WAT). If you were not expecting it, you can ignore this email: `
+      + 'nothing happens unless you accept. To report it, write to Health ID support at '
+      + `${input.supportEmail} and quote reference ${staffInvitationReference(input.invitationId)}.`,
+  };
+}
+
+/**
+ * An outreach organiser's invitation to a helper: the group's name when
+ * Identity found it safe, otherwise "an outreach group". The link opens the
+ * outreach site's invitation page. Outreach invitations are accepted by
+ * link only (0115), so no code is shown.
+ */
+function outreachInvitationContent(input: {
+  facilityName?: string | null;
+  invitationId: string;
+  token: string;
+  code: string;
+  expiresAt: Date;
+  origin: string;
+  supportEmail: string;
+}): MessageContent {
+  const group = input.facilityName || 'an outreach group';
+  const page = `${input.origin}/provider/outreach-invitation`;
+  return {
+    subject: `Invitation to help ${group} on Health ID Outreach`,
+    text: 'Hello,\n\n'
+      + `The organiser of ${group} has invited you to help register people at their outreach events on Health ID.\n\n`
+      + `To accept, open this link:\n${page}#${input.invitationId}.${input.token}\n\n`
+      + 'If the link does not open, copy all of it into your browser\'s address bar.\n\n'
       + `The invitation expires on ${alertTime(input.expiresAt)} (WAT). If you were not expecting it, you can ignore this email: `
       + 'nothing happens unless you accept. To report it, write to Health ID support at '
       + `${input.supportEmail} and quote reference ${staffInvitationReference(input.invitationId)}.`,

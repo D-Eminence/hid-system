@@ -10,7 +10,9 @@ export type TurnstileAction = LoginAction | 'patient-reset-start' | 'staff-reset
   | 'organization-completion'
   | 'patient-enrollment'
   | 'provider-enrollment'
-  | 'staff-invitation';
+  | 'staff-invitation'
+  | 'outreach-organiser-signup'
+  | 'outreach-invitation';
 
 interface SiteverifyResponse {
   success?: unknown;
@@ -33,6 +35,13 @@ function deploymentActions(value: Record<string, readonly TurnstileAction[]>): R
  * is for patients only (owner decision of 2026-11-01).
  */
 const STAFF_SITE_ACTIONS = ['staff-reset', 'staff-invitation', 'provider-enrollment'] as const satisfies readonly TurnstileAction[];
+
+/**
+ * What outreach. alone accepts besides the staff site actions: open sign-up
+ * to run outreach (outreach-organiser-signup) and a helper accepting an
+ * outreach invitation (outreach-invitation), plan PR-3.
+ */
+const OUTREACH_SITE_ACTIONS = ['outreach-organiser-signup', 'outreach-invitation'] as const satisfies readonly TurnstileAction[];
 
 /** Exported only so the spec can pin the whole table; expectedEvidence is its one reader. */
 export const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<Record<string, readonly TurnstileAction[]>>>> = Object.freeze({
@@ -57,7 +66,7 @@ export const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Re
     'lab.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE_ACTIONS],
     'pharmacy.healthidentitydirectory.com': ['pharmacy-login', ...STAFF_SITE_ACTIONS],
     'migrate.healthidentitydirectory.com': ['ocr-login', ...STAFF_SITE_ACTIONS],
-    'outreach.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE_ACTIONS],
+    'outreach.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE_ACTIONS, ...OUTREACH_SITE_ACTIONS],
     'admin.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
   }),
   staging: deploymentActions({
@@ -77,7 +86,7 @@ export const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Re
     'lab.staging.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE_ACTIONS],
     'pharmacy.staging.healthidentitydirectory.com': ['pharmacy-login', ...STAFF_SITE_ACTIONS],
     'migrate.staging.healthidentitydirectory.com': ['ocr-login', ...STAFF_SITE_ACTIONS],
-    'outreach.staging.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE_ACTIONS],
+    'outreach.staging.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE_ACTIONS, ...OUTREACH_SITE_ACTIONS],
     'admin.staging.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
   }),
 });

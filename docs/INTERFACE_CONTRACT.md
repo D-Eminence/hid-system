@@ -4577,8 +4577,9 @@ duration is asked, for the same staff roles as today, with no separate "Ask
 for more access". 0120 is unsigned until the
 owner signs its declaration (`reviewed_by` stays empty). Written as 0121 and
 renumbered 0120 by the release order on 2026-11-11, on staging 51d6937a
-(0001-0114); 0115-0119 are other branches' and are not on staging yet. This
-section's number (47) is set for now; the coordinator renumbers it at landing.
+(0001-0114); staging is now a710205f (0001-0116), and 0117-0119 are other
+branches' and are not on staging yet. This section's number (47) is set for
+now; the coordinator renumbers it at landing.
 
 Route, unchanged in shape: `POST /identity/standard-access/pin`
 (permission `identity.patient-access-pin.verify`, purpose `direct-care`), body
