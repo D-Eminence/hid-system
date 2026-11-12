@@ -42,7 +42,8 @@ describe('OCR learning service', () => {
     const [, observations] = db.query.mock.calls[1] as unknown as [string, [string, string]];
     expect(JSON.parse(observations[1])).toEqual([]);
     const [, showings] = db.query.mock.calls[2] as unknown as [string, [string, string]];
-    expect(JSON.parse(showings[1])).toEqual([{ ruleId: '22222222-2222-4222-8222-222222222222', outcome: 'accepted' }]);
+    expect(JSON.parse(showings[1])).toEqual([{ ruleId: '22222222-2222-4222-8222-222222222222', outcome: 'accepted',
+      field: 'name', readDigest: readDigest('name', 'amoxicilin') }]);
   });
 
   it('records a displayed suggestion not taken as rejected', async () => {
@@ -50,7 +51,8 @@ describe('OCR learning service', () => {
     await new OcrLearningService().learnFromReview(db.client,
       { ...review(reading('Amoxicilin')), shownSuggestions: displayed('Ampicillin') });
     const [, showings] = db.query.mock.calls[2] as unknown as [string, [string, string]];
-    expect(JSON.parse(showings[1])).toEqual([{ ruleId: '22222222-2222-4222-8222-222222222222', outcome: 'rejected' }]);
+    expect(JSON.parse(showings[1])).toEqual([{ ruleId: '22222222-2222-4222-8222-222222222222', outcome: 'rejected',
+      field: 'name', readDigest: readDigest('name', 'amoxicilin') }]);
   });
 
   it('judges only what was displayed: a rule active at save time but not shown is no showing, its field is evidence',
@@ -65,6 +67,15 @@ describe('OCR learning service', () => {
       const [, showings] = db.query.mock.calls[2] as unknown as [string, [string, string]];
       expect(JSON.parse(showings[1])).toEqual([]);
     });
+
+  it('teaches nothing when a saved synonym stands for a sensitive list entry (lab ZN stain is AFB)', async () => {
+    const labReading = { contract: 'hid-paper-reading-v2', items: [{ id: id(1), kind: 'lab_result', asWritten: 'ZN stian',
+      plain: 'x', fields: { test: 'ZN stian' } }] };
+    const db = client();
+    await new OcrLearningService().learnFromReview(db.client, review(labReading, { targetDomain: 'LAB',
+      acceptedFields: { observations: [{ itemId: id(1), testName: 'ZN stain' }] } }));
+    expect(db.query).not.toHaveBeenCalled();
+  });
 
   it('never counts a sensitive value as displayed', async () => {
     const db = client();

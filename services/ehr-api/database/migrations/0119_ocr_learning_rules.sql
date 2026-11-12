@@ -60,8 +60,11 @@
 --    - ocr.learning_after_validation(validation, showings jsonb) -> jsonb
 --      ({showings, retired, activated}), for ocr-api (hid_ocr_runtime): the
 --      record command's session and validation checks (0118); showings a JSON
---      array of at most 200 {ruleId, outcome} (accepted | rejected) of rules
---      of this facility or the platform (else 22023, nothing written). Records
+--      array of at most 200 {ruleId, outcome (accepted | rejected), field,
+--      readDigest}, each a rule of this facility or the platform whose own
+--      key is that field and read digest (the item it was shown on, which
+--      ocr-api computes from the reviewed reading; else 22023, nothing
+--      written), so no showing can name a rule the reading never had. Records
 --      them (a replay adds nothing), retires each rule shown whose last 10
 --      showings hold at least 3 rejected, then evaluates each key the
 --      validation observed (0118), under a transaction advisory lock per key
@@ -231,13 +234,14 @@ begin
   -- read and insert policies (the summary's policy is added beside them).
   if not (select relrowsecurity and relforcerowsecurity from pg_class where oid = 'ocr.validations'::regclass)
      or (select array_agg(policy_row.polname::text || ':' || policy_row.polcmd::text || ':'
+                          || policy_row.polpermissive::text || ':' || policy_row.polroles::text || ':'
                           || coalesce(pg_get_expr(policy_row.polqual, policy_row.polrelid), '')
                           || ':' || coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '')
                           order by policy_row.polname)
            from pg_policy policy_row where policy_row.polrelid = 'ocr.validations'::regclass)
         is distinct from array[
-          'ocr_validations_staff:r:(facility_id = platform.current_facility_id()):',
-          'ocr_validations_staff_insert:a::(facility_id = platform.current_facility_id())'] then
+          'ocr_validations_staff:r:true:{0}:(facility_id = platform.current_facility_id()):',
+          'ocr_validations_staff_insert:a:true:{0}::(facility_id = platform.current_facility_id())'] then
     raise exception using errcode = '55000',
       message = '0119: ocr.validations'' row-level security is not 0013''s';
   end if;
@@ -422,6 +426,7 @@ declare
   shown record;
   observed record;
   keyed_validation bytea;
+  learning_key bytea;
 begin
   if requested_validation_id is null or actor_account is null or session_facility is null
      or session_membership is null
@@ -437,23 +442,35 @@ begin
           and validation.created_at > clock_timestamp() - interval '10 minutes') then
     raise exception using errcode = 'P0002', message = 'Validation not found';
   end if;
+  select key_row.key into strict learning_key from ocr.learning_key key_row where key_row.id = 1;
+  -- Each showing names its rule and that rule's own key (the field and the
+  -- read digest of the reading's item it was shown on, which ocr-api computes
+  -- from the reviewed reading): a showing of any other rule is refused, so a
+  -- caller cannot record showings, nor retire, a rule its reading never had.
   if requested_showings is null or jsonb_typeof(requested_showings) <> 'array'
      or jsonb_array_length(requested_showings) > 200
      or exists (
        select 1 from jsonb_array_elements(requested_showings) entry
         where jsonb_typeof(entry) <> 'object'
-           or (select array_agg(key order by key) from jsonb_object_keys(entry) key) <> array['outcome', 'ruleId']
+           or (select array_agg(key order by key) from jsonb_object_keys(entry) key)
+              <> array['field', 'outcome', 'readDigest', 'ruleId']
            or jsonb_typeof(entry -> 'ruleId') <> 'string'
            or entry ->> 'ruleId' !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
            or jsonb_typeof(entry -> 'outcome') <> 'string'
            or entry ->> 'outcome' not in ('accepted', 'rejected')
+           or jsonb_typeof(entry -> 'field') <> 'string'
+           or entry ->> 'field' not in ('name', 'strength', 'frequency', 'test', 'unit', 'diagnosis')
+           or jsonb_typeof(entry -> 'readDigest') <> 'string'
+           or entry ->> 'readDigest' !~ '^[0-9a-f]{64}$'
            or not exists (select 1 from ocr.learning_rules rule
                            where rule.id = (entry ->> 'ruleId')::uuid
-                             and (rule.scope = 'platform' or rule.facility_id = session_facility))) then
+                             and (rule.scope = 'platform' or rule.facility_id = session_facility)
+                             and rule.field_class = entry ->> 'field'
+                             and rule.read_digest
+                                 = public.hmac(decode(entry ->> 'readDigest', 'hex'), learning_key, 'sha256'))) then
     raise exception using errcode = '22023', message = 'Invalid OCR suggestion showings';
   end if;
-  keyed_validation := public.hmac(convert_to(requested_validation_id::text, 'UTF8'),
-    (select key_row.key from ocr.learning_key key_row where key_row.id = 1), 'sha256');
+  keyed_validation := public.hmac(convert_to(requested_validation_id::text, 'UTF8'), learning_key, 'sha256');
   -- Showings, then retirement of each rule shown (3 of its last 10 not taken).
   for shown in
     select distinct on ((entry ->> 'ruleId')::uuid) (entry ->> 'ruleId')::uuid as rule_id, entry ->> 'outcome' as outcome

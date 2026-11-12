@@ -21,7 +21,8 @@
 --   - showings: recorded once per rule and validation; a rule retires when 3
 --     of its last 10 showings were not taken; it re-arms only from evidence
 --     after its retirement; showings of an unknown rule, another facility's
---     rule, a bad outcome or shape are refused with nothing written;
+--     rule, a rule shown on an item whose key (field, read digest) is not the
+--     rule's own, a bad outcome or shape are refused with nothing written;
 --   - the kill switch: only a platform super admin in a platform session
 --     with healthcare-operations sets it, with a platform audit row; others,
 --     bad input and an unknown facility are refused; the overview gives
@@ -247,6 +248,12 @@ security definer as $$
    where learning_rules.scope = rule_of.scope and read_digest = pg_temp.k(k) and status = 'active'
      and facility_id is not distinct from ('d1190000-0000-4000-8000-00000000000' || facility)::uuid
 $$;
+-- One showing as ocr-api sends it: the rule, the outcome, and the rule's own key (field and the raw read digest of
+-- the item it was shown on; key k's digest is k repeated 64 times, as pg_temp.keys sends it).
+create function pg_temp.shown(rule uuid, outcome text, k integer, field text default 'name') returns jsonb
+language sql as $$
+  select jsonb_build_object('ruleId', rule, 'outcome', outcome, 'field', field, 'readDigest', repeat(k::text, 64))
+$$;
 grant execute on all functions in schema pg_temp to public;
 
 -- A. Switch-on: the doctor at A saves V1 with K1-K6.
@@ -391,19 +398,19 @@ set local role hid_ocr_api_runtime;
 select pg_temp.as_staff(1, 'a');
 select pg_temp.rules_check('taken: recorded, not retired',
   ocr.learning_after_validation('d1195000-0000-4000-8000-000000000002',
-    jsonb_build_array(jsonb_build_object('ruleId', (select id from rules_r1), 'outcome', 'accepted')))
+    jsonb_build_array(pg_temp.shown((select id from rules_r1), 'accepted', 1)))
   = '{"showings":1,"retired":0,"activated":0}'::jsonb);
 select pg_temp.rules_check('a platform rule shown at A is recorded too',
   ocr.learning_after_validation('d1195000-0000-4000-8000-000000000002',
-    jsonb_build_array(jsonb_build_object('ruleId', pg_temp.rule_of('platform', 6), 'outcome', 'accepted')))
+    jsonb_build_array(pg_temp.shown(pg_temp.rule_of('platform', 6), 'accepted', 6)))
   ->> 'showings' = '1');
 select pg_temp.rules_check('not taken a third time in the last 10: retired',
   ocr.learning_after_validation('d1195000-0000-4000-8000-000000000003',
-    jsonb_build_array(jsonb_build_object('ruleId', (select id from rules_r1), 'outcome', 'rejected')))
+    jsonb_build_array(pg_temp.shown((select id from rules_r1), 'rejected', 1)))
   = '{"showings":1,"retired":1,"activated":0}'::jsonb);
 select pg_temp.rules_check('a replay records nothing',
   ocr.learning_after_validation('d1195000-0000-4000-8000-000000000003',
-    jsonb_build_array(jsonb_build_object('ruleId', (select id from rules_r1), 'outcome', 'rejected')))
+    jsonb_build_array(pg_temp.shown((select id from rules_r1), 'rejected', 1)))
   ->> 'showings' = '0');
 select pg_temp.rules_check('at A K1 is now the platform rule',
   (select scope = 'platform' from ocr.reading_suggestions(pg_temp.keys(1))));
@@ -428,17 +435,26 @@ select pg_temp.rules_check('5 new corrections from 4 staff after the retirement 
   ocr.learning_after_validation('d1195000-0000-4000-8000-000000000005', '[]') ->> 'activated' = '1');
 -- Refused showings: nothing written.
 select pg_temp.rules_try('an unknown rule',
-  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', '[{"ruleId":"%s","outcome":"accepted"}]')$q$,
-    gen_random_uuid()), '22023');
+  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', %L)$q$,
+    jsonb_build_array(pg_temp.shown(gen_random_uuid(), 'accepted', 1))::text), '22023');
 select pg_temp.rules_try('a bad outcome',
-  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', '[{"ruleId":"%s","outcome":"maybe"}]')$q$,
+  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', %L)$q$,
+    jsonb_build_array(pg_temp.shown((select id from rules_r1), 'maybe', 1))::text), '22023');
+select pg_temp.rules_try('a rule shown on an item whose key is not the rule''s (another read digest)',
+  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', %L)$q$,
+    jsonb_build_array(pg_temp.shown((select id from rules_r1), 'rejected', 2))::text), '22023');
+select pg_temp.rules_try('a rule shown on another field than its own',
+  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', %L)$q$,
+    jsonb_build_array(pg_temp.shown((select id from rules_r1), 'rejected', 1, 'strength'))::text), '22023');
+select pg_temp.rules_try('a showing without its key (the old shape)',
+  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', '[{"ruleId":"%s","outcome":"rejected"}]')$q$,
     (select id from rules_r1)), '22023');
 select pg_temp.rules_try('an extra member',
-  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', '[{"ruleId":"%s","outcome":"accepted","value":"x"}]')$q$,
-    (select id from rules_r1)), '22023');
+  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', %L)$q$,
+    jsonb_build_array(pg_temp.shown((select id from rules_r1), 'accepted', 1) || '{"value":"x"}')::text), '22023');
 select pg_temp.rules_try('201 showings',
   format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', %L)$q$,
-    (select jsonb_agg(jsonb_build_object('ruleId', (select id from rules_r1), 'outcome', 'accepted'))
+    (select jsonb_agg(pg_temp.shown((select id from rules_r1), 'accepted', 1))
        from generate_series(1, 201))::text), '22023');
 select pg_temp.rules_try('another facility''s validation',
   $q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000009', '[]')$q$, 'P0002');
@@ -451,8 +467,8 @@ set local session_replication_role = origin;
 set local role hid_ocr_api_runtime;
 select pg_temp.as_staff(1, 'a');
 select pg_temp.rules_try('clinic B''s rule shown at A',
-  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', '[{"ruleId":"%s","outcome":"accepted"}]')$q$,
-    pg_temp.rule_of('facility', 7, 'b')), '22023');
+  format($q$select ocr.learning_after_validation('d1195000-0000-4000-8000-000000000006', %L)$q$,
+    jsonb_build_array(pg_temp.shown(pg_temp.rule_of('facility', 7, 'b'), 'accepted', 7))::text), '22023');
 reset role;
 select pg_temp.rules_check('V6 wrote no showing',
   not exists (select 1 from ocr.learning_rule_showings

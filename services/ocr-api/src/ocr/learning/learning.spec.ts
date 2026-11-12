@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   itemSuggestions, linkedFieldPairs, listValue, observationsFor, pairsAreSensitive, readDigest, readingMayLearn,
-  readKey, showingsFor, suggestionKeys,
+  readKey, showingsFor, suggestionKeys, displayedSuggestions, observationsAreSensitive,
 } from './learning';
 import { itemIsSensitive, SENSITIVE_BRANDS, SENSITIVE_CLASSES_VERSION, valueIsSensitive } from './sensitive-classes';
 
@@ -130,13 +130,34 @@ describe('suggestions and showings', () => {
       text: 'Possibly Amoxicillin? Check the paper' });
     expect(shown.has(id(2))).toBe(false);
   });
-  it('counts a suggestion taken when the saved value is the suggested list value', () => {
-    const shown = itemSuggestions(keys, rules);
+  const ruleId = '33333333-3333-4333-8333-333333333333';
+  const nameKey = { field: 'name' as const, readDigest: readDigest('name', 'amoxicilin') };
+  it('counts a displayed suggestion taken when the saved value is the suggested list value', () => {
+    const shown = displayedSuggestions([{ itemId: id(1), ruleId, field: 'name', value: 'Amoxicillin' }], reading);
     const taken = linkedFieldPairs('PHARMACY', { medications: [{ itemId: id(1), medicationText: 'amoxicillin' }] }, reading);
-    expect(showingsFor(taken, shown)).toEqual([{ ruleId: 'r-name', outcome: 'accepted' }]);
+    expect(showingsFor(taken, shown)).toEqual([{ ruleId, outcome: 'accepted', ...nameKey }]);
     const notTaken = linkedFieldPairs('PHARMACY', { medications: [{ itemId: id(1), medicationText: 'Ampicillin' }] }, reading);
-    expect(showingsFor(notTaken, shown)).toEqual([{ ruleId: 'r-name', outcome: 'rejected' }]);
+    expect(showingsFor(notTaken, shown)).toEqual([{ ruleId, outcome: 'rejected', ...nameKey }]);
     expect(showingsFor([], shown)).toEqual([]);
+  });
+  it('binds a displayed suggestion to the reading\'s own item key, never one the client names', () => {
+    expect(displayedSuggestions([{ itemId: id(1), ruleId: ruleId.toUpperCase(), field: 'name', value: 'Amoxicillin' }],
+      reading).get(id(1))).toEqual({ itemId: id(1), ruleId, value: 'Amoxicillin', ...nameKey });
+    // An item or field the reading has no key for, and a sensitive value, are dropped.
+    expect(displayedSuggestions([{ itemId: id(9), ruleId, field: 'name', value: 'Amoxicillin' },
+      { itemId: id(1), ruleId, field: 'diagnosis', value: 'Malaria' },
+      { itemId: id(2), ruleId, field: 'name', value: 'Truvada' }], reading).size).toBe(0);
+  });
+  it('a synonym that stands for a sensitive list entry makes the review teach nothing (ZN stain is AFB)', () => {
+    const labReading = payload([lab(1, { test: 'ZN stian' })]);
+    const pairs = linkedFieldPairs('LAB', { observations: [{ itemId: id(1), testName: 'ZN stain' }] }, labReading);
+    expect(pairsAreSensitive(pairs)).toBe(false);
+    const observations = observationsFor(pairs);
+    expect(observations).toHaveLength(1);
+    expect(observationsAreSensitive(observations)).toBe(true);
+    expect(observationsAreSensitive([{ field: 'test', readDigest: 'x', suggestValue: 'Acid-fast bacilli (AFB)' }])).toBe(true);
+    expect(observationsAreSensitive([{ field: 'name', readDigest: 'x', suggestValue: 'Amoxicillin' },
+      { field: 'name', readDigest: 'y', suggestValue: null }])).toBe(false);
   });
 });
 

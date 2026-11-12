@@ -4674,7 +4674,14 @@ while the reviewer worked (as it received them, one per item). Only these are
 recorded as showings (taken when the saved value equals `value`; a rule
 retired meanwhile is still judged), and only their fields are kept out of the
 evidence. Absent, nothing was shown: no showing is recorded and every
-corrected field is evidence. A sensitive `value` is ignored.
+corrected field is evidence. A sensitive `value` is ignored. Each claim is
+bound to the reviewed reading's own key for that item and field (a claim for
+an item or field the reading has no key for is dropped), and
+`ocr.learning_after_validation` accepts a showing only for a rule whose own
+key is exactly that (else 22023), so a client cannot record showings of, or
+retire, a rule its reading never had. A review whose saved synonym stands for
+a sensitive list entry (lab "ZN stain" is "Acid-fast bacilli (AFB)") teaches
+nothing.
 
 The website shows `text` as a plain hint beside the field: no click, no dismiss,
 and never prefilled. The saved value is whatever the reviewer leaves. The

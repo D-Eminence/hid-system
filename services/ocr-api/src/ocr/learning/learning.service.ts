@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import {
-  acceptedFieldsAreSensitive, displayedSuggestions, itemSuggestions, linkedFieldPairs, observationsFor,
-  pairsAreSensitive, readingMayLearn, showingsFor, suggestionKeys,
+  acceptedFieldsAreSensitive, displayedSuggestions, itemSuggestions, linkedFieldPairs, observationsAreSensitive,
+  observationsFor, pairsAreSensitive, readingMayLearn, showingsFor, suggestionKeys,
   type ItemSuggestion, type LearningField, type RuleSuggestion, type ShownSuggestion,
 } from './learning';
 
@@ -50,11 +50,13 @@ export class OcrLearningService {
     if (review.disposition !== 'validated' || !readingMayLearn(review.payload)) return;
     const pairs = linkedFieldPairs(review.targetDomain, review.acceptedFields, review.payload);
     if (pairs.length === 0 || pairsAreSensitive(pairs) || acceptedFieldsAreSensitive(review.acceptedFields)) return;
+    const shown = displayedSuggestions(review.shownSuggestions ?? [], review.payload);
+    const observations = observationsFor(pairs, shown);
+    if (observationsAreSensitive(observations)) return;
     try {
       await this.inSavepoint(client, 'ocr_learning_review', async () => {
-        const shown = displayedSuggestions(review.shownSuggestions ?? []);
         await client.query('select ocr.record_correction_observations($1, $2::jsonb)',
-          [review.validationId, JSON.stringify(observationsFor(pairs, shown))]);
+          [review.validationId, JSON.stringify(observations)]);
         await client.query('select ocr.learning_after_validation($1, $2::jsonb)',
           [review.validationId, JSON.stringify(showingsFor(pairs, shown))]);
       });

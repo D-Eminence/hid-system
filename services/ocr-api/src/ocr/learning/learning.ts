@@ -232,14 +232,22 @@ export function itemSuggestions(keys: readonly SuggestionKey[], rules: readonly 
 /** A suggestion the website displayed beside one item's field (the validation request's shownSuggestions). */
 export interface ShownSuggestion { itemId: string; ruleId: string; field: LearningField; value: string }
 
+/** A displayed suggestion bound to the reading's own item key (field and read digest), which the database checks. */
+export interface BoundSuggestion extends ShownSuggestion { readDigest: string }
+
 /**
- * The displayed suggestions by item id (the first per item, as the website shows one per item); a sensitive value is
- * dropped, as it is never shown.
+ * The displayed suggestions by item id (the first per item, as the website shows one per item), each bound to the
+ * key of that item and field in the reviewed reading: a claim for an item or field the reading has no key for is
+ * dropped, and the database accepts a showing only for a rule with exactly that key, so a client cannot record
+ * showings of, or retire, a rule its reading never had. A sensitive value is dropped, as it is never shown.
  */
-export function displayedSuggestions(list: readonly ShownSuggestion[]): Map<string, ShownSuggestion> {
-  const byItem = new Map<string, ShownSuggestion>();
+export function displayedSuggestions(list: readonly ShownSuggestion[], payload: unknown): Map<string, BoundSuggestion> {
+  const keyOf = new Map(suggestionKeys(payload).map((key) => [`${key.itemId}|${key.field}`, key.readDigest]));
+  const byItem = new Map<string, BoundSuggestion>();
   for (const suggestion of list.slice(0, 200)) {
-    if (!byItem.has(suggestion.itemId) && !valueIsSensitive(suggestion.value)) byItem.set(suggestion.itemId, suggestion);
+    const readDigest = keyOf.get(`${suggestion.itemId}|${suggestion.field}`);
+    if (readDigest === undefined || byItem.has(suggestion.itemId) || valueIsSensitive(suggestion.value)) continue;
+    byItem.set(suggestion.itemId, { ...suggestion, ruleId: suggestion.ruleId.toLowerCase(), readDigest });
   }
   return byItem;
 }
@@ -248,19 +256,29 @@ export function displayedSuggestions(list: readonly ShownSuggestion[]): Map<stri
  * Whether staff took each suggestion that was shown on a linked item: taken when the saved value is the suggested
  * list value. One outcome per rule (not taken wins: the database records one showing per rule and validation).
  */
+export interface Showing { ruleId: string; outcome: 'accepted' | 'rejected'; field: LearningField; readDigest: string }
+
 export function showingsFor(pairs: readonly FieldPair[],
-  shown: ReadonlyMap<string, Pick<ShownSuggestion, 'ruleId' | 'field' | 'value'>>):
-  { ruleId: string; outcome: 'accepted' | 'rejected' }[] {
-  const outcomes = new Map<string, 'accepted' | 'rejected'>();
+  shown: ReadonlyMap<string, Pick<BoundSuggestion, 'ruleId' | 'field' | 'value' | 'readDigest'>>): Showing[] {
+  const outcomes = new Map<string, Showing>();
   for (const pair of pairs) {
     const suggestion = shown.get(pair.itemId);
     if (!suggestion || suggestion.field !== pair.field) continue;
     const taken = listValue(pair.field, pair.saved) === suggestion.value;
-    if (outcomes.get(suggestion.ruleId) !== 'rejected') {
-      outcomes.set(suggestion.ruleId, taken ? 'accepted' : 'rejected');
+    if (outcomes.get(suggestion.ruleId)?.outcome !== 'rejected') {
+      outcomes.set(suggestion.ruleId, { ruleId: suggestion.ruleId, outcome: taken ? 'accepted' : 'rejected',
+        field: suggestion.field, readDigest: suggestion.readDigest });
     }
   }
-  return [...outcomes].map(([ruleId, outcome]) => ({ ruleId, outcome })).slice(0, 200);
+  return [...outcomes.values()].slice(0, 200);
+}
+
+/**
+ * Whether any observation would teach a sensitive list value: a synonym the reviewer typed can stand for a sensitive
+ * entry (lab "ZN stain" is "Acid-fast bacilli (AFB)"), and such a review teaches nothing (the database refuses it too).
+ */
+export function observationsAreSensitive(observations: readonly Observation[]): boolean {
+  return observations.some((observation) => observation.suggestValue !== null && valueIsSensitive(observation.suggestValue));
 }
 
 /** The text of a reading's page lines (and page text), for the sensitive-word check. */
