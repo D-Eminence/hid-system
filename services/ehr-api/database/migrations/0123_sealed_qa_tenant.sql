@@ -90,9 +90,12 @@
 --    addresses: the demo seal refuses them as it refuses any non-demo one.
 --
 -- 0. Preconditions (catalog reads only; 55000 or 42501, nothing applied):
---    0001-0116 applied (0098's members table and seal, 0115's outreach
---    organisations); not applied yet; the eleven bodies replaced in sections
---    5 and 5b are byte for byte 0098's (md5 of pg_proc.prosrc); identity.patients has
+--    0001-0116 and 0120 applied (0098's members table and seal, 0115's
+--    outreach organisations, 0120's PIN body); not applied yet; the eleven
+--    bodies replaced in sections 5 and 5b are byte for byte the live ones
+--    (md5 of pg_proc.prosrc): 0098's, and for R3 0120's (e17e8bb8..., the
+--    24-hour read and write PIN, which replaced 0098's; release order 0120
+--    before this file, review of 2026-11-12); identity.patients has
 --    six policies and patients_registration_read reads as 0098 wrote it; the
 --    applier owns, or is a member of the owner of, each replaced function,
 --    identity.patients and the ten tables that get a trigger. Each
@@ -145,8 +148,9 @@
 --       a QA outreach group invites an address of the owner's domain only
 --       (22023 OUTREACH_INVITATION_INVALID, which Identity answers 400), so no
 --       QA invitation email reaches anyone outside it.
--- 5. Nine bodies replaced (CREATE OR REPLACE), each 0098's byte for byte plus
---    one QA clause beside its demo clause, always true for real and demo
+-- 5. Nine bodies replaced (CREATE OR REPLACE), each the live body byte for
+--    byte (0098's; R3 0120's) plus one QA clause beside its demo clause,
+--    always true for real and demo
 --    rows: R1 identity.create_access_request, R2 identity.activate_break_glass
 --    and R3 identity.access_patient_with_pin (the Health ID lookup also
 --    requires the actor's facility and the patient both QA or neither;
@@ -322,12 +326,13 @@ begin
      or not exists (select 1 from auth.roles where code = 'outreach_organiser') then
     raise exception using errcode = '55000', message = '0123: 0001-0116 must be applied first';
   end if;
-  -- The eleven bodies sections 5 and 5b replace are 0098's, byte for byte.
+  -- The eleven bodies sections 5 and 5b replace are the live ones, byte for
+  -- byte: 0098's, and for R3 0120's.
   select string_agg(pin.signature, ', ' order by pin.signature) into missing
     from (values
       ('identity.create_access_request(text,text,text,integer)', 'f88923a49a180c2180fdedb29bf2eccf'),
       ('identity.activate_break_glass(text,text,integer)', '6b888391ef7f0e4f264918baf00a6fe7'),
-      ('identity.access_patient_with_pin(text,text,integer)', '830c1baa4bca3df57cc02b7b002a8831'),
+      ('identity.access_patient_with_pin(text,text,integer)', 'e17e8bb85b755866bb0f1a03b5555c23'),
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '4202ba3bbf02abd7db34606d42adca9c'),
       ('identity.search_order_destinations(text,text)', '7890a21333d012621a36302fd7ad24cc'),
       ('identity.search_share_providers(text,uuid,text)', '2cc1107289f6ff4d55266c6ee4842932'),
@@ -341,7 +346,7 @@ begin
    where to_regprocedure(pin.signature) is null
       or (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(pin.signature)) <> pin.digest;
   if missing is not null then
-    raise exception using errcode = '55000', message = '0123: these bodies are not 0098''s: ' || missing;
+    raise exception using errcode = '55000', message = '0123: these bodies are not the expected ones (0098''s; for the PIN, 0120''s, so 0120 must be applied first): ' || missing;
   end if;
   if (select count(*) from pg_policy policy_row where policy_row.polrelid = 'identity.patients'::regclass) <> 6
      or not exists (select 1 from pg_policy policy_row
@@ -719,8 +724,8 @@ create trigger outreach_invitations_sealed_qa
   before insert or update of invitee_email on identity.outreach_invitations
   for each row execute function identity.outreach_invitations_sealed_qa();
 
--- 5. Nine bodies replaced: each 0098's byte for byte plus one QA clause beside
--- its demo clause.
+-- 5. Nine bodies replaced: each the live body byte for byte (0098's; R3
+-- 0120's) plus one QA clause beside its demo clause.
 -- R1
 create or replace function identity.create_access_request(
   requested_hid text,
@@ -1039,7 +1044,8 @@ begin
 end;
 $$;
 
--- R3
+-- R3: 0120's body (the 24-hour read and write PIN) byte for byte, plus the QA
+-- line after the demo line of the Health ID lookup.
 create or replace function identity.access_patient_with_pin(
   requested_hid text,
   requested_pin text,
@@ -1080,6 +1086,10 @@ declare
   target_limit identity.patient_access_pin_target_limits%rowtype;
   replayed boolean := false;
   denial_action text := 'identity.patient-access-pin.verify-denied';
+  -- 0121 (owner decision, 10 Nov 2026): a PIN opens the patient's records to
+  -- read and to add to, for exactly 24 hours, whatever duration is asked.
+  pin_scope constant text := 'write_records';
+  pin_minutes constant integer := 1440;
 begin
   if actor_account_id_value is null or actor_membership_id is null or actor_facility_id is null
      or actor_correlation_id is null
@@ -1093,7 +1103,7 @@ begin
                     where code = 'direct-care' and active) then
     raise exception using errcode = '22023', message = 'Patient PIN access requires direct care';
   end if;
-  if requested_duration_minutes is null or requested_duration_minutes not between 5 and 60 then
+  if requested_duration_minutes is null or requested_duration_minutes not between 5 and 1440 then
     raise exception using errcode = '22023', message = 'Invalid patient PIN access duration';
   end if;
   select membership.staff_id, membership.organization_id
@@ -1258,7 +1268,9 @@ begin
   end if;
 
   -- A PIN cannot defeat a current patient deny directive. This mirrors the
-  -- downstream authorization check before materializing the narrow grant.
+  -- downstream authorization check before materializing the grant. Since 0121
+  -- the grant is write_records, which also lets its holder read, so a deny for
+  -- either reading or writing (or for every action) stops it.
   if exists (
     select 1
       from identity.consent_directives directive
@@ -1271,7 +1283,8 @@ begin
        and directive_version.starts_at <= clock_timestamp()
        and (directive_version.expires_at is null or directive_version.expires_at > clock_timestamp())
        and (directive_version.facility_id is null or directive_version.facility_id = actor_facility_id)
-       and (cardinality(directive_version.actions) = 0 or 'read_records' = any(directive_version.actions))
+       and (cardinality(directive_version.actions) = 0
+            or directive_version.actions && array['read_records', pin_scope]::text[])
        and (cardinality(directive_version.purposes) = 0 or 'direct-care' = any(directive_version.purposes))
        and (
          directive_version.grantee_type = 'all'
@@ -1313,7 +1326,7 @@ begin
      and grant_row.account_id = actor_account_id_value
      and grant_row.membership_id = actor_membership_id
      and grant_row.facility_id = actor_facility_id
-     and grant_row.scope = 'read_records'
+     and grant_row.scope = pin_scope
      and grant_row.purpose_of_use = 'direct-care'
      and grant_row.authorization_method = 'patient_access_pin'
      and grant_row.status = 'active'
@@ -1331,15 +1344,15 @@ begin
     -- The command may be authorized in this same request transaction.
     -- current_timestamp is transaction-consistent; a later clock_timestamp()
     -- would leave starts_at future-dated versus the authorization default.
-    grant_expires_at := current_timestamp + make_interval(mins => requested_duration_minutes);
+    grant_expires_at := current_timestamp + make_interval(mins => pin_minutes);
     insert into identity.access_requests (
       id, patient_id, staff_id, membership_id, facility_id, scope, purpose_of_use,
       reason, status, requested_duration_minutes, break_glass, approved_at,
       correlation_id, authorization_method
     ) values (
       request_id_value, patient_id_value, actor_staff_id, actor_membership_id,
-      actor_facility_id, 'read_records', 'direct-care', 'Patient access PIN verification',
-      'approved', requested_duration_minutes, false, current_timestamp, actor_correlation_id,
+      actor_facility_id, pin_scope, 'direct-care', 'Patient access PIN verification',
+      'approved', pin_minutes, false, current_timestamp, actor_correlation_id,
       'patient_access_pin'
     );
     insert into identity.consent_grants (
@@ -1348,7 +1361,7 @@ begin
       correlation_id, authorization_method
     ) values (
       grant_id_value, request_id_value, patient_id_value, actor_staff_id, actor_account_id_value,
-      actor_membership_id, actor_facility_id, 'read_records', 'direct-care', 'active',
+      actor_membership_id, actor_facility_id, pin_scope, 'direct-care', 'active',
       'Patient access PIN verification', current_timestamp, grant_expires_at, false,
       actor_correlation_id, 'patient_access_pin'
     );
@@ -1368,15 +1381,17 @@ begin
     actor_organization_id, actor_facility_id, patient_id_value,
     case when replayed then 'identity.patient-access-pin.replay' else 'identity.patient-access-pin.verify' end,
     'success', 'consent-grant', grant_id_value::text, 'direct-care', 'application', 'identity-api',
-    jsonb_build_object('access_request_id', request_id_value, 'duration_minutes', requested_duration_minutes,
-      'expires_at', grant_expires_at, 'existing_grant', replayed, 'review_required', true)
+    jsonb_build_object('access_request_id', request_id_value, 'duration_minutes', pin_minutes,
+      'expires_at', grant_expires_at, 'existing_grant', replayed, 'review_required', true,
+      'scope', pin_scope)
   );
   if not replayed then
     insert into identity.outbox_events (
       event_type, aggregate_id, aggregate_version, facility_id, patient_id, correlation_id, payload
     ) values (
       'PatientAccessPinVerified', grant_id_value, 1, actor_facility_id, patient_id_value,
-      actor_correlation_id, jsonb_build_object('consentGrantId', grant_id_value, 'reviewRequired', true)
+      actor_correlation_id,
+      jsonb_build_object('consentGrantId', grant_id_value, 'reviewRequired', true, 'scope', pin_scope)
     );
   end if;
   return query select true, request_id_value, grant_id_value, patient_id_value,
@@ -3062,7 +3077,7 @@ begin
       or md5(proc.prosrc) is distinct from (select pin.digest from (values
            ('identity.create_access_request(text,text,text,integer)', '2745e91d666f16a6ad79019d31f0380a'),
            ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c'),
-           ('identity.access_patient_with_pin(text,text,integer)', 'e9efafc9b624940931cb47838c38ac5a'),
+           ('identity.access_patient_with_pin(text,text,integer)', '94230ed3d27fcc89b8b3bb6dd9e35c7e'),
            ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)',
             '0c2def2b530bcb3d68537ade52787b6b'),
            ('identity.search_order_destinations(text,text)', 'da222fe1b63db757a1ddb93fdc9eabf0'),

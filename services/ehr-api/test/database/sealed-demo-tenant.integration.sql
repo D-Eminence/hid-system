@@ -335,7 +335,7 @@ begin
     (select count(*) from (values
       ('identity.create_access_request(text,text,text,integer)', '2745e91d666f16a6ad79019d31f0380a'),
       ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c'),
-      ('identity.access_patient_with_pin(text,text,integer)', 'e9efafc9b624940931cb47838c38ac5a'),
+      ('identity.access_patient_with_pin(text,text,integer)', '94230ed3d27fcc89b8b3bb6dd9e35c7e'),
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '0c2def2b530bcb3d68537ade52787b6b'),
       ('identity.search_order_destinations(text,text)', 'da222fe1b63db757a1ddb93fdc9eabf0'),
       ('identity.search_share_providers(text,uuid,text)', '26ca190255ddc1ff30adb2fb5f0ee347'),
