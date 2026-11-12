@@ -4186,12 +4186,15 @@ signed separately. Suite:
 Expected owner attributes (release checklist P8; recorded 2026-11-12 from the
 triage of the suites under a migration login that is neither a superuser nor
 BYPASSRLS): the owner of the OCR tables and of their SECURITY DEFINER commands
-(`ocr.jobs`, `ocr.validations`, `ocr.job_events`) bypasses row-level security,
-as every OCR write needs (`ocr.job_events` has no INSERT policy, so a
-non-bypass owner refuses every job insert and status change); the owner of the
-outreach tables (`outreach.campaign_members`) does not (0110 fixed the campaign
-check for that owner). The owner confirms both with the read-only owner
-attributes query in 0123's pre-sign header. The suites treat that owner, the
+(one role for `ocr.jobs`, `ocr.validations` and `ocr.job_events`) bypasses
+row-level security, as every OCR write needs (`ocr.job_events` has no INSERT
+policy, so a non-bypass owner refuses every job insert and status change); the
+owner of the outreach tables (`outreach.campaign_members`) does not (0110 fixed
+the campaign check for that owner). These are expected, not verified; the owner
+confirms them on production with this read-only query (also in the sealed QA
+tenant migration's pre-sign header):
+`select c.oid::regclass, c.relowner::regrole, r.rolsuper, r.rolbypassrls from pg_class c join pg_roles r on r.oid = c.relowner where c.oid in ('ocr.jobs'::regclass, 'ocr.validations'::regclass, 'ocr.job_events'::regclass, 'outreach.campaign_members'::regclass);`.
+The suites treat that owner, the
 migration login, as not a runtime role whatever its name, and
 `ocr-source-deletion` runs the cases that need an owner who sees the source
 document only when it does.
