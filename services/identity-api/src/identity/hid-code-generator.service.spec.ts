@@ -14,6 +14,11 @@ class ScriptedGenerator extends HidCodeGenerator {
 const LETTERS = [0, 1, 2, 3, 4, 5];
 const DIGITS = [24, 25, 26, 27, 28, 29];
 const MIXED = [0, 1, 2, 24, 25, 26];
+// Z is 23, Q 14, D 3, E 4, M 11, B 1.
+const ZQA = [23, 14, 0, 24, 25, 26];
+const ZDEM = [23, 3, 4, 11, 24, 25];
+const ZQB = [23, 14, 1, 24, 25, 26];
+const ZDEN = [23, 3, 4, 12, 24, 25];
 
 describe('HidCodeGenerator', () => {
   const generator = new HidCodeGenerator();
@@ -43,6 +48,25 @@ describe('HidCodeGenerator', () => {
     const scripted = new ScriptedGenerator([LETTERS]);
     expect(() => scripted.generate()).toThrow('A HID could not be generated');
     expect(scripted.draws).toBe(64);
+  });
+
+  it('discards a draw starting with a sealed tenant\'s prefix (ZQA for QA, ZDEM for demo) and keeps the next one', () => {
+    const scripted = new ScriptedGenerator([ZQA, ZDEM, MIXED]);
+    expect(scripted.generate()).toBe('HID-ABC234');
+    expect(scripted.draws).toBe(3);
+  });
+
+  it('keeps a draw that only resembles a reserved prefix', () => {
+    expect(new ScriptedGenerator([ZQB]).generate()).toBe('HID-ZQB234');
+    expect(new ScriptedGenerator([ZDEN]).generate()).toBe('HID-ZDEN23');
+  });
+
+  it('never issues a code starting with ZQA or ZDEM in normal draws', () => {
+    for (let index = 0; index < 20000; index += 1) {
+      const code = generator.generate();
+      expect(code.startsWith('HID-ZQA')).toBe(false);
+      expect(code.startsWith('HID-ZDEM')).toBe(false);
+    }
   });
 
   it('spreads letters and digits over every position', () => {

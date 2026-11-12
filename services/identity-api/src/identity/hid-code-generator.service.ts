@@ -4,6 +4,12 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 const HID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const HAS_LETTER = /[A-Z]/;
 const HAS_DIGIT = /[0-9]/;
+/**
+ * Prefixes of the sealed tenants' Health IDs: ZDEM (demo, 0098) and ZQA (QA, 0123). Those IDs have 8 characters,
+ * so a 6-character draw can never equal one; a draw starting with either is still discarded, so no real Health ID
+ * looks like a demo or QA one (owner decision Q60, 2026-11-12).
+ */
+const RESERVED_PREFIXES = ['ZDEM', 'ZQA'] as const;
 /** A draw has both a letter and a digit about 82% of the time, so 64 draws all failing never happens in practice. */
 const MAX_DRAWS = 64;
 
@@ -21,15 +27,17 @@ export type HidReservation<Result> = (candidate: string) => Promise<
 export class HidCodeGenerator {
   /**
    * HID- and six characters, as hid-1.0 issued them (owner decision, 2026-10-27), always mixing at least one letter
-   * and at least one digit (owner decision, 2026-10-31: no Health ID of letters only or digits only). Each character
-   * comes from 32 values, so byte & 31 is unbiased; a draw of letters only or digits only is discarded, which keeps
-   * every allowed code equally likely.
+   * and at least one digit (owner decision, 2026-10-31: no Health ID of letters only or digits only), never starting
+   * with a sealed tenant's prefix (ZDEM, ZQA). Each character comes from 32 values, so byte & 31 is unbiased; a draw
+   * of letters only or digits only, or with a reserved prefix, is discarded, which keeps every allowed code equally
+   * likely.
    */
   generate(): string {
     for (let draw = 0; draw < MAX_DRAWS; draw += 1) {
       let code = '';
       for (const byte of this.entropy()) code += HID_ALPHABET[byte & 31];
-      if (HAS_LETTER.test(code) && HAS_DIGIT.test(code)) return `HID-${code}`;
+      if (HAS_LETTER.test(code) && HAS_DIGIT.test(code)
+        && !RESERVED_PREFIXES.some((prefix) => code.startsWith(prefix))) return `HID-${code}`;
     }
     throw new ServiceUnavailableException('A HID could not be generated');
   }
