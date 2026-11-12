@@ -16,6 +16,11 @@
 > `node-22.23.4-runtime-evidence.json`, not in these files.
 > `native_evidence_provenance` also cites that file, by the SHA-256 of the file
 > as committed (LF line endings).
+> Since 2026-11-12 the production assessment pins the zlib-patched base
+> `sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041`, whose
+> only changed ELF is `usr/lib/aarch64-linux-gnu/libz.so.1.3.1`. That change is
+> reviewed in `zlib-deb13u1-runtime-evidence.json`, also cited by SHA-256 in
+> `native_evidence_provenance`.
 
 Assessed 2026-10-05; expires 2026-11-04. Covers only the notification worker
 and database migration runner with the exact native file inventories in

@@ -75,7 +75,7 @@ No blanket ignore, severity downgrade or security exception is applied.
 
 By late October 2026 Grype reported CVE-2026-111497 (Critical), CVE-2026-105482
 and CVE-2026-106069 (High) against that base's Node 22.23.3 (for example run
-`40910587476`); all are fixed in the Node 22.23.4 security release. The base is now pinned to
+`40910587476`); all are fixed in the Node 22.23.4 security release. The base was then pinned to
 `sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812`, the
 same image variant carrying Node 22.23.4. Its only changed ELF is
 `/nodejs/bin/node`, byte-identical to the signed nodejs.org linux-arm64 release
