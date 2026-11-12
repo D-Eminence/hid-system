@@ -21,7 +21,7 @@ import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { CurrentPatientContextService } from './current-patient-context.service';
 import type { CurrentStaffContextService } from './current-staff-context.service';
-import { TokenService } from './token.service';
+import { isOutreachOrigin, TokenService } from './token.service';
 
 const actor: ActorContext = {
   id: '30000000-0000-4000-8000-000000000001',
@@ -265,6 +265,34 @@ describe('TokenService session lifetimes (patients: owner decision of 2026-10-28
     const { service } = harness(stored('staff', absolute));
     const result = await service.refresh('00000000-0000-4000-8000-000000000001.secret.local', { correlationId: 'staff-refresh' });
     expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 8 * HOUR));
+  });
+  it('gives a staff session signed in on outreach. a 15-minute idle lock, keeping the 24-hour absolute expiry', async () => {
+    const { service, insertedSession } = harness();
+    const result = await service.issue({ subject: actor.subject, accountId: actor.accountId, displayName: '',
+      facilities: [], authenticationMethod: 'local' },
+    { correlationId: 'outreach-ttl', origin: 'https://outreach.healthidentitydirectory.com' });
+    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 15 * 60_000));
+    expect(insertedSession()).toEqual({ issuedAt: now, expiresAt: new Date(now.getTime() + 15 * 60_000),
+      absoluteExpiresAt: new Date(now.getTime() + DAY) });
+  });
+
+  it('renews for 15 minutes from outreach., and 8 hours again from another staff site', async () => {
+    const absolute = new Date(now.getTime() + 20 * HOUR);
+    const outreach = harness(stored('staff', absolute));
+    await expect(outreach.service.refresh('00000000-0000-4000-8000-000000000001.secret.local',
+      { correlationId: 'outreach-refresh', origin: 'https://outreach.staging.healthidentitydirectory.com' }))
+      .resolves.toMatchObject({ refreshExpiresAt: new Date(now.getTime() + 15 * 60_000) });
+    const ehr = harness(stored('staff', absolute));
+    await expect(ehr.service.refresh('00000000-0000-4000-8000-000000000001.secret.local',
+      { correlationId: 'ehr-refresh', origin: 'https://ehr.healthidentitydirectory.com' }))
+      .resolves.toMatchObject({ refreshExpiresAt: new Date(now.getTime() + 8 * HOUR) });
+  });
+
+  it('reads only https outreach. hosts of Health ID as outreach origins', () => {
+    expect(isOutreachOrigin('https://outreach.healthidentitydirectory.com')).toBe(true);
+    expect(isOutreachOrigin('https://outreach.staging.healthidentitydirectory.com')).toBe(true);
+    for (const origin of [undefined, '', 'http://outreach.healthidentitydirectory.com', 'https://ehr.healthidentitydirectory.com',
+      'https://outreach.example.test', 'not a url']) expect(isOutreachOrigin(origin)).toBe(false);
   });
 });
 

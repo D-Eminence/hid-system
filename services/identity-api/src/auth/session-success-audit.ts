@@ -1,6 +1,6 @@
 import type { AuditEventInput } from '../audit/audit.service';
 import type { ActorContext, HidRequest } from '../common/request-context';
-import type { SessionEventMetadata } from './token.service';
+import { isOutreachOrigin, type SessionEventMetadata } from './token.service';
 
 /**
  * The session metadata of a request: its correlation id, the client address
@@ -13,6 +13,8 @@ export function sessionEventFromRequest(request: HidRequest): SessionEventMetada
     correlationId: request.correlationId,
     sourceIp: request.ip,
     userAgent: request.header('user-agent'),
+    // Only an outreach. Origin is carried: it gives the session the short idle lock.
+    ...(isOutreachOrigin(request.header('origin')) ? { origin: request.header('origin') } : {}),
   };
 }
 
