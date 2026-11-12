@@ -462,7 +462,7 @@ end
 $f$;
 savepoint refusal;
 insert into auth.accounts (id, subject, email, display_name, status) values
-  ('a1230003-0000-4000-8000-000000000031', 'synthetic:qa-suite:taken', 'operations+qa-lab1@healthidentitydirectory.com',
+  ('a1230003-0000-4000-8000-000000000031', 'synthetic:qa-suite:taken', 'lab@healthidentitydirectory.com',
    'Taken Login', 'active');
 select pg_temp.refused('a real account at a QA staff address', 'SEALED_QA_ADDRESS_TAKEN');
 rollback to savepoint refusal;
@@ -476,7 +476,7 @@ insert into auth.accounts (id, subject, email, display_name, status) values
    'Staff Elsewhere', 'active');
 insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
   ('a1230004-0000-4000-8000-000000000031', 'a1230003-0000-4000-8000-000000000031', 'Staff Elsewhere',
-   'operations+qa-admin@healthidentitydirectory.com', 'verified', 'doctor');
+   'admin@healthidentitydirectory.com', 'verified', 'doctor');
 select pg_temp.refused('a real staff record at a QA address', 'SEALED_QA_ADDRESS_TAKEN');
 rollback to savepoint refusal;
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, status) values
@@ -530,37 +530,38 @@ begin
     = array['QA-HOSPITAL|QA Hospital|sealed-qa-hospital|true|verified|Africa/Lagos',
             'QA-LABORATORY|QA Laboratory|sealed-qa-laboratory|true|verified|Africa/Lagos',
             'QA-PHARMACY|QA Pharmacy|sealed-qa-pharmacy|true|verified|Africa/Lagos']);
-  perform pg_temp.assert('nine accounts at the plus-addresses, pending_reset, no password, email verified',
+  perform pg_temp.assert('nine accounts at the role and patient addresses, pending_reset, no password, email verified',
     (select array_agg(account.email || '|' || account.status || '|' || (account.password_hash is null)
                       || '|' || (account.password_algorithm is null) || '|' || (account.email_verified_at is not null)
-                      order by account.email)
+                      order by account.email collate "C")
        from auth.accounts account where identity.sealed_qa_account(account.id))
-    = array['operations+qa-admin@healthidentitydirectory.com|pending_reset|true|true|true',
-            'operations+qa-clinician@healthidentitydirectory.com|pending_reset|true|true|true',
-            'operations+qa-lab1@healthidentitydirectory.com|pending_reset|true|true|true',
-            'operations+qa-lab2@healthidentitydirectory.com|pending_reset|true|true|true',
-            'operations+qa-migrate@healthidentitydirectory.com|pending_reset|true|true|true',
-            'operations+qa-outreach@healthidentitydirectory.com|pending_reset|true|true|true',
-            'operations+qa-pharmacy@healthidentitydirectory.com|pending_reset|true|true|true',
+    = array['admin@healthidentitydirectory.com|pending_reset|true|true|true',
+            'ehr@healthidentitydirectory.com|pending_reset|true|true|true',
+            'lab2@healthidentitydirectory.com|pending_reset|true|true|true',
+            'lab@healthidentitydirectory.com|pending_reset|true|true|true',
+            'migrate@healthidentitydirectory.com|pending_reset|true|true|true',
+            'outreach@healthidentitydirectory.com|pending_reset|true|true|true',
             'patient1+qa@healthidentitydirectory.com|pending_reset|true|true|true',
-            'patient2+qa@healthidentitydirectory.com|pending_reset|true|true|true']);
+            'patient2+qa@healthidentitydirectory.com|pending_reset|true|true|true',
+            'pharmacy@healthidentitydirectory.com|pending_reset|true|true|true']);
   perform pg_temp.assert('seven verified staff records; eight memberships with their facility role; no platform role',
     (select count(*) from identity.staff staff where identity.sealed_qa_account(staff.account_id)
       and staff.verification_status = 'verified' and staff.active) = 7
     and (select array_agg(facility.code || ':' || membership.membership_role || ':' || account.email
-                          order by facility.code, membership.membership_role, account.email)
+                          order by facility.code collate "C", membership.membership_role collate "C",
+                            account.email collate "C")
            from identity.staff_facility_memberships membership
            join identity.facilities facility on facility.id = membership.facility_id
            join auth.accounts account on account.id = membership.account_id
           where identity.sealed_qa_account(membership.account_id) and membership.active)
-      = array['QA-HOSPITAL:clinician:operations+qa-migrate@healthidentitydirectory.com',
-              'QA-HOSPITAL:doctor:operations+qa-clinician@healthidentitydirectory.com',
-              'QA-HOSPITAL:org_admin:operations+qa-admin@healthidentitydirectory.com',
-              'QA-LABORATORY:lab:operations+qa-lab1@healthidentitydirectory.com',
-              'QA-LABORATORY:lab:operations+qa-lab2@healthidentitydirectory.com',
-              'QA-LABORATORY:org_admin:operations+qa-admin@healthidentitydirectory.com',
-              'QA-PHARMACY:org_admin:operations+qa-admin@healthidentitydirectory.com',
-              'QA-PHARMACY:pharmacist:operations+qa-pharmacy@healthidentitydirectory.com']
+      = array['QA-HOSPITAL:clinician:migrate@healthidentitydirectory.com',
+              'QA-HOSPITAL:doctor:ehr@healthidentitydirectory.com',
+              'QA-HOSPITAL:org_admin:admin@healthidentitydirectory.com',
+              'QA-LABORATORY:lab:lab2@healthidentitydirectory.com',
+              'QA-LABORATORY:lab:lab@healthidentitydirectory.com',
+              'QA-LABORATORY:org_admin:admin@healthidentitydirectory.com',
+              'QA-PHARMACY:org_admin:admin@healthidentitydirectory.com',
+              'QA-PHARMACY:pharmacist:pharmacy@healthidentitydirectory.com']
     and (select count(*) from auth.account_roles assignment
           where identity.sealed_qa_account(assignment.account_id) and assignment.scope_type = 'facility'
             and assignment.revoked_at is null) = 8
@@ -932,7 +933,7 @@ set local role hid_identity_api_runtime;
 select pg_temp.as_real_patient();
 select set_config('hid.test.real_to_qa_invitation', (select invitation_id::text
   from identity.create_my_share_invitation('synthetic:qa-suite:patient', 'a123000b-0000-4000-8000-000000000001',
-    'operations+qa-clinician@healthidentitydirectory.com', 'QA clinic', 'view_only', '24h', 'sealed-real-invite-0001',
+    'ehr@healthidentitydirectory.com', 'QA clinic', 'view_only', '24h', 'sealed-real-invite-0001',
     repeat('c', 64))), true);
 select pg_temp.as_qa_clinician();
 select pg_temp.assert('real to QA: the QA clinician cannot accept a real patient''s invitation',
@@ -1077,9 +1078,9 @@ select pg_temp.assert('a QA patient invites no other domain, no subdomain, no lo
     'sealed-qa-invite-0013', repeat('c', 64))$q$) = '22023 SHARE_INVITATION_EMAIL_INVALID');
 select set_config('hid.test.qa_invitation', (select invitation_id::text
   from identity.create_my_share_invitation('patient:c0a00008-0000-4000-8000-000000000002',
-    'a123000b-0000-4000-8000-000000000022', 'Operations+QA-Clinician@HealthIdentityDirectory.com', 'QA clinic',
+    'a123000b-0000-4000-8000-000000000022', 'EHR@HealthIdentityDirectory.com', 'QA clinic',
     'view_only', '24h', 'sealed-qa-invite-0014', repeat('d', 64))), true);
-select pg_temp.assert('a plus-address of the owner''s domain is accepted',
+select pg_temp.assert('an address of the owner''s domain, in any case, is accepted',
   current_setting('hid.test.qa_invitation', true) ~ '^[0-9a-f-]{36}$');
 reset role;
 -- G4q also guards an update of the address (the invitation guard, which fires

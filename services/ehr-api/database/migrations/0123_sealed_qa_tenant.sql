@@ -44,10 +44,11 @@
 --    tenant only on Amazon RDS (rds_superuser exists), as 0098 D3: CI,
 --    acceptance, the staging upgrade rehearsal and throwaway clusters get
 --    the seal only, and the suite sealed-qa-tenant calls the seed itself.
--- D5 Seven staff logins and two patient logins, all at the owner's mailboxes
---    with plus-addresses (Identity accepts them: class-validator isEmail, the
---    SQL and TypeScript address checks allow '+', and uniqueness is
---    lower(email), so each alias is its own login), seeded pending_reset,
+-- D5 Seven staff logins, one mailbox of the owner's domain per role (owner,
+--    2026-11-12), and two patient logins at plus-addresses of the demo
+--    patients' mailboxes (patient1@ and patient2@ are 0098's demo logins and
+--    lower(email) is unique; Identity accepts plus-addresses: class-validator
+--    isEmail, the SQL and TypeScript address checks allow '+'), seeded pending_reset,
 --    without a password, the email verified. The owner sets each password
 --    through the normal forgot-password flow. No password or password hash
 --    is in this file.
@@ -188,17 +189,17 @@
 --     admin_review application and their product (an order's receiving
 --     facility needs it). QA Outreach: D8.
 --   Staff logins (each its own verified staff record):
---     operations+qa-clinician@healthidentitydirectory.com "QA Clinician":
+--     ehr@healthidentitydirectory.com "QA Clinician":
 --       doctor at QA Hospital (EHR, Migrate through doctor, shares, orders);
---     operations+qa-migrate@... "QA Migrate User": clinician at QA Hospital
+--     migrate@healthidentitydirectory.com "QA Migrate User": clinician at QA Hospital
 --       (Migrate's document upload and imports);
---     operations+qa-lab1@... "QA Lab Scientist" and operations+qa-lab2@...
+--     lab@healthidentitydirectory.com "QA Lab Scientist" and lab2@healthidentitydirectory.com
 --       "QA Lab Checker": lab at QA Laboratory (a result's second check needs
 --       a second person);
---     operations+qa-pharmacy@... "QA Pharmacist": pharmacist at QA Pharmacy;
---     operations+qa-admin@... "QA Facility Admin": org_admin at QA Hospital,
+--     pharmacy@healthidentitydirectory.com "QA Pharmacist": pharmacist at QA Pharmacy;
+--     admin@healthidentitydirectory.com "QA Facility Admin": org_admin at QA Hospital,
 --       QA Laboratory and QA Pharmacy;
---     operations+qa-outreach@... "QA Outreach Organiser": no membership; it
+--     outreach@healthidentitydirectory.com "QA Outreach Organiser": no membership; it
 --       starts the QA Outreach group (D8).
 --   Patient logins: patient1+qa@healthidentitydirectory.com (HID-ZQAAAAA2, QA
 --     Patient One) and patient2+qa@healthidentitydirectory.com (HID-ZQAAAAA3,
@@ -207,18 +208,26 @@
 --     live recovery hold (24 hours before patient approvals, new shares, the
 --     PIN, emergency contacts or invitations) applies as for any login.
 --
--- Before signing, the owner may run this read-only query on production;
--- every count must be 0 and rds must be 1:
+-- Before signing, the owner may run this read-only query on production. It
+-- answers one row per address (each of its four counts must be 0: a live
+-- account, a staff record, an open organization application naming it as
+-- first administrator, a pending staff invitation), then one row with the
+-- Health IDs and facility codes taken (both must be 0) and rds (must be 1):
 --   with addresses(email) as (values
---     ('operations+qa-clinician@healthidentitydirectory.com'), ('operations+qa-migrate@healthidentitydirectory.com'),
---     ('operations+qa-lab1@healthidentitydirectory.com'), ('operations+qa-lab2@healthidentitydirectory.com'),
---     ('operations+qa-pharmacy@healthidentitydirectory.com'), ('operations+qa-admin@healthidentitydirectory.com'),
---     ('operations+qa-outreach@healthidentitydirectory.com'), ('patient1+qa@healthidentitydirectory.com'),
+--     ('ehr@healthidentitydirectory.com'), ('migrate@healthidentitydirectory.com'),
+--     ('lab@healthidentitydirectory.com'), ('lab2@healthidentitydirectory.com'),
+--     ('pharmacy@healthidentitydirectory.com'), ('admin@healthidentitydirectory.com'),
+--     ('outreach@healthidentitydirectory.com'), ('patient1+qa@healthidentitydirectory.com'),
 --     ('patient2+qa@healthidentitydirectory.com'))
---   select (select count(*) from auth.accounts a join addresses x on lower(a.email) = x.email
---            where a.status <> 'deleted') as accounts,
---          (select count(*) from identity.staff s join addresses x on lower(s.email) = x.email) as staff,
---          (select count(*) from identity.patients p
+--   select x.email,
+--          (select count(*) from auth.accounts a where lower(a.email) = x.email and a.status <> 'deleted') as accounts,
+--          (select count(*) from identity.staff s where lower(s.email) = x.email) as staff,
+--          (select count(*) from identity.organization_applications o where lower(o.administrator_email) = x.email
+--            and o.status in ('pending_verification', 'ready_for_review')) as open_applications,
+--          (select count(*) from identity.staff_invitations i where lower(i.invitee_email) = x.email
+--            and i.status = 'pending' and i.expires_at > clock_timestamp()) as pending_invitations
+--     from addresses x order by x.email;
+--   select (select count(*) from identity.patients p
 --            where upper(p.hid_code) in ('HID-ZQAAAAA2', 'HID-ZQAAAAA3')) as health_ids,
 --          (select count(*) from identity.facilities f
 --            where upper(f.code) in ('QA-HOSPITAL', 'QA-LABORATORY', 'QA-PHARMACY')) as facility_codes,
@@ -1954,31 +1963,31 @@ declare
   qa_accounts constant jsonb := '[
     {"id": "c0a00003-0000-4000-8000-000000000001", "staff_id": "c0a00004-0000-4000-8000-000000000001",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-000000000001",
-     "email": "operations+qa-clinician@healthidentitydirectory.com", "display_name": "QA Clinician",
+     "email": "ehr@healthidentitydirectory.com", "display_name": "QA Clinician",
      "default_role": "doctor"},
     {"id": "c0a00003-0000-4000-8000-000000000002", "staff_id": "c0a00004-0000-4000-8000-000000000002",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-000000000002",
-     "email": "operations+qa-migrate@healthidentitydirectory.com", "display_name": "QA Migrate User",
+     "email": "migrate@healthidentitydirectory.com", "display_name": "QA Migrate User",
      "default_role": "clinician"},
     {"id": "c0a00003-0000-4000-8000-000000000003", "staff_id": "c0a00004-0000-4000-8000-000000000003",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-000000000003",
-     "email": "operations+qa-lab1@healthidentitydirectory.com", "display_name": "QA Lab Scientist",
+     "email": "lab@healthidentitydirectory.com", "display_name": "QA Lab Scientist",
      "default_role": "lab"},
     {"id": "c0a00003-0000-4000-8000-000000000004", "staff_id": "c0a00004-0000-4000-8000-000000000004",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-000000000004",
-     "email": "operations+qa-lab2@healthidentitydirectory.com", "display_name": "QA Lab Checker",
+     "email": "lab2@healthidentitydirectory.com", "display_name": "QA Lab Checker",
      "default_role": "lab"},
     {"id": "c0a00003-0000-4000-8000-000000000005", "staff_id": "c0a00004-0000-4000-8000-000000000005",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-000000000005",
-     "email": "operations+qa-pharmacy@healthidentitydirectory.com", "display_name": "QA Pharmacist",
+     "email": "pharmacy@healthidentitydirectory.com", "display_name": "QA Pharmacist",
      "default_role": "pharmacist"},
     {"id": "c0a00003-0000-4000-8000-000000000006", "staff_id": "c0a00004-0000-4000-8000-000000000006",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-000000000006",
-     "email": "operations+qa-admin@healthidentitydirectory.com", "display_name": "QA Facility Admin",
+     "email": "admin@healthidentitydirectory.com", "display_name": "QA Facility Admin",
      "default_role": "org_admin"},
     {"id": "c0a00003-0000-4000-8000-000000000007", "staff_id": "c0a00004-0000-4000-8000-000000000007",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-000000000007",
-     "email": "operations+qa-outreach@healthidentitydirectory.com", "display_name": "QA Outreach Organiser",
+     "email": "outreach@healthidentitydirectory.com", "display_name": "QA Outreach Organiser",
      "default_role": "outreach_organiser"},
     {"id": "c0a00008-0000-4000-8000-000000000001", "staff_id": null,
      "subject": "patient:c0a00008-0000-4000-8000-000000000001",
@@ -2211,7 +2220,7 @@ begin
     organization_id, facility_id, first_admin_account_id, reviewed_by_account_id, review_reason, reviewed_at,
     verified_organization_name, approval_mode)
   select qa.id, qa.product, qa.name, qa.kind, qa.cac, 'QA Facility Admin',
-         'operations+qa-admin@healthidentitydirectory.com', 'approved', 'verified', clock_timestamp(),
+         'admin@healthidentitydirectory.com', 'approved', 'verified', clock_timestamp(),
          qa.organization_id, qa.facility_id, admin_account, admin_account, install_reason, clock_timestamp(), qa.name,
          'admin_review'
     from jsonb_to_recordset(qa_applications) qa(id uuid, organization_id uuid, facility_id uuid, product text,

@@ -4582,22 +4582,24 @@ facility is not a destination, a clinician is not in the share directory.
 The tenant (seeded only on Amazon RDS, i.e. production; CI and rehearsals get
 the seal without the seed): QA Hospital (`QA-HOSPITAL`), QA Laboratory
 (`QA-LABORATORY`) and QA Pharmacy (`QA-PHARMACY`), verified and active. Seven
-staff logins, each with its own staff record, at the owner's mailboxes with
-plus-addresses (Identity accepts them; each alias is its own login):
+staff logins, each with its own staff record, one mailbox of the owner's domain
+per role:
 
 | Login | Role |
 | --- | --- |
-| `operations+qa-clinician@healthidentitydirectory.com` | doctor at QA Hospital (EHR, Migrate, shares, orders) |
-| `operations+qa-migrate@healthidentitydirectory.com` | clinician at QA Hospital (Migrate) |
-| `operations+qa-lab1@healthidentitydirectory.com` | lab at QA Laboratory |
-| `operations+qa-lab2@healthidentitydirectory.com` | lab at QA Laboratory (a result's second check) |
-| `operations+qa-pharmacy@healthidentitydirectory.com` | pharmacist at QA Pharmacy |
-| `operations+qa-admin@healthidentitydirectory.com` | org_admin at QA Hospital, QA Laboratory and QA Pharmacy |
-| `operations+qa-outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
+| `ehr@healthidentitydirectory.com` | doctor at QA Hospital (EHR, Migrate, shares, orders) |
+| `migrate@healthidentitydirectory.com` | clinician at QA Hospital (Migrate) |
+| `lab@healthidentitydirectory.com` | lab at QA Laboratory |
+| `lab2@healthidentitydirectory.com` | lab at QA Laboratory (a result's second check) |
+| `pharmacy@healthidentitydirectory.com` | pharmacist at QA Pharmacy |
+| `admin@healthidentitydirectory.com` | org_admin at QA Hospital, QA Laboratory and QA Pharmacy |
+| `outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
 
-Two patient logins: `patient1+qa@healthidentitydirectory.com` (`HID-ZQAAAAA2`,
-QA Patient One) and `patient2+qa@healthidentitydirectory.com` (`HID-ZQAAAAA3`,
-QA Patient Two). Every account is seeded `pending_reset` without a password,
+Two patient logins at plus-addresses of the demo patients' mailboxes (Identity
+accepts plus-addresses; `patient1@` and `patient2@` themselves are the demo's
+logins): `patient1+qa@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA Patient
+One) and `patient2+qa@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
+Two). Every account is seeded `pending_reset` without a password,
 its email verified; the owner sets each password with Forgot password. QA
 Patient One shares with the QA clinician at QA Hospital (written as section 26
 writes the demo's shares, with the migration's own audit row,
