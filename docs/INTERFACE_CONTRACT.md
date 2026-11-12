@@ -4609,7 +4609,12 @@ It refuses (55000, nothing moved, the release stops) a new address held by
 another account, staff record, open organization application or pending staff
 invitation (`DEMO_PATIENT_ADDRESS_TAKEN`), or a demo patient login on neither
 address or whose patient record holds an email of its own
-(`DEMO_PATIENT_LOGIN_UNEXPECTED`); it writes one audit row
+(`DEMO_PATIENT_LOGIN_UNEXPECTED`), or while a demo patient has a live email
+emergency contact (before 0123 it could only be `operations@`, `patient1@` or
+`patient2@`, and the database holds only its HMAC) or a pending share
+invitation to `patient1@` or `patient2@` (`DEMO_PATIENT_OLD_ADDRESS_IN_USE`;
+the owner removes or cancels them in the app first, and may add contacts again
+with the new addresses afterwards); it writes one audit row
 (`identity.sealed-demo.patient-logins-moved`, correlation id
 `0123-demo-patient-logins`, a count only). The demo's exact allowlist
 (`identity.sealed_demo_recipient`) and seed (`identity.sealed_demo_install`)

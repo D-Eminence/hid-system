@@ -171,7 +171,11 @@
 --    or a new address held by another account (not deleted) or staff
 --    record, named as first administrator by an open organization
 --    application or invited by a pending staff invitation
---    (DEMO_PATIENT_ADDRESS_TAKEN); else it sets the address of each demo
+--    (DEMO_PATIENT_ADDRESS_TAKEN), or while a demo patient has a live email
+--    emergency contact (it can only be to operations@, patient1@ or
+--    patient2@) or a pending share invitation to patient1@ or patient2@
+--    (DEMO_PATIENT_OLD_ADDRESS_IN_USE: the owner removes or cancels them in
+--    the app first); else it sets the address of each demo
 --    login still on its old one (updated_at and row_version too, nothing
 --    else) and writes one audit row, a count only. A second call moves
 --    nothing. Where the demo is not installed it moves nothing.
@@ -259,13 +263,21 @@
 --          (select count(*) from identity.staff_invitations i where lower(i.invitee_email) = x.email
 --            and i.status = 'pending' and i.expires_at > clock_timestamp()) as pending_invitations
 --     from addresses x order by x.email;
--- The second shows the two demo patient logins before the move: their
--- addresses must be patient1@ and patient2@ (or already patientdemo1@ and
--- patientdemo2@), status not deleted, own_email 0 (their patient records
--- hold no email of their own):
---   select a.id, lower(a.email) as email, a.status,
+-- The second shows the two demo patient logins before the move. It must
+-- answer exactly two rows, demo t, address patient1@ and patient2@ (or
+-- already patientdemo1@ and patientdemo2@), status not deleted, and 0 in
+-- own_email (an email on the patient record), email_contacts (live email
+-- emergency contacts) and old_address_invitations (pending share invitations
+-- to patient1@ or patient2@); remove or cancel those in the app first:
+--   select a.id, identity.sealed_demo_account(a.id) as demo, lower(a.email) as email, a.status,
 --          (select count(*) from identity.patients p where p.account_id = a.id
---            and (p.email_ciphertext is not null or p.email_lookup_hmac is not null)) as own_email
+--            and (p.email_ciphertext is not null or p.email_lookup_hmac is not null)) as own_email,
+--          (select count(*) from identity.patient_emergency_contacts c join identity.patients p on p.id = c.patient_id
+--            where p.account_id = a.id and c.channel = 'email' and c.status <> 'deactivated') as email_contacts,
+--          (select count(*) from identity.patient_share_invitations i join identity.patients p on p.id = i.patient_id
+--            where p.account_id = a.id and i.status = 'pending'
+--              and i.invitee_email in ('patient1@healthidentitydirectory.com', 'patient2@healthidentitydirectory.com'))
+--            as old_address_invitations
 --     from auth.accounts a
 --    where a.id in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002')
 --    order by a.id;
@@ -2895,6 +2907,21 @@ begin
     raise exception using errcode = '55000', message = '0123: DEMO_PATIENT_ADDRESS_TAKEN';
   end if;
 
+  -- Nothing of a demo patient still points at an old address, which becomes a
+  -- QA patient's: no live email emergency contact (before 0123 a demo
+  -- patient's could only be operations@, patient1@ or patient2@, and the
+  -- database holds only its HMAC) and no pending share invitation to an old
+  -- address. The owner removes or cancels them in the app first, and may add
+  -- the contacts again afterwards with the new addresses.
+  if exists (select 1 from identity.patient_emergency_contacts contact
+              where contact.channel = 'email' and contact.status <> 'deactivated'
+                and identity.sealed_demo_patient(contact.patient_id))
+     or exists (select 1 from identity.patient_share_invitations invitation
+                  join jsonb_to_recordset(demo_logins) login(old_email text) on invitation.invitee_email = login.old_email
+                 where invitation.status = 'pending' and identity.sealed_demo_patient(invitation.patient_id)) then
+    raise exception using errcode = '55000', message = '0123: DEMO_PATIENT_OLD_ADDRESS_IN_USE';
+  end if;
+
   -- Only the address changes: the password, its algorithm, the token version
   -- (so every session), the status and the verification stay as they are.
   update auth.accounts account
@@ -3059,7 +3086,7 @@ comment on function identity.sealed_demo_recipient(text) is
 comment on function identity.sealed_demo_install() is
   '0098, addresses 0123: installs the sealed demo tenant (Demo Hospital, Demo Laboratory, Demo Pharmacy, Demo Outreach; the staff login operations@healthidentitydirectory.com, pending_reset without a password; two patient logins patientdemo1@healthidentitydirectory.com and patientdemo2@healthidentitydirectory.com, each sharing with the demo login at Demo Hospital and Demo Outreach, written with identity.write_patient_share''s grant and share values and audited as the migration''s (system, provenance migration, identity.sealed-demo.seed-share), never as the patient''s; eight fictional patients). Refuses (55000) an address, id or key held by a real row, an address named by an open organization application or a pending staff invitation, or a share to a membership the patient could not choose. Inserts only; a second call inserts nothing. The owner sets each password through forgot-password; testers write in Patient One''s and Two''s charts through the shares, break-glass (read-only) the fictional patients, and test patient approvals and new shares after the 24-hour recovery hold.';
 comment on function identity.demo_patient_logins_move() is
-  '0123: moves the two demo patient logins from patient1@ and patient2@ to patientdemo1@ and patientdemo2@healthidentitydirectory.com (address only; password, sessions, status and verification kept), so that the QA patients can have patient1@ and patient2@. Refuses (55000) a new address held by another account, staff record, open application or pending staff invitation, or a demo patient login on neither address. A second call moves nothing.';
+  '0123: moves the two demo patient logins from patient1@ and patient2@ to patientdemo1@ and patientdemo2@healthidentitydirectory.com (address only; password, sessions, status and verification kept), so that the QA patients can have patient1@ and patient2@. Refuses (55000) a new address held by another account, staff record, open application or pending staff invitation, a demo patient login on neither address, or a demo patient''s live email emergency contact or pending share invitation to an old address. A second call moves nothing.';
 
 -- 9. Section 0's temporary table.
 drop table sealed_qa_0123_replaced;

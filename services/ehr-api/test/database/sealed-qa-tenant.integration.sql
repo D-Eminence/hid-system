@@ -20,8 +20,10 @@
 --      back on patient1@ and patient2@ as production has them, with a
 --      password and a session: the QA seed refuses while they hold them; the
 --      move refuses a new address held by an account, staff record, open
---      application or pending staff invitation, a login on neither address
---      or a patient record with an email of its own, each moving nothing;
+--      application or pending staff invitation, a login on neither address,
+--      a patient record with an email of its own, a demo patient's live email
+--      emergency contact or pending share invitation to an old address, each
+--      moving nothing; a partly moved state moves the rest;
 --      then it moves both to patientdemo1@ and patientdemo2@, address only,
 --      the session live, one count-only audit row, a second call moves
 --      nothing, the demo seed stays idempotent); then the install: counts,
@@ -593,6 +595,47 @@ update identity.patients set email_lookup_hmac = repeat('a', 64), email_cipherte
        contact_key_version = coalesce(contact_key_version, 'sealed-test-v1')
  where id = '98d00009-0000-4000-8000-000000000002';
 select pg_temp.move_refused('a demo patient record with an email of its own', 'DEMO_PATIENT_LOGIN_UNEXPECTED');
+rollback to savepoint move_refusal;
+-- A demo patient's live email emergency contact (before 0123 it could only be
+-- operations@, patient1@ or patient2@) or pending share invitation to an old
+-- address: refused, so nothing of the demo still points at a QA mailbox.
+-- Fixture rows without triggers (session_replication_role = replica).
+set local session_replication_role = replica;
+insert into identity.patient_emergency_contacts (id, patient_id, created_by_account_id, relationship, channel,
+  contact_ciphertext, contact_key_version, destination_hmac, notify_on_emergency_access, status)
+values ('a1230010-0000-4000-8000-000000000041', '98d00009-0000-4000-8000-000000000001',
+  '98d00008-0000-4000-8000-000000000001', 'sibling', 'email', decode(repeat('ab', 40), 'hex'), 'sealed-test-v1',
+  repeat('7', 64), true, 'unverified');
+set local session_replication_role = origin;
+select pg_temp.move_refused('a demo patient''s live email emergency contact', 'DEMO_PATIENT_OLD_ADDRESS_IN_USE');
+rollback to savepoint move_refusal;
+set local session_replication_role = replica;
+insert into identity.patient_emergency_contacts (id, patient_id, created_by_account_id, relationship, channel,
+  contact_ciphertext, contact_key_version, destination_hmac, notify_on_emergency_access, status, deactivated_at,
+  deactivation_reason)
+values ('a1230010-0000-4000-8000-000000000042', '98d00009-0000-4000-8000-000000000001',
+  '98d00008-0000-4000-8000-000000000001', 'sibling', 'email', null, null, null, true, 'deactivated',
+  clock_timestamp(), 'patient_removed');
+insert into identity.patient_share_invitations (id, reference, patient_id, invitee_email, level, duration_preset,
+  status, expires_at, idempotency_key, request_sha256, delivery_outcome)
+values ('a1230012-0000-4000-8000-000000000041', 'QAMVAAA2', '98d00009-0000-4000-8000-000000000001',
+  'patient2@healthidentitydirectory.com', 'view_only', '24h', 'pending', clock_timestamp() + interval '1 day',
+  'qa-suite-demo-move-share-0001', repeat('d', 64), 'sent');
+set local session_replication_role = origin;
+select pg_temp.move_refused('a demo patient''s pending share invitation to an old address',
+  'DEMO_PATIENT_OLD_ADDRESS_IN_USE');
+update identity.patient_share_invitations set status = 'cancelled', cancelled_at = clock_timestamp()
+ where id = 'a1230012-0000-4000-8000-000000000041';
+select pg_temp.assert('a deactivated contact and a cancelled invitation do not hold the move',
+  identity.demo_patient_logins_move() = 2);
+rollback to savepoint move_refusal;
+-- Partly moved (one login already at its new address): the other moves.
+update auth.accounts set email = 'patientdemo2@healthidentitydirectory.com'
+ where id = '98d00008-0000-4000-8000-000000000002';
+select pg_temp.assert('partly moved: only the login still on its old address moves',
+  identity.demo_patient_logins_move() = 1);
+select pg_temp.assert('partly moved: its audit row counts one',
+  (select details from audit.events where correlation_id = '0123-demo-patient-logins') = '{"accountsMoved": 1}'::jsonb);
 rollback to savepoint move_refusal;
 select pg_temp.assert('nobody but the owner may move them',
   not has_function_privilege('hid_identity_api_runtime', 'identity.demo_patient_logins_move()', 'EXECUTE')
