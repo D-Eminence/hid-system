@@ -1668,4 +1668,5 @@ revoke all on function identity.sealed_qa_ids(text),
   identity.patient_contact_changes_sealed_qa(),
   identity.qoreid_quota_counters_sealed_qa(),
   identity.patient_emergency_contacts_sealed_qa(),
-  identity.outreach_organisations_sealed_qa() from public;
+  identity.outreach_organisations_sealed_qa(),
+  identity.outreach_invitations_sealed_qa() from public;

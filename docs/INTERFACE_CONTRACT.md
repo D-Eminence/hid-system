@@ -4610,7 +4610,10 @@ contact phone encrypted with Identity's key, which a migration cannot write
 truthfully. The owner starts it with the organiser login through "Start an
 outreach group" (with `outreach_organiser_signup_enabled` on), naming it "QA
 ..."; a group whose organiser is a QA account becomes QA as it is made, and its
-name must start with "QA " (else 22023 `OUTREACH_ORGANISER_SIGNUP_INVALID`).
+name must start with "QA " (else 22023 `OUTREACH_ORGANISER_SIGNUP_INVALID`). A QA
+group invites volunteers at `@healthidentitydirectory.com` addresses only (400
+`OUTREACH_INVITATION_INVALID` otherwise), so no QA invitation email reaches
+anyone outside the owner's domain.
 
 Kept off for QA (coordinator, 2026-11-12): QoreID (a QA account consumes no
 QoreID quota, so no paid lookup; 42501 `QOREID_QUOTA_PERMISSION_DENIED`), a QA

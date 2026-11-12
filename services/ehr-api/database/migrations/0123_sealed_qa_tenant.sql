@@ -34,8 +34,9 @@
 --    - email is limited to the owner's domain instead of the demo's three
 --      exact mailboxes: a QA patient invites, adds as an emergency contact or
 --      changes their email to an address @healthidentitydirectory.com only,
---      plus-addresses allowed (identity.sealed_qa_recipient); any other
---      domain is refused as the demo refuses a non-demo address.
+--      plus-addresses allowed (identity.sealed_qa_recipient), and a QA
+--      outreach group invites such an address only; any other domain is
+--      refused as the demo refuses a non-demo address.
 --    Everything else a real tenant does, a QA login does: it is not
 --    demo-restricted (0114's and 0115's demo-only refusals name demo
 --    members only, so they never apply to QA).
@@ -82,10 +83,10 @@
 --    are byte for byte 0098's (md5 of pg_proc.prosrc); identity.patients has
 --    six policies and patients_registration_read reads as 0098 wrote it; the
 --    applier owns, or is a member of the owner of, each replaced function,
---    identity.patients and the eight tables that get a trigger. Each
+--    identity.patients and the ten tables that get a trigger. Each
 --    replaced function's attributes but its body are recorded and compared
 --    after the replacement (section 7).
--- 1. SHARE ROW EXCLUSIVE on the eight tables that get a trigger, up front,
+-- 1. SHARE ROW EXCLUSIVE on the ten tables that get a trigger, up front,
 --    NOWAIT every 10 ms for at most 5 seconds (else 55P03).
 -- 2. identity.sealed_qa_members, as 0098's table: (member_kind, member_id,
 --    recorded_at), primary key (kind, id), no foreign key, row-level
@@ -101,7 +102,7 @@
 --    true exactly for an address whose domain is healthidentitydirectory.com
 --    (any case, outer blanks trimmed, plus-addresses allowed, no subdomain);
 --    identity.sealed_qa_install(), the seed (section 10), the owner's.
--- 4. Eight triggers, each BEFORE, FOR EACH ROW, the function SECURITY
+-- 4. Nine triggers, each BEFORE, FOR EACH ROW, the function SECURITY
 --    DEFINER and the owner's, beside 0098's:
 --    G1q consent_grants_sealed_qa: the grant's facility (or its membership's)
 --       and its patient both QA or neither; else 42501 SEALED_QA_BOUNDARY.
@@ -127,6 +128,10 @@
 --       (EmergencyContactService.add computes the HMAC from the address it
 --       checks).
 --    G8q outreach_organisations_sealed_qa (insert): D8.
+--    G9q outreach_invitations_sealed_qa (insert, or update of invitee_email):
+--       a QA outreach group invites an address of the owner's domain only
+--       (22023 OUTREACH_INVITATION_INVALID, which Identity answers 400), so no
+--       QA invitation email reaches anyone outside it.
 -- 5. Nine bodies replaced (CREATE OR REPLACE), each 0098's byte for byte plus
 --    one QA clause beside its demo clause, always true for real and demo
 --    rows: R1 identity.create_access_request, R2 identity.activate_break_glass
@@ -149,7 +154,7 @@
 --    keep their ACLs.
 -- 7. Post-checks: the table, its policy and ACL; each new function's owner,
 --    SECURITY DEFINER, search_path, volatility and exact ACL; the readers of
---    identity.patients may run the two helpers its policy calls; the ten
+--    identity.patients may run the two helpers its policy calls; the QA
 --    triggers' definitions, enabled 'O'; the replaced functions keep every
 --    attribute but the body.
 -- 8. Comments.
@@ -235,6 +240,7 @@ begin
      or to_regprocedure('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)') is null
      or to_regprocedure('identity.consent_grants_sealed_demo()') is null
      or to_regclass('identity.outreach_organisations') is null
+     or to_regclass('identity.outreach_invitations') is null
      or to_regprocedure('identity.create_outreach_group(uuid,uuid,text,text,text,character,bytea,text,text,text,uuid,boolean)') is null
      or to_regprocedure('platform.reject_mutation()') is null
      or to_regprocedure('identity.patient_self_session(text,uuid)') is null
@@ -289,7 +295,8 @@ begin
                    'identity.staff_facility_memberships'::regclass, 'auth.account_roles'::regclass,
                    'identity.patient_share_invitations'::regclass, 'identity.patient_contact_changes'::regclass,
                    'platform.qoreid_quota_counters'::regclass, 'identity.patient_emergency_contacts'::regclass,
-                   'identity.outreach_organisations'::regclass, 'identity.sealed_demo_members'::regclass)) owned
+                   'identity.outreach_organisations'::regclass, 'identity.outreach_invitations'::regclass,
+                   'identity.sealed_demo_members'::regclass)) owned
    where not pg_has_role(current_user, owned.owner_oid, 'USAGE');
   if owner_problem is not null then
     raise exception using errcode = '42501', message = '0123: the applier does not own ' || owner_problem;
@@ -312,7 +319,7 @@ select proc.oid as function_oid, proc.proowner, proc.prosecdef, proc.provolatile
          'identity.admin_platform_overview()'::regprocedure,
          'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure);
 
--- 1. The locks the eight triggers take, up front and bounded.
+-- 1. The locks the QA triggers take, up front and bounded.
 do $$
 declare attempt integer := 0;
 begin
@@ -321,7 +328,8 @@ begin
     begin
       lock table identity.consent_grants, identity.staff_facility_memberships, auth.account_roles,
         identity.patient_share_invitations, identity.patient_contact_changes, platform.qoreid_quota_counters,
-        identity.patient_emergency_contacts, identity.outreach_organisations, identity.sealed_demo_members
+        identity.patient_emergency_contacts, identity.outreach_organisations, identity.outreach_invitations,
+        identity.sealed_demo_members
         in share row exclusive mode nowait;
       exit;
     exception when lock_not_available then
@@ -610,6 +618,23 @@ $$;
 create trigger outreach_organisations_sealed_qa
   before insert on identity.outreach_organisations
   for each row execute function identity.outreach_organisations_sealed_qa();
+
+-- G9q: a QA outreach group invites an address of the owner's domain only.
+create function identity.outreach_invitations_sealed_qa()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if identity.sealed_qa_facility(new.facility_id) and not identity.sealed_qa_recipient(new.invitee_email) then
+    raise exception using errcode = '22023', message = 'OUTREACH_INVITATION_INVALID';
+  end if;
+  return new;
+end
+$$;
+create trigger outreach_invitations_sealed_qa
+  before insert or update of invitee_email on identity.outreach_invitations
+  for each row execute function identity.outreach_invitations_sealed_qa();
 
 -- 5. Nine bodies replaced: each 0098's byte for byte plus one QA clause beside
 -- its demo clause.
@@ -2041,13 +2066,13 @@ begin
                     or not identity.sealed_qa_facility(facility.id))
      or exists (select 1 from auth.accounts account
                   join jsonb_to_recordset(qa_accounts) qa(id uuid, subject text, email text) on qa.id = account.id
-                 where account.subject <> qa.subject or lower(account.email) is distinct from qa.email
-                    or account.status = 'deleted' or not identity.sealed_qa_account(account.id))
+                 where account.subject <> qa.subject or account.status = 'deleted'
+                    or not identity.sealed_qa_account(account.id))
      or exists (select 1 from identity.staff staff_row
                   join jsonb_to_recordset(qa_accounts) qa(id uuid, staff_id uuid, email text)
                     on qa.staff_id = staff_row.id or (qa.staff_id is not null and staff_row.account_id = qa.id)
                  where staff_row.id is distinct from qa.staff_id or staff_row.account_id <> qa.id
-                    or lower(staff_row.email) <> qa.email)
+                    or not identity.sealed_qa_account(staff_row.account_id))
      or exists (select 1 from identity.staff_facility_memberships membership
                   join jsonb_to_recordset(qa_memberships) qa(id uuid, account_id uuid, staff_id uuid,
                     organization_id uuid, facility_id uuid) on qa.id = membership.id
@@ -2317,7 +2342,7 @@ revoke all on function identity.sealed_qa_ids(text), identity.sealed_qa_facility
   identity.consent_grants_sealed_qa(), identity.staff_memberships_sealed_qa(), identity.account_roles_sealed_qa(),
   identity.patient_share_invitations_sealed_qa(), identity.patient_contact_changes_sealed_qa(),
   identity.qoreid_quota_counters_sealed_qa(), identity.patient_emergency_contacts_sealed_qa(),
-  identity.outreach_organisations_sealed_qa() from public;
+  identity.outreach_organisations_sealed_qa(), identity.outreach_invitations_sealed_qa() from public;
 do $$
 declare role_name text;
 begin
@@ -2350,7 +2375,7 @@ begin
        'sealed_qa_recipient', 'sealed_qa_install', 'sealed_qa_members_not_demo', 'demo_members_never_qa',
        'consent_grants_sealed_qa', 'staff_memberships_sealed_qa', 'account_roles_sealed_qa',
        'patient_share_invitations_sealed_qa', 'patient_contact_changes_sealed_qa', 'qoreid_quota_counters_sealed_qa',
-       'patient_emergency_contacts_sealed_qa', 'outreach_organisations_sealed_qa')
+       'patient_emergency_contacts_sealed_qa', 'outreach_organisations_sealed_qa', 'outreach_invitations_sealed_qa')
      and (proc.proowner <> (select oid from pg_roles where rolname = current_user)
        or proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp']
        or (proc.proname <> 'sealed_qa_recipient') <> proc.prosecdef
@@ -2367,7 +2392,7 @@ begin
              'consent_grants_sealed_qa', 'staff_memberships_sealed_qa', 'account_roles_sealed_qa',
              'patient_share_invitations_sealed_qa', 'patient_contact_changes_sealed_qa',
              'qoreid_quota_counters_sealed_qa', 'patient_emergency_contacts_sealed_qa',
-             'outreach_organisations_sealed_qa')) <> 16 then
+             'outreach_organisations_sealed_qa', 'outreach_invitations_sealed_qa')) <> 17 then
     raise exception using errcode = '55000', message = '0123: these functions are not as written: '
       || coalesce(problem, 'a function is missing');
   end if;
@@ -2378,7 +2403,7 @@ begin
                   or not has_function_privilege(role_row.oid, 'identity.sealed_qa_facility(uuid)', 'EXECUTE'))) then
     raise exception using errcode = '55000', message = '0123: a reader of identity.patients cannot run the QA helpers';
   end if;
-  -- The ten triggers, enabled 'O', as written.
+  -- The QA triggers, enabled 'O', as written.
   select string_agg(expected.name, ', ') into problem
     from (values
       ('identity.sealed_qa_members', 'sealed_qa_members_immutable'),
@@ -2392,7 +2417,8 @@ begin
       ('identity.patient_contact_changes', 'patient_contact_changes_sealed_qa'),
       ('platform.qoreid_quota_counters', 'qoreid_quota_counters_sealed_qa'),
       ('identity.patient_emergency_contacts', 'patient_emergency_contacts_sealed_qa'),
-      ('identity.outreach_organisations', 'outreach_organisations_sealed_qa')
+      ('identity.outreach_organisations', 'outreach_organisations_sealed_qa'),
+      ('identity.outreach_invitations', 'outreach_invitations_sealed_qa')
     ) expected(table_name, name)
    where not exists (select 1 from pg_trigger trigger_row
                       where trigger_row.tgrelid = expected.table_name::regclass
