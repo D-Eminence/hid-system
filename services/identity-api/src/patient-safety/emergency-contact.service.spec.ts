@@ -206,13 +206,13 @@ describe('EmergencyContactService', () => {
         }
         return { rows: [] };
       });
-      await service.add(patientRequest, { ...emailContact, destination: ' Patient2@HealthIdentityDirectory.com ' });
+      await service.add(patientRequest, { ...emailContact, destination: ' PatientDemo2@HealthIdentityDirectory.com ' });
       const statements = query.mock.calls.map(([sql]) => String(sql));
       const check = statements.findIndex((sql) => sql.includes('sealed_demo_contact_allowed'));
       expect(check).toBeGreaterThan(statements.findIndex((sql) => sql.includes('from auth.otp_challenges')));
       expect(check).toBeLessThan(statements.findIndex((sql) => sql.includes('add_my_emergency_contact')));
-      const hmac = protector.destinationHmac('email', 'patient2@healthidentitydirectory.com');
-      expect(query.mock.calls[check][1]).toEqual([...patientSession, 'email', 'patient2@healthidentitydirectory.com', hmac]);
+      const hmac = protector.destinationHmac('email', 'patientdemo2@healthidentitydirectory.com');
+      expect(query.mock.calls[check][1]).toEqual([...patientSession, 'email', 'patientdemo2@healthidentitydirectory.com', hmac]);
       // The add stores the very HMAC the check recorded (0098 G7 admits a demo patient's contact only with it).
       expect(written[7]).toBe(hmac);
     });

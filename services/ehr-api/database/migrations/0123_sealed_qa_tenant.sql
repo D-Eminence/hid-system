@@ -44,14 +44,11 @@
 --    tenant only on Amazon RDS (rds_superuser exists), as 0098 D3: CI,
 --    acceptance, the staging upgrade rehearsal and throwaway clusters get
 --    the seal only, and the suite sealed-qa-tenant calls the seed itself.
--- D5 Seven staff logins, one mailbox of the owner's domain per role (owner,
---    2026-11-12), and two patient logins at plus-addresses of the demo
---    patients' mailboxes (patient1@ and patient2@ are 0098's demo logins and
---    lower(email) is unique; Identity accepts plus-addresses: class-validator
---    isEmail, the SQL and TypeScript address checks allow '+'), seeded pending_reset,
---    without a password, the email verified. The owner sets each password
---    through the normal forgot-password flow. No password or password hash
---    is in this file.
+-- D5 Seven staff logins, one mailbox of the owner's domain per role, and two
+--    patient logins, patient1@ and patient2@ (owner, 2026-11-12; D10 frees
+--    them), seeded pending_reset, without a password, the email verified.
+--    The owner sets each password through the normal forgot-password flow.
+--    No password or password hash is in this file.
 -- D6 QA Patient One shares with the QA clinician at QA Hospital (a consent
 --    grant and share row written as identity.write_patient_share writes them,
 --    with the migration's own audit row, as 0098 D6). QA Patient Two has no
@@ -78,10 +75,24 @@
 --    QoreID NIN check, refused for QA, and app. sign-ups are platform-wide,
 --    so they are real). The QA logins and patients are the seeded ones.
 --
+-- D10 The demo patient logins move (owner, 2026-11-12): patient1@ and
+--    patient2@ were 0098's two demo patient logins and lower(email) is
+--    unique, so this file moves those two accounts to the new mailboxes
+--    patientdemo1@ and patientdemo2@ (identity.demo_patient_logins_move,
+--    section 5b). Address only: the password, sessions (token version),
+--    status, verification, Health IDs, shares and the demo seal stay. 0098's
+--    exact allowlist (identity.sealed_demo_recipient) names the two new
+--    addresses in place of the old ones, still exact, and 0098's seed
+--    (identity.sealed_demo_install) seeds and checks them, byte for byte
+--    0098's otherwise. Section 10 moves the demo logins first and seeds QA
+--    after, in this migration's one transaction, so no address is held twice
+--    and nothing is half done. After this, patient1@ and patient2@ are QA
+--    addresses: the demo seal refuses them as it refuses any non-demo one.
+--
 -- 0. Preconditions (catalog reads only; 55000 or 42501, nothing applied):
 --    0001-0116 applied (0098's members table and seal, 0115's outreach
---    organisations); not applied yet; the nine bodies replaced in section 5
---    are byte for byte 0098's (md5 of pg_proc.prosrc); identity.patients has
+--    organisations); not applied yet; the eleven bodies replaced in sections
+--    5 and 5b are byte for byte 0098's (md5 of pg_proc.prosrc); identity.patients has
 --    six policies and patients_registration_read reads as 0098 wrote it; the
 --    applier owns, or is a member of the owner of, each replaced function,
 --    identity.patients and the ten tables that get a trigger. Each
@@ -149,6 +160,21 @@
 --    identity.sealed_demo_contact_allowed (a QA patient's contact is an email
 --    to the owner's domain, its HMAC recorded for G7q; the demo branch is
 --    unchanged).
+-- 5b. D10: R9 identity.sealed_demo_recipient (the exact allowlist with
+--    patientdemo1@ and patientdemo2@ in place of patient1@ and patient2@),
+--    R10 identity.sealed_demo_install (0098's with the same two addresses),
+--    and the new identity.demo_patient_logins_move(), the owner's, SECURITY
+--    DEFINER: under the demo's and then the QA seed's advisory locks, it
+--    refuses (55000, nothing moved) a demo patient login (0098's id, a demo
+--    member, not deleted) on neither its old nor its new address or whose
+--    patient record holds an email of its own (DEMO_PATIENT_LOGIN_UNEXPECTED),
+--    or a new address held by another account (not deleted) or staff
+--    record, named as first administrator by an open organization
+--    application or invited by a pending staff invitation
+--    (DEMO_PATIENT_ADDRESS_TAKEN); else it sets the address of each demo
+--    login still on its old one (updated_at and row_version too, nothing
+--    else) and writes one audit row, a count only. A second call moves
+--    nothing. Where the demo is not installed it moves nothing.
 -- 6. Grants, here and in runtime-grants.sql: EXECUTE on
 --    identity.sealed_qa_ids and identity.sealed_qa_facility to
 --    hid_identity_runtime and hid_schema_test_runtime; every other new
@@ -161,7 +187,9 @@
 --    attribute but the body.
 -- 8. Comments.
 -- 9. Section 0's temporary table dropped.
--- 10. The seed, on Amazon RDS only (D4): identity.sealed_qa_install(), which
+-- 10. The demo patient logins move (D10, everywhere; nothing where the demo
+--    is not installed), then the seed, on Amazon RDS only (D4):
+--    identity.sealed_qa_install(), which
 --    refuses (55000, nothing written, the release stops) when a QA address
 --    belongs to another account (not deleted) or staff record, is the first
 --    administrator of an open organization application or the invitee of a
@@ -201,32 +229,48 @@
 --       QA Laboratory and QA Pharmacy;
 --     outreach@healthidentitydirectory.com "QA Outreach Organiser": no membership; it
 --       starts the QA Outreach group (D8).
---   Patient logins: patient1+qa@healthidentitydirectory.com (HID-ZQAAAAA2, QA
---     Patient One) and patient2+qa@healthidentitydirectory.com (HID-ZQAAAAA3,
+--   Patient logins: patient1@healthidentitydirectory.com (HID-ZQAAAAA2, QA
+--     Patient One) and patient2@healthidentitydirectory.com (HID-ZQAAAAA3,
 --     QA Patient Two).
 --   Before testing, the owner sets each password with Forgot password; the
 --     live recovery hold (24 hours before patient approvals, new shares, the
 --     PIN, emergency contacts or invitations) applies as for any login.
 --
--- Before signing, the owner may run this read-only query on production. It
--- answers one row per address (each of its four counts must be 0: a live
--- account, a staff record, an open organization application naming it as
--- first administrator, a pending staff invitation), then one row with the
--- Health IDs and facility codes taken (both must be 0) and rds (must be 1):
+-- Before signing, the owner may run these read-only queries on production.
+-- The first answers one row per address, each of its four counts must be 0:
+-- a live account (other than the two demo patient logins this file moves), a
+-- staff record, an open organization application naming it as first
+-- administrator, a pending staff invitation. It covers the seven staff
+-- addresses, the QA patients' patient1@ and patient2@, and the demo patients'
+-- new patientdemo1@ and patientdemo2@:
 --   with addresses(email) as (values
 --     ('ehr@healthidentitydirectory.com'), ('migrate@healthidentitydirectory.com'),
 --     ('lab@healthidentitydirectory.com'), ('lab2@healthidentitydirectory.com'),
 --     ('pharmacy@healthidentitydirectory.com'), ('admin@healthidentitydirectory.com'),
---     ('outreach@healthidentitydirectory.com'), ('patient1+qa@healthidentitydirectory.com'),
---     ('patient2+qa@healthidentitydirectory.com'))
+--     ('outreach@healthidentitydirectory.com'), ('patient1@healthidentitydirectory.com'),
+--     ('patient2@healthidentitydirectory.com'), ('patientdemo1@healthidentitydirectory.com'),
+--     ('patientdemo2@healthidentitydirectory.com'))
 --   select x.email,
---          (select count(*) from auth.accounts a where lower(a.email) = x.email and a.status <> 'deleted') as accounts,
+--          (select count(*) from auth.accounts a where lower(a.email) = x.email and a.status <> 'deleted'
+--            and a.id not in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002')) as accounts,
 --          (select count(*) from identity.staff s where lower(s.email) = x.email) as staff,
 --          (select count(*) from identity.organization_applications o where lower(o.administrator_email) = x.email
 --            and o.status in ('pending_verification', 'ready_for_review')) as open_applications,
 --          (select count(*) from identity.staff_invitations i where lower(i.invitee_email) = x.email
 --            and i.status = 'pending' and i.expires_at > clock_timestamp()) as pending_invitations
 --     from addresses x order by x.email;
+-- The second shows the two demo patient logins before the move: their
+-- addresses must be patient1@ and patient2@ (or already patientdemo1@ and
+-- patientdemo2@), status not deleted, own_email 0 (their patient records
+-- hold no email of their own):
+--   select a.id, lower(a.email) as email, a.status,
+--          (select count(*) from identity.patients p where p.account_id = a.id
+--            and (p.email_ciphertext is not null or p.email_lookup_hmac is not null)) as own_email
+--     from auth.accounts a
+--    where a.id in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002')
+--    order by a.id;
+-- The third answers the Health IDs and facility codes taken (both must be 0)
+-- and rds (must be 1):
 --   select (select count(*) from identity.patients p
 --            where upper(p.hid_code) in ('HID-ZQAAAAA2', 'HID-ZQAAAAA3')) as health_ids,
 --          (select count(*) from identity.facilities f
@@ -240,7 +284,8 @@ declare
   owner_problem text;
 begin
   if to_regclass('identity.sealed_qa_members') is not null
-     or to_regprocedure('identity.sealed_qa_install()') is not null then
+     or to_regprocedure('identity.sealed_qa_install()') is not null
+     or to_regprocedure('identity.demo_patient_logins_move()') is not null then
     raise exception using errcode = '55000', message = '0123: already applied';
   end if;
   if to_regclass('identity.sealed_demo_members') is null
@@ -257,7 +302,7 @@ begin
      or not exists (select 1 from auth.roles where code = 'outreach_organiser') then
     raise exception using errcode = '55000', message = '0123: 0001-0116 must be applied first';
   end if;
-  -- The nine bodies section 5 replaces are 0098's, byte for byte.
+  -- The eleven bodies sections 5 and 5b replace are 0098's, byte for byte.
   select string_agg(pin.signature, ', ' order by pin.signature) into missing
     from (values
       ('identity.create_access_request(text,text,text,integer)', 'f88923a49a180c2180fdedb29bf2eccf'),
@@ -269,7 +314,9 @@ begin
       ('identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)',
        'b253ba70b4532a62b15eae6ae50465c1'),
       ('identity.admin_platform_overview()', '3b1b2ca005647190ea623c40afb4f96f'),
-      ('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)', '12f0000f8c5e77643304e84fd359ca58')
+      ('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)', '12f0000f8c5e77643304e84fd359ca58'),
+      ('identity.sealed_demo_recipient(text)', '3acc207860052470703504e74c751a30'),
+      ('identity.sealed_demo_install()', '8a5dfb0feee0b699b2d13faffbc4a178')
     ) pin(signature, digest)
    where to_regprocedure(pin.signature) is null
       or (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(pin.signature)) <> pin.digest;
@@ -297,7 +344,9 @@ begin
                    'identity.search_share_providers(text,uuid,text)'::regprocedure,
                    'identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)'::regprocedure,
                    'identity.admin_platform_overview()'::regprocedure,
-                   'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure)
+                   'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure,
+                   'identity.sealed_demo_recipient(text)'::regprocedure,
+                   'identity.sealed_demo_install()'::regprocedure)
           union all
           select rel.oid::regclass::text, rel.relowner
             from pg_class rel
@@ -327,7 +376,9 @@ select proc.oid as function_oid, proc.proowner, proc.prosecdef, proc.provolatile
          'identity.search_share_providers(text,uuid,text)'::regprocedure,
          'identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)'::regprocedure,
          'identity.admin_platform_overview()'::regprocedure,
-         'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure);
+         'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure,
+         'identity.sealed_demo_recipient(text)'::regprocedure,
+         'identity.sealed_demo_install()'::regprocedure);
 
 -- 1. The locks the QA triggers take, up front and bounded.
 do $$
@@ -1991,10 +2042,10 @@ declare
      "default_role": "outreach_organiser"},
     {"id": "c0a00008-0000-4000-8000-000000000001", "staff_id": null,
      "subject": "patient:c0a00008-0000-4000-8000-000000000001",
-     "email": "patient1+qa@healthidentitydirectory.com", "display_name": "QA Patient One", "default_role": null},
+     "email": "patient1@healthidentitydirectory.com", "display_name": "QA Patient One", "default_role": null},
     {"id": "c0a00008-0000-4000-8000-000000000002", "staff_id": null,
      "subject": "patient:c0a00008-0000-4000-8000-000000000002",
-     "email": "patient2+qa@healthidentitydirectory.com", "display_name": "QA Patient Two", "default_role": null}]';
+     "email": "patient2@healthidentitydirectory.com", "display_name": "QA Patient Two", "default_role": null}]';
   qa_memberships constant jsonb := '[
     {"id": "c0a00005-0000-4000-8000-000000000011", "account_id": "c0a00003-0000-4000-8000-000000000001",
      "staff_id": "c0a00004-0000-4000-8000-000000000001", "organization_id": "c0a00001-0000-4000-8000-000000000001",
@@ -2347,6 +2398,522 @@ begin
 end
 $$;
 
+-- 5b. The demo patient logins move to new mailboxes (owner, 2026-11-12), so
+-- that patient1@ and patient2@ become the QA patients' logins (D10).
+-- R9 identity.sealed_demo_recipient: 0098's exact allowlist with the demo
+-- patients' new addresses in place of their old ones. Still three exact
+-- addresses: no pattern, no plus-address.
+create or replace function identity.sealed_demo_recipient(requested_address text)
+returns boolean
+language sql immutable
+set search_path = pg_catalog, pg_temp
+as $$
+  select coalesce(lower(btrim(requested_address)) in ('operations@healthidentitydirectory.com',
+    'patientdemo1@healthidentitydirectory.com', 'patientdemo2@healthidentitydirectory.com'), false)
+$$;
+
+-- R10 identity.sealed_demo_install: 0098's body byte for byte except the two
+-- demo patient logins' addresses, so that a later call (the suites, or the
+-- owner's) seeds and checks the demo on its new addresses and stays idempotent.
+create or replace function identity.sealed_demo_install()
+returns jsonb
+language plpgsql volatile security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  staff_account constant uuid := '98d00003-0000-4000-8000-000000000001';
+  staff_record constant uuid := '98d00004-0000-4000-8000-000000000001';
+  install_reason constant text := 'Sealed demo tenant installed by migration 0098';
+  role_reason constant text := 'Sealed demo tenant (0098, owner decision)';
+  demo_organizations constant jsonb := '[
+    {"id": "98d00001-0000-4000-8000-000000000001", "name": "Demo Hospital", "slug": "sealed-demo-hospital"},
+    {"id": "98d00001-0000-4000-8000-000000000002", "name": "Demo Laboratory", "slug": "sealed-demo-laboratory"},
+    {"id": "98d00001-0000-4000-8000-000000000003", "name": "Demo Pharmacy", "slug": "sealed-demo-pharmacy"},
+    {"id": "98d00001-0000-4000-8000-000000000004", "name": "Demo Outreach", "slug": "sealed-demo-outreach"}]';
+  demo_facilities constant jsonb := '[
+    {"id": "98d00002-0000-4000-8000-000000000001", "organization_id": "98d00001-0000-4000-8000-000000000001",
+     "name": "Demo Hospital", "code": "DEMO-HOSPITAL"},
+    {"id": "98d00002-0000-4000-8000-000000000002", "organization_id": "98d00001-0000-4000-8000-000000000002",
+     "name": "Demo Laboratory", "code": "DEMO-LABORATORY"},
+    {"id": "98d00002-0000-4000-8000-000000000003", "organization_id": "98d00001-0000-4000-8000-000000000003",
+     "name": "Demo Pharmacy", "code": "DEMO-PHARMACY"},
+    {"id": "98d00002-0000-4000-8000-000000000004", "organization_id": "98d00001-0000-4000-8000-000000000004",
+     "name": "Demo Outreach", "code": "DEMO-OUTREACH"}]';
+  demo_accounts constant jsonb := '[
+    {"id": "98d00003-0000-4000-8000-000000000001", "subject": "sealed-demo:98d00003-0000-4000-8000-000000000001",
+     "email": "operations@healthidentitydirectory.com", "display_name": "Demo Operations"},
+    {"id": "98d00008-0000-4000-8000-000000000001", "subject": "patient:98d00008-0000-4000-8000-000000000001",
+     "email": "patientdemo1@healthidentitydirectory.com", "display_name": "Demo Patient One"},
+    {"id": "98d00008-0000-4000-8000-000000000002", "subject": "patient:98d00008-0000-4000-8000-000000000002",
+     "email": "patientdemo2@healthidentitydirectory.com", "display_name": "Demo Patient Two"}]';
+  demo_memberships constant jsonb := '[
+    {"id": "98d00005-0000-4000-8000-000000000001", "organization_id": "98d00001-0000-4000-8000-000000000001",
+     "facility_id": "98d00002-0000-4000-8000-000000000001", "role": "doctor", "is_primary": true},
+    {"id": "98d00005-0000-4000-8000-000000000002", "organization_id": "98d00001-0000-4000-8000-000000000002",
+     "facility_id": "98d00002-0000-4000-8000-000000000002", "role": "lab", "is_primary": false},
+    {"id": "98d00005-0000-4000-8000-000000000003", "organization_id": "98d00001-0000-4000-8000-000000000003",
+     "facility_id": "98d00002-0000-4000-8000-000000000003", "role": "pharmacist", "is_primary": false},
+    {"id": "98d00005-0000-4000-8000-000000000004", "organization_id": "98d00001-0000-4000-8000-000000000004",
+     "facility_id": "98d00002-0000-4000-8000-000000000004", "role": "nurse", "is_primary": false}]';
+  demo_roles constant jsonb := '[
+    {"id": "98d00006-0000-4000-8000-000000000011", "membership_id": "98d00005-0000-4000-8000-000000000001",
+     "facility_id": "98d00002-0000-4000-8000-000000000001", "role": "doctor"},
+    {"id": "98d00006-0000-4000-8000-000000000012", "membership_id": "98d00005-0000-4000-8000-000000000001",
+     "facility_id": "98d00002-0000-4000-8000-000000000001", "role": "org_admin"},
+    {"id": "98d00006-0000-4000-8000-000000000021", "membership_id": "98d00005-0000-4000-8000-000000000002",
+     "facility_id": "98d00002-0000-4000-8000-000000000002", "role": "lab"},
+    {"id": "98d00006-0000-4000-8000-000000000022", "membership_id": "98d00005-0000-4000-8000-000000000002",
+     "facility_id": "98d00002-0000-4000-8000-000000000002", "role": "org_admin"},
+    {"id": "98d00006-0000-4000-8000-000000000031", "membership_id": "98d00005-0000-4000-8000-000000000003",
+     "facility_id": "98d00002-0000-4000-8000-000000000003", "role": "pharmacist"},
+    {"id": "98d00006-0000-4000-8000-000000000032", "membership_id": "98d00005-0000-4000-8000-000000000003",
+     "facility_id": "98d00002-0000-4000-8000-000000000003", "role": "org_admin"},
+    {"id": "98d00006-0000-4000-8000-000000000041", "membership_id": "98d00005-0000-4000-8000-000000000004",
+     "facility_id": "98d00002-0000-4000-8000-000000000004", "role": "nurse"},
+    {"id": "98d00006-0000-4000-8000-000000000042", "membership_id": "98d00005-0000-4000-8000-000000000004",
+     "facility_id": "98d00002-0000-4000-8000-000000000004", "role": "org_admin"}]';
+  demo_applications constant jsonb := '[
+    {"id": "98d00007-0000-4000-8000-000000000002", "organization_id": "98d00001-0000-4000-8000-000000000002",
+     "facility_id": "98d00002-0000-4000-8000-000000000002", "product": "laboratory", "kind": "laboratory",
+     "cac": "RC00000000000000098002", "name": "Demo Laboratory"},
+    {"id": "98d00007-0000-4000-8000-000000000003", "organization_id": "98d00001-0000-4000-8000-000000000003",
+     "facility_id": "98d00002-0000-4000-8000-000000000003", "product": "pharmacy", "kind": "pharmacy",
+     "cac": "RC00000000000000098003", "name": "Demo Pharmacy"}]';
+  demo_patients constant jsonb := '[
+    {"id": "98d00009-0000-4000-8000-000000000001", "identifier_id": "98d0000a-0000-4000-8000-000000000001",
+     "account_id": "98d00008-0000-4000-8000-000000000001", "hid": "HID-ZDEMAAA2", "last": "Patient One",
+     "gender": "female", "dob": "1985-03-14"},
+    {"id": "98d00009-0000-4000-8000-000000000002", "identifier_id": "98d0000a-0000-4000-8000-000000000002",
+     "account_id": "98d00008-0000-4000-8000-000000000002", "hid": "HID-ZDEMAAA3", "last": "Patient Two",
+     "gender": "male", "dob": "1990-07-02"},
+    {"id": "98d00009-0000-4000-8000-000000000003", "identifier_id": "98d0000a-0000-4000-8000-000000000003",
+     "account_id": null, "hid": "HID-ZDEMBBB2", "last": "Patient Three", "gender": "male", "dob": "1950-01-10"},
+    {"id": "98d00009-0000-4000-8000-000000000004", "identifier_id": "98d0000a-0000-4000-8000-000000000004",
+     "account_id": null, "hid": "HID-ZDEMBBB3", "last": "Patient Four", "gender": "female", "dob": "1962-05-21"},
+    {"id": "98d00009-0000-4000-8000-000000000005", "identifier_id": "98d0000a-0000-4000-8000-000000000005",
+     "account_id": null, "hid": "HID-ZDEMBBB4", "last": "Patient Five", "gender": "male", "dob": "1971-09-30"},
+    {"id": "98d00009-0000-4000-8000-000000000006", "identifier_id": "98d0000a-0000-4000-8000-000000000006",
+     "account_id": null, "hid": "HID-ZDEMBBB5", "last": "Patient Six", "gender": "female", "dob": "1978-12-02"},
+    {"id": "98d00009-0000-4000-8000-000000000007", "identifier_id": "98d0000a-0000-4000-8000-000000000007",
+     "account_id": null, "hid": "HID-ZDEMBBB6", "last": "Patient Seven", "gender": "male", "dob": "1999-04-18"},
+    {"id": "98d00009-0000-4000-8000-000000000008", "identifier_id": "98d0000a-0000-4000-8000-000000000008",
+     "account_id": null, "hid": "HID-ZDEMBBB7", "last": "Patient Eight", "gender": "female", "dob": "2004-08-25"},
+    {"id": "98d00009-0000-4000-8000-000000000009", "identifier_id": "98d0000a-0000-4000-8000-000000000009",
+     "account_id": null, "hid": "HID-ZDEMBBB8", "last": "Patient Nine", "gender": "male", "dob": "2012-02-11"},
+    {"id": "98d00009-0000-4000-8000-000000000010", "identifier_id": "98d0000a-0000-4000-8000-000000000010",
+     "account_id": null, "hid": "HID-ZDEMBBB9", "last": "Patient Ten", "gender": "female", "dob": "2020-06-06"}]';
+  -- D6: Patient One and Patient Two share with the doctor membership at Demo
+  -- Hospital and the nurse membership at Demo Outreach.
+  demo_shares constant jsonb := '[
+    {"patient_id": "98d00009-0000-4000-8000-000000000001", "membership_id": "98d00005-0000-4000-8000-000000000001"},
+    {"patient_id": "98d00009-0000-4000-8000-000000000001", "membership_id": "98d00005-0000-4000-8000-000000000004"},
+    {"patient_id": "98d00009-0000-4000-8000-000000000002", "membership_id": "98d00005-0000-4000-8000-000000000001"},
+    {"patient_id": "98d00009-0000-4000-8000-000000000002", "membership_id": "98d00005-0000-4000-8000-000000000004"}]';
+  share_correlation constant text := '0098-sealed-demo-install';
+  demo_share record;
+  share_membership record;
+  share_grant uuid;
+  share_start timestamptz;
+  step bigint;
+  inserted bigint := 0;
+begin
+  -- One install at a time.
+  perform pg_advisory_xact_lock(hashtextextended('hid-sealed-demo-install', 0));
+
+  -- 1. An address of the demo tenant belongs to another account (not
+  -- deleted) or staff record, or is named by an open organization
+  -- application (its first administrator) or a pending staff invitation:
+  -- demo access is never attached to it, and seeding it would break that
+  -- application's approval or that invitation's acceptance. (The demo's own
+  -- applications are approved, so a second call passes.)
+  if exists (select 1 from auth.accounts account
+               join jsonb_to_recordset(demo_accounts) demo(id uuid, email text) on lower(account.email) = demo.email
+              where account.status <> 'deleted' and account.id <> demo.id)
+     or exists (select 1 from identity.staff staff_row
+                  join jsonb_to_recordset(demo_accounts) demo(id uuid, email text) on lower(staff_row.email) = demo.email
+                 where staff_row.id <> staff_record)
+     or exists (select 1 from identity.organization_applications application
+                  join jsonb_to_recordset(demo_accounts) demo(id uuid, email text)
+                    on lower(application.administrator_email) = demo.email
+                 where application.status in ('pending_verification', 'ready_for_review'))
+     or exists (select 1 from identity.staff_invitations invitation
+                  join jsonb_to_recordset(demo_accounts) demo(id uuid, email text)
+                    on lower(invitation.invitee_email) = demo.email
+                 where invitation.status = 'pending' and invitation.expires_at > clock_timestamp()) then
+    raise exception using errcode = '55000', message = '0098: SEALED_DEMO_ADDRESS_TAKEN';
+  end if;
+
+  -- 2. A fixed id is held by a row that is not the demo's: no demo marker,
+  -- or another email, subject, organization, facility, account, role or
+  -- Health ID than the demo's.
+  if exists (select 1 from identity.organizations organization
+               join jsonb_to_recordset(demo_organizations) demo(id uuid, slug text) on demo.id = organization.id
+              where lower(organization.slug) <> demo.slug
+                 or not exists (select 1 from identity.sealed_demo_members member
+                                 where member.member_kind = 'organization' and member.member_id = organization.id))
+     or exists (select 1 from identity.facilities facility
+                  join jsonb_to_recordset(demo_facilities) demo(id uuid, organization_id uuid, code text)
+                    on demo.id = facility.id
+                 where facility.organization_id <> demo.organization_id or upper(facility.code) <> demo.code
+                    or not identity.sealed_demo_facility(facility.id))
+     or exists (select 1 from auth.accounts account
+                  join jsonb_to_recordset(demo_accounts) demo(id uuid, subject text, email text) on demo.id = account.id
+                 where account.subject <> demo.subject or lower(account.email) is distinct from demo.email
+                    or account.status = 'deleted' or not identity.sealed_demo_account(account.id))
+     or exists (select 1 from identity.staff staff_row
+                 where (staff_row.id = staff_record or staff_row.account_id = staff_account)
+                   and (staff_row.id <> staff_record or staff_row.account_id <> staff_account
+                     or lower(staff_row.email) <> 'operations@healthidentitydirectory.com'))
+     or exists (select 1 from identity.staff_facility_memberships membership
+                  join jsonb_to_recordset(demo_memberships) demo(id uuid, organization_id uuid, facility_id uuid)
+                    on demo.id = membership.id
+                 where membership.account_id <> staff_account or membership.staff_id <> staff_record
+                    or membership.organization_id <> demo.organization_id
+                    or membership.facility_id is distinct from demo.facility_id)
+     or exists (select 1 from auth.account_roles assignment
+                  join jsonb_to_recordset(demo_roles) demo(id uuid, membership_id uuid, role text) on demo.id = assignment.id
+                 where assignment.account_id <> staff_account or assignment.scope_type <> 'facility'
+                    or assignment.membership_id is distinct from demo.membership_id or assignment.role_code <> demo.role)
+     or exists (select 1 from identity.organization_applications application
+                  join jsonb_to_recordset(demo_applications) demo(id uuid, organization_id uuid, facility_id uuid,
+                    product text, cac text) on demo.id = application.id
+                 where application.organization_id is distinct from demo.organization_id
+                    or application.facility_id is distinct from demo.facility_id
+                    or application.product_code <> demo.product or application.cac_registration_number <> demo.cac
+                    or application.approval_mode <> 'admin_review')
+     or exists (select 1 from identity.organization_products product
+                  join jsonb_to_recordset(demo_applications) demo(id uuid, organization_id uuid, facility_id uuid,
+                    product text) on demo.organization_id = product.organization_id and demo.product = product.product_code
+                 where product.facility_id <> demo.facility_id or product.source_application_id <> demo.id)
+     or exists (select 1 from identity.patients patient
+                  join jsonb_to_recordset(demo_patients) demo(id uuid, account_id uuid, hid text) on demo.id = patient.id
+                 where upper(patient.hid_code) <> demo.hid or patient.account_id is distinct from demo.account_id
+                    or not identity.sealed_demo_patient(patient.id))
+     or exists (select 1 from identity.patient_identifiers identifier
+                  join jsonb_to_recordset(demo_patients) demo(id uuid, identifier_id uuid, hid text)
+                    on demo.identifier_id = identifier.id
+                 where identifier.patient_id <> demo.id or identifier.identifier_type <> 'hid_code'
+                    or upper(identifier.public_value) is distinct from demo.hid)
+     or exists (select 1 from identity.patient_assurance_states assurance
+                  join jsonb_to_recordset(demo_patients) demo(id uuid, account_id uuid) on demo.id = assurance.patient_id
+                 where assurance.account_id is distinct from demo.account_id) then
+    raise exception using errcode = '55000', message = '0098: SEALED_DEMO_ID_TAKEN';
+  end if;
+
+  -- 3. A slug, facility code, Health ID or CAC of the demo tenant is held by
+  -- a real row.
+  if exists (select 1 from identity.organizations organization
+               join jsonb_to_recordset(demo_organizations) demo(id uuid, slug text)
+                 on lower(organization.slug) = demo.slug and organization.id <> demo.id)
+     or exists (select 1 from identity.facilities facility
+                  join jsonb_to_recordset(demo_facilities) demo(id uuid, code text)
+                    on upper(facility.code) = demo.code and facility.id <> demo.id)
+     or exists (select 1 from identity.patients patient
+                  join jsonb_to_recordset(demo_patients) demo(id uuid, hid text)
+                    on upper(patient.hid_code) = demo.hid and patient.id <> demo.id)
+     or exists (select 1 from identity.patient_identifiers identifier
+                  join jsonb_to_recordset(demo_patients) demo(identifier_id uuid, hid text)
+                    on identifier.identifier_type = 'hid_code' and upper(identifier.public_value) = demo.hid
+                   and identifier.id <> demo.identifier_id)
+     or exists (select 1 from identity.organization_applications application
+                  join jsonb_to_recordset(demo_applications) demo(id uuid, product text, cac text)
+                    on application.cac_registration_number = demo.cac and application.product_code = demo.product
+                   and application.status <> 'rejected' and application.id <> demo.id) then
+    raise exception using errcode = '55000', message = '0098: SEALED_DEMO_KEY_TAKEN';
+  end if;
+
+  -- 4. A demo account holds a real membership, a platform role, or (the
+  -- staff login) a patient record, or a patient login another patient
+  -- record. Triggers G2 and G3 make the first two impossible once installed.
+  if exists (select 1 from identity.staff_facility_memberships membership
+               join jsonb_to_recordset(demo_accounts) demo(id uuid) on demo.id = membership.account_id
+              where not identity.sealed_demo_facility(membership.facility_id))
+     or exists (select 1 from auth.account_roles assignment
+                  join jsonb_to_recordset(demo_accounts) demo(id uuid) on demo.id = assignment.account_id
+                 where assignment.scope_type = 'platform' and assignment.revoked_at is null)
+     or exists (select 1 from identity.patients patient where patient.account_id = staff_account)
+     or exists (select 1 from identity.patients patient
+                  join jsonb_to_recordset(demo_patients) demo(id uuid, account_id uuid)
+                    on demo.account_id = patient.account_id and patient.id <> demo.id) then
+    raise exception using errcode = '55000', message = '0098: SEALED_DEMO_ACCOUNT_NOT_SEALED';
+  end if;
+
+  -- Members first, so that the triggers see them; then the rows. Nothing
+  -- existing is updated.
+  insert into identity.sealed_demo_members (member_kind, member_id)
+  select 'organization', demo.id from jsonb_to_recordset(demo_organizations) demo(id uuid)
+  union all select 'facility', demo.id from jsonb_to_recordset(demo_facilities) demo(id uuid)
+  union all select 'account', demo.id from jsonb_to_recordset(demo_accounts) demo(id uuid)
+  union all select 'patient', demo.id from jsonb_to_recordset(demo_patients) demo(id uuid)
+  on conflict (member_kind, member_id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into identity.organizations (id, name, slug, active, source_system)
+  select demo.id, demo.name, demo.slug, true, 'hid-sealed-demo'
+    from jsonb_to_recordset(demo_organizations) demo(id uuid, name text, slug text)
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into identity.facilities (id, organization_id, name, code, active, timezone, lifecycle_status,
+    status_reason, source_system)
+  select demo.id, demo.organization_id, demo.name, demo.code, true, 'Africa/Lagos', 'verified', install_reason,
+         'hid-sealed-demo'
+    from jsonb_to_recordset(demo_facilities) demo(id uuid, organization_id uuid, name text, code text)
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into auth.accounts (id, subject, email, display_name, status, email_verified_at, source_system)
+  select demo.id, demo.subject, demo.email, demo.display_name, 'pending_reset', clock_timestamp(), 'hid-sealed-demo'
+    from jsonb_to_recordset(demo_accounts) demo(id uuid, subject text, email text, display_name text)
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into identity.staff (id, account_id, full_name, email, verification_status, default_role, active,
+    source_system)
+  values (staff_record, staff_account, 'Demo Operations', 'operations@healthidentitydirectory.com', 'verified',
+    'doctor', true, 'hid-sealed-demo')
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+    membership_role, app_role, is_primary, active, source_system)
+  select demo.id, staff_record, staff_account, demo.organization_id, demo.facility_id, demo.role, demo.role,
+         demo.is_primary, true, 'hid-sealed-demo'
+    from jsonb_to_recordset(demo_memberships) demo(id uuid, organization_id uuid, facility_id uuid, role text,
+      is_primary boolean)
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+  select demo.id, staff_account, demo.role, 'facility', demo.membership_id, demo.facility_id, role_reason
+    from jsonb_to_recordset(demo_roles) demo(id uuid, membership_id uuid, facility_id uuid, role text)
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  -- Demo Laboratory and Demo Pharmacy: an approved governed application (the
+  -- historical closed approval form: no profile, no provider fields) and
+  -- their product, which an order's receiving facility needs.
+  insert into identity.organization_applications (id, product_code, organization_name, organization_type,
+    cac_registration_number, administrator_name, administrator_email, status, verification_result, verified_at,
+    organization_id, facility_id, first_admin_account_id, reviewed_by_account_id, review_reason, reviewed_at,
+    verified_organization_name, approval_mode)
+  select demo.id, demo.product, demo.name, demo.kind, demo.cac, 'Demo Operations',
+         'operations@healthidentitydirectory.com', 'approved', 'verified', clock_timestamp(), demo.organization_id,
+         demo.facility_id, staff_account, staff_account, install_reason, clock_timestamp(), demo.name, 'admin_review'
+    from jsonb_to_recordset(demo_applications) demo(id uuid, organization_id uuid, facility_id uuid, product text,
+      kind text, cac text, name text)
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into identity.organization_products (organization_id, product_code, facility_id, status,
+    source_application_id)
+  select demo.organization_id, demo.product, demo.facility_id, 'active', demo.id
+    from jsonb_to_recordset(demo_applications) demo(id uuid, organization_id uuid, facility_id uuid, product text)
+  on conflict (organization_id, product_code) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, gender, dob, status,
+    source_system)
+  select demo.id, demo.account_id, demo.hid, 'Demo', demo.last, 'Demo ' || demo.last, demo.gender, demo.dob,
+         'active', 'hid-sealed-demo'
+    from jsonb_to_recordset(demo_patients) demo(id uuid, account_id uuid, hid text, last text, gender text, dob date)
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into identity.patient_identifiers (id, patient_id, identifier_type, public_value, verified, source_system)
+  select demo.identifier_id, demo.id, 'hid_code', demo.hid, true, 'hid-sealed-demo'
+    from jsonb_to_recordset(demo_patients) demo(id uuid, identifier_id uuid, hid text)
+  on conflict (id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  insert into identity.patient_assurance_states (patient_id, account_id, state, source_system, contact_verified_at)
+  select demo.id, demo.account_id, 'CONTACT_VERIFIED', 'hid-sealed-demo', clock_timestamp()
+    from jsonb_to_recordset(demo_patients) demo(id uuid, account_id uuid)
+   where demo.account_id is not null
+  on conflict (patient_id) do nothing;
+  get diagnostics step = row_count; inserted := inserted + step;
+
+  -- D6: the four shares. Each is the consent grant and the share row that the
+  -- patient's own Share action writes (identity.write_patient_share, 0095,
+  -- whose body section 0 pins), column for column: clinical_collaboration
+  -- until revoked, 365 days of direct-care write_records, granted by the
+  -- patient (so the patient revokes it in the portal), created_via search,
+  -- under the install's correlation id. Not that function's audit row: the
+  -- patients did not share, this migration did, so each share gets one audit
+  -- row of its own (system, provenance migration,
+  -- identity.sealed-demo.seed-share) and no audit row names a patient as its
+  -- actor. Each is written under the patient's advisory lock (0087's key),
+  -- only to a membership the patient could choose in the share directory
+  -- (identity.share_provider_eligible's rule, less the active sign-in the
+  -- staff login gets from the owner's password reset; else
+  -- SEALED_DEMO_SHARE_INELIGIBLE), and once only: a pair that already has a
+  -- grant with the install's correlation id (also one the patient revoked)
+  -- or an active share is left alone, so nothing is ever replaced, revoked or
+  -- restored. G1 checks each grant as it checks any other.
+  for demo_share in select * from jsonb_to_recordset(demo_shares) demo(patient_id uuid, membership_id uuid)
+  loop
+    perform pg_advisory_xact_lock(hashtextextended('patient-access-pin:' || demo_share.patient_id::text, 0));
+    continue when exists (select 1 from identity.consent_grants grant_row
+                           where grant_row.patient_id = demo_share.patient_id
+                             and grant_row.membership_id = demo_share.membership_id
+                             and grant_row.correlation_id = share_correlation)
+               or exists (select 1 from identity.patient_consent_shares share
+                            join identity.consent_grants grant_row on grant_row.id = share.consent_grant_id
+                           where share.patient_id = demo_share.patient_id
+                             and share.membership_id = demo_share.membership_id
+                             and grant_row.status = 'active' and grant_row.expires_at > clock_timestamp());
+    select membership.id, membership.staff_id, membership.account_id, membership.facility_id
+      into share_membership
+      from identity.staff_facility_memberships membership
+      join identity.staff staff_row on staff_row.id = membership.staff_id
+      join identity.facilities facility on facility.id = membership.facility_id
+      join identity.organizations organization on organization.id = membership.organization_id
+     where membership.id = demo_share.membership_id and membership.account_id = staff_account
+       and membership.active and membership.migration_hold_reason is null
+       and staff_row.active and lower(staff_row.verification_status) in ('verified', 'approved', 'active')
+       and facility.active and facility.organization_id = membership.organization_id and organization.active
+       and exists (select 1 from auth.account_roles assignment
+                    where assignment.account_id = membership.account_id and assignment.membership_id = membership.id
+                      and assignment.facility_id = membership.facility_id and assignment.scope_type = 'facility'
+                      and assignment.revoked_at is null and assignment.role_code in ('doctor', 'clinician', 'nurse'))
+       and exists (select 1 from auth.account_roles assignment
+                     join auth.roles role_row on role_row.code = assignment.role_code and role_row.active
+                     join auth.role_permissions role_permission on role_permission.role_code = role_row.code
+                      and role_permission.permission_code = 'identity.consent.write'
+                     join auth.permissions permission_row on permission_row.code = role_permission.permission_code
+                      and permission_row.active
+                    where assignment.account_id = membership.account_id and assignment.membership_id = membership.id
+                      and assignment.facility_id = membership.facility_id and assignment.scope_type = 'facility'
+                      and assignment.revoked_at is null)
+       and not exists (select 1 from identity.organization_applications application
+                        where application.organization_id = membership.organization_id
+                          and application.approval_mode = 'self_service');
+    if not found then
+      raise exception using errcode = '55000', message = '0098: SEALED_DEMO_SHARE_INELIGIBLE';
+    end if;
+    share_grant := gen_random_uuid();
+    share_start := clock_timestamp();
+    insert into identity.consent_grants (id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
+      scope, status, granted_by_patient_id, reason, starts_at, expires_at, break_glass, correlation_id,
+      purpose_of_use, authorization_method)
+    values (share_grant, null, demo_share.patient_id, share_membership.staff_id, share_membership.account_id,
+      share_membership.id, share_membership.facility_id, 'write_records', 'active', demo_share.patient_id,
+      'Shared by the patient', share_start, share_start + interval '365 days', false, share_correlation,
+      'direct-care', null);
+    insert into identity.patient_consent_shares (consent_grant_id, patient_id, membership_id, level, duration_preset,
+      created_via, invitation_id, replaced_consent_grant_id, idempotency_key, request_sha256)
+    values (share_grant, demo_share.patient_id, demo_share.membership_id, 'clinical_collaboration', 'until_revoked',
+      'search', null, null,
+      'sealed-demo-share-' || demo_share.patient_id::text || '-' || demo_share.membership_id::text,
+      encode(sha256(convert_to('sealed-demo-share:' || demo_share.patient_id::text || ':'
+        || demo_share.membership_id::text, 'UTF8')), 'hex'));
+    insert into audit.events (correlation_id, actor_type, facility_id, patient_id, action, outcome, resource_type,
+      resource_id, provenance, source_system, details)
+    values (share_correlation, 'system', share_membership.facility_id, demo_share.patient_id,
+      'identity.sealed-demo.seed-share', 'success', 'consent-grant', share_grant::text, 'migration',
+      'hid-sealed-demo', jsonb_build_object('scope', 'write_records', 'purpose', 'direct-care',
+        'level', 'clinical_collaboration', 'duration', 'until_revoked', 'via', 'search'));
+    inserted := inserted + 2;
+  end loop;
+
+  if inserted > 0 then
+    insert into audit.events (correlation_id, actor_type, action, outcome, resource_type, provenance,
+      source_system, details)
+    values ('0098-sealed-demo-install', 'system', 'identity.sealed-demo.install', 'success', 'sealed-demo-tenant',
+      'migration', 'hid-sealed-demo', jsonb_build_object('rowsInserted', inserted, 'facilities', 4,
+        'staffLogins', 1, 'patientLogins', 2, 'patients', 10, 'shares', 4));
+  end if;
+
+  return jsonb_build_object(
+    'inserted', inserted,
+    'organizations', (select count(*) from identity.sealed_demo_members member where member.member_kind = 'organization'),
+    'facilities', (select count(*) from identity.sealed_demo_members member where member.member_kind = 'facility'),
+    'accounts', (select count(*) from identity.sealed_demo_members member where member.member_kind = 'account'),
+    'patients', (select count(*) from identity.sealed_demo_members member where member.member_kind = 'patient'),
+    'memberships', (select count(*) from identity.staff_facility_memberships membership
+                     where membership.account_id = staff_account and membership.active),
+    'roles', (select count(*) from auth.account_roles assignment
+               where assignment.account_id = staff_account and assignment.revoked_at is null),
+    'shares', (select count(*) from identity.consent_grants grant_row
+                where grant_row.correlation_id = share_correlation
+                  and identity.sealed_demo_patient(grant_row.patient_id)));
+end
+$$;
+
+-- The move itself (D10), the owner's. Called once by section 10 before the QA
+-- seed, in this migration's transaction; a second call moves nothing.
+create function identity.demo_patient_logins_move()
+returns integer
+language plpgsql
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  demo_logins constant jsonb := '[
+    {"id": "98d00008-0000-4000-8000-000000000001", "old_email": "patient1@healthidentitydirectory.com",
+     "new_email": "patientdemo1@healthidentitydirectory.com"},
+    {"id": "98d00008-0000-4000-8000-000000000002", "old_email": "patient2@healthidentitydirectory.com",
+     "new_email": "patientdemo2@healthidentitydirectory.com"}]';
+  moved integer;
+begin
+  -- The demo's install lock, then the QA install's: neither seed runs meanwhile.
+  perform pg_advisory_xact_lock(hashtextextended('hid-sealed-demo-install', 0));
+  perform pg_advisory_xact_lock(hashtextextended('hid-sealed-qa-install', 0));
+
+  -- A demo patient login (0098's id, a demo member, not deleted) on neither
+  -- its old address nor its new one, or whose patient record holds an email
+  -- of its own (the database cannot re-encrypt it): nothing is moved.
+  if exists (select 1 from auth.accounts account
+               join jsonb_to_recordset(demo_logins) login(id uuid, old_email text, new_email text)
+                 on login.id = account.id
+              where account.status <> 'deleted' and identity.sealed_demo_account(account.id)
+                and (lower(account.email) is null or lower(account.email) not in (login.old_email, login.new_email)
+                     or exists (select 1 from identity.patients patient
+                                 where patient.account_id = account.id
+                                   and (patient.email_ciphertext is not null or patient.email_lookup_hmac is not null)))) then
+    raise exception using errcode = '55000', message = '0123: DEMO_PATIENT_LOGIN_UNEXPECTED';
+  end if;
+
+  -- The new addresses are free, as 0098 checks its own: no other account (not
+  -- deleted) or staff record holds one, no open organization application
+  -- names one as its first administrator, no pending staff invitation is to one.
+  if exists (select 1 from auth.accounts account
+               join jsonb_to_recordset(demo_logins) login(id uuid, new_email text)
+                 on lower(account.email) = login.new_email
+              where account.status <> 'deleted' and account.id <> login.id)
+     or exists (select 1 from identity.staff staff_row
+                  join jsonb_to_recordset(demo_logins) login(new_email text)
+                    on lower(staff_row.email) = login.new_email)
+     or exists (select 1 from identity.organization_applications application
+                  join jsonb_to_recordset(demo_logins) login(new_email text)
+                    on lower(application.administrator_email) = login.new_email
+                 where application.status in ('pending_verification', 'ready_for_review'))
+     or exists (select 1 from identity.staff_invitations invitation
+                  join jsonb_to_recordset(demo_logins) login(new_email text)
+                    on lower(invitation.invitee_email) = login.new_email
+                 where invitation.status = 'pending' and invitation.expires_at > clock_timestamp()) then
+    raise exception using errcode = '55000', message = '0123: DEMO_PATIENT_ADDRESS_TAKEN';
+  end if;
+
+  -- Only the address changes: the password, its algorithm, the token version
+  -- (so every session), the status and the verification stay as they are.
+  update auth.accounts account
+     set email = login.new_email, updated_at = clock_timestamp(), row_version = account.row_version + 1
+    from jsonb_to_recordset(demo_logins) login(id uuid, old_email text, new_email text)
+   where account.id = login.id and lower(account.email) = login.old_email and account.status <> 'deleted'
+     and identity.sealed_demo_account(account.id);
+  get diagnostics moved = row_count;
+
+  if moved > 0 then
+    insert into audit.events (correlation_id, actor_type, action, outcome, resource_type, provenance,
+      source_system, details)
+    values ('0123-demo-patient-logins', 'system', 'identity.sealed-demo.patient-logins-moved', 'success',
+      'sealed-demo-tenant', 'migration', 'hid-sealed-demo', jsonb_build_object('accountsMoved', moved));
+  end if;
+  return moved;
+end
+$$;
+
 -- 6. Grants (here and in runtime-grants.sql).
 revoke all on function identity.sealed_qa_ids(text), identity.sealed_qa_facility(uuid),
   identity.sealed_qa_patient(uuid), identity.sealed_qa_account(uuid), identity.sealed_qa_recipient(text),
@@ -2354,7 +2921,8 @@ revoke all on function identity.sealed_qa_ids(text), identity.sealed_qa_facility
   identity.consent_grants_sealed_qa(), identity.staff_memberships_sealed_qa(), identity.account_roles_sealed_qa(),
   identity.patient_share_invitations_sealed_qa(), identity.patient_contact_changes_sealed_qa(),
   identity.qoreid_quota_counters_sealed_qa(), identity.patient_emergency_contacts_sealed_qa(),
-  identity.outreach_organisations_sealed_qa(), identity.outreach_invitations_sealed_qa() from public;
+  identity.outreach_organisations_sealed_qa(), identity.outreach_invitations_sealed_qa(),
+  identity.demo_patient_logins_move() from public;
 do $$
 declare role_name text;
 begin
@@ -2387,7 +2955,8 @@ begin
        'sealed_qa_recipient', 'sealed_qa_install', 'sealed_qa_members_not_demo', 'demo_members_never_qa',
        'consent_grants_sealed_qa', 'staff_memberships_sealed_qa', 'account_roles_sealed_qa',
        'patient_share_invitations_sealed_qa', 'patient_contact_changes_sealed_qa', 'qoreid_quota_counters_sealed_qa',
-       'patient_emergency_contacts_sealed_qa', 'outreach_organisations_sealed_qa', 'outreach_invitations_sealed_qa')
+       'patient_emergency_contacts_sealed_qa', 'outreach_organisations_sealed_qa', 'outreach_invitations_sealed_qa',
+       'demo_patient_logins_move')
      and (proc.proowner <> (select oid from pg_roles where rolname = current_user)
        or proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp']
        or (proc.proname <> 'sealed_qa_recipient') <> proc.prosecdef
@@ -2404,7 +2973,8 @@ begin
              'consent_grants_sealed_qa', 'staff_memberships_sealed_qa', 'account_roles_sealed_qa',
              'patient_share_invitations_sealed_qa', 'patient_contact_changes_sealed_qa',
              'qoreid_quota_counters_sealed_qa', 'patient_emergency_contacts_sealed_qa',
-             'outreach_organisations_sealed_qa', 'outreach_invitations_sealed_qa')) <> 17 then
+             'outreach_organisations_sealed_qa', 'outreach_invitations_sealed_qa',
+             'demo_patient_logins_move')) <> 18 then
     raise exception using errcode = '55000', message = '0123: these functions are not as written: '
       || coalesce(problem, 'a function is missing');
   end if;
@@ -2448,7 +3018,7 @@ begin
       or proc.proacl is distinct from recorded.proacl or proc.prorettype <> recorded.prorettype
       or proc.proretset <> recorded.proretset or proc.proargtypes <> recorded.proargtypes
       or proc.proargnames is distinct from recorded.proargnames or proc.prolang <> recorded.prolang
-      -- Each body is section 5's, byte for byte (0098's plus the QA clause).
+      -- Each body is section 5's or 5b's, byte for byte.
       or md5(proc.prosrc) is distinct from (select pin.digest from (values
            ('identity.create_access_request(text,text,text,integer)', '2745e91d666f16a6ad79019d31f0380a'),
            ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c'),
@@ -2460,9 +3030,11 @@ begin
            ('identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)',
             'f7659b71a9240050c36d67f41ddf0890'),
            ('identity.admin_platform_overview()', 'c38a354bb38bd4e60f293dd69165506c'),
-           ('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)', 'f7bd015c0053621e2e18689abe886139')
+           ('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)', 'f7bd015c0053621e2e18689abe886139'),
+           ('identity.sealed_demo_recipient(text)', '9f35f5c9cbf890285d165aaf4cf84b0c'),
+           ('identity.sealed_demo_install()', '902055421acccba445d8c6bcdc233528')
          ) pin(signature, digest) where pin.signature::regprocedure = recorded.function_oid);
-  if problem is not null or (select count(*) from sealed_qa_0123_replaced) <> 9 then
+  if problem is not null or (select count(*) from sealed_qa_0123_replaced) <> 11 then
     raise exception using errcode = '55000', message = '0123: a replaced function changed beyond its body: '
       || coalesce(problem, 'one is missing');
   end if;
@@ -2482,13 +3054,24 @@ comment on function identity.sealed_qa_recipient(text) is
 comment on function identity.sealed_qa_install() is
   'Seeds the sealed QA tenant (0123): on Amazon RDS at release, elsewhere only by its suite. Idempotent; refuses any row it would take from someone else.';
 
+comment on function identity.sealed_demo_recipient(text) is
+  '0098, addresses 0123: whether an address is one of the owner''s three demo mailboxes, an exact allowlist (any case, outer blanks trimmed): operations@healthidentitydirectory.com, patientdemo1@healthidentitydirectory.com, patientdemo2@healthidentitydirectory.com.';
+comment on function identity.sealed_demo_install() is
+  '0098, addresses 0123: installs the sealed demo tenant (Demo Hospital, Demo Laboratory, Demo Pharmacy, Demo Outreach; the staff login operations@healthidentitydirectory.com, pending_reset without a password; two patient logins patientdemo1@healthidentitydirectory.com and patientdemo2@healthidentitydirectory.com, each sharing with the demo login at Demo Hospital and Demo Outreach, written with identity.write_patient_share''s grant and share values and audited as the migration''s (system, provenance migration, identity.sealed-demo.seed-share), never as the patient''s; eight fictional patients). Refuses (55000) an address, id or key held by a real row, an address named by an open organization application or a pending staff invitation, or a share to a membership the patient could not choose. Inserts only; a second call inserts nothing. The owner sets each password through forgot-password; testers write in Patient One''s and Two''s charts through the shares, break-glass (read-only) the fictional patients, and test patient approvals and new shares after the 24-hour recovery hold.';
+comment on function identity.demo_patient_logins_move() is
+  '0123: moves the two demo patient logins from patient1@ and patient2@ to patientdemo1@ and patientdemo2@healthidentitydirectory.com (address only; password, sessions, status and verification kept), so that the QA patients can have patient1@ and patient2@. Refuses (55000) a new address held by another account, staff record, open application or pending staff invitation, or a demo patient login on neither address. A second call moves nothing.';
+
 -- 9. Section 0's temporary table.
 drop table sealed_qa_0123_replaced;
 
 -- 10. The seed, on Amazon RDS only (D4). A refusal raises 55000 and the release
 -- stops with nothing applied.
+-- First the demo patient logins move (D10) wherever the demo is installed,
+-- then the seed, in this one transaction: patient1@ and patient2@ are free
+-- before the QA patients take them, and no address is ever held twice.
 do $$
 begin
+  perform identity.demo_patient_logins_move();
   if exists (select 1 from pg_roles where rolname = 'rds_superuser') then
     perform identity.sealed_qa_install();
   end if;

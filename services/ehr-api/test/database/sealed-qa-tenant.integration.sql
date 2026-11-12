@@ -16,8 +16,17 @@
 --      (an address held by a real account in any case or a staff record:
 --      SEALED_QA_ADDRESS_TAKEN; a Health ID or facility code held by a real
 --      row: SEALED_QA_KEY_TAKEN; a real row at a fixed id:
---      SEALED_QA_ID_TAKEN); then the install: counts, the nine logins
---      pending_reset without a password and with a verified plus-address,
+--      SEALED_QA_ID_TAKEN); then D10, the demo patient logins' move (put
+--      back on patient1@ and patient2@ as production has them, with a
+--      password and a session: the QA seed refuses while they hold them; the
+--      move refuses a new address held by an account, staff record, open
+--      application or pending staff invitation, a login on neither address
+--      or a patient record with an email of its own, each moving nothing;
+--      then it moves both to patientdemo1@ and patientdemo2@, address only,
+--      the session live, one count-only audit row, a second call moves
+--      nothing, the demo seed stays idempotent); then the install: counts,
+--      the nine logins pending_reset without a password and with a verified
+--      address (the QA patients at patient1@ and patient2@),
 --      the one seeded share (grant, share row, one migration audit row, no
 --      audit row with a patient or person as actor), Patient Two without a
 --      share, a second call inserts nothing;
@@ -32,7 +41,8 @@
 --   5. QA-only rules: no platform role, no QoreID quota, no phone; share
 --      invitations, email change and emergency contacts (the check C and
 --      G7q) to the owner's domain only; the demo branch of C keeps its three
---      exact mailboxes;
+--      exact mailboxes (patientdemo1@ and patientdemo2@ now), and a demo
+--      patient cannot invite patient1@ or patient2@;
 --   6. outreach (G8q): a QA organiser's group (name "QA ...") becomes QA, its
 --      organiser's membership accepted; another name is refused; a real
 --      organiser's group stays real (even when named "QA ..."); a QA account
@@ -467,7 +477,7 @@ insert into auth.accounts (id, subject, email, display_name, status) values
 select pg_temp.refused('a real account at a QA staff address', 'SEALED_QA_ADDRESS_TAKEN');
 rollback to savepoint refusal;
 insert into auth.accounts (id, subject, email, display_name, status) values
-  ('a1230003-0000-4000-8000-000000000031', 'synthetic:qa-suite:taken', 'Patient2+QA@HealthIdentityDirectory.com',
+  ('a1230003-0000-4000-8000-000000000031', 'synthetic:qa-suite:taken', 'Patient2@HealthIdentityDirectory.com',
    'Taken Login', 'pending_reset');
 select pg_temp.refused('a real account at a QA patient address in another case', 'SEALED_QA_ADDRESS_TAKEN');
 rollback to savepoint refusal;
@@ -497,6 +507,130 @@ select pg_temp.assert('the savepoint left no QA row', not exists (select 1 from 
 -- The demo tenant, so that all three sides exist; then the overview as the
 -- platform administrator sees it before the QA install.
 select identity.sealed_demo_install();
+
+-- 2a'. D10, the demo patient logins' move. After 0123 the demo seeds its
+-- patients at patientdemo1@ and patientdemo2@; production's demo was seeded
+-- before 0123 at patient1@ and patient2@, so the suite puts them back there
+-- (owner SQL), with a password and a live session on Patient One, then moves
+-- them as section 10 does.
+select pg_temp.assert('after 0123 the demo seeds its patient logins at the new addresses',
+  (select array_agg(lower(account.email) order by account.id) from auth.accounts account
+    where account.id in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002'))
+  = array['patientdemo1@healthidentitydirectory.com', 'patientdemo2@healthidentitydirectory.com']);
+update auth.accounts set email = 'patient1@healthidentitydirectory.com', status = 'active',
+       password_hash = '$argon2id$v=19$m=65536,t=3,p=1$' || repeat('d', 22) || '$' || repeat('e', 43),
+       password_algorithm = 'argon2id', token_version = 4
+ where id = '98d00008-0000-4000-8000-000000000001';
+update auth.accounts set email = 'Patient2@HealthIdentityDirectory.com'
+ where id = '98d00008-0000-4000-8000-000000000002';
+insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
+  authentication_method, issued_at, expires_at, absolute_expires_at, session_kind, patient_id) values
+  ('a123000b-0000-4000-8000-000000000091', '98d00008-0000-4000-8000-000000000001', 'a123000b-0000-4000-8000-000000000091',
+   md5('sealed-qa-demo-move') || md5('m'), gen_random_uuid(), 4, 'password', clock_timestamp() - interval '1 minute',
+   clock_timestamp() + interval '1 hour', clock_timestamp() + interval '2 hours', 'patient',
+   '98d00009-0000-4000-8000-000000000001');
+create temp table demo_logins_before as
+select account.id, account.password_hash, account.password_algorithm, account.token_version, account.status,
+       account.email_verified_at, account.subject, account.row_version
+  from auth.accounts account
+ where account.id in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002');
+select pg_temp.assert('before the move the QA seed refuses: patient1@ and patient2@ are the demo''s',
+  pg_temp.try('select identity.sealed_qa_install()') = '55000 0123: SEALED_QA_ADDRESS_TAKEN');
+
+-- The move's refusals: each 55000, nothing moved, no audit row.
+create function pg_temp.move_refused(label text, expected text)
+returns void language plpgsql as $f$
+declare answer text := pg_temp.try('select identity.demo_patient_logins_move()');
+begin
+  perform pg_temp.assert(label, answer = '55000 0123: ' || expected, answer);
+  perform pg_temp.assert(label || ': nothing moved',
+    (select array_agg(lower(account.email) order by account.id) from auth.accounts account
+      where account.id in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002'))
+      = array['patient1@healthidentitydirectory.com', 'patient2@healthidentitydirectory.com']
+    and not exists (select 1 from audit.events where correlation_id = '0123-demo-patient-logins'));
+end
+$f$;
+savepoint move_refusal;
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('a1230003-0000-4000-8000-000000000041', 'synthetic:qa-suite:demo-taken', 'PatientDemo1@HealthIdentityDirectory.com',
+   'Taken Demo Address', 'pending_reset');
+select pg_temp.move_refused('a real account at a new demo address in another case', 'DEMO_PATIENT_ADDRESS_TAKEN');
+rollback to savepoint move_refusal;
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('a1230003-0000-4000-8000-000000000041', 'synthetic:qa-suite:demo-staff', 'qa-suite-demo-staff@example.invalid',
+   'Demo Staff Elsewhere', 'active');
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
+  ('a1230004-0000-4000-8000-000000000041', 'a1230003-0000-4000-8000-000000000041', 'Demo Staff Elsewhere',
+   'patientdemo2@healthidentitydirectory.com', 'verified', 'doctor');
+select pg_temp.move_refused('a real staff record at a new demo address', 'DEMO_PATIENT_ADDRESS_TAKEN');
+rollback to savepoint move_refusal;
+insert into identity.organization_applications (id, product_code, organization_name, organization_type,
+  cac_registration_number, administrator_name, administrator_email, status)
+values ('a1230007-0000-4000-8000-000000000041', 'laboratory', 'Owner Lab Ltd', 'laboratory', 'RC1230041', 'Owner Admin',
+  'patientdemo1@healthidentitydirectory.com', 'pending_verification');
+select pg_temp.move_refused('an open application names a new demo address', 'DEMO_PATIENT_ADDRESS_TAKEN');
+rollback to savepoint move_refusal;
+insert into identity.staff_invitations (id, organization_id, facility_id, invited_by_account_id, invited_by_membership_id,
+  invitee_name, invitee_email, role_code, licence_body, licence_number, attestation_version, attested_at,
+  link_token_hmac, email_code_hmac, key_version, last_sent_at, last_send_id, expires_at, idempotency_key,
+  request_sha256, correlation_id)
+values ('a1230011-0000-4000-8000-000000000041', 'a1230001-0000-4000-8000-000000000001',
+  'a1230002-0000-4000-8000-000000000001', 'a1230003-0000-4000-8000-000000000001',
+  'a1230005-0000-4000-8000-000000000001', 'Owner Person', 'patientdemo2@healthidentitydirectory.com', 'receptionist', null,
+  null, 'facility-staff-attestation-v1', clock_timestamp(), repeat('1', 64), repeat('2', 64), 'v1', clock_timestamp(),
+  gen_random_uuid(), clock_timestamp() + interval '7 days', 'qa-suite-demo-move-invite', repeat('c', 64),
+  'qa-suite-demo-move-invite');
+select pg_temp.move_refused('a pending staff invitation to a new demo address', 'DEMO_PATIENT_ADDRESS_TAKEN');
+rollback to savepoint move_refusal;
+update auth.accounts set email = 'patient1+elsewhere@healthidentitydirectory.com'
+ where id = '98d00008-0000-4000-8000-000000000001';
+select pg_temp.assert('a demo patient login on neither address is refused, nothing moved',
+  pg_temp.try('select identity.demo_patient_logins_move()') = '55000 0123: DEMO_PATIENT_LOGIN_UNEXPECTED'
+  and (select lower(email) from auth.accounts where id = '98d00008-0000-4000-8000-000000000002')
+      = 'patient2@healthidentitydirectory.com');
+rollback to savepoint move_refusal;
+update identity.patients set email_lookup_hmac = repeat('a', 64), email_ciphertext = decode(repeat('ab', 40), 'hex'),
+       contact_key_version = coalesce(contact_key_version, 'sealed-test-v1')
+ where id = '98d00009-0000-4000-8000-000000000002';
+select pg_temp.move_refused('a demo patient record with an email of its own', 'DEMO_PATIENT_LOGIN_UNEXPECTED');
+rollback to savepoint move_refusal;
+select pg_temp.assert('nobody but the owner may move them',
+  not has_function_privilege('hid_identity_api_runtime', 'identity.demo_patient_logins_move()', 'EXECUTE')
+  and not has_function_privilege('hid_identity_runtime', 'identity.demo_patient_logins_move()', 'EXECUTE')
+  and not has_function_privilege('hid_schema_test_runtime', 'identity.demo_patient_logins_move()', 'EXECUTE'));
+
+-- The move, then a second call.
+select pg_temp.assert('the move moves the two demo patient logins',
+  identity.demo_patient_logins_move() = 2);
+select pg_temp.assert('a second call moves nothing', identity.demo_patient_logins_move() = 0);
+select pg_temp.assert('the demo patient logins are at patientdemo1@ and patientdemo2@; nothing else of them changed',
+  (select array_agg(account.email order by account.id) from auth.accounts account
+    where account.id in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002'))
+    = array['patientdemo1@healthidentitydirectory.com', 'patientdemo2@healthidentitydirectory.com']
+  and (select bool_and(account.password_hash is not distinct from before.password_hash
+                       and account.password_algorithm is not distinct from before.password_algorithm
+                       and account.token_version = before.token_version and account.status = before.status
+                       and account.email_verified_at is not distinct from before.email_verified_at
+                       and account.subject = before.subject and account.row_version = before.row_version + 1
+                       and identity.sealed_demo_account(account.id) and not identity.sealed_qa_account(account.id))
+         from auth.accounts account join demo_logins_before before on before.id = account.id) is true
+  and (select password_algorithm = 'argon2id' and status = 'active' and token_version = 4
+         from auth.accounts where id = '98d00008-0000-4000-8000-000000000001')
+  and exists (select 1 from auth.sessions session_row
+               where session_row.id = 'a123000b-0000-4000-8000-000000000091' and session_row.revoked_at is null
+                 and session_row.account_token_version = 4)
+  and (select array_agg(patient.hid_code order by patient.hid_code) from identity.patients patient
+        where patient.account_id in ('98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002')
+          and identity.sealed_demo_patient(patient.id))
+      = array['HID-ZDEMAAA2', 'HID-ZDEMAAA3']);
+select pg_temp.assert('one audit row for the move, a count only (no address)',
+  (select count(*) from audit.events where correlation_id = '0123-demo-patient-logins') = 1
+  and (select details = '{"accountsMoved": 2}'::jsonb and actor_type = 'system' and patient_id is null
+         and action = 'identity.sealed-demo.patient-logins-moved'
+         from audit.events where correlation_id = '0123-demo-patient-logins'));
+select pg_temp.assert('the demo seed is idempotent on the new addresses',
+  (identity.sealed_demo_install()->>'inserted')::integer = 0);
+drop table demo_logins_before;
 set local role hid_identity_api_runtime;
 select pg_temp.as_platform_admin();
 select set_config('hid.test.overview_before', pg_temp.overview(), true);
@@ -541,8 +675,8 @@ begin
             'lab@healthidentitydirectory.com|pending_reset|true|true|true',
             'migrate@healthidentitydirectory.com|pending_reset|true|true|true',
             'outreach@healthidentitydirectory.com|pending_reset|true|true|true',
-            'patient1+qa@healthidentitydirectory.com|pending_reset|true|true|true',
-            'patient2+qa@healthidentitydirectory.com|pending_reset|true|true|true',
+            'patient1@healthidentitydirectory.com|pending_reset|true|true|true',
+            'patient2@healthidentitydirectory.com|pending_reset|true|true|true',
             'pharmacy@healthidentitydirectory.com|pending_reset|true|true|true']);
   perform pg_temp.assert('seven verified staff records; eight memberships with their facility role; no platform role',
     (select count(*) from identity.staff staff where identity.sealed_qa_account(staff.account_id)
@@ -581,8 +715,8 @@ begin
        from identity.patients patient join auth.accounts account on account.id = patient.account_id
       where identity.sealed_qa_patient(patient.id) and patient.status = 'active'
         and patient.phone_e164_ciphertext is null and patient.phone_lookup_hmac is null)
-    = array['HID-ZQAAAAA2:QA Patient One:patient1+qa@healthidentitydirectory.com',
-            'HID-ZQAAAAA3:QA Patient Two:patient2+qa@healthidentitydirectory.com']
+    = array['HID-ZQAAAAA2:QA Patient One:patient1@healthidentitydirectory.com',
+            'HID-ZQAAAAA3:QA Patient Two:patient2@healthidentitydirectory.com']
     and (select count(*) from identity.patient_identifiers identifier
           where identity.sealed_qa_patient(identifier.patient_id) and identifier.identifier_type = 'hid_code'
             and identifier.verified) = 2
@@ -955,8 +1089,15 @@ select pg_temp.assert('QA to demo: the demo login cannot accept a QA patient''s 
 select pg_temp.as_demo_patient(1);
 select set_config('hid.test.demo_to_qa_invitation', (select invitation_id::text
   from identity.create_my_share_invitation('patient:98d00008-0000-4000-8000-000000000001',
-    'a123000b-0000-4000-8000-000000000011', 'patient2@healthidentitydirectory.com', null, 'view_only', '24h',
+    'a123000b-0000-4000-8000-000000000011', 'patientdemo2@healthidentitydirectory.com', null, 'view_only', '24h',
     'sealed-demo-invite-0001', repeat('e', 64))), true);
+select pg_temp.assert('demo to QA: a demo patient cannot invite the QA patients'' patient1@ or patient2@ (D10)',
+  pg_temp.try($q$select * from identity.create_my_share_invitation('patient:98d00008-0000-4000-8000-000000000001',
+    'a123000b-0000-4000-8000-000000000011', 'patient1@healthidentitydirectory.com', null, 'view_only', '24h',
+    'sealed-demo-invite-0002', repeat('f', 64))$q$) = '22023 SHARE_INVITATION_EMAIL_INVALID'
+  and pg_temp.try($q$select * from identity.create_my_share_invitation('patient:98d00008-0000-4000-8000-000000000001',
+    'a123000b-0000-4000-8000-000000000011', ' Patient2@HealthIdentityDirectory.com ', null, 'view_only', '24h',
+    'sealed-demo-invite-0003', repeat('f', 64))$q$) = '22023 SHARE_INVITATION_EMAIL_INVALID');
 reset role;
 select pg_temp.assert('QA to real: an acceptance at a real membership is refused (owner SQL)',
   pg_temp.direct_accept(current_setting('hid.test.qa_to_real_invitation')::uuid, 'a1230005-0000-4000-8000-000000000001',
@@ -1154,9 +1295,9 @@ select pg_temp.assert('C for a demo patient: its three exact mailboxes, never a 
   not identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001',
     'a123000b-0000-4000-8000-000000000011', 'email', 'operations+qa-mum@healthidentitydirectory.com', repeat('8', 64))
   and not identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001',
-    'a123000b-0000-4000-8000-000000000011', 'email', 'patient1+qa@healthidentitydirectory.com', repeat('8', 64))
+    'a123000b-0000-4000-8000-000000000011', 'email', 'patient1@healthidentitydirectory.com', repeat('8', 64))
   and identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001',
-    'a123000b-0000-4000-8000-000000000011', 'email', 'patient2@healthidentitydirectory.com', repeat('8', 64))
+    'a123000b-0000-4000-8000-000000000011', 'email', 'patientdemo2@healthidentitydirectory.com', repeat('8', 64))
   and current_setting('hid.sealed_demo_contact_hmac') = repeat('8', 64)
   and current_setting('hid.sealed_qa_contact_hmac') = '');
 select pg_temp.as_qa_patient(1);

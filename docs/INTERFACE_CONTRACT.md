@@ -2574,8 +2574,10 @@ seal without the seed): Demo Hospital (`DEMO-HOSPITAL`), Demo Laboratory
 `operations@healthidentitydirectory.com` ("Demo Operations"), with a membership
 at each (doctor, lab, pharmacist, nurse) and `org_admin` at each, chosen after
 sign-in as for any member of several facilities; two patient logins,
-`patient1@healthidentitydirectory.com` (`HID-ZDEMAAA2`) and
-`patient2@healthidentitydirectory.com` (`HID-ZDEMAAA3`); eight
+`patientdemo1@healthidentitydirectory.com` (`HID-ZDEMAAA2`) and
+`patientdemo2@healthidentitydirectory.com` (`HID-ZDEMAAA3`) (0098 seeded them at
+`patient1@` and `patient2@`; 0123 moved them, address only, so that those two
+are the QA patients' logins, section 45); eight
 fictional patients without a login or any contact detail (`HID-ZDEMBBB2` to
 `HID-ZDEMBBB9`). Patient One and Patient Two each share their record with the
 demo login at Demo Hospital (doctor) and at Demo Outreach (nurse): the seed
@@ -2637,7 +2639,7 @@ emergency contacts and invitees (each one of the three demo addresses below). To
 test accepting a patient's invitation, the patient invites
 `operations@healthidentitydirectory.com` (the staff login's own address), which
 accepts it at Demo Hospital or Demo Outreach; an invitation to
-`patient1@healthidentitydirectory.com` or `patient2@healthidentitydirectory.com`
+`patientdemo1@healthidentitydirectory.com` or `patientdemo2@healthidentitydirectory.com`
 is delivered to that mailbox but can never be accepted (acceptance needs a staff
 login whose own verified address it is). Migrate's OCR
 job creation (`POST /api/v1/ocr/jobs`) needs a records-processing
@@ -2673,8 +2675,9 @@ real actor and a demo one):
 - A demo patient may invite, add as an emergency contact or change their email to
   the owner's three demo mailboxes only, an exact allowlist (any case, trimmed;
   no pattern and no plus-address): `operations@healthidentitydirectory.com`,
-  `patient1@healthidentitydirectory.com` and
-  `patient2@healthidentitydirectory.com`, the demo logins' own addresses.
+  `patientdemo1@healthidentitydirectory.com` and
+  `patientdemo2@healthidentitydirectory.com`, the demo logins' own addresses
+  (`patient1@` and `patient2@` until 0123, which made them QA addresses).
   Otherwise: invitation 400 `SHARE_INVITATION_EMAIL_INVALID`; email change 409
   `CONTACT_UNAVAILABLE` (nothing recorded, no code sent; each allowlisted address
   already belongs to a demo login, so a demo patient's email change never
@@ -4595,11 +4598,23 @@ per role:
 | `admin@healthidentitydirectory.com` | org_admin at QA Hospital, QA Laboratory and QA Pharmacy |
 | `outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
 
-Two patient logins at plus-addresses of the demo patients' mailboxes (Identity
-accepts plus-addresses; `patient1@` and `patient2@` themselves are the demo's
-logins): `patient1+qa@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA Patient
-One) and `patient2+qa@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
-Two). Every account is seeded `pending_reset` without a password,
+Two patient logins: `patient1@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA
+Patient One) and `patient2@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
+Two). Those were the demo patients' logins (section 26), so in the same
+transaction, before the QA seed, 0123 moves the two demo patient logins to
+`patientdemo1@healthidentitydirectory.com` and `patientdemo2@healthidentitydirectory.com`
+(`identity.demo_patient_logins_move()`, the owner's): address only; their
+passwords, sessions, status, verification, Health IDs, shares and seal stay.
+It refuses (55000, nothing moved, the release stops) a new address held by
+another account, staff record, open organization application or pending staff
+invitation (`DEMO_PATIENT_ADDRESS_TAKEN`), or a demo patient login on neither
+address or whose patient record holds an email of its own
+(`DEMO_PATIENT_LOGIN_UNEXPECTED`); it writes one audit row
+(`identity.sealed-demo.patient-logins-moved`, correlation id
+`0123-demo-patient-logins`, a count only). The demo's exact allowlist
+(`identity.sealed_demo_recipient`) and seed (`identity.sealed_demo_install`)
+name the new addresses; a demo patient can no longer invite, add as a contact
+or change their email to `patient1@` or `patient2@`. Every account is seeded `pending_reset` without a password,
 its email verified; the owner sets each password with Forgot password. QA
 Patient One shares with the QA clinician at QA Hospital (written as section 26
 writes the demo's shares, with the migration's own audit row,
