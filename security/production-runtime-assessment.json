@@ -1,5 +1,5 @@
 {
-  "base_digest": "sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812",
+  "base_digest": "sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041",
   "node_source": {
     "node_version": "22.23.4",
     "source_url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4.tar.xz",
@@ -8,28 +8,14 @@
     "pattern_hits": []
   },
   "upstream_sources": [
-    "https://github.com/madler/zlib/commit/81cc0bebedd935daeb81b0b6e475d8786b51af3d",
     "https://sourceware.org/pipermail/libc-announce/2026/000057.html",
     "https://security-tracker.debian.org/tracker/CVE-2026-19499",
     "https://github.com/gcc-mirror/gcc/commit/59d235ffa5a69231eb42e5290d52dc8c90d28b7a",
     "https://github.com/gcc-mirror/gcc/commit/aaa8351f4d2e636f9680a1f0a8ebc2f0a60611e6",
     "https://security-tracker.debian.org/tracker/CVE-2026-84243",
-    "https://sourceware.org/bugzilla/show_bug.cgi?id=17142",
-    "https://security-tracker.debian.org/tracker/CVE-2026-76844",
-    "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148"
+    "https://sourceware.org/bugzilla/show_bug.cgi?id=17142"
   ],
   "findings": [
-    {
-      "id": "CVE-2026-85091",
-      "packages": [
-        "zlib1g"
-      ],
-      "versions": {
-        "zlib1g": "1:1.3.dfsg+really1.3.1-1+b1"
-      },
-      "justification": "vulnerable_code_not_present",
-      "rationale": "The exact bundled zlib is upstream 1.3.1, predating commit 81cc0be and the affected 1.3.1.2+ gz_vacate code."
-    },
     {
       "id": "CVE-2026-5435",
       "packages": [
@@ -96,17 +82,6 @@
       },
       "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
       "rationale": "Exploitation needs attacker control of LANGUAGE across a trust boundary without AT_SECURE, a selected LC_MESSAGES locale other than C, C.<encoding> or POSIX, and a planted .mo catalog. No process in these images leaves the C locale, whatever its environment: the only glibc programs are node and the Argon2 addon, both held to the exact ELF inventory; node's only setlocale call is ICU's query setlocale(LC_MESSAGES, NULL), and neither imports newlocale, uselocale or a named std::locale constructor. That includes tasks started with RunTask environment overrides and the node child process that the identity-promotion task starts. gettext therefore ignores LANGUAGE. The images also ship no locale data or message catalogs, and neither the base image config (PATH, SSL_CERT_FILE) nor any Terraform task definition sets LANG, LANGUAGE or LC_*."
-    },
-    {
-      "id": "CVE-2026-76844",
-      "packages": [
-        "zlib1g"
-      ],
-      "versions": {
-        "zlib1g": "1:1.3.dfsg+really1.3.1-1+b1"
-      },
-      "justification": "vulnerable_code_not_in_execute_path",
-      "rationale": "The affected gz_write() stale next_in path exists in this zlib 1.3.1 but is reached only through the gzFile write API (gzopen/gzdopen, then gzwrite, gzfwrite, gzputs, gzputc, gzprintf or gzflush, plus gzclearerr before 1.3.1.2). No final ELF imports any gz* function and the gate rejects any that does. node does not link libz.so.1; the only ELF that does is the system libcrypto.so.3, which no inventoried ELF needs and which imports only compress/deflate/inflate functions. All native binaries are bound by exact hashes."
     }
   ],
   "schema": "hid.production-runtime-assessment-policy/v1",
@@ -403,7 +378,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "ehr-api": {
@@ -696,7 +671,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "lab-api": {
@@ -981,7 +956,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "pharmacy-api": {
@@ -1266,7 +1241,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "ocr-api": {
@@ -1551,7 +1526,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "ocr-worker": {
@@ -1836,7 +1811,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "outreach-api": {
@@ -2121,7 +2096,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "notification-api": {
@@ -2406,7 +2381,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "notification-worker": {
@@ -2691,7 +2666,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "event-dispatcher": {
@@ -2976,7 +2951,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "support-api": {
@@ -3261,7 +3236,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "database-migration": {
@@ -3554,7 +3529,7 @@
       "usr/lib/aarch64-linux-gnu/libstdc++.so.6.0.33": "fff1f0050a33ddf29c44634c7639ac16e2573a61e3daab4fcc4c007b432ccf19",
       "usr/lib/aarch64-linux-gnu/libthread_db.so.1": "8bbc54f7f7ee348e1bdb2423d847f1f4f34c219d7f348587cb90ae8f9cbf2630",
       "usr/lib/aarch64-linux-gnu/libutil.so.1": "7a9ee1e1a208b3721b1cacc5c68beb8f03c588cc270da5842af0c2de368d5354",
-      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "6fe00acadf8119ff245855e5dcc7f26c6c0ffaf4bfa2baa88feab58f23727d65",
+      "usr/lib/aarch64-linux-gnu/libz.so.1.3.1": "ac4b7f163145ca73ddba8e657cc35c5b5380ce01f75cbf3b65f8deeebd9c1e72",
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     }
   },
@@ -3563,8 +3538,9 @@
     "staging-identity-runtime-assessment.json": "8ac92ab64a154967ac14b831c31c7603392906c1bef408a4d1bbae9a562c1ec8",
     "staging-ehr-runtime-assessment.json": "363ae61ae9573b6613205c9d36d299db25362e1e75973053fe52eb78c44d14e0",
     "staging-lab-runtime-assessment.json": "11c50190a2ec3c678adb81d301010cc88769a4924470d9c6d7101e95df751996",
-    "node-22.23.4-runtime-evidence.json": "64fd6c7ad36a60fd1597b8bbe1973630473677f5e81a37e630a8ce9ba2fa5fcc"
+    "node-22.23.4-runtime-evidence.json": "64fd6c7ad36a60fd1597b8bbe1973630473677f5e81a37e630a8ce9ba2fa5fcc",
+    "zlib-deb13u1-runtime-evidence.json": "17232cfccbda5eec2c365bbac2124a72e8d0d73f98fd4fdd48bb4342459643e6"
   },
   "admission": "Expected previously reviewed native bytes only. Every current image must independently match this complete inventory; a changed or extra ELF fails closed. Original raw reports retained. No exploitable-risk waiver.",
-  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment the only changed ELF is nodejs/bin/node. Its review (byte-identical to bin/node in the signed Node 22.23.4 linux-arm64 release; no affected glibc import, aligned new or PBDS content) and the base's non-ELF package changes are checksum-bound in node-22.23.4-runtime-evidence.json. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI. Rechecked 2026-10-31: CVE-2026-84243 (glibc gettext accepts LANGUAGE paths; glibc bug 17142, GLIBC-SA-2026-0025) is new and the native bytes are unchanged. The base image has no .mo catalogs or locale data, its config sets only PATH and SSL_CERT_FILE, and Terraform task definitions set no LANG, LANGUAGE or LC_*. libstdc++ and three unloaded glibc helper libraries import gettext functions, so the import list is not the basis; the basis is that node and the Argon2 addon never select a locale (node's only setlocale call is a NULL query), so LC_MESSAGES stays C and LANGUAGE is never read. Rechecked 2026-11-06: CVE-2026-76844 (zlib gz_write stale next_in, reached only through the gzFile write API) is new and the native bytes are unchanged. No newer distroless nodejs22-debian13 digest changes zlib1g, libc6 or the GCC runtime (latest 8ad697a6..., pushed 2026-10-31, differs only in tzdata). node does not link libz.so.1; the only ELF that does is the system libcrypto.so.3, which no inventoried ELF needs and which imports no gz* function; no ELF imports any gz* symbol, and the gate now rejects any ELF that does. Node's bundled zlib also contains gzwrite.c but the checksum-verified Node 22.23.4 source has no gz* call outside deps/zlib."
+  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment the only changed ELF is nodejs/bin/node. Its review (byte-identical to bin/node in the signed Node 22.23.4 linux-arm64 release; no affected glibc import, aligned new or PBDS content) and the base's non-ELF package changes are checksum-bound in node-22.23.4-runtime-evidence.json. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI. Rechecked 2026-10-31: CVE-2026-84243 (glibc gettext accepts LANGUAGE paths; glibc bug 17142, GLIBC-SA-2026-0025) is new and the native bytes are unchanged. The base image has no .mo catalogs or locale data, its config sets only PATH and SSL_CERT_FILE, and Terraform task definitions set no LANG, LANGUAGE or LC_*. libstdc++ and three unloaded glibc helper libraries import gettext functions, so the import list is not the basis; the basis is that node and the Argon2 addon never select a locale (node's only setlocale call is a NULL query), so LC_MESSAGES stays C and LANGUAGE is never read. Rechecked 2026-11-06: CVE-2026-76844 (zlib gz_write stale next_in, reached only through the gzFile write API) is new and the native bytes are unchanged. No newer distroless nodejs22-debian13 digest changes zlib1g, libc6 or the GCC runtime (latest 8ad697a6..., pushed 2026-10-31, differs only in tzdata). node does not link libz.so.1; the only ELF that does is the system libcrypto.so.3, which no inventoried ELF needs and which imports no gz* function; no ELF imports any gz* symbol, and the gate now rejects any ELF that does. Node's bundled zlib also contains gzwrite.c but the checksum-verified Node 22.23.4 source has no gz* call outside deps/zlib. Rechecked 2026-11-12: base repinned to 74224b87 (pushed 2026-11-08), which carries zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1 from DSA-6613-1. Debian marks both CVE-2026-85091 and CVE-2026-76844 fixed in that version; its gzwrite patch resets next_in when gz_write() fails, so both findings are removed as fixed. Versus f643bc05 the only changed ELF is usr/lib/aarch64-linux-gnu/libz.so.1.3.1, byte-identical to the Debian arm64 package and with the same exported symbols and imports; the other changes are tzdata 2026f data. This is checksum-bound in zlib-deb13u1-runtime-evidence.json; libc6, the GCC runtime and the node layer are unchanged."
 }
