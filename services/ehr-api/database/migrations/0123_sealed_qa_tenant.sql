@@ -240,7 +240,8 @@
 --     live recovery hold (24 hours before patient approvals, new shares, the
 --     PIN, emergency contacts or invitations) applies as for any login.
 --
--- Before signing, the owner may run these read-only queries on production.
+-- Before signing, the owner may run these read-only queries on production,
+-- in one session.
 -- The first answers one row per address, each of its four counts must be 0:
 -- a live account (other than the two demo patient logins this file moves), a
 -- staff record, an open organization application naming it as first
@@ -288,6 +289,13 @@
 --          (select count(*) from identity.facilities f
 --            where upper(f.code) in ('QA-HOSPITAL', 'QA-LABORATORY', 'QA-PHARMACY')) as facility_codes,
 --          (select count(*) from pg_roles where rolname = 'rds_superuser') as rds;
+-- The fourth is owner attributes, information only (nothing here depends on
+-- it; the coordinator's release notes record it): the owners of the OCR and
+-- outreach tables and whether each is a superuser or bypasses row-level
+-- security (expected: the OCR owner bypasses it, the outreach owner does not):
+--   select c.oid::regclass as table_name, c.relowner::regrole as owner, r.rolsuper, r.rolbypassrls
+--     from pg_class c join pg_roles r on r.oid = c.relowner
+--    where c.oid in ('ocr.jobs'::regclass, 'ocr.validations'::regclass, 'outreach.campaign_members'::regclass);
 
 -- 0. Preconditions.
 do $$
