@@ -1,6 +1,6 @@
 import { Transform, Type } from 'class-transformer';
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsDateString, IsIn, IsInt, IsOptional, IsString, IsUUID,
-  Max, MaxLength, Min, ValidateNested } from 'class-validator';
+  Matches, Max, MaxLength, Min, ValidateNested } from 'class-validator';
 
 export class ImportedLabObservationDto {
   @IsOptional() @IsString() @MaxLength(120) testCode?: string;
@@ -40,6 +40,25 @@ export const LAB_IMPORT_PAGE_MAX = 50;
 export class ListLabImportsQueryDto {
   @IsUUID('4') patientId!: string;
   @IsOptional() @IsUUID('4') cursor?: string;
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' && /^[0-9]{1,3}$/.test(value) ? Number(value) : value))
+  @IsInt() @Min(1) @Max(LAB_IMPORT_PAGE_MAX)
+  limit?: number;
+}
+
+/** An other-facilities cursor: base64url of the last record's time (microseconds, UTC) and id. */
+export const OTHER_FACILITY_CURSOR = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * GET lab/imports/other-facilities (0124): the patient's imported Lab
+ * evidence from other facilities on an active share that includes them. As
+ * ListLabImportsQueryDto, but the cursor is the opaque nextCursor of the
+ * previous page (the service cannot read another facility's row to resolve a
+ * bare id).
+ */
+export class ListOtherFacilityLabImportsQueryDto {
+  @IsUUID('4') patientId!: string;
+  @IsOptional() @IsString() @Matches(OTHER_FACILITY_CURSOR) cursor?: string;
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' && /^[0-9]{1,3}$/.test(value) ? Number(value) : value))
   @IsInt() @Min(1) @Max(LAB_IMPORT_PAGE_MAX)

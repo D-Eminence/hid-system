@@ -38,6 +38,12 @@ export class PatientSharesController {
     return answer;
   }
 
+  /** 0124: the patient's active shares that also show other facilities' imported records, and with sensitive ones. */
+  @Get('me/shares/scopes')
+  scopes(@Req() request: HidRequest) {
+    return this.shares.scopes(request);
+  }
+
   /** The B4 served probe: 200, or 404 while sharing is off (and on an older Identity). */
   @Get('me/share-invitations')
   invitations(@Req() request: HidRequest) {

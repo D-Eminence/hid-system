@@ -4,8 +4,8 @@ import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
 import { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
-import { ListImportedMedicationsQueryDto, OcrMedicationImportBatchDto, OcrMedicationImportDto }
-  from './dto/ocr-medication-import.dto';
+import { ListImportedMedicationsQueryDto, ListOtherFacilityImportedMedicationsQueryDto, OcrMedicationImportBatchDto,
+  OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
 import { PharmacyService } from './pharmacy.service';
 
 @Controller('pharmacy')
@@ -87,6 +87,19 @@ export class PharmacyController {
   @RequirePermissions('pharmacy.import.read')
   listImports(@Query() query: ListImportedMedicationsQueryDto, @Req() request: HidRequest) {
     return this.pharmacy.listImports(requireRequestContext(request), query);
+  }
+
+  /**
+   * 0124 (Q64 option A): the patient's imported medication records from OTHER
+   * facilities, for staff at the facility of an active patient share to their
+   * membership that includes other facilities. The SQL function checks the
+   * share and writes the read's audit row; no Identity decision is asked.
+   * Declared before imports/:importId.
+   */
+  @Get('imports/other-facilities')
+  @RequirePermissions('pharmacy.import.read')
+  listOtherFacilityImports(@Query() query: ListOtherFacilityImportedMedicationsQueryDto, @Req() request: HidRequest) {
+    return this.pharmacy.listOtherFacilityImports(requireRequestContext(request), query);
   }
 
   @Get('imports/:importId')

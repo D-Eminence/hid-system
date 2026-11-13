@@ -30,6 +30,7 @@ describe('Sharing routes (0095)', () => {
     expect(declared.map((route) => [route.method, route.path, route.audit])).toEqual([
       [RequestMethod.POST, 'me/share-providers/search', 'identity.share-providers.search.command'],
       [RequestMethod.POST, 'me/shares', 'identity.consent-grant.patient-share.command'],
+      [RequestMethod.GET, 'me/shares/scopes', null],
       [RequestMethod.GET, 'me/share-invitations', null],
       [RequestMethod.POST, 'me/share-invitations', 'identity.share-invitation.create.command'],
       [RequestMethod.POST, 'me/share-invitations/:invitationId/cancel', 'identity.share-invitation.cancel.command'],

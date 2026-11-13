@@ -108,6 +108,32 @@ export interface PharmacyImportedMedicationPage {
   nextCursor: string | null;
 }
 
+/**
+ * One imported (paper, OCR) medication record from ANOTHER facility, as
+ * GET /api/v1/pharmacy/imports/other-facilities returns it (0124): shown only
+ * under a patient share that includes other facilities. Unverified; show it
+ * with its source facility named.
+ */
+export interface PharmacyOtherFacilityImportedMedication {
+  id: string;
+  sourceFacilityId: string;
+  sourceFacilityName: string;
+  medicationText: string;
+  strengthText: string | null;
+  doseText: string | null;
+  frequencyText: string | null;
+  historicalContext: string | null;
+  activityStatus: string;
+  createdAt: string;
+  provenance: 'imported-from-paper-other-facility';
+}
+
+export interface PharmacyOtherFacilityImportedMedicationPage {
+  items: PharmacyOtherFacilityImportedMedication[];
+  /** Opaque; pass as `cursor` for the next page; null on the last page. */
+  nextCursor: string | null;
+}
+
 export interface ListPharmacyImportedMedicationsOptions {
   /** 1-100; Pharmacy answers 50 when it is left out. */
   limit?: number;
@@ -254,6 +280,32 @@ export class PharmacyApiClient {
       throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
     }
     return { items, nextCursor: value.nextCursor };
+  }
+
+  /**
+   * One patient's imported medication records from OTHER facilities, newest
+   * first (0124, GET pharmacy/imports/other-facilities): only under an active
+   * patient share to the caller that includes other facilities; 403
+   * OTHER_FACILITIES_NOT_SHARED otherwise.
+   */
+  async listOtherFacilityImportedMedications(patientId: string, context: PharmacyRequestContext,
+    options: ListPharmacyImportedMedicationsOptions = {},
+    signal?: AbortSignal): Promise<PharmacyOtherFacilityImportedMedicationPage> {
+    const query = new URLSearchParams({ patientId });
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    const value = record(await this.get(`/api/v1/pharmacy/imports/other-facilities?${query.toString()}`, context, signal),
+      'Other facilities\' imported medication page');
+    if (!Array.isArray(value.items) || value.items.length > 100
+      || (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.nextCursor)))) {
+      throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+    }
+    const items = value.items.map(parseOtherFacilityImport);
+    // Never pass on the caller's own facility's record as another facility's.
+    if (items.some((item) => item.sourceFacilityId === context.facilityId)) {
+      throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+    }
+    return { items, nextCursor: value.nextCursor as string | null };
   }
 
   private async resourceCommand(
@@ -421,5 +473,20 @@ function parseImport(payload: unknown): PharmacyImportedMedicationEvidence {
     validationId: text(value, 'validationId'), validationVersion: integer(value, 'validationVersion'),
     publicationId: text(value, 'publicationId'), version: integer(value, 'version'),
     createdAt: text(value, 'createdAt'),
+  };
+}
+
+function parseOtherFacilityImport(payload: unknown): PharmacyOtherFacilityImportedMedication {
+  const value = record(payload, 'Other facility imported medication');
+  if (value.provenance !== 'imported-from-paper-other-facility') {
+    throw new PharmacyApiProblem(502, { code: 'INVALID_PHARMACY_IMPORT_RESPONSE' });
+  }
+  return {
+    id: text(value, 'id'), sourceFacilityId: text(value, 'sourceFacilityId'),
+    sourceFacilityName: text(value, 'sourceFacilityName'), medicationText: text(value, 'medicationText'),
+    strengthText: nullableText(value, 'strengthText'), doseText: nullableText(value, 'doseText'),
+    frequencyText: nullableText(value, 'frequencyText'), historicalContext: nullableText(value, 'historicalContext'),
+    activityStatus: text(value, 'activityStatus'), createdAt: text(value, 'createdAt'),
+    provenance: 'imported-from-paper-other-facility',
   };
 }

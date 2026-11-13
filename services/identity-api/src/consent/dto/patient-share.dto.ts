@@ -1,4 +1,4 @@
-import { Allow, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
+import { Allow, IsBoolean, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
 
 /** The share levels (hid-1.0's tiers) and durations of migration 0095 (D1, D2). */
 export const SHARE_LEVELS = ['view_only', 'clinical_review', 'clinical_collaboration'] as const;
@@ -18,11 +18,17 @@ export class SearchShareProvidersDto {
   @Allow() query!: unknown;
 }
 
-/** P2: share with a clinician found by search. No free text. */
+/**
+ * P2: share with a clinician found by search. No free text. The scope (0124,
+ * Q64 option A): also show the patient's imported paper records from other
+ * facilities (default off), and with it, optionally, sensitive ones.
+ */
 export class CreateShareDto {
   @IsUUID() membershipId!: string;
   @IsIn(SHARE_LEVELS) level!: ShareLevel;
   @IsIn(SHARE_DURATIONS) duration!: ShareDuration;
+  @IsOptional() @IsBoolean() includeOtherFacilities?: boolean;
+  @IsOptional() @IsBoolean() includeSensitive?: boolean;
 }
 
 /** P5: invite a provider by email. The address is checked by the service (SHARE_INVITATION_EMAIL_INVALID). */

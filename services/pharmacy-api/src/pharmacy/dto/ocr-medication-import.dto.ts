@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Length, Max, Min,
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Length, Matches, Max, Min,
   ValidateNested } from 'class-validator';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
@@ -67,5 +67,25 @@ export class ListImportedMedicationsQueryDto {
   limit?: number;
 
   @IsOptional() @IsUUID('4')
+  cursor?: string;
+}
+
+/** An other-facilities cursor: base64url of the last record's time (microseconds, UTC) and id. */
+export const OTHER_FACILITY_CURSOR = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * GET pharmacy/imports/other-facilities (0124): the patient's imported
+ * medication records from other facilities on an active share that includes
+ * them. As ListImportedMedicationsQueryDto, but `cursor` is the opaque
+ * `nextCursor` of the previous page (the service cannot read another
+ * facility's row to resolve a bare id).
+ */
+export class ListOtherFacilityImportedMedicationsQueryDto {
+  @IsUUID('4') patientId!: string;
+
+  @IsOptional() @Transform(pageSize) @IsInt() @Min(1) @Max(IMPORT_PAGE_MAX)
+  limit?: number;
+
+  @IsOptional() @IsString() @Matches(OTHER_FACILITY_CURSOR)
   cursor?: string;
 }

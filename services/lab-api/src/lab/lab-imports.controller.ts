@@ -3,7 +3,7 @@ import { AuditAction, RequirePermissions } from '../common/decorators';
 import { InternalCaller } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { CreateLabImportDto, ListLabImportsQueryDto } from './dto/create-lab-import.dto';
+import { CreateLabImportDto, ListLabImportsQueryDto, ListOtherFacilityLabImportsQueryDto } from './dto/create-lab-import.dto';
 import { OcrLabImportDto } from './dto/ocr-lab-import.dto';
 import { LabImportsService } from './lab-imports.service';
 
@@ -33,6 +33,20 @@ export class LabImportsController {
   @AuditAction('lab.import.list.request')
   list(@Query() query: ListLabImportsQueryDto, @Req() request: HidRequest) {
     return this.imports.listForPatient(requireRequestContext(request), query);
+  }
+
+  /**
+   * 0124 (Q64 option A): the patient's imported Lab evidence from OTHER
+   * facilities, for staff at the facility of an active patient share to their
+   * membership that includes other facilities. The SQL function checks the
+   * share and writes the read's audit row; no Identity decision is asked.
+   * Declared before :importId.
+   */
+  @Get('other-facilities')
+  @RequirePermissions('lab.import.read')
+  @AuditAction('lab.import.other-facilities.list.request')
+  listOtherFacilities(@Query() query: ListOtherFacilityLabImportsQueryDto, @Req() request: HidRequest) {
+    return this.imports.listOtherFacilities(requireRequestContext(request), query);
   }
 
   @Get(':importId')

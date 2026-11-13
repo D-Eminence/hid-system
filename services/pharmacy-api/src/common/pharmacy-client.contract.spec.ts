@@ -77,4 +77,28 @@ describe('PharmacyApiClient transport contract', () => {
     await expect(client.listImportedMedicationEvidence('50000000-0000-4000-8000-0000000000ff', context))
       .rejects.toMatchObject({ status: 502 });
   });
+
+  it('reads one patient\'s imported medications from other facilities (0124), refusing its own facility\'s or an unmarked record', async () => {
+    const patientId = '50000000-0000-4000-8000-000000000001';
+    const item = { id: '123e4567-e89b-42d3-a456-426614174030', sourceFacilityId: '123e4567-e89b-42d3-a456-426614174031',
+      sourceFacilityName: 'Synthetic Community Pharmacy', medicationText: 'Fictional medicine', strengthText: '5mg',
+      doseText: null, frequencyText: 'once daily', historicalContext: null, activityStatus: 'unknown',
+      createdAt: '2026-11-05T10:00:00.000Z', provenance: 'imported-from-paper-other-facility' };
+    const answer = (page: unknown) => new Response(JSON.stringify(page), { status: 200, headers: { 'content-type': 'application/json' } });
+    const fetchMock = jest.fn().mockImplementation(async () => answer({ items: [item], nextCursor: 'MjAyNi0xMS0wNQ' }));
+    global.fetch = fetchMock;
+    const client = new PharmacyApiClient({ baseUrl: 'https://pharmacy.test', internalServiceToken: 'local-pharmacy-token-123456' });
+    await expect(client.listOtherFacilityImportedMedications(patientId, context, { limit: 20, cursor: 'MjAyNi0xMS0wNg' }))
+      .resolves.toEqual({ items: [item], nextCursor: 'MjAyNi0xMS0wNQ' });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://pharmacy.test/api/v1/pharmacy/imports/other-facilities?patientId=${patientId}&limit=20&cursor=MjAyNi0xMS0wNg`);
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(request.method).toBe('GET');
+    expect(request.headers).not.toHaveProperty('x-hid-internal-caller');
+    for (const page of [{ items: [{ ...item, sourceFacilityId: context.facilityId }], nextCursor: null },
+      { items: [{ ...item, provenance: 'imported' }], nextCursor: null }, { items: [item] }]) {
+      fetchMock.mockImplementation(async () => answer(page));
+      await expect(client.listOtherFacilityImportedMedications(patientId, context)).rejects.toMatchObject({ status: 502 });
+    }
+  });
 });

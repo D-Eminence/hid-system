@@ -101,6 +101,41 @@ export interface PatientSelfAuthorization {
   expiresAt: string;
 }
 
+/** POST identity/me/shares (0095), with the 0124 scope. */
+export interface PatientShareCreateInput {
+  membershipId: string;
+  level: 'view_only' | 'clinical_review' | 'clinical_collaboration';
+  duration: '24h' | '7d' | '30d' | 'until_revoked';
+  /** Also show the patient's imported paper records from other facilities (0124); default false. */
+  includeOtherFacilities?: boolean;
+  /** Include sensitive records in those; only with includeOtherFacilities (else 400 SHARE_REQUEST_INVALID). */
+  includeSensitive?: boolean;
+}
+
+/** The answer of POST identity/me/shares. */
+export interface PatientShareCreated {
+  consentGrantId: string;
+  membershipId: string;
+  scope: 'read_records' | 'write_records';
+  level: PatientShareCreateInput['level'];
+  duration: PatientShareCreateInput['duration'];
+  startsAt: string;
+  expiresAt: string;
+  clinicianName: string | null;
+  facilityName: string;
+  replacedConsentGrantId: string | null;
+  replayed: boolean;
+  includeOtherFacilities: boolean;
+  includeSensitive: boolean;
+}
+
+/** One of GET identity/me/shares/scopes's items (0124): an active share that includes other facilities. */
+export interface PatientShareScope {
+  consentGrantId: string;
+  includeOtherFacilities: boolean;
+  includeSensitive: boolean;
+}
+
 export class IdentityApiProblem extends Error {
   readonly code: string | null;
 
@@ -148,6 +183,20 @@ export class IdentityApiClient {
     const value=await this.request('/api/v1/identity/me','GET',undefined,context);
     if(!value||typeof value!=='object'||Array.isArray(value))throw new IdentityApiProblem(502,{code:'INVALID_PATIENT_PROFILE'});
     return value as Record<string,unknown>;
+  }
+
+  /** The patient's active shares that include other facilities' imported records (GET identity/me/shares/scopes, 0124). */
+  async myShareScopes(context: IdentityDelegatedContext): Promise<{ items: PatientShareScope[] }> {
+    const value = await this.request('/api/v1/identity/me/shares/scopes', 'GET', undefined, context);
+    const items = typeof value === 'object' && value !== null ? (value as { items?: unknown }).items : undefined;
+    if (!Array.isArray(items) || items.some((item) => typeof item !== 'object' || item === null
+      || typeof (item as PatientShareScope).consentGrantId !== 'string'
+      || typeof (item as PatientShareScope).includeOtherFacilities !== 'boolean'
+      || typeof (item as PatientShareScope).includeSensitive !== 'boolean')) {
+      throw new IdentityApiProblem(502, { code: 'INVALID_SHARE_SCOPES' });
+    }
+    return { items: (items as PatientShareScope[]).map((item) => ({ consentGrantId: item.consentGrantId,
+      includeOtherFacilities: item.includeOtherFacilities, includeSensitive: item.includeSensitive })) };
   }
 
   async authorizeStaffRecordRead(patientId:string,context:IdentityDelegatedContext):Promise<IdentityAuthorizationDecision> {

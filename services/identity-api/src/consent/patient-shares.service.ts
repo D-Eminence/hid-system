@@ -32,6 +32,7 @@ export const SHARE_DETAIL = {
   recentAuth: 'For your security, sign out, sign in again, and share within 10 minutes.',
   createLimited: 'You have shared your records many times today. Try again tomorrow.',
   keyReused: 'This request was already used for a different share. Start again.',
+  scopeInvalid: 'Sensitive records can only be included when you also show records from other facilities.',
   emailInvalid: 'Enter a valid email address.',
   alreadyOpen: 'You already invited this address. Cancel that invitation to send a new one.',
   tooManyOpen: 'You have 20 open invitations. Cancel one to send another.',
@@ -53,6 +54,7 @@ type ShareRow = {
   consent_grant_id: string; membership_id: string; scope: 'read_records' | 'write_records'; level: ShareLevel;
   duration_preset: ShareDuration; starts_at: Date; expires_at: Date; clinician_name: string | null; facility_name: string;
   replaced_consent_grant_id: string | null; replayed: boolean; notify_email: string | null;
+  include_other_facilities?: boolean | null; include_sensitive?: boolean | null;
 };
 
 export interface ShareCreated {
@@ -67,6 +69,17 @@ export interface ShareCreated {
   facilityName: string;
   replacedConsentGrantId: string | null;
   replayed: boolean;
+  /** 0124: the patient's imported paper records from other facilities are shown too (default false). */
+  includeOtherFacilities: boolean;
+  /** 0124: sensitive records are included in those (only with includeOtherFacilities). */
+  includeSensitive: boolean;
+}
+
+/** One of the patient's active shares that includes other facilities' imported records (0124). */
+export interface ShareScope {
+  consentGrantId: string;
+  includeOtherFacilities: boolean;
+  includeSensitive: boolean;
 }
 
 /** A clinician's name as the patient and the clinician see it: a person's name, or null. */
@@ -159,11 +172,22 @@ export class PatientSharesService implements BeforeApplicationShutdown {
     return { items };
   }
 
-  /** P2: 201 a new share, 200 a replay. */
+  /**
+   * P2: 201 a new share, 200 a replay. The scope (0124) goes to
+   * identity.create_my_consent_share_scoped; the digest names it only when
+   * other facilities are included, so a facility-only share keeps 0095's
+   * digest (and its earlier replays).
+   */
   async create(request: HidRequest, input: CreateShareDto, idempotencyKey: string): Promise<ShareCreated> {
     this.assertServed();
     const actor = requirePatient(request.actor);
-    const body = { membershipId: input.membershipId.toLowerCase(), level: input.level, duration: input.duration };
+    const includeOtherFacilities = input.includeOtherFacilities === true;
+    const includeSensitive = input.includeSensitive === true;
+    if (includeSensitive && !includeOtherFacilities) {
+      throw new DomainProblem(400, 'SHARE_REQUEST_INVALID', SHARE_DETAIL.scopeInvalid);
+    }
+    const body = { membershipId: input.membershipId.toLowerCase(), level: input.level, duration: input.duration,
+      ...(includeOtherFacilities ? { includeOtherFacilities: true, includeSensitive } : {}) };
     let row: ShareRow | undefined;
     try {
       row = await this.asPatient(request, actor, async (client) => {
@@ -171,10 +195,11 @@ export class PatientSharesService implements BeforeApplicationShutdown {
         await requireRecentPatientAuthentication(client, actor, SHARE_DETAIL.recentAuth);
         return (await client.query<ShareRow>(
           `select consent_grant_id::text, membership_id::text, scope, level, duration_preset, starts_at, expires_at,
-             clinician_name, facility_name, replaced_consent_grant_id::text, replayed, notify_email
-           from identity.create_my_consent_share($1, $2, $3, $4, $5, $6, $7)`,
-          [actor.subject, actor.sessionId, body.membershipId, body.level, body.duration, idempotencyKey,
-            requestDigest('identity.share.create', body)])).rows[0];
+             clinician_name, facility_name, replaced_consent_grant_id::text, replayed, notify_email,
+             include_other_facilities, include_sensitive
+           from identity.create_my_consent_share_scoped($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [actor.subject, actor.sessionId, body.membershipId, body.level, body.duration, includeOtherFacilities,
+            includeSensitive, idempotencyKey, requestDigest('identity.share.create', body)])).rows[0];
       });
     } catch (error) {
       if (isDatabaseError(error) && (error.code === 'P0002' || error.code === 'P0001')) {
@@ -188,6 +213,22 @@ export class PatientSharesService implements BeforeApplicationShutdown {
     if (!row) throw unavailable();
     this.announceShare(request.correlationId, row);
     return this.shareView(row);
+  }
+
+  /** 0124: the patient's active shares that include other facilities' imported records. */
+  async scopes(request: HidRequest): Promise<{ items: ShareScope[] }> {
+    this.assertServed();
+    const actor = requirePatient(request.actor);
+    let rows: Array<{ consent_grant_id: string; include_other_facilities: boolean; include_sensitive: boolean }>;
+    try {
+      rows = await this.asPatient(request, actor, async (client) => (await client.query<(typeof rows)[number]>(
+        `select consent_grant_id::text, include_other_facilities, include_sensitive
+           from identity.list_my_share_scopes($1, $2)`, [actor.subject, actor.sessionId])).rows);
+    } catch (error) {
+      throw this.problem(error);
+    }
+    return { items: rows.map((row) => ({ consentGrantId: row.consent_grant_id,
+      includeOtherFacilities: row.include_other_facilities === true, includeSensitive: row.include_sensitive === true })) };
   }
 
   /** P4: the B4 served probe. */
@@ -373,6 +414,7 @@ export class PatientSharesService implements BeforeApplicationShutdown {
       duration: row.duration_preset, startsAt: new Date(row.starts_at), expiresAt: new Date(row.expires_at),
       clinicianName: shownClinicianName(row.clinician_name), facilityName: row.facility_name,
       replacedConsentGrantId: row.replaced_consent_grant_id, replayed: row.replayed,
+      includeOtherFacilities: row.include_other_facilities === true, includeSensitive: row.include_sensitive === true,
     };
   }
 

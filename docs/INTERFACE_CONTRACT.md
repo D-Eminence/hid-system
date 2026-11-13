@@ -429,6 +429,9 @@ key) every route below answers 404, as an Identity before 0095 does.
   `IDEMPOTENCY_KEY_REUSED`; 429 `SHARE_CREATE_LIMITED` (20 a day). The
   clinician is emailed (`share-received`, no patient name or Health ID). A
   share is ended with `POST /identity/me/consent-grants/:grantId/revoke`.
+  Since 0124 the body may also carry `includeOtherFacilities` and
+  `includeSensitive` (default `false`), the answer always carries both, and
+  `GET /api/v1/identity/me/shares/scopes` lists them: see §47.
 - `GET /api/v1/identity/me/access-history`: each item gains `shareLevel`,
   `shareDuration` and `clinicianName`, null unless the grant came from a share
   or a confirmed invitation.
@@ -1137,6 +1140,7 @@ GET  /api/v1/lab/requests/:requestId
 PATCH /api/v1/lab/requests/:requestId
 POST /api/v1/lab/imports
 GET  /api/v1/lab/imports?patientId=<uuid>[&cursor=<importId>][&limit=1..50]
+GET  /api/v1/lab/imports/other-facilities?patientId=<uuid>[&cursor=<opaque>][&limit=1..50]
 GET  /api/v1/lab/imports/:importId
 ```
 
@@ -1163,6 +1167,9 @@ document and OCR job, extraction, validation (and version) and publication
 ids. One audit row per page (`lab.import.list`) records ids and counts only.
 `patientId` is the Identity UUID; a Health ID is never accepted in this URL.
 
+The patient's imported Lab evidence from OTHER facilities, under a share that
+includes them, is `GET /api/v1/lab/imports/other-facilities` (§47, 0124).
+
 Exact contract should be documented through OpenAPI.
 
 Lab results may notify consuming services through events.
@@ -1183,6 +1190,7 @@ POST /api/v1/pharmacy/dispensings/:dispensingId/reversals
 POST /api/v1/pharmacy/imports/from-ocr                  # internal OCR caller
 POST /api/v1/pharmacy/imports/from-ocr/batch            # internal OCR caller, 2-50 medicines
 GET  /api/v1/pharmacy/imports?patientId=<uuid>[&limit=1-100][&cursor=<id>]
+GET  /api/v1/pharmacy/imports/other-facilities?patientId=<uuid>[&limit=1-100][&cursor=<opaque>]
 GET  /api/v1/pharmacy/imports/:importId
 ```
 
@@ -1240,6 +1248,10 @@ before any read, so a refusal reads and audits nothing; row-level security
 (`pharmacy_imports_read`) applies as well. One audit row
 `pharmacy.import.list` names the patient, with the returned ids and count only.
 Any other query parameter, `healthId` among them, is refused 400.
+
+The patient's imported medication records from OTHER facilities, under a share
+that includes them, is `GET /api/v1/pharmacy/imports/other-facilities` (§47,
+0124).
 
 ## 14. OCR
 
@@ -4562,3 +4574,131 @@ The website's facility list says "FCT". Show "Federal Capital Territory (FCT)" a
 - The current-staff-context `facility` object does not include the profile. Use
   `GET /identity/facility-profile`.
 - The QoreID state, LGA, city and company email are not captured for pre-fill yet (plan A.5).
+
+## 47. Cross-facility imported records on a share (0124, provisional)
+
+The section number and the migration number 0124 are provisional; the number
+is assigned at merge. Owner decision Q64, option A (sensitive records excluded
+unless the patient includes them; DPO sign-off before release).
+
+### 47.1. The consent rule
+
+- A patient may choose, on a share (`POST identity/me/shares`), to "also show
+  my paper records from other facilities" (`includeOtherFacilities`, default
+  `false`) and, only together with it, to "include sensitive records"
+  (`includeSensitive`, default `false`). Sensitive means HIV/ARV, TB,
+  psychiatric and sickle cell (the lists of `hid.ocr.sensitive/v2`).
+- Shares made before 0124, shares made without the choice and every share made
+  by invitation (confirm) stay facility-only. A scope never changes; a new
+  share to the same clinician replaces the old one (0095) and so ends its
+  scope.
+- Only staff at the share's facility, signed in at the membership the share
+  was made to, read these records, under an active share and with purpose
+  `direct-care`. Never under break-glass, an Access PIN grant or an approved
+  access request (none of them is a share). Identity's consent check
+  (`identity.has_active_consent_grant`, `read_records`) must also allow the
+  read, so a deny directive, a held grant or an inactive account refuses.
+- Records come only from source facilities on the patient's side of the seal:
+  real facilities for a real patient, the sealed demo tenant (0098) for a demo
+  patient, the sealed QA tenant (0123) for a QA patient.
+- Entered-in-error lab imports are never shown.
+- Unless the patient included sensitive records, a record is withheld whole
+  when any of its text (test code, name, value, result text; medicine,
+  strength, dose, frequency, history), its external laboratory or its source
+  facility's name matches a sensitive term.
+- The database function checks all of this itself; the services ask Identity
+  for no authorization decision on these routes. Each read writes one audit row
+  (`lab.import.other-facilities.list` or `pharmacy.import.other-facilities.list`)
+  with ids and counts only (returned count, import ids, source facility ids,
+  whether sensitive records were included, whether it was a later page), never
+  a value. A refusal returns nothing.
+
+### 47.2. Identity (patient routes, as the other `me/shares` routes)
+
+- `POST /api/v1/identity/me/shares` (0095) also takes `includeOtherFacilities?:
+  boolean` and `includeSensitive?: boolean`. 400 `SHARE_REQUEST_INVALID`
+  ("Sensitive records can only be included when you also show records from
+  other facilities.") for `includeSensitive: true` without
+  `includeOtherFacilities: true`, before any database work. The answer (201 or
+  200 replay, and `confirm`'s) gains `includeOtherFacilities` and
+  `includeSensitive` (both `false` for a facility-only share). The idempotency
+  digest names the scope only when `includeOtherFacilities` is `true`, so a
+  facility-only share has the same digest as before 0124; a replay of the same
+  key with a different scope is 409 `IDEMPOTENCY_KEY_REUSED`. All other errors
+  are as 0095.
+- `GET /api/v1/identity/me/shares/scopes`: 200 `{ items: [{ consentGrantId,
+  includeOtherFacilities: true, includeSensitive }] }`, the patient's active,
+  unexpired shares that include other facilities, oldest first. A share not
+  listed is facility-only. 403 `PATIENT_SESSION_REQUIRED`; 503
+  `SHARE_UNAVAILABLE`; 404 while `PATIENT_SHARES_ENABLED` is `false`.
+
+### 47.3. Lab: `GET /api/v1/lab/imports/other-facilities?patientId=<uuid>[&cursor=<opaque>][&limit=1..50]`
+
+Browser route; `lab.import.read`, `X-Facility-ID`, `X-Purpose-Of-Use:
+direct-care`; request audit `lab.import.other-facilities.list.request`.
+`limit` defaults to 20. 200:
+
+```text
+{ records: [{ id, sourceFacilityId, sourceFacilityName, status, externalLabName,
+  externalReference, collectedAt, reportedAt, receivedAt, createdAt,
+  observations: [{ ordinal, testCode, testName, value, valueText, unit,
+    referenceRange, abnormalFlag, reportedAt }],
+  provenance: 'imported-from-paper-other-facility' }],
+  nextCursor: string | null }
+```
+
+Newest received first (`receivedAt`, then `id`). There is no `patientId`,
+`facilityId` or OCR provenance id on a record.
+
+### 47.4. Pharmacy: `GET /api/v1/pharmacy/imports/other-facilities?patientId=<uuid>[&cursor=<opaque>][&limit=1..100]`
+
+Browser route; `pharmacy.import.read`, `X-Facility-ID`, `X-Purpose-Of-Use:
+direct-care`. `limit` defaults to 50. 200:
+
+```text
+{ items: [{ id, sourceFacilityId, sourceFacilityName, medicationText,
+  strengthText, doseText, frequencyText, historicalContext, activityStatus,
+  createdAt, provenance: 'imported-from-paper-other-facility' }],
+  nextCursor: string | null }
+```
+
+Newest first (`createdAt`, then `id`).
+
+### 47.5. Paging and errors (both read routes)
+
+- `nextCursor` is set when a full page came back (it may lead to an empty
+  page) and is `null` otherwise. It is opaque (base64url, at most 128
+  characters; it holds the last record's time to the microsecond and id); send
+  it back unchanged as `cursor`. It is not a record id, unlike the
+  facility-scoped lists.
+- 400 `VALIDATION_FAILED`: `patientId` not a UUID, `limit` out of range, a
+  cursor that is not base64url, or any other query parameter (`healthId`
+  among them).
+- 400 `INVALID_CURSOR`: a cursor that does not decode to a time and an id.
+- 400 `OTHER_FACILITIES_REQUEST_INVALID`: the database refused the request as
+  invalid (for example no membership in the session).
+- 403 `OTHER_FACILITIES_NOT_SHARED`: no qualifying share (none, facility-only,
+  expired or revoked, another membership or facility, a purpose other than
+  `direct-care`, break-glass, PIN or approved request, deny directive). Show
+  nothing from other facilities; it is not an error to report to the user.
+- The facility-scoped lists (§12, §13) are unchanged.
+
+### 47.6. Website guidance
+
+- Patient (sharing): the share form shows "Also show my paper records from
+  other facilities" (off by default) and, only when it is on, "Include
+  sensitive records (HIV, TB, mental health, sickle cell)" (off by default).
+  "Who can see my records" marks the shares listed by
+  `GET identity/me/shares/scopes`. To change the choice the patient shares
+  again.
+- Staff (EHR, Lab and Pharmacy charts): show these records in their own
+  section titled "From other facilities (unverified)", never mixed with this
+  facility's records, each with its source facility named
+  (`sourceFacilityName`), and a plain hint: "Imported from paper records at
+  other facilities. Not verified." Treat 403 `OTHER_FACILITIES_NOT_SHARED` as
+  "nothing shared" and hide the section.
+- API client (`@hid/api-client`): `LabApiClient.labOtherFacilityImports(patientId,
+  context, { cursor, limit })`, `PharmacyApiClient.listOtherFacilityImportedMedications(patientId,
+  context, { cursor, limit })` and `IdentityApiClient.myShareScopes(context)`;
+  the share types `PatientShareCreateInput`, `PatientShareCreated` and
+  `PatientShareScope`.

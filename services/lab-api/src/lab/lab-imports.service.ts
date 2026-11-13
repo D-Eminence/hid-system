@@ -8,7 +8,8 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import { LAB_IMPORT_PAGE_DEFAULT, LAB_IMPORT_PAGE_MAX } from './dto/create-lab-import.dto';
-import type { CreateLabImportDto, ImportedLabObservationDto, ListLabImportsQueryDto } from './dto/create-lab-import.dto';
+import type { CreateLabImportDto, ImportedLabObservationDto, ListLabImportsQueryDto, ListOtherFacilityLabImportsQueryDto }
+  from './dto/create-lab-import.dto';
 import type { OcrLabImportCommand } from './lab-import.types';
 
 interface ImportRow extends QueryResultRow {
@@ -28,6 +29,56 @@ const IMPORT_SELECT = `select id::text,patient_id::text,facility_id::text,source
   external_lab_name,external_reference,collected_at,reported_at,received_at,
   source_document_id::text,ocr_job_id::text,extraction_id::text,validation_id::text,
   validation_version,publication_id::text,row_version::text,created_at from lab.imported_evidence`;
+
+interface OtherFacilityImportRow extends QueryResultRow {
+  import_id: string; source_facility_id: string; source_facility_name: string; status: string;
+  external_lab_name: string | null; external_reference: string | null; collected_at: Date | null;
+  reported_at: Date | null; received_at: Date; created_at: Date; observations: unknown[] | null;
+  cursor_at: string;
+}
+
+/**
+ * 0124: one page of the patient's lab imports from other facilities.
+ * $1 patient, $2 and $3 the cursor (received_at and id of the last record of
+ * the previous page, or both null), $4 the page size. cursor_at keeps
+ * received_at's microseconds for the next cursor. Exported for the tests.
+ */
+export const OTHER_FACILITY_IMPORTS_QUERY = `select import_id::text,source_facility_id::text,source_facility_name,status,
+  external_lab_name,external_reference,collected_at,reported_at,received_at,created_at,observations,
+  to_char(received_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_at
+  from lab.patient_imports_other_facilities($1::uuid,$2::timestamptz,$3::uuid,$4::integer)`;
+
+const CURSOR_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+const CURSOR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The other-facilities cursor: base64url of '<time with microseconds, UTC>|<id>'. */
+export function encodeOtherFacilityCursor(at: string, id: string): string {
+  return Buffer.from(`${at}|${id}`, 'utf8').toString('base64url');
+}
+
+/** The cursor's time and id, or a 400 INVALID_CURSOR problem. */
+export function decodeOtherFacilityCursor(cursor: string): { at: string; id: string } {
+  const [at, id, ...rest] = Buffer.from(cursor, 'base64url').toString('utf8').split('|');
+  if (rest.length > 0 || !at || !id || !CURSOR_AT.test(at) || !Number.isFinite(Date.parse(at)) || !CURSOR_ID.test(id)) {
+    throw new DomainProblem(400, 'INVALID_CURSOR', 'Invalid record cursor');
+  }
+  return { at, id };
+}
+
+/** A refusal of lab.patient_imports_other_facilities as its problem; anything else unchanged (500). */
+function otherFacilitiesProblem(error: unknown): unknown {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  const message = typeof error === 'object' && error !== null ? (error as { message?: unknown }).message : undefined;
+  if (code === '42501' && message === 'OTHER_FACILITIES_NOT_SHARED') {
+    return new DomainProblem(403, 'OTHER_FACILITIES_NOT_SHARED',
+      'The patient has not shared imported records from other facilities with you', undefined, { cause: error });
+  }
+  if (code === '22023') {
+    return new DomainProblem(400, 'OTHER_FACILITIES_REQUEST_INVALID',
+      'The request for records from other facilities is invalid', undefined, { cause: error });
+  }
+  return error;
+}
 
 @Injectable()
 export class LabImportsService {
@@ -96,6 +147,40 @@ export class LabImportsService {
         nextCursor: page.rows.length > limit ? rows.at(-1)!.id : null,
       };
     });
+  }
+
+  /**
+   * 0124 (Q64 option A): one page of the patient's imported Lab evidence from
+   * OTHER facilities, newest received first, for staff at the facility of an
+   * active patient share to their membership that includes other facilities.
+   * lab.patient_imports_other_facilities checks the share (never break-glass,
+   * a PIN grant or an approved request; purpose direct-care), withholds
+   * entered-in-error and, unless the patient included them, sensitive records,
+   * and writes the read's one audit row; so no Identity decision is asked and
+   * no second audit row is written here. nextCursor is set when a full page
+   * came back.
+   */
+  async listOtherFacilities(context: DataAccessContext, query: ListOtherFacilityLabImportsQueryDto) {
+    const limit = Math.min(Math.max(query.limit ?? LAB_IMPORT_PAGE_DEFAULT, 1), LAB_IMPORT_PAGE_MAX);
+    const cursor = query.cursor ? decodeOtherFacilityCursor(query.cursor) : null;
+    let rows: OtherFacilityImportRow[];
+    try {
+      rows = await this.database.withTransaction(context, async (client) => (await client.query<OtherFacilityImportRow>(
+        OTHER_FACILITY_IMPORTS_QUERY, [query.patientId, cursor?.at ?? null, cursor?.id ?? null, limit])).rows);
+    } catch (error) {
+      throw otherFacilitiesProblem(error);
+    }
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      records: page.map((row) => ({ id: row.import_id, sourceFacilityId: row.source_facility_id,
+        sourceFacilityName: row.source_facility_name, status: row.status, externalLabName: row.external_lab_name,
+        externalReference: row.external_reference, collectedAt: row.collected_at, reportedAt: row.reported_at,
+        receivedAt: row.received_at, createdAt: row.created_at,
+        observations: Array.isArray(row.observations) ? row.observations : [],
+        provenance: 'imported-from-paper-other-facility' as const })),
+      nextCursor: page.length === limit && last ? encodeOtherFacilityCursor(last.cursor_at, last.import_id) : null,
+    };
   }
 
   private async create(context: DataAccessContext,
