@@ -1678,3 +1678,9 @@ revoke all on function identity.facility_department_codes(),
   identity.set_facility_profile(bigint,jsonb,text,char) from public;
 revoke all on identity.facility_profiles, identity.nigeria_states, identity.registration_case_contacts,
   identity.patient_facility_contacts from public;
+
+-- Allergies a facility records and allergy-warning acknowledgements (0117),
+-- as that migration grants them (its section 4). Forced RLS on both tables;
+-- no DELETE (rows are never deleted).
+grant select, insert, update on ehr.recorded_allergies to hid_ehr_runtime, hid_schema_test_runtime;
+grant select, insert on ehr.prescription_allergy_acknowledgements to hid_ehr_runtime, hid_schema_test_runtime;

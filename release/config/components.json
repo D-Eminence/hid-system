@@ -96,7 +96,7 @@
   "migration": {
     "first": "0001",
     "last": "0119",
-    "count": 119,
+    "count": 120,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -565,6 +565,10 @@
       {
         "name": "0116_outreach_retention.sql",
         "sha256": "d590c45302484da9d3175022b30395eacd53d3618460fc3c85093a31b21d74bf"
+      },
+      {
+        "name": "0117_recorded_allergies.sql",
+        "sha256": "3b71fdbbe3a02071a198722ca00c0120240d5fcfd53035cd38e3a7217e53f003"
       },
       {
         "name": "0118_ocr_correction_observations.sql",

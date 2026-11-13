@@ -21,7 +21,7 @@ const backends = [
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
 const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/',
   ocr: '/migrate/', outreach: '/outreach/', admin: '/admin/' }
-const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812'
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041'
 const unprivilegedNginxRuntime = 'nginxinc/nginx-unprivileged@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01'
 
 const textExtensions = new Set([

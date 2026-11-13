@@ -109,7 +109,7 @@ reading also lands it there. The publication audit events carry `basis`,
 ## Learning from reviews (phase 2: rules and suggestions)
 
 Migrations 0118 and 0119, owner decision Q43 (`docs/INTERFACE_CONTRACT.md`
-section 44). `src/ocr/learning/learning.ts` turns an accepted review into
+section 45). `src/ocr/learning/learning.ts` turns an accepted review into
 observations:
 - one per changed field of a linked Pharmacy medicine (name, strength,
   frequency) or Lab result (test, unit);

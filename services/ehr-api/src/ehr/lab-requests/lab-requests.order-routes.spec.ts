@@ -171,9 +171,13 @@ describe('PrescriptionsService with routes to other facilities (P4c)', () => {
     createdAt: new Date('2026-08-10T10:00:00Z'), updatedAt: new Date('2026-08-10T10:00:00Z'), cursorAt: createdAtExact });
   const build = (found: OrderRouteSummary | null) => {
     const pharmacyApi = { acceptEhrPrescription: jest.fn().mockResolvedValue({ id: 'pharmacy-work-item' }) };
+    // The locked prescription; the allergy check (0117) may read the patient's records, and reads no
+    // allergy and no stored reason.
+    const query = jest.fn(async (sql: string) =>
+      ({ rows: /from ehr\.prescriptions/.test(sql) ? [prescription(OrderStatus.Active)]
+        : /ehr\.context_allows\(/.test(sql) ? [{ allowed: true }] : [] }));
     const repository = { run: jest.fn(async (_c: unknown, _p: unknown, _a: unknown, _e: unknown,
-      operation: (client: unknown) => Promise<{ value: unknown }>) =>
-      (await operation({ query: jest.fn().mockResolvedValue({ rows: [prescription(OrderStatus.Active)] }) })).value) };
+      operation: (client: unknown) => Promise<{ value: unknown }>) => (await operation({ query })).value) };
     const reader = { summary: jest.fn(async () => found),
       summaries: jest.fn(async (_c: unknown, _x: unknown, _k: unknown, _p: unknown, ids: string[]) =>
         new Map(found ? ids.map((id) => [id, found] as const) : [])),

@@ -10,6 +10,8 @@ import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
 import { calendarDate } from '../shared/calendar-date';
+import { checkPrescriptionAllergies, readAllergyAcknowledgements,
+  recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -84,10 +86,14 @@ export class PrescriptionsService {
           [encounterId, patientId, context.facilityId, cursor?.sortAt ?? null, cursor?.id ?? null, query.limit + 1],
         );
         const page = timelinePage(result.rows, query.limit, scope);
-        const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId,
-          page.items.map((item) => item.id));
-        return { value: { ...page, items: page.items.map((item) => withOrderRoute(item, routes)) },
-          details: { resultCount: page.items.length } };
+        const ids = page.items.map((item) => item.id);
+        const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, ids);
+        // 0117: each prescription's stored allergy acknowledgements (audited as a count, never the reason).
+        const acknowledgements = await readAllergyAcknowledgements(client, context, patientId, ids);
+        const items = page.items.map((item) => ({ ...withOrderRoute(item, routes),
+          allergyAcknowledgements: acknowledgements.get(item.id) ?? [] }));
+        return { value: { ...page, items },
+          details: { resultCount: page.items.length, allergyAcknowledgementCount: countValues(acknowledgements) } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
@@ -102,7 +108,11 @@ export class PrescriptionsService {
       async (client) => {
         const row = this.single(await this.find(client, context, patientId, encounterId, prescriptionId));
         const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, [row.id]);
-        return { value: withOrderRoute(row, routes) };
+        // 0117: the allergy acknowledgements stored for it, so whoever activates or resumes a draft
+        // sees the earlier reason (audited as a count, never the reason).
+        const acknowledgements = (await readAllergyAcknowledgements(client, context, patientId, [row.id])).get(row.id) ?? [];
+        return { value: { ...withOrderRoute(row, routes), allergyAcknowledgements: acknowledgements },
+          details: { allergyAcknowledgementCount: acknowledgements.length } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
@@ -120,6 +130,11 @@ export class PrescriptionsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'prescription',
         async () => {
+          // 0117: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
+          // the warning they were shown (its warningToken); without it nothing is written (the whole
+          // transaction, idempotency key included, rolls back).
+          const matches = await checkPrescriptionAllergies(client, context, patientId,
+            { display: input.medicationDisplay, code: input.medicationCode ?? null }, input.allergyAcknowledgement);
           const result = await client.query<PrescriptionRow>(
             `insert into ehr.prescriptions (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
@@ -135,6 +150,13 @@ export class PrescriptionsService {
             ],
           );
           const row = this.single(result.rows[0]);
+          if (matches.length > 0 && input.allergyAcknowledgement) {
+            // The audit says the prescriber went ahead after a warning: flags and counts only,
+            // never the substance or the reason text.
+            const details = await recordAllergyAcknowledgement(client, context, patientId, row.id, 'create', matches,
+              input.allergyAcknowledgement);
+            return { value: row, id: row.id, details };
+          }
           return { value: row, id: row.id };
         },
         (id) => this.findById(client, context, patientId, id),
@@ -162,6 +184,14 @@ export class PrescriptionsService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
         }
+        // 0117: Activate (draft) and Resume (on hold) check the allergies again: one may have been
+        // recorded since the prescription was saved. A match already covered by a stored reason for
+        // this prescription needs none.
+        const activating = input.status === OrderStatus.Active && current.status !== OrderStatus.Active;
+        const matches = activating
+          ? await checkPrescriptionAllergies(client, context, patientId,
+            { display: current.medicationDisplay, code: current.medicationCode }, input.allergyAcknowledgement, current.id)
+          : [];
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<PrescriptionRow>(
           `update ehr.prescriptions set
@@ -176,6 +206,11 @@ export class PrescriptionsService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Prescription changed since it was loaded');
+        if (matches.length > 0 && input.allergyAcknowledgement) {
+          const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
+            current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement);
+          return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion, ...override } };
+        }
         return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
@@ -223,10 +258,21 @@ export class PrescriptionsService {
           throw new DomainProblem(409, 'PRESCRIPTION_ROUTED',
             'This prescription has been sent to another pharmacy; withdraw it there first');
         }
+        // 0117 (the review of PR 218): an allergy may have been recorded since the prescription
+        // became active, so it is checked before this facility's pharmacy takes it. A match already
+        // covered by a reason stored for it needs none. Otherwise the 409 answers here, before
+        // Pharmacy is called, and the transaction writes nothing. An accepted reason is stored for
+        // the handoff stage; the audit says so with flags and counts, never the substance or reason.
+        const matches = await checkPrescriptionAllergies(client, context, patientId,
+          { display: current.medicationDisplay, code: current.medicationCode }, input.allergyAcknowledgement, current.id);
+        const allergyOverride = matches.length > 0 && input.allergyAcknowledgement
+          ? await recordAllergyAcknowledgement(client, context, patientId, current.id, 'handoff', matches,
+            input.allergyAcknowledgement)
+          : {};
         return {
           value: current,
           resourceId: prescriptionId,
-          details: { prescriptionVersion: Number(current.rowVersion) },
+          details: { prescriptionVersion: Number(current.rowVersion), ...allergyOverride },
         };
       },
       (client) => this.repository.exists(
@@ -293,4 +339,10 @@ export class PrescriptionsService {
     if (!row) throw new DomainProblem(404, 'PRESCRIPTION_NOT_FOUND', 'Prescription was not found');
     return row;
   }
+}
+
+function countValues(map: ReadonlyMap<string, readonly unknown[]>): number {
+  let count = 0;
+  for (const list of map.values()) count += list.length;
+  return count;
 }

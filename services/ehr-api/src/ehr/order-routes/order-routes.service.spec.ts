@@ -1,6 +1,8 @@
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import { requestDigest } from '../../common/idempotency';
 import { OrderRoutesService } from './order-routes.service';
+import { matchAllergies } from '../allergies/allergy-match';
+import { warningToken } from '../allergies/allergy-reader';
 
 const patientId = '123e4567-e89b-42d3-a456-426614174001';
 const facilityId = '123e4567-e89b-42d3-a456-426614174002';
@@ -35,7 +37,8 @@ function harness(answers: Record<string, unknown[] | Error> = {}) {
     query: jest.fn(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql, values });
       const name = /from\s+([a-z_]+\.[a-z_]+)\(/i.exec(sql)?.[1] ?? sql;
-      const answer = answers[name];
+      // 0117: the allergy check's read-access question; the facility may read unless a test says otherwise.
+      const answer = answers[name] ?? (/ehr\.context_allows\(/.test(sql) ? [{ allowed: true }] : undefined);
       if (answer instanceof Error) throw answer;
       return { rows: answer ?? [] };
     }),
@@ -150,6 +153,177 @@ describe('OrderRoutesService send (C1)', () => {
     await expect(service.send(context(), 'prescription', patientId, encounterId, requestId,
       { ...sendInput, attestationTextVersion: 'order-route-prescription-attestation-v2' }, key))
       .rejects.toMatchObject({ status: 503, code: 'ORDER_ROUTE_UNAVAILABLE' });
+  });
+});
+
+describe('OrderRoutesService send of a prescription: the allergy check (0117)', () => {
+  const prescriptionInput = { ...sendInput, attestationTextVersion: 'order-route-prescription-attestation-v1' };
+  const allergyId = '123e4567-e89b-42d3-a456-426614174010';
+  const penicillin = { id: allergyId, substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe' };
+  const token = warningToken(matchAllergies({ display: 'Amoxicillin 500 mg' }, [{ source: 'recorded', ...penicillin }]),
+    { display: 'Amoxicillin 500 mg' });
+
+  /**
+   * The harness, answering whether the facility may read the patient's
+   * records (`readAllowed`), the prescription read, the allergy reads, the
+   * acknowledgements already stored for the prescription (`stored`) and the
+   * send (or its refusal). Without read access, RLS hides the prescription,
+   * the allergies and the stored reasons (their read policies need
+   * read_records), while the send, which checks only write_records, goes on
+   * (as it does under an owner of ehr.send_order_route that bypasses RLS).
+   */
+  function sendHarness(status: string, recorded: unknown[], replayed = false, stored: unknown[] = [],
+    send: Error | null = null, readAllowed = true) {
+    const parts = harness();
+    parts.client.query.mockImplementation(async (sql: string, values: unknown[] = []) => {
+      parts.statements.push({ sql, values });
+      if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: readAllowed }] };
+      if (!readAllowed && /from ehr\.(prescriptions|recorded_allergies|prescription_allergy_acknowledgements)\b|patient_reported_health_profiles/
+        .test(sql)) return { rows: [] };
+      if (/send_order_route/.test(sql)) {
+        if (send) throw send;
+        return { rows: [{ ...sendRow, replayed }] };
+      }
+      if (/from ehr\.prescriptions/.test(sql)) {
+        return { rows: [{ status, medicationDisplay: 'Amoxicillin 500 mg', medicationCode: null }] };
+      }
+      if (/from ehr\.recorded_allergies/.test(sql)) return { rows: recorded };
+      if (/from ehr\.prescription_allergy_acknowledgements/.test(sql)) return { rows: stored };
+      return { rows: [] };
+    });
+    return parts;
+  }
+  const acknowledgement = { reason: 'No alternative; observe 30 minutes', warningToken: token };
+  const wrote = (statements: Array<{ sql: string }>) =>
+    statements.filter((statement) => /send_order_route|insert into|^\s*update /i.test(statement.sql));
+
+  it('refuses to send a draft that matches an allergy without a reason, before the send', async () => {
+    const { service, statements } = sendHarness('draft', [penicillin]);
+    await expect(service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
+        errors: expect.arrayContaining([{ field: 'allergyAcknowledgement.warningToken', messages: [token] }]) });
+    expect(statements.some((statement) => /send_order_route/.test(statement.sql))).toBe(false);
+  });
+
+  it('sends a draft with the reason and stores it for the send stage, after the send', async () => {
+    const { service, statements, audits } = sendHarness('draft', [penicillin]);
+    await service.send(context(), 'prescription', patientId, encounterId, requestId,
+      { ...prescriptionInput, allergyAcknowledgement: { reason: 'No alternative; observe 30 minutes', warningToken: token } }, key);
+    const sendAt = statements.findIndex((statement) => /send_order_route/.test(statement.sql));
+    const ackAt = statements.findIndex((statement) => /insert into ehr\.prescription_allergy_acknowledgements/.test(statement.sql));
+    expect(ackAt).toBeGreaterThan(sendAt);
+    expect(statements[ackAt]?.values.slice(5)).toEqual(['No alternative; observe 30 minutes', [allergyId], false, 'send', []]);
+    expect(audits[0]?.details).toMatchObject({ allergyOverride: true, matchedRecordedCount: 1 });
+  });
+
+  // The review of PR 218 (Medium 1): Amoxicillin activated on Monday, a severe Penicillin allergy
+  // recorded on Tuesday, the active prescription sent to another pharmacy on Wednesday.
+  it('refuses to send an active prescription that matches an allergy recorded since, and writes nothing', async () => {
+    const { service, statements, audits } = sendHarness('active', [penicillin]);
+    await expect(service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key))
+      .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
+        errors: expect.arrayContaining([{ field: 'allergyAcknowledgement.warningToken', messages: [token] },
+          expect.objectContaining({ field: 'allergyAcknowledgement.rejected', code: 'ALLERGY_ACKNOWLEDGEMENT_MISSING' })]) });
+    // The check read the allergies with the prescription's id (a stored reason would cover them).
+    const covered = statements.find((statement) => /from ehr\.prescription_allergy_acknowledgements/.test(statement.sql));
+    expect(covered?.values).toEqual([requestId, patientId, facilityId]);
+    expect(wrote(statements)).toEqual([]);
+    expect(audits).toEqual([]);
+  });
+
+  it('sends an active prescription with the reason for the warning shown and stores it for the send stage', async () => {
+    const { service, statements, audits } = sendHarness('active', [penicillin]);
+    const answer = await service.send(context(), 'prescription', patientId, encounterId, requestId,
+      { ...prescriptionInput, allergyAcknowledgement: acknowledgement }, key);
+    expect(answer).toMatchObject({ replayed: false, route: { id: routeId } });
+    const sendAt = statements.findIndex((statement) => /send_order_route/.test(statement.sql));
+    const ackAt = statements.findIndex((statement) => /insert into ehr\.prescription_allergy_acknowledgements/.test(statement.sql));
+    expect(sendAt).toBeGreaterThan(-1);
+    expect(ackAt).toBeGreaterThan(sendAt);
+    expect(statements[ackAt]?.values).toEqual([requestId, patientId, facilityId, accountId, membershipId,
+      'No alternative; observe 30 minutes', [allergyId], false, 'send', []]);
+    expect(audits[0]?.details).toMatchObject({ allergyOverride: true, matchedRecordedCount: 1, patientReportedMatched: false });
+    expect(JSON.stringify(audits[0]?.details)).not.toMatch(/penicillin|observe/i);
+  });
+
+  it('sends an active prescription whose match a stored reason already covers, with no 409 and no new reason', async () => {
+    const { service, statements, audits } = sendHarness('active', [penicillin], false,
+      [{ matchedRecordedAllergyIds: [allergyId], patientReportedTerms: [] }]);
+    await expect(service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key))
+      .resolves.toMatchObject({ replayed: false });
+    expect(statements.some((statement) => /send_order_route/.test(statement.sql))).toBe(true);
+    expect(statements.some((statement) => /insert into/.test(statement.sql))).toBe(false);
+    expect(audits[0]?.details).not.toHaveProperty('allergyOverride');
+  });
+
+  it('does not store a reason on a replay', async () => {
+    const replay = sendHarness('draft', [penicillin], true);
+    await replay.service.send(context(), 'prescription', patientId, encounterId, requestId,
+      { ...prescriptionInput, allergyAcknowledgement: acknowledgement }, key);
+    expect(replay.statements.some((statement) => /insert into/.test(statement.sql))).toBe(false);
+  });
+
+  it.each(['on_hold', 'completed', 'cancelled', 'entered_in_error'])(
+    'leaves a %s prescription to the send\'s own refusal, with no allergy check', async (status) => {
+      const { service, statements } = sendHarness(status, [penicillin], false, [],
+        databaseError('P0001', 'ORDER_ROUTE_ORDER_NOT_ELIGIBLE'));
+      await expect(service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key))
+        .rejects.toMatchObject({ status: 409, code: 'ORDER_ROUTE_ORDER_NOT_ELIGIBLE' });
+      expect(statements.some((statement) => /recorded_allergies|allergy/.test(statement.sql))).toBe(false);
+      expect(statements.some((statement) => /send_order_route/.test(statement.sql))).toBe(true);
+    });
+
+  it('leaves a prescription not found to the send\'s own 404, with no allergy check', async () => {
+    const { service, statements, client } = sendHarness('active', [penicillin]);
+    client.query.mockImplementation(async (sql: string, values: unknown[] = []) => {
+      statements.push({ sql, values });
+      if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: true }] };
+      if (/send_order_route/.test(sql)) throw databaseError('P0002', 'ORDER_NOT_FOUND');
+      return { rows: [] };
+    });
+    await expect(service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key))
+      .rejects.toMatchObject({ status: 404, code: 'ORDER_NOT_FOUND' });
+    expect(statements.some((statement) => /recorded_allergies/.test(statement.sql))).toBe(false);
+  });
+
+  // A facility that may write but not read the patient's records: a write_records grant, and a deny
+  // directive of the patient's naming only read_records. RLS then hides the prescription and the
+  // allergies, while ehr.send_order_route checks only write_records; the read access is asked first,
+  // so a prescription hidden from the check is never sent unchecked.
+  it.each(['draft', 'active'])(
+    'refuses to send a %s prescription with 403 CONSENT_REQUIRED when the facility may not read the patient\'s records',
+    async (status) => {
+      const { service, statements, audits } = sendHarness(status, [penicillin], false, [], null, false);
+      await expect(service.send(context(), 'prescription', patientId, encounterId, requestId,
+        { ...prescriptionInput, allergyAcknowledgement: acknowledgement }, key))
+        .rejects.toMatchObject({ status: 403, code: 'CONSENT_REQUIRED' });
+      // Only the question was asked: no prescription read, no allergy read, no send, no reason stored.
+      expect(statements).toEqual([{ sql: expect.stringMatching(/ehr\.context_allows\(\$1::uuid, \$2::uuid, 'read_records'\)/),
+        values: [patientId, facilityId] }]);
+      expect(wrote(statements)).toEqual([]);
+      expect(audits).toEqual([]);
+    });
+
+  it('asks whether the facility may read the patient\'s records before it reads the prescription, then sends as before',
+    async () => {
+      const { service, statements } = sendHarness('active', [penicillin], false,
+        [{ matchedRecordedAllergyIds: [allergyId], patientReportedTerms: [] }]);
+      await expect(service.send(context(), 'prescription', patientId, encounterId, requestId, prescriptionInput, key))
+        .resolves.toMatchObject({ replayed: false, route: { id: routeId } });
+      const at = (pattern: RegExp) => statements.findIndex((statement) => pattern.test(statement.sql));
+      expect(at(/ehr\.context_allows\(/)).toBe(0);
+      expect(at(/from ehr\.prescriptions/)).toBeGreaterThan(0);
+      expect(at(/send_order_route/)).toBeGreaterThan(at(/from ehr\.recorded_allergies/));
+    });
+
+  it('does not read allergies for a lab request, whatever its status', async () => {
+    for (const status of ['draft', 'active']) {
+      const { service, statements, audits } = sendHarness(status, [penicillin]);
+      await service.send(context(), 'lab_request', patientId, encounterId, requestId,
+        { ...sendInput, allergyAcknowledgement: acknowledgement }, key);
+      expect(statements.map((statement) => statement.sql)).toEqual(['select * from ehr.send_order_route($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)']);
+      expect(audits[0]?.details).not.toHaveProperty('allergyOverride');
+    }
   });
 });
 
