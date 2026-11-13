@@ -3,11 +3,17 @@ import type { Response } from 'express';
 import type { HidRequest } from './request-context';
 
 /** Problem members an extension can never replace. */
-const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors']);
+const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors',
+  'details']);
 
 export interface DomainProblemOptions {
   /** Extension members (RFC 9457), e.g. `healthId` on OUTREACH_HEALTH_ID_ALREADY_CREATED (0119). */
   extensions?: Readonly<Record<string, string | number | boolean | null>>;
+  /**
+   * A `details` object of plain values, e.g. { healthId } on ALREADY_CREATED: the
+   * website's shared HTTP client keeps only `details` and `errors` from a problem.
+   */
+  details?: Readonly<Record<string, string | number | boolean | null>>;
   /** Response headers, e.g. Retry-After. */
   headers?: Readonly<Record<string, string>>;
   /** Keep the plain-words detail on a 5xx (it is otherwise replaced by a generic one). */
@@ -51,6 +57,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       instance: `urn:hid:request:${request.correlationId ?? 'unavailable'}`,
       correlationId: request.correlationId ?? 'unavailable', code,
       ...(domain?.errors ? { errors: domain.errors } : {}),
+      ...(domain?.problemOptions.details ? { details: { ...domain.problemOptions.details } } : {}),
       ...extensionMembers(domain),
     });
   }

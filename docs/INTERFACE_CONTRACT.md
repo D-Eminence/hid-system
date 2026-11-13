@@ -4749,7 +4749,7 @@ only after the person proves it. The email
 |---|---|---|
 | 404 | `OUTREACH_REGISTRATION_NOT_FOUND` | not visible to this session |
 | 409 | `OUTREACH_REGISTRATION_REDACTED` | the registration's details were removed |
-| 409 | `OUTREACH_HEALTH_ID_ALREADY_CREATED` | a Health ID exists for it; the body carries `"healthId": "HID-..."` |
+| 409 | `OUTREACH_HEALTH_ID_ALREADY_CREATED` | a Health ID exists for it; the body carries `"healthId": "HID-..."` and the same in `"details": { "healthId": "HID-..." }` |
 | 422 | `OUTREACH_HEALTH_ID_UNDER_18` | "Health IDs for under-18s can't be created at outreach yet. A parent or guardian can do it later in the app." |
 | 422 | `OUTREACH_HEALTH_ID_PHONE_INVALID` | the registration has a phone that is not a valid number (a phone is optional; without one the patient has none) |
 | 422 | `OUTREACH_HEALTH_ID_EMAIL_INVALID` | missing or not an email (max 254) |
