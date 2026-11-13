@@ -56,10 +56,7 @@ export interface OutreachHealthIdCreateUnclaimedResult {
 
 /** The 0119 per-registration cooldown between codes (identity.outreach_health_id_start). */
 export const OUTREACH_HEALTH_ID_RESEND_SECONDS = 60;
-/** A volunteer may ask for this many times the per-recipient budget in one window (a busy outreach). */
-const VOLUNTEER_RATE_MULTIPLIER = 6;
-/** 0120: a volunteer may create this many Health IDs with no contact in a window (an hour). */
-export const OUTREACH_HEALTH_ID_CREATIONS_PER_WINDOW = 30;
+/** 0120: the window for a volunteer's Health IDs with no contact (the limit is OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR). */
 export const OUTREACH_HEALTH_ID_CREATION_WINDOW_SECONDS = 3600;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -140,9 +137,14 @@ export class OutreachHealthIdService {
 
     const preflight = await this.database.withSystemTransaction(context.correlationId, async (client) => {
       const window = { windowSeconds: this.env.OTP_RATE_WINDOW_SECONDS, maxRequests: this.env.OTP_RATE_MAX_REQUESTS };
-      const volunteerLimited = await consumeRateLimit(client, 'account',
+      // A volunteer's codes: per window and per day (configurable for a busy
+      // outreach), on top of the per-person and per-email limits.
+      const volunteerWindowLimited = await consumeRateLimit(client, 'account',
         this.hmac('outreach-health-id-volunteer', context.actor.accountId),
-        { ...window, maxRequests: window.maxRequests * VOLUNTEER_RATE_MULTIPLIER });
+        { ...window, maxRequests: this.env.OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX });
+      const volunteerDayLimited = await consumeRateLimit(client, 'account',
+        this.hmac('outreach-health-id-volunteer-day', context.actor.accountId),
+        { windowSeconds: 24 * 60 * 60, maxRequests: this.env.OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX });
       const recipientLimited = await consumeRateLimit(client, 'recipient',
         this.hmac('outreach-health-id-recipient', email), window);
       const ready = (await client.query<{ ready: boolean }>(
@@ -152,7 +154,7 @@ export class OutreachHealthIdService {
       // Every form a patient's phone may be stored in (a legacy +2340... too).
       const phoneBound = phone ? await this.contactBound(client, 'phone',
         patientPhoneStoredForms(phone).map((form) => createContactLookupHmac('phone', form))) : false;
-      return { limited: volunteerLimited || recipientLimited, ready, phoneBound };
+      return { limited: volunteerWindowLimited || recipientLimited, volunteerDayLimited, ready, phoneBound };
     });
     if (preflight.limited) {
       // The short per-volunteer / per-email windows (not the registration's
@@ -162,6 +164,9 @@ export class OutreachHealthIdService {
       throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES',
         `Too many codes were sent just now. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, undefined,
         { extensions: { retryAfterSeconds: seconds } });
+    }
+    if (preflight.volunteerDayLimited) {
+      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.volunteerDaily);
     }
     if (!preflight.ready) throw this.unavailable();
     if (preflight.phoneBound) throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
@@ -278,7 +283,7 @@ export class OutreachHealthIdService {
    * The claim HMAC is keyed with the
    * OTP key and stored with its version (OTP_HMAC_KEY_VERSION), which the
    * claim flow verifies with. A volunteer may create at most
-   * OUTREACH_HEALTH_ID_CREATIONS_PER_WINDOW in a window.
+   * OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR (150 by default) in an hour.
    */
   async createUnclaimed(input: { caseId: string }, context: DataAccessContext)
     : Promise<OutreachHealthIdCreateUnclaimedResult> {
@@ -293,7 +298,7 @@ export class OutreachHealthIdService {
       const bucket = this.hmac('outreach-health-id-create-volunteer', context.actor.accountId);
       const limited = await consumeRateLimit(client, 'account', bucket, {
         windowSeconds: OUTREACH_HEALTH_ID_CREATION_WINDOW_SECONDS,
-        maxRequests: OUTREACH_HEALTH_ID_CREATIONS_PER_WINDOW });
+        maxRequests: this.env.OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR });
       if (limited) {
         const blockedUntil = (await client.query<{ blocked_until: Date | null }>(
           'select blocked_until from auth.otp_rate_limits where scope = $1 and bucket_hmac = $2',
