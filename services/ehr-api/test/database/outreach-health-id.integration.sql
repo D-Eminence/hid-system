@@ -354,6 +354,21 @@ select pg_temp.idrt('5k another email creates it', '6c0a0000-0000-4000-8000-0000
 select pg_temp.idrt('5l with the name cleaned as sign-up allows', 'created/HID-RTE6C2',
   pg_temp.confirm_sql(2, '6c0a0000-0000-4000-8000-000000000022', repeat('e', 64), 'bola.two@example.invalid',
     'HID-RTE6C2', repeat('2', 64)), true);
+select pg_temp.hi_case('5n a name with nothing printable is refused', '23514: OUTREACH_HEALTH_ID_NAME_INVALID', session_user::text,
+  null, null, null, null, format($d$do $x$ begin
+    set local session_replication_role = replica;
+    update outreach.registration_cases set full_name = E'\x07\x08' where id = '6c080000-0000-4000-8000-000000000003';
+    set local session_replication_role = origin;
+    update identity.outreach_health_id_challenges set expires_at = clock_timestamp() + interval '5 minutes',
+      invalidated_at = null, invalidation_reason = null, failed_attempts = 0 where id = '6c0a0000-0000-4000-8000-000000000035';
+    perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
+      set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
+      set_config('app.membership_id', '6c030000-0000-4000-8000-000000000001', true),
+      set_config('app.purpose_of_use', 'direct-care', true);
+    set local role hid_identity_api_runtime;
+    perform %s;
+  end $x$$d$, replace(pg_temp.confirm_sql(3, '6c0a0000-0000-4000-8000-000000000035', repeat('e', 64), 'ade.three@example.invalid',
+    'HID-RTE6C3', repeat('3', 64)), $r$select concat_ws('/', outcome, hid_code) from$r$, 'outcome from')), false, 'statement');
 select pg_temp.hi_case('5m the names', 'Bola/Staff Two/Bola Staff Two', session_user::text, null, null, null, null,
   $s$select concat_ws('/', first_name, last_name, full_name) from identity.patients where hid_code = 'HID-RTE6C2'$s$);
 

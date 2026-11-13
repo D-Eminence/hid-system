@@ -228,6 +228,7 @@ describe('OutreachHealthIdService (0119)', () => {
       ['OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', 429],
       ['OUTREACH_HEALTH_ID_REQUEST_USED', '55000', 409],
       ['OUTREACH_HEALTH_ID_PHONE_TAKEN', '23505', 409], ['OUTREACH_HEALTH_ID_EMAIL_INVALID', '22023', 422],
+      ['OUTREACH_HEALTH_ID_NAME_INVALID', '23514', 422],
     ])('maps the database refusal %s (%s) to %d', async (message, sqlstate, status) => {
       startResult = () => { throw pgError(message, sqlstate); };
       expect(await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context)))

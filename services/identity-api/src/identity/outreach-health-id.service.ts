@@ -58,6 +58,7 @@ const MESSAGES = {
   suspended: 'This outreach group has been paused by Health ID. Contact Health ID support.',
   alreadyCreated: 'A Health ID was already created for this person.',
   under18: "Health IDs for under-18s can't be created at outreach yet. A parent or guardian can do it later in the app.",
+  nameInvalid: "The person's name on this registration can't be used for a Health ID. Check the name and register them again.",
   noPhone: "Add the person's phone number to create a Health ID.",
   phoneInvalid: "The person's phone number isn't a valid number, so a Health ID can't be created with it.",
   emailInvalid: 'Enter a valid email address.',
@@ -254,6 +255,9 @@ export class OutreachHealthIdService {
       return this.alreadyCreated(typeof detail === 'string' ? detail : null);
     }
     if (has('OUTREACH_HEALTH_ID_UNDER_18')) return new DomainProblem(422, 'OUTREACH_HEALTH_ID_UNDER_18', MESSAGES.under18);
+    if (has('OUTREACH_HEALTH_ID_NAME_INVALID')) {
+      return new DomainProblem(422, 'OUTREACH_HEALTH_ID_NAME_INVALID', MESSAGES.nameInvalid);
+    }
     if (has('OUTREACH_HEALTH_ID_NO_PHONE')) return new DomainProblem(422, 'OUTREACH_HEALTH_ID_NO_PHONE', MESSAGES.noPhone);
     if (has('OUTREACH_HEALTH_ID_EMAIL_INVALID')) {
       return new DomainProblem(422, 'OUTREACH_HEALTH_ID_EMAIL_INVALID', MESSAGES.emailInvalid);

@@ -60,6 +60,14 @@ begin
      or to_regprocedure('identity.sealed_demo_facility(uuid)') is null then
     raise exception using errcode = '55000', message = '0119: a prerequisite object is missing (0115, 0116, 0118, 0098)';
   end if;
+  -- The commands run as the owner of identity.patients and write these.
+  if exists (select 1 from unnest(array['auth.accounts', 'identity.patients', 'identity.patient_identifiers',
+               'identity.patient_assurance_states', 'audit.events']) as target(name)
+             where not has_table_privilege((select relowner from pg_class where oid = 'identity.patients'::regclass),
+               target.name, 'INSERT')) then
+    raise exception using errcode = '55000', message =
+      '0119: the owner of identity.patients cannot insert into the account, patient or audit tables';
+  end if;
   if to_regclass('identity.outreach_health_id_challenges') is not null then
     raise exception using errcode = '55000', message = '0119: already applied';
   end if;
@@ -407,6 +415,9 @@ begin
   -- collapsed, each name at most 80 characters (0093).
   clean_name := left(btrim(regexp_replace(regexp_replace(registration.full_name, '[[:cntrl:]]', ' ', 'g'),
     '[[:space:]]+', ' ', 'g')), 200);
+  if clean_name = '' then
+    raise exception using errcode = '23514', message = 'OUTREACH_HEALTH_ID_NAME_INVALID';
+  end if;
   first_name_value := left(split_part(clean_name, ' ', 1), 80);
   last_name_value := left(coalesce(nullif(btrim(substr(clean_name, length(split_part(clean_name, ' ', 1)) + 1)), ''),
     first_name_value), 80);
@@ -447,7 +458,7 @@ end
 $$;
 
 comment on function identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char) is
-  '0119: checks an outreach Health ID code and, when right, creates the account (no password, pending_reset, email verified), the patient (the registration''s name, sex and phone; the verified email; no date of birth), its Health ID identifier and CONTACT_VERIFIED assurance, the registration''s Health ID record and one audit row (ids only). Answers an outcome (created, replayed, invalid, expired, too_many_tries) so that a failed attempt is counted; raises the refusals of identity.outreach_health_id_registration, 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED / _EMAIL_TAKEN / _PHONE_TAKEN, 23514 _UNDER_18. The phone is optional: without one on the registration, the patient has none and the duplicate check rests on the email.';
+  '0119: checks an outreach Health ID code and, when right, creates the account (no password, pending_reset, email verified), the patient (the registration''s name, sex and phone; the verified email; no date of birth), its Health ID identifier and CONTACT_VERIFIED assurance, the registration''s Health ID record and one audit row (ids only). Answers an outcome (created, replayed, invalid, expired, too_many_tries) so that a failed attempt is counted; raises the refusals of identity.outreach_health_id_registration, 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED / _EMAIL_TAKEN / _PHONE_TAKEN, 23514 _UNDER_18 / _NAME_INVALID (a name with nothing printable). The phone is optional: without one on the registration, the patient has none and the duplicate check rests on the email.';
 
 -- 5. For outreach-api: the Health IDs created for registrations the session can see.
 create function identity.outreach_registration_health_ids_for(requested_case_ids uuid[])
@@ -479,9 +490,9 @@ declare
   owner_name name := (select pg_get_userbyid(relowner) from pg_class where oid = 'identity.patients'::regclass);
 begin
   if owner_name <> current_user then
-    if not pg_has_role(current_user, owner_name, 'SET') then
+    if not (pg_has_role(current_user, owner_name, 'USAGE') and pg_has_role(current_user, owner_name, 'SET')) then
       raise exception using errcode = '42501', message = format(
-        '0119: the applier (%s) must be able to SET ROLE to the owner of identity.patients (%s)', current_user, owner_name);
+        '0119: the applier (%s) must INHERIT and SET ROLE to the owner of identity.patients (%s)', current_user, owner_name);
     end if;
     execute format('alter table identity.outreach_health_id_challenges owner to %I', owner_name);
     execute format('alter table identity.outreach_registration_health_ids owner to %I', owner_name);
