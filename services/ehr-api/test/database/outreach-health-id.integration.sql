@@ -638,7 +638,7 @@ select pg_temp.hi_case('7w a redacted registration''s claim loses its phone, kee
           and claim.contact_key_version is null, claim.code_hmac = repeat('f', 64), claim.invalidated_at is not null)
        from identity.outreach_health_id_claims claim
       where claim.registration_case_id = '6c080000-0000-4000-8000-000000000009'$s$);
-select pg_temp.hi_case('7x no runtime role can run the claim scrub or its trigger function', 'false/false', session_user::text, null, null, null, null,
+select pg_temp.hi_case('7x no runtime role can run the claim scrub or its trigger function', 'f/f', session_user::text, null, null, null, null,
   $s$select concat_ws('/', bool_or(has_function_privilege(role_row.oid, 'identity.outreach_health_id_scrub_claims(integer)', 'EXECUTE')),
        bool_or(has_function_privilege(role_row.oid, 'identity.outreach_health_id_claim_redacted_case()', 'EXECUTE')))
        from pg_roles role_row where role_row.rolname like 'hid\_%'
@@ -648,10 +648,11 @@ select pg_temp.hi_case('7x no runtime role can run the claim scrub or its trigge
 update identity.outreach_health_id_claims set phone_e164_ciphertext = decode(repeat('cd', 40), 'hex'),
   phone_lookup_hmac = repeat('6', 64), contact_key_version = 'contact-v1'
  where registration_case_id = '6c080000-0000-4000-8000-000000000009';
-select pg_temp.hi_case('7y the scrub removes the phone of a redacted registration''s claim', '1/t', session_user::text,
-  null, null, null, null,
-  $s$select identity.outreach_health_id_scrub_claims(10) || '/' || (select (phone_lookup_hmac is null)::text::char
-       from identity.outreach_health_id_claims where registration_case_id = '6c080000-0000-4000-8000-000000000009')$s$);
+select pg_temp.hi_case('7y the scrub reaches the redacted registration''s claim', '1', session_user::text,
+  null, null, null, null, $s$select identity.outreach_health_id_scrub_claims(10)::text$s$, true);
+select pg_temp.hi_case('7y2 and removes its phone', 't', session_user::text, null, null, null, null,
+  $s$select (phone_lookup_hmac is null and phone_e164_ciphertext is null)::text::char
+       from identity.outreach_health_id_claims where registration_case_id = '6c080000-0000-4000-8000-000000000009'$s$);
 -- For the sweep (6k3): an expired claim that still holds a phone.
 update identity.outreach_health_id_claims set phone_e164_ciphertext = decode(repeat('cd', 40), 'hex'),
   phone_lookup_hmac = repeat('6', 64), contact_key_version = 'contact-v1'
