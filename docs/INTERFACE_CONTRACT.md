@@ -4707,8 +4707,28 @@ answers 204. The website builds the CSV, PDF, Word or Excel file itself from the
 list and case reads and then calls this once per export. It writes one audit row,
 `outreach.registration.exported` (resource type `outreach-registration-export`,
 the campaign as the resource when given), with `{ format, count, campaignId }` only,
-never a registration's contents. A campaign that is not this facility's answers 404
-`OUTREACH_CAMPAIGN_NOT_FOUND`; a wrong body answers 400 `VALIDATION_FAILED`.
+never a registration's contents. A campaign that is not this facility's, or that the
+session is not a member of (0045), answers 404 `OUTREACH_CAMPAIGN_NOT_FOUND`; a wrong
+body answers 400 `VALIDATION_FAILED`.
+
+### 48.y Paging the registration list (no migration)
+
+`GET /outreach/registration-cases` takes optional query parameters:
+
+- `campaignId` (uuid): only that campaign's registrations;
+- `limit` (1-500, default 100): the page size;
+- `before` (opaque): the `X-Next-Cursor` header of the previous page.
+
+It answers the same array as before, newest first (`created_at`, then `id`), still only
+registrations the session can see (the facility and campaign membership, 0045). When more
+rows exist, the response carries `X-Next-Cursor` (exposed to the browser by CORS); pass it as
+`before` for the next page, and stop when the header is absent. Without parameters the
+answer is exactly as before: the newest 100. A cursor that is not one the API gave answers
+400 `OUTREACH_LIST_CURSOR_INVALID`; a bad `limit` or `campaignId` answers 400
+`VALIDATION_FAILED`. An export of a large outreach should page through the whole list.
+
+NUL characters are removed from the name, phone, notes, area and guardian name on
+registration create (Postgres text cannot hold them); nothing else about those values changes.
 
 ## 44. Allergies and the allergy check at prescribing (0117)
 

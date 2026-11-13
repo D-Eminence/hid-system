@@ -2,6 +2,10 @@ import { Transform, Type } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, MinLength,
   ValidateNested } from 'class-validator';
 
+/** NUL characters removed (Postgres text cannot hold them); nothing else changed. */
+export const withoutNul = ({ value }: { value: unknown }) =>
+  typeof value === 'string' ? value.replace(/\u0000/g, '') : value;
+
 /**
  * Trimmed, inner whitespace collapsed, NUL characters (which Postgres text
  * cannot hold) removed; an empty text is treated as not given.

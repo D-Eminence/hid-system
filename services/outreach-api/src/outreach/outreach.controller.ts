@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
@@ -10,6 +10,7 @@ import { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import { LinkExistingPatientDto } from './dto/link-existing-patient.dto';
 import { ExportRegistrationsDto } from './dto/export-registrations.dto';
+import { ListRegistrationCasesQueryDto } from './dto/list-registration-cases.dto';
 import { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
 import { OutreachService } from './outreach.service';
 
@@ -104,7 +105,13 @@ export class OutreachController {
 
   @Get()
   @RequirePermissions('outreach.registration.read')
-  list(@Req() request: HidRequest) { return this.outreach.list(requireRequestContext(request)); }
+  async list(@Query() query: ListRegistrationCasesQueryDto, @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response) {
+    const page = await this.outreach.list(requireRequestContext(request),
+      { campaignId: query.campaignId, limit: query.limit, before: query.before });
+    if (page.nextCursor) response.setHeader('X-Next-Cursor', page.nextCursor);
+    return [...page];
+  }
 
   @Get(':caseId')
   @RequirePermissions('outreach.registration.read')

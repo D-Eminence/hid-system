@@ -9,7 +9,8 @@ import { CreateRegistrationCaseDto } from './dto/create-registration-case.dto';
 import { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
 import { ExportRegistrationsDto } from './dto/export-registrations.dto';
 import { ifMatchVersion, OutreachController } from './outreach.controller';
-import { OutreachService } from './outreach.service';
+import { decodeRegistrationCursor, encodeRegistrationCursor, OutreachService } from './outreach.service';
+import { ListRegistrationCasesQueryDto } from './dto/list-registration-cases.dto';
 import { assertScreeningPlausible, normalizeScreening, screeningRefusal } from './registration-screening';
 
 // Synthetic identifiers and values only.
@@ -406,6 +407,18 @@ describe('Recording an export of the registration list (0118 follow-up)', () => 
     expect(recordExportWithClient).not.toHaveBeenCalled();
   });
 
+  it('refuses a campaign the session is not a member of (404, the 0045 membership check) without an audit row', async () => {
+    const query = jest.fn(async (sql: string) => (sql.includes('outreach.registration_campaign_member(id, facility_id)')
+      ? { rows: [], rowCount: 0 } : { rows: [{ '?column?': 1 }], rowCount: 1 }));
+    const recordExportWithClient = jest.fn();
+    const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown) =>
+      operation({ query })) };
+    const outreach = new OutreachService(database as never, { recordExportWithClient } as never, identity as never);
+    await expect(outreach.recordExport({ format: 'csv', count: 2, campaignId: ids.case }, context))
+      .rejects.toMatchObject({ status: 404, code: 'OUTREACH_CAMPAIGN_NOT_FOUND' });
+    expect(recordExportWithClient).not.toHaveBeenCalled();
+  });
+
   it('is a 204 route needing outreach.registration.read', async () => {
     const outreach = { recordExport: jest.fn(async () => undefined) };
     const controller = new OutreachController(outreach as never);
@@ -416,5 +429,103 @@ describe('Recording an export of the registration list (0118 follow-up)', () => 
       expect.objectContaining({ facilityId: ids.facility }));
     expect(Reflect.getMetadata('__httpCode__', OutreachController.prototype.recordExport)).toBe(204);
     expect(Reflect.getMetadata('path', OutreachController.prototype.recordExport)).toBe('/exports');
+  });
+});
+
+describe('Outreach registration list paging', () => {
+  beforeEach(() => jest.clearAllMocks());
+  const row = (n: number) => ({ id: `123e4567-e89b-42d3-a456-4266141740${String(n).padStart(2, '0')}`,
+    facility_id: ids.facility, campaign_id: null, local_command_id: ids.command,
+    temporary_patient_id: 'tmp_123e4567-e89b-42d3-a456-426614174007', status: 'identity_resolution_pending',
+    full_name: 'Ada Person', sex: 'female', age_years: 32, phone: null, operational_notes: null, area: null,
+    has_screening: false, resolved_patient_id: null, resolution_kind: null, row_version: '1',
+    created_at: new Date(), updated_at: new Date(), cursor_micros: String(1763000000000000 - n) });
+
+  it('without options answers the newest 100 as before, the campaign membership filter kept, no cursor when no more', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [row(1), row(2)] });
+    const page = await service(query).outreach.list(context);
+    expect(page).toHaveLength(2);
+    expect(page.nextCursor).toBeUndefined();
+    expect(page[0]).not.toHaveProperty('cursor_micros');
+    const [sql, params] = query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('outreach.registration_campaign_member(campaign_id, facility_id)');
+    expect(sql).toContain('order by created_at desc,id desc limit $5');
+    expect(params).toEqual([ids.facility, null, null, null, 101]);
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context,
+      'outreach.registration-case.list', ids.facility);
+  });
+
+  it('answers exactly limit rows and a cursor of the last when one more exists', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [row(1), row(2), row(3)] });
+    const page = await service(query).outreach.list(context, { limit: 2, campaignId: ids.case });
+    expect(page.map((item) => item.id)).toEqual([row(1).id, row(2).id]);
+    expect(page.nextCursor).toBe(encodeRegistrationCursor(row(2).cursor_micros, row(2).id));
+    expect((query.mock.calls[0] as [string, unknown[]])[1]).toEqual([ids.facility, ids.case, null, null, 3]);
+    const next = jest.fn().mockResolvedValueOnce({ rows: [row(3)] });
+    const second = await service(next).outreach.list(context, { limit: 2, before: page.nextCursor });
+    expect(second.nextCursor).toBeUndefined();
+    expect((next.mock.calls[0] as [string, unknown[]])[1]).toEqual([ids.facility, null, row(2).cursor_micros, row(2).id, 3]);
+  });
+
+  it('a page of exactly limit rows with none after has no cursor', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [row(1), row(2)] });
+    expect((await service(query).outreach.list(context, { limit: 2 })).nextCursor).toBeUndefined();
+  });
+
+  it('refuses a cursor that is not one of ours (400) before reading', async () => {
+    for (const bad of ['', 'not base64!', Buffer.from('12.not-a-uuid').toString('base64url'),
+      Buffer.from(`99999999999999999999.${ids.case}`).toString('base64url'),
+      Buffer.from(`9223372036854775807.${ids.case}`).toString('base64url'),
+      Buffer.from(`9007199254740992.${ids.case}`).toString('base64url'), 'x'.repeat(97)]) {
+      expect(() => decodeRegistrationCursor(bad)).toThrow(expect.objectContaining({ status: 400,
+        code: 'OUTREACH_LIST_CURSOR_INVALID' }));
+    }
+    expect(decodeRegistrationCursor(encodeRegistrationCursor('9007199254740991', ids.case)).micros).toBe('9007199254740991');
+    expect(decodeRegistrationCursor(encodeRegistrationCursor('1763000000123456', ids.case.toUpperCase())))
+      .toEqual({ micros: '1763000000123456', id: ids.case });
+    const query = jest.fn();
+    await expect(service(query).outreach.list(context, { before: 'bad!' })).rejects.toMatchObject({ status: 400 });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('validates the query: limit 1-500 whole, campaignId a UUID', async () => {
+    const check = async (value: Record<string, unknown>) => (await validate(
+      plainToInstance(ListRegistrationCasesQueryDto, value), { whitelist: true, forbidNonWhitelisted: true }))
+      .map((error) => error.property).sort();
+    expect(await check({})).toEqual([]);
+    expect(await check({ limit: '500', campaignId: ids.case, before: 'abc' })).toEqual([]);
+    expect(await check({ limit: '0' })).toEqual(['limit']);
+    expect(await check({ limit: '501' })).toEqual(['limit']);
+    expect(await check({ limit: '2.5' })).toEqual(['limit']);
+    expect(await check({ campaignId: 'x' })).toEqual(['campaignId']);
+    expect(await check({ other: '1' })).toEqual(['other']);
+  });
+
+  it('sets X-Next-Cursor on the response only when there is a next page', async () => {
+    const page: { id: string }[] & { nextCursor?: string } = Object.assign([{ id: ids.case }], { nextCursor: 'abc' });
+    const outreach = { list: jest.fn(async (): Promise<{ id: string }[] & { nextCursor?: string }> => page) };
+    const controller = new OutreachController(outreach as never);
+    const request = { header: () => undefined, actor: context.actor, facilityId: ids.facility,
+      membershipId: context.membershipId, correlationId: 'c', purposeOfUse: 'direct-care' } as unknown as HidRequest;
+    const response = { setHeader: jest.fn() };
+    await expect(controller.list({ limit: 1 }, request, response as never)).resolves.toEqual([{ id: ids.case }]);
+    expect(response.setHeader).toHaveBeenCalledWith('X-Next-Cursor', 'abc');
+    outreach.list.mockResolvedValueOnce([]);
+    const quiet = { setHeader: jest.fn() };
+    await controller.list({}, request, quiet as never);
+    expect(quiet.setHeader).not.toHaveBeenCalled();
+  });
+});
+
+describe('NUL characters on registration create', () => {
+  it('are removed from the name, phone, notes and guardian name, and nothing else changes', async () => {
+    const dto = plainToInstance(CreateRegistrationCaseDto, { localCommandId: '123e4567-e89b-42d3-a456-426614174000',
+      temporaryPatientId: 'tmp_123e4567-e89b-42d3-a456-426614174007', fullName: ' Ada\u0000 Person ', sex: 'female',
+      ageYears: 30, phone: '0801\u00002345678', operationalNotes: 'Che\u0000cked  BP',
+      consent: { consentTextVersion: 'notice-2026-11-01', language: 'en', method: 'verbal', guardianName: ' Mama\u0000 P ' } });
+    expect(dto.fullName).toBe(' Ada Person ');
+    expect(dto.operationalNotes).toBe('Checked  BP');
+    expect(dto.phone).toBe(plainToInstance(CreateRegistrationCaseDto, { phone: '08012345678' }).phone);
+    expect((dto as unknown as { consent: { guardianName: string } }).consent.guardianName).toBe('Mama P');
   });
 });
