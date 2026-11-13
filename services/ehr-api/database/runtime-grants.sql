@@ -1654,3 +1654,9 @@ grant select, insert, update on outreach.registration_screenings to hid_outreach
 revoke all on outreach.registration_screenings from public;
 revoke all on function outreach.validate_registration_screening(), outreach.registration_case_area_guard(),
   outreach.registration_case_screening_redact() from public;
+
+-- Allergies a facility records and allergy-warning acknowledgements (0117),
+-- as that migration grants them (its section 4). Forced RLS on both tables;
+-- no DELETE (rows are never deleted).
+grant select, insert, update on ehr.recorded_allergies to hid_ehr_runtime, hid_schema_test_runtime;
+grant select, insert on ehr.prescription_allergy_acknowledgements to hid_ehr_runtime, hid_schema_test_runtime;

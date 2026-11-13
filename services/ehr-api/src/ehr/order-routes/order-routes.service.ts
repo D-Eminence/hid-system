@@ -8,6 +8,9 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { checkPrescriptionAllergies, recordAllergyAcknowledgement,
+  requireAllergyReadAccess } from '../allergies/prescription-allergy-gate';
+import type { AllergyMatch } from '../allergies/allergy-match';
 import type { SendOrderRouteDto, WithdrawOrderRouteDto } from './dto/order-route.dto';
 import {
   orderRouteSummary,
@@ -62,6 +65,9 @@ const ATTESTATION_KIND: Readonly<Record<OrderRouteKind, string>> = {
   prescription: 'prescription',
 };
 
+/** The prescription statuses ehr.send_order_route accepts (0098; any other is ORDER_ROUTE_ORDER_NOT_ELIGIBLE). */
+const SENDABLE_PRESCRIPTION_STATUSES: ReadonlySet<string> = new Set(['draft', 'active']);
+
 /**
  * The ordering facility's side of cross-facility orders (P4c, SPEC-FINAL
  * §9.1, §10.1) and the patient's list and Stop (§5).
@@ -115,11 +121,18 @@ export class OrderRoutesService {
         patientAgreement: 'clinician_attested',
       },
     }, async (client) => {
+      const allergyMatches = kind === 'prescription'
+        ? await this.checkSendablePrescriptionAllergies(client, context, patientId, encounterId, orderId, input)
+        : [];
       const row = await this.single<SendRow>(client,
         'select * from ehr.send_order_route($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
         [routeId, kind, patientId, orderId, encounterId, input.expectedRowVersion, input.receivingFacilityId,
           input.attestationTextVersion, idempotencyKey, digest], 'ORDER_NOT_FOUND');
       const replayed = row.replayed === true;
+      const allergyOverride = allergyMatches.length > 0 && input.allergyAcknowledgement && !replayed
+        ? await recordAllergyAcknowledgement(client, context, patientId, orderId, 'send', allergyMatches,
+          input.allergyAcknowledgement)
+        : {};
       // C1 answers only these columns. A new route is `sent` and was just
       // checked eligible (H4), so its receiver is available; for a replay the
       // stored route is answered as it is and its receiver's availability now
@@ -143,7 +156,7 @@ export class OrderRoutesService {
           replayed,
         },
         resourceId: row.route_id,
-        details: { routeId: row.route_id, replayed },
+        details: { routeId: row.route_id, replayed, ...allergyOverride },
       };
     // SERIALIZABLE (the review of 0100): the send locks the order only FOR NO KEY UPDATE and
     // reads the Lab or Pharmacy work items, so a same-facility acceptance of the same order
@@ -151,6 +164,36 @@ export class OrderRoutesService {
     // live route and a dispensable work item. DatabaseService runs a send PostgreSQL cancels
     // again; ehr.send_order_route replays its own idempotency key.
     }, undefined, { isolationLevel: 'SERIALIZABLE' });
+  }
+
+  /**
+   * 0117: every prescription the send can accept is checked against the
+   * allergies before it leaves for another facility's pharmacy: a draft (the
+   * send makes it active, as Activate does) and an active one (an allergy
+   * may have been recorded since it became active; the review of PR 218).
+   * A match already covered by a reason stored for this prescription needs
+   * none. Any other status, or a prescription not found, is not checked, so
+   * the send's own refusal answers (ORDER_ROUTE_ORDER_NOT_ELIGIBLE, 404).
+   * Read access comes first (403 CONSENT_REQUIRED without it): the read
+   * below runs under RLS, which hides the prescription from a facility that
+   * may write but not read the patient's records, and ehr.send_order_route
+   * checks only write_records (whether its own read then finds the order
+   * depends on whether its owner bypasses RLS), so "not found" here must
+   * never skip the check.
+   */
+  private async checkSendablePrescriptionAllergies(client: PoolClient, context: DataAccessContext, patientId: string,
+    encounterId: string, prescriptionId: string, input: SendOrderRouteDto): Promise<AllergyMatch[]> {
+    await requireAllergyReadAccess(client, context, patientId);
+    const result = await client.query<{ status: string; medicationDisplay: string; medicationCode: string | null }>(
+      `select status, medication_display as "medicationDisplay", medication_code as "medicationCode"
+         from ehr.prescriptions where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4`,
+      [prescriptionId, encounterId, patientId, context.facilityId],
+    );
+    const prescription = result.rows[0];
+    if (!prescription || !SENDABLE_PRESCRIPTION_STATUSES.has(prescription.status)) return [];
+    return checkPrescriptionAllergies(client, context, patientId,
+      { display: prescription.medicationDisplay, code: prescription.medicationCode }, input.allergyAcknowledgement,
+      prescriptionId);
   }
 
   /** The order's routes, newest first, with the attestation, events and what came back (C3). */

@@ -114,7 +114,7 @@ export class ClinicalRepository {
     operation: string,
     requestSha256: string,
     resourceType: string,
-    create: () => Promise<{ value: Value; id: string }>,
+    create: () => Promise<{ value: Value; id: string; details?: Readonly<Record<string, unknown>> }>,
     load: (id: string) => Promise<Value | undefined>,
   ): Promise<OperationResult<Value>> {
     const inserted = await client.query<{ id: string }>(
@@ -164,7 +164,7 @@ export class ClinicalRepository {
        where id = $3`,
       [resourceType, created.id, inserted.rows[0]?.id],
     );
-    return { value: created.value, resourceId: created.id, details: { idempotentReplay: false } };
+    return { value: created.value, resourceId: created.id, details: { ...created.details, idempotentReplay: false } };
   }
 
   async setChangeReason(client: PoolClient, reason: string): Promise<void> {
