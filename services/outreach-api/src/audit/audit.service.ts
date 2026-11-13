@@ -16,4 +16,18 @@ export class AuditService {
       context.actor.facility?.organizationId ?? null, context.facilityId, patientId ?? null,
       action, registrationCaseId]);
   }
+
+  /** An export of the registration list: the format, the count and the campaign, never a value. */
+  async recordExportWithClient(client: PoolClient, context: DataAccessContext,
+    details: { format: string; count: number; campaignId: string | null }): Promise<void> {
+    await client.query(`insert into audit.events (
+      correlation_id,actor_type,actor_subject,actor_account_id,actor_membership_id,
+      organization_id,facility_id,action,resource_type,resource_id,outcome,
+      purpose_of_use,details,provenance,source_system
+    ) values ($1,'staff',$2,$3,$4,$5,$6,'outreach.registration.exported','outreach-registration-export',$7,
+      'success','direct-care',$8::jsonb,'application','outreach-api')`,
+    [context.correlationId, context.actor.subject, context.actor.accountId, context.membershipId,
+      context.actor.facility?.organizationId ?? null, context.facilityId, details.campaignId,
+      JSON.stringify(details)]);
+  }
 }

@@ -62,6 +62,15 @@ function databaseState() {
         body: rest.slice(open.index + open[0].length, close),
       });
     }
+    // A policy created inside a dollar-quoted body (0118's DO block, which
+    // names its role with format()): its expression names functions too.
+    for (const [body] of raw.matchAll(/\$([a-z_]*)\$[\s\S]*?\$\1\$/gi)) {
+      for (const policy of body.matchAll(/\bcreate\s+policy\s+(\S+)\s+on\s+"?(outreach\.[a-z_][a-z0-9_]*)([^;]*)/gi)) {
+        for (const name of functionNames(policy[3]!)) {
+          policyFunctions.set(name, (policyFunctions.get(name) ?? new Set()).add(`policy ${policy[1]} on ${policy[2]}`));
+        }
+      }
+    }
     for (const statement of topLevel(raw).split(';')) {
       const policy = /^\s*create\s+policy\s+(\S+)\s+on\s+(outreach\.[a-z_][a-z0-9_]*)([\s\S]*)$/i.exec(statement);
       if (policy) {
@@ -152,7 +161,8 @@ function invokerReach(state: ReturnType<typeof databaseState>) {
 
 /**
  * SQL forms the replay above does not follow. None occurs today; if one is
- * added, extend the replay instead of trusting a pass.
+ * added, extend the replay instead of trusting a pass. (0118 creates one
+ * Outreach policy inside a DO block; the replay reads it.)
  */
 function unfollowedForms() {
   const found: string[] = [];
@@ -162,7 +172,11 @@ function unfollowedForms() {
     if (/\balter\s+policy\s+\S+\s+on\s+"?outreach"?\./i.test(raw)) found.push(`${name}: ALTER POLICY on Outreach`);
     if (/\balter\s+function\b[^;]*\bsecurity\s+(?:invoker|definer)\b/i.test(raw)) found.push(`${name}: ALTER FUNCTION ... SECURITY`);
     for (const [body] of raw.matchAll(/\$([a-z_]*)\$[\s\S]*?\$\1\$/gi)) {
-      if (/\bcreate\s+policy\s+\S+\s+on\s+"?outreach"?\./i.test(body)) found.push(`${name}: Outreach policy in a dollar-quoted body`);
+      // A policy in a dollar-quoted body is read (above) only in its plain form.
+      if (/\bcreate\s+policy\s+\S+\s+on\s+"?outreach"?\./i.test(body)
+        && !/\bcreate\s+policy\s+\S+\s+on\s+outreach\.[a-z_][a-z0-9_]*\s/i.test(body)) {
+        found.push(`${name}: Outreach policy in a dollar-quoted body`);
+      }
     }
   }
   return found;

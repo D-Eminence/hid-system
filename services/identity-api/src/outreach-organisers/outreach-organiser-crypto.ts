@@ -3,7 +3,19 @@ import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { normalizePatientPhone } from '../identity/contact-lookup';
 
-/** The organiser terms the owner approved (owner decision 4 of 11 Nov 2026). */
+/**
+ * The organiser terms versions accepted (owner decision 4 of 11 Nov 2026; 0118
+ * adds 2026-11-14 beside 2026-11-01, which the live website sends until the
+ * new terms ship). The database's activation commands accept the same two.
+ */
+export const OUTREACH_ORGANISER_TERMS_VERSIONS = ['2026-11-01', '2026-11-14'] as const;
+
+/**
+ * The organiser terms version the website is told to show (availability).
+ * Stays 2026-11-01 in this release: the live website compares it with its own
+ * version and would lock sign-up behind a reload screen on a mismatch. Move it
+ * to 2026-11-14 only in a release after the website with that text is live.
+ */
 export const OUTREACH_ORGANISER_TERMS_VERSION = '2026-11-01';
 
 /** The phone refusal, in plain English. */

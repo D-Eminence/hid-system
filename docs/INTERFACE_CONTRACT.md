@@ -3899,6 +3899,9 @@ x-hid-service-authorization: Bearer <workload JWT, sub = IDENTITY_SUPPORT_CALLER
 
 ## 38. Outreach: registering a person into a campaign (0110)
 
+> Since 0118 a registration also takes an optional `area`, answers `area` and `hasScreening`, and
+> has a screening (vital signs, tests, medicines given, referral): see §48.
+
 Migration 0110 (`0110_outreach_campaign_registration_lock.sql`; coordinator of
 2026-11-04, "0120 first (prove it, then fix)"; first numbered 0120 and
 renumbered 0110 on 2026-11-11 so the release list stays contiguous after 0109;
@@ -3992,6 +3995,9 @@ patient's dedicated records-processing grant publishes an EHR reading as a
 draft (section 42), checked between steps 3 and 4.
 
 ## 40. Outreach campaigns: their own admins manage them (0111)
+
+> Since 0118 a registration also takes an optional `area`, answers `area` and `hasScreening`, and
+> has a screening (vital signs, tests, medicines given, referral): see §48.
 
 Decision (relayed in chat, 2026-11-11, ADR-045 option B): any staff member
 allowed to write campaigns (`outreach.campaign.write`) may create one and
@@ -4579,6 +4585,150 @@ The website's facility list says "FCT". Show "Federal Capital Territory (FCT)" a
 - The current-staff-context `facility` object does not include the profile. Use
   `GET /identity/facility-profile`.
 - The QoreID state, LGA, city and company email are not captured for pre-fill yet (plan A.5).
+
+## 48. Outreach screening (0118, provisional)
+
+Migration 0118 (`0118_outreach_screening.sql`; owner request of 2026-11-13, for the medical outreach
+of 14 November 2026; the number is a placeholder) adds a screening to each outreach registration,
+an optional area on the registration, raises the outreach-group notes limit, and accepts a second
+organiser terms version. Provisional: the shapes below were agreed with the website team and may
+still be adjusted before the migration is signed.
+
+### 48.1. Read a screening
+
+`GET /api/v1/outreach/registration-cases/:caseId/screening` (permission `outreach.registration.read`)
+
+- `200 { "screening": null }` when none was recorded.
+- `200 { "screening": Screening }` with header `ETag: "<version>"` otherwise.
+- `404 OUTREACH_REGISTRATION_NOT_FOUND` when the session cannot see the registration.
+- One audit row per read (`outreach.registration-screening.read`, resource the case id; ids only, no values).
+
+### 48.2. Save a screening (the whole screening, replaced)
+
+`PUT /api/v1/outreach/registration-cases/:caseId/screening` (permission `outreach.registration.write`)
+
+Headers: `Idempotency-Key` (required, 16-128 URL-safe characters). `If-Match: "<version>"` is omitted
+for the first save and required once a screening exists (send the version from the last read or save).
+
+Body: every field optional and nullable; an omitted field is saved as `null` (the save replaces the
+whole screening, so send every field you want kept). Unknown fields are refused.
+
+| Field | Type | Rule |
+|---|---|---|
+| `bpSystolic`, `bpDiastolic` | integer | both or neither; systolic 50-300, diastolic 20-200 and lower than systolic (mmHg) |
+| `pulseBpm` | integer | 20-250 |
+| `temperatureC` | number, 1 decimal | 30.0-45.0 |
+| `weightKg` | number, 1 decimal | 0.5-400 |
+| `heightCm` | integer | 30-250 |
+| `glucoseValue` | number, 1 decimal | 1.0-40.0 in mmol/L, 18-720 in mg/dL; needs `glucoseUnit` and `glucoseTiming` |
+| `glucoseUnit` | `'mmol/L'` \| `'mg/dL'` | with a value only |
+| `glucoseTiming` | `'fasting'` \| `'random'` | with a value only |
+| `malariaRdt` | `'positive'` \| `'negative'` \| `'not_done'` | |
+| `hearingLeft`, `hearingRight` | `'pass'` \| `'refer'` \| `'not_done'` | |
+| `mainComplaint` | string | up to 200 (trimmed; empty is null) |
+| `seenByClinician` | boolean | |
+| `clinicianName` | string | up to 100 (name or role) |
+| `outcome` | string | up to 500 (outcome or advice) |
+| `medicinesGiven` | array of `{ name, dose? }` | up to 10; name 1-100, dose up to 200; null or omitted is `[]` |
+| `referred` | boolean | |
+| `referredTo` | string | up to 200; only with `referred: true` |
+
+Answers: `201` for the first save, `200` for an update; body `{ "screening": Screening }` and
+header `ETag: "<version>"`. The first save is version 1; each update is the next version. A retry with
+the same `Idempotency-Key` and the same body answers `200` with the current screening (only the last
+save's key is kept); the same key with another body is `409 IDEMPOTENCY_CONFLICT`.
+
+`Screening`: every body field (null when absent; `medicinesGiven` `[]` when none, each item
+`{ name, dose: string | null }`) plus `caseId`, `version`, `recordedAt`, `recordedByMembershipId`
+(the first recording) and `updatedAt`.
+
+Refusals (problem+json, `code`):
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | wrong type or shape, too long, unknown field or value, more than 10 medicines, more than 1 decimal |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | no or malformed `Idempotency-Key` |
+| 404 | `OUTREACH_REGISTRATION_NOT_FOUND` | the registration is not visible to the session |
+| 409 | `OUTREACH_SCREENING_EXISTS` | no `If-Match`, but a screening exists (reload it and save over it) |
+| 409 | `IDEMPOTENCY_CONFLICT` | the key was used for another body |
+| 409 | `OUTREACH_REGISTRATION_REDACTED` | the registration was redacted |
+| 412 | `VERSION_CONFLICT` | `If-Match` is not the current version (or no screening exists yet) |
+| 422 | `OUTREACH_SCREENING_OUT_OF_RANGE` | a value outside its range; `detail` names it in plain words, e.g. "Check the blood pressure: systolic must be 50–300 mmHg." |
+| 422 | `OUTREACH_SCREENING_INCOMPLETE` | one blood pressure number without the other; a glucose value without unit and timing (or a unit or timing without a value); `referredTo` without `referred: true` |
+| 428 | `IF_MATCH_REQUIRED` | `If-Match` present but not a positive version |
+
+The service checks ranges and pairs before writing; the database checks them again (its check
+violations answer 422 `OUTREACH_SCREENING_OUT_OF_RANGE`). One audit row per save
+(`outreach.registration-screening.recorded`, ids only). The API's CORS now allows `PUT` and exposes `ETag`.
+
+### 48.3. Who can see a screening, and redaction
+
+A screening row follows its registration's row-level security: a staff session with
+`outreach.registration.read` / `.write` at the registration's facility, and only for a registration
+that session can see (a campaign's registrations to its members only, 0045). There is no delete
+route. When a registration is redacted (the retention sweep or support), its screening is deleted
+in the same transaction and its `area` is cleared.
+
+### 48.4. Registration changes
+
+- `POST /api/v1/outreach/registration-cases` takes an optional `area` (area, town or LGA; up to 100
+  characters; trimmed, inner spaces collapsed, empty treated as not given). It is set only at
+  registration and never changed.
+- `GET /api/v1/outreach/registration-cases/:caseId`, the list, and the create and link answers include
+  `area` (`null` if none) and `hasScreening` (whether a screening the session can see exists).
+- Outreach-group notes (`operationalNotes`) may be up to 1000 characters (was 280); the refusal is
+  still 422 `OUTREACH_NOTES_TOO_LONG`.
+- An area the database refuses (its length counted as Postgres does, which can differ from the
+  request check for variation selectors) answers 422 `OUTREACH_AREA_INVALID`. NUL characters are
+  removed from the area and the screening's text fields.
+
+### 48.5. Organiser terms and the registration notice
+
+- The organiser activation and "Start an outreach group" bodies accept `termsVersion` `'2026-11-01'`
+  or `'2026-11-14'` (the live website sends 2026-11-01 until the new terms ship). The availability
+  answer (`GET identity/outreach-organisers/availability`) stays `'2026-11-01'` in this release: the
+  live website compares it with its own version and would lock sign-up behind a reload screen on a
+  mismatch. It moves to `'2026-11-14'` only in a later release, after the website with that text is live.
+- The registration notice version is not pinned (only its form is checked), so
+  `outreach-notice-2026-11-14` needs no backend change.
+
+### 48.6. Client
+
+`@hid/api-client`'s `OutreachApiClient` has `getRegistrationScreening(caseId, context)` and
+`saveRegistrationScreening(caseId, input, expectedVersion | undefined, context, idempotencyKey)`
+(types `SaveOutreachRegistrationScreening`, `OutreachRegistrationScreening`), and
+`OutreachRegistrationCase` has `area` and `hasScreening` (optional in the client type, as a backend before 0118 omits them).
+
+### 48.x Recording an export (no migration)
+
+`POST /outreach/registration-cases/exports`, permission `outreach.registration.read`,
+body `{ "format": "csv" | "pdf" | "docx" | "xlsx", "count": 0-100000, "campaignId"?: uuid }`,
+answers 204. The website builds the CSV, PDF, Word or Excel file itself from the
+list and case reads and then calls this once per export. It writes one audit row,
+`outreach.registration.exported` (resource type `outreach-registration-export`,
+the campaign as the resource when given), with `{ format, count, campaignId }` only,
+never a registration's contents. A campaign that is not this facility's, or that the
+session is not a member of (0045), answers 404 `OUTREACH_CAMPAIGN_NOT_FOUND`; a wrong
+body answers 400 `VALIDATION_FAILED`.
+
+### 48.y Paging the registration list (no migration)
+
+`GET /outreach/registration-cases` takes optional query parameters:
+
+- `campaignId` (uuid): only that campaign's registrations;
+- `limit` (1-500, default 100): the page size;
+- `before` (opaque): the `X-Next-Cursor` header of the previous page.
+
+It answers the same array as before, newest first (`created_at`, then `id`), still only
+registrations the session can see (the facility and campaign membership, 0045). When more
+rows exist, the response carries `X-Next-Cursor` (exposed to the browser by CORS); pass it as
+`before` for the next page, and stop when the header is absent. Without parameters the
+answer is exactly as before: the newest 100. A cursor that is not one the API gave answers
+400 `OUTREACH_LIST_CURSOR_INVALID`; a bad `limit` or `campaignId` answers 400
+`VALIDATION_FAILED`. An export of a large outreach should page through the whole list.
+
+NUL characters are removed from the name, phone, notes, area and guardian name on
+registration create (Postgres text cannot hold them); nothing else about those values changes.
 
 ## 44. Allergies and the allergy check at prescribing (0117)
 

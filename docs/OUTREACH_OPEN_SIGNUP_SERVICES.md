@@ -3,7 +3,7 @@
 Plan PR-3 and PR-4, with the owner's decisions of 11 November 2026: no Health ID check before an organiser's
 campaigns go live (decision Q38: a new organiser may set a campaign Active at once; support can still pause a
 group, the name blocklist stays, and registrants see "Unverified organiser"), no per-organiser limits, unlinked registrations kept 1 year, joint-controller
-terms version `2026-11-01`, an existing account may start an outreach group with the same login, free for now.
+terms version `2026-11-01` (and `2026-11-14` since 0118, see INTERFACE_CONTRACT.md §48), an existing account may start an outreach group with the same login, free for now.
 The database side (migrations 0115 "outreach organisers" and 0116 "outreach retention", branch
 `wt-outreach-signup-db`) is a separate change; every rule below is enforced there too, and the calls listed at the
 end are its functions exactly. Identity and Outreach only answer earlier and in plain English.
@@ -18,7 +18,7 @@ identity-api (all under `/api/v1`):
 | `POST identity/outreach-organisers` | signed out, Turnstile `outreach-organiser-signup` | start: details, then a 6-digit code by email; sets `hid_outreach_signup` |
 | `POST identity/outreach-organisers/verify-email` | signed out, the cookie | `{ code }` (a `challengeId` is accepted and not needed) |
 | `POST identity/outreach-organisers/resend-code` | signed out, the cookie | a new code after a minute, at most 5 codes |
-| `POST identity/outreach-organisers/activate` | signed out, the cookie | `{ termsVersion: '2026-11-01', acceptTerms: true, password }`; signs the organiser in |
+| `POST identity/outreach-organisers/activate` | signed out, the cookie | `{ termsVersion: '2026-11-01' or '2026-11-14', acceptTerms: true, password }`; signs the organiser in |
 | `GET/POST identity/outreach-organisers/for-my-account` | a signed-in staff account | "Start an outreach group" with the same login |
 | `GET identity/outreach-invitations` | the organiser at the X-Facility-ID group | `{ members, invitations }` (pending invitations) |
 | `POST identity/outreach-invitations` | the organiser | `{ name, email }`: invite a helper as `outreach_volunteer`; 409 if already invited or in the team; 429 at 50 waiting, 30 made today, or after 10 undeliverable emails today |
@@ -54,7 +54,7 @@ at an outreach group. A staff session signed in or refreshed from an `outreach.`
 
 outreach-api: `CreateRegistrationCaseDto` takes `consent { textVersion, language (en|yo|ha|ig|pcm), method
 (verbal_read_aloud|self_ticked|guardian), guardianName? }`, required at an outreach group with a campaign, a
-guardian's name under 18 and notes of 280 characters at most; the consent row is written in the same SERIALIZABLE
+guardian's name under 18 and notes of 1000 characters at most (280 before 0118); the consent row is written in the same SERIALIZABLE
 transaction. Phones are normalised to E.164 (`0801...` is `+234801...`). A registration in a campaign answers
 `possibleDuplicate`. `link-existing` refuses 403 `OUTREACH_TENANT_NO_HEALTH_ID_LINK` at an outreach group. Database
 refusals answer 423 `OUTREACH_ORGANISER_SUSPENDED` and 422 for consent (`OUTREACH_CONSENT_REQUIRED`), guardian

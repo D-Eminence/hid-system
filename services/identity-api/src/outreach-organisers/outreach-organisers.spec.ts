@@ -16,10 +16,10 @@ import type { DatabaseService } from '../database/database.service';
 import { PlatformControlCommandDto } from '../admin/dto/admin-command.dto';
 import { IdentityController } from '../identity/identity.controller';
 import type { OrganizationProfileCompletionService } from '../identity/organization-profile-completion.service';
-import { ActivateOutreachOrganiserDto, StartOutreachOrganiserSignupDto } from './dto/outreach-organiser.dto';
+import { ActivateOutreachOrganiserDto, StartOutreachGroupForAccountDto, StartOutreachOrganiserSignupDto } from './dto/outreach-organiser.dto';
 import { OUTREACH_INVITATION_REFUSALS, OutreachInvitationsService } from './outreach-invitations.service';
 import { decryptOutreachPhone, domainHmac, encryptOutreachPhone, normalizeOutreachPhone, outreachKey,
-  reservedOrganiserName } from './outreach-organiser-crypto';
+  reservedOrganiserName, OUTREACH_ORGANISER_TERMS_VERSIONS } from './outreach-organiser-crypto';
 import { assertOutreachSignupOpen } from './outreach-organiser-gate';
 import { OUTREACH_SIGNUP_COOKIE, OutreachOrganiserController } from './outreach-organiser.controller';
 import { OUTREACH_SIGNUP_REFUSALS, OutreachOrganiserService } from './outreach-organiser.service';
@@ -40,6 +40,7 @@ const startInput = {
   groupName: 'Synthetic Community Volunteers', kind: 'group' as const,
   turnstileAction: 'outreach-organiser-signup' as const, turnstileToken: 'opaque-proof',
 };
+const groupDetailsForTerms = { groupName: 'Synthetic Community Volunteers', kind: 'group' as const, phone: '0801 234 5678' };
 const openControls = { rows: [{ signup: true, outreach_portal: true, maintenance: false }] };
 
 function setEnvironment(extra: Record<string, string> = {}) {
@@ -138,12 +139,19 @@ describe('helpers', () => {
     expect(await validate(dto)).toEqual([]);
   });
 
-  it('validates the sign-up and activation bodies, terms version 2026-11-01 only', async () => {
+  it('validates the sign-up and activation bodies, terms version 2026-11-01 or 2026-11-14 only', async () => {
     expect(await validate(plainToInstance(StartOutreachOrganiserSignupDto, startInput))).toEqual([]);
     expect((await validate(plainToInstance(StartOutreachOrganiserSignupDto, { ...startInput, kind: 'company' })))
       .map((error) => error.property)).toEqual(['kind']);
     expect(await validate(plainToInstance(ActivateOutreachOrganiserDto,
       { termsVersion: '2026-11-01', acceptTerms: true, password: 'a-long-fictional-password' }))).toEqual([]);
+    expect(await validate(plainToInstance(ActivateOutreachOrganiserDto,
+      { termsVersion: '2026-11-14', acceptTerms: true, password: 'a-long-fictional-password' }))).toEqual([]);
+    expect(await validate(plainToInstance(StartOutreachGroupForAccountDto,
+      { ...groupDetailsForTerms, termsVersion: '2026-11-14', acceptTerms: true }))).toEqual([]);
+    expect((await validate(plainToInstance(StartOutreachGroupForAccountDto,
+      { ...groupDetailsForTerms, termsVersion: '2026-11-13', acceptTerms: true }))).map((error) => error.property))
+      .toEqual(['termsVersion']);
     expect((await validate(plainToInstance(ActivateOutreachOrganiserDto,
       { termsVersion: '2026-10-01', acceptTerms: false, password: 'a-long-fictional-password' })))
       .map((error) => error.property).sort()).toEqual(['acceptTerms', 'termsVersion']);
@@ -175,6 +183,14 @@ describe('OutreachOrganiserService', () => {
   const make = (db: ReturnType<typeof database>, otp = notification()) => new OutreachOrganiserService(
     db as unknown as DatabaseService, otp as unknown as NotificationOtpClient,
     completion as unknown as OrganizationProfileCompletionService);
+
+  it('advertises the 2026-11-01 terms in this release (the live website compares it), while accepting both', async () => {
+    const closed = new OutreachOrganiserService({ query: jest.fn(async () => { throw new Error('down'); }),
+      system: jest.fn(async () => { throw new Error('down'); }) } as never,
+      notification() as unknown as NotificationOtpClient, completion as unknown as OrganizationProfileCompletionService);
+    await expect(closed.availability()).resolves.toEqual({ open: false, termsVersion: '2026-11-01' });
+    expect(OUTREACH_ORGANISER_TERMS_VERSIONS).toEqual(['2026-11-01', '2026-11-14']);
+  });
 
   it('starts a sign-up: the network window first, then 0115\'s 12-argument command with HMACs only, then the email', async () => {
     const system = jest.fn(async (sql: string) => sql.includes('start_outreach_organiser_signup')

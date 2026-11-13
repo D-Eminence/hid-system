@@ -10,6 +10,10 @@ export interface OutreachRegistrationCase {
   ageYears: number;
   phone: string | null;
   operationalNotes: string | null;
+  /** The person's area, town or LGA as given at registration (0118), or null. */
+  area: string | null;
+  /** Whether the registration has a screening this session can see (0118). */
+  hasScreening: boolean;
   resolvedPatientId: string | null;
   resolutionKind: 'linked_existing' | null;
   rowVersion: number;
@@ -35,6 +39,8 @@ export interface RegistrationRow {
   age_years: number;
   phone: string | null;
   operational_notes: string | null;
+  area?: string | null;
+  has_screening?: boolean | null;
   resolved_patient_id: string | null;
   resolution_kind: 'linked_existing' | null;
   row_version: string | number;
@@ -55,6 +61,8 @@ export function registrationCase(row: RegistrationRow): OutreachRegistrationCase
     ageYears: Number(row.age_years),
     phone: row.phone,
     operationalNotes: row.operational_notes,
+    area: row.area ?? null,
+    hasScreening: row.has_screening === true,
     resolvedPatientId: row.resolved_patient_id,
     resolutionKind: row.resolution_kind,
     rowVersion: Number(row.row_version),

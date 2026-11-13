@@ -8,14 +8,29 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { CreateRegistrationCaseDto } from './dto/create-registration-case.dto';
 import type { LinkExistingPatientDto } from './dto/link-existing-patient.dto';
+import type { ExportRegistrationsDto } from './dto/export-registrations.dto';
 import type { CreateCampaignDto } from './dto/create-campaign.dto';
 import type { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import type { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
+import type { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
 import type { OutreachCampaign, CampaignMember, CampaignRole, CampaignStaff } from './campaign.types';
 import { registrationCase, type OutreachRegistrationCase, type RegistrationRow } from './outreach.types';
 import { isOutreachTenant, OUTREACH_NOTES_LIMIT, outreachRuleProblem, tenantNoHealthIdLink } from './outreach-tenant';
+import { assertScreeningPlausible, normalizeScreening, registrationScreening, screeningRefusal,
+  type RegistrationScreening, type ScreeningRow } from './registration-screening';
 
 interface IdempotencyRow { request_sha256: string; registration_case_id: string }
+
+/** Whether a registration has a screening the session can see (0118's row-level security). */
+const HAS_SCREENING = `exists (select 1 from outreach.registration_screenings screening
+  where screening.registration_case_id=registration_cases.id) as has_screening`;
+
+/** A screening save's answer: 201 for the first save, 200 for an update or a replay. */
+export interface ScreeningSaveResult { status: 200 | 201; screening: RegistrationScreening }
+
+const SCREENING_COLUMNS = `bp_systolic,bp_diastolic,pulse_bpm,temperature_c,weight_kg,height_cm,
+  glucose_value,glucose_unit,glucose_timing,malaria_rdt,hearing_left,hearing_right,main_complaint,
+  seen_by_clinician,clinician_name,outcome,medicines_given,referred,referred_to`;
 
 /** 403 for anyone but a campaign's own admins (0111, ADR-045 option B). */
 function campaignAdminRequired(what: string): DomainProblem {
@@ -31,6 +46,26 @@ function adminRefusal(error: unknown, what: string): unknown {
   return error;
 }
 
+export interface RegistrationListOptions { readonly campaignId?: string; readonly limit?: number; readonly before?: string }
+
+/** The opaque list cursor: base64url of "<created_at in microseconds since epoch>.<id>". */
+export function encodeRegistrationCursor(micros: string, id: string): string {
+  return Buffer.from(`${micros}.${id}`, 'utf8').toString('base64url');
+}
+
+export function decodeRegistrationCursor(cursor: string): { micros: string; id: string } {
+  const match = /^(\d{1,16})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+    .exec(/^[A-Za-z0-9_-]{1,96}$/.test(cursor) ? Buffer.from(cursor, 'base64url').toString('utf8') : '');
+  const micros = match?.[1];
+  const id = match?.[2];
+  // At most 2^53 - 1 (about the year 2255): the SQL multiplies through float8,
+  // exact only up to there, and overflows near the bigint maximum.
+  if (micros === undefined || id === undefined || BigInt(micros) > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new DomainProblem(400, 'OUTREACH_LIST_CURSOR_INVALID', 'The list cursor is not valid; start from the first page');
+  }
+  return { micros, id: id.toLowerCase() };
+}
+
 @Injectable()
 export class OutreachService {
   constructor(
@@ -43,6 +78,10 @@ export class OutreachService {
     context: DataAccessContext): Promise<OutreachRegistrationCase> {
     const normalized = { ...input, fullName: input.fullName.trim(),
       phone: input.phone?.trim() || null, operationalNotes: input.operationalNotes?.trim() || null };
+    // The area (0118) is in the digest only when given, so a request without it digests as before.
+    const area = input.area?.replace(/\u0000/g, '').trim().replace(/\s+/g, ' ') || undefined;
+    if (area) normalized.area = area;
+    else delete normalized.area;
     const tenant = isOutreachTenant(context);
     if (tenant) this.assertTenantRegistration(normalized);
     const digest = requestDigest('outreach.registration-case.create', normalized);
@@ -53,11 +92,11 @@ export class OutreachService {
         if (normalized.campaignId) await this.assertCampaignAcceptsRegistration(client, normalized.campaignId, context);
         const inserted = await client.query<RegistrationRow>(`insert into outreach.registration_cases (
           facility_id,created_by_account_id,created_by_membership_id,local_command_id,
-          temporary_patient_id,full_name,sex,age_years,phone,operational_notes,campaign_id
-        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *`,
+          temporary_patient_id,full_name,sex,age_years,phone,operational_notes,campaign_id,area
+        ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning *`,
         [context.facilityId, context.actor.accountId, context.membershipId, normalized.localCommandId,
           normalized.temporaryPatientId, normalized.fullName, normalized.sex, normalized.ageYears,
-          normalized.phone, normalized.operationalNotes, normalized.campaignId ?? null]);
+          normalized.phone, normalized.operationalNotes, normalized.campaignId ?? null, normalized.area ?? null]);
         const row = inserted.rows[0];
         if (!row) throw new Error('Outreach registration insert returned no row');
         await client.query(`insert into outreach.registration_case_events (
@@ -140,13 +179,46 @@ export class OutreachService {
     return result.rows[0]?.found === true;
   }
 
-  async list(context: DataAccessContext): Promise<readonly OutreachRegistrationCase[]> {
+  /** Records an export of the registration list (format and count only; 0118 follow-up, no migration). */
+  async recordExport(input: ExportRegistrationsDto, context: DataAccessContext): Promise<void> {
+    await this.database.withTransaction(context, async (client) => {
+      if (input.campaignId) {
+        // A campaign at the facility that the session is a member of (0045): never
+        // an audit row naming a campaign the person cannot see.
+        const campaign = await client.query(`select 1 from outreach.campaigns where id=$1 and facility_id=$2
+          and outreach.registration_campaign_member(id, facility_id)`, [input.campaignId, context.facilityId]);
+        if (!campaign.rowCount) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
+      }
+      await this.audit.recordExportWithClient(client, context,
+        { format: input.format, count: input.count, campaignId: input.campaignId ?? null });
+    });
+  }
+
+  /**
+   * The registrations the session can see, newest first: a page of `limit`
+   * (default 100, at most 500), optionally one campaign's, before a cursor.
+   * Without options it answers exactly as before (the newest 100). nextCursor
+   * is set when more rows exist; it encodes (created_at in whole
+   * microseconds, id), compared exactly in SQL.
+   */
+  async list(context: DataAccessContext, options: RegistrationListOptions = {}):
+    Promise<readonly OutreachRegistrationCase[] & { nextCursor?: string }> {
+    const limit = options.limit ?? 100;
+    const cursor = options.before === undefined ? null : decodeRegistrationCursor(options.before);
     return this.database.withTransaction(context, async (client) => {
-      const result = await client.query<RegistrationRow>(`select * from outreach.registration_cases
-        where facility_id=$1 and outreach.registration_campaign_member(campaign_id, facility_id)
-        order by created_at desc,id desc limit 100`, [context.facilityId]);
+      const result = await client.query<RegistrationRow & { cursor_micros: string }>(`select registration_cases.*,${HAS_SCREENING},
+          ((extract(epoch from created_at) * 1000000)::numeric(20,0))::text as cursor_micros
+        from outreach.registration_cases where facility_id=$1 and outreach.registration_campaign_member(campaign_id, facility_id)
+          and ($2::uuid is null or campaign_id = $2::uuid)
+          and ($3::bigint is null or (created_at, id) < (timestamptz 'epoch' + $3::bigint * interval '1 microsecond', $4::uuid))
+        order by created_at desc,id desc limit $5`,
+      [context.facilityId, options.campaignId ?? null, cursor?.micros ?? null, cursor?.id ?? null, limit + 1]);
       await this.audit.recordWithClient(client, context, 'outreach.registration-case.list', context.facilityId);
-      return result.rows.map(registrationCase);
+      const rows = result.rows.slice(0, limit);
+      const page: OutreachRegistrationCase[] & { nextCursor?: string } = rows.map(({ cursor_micros: _cursor, ...row }) => registrationCase(row));
+      const last = rows[rows.length - 1];
+      if (result.rows.length > limit && last) page.nextCursor = encodeRegistrationCursor(last.cursor_micros, last.id);
+      return page;
     });
   }
 
@@ -192,7 +264,7 @@ export class OutreachService {
           status='identity_resolved',resolved_patient_id=$2,resolution_kind='linked_existing',
           resolved_by_account_id=$3,resolved_by_membership_id=$4,resolution_reason=$5,
           resolved_at=clock_timestamp(),row_version=row_version+1
-          where id=$1 and row_version=$6 returning *`,
+          where id=$1 and row_version=$6 returning *,${HAS_SCREENING}`,
         [id, normalized.canonicalPatientId, context.actor.accountId, context.membershipId,
           normalized.reason, normalized.expectedVersion]);
         const row = updated.rows[0];
@@ -227,6 +299,93 @@ export class OutreachService {
     }
   }
 
+  /**
+   * The screening of a registration (0118), or null when none was recorded.
+   * 404 when the session cannot see the registration. One audit row (ids only).
+   */
+  async getScreening(caseId: string, context: DataAccessContext): Promise<RegistrationScreening | null> {
+    return this.database.withTransaction(context, async (client) => {
+      await this.assertCaseVisible(client, caseId);
+      const result = await client.query<ScreeningRow>(
+        'select * from outreach.registration_screenings where registration_case_id=$1', [caseId]);
+      await this.audit.recordWithClient(client, context, 'outreach.registration-screening.read', caseId);
+      const row = result.rows[0];
+      return row ? registrationScreening(row) : null;
+    });
+  }
+
+  /**
+   * Saves a registration's whole screening (0118): version 1 on the first save
+   * (no If-Match), the next version on an update (If-Match the current one).
+   * The last save's Idempotency-Key and digest are kept on the row: the same
+   * key and body answer the current screening (200), the same key with another
+   * body 409 IDEMPOTENCY_CONFLICT.
+   */
+  async saveScreening(caseId: string, input: SaveRegistrationScreeningDto, expectedVersion: number | undefined,
+    idempotencyKey: string, context: DataAccessContext): Promise<ScreeningSaveResult> {
+    const fields = normalizeScreening(input);
+    assertScreeningPlausible(fields);
+    const digest = requestDigest('registration_screening_save', { caseId, ...fields });
+    const values = [fields.bpSystolic, fields.bpDiastolic, fields.pulseBpm, fields.temperatureC, fields.weightKg,
+      fields.heightCm, fields.glucoseValue, fields.glucoseUnit, fields.glucoseTiming, fields.malariaRdt,
+      fields.hearingLeft, fields.hearingRight, fields.mainComplaint, fields.seenByClinician, fields.clinicianName,
+      fields.outcome, JSON.stringify(fields.medicinesGiven), fields.referred, fields.referredTo];
+    try {
+      return await this.database.withTransaction(context, async (client): Promise<ScreeningSaveResult> => {
+        await this.assertCaseVisible(client, caseId);
+        const current = (await client.query<ScreeningRow>(`select * from outreach.registration_screenings
+          where registration_case_id=$1 for update`, [caseId])).rows[0];
+        if (current && current.idempotency_key === idempotencyKey) {
+          if (current.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
+            'The Idempotency-Key belongs to a different Outreach request');
+          return { status: 200, screening: registrationScreening(current) };
+        }
+        let row: ScreeningRow | undefined;
+        if (!current) {
+          if (expectedVersion !== undefined) throw new DomainProblem(412, 'VERSION_CONFLICT',
+            'The screening changed; reload before saving');
+          row = (await client.query<ScreeningRow>(`insert into outreach.registration_screenings (
+            registration_case_id,facility_id,${SCREENING_COLUMNS},version,
+            recorded_by_account_id,recorded_by_membership_id,updated_by_account_id,updated_by_membership_id,
+            idempotency_key,request_sha256
+          ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,1,
+            $22,$23,$22,$23,$24,$25) returning *`,
+          [caseId, context.facilityId, ...values, context.actor.accountId, context.membershipId,
+            idempotencyKey, digest])).rows[0];
+        } else {
+          if (expectedVersion === undefined) throw new DomainProblem(409, 'OUTREACH_SCREENING_EXISTS',
+            'This person already has a screening; reload it and save your changes over it');
+          if (Number(current.version) !== expectedVersion) throw new DomainProblem(412, 'VERSION_CONFLICT',
+            'The screening changed; reload before saving');
+          row = (await client.query<ScreeningRow>(`update outreach.registration_screenings set
+            bp_systolic=$2,bp_diastolic=$3,pulse_bpm=$4,temperature_c=$5,weight_kg=$6,height_cm=$7,
+            glucose_value=$8,glucose_unit=$9,glucose_timing=$10,malaria_rdt=$11,hearing_left=$12,hearing_right=$13,
+            main_complaint=$14,seen_by_clinician=$15,clinician_name=$16,outcome=$17,medicines_given=$18::jsonb,
+            referred=$19,referred_to=$20,version=version+1,updated_by_account_id=$21,updated_by_membership_id=$22,
+            idempotency_key=$23,request_sha256=$24
+            where registration_case_id=$1 and version=$25 returning *`,
+          [caseId, ...values, context.actor.accountId, context.membershipId, idempotencyKey, digest,
+            expectedVersion])).rows[0];
+          if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'The screening changed; reload before saving');
+        }
+        if (!row) throw new Error('Outreach screening save returned no row');
+        await this.audit.recordWithClient(client, context, 'outreach.registration-screening.recorded', caseId);
+        return { status: current ? 200 : 201, screening: registrationScreening(row) };
+      }, { isolationLevel: 'SERIALIZABLE' });
+    } catch (error) {
+      // A concurrent first save that committed first and remains after the retry.
+      this.translateConflict(error, 'OUTREACH_SCREENING_EXISTS',
+        'This person already has a screening; reload it and save your changes over it');
+      throw screeningRefusal(error) ?? outreachRuleProblem(error) ?? error;
+    }
+  }
+
+  /** 404 unless the session can see the registration (its row-level security). */
+  private async assertCaseVisible(client: PoolClient, caseId: string): Promise<void> {
+    const result = await client.query('select id from outreach.registration_cases where id=$1', [caseId]);
+    if (!result.rows[0]) throw new DomainProblem(404, 'OUTREACH_REGISTRATION_NOT_FOUND',
+      'The Outreach registration case was not found');
+  }
 
   async listCampaigns(context: DataAccessContext): Promise<readonly OutreachCampaign[]> {
     return this.database.withTransaction(context, async (client) => {
@@ -450,7 +609,7 @@ export class OutreachService {
 
   private async find(client: PoolClient, id: string): Promise<OutreachRegistrationCase> {
     const result = await client.query<RegistrationRow>(
-      'select * from outreach.registration_cases where id=$1', [id]);
+      `select registration_cases.*,${HAS_SCREENING} from outreach.registration_cases where id=$1`, [id]);
     const row = result.rows[0];
     if (!row) throw new DomainProblem(404, 'OUTREACH_REGISTRATION_NOT_FOUND',
       'The Outreach registration case was not found');
@@ -473,7 +632,13 @@ export class OutreachService {
    */
   private translateCampaignRefusal(error: unknown): void {
     if (typeof error !== 'object' || error === null) return;
-    const { code, message } = error as { code?: unknown; message?: unknown };
+    const { code, message, constraint } = error as { code?: unknown; message?: unknown; constraint?: unknown };
+    // MaxLength (validator.js) does not count variation selectors such as
+    // U+FE0F and Postgres length() does, so a rare area passes the DTO and
+    // fails the database check: a 422, not a 500.
+    if (code === '23514' && constraint === 'registration_cases_area_ck') {
+      throw new DomainProblem(422, 'OUTREACH_AREA_INVALID', 'Enter the area in 100 characters or fewer.');
+    }
     if (code === '42501' && message === 'Exact Outreach campaign membership is required') {
       throw new DomainProblem(403, 'OUTREACH_CAMPAIGN_ACCESS_DENIED',
         'Exact membership in this Outreach campaign is required');

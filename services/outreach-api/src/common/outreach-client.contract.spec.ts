@@ -49,4 +49,21 @@ describe('OutreachApiClient transport contract', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('saves a screening with PUT, the key and If-Match, and reads it (0118)', async () => {
+    const caseId = '123e4567-e89b-42d3-a456-426614174004';
+    const fetchMock = jest.fn().mockImplementation(async () => new Response(JSON.stringify({ screening: null }),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+    global.fetch = fetchMock;
+    const client = new OutreachApiClient({ baseUrl: 'https://outreach.test' });
+    await client.saveRegistrationScreening(caseId, { pulseBpm: 72 }, 2, context, 'outreach-screen-key-1234');
+    await client.saveRegistrationScreening(caseId, { pulseBpm: 72 }, undefined, context, 'outreach-screen-key-5678');
+    await expect(client.getRegistrationScreening(caseId, context)).resolves.toEqual({ screening: null });
+    const [first, second, read] = fetchMock.mock.calls as [[string, RequestInit], [string, RequestInit], [string, RequestInit]];
+    expect(first[0]).toBe(`https://outreach.test/api/v1/outreach/registration-cases/${caseId}/screening`);
+    expect(first[1].method).toBe('PUT');
+    expect(first[1].headers).toMatchObject({ 'idempotency-key': 'outreach-screen-key-1234', 'if-match': '"2"' });
+    expect(second[1].headers).not.toHaveProperty('if-match');
+    expect(read[1].method).toBe('GET');
+  });
 });

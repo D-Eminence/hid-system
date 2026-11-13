@@ -9,8 +9,8 @@ import type { DataAccessContext } from '../common/request-context';
  */
 export const OUTREACH_TENANT_ROLES: ReadonlySet<string> = new Set(['outreach_organiser', 'outreach_volunteer']);
 
-/** The longest operational note at an outreach group's facility (plan PR-1). */
-export const OUTREACH_NOTES_LIMIT = 280;
+/** The longest operational note at an outreach group's facility (plan PR-1; 1000 since 0118, was 280). */
+export const OUTREACH_NOTES_LIMIT = 1000;
 
 /** Whether the request works at an outreach group's facility (not a hospital's). */
 export function isOutreachTenant(context: DataAccessContext): boolean {
@@ -22,7 +22,7 @@ export function tenantNoHealthIdLink(): DomainProblem {
     'Outreach groups cannot link people to a Health ID. The person can link their own Health ID later from their account.');
 }
 
-/** The codes outreachRuleProblem matches, each raised by 0115. */
+/** The codes outreachRuleProblem matches, each raised by 0115 (OUTREACH_ORGANISER_SUSPENDED also by 0118's screening check). */
 export const OUTREACH_TENANT_RULE_CODES = ['OUTREACH_ORGANISER_SUSPENDED',
   'OUTREACH_TENANT_NO_HEALTH_ID_LINK', 'OUTREACH_CONSENT_GUARDIAN_REQUIRED', 'OUTREACH_CONSENT_CASE_INVALID',
   'OUTREACH_CONSENT_REQUIRED', 'OUTREACH_CAMPAIGN_REQUIRED', 'OUTREACH_NOTES_TOO_LONG'] as const;

@@ -1,4 +1,5 @@
 import { Transform, Type } from 'class-transformer';
+import { trimmedText, withoutNul } from './registration-screening.dto';
 import { IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength,
   ValidateNested } from 'class-validator';
 
@@ -44,7 +45,7 @@ export class RegistrationConsentDto {
   method!: typeof CONSENT_METHODS[number];
 
   @IsOptional()
-  @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') || undefined : value)
+  @Transform(trimmedText)
   @IsString() @MinLength(2) @MaxLength(120)
   guardianName?: string;
 }
@@ -60,6 +61,7 @@ export class CreateRegistrationCaseDto {
   @Matches(/^tmp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   temporaryPatientId!: string;
 
+  @Transform(withoutNul)
   @IsString()
   @MinLength(1)
   @MaxLength(200)
@@ -74,16 +76,27 @@ export class CreateRegistrationCaseDto {
   ageYears!: number;
 
   @IsOptional()
-  @Transform(({ value }: { value: unknown }) => normalizeOutreachPhone(value))
+  @Transform(({ value }: { value: unknown }) => normalizeOutreachPhone(withoutNul({ value })))
   @IsString()
   @Matches(E164_PHONE, { message: 'Enter the phone number like 08012345678, or with its country code, like +234 801 234 5678' })
   phone?: string;
 
   @IsOptional()
+  @Transform(withoutNul)
   @IsString()
   @MinLength(3)
   @MaxLength(2000)
   operationalNotes?: string;
+
+  /**
+   * The person's area, town or LGA (0118), optional: trimmed, inner spaces
+   * collapsed, an empty value treated as not given. Set only at registration.
+   */
+  @IsOptional()
+  @Transform(trimmedText)
+  @IsString()
+  @MaxLength(100)
+  area?: string;
 
   /** Required at an outreach group's facility (the service and the database check). */
   @IsOptional()
