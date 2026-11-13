@@ -59,7 +59,7 @@ export class OutreachService {
     const normalized = { ...input, fullName: input.fullName.trim(),
       phone: input.phone?.trim() || null, operationalNotes: input.operationalNotes?.trim() || null };
     // The area (0118) is in the digest only when given, so a request without it digests as before.
-    const area = input.area?.trim().replace(/\s+/g, ' ') || undefined;
+    const area = input.area?.replace(/\u0000/g, '').trim().replace(/\s+/g, ' ') || undefined;
     if (area) normalized.area = area;
     else delete normalized.area;
     const tenant = isOutreachTenant(context);
@@ -592,7 +592,13 @@ export class OutreachService {
    */
   private translateCampaignRefusal(error: unknown): void {
     if (typeof error !== 'object' || error === null) return;
-    const { code, message } = error as { code?: unknown; message?: unknown };
+    const { code, message, constraint } = error as { code?: unknown; message?: unknown; constraint?: unknown };
+    // MaxLength (validator.js) does not count variation selectors such as
+    // U+FE0F and Postgres length() does, so a rare area passes the DTO and
+    // fails the database check: a 422, not a 500.
+    if (code === '23514' && constraint === 'registration_cases_area_ck') {
+      throw new DomainProblem(422, 'OUTREACH_AREA_INVALID', 'Enter the area in 100 characters or fewer.');
+    }
     if (code === '42501' && message === 'Exact Outreach campaign membership is required') {
       throw new DomainProblem(403, 'OUTREACH_CAMPAIGN_ACCESS_DENIED',
         'Exact membership in this Outreach campaign is required');

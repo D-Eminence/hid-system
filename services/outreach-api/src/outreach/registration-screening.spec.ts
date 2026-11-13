@@ -261,12 +261,28 @@ describe('Outreach registration area and hasScreening (0118)', () => {
     expect((await validate(plainToInstance(CreateRegistrationCaseDto, { ...base, area: 12 })))
       .map((error) => error.property)).toEqual(['area']);
   });
+
+  it('answers a database area refusal as 422, not 500, and removes NUL characters', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [] })
+      .mockRejectedValueOnce(Object.assign(new Error('new row violates check constraint'),
+        { code: '23514', constraint: 'registration_cases_area_ck' }));
+    await expect(service(query).outreach.create({ ...input, area: 'Ikeja' }, key, context))
+      .rejects.toMatchObject({ status: 422, code: 'OUTREACH_AREA_INVALID' });
+    const dto = plainToInstance(CreateRegistrationCaseDto,
+      { ...input, localCommandId: '123e4567-e89b-42d3-a456-426614174000', area: ' Ike\u0000ja ' });
+    expect(dto.area).toBe('Ikeja');
+  });
 });
 
 describe('SaveRegistrationScreeningDto', () => {
   const check = async (value: Record<string, unknown>) => (await validate(
     plainToInstance(SaveRegistrationScreeningDto, value), { whitelist: true, forbidNonWhitelisted: true }))
     .map((error) => error.property).sort();
+
+  it('asks for height in whole centimetres, in plain English', async () => {
+    const errors = await validate(plainToInstance(SaveRegistrationScreeningDto, { heightCm: 170.5 }));
+    expect(errors.map((error) => Object.values(error.constraints ?? {}))).toEqual([['Enter height in whole centimetres.']]);
+  });
 
   it('accepts an empty body, nulls and a full screening', async () => {
     expect(await check({})).toEqual([]);

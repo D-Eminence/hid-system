@@ -1,4 +1,5 @@
 import { Transform, Type } from 'class-transformer';
+import { trimmedText } from './registration-screening.dto';
 import { IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength,
   ValidateNested } from 'class-validator';
 
@@ -90,7 +91,7 @@ export class CreateRegistrationCaseDto {
    * collapsed, an empty value treated as not given. Set only at registration.
    */
   @IsOptional()
-  @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') || undefined : value)
+  @Transform(trimmedText)
   @IsString()
   @MaxLength(100)
   area?: string;

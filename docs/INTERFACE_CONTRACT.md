@@ -4678,12 +4678,17 @@ in the same transaction and its `area` is cleared.
   `area` (`null` if none) and `hasScreening` (whether a screening the session can see exists).
 - Outreach-group notes (`operationalNotes`) may be up to 1000 characters (was 280); the refusal is
   still 422 `OUTREACH_NOTES_TOO_LONG`.
+- An area the database refuses (its length counted as Postgres does, which can differ from the
+  request check for variation selectors) answers 422 `OUTREACH_AREA_INVALID`. NUL characters are
+  removed from the area and the screening's text fields.
 
 ### 48.5. Organiser terms and the registration notice
 
 - The organiser activation and "Start an outreach group" bodies accept `termsVersion` `'2026-11-01'`
   or `'2026-11-14'` (the live website sends 2026-11-01 until the new terms ship). The availability
-  answer (`GET identity/outreach-organisers/availability`) gives the current version, `'2026-11-14'`.
+  answer (`GET identity/outreach-organisers/availability`) stays `'2026-11-01'` in this release: the
+  live website compares it with its own version and would lock sign-up behind a reload screen on a
+  mismatch. It moves to `'2026-11-14'` only in a later release, after the website with that text is live.
 - The registration notice version is not pinned (only its form is checked), so
   `outreach-notice-2026-11-14` needs no backend change.
 
