@@ -72,7 +72,8 @@ function databaseState() {
       }
     }
     for (const statement of topLevel(raw).split(';')) {
-      const policy = /^\s*create\s+policy\s+(\S+)\s+on\s+(outreach\.[a-z_][a-z0-9_]*)([\s\S]*)$/i.exec(statement);
+      // CREATE POLICY, and ALTER POLICY ... USING / WITH CHECK (0121): the functions its expression names.
+      const policy = /^\s*(?:create|alter)\s+policy\s+(\S+)\s+on\s+(outreach\.[a-z_][a-z0-9_]*)([\s\S]*)$/i.exec(statement);
       if (policy) {
         for (const name of functionNames(policy[3]!)) {
           policyFunctions.set(name, (policyFunctions.get(name) ?? new Set()).add(`policy ${policy[1]} on ${policy[2]}`));
@@ -162,14 +163,18 @@ function invokerReach(state: ReturnType<typeof databaseState>) {
 /**
  * SQL forms the replay above does not follow. None occurs today; if one is
  * added, extend the replay instead of trusting a pass. (0118 creates one
- * Outreach policy inside a DO block; the replay reads it.)
+ * Outreach policy inside a DO block, and 0121 alters two at top level; the
+ * replay reads both.)
  */
 function unfollowedForms() {
   const found: string[] = [];
   for (const script of databaseScripts()) {
     const raw = withoutComments(readFileSync(script, 'utf8'));
     const name = relative(database, script);
-    if (/\balter\s+policy\s+\S+\s+on\s+"?outreach"?\./i.test(raw)) found.push(`${name}: ALTER POLICY on Outreach`);
+    // A top-level ALTER POLICY on outreach.<table> is read (above); any other form of it is not.
+    const alters = [...raw.matchAll(/\balter\s+policy\s+\S+\s+on\s+"?outreach"?\./gi)].length;
+    const readAlters = [...topLevel(raw).matchAll(/(?:^|;)\s*alter\s+policy\s+\S+\s+on\s+outreach\.[a-z_][a-z0-9_]*\s/gi)].length;
+    if (alters !== readAlters) found.push(`${name}: ALTER POLICY on Outreach`);
     if (/\balter\s+function\b[^;]*\bsecurity\s+(?:invoker|definer)\b/i.test(raw)) found.push(`${name}: ALTER FUNCTION ... SECURITY`);
     for (const [body] of raw.matchAll(/\$([a-z_]*)\$[\s\S]*?\$\1\$/gi)) {
       // A policy in a dollar-quoted body is read (above) only in its plain form.

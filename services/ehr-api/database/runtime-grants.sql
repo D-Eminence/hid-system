@@ -514,7 +514,9 @@ grant execute on function platform.current_actor_subject(), platform.current_acc
   platform.current_purpose_of_use(),
   auth.membership_has_permission(text, uuid, uuid, text),
   outreach.context_allows(uuid,text),
-  outreach.registration_campaign_member(uuid,uuid) to hid_outreach_runtime;
+  outreach.registration_campaign_member(uuid,uuid),
+  -- 0121: the registration read policies' once-per-query membership pairs (as registration_campaign_member).
+  outreach.session_campaign_pairs() to hid_outreach_runtime;
 -- Outreach campaigns (0111): a campaign's members by name, and to its admins
 -- who could be added; read by outreach-api alone.
 revoke all on function outreach.campaign_staff(uuid) from public;
@@ -726,6 +728,7 @@ grant execute on function platform.current_actor_subject(),
   pharmacy.context_allows(uuid,uuid,text),
   outreach.context_allows(uuid,text),
   outreach.registration_campaign_member(uuid,uuid),
+  outreach.session_campaign_pairs(),
   integration.claim_outbox_events(text,integer,integer,integer),
   integration.record_outbox_delivered(text,uuid,uuid,text,text),
   integration.record_outbox_failure(text,uuid,uuid,text,text,text,boolean,timestamptz,integer),
