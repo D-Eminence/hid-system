@@ -45,6 +45,8 @@ const environmentSchema = z.object({
   PHARMACY_WORKLOAD_JWKS_URL: optionalUrl,
   PHARMACY_EHR_CALLER_SUBJECT: optionalString,
   PHARMACY_OCR_CALLER_SUBJECT: optionalString,
+  // The patient on this facility's own work (0121): off by default, off is exactly as before.
+  OWN_WORK_PATIENT_CARD_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.PHARMACY_SERVICE_IDENTITY_MODE === 'local-secret'
       && !environment.PHARMACY_INTERNAL_SERVICE_TOKEN) {

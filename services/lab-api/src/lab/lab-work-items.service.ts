@@ -9,7 +9,8 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AcceptEhrLabOrderCommand, LabWorkItemResult } from './lab-work-items.types';
 import { LabOrderRouteAccess, basisDetails } from './order-route-access';
-import { LabOrderRouteCards, type OrderRouteCard } from './order-route-cards';
+import { LabOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
+import { LabOwnWorkPatientCards, OWN_WORK_PATIENT_CARDS_OFF } from './own-work-patient-cards';
 
 interface WorkItemRow extends QueryResultRow {
   id: string; patient_id: string; facility_id: string; ordering_facility_id: string;
@@ -68,6 +69,14 @@ const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility
  * keeps every read within the facility, before any row's check. Known limit
  * (no schema change in this step, docs/INTERFACE_CONTRACT.md): past roughly
  * 2,000 work items at a laboratory the list exceeds lab-api's 15-second limit.
+ * With OWN_WORK_PATIENT_CARD_ENABLED on, each list load also calls
+ * lab.work_item_patient_cards (0121) once for its own rows, at most 200. That
+ * is a statement of its own, so it does not count toward this query's
+ * 15-second limit and does not grow with the laboratory. Under a NOBYPASSRLS
+ * owner, as in production, each of those rows pays the work items' read
+ * policy and then the same consent test again (0121's header, D5): 0.7-1.1 s
+ * for 200 rows, against 0.8-1.2 s for this query (PostgreSQL 16, a shared
+ * 4-CPU 2.8 GHz Xeon). So the setting roughly doubles the list's database time.
  */
 export const WORK_LIST_QUERY = `with released_tests as materialized (
     select e.requested_test_id from lab.result_releases rel
@@ -98,7 +107,8 @@ select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id:
 export class LabWorkItemsService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
     private readonly audit: AuditService, private readonly routeAccess: LabOrderRouteAccess,
-    private readonly routeCards: LabOrderRouteCards) {}
+    private readonly routeCards: LabOrderRouteCards,
+    private readonly ownPatients: LabOwnWorkPatientCards = OWN_WORK_PATIENT_CARDS_OFF) {}
 
   async acceptEhrOrder(context: DataAccessContext, command: AcceptEhrLabOrderCommand): Promise<LabWorkItemResult> {
     if (!context.actor.permissions.includes('lab.work-item.accept')) {
@@ -199,7 +209,11 @@ export class LabWorkItemsService {
         workItemDenied);
       await this.audit.recordWithClient(client, this.auditEvent(context,row,'lab.work-item.read', basisDetails(basis)));
       const cards = row.order_route_id ? await this.routeCards.cards(client, [row.id], context.correlationId) : undefined;
-      return { ...this.project(row, cards?.get(row.id)), ...clinicalIndication(row) };
+      // Own work (0121, OWN_WORK_PATIENT_CARD_ENABLED): its patient, read after
+      // the read row above, which already names the patient.
+      const own = row.order_route_id ? undefined
+        : await this.ownPatients.patients(client, [row.id], context.correlationId);
+      return { ...this.project(row, cards?.get(row.id), own?.get(row.id)), ...clinicalIndication(row) };
     });
   }
 
@@ -213,7 +227,9 @@ export class LabWorkItemsService {
    * so the website can show it as done). A same-facility row also carries
    * its request's clinical information (`clinicalIndication`, null when the
    * EHR sent none). A route-backed row carries its route card and, while the
-   * route allows a read, its patient (C12). To a member
+   * route allows a read, its patient (C12). This facility's own row carries
+   * its patient while OWN_WORK_PATIENT_CARD_ENABLED is on and the member may
+   * read it (0121); off, it carries none. To a member
    * who may receive lab requests from other facilities, the answer says
    * whether this facility receives them now and whether any wait or are held
    * here (item 4, 0089; read in the transaction after the audit rows, left
@@ -232,9 +248,11 @@ export class LabWorkItemsService {
         open_work:boolean; specimen_statuses:string[]|null }>(WORK_LIST_QUERY, [context.facilityId]);
       const routed = result.rows.filter((row) => row.order_route_id).map((row) => row.id);
       const cards = await this.routeCards.cards(client, routed, context.correlationId);
-      await this.auditShownPatients(client, context, result.rows, cards);
+      const own = await this.ownPatients.patients(client, result.rows.filter((row) => !row.order_route_id)
+        .map((row) => row.id), context.correlationId);
+      await this.auditShownPatients(client, context, result.rows, cards, own);
       const receiving = await this.routeCards.receiving(client, context);
-      return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id)),testName:row.test_name,
+      return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id), own.get(row.id)),testName:row.test_name,
         accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [],
         openWork:row.open_work, ...clinicalIndication(row) })),
       ...receiving, ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
@@ -248,10 +266,13 @@ export class LabWorkItemsService {
    * row per patient shown, naming the patient, with the work items and routes
    * (ids only, §12) and basis 'order-route', in the list's transaction (no
    * answer without its audit). Rows without a patient on the card (the route
-   * allows no read now, or C12 failed) name no one.
+   * allows no read now, or C12 failed) name no one. Own work whose patient is
+   * shown (0121) gets the same: one row per patient, with the work items (ids
+   * only) and basis 'consent', which the patient's access log shows as a view;
+   * none while OWN_WORK_PATIENT_CARD_ENABLED is off.
    */
   private async auditShownPatients(client: PoolClient, context: DataAccessContext, rows: readonly WorkItemRow[],
-    cards: ReadonlyMap<string, OrderRouteCard>) {
+    cards: ReadonlyMap<string, OrderRouteCard>, own: ReadonlyMap<string, WorkItemRoutePatient>) {
     const shown = new Map<string, { first: WorkItemRow; workItemIds: string[]; orderRouteIds: string[] }>();
     for (const row of rows) {
       const card = cards.get(row.id);
@@ -265,6 +286,17 @@ export class LabWorkItemsService {
       await this.audit.recordWithClient(client, this.auditEvent(context, entry.first, 'lab.work-item.list',
         { basis: 'order-route', workItemIds: entry.workItemIds, orderRouteIds: entry.orderRouteIds }));
     }
+    const ownShown = new Map<string, { first: WorkItemRow; workItemIds: string[] }>();
+    for (const row of rows) {
+      if (row.order_route_id || !own.has(row.id)) continue;
+      const entry = ownShown.get(row.patient_id) ?? { first: row, workItemIds: [] };
+      entry.workItemIds.push(row.id);
+      ownShown.set(row.patient_id, entry);
+    }
+    for (const entry of ownShown.values()) {
+      await this.audit.recordWithClient(client, this.auditEvent(context, entry.first, 'lab.work-item.list',
+        { basis: 'consent', workItemIds: entry.workItemIds }));
+    }
   }
 
   private async authorize(patientId: string, context: DataAccessContext, action: 'read_records' | 'write_records') {
@@ -277,13 +309,17 @@ export class LabWorkItemsService {
   /**
    * A work item as Lab answers it. A route-backed one (P4c) never carries
    * the other facility's order id (PRIV P4.3); it carries its route card
-   * instead, and its patient only while the route allows a read.
+   * instead, and its patient only while the route allows a read. This
+   * facility's own one carries its patient when 0121's reader gave one
+   * (OWN_WORK_PATIENT_CARD_ENABLED on, and the member may read it).
    */
-  private project(row: WorkItemRow, card?: OrderRouteCard): LabWorkItemResult {
+  private project(row: WorkItemRow, card?: OrderRouteCard, ownPatient?: WorkItemRoutePatient): LabWorkItemResult {
     const base = { id: row.id,patientId: row.patient_id,facilityId: row.facility_id,
       sourceEhrOrderVersion: Number(row.source_ehr_order_version),
       status: row.status,priority: row.priority,acceptedAt: row.accepted_at,version: Number(row.row_version) };
-    if (!row.order_route_id) return { ...base, sourceEhrOrderId: row.source_ehr_order_id };
+    if (!row.order_route_id) {
+      return { ...base, sourceEhrOrderId: row.source_ehr_order_id, ...(ownPatient ? { patient: ownPatient } : {}) };
+    }
     return { ...base, ...(card ? { orderRoute: card.orderRoute, ...(card.patient ? { patient: card.patient } : {}) } : {}) };
   }
 

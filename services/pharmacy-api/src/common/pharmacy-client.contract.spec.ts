@@ -77,4 +77,25 @@ describe('PharmacyApiClient transport contract', () => {
     await expect(client.listImportedMedicationEvidence('50000000-0000-4000-8000-0000000000ff', context))
       .rejects.toMatchObject({ status: 502 });
   });
+
+  // 0121: an own work item may carry its patient (OWN_WORK_PATIENT_CARD_ENABLED on); the client keeps it, and
+  // answers exactly as before when it is absent.
+  it('keeps a work item\'s optional patient, and leaves it out when absent', async () => {
+    const base = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-e89b-42d3-a456-426614174004',
+      facilityId: context.facilityId, sourceEhrPrescriptionId: '123e4567-e89b-42d3-a456-426614174005',
+      sourceEncounterId: '123e4567-e89b-42d3-a456-426614174006', sourceEhrPrescriptionVersion: 1, status: 'accepted',
+      medication: { codeSystem: null, code: null, display: 'Amoxicillin 500 mg capsule' }, doseQuantity: 1,
+      doseUnit: 'capsule', routeCode: 'oral', frequency: 'Every 8 hours', instructions: 'After food',
+      acceptedAt: '2026-11-01T09:00:00.000Z', version: 1, dispensing: null };
+    const patient = { fullName: 'Amaka Card', sex: null, dateOfBirth: '1991-02-03', healthIdLast4: 'AAA2' };
+    global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({ items: [{ ...base, patient }, base] }),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+    const client = new PharmacyApiClient({ baseUrl: 'https://pharmacy.test' });
+    const [own, plain] = await client.listWorkItems(context);
+    expect(own?.patient).toEqual(patient);
+    expect(plain).not.toHaveProperty('patient');
+    global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({ ...base, patient: { sex: 'female' } }),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+    await expect(client.getWorkItem(base.id, context)).rejects.toMatchObject({ status: 502 });
+  });
 });

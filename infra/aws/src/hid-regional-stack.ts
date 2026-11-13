@@ -789,13 +789,15 @@ export class HidRegionalStack extends Stack {
         return { ...commonApi, ...base, PORT: '3003', IDENTITY_API_URL: urls['identity-api']!,
           IDENTITY_SERVICE_IDENTITY_MODE: 'jwt', LAB_SERVICE_IDENTITY_MODE: 'jwt',
           LAB_WORKLOAD_ISSUER_URL: issuer, LAB_WORKLOAD_JWKS_URL: jwks, LAB_WORKLOAD_AUDIENCE: 'hid-lab-api',
-          LAB_EHR_CALLER_SUBJECT: subjects.ehr, LAB_OCR_CALLER_SUBJECT: subjects.ocr };
+          LAB_EHR_CALLER_SUBJECT: subjects.ehr, LAB_OCR_CALLER_SUBJECT: subjects.ocr,
+          OWN_WORK_PATIENT_CARD_ENABLED: this.configuration.ownWorkPatientCardEnabled ? 'true' : 'false' };
       case 'pharmacy-api':
         return { ...commonApi, ...base, PORT: '3004', IDENTITY_API_URL: urls['identity-api']!,
           IDENTITY_SERVICE_IDENTITY_MODE: 'jwt', PHARMACY_SERVICE_IDENTITY_MODE: 'jwt',
           PHARMACY_WORKLOAD_ISSUER_URL: issuer, PHARMACY_WORKLOAD_JWKS_URL: jwks,
           PHARMACY_WORKLOAD_AUDIENCE: 'hid-pharmacy-api', PHARMACY_EHR_CALLER_SUBJECT: subjects.ehr,
-          PHARMACY_OCR_CALLER_SUBJECT: subjects.ocr };
+          PHARMACY_OCR_CALLER_SUBJECT: subjects.ocr,
+          OWN_WORK_PATIENT_CARD_ENABLED: this.configuration.ownWorkPatientCardEnabled ? 'true' : 'false' };
       case 'ocr-api':
         return { ...commonApi, ...base, PORT: '3005', IDENTITY_API_URL: urls['identity-api']!,
           EHR_API_URL: urls['ehr-api']!, LAB_API_URL: urls['lab-api']!, PHARMACY_API_URL: urls['pharmacy-api']!,

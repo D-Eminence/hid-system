@@ -1645,3 +1645,13 @@ revoke all on function identity.facility_department_codes(),
   identity.set_facility_profile(bigint,jsonb,text,char) from public;
 revoke all on identity.facility_profiles, identity.nigeria_states, identity.registration_case_contacts,
   identity.patient_facility_contacts from public;
+
+-- Patient details on this facility's own lab and pharmacy work (0121), as
+-- that migration grants them (its section 2): the Lab reader to the Lab
+-- runtime and the Pharmacy reader to the Pharmacy runtime, each also to the
+-- schema test runtime; nothing to the EHR, Identity, OCR, Outreach or
+-- Notification runtimes, and no table privilege to anyone (both read
+-- identity.patients as its owner).
+grant execute on function lab.work_item_patient_cards(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.work_item_patient_cards(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function lab.work_item_patient_cards(uuid[]), pharmacy.work_item_patient_cards(uuid[]) from public;

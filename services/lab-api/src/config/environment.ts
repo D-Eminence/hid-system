@@ -24,6 +24,8 @@ const environmentSchema=z.object({
  LAB_SERVICE_IDENTITY_MODE:z.enum(['local-secret','jwt']).default('local-secret'),
  LAB_WORKLOAD_ISSUER_URL:optionalUrl,LAB_WORKLOAD_AUDIENCE:optionalString,LAB_WORKLOAD_JWKS_URL:optionalUrl,
  LAB_EHR_CALLER_SUBJECT:optionalString,LAB_OCR_CALLER_SUBJECT:optionalString,
+ // The patient on this facility's own work (0121): off by default, off is exactly as before.
+ OWN_WORK_PATIENT_CARD_ENABLED:booleanString,
 }).superRefine((environment,context)=>{
  if(environment.LAB_SERVICE_IDENTITY_MODE==='local-secret'&&!environment.LAB_INTERNAL_SERVICE_TOKEN)context.addIssue({code:'custom',path:['LAB_INTERNAL_SERVICE_TOKEN'],message:'Local service identity requires an ephemeral secret'});
  if(environment.LAB_SERVICE_IDENTITY_MODE==='jwt')for(const key of ['LAB_WORKLOAD_ISSUER_URL','LAB_WORKLOAD_AUDIENCE','LAB_WORKLOAD_JWKS_URL','LAB_EHR_CALLER_SUBJECT','LAB_OCR_CALLER_SUBJECT'] as const)if(!environment[key])context.addIssue({code:'custom',path:[key],message:`${key} is required for JWT workload identity`});

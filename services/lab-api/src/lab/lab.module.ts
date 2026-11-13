@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { getEnvironment } from '../config/environment';
 import { LabIdentityAuthorizationModule } from '../identity/lab-identity-authorization.module';
 import { LabImportsController } from './lab-imports.controller';
 import { LabImportsService } from './lab-imports.service';
@@ -14,6 +15,7 @@ import { LabOrderRoutesController } from './lab-order-routes.controller';
 import { LabOrderRoutesService } from './lab-order-routes.service';
 import { LabOrderRouteAccess } from './order-route-access';
 import { LabOrderRouteCards } from './order-route-cards';
+import { LabOwnWorkPatientCards } from './own-work-patient-cards';
 import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 
 /**
@@ -24,6 +26,9 @@ import { HealthIdInUrlRefusalModule } from './health-id-in-url';
  */
 @Module({ imports: [LabIdentityAuthorizationModule, HealthIdInUrlRefusalModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController, LabOrderRoutesController],
   providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService, PatientResultsService,
-    LabOrderRoutesService, LabOrderRouteAccess, LabOrderRouteCards],
+    LabOrderRoutesService, LabOrderRouteAccess, LabOrderRouteCards,
+    // The patient on own work (0121), on only while OWN_WORK_PATIENT_CARD_ENABLED is true.
+    { provide: LabOwnWorkPatientCards,
+      useFactory: () => new LabOwnWorkPatientCards(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED) }],
   exports: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService] })
 export class LabModule {}
