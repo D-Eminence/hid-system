@@ -127,6 +127,9 @@ begin
   perform pg_temp.assert('no runtime role may run them',
     not exists (select 1 from pg_roles role_row
                  where role_row.rolname like 'hid\_%'
+                   -- the functions' owner (the migration login, whatever its name) is not a runtime role
+                   and role_row.oid <> (select proowner from pg_proc
+                                         where oid = 'identity.demo_story_install(text)'::regprocedure)
                    and (has_function_privilege(role_row.oid, 'identity.demo_story_install(text)', 'execute')
                      or has_function_privilege(role_row.oid,
                           'identity.demo_story_context(text,uuid,uuid,text)', 'execute'))
