@@ -36,7 +36,21 @@ export class NotificationController {
         && (!getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED || (input.channel !== 'email' && input.channel !== 'sms'))) {
       throw new ForbiddenException('Emergency-contact delivery is disabled');
     }
-    const result = await this.notifications.deliverOtp({ ...input, idempotencyKey }, input.plan);
+    // The outreach assisted Health ID code (0119): email only, with its own words.
+    const outreachHealthId = input.purpose === OtpPurpose.OUTREACH_HEALTH_ID_VERIFY;
+    if (!outreachHealthId && (input.groupName !== undefined || input.expiresInMinutes !== undefined)) {
+      throw new BadRequestException('groupName and expiresInMinutes belong to OUTREACH_HEALTH_ID_VERIFY only');
+    }
+    if (outreachHealthId) {
+      if (input.channel !== 'email') throw new BadRequestException('Outreach Health ID codes are delivered by email only');
+      if (input.expiresInMinutes === undefined) throw new BadRequestException('An outreach Health ID code needs its expiry');
+      const result = await this.notifications.deliverOutreachHealthIdCode({ recipient: input.recipient,
+        code: input.code, ...(input.groupName !== undefined ? { groupName: input.groupName } : {}),
+        expiresInMinutes: input.expiresInMinutes, idempotencyKey }, input.plan);
+      return this.response(result);
+    }
+    const { groupName: _groupName, expiresInMinutes: _expiresInMinutes, ...otp } = input;
+    const result = await this.notifications.deliverOtp({ ...otp, idempotencyKey }, input.plan);
     return this.response(result);
   }
 

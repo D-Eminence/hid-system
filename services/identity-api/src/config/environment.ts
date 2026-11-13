@@ -106,6 +106,12 @@ const environmentSchema = z.object({
   // 15 minutes blocks for 15 minutes). Never keyed by client IP.
   OTP_VERIFY_FAILURE_MAX: z.coerce.number().int().min(2).max(100).default(5),
   OTP_VERIFY_FAILURE_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
+  // Outreach Health ID (0119): what one volunteer may send at a busy outreach
+  // (owner, 2026-11-13: "we are attending to hundreds of people"). Codes per
+  // OTP_RATE_WINDOW_SECONDS, and per 24 hours; the database keeps a fixed
+  // backstop of 2000 a day. Per person and per email the limits stay fixed.
+  OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX: z.coerce.number().int().min(1).max(1000).default(120),
+  OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX: z.coerce.number().int().min(1).max(2000).default(1000),
   NOTIFICATION_API_URL: z.string().url().default('http://127.0.0.1:3007'),
   NOTIFICATION_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,

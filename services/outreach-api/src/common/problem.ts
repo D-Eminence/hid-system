@@ -2,11 +2,36 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logge
 import type { Response } from 'express';
 import type { HidRequest } from './request-context';
 
+/** Problem members an extension can never replace. */
+const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors',
+  'details']);
+
+export interface DomainProblemOptions {
+  /** Extension members (RFC 9457), e.g. `healthId` on OUTREACH_HEALTH_ID_ALREADY_CREATED (0119). */
+  extensions?: Readonly<Record<string, string | number | boolean | null>>;
+  /**
+   * A `details` object of plain values, e.g. { healthId } on ALREADY_CREATED: the
+   * website's shared HTTP client keeps only `details` and `errors` from a problem.
+   */
+  details?: Readonly<Record<string, string | number | boolean | null>>;
+  /** Response headers, e.g. Retry-After. */
+  headers?: Readonly<Record<string, string>>;
+  /** Keep the plain-words detail on a 5xx (it is otherwise replaced by a generic one). */
+  exposeDetail?: boolean;
+}
+
 export class DomainProblem extends HttpException {
   constructor(status: number, public readonly code: string, detail: string,
-    public readonly errors?: readonly { field: string; messages: readonly string[] }[]) {
+    public readonly errors?: readonly { field: string; messages: readonly string[] }[],
+    public readonly problemOptions: DomainProblemOptions = {}) {
     super(detail, status);
   }
+}
+
+function extensionMembers(problem: DomainProblem | undefined): Record<string, unknown> {
+  if (!problem?.problemOptions.extensions) return {};
+  return Object.fromEntries(Object.entries(problem.problemOptions.extensions).filter(([name, value]) =>
+    !STANDARD_MEMBERS.has(name) && (value === null || ['string', 'number', 'boolean'].includes(typeof value))));
 }
 
 @Catch()
@@ -19,17 +44,21 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     const response = context.getResponse<Response>();
     const status = exception instanceof HttpException ? exception.getStatus() : this.parserStatus(exception) ?? 500;
     const domain = exception instanceof DomainProblem ? exception : undefined;
-    const detail = status >= 500 ? 'The service could not complete the request.' : this.safeMessage(exception);
+    const detail = status >= 500 && !domain?.problemOptions.exposeDetail
+      ? 'The service could not complete the request.' : this.safeMessage(exception);
     const code = domain?.code ?? this.defaultCode(status);
     if (status >= 500) this.logger.error({ message: 'Outreach request failed',
       correlationId: request.correlationId, status, code,
       exceptionType: exception instanceof Error ? exception.constructor.name : 'UnknownException' });
+    for (const [name, value] of Object.entries(domain?.problemOptions.headers ?? {})) response.setHeader(name, value);
     response.status(status).type('application/problem+json').json({
       type: `https://healthidentitydirectory.com/problems/${code.toLowerCase().replaceAll('_', '-')}`,
       title: HttpStatus[status] ?? 'Request failed', status, detail,
       instance: `urn:hid:request:${request.correlationId ?? 'unavailable'}`,
       correlationId: request.correlationId ?? 'unavailable', code,
       ...(domain?.errors ? { errors: domain.errors } : {}),
+      ...(domain?.problemOptions.details ? { details: { ...domain.problemOptions.details } } : {}),
+      ...extensionMembers(domain),
     });
   }
 

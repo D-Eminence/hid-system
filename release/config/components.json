@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0118",
-    "count": 119,
+    "last": "0119",
+    "count": 120,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -573,6 +573,10 @@
       {
         "name": "0118_outreach_screening.sql",
         "sha256": "b1ed2c5440a06c900cdc46d664a8e48a3b49af189a69deed2f92e513e2c274b2"
+      },
+      {
+        "name": "0119_outreach_health_id.sql",
+        "sha256": "2ddf1be63db7aaf3e4c9e1006570cc34f9ed5ea0e51d6f14f5ebd9ce116ef3a1"
       }
     ]
   },

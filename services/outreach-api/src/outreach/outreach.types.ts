@@ -16,6 +16,10 @@ export interface OutreachRegistrationCase {
   hasScreening: boolean;
   resolvedPatientId: string | null;
   resolutionKind: 'linked_existing' | null;
+  /** The Health ID created for this person at the outreach (0119), or null. */
+  healthId: string | null;
+  /** Whether a Health ID was created from this registration at the outreach (0119). */
+  healthIdCreatedByOutreach: boolean;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -48,7 +52,8 @@ export interface RegistrationRow {
   updated_at: Date | string;
 }
 
-export function registrationCase(row: RegistrationRow): OutreachRegistrationCase {
+/** A registration as answered; `healthId` is the one 0119 created for it, if any. */
+export function registrationCase(row: RegistrationRow, healthId: string | null = null): OutreachRegistrationCase {
   return {
     id: row.id,
     facilityId: row.facility_id,
@@ -65,6 +70,8 @@ export function registrationCase(row: RegistrationRow): OutreachRegistrationCase
     hasScreening: row.has_screening === true,
     resolvedPatientId: row.resolved_patient_id,
     resolutionKind: row.resolution_kind,
+    healthId,
+    healthIdCreatedByOutreach: healthId !== null,
     rowVersion: Number(row.row_version),
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),

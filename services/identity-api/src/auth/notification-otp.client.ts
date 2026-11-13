@@ -74,6 +74,31 @@ export class NotificationOtpClient {
   }
 
   /**
+   * The code that proves a person's email when an outreach volunteer creates
+   * their Health ID (0119): purpose OUTREACH_HEALTH_ID_VERIFY on the OTP route,
+   * email only, with the outreach group's name when it has one (notification-api
+   * says "An outreach team" otherwise) and the code's lifetime in minutes.
+   * Keyed by the challenge, so a retry is never delivered twice. Like any
+   * code: without a delivery plan or a workload token nothing is sent and the
+   * outcome is definitive_failure.
+   */
+  async deliverOutreachHealthIdCode(input: {
+    challengeId: string;
+    recipient: string;
+    code: string;
+    groupName?: string;
+    expiresInMinutes: number;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure', safeCode: 'delivery_policy_unavailable' };
+    return this.post('otp', `otp:${input.challengeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, code: input.code, purpose: 'OUTREACH_HEALTH_ID_VERIFY',
+      ...(input.groupName ? { groupName: input.groupName } : {}), expiresInMinutes: input.expiresInMinutes, plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
    * Emergency-access alert to a verified emergency contact. The body is the
    * owner's fixed field set (full name, the last four characters of the Health
    * ID, clinician, facility and its phone, time) and never the break-glass

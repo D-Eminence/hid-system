@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } f
 import { Injectable } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
+import { lookupBoundPhoneAssociatedData } from '../identity/patient-contact-crypto';
 
 const CIPHERTEXT_VERSION = 1;
 /**
@@ -75,6 +76,24 @@ export class PatientProfileCrypto {
     const key = this.enrollmentKey(keyVersion);
     if (!key) return undefined;
     return this.decrypt(key, `identity:public-patient-enrollment:${enrollmentId}:${purpose}`, value)?.toString('utf8');
+  }
+
+  /**
+   * A phone written without an enrollment or a contact change (the outreach
+   * assisted Health ID, 0119), bound to its lookup HMAC. The row's key
+   * version is not at hand here, so both keys a patient contact may be
+   * written with (the NIN key, else the OTP-derived key) are tried; GCM
+   * authentication decides.
+   */
+  decryptLookupBoundPhone(phoneLookupHmac: string, value: Buffer | null): string | undefined {
+    const associatedData = lookupBoundPhoneAssociatedData(phoneLookupHmac);
+    for (const keyVersion of [this.environment.NIN_KEY_VERSION,
+      `${SIGNUP_DERIVED_KEY_PREFIX}${this.environment.OTP_HMAC_KEY_VERSION}`]) {
+      const key = this.enrollmentKey(keyVersion);
+      const plaintext = key ? this.decrypt(key, associatedData, value)?.toString('utf8') : undefined;
+      if (plaintext) return plaintext;
+    }
+    return undefined;
   }
 
   /** The stored verifier of a contact change's code: an HMAC bound to the change, never the code. */

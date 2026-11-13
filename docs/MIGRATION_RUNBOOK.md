@@ -364,3 +364,20 @@ an actual staging migration. No generic UPDATE on accounts is granted to solve
 recovery. Database rollback remains forward correction or an approved isolated
 restore with write reconciliation. Provider delivery, staging TLS/roles and
 restored application login remain external acceptance evidence.
+
+## Outreach Health ID limits (0119, 0120)
+
+A volunteer creating Health IDs at a busy outreach is limited by identity-api configuration, so the
+limits can be raised for an event without a migration (owner, 2026-11-13: "we are attending to
+hundreds of people"). Defaults apply when a variable is unset.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX` | 120 | email codes one volunteer may send per `OTP_RATE_WINDOW_SECONDS` (15 minutes by default) |
+| `OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX` | 1000 | email codes one volunteer may send in 24 hours (0119's database keeps a fixed backstop of 2000) |
+| `OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR` | 150 | Health IDs with no contact one volunteer may create per hour (0120) |
+
+Fixed, not configurable: 3 codes a day per registration and per email, a 60-second wait between
+codes for one registration, and 30 code confirmations a day per volunteer and email. Raising a
+variable takes effect on the next identity-api deployment; lowering one never affects Health IDs
+already created.
