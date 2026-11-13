@@ -4783,7 +4783,7 @@ only after the person proves it. The email
 | 403 | `OUTREACH_HEALTH_ID_NOT_AVAILABLE` | not an outreach group, or a sealed demo/QA one |
 | 423 | `OUTREACH_ORGANISER_SUSPENDED` | the group is paused by Health ID |
 | 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN` | the registration's phone is already on a Health ID (refuses only this registration): "This phone number already has a Health ID. Ask them to sign in with it." |
-| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | "Too many codes for this person today. Try again tomorrow." (3 in 24 hours), or "Wait a minute before sending another code." with `Retry-After: <seconds>` (60-second cooldown, or a rate window) |
+| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | one code, its own words: "Too many codes for this person today. Try again tomorrow." (3 per registration in 24 hours); "Too many codes were sent to this email today. Try again tomorrow, or use another email." (3 per email across registrations); "You have sent too many codes today. Try again tomorrow." (200 per volunteer); "Wait a minute before sending another code." with `Retry-After: <seconds>` (60-second cooldown); "Too many codes were sent just now. Try again in N minutes." with `Retry-After` (the short per-volunteer and per-email windows) |
 | 409 | `OUTREACH_HEALTH_ID_REQUEST_USED` | "This request was already used. Start again to send a new code." (retry with a new `Idempotency-Key`) |
 | 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | `channel: "sms"` ("Codes by SMS aren't available yet. Use the person's email."), or the email could not be sent (that code is ended) |
 
@@ -4801,7 +4801,7 @@ Identity recognises answers `201` too. A retry after the Health ID was created (
 |---|---|---|
 | 422 | `OUTREACH_HEALTH_ID_CODE_INVALID` | "That code isn't right. Check the email and try again." (also not 6 digits) |
 | 422 | `OUTREACH_HEALTH_ID_CODE_EXPIRED` | "That code has expired. Send a new one." (no open code) |
-| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_TRIES` | "Too many wrong codes. Send a new one." |
+| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_TRIES` | "Too many wrong codes. Send a new one." (the code's 5 tries), or "Too many codes were tried for this email today. Try again tomorrow." (30 confirmations a day per volunteer and email) |
 | 409 | `OUTREACH_HEALTH_ID_EMAIL_TAKEN` | "This email is already used by another Health ID or account. Use another email." (after the code is proved; any sign-in with that email, or one created meanwhile) |
 | 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN`, `OUTREACH_REGISTRATION_REDACTED`, `OUTREACH_HEALTH_ID_ALREADY_CREATED` (+ `healthId`) | as in 49.1 |
 | 404, 403, 422, 423 | as in 49.1 | |
@@ -4977,3 +4977,12 @@ under the emergency purpose. RLS needs no new policy: 0117's and 0094's read pol
 reasoned break-glass grant for `read_records` under purpose `emergency` (and only that action). The audit
 (`ehr.emergency.records.read`) adds `recordedAllergyCount` and `patientReportedAllergies` (a flag), never the
 substance, reaction or text.
+
+Retention of the codes (0119): a code keeps the email's ciphertext only until it is used (the patient
+then holds the email) and its lookup HMAC until 24 hours after it expired (for the per-email daily
+cap); then both are removed (by start, confirmation and 0116's daily retention sweep). When a
+registration is redacted, all its codes lose their email at once. 0116's sweep no longer redacts a
+registration that has a Health ID created at the outreach (it was linked); support can still redact it.
+The code email never names a group whose name carries a link or a domain ("An outreach team" instead).
+outreach-api waits up to 20 seconds for Identity on start and confirm (start sends the email).
+

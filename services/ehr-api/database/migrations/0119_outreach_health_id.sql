@@ -59,6 +59,7 @@ begin
      or to_regprocedure('outreach.organiser_tenant_state(uuid)') is null
      or to_regprocedure('outreach.registration_campaign_member(uuid,uuid)') is null
      or to_regprocedure('outreach.context_allows(uuid,text)') is null
+     or to_regprocedure('identity.sweep_expired_outreach_registrations(integer)') is null
      or to_regprocedure('auth.membership_has_permission(text,uuid,uuid,text)') is null
      or to_regprocedure('identity.sealed_demo_facility(uuid)') is null then
     raise exception using errcode = '55000', message = '0119: a prerequisite object is missing (0115, 0116, 0118, 0098)';
@@ -96,8 +97,13 @@ create table identity.outreach_health_id_challenges (
   registration_case_id uuid not null references outreach.registration_cases(id) on delete restrict,
   facility_id uuid not null,
   channel text not null check (channel = 'email'),
-  email_lookup_hmac char(64) not null check (email_lookup_hmac ~ '^[0-9a-f]{64}$'),
-  email_ciphertext bytea not null check (octet_length(email_ciphertext) between 16 and 2048),
+  -- The email is kept only while it is needed: the ciphertext until the code
+  -- is used (the patient then holds the email), both until 24 hours after the
+  -- code expired (the per-email daily cap), and neither once the registration
+  -- is redacted (identity.outreach_health_id_scrub_challenges and the trigger
+  -- on outreach.registration_redactions).
+  email_lookup_hmac char(64) check (email_lookup_hmac ~ '^[0-9a-f]{64}$'),
+  email_ciphertext bytea check (octet_length(email_ciphertext) between 16 and 2048),
   key_version text not null check (length(key_version) between 1 and 64),
   verifier_hmac char(64) not null check (verifier_hmac ~ '^[0-9a-f]{64}$'),
   verifier_key_version text not null check (length(verifier_key_version) between 1 and 64),
@@ -109,11 +115,18 @@ create table identity.outreach_health_id_challenges (
   created_at timestamptz not null default clock_timestamp(),
   consumed_at timestamptz,
   invalidated_at timestamptz,
-  invalidation_reason text check (invalidation_reason in ('resend', 'attempts_exhausted', 'delivery_failed')),
+  invalidation_reason text check (invalidation_reason in ('resend', 'attempts_exhausted', 'delivery_failed', 'redacted', 'expired')),
   check (failed_attempts between 0 and max_attempts),
   check ((invalidated_at is null) = (invalidation_reason is null)),
-  check (not (consumed_at is not null and invalidated_at is not null))
+  check (not (consumed_at is not null and invalidated_at is not null)),
+  check (email_ciphertext is null or email_lookup_hmac is not null),
+  check (email_ciphertext is not null or consumed_at is not null or invalidated_at is not null
+         or email_lookup_hmac is null)
 );
+create index outreach_health_id_challenges_email_idx
+  on identity.outreach_health_id_challenges (email_lookup_hmac, created_at) where email_lookup_hmac is not null;
+create index outreach_health_id_challenges_requester_idx
+  on identity.outreach_health_id_challenges (requested_by_account_id, created_at);
 create index outreach_health_id_challenges_case_idx
   on identity.outreach_health_id_challenges (registration_case_id, created_at desc);
 create unique index outreach_health_id_challenges_open_uq
@@ -283,6 +296,18 @@ begin
     raise exception using errcode = 'P0001', message = 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', detail = format('cooldown:%s',
       ceil(extract(epoch from last_sent + interval '60 seconds' - clock_timestamp()))::integer);
   end if;
+  -- Across registrations: 3 codes a day to one email, 200 a day from one volunteer.
+  if (select count(*) from identity.outreach_health_id_challenges challenge
+       where challenge.email_lookup_hmac = requested_email_lookup_hmac
+         and challenge.created_at > clock_timestamp() - interval '24 hours') >= 3 then
+    raise exception using errcode = 'P0001', message = 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', detail = 'email_daily';
+  end if;
+  if (select count(*) from identity.outreach_health_id_challenges challenge
+       where challenge.requested_by_account_id = platform.current_account_id()
+         and challenge.created_at > clock_timestamp() - interval '24 hours') >= 200 then
+    raise exception using errcode = 'P0001', message = 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', detail = 'volunteer_daily';
+  end if;
+  perform identity.outreach_health_id_scrub_challenges(200);
   update identity.outreach_health_id_challenges challenge
      set invalidated_at = clock_timestamp(), invalidation_reason = 'resend'
    where challenge.registration_case_id = requested_case_id
@@ -374,6 +399,7 @@ begin
     raise exception using errcode = '23505', message = 'OUTREACH_HEALTH_ID_ALREADY_CREATED', detail = existing.hid_code;
   end if;
   perform identity.outreach_health_id_eligible(requested_case_id);
+  perform identity.outreach_health_id_scrub_challenges(200);
   select * into challenge from identity.outreach_health_id_challenges candidate
    where candidate.id = requested_challenge_id and candidate.registration_case_id = requested_case_id
    for update;
@@ -415,7 +441,9 @@ begin
   first_name_value := left(split_part(clean_name, ' ', 1), 80);
   last_name_value := left(coalesce(nullif(btrim(substr(clean_name, length(split_part(clean_name, ' ', 1)) + 1)), ''),
     first_name_value), 80);
-  update identity.outreach_health_id_challenges candidate set consumed_at = clock_timestamp()
+  -- The patient holds the email from here: the challenge keeps only the
+  -- lookup HMAC, for the daily cap, until it is scrubbed.
+  update identity.outreach_health_id_challenges candidate set consumed_at = clock_timestamp(), email_ciphertext = null
    where candidate.id = challenge.id;
   insert into auth.accounts (id, subject, email, display_name, status, email_verified_at, source_system)
   values (new_account, 'patient:' || new_account::text, normalized_email, clean_name,
@@ -456,6 +484,88 @@ $$;
 
 comment on function identity.outreach_health_id_confirm(uuid,uuid,char,text,text) is
   '0119: checks an outreach Health ID code and, when right, creates the account (no password, pending_reset, email verified), the patient (the registration''s name and sex; the verified email; no phone, no date of birth), its Health ID identifier and CONTACT_VERIFIED assurance, the registration''s Health ID record and one audit row (ids only). Answers an outcome (created, replayed, invalid, expired, too_many_tries) so that a failed attempt is counted; raises the refusals of identity.outreach_health_id_registration, 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED / _EMAIL_TAKEN, 23514 _UNDER_18 / _NAME_INVALID (a name with nothing printable). The registration''s phone, never proven, is not stored on the Health ID, so it never blocks the number''s real owner; the person adds a phone later in the app.';
+
+-- 4b. Retention of the challenges' email (0116's sweep and redaction).
+create function identity.outreach_health_id_scrub_challenges(requested_limit integer)
+returns integer language plpgsql volatile security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  scrubbed integer;
+begin
+  -- 24 hours after a code expired, its email is no longer needed for anything
+  -- (the per-email daily cap looks back 24 hours from when a code is sent).
+  with due as (
+    select challenge.id from identity.outreach_health_id_challenges challenge
+     where (challenge.email_lookup_hmac is not null or challenge.email_ciphertext is not null)
+       and challenge.expires_at < clock_timestamp() - interval '24 hours'
+     order by challenge.expires_at
+     limit greatest(1, least(coalesce(requested_limit, 200), 5000))
+     for update skip locked)
+  update identity.outreach_health_id_challenges challenge
+     set email_ciphertext = null, email_lookup_hmac = null,
+         invalidated_at = case when challenge.consumed_at is null and challenge.invalidated_at is null
+                               then clock_timestamp() else challenge.invalidated_at end,
+         invalidation_reason = case when challenge.consumed_at is null and challenge.invalidated_at is null
+                                    then 'expired' else challenge.invalidation_reason end
+    from due where challenge.id = due.id;
+  get diagnostics scrubbed = row_count;
+  return scrubbed;
+end
+$$;
+comment on function identity.outreach_health_id_scrub_challenges(integer) is
+  '0119: removes the email (ciphertext and lookup HMAC) from outreach Health ID codes 24 hours after they expired, at most the given number (1-5000) per call. Run by start, confirm and 0116''s daily retention sweep. Counts only.';
+
+-- A redacted registration's codes lose their email at once.
+create function identity.outreach_health_id_redacted_case()
+returns trigger language plpgsql security definer
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  update identity.outreach_health_id_challenges challenge
+     set email_ciphertext = null, email_lookup_hmac = null,
+         invalidated_at = case when challenge.consumed_at is null and challenge.invalidated_at is null
+                               then clock_timestamp() else challenge.invalidated_at end,
+         invalidation_reason = case when challenge.consumed_at is null and challenge.invalidated_at is null
+                                    then 'redacted' else challenge.invalidation_reason end
+   where challenge.registration_case_id = new.registration_case_id;
+  return null;
+end
+$$;
+create trigger outreach_registration_redactions_health_id_scrub
+  after insert on outreach.registration_redactions
+  for each row execute function identity.outreach_health_id_redacted_case();
+
+-- 0116's retention sweep: a registration with a Health ID created at the
+-- outreach (0119) was linked, so it is not redacted as "never linked"; the
+-- sweep also scrubs the codes' email. The body is changed in place (0116's
+-- md5 pinned before, the result checked after; support redaction unchanged).
+do $$
+declare
+  definition text;
+  old_link text := E'       and not exists (select 1 from outreach.registration_redactions redaction\n                        where redaction.registration_case_id = case_row.id)\n     order by case_row.created_at, case_row.id';
+  new_link text := E'       and not exists (select 1 from outreach.registration_redactions redaction\n                        where redaction.registration_case_id = case_row.id)\n       and not exists (select 1 from identity.outreach_registration_health_ids link\n                        where link.registration_case_id = case_row.id)\n     order by case_row.created_at, case_row.id';
+  old_end text := E'  perform outreach.end_privileged_run();';
+  new_end text := E'  perform identity.outreach_health_id_scrub_challenges(5000);\n  perform outreach.end_privileged_run();';
+begin
+  if (select md5(prosrc) from pg_proc where oid = 'identity.sweep_expired_outreach_registrations(integer)'::regprocedure)
+       is distinct from '71a48920153c0e064077f61abe92af26' then
+    raise exception using errcode = '55000', message = '0119: identity.sweep_expired_outreach_registrations is not 0116''s';
+  end if;
+  definition := pg_get_functiondef('identity.sweep_expired_outreach_registrations(integer)'::regprocedure);
+  if (length(definition) - length(replace(definition, old_link, ''))) / length(old_link) <> 1
+     or (length(definition) - length(replace(definition, old_end, ''))) / length(old_end) <> 1 then
+    raise exception using errcode = '55000', message = '0119: the sweep text to replace is not there exactly once';
+  end if;
+  execute replace(replace(definition, old_link, new_link), old_end, new_end);
+  if (select prosrc from pg_proc where oid = 'identity.sweep_expired_outreach_registrations(integer)'::regprocedure)
+       not like '%identity.outreach_registration_health_ids link%'
+     or (select prosrc from pg_proc where oid = 'identity.sweep_expired_outreach_registrations(integer)'::regprocedure)
+       not like '%identity.outreach_health_id_scrub_challenges(5000)%' then
+    raise exception using errcode = '55000', message = '0119: the sweep was not changed as intended';
+  end if;
+end
+$$;
 
 -- 5. For outreach-api: the Health IDs created for registrations the session can see.
 create function identity.outreach_registration_health_ids_for(requested_case_ids uuid[])
@@ -501,6 +611,8 @@ begin
     execute format('alter function identity.outreach_health_id_open_challenge(uuid) owner to %I', owner_name);
     execute format('alter function identity.outreach_health_id_confirm(uuid,uuid,char,text,text) owner to %I', owner_name);
     execute format('alter function identity.outreach_registration_health_ids_for(uuid[]) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_scrub_challenges(integer) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_redacted_case() owner to %I', owner_name);
   end if;
   execute format('create policy outreach_health_id_challenges_owner on identity.outreach_health_id_challenges '
     || 'for all to %I using (true) with check (true)', owner_name);
@@ -515,7 +627,8 @@ revoke all on function identity.outreach_registration_health_ids_immutable(),
   identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer),
   identity.outreach_health_id_delivery_failed(uuid), identity.outreach_health_id_open_challenge(uuid),
   identity.outreach_health_id_confirm(uuid,uuid,char,text,text),
-  identity.outreach_registration_health_ids_for(uuid[]) from public;
+  identity.outreach_registration_health_ids_for(uuid[]), identity.outreach_health_id_scrub_challenges(integer),
+  identity.outreach_health_id_redacted_case() from public;
 
 -- Grants (here and in runtime-grants.sql).
 do $$
@@ -547,7 +660,9 @@ begin
               and (has_table_privilege(role_row.oid, 'identity.outreach_health_id_challenges', 'SELECT,INSERT,UPDATE,DELETE')
                    or has_table_privilege(role_row.oid, 'identity.outreach_registration_health_ids',
                         'SELECT,INSERT,UPDATE,DELETE')
-                   or has_function_privilege(role_row.oid, 'identity.outreach_health_id_eligible(uuid)', 'EXECUTE'))) then
+                   or has_function_privilege(role_row.oid, 'identity.outreach_health_id_eligible(uuid)', 'EXECUTE')
+                   or has_function_privilege(role_row.oid, 'identity.outreach_health_id_scrub_challenges(integer)', 'EXECUTE')
+                   or has_function_privilege(role_row.oid, 'identity.outreach_health_id_redacted_case()', 'EXECUTE'))) then
     raise exception using errcode = '55000', message = '0119: a runtime role holds a privilege it must not';
   end if;
   if exists (select 1 from pg_class where oid in ('identity.outreach_health_id_challenges'::regclass,

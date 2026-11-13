@@ -243,6 +243,23 @@ describe('OutreachHealthIdService (0119)', () => {
       expect(queries.find((q) => q.sql.includes('delivery_failed'))?.parameters).toEqual([challengeId]);
     });
 
+    it('answers the short rate windows with their own words and wait, and maps the cross-registration caps', async () => {
+      rateBlocked = true;
+      const windowed = await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context));
+      expect(windowed).toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', status: 429 });
+      expect(windowed.message).toMatch(/^Too many codes were sent just now\. Try again in \d+ minutes?\.$/);
+      expect(windowed.extensions).toMatchObject({ retryAfterSeconds: expect.any(Number) });
+      rateBlocked = false;
+      startResult = () => { throw pgError('OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', { detail: 'email_daily' }); };
+      expect(await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context)))
+        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', status: 429,
+          message: 'Too many codes were sent to this email today. Try again tomorrow, or use another email.' });
+      startResult = () => { throw pgError('OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', { detail: 'volunteer_daily' }); };
+      expect(await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context)))
+        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', status: 429,
+          message: 'You have sent too many codes today. Try again tomorrow.' });
+    });
+
     it('tells the daily limit from the cooldown, and a used request id', async () => {
       startResult = () => { throw pgError('OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', { detail: 'daily' }); };
       const daily = await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context));
@@ -334,6 +351,16 @@ describe('OutreachHealthIdService (0119)', () => {
       expect(await refusal(service().confirm({ caseId, code: '123456' }, context)))
         .toMatchObject({ code: 'OUTREACH_HEALTH_ID_ALREADY_CREATED', extensions: { healthId: 'HID-ZZ9YY8' } });
       expect(queries.some((q) => q.sql.includes('outreach_health_id_confirm('))).toBe(false);
+    });
+
+    it('counts confirms per volunteer and email, and refuses past the day\'s limit before asking the database', async () => {
+      openChallenge();
+      rateBlocked = true;
+      expect(await refusal(service().confirm({ caseId, code: '123456' }, context)))
+        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_TRIES', status: 429,
+          message: 'Too many codes were tried for this email today. Try again tomorrow.' });
+      expect(queries.some((q) => q.sql.includes('outreach_health_id_confirm('))).toBe(false);
+      rateBlocked = false;
     });
 
     it('answers expired for a code keyed with another OTP key version', async () => {

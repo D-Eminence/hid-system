@@ -54,6 +54,13 @@ describe('Outreach assisted Health ID code (0119, OUTREACH_HEALTH_ID_VERIFY)', (
     expect(outreachGroupName('Kano\u0000 Care\n\tTeam‮')).toBe('Kano Care Team');
     expect(outreachGroupName('x'.repeat(200))).toHaveLength(80);
     expect(outreachGroupName('\u0007\n ')).toBe('');
+    // A self-service name carrying a link or a domain is never put in the email.
+    for (const linked of ['Visit https://evil.example', 'www.free-gift.ng', 'Claim at prize.xyz now', 'ftp://x']) {
+      expect(outreachGroupName(linked)).toBe('');
+    }
+    expect(outreachGroupName('St. Mary Outreach')).toBe('St. Mary Outreach');
+    expect(outreachHealthIdCodeContent({ groupName: 'go to bit.ly/abc', code: '482913', expiresInMinutes: 10 }).text)
+      .toMatch(/^An outreach team is creating a Health ID for you\./);
     expect(outreachHealthIdCodeContent({ groupName: '\n\r', code: '111111', expiresInMinutes: 5 }).text)
       .toMatch(/^An outreach team /);
   });

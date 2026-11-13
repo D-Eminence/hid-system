@@ -435,6 +435,84 @@ select pg_temp.support('6d support redacts registration 2', 'redacted', 'synthet
 select pg_temp.idrt('6e a redacted registration', '55000: OUTREACH_REGISTRATION_REDACTED',
   $s$select full_name from identity.outreach_health_id_registration('6c080000-0000-4000-8000-000000000002')$s$);
 
+-- 6b. Caps across registrations, and the codes' email (retention).
+select pg_temp.hi_case('6f a used code keeps no email ciphertext (the patient holds it)', 't/t', session_user::text,
+  null, null, null, null,
+  $s$select concat_ws('/', email_ciphertext is null, email_lookup_hmac is not null)
+       from identity.outreach_health_id_challenges where id = '6c0a0000-0000-4000-8000-000000000005'$s$);
+select pg_temp.hi_case('6g a redacted registration''s codes lose their email', '0/true', session_user::text,
+  null, null, null, null,
+  $s$select (select count(*) from identity.outreach_health_id_challenges
+              where registration_case_id = '6c080000-0000-4000-8000-000000000002'
+                and (email_ciphertext is not null or email_lookup_hmac is not null))::text || '/'
+         || (select bool_and(consumed_at is not null or invalidated_at is not null)
+               from identity.outreach_health_id_challenges
+              where registration_case_id = '6c080000-0000-4000-8000-000000000002')::text$s$);
+select pg_temp.hi_case('6h 3 codes a day to one email across registrations', '55000: email_daily', session_user::text,
+  null, null, null, null, format($d$do $x$ begin
+    set local session_replication_role = replica;
+    update outreach.registration_cases set age_years = 40 where id = '6c080000-0000-4000-8000-000000000004';
+    set local session_replication_role = origin;
+    perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
+      set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
+      set_config('app.membership_id', '6c030000-0000-4000-8000-000000000001', true),
+      set_config('app.purpose_of_use', 'direct-care', true);
+    set local role hid_identity_api_runtime;
+    perform %s;
+  exception when sqlstate 'P0001' then
+    declare detail_text text; begin
+      get stacked diagnostics detail_text = pg_exception_detail;
+      raise exception using errcode = '55000', message = detail_text;
+    end;
+  end $x$$d$, replace(pg_temp.start_sql(4, '6c0a0000-0000-4000-8000-000000000041', 'ade.three@example.invalid',
+    repeat('4', 64)), 'select challenge_id::text from', 'challenge_id from')), false, 'statement');
+select pg_temp.hi_case('6i 200 codes a day from one volunteer', '55000: volunteer_daily', session_user::text,
+  null, null, null, null, format($d$do $x$ begin
+    set local session_replication_role = replica;
+    update outreach.registration_cases set age_years = 40 where id = '6c080000-0000-4000-8000-000000000004';
+    insert into identity.outreach_health_id_challenges (id, registration_case_id, facility_id, channel, key_version,
+      verifier_hmac, verifier_key_version, expires_at, max_attempts, requested_by_account_id, requested_by_membership_id,
+      created_at, invalidated_at, invalidation_reason)
+    select gen_random_uuid(), '6c080000-0000-4000-8000-000000000006', '6c000000-0000-4000-8000-000000000012', 'email',
+      'contact-v1', repeat('e', 64), 'otp-v1', clock_timestamp() + interval '10 minutes', 5,
+      '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001',
+      clock_timestamp() - interval '1 hour', clock_timestamp(), 'resend' from generate_series(1, 200);
+    set local session_replication_role = origin;
+    perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
+      set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
+      set_config('app.membership_id', '6c030000-0000-4000-8000-000000000001', true),
+      set_config('app.purpose_of_use', 'direct-care', true);
+    set local role hid_identity_api_runtime;
+    perform %s;
+  exception when sqlstate 'P0001' then
+    declare detail_text text; begin
+      get stacked diagnostics detail_text = pg_exception_detail;
+      raise exception using errcode = '55000', message = detail_text;
+    end;
+  end $x$$d$, replace(pg_temp.start_sql(4, '6c0a0000-0000-4000-8000-000000000042', 'fresh.four@example.invalid',
+    repeat('4', 64)), 'select challenge_id::text from', 'challenge_id from')), false, 'statement');
+update identity.outreach_health_id_challenges set expires_at = clock_timestamp() - interval '25 hours'
+ where id = '6c0a0000-0000-4000-8000-000000000035';
+select pg_temp.hi_case('6j the scrub runs', '1', session_user::text, null, null, null, null,
+  $s$select identity.outreach_health_id_scrub_challenges(10)::text$s$, true);
+select pg_temp.hi_case('6j2 24 hours after expiry a code loses its email', 'true/expired', session_user::text,
+  null, null, null, null,
+  $s$select (email_lookup_hmac is null and email_ciphertext is null)::text || '/' || coalesce(invalidation_reason, '-')
+       from identity.outreach_health_id_challenges where id = '6c0a0000-0000-4000-8000-000000000035'$s$);
+-- 6c. 0116's sweep: registration 5 (a Health ID was created) is linked and is
+-- not redacted as "never linked"; registration 1 (none) is.
+set local session_replication_role = replica;
+update outreach.campaigns set status = 'closed', closed_at = now() - interval '400 days',
+  updated_at = now() - interval '400 days' where id in ('6c070000-0000-4000-8000-000000000005',
+  '6c070000-0000-4000-8000-000000000001');
+set local session_replication_role = origin;
+select pg_temp.hi_case('6k the sweep runs', 'ok', 'hid_identity_api_runtime', 'system:auth', null, null, null,
+  $s$select identity.sweep_expired_outreach_registrations(100)$s$, true, 'statement');
+select pg_temp.hi_case('6l a linked registration is kept; an unlinked one is redacted', 'f/t', session_user::text,
+  null, null, null, null,
+  $s$select concat_ws('/',
+       exists (select 1 from outreach.registration_redactions where registration_case_id = '6c080000-0000-4000-8000-000000000005'),
+       exists (select 1 from outreach.registration_redactions where registration_case_id = '6c080000-0000-4000-8000-000000000001'))$s$);
 -- 7. Result.
 do $$
 declare failed text;

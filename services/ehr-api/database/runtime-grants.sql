@@ -1674,5 +1674,6 @@ grant execute on function identity.outreach_health_id_registration(uuid),
 grant execute on function identity.outreach_registration_health_ids_for(uuid[])
   to hid_outreach_runtime, hid_schema_test_runtime;
 revoke all on identity.outreach_health_id_challenges, identity.outreach_registration_health_ids from public;
-revoke all on function identity.outreach_registration_health_ids_immutable(), identity.outreach_health_id_eligible(uuid)
+revoke all on function identity.outreach_registration_health_ids_immutable(), identity.outreach_health_id_eligible(uuid),
+  identity.outreach_health_id_scrub_challenges(integer), identity.outreach_health_id_redacted_case()
   from public;
