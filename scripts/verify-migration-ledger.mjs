@@ -129,7 +129,7 @@ const acceptedMigrations = new Map([
   ['0114_collect_signup_fields.sql', '9f3e842a08a9af68a3378647474d98e738f3687c29e2d26b10ea64a5b06937e0'],
   ['0115_outreach_organisers.sql', '2ee407dfe2c6287003d15d1d8b44b1062f6968e29c2fa9930a8be67b2f2ee8a1'],
   ['0116_outreach_retention.sql', 'd590c45302484da9d3175022b30395eacd53d3618460fc3c85093a31b21d74bf'],
-  ['0123_sealed_qa_tenant.sql', '4fc8b8f9ec325e2a7746e9d92af4a04d15ddd6a32ec668df6f24d8f67b73bd7d'],
+  ['0123_sealed_qa_tenant.sql', '172fc193efab4912819e73b54ea5eb278e65f147410a853fc5934897f6f4d74b'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

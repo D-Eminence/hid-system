@@ -235,8 +235,10 @@
 --     pharmacy@healthidentitydirectory.com "QA Pharmacist": pharmacist at QA Pharmacy;
 --     admin@healthidentitydirectory.com "QA Facility Admin": org_admin at QA Hospital,
 --       QA Laboratory and QA Pharmacy;
---     outreach@healthidentitydirectory.com "QA Outreach Organiser": no membership; it
---       starts the QA Outreach group (D8).
+--     outreach+qa@healthidentitydirectory.com "QA Outreach Organiser": no membership; it
+--       starts the QA Outreach group (D8). A plus-alias of the outreach@
+--       mailbox (owner, 2026-11-13): outreach@ itself is the owner's real
+--       outreach login, so the seed must not claim it.
 --   Patient logins: patient1@healthidentitydirectory.com (HID-ZQAAAAA2, QA
 --     Patient One) and patient2@healthidentitydirectory.com (HID-ZQAAAAA3,
 --     QA Patient Two).
@@ -256,7 +258,7 @@
 --     ('ehr@healthidentitydirectory.com'), ('migrate@healthidentitydirectory.com'),
 --     ('lab@healthidentitydirectory.com'), ('lab2@healthidentitydirectory.com'),
 --     ('pharmacy@healthidentitydirectory.com'), ('admin@healthidentitydirectory.com'),
---     ('outreach@healthidentitydirectory.com'), ('patient1@healthidentitydirectory.com'),
+--     ('outreach+qa@healthidentitydirectory.com'), ('patient1@healthidentitydirectory.com'),
 --     ('patient2@healthidentitydirectory.com'), ('patientdemo1@healthidentitydirectory.com'),
 --     ('patientdemo2@healthidentitydirectory.com'))
 --   select x.email,
@@ -2073,7 +2075,7 @@ declare
      "default_role": "org_admin"},
     {"id": "c0a00003-0000-4000-8000-000000000007", "staff_id": "c0a00004-0000-4000-8000-000000000007",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-000000000007",
-     "email": "outreach@healthidentitydirectory.com", "display_name": "QA Outreach Organiser",
+     "email": "outreach+qa@healthidentitydirectory.com", "display_name": "QA Outreach Organiser",
      "default_role": "outreach_organiser"},
     {"id": "c0a00008-0000-4000-8000-000000000001", "staff_id": null,
      "subject": "patient:c0a00008-0000-4000-8000-000000000001",
