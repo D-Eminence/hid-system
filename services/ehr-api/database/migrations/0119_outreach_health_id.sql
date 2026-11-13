@@ -54,6 +54,7 @@ begin
   if to_regclass('outreach.registration_screenings') is null
      or to_regclass('outreach.registration_redactions') is null
      or to_regprocedure('outreach.organiser_tenant_state(uuid)') is null
+     or to_regprocedure('outreach.registration_campaign_member(uuid,uuid)') is null
      or to_regprocedure('auth.membership_has_permission(text,uuid,uuid,text)') is null
      or to_regprocedure('identity.sealed_demo_facility(uuid)') is null then
     raise exception using errcode = '55000', message = '0119: a prerequisite object is missing (0115, 0116, 0118, 0098)';
@@ -158,12 +159,13 @@ begin
        platform.current_facility_id(), 'outreach.registration.write'), false) then
     raise exception using errcode = '42501', message = 'OUTREACH_REGISTRATION_NOT_FOUND';
   end if;
-  -- Read under the volunteer's own row-level security: the facility and the
-  -- campaign's members only (0024, 0045).
+  -- The facility and the campaign's members only (0024, 0045). Checked here as
+  -- well as by row-level security, which does not apply to a superuser owner.
   select case_row.id, case_row.facility_id, case_row.full_name, case_row.sex, case_row.age_years, case_row.phone
     into registration
     from outreach.registration_cases case_row
-   where case_row.id = requested_case_id and case_row.facility_id = platform.current_facility_id();
+   where case_row.id = requested_case_id and case_row.facility_id = platform.current_facility_id()
+     and outreach.registration_campaign_member(case_row.campaign_id, case_row.facility_id);
   if registration.id is null then
     raise exception using errcode = '42501', message = 'OUTREACH_REGISTRATION_NOT_FOUND';
   end if;
@@ -182,8 +184,8 @@ begin
     raise exception using errcode = '55000', message = 'OUTREACH_ORGANISER_SUSPENDED';
   end if;
   return query select registration.id, registration.facility_id, registration.full_name, registration.sex,
-    registration.age_years, registration.phone,
-    (select organisation.display_name from identity.outreach_organisations organisation
+    registration.age_years::integer, registration.phone,
+    (select organisation.display_name::text from identity.outreach_organisations organisation
       where organisation.facility_id = registration.facility_id),
     (select link.hid_code from identity.outreach_registration_health_ids link
       where link.registration_case_id = registration.id);
@@ -191,7 +193,7 @@ end
 $$;
 
 comment on function identity.outreach_health_id_registration(uuid) is
-  '0119: the outreach registration a volunteer may create a Health ID from (name, sex, age, phone, the group''s name, or the Health ID already created), read under the volunteer''s own row-level security. Refuses 42501 OUTREACH_REGISTRATION_NOT_FOUND (not visible, or no outreach.registration.write), 55000 OUTREACH_REGISTRATION_REDACTED, 42501 OUTREACH_HEALTH_ID_NOT_AVAILABLE (not an outreach group, or a sealed demo or QA one), 55000 OUTREACH_ORGANISER_SUSPENDED.';
+  '0119: the outreach registration a volunteer may create a Health ID from (name, sex, age, phone, the group''s name, or the Health ID already created), at the volunteer''s facility and in a campaign they are a member of (checked here and by row-level security). Refuses 42501 OUTREACH_REGISTRATION_NOT_FOUND (not visible, or no outreach.registration.write), 55000 OUTREACH_REGISTRATION_REDACTED, 42501 OUTREACH_HEALTH_ID_NOT_AVAILABLE (not an outreach group, or a sealed demo or QA one), 55000 OUTREACH_ORGANISER_SUSPENDED.';
 
 -- The checks a creation needs beyond the registration itself.
 create function identity.outreach_health_id_eligible(requested_case_id uuid)
@@ -300,14 +302,18 @@ end
 $$;
 
 create function identity.outreach_health_id_open_challenge(requested_case_id uuid)
-returns table (challenge_id uuid, expires_at timestamptz, verifier_key_version text)
+returns table (challenge_id uuid, expires_at timestamptz, verifier_key_version text, email_ciphertext bytea,
+  key_version text)
 language plpgsql stable security definer
 set search_path = pg_catalog, pg_temp
 as $$
 #variable_conflict use_column
 begin
   perform identity.outreach_health_id_registration(requested_case_id);
-  return query select challenge.id, challenge.expires_at, challenge.verifier_key_version
+  -- The email's ciphertext, which identity-api decrypts for the account at
+  -- confirmation (the database never holds it in the clear).
+  return query select challenge.id, challenge.expires_at, challenge.verifier_key_version, challenge.email_ciphertext,
+    challenge.key_version
     from identity.outreach_health_id_challenges challenge
    where challenge.registration_case_id = requested_case_id
      and challenge.consumed_at is null and challenge.invalidated_at is null
@@ -430,11 +436,13 @@ as $$
    where link.registration_case_id = any(requested_case_ids)
      and cardinality(requested_case_ids) <= 500
      and link.facility_id = platform.current_facility_id()
-     and exists (select 1 from outreach.registration_cases case_row where case_row.id = link.registration_case_id)
+     and exists (select 1 from outreach.registration_cases case_row where case_row.id = link.registration_case_id
+                  and case_row.facility_id = link.facility_id
+                  and outreach.registration_campaign_member(case_row.campaign_id, case_row.facility_id))
 $$;
 
 comment on function identity.outreach_registration_health_ids_for(uuid[]) is
-  '0119: for the Outreach runtime, the Health IDs created (0119) for up to 500 registrations at the session facility that the session can see under the registration''s own row-level security.';
+  '0119: for the Outreach runtime, the Health IDs created (0119) for up to 500 registrations at the session facility that the session can see (the registration''s facility and campaign membership, checked here and by its row-level security).';
 
 -- 6. Owners, policies, ACLs.
 do $$
