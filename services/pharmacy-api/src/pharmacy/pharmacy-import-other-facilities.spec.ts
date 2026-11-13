@@ -9,7 +9,7 @@ import { IMPORT_PAGE_MAX, ListOtherFacilityImportedMedicationsQueryDto } from '.
 import { PharmacyOrderRouteAccess } from './order-route-access';
 import { PharmacyOrderRouteCards } from './order-route-cards';
 import { PharmacyController } from './pharmacy.controller';
-import { decodeOtherFacilityCursor, encodeOtherFacilityCursor, OTHER_FACILITY_IMPORTS_QUERY, PharmacyService }
+import { decodeOtherFacilityCursor, encodeOtherFacilityCursor, OTHER_FACILITIES_REFUSAL_QUERY, OTHER_FACILITY_IMPORTS_QUERY, PharmacyService }
   from './pharmacy.service';
 
 // Synthetic test data only.
@@ -35,8 +35,9 @@ function row(index: number) {
     cursor_at: `2026-11-05T10:00:${String(60 - index).padStart(2, '0')}.000123Z` };
 }
 
-function harness(answer: unknown[] | Error) {
-  const query = jest.fn(async () => {
+function harness(answer: unknown[] | Error, refused: string | null = null) {
+  const query = jest.fn(async (sql: string) => {
+    if (sql === OTHER_FACILITIES_REFUSAL_QUERY) return { rows: [{ refused }] };
     if (answer instanceof Error) throw answer;
     return { rows: answer };
   });
@@ -93,7 +94,7 @@ describe('GET pharmacy/imports/other-facilities (0124)', () => {
     expect(first.nextCursor).toBe(encodeOtherFacilityCursor('2026-11-05T10:00:58.000123Z', row(2).import_id));
     expect(decodeOtherFacilityCursor(first.nextCursor!)).toEqual({ at: '2026-11-05T10:00:58.000123Z', id: row(2).import_id });
     await service.listOtherFacilityImports(context, { patientId: ids.patient, limit: 2, cursor: first.nextCursor! });
-    expect(query).toHaveBeenLastCalledWith(OTHER_FACILITY_IMPORTS_QUERY,
+    expect(query).toHaveBeenCalledWith(OTHER_FACILITY_IMPORTS_QUERY,
       [ids.patient, '2026-11-05T10:00:58.000123Z', row(2).import_id, 2]);
     const clamped = harness([]);
     await clamped.service.listOtherFacilityImports(context, { patientId: ids.patient, limit: 10_000 });
@@ -109,7 +110,20 @@ describe('GET pharmacy/imports/other-facilities (0124)', () => {
     }
   });
 
-  it('maps the function\'s refusals: no qualifying share 403, invalid request 400; others unchanged', async () => {
+  it('answers a refusal the function flagged (denied audit row kept) with 403, after the transaction', async () => {
+    const refused = harness([], 'OTHER_FACILITIES_NOT_SHARED');
+    await expect(refused.service.listOtherFacilityImports(context, { patientId: ids.patient }))
+      .rejects.toMatchObject({ status: 403, code: 'OTHER_FACILITIES_NOT_SHARED' });
+    expect(refused.query).toHaveBeenCalledWith(OTHER_FACILITIES_REFUSAL_QUERY);
+    expect(refused.database.withTransaction).toHaveBeenCalledTimes(1);
+    // The transaction's work resolves (and so commits) before the 403 is thrown.
+    await expect(refused.database.withTransaction.mock.results[0]!.value).resolves.toEqual({ found: [], refused: true });
+    const empty = harness([], '');
+    await expect(empty.service.listOtherFacilityImports(context, { patientId: ids.patient }))
+      .resolves.toEqual({ items: [], nextCursor: null });
+  });
+
+  it('maps raised errors: invalid request 400; a raised 42501 OTHER_FACILITIES_NOT_SHARED (not raised since the denied audit row) still 403; others unchanged', async () => {
     await expect(harness(dbError('42501', 'OTHER_FACILITIES_NOT_SHARED')).service
       .listOtherFacilityImports(context, { patientId: ids.patient }))
       .rejects.toMatchObject({ status: 403, code: 'OTHER_FACILITIES_NOT_SHARED' });

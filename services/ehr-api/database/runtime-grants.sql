@@ -1664,6 +1664,6 @@ revoke all on function identity.patient_share_scopes_immutable(),
   identity.cross_facility_text_sensitive(text),
   identity.cross_facility_source_name(uuid,uuid),
   identity.share_other_facilities_access(uuid,text,uuid,uuid,text),
-  identity.cross_facility_read_audit(text,text,uuid,uuid,jsonb) from public;
+  identity.cross_facility_read_audit(text,text,uuid,uuid,text,jsonb) from public;
 revoke all on identity.patient_share_scopes, lab.other_facility_import_reads,
   pharmacy.other_facility_import_reads from public;

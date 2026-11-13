@@ -11,7 +11,8 @@ import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
 import { LAB_IMPORT_PAGE_MAX, ListOtherFacilityLabImportsQueryDto } from './dto/create-lab-import.dto';
 import { LabImportsController } from './lab-imports.controller';
-import { decodeOtherFacilityCursor, encodeOtherFacilityCursor, LabImportsService, OTHER_FACILITY_IMPORTS_QUERY }
+import { decodeOtherFacilityCursor, encodeOtherFacilityCursor, LabImportsService, OTHER_FACILITIES_REFUSAL_QUERY,
+  OTHER_FACILITY_IMPORTS_QUERY }
   from './lab-imports.service';
 
 // Synthetic test data only.
@@ -37,8 +38,9 @@ const row = (n: number) => ({
   cursor_at: `2026-10-0${n}T09:00:00.123456Z`,
 });
 
-function harness(answer: unknown[] | Error) {
-  const client = { query: jest.fn(async () => {
+function harness(answer: unknown[] | Error, refused: string | null = null) {
+  const client = { query: jest.fn(async (sql: string) => {
+    if (sql === OTHER_FACILITIES_REFUSAL_QUERY) return { rows: [{ refused }], rowCount: 1 };
     if (answer instanceof Error) throw answer;
     return { rows: answer, rowCount: answer.length };
   }) };
@@ -93,7 +95,7 @@ describe('GET lab/imports/other-facilities (0124)', () => {
     expect(first.nextCursor).toBe(encodeOtherFacilityCursor('2026-10-02T09:00:00.123456Z', row(2).import_id));
     expect(first.nextCursor).toMatch(/^[A-Za-z0-9_-]+$/);
     await service.listOtherFacilities(context, { patientId: ids.patient, limit: 2, cursor: first.nextCursor! });
-    expect(client.query).toHaveBeenLastCalledWith(OTHER_FACILITY_IMPORTS_QUERY,
+    expect(client.query).toHaveBeenCalledWith(OTHER_FACILITY_IMPORTS_QUERY,
       [ids.patient, '2026-10-02T09:00:00.123456Z', row(2).import_id, 2]);
     const clamped = harness([]);
     await clamped.service.listOtherFacilities(context, { patientId: ids.patient, limit: 10_000 });
@@ -112,7 +114,19 @@ describe('GET lab/imports/other-facilities (0124)', () => {
     }
   });
 
-  it('maps the function\'s refusals: no qualifying share 403, invalid request 400; others unchanged', async () => {
+  it('answers a refusal the function flagged (denied audit row kept) with 403, after the transaction', async () => {
+    const refused = harness([], 'OTHER_FACILITIES_NOT_SHARED');
+    await expect(refused.service.listOtherFacilities(context, { patientId: ids.patient }))
+      .rejects.toMatchObject({ status: 403, code: 'OTHER_FACILITIES_NOT_SHARED' });
+    expect(refused.client.query).toHaveBeenCalledWith(OTHER_FACILITIES_REFUSAL_QUERY);
+    expect(refused.database.withTransaction).toHaveBeenCalledTimes(1);
+    await expect((refused.database.withTransaction as jest.Mock).mock.results[0]!.value).resolves.toEqual({ found: [], refused: true });
+    const empty = harness([], '');
+    await expect(empty.service.listOtherFacilities(context, { patientId: ids.patient }))
+      .resolves.toEqual({ records: [], nextCursor: null });
+  });
+
+  it('maps raised errors: invalid request 400; a raised 42501 OTHER_FACILITIES_NOT_SHARED (not raised since the denied audit row) still 403; others unchanged', async () => {
     const notShared = harness(dbError('42501', 'OTHER_FACILITIES_NOT_SHARED'));
     await expect(notShared.service.listOtherFacilities(context, { patientId: ids.patient }))
       .rejects.toMatchObject({ status: 403, code: 'OTHER_FACILITIES_NOT_SHARED' });

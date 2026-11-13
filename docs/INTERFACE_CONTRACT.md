@@ -4614,7 +4614,16 @@ unless the patient includes them; DPO sign-off before release).
   (`lab.import.other-facilities.list` or `pharmacy.import.other-facilities.list`)
   with ids and counts only (returned count, import ids, source facility ids,
   whether sensitive records were included, whether it was a later page), never
-  a value. A refusal returns nothing.
+  a value. A refused read (no qualifying share) writes one count-only
+  `denied` audit row with the same action (who, which patient, the reason
+  `OTHER_FACILITIES_NOT_SHARED`; no resource, no value), which is kept: the
+  function does not raise, it sets the transaction setting
+  `hid.other_facilities_refused` and returns nothing, and the service answers
+  403 after the transaction commits. An id that is no patient answers the
+  same 403, and its denied row carries no patient id. A session whose
+  membership is not active at its facility gets the same 403 and no row (it
+  cannot be attributed; the permission guard normally stops it first). An
+  invalid request (400) writes no row.
 
 ### 47.2. Identity (patient routes, as the other `me/shares` routes)
 

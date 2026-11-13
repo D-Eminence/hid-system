@@ -106,6 +106,14 @@ interface OtherFacilityImportRow extends QueryResultRow {
   historical_context: string | null; activity_status: string; created_at: Date; cursor_at: string;
 }
 
+/**
+ * 0124: a refused cross-facility read does not raise (its denied audit row
+ * must survive); it sets this transaction setting and returns no rows. Read in
+ * the same transaction, after the query. Exported for the tests.
+ */
+export const OTHER_FACILITIES_REFUSAL_QUERY = `select current_setting('hid.other_facilities_refused', true) as refused`;
+export const OTHER_FACILITIES_REFUSED = 'OTHER_FACILITIES_NOT_SHARED';
+
 const CURSOR_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 const CURSOR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -602,9 +610,20 @@ export class PharmacyService {
     const cursor = query.cursor ? decodeOtherFacilityCursor(query.cursor) : null;
     let rows: OtherFacilityImportRow[];
     try {
-      rows = await this.database.withTransaction(context, async (client) => (await client.query<OtherFacilityImportRow>(
-        OTHER_FACILITY_IMPORTS_QUERY, [query.patientId, cursor?.at ?? null, cursor?.id ?? null, limit])).rows);
+      const read = await this.database.withTransaction(context, async (client) => {
+        const found = (await client.query<OtherFacilityImportRow>(
+          OTHER_FACILITY_IMPORTS_QUERY, [query.patientId, cursor?.at ?? null, cursor?.id ?? null, limit])).rows;
+        const flag = (await client.query<{ refused: string | null }>(OTHER_FACILITIES_REFUSAL_QUERY)).rows[0]?.refused;
+        return { found, refused: flag === OTHER_FACILITIES_REFUSED };
+      });
+      // The denied audit row is committed; then the refusal is answered.
+      if (read.refused) {
+        throw new DomainProblem(403, 'OTHER_FACILITIES_NOT_SHARED',
+          'The patient has not shared imported records from other facilities with you');
+      }
+      rows = read.found;
     } catch (error) {
+      if (error instanceof DomainProblem) throw error;
       throw otherFacilitiesProblem(error);
     }
     const page = rows.slice(0, limit);

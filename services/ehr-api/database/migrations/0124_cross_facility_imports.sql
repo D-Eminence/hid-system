@@ -39,8 +39,14 @@
 --         source facility's name.
 --     Each read writes one audit row (ids and counts only) in the caller's
 --     transaction, so the read and its audit row commit or roll back
---     together. A refusal raises 42501 OTHER_FACILITIES_NOT_SHARED and
---     returns nothing.
+--     together. A refusal (no qualifying share) writes one count-only denied
+--     audit row (who, which patient, the reason code), sets the transaction
+--     setting hid.other_facilities_refused to OTHER_FACILITIES_NOT_SHARED
+--     and returns nothing; it does not raise, so the denied row is kept
+--     when the caller commits. Lab and Pharmacy answer 403 after commit.
+--     An id that is no patient answers the same, its row without a patient
+--     id; a session whose membership is not active at its facility is
+--     refused the same way but writes no row (it cannot be attributed).
 --   * Row-level security: the two functions run as the owner of the import
 --     tables, which in production bypasses neither superuser nor row-level
 --     security checks (release checklist P8). The existing read policies
@@ -97,6 +103,13 @@ begin
                           'pharmacy.imported_medication_evidence'::regclass)) <> 6 then
     raise exception using errcode = '55000',
       message = '0124: the import tables'' policies are not 0017''s and 0023''s: ' || coalesce(mismatch, 'missing');
+  end if;
+  -- The share tables' owner also owns identity.patients (the audit helper
+  -- reads a patient's existence as that owner, which RLS does not filter).
+  if (select relowner from pg_class where oid = 'identity.patient_consent_shares'::regclass)
+       <> (select relowner from pg_class where oid = 'identity.patients'::regclass) then
+    raise exception using errcode = '55000',
+      message = '0124: identity.patient_consent_shares and identity.patients have different owners';
   end if;
   -- Both lab tables have one owner (0017); every import table forces row-level security.
   if (select relowner from pg_class where oid = 'lab.imported_evidence'::regclass)
@@ -293,7 +306,7 @@ comment on function identity.share_other_facilities_access(uuid, text, uuid, uui
 -- One audit row for a cross-facility read (ids and counts only).
 create function identity.cross_facility_read_audit(
   requested_action text, requested_resource_type text, requested_patient_id uuid, requested_consent_grant_id uuid,
-  requested_details jsonb
+  requested_outcome text, requested_details jsonb
 ) returns void
 language plpgsql security definer
 set search_path = pg_catalog, pg_temp
@@ -301,18 +314,32 @@ as $$
 begin
   if requested_action not in ('lab.import.other-facilities.list', 'pharmacy.import.other-facilities.list')
      or requested_resource_type not in ('lab-imported-evidence-other-facilities',
-                                        'pharmacy-imported-medication-other-facilities') then
+                                        'pharmacy-imported-medication-other-facilities')
+     or requested_outcome is null or requested_outcome not in ('success', 'denied') then
     raise exception using errcode = '22023', message = 'CROSS_FACILITY_AUDIT_INVALID';
+  end if;
+  -- A session whose membership is not its subject's active membership at its
+  -- facility cannot be attributed (the audit row's keys would refuse it); it
+  -- reads nothing, and no row is written rather than a failure.
+  if not coalesce(identity.has_active_membership(platform.current_actor_subject(), platform.current_membership_id(),
+       platform.current_facility_id()), false) then
+    return;
+  end if;
+  -- A refusal for an id that is no patient keeps no patient id (the audit
+  -- row's key), so it answers exactly as any other refusal.
+  if requested_outcome = 'denied' and not exists (select 1 from identity.patients patient
+                                                   where patient.id = requested_patient_id) then
+    requested_patient_id := null;
   end if;
   perform identity.share_audit('staff', platform.current_actor_subject(), platform.current_account_id(),
     platform.current_membership_id(), platform.current_facility_id(), requested_patient_id, requested_action,
-    'success', requested_resource_type, requested_consent_grant_id, platform.current_purpose_of_use(),
+    requested_outcome, requested_resource_type, requested_consent_grant_id, platform.current_purpose_of_use(),
     requested_details);
 end
 $$;
 
-comment on function identity.cross_facility_read_audit(text, text, uuid, uuid, jsonb) is
-  '0124: the one audit row of a cross-facility imported-records read: the reader''s session, the patient, the share''s consent grant as the resource, and ids and counts only. Granted to no runtime role.';
+comment on function identity.cross_facility_read_audit(text, text, uuid, uuid, text, jsonb) is
+  '0124: the one audit row of a cross-facility imported-records read (success: the share''s consent grant as the resource, ids and counts only) or refusal (denied: no resource, the reason code only), with the reader''s session and the patient (none for an id that is no patient). No row for a session whose membership is not active at its facility. Granted to no runtime role.';
 
 -- 6. The patient's command: a share, and its scope when chosen.
 create function identity.create_my_consent_share_scoped(
@@ -416,6 +443,7 @@ declare
   page jsonb;
   page_limit integer := least(greatest(coalesce(requested_limit, 20), 1), 50);
 begin
+  perform set_config('hid.other_facilities_refused', '', true);
   if requested_patient_id is null or session_facility is null or session_membership is null
      or session_subject is null or platform.current_account_id() is null
      or (requested_before_received_at is null) <> (requested_before_id is null) then
@@ -424,7 +452,13 @@ begin
   select * into access_row from identity.share_other_facilities_access(requested_patient_id, session_subject,
     session_membership, session_facility, session_purpose) access;
   if access_row.consent_grant_id is null then
-    raise exception using errcode = '42501', message = 'OTHER_FACILITIES_NOT_SHARED';
+    -- Refused: one count-only denied audit row, kept (no exception), the
+    -- refusal flagged for the caller, nothing returned.
+    perform identity.cross_facility_read_audit('lab.import.other-facilities.list',
+      'lab-imported-evidence-other-facilities', requested_patient_id, null, 'denied',
+      jsonb_build_object('reason', 'OTHER_FACILITIES_NOT_SHARED'));
+    perform set_config('hid.other_facilities_refused', 'OTHER_FACILITIES_NOT_SHARED', true);
+    return;
   end if;
   insert into lab.other_facility_import_reads (transaction_id, patient_id)
   values (pg_current_xact_id(), requested_patient_id);
@@ -473,7 +507,7 @@ begin
    limit page_limit) picked;
   delete from lab.other_facility_import_reads read_row where read_row.transaction_id = pg_current_xact_id();
   perform identity.cross_facility_read_audit('lab.import.other-facilities.list',
-    'lab-imported-evidence-other-facilities', requested_patient_id, access_row.consent_grant_id,
+    'lab-imported-evidence-other-facilities', requested_patient_id, access_row.consent_grant_id, 'success',
     jsonb_build_object('returnedCount', jsonb_array_length(page),
       'importIds', coalesce((select jsonb_agg(item -> 'importId' order by position)
                                from jsonb_array_elements(page) with ordinality listed(item, position)), '[]'::jsonb),
@@ -490,7 +524,7 @@ end
 $$;
 
 comment on function lab.patient_imports_other_facilities(uuid, timestamptz, uuid, integer) is
-  '0124 (Q64 option A): a page (1-50, newest first, cursor received_at and id) of the patient''s lab imports from other facilities on the patient''s side of the seal, for staff at the facility of an active patient share to their membership that includes other facilities (identity.share_other_facilities_access), purpose direct-care; never break-glass. Entered-in-error imports are left out, and sensitive ones unless the patient included them. One audit row per read; 42501 OTHER_FACILITIES_NOT_SHARED otherwise.';
+  '0124 (Q64 option A): a page (1-50, newest first, cursor received_at and id) of the patient''s lab imports from other facilities on the patient''s side of the seal, for staff at the facility of an active patient share to their membership that includes other facilities (identity.share_other_facilities_access), purpose direct-care; never break-glass. Entered-in-error imports are left out, and sensitive ones unless the patient included them. One audit row per read; a refusal writes one denied audit row, sets hid.other_facilities_refused to OTHER_FACILITIES_NOT_SHARED and returns nothing.';
 
 create function pharmacy.patient_imports_other_facilities(
   requested_patient_id uuid, requested_before_created_at timestamptz, requested_before_id uuid,
@@ -511,6 +545,7 @@ declare
   page jsonb;
   page_limit integer := least(greatest(coalesce(requested_limit, 50), 1), 100);
 begin
+  perform set_config('hid.other_facilities_refused', '', true);
   if requested_patient_id is null or session_facility is null or session_membership is null
      or session_subject is null or platform.current_account_id() is null
      or (requested_before_created_at is null) <> (requested_before_id is null) then
@@ -519,7 +554,11 @@ begin
   select * into access_row from identity.share_other_facilities_access(requested_patient_id, session_subject,
     session_membership, session_facility, session_purpose) access;
   if access_row.consent_grant_id is null then
-    raise exception using errcode = '42501', message = 'OTHER_FACILITIES_NOT_SHARED';
+    perform identity.cross_facility_read_audit('pharmacy.import.other-facilities.list',
+      'pharmacy-imported-medication-other-facilities', requested_patient_id, null, 'denied',
+      jsonb_build_object('reason', 'OTHER_FACILITIES_NOT_SHARED'));
+    perform set_config('hid.other_facilities_refused', 'OTHER_FACILITIES_NOT_SHARED', true);
+    return;
   end if;
   insert into pharmacy.other_facility_import_reads (transaction_id, patient_id)
   values (pg_current_xact_id(), requested_patient_id);
@@ -553,7 +592,7 @@ begin
    limit page_limit) picked;
   delete from pharmacy.other_facility_import_reads read_row where read_row.transaction_id = pg_current_xact_id();
   perform identity.cross_facility_read_audit('pharmacy.import.other-facilities.list',
-    'pharmacy-imported-medication-other-facilities', requested_patient_id, access_row.consent_grant_id,
+    'pharmacy-imported-medication-other-facilities', requested_patient_id, access_row.consent_grant_id, 'success',
     jsonb_build_object('returnedCount', jsonb_array_length(page),
       'importIds', coalesce((select jsonb_agg(item -> 'importId' order by position)
                                from jsonb_array_elements(page) with ordinality listed(item, position)), '[]'::jsonb),
@@ -569,7 +608,7 @@ end
 $$;
 
 comment on function pharmacy.patient_imports_other_facilities(uuid, timestamptz, uuid, integer) is
-  '0124 (Q64 option A): a page (1-100, newest first, cursor created_at and id) of the patient''s pharmacy imports from other facilities on the patient''s side of the seal, for staff at the facility of an active patient share to their membership that includes other facilities (identity.share_other_facilities_access), purpose direct-care; never break-glass. Sensitive ones are left out unless the patient included them. One audit row per read; 42501 OTHER_FACILITIES_NOT_SHARED otherwise.';
+  '0124 (Q64 option A): a page (1-100, newest first, cursor created_at and id) of the patient''s pharmacy imports from other facilities on the patient''s side of the seal, for staff at the facility of an active patient share to their membership that includes other facilities (identity.share_other_facilities_access), purpose direct-care; never break-glass. Sensitive ones are left out unless the patient included them. One audit row per read; a refusal writes one denied audit row, sets hid.other_facilities_refused to OTHER_FACILITIES_NOT_SHARED and returns nothing.';
 
 -- 8. Owners, policies, ACLs.
 do $$
@@ -586,7 +625,7 @@ begin
     foreach signature in array array['identity.patient_share_scopes_immutable()',
         'identity.cross_facility_text_sensitive(text)', 'identity.cross_facility_source_name(uuid,uuid)',
         'identity.share_other_facilities_access(uuid,text,uuid,uuid,text)',
-        'identity.cross_facility_read_audit(text,text,uuid,uuid,jsonb)',
+        'identity.cross_facility_read_audit(text,text,uuid,uuid,text,jsonb)',
         'identity.create_my_consent_share_scoped(text,uuid,uuid,text,text,boolean,boolean,text,text)',
         'identity.list_my_share_scopes(text,uuid)'] loop
       execute format('alter function %s owner to %I', signature, identity_owner);
@@ -612,7 +651,7 @@ begin
   foreach signature in array array['identity.cross_facility_text_sensitive(text)',
       'identity.cross_facility_source_name(uuid,uuid)',
       'identity.share_other_facilities_access(uuid,text,uuid,uuid,text)',
-      'identity.cross_facility_read_audit(text,text,uuid,uuid,jsonb)'] loop
+      'identity.cross_facility_read_audit(text,text,uuid,uuid,text,jsonb)'] loop
     execute format('revoke all on function %s from public', signature);
     if lab_owner <> identity_owner then
       execute format('grant execute on function %s to %I', signature, lab_owner);
@@ -715,7 +754,7 @@ begin
                      or has_table_privilege(role_row.oid, 'pharmacy.other_facility_import_reads',
                           'select,insert,update,delete')
                      or has_function_privilege(role_row.oid, 'identity.share_other_facilities_access(uuid,text,uuid,uuid,text)', 'execute')
-                     or has_function_privilege(role_row.oid, 'identity.cross_facility_read_audit(text,text,uuid,uuid,jsonb)', 'execute')
+                     or has_function_privilege(role_row.oid, 'identity.cross_facility_read_audit(text,text,uuid,uuid,text,jsonb)', 'execute')
                      or has_function_privilege(role_row.oid, 'identity.cross_facility_source_name(uuid,uuid)', 'execute'))) then
     raise exception using errcode = '55000', message = '0124: a runtime role holds a privilege it must not';
   end if;

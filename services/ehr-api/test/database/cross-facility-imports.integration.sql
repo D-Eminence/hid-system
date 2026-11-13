@@ -23,7 +23,7 @@ begin
       'pharmacy.patient_imports_other_facilities(uuid,timestamptz,uuid,integer)',
       'identity.cross_facility_source_name(uuid,uuid)',
       'identity.share_other_facilities_access(uuid,text,uuid,uuid,text)',
-      'identity.cross_facility_read_audit(text,text,uuid,uuid,jsonb)'] loop
+      'identity.cross_facility_read_audit(text,text,uuid,uuid,text,jsonb)'] loop
     if not exists (select 1 from pg_proc where oid = command::regprocedure and prosecdef
                     and proconfig = '{"search_path=pg_catalog, pg_temp"}'::text[]) then
       raise exception '% lost SECURITY DEFINER or its search_path', command;
@@ -67,7 +67,7 @@ begin
   foreach helper in array array['identity.cross_facility_text_sensitive(text)',
       'identity.cross_facility_source_name(uuid,uuid)',
       'identity.share_other_facilities_access(uuid,text,uuid,uuid,text)',
-      'identity.cross_facility_read_audit(text,text,uuid,uuid,jsonb)', 'identity.patient_share_scopes_immutable()'] loop
+      'identity.cross_facility_read_audit(text,text,uuid,uuid,text,jsonb)', 'identity.patient_share_scopes_immutable()'] loop
     if exists (select 1 from pg_roles role_row where role_row.rolname like 'hid\_%'
                 and has_function_privilege(role_row.oid, helper, 'EXECUTE')
                 and not pg_has_role(role_row.oid, (select proowner from pg_proc where oid = helper::regprocedure),
@@ -279,6 +279,10 @@ begin
     into listed
     from lab.patient_imports_other_facilities(('12420000-0000-4000-8000-00000000000' || patient)::uuid, before_at,
       before_id, page) read_row;
+  if current_setting('hid.other_facilities_refused', true) = 'OTHER_FACILITIES_NOT_SHARED' then
+    if listed <> '' then raise exception 'A refused read returned rows'; end if;
+    return '42501 OTHER_FACILITIES_NOT_SHARED';
+  end if;
   return listed;
 exception when others then
   return format('%s %s', sqlstate, sqlerrm);
@@ -291,6 +295,10 @@ begin
     into listed
     from pharmacy.patient_imports_other_facilities(('12420000-0000-4000-8000-00000000000' || patient)::uuid, null, null,
       null) read_row;
+  if current_setting('hid.other_facilities_refused', true) = 'OTHER_FACILITIES_NOT_SHARED' then
+    if listed <> '' then raise exception 'A refused read returned rows'; end if;
+    return '42501 OTHER_FACILITIES_NOT_SHARED';
+  end if;
   return listed;
 exception when others then
   return format('%s %s', sqlstate, sqlerrm);
@@ -462,6 +470,55 @@ begin
   if pg_temp.lab_read(1, clock_timestamp(), null) not like '22023 %' then raise exception 'Half a cursor'; end if;
 end $$;
 reset role;
+-- An id that is no patient answers as any refusal (no 500 that would tell
+-- which ids exist), for Lab and Pharmacy; its denied row has no patient id.
+-- A session whose membership is not active at its facility: refused, no row.
+set local role hid_lab_api_runtime;
+do $$
+declare listed integer;
+begin
+  perform pg_temp.as_staff(3, 1, 'direct-care', 'xfac-refuse-07');
+  select count(*) into listed from lab.patient_imports_other_facilities('12420000-0000-4000-8000-0000000000ff', null,
+    null, null);
+  if listed <> 0 or current_setting('hid.other_facilities_refused') <> 'OTHER_FACILITIES_NOT_SHARED' then
+    raise exception 'An unknown patient id must be refused like any other';
+  end if;
+  perform pg_temp.as_staff(3, 2, 'direct-care', 'xfac-refuse-09');
+  if pg_temp.lab_read(1) <> '42501 OTHER_FACILITIES_NOT_SHARED' then
+    raise exception 'A membership at another facility: %', pg_temp.lab_read(1);
+  end if;
+end $$;
+reset role;
+set local role hid_pharmacy_api_runtime;
+do $$
+declare listed integer;
+begin
+  perform pg_temp.as_staff(3, 1, 'direct-care', 'xfac-refuse-08');
+  select count(*) into listed from pharmacy.patient_imports_other_facilities('12420000-0000-4000-8000-0000000000ff',
+    null, null, null);
+  if listed <> 0 or current_setting('hid.other_facilities_refused') <> 'OTHER_FACILITIES_NOT_SHARED' then
+    raise exception 'Pharmacy: an unknown patient id must be refused like any other';
+  end if;
+  perform pg_temp.as_staff(3, 1, 'direct-care', 'xfac-refuse-10');
+  if pg_temp.pharmacy_read(1) <> '42501 OTHER_FACILITIES_NOT_SHARED' then
+    raise exception 'Pharmacy refusal: %', pg_temp.pharmacy_read(1);
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  if (select count(*) from audit.events where correlation_id in ('xfac-refuse-07', 'xfac-refuse-08')
+        and outcome = 'denied' and patient_id is null and details = '{"reason": "OTHER_FACILITIES_NOT_SHARED"}'::jsonb)
+       <> 2
+     or exists (select 1 from audit.events where correlation_id = 'xfac-refuse-09')
+     or (select count(*) from audit.events where correlation_id = 'xfac-refuse-10' and outcome = 'denied'
+           and action = 'pharmacy.import.other-facilities.list'
+           and resource_type = 'pharmacy-imported-medication-other-facilities'
+           and patient_id = '12420000-0000-4000-8000-000000000001'
+           and actor_membership_id = '12460000-0000-4000-8000-000000000003') <> 1 then
+    raise exception 'The unknown-patient, mismatched-session or pharmacy denied rows are wrong';
+  end if;
+end $$;
 -- Break-glass and a PIN grant for doctor 3 at A: neither is a share.
 set local session_replication_role = replica;
 insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope, status,
@@ -495,8 +552,24 @@ reset role;
 do $$
 begin
   if exists (select 1 from audit.events where correlation_id like 'xfac-refuse-%'
-              and action like '%.import.other-facilities.list') then
+              and action like '%.import.other-facilities.list' and outcome <> 'denied') then
     raise exception 'A refused read wrote a success audit row';
+  end if;
+  -- One count-only denied row per refused read (not for invalid requests).
+  if (select string_agg(correlation_id || ':' || actor_membership_id::text, ',' order by correlation_id)
+        from audit.events where correlation_id like 'xfac-refuse-%' and outcome = 'denied'
+         and action = 'lab.import.other-facilities.list' and resource_type = 'lab-imported-evidence-other-facilities'
+         and resource_id is null and patient_id = '12420000-0000-4000-8000-000000000001'
+         and details = '{"reason": "OTHER_FACILITIES_NOT_SHARED"}'::jsonb)
+     is distinct from 'xfac-refuse-01:12460000-0000-4000-8000-000000000003,xfac-refuse-02:12460000-0000-4000-8000-000000000002,'
+       || 'xfac-refuse-03:12460000-0000-4000-8000-000000000001,xfac-refuse-05:12460000-0000-4000-8000-000000000003,'
+       || 'xfac-refuse-06:12460000-0000-4000-8000-000000000003'
+     or exists (select 1 from audit.events where correlation_id = 'xfac-refuse-04') then
+    raise exception 'The denied audit rows are wrong';
+  end if;
+  if (select purpose_of_use from audit.events where correlation_id = 'xfac-refuse-03' and outcome = 'denied')
+       <> 'emergency' then
+    raise exception 'The denied row must record the session''s purpose';
   end if;
 end $$;
 
