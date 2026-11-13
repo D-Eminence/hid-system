@@ -244,9 +244,10 @@ describe('Outreach Health ID with no contact (0120)', () => {
         expect(timers.mock.calls.map((call) => call[1])).toContain(20_000);
         timers.mockClear();
         fetchMock.mockResolvedValue(json(201, { healthId: 'HID-AB2CD3', outcome: 'created' }));
+        // Confirm waits 20 s too since 0119's review; a call outside the Health
+        // ID routes keeps the client's usual timeout.
         await client.outreachHealthIdConfirm({ caseId, code: '123456' }, { correlationId: 'c', facilityId });
-        expect(timers.mock.calls.map((call) => call[1])).toContain(5_000);
-        expect(timers.mock.calls.map((call) => call[1])).not.toContain(20_000);
+        expect(timers.mock.calls.map((call) => call[1])).toContain(20_000);
       } finally {
         timers.mockRestore();
       }

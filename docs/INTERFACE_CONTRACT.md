@@ -4783,7 +4783,7 @@ only after the person proves it. The email
 | 403 | `OUTREACH_HEALTH_ID_NOT_AVAILABLE` | not an outreach group, or a sealed demo/QA one |
 | 423 | `OUTREACH_ORGANISER_SUSPENDED` | the group is paused by Health ID |
 | 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN` | the registration's phone is already on a Health ID (refuses only this registration): "This phone number already has a Health ID. Ask them to sign in with it." |
-| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | one code, its own words: "Too many codes for this person today. Try again tomorrow." (3 per registration in 24 hours); "Too many codes were sent to this email today. Try again tomorrow, or use another email." (3 per email across registrations); "You have sent too many codes today. Try again tomorrow." (200 per volunteer); "Wait a minute before sending another code." with `Retry-After: <seconds>` (60-second cooldown); "Too many codes were sent just now. Try again in N minutes." with `Retry-After` (the short per-volunteer and per-email windows) |
+| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | one code, its own words: "Too many codes for this person today. Try again tomorrow." (3 per registration in 24 hours); "Too many codes were sent to this email today. Try again tomorrow, or use another email." (3 per email across registrations); "You have sent too many codes today. Try again tomorrow." (per volunteer: OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX, 1000 a day by default, with a database backstop of 2000); "Wait a minute before sending another code." with `Retry-After: <seconds>` (60-second cooldown); "Too many codes were sent just now. Try again in N minutes." with `Retry-After` (the short per-volunteer window, OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX, 120 per 15 minutes by default, and the per-email window) |
 | 409 | `OUTREACH_HEALTH_ID_REQUEST_USED` | "This request was already used. Start again to send a new code." (retry with a new `Idempotency-Key`) |
 | 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | `channel: "sms"` ("Codes by SMS aren't available yet. Use the person's email."), or the email could not be sent (that code is ended) |
 
@@ -4857,7 +4857,7 @@ stands); the link is kept in `identity.outreach_registration_health_ids`, with `
 Permission `outreach.registration.write`, the same session, Origin and CSRF checks as the other
 registration writes, and a required `Idempotency-Key`. Body: `{}` (no body is also accepted); any field
 is refused `400 VALIDATION_FAILED`. Answers `Cache-Control: no-store`. A volunteer may create at most
-**30** such Health IDs an hour (a window per account, counted before the phone is checked); beyond that
+`OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR` such Health IDs an hour (identity-api configuration, 150 by default; a window per account, counted before the phone is checked); beyond that
 `429 OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS` with `Retry-After`.
 
 `201 { "healthId": "HID-XXXXXX", "claimCode": "K7MP2QXW", "claimExpiresAt": "<ISO, 180 days on>", "registration": <the registration as GET returns it> }`
