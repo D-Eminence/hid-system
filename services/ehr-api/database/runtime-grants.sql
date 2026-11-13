@@ -1660,3 +1660,19 @@ revoke all on function outreach.validate_registration_screening(), outreach.regi
 -- no DELETE (rows are never deleted).
 grant select, insert, update on ehr.recorded_allergies to hid_ehr_runtime, hid_schema_test_runtime;
 grant select, insert on ehr.prescription_allergy_acknowledgements to hid_ehr_runtime, hid_schema_test_runtime;
+
+-- Assisted Health ID at an outreach (0119), as that migration grants it: the
+-- Identity runtime's registration read, code start, delivery failure, open
+-- code and confirmation; the Outreach runtime's read of the Health IDs created
+-- for registrations it can see. The two tables, the eligibility check and the
+-- immutability trigger are granted to no role.
+grant execute on function identity.outreach_health_id_registration(uuid),
+  identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer),
+  identity.outreach_health_id_delivery_failed(uuid), identity.outreach_health_id_open_challenge(uuid),
+  identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.outreach_registration_health_ids_for(uuid[])
+  to hid_outreach_runtime, hid_schema_test_runtime;
+revoke all on identity.outreach_health_id_challenges, identity.outreach_registration_health_ids from public;
+revoke all on function identity.outreach_registration_health_ids_immutable(), identity.outreach_health_id_eligible(uuid)
+  from public;
