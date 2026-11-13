@@ -638,9 +638,24 @@ select pg_temp.hi_case('7w a redacted registration''s claim loses its phone, kee
           and claim.contact_key_version is null, claim.code_hmac = repeat('f', 64), claim.invalidated_at is not null)
        from identity.outreach_health_id_claims claim
       where claim.registration_case_id = '6c080000-0000-4000-8000-000000000009'$s$);
-select pg_temp.hi_case('7x no runtime can run the claim scrub', 'f/f', session_user::text, null, null, null, null,
-  $s$select concat_ws('/', has_function_privilege('hid_identity_api_runtime', 'identity.outreach_health_id_scrub_claims(integer)', 'EXECUTE'),
-       has_function_privilege('hid_outreach_api_runtime', 'identity.outreach_health_id_scrub_claims(integer)', 'EXECUTE'))$s$);
+select pg_temp.hi_case('7x no runtime role can run the claim scrub or its trigger function', 'false/false', session_user::text, null, null, null, null,
+  $s$select concat_ws('/', bool_or(has_function_privilege(role_row.oid, 'identity.outreach_health_id_scrub_claims(integer)', 'EXECUTE')),
+       bool_or(has_function_privilege(role_row.oid, 'identity.outreach_health_id_claim_redacted_case()', 'EXECUTE')))
+       from pg_roles role_row where role_row.rolname like 'hid\_%'
+        and role_row.oid <> (select relowner from pg_class where oid = 'identity.patients'::regclass)$s$);
+-- A redaction that ran while the claim was still being created left its phone
+-- (simulated: the phone put back after the redaction); the scrub removes it.
+update identity.outreach_health_id_claims set phone_e164_ciphertext = decode(repeat('cd', 40), 'hex'),
+  phone_lookup_hmac = repeat('6', 64), contact_key_version = 'contact-v1'
+ where registration_case_id = '6c080000-0000-4000-8000-000000000009';
+select pg_temp.hi_case('7y the scrub removes the phone of a redacted registration''s claim', '1/t', session_user::text,
+  null, null, null, null,
+  $s$select identity.outreach_health_id_scrub_claims(10) || '/' || (select (phone_lookup_hmac is null)::text::char
+       from identity.outreach_health_id_claims where registration_case_id = '6c080000-0000-4000-8000-000000000009')$s$);
+-- For the sweep (6k3): an expired claim that still holds a phone.
+update identity.outreach_health_id_claims set phone_e164_ciphertext = decode(repeat('cd', 40), 'hex'),
+  phone_lookup_hmac = repeat('6', 64), contact_key_version = 'contact-v1'
+ where registration_case_id = '6c080000-0000-4000-8000-000000000003';
 
 -- 6c. 0116's sweep: registration 5 (a Health ID was created) is linked and is
 -- not redacted as "never linked"; registration 1 (none) is.
@@ -652,9 +667,12 @@ set local session_replication_role = origin;
 select pg_temp.hi_case('6k the sweep runs', 'ok', 'hid_identity_api_runtime', 'system:auth', null, null, null,
   $s$select identity.sweep_expired_outreach_registrations(100)$s$, true, 'statement');
 -- (In 0120's run the sweep runs last: registration 1 has an unclaimed Health ID by then, so it is kept too.)
-select pg_temp.hi_case('6k2 the sweep also scrubs the claims', 't', session_user::text, null, null, null, null,
-  $s$select (prosrc like '%identity.outreach_health_id_scrub_claims(5000)%')::text::char
-       from pg_proc where oid = 'identity.sweep_expired_outreach_registrations(integer)'::regprocedure$s$);
+select pg_temp.hi_case('6k2 the sweep also scrubs the claims: the expired claim lost its phone', 't/t', session_user::text,
+  null, null, null, null,
+  $s$select (select (prosrc like '%identity.outreach_health_id_scrub_claims(5000)%')::text::char
+       from pg_proc where oid = 'identity.sweep_expired_outreach_registrations(integer)'::regprocedure) || '/'
+     || (select (phone_lookup_hmac is null and phone_e164_ciphertext is null)::text::char
+       from identity.outreach_health_id_claims where registration_case_id = '6c080000-0000-4000-8000-000000000003')$s$);
 select pg_temp.hi_case('6l linked registrations are kept: by email (5) and unclaimed (1)', 'f/f', session_user::text,
   null, null, null, null,
   $s$select concat_ws('/',

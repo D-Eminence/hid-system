@@ -4887,7 +4887,8 @@ to check a duplicate person against: when an active patient has the same name an
 still created and flagged `possible_duplicate`. Flags are for review later (50.4); nothing is refused on
 them. The claim's phone is removed when the registration is redacted, and once the claim can no longer be
 used (expired, out of attempts or invalidated) by `identity.outreach_health_id_scrub_claims`, which each
-creation and 0116's daily retention sweep run; the Health ID and its claim code stay.
+creation and 0116's daily retention sweep run (in batches, so up to a day later); the scrub also catches
+a redaction that ran while the claim was still being created. The Health ID and its claim code stay.
 
 | Status | `code` | When |
 |---|---|---|
@@ -4951,7 +4952,7 @@ refuses `42501 PLATFORM_ADMIN_REQUIRED` unless the session account holds `platfo
   A claim code works for **180 days** and allows **5** wrong tries; after either it is spent. Until it is
   claimed nobody can sign in. The phone kept on the claim row is moved onto the patient then, **only if
   it is still free** (no real patient has it by then).
-- **Possible duplicates** (a phone already on another unclaimed Health ID's claim; or no phone and an
+- **Possible duplicates** (a phone already on another unclaimed Health ID's live claim; or no phone and an
   active patient with the same name and sex) are flagged
   `possible_duplicate` and counted (`possibleDuplicates`) for review later; nothing is merged or refused
   automatically.

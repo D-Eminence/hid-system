@@ -22,7 +22,7 @@
 --     patient (name and sex; no contact, no date of birth) and its Health
 --     ID, with NO account and no contact-verified assurance: nobody can sign
 --     in until the person claims it. A phone already on a real patient is
---     refused; one already on another unclaimed Health ID, or (with no phone)
+--     refused; one already on another live unclaimed Health ID's claim, or (with no phone)
 --     a same name and sex, is flagged for review, never refused.
 --   * identity.outreach_health_id_counts(): Health IDs created at outreach,
 --     by email or unclaimed, not yet claimed, and flagged (counts only), for
@@ -68,7 +68,7 @@ alter table identity.outreach_registration_health_ids
 comment on column identity.outreach_registration_health_ids.created_via is
   '0120: email (0119: the person proved an email; the account exists) or unclaimed (no contact; no account until claimed).';
 comment on column identity.outreach_registration_health_ids.possible_duplicate is
-  '0120: unclaimed, and either its phone is on another unclaimed Health ID or (with no phone) an active patient had the same name and sex: for review later; never refused.';
+  '0120: unclaimed, and either its phone is on another live (unexpired, not out of attempts) unclaimed Health ID''s claim or (with no phone) an active patient had the same name and sex: for review later; never refused.';
 
 -- 2. Claim codes.
 -- The one-time claim code of a Health ID created with no contact (keyed HMAC
@@ -201,7 +201,7 @@ end
 $$;
 
 comment on function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text,text) is
-  '0120: creates a Health ID from an outreach registration for a person with no email (and possibly no phone): the patient (name and sex; no contact, no date of birth), its Health ID identifier, the registration''s Health ID record (created_via unclaimed; possible_duplicate when the phone is on another unclaimed Health ID or, with no phone, an active patient has the same name and sex) and the claim: the code''s keyed HMAC (180 days, 5 attempts) and the registration''s unproven phone, kept off the patient so it never blocks the number''s real owner. No account and no contact-verified assurance: nobody can sign in until it is claimed. One audit row (ids and the phoneOnRecord flag only; never the duplicate flag, which facility audit readers would see). Refuses as identity.outreach_health_id_eligible does (incl. 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED with the Health ID in detail, never the claim code), 23505 OUTREACH_HEALTH_ID_PHONE_TAKEN (the phone is on a real patient), 22023 OUTREACH_HEALTH_ID_REQUEST_INVALID.';
+  '0120: creates a Health ID from an outreach registration for a person with no email (and possibly no phone): the patient (name and sex; no contact, no date of birth), its Health ID identifier, the registration''s Health ID record (created_via unclaimed; possible_duplicate when the phone is on another live unclaimed Health ID''s claim or, with no phone, an active patient has the same name and sex) and the claim: the code''s keyed HMAC (180 days, 5 attempts) and the registration''s unproven phone, kept off the patient so it never blocks the number''s real owner. No account and no contact-verified assurance: nobody can sign in until it is claimed. One audit row (ids and the phoneOnRecord flag only; never the duplicate flag, which facility audit readers would see). Refuses as identity.outreach_health_id_eligible does (incl. 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED with the Health ID in detail, never the claim code), 23505 OUTREACH_HEALTH_ID_PHONE_TAKEN (the phone is on a real patient), 22023 OUTREACH_HEALTH_ID_REQUEST_INVALID.';
 
 -- 4. Counts for the platform admin (users created at outreach).
 create function identity.outreach_health_id_counts()
@@ -243,7 +243,11 @@ begin
     select claim.patient_id from identity.outreach_health_id_claims claim
      where claim.phone_lookup_hmac is not null and claim.claimed_at is null
        and (claim.expires_at < clock_timestamp() or claim.failed_attempts >= claim.max_attempts
-            or claim.invalidated_at is not null)
+            or claim.invalidated_at is not null
+            -- A redaction that ran while this claim was still being created
+            -- (its trigger could not see the uncommitted claim).
+            or exists (select 1 from outreach.registration_redactions redaction
+                        where redaction.registration_case_id = claim.registration_case_id))
      order by claim.expires_at
      limit greatest(1, least(coalesce(requested_limit, 200), 5000))
      for update skip locked)
@@ -255,7 +259,7 @@ begin
 end
 $$;
 comment on function identity.outreach_health_id_scrub_claims(integer) is
-  '0120: removes the unproven phone (ciphertext, lookup HMAC, key version) from outreach Health ID claims that can no longer be used and were never claimed (expired, out of attempts or invalidated), at most the given number (1-5000) per call. Run by create_unclaimed and 0116''s daily retention sweep. Counts only.';
+  '0120: removes the unproven phone (ciphertext, lookup HMAC, key version) from outreach Health ID claims that can no longer be used and were never claimed (expired, out of attempts or invalidated) or whose registration was redacted (also when the redaction raced the creation), at most the given number (1-5000) per call. Run by create_unclaimed and 0116''s daily retention sweep. Counts only.';
 
 create function identity.outreach_health_id_claim_redacted_case()
 returns trigger language plpgsql security definer
