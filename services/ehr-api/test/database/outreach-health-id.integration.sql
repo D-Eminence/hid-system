@@ -262,10 +262,11 @@ select pg_temp.hi_case('3b the account: no password, pending reset, email verifi
   $s$select concat_ws('/', account.status, account.email, account.password_hash is null, account.email_verified_at is not null)
        from auth.accounts account join identity.patients patient on patient.account_id = account.id
       where patient.hid_code = 'HID-RTE6C5'$s$);
-select pg_temp.hi_case('3c the patient: the registration''s name and sex, no date of birth, the contacts', 'Lola/Person 5/female/t/t/t/CONTACT_VERIFIED',
+select pg_temp.hi_case('3c the patient: the registration''s name and sex, no date of birth, the contacts, sign-up''s assurance', 'Lola/Person 5/female/t/t/t/CONTACT_VERIFIED/hid-public-signup/t',
   session_user::text, null, null, null, null,
   $s$select concat_ws('/', patient.first_name, patient.last_name, patient.gender, patient.dob is null,
-          patient.phone_lookup_hmac = repeat('5', 64), patient.email_lookup_hmac is not null, assurance.state)
+          patient.phone_lookup_hmac = repeat('5', 64), patient.email_lookup_hmac is not null, assurance.state,
+          assurance.source_system, assurance.source_reference like 'outreach-health-id:%')
        from identity.patients patient join identity.patient_assurance_states assurance on assurance.patient_id = patient.id
       where patient.hid_code = 'HID-RTE6C5'$s$);
 select pg_temp.idrt('3d a replay answers the same Health ID', 'replayed/HID-RTE6C5',
@@ -294,8 +295,15 @@ select pg_temp.hi_case('3j audit rows carry ids and counts only', '2/0', session
               and (details::text ilike '%lola%' or details::text ilike '%example.invalid%' or details::text like '%+234%'))::text$s$);
 
 -- 4. Duplicates: the same email or phone on another registration.
-select pg_temp.idrt('4a the email is taken', '23505: OUTREACH_HEALTH_ID_EMAIL_TAKEN',
+select pg_temp.idrt('4a an email already on a Health ID still gets a code (no probing)', '6c0a0000-0000-4000-8000-000000000003',
   pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000003', 'LOLA.person5@example.invalid', repeat('3', 64)));
+select pg_temp.idrt('4a2 and is refused once proved', '23505: OUTREACH_HEALTH_ID_EMAIL_TAKEN',
+  format($d$do $x$ begin perform %s; perform %s; end $x$$d$,
+    replace(pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000039', 'LOLA.person5@example.invalid', repeat('3', 64)),
+      'select challenge_id::text from', 'challenge_id from'),
+    replace(pg_temp.confirm_sql(3, '6c0a0000-0000-4000-8000-000000000039', repeat('e', 64), 'lola.person5@example.invalid',
+      'HID-RTE6C3', repeat('3', 64)), $r$select concat_ws('/', outcome, hid_code) from$r$, 'outcome from')),
+  false, 'statement');
 select pg_temp.idrt('4b the phone is taken', '23505: OUTREACH_HEALTH_ID_PHONE_TAKEN',
   pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000003', 'someone.else@example.invalid', repeat('5', 64)));
 select pg_temp.idrt('4c an invalid email', '22023: OUTREACH_HEALTH_ID_EMAIL_INVALID',
@@ -326,11 +334,49 @@ update identity.outreach_health_id_challenges set created_at = created_at - inte
 select pg_temp.idrt('5g a fourth in 24 hours is refused', 'P0001: OUTREACH_HEALTH_ID_TOO_MANY_CODES',
   pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000036', 'ade.three@example.invalid', repeat('3', 64)));
 
+select pg_temp.idrt('5h a retried request id is refused (start a new request)', '55000: OUTREACH_HEALTH_ID_REQUEST_USED',
+  pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000034', 'ade.three@example.invalid', repeat('3', 64)));
+
+-- 5b. A staff account's email: not refused before the proof (no probing of
+-- staff logins), refused at confirmation. Registration 2, names cleaned.
+set local session_replication_role = replica;
+update outreach.registration_cases set full_name = E'  Bola\t\tStaff   Two\n' where id = '6c080000-0000-4000-8000-000000000002';
+set local session_replication_role = origin;
+select pg_temp.idrt('5i a staff account''s email gets a code', '6c0a0000-0000-4000-8000-000000000021',
+  pg_temp.start_sql(2, '6c0a0000-0000-4000-8000-000000000021', 'HI-Volunteer@example.invalid', repeat('2', 64)), true);
+select pg_temp.idrt('5j and is refused once proved', '23505: OUTREACH_HEALTH_ID_EMAIL_TAKEN',
+  pg_temp.confirm_sql(2, '6c0a0000-0000-4000-8000-000000000021', repeat('e', 64), 'hi-volunteer@example.invalid',
+    'HID-RTE6C2', repeat('2', 64)));
+update identity.outreach_health_id_challenges set created_at = created_at - interval '2 minutes'
+ where registration_case_id = '6c080000-0000-4000-8000-000000000002';
+select pg_temp.idrt('5k another email creates it', '6c0a0000-0000-4000-8000-000000000022',
+  pg_temp.start_sql(2, '6c0a0000-0000-4000-8000-000000000022', 'bola.two@example.invalid', repeat('2', 64)), true);
+select pg_temp.idrt('5l with the name cleaned as sign-up allows', 'created/HID-RTE6C2',
+  pg_temp.confirm_sql(2, '6c0a0000-0000-4000-8000-000000000022', repeat('e', 64), 'bola.two@example.invalid',
+    'HID-RTE6C2', repeat('2', 64)), true);
+select pg_temp.hi_case('5n a name with nothing printable is refused', '23514: OUTREACH_HEALTH_ID_NAME_INVALID', session_user::text,
+  null, null, null, null, format($d$do $x$ begin
+    set local session_replication_role = replica;
+    update outreach.registration_cases set full_name = E'\x07\x08' where id = '6c080000-0000-4000-8000-000000000003';
+    set local session_replication_role = origin;
+    update identity.outreach_health_id_challenges set expires_at = clock_timestamp() + interval '5 minutes',
+      invalidated_at = null, invalidation_reason = null, failed_attempts = 0 where id = '6c0a0000-0000-4000-8000-000000000035';
+    perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
+      set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
+      set_config('app.membership_id', '6c030000-0000-4000-8000-000000000001', true),
+      set_config('app.purpose_of_use', 'direct-care', true);
+    set local role hid_identity_api_runtime;
+    perform %s;
+  end $x$$d$, replace(pg_temp.confirm_sql(3, '6c0a0000-0000-4000-8000-000000000035', repeat('e', 64), 'ade.three@example.invalid',
+    'HID-RTE6C3', repeat('3', 64)), $r$select concat_ws('/', outcome, hid_code) from$r$, 'outcome from')), false, 'statement');
+select pg_temp.hi_case('5m the names', 'Bola/Staff Two/Bola Staff Two', session_user::text, null, null, null, null,
+  $s$select concat_ws('/', first_name, last_name, full_name) from identity.patients where hid_code = 'HID-RTE6C2'$s$);
+
 -- 6. No phone, suspension, the sealed demo, redaction.
 select pg_temp.hi_case('6a no phone: the email path still works', 'ok', session_user::text, null, null, null, null,
   format($d$do $x$ begin
     set local session_replication_role = replica;
-    update outreach.registration_cases set phone = null where id = '6c080000-0000-4000-8000-000000000002';
+    update outreach.registration_cases set phone = null, age_years = 40 where id = '6c080000-0000-4000-8000-000000000001';
     set local session_replication_role = origin;
     perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
       set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
@@ -338,12 +384,12 @@ select pg_temp.hi_case('6a no phone: the email path still works', 'ok', session_
       set_config('app.purpose_of_use', 'direct-care', true);
     set local role hid_identity_api_runtime;
     %s;
-  end $x$$d$, replace(pg_temp.start_sql(2, '6c0a0000-0000-4000-8000-000000000002', 'two@example.invalid', null),
+  end $x$$d$, replace(pg_temp.start_sql(1, '6c0a0000-0000-4000-8000-000000000001', 'two@example.invalid', null),
     'select challenge_id::text from', 'perform challenge_id from')), false, 'statement');
 select pg_temp.hi_case('6a2 no phone, but a phone hash is sent', '22023: OUTREACH_HEALTH_ID_EMAIL_INVALID', session_user::text, null, null, null, null,
   format($d$do $x$ begin
     set local session_replication_role = replica;
-    update outreach.registration_cases set phone = null where id = '6c080000-0000-4000-8000-000000000002';
+    update outreach.registration_cases set phone = null, age_years = 40 where id = '6c080000-0000-4000-8000-000000000001';
     set local session_replication_role = origin;
     perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
       set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
@@ -351,7 +397,7 @@ select pg_temp.hi_case('6a2 no phone, but a phone hash is sent', '22023: OUTREAC
       set_config('app.purpose_of_use', 'direct-care', true);
     set local role hid_identity_api_runtime;
     %s;
-  end $x$$d$, replace(pg_temp.start_sql(2, '6c0a0000-0000-4000-8000-000000000002', 'two@example.invalid', repeat('2', 64)),
+  end $x$$d$, replace(pg_temp.start_sql(1, '6c0a0000-0000-4000-8000-000000000001', 'two@example.invalid', repeat('2', 64)),
     'select challenge_id::text from', 'perform challenge_id from')), false, 'statement');
 select pg_temp.hi_case('6b a suspended group', '55000: OUTREACH_ORGANISER_SUSPENDED', session_user::text, null, null, null,
   null, $d$do $x$ begin

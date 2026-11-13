@@ -54,11 +54,31 @@ function additionalData(id: string, purpose: ContactCipherPurpose): Buffer {
   return Buffer.from(`identity:public-patient-enrollment:${id}:${purpose}`);
 }
 
-export function encryptContactValue(key: Buffer, id: string, purpose: ContactCipherPurpose, value: string): Buffer {
+/**
+ * The associated data of a patient's phone that no enrollment or contact
+ * change wrote (the outreach assisted Health ID, 0119): bound to the phone's
+ * contact lookup HMAC, which identity.patients keeps beside the ciphertext.
+ * PatientContactReader reads it back (GET identity/me) with the NIN key or
+ * the OTP-derived key.
+ */
+export function lookupBoundPhoneAssociatedData(phoneLookupHmac: string): string {
+  return `identity:patient-phone:${phoneLookupHmac}`;
+}
+
+function seal(key: Buffer, associatedData: Buffer, value: string): Buffer {
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, nonce);
-  cipher.setAAD(additionalData(id, purpose));
+  cipher.setAAD(associatedData);
   return Buffer.concat([Buffer.from([1]), nonce, cipher.update(value, 'utf8'), cipher.final(), cipher.getAuthTag()]);
+}
+
+export function encryptContactValue(key: Buffer, id: string, purpose: ContactCipherPurpose, value: string): Buffer {
+  return seal(key, additionalData(id, purpose), value);
+}
+
+/** A patient's phone bound to its lookup HMAC (lookupBoundPhoneAssociatedData). */
+export function encryptLookupBoundPhone(key: Buffer, phoneLookupHmac: string, phone: string): Buffer {
+  return seal(key, Buffer.from(lookupBoundPhoneAssociatedData(phoneLookupHmac)), phone);
 }
 
 /** The plaintext, or undefined when the value is malformed or does not authenticate. */

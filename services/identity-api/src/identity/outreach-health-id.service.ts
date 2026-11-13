@@ -11,7 +11,7 @@ import { createContactLookupHmac, normalizePatientPhone, patientPhoneStoredForms
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { generateOutreachClaimCode, OUTREACH_CLAIM_KEY_VERSION, outreachClaimCodeHmac } from './outreach-claim-code';
 import { contactKeyForVersion, currentContactEncryption, decryptContactValue, encryptContactValue,
-  otpHmacKey } from './patient-contact-crypto';
+  encryptLookupBoundPhone, otpHmacKey } from './patient-contact-crypto';
 
 /** identity.outreach_health_id_registration(case) (0119). */
 interface RegistrationRow {
@@ -67,12 +67,15 @@ const MESSAGES = {
   suspended: 'This outreach group has been paused by Health ID. Contact Health ID support.',
   alreadyCreated: 'A Health ID was already created for this person.',
   under18: "Health IDs for under-18s can't be created at outreach yet. A parent or guardian can do it later in the app.",
+  nameInvalid: "The person's name on this registration can't be used for a Health ID. Check the name and register them again.",
   noPhone: "Add the person's phone number to create a Health ID.",
   phoneInvalid: "The person's phone number isn't a valid number, so a Health ID can't be created with it.",
   emailInvalid: 'Enter a valid email address.',
-  emailTaken: 'This email already has a Health ID. Ask them to sign in with it.',
+  emailTaken: 'This email is already used by another Health ID or account. Use another email.',
   phoneTaken: 'This phone number already has a Health ID. Ask them to sign in with it.',
   tooManyCodes: 'Too many codes for this person today. Try again tomorrow.',
+  cooldown: 'Wait a minute before sending another code.',
+  requestUsed: 'This request was already used. Start again to send a new code.',
   unavailable: "Health ID codes can't be sent right now. Try again in a few minutes.",
   smsUnavailable: "Codes by SMS aren't available yet. Use the person's email.",
   codeInvalid: "That code isn't right. Check the email and try again.",
@@ -116,7 +119,9 @@ export class OutreachHealthIdService {
     // A retry of the same request (same Idempotency-Key, registration,
     // volunteer and email) while its code is still open answers it again
     // without sending another.
-    if (open && open.challenge_id === challengeId) {
+    // An expired one is not answered again: the start goes on and 0119
+    // refuses the used id (409 OUTREACH_HEALTH_ID_REQUEST_USED).
+    if (open && open.challenge_id === challengeId && new Date(open.expires_at).getTime() > Date.now()) {
       return this.startAnswer(email, open.expires_at);
     }
     this.assertEligible(registration);
@@ -131,18 +136,18 @@ export class OutreachHealthIdService {
         this.hmac('outreach-health-id-recipient', email), window);
       const ready = (await client.query<{ ready: boolean }>(
         'select identity.patient_contact_lookup_ready() as ready')).rows[0]?.ready === true;
-      const emailBound = await this.contactBound(client, 'email', [emailLookup]);
+      // No email check here: start answers the same for any email (0119); confirm
+      // refuses a taken one only after the person proves it.
       // Every form a patient's phone may be stored in (a legacy +2340... too).
       const phoneBound = phone ? await this.contactBound(client, 'phone',
         patientPhoneStoredForms(phone).map((form) => createContactLookupHmac('phone', form))) : false;
-      return { limited: volunteerLimited || recipientLimited, ready, emailBound, phoneBound };
+      return { limited: volunteerLimited || recipientLimited, ready, phoneBound };
     });
     if (preflight.limited) {
       throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.tooManyCodes, undefined,
         { extensions: { retryAfterSeconds: this.env.OTP_RATE_WINDOW_SECONDS } });
     }
     if (!preflight.ready) throw this.unavailable();
-    if (preflight.emailBound) throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_EMAIL_TAKEN', MESSAGES.emailTaken);
     if (preflight.phoneBound) throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
 
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
@@ -193,8 +198,10 @@ export class OutreachHealthIdService {
     if (!key || !email) throw this.unavailable();
     // The patient's contacts share one key_version (the challenge's). The
     // phone is optional: without one, both are null and the patient has none.
-    const phoneCiphertext = phone ? encryptContactValue(key, open.challenge_id, 'phone', phone) : null;
+    // Bound to its lookup HMAC, the form PatientContactReader reads for a
+    // patient with no enrollment (GET identity/me).
     const phoneLookup = phone ? createContactLookupHmac('phone', phone) : null;
+    const phoneCiphertext = phone && phoneLookup ? encryptLookupBoundPhone(key, phoneLookup, phone) : null;
     const verifier = this.verifier(input.caseId, open.challenge_id, code);
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -218,6 +225,17 @@ export class OutreachHealthIdService {
       } catch (error) {
         if (error instanceof DomainProblem) throw error;
         if (databaseCode(error) === '23505' && databaseConstraint(error) === 'patients_hid_code_ci_uq') continue;
+        // An account or patient created concurrently with the same contact
+        // (as patient enrollment maps it): 409, never 5xx.
+        if (databaseCode(error) === '23505') {
+          const constraint = databaseConstraint(error);
+          if (constraint === 'accounts_email_ci_uq' || constraint === 'patients_email_hmac_uq') {
+            throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_EMAIL_TAKEN', MESSAGES.emailTaken);
+          }
+          if (constraint === 'patients_phone_hmac_uq') {
+            throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
+          }
+        }
         throw this.problem(error);
       }
     }
@@ -305,6 +323,9 @@ export class OutreachHealthIdService {
       return this.alreadyCreated(typeof detail === 'string' ? detail : null);
     }
     if (has('OUTREACH_HEALTH_ID_UNDER_18')) return new DomainProblem(422, 'OUTREACH_HEALTH_ID_UNDER_18', MESSAGES.under18);
+    if (has('OUTREACH_HEALTH_ID_NAME_INVALID')) {
+      return new DomainProblem(422, 'OUTREACH_HEALTH_ID_NAME_INVALID', MESSAGES.nameInvalid);
+    }
     if (has('OUTREACH_HEALTH_ID_NO_PHONE')) return new DomainProblem(422, 'OUTREACH_HEALTH_ID_NO_PHONE', MESSAGES.noPhone);
     if (has('OUTREACH_HEALTH_ID_EMAIL_INVALID')) {
       return new DomainProblem(422, 'OUTREACH_HEALTH_ID_EMAIL_INVALID', MESSAGES.emailInvalid);
@@ -316,7 +337,18 @@ export class OutreachHealthIdService {
       return new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
     }
     if (has('OUTREACH_HEALTH_ID_TOO_MANY_CODES')) {
+      // 0119's detail: 'daily', or 'cooldown:<seconds>' before the next code.
+      const detail = String((error as { detail?: unknown }).detail ?? '');
+      const cooldown = /^cooldown:(\d{1,5})$/.exec(detail);
+      if (cooldown) {
+        const seconds = Math.max(1, Number(cooldown[1]));
+        return new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.cooldown, undefined,
+          { extensions: { retryAfterSeconds: seconds } });
+      }
       return new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.tooManyCodes);
+    }
+    if (has('OUTREACH_HEALTH_ID_REQUEST_USED')) {
+      return new DomainProblem(409, 'OUTREACH_HEALTH_ID_REQUEST_USED', MESSAGES.requestUsed);
     }
     // Our own arguments were refused (a bug, not the volunteer's): unavailable.
     if (has('OUTREACH_HEALTH_ID_REQUEST_INVALID')) return this.unavailable();

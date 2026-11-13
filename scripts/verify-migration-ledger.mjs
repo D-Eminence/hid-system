@@ -131,7 +131,7 @@ const acceptedMigrations = new Map([
   ['0116_outreach_retention.sql', 'd590c45302484da9d3175022b30395eacd53d3618460fc3c85093a31b21d74bf'],
   ['0117_recorded_allergies.sql', '3b71fdbbe3a02071a198722ca00c0120240d5fcfd53035cd38e3a7217e53f003'],
   ['0118_outreach_screening.sql', 'b1ed2c5440a06c900cdc46d664a8e48a3b49af189a69deed2f92e513e2c274b2'],
-  ['0119_outreach_health_id.sql', '381bb6574581b628dfbeaa64344fbd0db6449d3f21724f429c388d611a9552dd'],
+  ['0119_outreach_health_id.sql', '9aff3193c23a53ad38f19968e7d7e00cb81833d252d9f4db81febc1cb7f1eba7'],
   ['0120_outreach_health_id_unclaimed.sql', '87358bbb6dcfcf8b684b03f9e89e1c7d37a8eaf346206675f7297bdf7ec58106'],
 ])
 

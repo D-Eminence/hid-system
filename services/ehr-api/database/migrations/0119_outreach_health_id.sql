@@ -55,9 +55,18 @@ begin
      or to_regclass('outreach.registration_redactions') is null
      or to_regprocedure('outreach.organiser_tenant_state(uuid)') is null
      or to_regprocedure('outreach.registration_campaign_member(uuid,uuid)') is null
+     or to_regprocedure('outreach.context_allows(uuid,text)') is null
      or to_regprocedure('auth.membership_has_permission(text,uuid,uuid,text)') is null
      or to_regprocedure('identity.sealed_demo_facility(uuid)') is null then
     raise exception using errcode = '55000', message = '0119: a prerequisite object is missing (0115, 0116, 0118, 0098)';
+  end if;
+  -- The commands run as the owner of identity.patients and write these.
+  if exists (select 1 from unnest(array['auth.accounts', 'identity.patients', 'identity.patient_identifiers',
+               'identity.patient_assurance_states', 'audit.events']) as target(name)
+             where not has_table_privilege((select relowner from pg_class where oid = 'identity.patients'::regclass),
+               target.name, 'INSERT')) then
+    raise exception using errcode = '55000', message =
+      '0119: the owner of identity.patients cannot insert into the account, patient or audit tables';
   end if;
   if to_regclass('identity.outreach_health_id_challenges') is not null then
     raise exception using errcode = '55000', message = '0119: already applied';
@@ -232,8 +241,11 @@ declare
   sent_today integer;
   new_expiry timestamptz;
 begin
-  perform identity.outreach_health_id_eligible(requested_case_id);
   select * into registration from identity.outreach_health_id_registration(requested_case_id);
+  -- The registration's lock first, then eligibility: a confirmation that
+  -- committed while this waited is seen (ALREADY_CREATED).
+  perform pg_advisory_xact_lock(hashtextextended('outreach-health-id:' || requested_case_id::text, 0));
+  perform identity.outreach_health_id_eligible(requested_case_id);
   if requested_challenge_id is null or normalized_email is null
      or normalized_email !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$' or length(normalized_email) > 254
      or coalesce(requested_email_lookup_hmac, '') !~ '^[0-9a-f]{64}$'
@@ -242,16 +254,18 @@ begin
      or requested_ttl_seconds not between 60 and 1800 or requested_max_attempts not between 1 and 10 then
     raise exception using errcode = '22023', message = 'OUTREACH_HEALTH_ID_EMAIL_INVALID';
   end if;
-  perform pg_advisory_xact_lock(hashtextextended('outreach-health-id:' || requested_case_id::text, 0));
+  -- A request id already used (a retried request whose code then failed or
+  -- expired): the caller starts a new request.
+  if exists (select 1 from identity.outreach_health_id_challenges challenge where challenge.id = requested_challenge_id) then
+    raise exception using errcode = '55000', message = 'OUTREACH_HEALTH_ID_REQUEST_USED';
+  end if;
   perform pg_advisory_xact_lock(hashtextextended('patient-contact:email:' || requested_email_lookup_hmac, 0));
   if requested_phone_lookup_hmac is not null then
     perform pg_advisory_xact_lock(hashtextextended('patient-contact:phone:' || requested_phone_lookup_hmac, 0));
   end if;
-  if exists (select 1 from auth.accounts account where lower(account.email) = normalized_email
-              and account.status <> 'deleted')
-     or exists (select 1 from identity.patients patient where patient.email_lookup_hmac = requested_email_lookup_hmac) then
-    raise exception using errcode = '23505', message = 'OUTREACH_HEALTH_ID_EMAIL_TAKEN';
-  end if;
+  -- Start answers the same for any email, so a volunteer cannot learn whether
+  -- an email belongs to a patient or a staff login; confirmation refuses an
+  -- email already on any account or patient, after the person proved it.
   if exists (select 1 from identity.patients patient where patient.phone_lookup_hmac = requested_phone_lookup_hmac) then
     raise exception using errcode = '23505', message = 'OUTREACH_HEALTH_ID_PHONE_TAKEN';
   end if;
@@ -259,8 +273,12 @@ begin
     into last_sent, sent_today
     from identity.outreach_health_id_challenges challenge
    where challenge.registration_case_id = requested_case_id;
-  if sent_today >= 3 or last_sent > clock_timestamp() - interval '60 seconds' then
-    raise exception using errcode = 'P0001', message = 'OUTREACH_HEALTH_ID_TOO_MANY_CODES';
+  if sent_today >= 3 then
+    raise exception using errcode = 'P0001', message = 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', detail = 'daily';
+  end if;
+  if last_sent > clock_timestamp() - interval '60 seconds' then
+    raise exception using errcode = 'P0001', message = 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', detail = format('cooldown:%s',
+      ceil(extract(epoch from last_sent + interval '60 seconds' - clock_timestamp()))::integer);
   end if;
   update identity.outreach_health_id_challenges challenge
      set invalidated_at = clock_timestamp(), invalidation_reason = 'resend'
@@ -284,7 +302,7 @@ end
 $$;
 
 comment on function identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer) is
-  '0119: a new email code for creating a Health ID from an outreach registration (the volunteer''s session). Refuses an email or phone already on a Health ID (23505 OUTREACH_HEALTH_ID_EMAIL_TAKEN / _PHONE_TAKEN, never whose), more than 3 codes for the registration in 24 hours or one within 60 seconds (P0001 OUTREACH_HEALTH_ID_TOO_MANY_CODES), and every refusal of identity.outreach_health_id_registration. One audit row (counts only).';
+  '0119: a new email code for creating a Health ID from an outreach registration (the volunteer''s session). Answers the same for any email (an email already in use is refused only at confirmation, after the proof); refuses the registration''s phone already on a Health ID (23505 OUTREACH_HEALTH_ID_PHONE_TAKEN, never whose), more than 3 codes for the registration in 24 hours (P0001 OUTREACH_HEALTH_ID_TOO_MANY_CODES, detail daily) or one within 60 seconds (detail cooldown:<seconds>), a request id already used (55000 OUTREACH_HEALTH_ID_REQUEST_USED), and every refusal of identity.outreach_health_id_registration. One audit row (counts only).';
 
 -- A delivery that failed definitively ends its code (it does not count
 -- towards the daily three any less).
@@ -339,6 +357,7 @@ declare
   new_patient uuid := gen_random_uuid();
   first_name_value text;
   last_name_value text;
+  clean_name text;
 begin
   select * into registration from identity.outreach_health_id_registration(requested_case_id);
   perform pg_advisory_xact_lock(hashtextextended('outreach-health-id:' || requested_case_id::text, 0));
@@ -392,25 +411,37 @@ begin
   if exists (select 1 from identity.patients patient where patient.phone_lookup_hmac = requested_phone_lookup_hmac) then
     raise exception using errcode = '23505', message = 'OUTREACH_HEALTH_ID_PHONE_TAKEN';
   end if;
-  first_name_value := split_part(btrim(registration.full_name), ' ', 1);
-  last_name_value := coalesce(nullif(btrim(substr(btrim(registration.full_name), length(first_name_value) + 1)), ''),
-    first_name_value);
+  -- Names as patient sign-up allows them: no control characters, whitespace
+  -- collapsed, each name at most 80 characters (0093).
+  clean_name := left(btrim(regexp_replace(regexp_replace(registration.full_name, '[[:cntrl:]]', ' ', 'g'),
+    '[[:space:]]+', ' ', 'g')), 200);
+  if clean_name = '' then
+    raise exception using errcode = '23514', message = 'OUTREACH_HEALTH_ID_NAME_INVALID';
+  end if;
+  first_name_value := left(split_part(clean_name, ' ', 1), 80);
+  last_name_value := left(coalesce(nullif(btrim(substr(clean_name, length(split_part(clean_name, ' ', 1)) + 1)), ''),
+    first_name_value), 80);
   update identity.outreach_health_id_challenges candidate set consumed_at = clock_timestamp()
    where candidate.id = challenge.id;
   insert into auth.accounts (id, subject, email, display_name, status, email_verified_at, source_system)
-  values (new_account, 'patient:' || new_account::text, normalized_email, btrim(registration.full_name),
+  values (new_account, 'patient:' || new_account::text, normalized_email, clean_name,
     'pending_reset', clock_timestamp(), 'hid-outreach-health-id');
   insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, gender, dob,
     phone_e164_ciphertext, phone_lookup_hmac, email_ciphertext, email_lookup_hmac, contact_key_version,
     source_system, status)
-  values (new_patient, new_account, requested_hid, first_name_value, last_name_value, btrim(registration.full_name),
+  values (new_patient, new_account, requested_hid, first_name_value, last_name_value, clean_name,
     registration.sex, null, requested_phone_ciphertext, requested_phone_lookup_hmac, challenge.email_ciphertext,
     challenge.email_lookup_hmac, challenge.key_version, 'hid-outreach-health-id', 'active');
   insert into identity.patient_identifiers (id, patient_id, identifier_type, public_value, verified, source_system)
   values (gen_random_uuid(), new_patient, 'hid_code', requested_hid, true, 'hid-outreach-health-id');
   insert into identity.patient_assurance_states (patient_id, account_id, state, source_system, source_reference,
     contact_verified_at)
-  values (new_patient, new_account, 'CONTACT_VERIFIED', 'hid-outreach-health-id', challenge.id::text, clock_timestamp());
+  -- The assurance patient sign-up writes ('hid-public-signup'), so the person
+  -- can verify a NIN later like any patient who signed up without one (0092's
+  -- identity.patient_self_nin_eligibility); the outreach origin is in the
+  -- reference, the patient's source_system and the registration's record.
+  values (new_patient, new_account, 'CONTACT_VERIFIED', 'hid-public-signup', 'outreach-health-id:' || challenge.id::text,
+    clock_timestamp());
   insert into identity.outreach_registration_health_ids (registration_case_id, facility_id, patient_id, account_id,
     hid_code, challenge_id, created_by_account_id, created_by_membership_id)
   values (requested_case_id, registration.facility_id, new_patient, new_account, requested_hid, challenge.id,
@@ -427,7 +458,7 @@ end
 $$;
 
 comment on function identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char) is
-  '0119: checks an outreach Health ID code and, when right, creates the account (no password, pending_reset, email verified), the patient (the registration''s name, sex and phone; the verified email; no date of birth), its Health ID identifier and CONTACT_VERIFIED assurance, the registration''s Health ID record and one audit row (ids only). Answers an outcome (created, replayed, invalid, expired, too_many_tries) so that a failed attempt is counted; raises the refusals of identity.outreach_health_id_registration, 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED / _EMAIL_TAKEN / _PHONE_TAKEN, 23514 _UNDER_18. The phone is optional: without one on the registration, the patient has none and the duplicate check rests on the email.';
+  '0119: checks an outreach Health ID code and, when right, creates the account (no password, pending_reset, email verified), the patient (the registration''s name, sex and phone; the verified email; no date of birth), its Health ID identifier and CONTACT_VERIFIED assurance, the registration''s Health ID record and one audit row (ids only). Answers an outcome (created, replayed, invalid, expired, too_many_tries) so that a failed attempt is counted; raises the refusals of identity.outreach_health_id_registration, 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED / _EMAIL_TAKEN / _PHONE_TAKEN, 23514 _UNDER_18 / _NAME_INVALID (a name with nothing printable). The phone is optional: without one on the registration, the patient has none and the duplicate check rests on the email.';
 
 -- 5. For outreach-api: the Health IDs created for registrations the session can see.
 create function identity.outreach_registration_health_ids_for(requested_case_ids uuid[])
@@ -440,19 +471,40 @@ as $$
    where link.registration_case_id = any(requested_case_ids)
      and cardinality(requested_case_ids) <= 500
      and link.facility_id = platform.current_facility_id()
+     and outreach.context_allows(link.facility_id, 'outreach.registration.read')
+     and not exists (select 1 from outreach.registration_redactions redaction
+                      where redaction.registration_case_id = link.registration_case_id)
      and exists (select 1 from outreach.registration_cases case_row where case_row.id = link.registration_case_id
                   and case_row.facility_id = link.facility_id
                   and outreach.registration_campaign_member(case_row.campaign_id, case_row.facility_id))
 $$;
 
 comment on function identity.outreach_registration_health_ids_for(uuid[]) is
-  '0119: for the Outreach runtime, the Health IDs created (0119) for up to 500 registrations at the session facility that the session can see (the registration''s facility and campaign membership, checked here and by its row-level security).';
+  '0119: for the Outreach runtime, the Health IDs created (0119) for up to 500 registrations at the session facility that the session can see: the facility, outreach.registration.read for direct care (outreach.context_allows) and campaign membership, checked here and by the registration''s row-level security; never a redacted registration.';
 
--- 6. Owners, policies, ACLs.
+-- 6. Owners, policies, ACLs. Everything new belongs to the owner of
+-- identity.patients (also outreach.registration_cases', precondition), whoever
+-- applies the migration; the SECURITY DEFINER commands then run as that owner.
 do $$
 declare
   owner_name name := (select pg_get_userbyid(relowner) from pg_class where oid = 'identity.patients'::regclass);
 begin
+  if owner_name <> current_user then
+    if not (pg_has_role(current_user, owner_name, 'USAGE') and pg_has_role(current_user, owner_name, 'SET')) then
+      raise exception using errcode = '42501', message = format(
+        '0119: the applier (%s) must INHERIT and SET ROLE to the owner of identity.patients (%s)', current_user, owner_name);
+    end if;
+    execute format('alter table identity.outreach_health_id_challenges owner to %I', owner_name);
+    execute format('alter table identity.outreach_registration_health_ids owner to %I', owner_name);
+    execute format('alter function identity.outreach_registration_health_ids_immutable() owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_registration(uuid) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_eligible(uuid) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_delivery_failed(uuid) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_open_challenge(uuid) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char) owner to %I', owner_name);
+    execute format('alter function identity.outreach_registration_health_ids_for(uuid[]) owner to %I', owner_name);
+  end if;
   execute format('create policy outreach_health_id_challenges_owner on identity.outreach_health_id_challenges '
     || 'for all to %I using (true) with check (true)', owner_name);
   execute format('create policy outreach_registration_health_ids_owner on identity.outreach_registration_health_ids '
@@ -500,6 +552,14 @@ begin
                         'SELECT,INSERT,UPDATE,DELETE')
                    or has_function_privilege(role_row.oid, 'identity.outreach_health_id_eligible(uuid)', 'EXECUTE'))) then
     raise exception using errcode = '55000', message = '0119: a runtime role holds a privilege it must not';
+  end if;
+  if exists (select 1 from pg_class where oid in ('identity.outreach_health_id_challenges'::regclass,
+               'identity.outreach_registration_health_ids'::regclass)
+               and relowner <> (select relowner from pg_class where oid = 'identity.patients'::regclass))
+     or exists (select 1 from pg_proc where pronamespace = 'identity'::regnamespace
+               and (proname like 'outreach\_health\_id\_%' or proname like 'outreach\_registration\_health\_ids\_%')
+               and proowner <> (select relowner from pg_class where oid = 'identity.patients'::regclass)) then
+    raise exception using errcode = '55000', message = '0119: a new object is not owned by the owner of identity.patients';
   end if;
 end
 $$;

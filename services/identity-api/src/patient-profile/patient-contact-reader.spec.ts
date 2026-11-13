@@ -1,6 +1,7 @@
 import { createCipheriv, randomBytes } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { resetEnvironmentForTests } from '../config/environment';
+import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
+import { currentContactEncryption, encryptLookupBoundPhone } from '../identity/patient-contact-crypto';
 import { PatientContactReader } from './patient-contact-reader';
 import { PatientProfileCrypto } from './patient-profile-crypto';
 
@@ -84,6 +85,25 @@ describe('PatientContactReader (GET identity/me, 0094)', () => {
       signup_phone_ciphertext: null, signup_phone_lookup_hmac: null, profile_ciphertext: null }]);
     await expect(new PatientContactReader(crypto).read(nin.client, actor)).resolves
       .toEqual({ email: null, emailVerified: false, phone: '+2348099999999', phoneVerified: true, hasPhoto: false });
+  });
+
+  it('reads the outreach assisted Health ID\'s phone (0119), bound to its lookup HMAC, with either key', async () => {
+    const lookup = '1'.repeat(64);
+    const nin = encryptLookupBoundPhone(Buffer.from(process.env.NIN_ENCRYPTION_KEY_B64!, 'base64'), lookup, '+2348012345678');
+    const crypto = new PatientProfileCrypto();
+    const outreach = client(contactRow({ phone_ciphertext: nin, phone_lookup_hmac: lookup }));
+    await expect(new PatientContactReader(crypto).read(outreach.client, actor)).resolves
+      .toMatchObject({ phone: '+2348012345678', phoneVerified: false });
+    // Another patient's lookup HMAC does not open it.
+    const moved = client(contactRow({ phone_ciphertext: nin, phone_lookup_hmac: '2'.repeat(64) }));
+    await expect(new PatientContactReader(crypto).read(moved.client, actor)).resolves.toMatchObject({ phone: null });
+    // Without the NIN key the OTP-derived key wrote it.
+    delete process.env.NIN_ENCRYPTION_KEY_B64;
+    resetEnvironmentForTests();
+    const derived = encryptLookupBoundPhone(currentContactEncryption(getEnvironment()).key, lookup, '+447700900123');
+    await expect(new PatientContactReader(new PatientProfileCrypto()).read(
+      client(contactRow({ phone_ciphertext: derived, phone_lookup_hmac: lookup })).client, actor)).resolves
+      .toMatchObject({ phone: '+447700900123' });
   });
 
   it('answers a migrated patient\'s phone (the migration key) as null, and nothing without a live session', async () => {
