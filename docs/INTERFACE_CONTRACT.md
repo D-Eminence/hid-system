@@ -4694,6 +4694,17 @@ in the same transaction and its `area` is cleared.
 (types `SaveOutreachRegistrationScreening`, `OutreachRegistrationScreening`), and
 `OutreachRegistrationCase` has `area` and `hasScreening` (optional in the client type, as a backend before 0118 omits them).
 
+### 48.x Recording an export (no migration)
+
+`POST /outreach/registration-cases/exports`, permission `outreach.registration.read`,
+body `{ "format": "csv" | "pdf" | "docx" | "xlsx", "count": 0-100000, "campaignId"?: uuid }`,
+answers 204. The website builds the CSV, PDF, Word or Excel file itself from the
+list and case reads and then calls this once per export. It writes one audit row,
+`outreach.registration.exported` (resource type `outreach-registration-export`,
+the campaign as the resource when given), with `{ format, count, campaignId }` only,
+never a registration's contents. A campaign that is not this facility's answers 404
+`OUTREACH_CAMPAIGN_NOT_FOUND`; a wrong body answers 400 `VALIDATION_FAILED`.
+
 ## 44. Allergies and the allergy check at prescribing (0117)
 
 Two sources, always kept apart and labelled on screens:

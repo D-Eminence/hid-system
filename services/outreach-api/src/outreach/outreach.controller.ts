@@ -9,6 +9,7 @@ import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import { LinkExistingPatientDto } from './dto/link-existing-patient.dto';
+import { ExportRegistrationsDto } from './dto/export-registrations.dto';
 import { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
 import { OutreachService } from './outreach.service';
 
@@ -87,6 +88,18 @@ export class OutreachController {
   addCampaignMember(@Param('campaignId', new ParseUUIDPipe()) campaignId: string,
     @Body() input: AddCampaignMemberDto, @Req() request: HidRequest) {
     return this.outreach.addCampaignMember(campaignId, input, requireRequestContext(request));
+  }
+
+  /**
+   * The website exports the registration list (CSV, PDF, Word or Excel) from
+   * the existing reads; this records that it did, with the format and the
+   * count only.
+   */
+  @Post('/exports')
+  @HttpCode(204)
+  @RequirePermissions('outreach.registration.read')
+  async recordExport(@Body() input: ExportRegistrationsDto, @Req() request: HidRequest): Promise<void> {
+    await this.outreach.recordExport(input, requireRequestContext(request));
   }
 
   @Get()

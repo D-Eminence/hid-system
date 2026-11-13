@@ -8,6 +8,7 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { CreateRegistrationCaseDto } from './dto/create-registration-case.dto';
 import type { LinkExistingPatientDto } from './dto/link-existing-patient.dto';
+import type { ExportRegistrationsDto } from './dto/export-registrations.dto';
 import type { CreateCampaignDto } from './dto/create-campaign.dto';
 import type { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import type { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
@@ -156,6 +157,19 @@ export class OutreachService {
              or (lower(btrim(other.full_name))=lower(btrim($5)) and other.age_years=$6))
       ) as found`, [row.campaign_id, row.facility_id, row.id, row.phone, row.full_name, row.age_years]);
     return result.rows[0]?.found === true;
+  }
+
+  /** Records an export of the registration list (format and count only; 0118 follow-up, no migration). */
+  async recordExport(input: ExportRegistrationsDto, context: DataAccessContext): Promise<void> {
+    await this.database.withTransaction(context, async (client) => {
+      if (input.campaignId) {
+        const campaign = await client.query(`select 1 from outreach.campaigns where id=$1 and facility_id=$2`,
+          [input.campaignId, context.facilityId]);
+        if (!campaign.rowCount) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
+      }
+      await this.audit.recordExportWithClient(client, context,
+        { format: input.format, count: input.count, campaignId: input.campaignId ?? null });
+    });
   }
 
   async list(context: DataAccessContext): Promise<readonly OutreachRegistrationCase[]> {

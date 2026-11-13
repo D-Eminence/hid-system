@@ -163,6 +163,12 @@ export class OutreachApiClient {
       expectedVersion === undefined ? undefined : `"${expectedVersion}"`);
   }
 
+  /** Records that the registration list was exported (format and count only); 204, no body. */
+  recordRegistrationExport(input: { format: 'csv' | 'pdf' | 'docx' | 'xlsx'; count: number; campaignId?: string },
+    context: OutreachRequestContext, signal?: AbortSignal) {
+    return this.request<void>('/api/v1/outreach/registration-cases/exports', 'POST', input, context, undefined, signal);
+  }
+
   private async request<Result>(path: string, method: 'GET' | 'POST' | 'PUT', body: unknown,
     context: OutreachRequestContext, idempotencyKey?: string,
     signal?: AbortSignal, ifMatch?: string): Promise<Result> {

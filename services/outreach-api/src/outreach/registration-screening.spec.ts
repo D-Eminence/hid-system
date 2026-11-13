@@ -7,6 +7,7 @@ import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { CreateRegistrationCaseDto } from './dto/create-registration-case.dto';
 import { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
+import { ExportRegistrationsDto } from './dto/export-registrations.dto';
 import { ifMatchVersion, OutreachController } from './outreach.controller';
 import { OutreachService } from './outreach.service';
 import { assertScreeningPlausible, normalizeScreening, screeningRefusal } from './registration-screening';
@@ -347,5 +348,57 @@ describe('The screening codes match migration 0118', () => {
     for (const constraint of ['registration_screenings_bp_ck', 'registration_screenings_glucose_ck',
       'registration_screenings_referral_ck']) expect(sql).toContain(`constraint ${constraint}`);
     expect(sql).toContain("idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'");
+  });
+});
+
+describe('Recording an export of the registration list (0118 follow-up)', () => {
+  it('validates the format, the count and the campaign', async () => {
+    const errors = async (input: Record<string, unknown>) => (await validate(plainToInstance(ExportRegistrationsDto, input),
+      { whitelist: true, forbidNonWhitelisted: true })).map((error) => error.property);
+    expect(await errors({ format: 'xlsx', count: 12 })).toEqual([]);
+    expect(await errors({ format: 'docx', count: 0, campaignId: ids.case })).toEqual([]);
+    expect(await errors({ format: 'zip', count: 12 })).toEqual(['format']);
+    expect(await errors({ format: 'csv', count: -1 })).toEqual(['count']);
+    expect(await errors({ format: 'csv', count: 1.5 })).toEqual(['count']);
+    expect(await errors({ format: 'csv', count: 3, campaignId: 'not-a-uuid' })).toEqual(['campaignId']);
+    expect(await errors({ format: 'csv', count: 3, rows: [] })).toEqual(['rows']);
+  });
+
+  it('writes one audit row with the format, count and campaign only', async () => {
+    const query = jest.fn(async () => ({ rows: [{ '?column?': 1 }], rowCount: 1 }));
+    const recordExportWithClient = jest.fn();
+    const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown) =>
+      operation({ query })) };
+    const outreach = new OutreachService(database as never, { recordExportWithClient } as never, identity as never);
+    await outreach.recordExport({ format: 'pdf', count: 40, campaignId: ids.case }, context);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('from outreach.campaigns'), [ids.case, ids.facility]);
+    expect(recordExportWithClient).toHaveBeenCalledWith(expect.anything(), context,
+      { format: 'pdf', count: 40, campaignId: ids.case });
+    await outreach.recordExport({ format: 'csv', count: 3 }, context);
+    expect(recordExportWithClient).toHaveBeenLastCalledWith(expect.anything(), context,
+      { format: 'csv', count: 3, campaignId: null });
+  });
+
+  it('refuses a campaign of another facility (404) without an audit row', async () => {
+    const query = jest.fn(async () => ({ rows: [], rowCount: 0 }));
+    const recordExportWithClient = jest.fn();
+    const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown) =>
+      operation({ query })) };
+    const outreach = new OutreachService(database as never, { recordExportWithClient } as never, identity as never);
+    await expect(outreach.recordExport({ format: 'pdf', count: 1, campaignId: ids.case }, context))
+      .rejects.toMatchObject({ status: 404, code: 'OUTREACH_CAMPAIGN_NOT_FOUND' });
+    expect(recordExportWithClient).not.toHaveBeenCalled();
+  });
+
+  it('is a 204 route needing outreach.registration.read', async () => {
+    const outreach = { recordExport: jest.fn(async () => undefined) };
+    const controller = new OutreachController(outreach as never);
+    const request = { header: () => undefined, actor: context.actor, facilityId: ids.facility,
+      correlationId: context.correlationId } as unknown as HidRequest;
+    await expect(controller.recordExport({ format: 'csv', count: 2 }, request)).resolves.toBeUndefined();
+    expect(outreach.recordExport).toHaveBeenCalledWith({ format: 'csv', count: 2 },
+      expect.objectContaining({ facilityId: ids.facility }));
+    expect(Reflect.getMetadata('__httpCode__', OutreachController.prototype.recordExport)).toBe(204);
+    expect(Reflect.getMetadata('path', OutreachController.prototype.recordExport)).toBe('/exports');
   });
 });
