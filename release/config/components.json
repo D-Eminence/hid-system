@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0116",
-    "count": 117,
+    "last": "0124",
+    "count": 118,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -565,6 +565,10 @@
       {
         "name": "0116_outreach_retention.sql",
         "sha256": "d590c45302484da9d3175022b30395eacd53d3618460fc3c85093a31b21d74bf"
+      },
+      {
+        "name": "0124_cross_facility_imports.sql",
+        "sha256": "87ae1e6736316163d74252182688e8e2226aa33e69f25a4fdb37deade1e872b9"
       }
     ]
   },
