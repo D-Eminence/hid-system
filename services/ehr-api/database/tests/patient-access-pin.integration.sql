@@ -124,11 +124,18 @@ select set_config('app.correlation_id', 'pin-integration-valid-0001', true);
 do $$
 declare granted record;
 begin
-  select * into granted from identity.access_patient_with_pin('HID-PNACCE55', '24 68', 15);
+  -- 0120: at most 1440 minutes (24 hours); 1441 is refused before any check.
+  begin
+    perform identity.access_patient_with_pin('HID-PNACCE55', '2468', 1441);
+    raise exception 'A PIN grant longer than 24 hours was accepted';
+  exception when sqlstate '22023' then null;
+  end;
+  select * into granted from identity.access_patient_with_pin('HID-PNACCE55', '24 68', 1440);
   if not granted.verified or granted.existing_grant or granted.grant_status <> 'active'
      or granted.subject_patient_id <> 'b5000000-0000-4000-8000-000000000001'::uuid then
-    raise exception 'Valid legacy bcrypt PIN did not produce the expected read grant';
+    raise exception 'Valid legacy bcrypt PIN did not produce the expected grant';
   end if;
+  perform set_config('pin_test.grant', granted.consent_grant_id::text, true);
   if not identity.has_active_consent_grant(
       granted.subject_patient_id, 'staff:pin-integration',
       'b4000000-0000-4000-8000-000000000001',
@@ -136,20 +143,60 @@ begin
     ) then
     raise exception 'PIN grant did not authorize its exact read context';
   end if;
-  if identity.has_active_consent_grant(
+  -- 0120: the PIN grant also lets the staff member add to the record.
+  if not identity.has_active_consent_grant(
       granted.subject_patient_id, 'staff:pin-integration',
       'b4000000-0000-4000-8000-000000000001',
       'b1000000-0000-4000-8000-000000000002', 'write_records', 'direct-care'
-    ) or identity.has_active_consent_grant(
+    ) then
+    raise exception 'PIN grant did not authorize its exact write context';
+  end if;
+  if identity.has_active_consent_grant(
       granted.subject_patient_id, 'staff:pin-integration',
       'b4000000-0000-4000-8000-000000000001',
       'b1000000-0000-4000-8000-000000000099', 'read_records', 'direct-care'
+    ) or identity.has_active_consent_grant(
+      granted.subject_patient_id, 'staff:pin-integration',
+      'b4000000-0000-4000-8000-000000000001',
+      'b1000000-0000-4000-8000-000000000099', 'write_records', 'direct-care'
     ) then
-    raise exception 'PIN grant escaped write or exact-facility scope';
+    raise exception 'PIN grant escaped exact-facility scope';
   end if;
 end
 $$;
 reset role;
+-- 0120: the grant and its request are write_records, direct care, by PIN, and
+-- last exactly 1440 minutes (24 hours).
+do $$
+begin
+  if not exists (
+      select 1 from identity.consent_grants grant_row
+        join identity.access_requests request_row on request_row.id = grant_row.request_id
+       where grant_row.id = current_setting('pin_test.grant')::uuid
+         and grant_row.scope = 'write_records' and request_row.scope = 'write_records'
+         and grant_row.purpose_of_use = 'direct-care' and request_row.purpose_of_use = 'direct-care'
+         and grant_row.authorization_method = 'patient_access_pin'
+         and request_row.authorization_method = 'patient_access_pin'
+         and not grant_row.break_glass and not request_row.break_glass
+         and request_row.requested_duration_minutes = 1440
+         and grant_row.expires_at - grant_row.starts_at = interval '24 hours'
+         and grant_row.status = 'active' and request_row.status = 'approved') then
+    raise exception 'The PIN grant is not a 24-hour write_records grant';
+  end if;
+  if (select details from audit.events where action = 'identity.patient-access-pin.verify'
+        and resource_id = current_setting('pin_test.grant')) ->> 'scope' is distinct from 'write_records'
+     or (select details from audit.events where action = 'identity.patient-access-pin.verify'
+        and resource_id = current_setting('pin_test.grant')) ->> 'duration_minutes' is distinct from '1440' then
+    raise exception 'The PIN audit row does not carry its scope and duration';
+  end if;
+  if (select payload from identity.outbox_events where event_type = 'PatientAccessPinVerified'
+        and aggregate_id = current_setting('pin_test.grant')::uuid)
+     is distinct from jsonb_build_object('consentGrantId', current_setting('pin_test.grant')::uuid,
+       'reviewRequired', true, 'scope', 'write_records') then
+    raise exception 'The PIN notice does not carry its scope';
+  end if;
+end
+$$;
 do $$
 begin
   if not exists (
@@ -164,7 +211,7 @@ $$;
 
 -- A `$2y$` source envelope has the same ASCII-PIN bcrypt behavior as `$2b$`.
 -- Store it unchanged and verify through the same public command; the replay
--- must retain the existing short-lived grant rather than create a new one.
+-- must return the existing 24-hour write grant rather than create a new one.
 update identity.patient_access_pins
    set pin_hash = '$2y$' || substring(pin_hash from 5), updated_at = clock_timestamp()
  where patient_id = 'b5000000-0000-4000-8000-000000000001';
@@ -173,12 +220,31 @@ do $$
 declare replay record;
 begin
   select * into replay from identity.access_patient_with_pin('HID-PNACCE55', '2468', 60);
-  if not replay.verified or not replay.existing_grant or replay.grant_status <> 'active' then
+  if not replay.verified or not replay.existing_grant or replay.grant_status <> 'active'
+     or replay.consent_grant_id <> current_setting('pin_test.grant')::uuid then
     raise exception 'Legacy `$2y$` PIN replay did not retain the existing grant';
   end if;
 end
 $$;
 reset role;
+-- 0120: the replay returns the same write grant, keeps its 24 hours and
+-- audits its scope and 1440 minutes, though it asked 60.
+do $$
+begin
+  if (select count(*) from identity.consent_grants
+       where patient_id = 'b5000000-0000-4000-8000-000000000001'
+         and authorization_method = 'patient_access_pin') <> 1
+     or (select details ->> 'scope' from audit.events where action = 'identity.patient-access-pin.replay') <> 'write_records'
+     -- The replay asked 60 minutes; a reused grant follows the same rule and
+     -- its audit says 1440.
+     or (select details ->> 'duration_minutes' from audit.events
+          where action = 'identity.patient-access-pin.replay') is distinct from '1440'
+     or (select expires_at - starts_at from identity.consent_grants
+          where id = current_setting('pin_test.grant')::uuid) <> interval '24 hours' then
+    raise exception 'The PIN replay did not return the existing write grant';
+  end if;
+end
+$$;
 do $$
 begin
   if not exists (
@@ -253,6 +319,281 @@ end $$;
 reset role;
 rollback to savepoint before_pin_directive;
 
+-- 0120: a deny of writing only, and a deny of every action, stop the PIN too
+-- (the grant is write_records). A deny for another purpose does not.
+create function pg_temp.pin_directive(directive_no integer, denied_actions text[], denied_purposes text[])
+returns void language sql as $f$
+  insert into identity.consent_directives (id, patient_id, current_version) values
+    (format('b9000000-0000-4000-8000-0000000001%s', lpad(directive_no::text, 2, '0'))::uuid,
+     'b5000000-0000-4000-8000-000000000001', 1);
+  insert into identity.consent_directive_versions (
+    id, directive_id, patient_id, version_no, status, provision_type, grantee_type,
+    actions, purposes, starts_at, source_reference, reason, content_sha256
+  ) values (
+    format('b9000000-0000-4000-8000-0000000002%s', lpad(directive_no::text, 2, '0'))::uuid,
+    format('b9000000-0000-4000-8000-0000000001%s', lpad(directive_no::text, 2, '0'))::uuid,
+    'b5000000-0000-4000-8000-000000000001', 1, 'active', 'deny', 'all',
+    denied_actions, denied_purposes, clock_timestamp() - interval '1 minute',
+    'patient-access-pin-test', 'Synthetic PIN directive', repeat('e', 64)
+  );
+$f$;
+savepoint before_pin_write_directive;
+select pg_temp.pin_directive(1, array['write_records'], array['direct-care']);
+set local role hid_identity_api_runtime;
+do $$ declare result record; begin
+  select * into result from identity.access_patient_with_pin('HID-PNACCE55', '2468', 1440);
+  if result.verified then raise exception 'PIN bypassed an active deny of writing'; end if;
+end $$;
+reset role;
+do $$ begin
+  if (select count(*) from audit.events
+       where action = 'identity.patient-access-pin.authorization-denied'
+         and patient_id = 'b5000000-0000-4000-8000-000000000001') <> 1 then
+    raise exception 'The deny of writing left no authorization-denied audit row';
+  end if;
+end $$;
+rollback to savepoint before_pin_write_directive;
+select pg_temp.pin_directive(2, '{}', array['direct-care']);
+set local role hid_identity_api_runtime;
+do $$ declare result record; begin
+  select * into result from identity.access_patient_with_pin('HID-PNACCE55', '2468', 1440);
+  if result.verified then raise exception 'PIN bypassed an active deny of every action'; end if;
+end $$;
+reset role;
+rollback to savepoint before_pin_write_directive;
+select pg_temp.pin_directive(3, array['write_records'], array['healthcare-operations']);
+set local role hid_identity_api_runtime;
+do $$ declare result record; begin
+  select * into result from identity.access_patient_with_pin('HID-PNACCE55', '2468', 1440);
+  if not result.verified or not result.existing_grant then
+    raise exception 'A deny for another purpose stopped the PIN';
+  end if;
+end $$;
+reset role;
+rollback to savepoint before_pin_write_directive;
+
+-- 0120: a 60-minute read_records PIN grant made before 0120 is not reused;
+-- the next correct PIN makes a new write_records grant and the old one runs
+-- out by itself.
+savepoint before_pin_old_read_grant;
+insert into identity.patient_access_pins (
+  patient_id, pin_hash, source_system, source_record_id, source_created_at, source_updated_at
+) values ('b5000000-0000-4000-8000-000000000002', crypt('1357', gen_salt('bf', 12)),
+   'supabase', 'legacy-pin-old-read', clock_timestamp() - interval '2 days', clock_timestamp() - interval '1 day');
+insert into identity.access_requests (
+  id, patient_id, staff_id, membership_id, facility_id, scope, purpose_of_use,
+  reason, status, requested_duration_minutes, break_glass, approved_at,
+  correlation_id, authorization_method
+) values (
+  'b7000000-0000-4000-8000-000000000001', 'b5000000-0000-4000-8000-000000000002',
+  'b3000000-0000-4000-8000-000000000001', 'b4000000-0000-4000-8000-000000000001',
+  'b1000000-0000-4000-8000-000000000002', 'read_records', 'direct-care', 'Patient access PIN verification',
+  'approved', 60, false, current_timestamp, 'pin-integration-old-read', 'patient_access_pin'
+);
+insert into identity.consent_grants (
+  id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
+  scope, purpose_of_use, status, reason, starts_at, expires_at, break_glass,
+  correlation_id, authorization_method
+) values (
+  'b8000000-0000-4000-8000-000000000001', 'b7000000-0000-4000-8000-000000000001',
+  'b5000000-0000-4000-8000-000000000002', 'b3000000-0000-4000-8000-000000000001',
+  'b2000000-0000-4000-8000-000000000001', 'b4000000-0000-4000-8000-000000000001',
+  'b1000000-0000-4000-8000-000000000002', 'read_records', 'direct-care', 'active',
+  'Patient access PIN verification', current_timestamp, current_timestamp + interval '60 minutes', false,
+  'pin-integration-old-read', 'patient_access_pin'
+);
+delete from identity.patient_access_pin_target_limits;
+set local role hid_identity_api_runtime;
+select set_config('app.correlation_id', 'pin-integration-old-read-0001', true);
+do $$ declare result record; begin
+  select * into result from identity.access_patient_with_pin('HID-PNABCD66', '1357', 1440);
+  if not result.verified or result.existing_grant
+     or result.consent_grant_id = 'b8000000-0000-4000-8000-000000000001'::uuid then
+    raise exception 'An old read_records PIN grant was reused';
+  end if;
+  perform set_config('pin_test.new_grant', result.consent_grant_id::text, true);
+end $$;
+reset role;
+do $$ begin
+  if (select scope from identity.consent_grants where id = current_setting('pin_test.new_grant')::uuid)
+       <> 'write_records'
+     or (select status from identity.consent_grants where id = 'b8000000-0000-4000-8000-000000000001') <> 'active' then
+    raise exception 'The new PIN grant is not write_records, or the old read grant was touched';
+  end if;
+end $$;
+rollback to savepoint before_pin_old_read_grant;
+
+-- 0120 (owner decision, 10 Nov 2026): a PIN always gives exactly 24 hours
+-- (1440 minutes), whatever duration is asked. A call asking 60 minutes and a
+-- call asking 5 each get a 1440-minute write_records grant, the access request
+-- stores 1440, and the audit says 1440.
+savepoint before_pin_asked_60;
+insert into identity.patient_access_pins (
+  patient_id, pin_hash, source_system, source_record_id, source_created_at, source_updated_at
+) values ('b5000000-0000-4000-8000-000000000002', crypt('1357', gen_salt('bf', 12)),
+   'supabase', 'legacy-pin-asked-60', clock_timestamp() - interval '2 days', clock_timestamp() - interval '1 day');
+delete from identity.patient_access_pin_target_limits;
+set local role hid_identity_api_runtime;
+select set_config('app.correlation_id', 'pin-integration-asked-60', true);
+do $$ declare result record; begin
+  select * into result from identity.access_patient_with_pin('HID-PNABCD66', '1357', 60);
+  if not result.verified or result.existing_grant
+     or result.expires_at is distinct from current_timestamp + interval '1440 minutes' then
+    raise exception 'A PIN call asking 60 minutes did not get a new 1440-minute grant';
+  end if;
+  perform set_config('pin_test.asked_grant', result.consent_grant_id::text, true);
+end $$;
+reset role;
+do $$ begin
+  if not exists (
+      select 1 from identity.consent_grants grant_row
+        join identity.access_requests request_row on request_row.id = grant_row.request_id
+       where grant_row.id = current_setting('pin_test.asked_grant')::uuid
+         and grant_row.scope = 'write_records' and request_row.scope = 'write_records'
+         and request_row.requested_duration_minutes = 1440
+         and grant_row.expires_at - grant_row.starts_at = interval '1440 minutes') then
+    raise exception 'A PIN call asking 60 minutes did not store a 1440-minute write_records grant';
+  end if;
+  if (select details from audit.events where action = 'identity.patient-access-pin.verify'
+        and resource_id = current_setting('pin_test.asked_grant')) ->> 'duration_minutes' is distinct from '1440'
+     or (select details from audit.events where action = 'identity.patient-access-pin.verify'
+        and resource_id = current_setting('pin_test.asked_grant')) ->> 'scope' is distinct from 'write_records' then
+    raise exception 'The audit of a PIN call asking 60 minutes does not say 1440 minutes of write_records';
+  end if;
+end $$;
+rollback to savepoint before_pin_asked_60;
+
+savepoint before_pin_asked_5;
+insert into identity.patient_access_pins (
+  patient_id, pin_hash, source_system, source_record_id, source_created_at, source_updated_at
+) values ('b5000000-0000-4000-8000-000000000002', crypt('1357', gen_salt('bf', 12)),
+   'supabase', 'legacy-pin-asked-5', clock_timestamp() - interval '2 days', clock_timestamp() - interval '1 day');
+delete from identity.patient_access_pin_target_limits;
+set local role hid_identity_api_runtime;
+select set_config('app.correlation_id', 'pin-integration-asked-5', true);
+do $$ declare result record; begin
+  select * into result from identity.access_patient_with_pin('HID-PNABCD66', '1357', 5);
+  if not result.verified or result.existing_grant
+     or result.expires_at is distinct from current_timestamp + interval '1440 minutes' then
+    raise exception 'A PIN call asking 5 minutes did not get a new 1440-minute grant';
+  end if;
+  perform set_config('pin_test.asked_grant', result.consent_grant_id::text, true);
+end $$;
+reset role;
+do $$ begin
+  if not exists (
+      select 1 from identity.consent_grants grant_row
+        join identity.access_requests request_row on request_row.id = grant_row.request_id
+       where grant_row.id = current_setting('pin_test.asked_grant')::uuid
+         and grant_row.scope = 'write_records' and request_row.scope = 'write_records'
+         and request_row.requested_duration_minutes = 1440
+         and grant_row.expires_at - grant_row.starts_at = interval '1440 minutes') then
+    raise exception 'A PIN call asking 5 minutes did not store a 1440-minute write_records grant';
+  end if;
+  if (select details from audit.events where action = 'identity.patient-access-pin.verify'
+        and resource_id = current_setting('pin_test.asked_grant')) ->> 'duration_minutes' is distinct from '1440'
+     or (select details from audit.events where action = 'identity.patient-access-pin.verify'
+        and resource_id = current_setting('pin_test.asked_grant')) ->> 'scope' is distinct from 'write_records' then
+    raise exception 'The audit of a PIN call asking 5 minutes does not say 1440 minutes of write_records';
+  end if;
+end $$;
+rollback to savepoint before_pin_asked_5;
+
+-- 0120: the duration asked is still checked as 5 to 1440 minutes; a value
+-- outside it (4, 1441) or a missing one is refused before any check.
+set local role hid_identity_api_runtime;
+select set_config('app.correlation_id', 'pin-integration-out-of-range', true);
+do $$
+declare
+  asked integer;
+begin
+  foreach asked in array array[4, 1441, null]::integer[] loop
+    begin
+      perform identity.access_patient_with_pin('HID-PNACCE55', '2468', asked);
+      raise exception 'A PIN call asking % minutes was accepted', coalesce(asked::text, 'no');
+    exception when sqlstate '22023' then null;
+    end;
+  end loop;
+end $$;
+reset role;
+
+-- 0120: the constraints admit a PIN row of read_records or write_records only,
+-- still direct care and never break-glass; the PIN notice's payload is the two
+-- keys, or the two keys and a read_records or write_records scope.
+do $$
+declare
+  failed text;
+  broken text;
+begin
+  for broken in select unnest(array[
+    $q$update identity.consent_grants set scope = 'break_glass', break_glass = true
+        where id = current_setting('pin_test.grant')::uuid$q$,
+    $q$update identity.consent_grants set purpose_of_use = 'healthcare-operations'
+        where id = current_setting('pin_test.grant')::uuid$q$,
+    $q$update identity.access_requests set scope = 'break_glass', break_glass = true
+        where id = (select request_id from identity.consent_grants where id = current_setting('pin_test.grant')::uuid)$q$,
+    $q$update identity.access_requests set purpose_of_use = 'healthcare-operations'
+        where id = (select request_id from identity.consent_grants where id = current_setting('pin_test.grant')::uuid)$q$])
+  loop
+    begin
+      execute broken;
+      raise exception 'A PIN row outside read_records or write_records direct care was accepted: %', broken;
+    exception when check_violation then
+      get stacked diagnostics failed = constraint_name;
+      if failed not in ('consent_grants_pin_scope_ck', 'access_requests_pin_scope_ck',
+                        'consent_grants_check3') then
+        raise exception 'Refused by % instead of the PIN scope constraint: %', failed, broken;
+      end if;
+    end;
+  end loop;
+  for broken in select unnest(array[
+    jsonb_build_object('scope', 'break_glass'), jsonb_build_object('scope', 'read'),
+    jsonb_build_object('scope', 'write_records', 'extra', true)])
+  loop
+    begin
+      insert into identity.outbox_events (
+        event_type, aggregate_id, aggregate_version, facility_id, patient_id, correlation_id, payload
+      ) values (
+        'PatientAccessPinVerified', current_setting('pin_test.grant')::uuid, 1,
+        'b1000000-0000-4000-8000-000000000002', 'b5000000-0000-4000-8000-000000000001',
+        'pin-integration-outbox-shape',
+        jsonb_build_object('consentGrantId', current_setting('pin_test.grant')::uuid, 'reviewRequired', true)
+          || broken::jsonb
+      );
+      raise exception 'A PIN notice payload outside the minimum was accepted: %', broken;
+    exception when check_violation then
+      get stacked diagnostics failed = constraint_name;
+      if failed <> 'identity_outbox_minimum_necessary' then
+        raise exception 'Refused by % instead of the outbox minimum: %', failed, broken;
+      end if;
+    end;
+  end loop;
+end
+$$;
+
+-- 0120: through the insert policy a PIN notice must name its grant's own
+-- scope; a read_records payload for a write grant is refused.
+set local role hid_identity_api_runtime;
+select set_config('app.correlation_id', 'pin-integration-policy-0001', true);
+do $$
+begin
+  begin
+    insert into identity.outbox_events (
+      event_type, aggregate_id, aggregate_version, facility_id, patient_id, correlation_id, payload
+    ) values (
+      'PatientAccessPinVerified', current_setting('pin_test.grant')::uuid, 1,
+      'b1000000-0000-4000-8000-000000000002', 'b5000000-0000-4000-8000-000000000001',
+      'pin-integration-policy-0001',
+      jsonb_build_object('consentGrantId', current_setting('pin_test.grant')::uuid, 'reviewRequired', true,
+        'scope', 'read_records')
+    );
+    raise exception 'A PIN notice naming another scope passed the insert policy';
+  exception when insufficient_privilege then null;
+  end;
+end
+$$;
+reset role;
+
 -- Reset earlier denial state, then prove that five failures lock the actor and
 -- that a correct PIN cannot bypass the active lock.
 delete from identity.patient_access_pin_target_limits;
@@ -294,7 +635,7 @@ begin
       select 1 from identity.consent_grants
        where patient_id = 'b5000000-0000-4000-8000-000000000001'
          and authorization_method = 'patient_access_pin'
-         and scope = 'read_records' and purpose_of_use = 'direct-care'
+         and scope = 'write_records' and purpose_of_use = 'direct-care'
          and status = 'active'
     ) then
     raise exception 'Valid PIN grant was not recorded with narrow authorization metadata';
@@ -305,7 +646,8 @@ begin
         where event_type = 'PatientAccessPinVerified'
           and (registration_case_id is not null
             or patient_access_pin_grant_id <> aggregate_id
-            or payload <> jsonb_build_object('consentGrantId', aggregate_id, 'reviewRequired', true))
+            or payload <> jsonb_build_object('consentGrantId', aggregate_id, 'reviewRequired', true,
+                 'scope', 'write_records'))
      ) then
     raise exception 'PIN notification intent is missing or exceeds the minimum-necessary envelope';
   end if;

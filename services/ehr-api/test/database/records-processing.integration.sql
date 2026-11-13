@@ -429,10 +429,11 @@ select pg_temp.as_staff(2, 'direct-care');
 select set_config('records_processing.pin', pg_temp.try($q$select consent_grant_id::text
   from identity.access_patient_with_pin('HID-RPADLT', '2468', 15)$q$), true);
 reset role;
-select pg_temp.expect('7b PIN under direct care', 'direct-care read_records patient_access_pin',
+-- 0120: a PIN grant is read and write (write_records).
+select pg_temp.expect('7b PIN under direct care', 'direct-care write_records patient_access_pin',
   (select format('%s %s %s', purpose_of_use, scope, authorization_method) from identity.consent_grants
     where id::text = current_setting('records_processing.pin')));
-select pg_temp.expect('7c the PIN grant covers records processing (34(1))', 'rp read=t rp write=t dc read=t dc write=f',
+select pg_temp.expect('7c the PIN grant covers records processing (34(1))', 'rp read=t rp write=t dc read=t dc write=t',
   format('rp read=%s rp write=%s dc read=%s dc write=%s',
     pg_temp.allowed(2, 1, 'read_records', 'healthcare-operations'), pg_temp.allowed(2, 1, 'write_records', 'healthcare-operations'),
     pg_temp.allowed(2, 1, 'read_records', 'direct-care'), pg_temp.allowed(2, 1, 'write_records', 'direct-care')));
@@ -728,7 +729,7 @@ select pg_temp.expect('10l a second before the grant ends', 'rp read=t rp write=
 select pg_temp.expect('10m when the grant ends', 'rp read=f rp write=f dc read=f dc write=f',
   pg_temp.cover_answers('doctor', 7, (select expires_at from identity.consent_grants
     where id::text = current_setting('records_processing.cover_g1'))));
--- Requests last at most 24 hours and PIN grants 60 minutes today; a grant
+-- Requests and PIN grants (since 0120) last at most 24 hours; a grant
 -- made to last three days (as the owner) shows the cover lasting as long as
 -- the grant, past 24 hours from its start.
 update identity.consent_grants set starts_at = now() - interval '2 hours', expires_at = now() + interval '3 days'
@@ -762,7 +763,7 @@ set local role hid_ehr_api_runtime;
 select pg_temp.expect('10q2 P7''s document after the revocation', 'hidden', pg_temp.cover_document('doctor', 'healthcare-operations'));
 reset role;
 
--- 10r-10v. The Access PIN (direct care, read, at most 60 minutes) covers it
+-- 10r-10v. The Access PIN (direct care, read and write, at most 24 hours since 0120) covers it
 -- too, read and write; it ends with the PIN grant.
 set local role hid_identity_api_runtime;
 select pg_temp.as_cover_patient(7);
@@ -771,11 +772,11 @@ select pg_temp.as_cover_staff('doctor', 'direct-care');
 select set_config('records_processing.cover_pin', pg_temp.try($q$select consent_grant_id::text
   from identity.access_patient_with_pin('HID-RPCVRA', '1357', 30)$q$), true);
 reset role;
-select pg_temp.expect('10r the PIN grant', 'direct-care read_records patient_access_pin approved',
+select pg_temp.expect('10r the PIN grant', 'direct-care write_records patient_access_pin approved',
   (select format('%s %s %s %s', grant_row.purpose_of_use, grant_row.scope, grant_row.authorization_method, request_row.status)
      from identity.consent_grants grant_row join identity.access_requests request_row on request_row.id = grant_row.request_id
     where grant_row.id::text = current_setting('records_processing.cover_pin')));
-select pg_temp.expect('10s covered by the PIN grant', 'rp read=t rp write=t dc read=t dc write=f',
+select pg_temp.expect('10s covered by the PIN grant', 'rp read=t rp write=t dc read=t dc write=t',
   pg_temp.cover_answers('doctor', 7));
 select pg_temp.expect('10r2 the cover names the PIN grant and ends with it', 'pin until=expires_at',
   pg_temp.cover_after('select 1', 'doctor', 7, 'write_records', now()));
@@ -1438,7 +1439,7 @@ select pg_temp.expect('10zi the nurse opens P8 with the PIN', 'true',
   (pg_temp.try($q$select consent_grant_id::text from identity.access_patient_with_pin('HID-RPCVRB', '8642', 30)$q$)
      ~ '^[0-9a-f-]{36}$')::text);
 reset role;
-select pg_temp.expect('10zi2 under 18 with the PIN: not covered', 'rp read=f rp write=f dc read=t dc write=f',
+select pg_temp.expect('10zi2 under 18 with the PIN: not covered', 'rp read=f rp write=f dc read=t dc write=t',
   pg_temp.cover_answers('nurse', 8));
 
 -- The outcome.

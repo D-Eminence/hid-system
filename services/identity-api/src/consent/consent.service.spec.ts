@@ -4,7 +4,9 @@ import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
-import { ConsentService, RECORDS_PROCESSING_REFUSAL, REVOCATION_DETAIL } from './consent.service';
+import {
+  ConsentService, PATIENT_PIN_ACCESS_MINUTES, RECORDS_PROCESSING_REFUSAL, REVOCATION_DETAIL,
+} from './consent.service';
 
 const context: DataAccessContext = {
   correlationId: 'consent-service-test-correlation',
@@ -442,7 +444,7 @@ describe('ConsentService', () => {
     );
   });
 
-  it('returns a narrow governed grant only when the database command verifies the PIN', async () => {
+  it('returns a narrow governed grant only when the database command verifies the PIN (24 hours, though 15 minutes are asked)', async () => {
     query.mockResolvedValueOnce({
       rows: [{
         verified: true,
@@ -450,7 +452,7 @@ describe('ConsentService', () => {
         consentGrantId: '40000000-0000-4000-8000-000000000003',
         patientId: '50000000-0000-4000-8000-000000000002',
         status: 'active',
-        expiresAt: new Date('2026-09-28T00:15:00.000Z'),
+        expiresAt: new Date('2026-09-29T00:00:00.000Z'),
         existingGrant: false,
       }],
     });
@@ -465,6 +467,52 @@ describe('ConsentService', () => {
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.access_patient_with_pin'),
       ['HID-ABCDEFGH', '1234', 15],
+    );
+  });
+
+  it('asks for 24 hours (1440 minutes) when the caller gives no duration (0120)', async () => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        verified: true,
+        accessRequestId: '40000000-0000-4000-8000-000000000002',
+        consentGrantId: '40000000-0000-4000-8000-000000000003',
+        patientId: '50000000-0000-4000-8000-000000000002',
+        status: 'active',
+        expiresAt: new Date('2026-09-29T00:00:00.000Z'),
+        existingGrant: false,
+      }],
+    });
+    expect(PATIENT_PIN_ACCESS_MINUTES).toBe(1440);
+    await expect(service.verifyPatientAccessPin(context, {
+      hid: 'HID-ABCDEFGH',
+      pin: '1234',
+    })).resolves.toMatchObject({ status: 'active', expiresAt: new Date('2026-09-29T00:00:00.000Z') });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.access_patient_with_pin'),
+      ['HID-ABCDEFGH', '1234', 1440],
+    );
+  });
+
+  it.each([60, 1440])('passes %i minutes unchanged; the database always gives 1440 (0120)', async (durationMinutes) => {
+    query.mockResolvedValueOnce({
+      rows: [{
+        verified: true,
+        accessRequestId: '40000000-0000-4000-8000-000000000002',
+        consentGrantId: '40000000-0000-4000-8000-000000000003',
+        patientId: '50000000-0000-4000-8000-000000000002',
+        status: 'active',
+        expiresAt: new Date('2026-09-29T00:00:00.000Z'),
+        existingGrant: true,
+      }],
+    });
+    await expect(service.verifyPatientAccessPin(context, {
+      hid: 'HID-ABCDEFGH',
+      pin: '1234',
+      durationMinutes,
+    })).resolves.toMatchObject({ existingGrant: true, expiresAt: new Date('2026-09-29T00:00:00.000Z') });
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('identity.access_patient_with_pin'),
+      ['HID-ABCDEFGH', '1234', durationMinutes],
     );
   });
 

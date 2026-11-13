@@ -391,7 +391,7 @@ begin
        and ((event.resource_id = current_setting('hid.approved')
              and event.details = '{"scope": "write_records", "authorizationMethod": "patient_approval"}')
          or (event.resource_id = current_setting('hid.pin')
-             and event.details = '{"scope": "read_records", "authorizationMethod": "patient_access_pin"}')));
+             and event.details = '{"scope": "write_records", "authorizationMethod": "patient_access_pin"}')));
   if mismatch is not null
      or (select count(*) from audit.events where action = 'identity.consent-grant.patient-revoke') <> 2 then
     raise exception 'The revocation audit rows differ: %', coalesce(mismatch, 'count');

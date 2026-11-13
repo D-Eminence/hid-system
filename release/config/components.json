@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0116",
-    "count": 117,
+    "last": "0120",
+    "count": 118,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -565,6 +565,10 @@
       {
         "name": "0116_outreach_retention.sql",
         "sha256": "d590c45302484da9d3175022b30395eacd53d3618460fc3c85093a31b21d74bf"
+      },
+      {
+        "name": "0120_patient_access_pin_day_read_write.sql",
+        "sha256": "71d2c8e89e775ada5792abe1e2673db601c1019d68c2784ebc6e603c67b81776"
       }
     ]
   },
