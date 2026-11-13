@@ -183,7 +183,7 @@ begin
   -- b. Not applied yet.
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'identity.access_patient_with_pin(text,text,integer)'::regprocedure)
-     = 'e17e8bb85b755866bb0f1a03b5555c23' then
+     = '60776067ac4f8fad8b34c7f25cb45a89' then
     raise exception using errcode = '55000', message = '0120: already applied';
   end if;
   -- c. The body replaced (0098's) and the bodies it and the checks rely on.
@@ -377,9 +377,12 @@ alter policy identity_outbox_patient_access_pin_insert on identity.outbox_events
     )
   );
 
--- 3. The function (b): 0098's body with the four changes marked "0121" (the
--- number this file was written under: the body is kept byte for byte, so the
--- md5 pinned in 0 and 4 still holds) or named in the header, and its comment.
+-- 3. The function (b): 0098's body with the four changes marked "0120" or
+-- named in the header, and its comment. The body's two comments that name the
+-- number said "0121", the number this file was written under, until
+-- 13 Nov 2026; they were changed to 0120 while the declaration was unsigned.
+-- So the body is not byte for byte the one written as 0121, and the md5
+-- pinned in 0 (not applied yet) and 4 (post-checks) is this body's.
 create or replace function identity.access_patient_with_pin(
   requested_hid text,
   requested_pin text,
@@ -420,7 +423,7 @@ declare
   target_limit identity.patient_access_pin_target_limits%rowtype;
   replayed boolean := false;
   denial_action text := 'identity.patient-access-pin.verify-denied';
-  -- 0121 (owner decision, 10 Nov 2026): a PIN opens the patient's records to
+  -- 0120 (owner decision, 10 Nov 2026): a PIN opens the patient's records to
   -- read and to add to, for exactly 24 hours, whatever duration is asked.
   pin_scope constant text := 'write_records';
   pin_minutes constant integer := 1440;
@@ -601,7 +604,7 @@ begin
   end if;
 
   -- A PIN cannot defeat a current patient deny directive. This mirrors the
-  -- downstream authorization check before materializing the grant. Since 0121
+  -- downstream authorization check before materializing the grant. Since 0120
   -- the grant is write_records, which also lets its holder read, so a deny for
   -- either reading or writing (or for every action) stops it.
   if exists (
@@ -742,7 +745,7 @@ declare
 begin
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'identity.access_patient_with_pin(text,text,integer)'::regprocedure)
-     is distinct from 'e17e8bb85b755866bb0f1a03b5555c23' then
+     is distinct from '60776067ac4f8fad8b34c7f25cb45a89' then
     raise exception using errcode = '55000', message = '0120: the function body is not this file''s';
   end if;
   select string_agg(before_row.signature, '; ') into mismatch

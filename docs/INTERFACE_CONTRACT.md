@@ -4604,10 +4604,11 @@ with or without `scope` (`read_records` or `write_records`); the insert policy
 `identity_outbox_patient_access_pin_insert` admits a PIN grant of either scope
 and requires the payload's `scope`, when present, to be the grant's.
 `identity.access_patient_with_pin` body md5 is now
-`e17e8bb85b755866bb0f1a03b5555c23` (0098's was
-`830c1baa4bca3df57cc02b7b002a8831`; two comments inside the body still say
-"0121", the number it was written under, so that md5 holds after the
-renumber); its signature, result, owner, SECURITY DEFINER, search_path and ACL
+`60776067ac4f8fad8b34c7f25cb45a89` (0098's was
+`830c1baa4bca3df57cc02b7b002a8831`; the two comments inside the body that
+said "0121", the number it was written under, say 0120 since 13 Nov 2026,
+changed before the declaration was signed, so the md5 is that of the body as
+renumbered); its signature, result, owner, SECURITY DEFINER, search_path and ACL
 are unchanged. Every other rule is kept: the
 permission, direct care only, the exact active membership, the failure
 windows and locks (0075), the sealed demo boundary (0098), the denial answers
