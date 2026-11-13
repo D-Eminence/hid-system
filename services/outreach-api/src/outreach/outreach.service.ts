@@ -13,6 +13,8 @@ import type { CreateCampaignDto } from './dto/create-campaign.dto';
 import type { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import type { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import type { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
+import type { ConfirmHealthIdDto, StartHealthIdDto } from './dto/health-id.dto';
+import { registrationHealthIds } from './registration-health-ids';
 import type { OutreachCampaign, CampaignMember, CampaignRole, CampaignStaff } from './campaign.types';
 import { registrationCase, type OutreachRegistrationCase, type RegistrationRow } from './outreach.types';
 import { isOutreachTenant, OUTREACH_NOTES_LIMIT, outreachRuleProblem, tenantNoHealthIdLink } from './outreach-tenant';
@@ -178,7 +180,8 @@ export class OutreachService {
         from outreach.registration_cases where facility_id=$1 and outreach.registration_campaign_member(campaign_id, facility_id)
         order by created_at desc,id desc limit 100`, [context.facilityId]);
       await this.audit.recordWithClient(client, context, 'outreach.registration-case.list', context.facilityId);
-      return result.rows.map(registrationCase);
+      const healthIds = await registrationHealthIds(client, result.rows.map((row) => row.id));
+      return result.rows.map((row) => registrationCase(row, healthIds.get(row.id) ?? null));
     });
   }
 
@@ -573,7 +576,33 @@ export class OutreachService {
     const row = result.rows[0];
     if (!row) throw new DomainProblem(404, 'OUTREACH_REGISTRATION_NOT_FOUND',
       'The Outreach registration case was not found');
-    return registrationCase(row);
+    return registrationCase(row, (await registrationHealthIds(client, [row.id])).get(row.id) ?? null);
+  }
+
+  /**
+   * Assisted Health ID (0119), email path: Identity sends the person a code.
+   * SMS is not live yet: 503 before anything is asked of Identity.
+   */
+  async startHealthId(caseId: string, input: StartHealthIdDto, idempotencyKey: string, context: DataAccessContext) {
+    if (input.channel === 'sms') {
+      throw new DomainProblem(503, 'OUTREACH_HEALTH_ID_UNAVAILABLE',
+        "Codes by SMS aren't available yet. Use the person's email.", undefined, { exposeDetail: true });
+    }
+    const email = input.email?.trim() ?? '';
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new DomainProblem(422, 'OUTREACH_HEALTH_ID_EMAIL_INVALID', 'Enter a valid email address.');
+    }
+    return this.identity.startHealthId(caseId, { channel: 'email', email }, idempotencyKey, context);
+  }
+
+  /** Assisted Health ID (0119): the person's code; 201 { healthId, registration } (a replay too). */
+  async confirmHealthId(caseId: string, input: ConfirmHealthIdDto, context: DataAccessContext) {
+    const code = typeof input.code === 'string' ? input.code.trim() : '';
+    if (!/^\d{6}$/.test(code)) {
+      throw new DomainProblem(422, 'OUTREACH_HEALTH_ID_CODE_INVALID', "That code isn't right. Check the email and try again.");
+    }
+    const created = await this.identity.confirmHealthId(caseId, code, context);
+    return { healthId: created.healthId, registration: await this.get(caseId, context) };
   }
 
   private outbox(client: PoolClient, eventType: string, id: string, version: number,

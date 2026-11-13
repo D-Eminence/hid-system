@@ -85,6 +85,20 @@ export interface IdentityAuthorizationDecision {
 /** A precheck answer: whether a records read would be allowed, never the grant behind it. */
 export type IdentityAuthorizationPrecheck = Omit<IdentityAuthorizationDecision, 'consentGrantId' | 'expiresAt'>;
 
+/** POST identity/outreach/health-id/start's answer (0119). */
+export interface IdentityOutreachHealthIdStart {
+  channel: 'email';
+  expiresAt: string;
+  destinationHint: string;
+  resendAfterSeconds: number;
+}
+
+/** POST identity/outreach/health-id/confirm's answer (0119). */
+export interface IdentityOutreachHealthIdConfirm {
+  healthId: string;
+  outcome: 'created' | 'replayed';
+}
+
 export interface IdentityClientOptions {
   baseUrl: string;
   caller: IdentityInternalCaller;
@@ -208,6 +222,44 @@ export class IdentityApiClient {
       ? (payload as { actor?: unknown }).actor : undefined;
     if (!validActor(actor)) throw new IdentityApiProblem(502, payload);
     return actor;
+  }
+
+  /**
+   * Assisted Health ID at an outreach (0119), for outreach-api: sends the
+   * person an email code. The volunteer's sign-in is forwarded in `context`
+   * (cookie, CSRF token, Origin or bearer). Never retried here: a second start
+   * would send a second code; the Idempotency-Key goes as a header so Identity
+   * recognises a retry of the same request.
+   */
+  async outreachHealthIdStart(
+    input: { caseId: string; channel: 'email' | 'sms'; email?: string },
+    idempotencyKey: string,
+    context: IdentityDelegatedContext,
+  ): Promise<IdentityOutreachHealthIdStart> {
+    const payload = await this.request('/api/v1/identity/outreach/health-id/start', 'POST', input,
+      { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined }, { 'idempotency-key': idempotencyKey });
+    const value = payload as Partial<IdentityOutreachHealthIdStart> | null;
+    if (!value || value.channel !== 'email' || typeof value.expiresAt !== 'string'
+        || typeof value.destinationHint !== 'string' || typeof value.resendAfterSeconds !== 'number') {
+      throw new IdentityApiProblem(502, payload);
+    }
+    return { channel: 'email', expiresAt: value.expiresAt, destinationHint: value.destinationHint,
+      resendAfterSeconds: value.resendAfterSeconds };
+  }
+
+  /** Assisted Health ID at an outreach (0119): checks the person's code and creates the Health ID. Never retried here. */
+  async outreachHealthIdConfirm(
+    input: { caseId: string; code: string },
+    context: IdentityDelegatedContext,
+  ): Promise<IdentityOutreachHealthIdConfirm> {
+    const payload = await this.request('/api/v1/identity/outreach/health-id/confirm', 'POST', input,
+      { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined });
+    const value = payload as Partial<IdentityOutreachHealthIdConfirm> | null;
+    if (!value || typeof value.healthId !== 'string' || !/^HID-[A-HJ-NP-Z2-9]{6,32}$/.test(value.healthId)
+        || (value.outcome !== 'created' && value.outcome !== 'replayed')) {
+      throw new IdentityApiProblem(502, payload);
+    }
+    return { healthId: value.healthId, outcome: value.outcome };
   }
 
   async authorizeDocumentScanner(
