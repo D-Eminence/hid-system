@@ -319,9 +319,9 @@ grant execute on function pg_temp.registration(text, text, integer, text), pg_te
 insert into os_ids values ('case1', gen_random_uuid()), ('case2', gen_random_uuid());
 select pg_temp.outreach_case('3a a registration without a campaign is refused', '23514: OUTREACH_CAMPAIGN_REQUIRED',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'), pg_temp.registration(pg_temp.id('case2'), null, 30, null));
-select pg_temp.outreach_case('3b notes over 280 characters are refused', '23514: OUTREACH_NOTES_TOO_LONG',
+select pg_temp.outreach_case('3b notes over 1000 characters are refused (0118; 280 before)', '23514: OUTREACH_NOTES_TOO_LONG',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
-  pg_temp.registration(pg_temp.id('case2'), pg_temp.id('camp1'), 30, repeat('n', 281)));
+  pg_temp.registration(pg_temp.id('case2'), pg_temp.id('camp1'), 30, repeat('n', 1001)));
 select pg_temp.outreach_case('3c a registration without consent is refused at commit', '23514: OUTREACH_CONSENT_REQUIRED',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),
   pg_temp.registration(pg_temp.id('case2'), pg_temp.id('camp1'), 30, null) || '; set constraints outreach.outreach_registration_consent_required immediate; set constraints outreach.outreach_registration_consent_required deferred');

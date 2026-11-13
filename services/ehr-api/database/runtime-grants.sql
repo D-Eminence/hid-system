@@ -1645,3 +1645,12 @@ revoke all on function identity.facility_department_codes(),
   identity.set_facility_profile(bigint,jsonb,text,char) from public;
 revoke all on identity.facility_profiles, identity.nigeria_states, identity.registration_case_contacts,
   identity.patient_facility_contacts from public;
+
+-- Outreach screening (0118), as that migration grants it: the Outreach
+-- runtime reads, records and updates a registration's screening (no delete:
+-- only a retention or support redaction deletes it, as the owner). The
+-- validation and redaction trigger functions are granted to no role.
+grant select, insert, update on outreach.registration_screenings to hid_outreach_runtime;
+revoke all on outreach.registration_screenings from public;
+revoke all on function outreach.validate_registration_screening(), outreach.registration_case_area_guard(),
+  outreach.registration_case_screening_redact() from public;
