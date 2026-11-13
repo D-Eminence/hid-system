@@ -249,6 +249,23 @@ describe('OutreachHealthIdService (0119)', () => {
       expect(queries.find((q) => q.sql.includes('delivery_failed'))?.parameters).toEqual([challengeId]);
     });
 
+    it('answers the short rate windows with their own words and wait, and maps the cross-registration caps', async () => {
+      rateBlocked = true;
+      const windowed = await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context));
+      expect(windowed).toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', status: 429 });
+      expect(windowed.message).toMatch(/^Too many codes were sent just now\. Try again in \d+ minutes?\.$/);
+      expect(windowed.extensions).toMatchObject({ retryAfterSeconds: expect.any(Number) });
+      rateBlocked = false;
+      startResult = () => { throw pgError('OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', { detail: 'email_daily' }); };
+      expect(await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context)))
+        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', status: 429,
+          message: 'Too many codes were sent to this email today. Try again tomorrow, or use another email.' });
+      startResult = () => { throw pgError('OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', { detail: 'volunteer_daily' }); };
+      expect(await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context)))
+        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', status: 429,
+          message: 'You have sent too many codes today. Try again tomorrow.' });
+    });
+
     it('tells the daily limit from the cooldown, and a used request id', async () => {
       startResult = () => { throw pgError('OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', { detail: 'daily' }); };
       const daily = await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context));
@@ -302,28 +319,20 @@ describe('OutreachHealthIdService (0119)', () => {
         key_version: encryption.version };
     }
 
-    it('creates the Health ID from the decrypted email, the keyed verifier and the registration phone', async () => {
+    it('creates the Health ID from the decrypted email and the keyed verifier, and never sends the unproven phone', async () => {
       openChallenge();
       await expect(service().confirm({ caseId, code: '123456' }, context))
         .resolves.toEqual({ healthId: 'HID-AB2CD3', outcome: 'created' });
       const call = queries.find((q) => q.sql.includes('outreach_health_id_confirm('))!;
-      const [requestedCase, requestedChallenge, verifier, email, hid, phoneCiphertext, phoneLookup] =
-        call.parameters as [string, string, string, string, string, Buffer, string];
+      expect(call.sql).toContain('outreach_health_id_confirm($1,$2,$3,$4,$5)');
+      expect(call.parameters).toHaveLength(5);
+      const [requestedCase, requestedChallenge, verifier, email, hid] = call.parameters as [string, string, string, string, string];
       expect([requestedCase, requestedChallenge, email, hid]).toEqual([caseId, challengeId, 'ada@example.test', 'HID-AB2CD3']);
       expect(verifier).toBe(createHmac('sha256', Buffer.from(OTP_KEY, 'base64'))
         .update(['outreach-health-id-otp', caseId, challengeId, '123456'].join('\u001f')).digest('hex'));
-      expect(phoneLookup).toBe(createContactLookupHmac('phone', '+2348012345678'));
-      // The form PatientContactReader reads back for GET identity/me (bound to the lookup HMAC).
-      expect(new PatientProfileCrypto().decryptLookupBoundPhone(phoneLookup, phoneCiphertext)).toBe('+2348012345678');
-      expect(new PatientProfileCrypto().decryptLookupBoundPhone('f'.repeat(64), phoneCiphertext)).toBeUndefined();
-    });
-
-    it('passes no phone when the registration has none', async () => {
-      openChallenge();
-      registration.phone = null;
-      await service().confirm({ caseId, code: '123456' }, context);
-      const call = queries.find((q) => q.sql.includes('outreach_health_id_confirm('))!;
-      expect(call.parameters.slice(5)).toEqual([null, null]);
+      // The registration's phone (+2348012345678) is not stored on the Health ID.
+      expect(JSON.stringify(call.parameters)).not.toContain('2348012345678');
+      expect(call.parameters).not.toContain(createContactLookupHmac('phone', '+2348012345678'));
     });
 
     it('answers a replay 201 and maps invalid, expired and too many tries', async () => {
@@ -350,6 +359,16 @@ describe('OutreachHealthIdService (0119)', () => {
       expect(queries.some((q) => q.sql.includes('outreach_health_id_confirm('))).toBe(false);
     });
 
+    it('counts confirms per volunteer and email, and refuses past the day\'s limit before asking the database', async () => {
+      openChallenge();
+      rateBlocked = true;
+      expect(await refusal(service().confirm({ caseId, code: '123456' }, context)))
+        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_TRIES', status: 429,
+          message: 'Too many codes were tried for this email today. Try again tomorrow.' });
+      expect(queries.some((q) => q.sql.includes('outreach_health_id_confirm('))).toBe(false);
+      rateBlocked = false;
+    });
+
     it('answers expired for a code keyed with another OTP key version', async () => {
       openChallenge();
       open!.verifier_key_version = 'otp-v2';
@@ -371,8 +390,7 @@ describe('OutreachHealthIdService (0119)', () => {
     it('answers a concurrent account or patient with the same contact 409, not 5xx', async () => {
       openChallenge();
       for (const [constraint, code] of [['accounts_email_ci_uq', 'OUTREACH_HEALTH_ID_EMAIL_TAKEN'],
-        ['patients_email_hmac_uq', 'OUTREACH_HEALTH_ID_EMAIL_TAKEN'],
-        ['patients_phone_hmac_uq', 'OUTREACH_HEALTH_ID_PHONE_TAKEN']] as const) {
+        ['patients_email_hmac_uq', 'OUTREACH_HEALTH_ID_EMAIL_TAKEN']] as const) {
         confirmResult = () => { throw pgError('duplicate key value', '23505', { constraint }); };
         const taken = await refusal(service().confirm({ caseId, code: '123456' }, context));
         expect(taken.code).toBe(code);

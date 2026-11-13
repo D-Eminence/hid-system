@@ -63,6 +63,10 @@ export const OUTREACH_HEALTH_ID_CREATIONS_PER_WINDOW = 30;
 export const OUTREACH_HEALTH_ID_CREATION_WINDOW_SECONDS = 3600;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/** Confirm attempts per volunteer and email in a day (all registrations). */
+const CONFIRM_WINDOW_SECONDS = 24 * 60 * 60;
+const CONFIRM_WINDOW_MAX = 30;
+
 const MESSAGES = {
   notFound: 'This registration was not found.',
   redacted: "This registration's details were removed, so a Health ID can't be created from it.",
@@ -79,6 +83,9 @@ const MESSAGES = {
   tooManyCodes: 'Too many codes for this person today. Try again tomorrow.',
   tooManyCreations: 'Too many Health IDs created in a short time. Wait a few minutes.',
   cooldown: 'Wait a minute before sending another code.',
+  emailDaily: 'Too many codes were sent to this email today. Try again tomorrow, or use another email.',
+  volunteerDaily: 'You have sent too many codes today. Try again tomorrow.',
+  tooManyConfirms: 'Too many codes were tried for this email today. Try again tomorrow.',
   requestUsed: 'This request was already used. Start again to send a new code.',
   unavailable: "Health ID codes can't be sent right now. Try again in a few minutes.",
   smsUnavailable: "Codes by SMS aren't available yet. Use the person's email.",
@@ -148,8 +155,13 @@ export class OutreachHealthIdService {
       return { limited: volunteerLimited || recipientLimited, ready, phoneBound };
     });
     if (preflight.limited) {
-      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.tooManyCodes, undefined,
-        { extensions: { retryAfterSeconds: this.env.OTP_RATE_WINDOW_SECONDS } });
+      // The short per-volunteer / per-email windows (not the registration's
+      // daily three): the same code, its own words and wait.
+      const seconds = this.env.OTP_RATE_WINDOW_SECONDS;
+      const minutes = Math.max(1, Math.ceil(seconds / 60));
+      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES',
+        `Too many codes were sent just now. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, undefined,
+        { extensions: { retryAfterSeconds: seconds } });
     }
     if (!preflight.ready) throw this.unavailable();
     if (preflight.phoneBound) throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
@@ -196,16 +208,23 @@ export class OutreachHealthIdService {
     // A code keyed with an OTP key this process no longer holds cannot be checked.
     if (open.verifier_key_version !== this.env.OTP_HMAC_KEY_VERSION) throw this.codeExpired();
     this.assertEligible(registration);
-    const phone = this.registrationPhone(registration);
     const key = contactKeyForVersion(this.env, open.key_version);
     const email = key ? decryptContactValue(key, open.challenge_id, 'contact', open.email_ciphertext) : undefined;
     if (!key || !email) throw this.unavailable();
-    // The patient's contacts share one key_version (the challenge's). The
-    // phone is optional: without one, both are null and the patient has none.
-    // Bound to its lookup HMAC, the form PatientContactReader reads for a
-    // patient with no enrollment (GET identity/me).
-    const phoneLookup = phone ? createContactLookupHmac('phone', phone) : null;
-    const phoneCiphertext = phone && phoneLookup ? encryptLookupBoundPhone(key, phoneLookup, phone) : null;
+    // Only the proven email goes on the Health ID. The registration's phone,
+    // typed by the volunteer and never proven, is not stored (it would block
+    // the number's real owner from signing up); the person adds a phone later
+    // in the app through the verified contact change.
+    // Confirm attempts per volunteer and email, across registrations: the
+    // per-code limit stops guessing one code; this stops a volunteer cycling
+    // codes for one email.
+    const confirmsLimited = await this.database.withSystemTransaction(context.correlationId, (client) =>
+      consumeRateLimit(client, 'account',
+        this.hmac('outreach-health-id-confirm', context.actor.accountId, email.toLowerCase()),
+        { windowSeconds: CONFIRM_WINDOW_SECONDS, maxRequests: CONFIRM_WINDOW_MAX }));
+    if (confirmsLimited) {
+      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_TRIES', MESSAGES.tooManyConfirms);
+    }
     const verifier = this.verifier(input.caseId, open.challenge_id, code);
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -213,8 +232,8 @@ export class OutreachHealthIdService {
       try {
         const row = await this.database.withTransaction(context, async (client) =>
           (await client.query<{ outcome: string; hid_code: string | null; patient_id: string | null }>(
-            'select * from identity.outreach_health_id_confirm($1,$2,$3,$4,$5,$6,$7)',
-            [input.caseId, open.challenge_id, verifier, email, hid, phoneCiphertext, phoneLookup])).rows[0]);
+            'select * from identity.outreach_health_id_confirm($1,$2,$3,$4,$5)',
+            [input.caseId, open.challenge_id, verifier, email, hid])).rows[0]);
         switch (row?.outcome) {
           case 'created':
           case 'replayed':
@@ -235,9 +254,6 @@ export class OutreachHealthIdService {
           const constraint = databaseConstraint(error);
           if (constraint === 'accounts_email_ci_uq' || constraint === 'patients_email_hmac_uq') {
             throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_EMAIL_TAKEN', MESSAGES.emailTaken);
-          }
-          if (constraint === 'patients_phone_hmac_uq') {
-            throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
           }
         }
         throw this.problem(error);
@@ -382,6 +398,10 @@ export class OutreachHealthIdService {
         const seconds = Math.max(1, Number(cooldown[1]));
         return new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.cooldown, undefined,
           { extensions: { retryAfterSeconds: seconds } });
+      }
+      if (detail === 'email_daily') return new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.emailDaily);
+      if (detail === 'volunteer_daily') {
+        return new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.volunteerDaily);
       }
       return new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.tooManyCodes);
     }

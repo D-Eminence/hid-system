@@ -4678,12 +4678,17 @@ in the same transaction and its `area` is cleared.
   `area` (`null` if none) and `hasScreening` (whether a screening the session can see exists).
 - Outreach-group notes (`operationalNotes`) may be up to 1000 characters (was 280); the refusal is
   still 422 `OUTREACH_NOTES_TOO_LONG`.
+- An area the database refuses (its length counted as Postgres does, which can differ from the
+  request check for variation selectors) answers 422 `OUTREACH_AREA_INVALID`. NUL characters are
+  removed from the area and the screening's text fields.
 
 ### 48.5. Organiser terms and the registration notice
 
 - The organiser activation and "Start an outreach group" bodies accept `termsVersion` `'2026-11-01'`
   or `'2026-11-14'` (the live website sends 2026-11-01 until the new terms ship). The availability
-  answer (`GET identity/outreach-organisers/availability`) gives the current version, `'2026-11-14'`.
+  answer (`GET identity/outreach-organisers/availability`) stays `'2026-11-01'` in this release: the
+  live website compares it with its own version and would lock sign-up behind a reload screen on a
+  mismatch. It moves to `'2026-11-14'` only in a later release, after the website with that text is live.
 - The registration notice version is not pinned (only its form is checked), so
   `outreach-notice-2026-11-14` needs no backend change.
 
@@ -4702,15 +4707,37 @@ answers 204. The website builds the CSV, PDF, Word or Excel file itself from the
 list and case reads and then calls this once per export. It writes one audit row,
 `outreach.registration.exported` (resource type `outreach-registration-export`,
 the campaign as the resource when given), with `{ format, count, campaignId }` only,
-never a registration's contents. A campaign that is not this facility's answers 404
-`OUTREACH_CAMPAIGN_NOT_FOUND`; a wrong body answers 400 `VALIDATION_FAILED`.
+never a registration's contents. A campaign that is not this facility's, or that the
+session is not a member of (0045), answers 404 `OUTREACH_CAMPAIGN_NOT_FOUND`; a wrong
+body answers 400 `VALIDATION_FAILED`.
+
+### 48.y Paging the registration list (no migration)
+
+`GET /outreach/registration-cases` takes optional query parameters:
+
+- `campaignId` (uuid): only that campaign's registrations;
+- `limit` (1-500, default 100): the page size;
+- `before` (opaque): the `X-Next-Cursor` header of the previous page.
+
+It answers the same array as before, newest first (`created_at`, then `id`), still only
+registrations the session can see (the facility and campaign membership, 0045). When more
+rows exist, the response carries `X-Next-Cursor` (exposed to the browser by CORS); pass it as
+`before` for the next page, and stop when the header is absent. Without parameters the
+answer is exactly as before: the newest 100. A cursor that is not one the API gave answers
+400 `OUTREACH_LIST_CURSOR_INVALID`; a bad `limit` or `campaignId` answers 400
+`VALIDATION_FAILED`. An export of a large outreach should page through the whole list.
+
+NUL characters are removed from the name, phone, notes, area and guardian name on
+registration create (Postgres text cannot hold them); nothing else about those values changes.
 
 ## 49. Outreach assisted Health ID (0119, provisional)
 
 Migration 0119 (`0119_outreach_health_id.sql`; owner request of 2026-11-13; the number is a placeholder)
 lets a volunteer or organiser at an outreach group create a Health ID for a person they registered, from
-the registration's name, sex and phone (if any), once the person proves an email address with a 6-digit
-code sent to it. Provisional: the shapes below were agreed with the website team for the outreach of
+the registration's name and sex, once the person proves an email address with a 6-digit
+code sent to it. The Health ID holds only the proven email: the registration's phone, typed by the
+volunteer and never proven, is not stored on it (it would block the number's real owner from signing
+up); the person adds a phone later in the app through the verified contact change. Provisional: the shapes below were agreed with the website team for the outreach of
 14 November 2026 and may still be adjusted before the migration is signed. Codes go by email only; SMS
 is not live. The registration itself is not changed (it stays `identity_resolution_pending`; 0115's rule G
 stands); the link is kept in `identity.outreach_registration_health_ids`.
@@ -4751,12 +4778,12 @@ only after the person proves it. The email
 | 409 | `OUTREACH_REGISTRATION_REDACTED` | the registration's details were removed |
 | 409 | `OUTREACH_HEALTH_ID_ALREADY_CREATED` | a Health ID exists for it; the body carries `"healthId": "HID-..."` and the same in `"details": { "healthId": "HID-..." }` |
 | 422 | `OUTREACH_HEALTH_ID_UNDER_18` | "Health IDs for under-18s can't be created at outreach yet. A parent or guardian can do it later in the app." |
-| 422 | `OUTREACH_HEALTH_ID_PHONE_INVALID` | the registration has a phone that is not a valid number (a phone is optional; without one the patient has none) |
+| 422 | `OUTREACH_HEALTH_ID_PHONE_INVALID` | the registration has a phone that is not a valid number (a phone is optional and is never stored on the Health ID) |
 | 422 | `OUTREACH_HEALTH_ID_EMAIL_INVALID` | missing or not an email (max 254) |
 | 403 | `OUTREACH_HEALTH_ID_NOT_AVAILABLE` | not an outreach group, or a sealed demo/QA one |
 | 423 | `OUTREACH_ORGANISER_SUSPENDED` | the group is paused by Health ID |
-| 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN` | "This phone number already has a Health ID. Ask them to sign in with it." |
-| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | "Too many codes for this person today. Try again tomorrow." (3 in 24 hours), or "Wait a minute before sending another code." with `Retry-After: <seconds>` (60-second cooldown, or a rate window) |
+| 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN` | the registration's phone is already on a Health ID (refuses only this registration): "This phone number already has a Health ID. Ask them to sign in with it." |
+| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | one code, its own words: "Too many codes for this person today. Try again tomorrow." (3 per registration in 24 hours); "Too many codes were sent to this email today. Try again tomorrow, or use another email." (3 per email across registrations); "You have sent too many codes today. Try again tomorrow." (200 per volunteer); "Wait a minute before sending another code." with `Retry-After: <seconds>` (60-second cooldown); "Too many codes were sent just now. Try again in N minutes." with `Retry-After` (the short per-volunteer and per-email windows) |
 | 409 | `OUTREACH_HEALTH_ID_REQUEST_USED` | "This request was already used. Start again to send a new code." (retry with a new `Idempotency-Key`) |
 | 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | `channel: "sms"` ("Codes by SMS aren't available yet. Use the person's email."), or the email could not be sent (that code is ended) |
 
@@ -4774,7 +4801,7 @@ Identity recognises answers `201` too. A retry after the Health ID was created (
 |---|---|---|
 | 422 | `OUTREACH_HEALTH_ID_CODE_INVALID` | "That code isn't right. Check the email and try again." (also not 6 digits) |
 | 422 | `OUTREACH_HEALTH_ID_CODE_EXPIRED` | "That code has expired. Send a new one." (no open code) |
-| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_TRIES` | "Too many wrong codes. Send a new one." |
+| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_TRIES` | "Too many wrong codes. Send a new one." (the code's 5 tries), or "Too many codes were tried for this email today. Try again tomorrow." (30 confirmations a day per volunteer and email) |
 | 409 | `OUTREACH_HEALTH_ID_EMAIL_TAKEN` | "This email is already used by another Health ID or account. Use another email." (after the code is proved; any sign-in with that email, or one created meanwhile) |
 | 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN`, `OUTREACH_REGISTRATION_REDACTED`, `OUTREACH_HEALTH_ID_ALREADY_CREATED` (+ `healthId`) | as in 49.1 |
 | 404, 403, 422, 423 | as in 49.1 | |
@@ -4795,9 +4822,9 @@ Identity recognises answers `201` too. A retry after the Health ID was created (
 delegated-browser routes, so a forwarded cookie always needs Origin and CSRF. Identity runs 0119's commands
 in the volunteer's own session. Answers as 49.1 and 49.2 (`confirm` answers `{ healthId, outcome }`; a
 429 carries `retryAfterSeconds`). Identity alone holds the contact keys, the OTP verifier key and the
-Health ID generator: the email and phone are stored encrypted with patient sign-up's contact key and
-key version, with sign-up's lookup HMACs (the phone bound to its lookup HMAC,
-`identity:patient-phone:<phoneLookupHmac>`, which GET identity/me reads back); the database keeps only a
+Health ID generator: the email is stored encrypted with patient sign-up's contact key and key version,
+with sign-up's lookup HMAC (no phone is stored; the registration's phone is only checked against existing
+Health IDs at start); the database keeps only a
 keyed verifier of the code. The patient's assurance is `CONTACT_VERIFIED` with source `hid-public-signup`
 (reference `outreach-health-id:<challenge>`), so NIN verification can follow later. The code
 email is `POST notification-api /notifications/otp` with purpose `OUTREACH_HEALTH_ID_VERIFY` (email only,
@@ -5069,3 +5096,12 @@ under the emergency purpose. RLS needs no new policy: 0117's and 0094's read pol
 reasoned break-glass grant for `read_records` under purpose `emergency` (and only that action). The audit
 (`ehr.emergency.records.read`) adds `recordedAllergyCount` and `patientReportedAllergies` (a flag), never the
 substance, reaction or text.
+
+Retention of the codes (0119): a code keeps the email's ciphertext only until it is used (the patient
+then holds the email) and its lookup HMAC until 24 hours after it expired (for the per-email daily
+cap); then both are removed (by start, confirmation and 0116's daily retention sweep). When a
+registration is redacted, all its codes lose their email at once. 0116's sweep no longer redacts a
+registration that has a Health ID created at the outreach (it was linked); support can still redact it.
+The code email never names a group whose name carries a link or a domain ("An outreach team" instead).
+outreach-api waits up to 20 seconds for Identity on start and confirm (start sends the email).
+

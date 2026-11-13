@@ -15,7 +15,7 @@ begin
   foreach command in array array['identity.outreach_health_id_registration(uuid)',
       'identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer)',
       'identity.outreach_health_id_delivery_failed(uuid)', 'identity.outreach_health_id_open_challenge(uuid)',
-      'identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char)'] loop
+      'identity.outreach_health_id_confirm(uuid,uuid,char,text,text)'] loop
     if not has_function_privilege('hid_identity_api_runtime', command, 'EXECUTE')
        or has_function_privilege('hid_outreach_api_runtime', command, 'EXECUTE')
        or not exists (select 1 from pg_proc where oid = command::regprocedure and prosecdef
@@ -219,9 +219,11 @@ returns text language sql as $$
     n, challenge, email, encode(sha256(convert_to(lower(email), 'utf8')), 'hex'), phone_hmac, max_attempts) $$;
 create function pg_temp.confirm_sql(n integer, challenge text, verifier text, email text, hid text, phone_hmac text)
 returns text language sql as $$
+  -- phone_hmac is unused since the phone is no longer stored (kept so the
+  -- cases read the same).
   select format($i$select concat_ws('/', outcome, hid_code) from identity.outreach_health_id_confirm(
-    '6c080000-0000-4000-8000-00000000000%s', %L, %L, %L, %L, decode(repeat('cd', 40), 'hex'), %L)$i$,
-    n, challenge, verifier, email, hid, phone_hmac) $$;
+    '6c080000-0000-4000-8000-00000000000%s', %L, %L, %L, %L)$i$,
+    n, challenge, verifier, email, hid) $$;
 grant execute on function pg_temp.start_sql(integer, text, text, text, integer),
   pg_temp.confirm_sql(integer, text, text, text, text, text) to public;
 
@@ -262,10 +264,10 @@ select pg_temp.hi_case('3b the account: no password, pending reset, email verifi
   $s$select concat_ws('/', account.status, account.email, account.password_hash is null, account.email_verified_at is not null)
        from auth.accounts account join identity.patients patient on patient.account_id = account.id
       where patient.hid_code = 'HID-RTE6C5'$s$);
-select pg_temp.hi_case('3c the patient: the registration''s name and sex, no date of birth, the contacts, sign-up''s assurance', 'Lola/Person 5/female/t/t/t/CONTACT_VERIFIED/hid-public-signup/t',
+select pg_temp.hi_case('3c the patient: the registration''s name and sex, no date of birth, the proven email only (no phone), sign-up''s assurance', 'Lola/Person 5/female/t/t/t/CONTACT_VERIFIED/hid-public-signup/t',
   session_user::text, null, null, null, null,
   $s$select concat_ws('/', patient.first_name, patient.last_name, patient.gender, patient.dob is null,
-          patient.phone_lookup_hmac = repeat('5', 64), patient.email_lookup_hmac is not null, assurance.state,
+          patient.phone_lookup_hmac is null and patient.phone_e164_ciphertext is null, patient.email_lookup_hmac is not null, assurance.state,
           assurance.source_system, assurance.source_reference like 'outreach-health-id:%')
        from identity.patients patient join identity.patient_assurance_states assurance on assurance.patient_id = patient.id
       where patient.hid_code = 'HID-RTE6C5'$s$);
@@ -304,7 +306,14 @@ select pg_temp.idrt('4a2 and is refused once proved', '23505: OUTREACH_HEALTH_ID
     replace(pg_temp.confirm_sql(3, '6c0a0000-0000-4000-8000-000000000039', repeat('e', 64), 'lola.person5@example.invalid',
       'HID-RTE6C3', repeat('3', 64)), $r$select concat_ws('/', outcome, hid_code) from$r$, 'outcome from')),
   false, 'statement');
-select pg_temp.idrt('4b the phone is taken', '23505: OUTREACH_HEALTH_ID_PHONE_TAKEN',
+-- A real patient (signed up, phone proven) holding phone hash 9.
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, phone_e164_ciphertext, phone_lookup_hmac,
+  contact_key_version, source_system, status)
+values ('6c0b0000-0000-4000-8000-000000000009', 'HID-RTE6R9', 'Real', 'Owner', 'Real Owner',
+  decode(repeat('ef', 40), 'hex'), repeat('9', 64), 'contact-v1', 'hid-public-signup', 'active');
+select pg_temp.idrt('4b the registration''s phone is on a real patient', '23505: OUTREACH_HEALTH_ID_PHONE_TAKEN',
+  pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000003', 'someone.else@example.invalid', repeat('9', 64)));
+select pg_temp.idrt('4b2 a phone only on an outreach registration blocks nobody', '6c0a0000-0000-4000-8000-000000000003',
   pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000003', 'someone.else@example.invalid', repeat('5', 64)));
 select pg_temp.idrt('4c an invalid email', '22023: OUTREACH_HEALTH_ID_EMAIL_INVALID',
   pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000003', 'not-an-email', repeat('3', 64)));
@@ -426,6 +435,70 @@ select pg_temp.support('6d support redacts registration 2', 'redacted', 'synthet
 select pg_temp.idrt('6e a redacted registration', '55000: OUTREACH_REGISTRATION_REDACTED',
   $s$select full_name from identity.outreach_health_id_registration('6c080000-0000-4000-8000-000000000002')$s$);
 
+-- 6b. Caps across registrations, and the codes' email (retention).
+select pg_temp.hi_case('6f a used code keeps no email ciphertext (the patient holds it)', 't/t', session_user::text,
+  null, null, null, null,
+  $s$select concat_ws('/', email_ciphertext is null, email_lookup_hmac is not null)
+       from identity.outreach_health_id_challenges where id = '6c0a0000-0000-4000-8000-000000000005'$s$);
+select pg_temp.hi_case('6g a redacted registration''s codes lose their email', '0/true', session_user::text,
+  null, null, null, null,
+  $s$select (select count(*) from identity.outreach_health_id_challenges
+              where registration_case_id = '6c080000-0000-4000-8000-000000000002'
+                and (email_ciphertext is not null or email_lookup_hmac is not null))::text || '/'
+         || (select bool_and(consumed_at is not null or invalidated_at is not null)
+               from identity.outreach_health_id_challenges
+              where registration_case_id = '6c080000-0000-4000-8000-000000000002')::text$s$);
+select pg_temp.hi_case('6h 3 codes a day to one email across registrations', '55000: email_daily', session_user::text,
+  null, null, null, null, format($d$do $x$ begin
+    set local session_replication_role = replica;
+    update outreach.registration_cases set age_years = 40 where id = '6c080000-0000-4000-8000-000000000004';
+    set local session_replication_role = origin;
+    perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
+      set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
+      set_config('app.membership_id', '6c030000-0000-4000-8000-000000000001', true),
+      set_config('app.purpose_of_use', 'direct-care', true);
+    set local role hid_identity_api_runtime;
+    perform %s;
+  exception when sqlstate 'P0001' then
+    declare detail_text text; begin
+      get stacked diagnostics detail_text = pg_exception_detail;
+      raise exception using errcode = '55000', message = detail_text;
+    end;
+  end $x$$d$, replace(pg_temp.start_sql(4, '6c0a0000-0000-4000-8000-000000000041', 'ade.three@example.invalid',
+    repeat('4', 64)), 'select challenge_id::text from', 'challenge_id from')), false, 'statement');
+select pg_temp.hi_case('6i 200 codes a day from one volunteer', '55000: volunteer_daily', session_user::text,
+  null, null, null, null, format($d$do $x$ begin
+    set local session_replication_role = replica;
+    update outreach.registration_cases set age_years = 40 where id = '6c080000-0000-4000-8000-000000000004';
+    insert into identity.outreach_health_id_challenges (id, registration_case_id, facility_id, channel, key_version,
+      verifier_hmac, verifier_key_version, expires_at, max_attempts, requested_by_account_id, requested_by_membership_id,
+      created_at, invalidated_at, invalidation_reason)
+    select gen_random_uuid(), '6c080000-0000-4000-8000-000000000006', '6c000000-0000-4000-8000-000000000012', 'email',
+      'contact-v1', repeat('e', 64), 'otp-v1', clock_timestamp() + interval '10 minutes', 5,
+      '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001',
+      clock_timestamp() - interval '1 hour', clock_timestamp(), 'resend' from generate_series(1, 200);
+    set local session_replication_role = origin;
+    perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
+      set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
+      set_config('app.membership_id', '6c030000-0000-4000-8000-000000000001', true),
+      set_config('app.purpose_of_use', 'direct-care', true);
+    set local role hid_identity_api_runtime;
+    perform %s;
+  exception when sqlstate 'P0001' then
+    declare detail_text text; begin
+      get stacked diagnostics detail_text = pg_exception_detail;
+      raise exception using errcode = '55000', message = detail_text;
+    end;
+  end $x$$d$, replace(pg_temp.start_sql(4, '6c0a0000-0000-4000-8000-000000000042', 'fresh.four@example.invalid',
+    repeat('4', 64)), 'select challenge_id::text from', 'challenge_id from')), false, 'statement');
+update identity.outreach_health_id_challenges set expires_at = clock_timestamp() - interval '25 hours'
+ where id = '6c0a0000-0000-4000-8000-000000000035';
+select pg_temp.hi_case('6j the scrub runs', '1', session_user::text, null, null, null, null,
+  $s$select identity.outreach_health_id_scrub_challenges(10)::text$s$, true);
+select pg_temp.hi_case('6j2 24 hours after expiry a code loses its email', 'true/expired', session_user::text,
+  null, null, null, null,
+  $s$select (email_lookup_hmac is null and email_ciphertext is null)::text || '/' || coalesce(invalidation_reason, '-')
+       from identity.outreach_health_id_challenges where id = '6c0a0000-0000-4000-8000-000000000035'$s$);
 -- 7. No contact at all (0120) (registration 4: an adult with no phone; registration 3 keeps its phone).
 create function pg_temp.unclaimed_sql(n integer, hid text, phone_hmac text, claim text) returns text language sql as $$
   select format($i$select concat_ws('/', hid_code, claim_expires_at > clock_timestamp() + interval '179 days')
@@ -437,8 +510,8 @@ grant execute on function pg_temp.unclaimed_sql(integer, text, text, text) to pu
 set local session_replication_role = replica;
 update outreach.registration_cases set age_years = 52, phone = null where id = '6c080000-0000-4000-8000-000000000004';
 set local session_replication_role = origin;
-select pg_temp.idrt('7a the phone already on a Health ID is refused', '23505: OUTREACH_HEALTH_ID_PHONE_TAKEN',
-  pg_temp.unclaimed_sql(3, 'HID-RTE6D3', repeat('5', 64), repeat('a', 64)));
+select pg_temp.idrt('7a the phone already on a real patient is refused', '23505: OUTREACH_HEALTH_ID_PHONE_TAKEN',
+  pg_temp.unclaimed_sql(3, 'HID-RTE6D3', repeat('9', 64), repeat('a', 64)));
 select pg_temp.idrt('7b a bad claim hash', '22023: OUTREACH_HEALTH_ID_REQUEST_INVALID',
   pg_temp.unclaimed_sql(4, 'HID-RTE6D4', null, 'not-hex'));
 select pg_temp.idrt('7c a phone hash for a registration with no phone', '22023: OUTREACH_HEALTH_ID_REQUEST_INVALID',
@@ -502,6 +575,21 @@ select pg_temp.hi_case('7p no patient holds the unproven phone, so sign-up is no
   null, null, null, null,
   $s$select count(*)::text from identity.patients where phone_lookup_hmac = repeat('7', 64)$s$);
 
+-- 6c. 0116's sweep: registration 5 (a Health ID was created) is linked and is
+-- not redacted as "never linked"; registration 1 (none) is.
+set local session_replication_role = replica;
+update outreach.campaigns set status = 'closed', closed_at = now() - interval '400 days',
+  updated_at = now() - interval '400 days' where id in ('6c070000-0000-4000-8000-000000000005',
+  '6c070000-0000-4000-8000-000000000001');
+set local session_replication_role = origin;
+select pg_temp.hi_case('6k the sweep runs', 'ok', 'hid_identity_api_runtime', 'system:auth', null, null, null,
+  $s$select identity.sweep_expired_outreach_registrations(100)$s$, true, 'statement');
+-- (In 0120's run the sweep runs last: registration 1 has an unclaimed Health ID by then, so it is kept too.)
+select pg_temp.hi_case('6l linked registrations are kept: by email (5) and unclaimed (1)', 'f/f', session_user::text,
+  null, null, null, null,
+  $s$select concat_ws('/',
+       exists (select 1 from outreach.registration_redactions where registration_case_id = '6c080000-0000-4000-8000-000000000005'),
+       exists (select 1 from outreach.registration_redactions where registration_case_id = '6c080000-0000-4000-8000-000000000001'))$s$);
 -- 8. Result.
 do $$
 declare failed text;

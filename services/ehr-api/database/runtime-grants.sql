@@ -1669,12 +1669,13 @@ grant select, insert on ehr.prescription_allergy_acknowledgements to hid_ehr_run
 grant execute on function identity.outreach_health_id_registration(uuid),
   identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer),
   identity.outreach_health_id_delivery_failed(uuid), identity.outreach_health_id_open_challenge(uuid),
-  identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char)
+  identity.outreach_health_id_confirm(uuid,uuid,char,text,text)
   to hid_identity_runtime, hid_schema_test_runtime;
 grant execute on function identity.outreach_registration_health_ids_for(uuid[])
   to hid_outreach_runtime, hid_schema_test_runtime;
 revoke all on identity.outreach_health_id_challenges, identity.outreach_registration_health_ids from public;
-revoke all on function identity.outreach_registration_health_ids_immutable(), identity.outreach_health_id_eligible(uuid)
+revoke all on function identity.outreach_registration_health_ids_immutable(), identity.outreach_health_id_eligible(uuid),
+  identity.outreach_health_id_scrub_challenges(integer), identity.outreach_health_id_redacted_case()
   from public;
 
 -- Health IDs created at outreach with no contact (0120), as that migration

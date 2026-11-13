@@ -38,7 +38,7 @@ async function bootstrap(): Promise<void> {
     methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
     allowedHeaders: ['authorization', 'content-type', 'idempotency-key', 'if-match',
       'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-purpose-of-use'],
-    exposedHeaders: ['etag', 'location', 'x-correlation-id'],
+    exposedHeaders: ['etag', 'location', 'x-correlation-id', 'x-next-cursor'],
     maxAge: 600,
   });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true,

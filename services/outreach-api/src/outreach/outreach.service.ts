@@ -48,6 +48,26 @@ function adminRefusal(error: unknown, what: string): unknown {
   return error;
 }
 
+export interface RegistrationListOptions { readonly campaignId?: string; readonly limit?: number; readonly before?: string }
+
+/** The opaque list cursor: base64url of "<created_at in microseconds since epoch>.<id>". */
+export function encodeRegistrationCursor(micros: string, id: string): string {
+  return Buffer.from(`${micros}.${id}`, 'utf8').toString('base64url');
+}
+
+export function decodeRegistrationCursor(cursor: string): { micros: string; id: string } {
+  const match = /^(\d{1,16})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+    .exec(/^[A-Za-z0-9_-]{1,96}$/.test(cursor) ? Buffer.from(cursor, 'base64url').toString('utf8') : '');
+  const micros = match?.[1];
+  const id = match?.[2];
+  // At most 2^53 - 1 (about the year 2255): the SQL multiplies through float8,
+  // exact only up to there, and overflows near the bigint maximum.
+  if (micros === undefined || id === undefined || BigInt(micros) > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new DomainProblem(400, 'OUTREACH_LIST_CURSOR_INVALID', 'The list cursor is not valid; start from the first page');
+  }
+  return { micros, id: id.toLowerCase() };
+}
+
 @Injectable()
 export class OutreachService {
   private readonly logger = new Logger(OutreachService.name);
@@ -63,7 +83,7 @@ export class OutreachService {
     const normalized = { ...input, fullName: input.fullName.trim(),
       phone: input.phone?.trim() || null, operationalNotes: input.operationalNotes?.trim() || null };
     // The area (0118) is in the digest only when given, so a request without it digests as before.
-    const area = input.area?.trim().replace(/\s+/g, ' ') || undefined;
+    const area = input.area?.replace(/\u0000/g, '').trim().replace(/\s+/g, ' ') || undefined;
     if (area) normalized.area = area;
     else delete normalized.area;
     const tenant = isOutreachTenant(context);
@@ -167,8 +187,10 @@ export class OutreachService {
   async recordExport(input: ExportRegistrationsDto, context: DataAccessContext): Promise<void> {
     await this.database.withTransaction(context, async (client) => {
       if (input.campaignId) {
-        const campaign = await client.query(`select 1 from outreach.campaigns where id=$1 and facility_id=$2`,
-          [input.campaignId, context.facilityId]);
+        // A campaign at the facility that the session is a member of (0045): never
+        // an audit row naming a campaign the person cannot see.
+        const campaign = await client.query(`select 1 from outreach.campaigns where id=$1 and facility_id=$2
+          and outreach.registration_campaign_member(id, facility_id)`, [input.campaignId, context.facilityId]);
         if (!campaign.rowCount) throw new DomainProblem(404, 'OUTREACH_CAMPAIGN_NOT_FOUND', 'The Outreach campaign was not found');
       }
       await this.audit.recordExportWithClient(client, context,
@@ -176,14 +198,33 @@ export class OutreachService {
     });
   }
 
-  async list(context: DataAccessContext): Promise<readonly OutreachRegistrationCase[]> {
+  /**
+   * The registrations the session can see, newest first: a page of `limit`
+   * (default 100, at most 500), optionally one campaign's, before a cursor.
+   * Without options it answers exactly as before (the newest 100). nextCursor
+   * is set when more rows exist; it encodes (created_at in whole
+   * microseconds, id), compared exactly in SQL.
+   */
+  async list(context: DataAccessContext, options: RegistrationListOptions = {}):
+    Promise<readonly OutreachRegistrationCase[] & { nextCursor?: string }> {
+    const limit = options.limit ?? 100;
+    const cursor = options.before === undefined ? null : decodeRegistrationCursor(options.before);
     return this.database.withTransaction(context, async (client) => {
-      const result = await client.query<RegistrationRow>(`select registration_cases.*,${HAS_SCREENING}
+      const result = await client.query<RegistrationRow & { cursor_micros: string }>(`select registration_cases.*,${HAS_SCREENING},
+          ((extract(epoch from created_at) * 1000000)::numeric(20,0))::text as cursor_micros
         from outreach.registration_cases where facility_id=$1 and outreach.registration_campaign_member(campaign_id, facility_id)
-        order by created_at desc,id desc limit 100`, [context.facilityId]);
+          and ($2::uuid is null or campaign_id = $2::uuid)
+          and ($3::bigint is null or (created_at, id) < (timestamptz 'epoch' + $3::bigint * interval '1 microsecond', $4::uuid))
+        order by created_at desc,id desc limit $5`,
+      [context.facilityId, options.campaignId ?? null, cursor?.micros ?? null, cursor?.id ?? null, limit + 1]);
       await this.audit.recordWithClient(client, context, 'outreach.registration-case.list', context.facilityId);
-      const healthIds = await registrationHealthIds(client, result.rows.map((row) => row.id));
-      return result.rows.map((row) => registrationCase(row, healthIds.get(row.id) ?? null));
+      const rows = result.rows.slice(0, limit);
+      const healthIds = await registrationHealthIds(client, rows.map((row) => row.id));
+      const page: OutreachRegistrationCase[] & { nextCursor?: string } = rows.map(({ cursor_micros: _cursor, ...row }) =>
+        registrationCase(row, healthIds.get(row.id) ?? null));
+      const last = rows[rows.length - 1];
+      if (result.rows.length > limit && last) page.nextCursor = encodeRegistrationCursor(last.cursor_micros, last.id);
+      return page;
     });
   }
 
@@ -651,7 +692,13 @@ export class OutreachService {
    */
   private translateCampaignRefusal(error: unknown): void {
     if (typeof error !== 'object' || error === null) return;
-    const { code, message } = error as { code?: unknown; message?: unknown };
+    const { code, message, constraint } = error as { code?: unknown; message?: unknown; constraint?: unknown };
+    // MaxLength (validator.js) does not count variation selectors such as
+    // U+FE0F and Postgres length() does, so a rare area passes the DTO and
+    // fails the database check: a 422, not a 500.
+    if (code === '23514' && constraint === 'registration_cases_area_ck') {
+      throw new DomainProblem(422, 'OUTREACH_AREA_INVALID', 'Enter the area in 100 characters or fewer.');
+    }
     if (code === '42501' && message === 'Exact Outreach campaign membership is required') {
       throw new DomainProblem(403, 'OUTREACH_CAMPAIGN_ACCESS_DENIED',
         'Exact membership in this Outreach campaign is required');

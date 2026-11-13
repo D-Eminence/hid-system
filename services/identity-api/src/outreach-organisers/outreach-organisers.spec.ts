@@ -19,7 +19,7 @@ import type { OrganizationProfileCompletionService } from '../identity/organizat
 import { ActivateOutreachOrganiserDto, StartOutreachGroupForAccountDto, StartOutreachOrganiserSignupDto } from './dto/outreach-organiser.dto';
 import { OUTREACH_INVITATION_REFUSALS, OutreachInvitationsService } from './outreach-invitations.service';
 import { decryptOutreachPhone, domainHmac, encryptOutreachPhone, normalizeOutreachPhone, outreachKey,
-  reservedOrganiserName } from './outreach-organiser-crypto';
+  reservedOrganiserName, OUTREACH_ORGANISER_TERMS_VERSIONS } from './outreach-organiser-crypto';
 import { assertOutreachSignupOpen } from './outreach-organiser-gate';
 import { OUTREACH_SIGNUP_COOKIE, OutreachOrganiserController } from './outreach-organiser.controller';
 import { OUTREACH_SIGNUP_REFUSALS, OutreachOrganiserService } from './outreach-organiser.service';
@@ -183,6 +183,14 @@ describe('OutreachOrganiserService', () => {
   const make = (db: ReturnType<typeof database>, otp = notification()) => new OutreachOrganiserService(
     db as unknown as DatabaseService, otp as unknown as NotificationOtpClient,
     completion as unknown as OrganizationProfileCompletionService);
+
+  it('advertises the 2026-11-01 terms in this release (the live website compares it), while accepting both', async () => {
+    const closed = new OutreachOrganiserService({ query: jest.fn(async () => { throw new Error('down'); }),
+      system: jest.fn(async () => { throw new Error('down'); }) } as never,
+      notification() as unknown as NotificationOtpClient, completion as unknown as OrganizationProfileCompletionService);
+    await expect(closed.availability()).resolves.toEqual({ open: false, termsVersion: '2026-11-01' });
+    expect(OUTREACH_ORGANISER_TERMS_VERSIONS).toEqual(['2026-11-01', '2026-11-14']);
+  });
 
   it('starts a sign-up: the network window first, then 0115\'s 12-argument command with HMACs only, then the email', async () => {
     const system = jest.fn(async (sql: string) => sql.includes('start_outreach_organiser_signup')
@@ -436,7 +444,7 @@ describe('OutreachOrganiserController', () => {
   const response = () => ({ cookie: jest.fn(), clearCookie: jest.fn(), setHeader: jest.fn() });
   function make() {
     const organisers = { start: jest.fn(async () => ({ cookie: `${signupId}.${token}`, body: { accepted: true, challengeId } })),
-      verify: jest.fn(async () => ({ verified: true })), availability: jest.fn(async () => ({ open: true, termsVersion: '2026-11-14' })),
+      verify: jest.fn(async () => ({ verified: true })), availability: jest.fn(async () => ({ open: true, termsVersion: '2026-11-01' })),
       activate: jest.fn(async () => ({ organizationId: 'org-1', facilityId: 'fac-1', accountId: 'acc-1', email: 'ada.organiser@example.test' })) };
     const turnstile = { verify: jest.fn(async () => undefined) };
     const auth = { login: jest.fn(async () => loginResult) };

@@ -10,8 +10,13 @@ import { normalizePatientPhone } from '../identity/contact-lookup';
  */
 export const OUTREACH_ORGANISER_TERMS_VERSIONS = ['2026-11-01', '2026-11-14'] as const;
 
-/** The current organiser terms version: the one the website is told to show (availability). */
-export const OUTREACH_ORGANISER_TERMS_VERSION = '2026-11-14';
+/**
+ * The organiser terms version the website is told to show (availability).
+ * Stays 2026-11-01 in this release: the live website compares it with its own
+ * version and would lock sign-up behind a reload screen on a mismatch. Move it
+ * to 2026-11-14 only in a release after the website with that text is live.
+ */
+export const OUTREACH_ORGANISER_TERMS_VERSION = '2026-11-01';
 
 /** The phone refusal, in plain English. */
 export const OUTREACH_PHONE_MESSAGE = 'Enter a phone number we can call, like 08012345678, '

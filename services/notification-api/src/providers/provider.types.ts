@@ -66,9 +66,16 @@ export const OUTREACH_GROUP_NAME_LIMIT = 80;
  */
 export function outreachGroupName(value: string | undefined): string {
   if (typeof value !== 'string') return '';
-  return Array.from(value.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, ' ').replace(/\s+/g, ' ').trim())
+  const name = Array.from(value.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, ' ').replace(/\s+/g, ' ').trim())
     .slice(0, OUTREACH_GROUP_NAME_LIMIT).join('').trim();
+  // Organiser names are self-service: a name that carries a link or a
+  // domain-like token is not put in the email (the caller says "An outreach
+  // team" instead), so the code email can never carry a link.
+  return OUTREACH_GROUP_NAME_LINK.test(name) ? '' : name;
 }
+
+/** A URL scheme, "www.", or a domain-like token (a dot followed by two or more letters). */
+const OUTREACH_GROUP_NAME_LINK = /:\/\/|www\.|\S\.[a-z]{2,}/i;
 
 /**
  * The code that proves a person's email when an outreach volunteer creates

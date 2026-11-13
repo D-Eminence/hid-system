@@ -112,6 +112,12 @@ export interface IdentityOutreachHealthIdCreateUnclaimed {
 /** How long outreachHealthIdCreateUnclaimed waits for Identity (0120); still never retried. */
 export const OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS = 20_000;
 
+/**
+ * How long the outreach Health ID start and confirm calls wait for Identity
+ * (0119): start includes the email delivery through notification-api.
+ */
+export const OUTREACH_HEALTH_ID_TIMEOUT_MS = 20_000;
+
 export interface IdentityClientOptions {
   baseUrl: string;
   caller: IdentityInternalCaller;
@@ -250,7 +256,8 @@ export class IdentityApiClient {
     context: IdentityDelegatedContext,
   ): Promise<IdentityOutreachHealthIdStart> {
     const payload = await this.request('/api/v1/identity/outreach/health-id/start', 'POST', input,
-      { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined }, { 'idempotency-key': idempotencyKey });
+      { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined }, { 'idempotency-key': idempotencyKey },
+      OUTREACH_HEALTH_ID_TIMEOUT_MS);
     const value = payload as Partial<IdentityOutreachHealthIdStart> | null;
     if (!value || value.channel !== 'email' || typeof value.expiresAt !== 'string'
         || typeof value.destinationHint !== 'string' || typeof value.resendAfterSeconds !== 'number') {
@@ -266,7 +273,7 @@ export class IdentityApiClient {
     context: IdentityDelegatedContext,
   ): Promise<IdentityOutreachHealthIdConfirm> {
     const payload = await this.request('/api/v1/identity/outreach/health-id/confirm', 'POST', input,
-      { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined });
+      { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined }, {}, OUTREACH_HEALTH_ID_TIMEOUT_MS);
     const value = payload as Partial<IdentityOutreachHealthIdConfirm> | null;
     if (!value || typeof value.healthId !== 'string' || !/^HID-[A-HJ-NP-Z2-9]{6,32}$/.test(value.healthId)
         || (value.outcome !== 'created' && value.outcome !== 'replayed')) {
