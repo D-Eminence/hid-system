@@ -450,3 +450,47 @@ describe('AdminService emergency-contact opt-out without contact keys', () => {
     expect(database.withPlatformTransaction).not.toHaveBeenCalled();
   });
 });
+
+describe('AdminService overview: Health IDs created at outreach (0120)', () => {
+  const adminContext = context as unknown as PlatformAdminContext;
+  const overviewRow = { registered_patients: '12', facilities: '3', verified_facilities: '2', suspended_facilities: '0',
+    active_memberships: '7', pending_identity_reviews: '1' };
+
+  function overviewHarness(counts: () => unknown) {
+    const query = jest.fn(async (sql: string) => {
+      if (sql.includes('identity.admin_platform_overview()')) return { rows: [overviewRow] };
+      if (sql.includes('identity.outreach_health_id_counts()')) return { rows: [counts()] };
+      return { rows: [] };
+    });
+    const database = { withPlatformTransaction: jest.fn(async (_context, operation) =>
+      operation({ query } as unknown as PoolClient)) };
+    const service = new AdminService(database as unknown as DatabaseService,
+      { recordWithClient: jest.fn() } as unknown as AuditService, {} as EmergencyContactProtector);
+    return { service, query, database };
+  }
+
+  it('adds the outreachHealthIds block as numbers, read-only, counts only', async () => {
+    const { service, query, database } = overviewHarness(() => ({ created_at_outreach: '9', created_with_email: '5',
+      created_unclaimed: '4', unclaimed_not_yet_claimed: '3', possible_duplicates: '1' }));
+    await expect(service.overview(adminContext)).resolves.toEqual({ registeredPatients: 12, facilities: 3,
+      verifiedFacilities: 2, suspendedFacilities: 0, activeStaffMemberships: 7, pendingIdentityReviews: 1,
+      outreachHealthIds: { createdAtOutreach: 9, createdWithEmail: 5, createdUnclaimed: 4, unclaimedNotYetClaimed: 3,
+        possibleDuplicates: 1 } });
+    expect(database.withPlatformTransaction).toHaveBeenCalledWith(adminContext, expect.any(Function), { readOnly: true });
+    expect(query.mock.calls.map(([sql]) => sql)).toEqual(expect.arrayContaining([
+      'savepoint outreach_health_id_counts', 'release savepoint outreach_health_id_counts']));
+  });
+
+  it('answers the block null before 0120 (no function), keeping the rest', async () => {
+    const { service, query } = overviewHarness(() => {
+      throw Object.assign(new Error('function identity.outreach_health_id_counts() does not exist'), { code: '42883' });
+    });
+    await expect(service.overview(adminContext)).resolves.toMatchObject({ registeredPatients: 12, outreachHealthIds: null });
+    expect(query).toHaveBeenCalledWith('rollback to savepoint outreach_health_id_counts');
+  });
+
+  it('does not hide any other failure of the counts', async () => {
+    const { service } = overviewHarness(() => { throw Object.assign(new Error('permission denied'), { code: '42501' }); });
+    await expect(service.overview(adminContext)).rejects.toMatchObject({ code: '42501' });
+  });
+});

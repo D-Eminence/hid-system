@@ -605,6 +605,19 @@ export class OutreachService {
     return { healthId: created.healthId, registration: await this.get(caseId, context) };
   }
 
+  /**
+   * No contact at all (0120): Identity creates the Health ID with no account
+   * and a one-time claim code; 201 { healthId, claimCode, claimExpiresAt,
+   * registration }. The claim code passes through and is never stored,
+   * logged or audited here. A second call finds the Health ID created and
+   * Identity answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with it only.
+   */
+  async createUnverifiedHealthId(caseId: string, context: DataAccessContext) {
+    const created = await this.identity.createUnclaimedHealthId(caseId, context);
+    return { healthId: created.healthId, claimCode: created.claimCode, claimExpiresAt: created.claimExpiresAt,
+      registration: await this.get(caseId, context) };
+  }
+
   private outbox(client: PoolClient, eventType: string, id: string, version: number,
     context: DataAccessContext, patientId: string | null, payload: Record<string, unknown>) {
     return client.query(`insert into outreach.outbox_events (

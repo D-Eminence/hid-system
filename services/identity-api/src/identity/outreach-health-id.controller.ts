@@ -3,13 +3,14 @@ import { WorkloadAuthService } from '../auth/workload-auth.service';
 import { AuditAction } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { ConfirmOutreachHealthIdDto, StartOutreachHealthIdDto } from './dto/outreach-health-id.dto';
+import { ConfirmOutreachHealthIdDto, CreateUnclaimedOutreachHealthIdDto,
+  StartOutreachHealthIdDto } from './dto/outreach-health-id.dto';
 import { OutreachHealthIdService } from './outreach-health-id.service';
 
 const WRITE_PERMISSION = 'outreach.registration.write';
 
 /**
- * Assisted Health ID at an outreach (0119), for outreach-api's workload only:
+ * Assisted Health ID at an outreach (0119, and 0120's no-contact path), for outreach-api's workload only:
  * it forwards the volunteer's browser sign-in (cookie, CSRF token, Origin) as
  * it does for POST identity/outreach/authorize. These are writes, so they are
  * not delegated-browser routes: the guard always applies the browser-write
@@ -38,6 +39,20 @@ export class OutreachHealthIdController {
   async confirm(@Body() input: ConfirmOutreachHealthIdDto, @Req() request: HidRequest) {
     const context = await this.authorize(request);
     return this.healthIds.confirm({ caseId: input.caseId, code: input.code }, context);
+  }
+
+  /**
+   * No contact at all (0120): the Health ID with no account and a one-time
+   * claim code, answered here only. The audit row of this request carries the
+   * route and status, never the answer.
+   */
+  @Post('create-unclaimed')
+  @HttpCode(201)
+  @Header('Cache-Control', 'no-store')
+  @AuditAction('identity.outreach.health-id.create-unclaimed.request')
+  async createUnclaimed(@Body() input: CreateUnclaimedOutreachHealthIdDto, @Req() request: HidRequest) {
+    const context = await this.authorize(request);
+    return this.healthIds.createUnclaimed({ caseId: input.caseId }, context);
   }
 
   private async authorize(request: HidRequest) {

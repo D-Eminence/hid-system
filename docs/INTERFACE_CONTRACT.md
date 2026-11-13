@@ -4795,6 +4795,94 @@ key version, with sign-up's lookup HMACs; the database keeps only a keyed verifi
 email is `POST notification-api /notifications/otp` with purpose `OUTREACH_HEALTH_ID_VERIFY` (email only,
 plus `groupName` and `expiresInMinutes`).
 
+## 50. Outreach Health ID with no contact (0120, provisional)
+
+Migration 0120 (`0120_outreach_health_id_unclaimed.sql`; owner request of 2026-11-13; the number is a
+placeholder and it releases right after 0119, which it extends) lets a volunteer or organiser create a
+Health ID for a person they registered who has **no email** (and possibly no phone), from the
+registration's name, sex and phone (if any). Provisional, as §49.
+
+**There is no account.** The Health ID is created with no account, no password and no contact-verified
+assurance, so **nobody can sign in to it until the person claims it** (50.4). No date of birth is stored.
+Instead the person gets a one-time **claim code** (8 characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789`),
+**shown once**, in the answer to the create: **print it on the person's slip** with the Health ID. It is
+never shown again, never stored (the database keeps only a keyed HMAC of it), and never logged or audited.
+
+As in §49, the registration itself is not changed: it stays `identity_resolution_pending` (0115's rule G
+stands); the link is kept in `identity.outreach_registration_health_ids`, with `created_via: 'unclaimed'`
+(0119's are `'email'`).
+
+### 50.1. Create the Health ID with no contact
+
+`POST /api/v1/outreach/registration-cases/:caseId/health-id/create-unverified`
+
+Permission `outreach.registration.write`, the same session, Origin and CSRF checks as the other
+registration writes, and a required `Idempotency-Key`. Body: `{}` (no body is also accepted); any field
+is refused `400 VALIDATION_FAILED`. Answers `Cache-Control: no-store`.
+
+`201 { "healthId": "HID-XXXXXX", "claimCode": "K7MP2QXW", "claimExpiresAt": "<ISO, 180 days on>", "registration": <the registration as GET returns it> }`
+
+**The claim code is answered once.** A retry, with the same `Idempotency-Key` or another, finds the
+Health ID created and answers `409 OUTREACH_HEALTH_ID_ALREADY_CREATED` with `healthId` and never the
+claim code. A client must not retry this call by itself (the api-client's `createUnverifiedHealthId` never
+does), and must show and print the code from the `201` before anything else. If the `201` was lost (a
+timeout), the Health ID exists but its code cannot be shown again; a reissue is not part of 0120.
+
+The guards are 0119's: campaign membership, not redacted, not a sealed demo or QA group, not suspended,
+18 or over, one Health ID per registration. A registration's phone that is already on a Health ID (in any
+stored form) is refused. With no phone there is nothing to check a duplicate person against: when an
+active patient has the same name and sex, the Health ID is still created, and flagged
+`possible_duplicate` for review later (50.4); it is never refused on that.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | the body has a field |
+| 404 | `OUTREACH_REGISTRATION_NOT_FOUND` | not visible to this session |
+| 409 | `OUTREACH_REGISTRATION_REDACTED` | the registration's details were removed |
+| 409 | `OUTREACH_HEALTH_ID_ALREADY_CREATED` | a Health ID exists for it (also a retry of this call); the body carries `"healthId": "HID-..."` only |
+| 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN` | "This phone number already has a Health ID. Ask them to sign in with it." |
+| 422 | `OUTREACH_HEALTH_ID_UNDER_18` | as in 49.1 |
+| 422 | `OUTREACH_HEALTH_ID_PHONE_INVALID` | the registration has a phone that is not a valid number |
+| 403 | `OUTREACH_HEALTH_ID_NOT_AVAILABLE` | not an outreach group, or a sealed demo/QA one |
+| 423 | `OUTREACH_ORGANISER_SUSPENDED` | the group is paused by Health ID |
+| 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | "The Health ID couldn't be created right now. Try again in a few minutes." |
+
+### 50.2. Registration reads
+
+`GET /api/v1/outreach/registration-cases/:caseId` and the list add, beside `healthId` and
+`healthIdCreatedByOutreach`, `"healthIdStatus": "verified" | "unclaimed" | null`: `verified` for a Health
+ID created after the person proved an email (§49), `unclaimed` for one created here, `null` when none was
+created. It says how the Health ID was created (`created_via`); the claim flow (50.4) will decide whether a
+claimed one reads differently. Read, as before, with
+`identity.outreach_registration_health_ids_for`, which now also answers `created_via`.
+
+### 50.3. Internal (outreach-api to identity-api) and the counts
+
+`POST /api/v1/identity/outreach/health-id/create-unclaimed` body `{ caseId }`, authenticated as 49.4's
+routes (the Outreach workload plus the volunteer's forwarded sign-in; not a delegated-browser route), in
+the volunteer's own session; no `Idempotency-Key`. `201 { healthId, claimCode, claimExpiresAt }`
+(`Cache-Control: no-store`); refusals as 50.1. Identity generates the Health ID (another is drawn on a
+clash) and the claim code (`crypto.randomInt`), and stores `HMAC-SHA256` of the uppercased code keyed with
+the key of 0119's code verifier (no new secret), with key version `claim-v1`. A phone is stored as 0119's
+confirm stores it (sign-up's contact key and key version, its lookup HMAC; the ciphertext is bound to the
+registration id). The database writes one audit row, `outreach.health-id.created-unclaimed`, with ids and
+flags only (`channel: none`, `phoneOnRecord`, `possibleDuplicate`).
+
+**Counts for the platform admin.** `GET /api/v1/admin/overview` (permission `platform.admin.access`) adds
+`outreachHealthIds: { createdAtOutreach, createdWithEmail, createdUnclaimed, unclaimedNotYetClaimed,
+possibleDuplicates }` (numbers; counts only, from `identity.outreach_health_id_counts()`), or `null` on a
+database before 0120.
+
+### 50.4. Later, after the campaign (not built in 0120)
+
+- **The claim.** The person enters their Health ID, the claim code from the slip and their own email,
+  proves the email with a code sent to it, and **the account is created then**, bound to that Health ID.
+  A claim code works for **180 days** and allows **5** wrong tries; after either it is spent. Until it is
+  claimed nobody can sign in.
+- **Possible duplicates** (no phone and an active patient with the same name and sex) are flagged
+  `possible_duplicate` and counted (`possibleDuplicates`) for review later; nothing is merged or refused
+  automatically.
+
 ## 44. Allergies and the allergy check at prescribing (0117)
 
 Two sources, always kept apart and labelled on screens:

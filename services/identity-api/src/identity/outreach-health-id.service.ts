@@ -9,6 +9,7 @@ import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { createContactLookupHmac, normalizePatientPhone, patientPhoneStoredForms } from './contact-lookup';
 import { HidCodeGenerator } from './hid-code-generator.service';
+import { generateOutreachClaimCode, OUTREACH_CLAIM_KEY_VERSION, outreachClaimCodeHmac } from './outreach-claim-code';
 import { contactKeyForVersion, currentContactEncryption, decryptContactValue, encryptContactValue,
   otpHmacKey } from './patient-contact-crypto';
 
@@ -43,6 +44,14 @@ export interface OutreachHealthIdStartResult {
 export interface OutreachHealthIdConfirmResult {
   healthId: string;
   outcome: 'created' | 'replayed';
+}
+
+/** POST identity/outreach/health-id/create-unclaimed's answer (0120). The claim code is in no other answer. */
+export interface OutreachHealthIdCreateUnclaimedResult {
+  healthId: string;
+  /** Shown once (printed on the slip); only its keyed HMAC is stored. */
+  claimCode: string;
+  claimExpiresAt: string;
 }
 
 /** The 0119 per-registration cooldown between codes (identity.outreach_health_id_start). */
@@ -209,6 +218,65 @@ export class OutreachHealthIdService {
       } catch (error) {
         if (error instanceof DomainProblem) throw error;
         if (databaseCode(error) === '23505' && databaseConstraint(error) === 'patients_hid_code_ci_uq') continue;
+        throw this.problem(error);
+      }
+    }
+    throw this.unavailable();
+  }
+
+  /**
+   * No contact at all (0120): creates the person's Health ID with no account
+   * and a one-time claim code (8 characters), stored as its keyed HMAC only.
+   * The code is answered here once and never again: a retry finds the Health
+   * ID created and answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with it.
+   * The registration's phone, if any, is stored as 0119's confirm stores it
+   * (sign-up's contact key and key version, its lookup HMAC), bound to the
+   * registration id since there is no challenge.
+   */
+  async createUnclaimed(input: { caseId: string }, context: DataAccessContext)
+    : Promise<OutreachHealthIdCreateUnclaimedResult> {
+    this.assertConfigured();
+    const registration = await this.run(() => this.database.withTransaction(context, (client) =>
+      this.registration(client, input.caseId)));
+    this.assertEligible(registration);
+    const phone = this.registrationPhone(registration);
+    if (phone) {
+      const preflight = await this.database.withSystemTransaction(context.correlationId, async (client) => ({
+        ready: (await client.query<{ ready: boolean }>(
+          'select identity.patient_contact_lookup_ready() as ready')).rows[0]?.ready === true,
+        // Every form a patient's phone may be stored in (a legacy +2340... too).
+        phoneBound: await this.contactBound(client, 'phone',
+          patientPhoneStoredForms(phone).map((form) => createContactLookupHmac('phone', form))),
+      }));
+      if (!preflight.ready) throw this.unavailable();
+      if (preflight.phoneBound) throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
+    }
+    const encryption = phone ? currentContactEncryption(this.env) : undefined;
+    const phoneCiphertext = phone && encryption ? encryptContactValue(encryption.key, input.caseId, 'phone', phone) : null;
+    const phoneLookup = phone ? createContactLookupHmac('phone', phone) : null;
+
+    let claimCode = generateOutreachClaimCode();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const hid = this.hidCodes.generate();
+      try {
+        const row = await this.database.withTransaction(context, async (client) =>
+          (await client.query<{ hid_code: string; patient_id: string; claim_expires_at: Date }>(
+            'select * from identity.outreach_health_id_create_unclaimed($1,$2,$3,$4,$5,$6,$7)',
+            [input.caseId, hid, phoneCiphertext, phoneLookup, encryption?.version ?? null,
+              outreachClaimCodeHmac(this.otpKey, claimCode), OUTREACH_CLAIM_KEY_VERSION])).rows[0]);
+        if (!row?.hid_code || !row.claim_expires_at) throw this.unavailable();
+        return { healthId: row.hid_code, claimCode, claimExpiresAt: new Date(row.claim_expires_at).toISOString() };
+      } catch (error) {
+        if (error instanceof DomainProblem) throw error;
+        if (databaseCode(error) === '23505') {
+          const constraint = databaseConstraint(error);
+          if (constraint === 'patients_hid_code_ci_uq') continue;
+          // Another Health ID's claim code has the same HMAC (vanishingly rare): draw another code.
+          if (constraint === 'outreach_health_id_claims_code_hmac_key') {
+            claimCode = generateOutreachClaimCode();
+            continue;
+          }
+        }
         throw this.problem(error);
       }
     }

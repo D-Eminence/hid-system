@@ -9,6 +9,8 @@ import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import { createContactLookupHmac } from './contact-lookup';
 import type { HidCodeGenerator } from './hid-code-generator.service';
+import { OUTREACH_CLAIM_CODE_ALPHABET, OUTREACH_CLAIM_KEY_VERSION, generateOutreachClaimCode,
+  outreachClaimCodeHmac } from './outreach-claim-code';
 import { OutreachHealthIdController } from './outreach-health-id.controller';
 import { emailHint, OutreachHealthIdService } from './outreach-health-id.service';
 import { contactKeyForVersion, currentContactEncryption, decryptContactValue,
@@ -47,6 +49,7 @@ describe('OutreachHealthIdService (0119)', () => {
   let bound: Record<string, boolean>;
   let startResult: () => unknown;
   let confirmResult: (parameters: unknown[]) => unknown;
+  let createResult: (parameters: unknown[]) => unknown;
   let rateBlocked: boolean;
   const queries: { sql: string; parameters: unknown[]; system: boolean }[] = [];
   const notification = { deliverOutreachHealthIdCode: jest.fn() };
@@ -63,6 +66,7 @@ describe('OutreachHealthIdService (0119)', () => {
           return { rows: value ? [value] : [] };
         }
         if (sql.includes('outreach_health_id_confirm(')) return { rows: [confirmResult(parameters)] };
+        if (sql.includes('outreach_health_id_create_unclaimed(')) return { rows: [createResult(parameters)] };
         if (sql.includes('outreach_health_id_delivery_failed(')) return { rows: [] };
         if (sql.includes('patient_contact_lookup_ready')) return { rows: [{ ready: true }] };
         if (sql.includes('public_patient_contact_already_bound')) {
@@ -107,6 +111,8 @@ describe('OutreachHealthIdService (0119)', () => {
     startResult = () => ({ challenge_id: queries.find((q) => q.sql.includes('outreach_health_id_start('))?.parameters[1],
       expires_at: new Date('2026-11-14T08:10:00Z') });
     confirmResult = () => ({ outcome: 'created', hid_code: 'HID-AB2CD3', patient_id: 'p' });
+    createResult = (parameters) => ({ hid_code: parameters[1], patient_id: 'p',
+      claim_expires_at: new Date('2027-05-12T08:00:00Z') });
     notification.deliverOutreachHealthIdCode.mockReset().mockResolvedValue({ outcome: 'accepted' });
     hidCodes.generate.mockReset().mockReturnValue('HID-AB2CD3');
     database.withTransaction.mockClear();
@@ -323,13 +329,122 @@ describe('OutreachHealthIdService (0119)', () => {
     });
   });
 
+  describe('createUnclaimed (0120)', () => {
+    const createCall = () => queries.find((q) => q.sql.includes('outreach_health_id_create_unclaimed('))!;
+
+    it('creates the Health ID with a one-time claim code, storing only its keyed HMAC, and the phone', async () => {
+      const answer = await service().createUnclaimed({ caseId }, context);
+      expect(answer).toEqual({ healthId: 'HID-AB2CD3', claimCode: expect.stringMatching(/^[A-HJKMNP-Z2-9]{8}$/),
+        claimExpiresAt: '2027-05-12T08:00:00.000Z' });
+      const call = createCall();
+      expect(call.system).toBe(false);
+      const [requestedCase, hid, phoneCiphertext, phoneLookup, keyVersion, claimHmac, claimVersion] =
+        call.parameters as [string, string, Buffer, string, string, string, string];
+      expect([requestedCase, hid, keyVersion, claimVersion]).toEqual([caseId, 'HID-AB2CD3', 'nin-v2', 'claim-v1']);
+      expect(phoneLookup).toBe(createContactLookupHmac('phone', '+2348012345678'));
+      expect(decryptContactValue(contactKeyForVersion(process.env as never, 'nin-v2')!, caseId, 'phone',
+        phoneCiphertext)).toBe('+2348012345678');
+      // The same key as 0119's code verifier; the uppercased code.
+      expect(claimHmac).toBe(createHmac('sha256', Buffer.from(OTP_KEY, 'base64'))
+        .update(answer.claimCode.toUpperCase()).digest('hex'));
+      expect(JSON.stringify(queries.map((q) => q.parameters))).not.toContain(answer.claimCode);
+    });
+
+    it('passes no phone (all three null) when the registration has none, and checks no phone', async () => {
+      registration.phone = null;
+      await service().createUnclaimed({ caseId }, context);
+      expect(createCall().parameters.slice(2, 5)).toEqual([null, null, null]);
+      expect(queries.some((q) => q.system)).toBe(false);
+    });
+
+    it('refuses an existing Health ID with it (never a claim code), an under-18 and an invalid phone', async () => {
+      registration.existing_hid_code = 'HID-ZZ9YY8';
+      const created = await refusal(service().createUnclaimed({ caseId }, context));
+      expect(created).toMatchObject({ code: 'OUTREACH_HEALTH_ID_ALREADY_CREATED', status: 409,
+        extensions: { healthId: 'HID-ZZ9YY8' } });
+      expect(created.extensions).toEqual({ healthId: 'HID-ZZ9YY8' });
+      registration.existing_hid_code = null;
+      registration.age_years = 17;
+      expect((await refusal(service().createUnclaimed({ caseId }, context))).code).toBe('OUTREACH_HEALTH_ID_UNDER_18');
+      registration.age_years = 30;
+      registration.phone = '12';
+      expect((await refusal(service().createUnclaimed({ caseId }, context))).code).toBe('OUTREACH_HEALTH_ID_PHONE_INVALID');
+      expect(queries.some((q) => q.sql.includes('outreach_health_id_create_unclaimed('))).toBe(false);
+    });
+
+    it('refuses a phone (any stored form) already on a Health ID before creating', async () => {
+      bound = { [`phone:${createContactLookupHmac('phone', '+23408012345678')}`]: true };
+      expect(await refusal(service().createUnclaimed({ caseId }, context)))
+        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_PHONE_TAKEN', status: 409 });
+      expect(queries.some((q) => q.sql.includes('outreach_health_id_create_unclaimed('))).toBe(false);
+    });
+
+    it('draws another Health ID, or another claim code, on a unique clash', async () => {
+      hidCodes.generate.mockReturnValueOnce('HID-TAKEN2').mockReturnValueOnce('HID-FREE34').mockReturnValue('HID-FREE56');
+      const hmacs: string[] = [];
+      createResult = (parameters) => {
+        hmacs.push(parameters[5] as string);
+        if (parameters[1] === 'HID-TAKEN2') throw pgError('duplicate', '23505', { constraint: 'patients_hid_code_ci_uq' });
+        if (hmacs.length === 2) throw pgError('duplicate', '23505', { constraint: 'outreach_health_id_claims_code_hmac_key' });
+        return { hid_code: parameters[1], patient_id: 'p', claim_expires_at: new Date('2027-05-12T08:00:00Z') };
+      };
+      const answer = await service().createUnclaimed({ caseId }, context);
+      expect(answer.healthId).toBe('HID-FREE56');
+      expect(hmacs).toHaveLength(3);
+      expect(hmacs[0]).toBe(hmacs[1]);
+      expect(hmacs[2]).toBe(outreachClaimCodeHmac(Buffer.from(OTP_KEY, 'base64'), answer.claimCode));
+    });
+
+    it.each([
+      ['OUTREACH_REGISTRATION_NOT_FOUND', '42501', 404], ['OUTREACH_REGISTRATION_REDACTED', '55000', 409],
+      ['OUTREACH_HEALTH_ID_NOT_AVAILABLE', '42501', 403], ['OUTREACH_ORGANISER_SUSPENDED', '55000', 423],
+      ['OUTREACH_HEALTH_ID_UNDER_18', '22023', 422], ['OUTREACH_HEALTH_ID_PHONE_TAKEN', '23505', 409],
+    ])('maps the database refusal %s (%s) to %d', async (message, sqlstate, status) => {
+      createResult = () => { throw pgError(message, sqlstate); };
+      expect(await refusal(service().createUnclaimed({ caseId }, context))).toMatchObject({ code: message, status });
+    });
+
+    it('maps already created (with the Health ID only) and its own refused arguments (503)', async () => {
+      createResult = () => { throw pgError('OUTREACH_HEALTH_ID_ALREADY_CREATED', '23505', { detail: 'HID-ZZ9YY8' }); };
+      const created = await refusal(service().createUnclaimed({ caseId }, context));
+      expect(created).toMatchObject({ status: 409, extensions: { healthId: 'HID-ZZ9YY8' } });
+      expect(created.extensions).toEqual({ healthId: 'HID-ZZ9YY8' });
+      createResult = () => { throw pgError('OUTREACH_HEALTH_ID_REQUEST_INVALID', '22023'); };
+      expect(await refusal(service().createUnclaimed({ caseId }, context)))
+        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_UNAVAILABLE', status: 503 });
+    });
+
+    it('answers 503 without the contact lookup key', async () => {
+      delete process.env.CONTACT_LOOKUP_HMAC_KEY_B64;
+      resetEnvironmentForTests();
+      expect((await refusal(service().createUnclaimed({ caseId }, context))).code).toBe('OUTREACH_HEALTH_ID_UNAVAILABLE');
+      expect(queries).toHaveLength(0);
+    });
+  });
+
+  it('draws claim codes of 8 from the unambiguous alphabet and keys their HMAC case-blind', () => {
+    expect(OUTREACH_CLAIM_CODE_ALPHABET).toBe('ABCDEFGHJKMNPQRSTUVWXYZ23456789');
+    expect(OUTREACH_CLAIM_KEY_VERSION).toBe('claim-v1');
+    const seen = new Set<string>();
+    for (let index = 0; index < 200; index += 1) {
+      const code = generateOutreachClaimCode();
+      expect(code).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/);
+      seen.add(code);
+    }
+    expect(seen.size).toBe(200);
+    const key = Buffer.alloc(32, 3);
+    expect(outreachClaimCodeHmac(key, 'abcd2345')).toBe(outreachClaimCodeHmac(key, 'ABCD2345'));
+    expect(outreachClaimCodeHmac(key, 'ABCD2345')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it('hints an email by its first character and domain', () => {
     expect(emailHint('ada@gmail.com')).toBe('a***@gmail.com');
   });
 });
 
 describe('OutreachHealthIdController (0119)', () => {
-  const healthIds = { start: jest.fn().mockResolvedValue({ channel: 'email' }), confirm: jest.fn().mockResolvedValue({}) };
+  const healthIds = { start: jest.fn().mockResolvedValue({ channel: 'email' }), confirm: jest.fn().mockResolvedValue({}),
+    createUnclaimed: jest.fn().mockResolvedValue({}) };
   const workloadAuth = { authenticateOutreach: jest.fn().mockResolvedValue({ subject: 'local:outreach-api' }) };
   const subject = new OutreachHealthIdController(healthIds as unknown as OutreachHealthIdService,
     workloadAuth as unknown as WorkloadAuthService);
@@ -347,6 +462,21 @@ describe('OutreachHealthIdController (0119)', () => {
       expect.objectContaining({ facilityId, membershipId, purposeOfUse: 'direct-care' }), 'outreach-health-id-key-0001');
     await subject.confirm({ caseId, code: '123456' }, request(['outreach.registration.write']));
     expect(healthIds.confirm).toHaveBeenCalledWith({ caseId, code: '123456' }, expect.objectContaining({ facilityId }));
+  });
+
+  it('creates an unclaimed Health ID (0120) in the volunteer\'s context, behind the same checks', async () => {
+    await subject.createUnclaimed({ caseId }, request(['outreach.registration.write']));
+    expect(healthIds.createUnclaimed).toHaveBeenCalledWith({ caseId },
+      expect.objectContaining({ facilityId, membershipId, purposeOfUse: 'direct-care' }));
+    healthIds.createUnclaimed.mockClear();
+    await expect(subject.createUnclaimed({ caseId }, request(['outreach.registration.read'])))
+      .rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(subject.createUnclaimed({ caseId }, request(['outreach.registration.write'],
+      { delegatedBrowserMethod: 'GET' }))).rejects.toMatchObject({ code: 'CSRF_VALIDATION_FAILED' });
+    workloadAuth.authenticateOutreach.mockRejectedValueOnce(new DomainProblem(401, 'WORKLOAD_AUTHENTICATION_REQUIRED', 'x'));
+    await expect(subject.createUnclaimed({ caseId }, request(['outreach.registration.write'])))
+      .rejects.toMatchObject({ code: 'WORKLOAD_AUTHENTICATION_REQUIRED' });
+    expect(healthIds.createUnclaimed).not.toHaveBeenCalled();
   });
 
   it('refuses without outreach.registration.write, a reported browser read, or a refused workload', async () => {

@@ -25,3 +25,9 @@ export class ConfirmOutreachHealthIdDto {
   @MaxLength(32)
   code!: string;
 }
+
+/** outreach-api's POST identity/outreach/health-id/create-unclaimed (0120): the registration only. */
+export class CreateUnclaimedOutreachHealthIdDto {
+  @IsUUID()
+  caseId!: string;
+}

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Header, HttpCode, Param, ParseUUIDPipe, Post, Put, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
@@ -11,7 +11,7 @@ import { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import { LinkExistingPatientDto } from './dto/link-existing-patient.dto';
 import { ExportRegistrationsDto } from './dto/export-registrations.dto';
 import { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
-import { ConfirmHealthIdDto, StartHealthIdDto } from './dto/health-id.dto';
+import { ConfirmHealthIdDto, requireEmptyHealthIdBody, StartHealthIdDto } from './dto/health-id.dto';
 import { OutreachService } from './outreach.service';
 
 /**
@@ -146,8 +146,8 @@ export class OutreachController {
    * Assisted Health ID (0119), email path: start sends the person a 6-digit
    * code (202), confirm checks it and creates the Health ID (201). Each takes
    * an Idempotency-Key. Identity does the work in the volunteer's own session.
-   * (A no-contact path, POST :caseId/health-id/create-unverified, will sit
-   * beside these under the same permission when its database functions exist.)
+   * The no-contact path (0120), create-unverified, sits beside them under the
+   * same permission.
    */
   @Post(':caseId/health-id/start')
   @HttpCode(202)
@@ -165,6 +165,24 @@ export class OutreachController {
     @Req() request: HidRequest) {
     requireIdempotencyKey(request.header('idempotency-key'));
     return this.outreach.confirmHealthId(caseId, input, requireRequestContext(request));
+  }
+
+  /**
+   * No contact at all (0120): the person's Health ID with no account and a
+   * one-time claim code (201 { healthId, claimCode, claimExpiresAt,
+   * registration }). Body {}. The claim code is answered once: a retry, with
+   * the same Idempotency-Key or not, answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED
+   * with healthId only.
+   */
+  @Post(':caseId/health-id/create-unverified')
+  @HttpCode(201)
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions('outreach.registration.write')
+  createUnverifiedHealthId(@Param('caseId', new ParseUUIDPipe()) caseId: string, @Body() body: unknown,
+    @Req() request: HidRequest) {
+    requireIdempotencyKey(request.header('idempotency-key'));
+    requireEmptyHealthIdBody(body);
+    return this.outreach.createUnverifiedHealthId(caseId, requireRequestContext(request));
   }
 
   @Post()

@@ -14,6 +14,9 @@ export interface OutreachClientOptions {
   credentials?: RequestCredentials;
 }
 
+/** How a Health ID created at outreach was created (0120). */
+export type OutreachHealthIdStatus = 'verified' | 'unclaimed';
+
 export interface OutreachRegistrationCase {
   id: string;
   facilityId: string;
@@ -36,6 +39,12 @@ export interface OutreachRegistrationCase {
   healthId?: string | null;
   /** Whether that Health ID was created from this registration at the outreach (0119); absent before 0119. */
   healthIdCreatedByOutreach?: boolean;
+  /**
+   * How that Health ID was created (0120): 'verified' (the person proved an
+   * email; 0119), 'unclaimed' (no contact; nobody can sign in until it is
+   * claimed), or null when there is none; absent before 0120.
+   */
+  healthIdStatus?: OutreachHealthIdStatus | null;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -56,6 +65,18 @@ export interface OutreachHealthIdStarted {
 /** 201 from POST .../health-id/confirm (0119), also for a replay. */
 export interface OutreachHealthIdCreated {
   healthId: string;
+  registration: OutreachRegistrationCase;
+}
+
+/**
+ * 201 from POST .../health-id/create-unverified (0120): a Health ID with no
+ * account and its one-time claim code. The claim code is answered only here,
+ * once: print it on the person's slip. Never store or log it.
+ */
+export interface OutreachHealthIdCreatedUnverified {
+  healthId: string;
+  claimCode: string;
+  claimExpiresAt: string;
   registration: OutreachRegistrationCase;
 }
 
@@ -188,6 +209,19 @@ export class OutreachApiClient {
     return this.request<OutreachHealthIdCreated>(
       `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/health-id/confirm`,
       'POST', input, context, idempotencyKey, signal, undefined, false);
+  }
+
+  /**
+   * No contact at all (0120): creates the person's Health ID with no account
+   * and a one-time claim code. Never retried: a second call, even with the
+   * same Idempotency-Key, answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with
+   * `healthId` and never the claim code again.
+   */
+  createUnverifiedHealthId(caseId: string, context: OutreachRequestContext, idempotencyKey: string,
+    signal?: AbortSignal) {
+    return this.request<OutreachHealthIdCreatedUnverified>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/health-id/create-unverified`,
+      'POST', {}, context, idempotencyKey, signal, undefined, false);
   }
 
   /** A registration's screening (0118): { screening: null } when none was recorded. */

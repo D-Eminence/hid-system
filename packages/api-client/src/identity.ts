@@ -99,6 +99,16 @@ export interface IdentityOutreachHealthIdConfirm {
   outcome: 'created' | 'replayed';
 }
 
+/**
+ * POST identity/outreach/health-id/create-unclaimed's answer (0120): a Health
+ * ID with no account, and its one-time claim code (only in this answer).
+ */
+export interface IdentityOutreachHealthIdCreateUnclaimed {
+  healthId: string;
+  claimCode: string;
+  claimExpiresAt: string;
+}
+
 export interface IdentityClientOptions {
   baseUrl: string;
   caller: IdentityInternalCaller;
@@ -260,6 +270,26 @@ export class IdentityApiClient {
       throw new IdentityApiProblem(502, payload);
     }
     return { healthId: value.healthId, outcome: value.outcome };
+  }
+
+  /**
+   * No contact at all (0120): creates the person's Health ID with no account
+   * and a one-time claim code. Never retried here: the claim code is answered
+   * once, and a second call answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED.
+   */
+  async outreachHealthIdCreateUnclaimed(
+    input: { caseId: string },
+    context: IdentityDelegatedContext,
+  ): Promise<IdentityOutreachHealthIdCreateUnclaimed> {
+    const payload = await this.request('/api/v1/identity/outreach/health-id/create-unclaimed', 'POST',
+      { caseId: input.caseId }, { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined });
+    const value = payload as Partial<IdentityOutreachHealthIdCreateUnclaimed> | null;
+    if (!value || typeof value.healthId !== 'string' || !/^HID-[A-HJ-NP-Z2-9]{6,32}$/.test(value.healthId)
+        || typeof value.claimCode !== 'string' || !/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/.test(value.claimCode)
+        || typeof value.claimExpiresAt !== 'string') {
+      throw new IdentityApiProblem(502, null);
+    }
+    return { healthId: value.healthId, claimCode: value.claimCode, claimExpiresAt: value.claimExpiresAt };
   }
 
   async authorizeDocumentScanner(

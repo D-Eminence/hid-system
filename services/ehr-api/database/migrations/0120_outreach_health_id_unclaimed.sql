@@ -105,6 +105,7 @@ declare
   first_name_value text;
   last_name_value text;
   duplicate_flag boolean := false;
+  clean_name text;
   claim_expiry timestamptz := clock_timestamp() + interval '180 days';
 begin
   select * into registration from identity.outreach_health_id_registration(requested_case_id);
@@ -128,16 +129,20 @@ begin
     -- Nothing to check a duplicate person against: flag a same name and sex
     -- for review later; never refuse on it.
     duplicate_flag := exists (select 1 from identity.patients patient
-      where lower(patient.full_name) = lower(btrim(registration.full_name))
+      where lower(patient.full_name) = lower(left(btrim(regexp_replace(regexp_replace(registration.full_name,
+              '[[:cntrl:]]', ' ', 'g'), '[[:space:]]+', ' ', 'g')), 200))
         and patient.gender is not distinct from registration.sex and patient.status = 'active');
   end if;
-  first_name_value := split_part(btrim(registration.full_name), ' ', 1);
-  last_name_value := coalesce(nullif(btrim(substr(btrim(registration.full_name), length(first_name_value) + 1)), ''),
-    first_name_value);
+  -- Names as patient sign-up allows them (as 0119's confirmation does).
+  clean_name := left(btrim(regexp_replace(regexp_replace(registration.full_name, '[[:cntrl:]]', ' ', 'g'),
+    '[[:space:]]+', ' ', 'g')), 200);
+  first_name_value := left(split_part(clean_name, ' ', 1), 80);
+  last_name_value := left(coalesce(nullif(btrim(substr(clean_name, length(split_part(clean_name, ' ', 1)) + 1)), ''),
+    first_name_value), 80);
   -- No account: nobody can sign in to this Health ID until it is claimed.
   insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, gender, dob,
     phone_e164_ciphertext, phone_lookup_hmac, contact_key_version, source_system, status)
-  values (new_patient, null, requested_hid, first_name_value, last_name_value, btrim(registration.full_name),
+  values (new_patient, null, requested_hid, first_name_value, last_name_value, clean_name,
     registration.sex, null, requested_phone_ciphertext, requested_phone_lookup_hmac,
     case when requested_phone_lookup_hmac is not null then requested_key_version end, 'hid-outreach-health-id', 'active');
   insert into identity.patient_identifiers (id, patient_id, identifier_type, public_value, verified, source_system)
@@ -193,19 +198,32 @@ as $$
    where link.registration_case_id = any(requested_case_ids)
      and cardinality(requested_case_ids) <= 500
      and link.facility_id = platform.current_facility_id()
+     and outreach.context_allows(link.facility_id, 'outreach.registration.read')
+     and not exists (select 1 from outreach.registration_redactions redaction
+                      where redaction.registration_case_id = link.registration_case_id)
      and exists (select 1 from outreach.registration_cases case_row where case_row.id = link.registration_case_id
                   and case_row.facility_id = link.facility_id
                   and outreach.registration_campaign_member(case_row.campaign_id, case_row.facility_id))
 $$;
 
 comment on function identity.outreach_registration_health_ids_for(uuid[]) is
-  '0119, 0120: for the Outreach runtime, the Health IDs created at outreach, how (created_via email or unclaimed), for up to 500 registrations at the session facility that the session can see (the registration''s facility and campaign membership, checked here and by its row-level security).';
+  '0119, 0120: for the Outreach runtime, the Health IDs created at outreach, how (created_via email or unclaimed), for up to 500 registrations at the session facility that the session can see: the facility, outreach.registration.read for direct care (outreach.context_allows) and campaign membership, checked here and by the registration''s row-level security; never a redacted registration.';
 
 -- 6. Owners, policies, ACLs.
 do $$
 declare
   owner_name name := (select pg_get_userbyid(relowner) from pg_class where oid = 'identity.patients'::regclass);
 begin
+  if owner_name <> current_user then
+    if not pg_has_role(current_user, owner_name, 'SET') then
+      raise exception using errcode = '42501', message = format(
+        '0120: the applier (%s) must be able to SET ROLE to the owner of identity.patients (%s)', current_user, owner_name);
+    end if;
+    execute format('alter table identity.outreach_health_id_claims owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_counts() owner to %I', owner_name);
+    execute format('alter function identity.outreach_registration_health_ids_for(uuid[]) owner to %I', owner_name);
+  end if;
   execute format('create policy outreach_health_id_claims_owner on identity.outreach_health_id_claims '
     || 'for all to %I using (true) with check (true)', owner_name);
 end
@@ -243,6 +261,14 @@ begin
               and role_row.oid <> (select relowner from pg_class where oid = 'identity.patients'::regclass)
               and has_table_privilege(role_row.oid, 'identity.outreach_health_id_claims', 'SELECT,INSERT,UPDATE,DELETE')) then
     raise exception using errcode = '55000', message = '0120: a runtime role holds a privilege on the claims it must not';
+  end if;
+  if (select relowner from pg_class where oid = 'identity.outreach_health_id_claims'::regclass)
+       <> (select relowner from pg_class where oid = 'identity.patients'::regclass)
+     or exists (select 1 from pg_proc where oid in (
+               'identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text)'::regprocedure,
+               'identity.outreach_health_id_counts()'::regprocedure, 'identity.outreach_registration_health_ids_for(uuid[])'::regprocedure)
+               and proowner <> (select relowner from pg_class where oid = 'identity.patients'::regclass)) then
+    raise exception using errcode = '55000', message = '0120: a new object is not owned by the owner of identity.patients';
   end if;
   if exists (select 1 from identity.outreach_registration_health_ids where created_via <> 'email') then
     raise exception using errcode = '55000', message = '0120: an existing record is not an email one';

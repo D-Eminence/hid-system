@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { IdentityApiClient, IdentityApiProblem, type IdentityDelegatedContext, type IdentityOutreachHealthIdConfirm,
-  type IdentityOutreachHealthIdStart } from '@hid/api-client';
+  type IdentityOutreachHealthIdCreateUnclaimed, type IdentityOutreachHealthIdStart } from '@hid/api-client';
 import { WorkloadCredentialsService } from '../auth/workload-credentials.service';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
@@ -45,6 +45,13 @@ export class IdentityService {
       .catch((error: unknown) => { throw healthIdProblem(error, 'confirm'); });
   }
 
+  /** No contact at all (0120): Identity creates the Health ID with no account and a one-time claim code. Called once. */
+  async createUnclaimedHealthId(caseId: string, context: DataAccessContext)
+    : Promise<IdentityOutreachHealthIdCreateUnclaimed> {
+    return this.client.outreachHealthIdCreateUnclaimed({ caseId }, this.delegated(context))
+      .catch((error: unknown) => { throw healthIdProblem(error, 'create'); });
+  }
+
   private delegated(context: DataAccessContext): IdentityDelegatedContext {
     return { correlationId: context.correlationId, facilityId: context.facilityId, purposeOfUse: 'direct-care',
       authorization: context.userAuthorization, cookie: context.userCookie, csrfToken: context.csrfToken,
@@ -70,6 +77,7 @@ export class IdentityService {
 const UNAVAILABLE = {
   start: "The code couldn't be sent right now. Try again in a few minutes.",
   confirm: "The Health ID couldn't be created right now. Try again in a few minutes.",
+  create: "The Health ID couldn't be created right now. Try again in a few minutes.",
 } as const;
 
 /**
@@ -78,7 +86,7 @@ const UNAVAILABLE = {
  * OUTREACH_HEALTH_ID_ALREADY_CREATED, and Retry-After from retryAfterSeconds.
  * A 5xx or no answer at all is 503 OUTREACH_HEALTH_ID_UNAVAILABLE.
  */
-export function healthIdProblem(error: unknown, step: 'start' | 'confirm'): DomainProblem {
+export function healthIdProblem(error: unknown, step: keyof typeof UNAVAILABLE): DomainProblem {
   if (!(error instanceof IdentityApiProblem) || error.status >= 500 || error.status < 400) {
     return new DomainProblem(503, 'OUTREACH_HEALTH_ID_UNAVAILABLE', UNAVAILABLE[step], undefined, { exposeDetail: true });
   }
