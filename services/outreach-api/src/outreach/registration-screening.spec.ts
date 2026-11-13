@@ -443,14 +443,15 @@ describe('Outreach registration list paging', () => {
     has_screening: false, resolved_patient_id: null, resolution_kind: null, row_version: '1',
     created_at: new Date(), updated_at: new Date(), cursor_micros: String(1763000000000000 - n) });
 
-  it('without options answers the newest 100 as before, the campaign membership filter kept, no cursor when no more', async () => {
+  it('without options answers the newest 100 as before (campaign membership by the read policy, 0121), no cursor when no more', async () => {
     const query = jest.fn().mockResolvedValueOnce({ rows: [row(1), row(2)] }).mockResolvedValue({ rows: [] });
     const page = await service(query).outreach.list(context);
     expect(page).toHaveLength(2);
     expect(page.nextCursor).toBeUndefined();
     expect(page[0]).not.toHaveProperty('cursor_micros');
     const [sql, params] = query.mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain('outreach.registration_campaign_member(campaign_id, facility_id)');
+    expect(sql).toContain('from outreach.registration_cases where facility_id=$1');
+    expect(sql).not.toContain('registration_campaign_member');
     expect(sql).toContain('order by created_at desc,id desc limit $5');
     expect(params).toEqual([ids.facility, null, null, null, 101]);
     expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context,

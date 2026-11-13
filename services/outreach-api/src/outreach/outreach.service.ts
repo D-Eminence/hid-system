@@ -212,7 +212,7 @@ export class OutreachService {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<RegistrationRow & { cursor_micros: string }>(`select registration_cases.*,${HAS_SCREENING},
           ((extract(epoch from created_at) * 1000000)::numeric(20,0))::text as cursor_micros
-        from outreach.registration_cases where facility_id=$1 and outreach.registration_campaign_member(campaign_id, facility_id)
+        from outreach.registration_cases where facility_id=$1
           and ($2::uuid is null or campaign_id = $2::uuid)
           and ($3::bigint is null or (created_at, id) < (timestamptz 'epoch' + $3::bigint * interval '1 microsecond', $4::uuid))
         order by created_at desc,id desc limit $5`,

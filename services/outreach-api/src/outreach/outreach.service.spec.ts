@@ -173,13 +173,14 @@ describe('OutreachService', () => {
     expect(query).toHaveBeenCalledTimes(2);
   });
 
-  it('filters listed cases by exact campaign membership', async () => {
+  it('lists the session facility\'s cases; campaign membership is the restrictive read policy\'s (0121)', async () => {
     const query = jest.fn().mockResolvedValueOnce({ rows: [row] }).mockResolvedValueOnce({ rows: [] });
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
     await expect(new OutreachService(database as never, audit as never, identity as never)
       .list(context)).resolves.toMatchObject([{ id: ids.case, campaignId: null, healthId: null,
         healthIdCreatedByOutreach: false }]);
-    expect(query.mock.calls[0][0]).toContain('outreach.registration_campaign_member(campaign_id, facility_id)');
+    expect(query.mock.calls[0][0]).toContain('from outreach.registration_cases where facility_id=$1');
+    expect(query.mock.calls[0][0]).not.toContain('registration_campaign_member');
   });
 
   it('requires Identity authorization before opening a patient-link transaction', async () => {
