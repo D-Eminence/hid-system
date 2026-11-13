@@ -1,5 +1,7 @@
 import { types } from 'pg';
 import type { DataAccessContext } from '../../common/request-context';
+import { matchAllergies } from '../allergies/allergy-match';
+import { warningToken } from '../allergies/allergy-reader';
 import { OrderStatus } from '../shared/clinical.dto';
 import { PrescriptionsService, type PrescriptionRow } from './prescriptions.service';
 
@@ -33,15 +35,45 @@ const noRoutes = { summaries: async () => new Map(), summary: async () => null,
 describe('PrescriptionsService Pharmacy handoff', () => {
   const pharmacyApi = { acceptEhrPrescription: jest.fn() };
   const repository = { run: jest.fn() };
+  /** In order: each statement of the hand-off's transaction ('tx: …'), its audit row ('audit') and Pharmacy ('pharmacy'). */
+  let log: string[] = [];
+  let calls: { sql: string; values: unknown[] }[] = [];
+  let audits: Record<string, unknown>[] = [];
 
   beforeEach(() => {
     jest.clearAllMocks();
-    pharmacyApi.acceptEhrPrescription.mockResolvedValue({ id: '123e4567-e89b-42d3-a456-426614174007' });
+    log = [];
+    calls = [];
+    audits = [];
+    pharmacyApi.acceptEhrPrescription.mockImplementation(async () => {
+      log.push('pharmacy');
+      return { id: '123e4567-e89b-42d3-a456-426614174007' };
+    });
   });
 
-  const serviceFor = (row: PrescriptionRow) => {
-    repository.run.mockImplementation(async (_context, _patientId, _access, _event, operation) =>
-      (await operation({ query: jest.fn().mockResolvedValue({ rows: [row] }) })).value);
+  /**
+   * The hand-off with a client answering the locked prescription, whether
+   * the facility may read the patient's records (`readAllowed`), the
+   * patient's recorded allergies and the acknowledgements already stored for
+   * the prescription; the repository records the audit details as
+   * ClinicalRepository.run merges them.
+   */
+  const serviceFor = (row: PrescriptionRow, recorded: unknown[] = [], stored: unknown[] = [], readAllowed = true) => {
+    const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
+      calls.push({ sql, values });
+      log.push(`tx: ${sql.trim().split(/\s+/).slice(0, 3).join(' ')}`);
+      if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: readAllowed }] };
+      if (/from ehr\.prescriptions/.test(sql)) return { rows: [row] };
+      if (/from ehr\.recorded_allergies/.test(sql)) return { rows: recorded };
+      if (/from ehr\.prescription_allergy_acknowledgements/.test(sql)) return { rows: stored };
+      return { rows: [] };
+    }) };
+    repository.run.mockImplementation(async (_context, _patientId, _access, event, operation) => {
+      const result = await operation(client);
+      audits.push({ action: event.action, details: { ...event.details, ...result.details } });
+      log.push('audit');
+      return result.value;
+    });
     return new PrescriptionsService(repository as never, pharmacyApi as never, noRoutes as never);
   };
 
@@ -93,5 +125,110 @@ describe('PrescriptionsService Pharmacy handoff', () => {
       expect.objectContaining({ sourceEhrPrescriptionId: prescriptionId,
         sourceEhrPrescriptionVersion: 3, sourceStatus: OrderStatus.Active,
         orderingFacilityId: facilityId, patientId }), 'handoff-key-1234');
+  });
+
+  /**
+   * The review of PR 218 (Medium 1): Amoxicillin activated on Monday, a
+   * severe Penicillin allergy recorded on Tuesday, the prescription handed to
+   * this facility's pharmacy on Wednesday.
+   */
+  describe('the allergy check (0117)', () => {
+    const allergyId = '123e4567-e89b-42d3-a456-426614174010';
+    const penicillin = { id: allergyId, substance: 'Penicillin', reaction: 'Anaphylaxis', severity: 'severe' };
+    const medicine = { display: 'Amoxicillin 500 mg', code: '123' };
+    const token = warningToken(matchAllergies(medicine, [{ source: 'recorded', ...penicillin }]), medicine);
+    const handoff = { expectedRowVersion: 3, reason: 'Reviewed for Pharmacy acceptance' };
+    const acknowledgement = { reason: 'Tolerated amoxicillin in 2024; observe 30 minutes', warningToken: token };
+    const inserts = () => calls.filter((call) => /insert into/.test(call.sql));
+
+    it('refuses with 409 before Pharmacy is called, and stores nothing', async () => {
+      const service = serviceFor(prescription(OrderStatus.Active), [penicillin]);
+      await expect(service.acceptForPharmacy(context, patientId, encounterId, prescriptionId, handoff, 'handoff-key-1234'))
+        .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
+          errors: expect.arrayContaining([{ field: 'allergyAcknowledgement.warningToken', messages: [token] },
+            expect.objectContaining({ field: 'allergyAcknowledgement.rejected', code: 'ALLERGY_ACKNOWLEDGEMENT_MISSING' })]) });
+      expect(pharmacyApi.acceptEhrPrescription).not.toHaveBeenCalled();
+      expect(inserts()).toEqual([]);
+      expect(audits).toEqual([]);
+      // Checked for this prescription: a reason stored for it would have covered the match.
+      expect(calls.find((call) => /from ehr\.prescription_allergy_acknowledgements/.test(call.sql))?.values)
+        .toEqual([prescriptionId, patientId, facilityId]);
+    });
+
+    it('refuses a reason given for another warning with 409 ALLERGY_WARNING_TOKEN_STALE, before Pharmacy', async () => {
+      const service = serviceFor(prescription(OrderStatus.Active), [penicillin]);
+      await expect(service.acceptForPharmacy(context, patientId, encounterId, prescriptionId,
+        { ...handoff, allergyAcknowledgement: { ...acknowledgement, warningToken: 'b'.repeat(64) } }, 'handoff-key-1234'))
+        .rejects.toMatchObject({ status: 409, code: 'ALLERGY_ACKNOWLEDGEMENT_REQUIRED',
+          errors: expect.arrayContaining([expect.objectContaining({ code: 'ALLERGY_WARNING_TOKEN_STALE' })]) });
+      expect(pharmacyApi.acceptEhrPrescription).not.toHaveBeenCalled();
+      expect(inserts()).toEqual([]);
+    });
+
+    it('with the reason for the warning shown, stores it for the handoff stage, then hands off', async () => {
+      const service = serviceFor(prescription(OrderStatus.Active), [penicillin]);
+      await service.acceptForPharmacy(context, patientId, encounterId, prescriptionId,
+        { ...handoff, allergyAcknowledgement: acknowledgement }, 'handoff-key-1234');
+      expect(inserts().map((call) => call.values)).toEqual([[prescriptionId, patientId, facilityId, accountId, membershipId,
+        'Tolerated amoxicillin in 2024; observe 30 minutes', [allergyId], false, 'handoff', []]]);
+      expect(log.indexOf('tx: insert into ehr.prescription_allergy_acknowledgements')).toBeGreaterThan(-1);
+      expect(log.indexOf('tx: insert into ehr.prescription_allergy_acknowledgements')).toBeLessThan(log.indexOf('audit'));
+      expect(log.at(-1)).toBe('pharmacy');
+      expect(pharmacyApi.acceptEhrPrescription).toHaveBeenCalledTimes(1);
+      expect(audits).toEqual([{ action: 'ehr.prescription.pharmacy-handoff.eligibility-checked', details: {
+        expectedPrescriptionVersion: 3, prescriptionVersion: 3, allergyOverride: true, matchedRecordedCount: 1,
+        patientReportedMatched: false } }]);
+      expect(JSON.stringify(audits)).not.toMatch(/penicillin|amoxicillin|observe/i);
+      // Pharmacy gets the prescription as before, never the reason.
+      expect(JSON.stringify(pharmacyApi.acceptEhrPrescription.mock.calls[0][1])).not.toMatch(/observe|allergy/i);
+    });
+
+    it('needs no new reason when a stored one already covers every match', async () => {
+      const service = serviceFor(prescription(OrderStatus.Active), [penicillin],
+        [{ matchedRecordedAllergyIds: [allergyId], patientReportedTerms: [] }]);
+      await service.acceptForPharmacy(context, patientId, encounterId, prescriptionId, handoff, 'handoff-key-1234');
+      expect(inserts()).toEqual([]);
+      expect(pharmacyApi.acceptEhrPrescription).toHaveBeenCalledTimes(1);
+      expect(audits[0]?.details).toEqual({ expectedPrescriptionVersion: 3, prescriptionVersion: 3 });
+    });
+
+    it('ignores an acknowledgement when nothing matches', async () => {
+      const service = serviceFor(prescription(OrderStatus.Active),
+        [{ id: allergyId, substance: 'Peanuts', reaction: null, severity: 'mild' }]);
+      await service.acceptForPharmacy(context, patientId, encounterId, prescriptionId,
+        { ...handoff, allergyAcknowledgement: acknowledgement }, 'handoff-key-1234');
+      expect(inserts()).toEqual([]);
+      expect(pharmacyApi.acceptEhrPrescription).toHaveBeenCalledTimes(1);
+    });
+
+    // A facility that may write but not read the patient's records (a deny directive naming only
+    // read_records): under RLS the allergy reads would see nothing, so the check refuses first.
+    it('refuses with 403 CONSENT_REQUIRED when the facility may not read the patient\'s records, before Pharmacy', async () => {
+      const service = serviceFor(prescription(OrderStatus.Active), [], [], false);
+      await expect(service.acceptForPharmacy(context, patientId, encounterId, prescriptionId,
+        { ...handoff, allergyAcknowledgement: acknowledgement }, 'handoff-key-1234'))
+        .rejects.toMatchObject({ status: 403, code: 'CONSENT_REQUIRED' });
+      expect(pharmacyApi.acceptEhrPrescription).not.toHaveBeenCalled();
+      expect(log).not.toContain('pharmacy');
+      expect(inserts()).toEqual([]);
+      expect(audits).toEqual([]);
+      expect(calls.find((call) => /ehr\.context_allows\(/.test(call.sql))?.values).toEqual([patientId, facilityId]);
+      expect(calls.some((call) => /recorded_allergies|patient_reported_health_profiles|prescription_allergy_acknowledgements/
+        .test(call.sql))).toBe(false);
+    });
+
+    it('answers a version conflict or a prescription not active first, without reading the allergies', async () => {
+      const stale = serviceFor(prescription(OrderStatus.Active), [penicillin]);
+      await expect(stale.acceptForPharmacy(context, patientId, encounterId, prescriptionId,
+        { ...handoff, expectedRowVersion: 2 }, 'handoff-key-1234'))
+        .rejects.toMatchObject({ status: 412, code: 'PRESCRIPTION_VERSION_CONFLICT' });
+      for (const status of [OrderStatus.Draft, OrderStatus.OnHold, OrderStatus.Completed]) {
+        const service = serviceFor(prescription(status), [penicillin]);
+        await expect(service.acceptForPharmacy(context, patientId, encounterId, prescriptionId, handoff, 'handoff-key-1234'))
+          .rejects.toMatchObject({ status: 409, code: 'PRESCRIPTION_NOT_ELIGIBLE' });
+      }
+      expect(calls.some((call) => /recorded_allergies|allergy/.test(call.sql))).toBe(false);
+      expect(pharmacyApi.acceptEhrPrescription).not.toHaveBeenCalled();
+    });
   });
 });

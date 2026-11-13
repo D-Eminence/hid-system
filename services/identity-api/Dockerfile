@@ -23,7 +23,7 @@ RUN mkdir -p /var/run/hid/workload-tokens && chown 65532:65532 /var/run/hid/work
 # This runtime deliberately has no shell or package manager. The pinned Node 22
 # Distroless image retains Debian 13 CA/TLS support while excluding the Node
 # image's bundled npm tree and Debian packages that are not HID runtime needs.
-FROM gcr.io/distroless/nodejs22-debian13@sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812 AS runtime
+FROM gcr.io/distroless/nodejs22-debian13@sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app/services/identity-api
 COPY --chown=65532:65532 --from=production-dependencies /app/services/identity-api/node_modules ./node_modules

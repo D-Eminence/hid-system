@@ -664,7 +664,8 @@ credentials or tokens. `GET /api/v1/identity/me` answers `ninVerified`
 
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
-the `read_records` action for the exact facility and patient. Activation requires a reason, expires
+the `read_records` action for the exact facility and patient. With 0117 it also answers `allergies` (recorded and
+patient-reported, labelled by source; see section 44, "Allergies and the allergy check at prescribing"). Activation requires a reason, expires
 within the configured 5–240 minute bounds, permits at most ten new activations
 per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
 notification and review. Idempotent replay does not extend expiry. Expiry,
@@ -4195,6 +4196,22 @@ worker command sees no job. 0112 has no down migration; the declaration is
 signed separately. Suite:
 `services/ehr-api/test/database/ocr-source-deletion.integration.sql`.
 
+Expected owner attributes (release checklist P8; recorded 2026-11-12 from the
+triage of the suites under a migration login that is neither a superuser nor
+BYPASSRLS): the owner of the OCR tables and of their SECURITY DEFINER commands
+(one role for `ocr.jobs`, `ocr.validations` and `ocr.job_events`) bypasses
+row-level security, as every OCR write needs (`ocr.job_events` has no INSERT
+policy, so a non-bypass owner refuses every job insert and status change); the
+owner of the outreach tables (`outreach.campaign_members`) does not (0110 fixed
+the campaign check for that owner). These are expected, not verified; the owner
+confirms them on production with this read-only query (also in the sealed QA
+tenant migration's pre-sign header):
+`select c.oid::regclass, c.relowner::regrole, r.rolsuper, r.rolbypassrls from pg_class c join pg_roles r on r.oid = c.relowner where c.oid in ('ocr.jobs'::regclass, 'ocr.validations'::regclass, 'ocr.job_events'::regclass, 'outreach.campaign_members'::regclass);`.
+The suites treat that owner, the
+migration login, as not a runtime role whatever its name, and
+`ocr-source-deletion` runs the cases that need an owner who sees the source
+document only when it does.
+
 ## 42. Records processing: publishing a reading as a draft (0113)
 
 Owner decision (D-Eminence, 2026-11-11), verbatim: "Option B: allow drafts,
@@ -4574,6 +4591,154 @@ The website's facility list says "FCT". Show "Federal Capital Territory (FCT)" a
 - The current-staff-context `facility` object does not include the profile. Use
   `GET /identity/facility-profile`.
 - The QoreID state, LGA, city and company email are not captured for pre-fill yet (plan A.5).
+
+## 44. Allergies and the allergy check at prescribing (0117)
+
+Two sources, always kept apart and labelled on screens:
+
+- **Recorded** (`ehr.recorded_allergies`, 0117): what a clinician recorded at a facility.
+- **Reported by the patient** (`ehr.patient_reported_health_profiles.allergies`, 0094): free text the patient typed.
+
+All routes are direct care only (`X-Purpose-Of-Use: direct-care`), go through `ClinicalRepository.run` (Identity's
+authorization, then forced RLS) and are audited by action, resource and counts, never by substance, reaction or
+reason text.
+
+| Route | Permission | Answer |
+| --- | --- | --- |
+| `GET ehr/patients/:patientId/allergies[?includeEnteredInError=true]` | `ehr.note.read` | `{ recorded: RecordedAllergy[], patientReported: { allergies: string \| null, updatedAt } }` |
+| `POST ehr/patients/:patientId/allergies` (`Idempotency-Key`) | `ehr.note.write` | 201 `RecordedAllergy` |
+| `POST ehr/patients/:patientId/allergies/:allergyId/entered-in-error` | `ehr.note.write` | 200 `RecordedAllergy` |
+| `POST ehr/patients/:patientId/allergy-check` | `ehr.prescription.write` | `{ matches: AllergyMatch[], acknowledgementRequired, warningToken }` |
+
+`RecordedAllergy`: `id, patientId, facilityId, createdBy, createdByMembershipId, substance, reaction, severity
+(mild | moderate | severe | unknown), status (active | entered_in_error), enteredInErrorBy, enteredInErrorAt,
+enteredInErrorReason, rowVersion, createdAt, updatedAt, recordedHere`. Recorded allergies follow the patient: a
+clinician with read access at any facility sees those recorded at every facility; only the recording facility
+(`recordedHere: true`) may mark one entered in error (else 409 `ALLERGY_RECORDED_ELSEWHERE`, decided from a plain
+read before the row is locked, because under forced RLS a locking read at another facility sees no row).
+
+Create body: `{ substance (1-200, one line), reaction? (1-500, one line), severity }`. "NKDA", "No known allergies",
+"none" and the like are refused with 400 `ALLERGY_NOT_A_SUBSTANCE` (they are not an allergy). The list answers active
+allergies first, the most serious first (severe, not known, moderate, mild), then newest first.
+Entered in error body: `{ expectedRowVersion, reason (3-500) }`; 412 `VERSION_CONFLICT`, 409
+`ALLERGY_ALREADY_ENTERED_IN_ERROR`. Nothing is ever deleted.
+
+**The check.** `AllergyMatch`: `source (recorded | patient_reported), allergyId? (recorded only; the first when
+grouped), allergyIds? (recorded only: every recorded allergy the line stands for), substance, reaction, severity,
+matchKind (same_medicine | same_class | cross_reactivity), className?, recordedHere? and recordedOn? (recorded only:
+whether it was recorded at the current facility, and when), message`. The message is plain English: the allergy with
+its severity and reaction ("Penicillin allergy: SEVERE (Anaphylaxis)." or "Patient-reported allergy: “…”."), why
+it matched, then where it came from ("Recorded by a clinician at this facility on 3 Mar 2026.", "… at another
+facility …", or "Entered by the patient in their Health ID portal, not checked by a clinician."). The same substance,
+severity and reaction recorded more than once is one line with every id in `allergyIds` ("recorded at 2
+facilities"). The medicine's display text and code are compared with each allergy (the patient's text is split into
+terms on commas, semicolons, slashes, new lines and "and"; "none", "nil", "NKDA" and the like are ignored; a hyphen
+separates words, so "Amoxicillin-clavulanate" names amoxicillin; "sulph" is read as "sulf"; brand and other names are
+read as their generics, both ways, e.g. Flagyl as metronidazole, Augmentin as amoxicillin with clavulanic acid, Keflex
+as cefalexin, Tramal as tramadol, Ciprotab as ciprofloxacin, Panadol as paracetamol and co-codamol as codeine with
+paracetamol, and acetaminophen and paracetamol (or cefalexin and cephalexin) as one medicine; one-letter
+misspellings and plurals of names of 8 letters or more match; salts, forms and strengths such as "sodium",
+"sulfate", "capsules" or "500mg" do not name a medicine on their own): the same medicine; the same class
+(`className`: "penicillins", "cephalosporins", "carbapenems", "sulfonamides (“sulfa” medicines)", "NSAIDs, the
+anti-inflammatory painkillers", "fluoroquinolones" (also named "quinolones"; any "-floxacin") or "macrolides" (any
+"-thromycin"); by class words, members, prefixes and name patterns; quinine, chloroquine and the other quinolines are
+not quinolones); and cross-reactivity between penicillins, cephalosporins and carbapenems, both ways, and between
+ceftazidime and aztreonam (`className` is then the medicine's name). No match never means "safe".
+
+`warningToken` names exactly the warning shown: the sha256 (hex) of the medicine (its normalized display text and
+code) and every matched allergy with how it matched. The prescriber's acknowledgement must carry it.
+
+**At prescribing, at the send and at the hand-off.** The check runs, inside the transaction that writes the
+prescription (or the route, or the hand-off's eligibility audit) and under a per-patient lock shared with recording an
+allergy, whenever a prescription is written as or becomes active, and again before it goes to a pharmacy, because an
+allergy may have been recorded since it became active:
+
+- `POST ehr/patients/:patientId/encounters/:encounterId/prescriptions` (create);
+- `PATCH …/prescriptions/:id` with `status: active` from draft (Activate) or on hold (Resume);
+- `POST …/prescriptions/:id/order-routes` (send to another facility) of a draft, which the send makes active, or of
+  an active prescription: every status `ehr.send_order_route` accepts (0098: draft and active). A prescription in any
+  other status is not checked, so the send's own 409 `ORDER_ROUTE_ORDER_NOT_ELIGIBLE` (or its 404) answers;
+- `POST …/prescriptions/:id/pharmacy-work-item` (the hand-off to this facility's pharmacy, permission
+  `pharmacy.work-item.accept`), after its own checks, which answer first: 412 `PRESCRIPTION_VERSION_CONFLICT`, 409
+  `PRESCRIPTION_NOT_ELIGIBLE` (not active) and 409 `PRESCRIPTION_ROUTED`. Its 409 answers before pharmacy-api is
+  called, so nothing is written in the EHR or in Pharmacy.
+
+The check reads the allergies under forced RLS, which needs `read_records`, so when the facility may write but not
+read the patient's records (a deny directive of the patient's naming only `read_records`) it refuses with 403
+`CONSENT_REQUIRED`, as a missing consent is refused everywhere else, before it reads or writes anything (the send asks
+before it reads the prescription), so a prescription is never written, activated, resumed, sent or handed on unchecked.
+
+On Activate, Resume, send and hand-off, a match already covered by an acknowledgement stored for the prescription (at
+any stage: its recorded allergy ids, and each of the patient's own terms) needs no new one. Otherwise, with a match and
+no accepted `allergyAcknowledgement`, nothing is written and the answer is 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED` with,
+in `errors[]`:
+
+- one entry per match: `{ field: "allergyAcknowledgement", messages: [the match's message] }`;
+- one entry `{ field: "allergyAcknowledgement.warningToken", messages: [the current warning's token] }`;
+- one entry per part of the acknowledgement that failed: `{ field: "allergyAcknowledgement.rejected", code,
+  messages: [a plain-English sentence] }`. A reason and a token can both fail (two entries).
+
+| `code` | When | What the client does |
+| --- | --- | --- |
+| `ALLERGY_ACKNOWLEDGEMENT_MISSING` | no `allergyAcknowledgement` was sent (the first warning) | show the warning, ask for a reason |
+| `ALLERGY_ACKNOWLEDGEMENT_REASON_MISSING` | `reason` absent, or only spaces | ask for a reason; the token was fine unless a token entry is also present |
+| `ALLERGY_ACKNOWLEDGEMENT_REASON_INVALID` | `reason` under 10 or over 500 characters after trimming, no word of three letters, or a control character other than a new line | keep the warning, ask to fix the reason |
+| `ALLERGY_WARNING_TOKEN_INVALID` | `warningToken` absent or not 64 lower-case hex | run the check again (or use the token in this 409) |
+| `ALLERGY_WARNING_TOKEN_STALE` | a well-formed token of another warning (an allergy recorded meanwhile, another medicine, or the patient's text changed) | show the new warning, clear the tick, send the token from this 409 |
+
+The `detail` is "The allergy warning changed since it was shown. Check the allergies again and give a reason to go
+ahead." when the token is stale; "The reason to go ahead after the allergy warning was not accepted. …" for a reason
+or token problem otherwise; and "This medicine may match an allergy on the patient's record. …" when none was sent. A
+client reads `errors[].code` on the `allergyAcknowledgement.rejected` entries, not the detail. The create, PATCH,
+send and hand-off bodies take `allergyAcknowledgement: { reason, warningToken }`, an object; the request validation
+only refuses (400) a non-object, a non-string or null `reason` or `warningToken`, a `reason` over 2000 or a
+`warningToken` over 200 characters, or another property. The reason's rules (10-500 after trimming, at least one word
+of three letters, no control character but new lines) and the token are checked by the allergy check, so their
+refusals are the 409 above with the current warning, never a 400. A valid acknowledgement writes the prescription (or
+the change, or the route, or lets the hand-off go on) and one `ehr.prescription_allergy_acknowledgements` row with
+its stage (`create | activate | resume | send | handoff`), the reason, the matched recorded allergy ids and the
+patient's own terms that matched. The audit of that create, update, send or hand-off
+(`ehr.prescription.pharmacy-handoff.eligibility-checked`) adds `allergyOverride: true, matchedRecordedCount,
+patientReportedMatched` (counts and a flag, never the substance or the reason). The hand-off stores its row in the
+EHR transaction that ends before pharmacy-api is called, as it does its audit row, so a refusal by Pharmacy after
+that keeps the row, and a retry finds the match covered. A send's replay (the same key and body) is checked like the
+first send: it answers the stored route unless an allergy recorded since matches and no stored reason covers it, and
+then the 409; a reason given on a replay is not stored, since the route was already sent. An acknowledgement sent
+when nothing needs one is ignored, whatever it holds. A client must only send `allergyAcknowledgement` after a
+warning: an ehr-api without 0117 refuses the unknown property (on the hand-off body, so does an ehr-api from before
+the hand-off check).
+
+**The stored acknowledgements on the prescription reads.** `GET …/encounters/:encounterId/prescriptions/:id` and each
+item of `GET …/encounters/:encounterId/prescriptions` carry `allergyAcknowledgements:
+PrescriptionAllergyAcknowledgement[]` (oldest first; `[]` when none), so a second clinician activating, resuming,
+sending or handing it off sees the earlier reason. `PrescriptionAllergyAcknowledgement`: `id, stage (create |
+activate | resume | send | handoff), reason, createdBy (account id), createdByMembershipId, createdAt,
+matchedRecordedAllergyIds (uuid[]: the recorded allergies it covered; `GET …/allergies?includeEnteredInError=true`
+names them), patientReportedMatched, patientReportedTerms (string[]: the patient's own terms it covered,
+normalized)`. Same permission (`ehr.prescription.read`), authorization and RLS as before (acknowledgements are read
+at their own facility with read access); the read's audit adds `allergyAcknowledgementCount` (the list: the page's
+total), never the reason.
+
+**Severity in the messages.** `severe` reads "SEVERE", `moderate` "moderate", `mild` "mild" and `unknown` "severity
+not known" (the clinician's choice "Not known" in the form): "Latex allergy: severity not known."
+
+**In the emergency read (0117).** `GET /api/v1/ehr/patients/:patientId/emergency-records` (purpose `emergency`, a
+current break-glass grant, as before) also answers `allergies`, read-only and labelled by source:
+
+```text
+allergies: {
+  recorded: [{ source: "recorded", id, substance, reaction | null, severity (mild | moderate | severe | unknown),
+               recordedHere, recordedOn }],          // active only, every facility, most serious first, at most 200
+  patientReported: { source: "patient_reported", allergies: string | null, updatedAt | null }
+}
+```
+
+`recordedHere` is whether it was recorded at the current facility; `recordedOn` when. No route changes an allergy
+under the emergency purpose. RLS needs no new policy: 0117's and 0094's read policies
+(`ehr.imported_record_read_context`) go through `ehr.context_allows` at the current facility, which admits the
+reasoned break-glass grant for `read_records` under purpose `emergency` (and only that action). The audit
+(`ehr.emergency.records.read`) adds `recordedAllergyCount` and `patientReportedAllergies` (a flag), never the
+substance, reaction or text.
 
 ## 47. Cross-facility imported records on a share (0124, provisional)
 

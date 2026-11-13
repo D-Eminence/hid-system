@@ -17,6 +17,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsOptionalButNotNull } from '../../common/validation';
+import { AllergyAcknowledgementDto } from '../allergies/allergies.dto';
 
 const trim = ({ value }: TransformFnParams): unknown => typeof value === 'string' ? value.trim() : value;
 
@@ -371,6 +372,17 @@ export class CreatePrescriptionDto {
 
   @IsEnum(OrderStatus)
   status!: OrderStatus;
+
+  /**
+   * 0117: sent only after an allergy warning (409 ALLERGY_ACKNOWLEDGEMENT_REQUIRED
+   * or the allergy check), with the prescriber's reason to go ahead and the
+   * warning's token.
+   */
+  @IsOptionalButNotNull()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => AllergyAcknowledgementDto)
+  allergyAcknowledgement?: AllergyAcknowledgementDto;
 }
 
 export class UpdatePrescriptionDto extends VersionedUpdateDto {
@@ -393,6 +405,17 @@ export class UpdatePrescriptionDto extends VersionedUpdateDto {
   @IsOptionalButNotNull()
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   endsOn?: string;
+
+  /**
+   * 0117: on Activate or Resume, sent only after an allergy warning (409
+   * ALLERGY_ACKNOWLEDGEMENT_REQUIRED or the allergy check), with the
+   * prescriber's reason and the warning's token.
+   */
+  @IsOptionalButNotNull()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => AllergyAcknowledgementDto)
+  allergyAcknowledgement?: AllergyAcknowledgementDto;
 }
 
 export class AcceptPrescriptionForPharmacyDto {
@@ -404,6 +427,17 @@ export class AcceptPrescriptionForPharmacyDto {
   @IsString()
   @Length(8, 500)
   reason!: string;
+
+  /**
+   * 0117: sent only after an allergy warning on the hand-off (409
+   * ALLERGY_ACKNOWLEDGEMENT_REQUIRED or the allergy check), with the reason to
+   * go ahead and the warning's token.
+   */
+  @IsOptionalButNotNull()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => AllergyAcknowledgementDto)
+  allergyAcknowledgement?: AllergyAcknowledgementDto;
 }
 
 /** Sends an active lab request, at the version the client last read, to Lab. */
