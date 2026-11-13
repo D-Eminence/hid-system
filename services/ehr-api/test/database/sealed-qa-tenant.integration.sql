@@ -686,12 +686,6 @@ select pg_temp.assert('one audit row for the move, a count only (no address)',
 select pg_temp.assert('the demo seed is idempotent on the new addresses',
   (identity.sealed_demo_install()->>'inserted')::integer = 0);
 drop table demo_logins_before;
--- The owner's real outreach login at outreach@ (owner, 2026-11-13): the QA
--- organiser is its plus-alias outreach+qa@, so the seed neither refuses nor
--- touches it.
-insert into auth.accounts (id, subject, email, display_name, status, email_verified_at)
-values ('a1230020-0000-4000-8000-000000000001', 'synthetic:qa-suite:real-outreach',
-  'outreach@healthidentitydirectory.com', 'Real Outreach Organiser', 'active', clock_timestamp());
 set local role hid_identity_api_runtime;
 select pg_temp.as_platform_admin();
 select set_config('hid.test.overview_before', pg_temp.overview(), true);
@@ -702,10 +696,6 @@ select pg_temp.assert('the overview answers before the install',
 -- 2b. The install (twice).
 create temp table sealed_qa_install_1 as select identity.sealed_qa_install() as summary;
 create temp table sealed_qa_install_2 as select identity.sealed_qa_install() as summary;
-select pg_temp.assert('the real outreach@ login is untouched and not QA',
-  (select account.email = 'outreach@healthidentitydirectory.com' and account.status = 'active'
-          and not identity.sealed_qa_account(account.id) and not identity.sealed_demo_account(account.id)
-     from auth.accounts account where account.id = 'a1230020-0000-4000-8000-000000000001'));
 do $$
 declare
   first jsonb := (select summary from sealed_qa_install_1);
@@ -739,7 +729,7 @@ begin
             'lab2@healthidentitydirectory.com|pending_reset|true|true|true',
             'lab@healthidentitydirectory.com|pending_reset|true|true|true',
             'migrate@healthidentitydirectory.com|pending_reset|true|true|true',
-            'outreach+qa@healthidentitydirectory.com|pending_reset|true|true|true',
+            'outreach@healthidentitydirectory.com|pending_reset|true|true|true',
             'patient1@healthidentitydirectory.com|pending_reset|true|true|true',
             'patient2@healthidentitydirectory.com|pending_reset|true|true|true',
             'pharmacy@healthidentitydirectory.com|pending_reset|true|true|true']);

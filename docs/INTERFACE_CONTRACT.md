@@ -4596,7 +4596,7 @@ per role:
 | `lab2@healthidentitydirectory.com` | lab at QA Laboratory (a result's second check) |
 | `pharmacy@healthidentitydirectory.com` | pharmacist at QA Pharmacy |
 | `admin@healthidentitydirectory.com` | org_admin at QA Hospital, QA Laboratory and QA Pharmacy |
-| `outreach+qa@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
+| `outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
 
 Two patient logins: `patient1@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA
 Patient One) and `patient2@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
