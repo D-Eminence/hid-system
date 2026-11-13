@@ -237,16 +237,18 @@ describe('Outreach registration area and hasScreening (0118)', () => {
     expect(query.mock.calls[1][1][11]).toBe('Ikeja LGA');
     const plain = jest.fn().mockResolvedValueOnce({ rows: [{ request_sha256: requestDigest(
       'outreach.registration-case.create', { ...input, phone: null, operationalNotes: null }),
-    registration_case_id: ids.case }] }).mockResolvedValueOnce({ rows: [caseRow] });
+    registration_case_id: ids.case }] }).mockResolvedValueOnce({ rows: [caseRow] }).mockResolvedValueOnce({ rows: [] });
     await expect(service(plain).outreach.create({ ...input, area: undefined }, key, context))
       .resolves.toMatchObject({ id: ids.case, area: null });
   });
 
   it('answers hasScreening on a read and the list', async () => {
-    const query = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, area: null, has_screening: true }] });
+    const query = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, area: null, has_screening: true }] })
+      .mockResolvedValueOnce({ rows: [] });
     await expect(service(query).outreach.get(ids.case, context)).resolves.toMatchObject({ hasScreening: true, area: null });
     expect(query.mock.calls[0][0]).toContain('outreach.registration_screenings');
-    const list = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, has_screening: false }] });
+    const list = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, has_screening: false }] })
+      .mockResolvedValueOnce({ rows: [] });
     await expect(service(list).outreach.list(context)).resolves.toMatchObject([{ hasScreening: false }]);
     expect(list.mock.calls[0][0]).toContain('has_screening');
   });

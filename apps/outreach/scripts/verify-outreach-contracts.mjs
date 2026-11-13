@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import process from 'node:process'
 
@@ -49,6 +49,25 @@ if (!files.gateway.includes("'/outreach'") || !files.gateway.includes('ports.out
 if (/OutreachModule/.test(files.ehrApp)) failures.push('EHR still registers the legacy Outreach module')
 if (/insert into identity\.|update identity\.|insert into ehr\.|update ehr\.|hid_code|\bNIN\b/i.test(files.service)) {
   failures.push('Outreach service crosses a canonical Identity/EHR persistence boundary')
+}
+// Every outreach-api source file: never write Identity or EHR, never handle a
+// NIN. A Health ID is read in exactly one place (0119): registration-health-ids.ts,
+// through identity.outreach_registration_health_ids_for only.
+const outreachSource = join(repository, 'services/outreach-api/src')
+const healthIdReader = join(outreachSource, 'outreach/registration-health-ids.ts')
+for (const entry of await readdir(outreachSource, { recursive: true })) {
+  if (!entry.endsWith('.ts') || entry.endsWith('.spec.ts')) continue
+  const path = join(outreachSource, entry)
+  const text = await readFile(path, 'utf8')
+  if (/insert into identity\.|update identity\.|delete from identity\.|insert into ehr\.|update ehr\.|delete from ehr\.|\bNIN\b/i.test(text)) {
+    failures.push(`${entry} crosses a canonical Identity/EHR persistence boundary`)
+  }
+  if (/hid_code/i.test(text)) {
+    const reads = text.match(/from identity\.[a-z_]+/gi) ?? []
+    if (path !== healthIdReader || reads.length !== 1 || reads[0] !== 'from identity.outreach_registration_health_ids_for') {
+      failures.push(`${entry} reads a Health ID other than through identity.outreach_registration_health_ids_for`)
+    }
+  }
 }
 
 if (failures.length) {
