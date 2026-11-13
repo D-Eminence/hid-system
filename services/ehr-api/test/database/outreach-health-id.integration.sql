@@ -575,6 +575,41 @@ select pg_temp.hi_case('7p no patient holds the unproven phone, so sign-up is no
   null, null, null, null,
   $s$select count(*)::text from identity.patients where phone_lookup_hmac = repeat('7', 64)$s$);
 
+-- 7c. No phone: an active patient with the same name and sex flags the new
+-- Health ID; the other sex does not (Rahman's check). Registrations 7 (female)
+-- and 8 (male) at campaign 5, adults with no phone, and a signed-up patient
+-- with that name.
+set local session_replication_role = replica;
+insert into outreach.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, local_command_id,
+  temporary_patient_id, full_name, sex, age_years, phone, operational_notes, campaign_id, created_at)
+select ('6c080000-0000-4000-8000-00000000000' || n)::uuid, '6c000000-0000-4000-8000-000000000002',
+  '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001', gen_random_uuid(),
+  'tmp_' || gen_random_uuid(), 'Ngozi  Same Name', sex, 40, null, 'Checked blood pressure',
+  '6c070000-0000-4000-8000-000000000005', now() - interval '1 hour'
+  from (values (7, 'female'), (8, 'male')) as r(n, sex);
+insert into outreach.registration_consents (registration_case_id, facility_id, consent_text_version, language, method,
+  guardian_name, captured_by_account_id, captured_by_membership_id)
+select ('6c080000-0000-4000-8000-00000000000' || n)::uuid, '6c000000-0000-4000-8000-000000000002', 'notice-2026-11-01',
+  'ha', 'guardian', 'Mama Person ' || n, '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001'
+  from (values (7), (8)) as r(n);
+insert into outreach.command_idempotency (requester_account_id, requester_membership_id, facility_id, operation,
+  idempotency_key, request_sha256, registration_case_id)
+select '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001',
+  '6c000000-0000-4000-8000-000000000002', 'registration_case_create', 'healthid-key-' || n, repeat('f', 64),
+  ('6c080000-0000-4000-8000-00000000000' || n)::uuid from (values (7), (8)) as r(n);
+set local session_replication_role = origin;
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, gender, source_system, status)
+values ('6c0b0000-0000-4000-8000-000000000008', 'HID-RTE6R8', 'Ngozi', 'Same Name', 'ngozi same name', 'female',
+  'hid-public-signup', 'active');
+select pg_temp.idrt('7q no phone, an active patient with the same name and sex: created', 'HID-RTE6D8/t',
+  pg_temp.unclaimed_sql(7, 'HID-RTE6D8', null, repeat('d', 64)), true);
+select pg_temp.idrt('7r no phone, the same name but the other sex: created', 'HID-RTE6D9/t',
+  pg_temp.unclaimed_sql(8, 'HID-RTE6D9', null, repeat('e', 64)), true);
+select pg_temp.hi_case('7s flagged for the same sex only', 'HID-RTE6D8=true/HID-RTE6D9=false', session_user::text,
+  null, null, null, null,
+  $s$select string_agg(hid_code || '=' || possible_duplicate, '/' order by hid_code)
+       from identity.outreach_registration_health_ids where hid_code in ('HID-RTE6D8', 'HID-RTE6D9')$s$);
+
 -- 6c. 0116's sweep: registration 5 (a Health ID was created) is linked and is
 -- not redacted as "never linked"; registration 1 (none) is.
 set local session_replication_role = replica;
