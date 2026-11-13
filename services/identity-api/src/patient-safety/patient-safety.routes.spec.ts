@@ -80,6 +80,7 @@ describe('Patient-only routes (A9)', () => {
     // The patient's sharing (0095).
     'PatientSharesController.search', 'PatientSharesController.create', 'PatientSharesController.invitations',
     'PatientSharesController.invite', 'PatientSharesController.cancel', 'PatientSharesController.confirm',
+    'PatientSharesController.scopes',
     // Delete my account (0096).
     'PatientAccountDeletionController.status', 'PatientAccountDeletionController.requestDeletion',
     'PatientAccountDeletionController.confirm', 'PatientAccountDeletionController.cancel',

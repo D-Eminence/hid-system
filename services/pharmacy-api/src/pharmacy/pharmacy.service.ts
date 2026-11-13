@@ -9,8 +9,9 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
 import type { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
-import { IMPORT_PAGE_DEFAULT, type ListImportedMedicationsQueryDto, type OcrMedicationImportBatchDto,
-  type OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
+import { IMPORT_PAGE_DEFAULT, IMPORT_PAGE_MAX, type ListImportedMedicationsQueryDto,
+  type ListOtherFacilityImportedMedicationsQueryDto, type OcrMedicationImportBatchDto, type OcrMedicationImportDto }
+  from './dto/ocr-medication-import.dto';
 import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard } from './order-route-cards';
 
@@ -87,6 +88,63 @@ export const PATIENT_IMPORTS_QUERY = `select e.* from pharmacy.imported_medicati
     and ($3::uuid is null or (e.created_at,e.id) < (select c.created_at,c.id
       from pharmacy.imported_medication_evidence c where c.id=$3 and c.patient_id=$1 and c.facility_id=$2))
   order by e.created_at desc,e.id desc limit $4`;
+
+/**
+ * 0124: one page of the patient's imported medication records from other
+ * facilities. $1 patient, $2 and $3 the cursor (created_at and id of the last
+ * record of the previous page, or both null), $4 the page size. cursor_at
+ * keeps created_at's microseconds for the next cursor. Exported for the tests.
+ */
+export const OTHER_FACILITY_IMPORTS_QUERY = `select import_id::text,source_facility_id::text,source_facility_name,
+  medication_text,strength_text,dose_text,frequency_text,historical_context,activity_status,created_at,
+  to_char(created_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_at
+  from pharmacy.patient_imports_other_facilities($1::uuid,$2::timestamptz,$3::uuid,$4::integer)`;
+
+interface OtherFacilityImportRow extends QueryResultRow {
+  import_id: string; source_facility_id: string; source_facility_name: string; medication_text: string;
+  strength_text: string | null; dose_text: string | null; frequency_text: string | null;
+  historical_context: string | null; activity_status: string; created_at: Date; cursor_at: string;
+}
+
+/**
+ * 0124: a refused cross-facility read does not raise (its denied audit row
+ * must survive); it sets this transaction setting and returns no rows. Read in
+ * the same transaction, after the query. Exported for the tests.
+ */
+export const OTHER_FACILITIES_REFUSAL_QUERY = `select current_setting('hid.other_facilities_refused', true) as refused`;
+export const OTHER_FACILITIES_REFUSED = 'OTHER_FACILITIES_NOT_SHARED';
+
+const CURSOR_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+const CURSOR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The other-facilities cursor: base64url of '<time with microseconds, UTC>|<id>'. */
+export function encodeOtherFacilityCursor(at: string, id: string): string {
+  return Buffer.from(`${at}|${id}`, 'utf8').toString('base64url');
+}
+
+/** The cursor's time and id, or a 400 INVALID_CURSOR problem. */
+export function decodeOtherFacilityCursor(cursor: string): { at: string; id: string } {
+  const [at, id, ...rest] = Buffer.from(cursor, 'base64url').toString('utf8').split('|');
+  if (rest.length > 0 || !at || !id || !CURSOR_AT.test(at) || !Number.isFinite(Date.parse(at)) || !CURSOR_ID.test(id)) {
+    throw new DomainProblem(400, 'INVALID_CURSOR', 'Invalid record cursor');
+  }
+  return { at, id };
+}
+
+/** A refusal of pharmacy.patient_imports_other_facilities as its problem; anything else unchanged (500). */
+function otherFacilitiesProblem(error: unknown): unknown {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  const message = typeof error === 'object' && error !== null ? (error as { message?: unknown }).message : undefined;
+  if (code === '42501' && message === 'OTHER_FACILITIES_NOT_SHARED') {
+    return new DomainProblem(403, 'OTHER_FACILITIES_NOT_SHARED',
+      'The patient has not shared imported records from other facilities with you');
+  }
+  if (code === '22023') {
+    return new DomainProblem(400, 'OTHER_FACILITIES_REQUEST_INVALID',
+      'The request for records from other facilities is invalid');
+  }
+  return error;
+}
 
 const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
   from pharmacy.dispensings d left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
@@ -535,6 +593,49 @@ export class PharmacyService {
       }, { returnedCount: page.length, importIds: page.map((row) => row.id), paged: Boolean(query.cursor) });
       return { items: page.map((row) => this.projectImport(row)), nextCursor };
     });
+  }
+
+  /**
+   * 0124 (Q64 option A): one page of the patient's imported medication records
+   * from OTHER facilities, newest first, for staff at the facility of an
+   * active patient share to their membership that includes other facilities.
+   * pharmacy.patient_imports_other_facilities checks the share (never
+   * break-glass, a PIN grant or an approved request; purpose direct-care),
+   * withholds sensitive records unless the patient included them, and writes
+   * the read's one audit row; so no Identity decision is asked and no second
+   * audit row is written here. nextCursor is set when a full page came back.
+   */
+  async listOtherFacilityImports(context: DataAccessContext, query: ListOtherFacilityImportedMedicationsQueryDto) {
+    const limit = Math.min(Math.max(query.limit ?? IMPORT_PAGE_DEFAULT, 1), IMPORT_PAGE_MAX);
+    const cursor = query.cursor ? decodeOtherFacilityCursor(query.cursor) : null;
+    let rows: OtherFacilityImportRow[];
+    try {
+      const read = await this.database.withTransaction(context, async (client) => {
+        const found = (await client.query<OtherFacilityImportRow>(
+          OTHER_FACILITY_IMPORTS_QUERY, [query.patientId, cursor?.at ?? null, cursor?.id ?? null, limit])).rows;
+        const flag = (await client.query<{ refused: string | null }>(OTHER_FACILITIES_REFUSAL_QUERY)).rows[0]?.refused;
+        return { found, refused: flag === OTHER_FACILITIES_REFUSED };
+      });
+      // The denied audit row is committed; then the refusal is answered.
+      if (read.refused) {
+        throw new DomainProblem(403, 'OTHER_FACILITIES_NOT_SHARED',
+          'The patient has not shared imported records from other facilities with you');
+      }
+      rows = read.found;
+    } catch (error) {
+      if (error instanceof DomainProblem) throw error;
+      throw otherFacilitiesProblem(error);
+    }
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      items: page.map((row) => ({ id: row.import_id, sourceFacilityId: row.source_facility_id,
+        sourceFacilityName: row.source_facility_name, medicationText: row.medication_text,
+        strengthText: row.strength_text, doseText: row.dose_text, frequencyText: row.frequency_text,
+        historicalContext: row.historical_context, activityStatus: row.activity_status, createdAt: row.created_at,
+        provenance: 'imported-from-paper-other-facility' as const })),
+      nextCursor: page.length === limit && last ? encodeOtherFacilityCursor(last.cursor_at, last.import_id) : null,
+    };
   }
 
   private async authorize(patientId: string, context: DataAccessContext,

@@ -1651,3 +1651,25 @@ revoke all on identity.facility_profiles, identity.nigeria_states, identity.regi
 -- no DELETE (rows are never deleted).
 grant select, insert, update on ehr.recorded_allergies to hid_ehr_runtime, hid_schema_test_runtime;
 grant select, insert on ehr.prescription_allergy_acknowledgements to hid_ehr_runtime, hid_schema_test_runtime;
+
+-- Cross-facility imported records on a patient's share (0124, Q64 option A),
+-- as that migration grants them: the patient's scoped share command and the
+-- list of their scopes to the Identity runtime; each cross-facility read to
+-- its own runtime. identity.patient_share_scopes, the two marker tables and
+-- the Identity helpers (sensitive text, source name, share access, audit,
+-- the immutability trigger) are granted to no runtime role.
+grant execute on function
+  identity.create_my_consent_share_scoped(text,uuid,uuid,text,text,boolean,boolean,text,text),
+  identity.list_my_share_scopes(text,uuid)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function lab.patient_imports_other_facilities(uuid,timestamptz,uuid,integer)
+  to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.patient_imports_other_facilities(uuid,timestamptz,uuid,integer)
+  to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function identity.patient_share_scopes_immutable(),
+  identity.cross_facility_text_sensitive(text),
+  identity.cross_facility_source_name(uuid,uuid),
+  identity.share_other_facilities_access(uuid,text,uuid,uuid,text),
+  identity.cross_facility_read_audit(text,text,uuid,uuid,text,jsonb) from public;
+revoke all on identity.patient_share_scopes, lab.other_facility_import_reads,
+  pharmacy.other_facility_import_reads from public;

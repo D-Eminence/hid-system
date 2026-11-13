@@ -84,4 +84,29 @@ describe('LabApiClient transport contract', () => {
     await expect(client.patientImports('123e4567-e89b-42d3-a456-426614174099', bearerContext))
       .rejects.toMatchObject({ status: 502, payload: { code: 'INVALID_LAB_IMPORT_RESPONSE' } });
   });
+
+  it('reads one patient\'s imported Lab evidence from other facilities (0124), refusing its own facility\'s or an unmarked record', async () => {
+    const patientId = '123e4567-e89b-42d3-a456-426614174010';
+    const record = { id: '123e4567-e89b-42d3-a456-426614174012', sourceFacilityId: '123e4567-e89b-42d3-a456-426614174020',
+      sourceFacilityName: 'Synthetic District Clinic', status: 'accepted', externalLabName: null, externalReference: null,
+      collectedAt: null, reportedAt: null, receivedAt: '2026-10-10T00:00:00.000Z', createdAt: '2026-10-10T00:00:00.000Z',
+      observations: [], provenance: 'imported-from-paper-other-facility' };
+    const answer = (page: unknown) => new Response(JSON.stringify(page), { status: 200, headers: { 'content-type': 'application/json' } });
+    const fetchMock = jest.fn().mockImplementation(async () => answer({ records: [record], nextCursor: 'MjAyNi0xMC0xMA' }));
+    global.fetch = fetchMock;
+    const client = new LabApiClient({ baseUrl: 'https://lab.test', internalServiceToken: 'local-lab-service-token-123456' });
+    await expect(client.labOtherFacilityImports(patientId, bearerContext, { cursor: 'MjAyNi0xMC0wOQ', limit: 10 }))
+      .resolves.toEqual({ records: [record], nextCursor: 'MjAyNi0xMC0xMA' });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://lab.test/api/v1/lab/imports/other-facilities?patientId=${patientId}&cursor=MjAyNi0xMC0wOQ&limit=10`);
+    const headers = (fetchMock.mock.calls[0]?.[1] as RequestInit).headers;
+    expect(headers).toMatchObject({ authorization: 'Bearer propagated-user', 'x-facility-id': bearerContext.facilityId });
+    expect(headers).not.toHaveProperty('x-hid-internal-caller');
+    for (const page of [{ records: [{ ...record, sourceFacilityId: bearerContext.facilityId }], nextCursor: null },
+      { records: [{ ...record, provenance: undefined }], nextCursor: null }, { records: [record], nextCursor: 'a b' }]) {
+      fetchMock.mockImplementation(async () => answer(page));
+      await expect(client.labOtherFacilityImports(patientId, bearerContext))
+        .rejects.toMatchObject({ status: 502, payload: { code: 'INVALID_LAB_IMPORT_RESPONSE' } });
+    }
+  });
 });

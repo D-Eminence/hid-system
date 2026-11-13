@@ -101,6 +101,8 @@ export type {
   LabClientOptions,
   LabInternalCaller,
   LabRequestContext,
+  LabOtherFacilityImportedEvidence,
+  LabOtherFacilityImportedEvidencePage,
   LabResourceReference,
   PatientLabPage,
 } from './lab';
@@ -116,6 +118,8 @@ export type {
   PharmacyClientOptions,
   PharmacyInternalCaller,
   PharmacyMedicationReference,
+  PharmacyOtherFacilityImportedMedication,
+  PharmacyOtherFacilityImportedMedicationPage,
   PharmacyRequestContext,
   PharmacyResourceReference,
   PharmacyWorkItem,
@@ -152,5 +156,8 @@ export type {
   IdentityInternalCaller,
   IdentityRegistrationCase,
   PatientSelfAuthorization,
+  PatientShareCreated,
+  PatientShareCreateInput,
+  PatientShareScope,
   ResolveNinRegistration,
 } from './identity';

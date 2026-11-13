@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0117",
-    "count": 118,
+    "last": "0124",
+    "count": 119,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -569,6 +569,10 @@
       {
         "name": "0117_recorded_allergies.sql",
         "sha256": "3b71fdbbe3a02071a198722ca00c0120240d5fcfd53035cd38e3a7217e53f003"
+      },
+      {
+        "name": "0124_cross_facility_imports.sql",
+        "sha256": "bb205202e5c769616fb63e7bdb11a67661873f991a9200cb82b880ba9ef527f2"
       }
     ]
   },

@@ -49,6 +49,31 @@ export interface LabImportedEvidencePage {
 /** GET /api/v1/lab/imports page size bounds (lab-api ListLabImportsQueryDto). */
 export const LAB_IMPORT_PAGE_MAX = 50;
 
+/** The provenance every record from another facility carries (0124). */
+export const OTHER_FACILITY_PROVENANCE = 'imported-from-paper-other-facility';
+
+/**
+ * One imported (paper, OCR) Lab report from ANOTHER facility, as
+ * GET /api/v1/lab/imports/other-facilities returns it (0124): shown only under
+ * a patient share that includes other facilities. Unverified; show it with its
+ * source facility named.
+ */
+export interface LabOtherFacilityImportedEvidence {
+  id: string; sourceFacilityId: string; sourceFacilityName: string; status: string;
+  externalLabName: string | null; externalReference: string | null;
+  collectedAt: string | null; reportedAt: string | null; receivedAt: string; createdAt: string;
+  observations: Array<{ ordinal: number; testCode: string | null; testName: string; value: string | null;
+    valueText: string | null; unit: string | null; referenceRange: string | null; abnormalFlag: string;
+    reportedAt: string | null }>;
+  provenance: typeof OTHER_FACILITY_PROVENANCE;
+}
+
+export interface LabOtherFacilityImportedEvidencePage {
+  records: LabOtherFacilityImportedEvidence[];
+  /** Opaque; pass as `cursor` for the next page; null on the last page. */
+  nextCursor: string | null;
+}
+
 export class LabApiProblem extends Error {
   constructor(readonly status: number, readonly payload: unknown) {
     super(typeof payload === 'object' && payload !== null && 'detail' in payload
@@ -120,6 +145,31 @@ export class LabApiClient {
     if (!value || !Array.isArray(value.records) || value.records.length > LAB_IMPORT_PAGE_MAX
       || (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !/^[a-f0-9-]{36}$/i.test(value.nextCursor)))
       || value.records.some((record) => !record || typeof record.id !== 'string' || record.patientId !== patientId
+        || !Array.isArray(record.observations))) {
+      throw new LabApiProblem(502, { code: 'INVALID_LAB_IMPORT_RESPONSE' });
+    }
+    return value;
+  }
+
+  /**
+   * One patient's imported Lab evidence from OTHER facilities, newest received
+   * first (0124): only under an active patient share to the caller that
+   * includes other facilities; 403 OTHER_FACILITIES_NOT_SHARED otherwise. A
+   * staff read sent with the user's credentials and no internal caller.
+   */
+  async labOtherFacilityImports(patientId: string, context: LabRequestContext,
+    page: { cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<LabOtherFacilityImportedEvidencePage> {
+    const query = new URLSearchParams({ patientId });
+    if (page.cursor) query.set('cursor', page.cursor);
+    if (page.limit !== undefined) query.set('limit', String(page.limit));
+    const value = await this.request('/api/v1/lab/imports/other-facilities?' + query.toString(), 'GET', undefined,
+      context, undefined, undefined, signal) as LabOtherFacilityImportedEvidencePage;
+    // Never pass on more than a page, the caller's own facility's record, or one without its provenance.
+    if (!value || !Array.isArray(value.records) || value.records.length > LAB_IMPORT_PAGE_MAX
+      || (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.nextCursor)))
+      || value.records.some((record) => !record || typeof record.id !== 'string'
+        || typeof record.sourceFacilityId !== 'string' || record.sourceFacilityId === context.facilityId
+        || typeof record.sourceFacilityName !== 'string' || record.provenance !== OTHER_FACILITY_PROVENANCE
         || !Array.isArray(record.observations))) {
       throw new LabApiProblem(502, { code: 'INVALID_LAB_IMPORT_RESPONSE' });
     }

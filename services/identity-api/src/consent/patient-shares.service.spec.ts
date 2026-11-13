@@ -124,17 +124,60 @@ describe('PatientSharesService (0095)', () => {
       const answer = await service.create(patientRequest, input, key);
       expect(answer).toEqual({ consentGrantId: grantId, membershipId, scope: 'write_records', level: 'clinical_collaboration',
         duration: 'until_revoked', startsAt: new Date('2026-10-28T10:00:00Z'), expiresAt: new Date('2027-10-28T10:00:00Z'),
-        clinicianName: 'Adaeze Okafor', facilityName: 'Lagos General Hospital', replacedConsentGrantId: null, replayed: false });
+        clinicianName: 'Adaeze Okafor', facilityName: 'Lagos General Hospital', replacedConsentGrantId: null, replayed: false,
+        includeOtherFacilities: false, includeSensitive: false });
       const order = calls.map((call) => (/otp_challenges/.test(call.sql) ? 'hold' : /sessions current_session/.test(call.sql)
         ? 'recent' : /create_my_consent_share/.test(call.sql) ? 'share' : null)).filter(Boolean);
       expect(order).toEqual(['hold', 'recent', 'share']);
       const share = calls.find((call) => /create_my_consent_share/.test(call.sql))!;
+      // 0124: the scoped function, facility-only by default, with 0095's digest unchanged.
+      expect(share.sql).toMatch(/identity\.create_my_consent_share_scoped\(\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9\)/);
       expect(share.values).toEqual(['patient:safety', '80000000-0000-4000-8000-000000000001', membershipId,
-        'clinical_collaboration', 'until_revoked', key,
+        'clinical_collaboration', 'until_revoked', false, false, key,
         requestDigest('identity.share.create', { membershipId, level: 'clinical_collaboration', duration: 'until_revoked' })]);
       await service.settleEmails();
       expect(notification.deliverShareReceived).toHaveBeenCalledWith({ consentGrantId: grantId, recipient: 'dr@example.test',
         facilityName: 'Lagos General Hospital', correlationId: patientRequest.correlationId });
+    });
+
+    it('0124: passes the chosen scope, names it in the digest, and answers it; false values keep the default digest', async () => {
+      const scoped = harness([[/create_my_consent_share_scoped/, (values) => ({ rows: [shareRow({
+        include_other_facilities: values[5], include_sensitive: values[6] })] })]]);
+      for (const includeSensitive of [false, true]) {
+        const answer = await scoped.service.create(patientRequest, { ...input, includeOtherFacilities: true, includeSensitive }, key);
+        expect(answer).toMatchObject({ consentGrantId: grantId, includeOtherFacilities: true, includeSensitive });
+        const share = scoped.calls.filter((call) => /create_my_consent_share_scoped/.test(call.sql)).at(-1)!;
+        expect(share.values.slice(5)).toEqual([true, includeSensitive, key, requestDigest('identity.share.create',
+          { membershipId, level: 'clinical_collaboration', duration: 'until_revoked', includeOtherFacilities: true,
+            includeSensitive })]);
+      }
+      const explicit = harness([[/create_my_consent_share_scoped/, { rows: [shareRow()] }]]);
+      await explicit.service.create(patientRequest, { ...input, includeOtherFacilities: false, includeSensitive: false }, key);
+      expect(explicit.calls.find((call) => /create_my_consent_share_scoped/.test(call.sql))!.values.slice(5)).toEqual(
+        [false, false, key, requestDigest('identity.share.create',
+          { membershipId, level: 'clinical_collaboration', duration: 'until_revoked' })]);
+    });
+
+    it('0124: refuses sensitive records without other facilities before the database (400 SHARE_REQUEST_INVALID)', async () => {
+      for (const scope of [{ includeSensitive: true }, { includeOtherFacilities: false, includeSensitive: true }]) {
+        const { service, calls } = harness();
+        await expect(service.create(patientRequest, { ...input, ...scope }, key)).rejects.toMatchObject(
+          { status: 400, code: 'SHARE_REQUEST_INVALID', message: SHARE_DETAIL.scopeInvalid });
+        expect(calls).toHaveLength(0);
+      }
+    });
+
+    it('0124: lists the patient\'s share scopes in the patient\'s session; a dead session is 403', async () => {
+      const { service, calls } = harness([[/list_my_share_scopes/, { rows: [
+        { consent_grant_id: grantId, include_other_facilities: true, include_sensitive: false }] }]]);
+      await expect(service.scopes(patientRequest)).resolves.toEqual({ items: [
+        { consentGrantId: grantId, includeOtherFacilities: true, includeSensitive: false }] });
+      const listed = calls.find((call) => /list_my_share_scopes/.test(call.sql))!;
+      expect(listed).toMatchObject({ values: ['patient:safety', '80000000-0000-4000-8000-000000000001'], system: true });
+      const dead = harness([[/list_my_share_scopes/, dbError('42501')]]);
+      await expect(dead.service.scopes(patientRequest)).rejects.toMatchObject({ status: 403, code: 'PATIENT_SESSION_REQUIRED' });
+      const failing = harness([[/list_my_share_scopes/, dbError('XX000')]]);
+      await expect(failing.service.scopes(patientRequest)).rejects.toMatchObject({ status: 503, code: 'SHARE_UNAVAILABLE' });
     });
 
     it('sends nothing on a replay, or without a verified clinician email', async () => {
@@ -294,6 +337,7 @@ describe('PatientSharesService (0095)', () => {
       const attempts: Array<() => Promise<unknown>> = [
         () => service.search(patientRequest, 'Lagos'), () => service.create(patientRequest,
           { membershipId, level: 'view_only', duration: '24h' }, key), () => service.invitations(patientRequest),
+        () => service.scopes(patientRequest),
         () => service.invite(patientRequest, { email: 'a@b.test', level: 'view_only', duration: '24h' }, key),
         () => service.cancel(patientRequest, invitationId), () => service.confirm(patientRequest, invitationId),
         () => service.sharedWithMe(staffContext), () => service.staffInvitations(staffContext),
