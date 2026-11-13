@@ -29,6 +29,28 @@ describe('Identity production database transport', () => {
     });
   }
 
+  it('falls back to the outreach Health ID per-volunteer defaults for an unset or invalid value, never 0 or no limit', () => {
+    const defaults = { OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX: 120, OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX: 1000,
+      OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR: 150 };
+    production();
+    expect(getEnvironment()).toMatchObject(defaults);
+    for (const invalid of ['', ' ', '0', '-5', '2.5', 'abc', '1e3', '999999', 'Infinity', 'NaN']) {
+      resetEnvironmentForTests();
+      Object.assign(process.env, { OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX: invalid,
+        OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX: invalid, OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR: invalid });
+      expect(getEnvironment()).toMatchObject(defaults);
+    }
+    resetEnvironmentForTests();
+    Object.assign(process.env, { OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR: '1001' });
+    expect(getEnvironment()).toMatchObject({ OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR: 150 });
+    resetEnvironmentForTests();
+    Object.assign(process.env, { OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX: '300',
+      OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX: ' 1500 ', OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR: '1000' });
+    expect(getEnvironment()).toMatchObject({ OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX: 300,
+      OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX: 1500, OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR: 1000 });
+  });
+
+
   it('rejects database URL TLS overrides and a global verification bypass', () => {
     production(); process.env.DATABASE_URL += '?sslmode=no-verify'; resetEnvironmentForTests();
     expect(() => getEnvironment()).toThrow(/must not override/);
