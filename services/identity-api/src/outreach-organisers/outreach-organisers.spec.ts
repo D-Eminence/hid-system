@@ -16,7 +16,7 @@ import type { DatabaseService } from '../database/database.service';
 import { PlatformControlCommandDto } from '../admin/dto/admin-command.dto';
 import { IdentityController } from '../identity/identity.controller';
 import type { OrganizationProfileCompletionService } from '../identity/organization-profile-completion.service';
-import { ActivateOutreachOrganiserDto, StartOutreachOrganiserSignupDto } from './dto/outreach-organiser.dto';
+import { ActivateOutreachOrganiserDto, StartOutreachGroupForAccountDto, StartOutreachOrganiserSignupDto } from './dto/outreach-organiser.dto';
 import { OUTREACH_INVITATION_REFUSALS, OutreachInvitationsService } from './outreach-invitations.service';
 import { decryptOutreachPhone, domainHmac, encryptOutreachPhone, normalizeOutreachPhone, outreachKey,
   reservedOrganiserName } from './outreach-organiser-crypto';
@@ -40,6 +40,7 @@ const startInput = {
   groupName: 'Synthetic Community Volunteers', kind: 'group' as const,
   turnstileAction: 'outreach-organiser-signup' as const, turnstileToken: 'opaque-proof',
 };
+const groupDetailsForTerms = { groupName: 'Synthetic Community Volunteers', kind: 'group' as const, phone: '0801 234 5678' };
 const openControls = { rows: [{ signup: true, outreach_portal: true, maintenance: false }] };
 
 function setEnvironment(extra: Record<string, string> = {}) {
@@ -138,12 +139,19 @@ describe('helpers', () => {
     expect(await validate(dto)).toEqual([]);
   });
 
-  it('validates the sign-up and activation bodies, terms version 2026-11-01 only', async () => {
+  it('validates the sign-up and activation bodies, terms version 2026-11-01 or 2026-11-14 only', async () => {
     expect(await validate(plainToInstance(StartOutreachOrganiserSignupDto, startInput))).toEqual([]);
     expect((await validate(plainToInstance(StartOutreachOrganiserSignupDto, { ...startInput, kind: 'company' })))
       .map((error) => error.property)).toEqual(['kind']);
     expect(await validate(plainToInstance(ActivateOutreachOrganiserDto,
       { termsVersion: '2026-11-01', acceptTerms: true, password: 'a-long-fictional-password' }))).toEqual([]);
+    expect(await validate(plainToInstance(ActivateOutreachOrganiserDto,
+      { termsVersion: '2026-11-14', acceptTerms: true, password: 'a-long-fictional-password' }))).toEqual([]);
+    expect(await validate(plainToInstance(StartOutreachGroupForAccountDto,
+      { ...groupDetailsForTerms, termsVersion: '2026-11-14', acceptTerms: true }))).toEqual([]);
+    expect((await validate(plainToInstance(StartOutreachGroupForAccountDto,
+      { ...groupDetailsForTerms, termsVersion: '2026-11-13', acceptTerms: true }))).map((error) => error.property))
+      .toEqual(['termsVersion']);
     expect((await validate(plainToInstance(ActivateOutreachOrganiserDto,
       { termsVersion: '2026-10-01', acceptTerms: false, password: 'a-long-fictional-password' })))
       .map((error) => error.property).sort()).toEqual(['acceptTerms', 'termsVersion']);
@@ -428,7 +436,7 @@ describe('OutreachOrganiserController', () => {
   const response = () => ({ cookie: jest.fn(), clearCookie: jest.fn(), setHeader: jest.fn() });
   function make() {
     const organisers = { start: jest.fn(async () => ({ cookie: `${signupId}.${token}`, body: { accepted: true, challengeId } })),
-      verify: jest.fn(async () => ({ verified: true })), availability: jest.fn(async () => ({ open: true, termsVersion: '2026-11-01' })),
+      verify: jest.fn(async () => ({ verified: true })), availability: jest.fn(async () => ({ open: true, termsVersion: '2026-11-14' })),
       activate: jest.fn(async () => ({ organizationId: 'org-1', facilityId: 'fac-1', accountId: 'acc-1', email: 'ada.organiser@example.test' })) };
     const turnstile = { verify: jest.fn(async () => undefined) };
     const auth = { login: jest.fn(async () => loginResult) };

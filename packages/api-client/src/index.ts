@@ -139,7 +139,11 @@ export type {
   LinkOutreachExistingPatient,
   OutreachClientOptions,
   OutreachRegistrationCase,
+  OutreachRegistrationScreening,
+  OutreachRegistrationScreeningResult,
   OutreachRequestContext,
+  OutreachScreeningMedicine,
+  SaveOutreachRegistrationScreening,
 } from './outreach';
 export { IdentityApiClient, IdentityApiProblem } from './identity';
 export type {

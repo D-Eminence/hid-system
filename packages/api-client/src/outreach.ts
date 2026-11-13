@@ -26,6 +26,10 @@ export interface OutreachRegistrationCase {
   ageYears: number;
   phone: string | null;
   operationalNotes: string | null;
+  /** The person's area, town or LGA as given at registration (0118), or null; absent before 0118. */
+  area?: string | null;
+  /** Whether the registration has a screening (0118); absent before 0118. */
+  hasScreening?: boolean;
   resolvedPatientId: string | null;
   resolutionKind: 'linked_existing' | null;
   rowVersion: number;
@@ -42,6 +46,51 @@ export interface CreateOutreachRegistrationCase {
   ageYears: number;
   phone?: string | null;
   operationalNotes?: string | null;
+  /** Optional, up to 100 characters (0118). */
+  area?: string | null;
+}
+
+export interface OutreachScreeningMedicine {
+  name: string;
+  dose?: string | null;
+}
+
+/** A registration's whole screening as saved (0118): every field optional; an omitted field is saved as null. */
+export interface SaveOutreachRegistrationScreening {
+  bpSystolic?: number | null;
+  bpDiastolic?: number | null;
+  pulseBpm?: number | null;
+  temperatureC?: number | null;
+  weightKg?: number | null;
+  heightCm?: number | null;
+  glucoseValue?: number | null;
+  glucoseUnit?: 'mmol/L' | 'mg/dL' | null;
+  glucoseTiming?: 'fasting' | 'random' | null;
+  malariaRdt?: 'positive' | 'negative' | 'not_done' | null;
+  hearingLeft?: 'pass' | 'refer' | 'not_done' | null;
+  hearingRight?: 'pass' | 'refer' | 'not_done' | null;
+  mainComplaint?: string | null;
+  seenByClinician?: boolean | null;
+  clinicianName?: string | null;
+  outcome?: string | null;
+  medicinesGiven?: readonly OutreachScreeningMedicine[] | null;
+  referred?: boolean | null;
+  referredTo?: string | null;
+}
+
+/** A registration's screening as answered (0118). */
+export interface OutreachRegistrationScreening extends Required<Omit<SaveOutreachRegistrationScreening,
+  'medicinesGiven'>> {
+  caseId: string;
+  medicinesGiven: readonly { name: string; dose: string | null }[];
+  version: number;
+  recordedAt: string;
+  recordedByMembershipId: string;
+  updatedAt: string;
+}
+
+export interface OutreachRegistrationScreeningResult {
+  screening: OutreachRegistrationScreening | null;
 }
 
 export interface LinkOutreachExistingPatient {
@@ -93,9 +142,30 @@ export class OutreachApiClient {
       'POST', input, context, idempotencyKey, signal);
   }
 
-  private async request<Result>(path: string, method: 'GET' | 'POST', body: unknown,
+  /** A registration's screening (0118): { screening: null } when none was recorded. */
+  getRegistrationScreening(caseId: string, context: OutreachRequestContext, signal?: AbortSignal) {
+    return this.request<OutreachRegistrationScreeningResult>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/screening`,
+      'GET', undefined, context, undefined, signal);
+  }
+
+  /**
+   * Saves a registration's whole screening (0118). expectedVersion is omitted
+   * for the first save and is the current screening's version after it (sent
+   * as If-Match).
+   */
+  saveRegistrationScreening(caseId: string, input: SaveOutreachRegistrationScreening,
+    expectedVersion: number | undefined, context: OutreachRequestContext, idempotencyKey: string,
+    signal?: AbortSignal) {
+    return this.request<{ screening: OutreachRegistrationScreening }>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/screening`,
+      'PUT', input, context, idempotencyKey, signal,
+      expectedVersion === undefined ? undefined : `"${expectedVersion}"`);
+  }
+
+  private async request<Result>(path: string, method: 'GET' | 'POST' | 'PUT', body: unknown,
     context: OutreachRequestContext, idempotencyKey?: string,
-    signal?: AbortSignal): Promise<Result> {
+    signal?: AbortSignal, ifMatch?: string): Promise<Result> {
     const attempts = idempotencyKey ? 2 : 1;
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -117,6 +187,7 @@ export class OutreachApiClient {
             ...(context.csrfToken ? { 'x-csrf-token': context.csrfToken } : {}),
             ...(context.authorization ? { authorization: context.authorization } : {}),
             ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
+            ...(ifMatch ? { 'if-match': ifMatch } : {}),
           },
         });
         if (!response.ok) {

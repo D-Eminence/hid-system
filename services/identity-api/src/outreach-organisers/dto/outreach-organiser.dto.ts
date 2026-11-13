@@ -2,7 +2,7 @@ import { Transform } from 'class-transformer';
 import {
   Equals, IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength,
 } from 'class-validator';
-import { OUTREACH_ORGANISER_TERMS_VERSION } from '../outreach-organiser-crypto';
+import { OUTREACH_ORGANISER_TERMS_VERSIONS } from '../outreach-organiser-crypto';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value;
 const trimLower = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().toLowerCase() : value;
@@ -54,9 +54,9 @@ export class VerifyOutreachOrganiserEmailDto {
   code!: string;
 }
 
-/** The terms the person accepts: exactly the approved version, ticked. */
+/** The terms the person accepts: an accepted version (2026-11-01 or 2026-11-14), ticked. */
 export class OutreachTermsDto {
-  @Equals(OUTREACH_ORGANISER_TERMS_VERSION, { message: 'Reload the page to see the current organiser terms' })
+  @IsIn(OUTREACH_ORGANISER_TERMS_VERSIONS, { message: 'Reload the page to see the current organiser terms' })
   termsVersion!: string;
 
   @Equals(true, { message: 'Accept the organiser terms to continue' })
@@ -70,7 +70,7 @@ export class ActivateOutreachOrganiserDto extends OutreachTermsDto {
 
 /** An existing Health ID account starts an outreach group for itself (owner decision 5). */
 export class StartOutreachGroupForAccountDto extends OutreachGroupDetailsDto {
-  @Equals(OUTREACH_ORGANISER_TERMS_VERSION, { message: 'Reload the page to see the current organiser terms' })
+  @IsIn(OUTREACH_ORGANISER_TERMS_VERSIONS, { message: 'Reload the page to see the current organiser terms' })
   termsVersion!: string;
 
   @Equals(true, { message: 'Accept the organiser terms to continue' })

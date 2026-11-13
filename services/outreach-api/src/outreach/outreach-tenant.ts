@@ -9,8 +9,8 @@ import type { DataAccessContext } from '../common/request-context';
  */
 export const OUTREACH_TENANT_ROLES: ReadonlySet<string> = new Set(['outreach_organiser', 'outreach_volunteer']);
 
-/** The longest operational note at an outreach group's facility (plan PR-1). */
-export const OUTREACH_NOTES_LIMIT = 280;
+/** The longest operational note at an outreach group's facility (plan PR-1; 1000 since 0118, was 280). */
+export const OUTREACH_NOTES_LIMIT = 1000;
 
 /** Whether the request works at an outreach group's facility (not a hospital's). */
 export function isOutreachTenant(context: DataAccessContext): boolean {

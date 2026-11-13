@@ -56,7 +56,7 @@ describe('Outreach group rules (open sign-up on outreach.)', () => {
     [{ ...input, campaignId: undefined, consent }, 'OUTREACH_CAMPAIGN_REQUIRED'],
     [{ ...input }, 'OUTREACH_CONSENT_REQUIRED'],
     [{ ...input, ageYears: 15, consent }, 'OUTREACH_CONSENT_GUARDIAN_REQUIRED'],
-    [{ ...input, consent, operationalNotes: 'x'.repeat(281) }, 'OUTREACH_NOTES_TOO_LONG'],
+    [{ ...input, consent, operationalNotes: 'x'.repeat(1001) }, 'OUTREACH_NOTES_TOO_LONG'],
   ])('refuses an outreach group registration before writing anything (%#: %s)', async (body, code) => {
     const database = { withTransaction: jest.fn() };
     await expect(new OutreachService(database as never, audit as never, identity as never)

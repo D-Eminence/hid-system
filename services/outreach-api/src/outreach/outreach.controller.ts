@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Req, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
@@ -8,7 +9,23 @@ import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import { LinkExistingPatientDto } from './dto/link-existing-patient.dto';
+import { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
 import { OutreachService } from './outreach.service';
+
+/**
+ * The version an If-Match header names ("3", W/"3" or 3); undefined when the
+ * header is absent; 428 IF_MATCH_REQUIRED when it is present but names no
+ * positive version.
+ */
+export function ifMatchVersion(header: string | undefined): number | undefined {
+  if (header === undefined || header.trim() === '') return undefined;
+  const raw = header.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
+  const version = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(version) || version < 1) {
+    throw new DomainProblem(428, 'IF_MATCH_REQUIRED', 'If-Match must contain the expected positive version');
+  }
+  return version;
+}
 
 @Controller('outreach/registration-cases')
 export class OutreachController {
@@ -45,9 +62,8 @@ export class OutreachController {
   @RequirePermissions('outreach.campaign.write')
   updateCampaignStatus(@Param('campaignId', new ParseUUIDPipe()) campaignId: string,
     @Body() input: UpdateCampaignStatusDto, @Req() request: HidRequest) {
-    const raw = request.header('if-match')?.replace(/^W\//, '').replace(/^"|"$/g, '');
-    const expectedVersion = Number(raw);
-    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+    const expectedVersion = ifMatchVersion(request.header('if-match'));
+    if (expectedVersion === undefined) {
       throw new DomainProblem(428, 'IF_MATCH_REQUIRED', 'If-Match must contain the expected positive version');
     }
     return this.outreach.updateCampaignStatus(campaignId, input, expectedVersion, requireRequestContext(request));
@@ -81,6 +97,35 @@ export class OutreachController {
   @RequirePermissions('outreach.registration.read')
   get(@Param('caseId', new ParseUUIDPipe()) caseId: string, @Req() request: HidRequest) {
     return this.outreach.get(caseId, requireRequestContext(request));
+  }
+
+  /** A registration's screening (0118): { screening: null } or { screening } with ETag "<version>". */
+  @Get(':caseId/screening')
+  @RequirePermissions('outreach.registration.read')
+  async getScreening(@Param('caseId', new ParseUUIDPipe()) caseId: string, @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response) {
+    const screening = await this.outreach.getScreening(caseId, requireRequestContext(request));
+    if (screening) response.setHeader('ETag', `"${screening.version}"`);
+    return { screening };
+  }
+
+  /**
+   * Saves a registration's whole screening (0118). Idempotency-Key required;
+   * If-Match "<version>" omitted for the first save (201), required after it
+   * (200). Answers { screening } with ETag "<version>".
+   */
+  @Put(':caseId/screening')
+  @RequirePermissions('outreach.registration.write')
+  async saveScreening(@Param('caseId', new ParseUUIDPipe()) caseId: string,
+    @Body() input: SaveRegistrationScreeningDto, @Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response) {
+    const idempotencyKey = requireIdempotencyKey(request.header('idempotency-key'));
+    const expectedVersion = ifMatchVersion(request.header('if-match'));
+    const result = await this.outreach.saveScreening(caseId, input, expectedVersion, idempotencyKey,
+      requireRequestContext(request));
+    response.status(result.status);
+    response.setHeader('ETag', `"${result.screening.version}"`);
+    return { screening: result.screening };
   }
 
   @Post()

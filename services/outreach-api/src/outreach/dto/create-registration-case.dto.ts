@@ -85,6 +85,16 @@ export class CreateRegistrationCaseDto {
   @MaxLength(2000)
   operationalNotes?: string;
 
+  /**
+   * The person's area, town or LGA (0118), optional: trimmed, inner spaces
+   * collapsed, an empty value treated as not given. Set only at registration.
+   */
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') || undefined : value)
+  @IsString()
+  @MaxLength(100)
+  area?: string;
+
   /** Required at an outreach group's facility (the service and the database check). */
   @IsOptional()
   @ValidateNested()
