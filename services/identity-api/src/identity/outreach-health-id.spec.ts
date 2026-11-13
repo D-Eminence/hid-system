@@ -49,6 +49,7 @@ describe('OutreachHealthIdService (0119)', () => {
   let startResult: () => unknown;
   let confirmResult: (parameters: unknown[]) => unknown;
   let rateBlocked: boolean;
+  const blockedBuckets = new Set<string>();
   const queries: { sql: string; parameters: unknown[]; system: boolean }[] = [];
   const notification = { deliverOutreachHealthIdCode: jest.fn() };
   const hidCodes = { generate: jest.fn() };
@@ -70,7 +71,8 @@ describe('OutreachHealthIdService (0119)', () => {
           return { rows: [{ bound: bound[`${parameters[0]}:${parameters[1]}`] === true }] };
         }
         if (sql.includes('from auth.otp_rate_limits')) {
-          return { rows: rateBlocked ? [{ request_count: 1, window_started_at: new Date(),
+          const blocked = rateBlocked || blockedBuckets.has(String(parameters[1]));
+          return { rows: blocked ? [{ request_count: 1, window_started_at: new Date(),
             blocked_until: new Date(Date.now() + 60_000) }] : [] };
         }
         return { rows: [] };
@@ -241,6 +243,20 @@ describe('OutreachHealthIdService (0119)', () => {
         .toMatchObject({ code: 'OUTREACH_HEALTH_ID_UNAVAILABLE', status: 503 });
       const challengeId = queries.find((q) => q.sql.includes('outreach_health_id_start('))!.parameters[1];
       expect(queries.find((q) => q.sql.includes('delivery_failed'))?.parameters).toEqual([challengeId]);
+    });
+
+    it('refuses a volunteer past the configurable daily limit, after the short window', async () => {
+      const dayBucket = createHmac('sha256', Buffer.from(OTP_KEY, 'base64'))
+        .update(['outreach-health-id-volunteer-day', actor.accountId].join('\u001f')).digest('hex');
+      blockedBuckets.add(dayBucket);
+      try {
+        expect(await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context)))
+          .toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', status: 429,
+            message: 'You have sent too many codes today. Try again tomorrow.' });
+        expect(notification.deliverOutreachHealthIdCode).not.toHaveBeenCalled();
+      } finally {
+        blockedBuckets.clear();
+      }
     });
 
     it('answers the short rate windows with their own words and wait, and maps the cross-registration caps', async () => {

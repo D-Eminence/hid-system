@@ -296,7 +296,9 @@ begin
     raise exception using errcode = 'P0001', message = 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', detail = format('cooldown:%s',
       ceil(extract(epoch from last_sent + interval '60 seconds' - clock_timestamp()))::integer);
   end if;
-  -- Across registrations: 3 codes a day to one email, 200 a day from one volunteer.
+  -- Across registrations: 3 codes a day to one email; from one volunteer, a
+  -- fixed backstop of 2000 a day (identity-api enforces the configurable
+  -- per-volunteer limits, 1000 a day by default, for a busy outreach).
   if (select count(*) from identity.outreach_health_id_challenges challenge
        where challenge.email_lookup_hmac = requested_email_lookup_hmac
          and challenge.created_at > clock_timestamp() - interval '24 hours') >= 3 then
@@ -304,7 +306,7 @@ begin
   end if;
   if (select count(*) from identity.outreach_health_id_challenges challenge
        where challenge.requested_by_account_id = platform.current_account_id()
-         and challenge.created_at > clock_timestamp() - interval '24 hours') >= 200 then
+         and challenge.created_at > clock_timestamp() - interval '24 hours') >= 2000 then
     raise exception using errcode = 'P0001', message = 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', detail = 'volunteer_daily';
   end if;
   perform identity.outreach_health_id_scrub_challenges(200);

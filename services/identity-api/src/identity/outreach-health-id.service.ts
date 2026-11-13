@@ -47,8 +47,6 @@ export interface OutreachHealthIdConfirmResult {
 
 /** The 0119 per-registration cooldown between codes (identity.outreach_health_id_start). */
 export const OUTREACH_HEALTH_ID_RESEND_SECONDS = 60;
-/** A volunteer may ask for this many times the per-recipient budget in one window (a busy outreach). */
-const VOLUNTEER_RATE_MULTIPLIER = 6;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** Confirm attempts per volunteer and email in a day (all registrations). */
@@ -127,9 +125,14 @@ export class OutreachHealthIdService {
 
     const preflight = await this.database.withSystemTransaction(context.correlationId, async (client) => {
       const window = { windowSeconds: this.env.OTP_RATE_WINDOW_SECONDS, maxRequests: this.env.OTP_RATE_MAX_REQUESTS };
-      const volunteerLimited = await consumeRateLimit(client, 'account',
+      // A volunteer's codes: per window and per day (configurable for a busy
+      // outreach), on top of the per-person and per-email limits.
+      const volunteerWindowLimited = await consumeRateLimit(client, 'account',
         this.hmac('outreach-health-id-volunteer', context.actor.accountId),
-        { ...window, maxRequests: window.maxRequests * VOLUNTEER_RATE_MULTIPLIER });
+        { ...window, maxRequests: this.env.OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX });
+      const volunteerDayLimited = await consumeRateLimit(client, 'account',
+        this.hmac('outreach-health-id-volunteer-day', context.actor.accountId),
+        { windowSeconds: 24 * 60 * 60, maxRequests: this.env.OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX });
       const recipientLimited = await consumeRateLimit(client, 'recipient',
         this.hmac('outreach-health-id-recipient', email), window);
       const ready = (await client.query<{ ready: boolean }>(
@@ -139,7 +142,7 @@ export class OutreachHealthIdService {
       // Every form a patient's phone may be stored in (a legacy +2340... too).
       const phoneBound = phone ? await this.contactBound(client, 'phone',
         patientPhoneStoredForms(phone).map((form) => createContactLookupHmac('phone', form))) : false;
-      return { limited: volunteerLimited || recipientLimited, ready, phoneBound };
+      return { limited: volunteerWindowLimited || recipientLimited, volunteerDayLimited, ready, phoneBound };
     });
     if (preflight.limited) {
       // The short per-volunteer / per-email windows (not the registration's
@@ -149,6 +152,9 @@ export class OutreachHealthIdService {
       throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES',
         `Too many codes were sent just now. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, undefined,
         { extensions: { retryAfterSeconds: seconds } });
+    }
+    if (preflight.volunteerDayLimited) {
+      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', MESSAGES.volunteerDaily);
     }
     if (!preflight.ready) throw this.unavailable();
     if (preflight.phoneBound) throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);

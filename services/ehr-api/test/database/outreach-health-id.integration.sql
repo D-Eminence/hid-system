@@ -466,7 +466,7 @@ select pg_temp.hi_case('6h 3 codes a day to one email across registrations', '55
     end;
   end $x$$d$, replace(pg_temp.start_sql(4, '6c0a0000-0000-4000-8000-000000000041', 'ade.three@example.invalid',
     repeat('4', 64)), 'select challenge_id::text from', 'challenge_id from')), false, 'statement');
-select pg_temp.hi_case('6i 200 codes a day from one volunteer', '55000: volunteer_daily', session_user::text,
+select pg_temp.hi_case('6i a backstop of 2000 codes a day from one volunteer', '55000: volunteer_daily', session_user::text,
   null, null, null, null, format($d$do $x$ begin
     set local session_replication_role = replica;
     update outreach.registration_cases set age_years = 40 where id = '6c080000-0000-4000-8000-000000000004';
@@ -476,7 +476,7 @@ select pg_temp.hi_case('6i 200 codes a day from one volunteer', '55000: voluntee
     select gen_random_uuid(), '6c080000-0000-4000-8000-000000000006', '6c000000-0000-4000-8000-000000000012', 'email',
       'contact-v1', repeat('e', 64), 'otp-v1', clock_timestamp() + interval '10 minutes', 5,
       '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001',
-      clock_timestamp() - interval '1 hour', clock_timestamp(), 'resend' from generate_series(1, 200);
+      clock_timestamp() - interval '1 hour', clock_timestamp(), 'resend' from generate_series(1, 2000);
     set local session_replication_role = origin;
     perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
       set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
