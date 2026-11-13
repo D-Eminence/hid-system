@@ -4678,12 +4678,17 @@ in the same transaction and its `area` is cleared.
   `area` (`null` if none) and `hasScreening` (whether a screening the session can see exists).
 - Outreach-group notes (`operationalNotes`) may be up to 1000 characters (was 280); the refusal is
   still 422 `OUTREACH_NOTES_TOO_LONG`.
+- An area the database refuses (its length counted as Postgres does, which can differ from the
+  request check for variation selectors) answers 422 `OUTREACH_AREA_INVALID`. NUL characters are
+  removed from the area and the screening's text fields.
 
 ### 48.5. Organiser terms and the registration notice
 
 - The organiser activation and "Start an outreach group" bodies accept `termsVersion` `'2026-11-01'`
   or `'2026-11-14'` (the live website sends 2026-11-01 until the new terms ship). The availability
-  answer (`GET identity/outreach-organisers/availability`) gives the current version, `'2026-11-14'`.
+  answer (`GET identity/outreach-organisers/availability`) stays `'2026-11-01'` in this release: the
+  live website compares it with its own version and would lock sign-up behind a reload screen on a
+  mismatch. It moves to `'2026-11-14'` only in a later release, after the website with that text is live.
 - The registration notice version is not pinned (only its form is checked), so
   `outreach-notice-2026-11-14` needs no backend change.
 
@@ -4702,8 +4707,28 @@ answers 204. The website builds the CSV, PDF, Word or Excel file itself from the
 list and case reads and then calls this once per export. It writes one audit row,
 `outreach.registration.exported` (resource type `outreach-registration-export`,
 the campaign as the resource when given), with `{ format, count, campaignId }` only,
-never a registration's contents. A campaign that is not this facility's answers 404
-`OUTREACH_CAMPAIGN_NOT_FOUND`; a wrong body answers 400 `VALIDATION_FAILED`.
+never a registration's contents. A campaign that is not this facility's, or that the
+session is not a member of (0045), answers 404 `OUTREACH_CAMPAIGN_NOT_FOUND`; a wrong
+body answers 400 `VALIDATION_FAILED`.
+
+### 48.y Paging the registration list (no migration)
+
+`GET /outreach/registration-cases` takes optional query parameters:
+
+- `campaignId` (uuid): only that campaign's registrations;
+- `limit` (1-500, default 100): the page size;
+- `before` (opaque): the `X-Next-Cursor` header of the previous page.
+
+It answers the same array as before, newest first (`created_at`, then `id`), still only
+registrations the session can see (the facility and campaign membership, 0045). When more
+rows exist, the response carries `X-Next-Cursor` (exposed to the browser by CORS); pass it as
+`before` for the next page, and stop when the header is absent. Without parameters the
+answer is exactly as before: the newest 100. A cursor that is not one the API gave answers
+400 `OUTREACH_LIST_CURSOR_INVALID`; a bad `limit` or `campaignId` answers 400
+`VALIDATION_FAILED`. An export of a large outreach should page through the whole list.
+
+NUL characters are removed from the name, phone, notes, area and guardian name on
+registration create (Postgres text cannot hold them); nothing else about those values changes.
 
 ## 49. Outreach assisted Health ID (0119, provisional)
 

@@ -2,9 +2,16 @@ import { Transform, Type } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, MinLength,
   ValidateNested } from 'class-validator';
 
-/** Trimmed, inner whitespace collapsed; an empty text is treated as not given. */
+/** NUL characters removed (Postgres text cannot hold them); nothing else changed. */
+export const withoutNul = ({ value }: { value: unknown }) =>
+  typeof value === 'string' ? value.replace(/\u0000/g, '') : value;
+
+/**
+ * Trimmed, inner whitespace collapsed, NUL characters (which Postgres text
+ * cannot hold) removed; an empty text is treated as not given.
+ */
 export const trimmedText = ({ value }: { value: unknown }) =>
-  typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') || undefined : value;
+  typeof value === 'string' ? value.replace(/\u0000/g, '').trim().replace(/\s+/g, ' ') || undefined : value;
 
 export const GLUCOSE_UNITS = ['mmol/L', 'mg/dL'] as const;
 export const GLUCOSE_TIMINGS = ['fasting', 'random'] as const;
@@ -35,7 +42,7 @@ export class SaveRegistrationScreeningDto {
   @IsOptional() @IsInt() pulseBpm?: number | null;
   @IsOptional() @IsNumber({ allowNaN: false, allowInfinity: false, maxDecimalPlaces: 1 }) temperatureC?: number | null;
   @IsOptional() @IsNumber({ allowNaN: false, allowInfinity: false, maxDecimalPlaces: 1 }) weightKg?: number | null;
-  @IsOptional() @IsInt() heightCm?: number | null;
+  @IsOptional() @IsInt({ message: 'Enter height in whole centimetres.' }) heightCm?: number | null;
   @IsOptional() @IsNumber({ allowNaN: false, allowInfinity: false, maxDecimalPlaces: 1 }) glucoseValue?: number | null;
   @IsOptional() @IsIn(GLUCOSE_UNITS) glucoseUnit?: typeof GLUCOSE_UNITS[number] | null;
   @IsOptional() @IsIn(GLUCOSE_TIMINGS) glucoseTiming?: typeof GLUCOSE_TIMINGS[number] | null;
