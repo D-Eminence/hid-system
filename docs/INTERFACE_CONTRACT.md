@@ -4878,13 +4878,17 @@ The guards are 0119's: campaign membership, not redacted, not a sealed demo or Q
 
 **Where the phone lives.** The registration's phone is unproven, so it is **not** put on the patient: it
 is kept (encrypted, with its lookup HMAC and key version) on the Health ID's claim row,
-`identity.outreach_health_id_claims`. Public sign-up, 0119 and 0120 never see these unclaimed phones, so
-the number's real owner can still sign up with it. `OUTREACH_HEALTH_ID_PHONE_TAKEN` is answered only when
+`identity.outreach_health_id_claims`. Public sign-up and 0119 never see these unclaimed phones, so the
+number's real owner can still sign up with it; 0120 reads them only to flag a duplicate (below). `OUTREACH_HEALTH_ID_PHONE_TAKEN` is answered only when
 the phone (in any stored form) is on a **real patient**. When it is already on another unclaimed Health
-ID's claim, the new one is still created and flagged `possible_duplicate`. With no phone there is nothing
+ID's live claim (not expired, not out of attempts, not invalidated), the new one is still created and
+flagged `possible_duplicate`. With no phone there is nothing
 to check a duplicate person against: when an active patient has the same name and sex, the Health ID is
 still created and flagged `possible_duplicate`. Flags are for review later (50.4); nothing is refused on
-them.
+them. The claim's phone is removed when the registration is redacted, and once the claim can no longer be
+used (expired, out of attempts or invalidated) by `identity.outreach_health_id_scrub_claims`, which each
+creation and 0116's daily retention sweep run (in batches, so up to a day later); the scrub also catches
+a redaction that ran while the claim was still being created. The Health ID and its claim code stay.
 
 | Status | `code` | When |
 |---|---|---|
@@ -4897,7 +4901,7 @@ them.
 | 422 | `OUTREACH_HEALTH_ID_UNDER_18` | as in 49.1 |
 | 422 | `OUTREACH_HEALTH_ID_PHONE_INVALID` | the registration has a phone that is not a valid number |
 | 422 | `OUTREACH_HEALTH_ID_NAME_INVALID` | the registration's name has nothing printable: "The person's name on this registration can't be used for a Health ID. Check the name and register them again." |
-| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS` | "Too many Health IDs created in a short time. Wait a few minutes."; `Retry-After` |
+| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS` | "Too many Health IDs created in a short time. Try again in *N* minutes." (*N* from the real wait; refused tries count, so it can be most of the hour); `Retry-After` |
 | 403 | `OUTREACH_HEALTH_ID_NOT_AVAILABLE` | not an outreach group, or a sealed demo/QA one |
 | 423 | `OUTREACH_ORGANISER_SUSPENDED` | the group is paused by Health ID |
 | 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | "The Health ID couldn't be created right now. Try again in a few minutes." |
@@ -4917,13 +4921,17 @@ claimed one reads differently. Read, as before, with
 routes (the Outreach workload plus the volunteer's forwarded sign-in; not a delegated-browser route), in
 the volunteer's own session; no `Idempotency-Key`. `201 { healthId, claimCode, claimExpiresAt }`
 (`Cache-Control: no-store`); refusals as 50.1. Identity generates the Health ID (another is drawn on a
-clash) and the claim code (`crypto.randomInt`), and stores `HMAC-SHA256` of the uppercased code keyed with
-the key of 0119's code verifier, the OTP key (no new secret), with the label `claim-v1`
-(`code_key_version`). A phone is encrypted as 0119's confirm does it (sign-up's contact key and key
+clash) and the claim code (`crypto.randomInt`), and stores `HMAC-SHA256`, keyed with the key of 0119's
+code verifier, the OTP key (no new secret), of `outreach-claim-code` US `v1` US *Health ID* US *code*
+(both uppercased; US is U+001F), so it is labelled like every other use of that key and bound to the
+Health ID; `code_key_version` is `claim-v1` and `hmac_key_version` the OTP key version. The browser
+(`OutreachApiClient.createUnverifiedHealthId`) waits 45 s, longer than outreach-api's 20 s wait for
+Identity, so it does not give up while the claim code can still arrive. A phone is encrypted as 0119's confirm does it (sign-up's contact key and key
 version, its lookup HMAC; the ciphertext is bound to that lookup HMAC) and kept on the claim row (50.1).
 A 429 carries `retryAfterSeconds`. The database writes one audit row,
-`outreach.health-id.created-unclaimed`, with ids and flags only (`channel: none`, `phoneOnRecord`,
-`possibleDuplicate`).
+`outreach.health-id.created-unclaimed`, with ids and flags only (`channel: none`, `phoneOnRecord`). The
+duplicate flag is not audited: facility audit readers see `details`, and it would tell them the phone or
+name is on another group's record; it is kept on the Health ID record, which only the platform reads.
 
 **The claim key.** Each claim row stores the OTP key version it was keyed with (`hmac_key_version`,
 `OTP_HMAC_KEY_VERSION` at creation), and the claim flow verifies with that version's key. An OTP key
@@ -4944,7 +4952,7 @@ refuses `42501 PLATFORM_ADMIN_REQUIRED` unless the session account holds `platfo
   A claim code works for **180 days** and allows **5** wrong tries; after either it is spent. Until it is
   claimed nobody can sign in. The phone kept on the claim row is moved onto the patient then, **only if
   it is still free** (no real patient has it by then).
-- **Possible duplicates** (a phone already on another unclaimed Health ID's claim; or no phone and an
+- **Possible duplicates** (a phone already on another unclaimed Health ID's live claim; or no phone and an
   active patient with the same name and sex) are flagged
   `possible_duplicate` and counted (`possibleDuplicates`) for review later; nothing is merged or refused
   automatically.

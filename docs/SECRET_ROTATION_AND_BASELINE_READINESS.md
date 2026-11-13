@@ -60,7 +60,13 @@ claim flow verifies with that version's key. A new OTP key version may be introd
 old version must stay available to identity-api (not retired) while any unclaimed, unexpired claim code
 was created under it: up to 180 days after the last such creation
 (`select hmac_key_version, max(expires_at) from identity.outreach_health_id_claims where claimed_at is null
-and invalidated_at is null group by 1`). In non-production without `OTP_HMAC_KEY_B64`, identity-api uses a
+and invalidated_at is null group by 1`). The claim row's unproven phone is encrypted under the contact
+key named by its `contact_key_version` (`signup-derived:<OTP_HMAC_KEY_VERSION>` or `NIN_KEY_VERSION`):
+that key version must also stay available while such a claim holds a phone
+(`select contact_key_version, count(*) from identity.outreach_health_id_claims where phone_lookup_hmac is
+not null group by 1`, which must show no row for that version). The phone is removed once the claim can no
+longer be used or the registration is redacted, by each creation and 0116's daily sweep in batches, so a
+spent claim may hold its key version for up to a day; check the query rather than the expiry date. In non-production without `OTP_HMAC_KEY_B64`, identity-api uses a
 process-local key that changes on restart, which invalidates claim codes made there.
 
 Before an approved deployment, the release owner must confirm that retired

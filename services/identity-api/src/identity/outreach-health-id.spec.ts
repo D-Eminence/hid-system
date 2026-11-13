@@ -454,9 +454,9 @@ describe('OutreachHealthIdService (0119)', () => {
       // patient) and the claim flow moves it onto the patient unchanged.
       expect(new PatientProfileCrypto().decryptLookupBoundPhone(phoneLookup, phoneCiphertext)).toBe('+2348012345678');
       expect(new PatientProfileCrypto().decryptLookupBoundPhone('f'.repeat(64), phoneCiphertext)).toBeUndefined();
-      // The same key as 0119's code verifier; the uppercased code.
+      // The same key as 0119's code verifier; labelled, bound to the Health ID, the uppercased code.
       expect(claimHmac).toBe(createHmac('sha256', Buffer.from(OTP_KEY, 'base64'))
-        .update(answer.claimCode.toUpperCase()).digest('hex'));
+        .update(`outreach-claim-code\u001fv1\u001f${answer.healthId}\u001f${answer.claimCode.toUpperCase()}`).digest('hex'));
       expect(JSON.stringify(queries.map((q) => q.parameters))).not.toContain(answer.claimCode);
     });
 
@@ -483,7 +483,10 @@ describe('OutreachHealthIdService (0119)', () => {
       bound = { [`phone:${createContactLookupHmac('phone', '+2348012345678')}`]: true };
       const limited = await refusal(service().createUnclaimed({ caseId }, context));
       expect(limited).toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS', status: 429,
-        message: 'Too many Health IDs created in a short time. Wait a few minutes.' });
+        message: expect.stringMatching(/^Too many Health IDs created in a short time\. Try again in \d+ minutes?\.$/) });
+      expect(limited.message).toBe(`Too many Health IDs created in a short time. Try again in ${
+        Math.max(1, Math.ceil(Number(limited.extensions?.retryAfterSeconds) / 60))} minute${
+        Math.max(1, Math.ceil(Number(limited.extensions?.retryAfterSeconds) / 60)) === 1 ? '' : 's'}.`);
       expect(limited.extensions?.retryAfterSeconds).toEqual(expect.any(Number));
       expect(Number(limited.extensions?.retryAfterSeconds)).toBeGreaterThan(0);
       expect(Number(limited.extensions?.retryAfterSeconds)).toBeLessThanOrEqual(60);
@@ -525,8 +528,7 @@ describe('OutreachHealthIdService (0119)', () => {
       const answer = await service().createUnclaimed({ caseId }, context);
       expect(answer.healthId).toBe('HID-FREE56');
       expect(hmacs).toHaveLength(3);
-      expect(hmacs[0]).toBe(hmacs[1]);
-      expect(hmacs[2]).toBe(outreachClaimCodeHmac(Buffer.from(OTP_KEY, 'base64'), answer.claimCode));
+      expect(hmacs[2]).toBe(outreachClaimCodeHmac(Buffer.from(OTP_KEY, 'base64'), 'HID-FREE56', answer.claimCode));
     });
 
     it.each([
@@ -567,8 +569,14 @@ describe('OutreachHealthIdService (0119)', () => {
     }
     expect(seen.size).toBe(200);
     const key = Buffer.alloc(32, 3);
-    expect(outreachClaimCodeHmac(key, 'abcd2345')).toBe(outreachClaimCodeHmac(key, 'ABCD2345'));
-    expect(outreachClaimCodeHmac(key, 'ABCD2345')).toMatch(/^[0-9a-f]{64}$/);
+    expect(outreachClaimCodeHmac(key, 'hid-abcd23', 'abcd2345')).toBe(outreachClaimCodeHmac(key, 'HID-ABCD23', 'ABCD2345'));
+    expect(outreachClaimCodeHmac(key, 'HID-ABCD23', 'ABCD2345')).toMatch(/^[0-9a-f]{64}$/);
+    // Labelled and bound to the Health ID: never the bare code's HMAC, never another Health ID's.
+    expect(outreachClaimCodeHmac(key, 'HID-ABCD23', 'ABCD2345'))
+      .toBe(createHmac('sha256', key).update('outreach-claim-code\u001fv1\u001fHID-ABCD23\u001fABCD2345').digest('hex'));
+    expect(outreachClaimCodeHmac(key, 'HID-ABCD23', 'ABCD2345'))
+      .not.toBe(createHmac('sha256', key).update('ABCD2345').digest('hex'));
+    expect(outreachClaimCodeHmac(key, 'HID-ABCD23', 'ABCD2345')).not.toBe(outreachClaimCodeHmac(key, 'HID-ABCD24', 'ABCD2345'));
   });
 
   it('hints an email by its first character and domain', () => {

@@ -78,7 +78,6 @@ const MESSAGES = {
   emailTaken: 'This email is already used by another Health ID or account. Use another email.',
   phoneTaken: 'This phone number already has a Health ID. Ask them to sign in with it.',
   tooManyCodes: 'Too many codes for this person today. Try again tomorrow.',
-  tooManyCreations: 'Too many Health IDs created in a short time. Wait a few minutes.',
   cooldown: 'Wait a minute before sending another code.',
   emailDaily: 'Too many codes were sent to this email today. Try again tomorrow, or use another email.',
   volunteerDaily: 'You have sent too many codes today. Try again tomorrow.',
@@ -319,7 +318,11 @@ export class OutreachHealthIdService {
       };
     });
     if (preflight.retryAfterSeconds !== null) {
-      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS', MESSAGES.tooManyCreations, undefined,
+      // The words give the real wait (refused tries count too, so it can be
+      // most of the hour), as Retry-After does.
+      const minutes = Math.max(1, Math.ceil(preflight.retryAfterSeconds / 60));
+      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS',
+        `Too many Health IDs created in a short time. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, undefined,
         { extensions: { retryAfterSeconds: preflight.retryAfterSeconds } });
     }
     if (!preflight.ready) throw this.unavailable();
@@ -339,7 +342,7 @@ export class OutreachHealthIdService {
           (await client.query<{ hid_code: string; patient_id: string; claim_expires_at: Date }>(
             'select * from identity.outreach_health_id_create_unclaimed($1,$2,$3,$4,$5,$6,$7,$8)',
             [input.caseId, hid, phoneCiphertext, phoneLookup, encryption?.version ?? null,
-              outreachClaimCodeHmac(this.otpKey, claimCode), OUTREACH_CLAIM_KEY_VERSION,
+              outreachClaimCodeHmac(this.otpKey, hid, claimCode), OUTREACH_CLAIM_KEY_VERSION,
               this.env.OTP_HMAC_KEY_VERSION])).rows[0]);
         if (!row?.hid_code || !row.claim_expires_at) throw this.unavailable();
         return { healthId: row.hid_code, claimCode, claimExpiresAt: new Date(row.claim_expires_at).toISOString() };

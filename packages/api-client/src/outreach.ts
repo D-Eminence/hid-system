@@ -14,6 +14,14 @@ export interface OutreachClientOptions {
   credentials?: RequestCredentials;
 }
 
+/**
+ * How long the browser waits for createUnverifiedHealthId: longer than
+ * outreach-api's own wait for Identity (OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS,
+ * 20 s) plus its registration read, so the browser never gives up while the
+ * server can still answer with the one-time claim code.
+ */
+export const OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS = 45_000;
+
 /** How a Health ID created at outreach was created (0120). */
 export type OutreachHealthIdStatus = 'verified' | 'unclaimed';
 
@@ -221,7 +229,8 @@ export class OutreachApiClient {
     signal?: AbortSignal) {
     return this.request<OutreachHealthIdCreatedUnverified>(
       `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/health-id/create-unverified`,
-      'POST', {}, context, idempotencyKey, signal, undefined, false);
+      'POST', {}, context, idempotencyKey, signal, undefined, false,
+      Math.max(this.options.timeoutMs ?? 10_000, OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS));
   }
 
   /** A registration's screening (0118): { screening: null } when none was recorded. */
@@ -253,7 +262,7 @@ export class OutreachApiClient {
 
   private async request<Result>(path: string, method: 'GET' | 'POST' | 'PUT', body: unknown,
     context: OutreachRequestContext, idempotencyKey?: string,
-    signal?: AbortSignal, ifMatch?: string, retry = true): Promise<Result> {
+    signal?: AbortSignal, ifMatch?: string, retry = true, timeoutMs?: number): Promise<Result> {
     // A Health ID code is never resent by a retry: each start emails a new code.
     const attempts = idempotencyKey && retry ? 2 : 1;
     let lastError: unknown;
@@ -264,7 +273,7 @@ export class OutreachApiClient {
           path,
           method,
           body,
-          timeoutMs: this.options.timeoutMs ?? 10_000,
+          timeoutMs: timeoutMs ?? this.options.timeoutMs ?? 10_000,
           credentials: this.options.credentials ?? 'include',
           signal,
           headers: {

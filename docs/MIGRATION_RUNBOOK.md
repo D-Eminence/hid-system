@@ -369,7 +369,9 @@ restored application login remain external acceptance evidence.
 
 A volunteer creating Health IDs at a busy outreach is limited by identity-api configuration, so the
 limits can be raised for an event without a migration (owner, 2026-11-13: "we are attending to
-hundreds of people"). Defaults apply when a variable is unset.
+hundreds of people"). The default applies when a variable is unset, empty or invalid (not a whole
+number from 1 to its maximum: 1000, 2000 and 1000 in table order), so a bad value never means 0 or
+no limit.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

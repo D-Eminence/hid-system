@@ -1683,11 +1683,13 @@ revoke all on function identity.outreach_registration_health_ids_immutable(), id
 
 -- Health IDs created at outreach with no contact (0120), as that migration
 -- grants them: the Identity runtime's creation and counts; the Outreach
--- runtime's read (replaced by 0120 to add created_via). The claim codes are
--- granted to no role.
+-- runtime's read (replaced by 0120 to add created_via). The claim codes and
+-- the claim scrub (function and redaction trigger) are granted to no role.
 grant execute on function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text,text),
   identity.outreach_health_id_counts()
   to hid_identity_runtime, hid_schema_test_runtime;
 grant execute on function identity.outreach_registration_health_ids_for(uuid[])
   to hid_outreach_runtime, hid_schema_test_runtime;
 revoke all on identity.outreach_health_id_claims from public;
+revoke all on function identity.outreach_health_id_scrub_claims(integer),
+  identity.outreach_health_id_claim_redacted_case() from public;

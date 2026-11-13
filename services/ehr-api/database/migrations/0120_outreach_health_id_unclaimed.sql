@@ -22,7 +22,7 @@
 --     patient (name and sex; no contact, no date of birth) and its Health
 --     ID, with NO account and no contact-verified assurance: nobody can sign
 --     in until the person claims it. A phone already on a real patient is
---     refused; one already on another unclaimed Health ID, or (with no phone)
+--     refused; one already on another live unclaimed Health ID's claim, or (with no phone)
 --     a same name and sex, is flagged for review, never refused.
 --   * identity.outreach_health_id_counts(): Health IDs created at outreach,
 --     by email or unclaimed, not yet claimed, and flagged (counts only), for
@@ -68,7 +68,7 @@ alter table identity.outreach_registration_health_ids
 comment on column identity.outreach_registration_health_ids.created_via is
   '0120: email (0119: the person proved an email; the account exists) or unclaimed (no contact; no account until claimed).';
 comment on column identity.outreach_registration_health_ids.possible_duplicate is
-  '0120: unclaimed, and either its phone is on another unclaimed Health ID or (with no phone) an active patient had the same name and sex: for review later; never refused.';
+  '0120: unclaimed, and either its phone is on another live (unexpired, not out of attempts) unclaimed Health ID''s claim or (with no phone) an active patient had the same name and sex: for review later; never refused.';
 
 -- 2. Claim codes.
 -- The one-time claim code of a Health ID created with no contact (keyed HMAC
@@ -150,7 +150,8 @@ begin
     end if;
     duplicate_flag := exists (select 1 from identity.outreach_health_id_claims claim
       where claim.phone_lookup_hmac = requested_phone_lookup_hmac and claim.claimed_at is null
-        and claim.invalidated_at is null);
+        and claim.invalidated_at is null and claim.expires_at > clock_timestamp()
+        and claim.failed_attempts < claim.max_attempts);
   else
     -- Nothing to check a duplicate person against: flag a same name and sex
     -- for review later; never refuse on it.
@@ -191,14 +192,16 @@ begin
   values (platform.current_correlation_id(), 'staff', platform.current_actor_subject(), platform.current_account_id(),
     platform.current_membership_id(), registration.facility_id, new_patient, 'outreach.health-id.created-unclaimed',
     'success', 'outreach-registration-case', requested_case_id::text, 'direct-care', 'application', 'identity-api',
-    jsonb_build_object('channel', 'none', 'phoneOnRecord', requested_phone_lookup_hmac is not null,
-      'possibleDuplicate', duplicate_flag));
+    -- Not the duplicate flag: facility audit readers see details, and the flag
+    -- would tell them the phone or name is on another group's record.
+    jsonb_build_object('channel', 'none', 'phoneOnRecord', requested_phone_lookup_hmac is not null));
+  perform identity.outreach_health_id_scrub_claims(200);
   return query select requested_hid, new_patient, claim_expiry;
 end
 $$;
 
 comment on function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text,text) is
-  '0120: creates a Health ID from an outreach registration for a person with no email (and possibly no phone): the patient (name and sex; no contact, no date of birth), its Health ID identifier, the registration''s Health ID record (created_via unclaimed; possible_duplicate when the phone is on another unclaimed Health ID or, with no phone, an active patient has the same name and sex) and the claim: the code''s keyed HMAC (180 days, 5 attempts) and the registration''s unproven phone, kept off the patient so it never blocks the number''s real owner. No account and no contact-verified assurance: nobody can sign in until it is claimed. One audit row (ids and flags only). Refuses as identity.outreach_health_id_eligible does (incl. 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED with the Health ID in detail, never the claim code), 23505 OUTREACH_HEALTH_ID_PHONE_TAKEN (the phone is on a real patient), 22023 OUTREACH_HEALTH_ID_REQUEST_INVALID.';
+  '0120: creates a Health ID from an outreach registration for a person with no email (and possibly no phone): the patient (name and sex; no contact, no date of birth), its Health ID identifier, the registration''s Health ID record (created_via unclaimed; possible_duplicate when the phone is on another live unclaimed Health ID''s claim or, with no phone, an active patient has the same name and sex) and the claim: the code''s keyed HMAC (180 days, 5 attempts) and the registration''s unproven phone, kept off the patient so it never blocks the number''s real owner. No account and no contact-verified assurance: nobody can sign in until it is claimed. One audit row (ids and the phoneOnRecord flag only; never the duplicate flag, which facility audit readers would see). Refuses as identity.outreach_health_id_eligible does (incl. 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED with the Health ID in detail, never the claim code), 23505 OUTREACH_HEALTH_ID_PHONE_TAKEN (the phone is on a real patient), 22023 OUTREACH_HEALTH_ID_REQUEST_INVALID.';
 
 -- 4. Counts for the platform admin (users created at outreach).
 create function identity.outreach_health_id_counts()
@@ -223,7 +226,79 @@ end
 $$;
 
 comment on function identity.outreach_health_id_counts() is
-  '0120: counts of Health IDs created at outreach (with a verified email; with no contact; of those, not yet claimed; flagged as a possible duplicate). Counts only. Identity runtime; refuses 42501 PLATFORM_ADMIN_REQUIRED unless the session account holds platform.admin.access (the route checks it too).';
+  '0120: counts of Health IDs created at outreach (with a verified email; with no contact; of those, not yet claimed, including expired or attempt-exhausted claims; flagged as a possible duplicate). Counts only. Identity runtime; refuses 42501 PLATFORM_ADMIN_REQUIRED unless the session account holds platform.admin.access (the route checks it too).';
+
+-- 4b. Retention of the claim's unproven phone (as 0119 does for the codes'
+-- email): removed once the claim can no longer be used (expired, out of
+-- attempts or invalidated, and never claimed) and at once when the
+-- registration is redacted. The claim code and the Health ID stay.
+create function identity.outreach_health_id_scrub_claims(requested_limit integer)
+returns integer language plpgsql volatile security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  scrubbed integer;
+begin
+  with due as (
+    select claim.patient_id from identity.outreach_health_id_claims claim
+     where claim.phone_lookup_hmac is not null and claim.claimed_at is null
+       and (claim.expires_at < clock_timestamp() or claim.failed_attempts >= claim.max_attempts
+            or claim.invalidated_at is not null
+            -- A redaction that ran while this claim was still being created
+            -- (its trigger could not see the uncommitted claim).
+            or exists (select 1 from outreach.registration_redactions redaction
+                        where redaction.registration_case_id = claim.registration_case_id))
+     order by claim.expires_at
+     limit greatest(1, least(coalesce(requested_limit, 200), 5000))
+     for update skip locked)
+  update identity.outreach_health_id_claims claim
+     set phone_e164_ciphertext = null, phone_lookup_hmac = null, contact_key_version = null
+    from due where claim.patient_id = due.patient_id;
+  get diagnostics scrubbed = row_count;
+  return scrubbed;
+end
+$$;
+comment on function identity.outreach_health_id_scrub_claims(integer) is
+  '0120: removes the unproven phone (ciphertext, lookup HMAC, key version) from outreach Health ID claims that can no longer be used and were never claimed (expired, out of attempts or invalidated) or whose registration was redacted (also when the redaction raced the creation), at most the given number (1-5000) per call. Run by create_unclaimed and 0116''s daily retention sweep. Counts only.';
+
+create function identity.outreach_health_id_claim_redacted_case()
+returns trigger language plpgsql security definer
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  update identity.outreach_health_id_claims claim
+     set phone_e164_ciphertext = null, phone_lookup_hmac = null, contact_key_version = null
+   where claim.registration_case_id = new.registration_case_id and claim.phone_lookup_hmac is not null;
+  return null;
+end
+$$;
+create trigger outreach_registration_redactions_health_id_claim_scrub
+  after insert on outreach.registration_redactions
+  for each row execute function identity.outreach_health_id_claim_redacted_case();
+
+-- 0116's retention sweep (as 0119 left it) also scrubs the claims. Changed in
+-- place: 0119's body pinned before, the result checked after.
+do $$
+declare
+  old_end text := E'  perform identity.outreach_health_id_scrub_challenges(5000);\n';
+  new_end text := E'  perform identity.outreach_health_id_scrub_challenges(5000);\n  perform identity.outreach_health_id_scrub_claims(5000);\n';
+  definition text;
+begin
+  if (select md5(prosrc) from pg_proc where oid = 'identity.sweep_expired_outreach_registrations(integer)'::regprocedure)
+       is distinct from '39ed34999005c9907edeafd4748aaac2' then
+    raise exception using errcode = '55000', message = '0120: identity.sweep_expired_outreach_registrations is not 0119''s';
+  end if;
+  definition := pg_get_functiondef('identity.sweep_expired_outreach_registrations(integer)'::regprocedure);
+  if (length(definition) - length(replace(definition, old_end, ''))) / length(old_end) <> 1 then
+    raise exception using errcode = '55000', message = '0120: the sweep text to replace is not there exactly once';
+  end if;
+  execute replace(definition, old_end, new_end);
+  if (select prosrc from pg_proc where oid = 'identity.sweep_expired_outreach_registrations(integer)'::regprocedure)
+       not like '%identity.outreach_health_id_scrub_claims(5000)%' then
+    raise exception using errcode = '55000', message = '0120: the sweep was not changed as intended';
+  end if;
+end
+$$;
 
 -- 5. For outreach-api (replaces 0119's, adding created_via): the Health IDs created for registrations the session can see.
 drop function identity.outreach_registration_health_ids_for(uuid[]);
@@ -261,6 +336,8 @@ begin
     execute format('alter table identity.outreach_health_id_claims owner to %I', owner_name);
     execute format('alter function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text,text) owner to %I', owner_name);
     execute format('alter function identity.outreach_health_id_counts() owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_scrub_claims(integer) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_claim_redacted_case() owner to %I', owner_name);
     execute format('alter function identity.outreach_registration_health_ids_for(uuid[]) owner to %I', owner_name);
   end if;
   execute format('create policy outreach_health_id_claims_owner on identity.outreach_health_id_claims '
@@ -270,7 +347,8 @@ $$;
 
 revoke all on identity.outreach_health_id_claims from public;
 revoke all on function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text,text),
-  identity.outreach_health_id_counts(), identity.outreach_registration_health_ids_for(uuid[]) from public;
+  identity.outreach_health_id_counts(), identity.outreach_registration_health_ids_for(uuid[]),
+  identity.outreach_health_id_scrub_claims(integer), identity.outreach_health_id_claim_redacted_case() from public;
 
 -- Grants (here and in runtime-grants.sql).
 do $$
@@ -305,12 +383,20 @@ begin
        <> (select relowner from pg_class where oid = 'identity.patients'::regclass)
      or exists (select 1 from pg_proc where oid in (
                'identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text,text)'::regprocedure,
-               'identity.outreach_health_id_counts()'::regprocedure, 'identity.outreach_registration_health_ids_for(uuid[])'::regprocedure)
+               'identity.outreach_health_id_counts()'::regprocedure, 'identity.outreach_registration_health_ids_for(uuid[])'::regprocedure,
+               'identity.outreach_health_id_scrub_claims(integer)'::regprocedure,
+               'identity.outreach_health_id_claim_redacted_case()'::regprocedure)
                and proowner <> (select relowner from pg_class where oid = 'identity.patients'::regclass)) then
     raise exception using errcode = '55000', message = '0120: a new object is not owned by the owner of identity.patients';
   end if;
   if exists (select 1 from identity.outreach_registration_health_ids where created_via <> 'email') then
     raise exception using errcode = '55000', message = '0120: an existing record is not an email one';
+  end if;
+  if exists (select 1 from pg_roles role_row where role_row.rolname like 'hid\_%'
+              and role_row.oid <> (select relowner from pg_class where oid = 'identity.patients'::regclass)
+              and (has_function_privilege(role_row.oid, 'identity.outreach_health_id_scrub_claims(integer)', 'EXECUTE')
+                   or has_function_privilege(role_row.oid, 'identity.outreach_health_id_claim_redacted_case()', 'EXECUTE'))) then
+    raise exception using errcode = '55000', message = '0120: a runtime role can run the claim scrub';
   end if;
 end
 $$;

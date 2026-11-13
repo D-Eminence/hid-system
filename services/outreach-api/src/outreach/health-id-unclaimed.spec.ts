@@ -1,4 +1,5 @@
-import { IdentityApiClient, IdentityApiProblem, OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS, OutreachApiClient,
+import { IdentityApiClient, IdentityApiProblem, OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS,
+  OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS, OutreachApiClient,
   OutreachApiProblem } from '@hid/api-client';
 import { Logger } from '@nestjs/common';
 import { REQUIRED_PERMISSIONS } from '../common/decorators';
@@ -10,6 +11,9 @@ import { resetEnvironmentForTests } from '../config/environment';
 import { requireEmptyHealthIdBody } from './dto/health-id.dto';
 import { OutreachController } from './outreach.controller';
 import { OutreachService } from './outreach.service';
+import { OUTREACH_HEALTH_ID_CREATE_READ_BUDGET_MS, OUTREACH_HEALTH_ID_CREATE_SERVER_BUDGET_MS } from './health-id-budget';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // A Health ID created at the outreach for a person with no contact (0120) in
 // outreach-api: the route, the proxy to Identity, healthIdStatus and the
@@ -128,6 +132,62 @@ describe('Outreach Health ID with no contact (0120)', () => {
       warn.mockRestore();
     });
 
+    it('bounds the read before Identity: too slow answers 503 and asks Identity nothing', async () => {
+      jest.useFakeTimers();
+      try {
+        query.mockImplementationOnce(() => new Promise(() => undefined));
+        const pending = problem(service().createUnverifiedHealthId(caseId, context));
+        await jest.advanceTimersByTimeAsync(OUTREACH_HEALTH_ID_CREATE_READ_BUDGET_MS);
+        expect(await pending).toMatchObject({ code: 'OUTREACH_HEALTH_ID_UNAVAILABLE' });
+        expect((await pending).getStatus()).toBe(503);
+        expect(identity.createUnclaimedHealthId).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('bounds the re-read: too slow still answers 201 with the claim code from the earlier read', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      jest.useFakeTimers();
+      try {
+        identity.createUnclaimedHealthId.mockResolvedValue(created);
+        registrationRead([]);
+        query.mockImplementationOnce(() => new Promise(() => undefined));
+        const pending = service().createUnverifiedHealthId(caseId, context);
+        await jest.advanceTimersByTimeAsync(OUTREACH_HEALTH_ID_CREATE_READ_BUDGET_MS);
+        expect(await pending).toEqual({ ...created, registration: expect.objectContaining({ id: caseId,
+          healthId: created.healthId, healthIdStatus: 'unclaimed' }) });
+        expect(warn.mock.calls[0]![0]).toMatchObject({ event: 'outreach.health-id.create-unverified.reread-failed',
+          exceptionType: 'ReadBudgetExceeded' });
+      } finally {
+        jest.useRealTimers();
+        warn.mockRestore();
+      }
+    });
+
+    it('keeps the order: server budget < browser wait < gateway read timeout for the Health ID routes', () => {
+      expect(OUTREACH_HEALTH_ID_CREATE_SERVER_BUDGET_MS).toBe(
+        2 * OUTREACH_HEALTH_ID_CREATE_READ_BUDGET_MS + OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS);
+      expect(OUTREACH_HEALTH_ID_CREATE_SERVER_BUDGET_MS + 5_000)
+        .toBeLessThanOrEqual(OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS);
+      const template = readFileSync(join(__dirname, '../../../../gateway/nginx.conf.template'), 'utf8');
+      const server = template.match(/^ {2}proxy_read_timeout (\d+)s;$/m);
+      const routeStart = template.indexOf(
+        'location ~* "^/api/v1/outreach/registration-cases/[^/]+/health-id/(start|confirm|create-unverified)/?$" {');
+      expect(routeStart).toBeGreaterThan(0);
+      const routeBlock = template.slice(routeStart, template.indexOf('\n    }\n', routeStart));
+      const route = routeBlock.match(/proxy_read_timeout (\d+)s;/);
+      expect(server).not.toBeNull();
+      expect(route).not.toBeNull();
+      const gatewayMs = Number(route![1]) * 1000;
+      expect(Number(server![1]) * 1000).toBeLessThan(OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS);
+      expect(OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS + 10_000).toBeLessThanOrEqual(gatewayMs);
+      // Nested inside the outreach location (an outer regex location would never be reached).
+      const outreachBlock = template.slice(template.indexOf('location ^~ /api/v1/outreach/ {'));
+      expect(outreachBlock.indexOf('health-id/(start|confirm|create-unverified)'))
+        .toBeLessThan(outreachBlock.indexOf('\n  }\n'));
+    });
+
     it('asks Identity nothing when the registration cannot be read first', async () => {
       query.mockResolvedValueOnce({ rows: [] });
       expect((await problem(service().createUnverifiedHealthId(caseId, context))).code)
@@ -188,10 +248,10 @@ describe('Outreach Health ID with no contact (0120)', () => {
     it('passes the volunteer\'s creation limit on: 429 with its words and Retry-After', async () => {
       jest.spyOn(IdentityApiClient.prototype, 'outreachHealthIdCreateUnclaimed').mockRejectedValue(
         new IdentityApiProblem(429, { code: 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS',
-          detail: 'Too many Health IDs created in a short time. Wait a few minutes.', retryAfterSeconds: 1200 }));
+          detail: 'Too many Health IDs created in a short time. Try again in 20 minutes.', retryAfterSeconds: 1200 }));
       const refusal = await problem(identityService().createUnclaimedHealthId(caseId, context));
       expect([refusal.getStatus(), refusal.code, refusal.message]).toEqual([429, 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS',
-        'Too many Health IDs created in a short time. Wait a few minutes.']);
+        'Too many Health IDs created in a short time. Try again in 20 minutes.']);
       expect(refusal.problemOptions.headers).toEqual({ 'Retry-After': '1200' });
     });
 
@@ -248,6 +308,26 @@ describe('Outreach Health ID with no contact (0120)', () => {
         // ID routes keeps the client's usual timeout.
         await client.outreachHealthIdConfirm({ caseId, code: '123456' }, { correlationId: 'c', facilityId });
         expect(timers.mock.calls.map((call) => call[1])).toContain(20_000);
+      } finally {
+        timers.mockRestore();
+      }
+    });
+
+    it('the browser waits longer for create-unverified than outreach-api waits for Identity, still once', async () => {
+      const fetchMock = jest.fn().mockResolvedValue(json(201, created));
+      global.fetch = fetchMock;
+      const timers = jest.spyOn(globalThis, 'setTimeout');
+      try {
+        const browser = new OutreachApiClient({ baseUrl: 'https://outreach.test' });
+        await browser.createUnverifiedHealthId(caseId, { correlationId: 'c', facilityId, purposeOfUse: 'direct-care' }, 'k1');
+        expect(OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS).toBeGreaterThanOrEqual(
+          OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS + 20_000);
+        expect(timers.mock.calls.map((call) => call[1])).toContain(OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        timers.mockClear();
+        fetchMock.mockResolvedValue(json(200, { screening: null }));
+        await browser.getRegistrationScreening(caseId, { correlationId: 'c', facilityId, purposeOfUse: 'direct-care' });
+        expect(timers.mock.calls.map((call) => call[1])).toContain(10_000);
       } finally {
         timers.mockRestore();
       }

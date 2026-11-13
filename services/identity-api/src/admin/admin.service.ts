@@ -153,7 +153,10 @@ export class AdminService {
         possibleDuplicates: Number(row.possible_duplicates),
       };
     } catch (error) {
-      if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '42883') {
+      // Only a database before 0120 (the counts function itself is missing);
+      // anything missing inside it is a real failure.
+      if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '42883'
+        && /outreach_health_id_counts/.test(String((error as { message?: unknown }).message ?? ''))) {
         await client.query('rollback to savepoint outreach_health_id_counts');
         return null;
       }
