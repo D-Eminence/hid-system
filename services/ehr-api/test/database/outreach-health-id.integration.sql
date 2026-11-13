@@ -542,8 +542,8 @@ select pg_temp.idrt('7i the counts: not for an organiser', '42501: PLATFORM_ADMI
 select pg_temp.support('7i2 the counts for a platform administrator', '3/2/1/1/0', 'synthetic:hi-support',
   $s$select concat_ws('/', created_at_outreach, created_with_email, created_unclaimed, unclaimed_not_yet_claimed,
        possible_duplicates) from identity.outreach_health_id_counts()$s$, false);
-select pg_temp.hi_case('7j the audit row carries flags only', 'none/false/false', session_user::text, null, null, null, null,
-  $s$select concat_ws('/', details->>'channel', details->>'phoneOnRecord', details->>'possibleDuplicate')
+select pg_temp.hi_case('7j the audit row carries flags only, never the duplicate flag', 'none/false/t', session_user::text, null, null, null, null,
+  $s$select concat_ws('/', details->>'channel', details->>'phoneOnRecord', not (details ? 'possibleDuplicate'))
        from audit.events where action = 'outreach.health-id.created-unclaimed'
         and resource_id = '6c080000-0000-4000-8000-000000000004'$s$);
 select pg_temp.hi_case('7k no runtime reads the claims', 'f/f', session_user::text, null, null, null, null,
@@ -578,25 +578,27 @@ select pg_temp.hi_case('7p no patient holds the unproven phone, so sign-up is no
 -- 7c. No phone: an active patient with the same name and sex flags the new
 -- Health ID; the other sex does not (Rahman's check). Registrations 7 (female)
 -- and 8 (male) at campaign 5, adults with no phone, and a signed-up patient
--- with that name.
+-- with that name. Registration 9 (with a phone) is for the claims' phone
+-- retention below.
 set local session_replication_role = replica;
 insert into outreach.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, local_command_id,
   temporary_patient_id, full_name, sex, age_years, phone, operational_notes, campaign_id, created_at)
 select ('6c080000-0000-4000-8000-00000000000' || n)::uuid, '6c000000-0000-4000-8000-000000000002',
   '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001', gen_random_uuid(),
-  'tmp_' || gen_random_uuid(), 'Ngozi  Same Name', sex, 40, null, 'Checked blood pressure',
+  'tmp_' || gen_random_uuid(), case when n = 9 then 'Ada Retention' else 'Ngozi  Same Name' end, sex, 40,
+  case when n = 9 then '+2348000000099' end, 'Checked blood pressure',
   '6c070000-0000-4000-8000-000000000005', now() - interval '1 hour'
-  from (values (7, 'female'), (8, 'male')) as r(n, sex);
+  from (values (7, 'female'), (8, 'male'), (9, 'female')) as r(n, sex);
 insert into outreach.registration_consents (registration_case_id, facility_id, consent_text_version, language, method,
   guardian_name, captured_by_account_id, captured_by_membership_id)
 select ('6c080000-0000-4000-8000-00000000000' || n)::uuid, '6c000000-0000-4000-8000-000000000002', 'notice-2026-11-01',
   'ha', 'guardian', 'Mama Person ' || n, '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001'
-  from (values (7), (8)) as r(n);
+  from (values (7), (8), (9)) as r(n);
 insert into outreach.command_idempotency (requester_account_id, requester_membership_id, facility_id, operation,
   idempotency_key, request_sha256, registration_case_id)
 select '6c010000-0000-4000-8000-000000000001', '6c030000-0000-4000-8000-000000000001',
   '6c000000-0000-4000-8000-000000000002', 'registration_case_create', 'healthid-key-' || n, repeat('f', 64),
-  ('6c080000-0000-4000-8000-00000000000' || n)::uuid from (values (7), (8)) as r(n);
+  ('6c080000-0000-4000-8000-00000000000' || n)::uuid from (values (7), (8), (9)) as r(n);
 set local session_replication_role = origin;
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, gender, source_system, status)
 values ('6c0b0000-0000-4000-8000-000000000008', 'HID-RTE6R8', 'Ngozi', 'Same Name', 'ngozi same name', 'female',
@@ -610,6 +612,36 @@ select pg_temp.hi_case('7s flagged for the same sex only', 'HID-RTE6D8=true/HID-
   $s$select string_agg(hid_code || '=' || possible_duplicate, '/' order by hid_code)
        from identity.outreach_registration_health_ids where hid_code in ('HID-RTE6D8', 'HID-RTE6D9')$s$);
 
+-- 7d. The claims' unproven phone (retention). The two claims holding phone
+-- hash 7 (registrations 3 and 1) can no longer be used: one expired, one out
+-- of attempts. A new Health ID with that phone is not flagged by them, and the
+-- scrub run by the creation removes their phone; the new claim keeps its own.
+update identity.outreach_health_id_claims set expires_at = clock_timestamp() - interval '1 day'
+ where registration_case_id = '6c080000-0000-4000-8000-000000000003';
+update identity.outreach_health_id_claims set failed_attempts = max_attempts
+ where registration_case_id = '6c080000-0000-4000-8000-000000000001';
+select pg_temp.idrt('7t a phone only on dead claims: created, not flagged', 'HID-RTE6DA/t',
+  pg_temp.unclaimed_sql(9, 'HID-RTE6DA', repeat('7', 64), repeat('f', 64)), true);
+select pg_temp.hi_case('7u not flagged; the dead claims lost their phone, the new one keeps it',
+  'false/HID-RTE6D3=false/HID-RTE6D7=false/HID-RTE6DA=true', session_user::text, null, null, null, null,
+  $s$select (select possible_duplicate::text from identity.outreach_registration_health_ids where hid_code = 'HID-RTE6DA')
+       || '/' || string_agg(link.hid_code || '=' || (claim.phone_lookup_hmac is not null and claim.phone_e164_ciphertext is not null
+          and claim.contact_key_version is not null), '/' order by link.hid_code)
+       from identity.outreach_health_id_claims claim
+       join identity.outreach_registration_health_ids link on link.patient_id = claim.patient_id
+      where link.hid_code in ('HID-RTE6D3', 'HID-RTE6D7', 'HID-RTE6DA')$s$);
+select pg_temp.support('7v support redacts registration 9', 'redacted', 'synthetic:hi-support',
+  $s$select identity.admin_redact_outreach_registration('6c080000-0000-4000-8000-000000000009', 'Caller asked us to delete her details')$s$);
+select pg_temp.hi_case('7w a redacted registration''s claim loses its phone, keeps its code', 't/t/f', session_user::text,
+  null, null, null, null,
+  $s$select concat_ws('/', claim.phone_lookup_hmac is null and claim.phone_e164_ciphertext is null
+          and claim.contact_key_version is null, claim.code_hmac = repeat('f', 64), claim.invalidated_at is not null)
+       from identity.outreach_health_id_claims claim
+      where claim.registration_case_id = '6c080000-0000-4000-8000-000000000009'$s$);
+select pg_temp.hi_case('7x no runtime can run the claim scrub', 'f/f', session_user::text, null, null, null, null,
+  $s$select concat_ws('/', has_function_privilege('hid_identity_api_runtime', 'identity.outreach_health_id_scrub_claims(integer)', 'EXECUTE'),
+       has_function_privilege('hid_outreach_api_runtime', 'identity.outreach_health_id_scrub_claims(integer)', 'EXECUTE'))$s$);
+
 -- 6c. 0116's sweep: registration 5 (a Health ID was created) is linked and is
 -- not redacted as "never linked"; registration 1 (none) is.
 set local session_replication_role = replica;
@@ -620,6 +652,9 @@ set local session_replication_role = origin;
 select pg_temp.hi_case('6k the sweep runs', 'ok', 'hid_identity_api_runtime', 'system:auth', null, null, null,
   $s$select identity.sweep_expired_outreach_registrations(100)$s$, true, 'statement');
 -- (In 0120's run the sweep runs last: registration 1 has an unclaimed Health ID by then, so it is kept too.)
+select pg_temp.hi_case('6k2 the sweep also scrubs the claims', 't', session_user::text, null, null, null, null,
+  $s$select (prosrc like '%identity.outreach_health_id_scrub_claims(5000)%')::text::char
+       from pg_proc where oid = 'identity.sweep_expired_outreach_registrations(integer)'::regprocedure$s$);
 select pg_temp.hi_case('6l linked registrations are kept: by email (5) and unclaimed (1)', 'f/f', session_user::text,
   null, null, null, null,
   $s$select concat_ws('/',

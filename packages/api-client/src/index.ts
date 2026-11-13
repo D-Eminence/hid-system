@@ -133,7 +133,7 @@ export type {
   OcrPublicationResult, OcrRetryInput, OcrTargetDomain, OcrTransport, OcrTransportRequest,
   OcrValidation, OcrValidationInput,
 } from './ocr';
-export { OutreachApiClient, OutreachApiProblem } from './outreach';
+export { OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS, OutreachApiClient, OutreachApiProblem } from './outreach';
 export type {
   CreateOutreachRegistrationCase,
   LinkOutreachExistingPatient,

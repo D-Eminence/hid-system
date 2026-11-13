@@ -1,4 +1,5 @@
-import { IdentityApiClient, IdentityApiProblem, OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS, OutreachApiClient,
+import { IdentityApiClient, IdentityApiProblem, OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS,
+  OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS, OutreachApiClient,
   OutreachApiProblem } from '@hid/api-client';
 import { Logger } from '@nestjs/common';
 import { REQUIRED_PERMISSIONS } from '../common/decorators';
@@ -248,6 +249,26 @@ describe('Outreach Health ID with no contact (0120)', () => {
         // ID routes keeps the client's usual timeout.
         await client.outreachHealthIdConfirm({ caseId, code: '123456' }, { correlationId: 'c', facilityId });
         expect(timers.mock.calls.map((call) => call[1])).toContain(20_000);
+      } finally {
+        timers.mockRestore();
+      }
+    });
+
+    it('the browser waits longer for create-unverified than outreach-api waits for Identity, still once', async () => {
+      const fetchMock = jest.fn().mockResolvedValue(json(201, created));
+      global.fetch = fetchMock;
+      const timers = jest.spyOn(globalThis, 'setTimeout');
+      try {
+        const browser = new OutreachApiClient({ baseUrl: 'https://outreach.test' });
+        await browser.createUnverifiedHealthId(caseId, { correlationId: 'c', facilityId, purposeOfUse: 'direct-care' }, 'k1');
+        expect(OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS).toBeGreaterThanOrEqual(
+          OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS + 20_000);
+        expect(timers.mock.calls.map((call) => call[1])).toContain(OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        timers.mockClear();
+        fetchMock.mockResolvedValue(json(200, { screening: null }));
+        await browser.getRegistrationScreening(caseId, { correlationId: 'c', facilityId, purposeOfUse: 'direct-care' });
+        expect(timers.mock.calls.map((call) => call[1])).toContain(10_000);
       } finally {
         timers.mockRestore();
       }

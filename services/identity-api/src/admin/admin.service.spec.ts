@@ -493,4 +493,11 @@ describe('AdminService overview: Health IDs created at outreach (0120)', () => {
     const { service } = overviewHarness(() => { throw Object.assign(new Error('PLATFORM_ADMIN_REQUIRED'), { code: '42501' }); });
     await expect(service.overview(adminContext)).rejects.toMatchObject({ code: '42501' });
   });
+
+  it('does not hide a function missing inside the counts (42883 for another function)', async () => {
+    const { service } = overviewHarness(() => {
+      throw Object.assign(new Error('function auth.account_has_platform_permission(uuid, text) does not exist'), { code: '42883' });
+    });
+    await expect(service.overview(adminContext)).rejects.toMatchObject({ code: '42883' });
+  });
 });

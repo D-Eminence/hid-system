@@ -339,7 +339,7 @@ export class OutreachHealthIdService {
           (await client.query<{ hid_code: string; patient_id: string; claim_expires_at: Date }>(
             'select * from identity.outreach_health_id_create_unclaimed($1,$2,$3,$4,$5,$6,$7,$8)',
             [input.caseId, hid, phoneCiphertext, phoneLookup, encryption?.version ?? null,
-              outreachClaimCodeHmac(this.otpKey, claimCode), OUTREACH_CLAIM_KEY_VERSION,
+              outreachClaimCodeHmac(this.otpKey, hid, claimCode), OUTREACH_CLAIM_KEY_VERSION,
               this.env.OTP_HMAC_KEY_VERSION])).rows[0]);
         if (!row?.hid_code || !row.claim_expires_at) throw this.unavailable();
         return { healthId: row.hid_code, claimCode, claimExpiresAt: new Date(row.claim_expires_at).toISOString() };
