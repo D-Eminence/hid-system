@@ -112,39 +112,13 @@ create table identity.outreach_registration_health_ids (
   registration_case_id uuid primary key references outreach.registration_cases(id) on delete restrict,
   facility_id uuid not null,
   patient_id uuid not null unique references identity.patients(id) on delete restrict,
-  account_id uuid unique references auth.accounts(id) on delete restrict,
+  account_id uuid not null unique references auth.accounts(id) on delete restrict,
   hid_code text not null check (hid_code ~ '^HID-[A-HJ-NP-Z2-9]{6,32}$'),
-  challenge_id uuid unique references identity.outreach_health_id_challenges(id) on delete restrict,
-  created_via text not null check (created_via in ('email', 'unclaimed')),
-  possible_duplicate boolean not null default false,
+  challenge_id uuid not null unique references identity.outreach_health_id_challenges(id) on delete restrict,
   created_by_account_id uuid not null,
   created_by_membership_id uuid not null,
-  created_at timestamptz not null default clock_timestamp(),
-  check ((created_via = 'email') = (account_id is not null and challenge_id is not null)),
-  check ((created_via = 'unclaimed') = (account_id is null and challenge_id is null))
+  created_at timestamptz not null default clock_timestamp()
 );
-
--- The one-time claim code of a Health ID created with no contact (keyed HMAC
--- only; the code itself is shown once and never stored).
-create table identity.outreach_health_id_claims (
-  patient_id uuid primary key references identity.patients(id) on delete restrict,
-  registration_case_id uuid not null unique
-    references identity.outreach_registration_health_ids(registration_case_id) on delete restrict,
-  code_hmac char(64) not null unique check (code_hmac ~ '^[0-9a-f]{64}$'),
-  code_key_version text not null check (length(code_key_version) between 1 and 64),
-  expires_at timestamptz not null,
-  failed_attempts integer not null default 0,
-  max_attempts integer not null default 5 check (max_attempts between 1 and 10),
-  claimed_at timestamptz,
-  claimed_account_id uuid unique references auth.accounts(id) on delete restrict,
-  invalidated_at timestamptz,
-  created_at timestamptz not null default clock_timestamp(),
-  check (failed_attempts between 0 and max_attempts),
-  check ((claimed_at is null) = (claimed_account_id is null)),
-  check (not (claimed_at is not null and invalidated_at is not null))
-);
-comment on table identity.outreach_health_id_claims is
-  '0119: the claim code (keyed HMAC only) of a Health ID created at an outreach with no contact: valid 180 days, attempt-limited. The claim itself (the person proves their own email; the account is created then) comes after the campaign. Owner-only.';
 
 comment on table identity.outreach_health_id_challenges is
   '0119: the email codes for creating a Health ID from an outreach registration (a keyed verifier only, never the code), with expiry, attempts and who asked. Owner-only.';
@@ -165,8 +139,6 @@ alter table identity.outreach_health_id_challenges enable row level security;
 alter table identity.outreach_health_id_challenges force row level security;
 alter table identity.outreach_registration_health_ids enable row level security;
 alter table identity.outreach_registration_health_ids force row level security;
-alter table identity.outreach_health_id_claims enable row level security;
-alter table identity.outreach_health_id_claims force row level security;
 
 -- 2. The registration, as the volunteer may use it.
 create function identity.outreach_health_id_registration(requested_case_id uuid)
@@ -440,8 +412,8 @@ begin
     contact_verified_at)
   values (new_patient, new_account, 'CONTACT_VERIFIED', 'hid-outreach-health-id', challenge.id::text, clock_timestamp());
   insert into identity.outreach_registration_health_ids (registration_case_id, facility_id, patient_id, account_id,
-    hid_code, challenge_id, created_via, created_by_account_id, created_by_membership_id)
-  values (requested_case_id, registration.facility_id, new_patient, new_account, requested_hid, challenge.id, 'email',
+    hid_code, challenge_id, created_by_account_id, created_by_membership_id)
+  values (requested_case_id, registration.facility_id, new_patient, new_account, requested_hid, challenge.id,
     platform.current_account_id(), platform.current_membership_id());
   insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
     facility_id, patient_id, action, outcome, resource_type, resource_id, purpose_of_use, provenance, source_system,
@@ -457,104 +429,13 @@ $$;
 comment on function identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char) is
   '0119: checks an outreach Health ID code and, when right, creates the account (no password, pending_reset, email verified), the patient (the registration''s name, sex and phone; the verified email; no date of birth), its Health ID identifier and CONTACT_VERIFIED assurance, the registration''s Health ID record and one audit row (ids only). Answers an outcome (created, replayed, invalid, expired, too_many_tries) so that a failed attempt is counted; raises the refusals of identity.outreach_health_id_registration, 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED / _EMAIL_TAKEN / _PHONE_TAKEN, 23514 _UNDER_18. The phone is optional: without one on the registration, the patient has none and the duplicate check rests on the email.';
 
--- 4b. No contact at all: a Health ID the person claims later.
-create function identity.outreach_health_id_create_unclaimed(
-  requested_case_id uuid, requested_hid text, requested_phone_ciphertext bytea, requested_phone_lookup_hmac char(64),
-  requested_key_version text, requested_claim_code_hmac char(64), requested_claim_key_version text
-) returns table (hid_code text, patient_id uuid, claim_expires_at timestamptz)
-language plpgsql volatile security definer
-set search_path = pg_catalog, pg_temp
-as $$
-#variable_conflict use_column
-declare
-  registration record;
-  new_patient uuid := gen_random_uuid();
-  first_name_value text;
-  last_name_value text;
-  duplicate_flag boolean := false;
-  claim_expiry timestamptz := clock_timestamp() + interval '180 days';
-begin
-  select * into registration from identity.outreach_health_id_registration(requested_case_id);
-  perform pg_advisory_xact_lock(hashtextextended('outreach-health-id:' || requested_case_id::text, 0));
-  perform identity.outreach_health_id_eligible(requested_case_id);
-  if requested_hid is null or requested_hid !~ '^HID-[A-HJ-NP-Z2-9]{6,32}$'
-     or (registration.phone is null) <> (requested_phone_lookup_hmac is null)
-     or (requested_phone_ciphertext is null) <> (requested_phone_lookup_hmac is null)
-     or coalesce(requested_phone_lookup_hmac, repeat('0', 64)) !~ '^[0-9a-f]{64}$'
-     or (requested_phone_lookup_hmac is not null and coalesce(length(requested_key_version), 0) not between 1 and 64)
-     or coalesce(requested_claim_code_hmac, '') !~ '^[0-9a-f]{64}$'
-     or coalesce(length(requested_claim_key_version), 0) not between 1 and 64 then
-    raise exception using errcode = '22023', message = 'OUTREACH_HEALTH_ID_REQUEST_INVALID';
-  end if;
-  if requested_phone_lookup_hmac is not null then
-    perform pg_advisory_xact_lock(hashtextextended('patient-contact:phone:' || requested_phone_lookup_hmac, 0));
-    if exists (select 1 from identity.patients patient where patient.phone_lookup_hmac = requested_phone_lookup_hmac) then
-      raise exception using errcode = '23505', message = 'OUTREACH_HEALTH_ID_PHONE_TAKEN';
-    end if;
-  else
-    -- Nothing to check a duplicate person against: flag a same name and sex
-    -- for review later; never refuse on it.
-    duplicate_flag := exists (select 1 from identity.patients patient
-      where lower(patient.full_name) = lower(btrim(registration.full_name))
-        and patient.gender is not distinct from registration.sex and patient.status = 'active');
-  end if;
-  first_name_value := split_part(btrim(registration.full_name), ' ', 1);
-  last_name_value := coalesce(nullif(btrim(substr(btrim(registration.full_name), length(first_name_value) + 1)), ''),
-    first_name_value);
-  -- No account: nobody can sign in to this Health ID until it is claimed.
-  insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, gender, dob,
-    phone_e164_ciphertext, phone_lookup_hmac, contact_key_version, source_system, status)
-  values (new_patient, null, requested_hid, first_name_value, last_name_value, btrim(registration.full_name),
-    registration.sex, null, requested_phone_ciphertext, requested_phone_lookup_hmac,
-    case when requested_phone_lookup_hmac is not null then requested_key_version end, 'hid-outreach-health-id', 'active');
-  insert into identity.patient_identifiers (id, patient_id, identifier_type, public_value, verified, source_system)
-  values (gen_random_uuid(), new_patient, 'hid_code', requested_hid, true, 'hid-outreach-health-id');
-  insert into identity.outreach_registration_health_ids (registration_case_id, facility_id, patient_id, account_id,
-    hid_code, challenge_id, created_via, possible_duplicate, created_by_account_id, created_by_membership_id)
-  values (requested_case_id, registration.facility_id, new_patient, null, requested_hid, null, 'unclaimed',
-    duplicate_flag, platform.current_account_id(), platform.current_membership_id());
-  insert into identity.outreach_health_id_claims (patient_id, registration_case_id, code_hmac, code_key_version,
-    expires_at)
-  values (new_patient, requested_case_id, requested_claim_code_hmac, requested_claim_key_version, claim_expiry);
-  insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
-    facility_id, patient_id, action, outcome, resource_type, resource_id, purpose_of_use, provenance, source_system,
-    details)
-  values (platform.current_correlation_id(), 'staff', platform.current_actor_subject(), platform.current_account_id(),
-    platform.current_membership_id(), registration.facility_id, new_patient, 'outreach.health-id.created-unclaimed',
-    'success', 'outreach-registration-case', requested_case_id::text, 'direct-care', 'application', 'identity-api',
-    jsonb_build_object('channel', 'none', 'phoneOnRecord', requested_phone_lookup_hmac is not null,
-      'possibleDuplicate', duplicate_flag));
-  return query select requested_hid, new_patient, claim_expiry;
-end
-$$;
-
-comment on function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text) is
-  '0119: creates a Health ID from an outreach registration for a person with no email (and possibly no phone): the patient (name, sex, phone if any; no date of birth), its Health ID identifier, the registration''s Health ID record (created_via unclaimed, possible_duplicate when there is no phone and an active patient has the same name and sex) and the claim code''s keyed HMAC (180 days, 5 attempts). No account and no contact-verified assurance: nobody can sign in until it is claimed. One audit row (ids and flags only). Refuses as identity.outreach_health_id_eligible does (incl. 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED with the Health ID in detail, never the claim code), 23505 OUTREACH_HEALTH_ID_PHONE_TAKEN, 22023 OUTREACH_HEALTH_ID_REQUEST_INVALID.';
-
--- 4c. Counts for the platform admin (users created at outreach).
-create function identity.outreach_health_id_counts()
-returns table (created_at_outreach bigint, created_with_email bigint, created_unclaimed bigint,
-  unclaimed_not_yet_claimed bigint, possible_duplicates bigint)
-language sql stable security definer
-set search_path = pg_catalog, pg_temp
-as $$
-  select count(*), count(*) filter (where link.created_via = 'email'), count(*) filter (where link.created_via = 'unclaimed'),
-    count(*) filter (where link.created_via = 'unclaimed' and not exists (select 1 from identity.outreach_health_id_claims claim
-      where claim.registration_case_id = link.registration_case_id and claim.claimed_at is not null)),
-    count(*) filter (where link.possible_duplicate)
-    from identity.outreach_registration_health_ids link
-$$;
-
-comment on function identity.outreach_health_id_counts() is
-  '0119: counts of Health IDs created at outreach (with a verified email; with no contact; of those, not yet claimed; flagged as a possible duplicate). Counts only. Identity runtime; the route checks the platform-admin permission.';
-
 -- 5. For outreach-api: the Health IDs created for registrations the session can see.
 create function identity.outreach_registration_health_ids_for(requested_case_ids uuid[])
-returns table (registration_case_id uuid, hid_code text, created_via text)
+returns table (registration_case_id uuid, hid_code text)
 language sql stable security definer
 set search_path = pg_catalog, pg_temp
 as $$
-  select link.registration_case_id, link.hid_code, link.created_via
+  select link.registration_case_id, link.hid_code
     from identity.outreach_registration_health_ids link
    where link.registration_case_id = any(requested_case_ids)
      and cardinality(requested_case_ids) <= 500
@@ -576,20 +457,15 @@ begin
     || 'for all to %I using (true) with check (true)', owner_name);
   execute format('create policy outreach_registration_health_ids_owner on identity.outreach_registration_health_ids '
     || 'for all to %I using (true) with check (true)', owner_name);
-  execute format('create policy outreach_health_id_claims_owner on identity.outreach_health_id_claims '
-    || 'for all to %I using (true) with check (true)', owner_name);
 end
 $$;
 
-revoke all on identity.outreach_health_id_challenges, identity.outreach_registration_health_ids,
-  identity.outreach_health_id_claims from public;
+revoke all on identity.outreach_health_id_challenges, identity.outreach_registration_health_ids from public;
 revoke all on function identity.outreach_registration_health_ids_immutable(),
   identity.outreach_health_id_registration(uuid), identity.outreach_health_id_eligible(uuid),
   identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer),
   identity.outreach_health_id_delivery_failed(uuid), identity.outreach_health_id_open_challenge(uuid),
   identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char),
-  identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text),
-  identity.outreach_health_id_counts(),
   identity.outreach_registration_health_ids_for(uuid[]) from public;
 
 -- Grants (here and in runtime-grants.sql).
@@ -602,9 +478,7 @@ begin
       execute format('grant execute on function identity.outreach_health_id_registration(uuid), '
         || 'identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer), '
         || 'identity.outreach_health_id_delivery_failed(uuid), identity.outreach_health_id_open_challenge(uuid), '
-        || 'identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char), '
-        || 'identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text), '
-        || 'identity.outreach_health_id_counts() to %I', role_name);
+        || 'identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char) to %I', role_name);
     end if;
   end loop;
   foreach role_name in array array['hid_outreach_runtime', 'hid_schema_test_runtime'] loop
@@ -624,7 +498,6 @@ begin
               and (has_table_privilege(role_row.oid, 'identity.outreach_health_id_challenges', 'SELECT,INSERT,UPDATE,DELETE')
                    or has_table_privilege(role_row.oid, 'identity.outreach_registration_health_ids',
                         'SELECT,INSERT,UPDATE,DELETE')
-                   or has_table_privilege(role_row.oid, 'identity.outreach_health_id_claims', 'SELECT,INSERT,UPDATE,DELETE')
                    or has_function_privilege(role_row.oid, 'identity.outreach_health_id_eligible(uuid)', 'EXECUTE'))) then
     raise exception using errcode = '55000', message = '0119: a runtime role holds a privilege it must not';
   end if;
