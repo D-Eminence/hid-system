@@ -4587,7 +4587,9 @@ unless the patient includes them; DPO sign-off before release).
   my paper records from other facilities" (`includeOtherFacilities`, default
   `false`) and, only together with it, to "include sensitive records"
   (`includeSensitive`, default `false`). Sensitive means HIV/ARV, TB,
-  psychiatric and sickle cell (the lists of `hid.ocr.sensitive/v2`).
+  psychiatric and sickle cell (`hid.ocr.sensitive/v2`'s lists widened with
+  the patient-results policy's fragments for those classes and Nigerian lab
+  shorthand such as HIV1/2, VL, MTB, Xpert, sickling and HbS).
 - Shares made before 0124, shares made without the choice and every share made
   by invitation (confirm) stay facility-only. A scope never changes; a new
   share to the same clinician replaces the old one (0095) and so ends its
@@ -4603,9 +4605,10 @@ unless the patient includes them; DPO sign-off before release).
   patient, the sealed QA tenant (0123) for a QA patient.
 - Entered-in-error lab imports are never shown.
 - Unless the patient included sensitive records, a record is withheld whole
-  when any of its text (test code, name, value, result text; medicine,
-  strength, dose, frequency, history), its external laboratory or its source
-  facility's name matches a sensitive term.
+  when any text it returns matches a sensitive term: test code, name, value,
+  result text, unit and reference range; the external laboratory and its
+  reference; medicine, strength, dose, frequency and history; and the source
+  facility's name.
 - The database function checks all of this itself; the services ask Identity
   for no authorization decision on these routes. Each read writes one audit row
   (`lab.import.other-facilities.list` or `pharmacy.import.other-facilities.list`)

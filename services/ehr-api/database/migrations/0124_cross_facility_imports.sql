@@ -33,11 +33,13 @@
 --       - from source facilities on the patient's side of the seal (real,
 --         0098's demo, 0123's QA);
 --       - without sensitive records (HIV/ARV, TB, psychiatric, sickle cell;
---         the lists of hid.ocr.sensitive/v2) unless the patient chose
---         include_sensitive. A record is withheld whole when any of its text,
---         its external laboratory or its source facility's name matches.
---     Each read writes one audit row (ids and counts only) in its own
---     transaction. A refusal raises 42501 OTHER_FACILITIES_NOT_SHARED and
+--         section 3) unless the patient chose include_sensitive. A record is
+--         withheld whole when any text it returns matches, including its
+--         external laboratory, its reference, its units and ranges and its
+--         source facility's name.
+--     Each read writes one audit row (ids and counts only) in the caller's
+--     transaction, so the read and its audit row commit or roll back
+--     together. A refusal raises 42501 OTHER_FACILITIES_NOT_SHARED and
 --     returns nothing.
 --   * Row-level security: the two functions run as the owner of the import
 --     tables, which in production bypasses neither superuser nor row-level
@@ -158,62 +160,58 @@ comment on table lab.other_facility_import_reads is
 comment on table pharmacy.other_facility_import_reads is
   '0124: a cross-facility read of one patient''s pharmacy imports in progress, one row for its transaction, written by pharmacy.patient_imports_other_facilities just before its read and deleted just after. The policy pharmacy_imports_other_facilities admits the import table''s owner to that patient''s rows only while the row exists.';
 
--- 3. The sensitive classes (hid.ocr.sensitive/v2's three lists, as ocr-api
--- keeps them in services/ocr-api/src/ocr/learning/sensitive-classes.ts and
--- #237's 0118 in ocr.learning_value_sensitive): one of the generic names
--- anywhere in the text, or a brand or word pattern as a whole word, any case.
--- It errs towards withholding (for example "Rh" or "art" as a word).
+-- 3. The four sensitive classes (HIV/ARV, TB, psychiatric, sickle cell):
+-- hid.ocr.sensitive/v2's three lists (ocr-api's sensitive-classes.ts, #237's
+-- ocr.learning_value_sensitive) widened with the HIV, TB, psychiatric and
+-- sickle-cell fragments of the patient-results policy (ehr-api's
+-- patient-evidence.policy.ts) and Nigerian lab shorthand (HIV1/2, VL, MTB,
+-- Xpert, sickling, HbS). A generic name or stem anywhere in the text, or a
+-- word pattern, abbreviation or brand as a whole word, any case. Each
+-- pattern is a constant, so PostgreSQL compiles it once per session. It
+-- errs towards withholding (for example "Rh" or "art" as a word).
 create function identity.cross_facility_text_sensitive(requested_value text)
 returns boolean
 language sql immutable
 set search_path = pg_catalog, pg_temp
 as $$
-  select requested_value is not null and coalesce(
-    exists (select 1 from unnest(array[ -- generics
-    'abacavir', 'atazanavir', 'bictegravir', 'cabotegravir', 'darunavir', 'didanosine', 'dolutegravir',
-    'efavirenz', 'emtricitabine', 'etravirine', 'lamivudine', 'lopinavir', 'nevirapine', 'raltegravir',
-    'rilpivirine', 'ritonavir', 'stavudine', 'tenofovir', 'tenofovir disoproxil', 'tenofovir alafenamide',
-    'zidovudine', 'doravirine', 'fostemsavir', 'maraviroc', 'enfuvirtide', 'indinavir', 'saquinavir', 'nelfinavir',
-    'fosamprenavir', 'isoniazid', 'rifampicin', 'rifampin', 'rifapentine', 'rifabutin', 'pyrazinamide',
-    'ethambutol', 'streptomycin', 'bedaquiline', 'delamanid', 'pretomanid', 'cycloserine', 'terizidone',
-    'ethionamide', 'prothionamide', 'para-aminosalicylic acid', 'aminosalicylic acid', 'capreomycin', 'kanamycin',
-    'clofazimine', 'thioacetazone', 'haloperidol', 'chlorpromazine', 'fluphenazine', 'olanzapine', 'risperidone',
-    'quetiapine', 'aripiprazole', 'clozapine', 'trifluoperazine', 'flupentixol', 'zuclopenthixol', 'sulpiride',
-    'amisulpride', 'paliperidone', 'ziprasidone', 'pimozide', 'perphenazine', 'thioridazine', 'lithium',
-    'lithium carbonate', 'diazepam', 'lorazepam', 'alprazolam', 'bromazepam', 'chlordiazepoxide', 'clonazepam',
-    'nitrazepam', 'temazepam', 'zolpidem', 'zopiclone', 'amitriptyline', 'imipramine', 'clomipramine',
-    'nortriptyline', 'fluoxetine', 'sertraline', 'paroxetine', 'citalopram', 'escitalopram', 'fluvoxamine',
-    'mirtazapine', 'venlafaxine', 'duloxetine', 'trazodone', 'methylphenidate', 'atomoxetine', 'hydroxycarbamide',
-    'hydroxyurea', 'voxelotor', 'crizanlizumab', 'l-glutamine'
-      ]::text[]) generic where position(generic in lower(requested_value)) > 0)
-    or lower(requested_value) ~ ('(^|[^a-z0-9])(' || array_to_string(array[ -- words
-    'hiv', 'aids', 'plhiv', 'pvh', 'retroviral', 'rvs', 'r[/-]?v[/-]?d', 'haart', 'art', 'arvs?', 'cd4',
-    'viral load', 'prep', 'pep', 'pre-exposure', 'post-exposure', 'tdf', '3tc', 'dtg', 'efv', 'nvp', 'azt', 'lpv',
-    'atv', 'tld', 'tle', 'ftc', 'tb', 'ptb', 'eptb', 'tuberculo[a-z]*', 'genexpert', 'gene xpert', 'afb',
-    'acid[- ]fast', 'mantoux', 'tuberculin', 'rhze', 'rhz', 'rh', 'inh', 'dots', 'psych[a-z]*', 'schizo[a-z]*',
-    'bipolar', 'depressi[a-z]*', 'mania', 'manic', 'anxiety', 'ssri', 'antipsychotic[a-z]*', 'sickle[a-z]*', 'scd',
-    'sca', 'hbss', 'hb ss', 'genotype', 'electrophoresis'
-      ]::text[] || array(select regexp_replace(brand, '[ -]', '[ -]?', 'g') from unnest(array[ -- brands
-    'atripla', 'truvada', 'descovy', 'kaletra', 'aluvia', 'biktarvy', 'triumeq', 'combivir', 'trizivir', 'symfi',
-    'symfi lo', 'odefsey', 'genvoya', 'stribild', 'juluca', 'dovato', 'complera', 'eviplera', 'epzicom', 'kivexa',
-    'epivir', 'retrovir', 'viread', 'vemlidy', 'emtriva', 'ziagen', 'sustiva', 'stocrin', 'viramune', 'isentress',
-    'tivicay', 'prezista', 'prezcobix', 'reyataz', 'evotaz', 'norvir', 'intelence', 'edurant', 'selzentry',
-    'celsentri', 'fuzeon', 'rukobia', 'cabenuva', 'vocabria', 'apretude', 'delstrigo', 'pifeltro', 'symtuza',
-    'cimduo', 'temixys', 'triomune', 'duovir', 'duovir-n', 'lamivir', 'viraday', 'teevir', 'acriptega', 'avonza',
-    'tenvir', 'tenvir-em', 'ricovir', 'ricovir-em', 'rifinah', 'rifater', 'rimactane', 'rifadin', 'myambutol',
-    'sirturo', 'deltyba', 'priftin', 'mycobutin', 'akurit', 'akurit-4', 'forecox', 'voractiv', 'rimstar',
-    'rifafour', 'dovprela', 'lamprene', 'trecator', 'largactil', 'haldol', 'serenace', 'modecate', 'zyprexa',
-    'risperdal', 'seroquel', 'abilify', 'clozaril', 'stelazine', 'depixol', 'fluanxol', 'clopixol', 'invega',
-    'geodon', 'orap', 'melleril', 'priadel', 'camcolit', 'valium', 'ativan', 'xanax', 'lexotan', 'librium',
-    'rivotril', 'klonopin', 'mogadon', 'restoril', 'stilnox', 'ambien', 'imovane', 'tryptizol', 'elavil',
-    'tofranil', 'anafranil', 'prozac', 'zoloft', 'paxil', 'seroxat', 'celexa', 'cipramil', 'lexapro', 'cipralex',
-    'luvox', 'faverin', 'remeron', 'effexor', 'cymbalta', 'desyrel', 'ritalin', 'concerta', 'strattera', 'hydrea',
-    'siklos', 'droxia', 'oxbryta', 'adakveo', 'endari', 'niprisan', 'nicosan', 'ciklavit'
-      ]::text[]) brand), '|') || ')($|[^a-z0-9])'), false)
+  select requested_value is not null and (
+    -- generics (and stems such as sickl-, antiretrovir-, mycobacter-) anywhere in the text
+    lower(requested_value) ~ ('(abacavir|atazanavir|bictegravir|cabotegravir|darunavir|didanosine|dolutegravir|efavirenz|emtricitabine|etravi'
+    || 'rine|lamivudine|lopinavir|nevirapine|raltegravir|rilpivirine|ritonavir|stavudine|tenofovir|tenofovir disoproxi'
+    || 'l|tenofovir alafenamide|zidovudine|doravirine|fostemsavir|maraviroc|enfuvirtide|indinavir|saquinavir|nelfinavi'
+    || 'r|fosamprenavir|isoniazid|rifampicin|rifampin|rifapentine|rifabutin|pyrazinamide|ethambutol|streptomycin|bedaq'
+    || 'uiline|delamanid|pretomanid|cycloserine|terizidone|ethionamide|prothionamide|para-aminosalicylic acid|aminosal'
+    || 'icylic acid|capreomycin|kanamycin|clofazimine|thioacetazone|haloperidol|chlorpromazine|fluphenazine|olanzapine'
+    || '|risperidone|quetiapine|aripiprazole|clozapine|trifluoperazine|flupentixol|zuclopenthixol|sulpiride|amisulprid'
+    || 'e|paliperidone|ziprasidone|pimozide|perphenazine|thioridazine|lithium|lithium carbonate|diazepam|lorazepam|alp'
+    || 'razolam|bromazepam|chlordiazepoxide|clonazepam|nitrazepam|temazepam|zolpidem|zopiclone|amitriptyline|imipramin'
+    || 'e|clomipramine|nortriptyline|fluoxetine|sertraline|paroxetine|citalopram|escitalopram|fluvoxamine|mirtazapine|'
+    || 'venlafaxine|duloxetine|trazodone|methylphenidate|atomoxetine|hydroxycarbamide|hydroxyurea|voxelotor|crizanlizu'
+    || 'mab|l-glutamine|antiretrovir|retrovir|immunodeficiency|mycobacter|sickl|drepanocyt)')
+    -- word patterns, abbreviations and brand names as whole words
+    or lower(requested_value) ~ ('(^|[^a-z0-9])(aids|plhiv|pvh|retroviral|rvs|r[/-]?v[/-]?d|haart|art|arvs?|cd4|viral load|prep|pep|pre-exposure'
+    || '|post-exposure|tdf|3tc|dtg|efv|nvp|azt|lpv|atv|tld|tle|ftc|tb|ptb|eptb|tuberculo[a-z]*|genexpert|gene xpert|af'
+    || 'b|acid[- ]fast|mantoux|tuberculin|rhze|rhz|rh|inh|dots|psych[a-z]*|schizo[a-z]*|bipolar|depressi[a-z]*|mania|m'
+    || 'anic|anxiety|ssri|antipsychotic[a-z]*|sickle[a-z]*|scd|sca|hbss|hb ss|genotype|electrophoresis|hiv[a-z0-9]*|h['
+    || ' .]+i[ .]+v|human[ -]*immuno[ -]*deficiency|vl|viral[ -]?loads?|cd[ -]?4[a-z0-9]*|rvd|rvi|plwha|pmtct|taf|zdv|'
+    || 'drv|rpv|mtb|xpert|lam|lf[ -]?lam|ipt|3hp|psychos[a-z]*|psychotic|suicid[a-z]*|self[ -]?harm|mental|ptsd|ocd|ph'
+    || 'q[ -]?[0-9]*|gad[ -]?[0-9]+|dementia|neurosis|neurotic|catatoni[a-z]*|hbs|hb[ -]?s[ -]?s|hb[ -]?s[ -]?c|hb[ -]'
+    || '?a[ -]?s|hb[ -]?electrophoresis|ha?emoglobin[ -]?electrophoresis|genotyp[a-z]*|atripla|truvada|descovy|kaletra'
+    || '|aluvia|biktarvy|triumeq|combivir|trizivir|symfi|symfi[ -]?lo|odefsey|genvoya|stribild|juluca|dovato|complera|'
+    || 'eviplera|epzicom|kivexa|epivir|retrovir|viread|vemlidy|emtriva|ziagen|sustiva|stocrin|viramune|isentress|tivic'
+    || 'ay|prezista|prezcobix|reyataz|evotaz|norvir|intelence|edurant|selzentry|celsentri|fuzeon|rukobia|cabenuva|voca'
+    || 'bria|apretude|delstrigo|pifeltro|symtuza|cimduo|temixys|triomune|duovir|duovir[ -]?n|lamivir|viraday|teevir|ac'
+    || 'riptega|avonza|tenvir|tenvir[ -]?em|ricovir|ricovir[ -]?em|rifinah|rifater|rimactane|rifadin|myambutol|sirturo'
+    || '|deltyba|priftin|mycobutin|akurit|akurit[ -]?4|forecox|voractiv|rimstar|rifafour|dovprela|lamprene|trecator|la'
+    || 'rgactil|haldol|serenace|modecate|zyprexa|risperdal|seroquel|abilify|clozaril|stelazine|depixol|fluanxol|clopix'
+    || 'ol|invega|geodon|orap|melleril|priadel|camcolit|valium|ativan|xanax|lexotan|librium|rivotril|klonopin|mogadon|'
+    || 'restoril|stilnox|ambien|imovane|tryptizol|elavil|tofranil|anafranil|prozac|zoloft|paxil|seroxat|celexa|ciprami'
+    || 'l|lexapro|cipralex|luvox|faverin|remeron|effexor|cymbalta|desyrel|ritalin|concerta|strattera|hydrea|siklos|dro'
+    || 'xia|oxbryta|adakveo|endari|niprisan|nicosan|ciklavit)($|[^a-z0-9])'))
 $$;
 
 comment on function identity.cross_facility_text_sensitive(text) is
-  '0124: whether a text names a sensitive class (HIV/ARV, TB, psychiatric, sickle cell; hid.ocr.sensitive/v2''s generic names anywhere, its brand names and word patterns as whole words, any case). A cross-facility imported record with any such text is withheld unless the patient chose include_sensitive. Granted to no runtime role.';
+  '0124: whether a text names a sensitive class (HIV/ARV, TB, psychiatric, sickle cell; hid.ocr.sensitive/v2''s lists widened with the patient-results policy''s fragments and Nigerian lab shorthand: generic names and stems anywhere, word patterns, abbreviations and brands as whole words, any case). A cross-facility imported record with any such text is withheld unless the patient chose include_sensitive. Granted to no runtime role.';
 
 -- 4. A source facility's name, when it is on the patient's side of the seal
 -- (0098's demo always, 0123's QA when 0123 is applied: it is ordered before
@@ -461,13 +459,16 @@ begin
      and (access_row.include_sensitive or not (
           identity.cross_facility_text_sensitive(facility.name)
           or identity.cross_facility_text_sensitive(evidence.external_lab_name)
+          or identity.cross_facility_text_sensitive(evidence.external_reference)
           or exists (select 1 from lab.imported_observations observation
                       where observation.import_id = evidence.id and observation.patient_id = evidence.patient_id
                         and observation.facility_id = evidence.facility_id
                         and (identity.cross_facility_text_sensitive(observation.test_code)
                              or identity.cross_facility_text_sensitive(observation.test_name)
                              or identity.cross_facility_text_sensitive(observation.value)
-                             or identity.cross_facility_text_sensitive(observation.value_text)))))
+                             or identity.cross_facility_text_sensitive(observation.value_text)
+                             or identity.cross_facility_text_sensitive(observation.unit)
+                             or identity.cross_facility_text_sensitive(observation.reference_range)))))
    order by evidence.received_at desc, evidence.id desc
    limit page_limit) picked;
   delete from lab.other_facility_import_reads read_row where read_row.transaction_id = pg_current_xact_id();

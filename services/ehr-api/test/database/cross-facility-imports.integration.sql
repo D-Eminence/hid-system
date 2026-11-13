@@ -102,7 +102,10 @@ declare
 begin
   foreach sample in array array['Truvada 1 tab daily', 'TLD', 'HIV 1/2 rapid test', 'Viral load', 'GeneXpert MTB/RIF',
       'Rifampicin/Isoniazid', 'Olanzapine 10mg', 'Hb electrophoresis', 'Sickle cell screen', 'PrEP', 'CD4 count',
-      'Sample ART Clinic', 'tenofovir disoproxil'] loop
+      'Sample ART Clinic', 'tenofovir disoproxil', 'HIV1/2 antibody', 'Anti-HIV1+2', 'HIV2', 'HIVAb',
+      'Human immunodeficiency virus', 'H.I.V screening', 'Antiretroviral therapy', 'VL', 'Xpert MTB/RIF',
+      'Sputum for MTB', 'Sickling', 'PCV sickling negative', 'HbSS', 'Hb S S', 'Haemoglobin electrophoresis',
+      'Suicidal ideation', 'Psychosis', 'HbAS', 'Hb AS'] loop
     if not identity.cross_facility_text_sensitive(sample) then
       raise exception '% must be sensitive', sample;
     end if;
@@ -116,14 +119,14 @@ begin
   if identity.cross_facility_text_sensitive(null) then
     raise exception 'A null text is not sensitive';
   end if;
-  -- With #237's 0118 applied, the two checks agree.
+  -- With #237's 0118 applied, whatever its check calls sensitive, this one does too (this list is wider).
   if to_regprocedure('ocr.learning_value_sensitive(text)') is not null then
     foreach sample in array array['Truvada 1 tab daily', 'TLD', 'Full blood count', 'Paracetamol 500 mg', 'PrEP',
         'Preparation H', 'Peptic ulcer', 'Hb SS', 'Olanzapine', 'Malaria parasite'] loop
-      execute 'select ocr.learning_value_sensitive($1) is distinct from identity.cross_facility_text_sensitive($1)'
+      execute 'select ocr.learning_value_sensitive($1) and not identity.cross_facility_text_sensitive($1)'
         into strict differs using sample;
       if differs then
-        raise exception 'The two sensitive checks differ on %', sample;
+        raise exception '0118''s check calls % sensitive, this one does not', sample;
       end if;
     end loop;
   end if;
@@ -207,14 +210,24 @@ from (values
   (5, 1, 3, 'accepted', 'Xfac Diagnostics'),          -- C, a sensitive facility name
   (6, 1, 4, 'accepted', 'Xfac Diagnostics'),          -- D, demo: across the seal
   (7, 2, 2, 'accepted', 'Xfac Diagnostics'),          -- P2 at B
-  (8, 1, 2, 'accepted', 'Xfac TB Laboratory')         -- B, a sensitive external laboratory
+  (8, 1, 2, 'accepted', 'Xfac TB Laboratory'),        -- B, a sensitive external laboratory
+  (9, 1, 2, 'accepted', 'Xfac Diagnostics')           -- B, a sensitive reference range
 ) imports(n, p, f, status, lab_name);
+update lab.imported_evidence set external_reference = 'ART clinic 0042/TB-REG'
+ where id = '12480000-0000-4000-8000-000000000008';
+update lab.imported_evidence set external_lab_name = 'Xfac Diagnostics'
+ where id = '12480000-0000-4000-8000-000000000008';
 insert into lab.imported_observations (import_id, facility_id, patient_id, ordinal, test_code, test_name, value,
   value_text, unit, reference_range, abnormal_flag, reported_at, status)
 select evidence.id, evidence.facility_id, evidence.patient_id, 1, null,
-  case evidence.id when '12480000-0000-4000-8000-000000000002' then 'HIV 1/2 rapid test' else 'Haemoglobin' end,
-  case evidence.id when '12480000-0000-4000-8000-000000000002' then 'Reactive' else '12.5' end, null,
-  case evidence.id when '12480000-0000-4000-8000-000000000002' then null else 'g/dL' end, null, 'unknown', null, 'reported'
+  case evidence.id when '12480000-0000-4000-8000-000000000002' then 'HIV 1/2 rapid test'
+                   when '12480000-0000-4000-8000-000000000009' then 'Rapid test' else 'Haemoglobin' end,
+  case evidence.id when '12480000-0000-4000-8000-000000000002' then 'Reactive'
+                   when '12480000-0000-4000-8000-000000000009' then 'Negative' else '12.5' end, null,
+  case evidence.id when '12480000-0000-4000-8000-000000000002' then null
+                   when '12480000-0000-4000-8000-000000000009' then null else 'g/dL' end,
+  case evidence.id when '12480000-0000-4000-8000-000000000009' then 'HIV 1/2: Non-reactive' end,
+  'unknown', null, 'reported'
 from lab.imported_evidence evidence where evidence.id::text like '12480000-%';
 insert into pharmacy.imported_medication_evidence (id, patient_id, facility_id, source_document_id, ocr_job_id,
   extraction_id, validation_id, validation_version, publication_id, medication_text, strength_text, dose_text,
@@ -510,7 +523,7 @@ declare
   answer text;
 begin
   answer := pg_temp.lab_read(1);
-  if answer <> '1@2,2@2,5@3,8@2' then raise exception 'Lab read, sensitive included: %', answer; end if;
+  if answer <> '1@2,2@2,5@3,8@2,9@2' then raise exception 'Lab read, sensitive included: %', answer; end if;
   answer := pg_temp.lab_read(1, null, null, 2);
   if answer <> '1@2,2@2' then raise exception 'First page: %', answer; end if;
   answer := pg_temp.lab_read(1, current_setting('xfac.cursor_at')::timestamptz,
