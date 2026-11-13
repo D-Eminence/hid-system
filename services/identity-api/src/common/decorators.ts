@@ -16,6 +16,16 @@ export const RequirePermissions = (...permissions: string[]): MethodDecorator & 
 export const AuditAction = (action: string): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_ACTION, action);
 export const NoAudit = (): MethodDecorator & ClassDecorator => SetMetadata(NO_AUDIT, true);
 export const AuditFailuresOnly = (): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_FAILURES_ONLY, true);
+export const AUDIT_SUCCESS_BEST_EFFORT = Symbol('AUDIT_SUCCESS_BEST_EFFORT');
+/**
+ * A route whose success has already been committed with its own audit row in
+ * the same database transaction, and whose answer cannot be given again (0120's
+ * create-unclaimed answers a one-time claim code). The interceptor still writes
+ * its post-success audit row, but a failure of that write is logged (route and
+ * correlation id only) and the answer is returned, instead of a 503 that would
+ * lose it. Method-level only; never for a route whose audit is its only record.
+ */
+export const AuditSuccessBestEffort = (): MethodDecorator => SetMetadata(AUDIT_SUCCESS_BEST_EFFORT, true);
 export const DELEGATED_BROWSER_REQUEST = Symbol('DELEGATED_BROWSER_REQUEST');
 /**
  * A route through which another HID service (EHR, OCR, Lab, Pharmacy or

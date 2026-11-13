@@ -133,13 +133,15 @@ export type {
   OcrPublicationResult, OcrRetryInput, OcrTargetDomain, OcrTransport, OcrTransportRequest,
   OcrValidation, OcrValidationInput,
 } from './ocr';
-export { OutreachApiClient, OutreachApiProblem } from './outreach';
+export { OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS, OutreachApiClient, OutreachApiProblem } from './outreach';
 export type {
   CreateOutreachRegistrationCase,
   LinkOutreachExistingPatient,
   OutreachClientOptions,
   OutreachHealthIdCreated,
+  OutreachHealthIdCreatedUnverified,
   OutreachHealthIdStarted,
+  OutreachHealthIdStatus,
   OutreachHealthIdStartInput,
   OutreachRegistrationCase,
   OutreachRegistrationScreening,
@@ -148,7 +150,7 @@ export type {
   OutreachScreeningMedicine,
   SaveOutreachRegistrationScreening,
 } from './outreach';
-export { IdentityApiClient, IdentityApiProblem } from './identity';
+export { IdentityApiClient, IdentityApiProblem, OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS } from './identity';
 export type {
   IdentityActorContext,
   IdentityAuthorizationDecision,
@@ -158,6 +160,7 @@ export type {
   IdentityFacilityAssignment,
   IdentityInternalCaller,
   IdentityOutreachHealthIdConfirm,
+  IdentityOutreachHealthIdCreateUnclaimed,
   IdentityOutreachHealthIdStart,
   IdentityRegistrationCase,
   PatientSelfAuthorization,

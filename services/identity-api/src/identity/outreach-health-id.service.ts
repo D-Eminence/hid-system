@@ -9,6 +9,7 @@ import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { createContactLookupHmac, normalizePatientPhone, patientPhoneStoredForms } from './contact-lookup';
 import { HidCodeGenerator } from './hid-code-generator.service';
+import { generateOutreachClaimCode, OUTREACH_CLAIM_KEY_VERSION, outreachClaimCodeHmac } from './outreach-claim-code';
 import { contactKeyForVersion, currentContactEncryption, decryptContactValue, encryptContactValue,
   encryptLookupBoundPhone, otpHmacKey } from './patient-contact-crypto';
 
@@ -45,8 +46,18 @@ export interface OutreachHealthIdConfirmResult {
   outcome: 'created' | 'replayed';
 }
 
+/** POST identity/outreach/health-id/create-unclaimed's answer (0120). The claim code is in no other answer. */
+export interface OutreachHealthIdCreateUnclaimedResult {
+  healthId: string;
+  /** Shown once (printed on the slip); only its keyed HMAC is stored. */
+  claimCode: string;
+  claimExpiresAt: string;
+}
+
 /** The 0119 per-registration cooldown between codes (identity.outreach_health_id_start). */
 export const OUTREACH_HEALTH_ID_RESEND_SECONDS = 60;
+/** 0120: the window for a volunteer's Health IDs with no contact (the limit is OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR). */
+export const OUTREACH_HEALTH_ID_CREATION_WINDOW_SECONDS = 3600;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** Confirm attempts per volunteer and email in a day (all registrations). */
@@ -247,6 +258,103 @@ export class OutreachHealthIdService {
           const constraint = databaseConstraint(error);
           if (constraint === 'accounts_email_ci_uq' || constraint === 'patients_email_hmac_uq') {
             throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_EMAIL_TAKEN', MESSAGES.emailTaken);
+          }
+        }
+        throw this.problem(error);
+      }
+    }
+    throw this.unavailable();
+  }
+
+  /**
+   * No contact at all (0120): creates the person's Health ID with no account
+   * and a one-time claim code (8 characters), stored as its keyed HMAC only.
+   * The code is answered here once and never again: a retry finds the Health
+   * ID created and answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with it.
+   * The registration's phone, if any, is encrypted as 0119's confirm does it
+   * (sign-up's contact key and key version, its lookup HMAC, the ciphertext
+   * bound to that lookup HMAC) but is kept on the claim row, not on the
+   * patient: an unproven phone never locks its real owner out of sign-up.
+   * PHONE_TAKEN is answered only for a phone on a real patient (checked here
+   * in every stored form, and again by the database); a phone already on
+   * another unclaimed Health ID's claim is flagged possible_duplicate. The
+   * claim flow moves the phone onto the patient only if it is still free.
+   * The claim HMAC is keyed with the
+   * OTP key and stored with its version (OTP_HMAC_KEY_VERSION), which the
+   * claim flow verifies with. A volunteer may create at most
+   * OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR (150 by default) in an hour.
+   */
+  async createUnclaimed(input: { caseId: string }, context: DataAccessContext)
+    : Promise<OutreachHealthIdCreateUnclaimedResult> {
+    this.assertConfigured();
+    const registration = await this.run(() => this.database.withTransaction(context, (client) =>
+      this.registration(client, input.caseId)));
+    this.assertEligible(registration);
+    const phone = this.registrationPhone(registration);
+    const preflight = await this.database.withSystemTransaction(context.correlationId, async (client) => {
+      // Counted before the phone is checked, so the check cannot be used to
+      // probe phone numbers (or bind them) en masse.
+      const bucket = this.hmac('outreach-health-id-create-volunteer', context.actor.accountId);
+      const limited = await consumeRateLimit(client, 'account', bucket, {
+        windowSeconds: OUTREACH_HEALTH_ID_CREATION_WINDOW_SECONDS,
+        maxRequests: this.env.OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR });
+      if (limited) {
+        const blockedUntil = (await client.query<{ blocked_until: Date | null }>(
+          'select blocked_until from auth.otp_rate_limits where scope = $1 and bucket_hmac = $2',
+          ['account', bucket])).rows[0]?.blocked_until;
+        const retryAfterSeconds = blockedUntil
+          ? Math.max(1, Math.ceil((new Date(blockedUntil).getTime() - Date.now()) / 1000))
+          : OUTREACH_HEALTH_ID_CREATION_WINDOW_SECONDS;
+        return { retryAfterSeconds, ready: false, phoneBound: false };
+      }
+      if (!phone) return { retryAfterSeconds: null, ready: true, phoneBound: false };
+      return {
+        retryAfterSeconds: null,
+        ready: (await client.query<{ ready: boolean }>(
+          'select identity.patient_contact_lookup_ready() as ready')).rows[0]?.ready === true,
+        // Every form a patient's phone may be stored in (a legacy +2340... too).
+        phoneBound: await this.contactBound(client, 'phone',
+          patientPhoneStoredForms(phone).map((form) => createContactLookupHmac('phone', form))),
+      };
+    });
+    if (preflight.retryAfterSeconds !== null) {
+      // The words give the real wait (refused tries count too, so it can be
+      // most of the hour), as Retry-After does.
+      const minutes = Math.max(1, Math.ceil(preflight.retryAfterSeconds / 60));
+      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS',
+        `Too many Health IDs created in a short time. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, undefined,
+        { extensions: { retryAfterSeconds: preflight.retryAfterSeconds } });
+    }
+    if (!preflight.ready) throw this.unavailable();
+    if (preflight.phoneBound) throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
+    const encryption = phone ? currentContactEncryption(this.env) : undefined;
+    // Bound to its lookup HMAC, as 0119's confirmation encrypts it, so the
+    // claim flow can move it onto the patient unchanged.
+    const phoneLookup = phone ? createContactLookupHmac('phone', phone) : null;
+    const phoneCiphertext = phone && encryption && phoneLookup
+      ? encryptLookupBoundPhone(encryption.key, phoneLookup, phone) : null;
+
+    let claimCode = generateOutreachClaimCode();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const hid = this.hidCodes.generate();
+      try {
+        const row = await this.database.withTransaction(context, async (client) =>
+          (await client.query<{ hid_code: string; patient_id: string; claim_expires_at: Date }>(
+            'select * from identity.outreach_health_id_create_unclaimed($1,$2,$3,$4,$5,$6,$7,$8)',
+            [input.caseId, hid, phoneCiphertext, phoneLookup, encryption?.version ?? null,
+              outreachClaimCodeHmac(this.otpKey, hid, claimCode), OUTREACH_CLAIM_KEY_VERSION,
+              this.env.OTP_HMAC_KEY_VERSION])).rows[0]);
+        if (!row?.hid_code || !row.claim_expires_at) throw this.unavailable();
+        return { healthId: row.hid_code, claimCode, claimExpiresAt: new Date(row.claim_expires_at).toISOString() };
+      } catch (error) {
+        if (error instanceof DomainProblem) throw error;
+        if (databaseCode(error) === '23505') {
+          const constraint = databaseConstraint(error);
+          if (constraint === 'patients_hid_code_ci_uq') continue;
+          // Another Health ID's claim code has the same HMAC (vanishingly rare): draw another code.
+          if (constraint === 'outreach_health_id_claims_code_hmac_key') {
+            claimCode = generateOutreachClaimCode();
+            continue;
           }
         }
         throw this.problem(error);

@@ -2,17 +2,20 @@ import {
   CallHandler,
   ExecutionContext,
   Injectable,
+  Logger,
   NestInterceptor,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Response } from 'express';
 import { catchError, from, mergeMap, type Observable, throwError } from 'rxjs';
-import { AUDIT_ACTION, AUDIT_FAILURES_ONLY, NO_AUDIT } from '../common/decorators';
+import { AUDIT_ACTION, AUDIT_FAILURES_ONLY, AUDIT_SUCCESS_BEST_EFFORT, NO_AUDIT } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { AuditService } from './audit.service';
 
 @Injectable()
 export class AuditInterceptor implements NestInterceptor {
+  private readonly logger = new Logger(AuditInterceptor.name);
+
   constructor(
     private readonly reflector: Reflector,
     private readonly audit: AuditService,
@@ -36,6 +39,8 @@ export class AuditInterceptor implements NestInterceptor {
       context.getClass(),
     ]) ?? `${request.method.toLowerCase()}.${request.route?.path ?? 'unresolved'}`;
     const startedAt = Date.now();
+    // Method-level only (AuditSuccessBestEffort): never inherited from a class.
+    const successBestEffort = this.reflector.get<boolean>(AUDIT_SUCCESS_BEST_EFFORT, context.getHandler()) === true;
 
     const responseStream = next.handle();
     const successAudited = failuresOnly ? responseStream : responseStream.pipe(
@@ -55,7 +60,18 @@ export class AuditInterceptor implements NestInterceptor {
         sourceIp: request.ip,
         userAgent: request.header('user-agent'),
         details: { method: request.method, route: request.route?.path, status: response.statusCode, durationMs: Date.now() - startedAt },
-      })).pipe(mergeMap(() => [result]))),
+      })).pipe(
+        mergeMap(() => [result]),
+        // The success is committed and audited in its own transaction; its
+        // answer cannot be given again. Log (no body) and answer it.
+        catchError((error: unknown) => {
+          if (!successBestEffort) return throwError(() => error);
+          this.logger.error({ event: 'audit.success-record.failed', action: `api.${action}`,
+            route: request.route?.path, correlationId: request.correlationId,
+            exceptionType: error instanceof Error ? error.constructor.name : 'UnknownException' });
+          return [result];
+        }),
+      )),
     );
     return successAudited.pipe(
       catchError((error: unknown) => from(this.audit.record({

@@ -79,9 +79,10 @@ describe('Outreach assisted Health ID routes (0119)', () => {
     it('confirms and answers the Health ID with the registration as GET returns it', async () => {
       identity.confirmHealthId.mockResolvedValue({ healthId: 'HID-AB2CD3', outcome: 'created' });
       query.mockResolvedValueOnce({ rows: [row] })
-        .mockResolvedValueOnce({ rows: [{ registration_case_id: caseId, hid_code: 'HID-AB2CD3' }] });
+        .mockResolvedValueOnce({ rows: [{ registration_case_id: caseId, hid_code: 'HID-AB2CD3', created_via: 'email' }] });
       await expect(service().confirmHealthId(caseId, { code: ' 123456 ' }, context)).resolves.toMatchObject({
-        healthId: 'HID-AB2CD3', registration: { id: caseId, healthId: 'HID-AB2CD3', healthIdCreatedByOutreach: true } });
+        healthId: 'HID-AB2CD3', registration: { id: caseId, healthId: 'HID-AB2CD3', healthIdCreatedByOutreach: true,
+          healthIdStatus: 'verified' } });
       expect(identity.confirmHealthId).toHaveBeenCalledWith(caseId, '123456', context);
       expect(query.mock.calls[1]).toEqual([expect.stringContaining('identity.outreach_registration_health_ids_for($1::uuid[])'),
         [[caseId]]]);
@@ -91,12 +92,16 @@ describe('Outreach assisted Health ID routes (0119)', () => {
 
     it('lists registrations with their Health IDs in one call', async () => {
       const other = { ...row, id: '123e4567-e89b-42d3-a456-426614174099' };
-      query.mockResolvedValueOnce({ rows: [row, other] })
-        .mockResolvedValueOnce({ rows: [{ registration_case_id: other.id, hid_code: 'HID-ZZ9YY8' }] });
+      const third = { ...row, id: '123e4567-e89b-42d3-a456-426614174098' };
+      query.mockResolvedValueOnce({ rows: [row, other, third] })
+        .mockResolvedValueOnce({ rows: [{ registration_case_id: other.id, hid_code: 'HID-ZZ9YY8', created_via: 'email' },
+          { registration_case_id: third.id, hid_code: 'HID-QQ7RR6', created_via: 'unclaimed' }] });
       await expect(service().list(context)).resolves.toMatchObject([
-        { id: caseId, healthId: null, healthIdCreatedByOutreach: false },
-        { id: other.id, healthId: 'HID-ZZ9YY8', healthIdCreatedByOutreach: true }]);
-      expect(query.mock.calls[1]![1]).toEqual([[caseId, other.id]]);
+        { id: caseId, healthId: null, healthIdCreatedByOutreach: false, healthIdStatus: null },
+        { id: other.id, healthId: 'HID-ZZ9YY8', healthIdCreatedByOutreach: true, healthIdStatus: 'verified' },
+        { id: third.id, healthId: 'HID-QQ7RR6', healthIdCreatedByOutreach: true, healthIdStatus: 'unclaimed' }]);
+      expect(query.mock.calls[1]).toEqual([expect.stringContaining('select registration_case_id,hid_code,created_via '),
+        [[caseId, other.id, third.id]]]);
     });
   });
 

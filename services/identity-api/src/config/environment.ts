@@ -1,6 +1,18 @@
 import { isIP } from 'node:net';
 import { z } from 'zod';
 
+/**
+ * A per-volunteer outreach limit: a whole number from 1 to max; anything else
+ * (unset, empty, 0, negative, fractional, too large, not a number) is the default.
+ */
+function outreachLimit(max: number, fallback: number) {
+  return z.preprocess((value) => {
+    if (typeof value !== 'string' || !/^\d{1,6}$/.test(value.trim())) return fallback;
+    const parsed = Number(value.trim());
+    return parsed >= 1 && parsed <= max ? parsed : fallback;
+  }, z.number().int().min(1).max(max));
+}
+
 const emptyToUndefined = (value: unknown): unknown =>
   typeof value === 'string' && value.trim() === '' ? undefined : value;
 
@@ -110,8 +122,12 @@ const environmentSchema = z.object({
   // (owner, 2026-11-13: "we are attending to hundreds of people"). Codes per
   // OTP_RATE_WINDOW_SECONDS, and per 24 hours; the database keeps a fixed
   // backstop of 2000 a day. Per person and per email the limits stay fixed.
-  OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX: z.coerce.number().int().min(1).max(1000).default(120),
-  OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX: z.coerce.number().int().min(1).max(2000).default(1000),
+  // An unset, empty or invalid value (not a whole number in range) falls back
+  // to the default, never to 0 or to no limit.
+  OUTREACH_HEALTH_ID_VOLUNTEER_WINDOW_MAX: outreachLimit(1000, 120),
+  OUTREACH_HEALTH_ID_VOLUNTEER_DAILY_MAX: outreachLimit(2000, 1000),
+  // 0120: Health IDs with no contact one volunteer may create in an hour.
+  OUTREACH_HEALTH_ID_CREATIONS_PER_HOUR: outreachLimit(1000, 150),
   NOTIFICATION_API_URL: z.string().url().default('http://127.0.0.1:3007'),
   NOTIFICATION_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,

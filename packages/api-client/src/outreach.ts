@@ -14,6 +14,17 @@ export interface OutreachClientOptions {
   credentials?: RequestCredentials;
 }
 
+/**
+ * How long the browser waits for createUnverifiedHealthId: longer than
+ * outreach-api's own wait for Identity (OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS,
+ * 20 s) plus its registration read, so the browser never gives up while the
+ * server can still answer with the one-time claim code.
+ */
+export const OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS = 45_000;
+
+/** How a Health ID created at outreach was created (0120). */
+export type OutreachHealthIdStatus = 'verified' | 'unclaimed';
+
 export interface OutreachRegistrationCase {
   id: string;
   facilityId: string;
@@ -36,6 +47,12 @@ export interface OutreachRegistrationCase {
   healthId?: string | null;
   /** Whether that Health ID was created from this registration at the outreach (0119); absent before 0119. */
   healthIdCreatedByOutreach?: boolean;
+  /**
+   * How that Health ID was created (0120): 'verified' (the person proved an
+   * email; 0119), 'unclaimed' (no contact; nobody can sign in until it is
+   * claimed), or null when there is none; absent before 0120.
+   */
+  healthIdStatus?: OutreachHealthIdStatus | null;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -56,6 +73,18 @@ export interface OutreachHealthIdStarted {
 /** 201 from POST .../health-id/confirm (0119), also for a replay. */
 export interface OutreachHealthIdCreated {
   healthId: string;
+  registration: OutreachRegistrationCase;
+}
+
+/**
+ * 201 from POST .../health-id/create-unverified (0120): a Health ID with no
+ * account and its one-time claim code. The claim code is answered only here,
+ * once: print it on the person's slip. Never store or log it.
+ */
+export interface OutreachHealthIdCreatedUnverified {
+  healthId: string;
+  claimCode: string;
+  claimExpiresAt: string;
   registration: OutreachRegistrationCase;
 }
 
@@ -190,6 +219,20 @@ export class OutreachApiClient {
       'POST', input, context, idempotencyKey, signal, undefined, false);
   }
 
+  /**
+   * No contact at all (0120): creates the person's Health ID with no account
+   * and a one-time claim code. Never retried: a second call, even with the
+   * same Idempotency-Key, answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with
+   * `healthId` and never the claim code again.
+   */
+  createUnverifiedHealthId(caseId: string, context: OutreachRequestContext, idempotencyKey: string,
+    signal?: AbortSignal) {
+    return this.request<OutreachHealthIdCreatedUnverified>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/health-id/create-unverified`,
+      'POST', {}, context, idempotencyKey, signal, undefined, false,
+      Math.max(this.options.timeoutMs ?? 10_000, OUTREACH_HEALTH_ID_CREATE_UNVERIFIED_BROWSER_TIMEOUT_MS));
+  }
+
   /** A registration's screening (0118): { screening: null } when none was recorded. */
   getRegistrationScreening(caseId: string, context: OutreachRequestContext, signal?: AbortSignal) {
     return this.request<OutreachRegistrationScreeningResult>(
@@ -219,7 +262,7 @@ export class OutreachApiClient {
 
   private async request<Result>(path: string, method: 'GET' | 'POST' | 'PUT', body: unknown,
     context: OutreachRequestContext, idempotencyKey?: string,
-    signal?: AbortSignal, ifMatch?: string, retry = true): Promise<Result> {
+    signal?: AbortSignal, ifMatch?: string, retry = true, timeoutMs?: number): Promise<Result> {
     // A Health ID code is never resent by a retry: each start emails a new code.
     const attempts = idempotencyKey && retry ? 2 : 1;
     let lastError: unknown;
@@ -230,7 +273,7 @@ export class OutreachApiClient {
           path,
           method,
           body,
-          timeoutMs: this.options.timeoutMs ?? 10_000,
+          timeoutMs: timeoutMs ?? this.options.timeoutMs ?? 10_000,
           credentials: this.options.credentials ?? 'include',
           signal,
           headers: {
