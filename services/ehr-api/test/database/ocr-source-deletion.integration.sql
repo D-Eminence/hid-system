@@ -673,9 +673,15 @@ begin
     and not exists (select 1 from information_schema.columns where table_schema = 'ocr'
                      and table_name = 'source_deletion_attempts' and data_type in ('text', 'jsonb', 'json')));
 end $$;
-select pg_temp.deletion_case('a failed -> queued retry on a document not claimed still works', 'ok',
-  $q$update ocr.jobs set status = 'queued', failed_at = null, last_error_code = null, next_attempt_at = clock_timestamp(),
-       row_version = row_version + 1 where id = 'c0117000-0000-4000-8000-000000000004'$q$, false);
+-- The job guard reads the document as its owner, so (as the cases above) this
+-- needs an owner that sees it (release checklist P8).
+do $$
+begin
+  if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_case('a failed -> queued retry on a document not claimed still works', 'ok',
+    $q$update ocr.jobs set status = 'queued', failed_at = null, last_error_code = null, next_attempt_at = clock_timestamp(),
+         row_version = row_version + 1 where id = 'c0117000-0000-4000-8000-000000000004'$q$, false);
+end $$;
 
 -- 3. A confirmation added after the purge is blanked by the next call.
 do $$
@@ -784,11 +790,11 @@ select pg_temp.deletion_case('a claim of another shape is refused', '55000',
    where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
 select pg_temp.deletion_case('a document on legal hold is never claimed', '55000',
   $q$update ehr.documents set status = 'source_deleting' where id = 'c0116000-0000-4000-8000-000000000007'$q$, false);
-select pg_temp.deletion_case('the owner, in a worker session, may make the exact claim (as the claim does)', 'ok',
-  $q$update ehr.documents set status = 'source_deleting' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
 do $$
 begin
   if not current_setting('ocr_deletion.owner_sees')::boolean then return; end if;
+  perform pg_temp.deletion_case('the owner, in a worker session, may make the exact claim (as the claim does)', 'ok',
+    $q$update ehr.documents set status = 'source_deleting' where id = 'c0116000-0000-4000-8000-000000000003'$q$, false);
   perform pg_temp.deletion_case('a purge step keeping the file name is refused', '55000',
     $q$update ehr.documents set status = 'source_deleted' where id = 'c0116000-0000-4000-8000-000000000014'$q$, false);
   perform pg_temp.deletion_case('a claimed document is never restored', '55000',
