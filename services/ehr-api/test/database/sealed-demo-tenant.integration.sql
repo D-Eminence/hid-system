@@ -330,17 +330,18 @@ begin
         'consent_grants_sealed_demo', 'staff_memberships_sealed_demo', 'account_roles_sealed_demo',
         'patient_share_invitations_sealed_demo', 'patient_contact_changes_sealed_demo',
         'qoreid_quota_counters_sealed_demo', 'patient_emergency_contacts_sealed_demo')) = 9);
+  -- 0098's eight bodies as 0123 left them (0098's demo clause, plus 0123's QA clause beside it).
   perform pg_temp.assert('the eight new bodies',
     (select count(*) from (values
-      ('identity.create_access_request(text,text,text,integer)', 'f88923a49a180c2180fdedb29bf2eccf'),
-      ('identity.activate_break_glass(text,text,integer)', '6b888391ef7f0e4f264918baf00a6fe7'),
-      ('identity.access_patient_with_pin(text,text,integer)', '830c1baa4bca3df57cc02b7b002a8831'),
-      ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '4202ba3bbf02abd7db34606d42adca9c'),
-      ('identity.search_order_destinations(text,text)', '7890a21333d012621a36302fd7ad24cc'),
-      ('identity.search_share_providers(text,uuid,text)', '2cc1107289f6ff4d55266c6ee4842932'),
+      ('identity.create_access_request(text,text,text,integer)', '2745e91d666f16a6ad79019d31f0380a'),
+      ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c'),
+      ('identity.access_patient_with_pin(text,text,integer)', '94230ed3d27fcc89b8b3bb6dd9e35c7e'),
+      ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '0c2def2b530bcb3d68537ade52787b6b'),
+      ('identity.search_order_destinations(text,text)', 'da222fe1b63db757a1ddb93fdc9eabf0'),
+      ('identity.search_share_providers(text,uuid,text)', '26ca190255ddc1ff30adb2fb5f0ee347'),
       ('identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)',
-       'b253ba70b4532a62b15eae6ae50465c1'),
-      ('identity.admin_platform_overview()', '3b1b2ca005647190ea623c40afb4f96f')) pinned(signature, digest)
+       'f7659b71a9240050c36d67f41ddf0890'),
+      ('identity.admin_platform_overview()', 'c38a354bb38bd4e60f293dd69165506c')) pinned(signature, digest)
       join pg_proc proc on proc.oid = pinned.signature::regprocedure and md5(proc.prosrc) = pinned.digest) = 8);
   perform pg_temp.assert('the registration read is sealed and identity.patients keeps six policies',
     (select count(*) from pg_policy policy_row where policy_row.polrelid = 'identity.patients'::regclass) = 6
@@ -349,16 +350,21 @@ begin
       like '%sealed_demo_ids(''patient''::text)%sealed_demo_facility(platform.current_facility_id())%');
   perform pg_temp.assert('the recipient allowlist: exactly the three demo mailboxes, any case, nothing else',
     identity.sealed_demo_recipient('operations@healthidentitydirectory.com')
-    and identity.sealed_demo_recipient(' Patient1@HealthIdentityDirectory.com ')
-    and identity.sealed_demo_recipient('PATIENT2@healthidentitydirectory.com')
+    and identity.sealed_demo_recipient(' Patientdemo1@HealthIdentityDirectory.com ')
+    and identity.sealed_demo_recipient('PATIENTDEMO2@healthidentitydirectory.com')
     and not identity.sealed_demo_recipient('operations+patient1@healthidentitydirectory.com')
     and not identity.sealed_demo_recipient('operations+a.b_c-9@healthidentitydirectory.com')
     and not identity.sealed_demo_recipient('patient1+x@healthidentitydirectory.com')
     and not identity.sealed_demo_recipient('patient3@healthidentitydirectory.com')
+    -- 0123 moved the demo patient logins: patient1@ and patient2@ are QA addresses now.
+    and not identity.sealed_demo_recipient('patient1@healthidentitydirectory.com')
+    and not identity.sealed_demo_recipient('Patient2@HealthIdentityDirectory.com')
+    and not identity.sealed_demo_recipient('patientdemo3@healthidentitydirectory.com')
+    and not identity.sealed_demo_recipient('patientdemo1+x@healthidentitydirectory.com')
     and not identity.sealed_demo_recipient('support@healthidentitydirectory.com')
     and not identity.sealed_demo_recipient('operations@healthidentitydirectory.co')
     and not identity.sealed_demo_recipient('xoperations@healthidentitydirectory.com')
-    and not identity.sealed_demo_recipient('patient1@healthidentitydirectory.com.evil.example')
+    and not identity.sealed_demo_recipient('patientdemo1@healthidentitydirectory.com.evil.example')
     and not identity.sealed_demo_recipient('patient1@evil.example')
     and not identity.sealed_demo_recipient('operations@healthidentitydirectory.com, someone@example.invalid')
     and not identity.sealed_demo_recipient('')
@@ -432,7 +438,7 @@ insert into auth.accounts (id, subject, email, display_name, status) values
 select pg_temp.refused('the address in another case', 'SEALED_DEMO_ADDRESS_TAKEN');
 rollback to savepoint refusal;
 insert into auth.accounts (id, subject, email, display_name, status) values
-  ('98a00003-0000-4000-8000-000000000031', 'synthetic:sealed:owner-patient', 'patient2@healthidentitydirectory.com',
+  ('98a00003-0000-4000-8000-000000000031', 'synthetic:sealed:owner-patient', 'patientdemo2@healthidentitydirectory.com',
    'Owner Patient', 'pending_reset');
 select pg_temp.refused('a pending_reset account at a patient address', 'SEALED_DEMO_ADDRESS_TAKEN');
 rollback to savepoint refusal;
@@ -456,7 +462,7 @@ rollback to savepoint refusal;
 insert into identity.organization_applications (id, product_code, organization_name, organization_type,
   cac_registration_number, administrator_name, administrator_email, status)
 values ('98a00007-0000-4000-8000-000000000033', 'laboratory', 'Owner Lab Ltd', 'laboratory', 'RC9898033', 'Owner Admin',
-  'patient1@healthidentitydirectory.com', 'pending_verification');
+  'patientdemo1@healthidentitydirectory.com', 'pending_verification');
 select pg_temp.refused('an open application names a patient address', 'SEALED_DEMO_ADDRESS_TAKEN');
 rollback to savepoint refusal;
 insert into identity.staff_invitations (id, organization_id, facility_id, invited_by_account_id, invited_by_membership_id,
@@ -569,8 +575,8 @@ begin
                       order by account.email)
        from auth.accounts account where identity.sealed_demo_account(account.id))
     = array['operations@healthidentitydirectory.com|pending_reset|true|true|true',
-            'patient1@healthidentitydirectory.com|pending_reset|true|true|true',
-            'patient2@healthidentitydirectory.com|pending_reset|true|true|true']);
+            'patientdemo1@healthidentitydirectory.com|pending_reset|true|true|true',
+            'patientdemo2@healthidentitydirectory.com|pending_reset|true|true|true']);
   perform pg_temp.assert('the staff login: verified staff, four memberships, doctor lab pharmacist nurse and org_admin, no platform role',
     (select staff.verification_status = 'verified' and staff.active and staff.default_role = 'doctor'
        from identity.staff staff where staff.account_id = '98d00003-0000-4000-8000-000000000001')
@@ -600,8 +606,8 @@ begin
     and (select array_agg(patient.hid_code || ':' || account.email order by patient.hid_code)
            from identity.patients patient join auth.accounts account on account.id = patient.account_id
           where identity.sealed_demo_patient(patient.id))
-      = array['HID-ZDEMAAA2:patient1@healthidentitydirectory.com',
-              'HID-ZDEMAAA3:patient2@healthidentitydirectory.com']
+      = array['HID-ZDEMAAA2:patientdemo1@healthidentitydirectory.com',
+              'HID-ZDEMAAA3:patientdemo2@healthidentitydirectory.com']
     and (select count(*) from identity.patients patient
           where identity.sealed_demo_patient(patient.id) and patient.account_id is null
             and patient.hid_code ~ '^HID-ZDEMBBB[2-9]$'
@@ -893,10 +899,10 @@ select set_config('hid.test.demo_invitation', (select invitation_id::text
     '24h', 'sealed-share-invite-0002', repeat('b', 64))), true);
 select set_config('hid.test.demo_invitation_patient2', (select invitation_id::text
   from identity.create_my_share_invitation('patient:98d00008-0000-4000-8000-000000000001',
-    '98a0000b-0000-4000-8000-000000000011', 'Patient2@HealthIdentityDirectory.com', 'Patient Two', 'view_only',
+    '98a0000b-0000-4000-8000-000000000011', 'Patientdemo2@HealthIdentityDirectory.com', 'Patient Two', 'view_only',
     '24h', 'sealed-share-invite-0003', repeat('c', 64))), true);
 select pg_temp.as_demo_staff(1);
-select pg_temp.assert('the demo login accepts the invitation to its own address at Demo Hospital, never one to patient2@',
+select pg_temp.assert('the demo login accepts the invitation to its own address at Demo Hospital, never one to patientdemo2@',
   (select status = 'accepted' and not replayed
      from identity.accept_share_invitation(current_setting('hid.test.demo_invitation')::uuid))
   and pg_temp.try(format('select * from identity.accept_share_invitation(%L)',
@@ -927,11 +933,11 @@ set local role hid_identity_api_runtime;
 select pg_temp.as_demo_patient(1);
 select pg_temp.assert('an allowlisted address passes the seal and meets the live rules',
   pg_temp.value_of($q$select identity.start_my_email_change('patient:98d00008-0000-4000-8000-000000000001',
-    '98a0000b-0000-4000-8000-000000000011', gen_random_uuid(), 'Patient2@HealthIdentityDirectory.com',
+    '98a0000b-0000-4000-8000-000000000011', gen_random_uuid(), 'Patientdemo2@HealthIdentityDirectory.com',
     repeat('7', 64), decode(repeat('ef', 40), 'hex'), 'sealed-test-v1', repeat('6', 64), 'sealed-test-v1', 600, 5, 60)$q$)
     = 'unavailable'
   and pg_temp.value_of($q$select identity.start_my_email_change('patient:98d00008-0000-4000-8000-000000000001',
-    '98a0000b-0000-4000-8000-000000000011', gen_random_uuid(), 'patient1@healthidentitydirectory.com',
+    '98a0000b-0000-4000-8000-000000000011', gen_random_uuid(), 'patientdemo1@healthidentitydirectory.com',
     repeat('5', 64), decode(repeat('ef', 40), 'hex'), 'sealed-test-v1', repeat('4', 64), 'sealed-test-v1', 600, 5, 60)$q$)
     = 'unchanged');
 reset role;
@@ -983,12 +989,12 @@ select pg_temp.assert('the emergency-contact check',
 -- recorded nowhere.
 select pg_temp.assert('the emergency-contact check refuses a demo mailbox with an HMAC that is not 64 lowercase hex characters',
   (select bool_and(not identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001',
-            '98a0000b-0000-4000-8000-000000000011', 'email', 'patient2@healthidentitydirectory.com', malformed.hmac))
+            '98a0000b-0000-4000-8000-000000000011', 'email', 'patientdemo2@healthidentitydirectory.com', malformed.hmac))
      from (values (repeat('A', 64)), (repeat('a', 63)), (repeat('a', 65)), ('abc'), (' ' || repeat('a', 63)),
                   (repeat('g', 64)), (null)) malformed(hmac))
   and current_setting('hid.sealed_demo_contact_hmac') = repeat('a', 64)
   and identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001',
-    '98a0000b-0000-4000-8000-000000000011', 'email', 'patient2@healthidentitydirectory.com', repeat('0123456789abcdef', 4))
+    '98a0000b-0000-4000-8000-000000000011', 'email', 'patientdemo2@healthidentitydirectory.com', repeat('0123456789abcdef', 4))
   and current_setting('hid.sealed_demo_contact_hmac') = repeat('0123456789abcdef', 4)
   and position('not an email to a demo mailbox with a well-formed HMAC (64 lowercase hex characters)'
     in obj_description('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure, 'pg_proc')) > 0);
@@ -1002,7 +1008,7 @@ select pg_temp.assert('G7: a demo patient''s contact added without the check is 
     '98a00010-0000-4000-8000-000000000001', 'sms', repeat('7', 64)) = '42501 EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED');
 select pg_temp.assert('G7: an SMS contact is refused even with the HMAC the check recorded for a mailbox',
   identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001', '98a0000b-0000-4000-8000-000000000011',
-    'email', 'Patient2@HealthIdentityDirectory.com', repeat('6', 64))
+    'email', 'Patientdemo2@HealthIdentityDirectory.com', repeat('6', 64))
   and pg_temp.add_contact('patient:98d00008-0000-4000-8000-000000000001', '98a0000b-0000-4000-8000-000000000011',
     '98a00010-0000-4000-8000-000000000001', 'sms', repeat('6', 64)) = '42501 EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED');
 select pg_temp.assert('G7: the demo mailbox the check recorded is added, any other HMAC is not',
@@ -1433,8 +1439,8 @@ select pg_temp.as_staff('synthetic:sealed:admin', null, null, 'healthcare-operat
 select pg_temp.assert('the admin markers',
   (select array_agg(account.email order by account.email) from auth.accounts account
     where account.id = any((select identity.sealed_demo_ids('account'))::uuid[]))
-    = array['operations@healthidentitydirectory.com', 'patient1@healthidentitydirectory.com',
-            'patient2@healthidentitydirectory.com']
+    = array['operations@healthidentitydirectory.com', 'patientdemo1@healthidentitydirectory.com',
+            'patientdemo2@healthidentitydirectory.com']
   and cardinality(identity.sealed_demo_ids('facility')) = 4
   and (select array_agg(identity.sealed_demo_application(application_id) order by application_id)
          from unnest(array['98a00007-0000-4000-8000-000000000001', '98a00007-0000-4000-8000-000000000002',

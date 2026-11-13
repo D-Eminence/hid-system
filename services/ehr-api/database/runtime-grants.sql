@@ -1645,3 +1645,30 @@ revoke all on function identity.facility_department_codes(),
   identity.set_facility_profile(bigint,jsonb,text,char) from public;
 revoke all on identity.facility_profiles, identity.nigeria_states, identity.registration_case_contacts,
   identity.patient_facility_contacts from public;
+
+-- Sealed QA tenant (0123): identity.patients' registration read calls the two QA member helpers as the reader, so
+-- those two go to the Identity runtime and the schema test runtime (the emergency-contact check Identity asks is
+-- 0098's, already granted above). Nothing to the EHR, Lab, Pharmacy or Notification runtimes; no grant on
+-- identity.sealed_qa_members; the other helpers, the install, the demo patient logins' move and the trigger
+-- functions are granted to no role.
+grant execute on function identity.sealed_qa_ids(text),
+  identity.sealed_qa_facility(uuid)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.sealed_qa_ids(text),
+  identity.sealed_qa_facility(uuid),
+  identity.sealed_qa_patient(uuid),
+  identity.sealed_qa_account(uuid),
+  identity.sealed_qa_recipient(text),
+  identity.sealed_qa_install(),
+  identity.sealed_qa_members_not_demo(),
+  identity.demo_members_never_qa(),
+  identity.consent_grants_sealed_qa(),
+  identity.staff_memberships_sealed_qa(),
+  identity.account_roles_sealed_qa(),
+  identity.patient_share_invitations_sealed_qa(),
+  identity.patient_contact_changes_sealed_qa(),
+  identity.qoreid_quota_counters_sealed_qa(),
+  identity.patient_emergency_contacts_sealed_qa(),
+  identity.outreach_organisations_sealed_qa(),
+  identity.outreach_invitations_sealed_qa(),
+  identity.demo_patient_logins_move() from public;

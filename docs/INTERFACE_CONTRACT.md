@@ -2574,8 +2574,10 @@ seal without the seed): Demo Hospital (`DEMO-HOSPITAL`), Demo Laboratory
 `operations@healthidentitydirectory.com` ("Demo Operations"), with a membership
 at each (doctor, lab, pharmacist, nurse) and `org_admin` at each, chosen after
 sign-in as for any member of several facilities; two patient logins,
-`patient1@healthidentitydirectory.com` (`HID-ZDEMAAA2`) and
-`patient2@healthidentitydirectory.com` (`HID-ZDEMAAA3`); eight
+`patientdemo1@healthidentitydirectory.com` (`HID-ZDEMAAA2`) and
+`patientdemo2@healthidentitydirectory.com` (`HID-ZDEMAAA3`) (0098 seeded them at
+`patient1@` and `patient2@`; 0123 moved them, address only, so that those two
+are the QA patients' logins, section 45); eight
 fictional patients without a login or any contact detail (`HID-ZDEMBBB2` to
 `HID-ZDEMBBB9`). Patient One and Patient Two each share their record with the
 demo login at Demo Hospital (doctor) and at Demo Outreach (nurse): the seed
@@ -2637,7 +2639,7 @@ emergency contacts and invitees (each one of the three demo addresses below). To
 test accepting a patient's invitation, the patient invites
 `operations@healthidentitydirectory.com` (the staff login's own address), which
 accepts it at Demo Hospital or Demo Outreach; an invitation to
-`patient1@healthidentitydirectory.com` or `patient2@healthidentitydirectory.com`
+`patientdemo1@healthidentitydirectory.com` or `patientdemo2@healthidentitydirectory.com`
 is delivered to that mailbox but can never be accepted (acceptance needs a staff
 login whose own verified address it is). Migrate's OCR
 job creation (`POST /api/v1/ocr/jobs`) needs a records-processing
@@ -2673,8 +2675,9 @@ real actor and a demo one):
 - A demo patient may invite, add as an emergency contact or change their email to
   the owner's three demo mailboxes only, an exact allowlist (any case, trimmed;
   no pattern and no plus-address): `operations@healthidentitydirectory.com`,
-  `patient1@healthidentitydirectory.com` and
-  `patient2@healthidentitydirectory.com`, the demo logins' own addresses.
+  `patientdemo1@healthidentitydirectory.com` and
+  `patientdemo2@healthidentitydirectory.com`, the demo logins' own addresses
+  (`patient1@` and `patient2@` until 0123, which made them QA addresses).
   Otherwise: invitation 400 `SHARE_INVITATION_EMAIL_INVALID`; email change 409
   `CONTACT_UNAVAILABLE` (nothing recorded, no code sent; each allowlisted address
   already belongs to a demo login, so a demo patient's email change never
@@ -4562,3 +4565,89 @@ The website's facility list says "FCT". Show "Federal Capital Territory (FCT)" a
 - The current-staff-context `facility` object does not include the profile. Use
   `GET /identity/facility-profile`.
 - The QoreID state, LGA, city and company email are not captured for pre-fill yet (plan A.5).
+
+## 45. The sealed QA tenant (0123)
+
+Migration 0123 (`0123_sealed_qa_tenant.sql`, provisional number; owner decision
+Q60 of 2026-11-12) adds a third tenant beside the real ones and the sealed demo
+(section 26), for the owner's own end-to-end testing by hand and with a browser
+agent. Unlike the demo it is not a showcase: every QA login can do every real
+action. Like the demo it is sealed in the database: nothing QA reaches, shares
+with, orders to or finds a real or a demo facility, patient or person, and
+nothing real or demo reaches QA. The marker is the owner-only table
+`identity.sealed_qa_members` (as `identity.sealed_demo_members`; a member is
+never both). 0098's rule ("both demo or neither") is unchanged; 0123 adds the
+same rule for QA at every place 0098 enforces its own, so the three sides are
+sealed from each other. Every answer is one a real tenant already gets for an
+unknown or ineligible value: across the boundary a Health ID is not found, a
+facility is not a destination, a clinician is not in the share directory.
+
+The tenant (seeded only on Amazon RDS, i.e. production; CI and rehearsals get
+the seal without the seed): QA Hospital (`QA-HOSPITAL`), QA Laboratory
+(`QA-LABORATORY`) and QA Pharmacy (`QA-PHARMACY`), verified and active. Seven
+staff logins, each with its own staff record, one mailbox of the owner's domain
+per role:
+
+| Login | Role |
+| --- | --- |
+| `ehr@healthidentitydirectory.com` | doctor at QA Hospital (EHR, Migrate, shares, orders) |
+| `migrate@healthidentitydirectory.com` | clinician at QA Hospital (Migrate) |
+| `lab@healthidentitydirectory.com` | lab at QA Laboratory |
+| `lab2@healthidentitydirectory.com` | lab at QA Laboratory (a result's second check) |
+| `pharmacy@healthidentitydirectory.com` | pharmacist at QA Pharmacy |
+| `admin@healthidentitydirectory.com` | org_admin at QA Hospital, QA Laboratory and QA Pharmacy |
+| `outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
+
+Two patient logins: `patient1@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA
+Patient One) and `patient2@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
+Two). Those were the demo patients' logins (section 26), so in the same
+transaction, before the QA seed, 0123 moves the two demo patient logins to
+`patientdemo1@healthidentitydirectory.com` and `patientdemo2@healthidentitydirectory.com`
+(`identity.demo_patient_logins_move()`, the owner's): address only; their
+passwords, sessions, status, verification, Health IDs, shares and seal stay.
+It refuses (55000, nothing moved, the release stops) a new address held by
+another account, staff record, open organization application or pending staff
+invitation (`DEMO_PATIENT_ADDRESS_TAKEN`), or a demo patient login on neither
+address or whose patient record holds an email of its own
+(`DEMO_PATIENT_LOGIN_UNEXPECTED`), or while a demo patient has a live email
+emergency contact (before 0123 it could only be `operations@`, `patient1@` or
+`patient2@`, and the database holds only its HMAC) or a pending share
+invitation to `patient1@` or `patient2@` (`DEMO_PATIENT_OLD_ADDRESS_IN_USE`;
+the owner removes or cancels them in the app first, and may add contacts again
+with the new addresses afterwards); it writes one audit row
+(`identity.sealed-demo.patient-logins-moved`, correlation id
+`0123-demo-patient-logins`, a count only). The demo's exact allowlist
+(`identity.sealed_demo_recipient`) and seed (`identity.sealed_demo_install`)
+name the new addresses; a demo patient can no longer invite, add as a contact
+or change their email to `patient1@` or `patient2@`. Every account is seeded `pending_reset` without a password,
+its email verified; the owner sets each password with Forgot password. QA
+Patient One shares with the QA clinician at QA Hospital (written as section 26
+writes the demo's shares, with the migration's own audit row,
+`identity.sealed-qa.seed-share`, correlation id `0123-sealed-qa-install`); QA
+Patient Two has no share, so the owner tests the real share flow with it.
+Identity's Health ID generator never issues a code starting `ZQA` or `ZDEM`.
+
+QA Outreach: an outreach group (0115) must hold its organiser's
+contact phone encrypted with Identity's key, which a migration cannot write
+truthfully. The owner starts it with the organiser login through "Start an
+outreach group" (with `outreach_organiser_signup_enabled` on), naming it "QA
+..."; a group whose organiser is a QA account becomes QA as it is made, and its
+name must start with "QA " (else 22023 `OUTREACH_ORGANISER_SIGNUP_INVALID`). A QA
+group invites volunteers at `@healthidentitydirectory.com` addresses only (400
+`OUTREACH_INVITATION_INVALID` otherwise), so no QA invitation email reaches
+anyone outside the owner's domain.
+
+Kept off for QA (coordinator, 2026-11-12): QoreID (a QA account consumes no
+QoreID quota, so no paid lookup; 42501 `QOREID_QUOTA_PERMISSION_DENIED`), a QA
+patient's phone (so no SMS; 400 `PATIENT_CONTACT_CHANGE_INVALID`), platform roles,
+and the platform overview's counts. A QA patient's share invitations, emergency
+contacts and email changes go to `@healthidentitydirectory.com` addresses only
+(plus-addresses allowed); any other domain is refused as the demo refuses a
+non-demo address (400 `SHARE_INVITATION_EMAIL_INVALID`, 409
+`CONTACT_UNAVAILABLE`, `EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED`).
+
+Known limits (accepted): a QA facility admin cannot invite a new login (the new
+account is real, and the seal refuses a real account at a QA facility); no new
+patient is created inside QA (facility registration needs a QoreID NIN check,
+kept off, and app. sign-ups are platform-wide). Testing uses the seeded logins
+and patients.
