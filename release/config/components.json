@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0117",
-    "count": 118,
+    "last": "0119",
+    "count": 120,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -569,6 +569,14 @@
       {
         "name": "0117_recorded_allergies.sql",
         "sha256": "3b71fdbbe3a02071a198722ca00c0120240d5fcfd53035cd38e3a7217e53f003"
+      },
+      {
+        "name": "0118_ocr_correction_observations.sql",
+        "sha256": "4c4b194a93f717fff5f55efb710e807780450b139e0e10544ef87b20a0354ae3"
+      },
+      {
+        "name": "0119_ocr_learning_rules.sql",
+        "sha256": "6c75c2c58ff5e7676475215ceadefdf268b2921c0f8988b9a05dbf5ab0a3dee1"
       }
     ]
   },

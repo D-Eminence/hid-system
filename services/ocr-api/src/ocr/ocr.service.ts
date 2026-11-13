@@ -24,6 +24,7 @@ import { OcrReadingSwitch } from './ocr-reading-switch';
 import { REVIEW_OUTCOME_SCHEMA, safeReviewOutcome, type ReviewOutcome,
   type ReviewOutcomeFailure } from './quality/review-outcome';
 import { projectExtraction, type ExtractionRow } from './reading/extraction-view';
+import { OcrLearningService } from './learning/learning.service';
 import { PAPER_READING_CONTRACT } from './reading/paper-reading.contract';
 import { OCR_PROCESSING_CONTRACT, PROMPT_VERSION, READINGS_REDONE_WHEN_AI_ON } from './reading/reading-versions';
 
@@ -137,6 +138,8 @@ export class OcrService {
     private readonly pharmacyApi: PharmacyApiService,
     private readonly publicationSwitch: OcrPublicationSwitch,
     private readonly readingSwitch: OcrReadingSwitch,
+    // OCR learning (0118/0119); tests that build the service by hand get one that answers nothing on their mocks.
+    private readonly learning: OcrLearningService = new OcrLearningService(),
   ) {}
 
   async createJob(input: CreateOcrJobDto, idempotencyHeader: string | undefined, context: DataAccessContext) {
@@ -300,7 +303,20 @@ export class OcrService {
       // Each extraction is re-read through the contract: no stored key outside it, no raw model output. A source
       // the OCR worker deleted after 7 days (0112) is said so explicitly, from the document's status.
       const contentDeleted = SOURCE_DELETION_STATUSES.has(source.status);
-      return { items: result.rows.map((row) => projectExtraction(row, contentDeleted)) };
+      const items = [];
+      for (const row of result.rows) {
+        const view = projectExtraction(row, contentDeleted);
+        // Learning (0119): an active rule's suggestion beside an item's field, "Possibly X? Check the paper".
+        // Never for a deleted source or a sensitive reading; nothing on failure.
+        const suggestions = contentDeleted || view.paperReading.items.length === 0 ? new Map()
+          : await this.learning.suggestionsFor(client, jobId, row.structuredPayload);
+        items.push(suggestions.size === 0 ? view : { ...view, paperReading: { ...view.paperReading,
+          items: view.paperReading.items.map((item) => {
+            const suggestion = suggestions.get(item.id);
+            return suggestion ? { ...item, suggestion } : item;
+          }) } });
+      }
+      return { items };
     });
   }
 
@@ -341,7 +357,9 @@ export class OcrService {
     // request from an existing client hashes exactly as it did before these fields existed.
     const digest = requestDigest('ocr.validation.create', { jobId,
       ...Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) });
-    return this.database.withTransaction(context, async (client) => {
+    let learningReview: Parameters<OcrLearningService['learnFromReview']>[1] | undefined;
+    const saved = await this.database.withTransaction(context, async (client) => {
+      learningReview = undefined; // a retried attempt starts again
       // Every command of the job locks the job row first, so they queue in one
       // order. Validations and confirmations are insert-only (0013, 0016
       // triggers) and the runtime role cannot lock them, so their replay
@@ -382,7 +400,7 @@ export class OcrService {
         [jobId],
       );
       const validationVersion = Number(versionResult.rows[0]?.version ?? 1);
-      const reviewOutcome = await this.reviewOutcome(client, jobId, input);
+      const { outcome: reviewOutcome, payload: reviewedPayload } = await this.reviewOutcome(client, jobId, input);
       const validationResult = await client.query<{ id: string }>(
         `insert into ocr.validations (
            job_id, facility_id, extraction_id, validation_version, validated_payload,
@@ -401,6 +419,8 @@ export class OcrService {
       );
       const validationId = validationResult.rows[0]?.id;
       if (!validationId) throw new DomainProblem(503, 'OCR_VALIDATION_NOT_CREATED', 'OCR validation could not be created');
+      learningReview = { jobId, validationId, disposition: input.disposition, targetDomain: input.targetDomain,
+        acceptedFields: input.acceptedFields, payload: reviewedPayload, shownSuggestions: input.shownSuggestions };
       const updated = await client.query<OcrJobRow>(
         `update ocr.jobs set status = $5, completed_at = clock_timestamp(),
                 correlation_id = $4, row_version = row_version + 1
@@ -418,6 +438,18 @@ export class OcrService {
       return { ...this.project(row), validationId, validationVersion,
         disposition: input.disposition, targetDomain: input.targetDomain, candidateType: input.candidateType };
     }, { isolationLevel: 'SERIALIZABLE' });
+    // Learning (0118/0119) after the save committed, in its own READ COMMITTED transaction: corrected fields of
+    // linked items and the suggestions taken. It can neither abort nor delay the save; a failure is logged with a code.
+    const review = learningReview;
+    if (review) {
+      try {
+        await this.database.withTransaction(context, (client) => this.learning.learnFromReview(client, review),
+          { isolationLevel: 'READ COMMITTED' });
+      } catch {
+        this.logger.warn(JSON.stringify({ event: 'ocr.learning.review_failed', code: 'transaction_failed', jobId }));
+      }
+    }
+    return saved;
   }
 
   async listValidations(jobId: string, context: DataAccessContext) {
@@ -753,8 +785,8 @@ export class OcrService {
    * inside a savepoint, so a failed read leaves the transaction usable; any failure stores
    * { schema, error: 'summary_failed' } and the save goes on.
    */
-  private async reviewOutcome(client: PoolClient, jobId: string,
-    input: ValidateOcrJobDto): Promise<ReviewOutcome | ReviewOutcomeFailure> {
+  private async reviewOutcome(client: PoolClient, jobId: string, input: ValidateOcrJobDto):
+    Promise<{ outcome: ReviewOutcome | ReviewOutcomeFailure; payload: unknown }> {
     let extraction: { structured_payload?: unknown; provenance?: unknown } | undefined;
     try {
       await client.query('savepoint ocr_review_outcome');
@@ -770,7 +802,7 @@ export class OcrService {
       }
     } catch {
       this.logger.warn(JSON.stringify({ event: 'ocr.review_outcome.failed', code: 'extraction_read_failed', jobId }));
-      return { schema: REVIEW_OUTCOME_SCHEMA, error: 'summary_failed' };
+      return { outcome: { schema: REVIEW_OUTCOME_SCHEMA, error: 'summary_failed' }, payload: undefined };
     }
     const outcome = safeReviewOutcome({ disposition: input.disposition, targetDomain: input.targetDomain,
       acceptedFields: input.acceptedFields, corrections: input.corrections, reviewConfirmed: input.reviewConfirmed,
@@ -779,7 +811,7 @@ export class OcrService {
     if ('error' in outcome) {
       this.logger.warn(JSON.stringify({ event: 'ocr.review_outcome.failed', code: outcome.error, jobId }));
     }
-    return outcome;
+    return { outcome, payload: extraction?.structured_payload };
   }
 
   private async lockJobKey(client: PoolClient, jobId: string) {

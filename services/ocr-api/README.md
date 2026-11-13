@@ -106,6 +106,41 @@ name no visit (`encounterId` optional); a direct-care publisher of such a
 reading also lands it there. The publication audit events carry `basis`,
 `grantId`, `confirmedBy` and `publishedBy` (ids only).
 
+## Learning from reviews (phase 2: rules and suggestions)
+
+Migrations 0118 and 0119, owner decision Q43 (`docs/INTERFACE_CONTRACT.md`
+section 45). `src/ocr/learning/learning.ts` turns an accepted review into
+observations:
+- one per changed field of a linked Pharmacy medicine (name, strength,
+  frequency) or Lab result (test, unit);
+- each holds a SHA-256 digest of the value read and the saved value when it is
+  a closed-list value (else NULL, a conflict). Nothing from the paper leaves
+  this process.
+
+`OcrLearningService` sends them with whether each suggestion shown was taken.
+The database switches a rule on by itself: 5 identical corrections, 3 staff, no
+conflict; a platform rule needs 2 facilities. A rule retires itself after 3 not
+taken in its last 10 showings.
+
+On the extractions read, an item may carry `suggestion` ("Possibly X? Check
+the paper"). The saved value never changes and the suggestion never goes into
+the reader's prompt.
+
+A reading holding any item or page line of a sensitive class
+(`sensitive-classes.ts`, versioned) teaches nothing and shows nothing. A review
+that saves a sensitive value teaches nothing, and a sensitive value is never
+suggested.
+
+A field where a suggestion was shown is recorded only as a showing, never as
+evidence. The database stores read digests and validation ids only as HMACs
+under its own key.
+
+Learning from a review runs after the validation committed, in its own READ
+COMMITTED transaction, so it can neither abort nor delay a save. Suggestions on
+a read run in a savepoint; neither ever fails a save or a read. The drug, diagnosis and lab lists under
+`src/ocr/learning/lists` are byte-for-byte copies of the OCR worker's;
+`learning.spec.ts` checks it.
+
 ## Paper readings (`hid-paper-reading-v2`)
 
 The worker writes `provenance.processingContract` `hid-textract-v2` and a

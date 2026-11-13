@@ -173,6 +173,21 @@ export class PostgresWorkerRepository implements WorkerRepository, SourceDeletio
     });
   }
 
+  // OCR learning evidence older than 180 days, with the source deletion round: correction observations (0118),
+  // then suggestion showings (0119), each in its own transaction.
+  async purgeLearningObservations(limit: number, correlationId: string): Promise<number> {
+    let removed = 0;
+    for (const command of ['ocr.purge_correction_observations', 'ocr.purge_learning_showings']) {
+      removed += await this.transaction(correlationId, async (client) => {
+        const count = Number((await client.query<{ removed: number }>(
+          `select ${command}($1) as removed`, [limit])).rows[0]?.removed);
+        if (!Number.isSafeInteger(count) || count < 0) throw new Error('OCR learning purge returned an invalid count');
+        return count;
+      });
+    }
+    return removed;
+  }
+
   async purgeSourceDocument(documentId: string, deletedVersions: number, correlationId: string): Promise<SourcePurgeResult> {
     return this.transaction(correlationId, async (client) => {
       const row = (await client.query<{ outcome: string; extractions: number; validations: number; confirmations: number }>(

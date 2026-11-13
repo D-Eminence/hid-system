@@ -15,6 +15,8 @@ import { AdminOrderRoutesService } from './order-routes.service';
 import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 import { AdminOcrUsageController } from './ocr-usage.controller';
 import { AdminOcrUsageService } from './ocr-usage.service';
+import { AdminOcrLearningController } from './ocr-learning.controller';
+import { AdminOcrLearningService } from './ocr-learning.service';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IdentityModule, PatientSafetyModule, HealthIdInUrlRefusalModule],
@@ -22,8 +24,10 @@ import { AdminOcrUsageService } from './ocr-usage.service';
     // Orders between facilities (P4c): support's summary, listing, lookup and close.
     AdminOrderRouteReadsController, AdminOrderRouteCommandsController,
     // OCR page allowance and monthly use per facility (migration 0107).
-    AdminOcrUsageController],
+    AdminOcrUsageController,
+    // OCR learning: platform-wide review outcomes, rule counts and the kill switches (migration 0119).
+    AdminOcrLearningController],
   providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService, AdminOrderRoutesService,
-    AdminOcrUsageService],
+    AdminOcrUsageService, AdminOcrLearningService],
 })
 export class AdminModule {}

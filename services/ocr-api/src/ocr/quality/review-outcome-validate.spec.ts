@@ -82,7 +82,7 @@ function harness(options: { extractionError?: Error; replay?: Record<string, unk
   };
   const auditDetails = () => ((audit.recordWithClient as jest.Mock).mock.calls as [PoolClient, { action: string;
     details: Record<string, unknown> }][]).map(([, event]) => event);
-  return { service, calls, insertedProvenance, auditDetails };
+  return { service, calls, insertedProvenance, auditDetails, database };
 }
 
 const body = (overrides: Partial<ValidateOcrJobDto> = {}): ValidateOcrJobDto => ({ extractionId, expectedVersion: 4,
@@ -94,6 +94,31 @@ const body = (overrides: Partial<ValidateOcrJobDto> = {}): ValidateOcrJobDto => 
     originalValue: '5mg', correctedValue: '25mg' }], reason: 'Reviewed against the fictional source',
   purpose: 'healthcare-operations', reviewConfirmed: true, missedItems: 0,
   removedItems: [{ itemId: 'it-00000000000000b2', removalReason: 'not_on_paper' }], ...overrides });
+
+describe('OCR learning after the validation (0118/0119)', () => {
+  it('runs in its own READ COMMITTED transaction after the SERIALIZABLE save, never inside it', async () => {
+    const { service, calls, database } = harness();
+    await service.validate(jobId, body(), 'ocr-review-learning-key-0001', context);
+    const options = (database.withTransaction as jest.Mock).mock.calls.map((call) => call[2]);
+    expect(options).toEqual([{ isolationLevel: 'SERIALIZABLE' }, { isolationLevel: 'READ COMMITTED' }]);
+    const update = calls.findIndex(([sql]) => sql.includes('update ocr.jobs set status = $5'));
+    const learning = calls.findIndex(([sql]) => sql === 'savepoint ocr_learning_review');
+    expect(update).toBeGreaterThan(-1);
+    expect(learning).toBeGreaterThan(update);
+  });
+
+  it('answers the saved validation even when the learning transaction fails', async () => {
+    const { service, database } = harness();
+    const original = (database.withTransaction as jest.Mock).getMockImplementation()!;
+    (database.withTransaction as jest.Mock).mockImplementation(async (c: DataAccessContext,
+      operation: (db: PoolClient) => Promise<unknown>, options?: { isolationLevel?: string }) => {
+      if (options?.isolationLevel === 'READ COMMITTED') throw Object.assign(new Error('down'), { code: '57P01' });
+      return original(c, operation, options);
+    });
+    await expect(service.validate(jobId, body(), 'ocr-review-learning-key-0002', context)).resolves.toMatchObject({
+      validationId: '90000000-0000-4000-8000-000000000001', disposition: 'validated' });
+  });
+});
 
 describe('OCR validation review outcome', () => {
   it('stores the review outcome in the validation provenance and the accept audit, with no patient text', async () => {
