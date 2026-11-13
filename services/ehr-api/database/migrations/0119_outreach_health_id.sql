@@ -36,8 +36,11 @@
 --       - identity.outreach_health_id_confirm(...): checks the code (counting
 --         failures, which are kept: the command answers an outcome rather than
 --         raising), then creates the account (no password, status
---         pending_reset, email verified), the patient (name, sex, phone, email;
---         no date of birth), its Health ID identifier and assurance state
+--         pending_reset, email verified), the patient (name, sex and the
+--         proven email only: the registration's phone, never proven, is not
+--         stored, so it never blocks the number's real owner; the person adds
+--         a phone later in the app; no date of birth), its Health ID
+--         identifier and assurance state
 --         CONTACT_VERIFIED, records the registration's Health ID, and writes
 --         one audit row (ids only). A replay answers the Health ID created.
 --   * identity.outreach_registration_health_ids_for(cases): for the Outreach
@@ -342,7 +345,7 @@ $$;
 -- 4. Confirming the code and creating the Health ID.
 create function identity.outreach_health_id_confirm(
   requested_case_id uuid, requested_challenge_id uuid, requested_verifier_hmac char(64), requested_email text,
-  requested_hid text, requested_phone_ciphertext bytea, requested_phone_lookup_hmac char(64)
+  requested_hid text
 ) returns table (outcome text, hid_code text, patient_id uuid)
 language plpgsql volatile security definer
 set search_path = pg_catalog, pg_temp
@@ -393,23 +396,14 @@ begin
                              else 'invalid' end, null::text, null::uuid;
     return;
   end if;
-  if normalized_email is null or requested_hid !~ '^HID-[A-HJ-NP-Z2-9]{6,32}$'
-     or (registration.phone is null) <> (requested_phone_lookup_hmac is null)
-     or (requested_phone_ciphertext is null) <> (requested_phone_lookup_hmac is null)
-     or coalesce(requested_phone_lookup_hmac, repeat('0', 64)) !~ '^[0-9a-f]{64}$' then
+  if normalized_email is null or requested_hid is null or requested_hid !~ '^HID-[A-HJ-NP-Z2-9]{6,32}$' then
     raise exception using errcode = '22023', message = 'OUTREACH_HEALTH_ID_REQUEST_INVALID';
   end if;
   perform pg_advisory_xact_lock(hashtextextended('patient-contact:email:' || challenge.email_lookup_hmac, 0));
-  if requested_phone_lookup_hmac is not null then
-    perform pg_advisory_xact_lock(hashtextextended('patient-contact:phone:' || requested_phone_lookup_hmac, 0));
-  end if;
   if exists (select 1 from auth.accounts account where lower(account.email) = normalized_email
               and account.status <> 'deleted')
      or exists (select 1 from identity.patients patient where patient.email_lookup_hmac = challenge.email_lookup_hmac) then
     raise exception using errcode = '23505', message = 'OUTREACH_HEALTH_ID_EMAIL_TAKEN';
-  end if;
-  if exists (select 1 from identity.patients patient where patient.phone_lookup_hmac = requested_phone_lookup_hmac) then
-    raise exception using errcode = '23505', message = 'OUTREACH_HEALTH_ID_PHONE_TAKEN';
   end if;
   -- Names as patient sign-up allows them: no control characters, whitespace
   -- collapsed, each name at most 80 characters (0093).
@@ -426,12 +420,15 @@ begin
   insert into auth.accounts (id, subject, email, display_name, status, email_verified_at, source_system)
   values (new_account, 'patient:' || new_account::text, normalized_email, clean_name,
     'pending_reset', clock_timestamp(), 'hid-outreach-health-id');
+  -- Only the proven email. The registration's phone, typed by the volunteer
+  -- and never proven, is not stored on the Health ID (it would block the
+  -- number's real owner from signing up); the person adds a phone later in the
+  -- app through the verified contact change.
   insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, gender, dob,
-    phone_e164_ciphertext, phone_lookup_hmac, email_ciphertext, email_lookup_hmac, contact_key_version,
-    source_system, status)
+    email_ciphertext, email_lookup_hmac, contact_key_version, source_system, status)
   values (new_patient, new_account, requested_hid, first_name_value, last_name_value, clean_name,
-    registration.sex, null, requested_phone_ciphertext, requested_phone_lookup_hmac, challenge.email_ciphertext,
-    challenge.email_lookup_hmac, challenge.key_version, 'hid-outreach-health-id', 'active');
+    registration.sex, null, challenge.email_ciphertext, challenge.email_lookup_hmac, challenge.key_version,
+    'hid-outreach-health-id', 'active');
   insert into identity.patient_identifiers (id, patient_id, identifier_type, public_value, verified, source_system)
   values (gen_random_uuid(), new_patient, 'hid_code', requested_hid, true, 'hid-outreach-health-id');
   insert into identity.patient_assurance_states (patient_id, account_id, state, source_system, source_reference,
@@ -457,8 +454,8 @@ begin
 end
 $$;
 
-comment on function identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char) is
-  '0119: checks an outreach Health ID code and, when right, creates the account (no password, pending_reset, email verified), the patient (the registration''s name, sex and phone; the verified email; no date of birth), its Health ID identifier and CONTACT_VERIFIED assurance, the registration''s Health ID record and one audit row (ids only). Answers an outcome (created, replayed, invalid, expired, too_many_tries) so that a failed attempt is counted; raises the refusals of identity.outreach_health_id_registration, 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED / _EMAIL_TAKEN / _PHONE_TAKEN, 23514 _UNDER_18 / _NAME_INVALID (a name with nothing printable). The phone is optional: without one on the registration, the patient has none and the duplicate check rests on the email.';
+comment on function identity.outreach_health_id_confirm(uuid,uuid,char,text,text) is
+  '0119: checks an outreach Health ID code and, when right, creates the account (no password, pending_reset, email verified), the patient (the registration''s name and sex; the verified email; no phone, no date of birth), its Health ID identifier and CONTACT_VERIFIED assurance, the registration''s Health ID record and one audit row (ids only). Answers an outcome (created, replayed, invalid, expired, too_many_tries) so that a failed attempt is counted; raises the refusals of identity.outreach_health_id_registration, 23505 OUTREACH_HEALTH_ID_ALREADY_CREATED / _EMAIL_TAKEN, 23514 _UNDER_18 / _NAME_INVALID (a name with nothing printable). The registration''s phone, never proven, is not stored on the Health ID, so it never blocks the number''s real owner; the person adds a phone later in the app.';
 
 -- 5. For outreach-api: the Health IDs created for registrations the session can see.
 create function identity.outreach_registration_health_ids_for(requested_case_ids uuid[])
@@ -502,7 +499,7 @@ begin
     execute format('alter function identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer) owner to %I', owner_name);
     execute format('alter function identity.outreach_health_id_delivery_failed(uuid) owner to %I', owner_name);
     execute format('alter function identity.outreach_health_id_open_challenge(uuid) owner to %I', owner_name);
-    execute format('alter function identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char) owner to %I', owner_name);
+    execute format('alter function identity.outreach_health_id_confirm(uuid,uuid,char,text,text) owner to %I', owner_name);
     execute format('alter function identity.outreach_registration_health_ids_for(uuid[]) owner to %I', owner_name);
   end if;
   execute format('create policy outreach_health_id_challenges_owner on identity.outreach_health_id_challenges '
@@ -517,7 +514,7 @@ revoke all on function identity.outreach_registration_health_ids_immutable(),
   identity.outreach_health_id_registration(uuid), identity.outreach_health_id_eligible(uuid),
   identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer),
   identity.outreach_health_id_delivery_failed(uuid), identity.outreach_health_id_open_challenge(uuid),
-  identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char),
+  identity.outreach_health_id_confirm(uuid,uuid,char,text,text),
   identity.outreach_registration_health_ids_for(uuid[]) from public;
 
 -- Grants (here and in runtime-grants.sql).
@@ -530,7 +527,7 @@ begin
       execute format('grant execute on function identity.outreach_health_id_registration(uuid), '
         || 'identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer), '
         || 'identity.outreach_health_id_delivery_failed(uuid), identity.outreach_health_id_open_challenge(uuid), '
-        || 'identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char) to %I', role_name);
+        || 'identity.outreach_health_id_confirm(uuid,uuid,char,text,text) to %I', role_name);
     end if;
   end loop;
   foreach role_name in array array['hid_outreach_runtime', 'hid_schema_test_runtime'] loop

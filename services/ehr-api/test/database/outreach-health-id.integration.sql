@@ -15,7 +15,7 @@ begin
   foreach command in array array['identity.outreach_health_id_registration(uuid)',
       'identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer)',
       'identity.outreach_health_id_delivery_failed(uuid)', 'identity.outreach_health_id_open_challenge(uuid)',
-      'identity.outreach_health_id_confirm(uuid,uuid,char,text,text,bytea,char)'] loop
+      'identity.outreach_health_id_confirm(uuid,uuid,char,text,text)'] loop
     if not has_function_privilege('hid_identity_api_runtime', command, 'EXECUTE')
        or has_function_privilege('hid_outreach_api_runtime', command, 'EXECUTE')
        or not exists (select 1 from pg_proc where oid = command::regprocedure and prosecdef
@@ -219,9 +219,11 @@ returns text language sql as $$
     n, challenge, email, encode(sha256(convert_to(lower(email), 'utf8')), 'hex'), phone_hmac, max_attempts) $$;
 create function pg_temp.confirm_sql(n integer, challenge text, verifier text, email text, hid text, phone_hmac text)
 returns text language sql as $$
+  -- phone_hmac is unused since the phone is no longer stored (kept so the
+  -- cases read the same).
   select format($i$select concat_ws('/', outcome, hid_code) from identity.outreach_health_id_confirm(
-    '6c080000-0000-4000-8000-00000000000%s', %L, %L, %L, %L, decode(repeat('cd', 40), 'hex'), %L)$i$,
-    n, challenge, verifier, email, hid, phone_hmac) $$;
+    '6c080000-0000-4000-8000-00000000000%s', %L, %L, %L, %L)$i$,
+    n, challenge, verifier, email, hid) $$;
 grant execute on function pg_temp.start_sql(integer, text, text, text, integer),
   pg_temp.confirm_sql(integer, text, text, text, text, text) to public;
 
@@ -262,10 +264,10 @@ select pg_temp.hi_case('3b the account: no password, pending reset, email verifi
   $s$select concat_ws('/', account.status, account.email, account.password_hash is null, account.email_verified_at is not null)
        from auth.accounts account join identity.patients patient on patient.account_id = account.id
       where patient.hid_code = 'HID-RTE6C5'$s$);
-select pg_temp.hi_case('3c the patient: the registration''s name and sex, no date of birth, the contacts, sign-up''s assurance', 'Lola/Person 5/female/t/t/t/CONTACT_VERIFIED/hid-public-signup/t',
+select pg_temp.hi_case('3c the patient: the registration''s name and sex, no date of birth, the proven email only (no phone), sign-up''s assurance', 'Lola/Person 5/female/t/t/t/CONTACT_VERIFIED/hid-public-signup/t',
   session_user::text, null, null, null, null,
   $s$select concat_ws('/', patient.first_name, patient.last_name, patient.gender, patient.dob is null,
-          patient.phone_lookup_hmac = repeat('5', 64), patient.email_lookup_hmac is not null, assurance.state,
+          patient.phone_lookup_hmac is null and patient.phone_e164_ciphertext is null, patient.email_lookup_hmac is not null, assurance.state,
           assurance.source_system, assurance.source_reference like 'outreach-health-id:%')
        from identity.patients patient join identity.patient_assurance_states assurance on assurance.patient_id = patient.id
       where patient.hid_code = 'HID-RTE6C5'$s$);
@@ -304,7 +306,14 @@ select pg_temp.idrt('4a2 and is refused once proved', '23505: OUTREACH_HEALTH_ID
     replace(pg_temp.confirm_sql(3, '6c0a0000-0000-4000-8000-000000000039', repeat('e', 64), 'lola.person5@example.invalid',
       'HID-RTE6C3', repeat('3', 64)), $r$select concat_ws('/', outcome, hid_code) from$r$, 'outcome from')),
   false, 'statement');
-select pg_temp.idrt('4b the phone is taken', '23505: OUTREACH_HEALTH_ID_PHONE_TAKEN',
+-- A real patient (signed up, phone proven) holding phone hash 9.
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, phone_e164_ciphertext, phone_lookup_hmac,
+  contact_key_version, source_system, status)
+values ('6c0b0000-0000-4000-8000-000000000009', 'HID-RTE6R9', 'Real', 'Owner', 'Real Owner',
+  decode(repeat('ef', 40), 'hex'), repeat('9', 64), 'contact-v1', 'hid-public-signup', 'active');
+select pg_temp.idrt('4b the registration''s phone is on a real patient', '23505: OUTREACH_HEALTH_ID_PHONE_TAKEN',
+  pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000003', 'someone.else@example.invalid', repeat('9', 64)));
+select pg_temp.idrt('4b2 a phone only on an outreach registration blocks nobody', '6c0a0000-0000-4000-8000-000000000003',
   pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000003', 'someone.else@example.invalid', repeat('5', 64)));
 select pg_temp.idrt('4c an invalid email', '22023: OUTREACH_HEALTH_ID_EMAIL_INVALID',
   pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000003', 'not-an-email', repeat('3', 64)));

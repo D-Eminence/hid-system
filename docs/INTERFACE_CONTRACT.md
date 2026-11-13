@@ -4734,8 +4734,10 @@ registration create (Postgres text cannot hold them); nothing else about those v
 
 Migration 0119 (`0119_outreach_health_id.sql`; owner request of 2026-11-13; the number is a placeholder)
 lets a volunteer or organiser at an outreach group create a Health ID for a person they registered, from
-the registration's name, sex and phone (if any), once the person proves an email address with a 6-digit
-code sent to it. Provisional: the shapes below were agreed with the website team for the outreach of
+the registration's name and sex, once the person proves an email address with a 6-digit
+code sent to it. The Health ID holds only the proven email: the registration's phone, typed by the
+volunteer and never proven, is not stored on it (it would block the number's real owner from signing
+up); the person adds a phone later in the app through the verified contact change. Provisional: the shapes below were agreed with the website team for the outreach of
 14 November 2026 and may still be adjusted before the migration is signed. Codes go by email only; SMS
 is not live. The registration itself is not changed (it stays `identity_resolution_pending`; 0115's rule G
 stands); the link is kept in `identity.outreach_registration_health_ids`.
@@ -4776,11 +4778,11 @@ only after the person proves it. The email
 | 409 | `OUTREACH_REGISTRATION_REDACTED` | the registration's details were removed |
 | 409 | `OUTREACH_HEALTH_ID_ALREADY_CREATED` | a Health ID exists for it; the body carries `"healthId": "HID-..."` and the same in `"details": { "healthId": "HID-..." }` |
 | 422 | `OUTREACH_HEALTH_ID_UNDER_18` | "Health IDs for under-18s can't be created at outreach yet. A parent or guardian can do it later in the app." |
-| 422 | `OUTREACH_HEALTH_ID_PHONE_INVALID` | the registration has a phone that is not a valid number (a phone is optional; without one the patient has none) |
+| 422 | `OUTREACH_HEALTH_ID_PHONE_INVALID` | the registration has a phone that is not a valid number (a phone is optional and is never stored on the Health ID) |
 | 422 | `OUTREACH_HEALTH_ID_EMAIL_INVALID` | missing or not an email (max 254) |
 | 403 | `OUTREACH_HEALTH_ID_NOT_AVAILABLE` | not an outreach group, or a sealed demo/QA one |
 | 423 | `OUTREACH_ORGANISER_SUSPENDED` | the group is paused by Health ID |
-| 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN` | "This phone number already has a Health ID. Ask them to sign in with it." |
+| 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN` | the registration's phone is already on a Health ID (refuses only this registration): "This phone number already has a Health ID. Ask them to sign in with it." |
 | 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | "Too many codes for this person today. Try again tomorrow." (3 in 24 hours), or "Wait a minute before sending another code." with `Retry-After: <seconds>` (60-second cooldown, or a rate window) |
 | 409 | `OUTREACH_HEALTH_ID_REQUEST_USED` | "This request was already used. Start again to send a new code." (retry with a new `Idempotency-Key`) |
 | 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | `channel: "sms"` ("Codes by SMS aren't available yet. Use the person's email."), or the email could not be sent (that code is ended) |
@@ -4820,9 +4822,9 @@ Identity recognises answers `201` too. A retry after the Health ID was created (
 delegated-browser routes, so a forwarded cookie always needs Origin and CSRF. Identity runs 0119's commands
 in the volunteer's own session. Answers as 49.1 and 49.2 (`confirm` answers `{ healthId, outcome }`; a
 429 carries `retryAfterSeconds`). Identity alone holds the contact keys, the OTP verifier key and the
-Health ID generator: the email and phone are stored encrypted with patient sign-up's contact key and
-key version, with sign-up's lookup HMACs (the phone bound to its lookup HMAC,
-`identity:patient-phone:<phoneLookupHmac>`, which GET identity/me reads back); the database keeps only a
+Health ID generator: the email is stored encrypted with patient sign-up's contact key and key version,
+with sign-up's lookup HMAC (no phone is stored; the registration's phone is only checked against existing
+Health IDs at start); the database keeps only a
 keyed verifier of the code. The patient's assurance is `CONTACT_VERIFIED` with source `hid-public-signup`
 (reference `outreach-health-id:<challenge>`), so NIN verification can follow later. The code
 email is `POST notification-api /notifications/otp` with purpose `OUTREACH_HEALTH_ID_VERIFY` (email only,

@@ -183,16 +183,13 @@ export class OutreachHealthIdService {
     // A code keyed with an OTP key this process no longer holds cannot be checked.
     if (open.verifier_key_version !== this.env.OTP_HMAC_KEY_VERSION) throw this.codeExpired();
     this.assertEligible(registration);
-    const phone = this.registrationPhone(registration);
     const key = contactKeyForVersion(this.env, open.key_version);
     const email = key ? decryptContactValue(key, open.challenge_id, 'contact', open.email_ciphertext) : undefined;
     if (!key || !email) throw this.unavailable();
-    // The patient's contacts share one key_version (the challenge's). The
-    // phone is optional: without one, both are null and the patient has none.
-    // Bound to its lookup HMAC, the form PatientContactReader reads for a
-    // patient with no enrollment (GET identity/me).
-    const phoneLookup = phone ? createContactLookupHmac('phone', phone) : null;
-    const phoneCiphertext = phone && phoneLookup ? encryptLookupBoundPhone(key, phoneLookup, phone) : null;
+    // Only the proven email goes on the Health ID. The registration's phone,
+    // typed by the volunteer and never proven, is not stored (it would block
+    // the number's real owner from signing up); the person adds a phone later
+    // in the app through the verified contact change.
     const verifier = this.verifier(input.caseId, open.challenge_id, code);
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -200,8 +197,8 @@ export class OutreachHealthIdService {
       try {
         const row = await this.database.withTransaction(context, async (client) =>
           (await client.query<{ outcome: string; hid_code: string | null; patient_id: string | null }>(
-            'select * from identity.outreach_health_id_confirm($1,$2,$3,$4,$5,$6,$7)',
-            [input.caseId, open.challenge_id, verifier, email, hid, phoneCiphertext, phoneLookup])).rows[0]);
+            'select * from identity.outreach_health_id_confirm($1,$2,$3,$4,$5)',
+            [input.caseId, open.challenge_id, verifier, email, hid])).rows[0]);
         switch (row?.outcome) {
           case 'created':
           case 'replayed':
@@ -222,9 +219,6 @@ export class OutreachHealthIdService {
           const constraint = databaseConstraint(error);
           if (constraint === 'accounts_email_ci_uq' || constraint === 'patients_email_hmac_uq') {
             throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_EMAIL_TAKEN', MESSAGES.emailTaken);
-          }
-          if (constraint === 'patients_phone_hmac_uq') {
-            throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
           }
         }
         throw this.problem(error);
