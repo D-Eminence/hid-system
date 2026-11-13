@@ -409,11 +409,15 @@ describe('OutreachHealthIdService (0119)', () => {
         claimExpiresAt: '2027-05-12T08:00:00.000Z' });
       const call = createCall();
       expect(call.system).toBe(false);
-      const [requestedCase, hid, phoneCiphertext, phoneLookup, keyVersion, claimHmac, claimVersion] =
-        call.parameters as [string, string, Buffer, string, string, string, string];
+      const [requestedCase, hid, phoneCiphertext, phoneLookup, keyVersion, claimHmac, claimVersion, hmacKeyVersion] =
+        call.parameters as [string, string, Buffer, string, string, string, string, string];
+      expect(call.parameters).toHaveLength(8);
       expect([requestedCase, hid, keyVersion, claimVersion]).toEqual([caseId, 'HID-AB2CD3', 'nin-v2', 'claim-v1']);
+      // The OTP key's version, which the claim flow verifies with.
+      expect(hmacKeyVersion).toBe('otp-v3');
       expect(phoneLookup).toBe(createContactLookupHmac('phone', '+2348012345678'));
-      // Bound to the lookup HMAC, so the patient's own profile reads it (as 0119's confirmation).
+      // Bound to the lookup HMAC as 0119's confirmation encrypts it; 0120 keeps it on the claim row (not the
+      // patient) and the claim flow moves it onto the patient unchanged.
       expect(new PatientProfileCrypto().decryptLookupBoundPhone(phoneLookup, phoneCiphertext)).toBe('+2348012345678');
       expect(new PatientProfileCrypto().decryptLookupBoundPhone('f'.repeat(64), phoneCiphertext)).toBeUndefined();
       // The same key as 0119's code verifier; the uppercased code.
@@ -426,7 +430,31 @@ describe('OutreachHealthIdService (0119)', () => {
       registration.phone = null;
       await service().createUnclaimed({ caseId }, context);
       expect(createCall().parameters.slice(2, 5)).toEqual([null, null, null]);
-      expect(queries.some((q) => q.system)).toBe(false);
+      expect(queries.some((q) => q.sql.includes('already_bound') || q.sql.includes('patient_contact_lookup_ready')))
+        .toBe(false);
+    });
+
+    it('counts each creation in the volunteer\'s hourly window (30), keyed by an HMAC of the account', async () => {
+      await service().createUnclaimed({ caseId }, context);
+      const counted = queries.find((q) => q.system && q.sql.includes('insert into auth.otp_rate_limits'))!;
+      expect(counted.parameters[0]).toBe('account');
+      expect(counted.parameters[1]).toMatch(/^[0-9a-f]{64}$/);
+      expect(counted.parameters[1]).not.toBe(actor.accountId);
+      expect(counted.parameters[5]).toBe(3600);
+      expect(queries.indexOf(counted)).toBeLessThan(queries.findIndex((q) => q.sql.includes('already_bound')));
+    });
+
+    it('answers 429 OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS with retryAfterSeconds, before the phone check', async () => {
+      rateBlocked = true;
+      bound = { [`phone:${createContactLookupHmac('phone', '+2348012345678')}`]: true };
+      const limited = await refusal(service().createUnclaimed({ caseId }, context));
+      expect(limited).toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS', status: 429,
+        message: 'Too many Health IDs created in a short time. Wait a few minutes.' });
+      expect(limited.extensions?.retryAfterSeconds).toEqual(expect.any(Number));
+      expect(Number(limited.extensions?.retryAfterSeconds)).toBeGreaterThan(0);
+      expect(Number(limited.extensions?.retryAfterSeconds)).toBeLessThanOrEqual(60);
+      expect(queries.some((q) => q.sql.includes('already_bound'))).toBe(false);
+      expect(queries.some((q) => q.sql.includes('outreach_health_id_create_unclaimed('))).toBe(false);
     });
 
     it('refuses an existing Health ID with it (never a claim code), an under-18 and an invalid phone', async () => {

@@ -150,7 +150,7 @@ export type {
   OutreachScreeningMedicine,
   SaveOutreachRegistrationScreening,
 } from './outreach';
-export { IdentityApiClient, IdentityApiProblem } from './identity';
+export { IdentityApiClient, IdentityApiProblem, OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS } from './identity';
 export type {
   IdentityActorContext,
   IdentityAuthorizationDecision,

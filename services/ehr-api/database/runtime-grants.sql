@@ -1681,7 +1681,7 @@ revoke all on function identity.outreach_registration_health_ids_immutable(), id
 -- grants them: the Identity runtime's creation and counts; the Outreach
 -- runtime's read (replaced by 0120 to add created_via). The claim codes are
 -- granted to no role.
-grant execute on function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text),
+grant execute on function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text,text),
   identity.outreach_health_id_counts()
   to hid_identity_runtime, hid_schema_test_runtime;
 grant execute on function identity.outreach_registration_health_ids_for(uuid[])

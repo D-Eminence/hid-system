@@ -53,6 +53,16 @@ associated credential value was found.
 | Local database URL, authentication signing secret, and login pepper | Found only in ignored local development files; database endpoints classify as local. No canonical or Git-history value was found. | If any value was copied outside isolated local development or might be reused in a shared environment, generate a new independent value before use. | Place the replacement in the approved secret store/runtime environment, never in source or an `.env.example` file. |
 | Cloudflare, AWS, GitHub, database-release, Turnstile-secret, NIN, FCM, Novu, SES/Termii/Meta/Brevo and similar provider credentials | Interfaces, placeholders, and secret-store references exist where required by the target design, but no credential value was found in canonical source or the focused history scan. | Do not invent or rotate a non-evidenced value. Mint, scope, and record each real production credential through the provider/secret-management change process before deployment. | Configure only through Cloudflare/AWS/provider secret mechanisms and ECS/runtime references; no frontend or Git source update may contain values. |
 
+**OTP HMAC key (`OTP_HMAC_KEY_B64`, `OTP_HMAC_KEY_VERSION`) and outreach claim codes (0120).** The OTP key
+also keys the claim codes of Health IDs created at an outreach with no contact; each claim row stores
+the OTP key version it was keyed with (`identity.outreach_health_id_claims.hmac_key_version`), and the
+claim flow verifies with that version's key. A new OTP key version may be introduced at any time, but an
+old version must stay available to identity-api (not retired) while any unclaimed, unexpired claim code
+was created under it: up to 180 days after the last such creation
+(`select hmac_key_version, max(expires_at) from identity.outreach_health_id_claims where claimed_at is null
+and invalidated_at is null group by 1`). In non-production without `OTP_HMAC_KEY_B64`, identity-api uses a
+process-local key that changes on restart, which invalidates claim codes made there.
+
 Before an approved deployment, the release owner must confirm that retired
 Vercel and historical Supabase resources are no longer able to serve HID,
 revoke any still-live retired-provider tokens, and record the new target

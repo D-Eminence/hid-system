@@ -431,7 +431,7 @@ create function pg_temp.unclaimed_sql(n integer, hid text, phone_hmac text, clai
   select format($i$select concat_ws('/', hid_code, claim_expires_at > clock_timestamp() + interval '179 days')
     from identity.outreach_health_id_create_unclaimed('6c080000-0000-4000-8000-00000000000%s', %L,
       case when %L::text is null then null else decode(repeat('cd', 40), 'hex') end, %L,
-      case when %L::text is null then null else 'contact-v1' end, %L, 'claim-v1')$i$,
+      case when %L::text is null then null else 'contact-v1' end, %L, 'claim-v1', 'otp-v1')$i$,
     n, hid, phone_hmac, phone_hmac, phone_hmac, claim) $$;
 grant execute on function pg_temp.unclaimed_sql(integer, text, text, text) to public;
 set local session_replication_role = replica;
@@ -445,12 +445,12 @@ select pg_temp.idrt('7c a phone hash for a registration with no phone', '22023: 
   pg_temp.unclaimed_sql(4, 'HID-RTE6D4', repeat('4', 64), repeat('a', 64)));
 select pg_temp.idrt('7d created with no contact', 'HID-RTE6D4/t',
   pg_temp.unclaimed_sql(4, 'HID-RTE6D4', null, repeat('a', 64)), true);
-select pg_temp.hi_case('7e no account, no contact, no assurance; the record and the claim', 't/t/t/f/unclaimed/f/t/5',
+select pg_temp.hi_case('7e no account, no contact, no assurance; the record and the claim', 't/t/t/f/unclaimed/f/t/5/claim-v1/otp-v1',
   session_user::text, null, null, null, null,
   $s$select concat_ws('/', patient.account_id is null, patient.email_lookup_hmac is null and patient.phone_lookup_hmac is null,
           patient.dob is null, exists (select 1 from identity.patient_assurance_states a where a.patient_id = patient.id),
           link.created_via, link.possible_duplicate, claim.code_hmac = repeat('a', 64) and claim.claimed_at is null,
-          claim.max_attempts)
+          claim.max_attempts, claim.code_key_version, claim.hmac_key_version)
        from identity.patients patient
        join identity.outreach_registration_health_ids link on link.patient_id = patient.id
        join identity.outreach_health_id_claims claim on claim.patient_id = patient.id
@@ -464,9 +464,11 @@ select pg_temp.hi_case('7h outreach-api sees it as unclaimed', '6c080000-0000-40
   '6c030000-0000-4000-8000-000000000001', 'direct-care',
   $s$select registration_case_id || '=' || hid_code || '/' || created_via
        from identity.outreach_registration_health_ids_for(array['6c080000-0000-4000-8000-000000000004']::uuid[])$s$);
-select pg_temp.idrt('7i the counts', '3/2/1/1/0',
+select pg_temp.idrt('7i the counts: not for an organiser', '42501: PLATFORM_ADMIN_REQUIRED',
+  $s$select created_at_outreach::text from identity.outreach_health_id_counts()$s$);
+select pg_temp.support('7i2 the counts for a platform administrator', '3/2/1/1/0', 'synthetic:hi-support',
   $s$select concat_ws('/', created_at_outreach, created_with_email, created_unclaimed, unclaimed_not_yet_claimed,
-       possible_duplicates) from identity.outreach_health_id_counts()$s$);
+       possible_duplicates) from identity.outreach_health_id_counts()$s$, false);
 select pg_temp.hi_case('7j the audit row carries flags only', 'none/false/false', session_user::text, null, null, null, null,
   $s$select concat_ws('/', details->>'channel', details->>'phoneOnRecord', details->>'possibleDuplicate')
        from audit.events where action = 'outreach.health-id.created-unclaimed'
@@ -474,6 +476,31 @@ select pg_temp.hi_case('7j the audit row carries flags only', 'none/false/false'
 select pg_temp.hi_case('7k no runtime reads the claims', 'f/f', session_user::text, null, null, null, null,
   $s$select concat_ws('/', has_table_privilege('hid_identity_api_runtime', 'identity.outreach_health_id_claims', 'SELECT'),
        has_function_privilege('hid_outreach_api_runtime', 'identity.outreach_health_id_counts()', 'EXECUTE'))$s$);
+
+-- 7b. The unproven phone stays on the claim, never on the patient
+-- (registration 3, which has a phone; registration 1 made an adult).
+set local session_replication_role = replica;
+update outreach.registration_cases set age_years = 41 where id = '6c080000-0000-4000-8000-000000000001';
+set local session_replication_role = origin;
+select pg_temp.idrt('7l with a phone: created', 'HID-RTE6D3/t',
+  pg_temp.unclaimed_sql(3, 'HID-RTE6D3', repeat('7', 64), repeat('b', 64)), true);
+select pg_temp.hi_case('7m the phone is on the claim, not the patient; not flagged', 't/t/f',
+  session_user::text, null, null, null, null,
+  $s$select concat_ws('/', patient.phone_lookup_hmac is null and patient.phone_e164_ciphertext is null
+          and patient.contact_key_version is null,
+          claim.phone_lookup_hmac = repeat('7', 64) and claim.phone_e164_ciphertext is not null
+          and claim.contact_key_version = 'contact-v1', link.possible_duplicate)
+       from identity.patients patient
+       join identity.outreach_health_id_claims claim on claim.patient_id = patient.id
+       join identity.outreach_registration_health_ids link on link.patient_id = patient.id
+      where patient.hid_code = 'HID-RTE6D3'$s$);
+select pg_temp.idrt('7n the same unproven phone again: created and flagged, not refused', 'HID-RTE6D7/t',
+  pg_temp.unclaimed_sql(1, 'HID-RTE6D7', repeat('7', 64), repeat('c', 64)), true);
+select pg_temp.hi_case('7o flagged', 'true', session_user::text, null, null, null, null,
+  $s$select possible_duplicate::text from identity.outreach_registration_health_ids where hid_code = 'HID-RTE6D7'$s$);
+select pg_temp.hi_case('7p no patient holds the unproven phone, so sign-up is not blocked', '0', session_user::text,
+  null, null, null, null,
+  $s$select count(*)::text from identity.patients where phone_lookup_hmac = repeat('7', 64)$s$);
 
 -- 8. Result.
 do $$

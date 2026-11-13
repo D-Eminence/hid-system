@@ -489,8 +489,8 @@ describe('AdminService overview: Health IDs created at outreach (0120)', () => {
     expect(query).toHaveBeenCalledWith('rollback to savepoint outreach_health_id_counts');
   });
 
-  it('does not hide any other failure of the counts', async () => {
-    const { service } = overviewHarness(() => { throw Object.assign(new Error('permission denied'), { code: '42501' }); });
+  it('does not hide any other failure of the counts (e.g. 42501 PLATFORM_ADMIN_REQUIRED)', async () => {
+    const { service } = overviewHarness(() => { throw Object.assign(new Error('PLATFORM_ADMIN_REQUIRED'), { code: '42501' }); });
     await expect(service.overview(adminContext)).rejects.toMatchObject({ code: '42501' });
   });
 });

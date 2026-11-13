@@ -1,4 +1,6 @@
-import { IdentityApiClient, IdentityApiProblem, OutreachApiClient, OutreachApiProblem } from '@hid/api-client';
+import { IdentityApiClient, IdentityApiProblem, OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS, OutreachApiClient,
+  OutreachApiProblem } from '@hid/api-client';
+import { Logger } from '@nestjs/common';
 import { REQUIRED_PERMISSIONS } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
@@ -85,29 +87,62 @@ describe('Outreach Health ID with no contact (0120)', () => {
     const service = () => new OutreachService(database as never, audit as never, identity as never);
     beforeEach(() => { query.mockReset(); identity.createUnclaimedHealthId.mockReset(); audit.recordWithClient.mockReset(); });
 
-    it('answers 201 the Health ID, the claim code, its expiry and the registration as GET returns it', async () => {
+    const registrationRead = (healthIds: unknown[]) => {
+      query.mockResolvedValueOnce({ rows: [row] }).mockResolvedValueOnce({ rows: healthIds });
+    };
+
+    it('reads the registration before Identity, then answers 201 with the claim code and the registration re-read', async () => {
       identity.createUnclaimedHealthId.mockResolvedValue(created);
-      query.mockResolvedValueOnce({ rows: [row] })
-        .mockResolvedValueOnce({ rows: [{ registration_case_id: caseId, hid_code: created.healthId, created_via: 'unclaimed' }] });
-      await expect(service().createUnverifiedHealthId(caseId, context)).resolves.toEqual({ ...created,
+      registrationRead([]);
+      registrationRead([{ registration_case_id: caseId, hid_code: created.healthId, created_via: 'unclaimed' }]);
+      const answer = await service().createUnverifiedHealthId(caseId, context);
+      expect(answer).toEqual({ ...created,
         registration: expect.objectContaining({ id: caseId, status: 'identity_resolution_pending',
           healthId: created.healthId, healthIdCreatedByOutreach: true, healthIdStatus: 'unclaimed' }) });
+      expect(query.mock.invocationCallOrder[0]!).toBeLessThan(identity.createUnclaimedHealthId.mock.invocationCallOrder[0]!);
+      expect(query.mock.invocationCallOrder[2]!).toBeGreaterThan(identity.createUnclaimedHealthId.mock.invocationCallOrder[0]!);
       expect(identity.createUnclaimedHealthId).toHaveBeenCalledTimes(1);
       expect(identity.createUnclaimedHealthId).toHaveBeenCalledWith(caseId, context);
       // The claim code is never written, audited or sent to the database here
-      // (the registration read is audited as GET's is: its id only).
-      expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
-      expect(audit.recordWithClient.mock.calls[0]!.slice(2)).toEqual(['outreach.registration-case.read', caseId, undefined]);
+      // (the registration reads are audited as GET's are: the id only).
+      expect(audit.recordWithClient).toHaveBeenCalledTimes(2);
+      for (const call of audit.recordWithClient.mock.calls) {
+        expect(call.slice(2)).toEqual(['outreach.registration-case.read', caseId, undefined]);
+      }
       expect(JSON.stringify([query.mock.calls, audit.recordWithClient.mock.calls])).not.toContain(created.claimCode);
     });
 
+    it('never throws a returned claim code away: a failed re-read answers 201 from the earlier read', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      identity.createUnclaimedHealthId.mockResolvedValue(created);
+      registrationRead([]);
+      query.mockRejectedValueOnce(Object.assign(new Error('connection terminated'), { code: '57P01' }));
+      const answer = await service().createUnverifiedHealthId(caseId, context);
+      expect(answer).toEqual({ ...created, registration: expect.objectContaining({ id: caseId,
+        healthId: created.healthId, healthIdCreatedByOutreach: true, healthIdStatus: 'unclaimed' }) });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toEqual({ event: 'outreach.health-id.create-unverified.reread-failed', caseId,
+        correlationId: context.correlationId, exceptionType: 'Error' });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(created.claimCode);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(row.full_name);
+      warn.mockRestore();
+    });
+
+    it('asks Identity nothing when the registration cannot be read first', async () => {
+      query.mockResolvedValueOnce({ rows: [] });
+      expect((await problem(service().createUnverifiedHealthId(caseId, context))).code)
+        .toBe('OUTREACH_REGISTRATION_NOT_FOUND');
+      expect(identity.createUnclaimedHealthId).not.toHaveBeenCalled();
+    });
+
     it('a retry answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with the Health ID only, never the claim code', async () => {
+      registrationRead([{ registration_case_id: caseId, hid_code: created.healthId, created_via: 'unclaimed' }]);
       identity.createUnclaimedHealthId.mockRejectedValue(new DomainProblem(409, 'OUTREACH_HEALTH_ID_ALREADY_CREATED',
         'A Health ID was already created for this person.', undefined, { extensions: { healthId: created.healthId } }));
       const refusal = await problem(service().createUnverifiedHealthId(caseId, context));
       expect(refusal.getStatus()).toBe(409);
       expect(refusal.problemOptions.extensions).toEqual({ healthId: created.healthId });
-      expect(query).not.toHaveBeenCalled();
+      expect(JSON.stringify(refusal.problemOptions)).not.toContain(created.claimCode);
     });
   });
 
@@ -150,6 +185,16 @@ describe('Outreach Health ID with no contact (0120)', () => {
       expect(refusal.problemOptions.extensions).toEqual(Object.keys(extra).length ? extra : undefined);
     });
 
+    it('passes the volunteer\'s creation limit on: 429 with its words and Retry-After', async () => {
+      jest.spyOn(IdentityApiClient.prototype, 'outreachHealthIdCreateUnclaimed').mockRejectedValue(
+        new IdentityApiProblem(429, { code: 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS',
+          detail: 'Too many Health IDs created in a short time. Wait a few minutes.', retryAfterSeconds: 1200 }));
+      const refusal = await problem(identityService().createUnclaimedHealthId(caseId, context));
+      expect([refusal.getStatus(), refusal.code, refusal.message]).toEqual([429, 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS',
+        'Too many Health IDs created in a short time. Wait a few minutes.']);
+      expect(refusal.problemOptions.headers).toEqual({ 'Retry-After': '1200' });
+    });
+
     it('answers 503 with its plain words when Identity fails or does not answer', async () => {
       for (const error of [new IdentityApiProblem(503, { code: 'OUTREACH_HEALTH_ID_UNAVAILABLE' }), new Error('timeout')]) {
         jest.spyOn(IdentityApiClient.prototype, 'outreachHealthIdCreateUnclaimed').mockRejectedValueOnce(error);
@@ -185,6 +230,26 @@ describe('Outreach Health ID with no contact (0120)', () => {
       fetchMock.mockResolvedValue(json(201, created));
       await expect(client.outreachHealthIdCreateUnclaimed({ caseId }, { correlationId: 'c', facilityId }))
         .resolves.toEqual(created);
+    });
+
+    it('IdentityApiClient waits 20 s for create-unclaimed (the usual 5 s elsewhere), still once', async () => {
+      const fetchMock = jest.fn().mockResolvedValue(json(201, created));
+      global.fetch = fetchMock;
+      const timers = jest.spyOn(globalThis, 'setTimeout');
+      try {
+        const client = new IdentityApiClient({ baseUrl: 'https://identity.test', caller: 'outreach-api', timeoutMs: 5_000,
+          workloadHeaders: async () => ({}) });
+        await client.outreachHealthIdCreateUnclaimed({ caseId }, { correlationId: 'c', facilityId });
+        expect(OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS).toBe(20_000);
+        expect(timers.mock.calls.map((call) => call[1])).toContain(20_000);
+        timers.mockClear();
+        fetchMock.mockResolvedValue(json(201, { healthId: 'HID-AB2CD3', outcome: 'created' }));
+        await client.outreachHealthIdConfirm({ caseId, code: '123456' }, { correlationId: 'c', facilityId });
+        expect(timers.mock.calls.map((call) => call[1])).toContain(5_000);
+        expect(timers.mock.calls.map((call) => call[1])).not.toContain(20_000);
+      } finally {
+        timers.mockRestore();
+      }
     });
 
     it('IdentityApiClient refuses a malformed answer 502 without keeping it', async () => {

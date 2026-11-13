@@ -1,6 +1,6 @@
 import { Body, Controller, Header, HttpCode, Post, Req } from '@nestjs/common';
 import { WorkloadAuthService } from '../auth/workload-auth.service';
-import { AuditAction } from '../common/decorators';
+import { AuditAction, AuditSuccessBestEffort } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { ConfirmOutreachHealthIdDto, CreateUnclaimedOutreachHealthIdDto,
@@ -44,12 +44,16 @@ export class OutreachHealthIdController {
   /**
    * No contact at all (0120): the Health ID with no account and a one-time
    * claim code, answered here only. The audit row of this request carries the
-   * route and status, never the answer.
+   * route and status, never the answer. The database function writes its own
+   * audit row in the creating transaction, so a failure of the request's
+   * success row afterwards is logged and the 201 still answered: a 503 would
+   * lose a claim code that can never be shown again.
    */
   @Post('create-unclaimed')
   @HttpCode(201)
   @Header('Cache-Control', 'no-store')
   @AuditAction('identity.outreach.health-id.create-unclaimed.request')
+  @AuditSuccessBestEffort()
   async createUnclaimed(@Body() input: CreateUnclaimedOutreachHealthIdDto, @Req() request: HidRequest) {
     const context = await this.authorize(request);
     return this.healthIds.createUnclaimed({ caseId: input.caseId }, context);

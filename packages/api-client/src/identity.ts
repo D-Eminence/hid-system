@@ -109,6 +109,9 @@ export interface IdentityOutreachHealthIdCreateUnclaimed {
   claimExpiresAt: string;
 }
 
+/** How long outreachHealthIdCreateUnclaimed waits for Identity (0120); still never retried. */
+export const OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS = 20_000;
+
 export interface IdentityClientOptions {
   baseUrl: string;
   caller: IdentityInternalCaller;
@@ -276,13 +279,16 @@ export class IdentityApiClient {
    * No contact at all (0120): creates the person's Health ID with no account
    * and a one-time claim code. Never retried here: the claim code is answered
    * once, and a second call answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED.
+   * Waits up to 20 s (not the client's usual timeout): a timeout after
+   * Identity commits would lose a claim code that cannot be shown again.
    */
   async outreachHealthIdCreateUnclaimed(
     input: { caseId: string },
     context: IdentityDelegatedContext,
   ): Promise<IdentityOutreachHealthIdCreateUnclaimed> {
     const payload = await this.request('/api/v1/identity/outreach/health-id/create-unclaimed', 'POST',
-      { caseId: input.caseId }, { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined });
+      { caseId: input.caseId }, { ...context, purposeOfUse: 'direct-care', idempotencyKey: undefined }, {},
+      OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS);
     const value = payload as Partial<IdentityOutreachHealthIdCreateUnclaimed> | null;
     if (!value || typeof value.healthId !== 'string' || !/^HID-[A-HJ-NP-Z2-9]{6,32}$/.test(value.healthId)
         || typeof value.claimCode !== 'string' || !/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/.test(value.claimCode)
@@ -361,6 +367,7 @@ export class IdentityApiClient {
     body: unknown,
     context: IdentityDelegatedContext,
     additionalHeaders: Readonly<Record<string, string>> = {},
+    timeoutMs?: number,
   ): Promise<unknown> {
     const attempts = context.idempotencyKey ? 2 : 1;
     let lastError: unknown;
@@ -373,7 +380,7 @@ export class IdentityApiClient {
           method,
           body,
           signal: context.signal,
-          timeoutMs: this.options.timeoutMs ?? 5_000,
+          timeoutMs: timeoutMs ?? this.options.timeoutMs ?? 5_000,
           credentials: 'omit',
           headers: {
             accept: 'application/json',

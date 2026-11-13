@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
@@ -50,6 +50,8 @@ function adminRefusal(error: unknown, what: string): unknown {
 
 @Injectable()
 export class OutreachService {
+  private readonly logger = new Logger(OutreachService.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly audit: AuditService,
@@ -611,11 +613,26 @@ export class OutreachService {
    * registration }. The claim code passes through and is never stored,
    * logged or audited here. A second call finds the Health ID created and
    * Identity answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with it only.
+   *
+   * A code Identity returned is never thrown away: the registration is read
+   * before Identity is asked, and if reading it again afterwards fails, the
+   * 201 answers that earlier read with the new Health ID set on it.
    */
   async createUnverifiedHealthId(caseId: string, context: DataAccessContext) {
+    const before = await this.get(caseId, context);
     const created = await this.identity.createUnclaimedHealthId(caseId, context);
+    let registration: OutreachRegistrationCase;
+    try {
+      registration = await this.get(caseId, context);
+    } catch (error) {
+      this.logger.warn({ event: 'outreach.health-id.create-unverified.reread-failed', caseId,
+        correlationId: context.correlationId,
+        exceptionType: error instanceof Error ? error.constructor.name : 'UnknownException' });
+      registration = { ...before, healthId: created.healthId, healthIdCreatedByOutreach: true,
+        healthIdStatus: 'unclaimed' };
+    }
     return { healthId: created.healthId, claimCode: created.claimCode, claimExpiresAt: created.claimExpiresAt,
-      registration: await this.get(caseId, context) };
+      registration };
   }
 
   private outbox(client: PoolClient, eventType: string, id: string, version: number,
