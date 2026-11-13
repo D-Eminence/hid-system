@@ -36,6 +36,8 @@ do $$ begin
   end if;
   if exists (select 1 from pg_roles where not rolsuper and rolname <> 'hid_ocr_runtime'
                and rolname like 'hid\_%' and not pg_has_role(oid, 'hid_ocr_runtime', 'usage')
+               -- the table's owner (the migration login, whatever its name) is not a runtime role
+               and oid <> (select relowner from pg_class where oid = 'ocr.outbox_events'::regclass)
                and has_table_privilege(oid, 'ocr.outbox_events', 'INSERT')) then
     raise exception 'a role other than the OCR runtime can insert OCR outbox events';
   end if;

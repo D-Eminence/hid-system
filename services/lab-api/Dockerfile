@@ -23,7 +23,7 @@ RUN cd /app/packages/server-telemetry && npm ci --omit=dev && npm cache clean --
 COPY --from=build /app/packages/server-telemetry/dist /app/packages/server-telemetry/dist
 RUN cd services/lab-api && npm ci --omit=dev && npm cache clean --force
 
-FROM gcr.io/distroless/nodejs22-debian13@sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812 AS runtime
+FROM gcr.io/distroless/nodejs22-debian13@sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=65532:65532 --from=production-dependencies /app/services/lab-api/node_modules ./services/lab-api/node_modules
