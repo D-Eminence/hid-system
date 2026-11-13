@@ -413,8 +413,9 @@ describe('OutreachHealthIdService (0119)', () => {
         call.parameters as [string, string, Buffer, string, string, string, string];
       expect([requestedCase, hid, keyVersion, claimVersion]).toEqual([caseId, 'HID-AB2CD3', 'nin-v2', 'claim-v1']);
       expect(phoneLookup).toBe(createContactLookupHmac('phone', '+2348012345678'));
-      expect(decryptContactValue(contactKeyForVersion(process.env as never, 'nin-v2')!, caseId, 'phone',
-        phoneCiphertext)).toBe('+2348012345678');
+      // Bound to the lookup HMAC, so the patient's own profile reads it (as 0119's confirmation).
+      expect(new PatientProfileCrypto().decryptLookupBoundPhone(phoneLookup, phoneCiphertext)).toBe('+2348012345678');
+      expect(new PatientProfileCrypto().decryptLookupBoundPhone('f'.repeat(64), phoneCiphertext)).toBeUndefined();
       // The same key as 0119's code verifier; the uppercased code.
       expect(claimHmac).toBe(createHmac('sha256', Buffer.from(OTP_KEY, 'base64'))
         .update(answer.claimCode.toUpperCase()).digest('hex'));

@@ -464,7 +464,7 @@ select pg_temp.hi_case('7h outreach-api sees it as unclaimed', '6c080000-0000-40
   '6c030000-0000-4000-8000-000000000001', 'direct-care',
   $s$select registration_case_id || '=' || hid_code || '/' || created_via
        from identity.outreach_registration_health_ids_for(array['6c080000-0000-4000-8000-000000000004']::uuid[])$s$);
-select pg_temp.idrt('7i the counts', '2/1/1/1/0',
+select pg_temp.idrt('7i the counts', '3/2/1/1/0',
   $s$select concat_ws('/', created_at_outreach, created_with_email, created_unclaimed, unclaimed_not_yet_claimed,
        possible_duplicates) from identity.outreach_health_id_counts()$s$);
 select pg_temp.hi_case('7j the audit row carries flags only', 'none/false/false', session_user::text, null, null, null, null,

@@ -270,8 +270,11 @@ export class OutreachHealthIdService {
       if (preflight.phoneBound) throw new DomainProblem(409, 'OUTREACH_HEALTH_ID_PHONE_TAKEN', MESSAGES.phoneTaken);
     }
     const encryption = phone ? currentContactEncryption(this.env) : undefined;
-    const phoneCiphertext = phone && encryption ? encryptContactValue(encryption.key, input.caseId, 'phone', phone) : null;
+    // Bound to its lookup HMAC, as 0119's confirmation stores it: the form
+    // PatientContactReader reads for a patient with no enrollment.
     const phoneLookup = phone ? createContactLookupHmac('phone', phone) : null;
+    const phoneCiphertext = phone && encryption && phoneLookup
+      ? encryptLookupBoundPhone(encryption.key, phoneLookup, phone) : null;
 
     let claimCode = generateOutreachClaimCode();
     for (let attempt = 0; attempt < 8; attempt += 1) {

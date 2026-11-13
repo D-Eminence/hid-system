@@ -136,6 +136,9 @@ begin
   -- Names as patient sign-up allows them (as 0119's confirmation does).
   clean_name := left(btrim(regexp_replace(regexp_replace(registration.full_name, '[[:cntrl:]]', ' ', 'g'),
     '[[:space:]]+', ' ', 'g')), 200);
+  if clean_name = '' then
+    raise exception using errcode = '23514', message = 'OUTREACH_HEALTH_ID_NAME_INVALID';
+  end if;
   first_name_value := left(split_part(clean_name, ' ', 1), 80);
   last_name_value := left(coalesce(nullif(btrim(substr(clean_name, length(split_part(clean_name, ' ', 1)) + 1)), ''),
     first_name_value), 80);
@@ -215,9 +218,9 @@ declare
   owner_name name := (select pg_get_userbyid(relowner) from pg_class where oid = 'identity.patients'::regclass);
 begin
   if owner_name <> current_user then
-    if not pg_has_role(current_user, owner_name, 'SET') then
+    if not (pg_has_role(current_user, owner_name, 'USAGE') and pg_has_role(current_user, owner_name, 'SET')) then
       raise exception using errcode = '42501', message = format(
-        '0120: the applier (%s) must be able to SET ROLE to the owner of identity.patients (%s)', current_user, owner_name);
+        '0120: the applier (%s) must INHERIT and SET ROLE to the owner of identity.patients (%s)', current_user, owner_name);
     end if;
     execute format('alter table identity.outreach_health_id_claims owner to %I', owner_name);
     execute format('alter function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text) owner to %I', owner_name);
