@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
@@ -42,6 +42,15 @@ interface ReviewRow extends QueryResultRow {
   createdAt: Date; updatedAt: Date;
   /** 0098: the review is at a sealed demo facility. */
   demo: boolean;
+}
+
+/** The platform overview's outreachHealthIds block (0120). */
+export interface OutreachHealthIdCounts {
+  createdAtOutreach: number;
+  createdWithEmail: number;
+  createdUnclaimed: number;
+  unclaimedNotYetClaimed: number;
+  possibleDuplicates: number;
 }
 
 interface CommandRow extends QueryResultRow { replayed: boolean }
@@ -117,8 +126,39 @@ export class AdminService {
         registeredPatients: Number(row.registered_patients), facilities: Number(row.facilities),
         verifiedFacilities: Number(row.verified_facilities), suspendedFacilities: Number(row.suspended_facilities),
         activeStaffMemberships: Number(row.active_memberships), pendingIdentityReviews: Number(row.pending_identity_reviews),
+        outreachHealthIds: await this.outreachHealthIdCounts(client),
       };
     }, { readOnly: true });
+  }
+
+  /**
+   * Health IDs created at outreach (0120): with a verified email, with no
+   * contact, of those not yet claimed, and flagged as a possible duplicate.
+   * Counts only. null when the database is before 0120 (a rehearsal order
+   * only), so the rest of the overview still answers.
+   */
+  private async outreachHealthIdCounts(client: PoolClient): Promise<OutreachHealthIdCounts | null> {
+    await client.query('savepoint outreach_health_id_counts');
+    try {
+      const row = (await client.query<{
+        created_at_outreach: string; created_with_email: string; created_unclaimed: string;
+        unclaimed_not_yet_claimed: string; possible_duplicates: string;
+      }>(`select created_at_outreach::text, created_with_email::text, created_unclaimed::text,
+        unclaimed_not_yet_claimed::text, possible_duplicates::text from identity.outreach_health_id_counts()`)).rows[0];
+      await client.query('release savepoint outreach_health_id_counts');
+      if (!row) throw new DomainProblem(503, 'ADMIN_DATA_UNAVAILABLE', 'Administration data is unavailable');
+      return {
+        createdAtOutreach: Number(row.created_at_outreach), createdWithEmail: Number(row.created_with_email),
+        createdUnclaimed: Number(row.created_unclaimed), unclaimedNotYetClaimed: Number(row.unclaimed_not_yet_claimed),
+        possibleDuplicates: Number(row.possible_duplicates),
+      };
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '42883') {
+        await client.query('rollback to savepoint outreach_health_id_counts');
+        return null;
+      }
+      throw error;
+    }
   }
 
   async listFacilities(context: PlatformAdminContext, query: ListFacilitiesDto) {

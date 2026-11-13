@@ -14,6 +14,9 @@ export interface OutreachClientOptions {
   credentials?: RequestCredentials;
 }
 
+/** How a Health ID created at outreach was created (0120). */
+export type OutreachHealthIdStatus = 'verified' | 'unclaimed';
+
 export interface OutreachRegistrationCase {
   id: string;
   facilityId: string;
@@ -32,9 +35,49 @@ export interface OutreachRegistrationCase {
   hasScreening?: boolean;
   resolvedPatientId: string | null;
   resolutionKind: 'linked_existing' | null;
+  /** The Health ID created for this person at the outreach (0119), or null; absent before 0119. */
+  healthId?: string | null;
+  /** Whether that Health ID was created from this registration at the outreach (0119); absent before 0119. */
+  healthIdCreatedByOutreach?: boolean;
+  /**
+   * How that Health ID was created (0120): 'verified' (the person proved an
+   * email; 0119), 'unclaimed' (no contact; nobody can sign in until it is
+   * claimed), or null when there is none; absent before 0120.
+   */
+  healthIdStatus?: OutreachHealthIdStatus | null;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** POST .../health-id/start (0119): email only for now; { channel: 'sms' } answers 503 OUTREACH_HEALTH_ID_UNAVAILABLE. */
+export type OutreachHealthIdStartInput = { channel: 'email'; email: string } | { channel: 'sms' };
+
+/** 202 from POST .../health-id/start (0119). */
+export interface OutreachHealthIdStarted {
+  channel: 'email';
+  expiresAt: string;
+  /** The email masked, e.g. "a***@gmail.com". */
+  destinationHint: string;
+  resendAfterSeconds: number;
+}
+
+/** 201 from POST .../health-id/confirm (0119), also for a replay. */
+export interface OutreachHealthIdCreated {
+  healthId: string;
+  registration: OutreachRegistrationCase;
+}
+
+/**
+ * 201 from POST .../health-id/create-unverified (0120): a Health ID with no
+ * account and its one-time claim code. The claim code is answered only here,
+ * once: print it on the person's slip. Never store or log it.
+ */
+export interface OutreachHealthIdCreatedUnverified {
+  healthId: string;
+  claimCode: string;
+  claimExpiresAt: string;
+  registration: OutreachRegistrationCase;
 }
 
 export interface CreateOutreachRegistrationCase {
@@ -112,7 +155,13 @@ export class OutreachApiProblem extends Error {
     this.name = 'OutreachApiProblem';
     this.code = typeof problem?.code === 'string' ? problem.code : null;
     this.retryable = status === 408 || status === 429 || status >= 500;
+    const healthId = typeof payload === 'object' && payload !== null
+      ? (payload as { healthId?: unknown }).healthId : undefined;
+    this.healthId = typeof healthId === 'string' ? healthId : null;
   }
+
+  /** OUTREACH_HEALTH_ID_ALREADY_CREATED's Health ID (0119), else null. */
+  readonly healthId: string | null;
 }
 
 export class OutreachApiClient {
@@ -140,6 +189,39 @@ export class OutreachApiClient {
     return this.request<OutreachRegistrationCase>(
       `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/link-existing`,
       'POST', input, context, idempotencyKey, signal);
+  }
+
+  /**
+   * Sends the person a 6-digit code by email to create their Health ID (0119).
+   * Problems: OutreachApiProblem with code (e.g. OUTREACH_HEALTH_ID_EMAIL_TAKEN)
+   * and, for OUTREACH_HEALTH_ID_ALREADY_CREATED, the Health ID in `healthId`.
+   */
+  healthIdStart(caseId: string, input: OutreachHealthIdStartInput, context: OutreachRequestContext,
+    idempotencyKey: string, signal?: AbortSignal) {
+    return this.request<OutreachHealthIdStarted>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/health-id/start`,
+      'POST', input, context, idempotencyKey, signal, undefined, false);
+  }
+
+  /** Checks the code the person read out and creates their Health ID (0119). */
+  healthIdConfirm(caseId: string, input: { code: string }, context: OutreachRequestContext,
+    idempotencyKey: string, signal?: AbortSignal) {
+    return this.request<OutreachHealthIdCreated>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/health-id/confirm`,
+      'POST', input, context, idempotencyKey, signal, undefined, false);
+  }
+
+  /**
+   * No contact at all (0120): creates the person's Health ID with no account
+   * and a one-time claim code. Never retried: a second call, even with the
+   * same Idempotency-Key, answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with
+   * `healthId` and never the claim code again.
+   */
+  createUnverifiedHealthId(caseId: string, context: OutreachRequestContext, idempotencyKey: string,
+    signal?: AbortSignal) {
+    return this.request<OutreachHealthIdCreatedUnverified>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/health-id/create-unverified`,
+      'POST', {}, context, idempotencyKey, signal, undefined, false);
   }
 
   /** A registration's screening (0118): { screening: null } when none was recorded. */
@@ -171,8 +253,9 @@ export class OutreachApiClient {
 
   private async request<Result>(path: string, method: 'GET' | 'POST' | 'PUT', body: unknown,
     context: OutreachRequestContext, idempotencyKey?: string,
-    signal?: AbortSignal, ifMatch?: string): Promise<Result> {
-    const attempts = idempotencyKey ? 2 : 1;
+    signal?: AbortSignal, ifMatch?: string, retry = true): Promise<Result> {
+    // A Health ID code is never resent by a retry: each start emails a new code.
+    const attempts = idempotencyKey && retry ? 2 : 1;
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {

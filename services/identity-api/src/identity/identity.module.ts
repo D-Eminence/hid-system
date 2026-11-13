@@ -48,6 +48,8 @@ import { OrderDestinationsController } from './order-destinations.controller';
 import { OrderDestinationsService } from './order-destinations.service';
 import { SupportHealthIdController } from './support-health-id.controller';
 import { SupportHealthIdService } from './support-health-id.service';
+import { OutreachHealthIdController } from './outreach-health-id.controller';
+import { OutreachHealthIdService } from './outreach-health-id.service';
 
 @Module({
   imports: [AuthModule, TurnstileModule, IntegrationModule],
@@ -67,10 +69,13 @@ import { SupportHealthIdService } from './support-health-id.service';
     // The directory of laboratories and pharmacies an order can go to (P4c).
     OrderDestinationsController,
     // The support chat's server Health ID check (0109), for support-api's workload alone.
-    SupportHealthIdController],
+    SupportHealthIdController,
+    // Assisted Health ID at an outreach (0119), for outreach-api's workload alone.
+    OutreachHealthIdController],
   providers: [
     IdentityService,
     SupportHealthIdService,
+    OutreachHealthIdService,
     RecordAccessNoticeService,
     NinRegistrationService,
     FacilityProfileService,

@@ -1,3 +1,5 @@
+import type { RegistrationHealthId } from './registration-health-ids';
+
 export interface OutreachRegistrationCase {
   id: string;
   facilityId: string;
@@ -16,6 +18,15 @@ export interface OutreachRegistrationCase {
   hasScreening: boolean;
   resolvedPatientId: string | null;
   resolutionKind: 'linked_existing' | null;
+  /** The Health ID created for this person at the outreach (0119), or null. */
+  healthId: string | null;
+  /** Whether a Health ID was created from this registration at the outreach (0119). */
+  healthIdCreatedByOutreach: boolean;
+  /**
+   * How it was created (0120): 'verified' (the person proved an email, 0119),
+   * 'unclaimed' (no contact; nobody can sign in until it is claimed), or null.
+   */
+  healthIdStatus: 'verified' | 'unclaimed' | null;
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -48,7 +59,9 @@ export interface RegistrationRow {
   updated_at: Date | string;
 }
 
-export function registrationCase(row: RegistrationRow): OutreachRegistrationCase {
+/** A registration as answered; `healthId` is the one created for it at the outreach (0119, 0120), if any. */
+export function registrationCase(row: RegistrationRow,
+  healthId: RegistrationHealthId | null = null): OutreachRegistrationCase {
   return {
     id: row.id,
     facilityId: row.facility_id,
@@ -65,6 +78,9 @@ export function registrationCase(row: RegistrationRow): OutreachRegistrationCase
     hasScreening: row.has_screening === true,
     resolvedPatientId: row.resolved_patient_id,
     resolutionKind: row.resolution_kind,
+    healthId: healthId?.healthId ?? null,
+    healthIdCreatedByOutreach: healthId !== null,
+    healthIdStatus: healthId?.status ?? null,
     rowVersion: Number(row.row_version),
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),

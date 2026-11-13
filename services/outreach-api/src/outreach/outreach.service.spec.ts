@@ -57,11 +57,12 @@ describe('OutreachService', () => {
     const digest = requestDigest('outreach.registration-case.create', { ...input,
       fullName: input.fullName, phone: null, operationalNotes: null });
     const query = jest.fn().mockResolvedValueOnce({ rows: [{ request_sha256: digest,
-      registration_case_id: ids.case }] }).mockResolvedValueOnce({ rows: [row] });
+      registration_case_id: ids.case }] }).mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({ rows: [] }); // the Health IDs created at the outreach (0119)
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
     await expect(new OutreachService(database as never, audit as never, identity as never)
       .create(input, 'idempotency-key-1234', context)).resolves.toMatchObject({ id: ids.case });
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(3);
     expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
 
@@ -83,7 +84,7 @@ describe('OutreachService', () => {
     // Attempt 1 misses the winner in its snapshot and meets its row at the insert; attempt 2 replays it.
     const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(duplicate())
       .mockResolvedValueOnce({ rows: [{ request_sha256: digest, registration_case_id: ids.case }] })
-      .mockResolvedValueOnce({ rows: [row] });
+      .mockResolvedValueOnce({ rows: [row] }).mockResolvedValueOnce({ rows: [] });
     await expect(new OutreachService(retryingDatabase(query), audit as never, identity as never)
       .create(input, 'idempotency-key-1234', context)).resolves.toMatchObject({ id: ids.case });
     expect(audit.recordWithClient).not.toHaveBeenCalled();
@@ -173,10 +174,11 @@ describe('OutreachService', () => {
   });
 
   it('filters listed cases by exact campaign membership', async () => {
-    const query = jest.fn().mockResolvedValueOnce({ rows: [row] });
+    const query = jest.fn().mockResolvedValueOnce({ rows: [row] }).mockResolvedValueOnce({ rows: [] });
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
     await expect(new OutreachService(database as never, audit as never, identity as never)
-      .list(context)).resolves.toMatchObject([{ id: ids.case, campaignId: null }]);
+      .list(context)).resolves.toMatchObject([{ id: ids.case, campaignId: null, healthId: null,
+        healthIdCreatedByOutreach: false }]);
     expect(query.mock.calls[0][0]).toContain('outreach.registration_campaign_member(campaign_id, facility_id)');
   });
 

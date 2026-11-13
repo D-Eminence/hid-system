@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
@@ -13,6 +13,8 @@ import type { CreateCampaignDto } from './dto/create-campaign.dto';
 import type { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import type { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import type { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
+import type { ConfirmHealthIdDto, StartHealthIdDto } from './dto/health-id.dto';
+import { registrationHealthIds } from './registration-health-ids';
 import type { OutreachCampaign, CampaignMember, CampaignRole, CampaignStaff } from './campaign.types';
 import { registrationCase, type OutreachRegistrationCase, type RegistrationRow } from './outreach.types';
 import { isOutreachTenant, OUTREACH_NOTES_LIMIT, outreachRuleProblem, tenantNoHealthIdLink } from './outreach-tenant';
@@ -68,6 +70,8 @@ export function decodeRegistrationCursor(cursor: string): { micros: string; id: 
 
 @Injectable()
 export class OutreachService {
+  private readonly logger = new Logger(OutreachService.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly audit: AuditService,
@@ -215,7 +219,9 @@ export class OutreachService {
       [context.facilityId, options.campaignId ?? null, cursor?.micros ?? null, cursor?.id ?? null, limit + 1]);
       await this.audit.recordWithClient(client, context, 'outreach.registration-case.list', context.facilityId);
       const rows = result.rows.slice(0, limit);
-      const page: OutreachRegistrationCase[] & { nextCursor?: string } = rows.map(({ cursor_micros: _cursor, ...row }) => registrationCase(row));
+      const healthIds = await registrationHealthIds(client, rows.map((row) => row.id));
+      const page: OutreachRegistrationCase[] & { nextCursor?: string } = rows.map(({ cursor_micros: _cursor, ...row }) =>
+        registrationCase(row, healthIds.get(row.id) ?? null));
       const last = rows[rows.length - 1];
       if (result.rows.length > limit && last) page.nextCursor = encodeRegistrationCursor(last.cursor_micros, last.id);
       return page;
@@ -613,7 +619,61 @@ export class OutreachService {
     const row = result.rows[0];
     if (!row) throw new DomainProblem(404, 'OUTREACH_REGISTRATION_NOT_FOUND',
       'The Outreach registration case was not found');
-    return registrationCase(row);
+    return registrationCase(row, (await registrationHealthIds(client, [row.id])).get(row.id) ?? null);
+  }
+
+  /**
+   * Assisted Health ID (0119), email path: Identity sends the person a code.
+   * SMS is not live yet: 503 before anything is asked of Identity.
+   */
+  async startHealthId(caseId: string, input: StartHealthIdDto, idempotencyKey: string, context: DataAccessContext) {
+    if (input.channel === 'sms') {
+      throw new DomainProblem(503, 'OUTREACH_HEALTH_ID_UNAVAILABLE',
+        "Codes by SMS aren't available yet. Use the person's email.", undefined, { exposeDetail: true });
+    }
+    const email = input.email?.trim() ?? '';
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new DomainProblem(422, 'OUTREACH_HEALTH_ID_EMAIL_INVALID', 'Enter a valid email address.');
+    }
+    return this.identity.startHealthId(caseId, { channel: 'email', email }, idempotencyKey, context);
+  }
+
+  /** Assisted Health ID (0119): the person's code; 201 { healthId, registration } (a replay too). */
+  async confirmHealthId(caseId: string, input: ConfirmHealthIdDto, context: DataAccessContext) {
+    const code = typeof input.code === 'string' ? input.code.trim() : '';
+    if (!/^\d{6}$/.test(code)) {
+      throw new DomainProblem(422, 'OUTREACH_HEALTH_ID_CODE_INVALID', "That code isn't right. Check the email and try again.");
+    }
+    const created = await this.identity.confirmHealthId(caseId, code, context);
+    return { healthId: created.healthId, registration: await this.get(caseId, context) };
+  }
+
+  /**
+   * No contact at all (0120): Identity creates the Health ID with no account
+   * and a one-time claim code; 201 { healthId, claimCode, claimExpiresAt,
+   * registration }. The claim code passes through and is never stored,
+   * logged or audited here. A second call finds the Health ID created and
+   * Identity answers 409 OUTREACH_HEALTH_ID_ALREADY_CREATED with it only.
+   *
+   * A code Identity returned is never thrown away: the registration is read
+   * before Identity is asked, and if reading it again afterwards fails, the
+   * 201 answers that earlier read with the new Health ID set on it.
+   */
+  async createUnverifiedHealthId(caseId: string, context: DataAccessContext) {
+    const before = await this.get(caseId, context);
+    const created = await this.identity.createUnclaimedHealthId(caseId, context);
+    let registration: OutreachRegistrationCase;
+    try {
+      registration = await this.get(caseId, context);
+    } catch (error) {
+      this.logger.warn({ event: 'outreach.health-id.create-unverified.reread-failed', caseId,
+        correlationId: context.correlationId,
+        exceptionType: error instanceof Error ? error.constructor.name : 'UnknownException' });
+      registration = { ...before, healthId: created.healthId, healthIdCreatedByOutreach: true,
+        healthIdStatus: 'unclaimed' };
+    }
+    return { healthId: created.healthId, claimCode: created.claimCode, claimExpiresAt: created.claimExpiresAt,
+      registration };
   }
 
   private outbox(client: PoolClient, eventType: string, id: string, version: number,

@@ -1,10 +1,12 @@
-import { IsEnum, IsIn, IsObject, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import { IsEnum, IsIn, IsInt, IsObject, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 
 export enum OtpPurpose {
   SIGNUP_VERIFY='SIGNUP_VERIFY', EMAIL_VERIFY='EMAIL_VERIFY', PHONE_VERIFY='PHONE_VERIFY',
   PASSWORD_RESET='PASSWORD_RESET', LOGIN_STEP_UP='LOGIN_STEP_UP', ADMIN_STEP_UP='ADMIN_STEP_UP',
   SENSITIVE_ACTION='SENSITIVE_ACTION', LEGACY_ACCOUNT_RECOVERY='LEGACY_ACCOUNT_RECOVERY',
   LEGACY_SESSION_FALLBACK='LEGACY_SESSION_FALLBACK', EMERGENCY_CONTACT_VERIFY='EMERGENCY_CONTACT_VERIFY',
+  /** A person's email code when an outreach volunteer creates their Health ID (0119): email only. */
+  OUTREACH_HEALTH_ID_VERIFY='OUTREACH_HEALTH_ID_VERIFY',
 }
 
 export class DeliverOtpDto {
@@ -13,6 +15,10 @@ export class DeliverOtpDto {
   @IsString() @Matches(/^\d{6}$/) code!: string;
   @IsEnum(OtpPurpose) purpose!: OtpPurpose;
   @IsOptional() @IsObject() plan?: Record<string, unknown>;
+  /** OUTREACH_HEALTH_ID_VERIFY only: the outreach group's name (sanitized and capped at 80 when rendered). */
+  @IsOptional() @IsString() @MaxLength(200) groupName?: string;
+  /** OUTREACH_HEALTH_ID_VERIFY only (required there): how long the code works. */
+  @IsOptional() @IsInt() @Min(1) @Max(60) expiresInMinutes?: number;
 }
 
 export function validateRecipient(channel: DeliverOtpDto['channel'], recipient: string): boolean {

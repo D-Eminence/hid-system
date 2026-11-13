@@ -138,6 +138,11 @@ export type {
   CreateOutreachRegistrationCase,
   LinkOutreachExistingPatient,
   OutreachClientOptions,
+  OutreachHealthIdCreated,
+  OutreachHealthIdCreatedUnverified,
+  OutreachHealthIdStarted,
+  OutreachHealthIdStatus,
+  OutreachHealthIdStartInput,
   OutreachRegistrationCase,
   OutreachRegistrationScreening,
   OutreachRegistrationScreeningResult,
@@ -145,7 +150,7 @@ export type {
   OutreachScreeningMedicine,
   SaveOutreachRegistrationScreening,
 } from './outreach';
-export { IdentityApiClient, IdentityApiProblem } from './identity';
+export { IdentityApiClient, IdentityApiProblem, OUTREACH_HEALTH_ID_CREATE_UNCLAIMED_TIMEOUT_MS } from './identity';
 export type {
   IdentityActorContext,
   IdentityAuthorizationDecision,
@@ -154,6 +159,9 @@ export type {
   IdentityDelegatedContext,
   IdentityFacilityAssignment,
   IdentityInternalCaller,
+  IdentityOutreachHealthIdConfirm,
+  IdentityOutreachHealthIdCreateUnclaimed,
+  IdentityOutreachHealthIdStart,
   IdentityRegistrationCase,
   PatientSelfAuthorization,
   ResolveNinRegistration,

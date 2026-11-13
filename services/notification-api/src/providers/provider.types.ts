@@ -56,6 +56,45 @@ export function emergencyContactVerificationText(code: string): string {
     + 'It expires shortly. If you were not expecting this, ignore this message.';
 }
 
+/** The longest outreach group name an outreach Health ID code email carries. */
+export const OUTREACH_GROUP_NAME_LIMIT = 80;
+
+/**
+ * An outreach group's name as the code email carries it: control and format
+ * characters removed, whitespace collapsed, at most 80 characters; empty when
+ * nothing is left. The email is plain text only, so nothing in it is markup.
+ */
+export function outreachGroupName(value: string | undefined): string {
+  if (typeof value !== 'string') return '';
+  const name = Array.from(value.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, ' ').replace(/\s+/g, ' ').trim())
+    .slice(0, OUTREACH_GROUP_NAME_LIMIT).join('').trim();
+  // Organiser names are self-service: a name that carries a link or a
+  // domain-like token is not put in the email (the caller says "An outreach
+  // team" instead), so the code email can never carry a link.
+  return OUTREACH_GROUP_NAME_LINK.test(name) ? '' : name;
+}
+
+/** A URL scheme, "www.", or a domain-like token (a dot followed by two or more letters). */
+const OUTREACH_GROUP_NAME_LINK = /:\/\/|www\.|\S\.[a-z]{2,}/i;
+
+/**
+ * The code that proves a person's email when an outreach volunteer creates
+ * their Health ID (0119, OUTREACH_HEALTH_ID_VERIFY): plain text only, in the
+ * owner's words, naming the group (or "An outreach team") and how long the
+ * code works. The code is never in the subject.
+ */
+export function outreachHealthIdCodeContent(input: { groupName?: string; code: string; expiresInMinutes: number }): MessageContent {
+  const group = outreachGroupName(input.groupName) || 'An outreach team';
+  const minutes = `${input.expiresInMinutes} minute${input.expiresInMinutes === 1 ? '' : 's'}`;
+  return {
+    subject: 'Your Health ID code',
+    text: `${group} is creating a Health ID for you. Your code is ${input.code}. It works for ${minutes}. `
+      + 'If you are with their volunteer now, read this code to them. If you didn\'t ask for this, ignore this email: '
+      + 'no Health ID is made without the code. Afterwards, set your password in the Health ID app with '
+      + '\'Forgot password\'.',
+  };
+}
+
 export function messageContent(message: OtpMessage): MessageContent {
   if (message.content) return message.content;
   if (message.purpose === 'EMERGENCY_CONTACT_VERIFY') {

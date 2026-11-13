@@ -1660,3 +1660,31 @@ revoke all on function outreach.validate_registration_screening(), outreach.regi
 -- no DELETE (rows are never deleted).
 grant select, insert, update on ehr.recorded_allergies to hid_ehr_runtime, hid_schema_test_runtime;
 grant select, insert on ehr.prescription_allergy_acknowledgements to hid_ehr_runtime, hid_schema_test_runtime;
+
+-- Assisted Health ID at an outreach (0119), as that migration grants it: the
+-- Identity runtime's registration read, code start, delivery failure, open
+-- code and confirmation; the Outreach runtime's read of the Health IDs created
+-- for registrations it can see. The two tables, the eligibility check and the
+-- immutability trigger are granted to no role.
+grant execute on function identity.outreach_health_id_registration(uuid),
+  identity.outreach_health_id_start(uuid,uuid,text,char,bytea,char,text,char,text,integer,integer),
+  identity.outreach_health_id_delivery_failed(uuid), identity.outreach_health_id_open_challenge(uuid),
+  identity.outreach_health_id_confirm(uuid,uuid,char,text,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.outreach_registration_health_ids_for(uuid[])
+  to hid_outreach_runtime, hid_schema_test_runtime;
+revoke all on identity.outreach_health_id_challenges, identity.outreach_registration_health_ids from public;
+revoke all on function identity.outreach_registration_health_ids_immutable(), identity.outreach_health_id_eligible(uuid),
+  identity.outreach_health_id_scrub_challenges(integer), identity.outreach_health_id_redacted_case()
+  from public;
+
+-- Health IDs created at outreach with no contact (0120), as that migration
+-- grants them: the Identity runtime's creation and counts; the Outreach
+-- runtime's read (replaced by 0120 to add created_via). The claim codes are
+-- granted to no role.
+grant execute on function identity.outreach_health_id_create_unclaimed(uuid,text,bytea,char,text,char,text,text),
+  identity.outreach_health_id_counts()
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.outreach_registration_health_ids_for(uuid[])
+  to hid_outreach_runtime, hid_schema_test_runtime;
+revoke all on identity.outreach_health_id_claims from public;

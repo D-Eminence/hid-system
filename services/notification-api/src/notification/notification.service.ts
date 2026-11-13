@@ -2,7 +2,7 @@ import { BadRequestException, Inject, Injectable, Optional, ServiceUnavailableEx
 import { getEnvironment, type Environment } from '../config/environment';
 import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
-import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type ProviderResult, staffInvitationContent,
+import { emergencyContactAlertContent, outreachHealthIdCodeContent, type OtpMessage, type OtpProvider, type ProviderResult, staffInvitationContent,
   type StaffInvitationRole, staffSiteForRole, staffSiteOrigin } from '../providers/provider.types';
 import { contactChangedContent, emailChangeCodeContent, passwordResetCodeContent, passwordUpdatedContent,
   patientWelcomeContent } from '../providers/patient-emails';
@@ -53,6 +53,23 @@ export class NotificationService {
 
   deliverOtp(message: OtpMessage, rawPlan?: unknown): Promise<DeliveryResult> {
     return this.deliver(message, rawPlan);
+  }
+
+  /**
+   * The outreach assisted Health ID code (0119), OTP purpose
+   * OUTREACH_HEALTH_ID_VERIFY: plain text only, rendered here with the
+   * group's name (or "An outreach team") and the code's lifetime, delivered
+   * by email like any OTP (profile checks, delivery plan and fallback). The
+   * content is set, so no WhatsApp template is ever used.
+   */
+  deliverOutreachHealthIdCode(input: { recipient: string; code: string; groupName?: string; expiresInMinutes: number;
+    idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: input.code, purpose: 'OUTREACH_HEALTH_ID_VERIFY',
+      idempotencyKey: input.idempotencyKey,
+      content: outreachHealthIdCodeContent({ ...(input.groupName !== undefined ? { groupName: input.groupName } : {}),
+        code: input.code, expiresInMinutes: input.expiresInMinutes }),
+    }, rawPlan);
   }
 
   /**

@@ -15,6 +15,7 @@ import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { createContactLookupHmac, normalizePatientPhone } from './contact-lookup';
+import { LOCAL_OTP_KEY } from './patient-contact-crypto';
 import type { SignupGender } from './dto/patient-enrollment.dto';
 import { enrollmentKeysConfigured } from './enrollment-keys';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
@@ -52,7 +53,8 @@ export interface PatientSignupInput {
  * sign-up never depends on the NIN keys.
  */
 const SIGNUP_DERIVED_KEY_PREFIX = 'otp-hkdf:';
-const localOtpKey = randomBytes(32);
+/** Shared with the outreach assisted Health ID, which encrypts with the same derived key (patient-contact-crypto). */
+const localOtpKey = LOCAL_OTP_KEY;
 const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
 /**
  * How long after activation the enrollment cookie may show the HID again
