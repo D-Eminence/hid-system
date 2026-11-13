@@ -47,7 +47,8 @@ export interface ActiveEnrollmentRow {
  * transaction: identity.patient_self_contact (bound to the live session)
  * answers the account email and the phone ciphertext; this decrypts the
  * phone with the scheme that wrote it: a 0094 contact change, or the
- * sign-up's declared phone, or the NIN route's verified phone contact. A
+ * sign-up's declared phone, or the NIN route's verified phone contact, or
+ * the outreach assisted Health ID's phone bound to its lookup HMAC (0119). A
  * phone migrated from hid-1.0 is encrypted with the migration's key, which
  * Identity does not hold, so it reads as null until the patient changes it.
  * The phone is verified only while it is the NIN route's verified contact;
@@ -91,6 +92,9 @@ export class PatientContactReader {
         }
         if (phone) break;
       }
+      // A phone no enrollment wrote: the outreach assisted Health ID (0119)
+      // binds it to its lookup HMAC instead.
+      if (!phone && row.phone_lookup_hmac) phone = this.crypto.decryptLookupBoundPhone(row.phone_lookup_hmac, ciphertext);
     }
     return phone && PATIENT_PHONE_E164.test(phone) ? phone : undefined;
   }

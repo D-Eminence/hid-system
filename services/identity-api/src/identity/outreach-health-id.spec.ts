@@ -11,6 +11,7 @@ import { createContactLookupHmac } from './contact-lookup';
 import type { HidCodeGenerator } from './hid-code-generator.service';
 import { OutreachHealthIdController } from './outreach-health-id.controller';
 import { emailHint, OutreachHealthIdService } from './outreach-health-id.service';
+import { PatientProfileCrypto } from '../patient-profile/patient-profile-crypto';
 import { contactKeyForVersion, currentContactEncryption, decryptContactValue,
   encryptContactValue } from './patient-contact-crypto';
 
@@ -188,10 +189,27 @@ describe('OutreachHealthIdService (0119)', () => {
       expect(notification.deliverOutreachHealthIdCode).not.toHaveBeenCalled();
     });
 
-    it('refuses an email or phone (any stored form) already on a Health ID', async () => {
-      bound[`email:${createContactLookupHmac('email', 'ada@example.test')}`] = true;
-      expect(await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context)))
-        .toMatchObject({ code: 'OUTREACH_HEALTH_ID_EMAIL_TAKEN', status: 409 });
+    it('answers the same 202 for an email already on a patient and a fresh one, and never looks the email up', async () => {
+      const answer = async (email: string) => {
+        queries.length = 0;
+        startResult = () => ({ challenge_id: 'x', expires_at: new Date('2026-11-14T08:10:00Z') });
+        const result = await service().start({ caseId, channel: 'email', email }, context);
+        return { result, statements: queries.filter((q) => !q.sql.includes('outreach_health_id_start('))
+          .map((q) => q.sql) };
+      };
+      bound[`email:${createContactLookupHmac('email', 'taken@example.test')}`] = true;
+      const taken = await answer('taken@example.test');
+      const fresh = await answer('fresh@example.test');
+      expect(taken.result).toEqual({ channel: 'email', expiresAt: '2026-11-14T08:10:00.000Z',
+        destinationHint: 't***@example.test', resendAfterSeconds: 60 });
+      expect({ ...taken.result, destinationHint: '' }).toEqual({ ...fresh.result, destinationHint: '' });
+      // The same statements on the same path, and none of them an email lookup.
+      expect(taken.statements).toEqual(fresh.statements);
+      expect(queries.some((q) => q.sql.includes('already_bound') && q.parameters[0] === 'email')).toBe(false);
+      expect(notification.deliverOutreachHealthIdCode).toHaveBeenCalledTimes(2);
+    });
+
+    it('refuses a phone (any stored form) already on a Health ID', async () => {
       bound = { [`phone:${createContactLookupHmac('phone', '+23408012345678')}`]: true };
       expect(await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context)))
         .toMatchObject({ code: 'OUTREACH_HEALTH_ID_PHONE_TAKEN', status: 409 });
@@ -207,7 +225,8 @@ describe('OutreachHealthIdService (0119)', () => {
     it.each([
       ['OUTREACH_REGISTRATION_NOT_FOUND', '42501', 404], ['OUTREACH_REGISTRATION_REDACTED', '55000', 409],
       ['OUTREACH_HEALTH_ID_NOT_AVAILABLE', '42501', 403], ['OUTREACH_ORGANISER_SUSPENDED', '55000', 423],
-      ['OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', 429], ['OUTREACH_HEALTH_ID_EMAIL_TAKEN', '23505', 409],
+      ['OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', 429],
+      ['OUTREACH_HEALTH_ID_REQUEST_USED', '55000', 409],
       ['OUTREACH_HEALTH_ID_PHONE_TAKEN', '23505', 409], ['OUTREACH_HEALTH_ID_EMAIL_INVALID', '22023', 422],
     ])('maps the database refusal %s (%s) to %d', async (message, sqlstate, status) => {
       startResult = () => { throw pgError(message, sqlstate); };
@@ -221,6 +240,37 @@ describe('OutreachHealthIdService (0119)', () => {
         .toMatchObject({ code: 'OUTREACH_HEALTH_ID_UNAVAILABLE', status: 503 });
       const challengeId = queries.find((q) => q.sql.includes('outreach_health_id_start('))!.parameters[1];
       expect(queries.find((q) => q.sql.includes('delivery_failed'))?.parameters).toEqual([challengeId]);
+    });
+
+    it('tells the daily limit from the cooldown, and a used request id', async () => {
+      startResult = () => { throw pgError('OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', { detail: 'daily' }); };
+      const daily = await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context));
+      expect(daily).toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES',
+        message: 'Too many codes for this person today. Try again tomorrow.' });
+      expect(daily.extensions).toBeUndefined();
+      startResult = () => { throw pgError('OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'P0001', { detail: 'cooldown:42' }); };
+      const cooldown = await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context));
+      expect(cooldown).toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES',
+        message: 'Wait a minute before sending another code.', extensions: { retryAfterSeconds: 42 } });
+      expect(cooldown.getStatus()).toBe(429);
+      startResult = () => { throw pgError('OUTREACH_HEALTH_ID_REQUEST_USED', '55000'); };
+      const used = await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context));
+      expect(used).toMatchObject({ code: 'OUTREACH_HEALTH_ID_REQUEST_USED',
+        message: 'This request was already used. Start again to send a new code.' });
+      expect(used.getStatus()).toBe(409);
+    });
+
+    it('does not answer a retried key with an expired code: the start goes on and the used id is refused', async () => {
+      const key = 'outreach-health-id-key-0002';
+      await service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context, key);
+      const challengeId = queries.find((q) => q.sql.includes('outreach_health_id_start('))!.parameters[1];
+      open = { challenge_id: challengeId, expires_at: new Date(Date.now() - 1000) };
+      queries.length = 0;
+      startResult = () => { throw pgError('OUTREACH_HEALTH_ID_REQUEST_USED', '55000'); };
+      expect((await refusal(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context, key))).code)
+        .toBe('OUTREACH_HEALTH_ID_REQUEST_USED');
+      expect(queries.find((q) => q.sql.includes('outreach_health_id_start('))?.parameters[1]).toBe(challengeId);
+      expect(notification.deliverOutreachHealthIdCode).toHaveBeenCalledTimes(1);
     });
 
     it('answers a retry with the same Idempotency-Key again without sending another code', async () => {
@@ -256,8 +306,9 @@ describe('OutreachHealthIdService (0119)', () => {
       expect(verifier).toBe(createHmac('sha256', Buffer.from(OTP_KEY, 'base64'))
         .update(['outreach-health-id-otp', caseId, challengeId, '123456'].join('\u001f')).digest('hex'));
       expect(phoneLookup).toBe(createContactLookupHmac('phone', '+2348012345678'));
-      expect(decryptContactValue(contactKeyForVersion(process.env as never, 'nin-v2')!, challengeId, 'phone',
-        phoneCiphertext)).toBe('+2348012345678');
+      // The form PatientContactReader reads back for GET identity/me (bound to the lookup HMAC).
+      expect(new PatientProfileCrypto().decryptLookupBoundPhone(phoneLookup, phoneCiphertext)).toBe('+2348012345678');
+      expect(new PatientProfileCrypto().decryptLookupBoundPhone('f'.repeat(64), phoneCiphertext)).toBeUndefined();
     });
 
     it('passes no phone when the registration has none', async () => {
@@ -310,11 +361,30 @@ describe('OutreachHealthIdService (0119)', () => {
         .resolves.toEqual({ healthId: 'HID-FREE34', outcome: 'created' });
     });
 
+    it('answers a concurrent account or patient with the same contact 409, not 5xx', async () => {
+      openChallenge();
+      for (const [constraint, code] of [['accounts_email_ci_uq', 'OUTREACH_HEALTH_ID_EMAIL_TAKEN'],
+        ['patients_email_hmac_uq', 'OUTREACH_HEALTH_ID_EMAIL_TAKEN'],
+        ['patients_phone_hmac_uq', 'OUTREACH_HEALTH_ID_PHONE_TAKEN']] as const) {
+        confirmResult = () => { throw pgError('duplicate key value', '23505', { constraint }); };
+        const taken = await refusal(service().confirm({ caseId, code: '123456' }, context));
+        expect(taken.code).toBe(code);
+        if (code === 'OUTREACH_HEALTH_ID_EMAIL_TAKEN') {
+          expect(taken.message).toBe('This email is already used by another Health ID or account. Use another email.');
+        }
+        expect(taken.getStatus()).toBe(409);
+      }
+    });
+
     it('maps the database refusals: already created (with the Health ID), phone and email taken', async () => {
       openChallenge();
       confirmResult = () => { throw pgError('OUTREACH_HEALTH_ID_ALREADY_CREATED', '23505', { detail: 'HID-ZZ9YY8' }); };
       expect(await refusal(service().confirm({ caseId, code: '123456' }, context)))
         .toMatchObject({ status: 409, extensions: { healthId: 'HID-ZZ9YY8' } });
+      confirmResult = () => { throw pgError('OUTREACH_HEALTH_ID_EMAIL_TAKEN', '23505'); };
+      expect(await refusal(service().confirm({ caseId, code: '123456' }, context))).toMatchObject({
+        code: 'OUTREACH_HEALTH_ID_EMAIL_TAKEN',
+        message: 'This email is already used by another Health ID or account. Use another email.' });
       confirmResult = () => { throw pgError('OUTREACH_HEALTH_ID_PHONE_TAKEN', '23505'); };
       expect((await refusal(service().confirm({ caseId, code: '123456' }, context))).code)
         .toBe('OUTREACH_HEALTH_ID_PHONE_TAKEN');

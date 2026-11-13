@@ -149,8 +149,8 @@ describe('Outreach assisted Health ID routes (0119)', () => {
 
     it('forwards the volunteer\'s sign-in and the key to Identity once, never retrying a start', async () => {
       const start = jest.spyOn(IdentityApiClient.prototype, 'outreachHealthIdStart')
-        .mockRejectedValue(new IdentityApiProblem(409, { code: 'OUTREACH_HEALTH_ID_EMAIL_TAKEN',
-          detail: 'This email already has a Health ID. Ask them to sign in with it.' }));
+        .mockRejectedValue(new IdentityApiProblem(409, { code: 'OUTREACH_HEALTH_ID_PHONE_TAKEN',
+          detail: 'This phone number already has a Health ID. Ask them to sign in with it.' }));
       Object.assign(process.env, { NODE_ENV: 'test', IDENTITY_API_URL: 'http://identity.test',
         DATABASE_URL: 'postgresql://test:test@localhost/hid', CORS_ORIGINS: 'https://outreach.test',
         OUTREACH_IDENTITY_INTERNAL_SERVICE_TOKEN: 'outreach-local-test-secret-0123456789abcdef' });
@@ -158,8 +158,8 @@ describe('Outreach assisted Health ID routes (0119)', () => {
       const service = new IdentityService({ headers: jest.fn().mockResolvedValue({}) } as unknown as WorkloadCredentialsService);
       const refusal = await problem(service.startHealthId(caseId, { channel: 'email', email: 'a@b.co' }, 'key-1234567890abcd',
         context));
-      expect(refusal).toMatchObject({ code: 'OUTREACH_HEALTH_ID_EMAIL_TAKEN',
-        message: 'This email already has a Health ID. Ask them to sign in with it.' });
+      expect(refusal).toMatchObject({ code: 'OUTREACH_HEALTH_ID_PHONE_TAKEN',
+        message: 'This phone number already has a Health ID. Ask them to sign in with it.' });
       expect(start).toHaveBeenCalledTimes(1);
       expect(start).toHaveBeenCalledWith({ caseId, channel: 'email', email: 'a@b.co' }, 'key-1234567890abcd',
         expect.objectContaining({ cookie: context.userCookie, csrfToken: 'c', origin: context.origin, facilityId,

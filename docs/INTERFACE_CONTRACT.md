@@ -4734,7 +4734,11 @@ Body: `{ "channel": "email", "email": "ada@example.test" }` or `{ "channel": "sm
 The code works for the OTP lifetime (`OTP_EXPIRY_SECONDS`, default 5 minutes, at most 10) and allows `OTP_MAX_ATTEMPTS`
 wrong tries. A new code ends the previous one. At most 3 codes per registration in 24 hours and one per
 60 seconds; the volunteer and the email also have rate windows. A retry with the same `Idempotency-Key`
-(and the same email) while its code is open answers the same `202` without sending another. The email
+(and the same email) while its code is open and unexpired answers the same `202` without sending another;
+once that code has failed delivery or expired, the same key is refused `409 OUTREACH_HEALTH_ID_REQUEST_USED`
+(use a new key). Start answers the same for any email: it never checks whether the email already belongs
+to a Health ID or any sign-in (so the route cannot probe who is registered); confirm refuses a taken email
+only after the person proves it. The email
 (subject "Your Health ID code", plain text only) names the outreach group (or "An outreach team"):
 
 > &lt;Group&gt; is creating a Health ID for you. Your code is 123456. It works for 10 minutes. If you are with
@@ -4751,9 +4755,9 @@ wrong tries. A new code ends the previous one. At most 3 codes per registration 
 | 422 | `OUTREACH_HEALTH_ID_EMAIL_INVALID` | missing or not an email (max 254) |
 | 403 | `OUTREACH_HEALTH_ID_NOT_AVAILABLE` | not an outreach group, or a sealed demo/QA one |
 | 423 | `OUTREACH_ORGANISER_SUSPENDED` | the group is paused by Health ID |
-| 409 | `OUTREACH_HEALTH_ID_EMAIL_TAKEN` | "This email already has a Health ID. Ask them to sign in with it." |
 | 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN` | "This phone number already has a Health ID. Ask them to sign in with it." |
-| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | "Too many codes for this person today. Try again tomorrow."; `Retry-After` when known |
+| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CODES` | "Too many codes for this person today. Try again tomorrow." (3 in 24 hours), or "Wait a minute before sending another code." with `Retry-After: <seconds>` (60-second cooldown, or a rate window) |
+| 409 | `OUTREACH_HEALTH_ID_REQUEST_USED` | "This request was already used. Start again to send a new code." (retry with a new `Idempotency-Key`) |
 | 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | `channel: "sms"` ("Codes by SMS aren't available yet. Use the person's email."), or the email could not be sent (that code is ended) |
 
 ### 49.2. Confirm the code and create the Health ID
@@ -4771,7 +4775,8 @@ Identity recognises answers `201` too. A retry after the Health ID was created (
 | 422 | `OUTREACH_HEALTH_ID_CODE_INVALID` | "That code isn't right. Check the email and try again." (also not 6 digits) |
 | 422 | `OUTREACH_HEALTH_ID_CODE_EXPIRED` | "That code has expired. Send a new one." (no open code) |
 | 429 | `OUTREACH_HEALTH_ID_TOO_MANY_TRIES` | "Too many wrong codes. Send a new one." |
-| 409 | `OUTREACH_HEALTH_ID_EMAIL_TAKEN`, `OUTREACH_HEALTH_ID_PHONE_TAKEN`, `OUTREACH_REGISTRATION_REDACTED`, `OUTREACH_HEALTH_ID_ALREADY_CREATED` (+ `healthId`) | as in 49.1 |
+| 409 | `OUTREACH_HEALTH_ID_EMAIL_TAKEN` | "This email is already used by another Health ID or account. Use another email." (after the code is proved; any sign-in with that email, or one created meanwhile) |
+| 409 | `OUTREACH_HEALTH_ID_PHONE_TAKEN`, `OUTREACH_REGISTRATION_REDACTED`, `OUTREACH_HEALTH_ID_ALREADY_CREATED` (+ `healthId`) | as in 49.1 |
 | 404, 403, 422, 423 | as in 49.1 | |
 | 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | try again |
 
@@ -4791,7 +4796,10 @@ delegated-browser routes, so a forwarded cookie always needs Origin and CSRF. Id
 in the volunteer's own session. Answers as 49.1 and 49.2 (`confirm` answers `{ healthId, outcome }`; a
 429 carries `retryAfterSeconds`). Identity alone holds the contact keys, the OTP verifier key and the
 Health ID generator: the email and phone are stored encrypted with patient sign-up's contact key and
-key version, with sign-up's lookup HMACs; the database keeps only a keyed verifier of the code. The code
+key version, with sign-up's lookup HMACs (the phone bound to its lookup HMAC,
+`identity:patient-phone:<phoneLookupHmac>`, which GET identity/me reads back); the database keeps only a
+keyed verifier of the code. The patient's assurance is `CONTACT_VERIFIED` with source `hid-public-signup`
+(reference `outreach-health-id:<challenge>`), so NIN verification can follow later. The code
 email is `POST notification-api /notifications/otp` with purpose `OUTREACH_HEALTH_ID_VERIFY` (email only,
 plus `groupName` and `expiresInMinutes`).
 
