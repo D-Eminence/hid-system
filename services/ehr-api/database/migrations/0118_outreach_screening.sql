@@ -20,7 +20,8 @@
 --        0045). No delete except by a retention or support redaction.
 --      - outreach.validate_registration_screening (trigger): the case exists
 --        at the same facility and is not redacted (55000
---        OUTREACH_REGISTRATION_REDACTED); the session's own account and
+--        OUTREACH_REGISTRATION_REDACTED) and its outreach group is not
+--        suspended (55000 OUTREACH_ORGANISER_SUSPENDED); the session's own account and
 --        membership record it; an insert is version 1, an update the next
 --        version, and the case, facility and first recording never change;
 --        medicines are a list of up to 10 {name 1-100, dose up to 200}.
@@ -151,6 +152,11 @@ begin
               where redaction.registration_case_id = new.registration_case_id) then
     raise exception using errcode = '55000', message = 'OUTREACH_REGISTRATION_REDACTED';
   end if;
+  -- A suspended outreach group records nothing more (0115's rule for its
+  -- registrations, campaigns and members).
+  if outreach.organiser_tenant_state(new.facility_id) = 'suspended' then
+    raise exception using errcode = '55000', message = 'OUTREACH_ORGANISER_SUSPENDED';
+  end if;
   if actor_account is null or actor_membership is null
      or new.updated_by_account_id is distinct from actor_account
      or new.updated_by_membership_id is distinct from actor_membership then
@@ -223,14 +229,14 @@ alter table outreach.registration_cases add column area text
 comment on column outreach.registration_cases.area is
   '0118: the person''s area, town or LGA as given at registration (optional); never changed; cleared when the registration is redacted.';
 
--- The area never changes, except that a redaction (full name set to
--- '[redacted]') clears it.
+-- The area never changes, except that a redaction (in a retention run, the
+-- full name set to '[redacted]', whatever it was before) clears it.
 create function outreach.registration_case_area_guard()
 returns trigger language plpgsql
 set search_path = pg_catalog, pg_temp
 as $$
 begin
-  if new.full_name = '[redacted]' and old.full_name is distinct from '[redacted]' then
+  if outreach.privileged_run_active('retention') and new.full_name = '[redacted]' then
     new.area := null;
   elsif new.area is distinct from old.area then
     raise exception using errcode = '23514', message = 'OUTREACH_REGISTRATION_AREA_IMMUTABLE';
@@ -243,13 +249,14 @@ create trigger outreach_registration_area_guard
   before update on outreach.registration_cases
   for each row execute function outreach.registration_case_area_guard();
 
--- A redacted registration's screening is deleted in the same transaction.
+-- A redacted registration's screening is deleted in the same transaction
+-- (the redaction update, in a retention run).
 create function outreach.registration_case_screening_redact()
 returns trigger language plpgsql security definer
 set search_path = pg_catalog, pg_temp
 as $$
 begin
-  if new.full_name = '[redacted]' and old.full_name is distinct from '[redacted]' then
+  if outreach.privileged_run_active('retention') and new.full_name = '[redacted]' then
     delete from outreach.registration_screenings screening where screening.registration_case_id = new.id;
   end if;
   return null;

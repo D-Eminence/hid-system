@@ -145,7 +145,7 @@ describe('Outreach route permissions', () => {
       const permissions = reflector.get<string[]>(REQUIRED_PERMISSIONS, handler);
       expect({ name, permissions }).toEqual({ name, permissions: [expect.any(String)] });
       // Recording an export (0118 follow-up) changes no registration: a read permission.
-      const suffix = method(handler) === 0 || name.endsWith('recordExport') ? '.read' : '.write';
+      const suffix = method(handler) === 0 || name === 'recordExport' ? '.read' : '.write';
       expect({ name, permission: permissions[0]?.endsWith(suffix) }).toEqual({ name, permission: true });
     }
   });

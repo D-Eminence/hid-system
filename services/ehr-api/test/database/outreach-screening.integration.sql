@@ -314,6 +314,8 @@ select pg_temp.organiser('4b notes of 1001 characters are not', '23514: OUTREACH
 select pg_temp.organiser('4c an area over 100 characters is not', '23514: new row for relation "registration_cases" violates check constraint "registration_cases_area_ck"',
   pg_temp.registration_insert(10, repeat('a', 101)), false, 'statement');
 set local session_replication_role = replica;
+-- Registration 2's person was registered as '[redacted]' (the 0024 check allows it): its redaction must still clear.
+update outreach.registration_cases set full_name = '[redacted]' where id = '5c080000-0000-4000-8000-000000000002';
 update outreach.registration_cases set area = 'Oja Oba, Ilorin West'
  where id in ('5c080000-0000-4000-8000-000000000002', '5c080000-0000-4000-8000-000000000005');
 set local session_replication_role = origin;
@@ -321,6 +323,21 @@ select pg_temp.sc_case('4d the area never changes', '23514: OUTREACH_REGISTRATIO
   null, null, null, null,
   $s$update outreach.registration_cases set area = 'Elsewhere' where id = '5c080000-0000-4000-8000-000000000005'$s$,
   false, 'statement');
+
+-- 4e. A suspended outreach group records no screening.
+select pg_temp.sc_case('4e a suspended group records no screening', '55000: OUTREACH_ORGANISER_SUSPENDED',
+  session_user::text, null, null, null, null,
+  format($d$do $x$ begin
+    update identity.outreach_organisations set status = 'suspended', suspended_at = clock_timestamp(),
+      suspended_by_account_id = '5c010000-0000-4000-8000-000000000003', suspension_reason = 'Synthetic suspension for the suite'
+     where facility_id = '5c000000-0000-4000-8000-000000000002';
+    perform set_config('app.actor_subject', 'synthetic:sc-organiser', true),
+            set_config('app.facility_id', '5c000000-0000-4000-8000-000000000002', true),
+            set_config('app.membership_id', '5c030000-0000-4000-8000-000000000001', true),
+            set_config('app.purpose_of_use', 'direct-care', true);
+    set local role hid_outreach_api_runtime;
+    %s;
+  end $x$$d$, pg_temp.screen_insert(3, 'pulse_bpm', '80')), false, 'statement');
 
 -- 5. Redaction: support redacts registration 5; its screening goes and its area is cleared.
 select pg_temp.support('5a support redacts the registration', 'redacted', 'synthetic:sc-support',
@@ -350,6 +367,15 @@ select pg_temp.sc_case('5f the expired one''s screening is gone; the others'' ar
   $s$select string_agg(right(case_id::text, 1) || ':' || (select count(*) from outreach.registration_screenings screening
                                  where screening.registration_case_id = case_id), '|' order by case_id)
        from unnest(array['5c080000-0000-4000-8000-000000000001', '5c080000-0000-4000-8000-000000000002']::uuid[]) case_id$s$);
+
+select pg_temp.support('5g support redacts registration 2, whose person was registered as "[redacted]"', 'redacted',
+  'synthetic:sc-support',
+  $s$select identity.admin_redact_outreach_registration('5c080000-0000-4000-8000-000000000002', 'Caller asked us to delete her details')$s$);
+select pg_temp.sc_case('5h its screening is gone and its area cleared all the same', '0/null', session_user::text, null,
+  null, null, null, $s$select (select count(*) from outreach.registration_screenings
+                    where registration_case_id = '5c080000-0000-4000-8000-000000000002')::text || '/'
+              || coalesce((select area from outreach.registration_cases
+                            where id = '5c080000-0000-4000-8000-000000000002'), 'null')$s$);
 
 -- 6. Result.
 do $$
