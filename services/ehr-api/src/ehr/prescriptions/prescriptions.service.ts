@@ -3,13 +3,14 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
-import { AcceptPrescriptionForPharmacyDto, CreatePrescriptionDto, OrderStatus,
-  TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
+import { AcceptPrescriptionForPharmacyDto, OrderStatus, TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
 import { calendarDate } from '../shared/calendar-date';
+import { type CreatePrescriptionInput, PRESCRIPTION_DISPENSING_DETAILS_OFF,
+  PrescriptionDispensingDetails } from './prescription-dispensing-details';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -57,7 +58,13 @@ export class PrescriptionsService {
     private readonly repository: ClinicalRepository,
     private readonly pharmacyApi: PharmacyApiService,
     private readonly orderRoutes: OrderRouteReader,
+    private readonly details: PrescriptionDispensingDetails = PRESCRIPTION_DISPENSING_DETAILS_OFF,
   ) {}
+
+  /** The answer's columns: today's, plus the dispensing details while they are on (0122). */
+  private columns(): string {
+    return COLUMNS + this.details.selectList();
+  }
 
   /**
    * One page of the encounter's prescriptions, each with its latest route to
@@ -67,7 +74,10 @@ export class PrescriptionsService {
    * accepted for someone who was not the patient (item 3, 0088), so the
    * website may ask a clinician to have it ended there first (D15); and
    * `lateCorrection: true`: it can also reverse, after the prescription
-   * ended, a dispensing it recorded for the wrong person (D17, 0090).
+   * ended, a dispensing it recorded for the wrong person (D17, 0090). While
+   * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (0122), each item carries
+   * the dispensing details it was written with, and `dispensingDetails: true`
+   * says a create may carry them; off, neither.
    */
   async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.prescriptions', patientId, encounterId };
@@ -77,7 +87,7 @@ export class PrescriptionsService {
       { action: 'ehr.prescription.list', resourceType: 'prescription', resourceId: encounterId },
       async (client) => {
         const result = await client.query<PrescriptionRow & { cursorAt: string }>(
-          `select ${COLUMNS}, ${timelineCursorSql('created_at')} as "cursorAt" from ehr.prescriptions
+          `select ${this.columns()}, ${timelineCursorSql('created_at')} as "cursorAt" from ehr.prescriptions
            where encounter_id = $1 and patient_id = $2 and facility_id = $3
              and ($4::timestamptz is null or (created_at, id) < ($4::timestamptz, $5::uuid))
            order by created_at desc, id desc limit $6`,
@@ -86,13 +96,13 @@ export class PrescriptionsService {
         const page = timelinePage(result.rows, query.limit, scope);
         const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId,
           page.items.map((item) => item.id));
-        return { value: { ...page, items: page.items.map((item) => withOrderRoute(item, routes)) },
+        return { value: { ...page, items: page.items.map((item) => withOrderRoute(this.details.project(item), routes)) },
           details: { resultCount: page.items.length } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
     return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true,
-      lateCorrection: true };
+      lateCorrection: true, ...this.details.flag() };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string) {
@@ -102,18 +112,25 @@ export class PrescriptionsService {
       async (client) => {
         const row = this.single(await this.find(client, context, patientId, encounterId, prescriptionId));
         const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, [row.id]);
-        return { value: withOrderRoute(row, routes) };
+        return { value: withOrderRoute(this.details.project(row), routes) };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
   }
 
-  create(context: DataAccessContext, patientId: string, encounterId: string, input: CreatePrescriptionDto, key: string) {
+  /**
+   * A new prescription. While PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on
+   * (0122) it may carry the dispensing details (CreatePrescriptionBodyPipe),
+   * each pair together, stored with it and echoed when set; a body without
+   * them keeps today's Idempotency-Key digest. Off, exactly as before.
+   */
+  create(context: DataAccessContext, patientId: string, encounterId: string, input: CreatePrescriptionInput, key: string) {
     if ((input.doseQuantity === undefined) !== (input.doseUnit === undefined)) {
       throw new DomainProblem(400, 'DOSE_INCOMPLETE', 'Dose quantity and unit must be supplied together');
     }
+    this.details.requirePairs(input);
     const operation = 'prescription.create';
-    const digest = requestDigest(operation, { patientId, encounterId, input });
+    const digest = requestDigest(operation, { patientId, encounterId, input: this.details.digestInput(input) });
     return this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.prescription.create', resourceType: 'prescription' },
@@ -124,20 +141,24 @@ export class PrescriptionsService {
             `insert into ehr.prescriptions (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
                medication_code_system, medication_code, medication_display, dose_quantity, dose_unit,
-               route_code, frequency, instructions, starts_on, ends_on, status
-             ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-             returning ${COLUMNS}`,
+               route_code, frequency, instructions, starts_on, ends_on, status${this.details.insertColumns()}
+             ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${this.details.insertPlaceholders()})
+             returning ${this.columns()}`,
             [
               encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
               input.medicationCodeSystem ?? null, input.medicationCode ?? null, input.medicationDisplay,
               input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null,
               input.frequency, input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.status,
+              ...this.details.insertValues(input),
             ],
           );
           const row = this.single(result.rows[0]);
-          return { value: row, id: row.id };
+          return { value: this.details.project(row), id: row.id };
         },
-        (id) => this.findById(client, context, patientId, id),
+        async (id) => {
+          const row = await this.findById(client, context, patientId, id);
+          return row && this.details.project(row);
+        },
       ),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
@@ -168,7 +189,7 @@ export class PrescriptionsService {
              status = coalesce($1, status), frequency = coalesce($2, frequency),
              instructions = coalesce($3, instructions), ends_on = coalesce($4::date, ends_on)
            where id = $5 and encounter_id = $6 and patient_id = $7 and facility_id = $8 and row_version = $9
-           returning ${COLUMNS}`,
+           returning ${this.columns()}`,
           [
             input.status ?? null, input.frequency ?? null, input.instructions ?? null, input.endsOn ?? null,
             prescriptionId, encounterId, patientId, context.facilityId, input.expectedRowVersion,
@@ -176,7 +197,7 @@ export class PrescriptionsService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Prescription changed since it was loaded');
-        return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion } };
+        return { value: this.details.project(row), resourceId: prescriptionId, details: { rowVersion: row.rowVersion } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
@@ -265,7 +286,7 @@ export class PrescriptionsService {
 
   private async find(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
     const result = await client.query<PrescriptionRow>(
-      `select ${COLUMNS} from ehr.prescriptions
+      `select ${this.columns()} from ehr.prescriptions
        where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4`,
       [id, encounterId, patientId, context.facilityId],
     );
@@ -274,7 +295,7 @@ export class PrescriptionsService {
 
   private async findById(client: PoolClient, context: DataAccessContext, patientId: string, id: string) {
     const result = await client.query<PrescriptionRow>(
-      `select ${COLUMNS} from ehr.prescriptions where id = $1 and patient_id = $2 and facility_id = $3`,
+      `select ${this.columns()} from ehr.prescriptions where id = $1 and patient_id = $2 and facility_id = $3`,
       [id, patientId, context.facilityId],
     );
     return result.rows[0];
@@ -282,7 +303,7 @@ export class PrescriptionsService {
 
   private async lock(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
     const result = await client.query<PrescriptionRow>(
-      `select ${COLUMNS} from ehr.prescriptions
+      `select ${this.columns()} from ehr.prescriptions
        where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 for update`,
       [id, encounterId, patientId, context.facilityId],
     );

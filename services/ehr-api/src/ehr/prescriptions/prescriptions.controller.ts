@@ -4,10 +4,10 @@ import type { HidRequest } from '../../common/request-context';
 import { clinicalContext, requireIdempotencyKey } from '../shared/clinical-context';
 import {
   AcceptPrescriptionForPharmacyDto,
-  CreatePrescriptionDto,
   TimelineQueryDto,
   UpdatePrescriptionDto,
 } from '../shared/clinical.dto';
+import { CreatePrescriptionBodyPipe, type CreatePrescriptionInput } from './prescription-dispensing-details';
 import { PrescriptionsService } from './prescriptions.service';
 
 @Controller('ehr/patients/:patientId/encounters/:encounterId/prescriptions')
@@ -29,12 +29,19 @@ export class PrescriptionsController {
     return this.prescriptions.get(clinicalContext(request), patientId, encounterId, prescriptionId);
   }
 
+  /**
+   * The body is checked by CreatePrescriptionBodyPipe: today's
+   * CreatePrescriptionDto, or with the dispensing details while
+   * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (0122). Its declared type is
+   * a union, so the global pipe leaves it to that pipe.
+   */
   @Post()
   @HttpCode(201)
   @RequirePermissions('ehr.prescription.write')
   create(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
-    @Headers('idempotency-key') key: string | undefined, @Body() input: CreatePrescriptionDto) {
+    @Headers('idempotency-key') key: string | undefined,
+    @Body(CreatePrescriptionBodyPipe) input: CreatePrescriptionInput) {
     return this.prescriptions.create(
       clinicalContext(request), patientId, encounterId, input, requireIdempotencyKey(key),
     );

@@ -1655,3 +1655,13 @@ revoke all on identity.facility_profiles, identity.nigeria_states, identity.regi
 grant execute on function lab.work_item_patient_cards(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
 grant execute on function pharmacy.work_item_patient_cards(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
 revoke all on function lab.work_item_patient_cards(uuid[]), pharmacy.work_item_patient_cards(uuid[]) from public;
+
+-- Prescription strength, form, duration, quantity and priority for the
+-- pharmacy (0122), as that migration grants them (its section 2): the
+-- Pharmacy reader to the Pharmacy runtime and the schema test runtime;
+-- nothing to the EHR, Lab, Identity, OCR, Outreach or Notification runtimes
+-- (it reads pharmacy.work_items and ehr.record_versions as its owner). The
+-- seven new ehr.prescriptions columns need no grant: the EHR runtime's
+-- privileges on that table above are table-wide.
+grant execute on function pharmacy.work_item_prescription_details(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function pharmacy.work_item_prescription_details(uuid[]) from public;

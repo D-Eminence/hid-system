@@ -55,6 +55,10 @@ export interface HidEnvironmentConfig {
   // Off unless HID_OWN_WORK_PATIENT_CARD_ENABLED=true at synth time: lab-api and
   // pharmacy-api then add the patient's details to this facility's own work (0121).
   readonly ownWorkPatientCardEnabled: boolean;
+  // Off unless HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED=true at synth time:
+  // ehr-api then takes a prescription's dispensing details and pharmacy-api adds
+  // them to own work (0122). Switch it on only after 0122 is applied.
+  readonly prescriptionDispensingDetailsEnabled: boolean;
 }
 
 interface ProfileValues {
@@ -163,6 +167,7 @@ export function environmentConfig(
   stagingModeValue?: string,
   qoreIdEnabledValue?: string,
   ownWorkPatientCardEnabledValue?: string,
+  prescriptionDispensingDetailsEnabledValue?: string,
 ): HidEnvironmentConfig {
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -188,11 +193,16 @@ export function environmentConfig(
   if (!['true', 'false'].includes(ownWorkPatientCardEnabledInput)) {
     throw new Error('HID_OWN_WORK_PATIENT_CARD_ENABLED must be true or false when supplied');
   }
+  const prescriptionDispensingDetailsEnabledInput = prescriptionDispensingDetailsEnabledValue ?? 'false';
+  if (!['true', 'false'].includes(prescriptionDispensingDetailsEnabledInput)) {
+    throw new Error('HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED must be true or false when supplied');
+  }
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
     qoreIdEnabled: qoreIdEnabledInput === 'true',
     ownWorkPatientCardEnabled: ownWorkPatientCardEnabledInput === 'true',
+    prescriptionDispensingDetailsEnabled: prescriptionDispensingDetailsEnabledInput === 'true',
   };
 }
 

@@ -373,6 +373,82 @@ export class CreatePrescriptionDto {
   status!: OrderStatus;
 }
 
+/** How urgent a prescription is (0122): the Lab request priorities. */
+export enum PrescriptionPriority {
+  Routine = 'routine',
+  Urgent = 'urgent',
+  Asap = 'asap',
+  Stat = 'stat',
+}
+
+/** The forms a prescriber chooses from (0122), as the pharmacy queue draws them. */
+export enum PrescriptionDoseForm {
+  Tablet = 'tablet',
+  Capsule = 'capsule',
+  Liquid = 'liquid',
+  Injection = 'injection',
+  Cream = 'cream',
+  Inhaler = 'inhaler',
+  Drops = 'drops',
+  Other = 'other',
+}
+
+export enum PrescriptionDurationUnit {
+  Day = 'day',
+  Week = 'week',
+  Month = 'month',
+}
+
+/**
+ * A new prescription with the optional dispensing details (0122): its
+ * priority, its strength and form as the prescriber means them, how long it
+ * is for, and how much to hand over (the pharmacist still confirms what is
+ * dispensed). Set at creation only: UpdatePrescriptionDto has none of them.
+ * durationValue and durationUnit go together, as do quantityToDispense and
+ * quantityUnit (PrescriptionsService.create). Used only while
+ * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (CreatePrescriptionBodyPipe);
+ * off, a body is checked against CreatePrescriptionDto as before, so each of
+ * these fields is refused like any unknown field.
+ */
+export class CreatePrescriptionWithDetailsDto extends CreatePrescriptionDto {
+  @IsOptionalButNotNull()
+  @IsEnum(PrescriptionPriority)
+  priority?: PrescriptionPriority;
+
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(1, 80)
+  strength?: string;
+
+  @IsOptionalButNotNull()
+  @IsEnum(PrescriptionDoseForm)
+  doseForm?: PrescriptionDoseForm;
+
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  durationValue?: number;
+
+  @IsOptionalButNotNull()
+  @IsEnum(PrescriptionDurationUnit)
+  durationUnit?: PrescriptionDurationUnit;
+
+  /** ehr.prescriptions.quantity_to_dispense is numeric(12,4). */
+  @IsOptionalButNotNull()
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0.0001)
+  @Max(99_999_999.9999)
+  quantityToDispense?: number;
+
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(1, 80)
+  quantityUnit?: string;
+}
+
 export class UpdatePrescriptionDto extends VersionedUpdateDto {
   @IsOptionalButNotNull()
   @IsEnum(OrderStatus)

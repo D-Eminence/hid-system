@@ -98,4 +98,35 @@ describe('PharmacyApiClient transport contract', () => {
       { status: 200, headers: { 'content-type': 'application/json' } }));
     await expect(client.getWorkItem(base.id, context)).rejects.toMatchObject({ status: 502 });
   });
+
+  // 0122: an own work item may carry the prescription details (PRESCRIPTION_DISPENSING_DETAILS_ENABLED on); the
+  // client keeps each one sent, leaves out each one not sent, and refuses a malformed one.
+  it('keeps a work item\'s optional prescription details, and leaves them out when absent', async () => {
+    const base = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-e89b-42d3-a456-426614174004',
+      facilityId: context.facilityId, sourceEhrPrescriptionId: '123e4567-e89b-42d3-a456-426614174005',
+      sourceEncounterId: '123e4567-e89b-42d3-a456-426614174006', sourceEhrPrescriptionVersion: 1, status: 'accepted',
+      medication: { codeSystem: null, code: null, display: 'Amoxicillin 500 mg capsule' }, doseQuantity: 1,
+      doseUnit: 'capsule', routeCode: 'oral', frequency: 'Every 8 hours', instructions: 'After food',
+      acceptedAt: '2026-11-01T09:00:00.000Z', version: 1, dispensing: null };
+    const detailed = { ...base, medication: { ...base.medication, strength: '500 mg', doseForm: 'capsule' },
+      priority: 'urgent', duration: { value: 7, unit: 'day' }, quantityToDispense: 21, quantityUnit: 'capsule' };
+    const respond = (payload: unknown) => {
+      global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify(payload),
+        { status: 200, headers: { 'content-type': 'application/json' } }));
+    };
+    const client = new PharmacyApiClient({ baseUrl: 'https://pharmacy.test' });
+    respond({ items: [detailed, { ...base, duration: { value: 3, unit: 'day' } }, base] });
+    const [own, dated, plain] = await client.listWorkItems(context);
+    expect(own).toMatchObject({ medication: detailed.medication, priority: 'urgent', duration: { value: 7, unit: 'day' },
+      quantityToDispense: 21, quantityUnit: 'capsule' });
+    expect(dated?.duration).toEqual({ value: 3, unit: 'day' });
+    expect(Object.keys(dated ?? {})).not.toEqual(expect.arrayContaining(['priority']));
+    for (const key of ['priority', 'duration', 'quantityToDispense', 'quantityUnit']) expect(plain).not.toHaveProperty(key);
+    expect(Object.keys(plain?.medication ?? {})).toEqual(['codeSystem', 'code', 'display']);
+    for (const malformed of [{ priority: 1 }, { duration: { value: 1.5, unit: 'day' } }, { duration: '7 days' },
+      { quantityToDispense: '21' }, { quantityUnit: '' }, { medication: { ...base.medication, strength: 500 } }]) {
+      respond({ ...base, ...malformed });
+      await expect(client.getWorkItem(base.id, context)).rejects.toMatchObject({ status: 502 });
+    }
+  });
 });
