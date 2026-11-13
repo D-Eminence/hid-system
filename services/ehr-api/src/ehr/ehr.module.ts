@@ -4,6 +4,7 @@ import { StaffEvidenceService } from './patient-records/staff-evidence.service';
 import { StaffChatScopeService } from './patient-records/staff-chat-scope.service';
 import { Module } from '@nestjs/common';
 import { ClinicalNotesModule } from './clinical-notes/clinical-notes.module';
+import { AllergiesModule } from './allergies/allergies.module';
 import { DiagnosesModule } from './diagnoses/diagnoses.module';
 import { EncountersModule } from './encounters/encounters.module';
 import { LabRequestsModule } from './lab-requests/lab-requests.module';
@@ -35,6 +36,7 @@ import { HealthProfileService } from './health-profile/health-profile.service';
     VitalsModule,
     OcrIntegrationModule,
     DiagnosesModule,
+    AllergiesModule,
     PrescriptionsModule,
     LabRequestsModule,
     OrderRoutesModule,
