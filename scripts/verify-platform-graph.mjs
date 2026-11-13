@@ -304,7 +304,7 @@ assert.deepEqual(dispatcherIam.Statement[0].Action.sort(),
 assert.doesNotMatch(dispatcherIam.Statement[0].Resource, /\*/,
   'Event dispatcher IAM example must bind an exact event bus ARN')
 
-const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812'
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041'
 const dockerContracts = new Map([
   ['identity-api', 'CMD ["dist/main.js"]'],
   ['ehr-api', 'CMD ["dist/main.js"]'],
