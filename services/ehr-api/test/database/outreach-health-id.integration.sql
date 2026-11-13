@@ -327,7 +327,20 @@ select pg_temp.idrt('5g a fourth in 24 hours is refused', 'P0001: OUTREACH_HEALT
   pg_temp.start_sql(3, '6c0a0000-0000-4000-8000-000000000036', 'ade.three@example.invalid', repeat('3', 64)));
 
 -- 6. No phone, suspension, the sealed demo, redaction.
-select pg_temp.hi_case('6a no phone', '23514: OUTREACH_HEALTH_ID_NO_PHONE', session_user::text, null, null, null, null,
+select pg_temp.hi_case('6a no phone: the email path still works', 'ok', session_user::text, null, null, null, null,
+  format($d$do $x$ begin
+    set local session_replication_role = replica;
+    update outreach.registration_cases set phone = null where id = '6c080000-0000-4000-8000-000000000002';
+    set local session_replication_role = origin;
+    perform set_config('app.actor_subject', 'synthetic:hi-organiser', true),
+      set_config('app.facility_id', '6c000000-0000-4000-8000-000000000002', true),
+      set_config('app.membership_id', '6c030000-0000-4000-8000-000000000001', true),
+      set_config('app.purpose_of_use', 'direct-care', true);
+    set local role hid_identity_api_runtime;
+    %s;
+  end $x$$d$, replace(pg_temp.start_sql(2, '6c0a0000-0000-4000-8000-000000000002', 'two@example.invalid', null),
+    'select challenge_id::text from', 'perform challenge_id from')), false, 'statement');
+select pg_temp.hi_case('6a2 no phone, but a phone hash is sent', '22023: OUTREACH_HEALTH_ID_EMAIL_INVALID', session_user::text, null, null, null, null,
   format($d$do $x$ begin
     set local session_replication_role = replica;
     update outreach.registration_cases set phone = null where id = '6c080000-0000-4000-8000-000000000002';
@@ -367,7 +380,57 @@ select pg_temp.support('6d support redacts registration 2', 'redacted', 'synthet
 select pg_temp.idrt('6e a redacted registration', '55000: OUTREACH_REGISTRATION_REDACTED',
   $s$select full_name from identity.outreach_health_id_registration('6c080000-0000-4000-8000-000000000002')$s$);
 
--- 7. Result.
+
+-- 7. No contact at all (registration 4: an adult with no phone; registration 3 keeps its phone).
+create function pg_temp.unclaimed_sql(n integer, hid text, phone_hmac text, claim text) returns text language sql as $$
+  select format($i$select concat_ws('/', hid_code, claim_expires_at > clock_timestamp() + interval '179 days')
+    from identity.outreach_health_id_create_unclaimed('6c080000-0000-4000-8000-00000000000%s', %L,
+      case when %L::text is null then null else decode(repeat('cd', 40), 'hex') end, %L,
+      case when %L::text is null then null else 'contact-v1' end, %L, 'claim-v1')$i$,
+    n, hid, phone_hmac, phone_hmac, phone_hmac, claim) $$;
+grant execute on function pg_temp.unclaimed_sql(integer, text, text, text) to public;
+set local session_replication_role = replica;
+update outreach.registration_cases set age_years = 52, phone = null where id = '6c080000-0000-4000-8000-000000000004';
+set local session_replication_role = origin;
+select pg_temp.idrt('7a the phone already on a Health ID is refused', '23505: OUTREACH_HEALTH_ID_PHONE_TAKEN',
+  pg_temp.unclaimed_sql(3, 'HID-RTE6D3', repeat('5', 64), repeat('a', 64)));
+select pg_temp.idrt('7b a bad claim hash', '22023: OUTREACH_HEALTH_ID_REQUEST_INVALID',
+  pg_temp.unclaimed_sql(4, 'HID-RTE6D4', null, 'not-hex'));
+select pg_temp.idrt('7c a phone hash for a registration with no phone', '22023: OUTREACH_HEALTH_ID_REQUEST_INVALID',
+  pg_temp.unclaimed_sql(4, 'HID-RTE6D4', repeat('4', 64), repeat('a', 64)));
+select pg_temp.idrt('7d created with no contact', 'HID-RTE6D4/t',
+  pg_temp.unclaimed_sql(4, 'HID-RTE6D4', null, repeat('a', 64)), true);
+select pg_temp.hi_case('7e no account, no contact, no assurance; the record and the claim', 't/t/t/f/unclaimed/f/t/5',
+  session_user::text, null, null, null, null,
+  $s$select concat_ws('/', patient.account_id is null, patient.email_lookup_hmac is null and patient.phone_lookup_hmac is null,
+          patient.dob is null, exists (select 1 from identity.patient_assurance_states a where a.patient_id = patient.id),
+          link.created_via, link.possible_duplicate, claim.code_hmac = repeat('a', 64) and claim.claimed_at is null,
+          claim.max_attempts)
+       from identity.patients patient
+       join identity.outreach_registration_health_ids link on link.patient_id = patient.id
+       join identity.outreach_health_id_claims claim on claim.patient_id = patient.id
+      where patient.hid_code = 'HID-RTE6D4'$s$);
+select pg_temp.idrt('7f a second time: already created, the Health ID only', '23505: OUTREACH_HEALTH_ID_ALREADY_CREATED',
+  pg_temp.unclaimed_sql(4, 'HID-RTE6D5', null, repeat('b', 64)));
+select pg_temp.idrt('7g the email path on it: already created', '23505: OUTREACH_HEALTH_ID_ALREADY_CREATED',
+  pg_temp.start_sql(4, '6c0a0000-0000-4000-8000-000000000044', 'four@example.invalid', null));
+select pg_temp.hi_case('7h outreach-api sees it as unclaimed', '6c080000-0000-4000-8000-000000000004=HID-RTE6D4/unclaimed',
+  'hid_outreach_api_runtime', 'synthetic:hi-organiser', '6c000000-0000-4000-8000-000000000002',
+  '6c030000-0000-4000-8000-000000000001', 'direct-care',
+  $s$select registration_case_id || '=' || hid_code || '/' || created_via
+       from identity.outreach_registration_health_ids_for(array['6c080000-0000-4000-8000-000000000004']::uuid[])$s$);
+select pg_temp.idrt('7i the counts', '2/1/1/1/0',
+  $s$select concat_ws('/', created_at_outreach, created_with_email, created_unclaimed, unclaimed_not_yet_claimed,
+       possible_duplicates) from identity.outreach_health_id_counts()$s$);
+select pg_temp.hi_case('7j the audit row carries flags only', 'none/false/false', session_user::text, null, null, null, null,
+  $s$select concat_ws('/', details->>'channel', details->>'phoneOnRecord', details->>'possibleDuplicate')
+       from audit.events where action = 'outreach.health-id.created-unclaimed'
+        and resource_id = '6c080000-0000-4000-8000-000000000004'$s$);
+select pg_temp.hi_case('7k no runtime reads the claims', 'f/f', session_user::text, null, null, null, null,
+  $s$select concat_ws('/', has_table_privilege('hid_identity_api_runtime', 'identity.outreach_health_id_claims', 'SELECT'),
+       has_function_privilege('hid_outreach_api_runtime', 'identity.outreach_health_id_counts()', 'EXECUTE'))$s$);
+
+-- 8. Result.
 do $$
 declare failed text;
 begin
