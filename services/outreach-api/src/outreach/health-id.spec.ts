@@ -105,7 +105,8 @@ describe('Outreach assisted Health ID routes (0119)', () => {
       const created = healthIdProblem(new IdentityApiProblem(409, { code: 'OUTREACH_HEALTH_ID_ALREADY_CREATED',
         detail: 'A Health ID was already created for this person.', healthId: 'HID-ZZ9YY8' }), 'confirm');
       expect(created).toMatchObject({ code: 'OUTREACH_HEALTH_ID_ALREADY_CREATED',
-        message: 'A Health ID was already created for this person.', problemOptions: { extensions: { healthId: 'HID-ZZ9YY8' } } });
+        message: 'A Health ID was already created for this person.',
+        problemOptions: { extensions: { healthId: 'HID-ZZ9YY8' }, details: { healthId: 'HID-ZZ9YY8' } } });
       expect(created.getStatus()).toBe(409);
       const limited = healthIdProblem(new IdentityApiProblem(429, { code: 'OUTREACH_HEALTH_ID_TOO_MANY_CODES',
         detail: 'Too many codes for this person today. Try again tomorrow.', retryAfterSeconds: 900 }), 'start');
@@ -123,9 +124,11 @@ describe('Outreach assisted Health ID routes (0119)', () => {
         setHeader: jest.fn() };
       const host = { switchToHttp: () => ({ getRequest: () => ({ correlationId: 'c' }), getResponse: () => response }) };
       filter.catch(new DomainProblem(409, 'OUTREACH_HEALTH_ID_ALREADY_CREATED', 'Already.', undefined,
-        { extensions: { healthId: 'HID-ZZ9YY8', code: 'X' } }), host as unknown as ArgumentsHost);
+        { extensions: { healthId: 'HID-ZZ9YY8', code: 'X', details: 'x' }, details: { healthId: 'HID-ZZ9YY8' } }),
+        host as unknown as ArgumentsHost);
+      // Top-level healthId and details.healthId (the website's client keeps only details and errors).
       expect(response.json).toHaveBeenLastCalledWith(expect.objectContaining({ code: 'OUTREACH_HEALTH_ID_ALREADY_CREATED',
-        detail: 'Already.', healthId: 'HID-ZZ9YY8' }));
+        detail: 'Already.', healthId: 'HID-ZZ9YY8', details: { healthId: 'HID-ZZ9YY8' } }));
       filter.catch(new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CODES', 'Too many.', undefined,
         { headers: { 'Retry-After': '900' } }), host as unknown as ArgumentsHost);
       expect(response.setHeader).toHaveBeenCalledWith('Retry-After', '900');

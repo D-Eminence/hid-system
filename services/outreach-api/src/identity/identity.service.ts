@@ -88,7 +88,7 @@ export function healthIdProblem(error: unknown, step: 'start' | 'confirm'): Doma
   const retryAfter = typeof payload.retryAfterSeconds === 'number' && Number.isSafeInteger(payload.retryAfterSeconds)
     && payload.retryAfterSeconds > 0 ? payload.retryAfterSeconds : undefined;
   return new DomainProblem(error.status, error.code ?? 'IDENTITY_REQUEST_REFUSED', error.message, undefined, {
-    ...(healthId ? { extensions: { healthId } } : {}),
+    ...(healthId ? { extensions: { healthId }, details: { healthId } } : {}),
     ...(retryAfter ? { headers: { 'Retry-After': String(retryAfter) } } : {}),
   });
 }
