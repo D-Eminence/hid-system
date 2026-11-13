@@ -483,7 +483,10 @@ describe('OutreachHealthIdService (0119)', () => {
       bound = { [`phone:${createContactLookupHmac('phone', '+2348012345678')}`]: true };
       const limited = await refusal(service().createUnclaimed({ caseId }, context));
       expect(limited).toMatchObject({ code: 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS', status: 429,
-        message: 'Too many Health IDs created in a short time. Wait a few minutes.' });
+        message: expect.stringMatching(/^Too many Health IDs created in a short time\. Try again in \d+ minutes?\.$/) });
+      expect(limited.message).toBe(`Too many Health IDs created in a short time. Try again in ${
+        Math.max(1, Math.ceil(Number(limited.extensions?.retryAfterSeconds) / 60))} minute${
+        Math.max(1, Math.ceil(Number(limited.extensions?.retryAfterSeconds) / 60)) === 1 ? '' : 's'}.`);
       expect(limited.extensions?.retryAfterSeconds).toEqual(expect.any(Number));
       expect(Number(limited.extensions?.retryAfterSeconds)).toBeGreaterThan(0);
       expect(Number(limited.extensions?.retryAfterSeconds)).toBeLessThanOrEqual(60);

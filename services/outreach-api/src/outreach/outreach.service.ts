@@ -15,6 +15,7 @@ import type { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import type { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
 import type { ConfirmHealthIdDto, StartHealthIdDto } from './dto/health-id.dto';
 import { registrationHealthIds } from './registration-health-ids';
+import { OUTREACH_HEALTH_ID_CREATE_READ_BUDGET_MS, ReadBudgetExceeded, withinBudget } from './health-id-budget';
 import type { OutreachCampaign, CampaignMember, CampaignRole, CampaignStaff } from './campaign.types';
 import { registrationCase, type OutreachRegistrationCase, type RegistrationRow } from './outreach.types';
 import { isOutreachTenant, OUTREACH_NOTES_LIMIT, outreachRuleProblem, tenantNoHealthIdLink } from './outreach-tenant';
@@ -660,11 +661,22 @@ export class OutreachService {
    * 201 answers that earlier read with the new Health ID set on it.
    */
   async createUnverifiedHealthId(caseId: string, context: DataAccessContext) {
-    const before = await this.get(caseId, context);
+    // Each read is bounded so the whole call (read, Identity's 20 s, read)
+    // ends well before the browser (45 s) and the gateway (60 s) give up: a
+    // slow read before Identity is asked refuses 503 with nothing created; a
+    // slow read after answers the earlier read with the new Health ID.
+    const before = await withinBudget(this.get(caseId, context), OUTREACH_HEALTH_ID_CREATE_READ_BUDGET_MS)
+      .catch((error: unknown) => {
+        if (error instanceof ReadBudgetExceeded) {
+          throw new DomainProblem(503, 'OUTREACH_HEALTH_ID_UNAVAILABLE',
+            "The Health ID can't be created right now. Try again in a few minutes.", undefined, { exposeDetail: true });
+        }
+        throw error;
+      });
     const created = await this.identity.createUnclaimedHealthId(caseId, context);
     let registration: OutreachRegistrationCase;
     try {
-      registration = await this.get(caseId, context);
+      registration = await withinBudget(this.get(caseId, context), OUTREACH_HEALTH_ID_CREATE_READ_BUDGET_MS);
     } catch (error) {
       this.logger.warn({ event: 'outreach.health-id.create-unverified.reread-failed', caseId,
         correlationId: context.correlationId,

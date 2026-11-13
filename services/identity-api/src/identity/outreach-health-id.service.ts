@@ -78,7 +78,6 @@ const MESSAGES = {
   emailTaken: 'This email is already used by another Health ID or account. Use another email.',
   phoneTaken: 'This phone number already has a Health ID. Ask them to sign in with it.',
   tooManyCodes: 'Too many codes for this person today. Try again tomorrow.',
-  tooManyCreations: 'Too many Health IDs created in a short time. Wait a few minutes.',
   cooldown: 'Wait a minute before sending another code.',
   emailDaily: 'Too many codes were sent to this email today. Try again tomorrow, or use another email.',
   volunteerDaily: 'You have sent too many codes today. Try again tomorrow.',
@@ -319,7 +318,11 @@ export class OutreachHealthIdService {
       };
     });
     if (preflight.retryAfterSeconds !== null) {
-      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS', MESSAGES.tooManyCreations, undefined,
+      // The words give the real wait (refused tries count too, so it can be
+      // most of the hour), as Retry-After does.
+      const minutes = Math.max(1, Math.ceil(preflight.retryAfterSeconds / 60));
+      throw new DomainProblem(429, 'OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS',
+        `Too many Health IDs created in a short time. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, undefined,
         { extensions: { retryAfterSeconds: preflight.retryAfterSeconds } });
     }
     if (!preflight.ready) throw this.unavailable();

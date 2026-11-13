@@ -4901,7 +4901,7 @@ a redaction that ran while the claim was still being created. The Health ID and 
 | 422 | `OUTREACH_HEALTH_ID_UNDER_18` | as in 49.1 |
 | 422 | `OUTREACH_HEALTH_ID_PHONE_INVALID` | the registration has a phone that is not a valid number |
 | 422 | `OUTREACH_HEALTH_ID_NAME_INVALID` | the registration's name has nothing printable: "The person's name on this registration can't be used for a Health ID. Check the name and register them again." |
-| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS` | "Too many Health IDs created in a short time. Wait a few minutes."; `Retry-After` |
+| 429 | `OUTREACH_HEALTH_ID_TOO_MANY_CREATIONS` | "Too many Health IDs created in a short time. Try again in *N* minutes." (*N* from the real wait; refused tries count, so it can be most of the hour); `Retry-After` |
 | 403 | `OUTREACH_HEALTH_ID_NOT_AVAILABLE` | not an outreach group, or a sealed demo/QA one |
 | 423 | `OUTREACH_ORGANISER_SUSPENDED` | the group is paused by Health ID |
 | 503 | `OUTREACH_HEALTH_ID_UNAVAILABLE` | "The Health ID couldn't be created right now. Try again in a few minutes." |
