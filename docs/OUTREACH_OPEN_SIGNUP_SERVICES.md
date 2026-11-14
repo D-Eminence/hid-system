@@ -50,7 +50,7 @@ group: at most 50 invitations wait at once and 30 are made a day per group, canc
 `OUTREACH_INVITATION_DELIVERY_PAUSED`); one address gets at most 3 outreach invitation emails a day from all groups
 (past that the invitation is made, not emailed, and answers `deliveryOutcome: 'unknown'`). `POST identity/outreach/patient-authorization` refuses 403 `OUTREACH_TENANT_NO_HEALTH_ID_LINK`
 at an outreach group. A staff session signed in or refreshed from an `outreach.` origin idles out after
-`AUTH_OUTREACH_REFRESH_TTL_SECONDS` (default 900). Activation and "Start an outreach group" answer
+`AUTH_OUTREACH_REFRESH_TTL_SECONDS` (default 86400: 24 hours, never past the staff absolute lifetime). Activation and "Start an outreach group" answer
 `organiserStatus: 'active'` and `label: 'Unverified organiser'`. There is no review route.
 
 outreach-api: `CreateRegistrationCaseDto` takes `consent { textVersion, language (en|yo|ha|ig|pcm), method

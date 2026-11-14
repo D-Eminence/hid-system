@@ -135,11 +135,11 @@ afterEach(() => {
 });
 
 describe('session lifetimes with both switches off (production today)', () => {
-  it('keeps today\'s values: 15 min / 24 h on outreach., 8 h / 24 h elsewhere, patients 7 d / 30 d', async () => {
+  it('keeps today\'s values: 24 h / 24 h on outreach., 8 h / 24 h elsewhere, patients 7 d / 30 d', async () => {
     const cases: Array<[CredentialIdentity, string | undefined, number, number]> = [
-      [linkIdentity('own_device'), outreachOrigin, 15 * MINUTE, DAY],
-      [linkIdentity('standard'), outreachOrigin, 15 * MINUTE, DAY],
-      [linkIdentity(), outreachOrigin, 15 * MINUTE, DAY],
+      [linkIdentity('own_device'), outreachOrigin, DAY, DAY],
+      [linkIdentity('standard'), outreachOrigin, DAY, DAY],
+      [linkIdentity(), outreachOrigin, DAY, DAY],
       [linkIdentity('own_device'), 'https://ehr.healthidentitydirectory.com', 8 * HOUR, DAY],
       [linkIdentity(), undefined, 8 * HOUR, DAY],
     ];
@@ -195,12 +195,12 @@ describe('session lifetimes with OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED on', ()
       absoluteExpiresAt: new Date(now.getTime() + 2 * DAY) });
   });
 
-  it('keeps a shared phone at the 15-minute idle lock and never asks the database', async () => {
+  it('keeps a shared phone at today\'s outreach lifetime (24 hours from sign-in) and never asks the database', async () => {
     const { service, insertedSession, eligibilityCalls } = harness({ eligible: true });
     const result = await service.issue(linkIdentity('standard'), { correlationId: 'shared', origin: outreachOrigin });
-    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 15 * MINUTE));
+    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + DAY));
     expect(result.longVolunteerSession).toBe(false);
-    expect(insertedSession()).toEqual({ expiresAt: new Date(now.getTime() + 15 * MINUTE),
+    expect(insertedSession()).toEqual({ expiresAt: new Date(now.getTime() + DAY),
       absoluteExpiresAt: new Date(now.getTime() + DAY) });
     expect(eligibilityCalls()).toHaveLength(0);
   });
@@ -210,7 +210,7 @@ describe('session lifetimes with OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED on', ()
       const { service, insertedSession } = harness({ eligible });
       const result = await service.issue(linkIdentity('own_device'), { correlationId: 'not-eligible', origin: outreachOrigin });
       expect(result.longVolunteerSession).toBe(false);
-      expect(insertedSession()).toEqual({ expiresAt: new Date(now.getTime() + 15 * MINUTE),
+      expect(insertedSession()).toEqual({ expiresAt: new Date(now.getTime() + DAY),
         absoluteExpiresAt: new Date(now.getTime() + DAY) });
     }
   });
@@ -273,7 +273,7 @@ describe('refresh of a long volunteer family', () => {
     const staff = harness({ eligible: true, oldSession: stored('staff', new Date(now.getTime() + 20 * HOUR), null,
       new Date(now.getTime() - 4 * HOUR)) });
     await expect(staff.service.refresh(REFRESH_TOKEN, { correlationId: 'staff', origin: outreachOrigin }))
-      .resolves.toMatchObject({ refreshExpiresAt: new Date(now.getTime() + 15 * MINUTE) });
+      .resolves.toMatchObject({ refreshExpiresAt: new Date(now.getTime() + 20 * HOUR) });
     expect(staff.eligibilityCalls()).toHaveLength(0);
     const patient = harness({ eligible: false, principal: patientActor, oldSession: stored('patient', longAbsolute) });
     await expect(patient.service.refresh(REFRESH_TOKEN, { correlationId: 'patient' }))
@@ -335,7 +335,7 @@ describe('refresh of a long volunteer family', () => {
       const staff = harness({ eligible: false, oldSession: stored('staff', absolute, null,
         new Date(absolute.getTime() - DAY)) });
       await expect(staff.service.refresh(REFRESH_TOKEN, { correlationId: 'ordinary', origin: outreachOrigin }))
-        .resolves.toMatchObject({ refreshExpiresAt: new Date(Math.min(now.getTime() + 15 * MINUTE, absolute.getTime())) });
+        .resolves.toMatchObject({ refreshExpiresAt: new Date(Math.min(now.getTime() + DAY, absolute.getTime())) });
       expect(staff.eligibilityCalls()).toHaveLength(0);
     }
   });
@@ -347,7 +347,7 @@ describe('refresh of a long volunteer family', () => {
       .rejects.toBeInstanceOf(UnauthorizedException);
     const short = harness({ eligible: false, oldSession: stored('staff', new Date(now.getTime() + 20 * HOUR), null, null) });
     await expect(short.service.refresh(REFRESH_TOKEN, { correlationId: 'fallback-short', origin: outreachOrigin }))
-      .resolves.toMatchObject({ refreshExpiresAt: new Date(now.getTime() + 15 * MINUTE) });
+      .resolves.toMatchObject({ refreshExpiresAt: new Date(now.getTime() + 20 * HOUR) });
   });
 
   it('keeps reuse detection unchanged: a revoked long token revokes the whole family', async () => {

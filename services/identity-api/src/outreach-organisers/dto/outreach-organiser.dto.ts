@@ -114,7 +114,8 @@ export class SignedInOutreachInvitationDto extends OutreachInvitationProofDto {}
  * A new helper accepts by the link alone and is signed in without a password
  * (POST /identity/outreach-invitations/accept-link). `device` is the
  * person's choice: 'own' (this is my own phone, keep me signed in) or
- * 'shared' (sign me out after 15 minutes).
+ * 'shared' (today's outreach session: signed in for up to 24 hours from
+ * sign-in, AUTH_OUTREACH_REFRESH_TTL_SECONDS).
  */
 export class AcceptOutreachInvitationByLinkDto extends OutreachInvitationProofDto {
   @IsIn(['outreach-invitation'])

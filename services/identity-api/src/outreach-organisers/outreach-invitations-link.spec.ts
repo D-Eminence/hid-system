@@ -99,7 +99,7 @@ const loginResult = (longVolunteerSession: boolean) => ({
       roles: ['outreach_volunteer'], permissions: [], isPrimary: true } },
   accessToken: 'access', refreshToken: 'refresh', csrfToken: 'csrf',
   expiresAt: new Date('2026-11-14T09:15:00.000Z'),
-  refreshExpiresAt: new Date(longVolunteerSession ? '2026-11-21T09:00:00.000Z' : '2026-11-14T09:15:00.000Z'),
+  refreshExpiresAt: new Date(longVolunteerSession ? '2026-11-21T09:00:00.000Z' : '2026-11-15T09:00:00.000Z'),
   longVolunteerSession,
 });
 
@@ -215,7 +215,8 @@ describe('POST /identity/outreach-invitations/accept-link with the switch on', (
   it('asks for the standard session on a shared phone, and answers the session the phone really got', async () => {
     const shared = make({ issue: jest.fn(async () => loginResult(false)) });
     await expect(shared.controller.accept({ ...input, device: 'shared' }, request(), response() as never))
-      .resolves.toMatchObject({ signedIn: true, deviceTrust: 'standard' });
+      // Today's outreach lifetime: signed in until 24 hours after sign-in.
+      .resolves.toMatchObject({ signedIn: true, deviceTrust: 'standard', signedInUntil: '2026-11-15T09:00:00.000Z' });
     expect(shared.issue).toHaveBeenCalledWith(expect.objectContaining({ deviceTrust: 'standard', signInVia: 'invitation_link' }),
       expect.anything());
     // "Own phone" asked, but the long session was not given (its switch off, or not volunteer-only).

@@ -128,7 +128,7 @@ export class OutreachInvitationsPublicController {
  * website falls back to the password form). Then Origin, the signed-in check,
  * Turnstile (action outreach-invitation), the network's window and the
  * command. `device` 'own' asks for the long volunteer session, 'shared' keeps
- * the 15-minute idle lock. If the sign-in fails after the invitation was
+ * today's outreach lifetime (24 hours from sign-in by default). If the sign-in fails after the invitation was
  * accepted, the answer is still 200 with signedIn false: the link is used,
  * and the person signs in with "Forgot password?".
  */

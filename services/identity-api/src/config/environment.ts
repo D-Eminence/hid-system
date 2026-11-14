@@ -88,11 +88,13 @@ const environmentSchema = z.object({
   // lifetime is capped at it (TokenService), never refused at boot.
   AUTH_PATIENT_REFRESH_TTL_SECONDS: z.coerce.number().int().min(900).max(604800).default(604800),
   AUTH_PATIENT_ABSOLUTE_TTL_SECONDS: z.coerce.number().int().min(3600).max(2592000).default(2592000),
-  // Staff sessions used from an outreach. site (plan PR-3, field critique): a
-  // short idle lock, 15 minutes by default, because volunteers share phones
-  // and laptops at events. Applied at sign-in and at every refresh whose
-  // Origin is an outreach. host; the absolute lifetime is the staff one.
-  AUTH_OUTREACH_REFRESH_TTL_SECONDS: z.coerce.number().int().min(300).max(28800).default(900),
+  // Staff sessions used from an outreach. site: how long a session may sit
+  // unused. Owner decision of 2026-11-14 (event morning): "15 minutes is too
+  // small. Leave them auto login for 24hrs" - so by default a volunteer stays
+  // signed in for the staff absolute lifetime (24 hours from sign-in) however
+  // long the phone sits idle. Applied at sign-in and at every refresh whose
+  // Origin is an outreach. host; never past the absolute lifetime.
+  AUTH_OUTREACH_REFRESH_TTL_SECONDS: z.coerce.number().int().min(300).max(86400).default(86400),
   // Password-free sign-in for outreach volunteers (Phase 1). Both switches are
   // off unless set to 'true', so production behaves exactly as before.
   // OUTREACH_INVITE_LINK_SIGN_IN_ENABLED: POST
@@ -101,8 +103,9 @@ const environmentSchema = z.object({
   OUTREACH_INVITE_LINK_SIGN_IN_ENABLED: booleanString,
   // OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED: a volunteer-only login that chose
   // "this is my own phone" at a password-free sign-in stays signed in for the
-  // pair below instead of the staff pair. A shared phone keeps the 15-minute
-  // idle lock. Turning it off ends those long sessions at their next refresh.
+  // pair below instead of the staff pair. A shared phone keeps today's
+  // outreach lifetime (24 hours from sign-in, above). Turning it off ends
+  // those long sessions at their next refresh.
   OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED: booleanString,
   // The volunteer "own phone" session: 7 days idle, 30 days at most by default.
   AUTH_OUTREACH_VOLUNTEER_REFRESH_TTL_SECONDS: z.coerce.number().int().min(900).max(604800).default(604800),
