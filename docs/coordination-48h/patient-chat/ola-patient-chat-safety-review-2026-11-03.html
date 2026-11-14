@@ -1,0 +1,204 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Patient Chat Safety Review</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+/* Layout: one reading column of a clinical safety brief; tables scroll inside their own box on phones. */
+:root {
+  --bg: #fbfbf8;
+  --surface: #f1f3ef;
+  --ink: #1d2a2b;
+  --ink-2: #4a5859;
+  --line: #d6dcd6;
+  --accent: #1f6b5c;
+  --gap-bg: #fbefd6; --gap-ink: #6b4500;
+  --stop-bg: #f8e0dc; --stop-ink: #8a2416;
+  --ok-bg: #dcefe6; --ok-ink: #1a5641;
+  --display: "Newsreader", Georgia, "Times New Roman", serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141b1c; --surface: #1c2526; --ink: #e5ebe8; --ink-2: #a9b6b3; --line: #33403f; --accent: #6cc3ad;
+    --gap-bg: #3a2c10; --gap-ink: #f1c878; --stop-bg: #3f1d18; --stop-ink: #f4a597; --ok-bg: #173327; --ok-ink: #8fd6b6;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141b1c; --surface: #1c2526; --ink: #e5ebe8; --ink-2: #a9b6b3; --line: #33403f; --accent: #6cc3ad;
+  --gap-bg: #3a2c10; --gap-ink: #f1c878; --stop-bg: #3f1d18; --stop-ink: #f4a597; --ok-bg: #173327; --ok-ink: #8fd6b6;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); }
+.page { max-width: 54rem; margin: 0 auto; padding-block: 40px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 36px; }
+header { display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--line); padding-bottom: 24px; }
+.eyebrow { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); margin: 0; }
+h1 { font: 600 2.2rem/1.15 var(--display); margin: 0; text-wrap: balance; }
+h2 { font: 600 1.45rem/1.25 var(--display); margin: 0; text-wrap: balance; }
+h3 { font: 600 1rem/1.4 var(--body); margin: 0; }
+p { margin: 0; max-width: 68ch; }
+section { display: flex; flex-direction: column; gap: 14px; }
+.quote { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; color: var(--ink-2); font-style: italic; max-width: 68ch; }
+ul, ol { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 6px; max-width: 70ch; }
+.short { background: var(--surface); border-radius: 6px; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; min-width: 40rem; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); font-weight: 500; background: var(--surface); }
+tr:last-child td { border-bottom: 0; }
+td:first-child { font-weight: 500; white-space: nowrap; }
+.pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+.pill.gap { background: var(--gap-bg); color: var(--gap-ink); }
+.pill.stop { background: var(--stop-bg); color: var(--stop-ink); }
+.pill.ok { background: var(--ok-bg); color: var(--ok-ink); }
+.ref { font: 12.5px/1.5 var(--mono); color: var(--ink-2); word-break: break-word; }
+.decisions { list-style: none; padding: 0; gap: 12px; counter-reset: q; }
+.decisions li { counter-increment: q; display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 4px 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.decisions li::before { content: counter(q); font: 600 1.1rem var(--display); color: var(--accent); }
+.decisions .rec { grid-column: 2; color: var(--ink-2); font-size: 14px; }
+.rec b { color: var(--ink); font-weight: 600; }
+.safeguards { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 12px; }
+.sg { border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sg h3 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.sg code { font: 12px var(--mono); color: var(--accent); }
+.sg p { font-size: 14px; color: var(--ink-2); }
+footer { border-top: 1px solid var(--line); padding-top: 18px; display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; color: var(--ink-2); }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="page">
+<header>
+  <p class="eyebrow">For the owner, through the coordinator · from Ola, clinical owner · 3 November 2026</p>
+  <h1>The patient chat already reads nearly the whole record</h1>
+  <p>This review covers your decision D3 on the patient chat. I checked what the chat does today before designing anything, and what I found changes the question.</p>
+  <p class="quote">"the patient chat should be able to read all medical records especially the one healthcare provider will be using when they open patient profile in ehr" (owner, 3 Nov)</p>
+</header>
+
+<section class="short" aria-labelledby="short">
+  <h2 id="short">In short</h2>
+  <ul>
+    <li><b>The chat production runs is not the careful "release set only" design.</b> That design (hid-system #95) is on hid-system main only and was never deployed. Production runs the staging backend, and its patient chat already reads almost every record from every facility.</li>
+    <li><b>It reads things a patient should not get without a clinician.</b> These include clinicians' working diagnoses and their free-text notes, the reason a test was ordered, cancelled prescriptions, Lab's correction reasons, and released results such as HIV or pregnancy tests, with nobody there to explain them.</li>
+    <li><b>Everything goes to the AI service, processed in the US, with nothing removed first.</b> That includes the patient's name and date of birth. The patient is not told about this before asking. No privacy assessment (DPIA) covers the chat.</li>
+    <li><b>The production settings say the chat is on.</b> Whether those settings are live has not been checked, and DevOps should confirm it today.</li>
+    <li><b>So D3 mostly confirms what the chat already does.</b> The real work is making it safe. My recommendation is to hide the patient chat page until safeguards S1 to S8 below are in, and to keep the staff chat on.</li>
+  </ul>
+</section>
+
+<section aria-labelledby="today">
+  <h2 id="today">What the live chat reads today</h2>
+  <p>This is the backend production runs (hid-system <code>staging-novu-ci-20261005</code> at 34d69557). The chat reads the patient's own records from every facility, through the patient's own sign-in.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Record</th><th>What the chat reads</th><th>Clinical view</th></tr></thead>
+    <tbody>
+      <tr><td>Visits</td><td>Finished visits only.</td><td><span class="pill ok">Safe</span></td></tr>
+      <tr><td>Notes</td><td>Signed notes, including notes from visits that are not finished yet. Never drafts.</td><td><span class="pill gap">Gap</span> Care still in progress reaches the patient.</td></tr>
+      <tr><td>Diagnoses</td><td>From finished visits: every status except "entered in error", so refuted, provisional and differential diagnoses too, with the clinician's free-text notes.</td><td><span class="pill stop">Unsafe</span> A patient can read a working diagnosis such as "possible cancer", or one the clinician ruled out. Notes can name partners or parents.</td></tr>
+      <tr><td>Prescriptions</td><td>Everything except drafts and "entered in error", so cancelled ones too.</td><td><span class="pill gap">Gap</span> A stopped medicine can read as current.</td></tr>
+      <tr><td>Lab requests</td><td>Every request, with the clinician's clinical information, the reason for the test.</td><td><span class="pill stop">Unsafe</span> "Query HIV" can show before any result exists.</td></tr>
+      <tr><td>Lab results</td><td>Released results from every facility, with Lab's correction reason. While a correction waits, the result silently disappears.</td><td><span class="pill stop">Unsafe</span> Sensitive results reach the patient with no clinician. There is no "Talk to your doctor" line, although you asked for one (decision 32).</td></tr>
+      <tr><td>Vitals</td><td>Finished visits, with corrections applied.</td><td><span class="pill ok">Safe</span> Vitals cannot be marked entered in error.</td></tr>
+      <tr><td>Documents</td><td>Scanned text and the file name of clean documents from finished visits, of any classification, "restricted" included.</td><td><span class="pill gap">Gap</span> Restricted documents should stay out.</td></tr>
+      <tr><td>Imported history</td><td>All of it, earlier versions included.</td><td><span class="pill ok">Allowed</span> As you decided (decision 6).</td></tr>
+      <tr><td>Profile</td><td>Name, date of birth, sex, state and country. These are sent to the AI for summary, condition and search questions.</td><td><span class="pill gap">Gap</span> The AI needs age and sex, not the name.</td></tr>
+      <tr><td>Withdrawn visits</td><td>Notes, prescriptions and lab requests from a visit that was cancelled or opened on the wrong patient stay readable.</td><td><span class="pill stop">Unsafe</span> Another patient's care can appear.</td></tr>
+      <tr><td>Not read</td><td>What the patient entered themselves (allergies, medicines, conditions), drafts, and records marked entered in error.</td><td>Allergies and the patient's own entries should be added.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section aria-labelledby="where">
+  <h2 id="where">Where the records go, and what guards them</h2>
+  <ul>
+    <li>Records go to the Claude API, processed in the US, with no step that removes names, dates of birth or free text. Search questions also send pieces of records to AWS Bedrock.</li>
+    <li>"View source record" can open any record the answer had as evidence, with every field, not only the records the answer cites.</li>
+    <li>One switch turns on both the patient chat and the staff chat, so there is no way to turn off the patient chat alone.</li>
+    <li>An answer that cites a record it was not given is refused. A correct citation does not prove the sentence is right, and short conversational answers are not checked at all.</li>
+    <li>The audit log holds counts only. Nothing records which records were sent to which service.</li>
+    <li>The patient sees no notice before the first question about what is read or who processes it.</li>
+    <li>No DPIA in either repo covers the chat. The only draft leaves online processing out. The privacy notice on the website's main branch, which may not be live yet, mentions "the service behind the Health ID chat assistant" and "other countries", but names neither Anthropic nor the US.</li>
+    <li>Where the chat should be processed is recorded three ways: the code says US, decision 33(1) says worldwide (for the staff chat), and decision 6 plans a move to the EU, not built yet.</li>
+  </ul>
+</section>
+
+<section aria-labelledby="on">
+  <h2 id="on">Is it switched on?</h2>
+  <ul>
+    <li><b>Website: on.</b> The production settings open the Chat page on app. (health <code>config/production.json:19</code>).</li>
+    <li><b>Backend: the settings say on.</b> The committed production settings turn on AI and US processing for the EHR service, and have since 19 October (hid-system dev branch, <code>infra/terraform/environments/production.tfvars:61</code> and <code>:223</code>, passed on at <code>modules/application/workloads.tf:281</code> and <code>:284</code>).</li>
+    <li><b>Not checked: whether those settings are live.</b> DevOps can confirm in one step: read the live EHR service's settings, or ask one question from a test patient account. We also don't know whether any real patients use the chat today.</li>
+  </ul>
+</section>
+
+<section aria-labelledby="plan">
+  <h2 id="plan">What D3 would read, safely</h2>
+  <p>The rule: what the clinician sees in the chart, from every facility, leaving out anything unfinished, withdrawn, staff-only or about other people.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Record</th><th>Read</th><th>Leave out</th></tr></thead>
+    <tbody>
+      <tr><td>Visits and notes</td><td>Signed notes from finished visits, current version.</td><td>Drafts, open visits, earlier versions, entered in error.</td></tr>
+      <tr><td>Diagnoses</td><td>Confirmed diagnoses: name, code, status, dates.</td><td>Clinicians' notes; refuted, unconfirmed and differential diagnoses. Provisional ones are question 4.</td></tr>
+      <tr><td>Prescriptions</td><td>Active, on hold and completed, with the status said plainly.</td><td>Drafts, cancelled, entered in error.</td></tr>
+      <tr><td>Lab requests</td><td>Test name, date and status.</td><td>The clinical information (the reason for the test).</td></tr>
+      <tr><td>Lab results</td><td>Released results, with "Talk to your doctor about what this result means".</td><td>Correction reasons; sensitive results until discussed (S4); any result with a correction waiting (S1).</td></tr>
+      <tr><td>Vitals</td><td>As today.</td><td>Correction reasons and staff details.</td></tr>
+      <tr><td>Documents</td><td>Scanned text of patient documents (classification "phi"), labelled "not checked by a clinician".</td><td>Restricted and internal documents, and file names.</td></tr>
+      <tr><td>Imported history</td><td>As today, with where it came from.</td><td>None.</td></tr>
+      <tr><td>Patient's own entries</td><td>Allergies, medicines, conditions, blood group, genotype, labelled "You added this".</td><td>None.</td></tr>
+      <tr><td>Never</td><td>None.</td><td>Other patients, staff names, the audit log, emergency-access events, the staff chat.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section aria-labelledby="sg">
+  <h2 id="sg">Safeguards</h2>
+  <p>S1 to S8 protect the patient and should come before the chat page opens again. S9 to S11 are needed before the chat is relied on at a real facility.</p>
+  <div class="safeguards">
+    <div class="sg"><h3><code>S1</code>Corrections</h3><p>Results show only once released, and never while a correction waits. In that case the chat says "The lab is correcting this result."</p></div>
+    <div class="sg"><h3><code>S2</code>Withdrawn records</h3><p>Nothing entered in error, cancelled, refuted or from a wrong-patient visit. Withdrawing a visit takes everything attached to it. Vitals can be marked entered in error.</p></div>
+    <div class="sg"><h3><code>S3</code>Finished visits</h3><p>Signed notes from finished visits only.</p></div>
+    <div class="sg"><h3><code>S4</code>Sensitive results</h3><p>HIV, hepatitis, STIs, pregnancy, cancer, genetic and mental health results, and critical results, wait until a clinician presses "Discussed with the patient". I approve the list.</p></div>
+    <div class="sg"><h3><code>S5</code>Talk to your doctor</h3><p>The server, not the AI, adds "Talk to your doctor about what this result means" to every answer that uses a result.</p></div>
+    <div class="sg"><h3><code>S6</code>Other people</h3><p>No clinicians' free text, no correction reasons, no file names. Health IDs, phone numbers and similar are removed before anything is sent.</p></div>
+    <div class="sg"><h3><code>S7</code>Send less</h3><p>The AI gets age and sex, not name and date of birth. The same rule applies to search.</p></div>
+    <div class="sg"><h3><code>S8</code>Source viewer</h3><p>It opens only records an answer cited, with safe fields and plain labels.</p></div>
+    <div class="sg"><h3><code>S9</code>Its own switch</h3><p>A switch for the patient chat alone, so it can stay off while the staff chat stays on.</p></div>
+    <div class="sg"><h3><code>S10</code>Tell the patient</h3><p>A notice before the first question: what is read, who processes it and where, and that answers can be wrong. The backend enforces it.</p></div>
+    <div class="sg"><h3><code>S11</code>DPIA and sign-off</h3><p>The DPIA names Anthropic, AWS Bedrock and Textract and one place of processing, and the DPO signs it. Each question's audit row records what was sent where. I sign off each record type after a safety test on made-up records.</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="decide">
+  <h2 id="decide">Decisions needed</h2>
+  <ol class="decisions">
+    <li><span>Is D3 for the chat only, with the Records page and the shared card staying as today?</span><span class="rec"><b>Recommended: yes.</b> Your 2 Nov "keep it as today" was about the Records page, and it never mentioned the chat.</span></li>
+    <li><span>Hide the patient chat page now, until S1 to S8 are in, and keep the staff chat on?</span><span class="rec"><b>Recommended: yes.</b> That needs a small website release that turns the Chat page off. Turning AI off in the backend would stop the staff chat too.</span></li>
+    <li><span>Should the chat wait until a visit is finished before reading its notes?</span><span class="rec"><b>Recommended: yes.</b></span></li>
+    <li><span>Which diagnoses: confirmed only, or provisional too?</span><span class="rec"><b>Recommended: confirmed only</b>, as in your decision 4.</span></li>
+    <li><span>Sensitive and critical results: (a) a clinician presses "Discussed with the patient" first, (b) never in the chat, or (c) shown after a set number of days?</span><span class="rec"><b>Recommended: (a).</b> I approve the list of tests.</span></li>
+    <li><span>Leave out clinicians' free text (diagnosis notes, reasons for tests, Lab's correction reasons) and cancelled prescriptions?</span><span class="rec"><b>Recommended: yes.</b></span></li>
+    <li><span>Until the EU move, where is the patient chat processed: the US, as the code does now, or worldwide?</span><span class="rec"><b>Recommended: say the US</b>, because that is what the code and settings do. The DPIA must say one place.</span></li>
+    <li><span>Should "Talk to your doctor" also go with diagnoses, or with results only?</span><span class="rec"><b>Recommended: both.</b></span></li>
+    <li><span>Who builds: Session E or a new session the backend and its migration, Lekan the patient website, and Ola the "Discussed with the patient" button in the EHR, with the coordinator giving the migration number?</span><span class="rec"><b>Recommended: yes.</b> One migration is needed. Numbers 0104 to 0120 are already taken, so the coordinator gives the next one.</span></li>
+  </ol>
+</section>
+
+<footer>
+  <h3>How this was checked</h3>
+  <p>Three read-only reviews mapped the live chat and the clinician's chart. Then eight independent checkers, two per area, tried to disprove each claim from the code. Corrections from that check are already included above. Code read at hid-system staging 34d69557, main 6ef652e9 and dev 5dd00db5, and health main c43ad5cd. Nothing was changed.</p>
+  <p>Not checked: the live settings and the live database, the DPIA document itself (it is in neither repo), and unmerged branches that may change the Lab paths.</p>
+  <p>The full design, with file and line references for every point, is in Ola's notes and available on request.</p>
+</footer>
+</div>
+
+</body></html>
