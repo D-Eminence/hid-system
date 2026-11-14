@@ -23,9 +23,33 @@ interface SessionRow {
   absolute_expires_at: Date;
   revoked_at: Date | null;
   authentication_method: 'password' | 'oidc';
+  /** When the family's first session was issued (its sign-in); null only if no row is found. */
+  family_issued_at?: Date | null;
 }
 
 class RefreshRotationConflict extends Error {}
+
+/**
+ * The refresh session by its token hash, with when its family's first
+ * session was issued (family_issued_at), which tells a long volunteer family
+ * from an ordinary staff one by its whole lifetime.
+ */
+export const REFRESH_SESSION_SQL = `select session.id::text, session.account_id::text,
+          account.subject as actor_subject, session.family_id::text,
+          session.access_jti::text, session.account_token_version::text as token_version,
+          session.authentication_method, session.session_kind, session.patient_id::text,
+          session.expires_at, session.absolute_expires_at, session.revoked_at,
+          (select min(family.issued_at) from auth.sessions family
+            where family.family_id = session.family_id) as family_issued_at
+     from auth.sessions session
+     join auth.accounts account on account.id = session.account_id
+    where session.refresh_token_sha256 = $1
+      and account.status = 'active'
+      and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+      and account.token_version = session.account_token_version`;
+
+/** Slack when telling a long volunteer family from a staff one by its lifetime. */
+const LONG_FAMILY_MARGIN_MS = 60_000;
 
 export interface SessionEventMetadata {
   correlationId: string;
@@ -148,20 +172,7 @@ export class TokenService {
 
   async refresh(refreshToken: string, event: SessionEventMetadata): Promise<LoginResult> {
     const refreshHash = this.sha256(refreshToken);
-    const existing = await this.database.query<SessionRow>(
-      `select session.id::text, session.account_id::text,
-              account.subject as actor_subject, session.family_id::text,
-              session.access_jti::text, session.account_token_version::text as token_version,
-              session.authentication_method, session.session_kind, session.patient_id::text,
-              session.expires_at, session.absolute_expires_at, session.revoked_at
-         from auth.sessions session
-         join auth.accounts account on account.id = session.account_id
-        where session.refresh_token_sha256 = $1
-          and account.status = 'active'
-          and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
-          and account.token_version = session.account_token_version`,
-      [refreshHash],
-    );
+    const existing = await this.database.query<SessionRow>(REFRESH_SESSION_SQL, [refreshHash]);
     const oldSession = existing.rows[0];
     if (!oldSession) throw new UnauthorizedException('Invalid refresh session');
 
@@ -569,12 +580,18 @@ export class TokenService {
   }
 
   /**
-   * A family is a long volunteer one when its absolute expiry lies beyond
-   * what any staff session can have (AUTH_ABSOLUTE_TTL_SECONDS from now):
-   * the existing column marks it, so no migration is needed.
+   * A family is a long volunteer one when its whole lifetime (absolute expiry
+   * minus the time its first session was issued) is longer than any staff
+   * session can have (AUTH_ABSOLUTE_TTL_SECONDS, plus a minute's margin).
+   * It is decided from the family's own lifetime, not from the time left, so
+   * the re-check and the switch-off revoke cover the family's last day too.
+   * The existing columns mark it, so no migration is needed. If the first
+   * issue time is missing, it falls back to the time left.
    */
   private isLongFamily(session: SessionRow, now: Date): boolean {
-    return session.absolute_expires_at.getTime() > now.getTime() + this.environment.AUTH_ABSOLUTE_TTL_SECONDS * 1_000;
+    const staffLifetime = this.environment.AUTH_ABSOLUTE_TTL_SECONDS * 1_000 + LONG_FAMILY_MARGIN_MS;
+    const start = session.family_issued_at ? new Date(session.family_issued_at) : now;
+    return session.absolute_expires_at.getTime() - start.getTime() > staffLifetime;
   }
 
   private newRefreshToken(sessionId: string, method: 'local' | 'oidc'): string {
