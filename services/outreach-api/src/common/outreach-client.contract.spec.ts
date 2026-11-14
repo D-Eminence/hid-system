@@ -66,4 +66,18 @@ describe('OutreachApiClient transport contract', () => {
     expect(second[1].headers).not.toHaveProperty('if-match');
     expect(read[1].method).toBe('GET');
   });
+
+  it('sends genotype and blood group as given and reads what the service accepts (0122)', async () => {
+    const caseId = '123e4567-e89b-42d3-a456-426614174004';
+    const fetchMock = jest.fn().mockImplementation(async () => new Response(JSON.stringify({ screening: null,
+      accepts: ['genotype', 'bloodGroup'] }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    global.fetch = fetchMock;
+    const client = new OutreachApiClient({ baseUrl: 'https://outreach.test' });
+    await client.saveRegistrationScreening(caseId, { genotype: 'AS', bloodGroup: 'O-' }, undefined, context,
+      'outreach-screen-key-9012');
+    await expect(client.getRegistrationScreening(caseId, context))
+      .resolves.toEqual({ screening: null, accepts: ['genotype', 'bloodGroup'] });
+    const [save] = fetchMock.mock.calls as [[string, RequestInit]];
+    expect(JSON.parse(String(save[1].body))).toEqual({ genotype: 'AS', bloodGroup: 'O-' });
+  });
 });

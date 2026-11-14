@@ -24,9 +24,15 @@ import { assertScreeningPlausible, normalizeScreening, registrationScreening, sc
 
 interface IdempotencyRow { request_sha256: string; registration_case_id: string }
 
-/** Whether a registration has a screening the session can see (0118's row-level security). */
-const HAS_SCREENING = `exists (select 1 from outreach.registration_screenings screening
-  where screening.registration_case_id=registration_cases.id) as has_screening`;
+/**
+ * The registration's screening as the session can see it (0118's row-level
+ * security), in one read per registration: null when there is none, else its
+ * genotype and blood group (0122) for the registration list and its export.
+ * hasScreening is whether it is not null.
+ */
+const HAS_SCREENING = `(select jsonb_build_object('genotype',screening.genotype,'bloodGroup',screening.blood_group)
+  from outreach.registration_screenings screening
+  where screening.registration_case_id=registration_cases.id) as screening_summary`;
 
 /** A screening save's answer: 201 for the first save, 200 for an update or a replay. */
 export interface ScreeningSaveResult { status: 200 | 201; screening: RegistrationScreening }
@@ -326,12 +332,15 @@ export class OutreachService {
    * (no If-Match), the next version on an update (If-Match the current one).
    * The last save's Idempotency-Key and digest are kept on the row: the same
    * key and body answer the current screening (200), the same key with another
-   * body 409 IDEMPOTENCY_CONFLICT.
+   * body 409 IDEMPOTENCY_CONFLICT. Genotype and blood group (0122) left out of
+   * the body are kept as recorded on an update (null clears them).
    */
   async saveScreening(caseId: string, input: SaveRegistrationScreeningDto, expectedVersion: number | undefined,
     idempotencyKey: string, context: DataAccessContext): Promise<ScreeningSaveResult> {
     const fields = normalizeScreening(input);
     assertScreeningPlausible(fields);
+    // Genotype and blood group (0122) are in the digest only when the body
+    // carried them, so a body without them digests as before.
     const digest = requestDigest('registration_screening_save', { caseId, ...fields });
     const values = [fields.bpSystolic, fields.bpDiastolic, fields.pulseBpm, fields.temperatureC, fields.weightKg,
       fields.heightCm, fields.glucoseValue, fields.glucoseUnit, fields.glucoseTiming, fields.malariaRdt,
@@ -354,11 +363,11 @@ export class OutreachService {
           row = (await client.query<ScreeningRow>(`insert into outreach.registration_screenings (
             registration_case_id,facility_id,${SCREENING_COLUMNS},version,
             recorded_by_account_id,recorded_by_membership_id,updated_by_account_id,updated_by_membership_id,
-            idempotency_key,request_sha256
+            idempotency_key,request_sha256,genotype,blood_group
           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,1,
-            $22,$23,$22,$23,$24,$25) returning *`,
+            $22,$23,$22,$23,$24,$25,$26,$27) returning *`,
           [caseId, context.facilityId, ...values, context.actor.accountId, context.membershipId,
-            idempotencyKey, digest])).rows[0];
+            idempotencyKey, digest, fields.genotype ?? null, fields.bloodGroup ?? null])).rows[0];
         } else {
           if (expectedVersion === undefined) throw new DomainProblem(409, 'OUTREACH_SCREENING_EXISTS',
             'This person already has a screening; reload it and save your changes over it');
@@ -369,10 +378,13 @@ export class OutreachService {
             glucose_value=$8,glucose_unit=$9,glucose_timing=$10,malaria_rdt=$11,hearing_left=$12,hearing_right=$13,
             main_complaint=$14,seen_by_clinician=$15,clinician_name=$16,outcome=$17,medicines_given=$18::jsonb,
             referred=$19,referred_to=$20,version=version+1,updated_by_account_id=$21,updated_by_membership_id=$22,
-            idempotency_key=$23,request_sha256=$24
+            idempotency_key=$23,request_sha256=$24,
+            genotype=case when $26::boolean then $27::text else genotype end,
+            blood_group=case when $28::boolean then $29::text else blood_group end
             where registration_case_id=$1 and version=$25 returning *`,
           [caseId, ...values, context.actor.accountId, context.membershipId, idempotencyKey, digest,
-            expectedVersion])).rows[0];
+            expectedVersion, fields.genotype !== undefined, fields.genotype ?? null,
+            fields.bloodGroup !== undefined, fields.bloodGroup ?? null])).rows[0];
           if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'The screening changed; reload before saving');
         }
         if (!row) throw new Error('Outreach screening save returned no row');

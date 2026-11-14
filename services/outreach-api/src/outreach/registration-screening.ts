@@ -1,5 +1,5 @@
 import { DomainProblem } from '../common/problem';
-import type { SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
+import type { BloodGroup, Genotype, SaveRegistrationScreeningDto } from './dto/registration-screening.dto';
 
 /** One medicine given, as saved and answered. */
 export interface ScreeningMedicine { name: string; dose: string | null }
@@ -25,10 +25,19 @@ export interface ScreeningFields {
   medicinesGiven: ScreeningMedicine[];
   referred: boolean | null;
   referredTo: string | null;
+  /**
+   * Since 0122: absent when the save did not carry it (an update then keeps
+   * the recorded value), null to leave it empty or clear it.
+   */
+  genotype?: Genotype | null;
+  bloodGroup?: BloodGroup | null;
 }
 
 /** The screening of an outreach registration as the API answers it. */
 export interface RegistrationScreening extends ScreeningFields {
+  /** Since 0122: always answered, null when not recorded. */
+  genotype: Genotype | null;
+  bloodGroup: BloodGroup | null;
   caseId: string;
   version: number;
   recordedAt: string;
@@ -57,6 +66,9 @@ export interface ScreeningRow {
   medicines_given: unknown;
   referred: boolean | null;
   referred_to: string | null;
+  /** 0122's columns (absent only on a row read before 0122). */
+  genotype?: Genotype | null;
+  blood_group?: BloodGroup | null;
   version: string | number;
   recorded_at: Date | string;
   recorded_by_membership_id: string;
@@ -72,7 +84,11 @@ const text = (value: string | null | undefined): string | null => {
 const nullable = <Value>(value: Value | null | undefined): Value | null => value ?? null;
 const decimal = (value: string | number | null): number | null => value === null ? null : Number(value);
 
-/** A save body with every field present (null when not given), texts trimmed. */
+/**
+ * A save body with every 0118 field present (null when not given), texts
+ * trimmed. Genotype and blood group (0122) are present only when the body
+ * carried them (null included), so a body without them digests as before.
+ */
 export function normalizeScreening(input: SaveRegistrationScreeningDto): ScreeningFields {
   return {
     bpSystolic: nullable(input.bpSystolic),
@@ -95,6 +111,8 @@ export function normalizeScreening(input: SaveRegistrationScreeningDto): Screeni
       name: text(medicine.name) ?? '', dose: text(medicine.dose) })),
     referred: nullable(input.referred),
     referredTo: text(input.referredTo),
+    ...(input.genotype === undefined ? {} : { genotype: input.genotype }),
+    ...(input.bloodGroup === undefined ? {} : { bloodGroup: input.bloodGroup }),
   };
 }
 
@@ -172,6 +190,8 @@ export function registrationScreening(row: ScreeningRow): RegistrationScreening 
       dose: typeof medicine.dose === 'string' ? medicine.dose : null })),
     referred: row.referred,
     referredTo: row.referred_to,
+    genotype: row.genotype ?? null,
+    bloodGroup: row.blood_group ?? null,
     version: Number(row.version),
     recordedAt: new Date(row.recorded_at).toISOString(),
     recordedByMembershipId: row.recorded_by_membership_id,

@@ -4,8 +4,9 @@
 -- members only), versioned, range-checked, never deleted by the runtime and
 -- deleted when the registration is redacted; the registration's area (set
 -- once, cleared on redaction); the outreach-group notes cap at 1000; the
--- organiser terms 2026-11-01 and 2026-11-14. Rollback-only. Fictional people
--- and places only; ids start 5c0.
+-- organiser terms 2026-11-01 and 2026-11-14. Since 0122, the optional
+-- genotype and blood group (section 4f). Rollback-only. Fictional people and
+-- places only; ids start 5c0.
 --
 -- Fixtures are inserted with session_replication_role = replica (the
 -- retention suite's). Every case runs as the production runtime role under
@@ -35,6 +36,28 @@ begin
             'identity.activate_outreach_organiser_for_account(text,text,text,text,character,bytea,text)'::regprocedure)
             and prosrc like '%not in (''2026-11-01'', ''2026-11-14'')%') <> 2 then
     raise exception 'the screening objects are not as 0118 makes them';
+  end if;
+  -- 0122: two nullable text columns with no default, each with its validated
+  -- CHECK; the runtime's table grant covers them; no other runtime reads them.
+  if (select count(*) from pg_attribute where attrelid = 'outreach.registration_screenings'::regclass
+        and attname in ('genotype', 'blood_group') and not attisdropped and not attnotnull and not atthasdef
+        and atttypid = 'text'::regtype) <> 2
+     or (select count(*) from pg_constraint where conrelid = 'outreach.registration_screenings'::regclass
+          and contype = 'c' and convalidated
+          and conname in ('registration_screenings_genotype_check', 'registration_screenings_blood_group_check')) <> 2
+     or not has_column_privilege('hid_outreach_api_runtime', 'outreach.registration_screenings', 'genotype',
+                                 'SELECT,INSERT,UPDATE')
+     or not has_column_privilege('hid_outreach_api_runtime', 'outreach.registration_screenings', 'blood_group',
+                                 'SELECT,INSERT,UPDATE')
+     or exists (select 1 from pg_roles role_row where role_row.rolname like 'hid\_%'
+                 and role_row.rolname <> 'hid_outreach_api_runtime'
+                 and role_row.oid <> (select relowner from pg_class where oid = 'outreach.registration_screenings'::regclass)
+                 and not pg_has_role(role_row.oid, 'hid_outreach_api_runtime', 'USAGE')
+                 and not pg_has_role('hid_outreach_api_runtime', role_row.oid, 'USAGE')
+                 and (has_column_privilege(role_row.oid, 'outreach.registration_screenings', 'genotype', 'SELECT')
+                      or has_column_privilege(role_row.oid, 'outreach.registration_screenings', 'blood_group', 'SELECT')))
+  then
+    raise exception 'the genotype and blood group columns are not as 0122 makes them';
   end if;
 end $$;
 
@@ -339,6 +362,51 @@ select pg_temp.sc_case('4e a suspended group records no screening', '55000: OUTR
     %s;
   end $x$$d$, pg_temp.screen_insert(3, 'pulse_bpm', '80')), false, 'statement');
 
+-- 4f. Genotype and blood group (0122), both optional: every code is taken,
+-- anything else is refused by name, and null is the default.
+select pg_temp.organiser('4f genotype ' || code, 'rows 1', pg_temp.screen_insert(3, 'genotype', quote_literal(code)),
+  false, 'count') from unnest(array['AA', 'AS', 'AC', 'SS', 'SC', 'CC', 'unknown']) code;
+select pg_temp.organiser('4g blood group ' || code, 'rows 1', pg_temp.screen_insert(3, 'blood_group', quote_literal(code)),
+  false, 'count') from unnest(array['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown']) code;
+select pg_temp.organiser('4h genotype ' || quote_literal(code) || ' is refused',
+  '23514: new row for relation "registration_screenings" violates check constraint "registration_screenings_genotype_check"',
+  pg_temp.screen_insert(3, 'genotype', quote_literal(code)), false, 'statement')
+  from unnest(array['XX', 'aa', 'AA ', 'SA', '', 'Not known']) code;
+select pg_temp.organiser('4i blood group ' || quote_literal(code) || ' is refused',
+  '23514: new row for relation "registration_screenings" violates check constraint "registration_screenings_blood_group_check"',
+  pg_temp.screen_insert(3, 'blood_group', quote_literal(code)), false, 'statement')
+  from unnest(array['A+ ', 'o+', U&'A\2212', 'AB', 'O', '', 'Not known']) code;
+select pg_temp.organiser('4j null genotype and blood group are taken', 'rows 1',
+  pg_temp.screen_insert(3, 'genotype, blood_group', 'null, null'), false, 'count');
+select pg_temp.organiser('4k a screening saved without them leaves both null', 'null/null',
+  $s$select coalesce(genotype, 'null') || '/' || coalesce(blood_group, 'null') from outreach.registration_screenings
+      where registration_case_id = '5c080000-0000-4000-8000-000000000005'$s$);
+select pg_temp.organiser('4l the next version records them', 'rows 1',
+  $s$update outreach.registration_screenings set genotype = 'AS', blood_group = 'O-', version = 3,
+      idempotency_key = 'screening-suite-key-0003', request_sha256 = repeat('d', 64)
+      where registration_case_id = '5c080000-0000-4000-8000-000000000005' and version = 2$s$, true, 'count');
+select pg_temp.organiser('4m they read back with the version', 'AS/O-/3',
+  $s$select concat_ws('/', genotype, blood_group, version) from outreach.registration_screenings
+      where registration_case_id = '5c080000-0000-4000-8000-000000000005'$s$);
+select pg_temp.organiser('4n changing them without the next version is refused', '23514: OUTREACH_SCREENING_VERSION_INVALID',
+  $s$update outreach.registration_screenings set genotype = 'SS'
+      where registration_case_id = '5c080000-0000-4000-8000-000000000005'$s$, false, 'statement');
+select pg_temp.organiser('4o an update to a wrong blood group is refused',
+  '23514: new row for relation "registration_screenings" violates check constraint "registration_screenings_blood_group_check"',
+  $s$update outreach.registration_screenings set blood_group = 'O', version = 4
+      where registration_case_id = '5c080000-0000-4000-8000-000000000005'$s$, false, 'statement');
+select pg_temp.organiser('4p an update that leaves them out', 'rows 1',
+  $s$update outreach.registration_screenings set pulse_bpm = 90, version = 4,
+      idempotency_key = 'screening-suite-key-0004', request_sha256 = repeat('e', 64)
+      where registration_case_id = '5c080000-0000-4000-8000-000000000005' and version = 3$s$, true, 'count');
+select pg_temp.organiser('4q keeps them', 'AS/O-/90/4',
+  $s$select concat_ws('/', genotype, blood_group, pulse_bpm, version) from outreach.registration_screenings
+      where registration_case_id = '5c080000-0000-4000-8000-000000000005'$s$);
+select pg_temp.volunteer('4r a volunteer in no campaign sees no genotype or blood group', 'none',
+  $s$select genotype || blood_group from outreach.registration_screenings$s$);
+select pg_temp.doctor('4s nor does a doctor at another facility', 'none',
+  $s$select genotype || blood_group from outreach.registration_screenings$s$);
+
 -- 5. Redaction: support redacts registration 5; its screening goes and its area is cleared.
 select pg_temp.support('5a support redacts the registration', 'redacted', 'synthetic:sc-support',
   $s$select identity.admin_redact_outreach_registration('5c080000-0000-4000-8000-000000000005', 'Caller asked us to delete her details')$s$);
@@ -347,6 +415,9 @@ select pg_temp.sc_case('5b its screening is gone and its area cleared', '0/null'
                     where registration_case_id = '5c080000-0000-4000-8000-000000000005')::text || '/'
               || coalesce((select area from outreach.registration_cases
                             where id = '5c080000-0000-4000-8000-000000000005'), 'null')$s$);
+select pg_temp.sc_case('5b2 its genotype and blood group went with it (0122)', '0', session_user::text, null, null,
+  null, null, $s$select count(*)::text from outreach.registration_screenings
+                  where genotype is not null or blood_group is not null$s$);
 select pg_temp.organiser('5c no screening can be recorded for it again', '55000: OUTREACH_REGISTRATION_REDACTED',
   pg_temp.screen_insert(5, 'pulse_bpm', '80'), false, 'statement');
 -- The sweeper: registration 1 (closed 400 days ago) is expired, registration 2 (closed 10 days ago) is not.

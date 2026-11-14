@@ -41,6 +41,10 @@ export interface OutreachRegistrationCase {
   area?: string | null;
   /** Whether the registration has a screening (0118); absent before 0118. */
   hasScreening?: boolean;
+  /** The screening's genotype (0122), null when not recorded; absent before 0122. */
+  genotype?: OutreachGenotype | null;
+  /** The screening's blood group (0122), null when not recorded; absent before 0122. */
+  bloodGroup?: OutreachBloodGroup | null;
   resolvedPatientId: string | null;
   resolutionKind: 'linked_existing' | null;
   /** The Health ID created for this person at the outreach (0119), or null; absent before 0119. */
@@ -101,12 +105,24 @@ export interface CreateOutreachRegistrationCase {
   area?: string | null;
 }
 
+/** Genotypes (0122); 'unknown' means the person does not know it ("Not known"). */
+export const OUTREACH_GENOTYPES = ['AA', 'AS', 'AC', 'SS', 'SC', 'CC', 'unknown'] as const;
+export type OutreachGenotype = typeof OUTREACH_GENOTYPES[number];
+/** Blood groups (0122), stored with an ASCII '-'; 'unknown' means "Not known". */
+export const OUTREACH_BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'] as const;
+export type OutreachBloodGroup = typeof OUTREACH_BLOOD_GROUPS[number];
+
 export interface OutreachScreeningMedicine {
   name: string;
   dose?: string | null;
 }
 
-/** A registration's whole screening as saved (0118): every field optional; an omitted field is saved as null. */
+/**
+ * A registration's whole screening as saved (0118): every field optional; an
+ * omitted field is saved as null, except genotype and blood group (0122),
+ * which an update keeps when omitted. Send those two only to a service whose
+ * screening answer lists them in `accepts`: an older one refuses them (400).
+ */
 export interface SaveOutreachRegistrationScreening {
   bpSystolic?: number | null;
   bpDiastolic?: number | null;
@@ -127,12 +143,20 @@ export interface SaveOutreachRegistrationScreening {
   medicinesGiven?: readonly OutreachScreeningMedicine[] | null;
   referred?: boolean | null;
   referredTo?: string | null;
+  /** Since 0122. */
+  genotype?: OutreachGenotype | null;
+  /** Since 0122. */
+  bloodGroup?: OutreachBloodGroup | null;
 }
 
-/** A registration's screening as answered (0118). */
+/** A registration's screening as answered (0118; genotype and blood group since 0122). */
 export interface OutreachRegistrationScreening extends Required<Omit<SaveOutreachRegistrationScreening,
-  'medicinesGiven'>> {
+  'medicinesGiven' | 'genotype' | 'bloodGroup'>> {
   caseId: string;
+  /** Absent before 0122; null when not recorded. */
+  genotype?: OutreachGenotype | null;
+  /** Absent before 0122; null when not recorded. */
+  bloodGroup?: OutreachBloodGroup | null;
   medicinesGiven: readonly { name: string; dose: string | null }[];
   version: number;
   recordedAt: string;
@@ -142,6 +166,8 @@ export interface OutreachRegistrationScreening extends Required<Omit<SaveOutreac
 
 export interface OutreachRegistrationScreeningResult {
   screening: OutreachRegistrationScreening | null;
+  /** The optional fields beyond 0118's that the service takes (0122: genotype, bloodGroup); absent before 0122. */
+  accepts?: readonly string[];
 }
 
 export interface LinkOutreachExistingPatient {
@@ -248,7 +274,7 @@ export class OutreachApiClient {
   saveRegistrationScreening(caseId: string, input: SaveOutreachRegistrationScreening,
     expectedVersion: number | undefined, context: OutreachRequestContext, idempotencyKey: string,
     signal?: AbortSignal) {
-    return this.request<{ screening: OutreachRegistrationScreening }>(
+    return this.request<{ screening: OutreachRegistrationScreening; accepts?: readonly string[] }>(
       `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/screening`,
       'PUT', input, context, idempotencyKey, signal,
       expectedVersion === undefined ? undefined : `"${expectedVersion}"`);

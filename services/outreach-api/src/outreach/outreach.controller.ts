@@ -16,6 +16,14 @@ import { ConfirmHealthIdDto, requireEmptyHealthIdBody, StartHealthIdDto } from '
 import { OutreachService } from './outreach.service';
 
 /**
+ * The optional screening fields this service takes beyond 0118's, answered
+ * beside every screening read and save (since 0122), so the website sends them
+ * only to a service that takes them (an older one refuses an unknown field
+ * with 400).
+ */
+export const SCREENING_ACCEPTS = ['genotype', 'bloodGroup'] as const;
+
+/**
  * The version an If-Match header names ("3", W/"3" or 3); undefined when the
  * header is absent; 428 IF_MATCH_REQUIRED when it is present but names no
  * positive version.
@@ -120,20 +128,23 @@ export class OutreachController {
     return this.outreach.get(caseId, requireRequestContext(request));
   }
 
-  /** A registration's screening (0118): { screening: null } or { screening } with ETag "<version>". */
+  /**
+   * A registration's screening (0118): { screening: null } or { screening } with
+   * ETag "<version>", and since 0122 accepts: ['genotype', 'bloodGroup'].
+   */
   @Get(':caseId/screening')
   @RequirePermissions('outreach.registration.read')
   async getScreening(@Param('caseId', new ParseUUIDPipe()) caseId: string, @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response) {
     const screening = await this.outreach.getScreening(caseId, requireRequestContext(request));
     if (screening) response.setHeader('ETag', `"${screening.version}"`);
-    return { screening };
+    return { screening, accepts: SCREENING_ACCEPTS };
   }
 
   /**
    * Saves a registration's whole screening (0118). Idempotency-Key required;
    * If-Match "<version>" omitted for the first save (201), required after it
-   * (200). Answers { screening } with ETag "<version>".
+   * (200). Answers { screening, accepts } with ETag "<version>".
    */
   @Put(':caseId/screening')
   @RequirePermissions('outreach.registration.write')
@@ -146,7 +157,7 @@ export class OutreachController {
       requireRequestContext(request));
     response.status(result.status);
     response.setHeader('ETag', `"${result.screening.version}"`);
-    return { screening: result.screening };
+    return { screening: result.screening, accepts: SCREENING_ACCEPTS };
   }
 
   /*

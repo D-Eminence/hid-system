@@ -17,6 +17,12 @@ export const GLUCOSE_UNITS = ['mmol/L', 'mg/dL'] as const;
 export const GLUCOSE_TIMINGS = ['fasting', 'random'] as const;
 export const MALARIA_RDT_RESULTS = ['positive', 'negative', 'not_done'] as const;
 export const HEARING_RESULTS = ['pass', 'refer', 'not_done'] as const;
+/** Genotypes (0122); 'unknown' is "Not known" (the person does not know it). */
+export const GENOTYPES = ['AA', 'AS', 'AC', 'SS', 'SC', 'CC', 'unknown'] as const;
+/** Blood groups (0122), with an ASCII '-'; 'unknown' is "Not known". */
+export const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'] as const;
+export type Genotype = typeof GENOTYPES[number];
+export type BloodGroup = typeof BLOOD_GROUPS[number];
 /** The most medicines one screening lists (0118). */
 export const SCREENING_MEDICINES_LIMIT = 10;
 
@@ -32,7 +38,8 @@ export class ScreeningMedicineDto {
 
 /**
  * The whole screening of an outreach registration (0118), replaced on each
- * save. Every field is optional; an omitted field is saved as empty (null).
+ * save. Every field is optional; an omitted field is saved as empty (null),
+ * except genotype and blood group (0122): omitted, an update keeps them.
  * Shapes and lengths are checked here (400); plausible ranges and pairs are
  * checked by the service (422) and again by the database.
  */
@@ -60,4 +67,13 @@ export class SaveRegistrationScreeningDto {
 
   @IsOptional() @IsBoolean() referred?: boolean | null;
   @IsOptional() @Transform(trimmedText) @IsString() @MaxLength(200) referredTo?: string | null;
+
+  /**
+   * Since 0122. Omitted (undefined): a first save leaves it empty and an update
+   * keeps what was recorded, so a website that does not know the field never
+   * clears it. null clears it.
+   */
+  @IsOptional() @IsIn(GENOTYPES) genotype?: Genotype | null;
+  /** Since 0122; omitted or null as for genotype. */
+  @IsOptional() @IsIn(BLOOD_GROUPS) bloodGroup?: BloodGroup | null;
 }
