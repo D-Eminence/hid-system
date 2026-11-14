@@ -1,4 +1,4 @@
-import { OutreachApiClient, OutreachApiProblem } from '@hid/api-client';
+import { OutreachApiClient, OutreachApiProblem, type OutreachRegistrationCase } from '@hid/api-client';
 
 const context = { correlationId: 'client-contract-1234',
   facilityId: '123e4567-e89b-42d3-a456-426614174001', purposeOfUse: 'direct-care' as const,
@@ -79,5 +79,14 @@ describe('OutreachApiClient transport contract', () => {
       .resolves.toEqual({ screening: null, accepts: ['genotype', 'bloodGroup'] });
     const [save] = fetchMock.mock.calls as [[string, RequestInit]];
     expect(JSON.parse(String(save[1].body))).toEqual({ genotype: 'AS', bloodGroup: 'O-' });
+  });
+
+  it('types a registration with hasRecordedChecks and no health value (finding of 14 Nov 2026)', () => {
+    const registration: Pick<OutreachRegistrationCase, 'hasScreening' | 'hasRecordedChecks'> = {
+      hasScreening: true, hasRecordedChecks: false };
+    // @ts-expect-error a registration carries no genotype: it is read per person, with its own audit row.
+    const withGenotype: Partial<OutreachRegistrationCase> = { genotype: 'AS' };
+    expect(registration.hasRecordedChecks).toBe(false);
+    expect(withGenotype).toBeDefined();
   });
 });

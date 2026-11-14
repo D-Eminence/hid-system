@@ -26,16 +26,50 @@ interface IdempotencyRow { request_sha256: string; registration_case_id: string 
 
 /**
  * The registration's screening as the session can see it (0118's row-level
- * security), in one read per registration: null when there is none, else its
- * genotype and blood group (0122) for the registration list and its export.
- * hasScreening is whether it is not null.
+ * security), in one read per registration: null when there is none, else how
+ * many health checks it holds (0 for a form saved with nothing filled in).
+ * hasScreening is whether it is not null, hasRecordedChecks whether it is
+ * above 0. No health value leaves here: the registration list, read, create
+ * and link answers carry neither genotype nor blood group (finding of 14 Nov
+ * 2026: those are read one person at a time, with a screening read audit row).
+ * Genotype and blood group (0122) are counted through to_jsonb, so this read
+ * names no 0122 column and runs on a database without them.
  */
-const HAS_SCREENING = `(select jsonb_build_object('genotype',screening.genotype,'bloodGroup',screening.blood_group)
+const HAS_SCREENING = `(select num_nonnulls(screening.bp_systolic,screening.bp_diastolic,screening.pulse_bpm,
+    screening.temperature_c,screening.weight_kg,screening.height_cm,screening.glucose_value,screening.glucose_unit,
+    screening.glucose_timing,screening.malaria_rdt,screening.hearing_left,screening.hearing_right,
+    screening.main_complaint,screening.seen_by_clinician,screening.clinician_name,screening.outcome,screening.referred,
+    screening.referred_to,to_jsonb(screening)->>'genotype',to_jsonb(screening)->>'blood_group')
+    + (jsonb_array_length(screening.medicines_given) > 0)::int
   from outreach.registration_screenings screening
-  where screening.registration_case_id=registration_cases.id) as screening_summary`;
+  where screening.registration_case_id=registration_cases.id) as screening_values`;
+
+/** The optional screening fields beyond 0118's that a database with 0122 takes. */
+export const SCREENING_EXTRAS = ['genotype', 'bloodGroup'] as const;
+
+/**
+ * Whether the screenings table has 0122's columns, from a "select *" on it:
+ * node-postgres names every selected column in `fields`, rows or none. The
+ * service names genotype and blood_group only then, so this build runs on a
+ * database without 0122 (a release that rolls outreach-api before the
+ * migration): the health checks save and read as before, and the website is
+ * told (accepts: []) not to offer the two boxes.
+ */
+function hasBloodColumns(result: { fields?: readonly { name: string }[] }): boolean {
+  const names = new Set((result.fields ?? []).map((field) => field.name));
+  return names.has('genotype') && names.has('blood_group');
+}
 
 /** A screening save's answer: 201 for the first save, 200 for an update or a replay. */
-export interface ScreeningSaveResult { status: 200 | 201; screening: RegistrationScreening }
+export interface ScreeningSaveResult {
+  status: 200 | 201;
+  screening: RegistrationScreening;
+  /** The extra fields this database takes (0122): genotype and bloodGroup, or none before 0122. */
+  accepts: readonly string[];
+}
+
+/** A screening read: the screening or null, and the extra fields this database takes. */
+export interface ScreeningReadResult { screening: RegistrationScreening | null; accepts: readonly string[] }
 
 const SCREENING_COLUMNS = `bp_systolic,bp_diastolic,pulse_bpm,temperature_c,weight_kg,height_cm,
   glucose_value,glucose_unit,glucose_timing,malaria_rdt,hearing_left,hearing_right,main_complaint,
@@ -317,13 +351,23 @@ export class OutreachService {
    * 404 when the session cannot see the registration. One audit row (ids only).
    */
   async getScreening(caseId: string, context: DataAccessContext): Promise<RegistrationScreening | null> {
+    return (await this.readScreening(caseId, context)).screening;
+  }
+
+  /**
+   * getScreening, with the extra fields this database takes (0122's genotype
+   * and bloodGroup, or none on a database without them), for the answer's
+   * `accepts`.
+   */
+  async readScreening(caseId: string, context: DataAccessContext): Promise<ScreeningReadResult> {
     return this.database.withTransaction(context, async (client) => {
       await this.assertCaseVisible(client, caseId);
       const result = await client.query<ScreeningRow>(
         'select * from outreach.registration_screenings where registration_case_id=$1', [caseId]);
       await this.audit.recordWithClient(client, context, 'outreach.registration-screening.read', caseId);
       const row = result.rows[0];
-      return row ? registrationScreening(row) : null;
+      return { screening: row ? registrationScreening(row) : null,
+        accepts: hasBloodColumns(result) ? SCREENING_EXTRAS : [] };
     });
   }
 
@@ -333,7 +377,9 @@ export class OutreachService {
    * The last save's Idempotency-Key and digest are kept on the row: the same
    * key and body answer the current screening (200), the same key with another
    * body 409 IDEMPOTENCY_CONFLICT. Genotype and blood group (0122) left out of
-   * the body are kept as recorded on an update (null clears them).
+   * the body are kept as recorded on an update (null clears them). On a
+   * database without 0122 they are never named: a body giving either a value
+   * is refused (409 OUTREACH_SCREENING_FIELDS_NOT_TAKEN), null is ignored.
    */
   async saveScreening(caseId: string, input: SaveRegistrationScreeningDto, expectedVersion: number | undefined,
     idempotencyKey: string, context: DataAccessContext): Promise<ScreeningSaveResult> {
@@ -349,12 +395,19 @@ export class OutreachService {
     try {
       return await this.database.withTransaction(context, async (client): Promise<ScreeningSaveResult> => {
         await this.assertCaseVisible(client, caseId);
-        const current = (await client.query<ScreeningRow>(`select * from outreach.registration_screenings
-          where registration_case_id=$1 for update`, [caseId])).rows[0];
+        const selected = await client.query<ScreeningRow>(`select * from outreach.registration_screenings
+          where registration_case_id=$1 for update`, [caseId]);
+        const current = selected.rows[0];
+        const blood = hasBloodColumns(selected);
+        if (!blood && ((fields.genotype ?? null) !== null || (fields.bloodGroup ?? null) !== null)) {
+          throw new DomainProblem(409, 'OUTREACH_SCREENING_FIELDS_NOT_TAKEN',
+            'Genotype and blood group cannot be saved yet. Save the other health checks without them.');
+        }
+        const accepts = blood ? SCREENING_EXTRAS : [];
         if (current && current.idempotency_key === idempotencyKey) {
           if (current.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
             'The Idempotency-Key belongs to a different Outreach request');
-          return { status: 200, screening: registrationScreening(current) };
+          return { status: 200, screening: registrationScreening(current), accepts };
         }
         let row: ScreeningRow | undefined;
         if (!current) {
@@ -363,11 +416,11 @@ export class OutreachService {
           row = (await client.query<ScreeningRow>(`insert into outreach.registration_screenings (
             registration_case_id,facility_id,${SCREENING_COLUMNS},version,
             recorded_by_account_id,recorded_by_membership_id,updated_by_account_id,updated_by_membership_id,
-            idempotency_key,request_sha256,genotype,blood_group
+            idempotency_key,request_sha256${blood ? ',genotype,blood_group' : ''}
           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,1,
-            $22,$23,$22,$23,$24,$25,$26,$27) returning *`,
+            $22,$23,$22,$23,$24,$25${blood ? ',$26,$27' : ''}) returning *`,
           [caseId, context.facilityId, ...values, context.actor.accountId, context.membershipId,
-            idempotencyKey, digest, fields.genotype ?? null, fields.bloodGroup ?? null])).rows[0];
+            idempotencyKey, digest, ...(blood ? [fields.genotype ?? null, fields.bloodGroup ?? null] : [])])).rows[0];
         } else {
           if (expectedVersion === undefined) throw new DomainProblem(409, 'OUTREACH_SCREENING_EXISTS',
             'This person already has a screening; reload it and save your changes over it');
@@ -378,18 +431,18 @@ export class OutreachService {
             glucose_value=$8,glucose_unit=$9,glucose_timing=$10,malaria_rdt=$11,hearing_left=$12,hearing_right=$13,
             main_complaint=$14,seen_by_clinician=$15,clinician_name=$16,outcome=$17,medicines_given=$18::jsonb,
             referred=$19,referred_to=$20,version=version+1,updated_by_account_id=$21,updated_by_membership_id=$22,
-            idempotency_key=$23,request_sha256=$24,
+            idempotency_key=$23,request_sha256=$24${blood ? `,
             genotype=case when $26::boolean then $27::text else genotype end,
-            blood_group=case when $28::boolean then $29::text else blood_group end
+            blood_group=case when $28::boolean then $29::text else blood_group end` : ''}
             where registration_case_id=$1 and version=$25 returning *`,
           [caseId, ...values, context.actor.accountId, context.membershipId, idempotencyKey, digest,
-            expectedVersion, fields.genotype !== undefined, fields.genotype ?? null,
-            fields.bloodGroup !== undefined, fields.bloodGroup ?? null])).rows[0];
+            expectedVersion, ...(blood ? [fields.genotype !== undefined, fields.genotype ?? null,
+              fields.bloodGroup !== undefined, fields.bloodGroup ?? null] : [])])).rows[0];
           if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'The screening changed; reload before saving');
         }
         if (!row) throw new Error('Outreach screening save returned no row');
         await this.audit.recordWithClient(client, context, 'outreach.registration-screening.recorded', caseId);
-        return { status: current ? 200 : 201, screening: registrationScreening(row) };
+        return { status: current ? 200 : 201, screening: registrationScreening(row), accepts };
       }, { isolationLevel: 'SERIALIZABLE' });
     } catch (error) {
       // A concurrent first save that committed first and remains after the retry.

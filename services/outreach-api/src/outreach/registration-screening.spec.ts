@@ -49,15 +49,34 @@ function screeningRow(overrides: Record<string, unknown> = {}) {
     medicines_given: [{ name: 'Paracetamol', dose: '500 mg twice daily' }], referred: true,
     referred_to: 'General hospital', version: 1, recorded_at: new Date('2026-11-14T09:00:00.000Z'),
     recorded_by_membership_id: ids.membership, updated_at: new Date('2026-11-14T09:00:00.000Z'),
-    idempotency_key: key, request_sha256: digest, ...overrides };
+    idempotency_key: key, request_sha256: digest, genotype: null, blood_group: null, ...overrides };
+}
+
+/** The columns of outreach.registration_screenings after 0122 (before 0122: without the last two). */
+const SCREENING_COLUMNS_0122 = [...Object.keys(screeningRow()).filter((name) => !['genotype', 'blood_group'].includes(name)),
+  'genotype', 'blood_group'];
+/**
+ * A screening "select *" answers its columns in `fields`, rows or none, as
+ * node-postgres does; `blood` false is a database without 0122 (its rows lose
+ * the two keys too).
+ */
+function withFields(query: jest.Mock, blood = true): jest.Mock {
+  return jest.fn(async (sql: string, values?: unknown[]) => {
+    const result = await query(sql, values) as { rows: Record<string, unknown>[] } | undefined;
+    if (!result || !/^select \* from outreach\.registration_screenings/.test(sql)) return result;
+    const columns = blood ? SCREENING_COLUMNS_0122 : SCREENING_COLUMNS_0122.filter((name) => !['genotype', 'blood_group'].includes(name));
+    const rows = blood ? result.rows : result.rows.map(({ genotype: _g, blood_group: _b, ...row }) => row);
+    return { ...result, rows, fields: columns.map((name) => ({ name })) };
+  });
 }
 
 const caseVisible = { rows: [{ id: ids.case }] };
 const audit = { recordWithClient: jest.fn() };
 const identity = { authorizeExistingPatient: jest.fn() };
-function service(query: jest.Mock) {
+function service(query: jest.Mock, blood = true) {
+  const answered = withFields(query, blood);
   const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown,
-    _options?: unknown) => operation({ query })) };
+    _options?: unknown) => operation({ query: answered })) };
   return { database, outreach: new OutreachService(database as never, audit as never, identity as never) };
 }
 
@@ -209,7 +228,7 @@ describe('Outreach screening service (0118)', () => {
     const statements = jest.fn();
     const pool = { connect: async () => ({ release: () => undefined,
       query: async (sql: string, values?: unknown[]) => (/^(BEGIN|COMMIT|ROLLBACK|SET )/.test(sql)
-        || sql.includes('set_config(') ? { rows: [] } : statements(sql, values)) }) };
+        || sql.includes('set_config(') ? { rows: [] } : withFields(statements)(sql, values)) }) };
     Object.assign(database, { pool, pauseBeforeRetry: async () => undefined });
     const duplicate = () => Object.assign(new Error('duplicate key value'), { code: '23505' });
     statements.mockResolvedValueOnce(caseVisible).mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(duplicate())
@@ -283,24 +302,84 @@ describe('Outreach screening genotype and blood group (0122)', () => {
     }
   });
 
-  it('answers them on the registration list (for the export) and a read, null without a screening', async () => {
+  it('answers neither on the registration list, read or link: only whether checks were recorded', async () => {
     const caseRow = { id: ids.case, facility_id: ids.facility, campaign_id: null, local_command_id: ids.command,
       temporary_patient_id: 'tmp_123e4567-e89b-42d3-a456-426614174007', status: 'identity_resolution_pending',
       full_name: 'Ada Person', sex: 'female', age_years: 32, phone: null, operational_notes: null,
       resolved_patient_id: null, resolution_kind: null, row_version: '1', created_at: new Date(), updated_at: new Date() };
     const list = jest.fn().mockResolvedValueOnce({ rows: [
-      { ...caseRow, screening_summary: { genotype: 'AS', bloodGroup: 'A-' } },
-      { ...caseRow, id: ids.command, screening_summary: { genotype: null, bloodGroup: null } },
-      { ...caseRow, id: ids.facility, screening_summary: null }] })
+      { ...caseRow, screening_values: 3 },
+      { ...caseRow, id: ids.command, screening_values: 0 },
+      { ...caseRow, id: ids.facility, screening_values: null }] })
       .mockResolvedValueOnce({ rows: [] });
-    await expect(service(list).outreach.list(context)).resolves.toMatchObject([
-      { hasScreening: true, genotype: 'AS', bloodGroup: 'A-' }, { hasScreening: true, genotype: null, bloodGroup: null },
-      { hasScreening: false, genotype: null, bloodGroup: null }]);
-    expect(list.mock.calls[0][0]).toContain("jsonb_build_object('genotype',screening.genotype,'bloodGroup',screening.blood_group)");
-    expect(list.mock.calls[0][0]).not.toContain('exists (select 1 from outreach.registration_screenings');
-    const read = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, has_screening: false }] })
+    const page = await service(list).outreach.list(context);
+    expect(page).toMatchObject([{ hasScreening: true, hasRecordedChecks: true },
+      { hasScreening: true, hasRecordedChecks: false }, { hasScreening: false, hasRecordedChecks: false }]);
+    for (const item of page) {
+      expect(item).not.toHaveProperty('genotype');
+      expect(item).not.toHaveProperty('bloodGroup');
+    }
+    const sql = list.mock.calls[0][0] as string;
+    expect(sql).toContain('as screening_values');
+    // No 0122 column is named, so the list runs on a database without them, and no value leaves.
+    expect(sql).not.toMatch(/screening\.(genotype|blood_group)/);
+    expect(sql).toContain("to_jsonb(screening)->>'genotype'");
+    expect(sql).toContain('num_nonnulls(');
+    expect(sql).toContain('jsonb_array_length(screening.medicines_given) > 0');
+    const read = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, screening_values: '2' }] })
       .mockResolvedValueOnce({ rows: [] });
-    await expect(service(read).outreach.get(ids.case, context)).resolves.toMatchObject({ genotype: null, bloodGroup: null });
+    const one = await service(read).outreach.get(ids.case, context);
+    expect(one).toMatchObject({ hasScreening: true, hasRecordedChecks: true });
+    expect(one).not.toHaveProperty('genotype');
+  });
+});
+
+describe('Outreach screening on a database without 0122 (outreach-api released before the migration)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('reads without the two keys and accepts nothing extra; with 0122 it accepts both', async () => {
+    const before = jest.fn().mockResolvedValueOnce(caseVisible).mockResolvedValueOnce({ rows: [screeningRow()] });
+    const old = await service(before, false).outreach.readScreening(ids.case, context);
+    expect(old.accepts).toEqual([]);
+    expect(old.screening).not.toHaveProperty('genotype');
+    expect(old.screening).not.toHaveProperty('bloodGroup');
+    const none = jest.fn().mockResolvedValueOnce(caseVisible).mockResolvedValueOnce({ rows: [] });
+    await expect(service(none, false).outreach.readScreening(ids.case, context))
+      .resolves.toEqual({ screening: null, accepts: [] });
+    const after = jest.fn().mockResolvedValueOnce(caseVisible).mockResolvedValueOnce({ rows: [] });
+    await expect(service(after).outreach.readScreening(ids.case, context))
+      .resolves.toEqual({ screening: null, accepts: ['genotype', 'bloodGroup'] });
+    expect(audit.recordWithClient).toHaveBeenCalledTimes(3);
+  });
+
+  it('saves a first save and an update without naming the two columns', async () => {
+    const first = jest.fn().mockResolvedValueOnce(caseVisible).mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [screeningRow()] });
+    await expect(service(first, false).outreach.saveScreening(ids.case, body, undefined, key, context))
+      .resolves.toMatchObject({ status: 201, accepts: [] });
+    const [insert, insertValues] = first.mock.calls[2];
+    expect(insert).not.toMatch(/genotype|blood_group/);
+    expect(insert).toContain('$24,$25) returning *');
+    expect(insertValues).toHaveLength(25);
+    const current = screeningRow({ version: 2, idempotency_key: 'another-key-000000001' });
+    const update = jest.fn().mockResolvedValueOnce(caseVisible).mockResolvedValueOnce({ rows: [current] })
+      .mockResolvedValueOnce({ rows: [screeningRow({ version: 3 })] });
+    await expect(service(update, false).outreach.saveScreening(ids.case, { pulseBpm: 70, genotype: null }, 2, key, context))
+      .resolves.toMatchObject({ status: 200, accepts: [] });
+    const [updateSql, updateValues] = update.mock.calls[2];
+    expect(updateSql).not.toMatch(/genotype|blood_group/);
+    expect(updateValues).toHaveLength(25);
+  });
+
+  it('refuses a genotype or blood group value in plain words, before writing', async () => {
+    for (const input of [{ genotype: 'AS' as const }, { bloodGroup: 'O+' as const }]) {
+      const query = jest.fn().mockResolvedValueOnce(caseVisible).mockResolvedValueOnce({ rows: [] });
+      await expect(service(query, false).outreach.saveScreening(ids.case, input, undefined, key, context))
+        .rejects.toMatchObject({ status: 409, code: 'OUTREACH_SCREENING_FIELDS_NOT_TAKEN',
+          message: 'Genotype and blood group cannot be saved yet. Save the other health checks without them.' });
+      expect(query).toHaveBeenCalledTimes(2);
+    }
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
 });
 
@@ -328,15 +407,14 @@ describe('Outreach registration area and hasScreening (0118)', () => {
   });
 
   it('answers hasScreening on a read and the list', async () => {
-    const query = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, area: null,
-      screening_summary: { genotype: null, bloodGroup: null } }] })
+    const query = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, area: null, screening_values: 0 }] })
       .mockResolvedValueOnce({ rows: [] });
     await expect(service(query).outreach.get(ids.case, context)).resolves.toMatchObject({ hasScreening: true, area: null });
     expect(query.mock.calls[0][0]).toContain('outreach.registration_screenings');
-    const list = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, screening_summary: null }] })
+    const list = jest.fn().mockResolvedValueOnce({ rows: [{ ...caseRow, screening_values: null }] })
       .mockResolvedValueOnce({ rows: [] });
     await expect(service(list).outreach.list(context)).resolves.toMatchObject([{ hasScreening: false }]);
-    expect(list.mock.calls[0][0]).toContain('as screening_summary');
+    expect(list.mock.calls[0][0]).toContain('as screening_values');
   });
 
   it('validates the area: up to 100 characters, empty treated as not given', async () => {
@@ -432,9 +510,11 @@ describe('The screening routes', () => {
     }
   });
 
-  it('answers a screening with its ETag, and null without one', async () => {
+  it('answers a screening with its ETag, and null without one, with what the database accepts', async () => {
     const screening = { version: 2 };
-    const outreach = { getScreening: jest.fn().mockResolvedValueOnce(screening).mockResolvedValueOnce(null) };
+    const outreach = { readScreening: jest.fn()
+      .mockResolvedValueOnce({ screening, accepts: ['genotype', 'bloodGroup'] })
+      .mockResolvedValueOnce({ screening: null, accepts: [] }) };
     const controller = new OutreachController(outreach as never);
     const first = response();
     await expect(controller.getScreening(ids.case, request({}), first as never))
@@ -442,12 +522,13 @@ describe('The screening routes', () => {
     expect(first.setHeader).toHaveBeenCalledWith('ETag', '"2"');
     const second = response();
     await expect(controller.getScreening(ids.case, request({}), second as never))
-      .resolves.toEqual({ screening: null, accepts: ['genotype', 'bloodGroup'] });
+      .resolves.toEqual({ screening: null, accepts: [] });
     expect(second.setHeader).not.toHaveBeenCalled();
   });
 
   it('saves with the Idempotency-Key and If-Match, answering the status and ETag', async () => {
-    const outreach = { saveScreening: jest.fn(async () => ({ status: 201, screening: { version: 1 } })) };
+    const outreach = { saveScreening: jest.fn(async () => ({ status: 201, screening: { version: 1 },
+      accepts: ['genotype', 'bloodGroup'] })) };
     const controller = new OutreachController(outreach as never);
     const answer = response();
     await expect(controller.saveScreening(ids.case, {}, request({ 'idempotency-key': key }), answer as never))

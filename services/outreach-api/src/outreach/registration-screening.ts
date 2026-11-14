@@ -35,9 +35,13 @@ export interface ScreeningFields {
 
 /** The screening of an outreach registration as the API answers it. */
 export interface RegistrationScreening extends ScreeningFields {
-  /** Since 0122: always answered, null when not recorded. */
-  genotype: Genotype | null;
-  bloodGroup: BloodGroup | null;
+  /**
+   * Since 0122: answered (null when not recorded) when the database has
+   * 0122's columns, left out when it does not, so a website never takes a
+   * screening without them as a sign that the service records them.
+   */
+  genotype?: Genotype | null;
+  bloodGroup?: BloodGroup | null;
   caseId: string;
   version: number;
   recordedAt: string;
@@ -190,8 +194,8 @@ export function registrationScreening(row: ScreeningRow): RegistrationScreening 
       dose: typeof medicine.dose === 'string' ? medicine.dose : null })),
     referred: row.referred,
     referredTo: row.referred_to,
-    genotype: row.genotype ?? null,
-    bloodGroup: row.blood_group ?? null,
+    ...('genotype' in row ? { genotype: row.genotype ?? null } : {}),
+    ...('blood_group' in row ? { bloodGroup: row.blood_group ?? null } : {}),
     version: Number(row.version),
     recordedAt: new Date(row.recorded_at).toISOString(),
     recordedByMembershipId: row.recorded_by_membership_id,

@@ -4973,8 +4973,7 @@ is released.
 
 - One code set everywhere: the database columns `genotype` and `blood_group`, the API and the
   website use exactly these strings, with an ASCII `-`. `'unknown'` means the person does not know
-  it (shown as "Not known"). A website shows the minus as a real minus sign (A−) but sends `'A-'`;
-  a file export writes ASCII `A-`.
+  it (shown as "Not known"). A website shows the minus as a real minus sign (A−) but sends `'A-'`.
 - Any other value (another letter case, a trailing space, the Unicode minus) is 400
   `VALIDATION_FAILED`; the database checks the same lists (`registration_screenings_genotype_check`,
   `registration_screenings_blood_group_check`, answered 422 `OUTREACH_SCREENING_OUT_OF_RANGE` if it
@@ -4987,25 +4986,50 @@ is released.
 
 ### 51.2. Answers
 
-- The `Screening` answer of §48.1 and §48.2 always has `genotype` and `bloodGroup` (`null` when not recorded).
-- The read and save answers carry `"accepts": ["genotype", "bloodGroup"]` beside `screening`, also when
-  `screening` is `null`. A website sends the two fields only when `accepts` lists them: a service
-  before 0122 refuses an unknown field with 400 `VALIDATION_FAILED`.
-- The registration list, the registration read and the create and link answers (§48.4) have
-  `genotype` and `bloodGroup` from the registration's screening (`null` when there is none or they were
-  not recorded), so the website's export can add "Genotype" and "Blood group" columns. They follow the
-  screening's row-level security; the list keeps its one audit row
-  (`outreach.registration-case.list`); audit rows stay ids only.
+- The `Screening` answer of §48.1 and §48.2 has `genotype` and `bloodGroup` (`null` when not recorded)
+  when the database has 0122's columns. On a database without them (outreach-api released before the
+  migration) both keys are left out.
+- The read and save answers carry `accepts` beside `screening`, also when `screening` is `null`:
+  `["genotype", "bloodGroup"]` when the database has 0122's columns, `[]` before. A website sends the two
+  fields only when `accepts` lists them: a service before this change refuses an unknown field with 400
+  `VALIDATION_FAILED`.
+- **Who sees the values, and the audit (decision pending with the owner).** Genotype and blood group are
+  answered only by the screening read and save of one registration (§48.1, §48.2). The read writes its
+  `outreach.registration-screening.read` audit row (ids only) and the save its `.recorded` row, so which
+  person's values were seen is recorded. The registration list, the registration read and the create and
+  link answers (§48.4) carry **neither** value, and the website's export has no "Genotype" or "Blood group"
+  column. Adding them to the list or the export needs the owner's explicit yes, with an audit row that
+  says health values were included and the export limited to organisers.
+- The registration list, read, create and link answers carry `hasRecordedChecks` beside `hasScreening`:
+  whether the registration's screening holds at least one health check (any field not `null`, or a
+  medicine given). A form saved with nothing filled in has `hasScreening: true` and
+  `hasRecordedChecks: false`; a slip or an export says checks were recorded only on `hasRecordedChecks`.
+  It is read in the same one subquery per registration as `hasScreening`, which names no 0122 column
+  (it counts genotype and blood group through `to_jsonb`), so the list runs on a database with or
+  without 0122.
 - `@hid/api-client`: `OUTREACH_GENOTYPES`, `OUTREACH_BLOOD_GROUPS`, the types `OutreachGenotype` and
-  `OutreachBloodGroup`; the new fields are optional in `SaveOutreachRegistrationScreening`,
-  `OutreachRegistrationScreening`, `OutreachRegistrationCase`, and `accepts` is optional in
-  `OutreachRegistrationScreeningResult` (all absent before 0122).
+  `OutreachBloodGroup`; the new fields are optional in `SaveOutreachRegistrationScreening` and
+  `OutreachRegistrationScreening`; `hasRecordedChecks` is optional in `OutreachRegistrationCase` and
+  `accepts` in `OutreachRegistrationScreeningResult` (absent from an older service).
 
-### 51.3. Old services and rollback
+### 51.3. Old services, release order and rollback
 
-Today's outreach-api keeps working on 0122: it reads with `select *` and ignores the new columns, its
-insert leaves them null, and its update leaves a recorded genotype and blood group as they are (proven
-on PostgreSQL 16 with today's build). Rollback: a later migration dropping the two columns.
+- Today's outreach-api keeps working on 0122: it reads with `select *` and ignores the new columns, its
+  insert leaves them null, and its update leaves a recorded genotype and blood group as they are (proven
+  on PostgreSQL 16 with today's build).
+- This outreach-api keeps working on a database without 0122 (so a release that rolls outreach-api
+  before the migration is no outage): it learns from each screening `select *` whether the two columns
+  exist, and names them in its insert and update only then. Without them the list, reads and saves work
+  as before, `accepts` is `[]`, and a save giving a genotype or blood group value is refused with 409
+  `OUTREACH_SCREENING_FIELDS_NOT_TAKEN` ("Genotype and blood group cannot be saved yet. Save the other
+  health checks without them."); `null` for either is ignored.
+- Release order: the owner signs 0122 before the branch is merged, so the merge release applies 0122
+  (plan, dry run, apply) before it rolls outreach-api.
+- Rollback: a later migration dropping the two columns. Dropping them **deletes every recorded genotype
+  and blood group for good**. This outreach-api need not be rolled back first: its next screening read or
+  save sees the columns gone (a save in flight at that very moment fails once and can be sent again).
+  An outreach-api that names the columns without this check (none was released) would have to be rolled
+  back first.
 
 ## 44. Allergies and the allergy check at prescribing (0117)
 

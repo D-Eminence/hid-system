@@ -1,4 +1,3 @@
-import type { BloodGroup, Genotype } from './dto/registration-screening.dto';
 import type { RegistrationHealthId } from './registration-health-ids';
 
 export interface OutreachRegistrationCase {
@@ -18,11 +17,12 @@ export interface OutreachRegistrationCase {
   /** Whether the registration has a screening this session can see (0118). */
   hasScreening: boolean;
   /**
-   * The screening's genotype and blood group (0122), null when none was
-   * recorded, for the registration list and its export.
+   * Whether that screening holds at least one health check (since 0122's
+   * change): false for no screening, and for a form saved with nothing filled
+   * in. The slip and the export say "recorded" only then. No health value is
+   * answered here.
    */
-  genotype: Genotype | null;
-  bloodGroup: BloodGroup | null;
+  hasRecordedChecks: boolean;
   resolvedPatientId: string | null;
   resolutionKind: 'linked_existing' | null;
   /** The Health ID created for this person at the outreach (0119), or null. */
@@ -58,9 +58,8 @@ export interface RegistrationRow {
   phone: string | null;
   operational_notes: string | null;
   area?: string | null;
-  has_screening?: boolean | null;
-  /** The visible screening's genotype and blood group (0122), or null when there is no screening. */
-  screening_summary?: { genotype: Genotype | null; bloodGroup: BloodGroup | null } | null;
+  /** How many health checks the visible screening holds, or null when there is none (outreach.service HAS_SCREENING). */
+  screening_values?: number | string | null;
   resolved_patient_id: string | null;
   resolution_kind: 'linked_existing' | null;
   row_version: string | number;
@@ -84,9 +83,9 @@ export function registrationCase(row: RegistrationRow,
     phone: row.phone,
     operationalNotes: row.operational_notes,
     area: row.area ?? null,
-    hasScreening: row.has_screening === true || (row.screening_summary !== undefined && row.screening_summary !== null),
-    genotype: row.screening_summary?.genotype ?? null,
-    bloodGroup: row.screening_summary?.bloodGroup ?? null,
+    hasScreening: row.screening_values !== undefined && row.screening_values !== null,
+    hasRecordedChecks: row.screening_values !== undefined && row.screening_values !== null
+      && Number(row.screening_values) > 0,
     resolvedPatientId: row.resolved_patient_id,
     resolutionKind: row.resolution_kind,
     healthId: healthId?.healthId ?? null,

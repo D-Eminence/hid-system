@@ -41,10 +41,13 @@ export interface OutreachRegistrationCase {
   area?: string | null;
   /** Whether the registration has a screening (0118); absent before 0118. */
   hasScreening?: boolean;
-  /** The screening's genotype (0122), null when not recorded; absent before 0122. */
-  genotype?: OutreachGenotype | null;
-  /** The screening's blood group (0122), null when not recorded; absent before 0122. */
-  bloodGroup?: OutreachBloodGroup | null;
+  /**
+   * Whether that screening holds at least one health check: false for a form
+   * saved with nothing filled in; absent from an older service. No health value
+   * is on a registration: genotype and blood group are read per person
+   * (getRegistrationScreening, with its own audit row).
+   */
+  hasRecordedChecks?: boolean;
   resolvedPatientId: string | null;
   resolutionKind: 'linked_existing' | null;
   /** The Health ID created for this person at the outreach (0119), or null; absent before 0119. */
@@ -166,7 +169,11 @@ export interface OutreachRegistrationScreening extends Required<Omit<SaveOutreac
 
 export interface OutreachRegistrationScreeningResult {
   screening: OutreachRegistrationScreening | null;
-  /** The optional fields beyond 0118's that the service takes (0122: genotype, bloodGroup); absent before 0122. */
+  /**
+   * The optional fields beyond 0118's that the service takes: ['genotype',
+   * 'bloodGroup'] once its database has 0122, [] before; absent from an older
+   * service.
+   */
   accepts?: readonly string[];
 }
 
