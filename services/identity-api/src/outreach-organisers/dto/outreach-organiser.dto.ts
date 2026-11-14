@@ -109,3 +109,20 @@ export class AcceptOutreachInvitationDto extends OutreachInvitationProofDto {
 
 /** Signed in: the same link. */
 export class SignedInOutreachInvitationDto extends OutreachInvitationProofDto {}
+
+/**
+ * A new helper accepts by the link alone and is signed in without a password
+ * (POST /identity/outreach-invitations/accept-link). `device` is the
+ * person's choice: 'own' (this is my own phone, keep me signed in) or
+ * 'shared' (sign me out after 15 minutes).
+ */
+export class AcceptOutreachInvitationByLinkDto extends OutreachInvitationProofDto {
+  @IsIn(['outreach-invitation'])
+  turnstileAction!: 'outreach-invitation';
+
+  @IsOptional() @IsString() @MaxLength(2048)
+  turnstileToken?: string;
+
+  @IsIn(['own', 'shared'], { message: 'Choose whether this is your own phone or a shared phone' })
+  device!: 'own' | 'shared';
+}

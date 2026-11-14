@@ -8,6 +8,7 @@ import type { ActorContext } from '../common/request-context';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
 import { CurrentStaffContextService } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
+import { volunteerSignInEligible } from './outreach-volunteer';
 
 interface SessionRow {
   session_kind?: 'staff' | 'patient';
@@ -83,7 +84,8 @@ export class TokenService {
     const refreshToken = this.newRefreshToken(sessionId, authenticationMethod);
     const csrfToken = this.deriveRefreshCsrf(refreshToken);
     const now = new Date();
-    const lifetimes = this.lifetimes(actor.kind ?? 'staff', event.origin);
+    const longVolunteer = await this.grantsLongVolunteerSession(identity, actor);
+    const lifetimes = this.lifetimes(actor.kind ?? 'staff', event.origin, longVolunteer);
     const expiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
     const absoluteExpiresAt = new Date(now.getTime() + lifetimes.absoluteSeconds * 1_000);
     // Never past the family's absolute expiry (auth.sessions CHECK, 0002).
@@ -130,11 +132,18 @@ export class TokenService {
       });
       await this.insertSessionEvent(client, {
         eventType: 'login_succeeded', outcome: 'success', accountId: actor.accountId,
-        sessionId, event, details: { password_upgraded: Boolean(identity.passwordUpgrade) },
+        sessionId, event, details: {
+          password_upgraded: Boolean(identity.passwordUpgrade),
+          // A password-free sign-in records its true method here: the session
+          // row itself says 'password' (no migration).
+          ...(identity.signInVia ? { sign_in_via: identity.signInVia } : {}),
+          ...(identity.deviceTrust ? { device_trust: identity.deviceTrust, long_session: longVolunteer } : {}),
+        },
       });
     });
 
-    return { actor: { ...actor, sessionId }, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt };
+    return { actor: { ...actor, sessionId }, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt,
+      ...(identity.deviceTrust ? { longVolunteerSession: longVolunteer } : {}) };
   }
 
   async refresh(refreshToken: string, event: SessionEventMetadata): Promise<LoginResult> {
@@ -191,6 +200,15 @@ export class TokenService {
     if (actor.kind === 'patient' && actor.patientId !== oldSession.patient_id) {
       throw new UnauthorizedException('Patient account association changed');
     }
+    // A long volunteer family ("own phone") is renewed only while the switch is
+    // on and the login is still volunteer-only; otherwise it ends here, so a
+    // volunteer promoted to organiser or removed never keeps a 30-day family.
+    const longVolunteer = (actor.kind ?? 'staff') === 'staff' && this.isLongFamily(oldSession, now);
+    if (longVolunteer && (!this.environment.OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED
+      || !await volunteerSignInEligible(this.database, { accountId: oldSession.account_id }))) {
+      await this.expireSession(oldSession, event);
+      throw new UnauthorizedException('Refresh session expired');
+    }
     const accountTokenVersion = Number(oldSession.token_version);
     if (!Number.isSafeInteger(accountTokenVersion) || accountTokenVersion < 1) {
       throw new UnauthorizedException('Invalid refresh session');
@@ -201,7 +219,7 @@ export class TokenService {
     const csrfToken = this.deriveRefreshCsrf(newRefreshToken);
     const accessExpiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
     const refreshExpiresAt = new Date(Math.min(
-      now.getTime() + this.lifetimes(actor.kind ?? 'staff', event.origin).refreshSeconds * 1_000,
+      now.getTime() + this.lifetimes(actor.kind ?? 'staff', event.origin, longVolunteer).refreshSeconds * 1_000,
       oldSession.absolute_expires_at.getTime(),
     ));
     const accessToken = await this.signAccessToken(
@@ -251,6 +269,7 @@ export class TokenService {
       csrfToken,
       expiresAt: accessExpiresAt,
       refreshExpiresAt,
+      ...(longVolunteer ? { longVolunteerSession: true } : {}),
     };
   }
 
@@ -512,16 +531,50 @@ export class TokenService {
    * The access token's lifetime is the same for both. A staff session
    * signed in or refreshed from an outreach. site idles out after
    * AUTH_OUTREACH_REFRESH_TTL_SECONDS (15 minutes by default) instead.
+   * A long outreach volunteer session ("own phone", only while
+   * OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED is on) gets the volunteer pair
+   * (7 days idle and 30 days at most by default), whatever its Origin.
    */
-  private lifetimes(kind: 'staff' | 'patient', origin?: string): { refreshSeconds: number; absoluteSeconds: number } {
+  private lifetimes(kind: 'staff' | 'patient', origin: string | undefined,
+    longVolunteer: boolean): { refreshSeconds: number; absoluteSeconds: number } {
     if (kind === 'patient') {
       return { refreshSeconds: this.environment.AUTH_PATIENT_REFRESH_TTL_SECONDS,
         absoluteSeconds: this.environment.AUTH_PATIENT_ABSOLUTE_TTL_SECONDS };
+    }
+    if (longVolunteer && this.environment.OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED) {
+      return { refreshSeconds: this.environment.AUTH_OUTREACH_VOLUNTEER_REFRESH_TTL_SECONDS,
+        absoluteSeconds: this.environment.AUTH_OUTREACH_VOLUNTEER_ABSOLUTE_TTL_SECONDS };
     }
     const refreshSeconds = isOutreachOrigin(origin)
       ? Math.min(this.environment.AUTH_OUTREACH_REFRESH_TTL_SECONDS, this.environment.AUTH_REFRESH_TTL_SECONDS)
       : this.environment.AUTH_REFRESH_TTL_SECONDS;
     return { refreshSeconds, absoluteSeconds: this.environment.AUTH_ABSOLUTE_TTL_SECONDS };
+  }
+
+  /**
+   * Whether a new session gets the long volunteer lifetimes: only a staff
+   * sign-in that asked for 'own_device', while
+   * OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED is on, for a login that is
+   * volunteer-only right now (the database decides, never the cached roles).
+   * A failed check gives today's lifetimes.
+   */
+  private async grantsLongVolunteerSession(identity: CredentialIdentity, actor: ActorContext): Promise<boolean> {
+    if (identity.deviceTrust !== 'own_device' || !this.environment.OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED
+      || (actor.kind ?? 'staff') !== 'staff' || !actor.accountId) return false;
+    try {
+      return await volunteerSignInEligible(this.database, { accountId: actor.accountId });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * A family is a long volunteer one when its absolute expiry lies beyond
+   * what any staff session can have (AUTH_ABSOLUTE_TTL_SECONDS from now):
+   * the existing column marks it, so no migration is needed.
+   */
+  private isLongFamily(session: SessionRow, now: Date): boolean {
+    return session.absolute_expires_at.getTime() > now.getTime() + this.environment.AUTH_ABSOLUTE_TTL_SECONDS * 1_000;
   }
 
   private newRefreshToken(sessionId: string, method: 'local' | 'oidc'): string {

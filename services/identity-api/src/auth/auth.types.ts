@@ -1,5 +1,6 @@
 import type { JWTPayload } from 'jose';
 import type { ActorContext, FacilityAssignment } from '../common/request-context';
+import type { DeviceTrust, SignInVia } from './outreach-volunteer';
 
 export interface HidJwtClaims extends JWTPayload {
   actor_kind?: 'staff' | 'patient';
@@ -25,6 +26,8 @@ export interface LoginResult {
   refreshToken: string;
   expiresAt: Date;
   refreshExpiresAt: Date;
+  /** True when this session has the long outreach volunteer lifetimes ("own phone"). */
+  longVolunteerSession?: boolean;
 }
 
 export interface CredentialIdentity {
@@ -39,4 +42,13 @@ export interface CredentialIdentity {
     hash: string;
     expectedRowVersion: number;
   };
+  /**
+   * A password-free outreach volunteer sign-in only: 'own_device' asks for
+   * the long volunteer session (granted only while
+   * OUTREACH_VOLUNTEER_LONG_SESSION_ENABLED is on and the login is
+   * volunteer-only); 'standard' keeps today's lifetimes.
+   */
+  deviceTrust?: DeviceTrust;
+  /** A password-free sign-in only: how it was made, for the session event and the audit. */
+  signInVia?: SignInVia;
 }

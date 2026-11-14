@@ -285,6 +285,41 @@ export class OutreachInvitationsService {
     return { email, facilityId: row.facility_id, membershipId: row.membership_id, roleCode: OUTREACH_VOLUNTEER_ROLE };
   }
 
+  /**
+   * A helper without an account accepts by the link alone (password-free
+   * sign-in, Phase 1): the same command as acceptWithPassword, given the
+   * argon2id hash of a random secret that is dropped at once (never stored,
+   * logged or answered), so the new login has no usable password until the
+   * person sets one with "Forgot password?". The network's 20 an hour are
+   * charged first. Answers the new login's account id and subject for the
+   * sign-in that follows. An email that already has a login still answers
+   * OUTREACH_INVITATION_SIGN_IN_REQUIRED (owner decision Q3).
+   */
+  async acceptWithLink(input: { invitationId: string; token: string }, remoteIp: string | undefined, correlationId: string) {
+    const key = this.requireKey();
+    await this.chargeNetwork(key, remoteIp, correlationId);
+    const passwordHash = await hashAccountPassword(randomBytes(32).toString('base64url'));
+    let answer: { row?: AcceptRow; subject?: string } = {};
+    try {
+      answer = await this.database.withSystemTransaction(correlationId, async (client) => {
+        const row = (await client.query<AcceptRow>(
+          'select * from identity.accept_outreach_invitation_with_password($1,$2,$3)',
+          [input.invitationId, linkHmac(key, input.invitationId, input.token), passwordHash])).rows[0];
+        if (row?.result !== 'ready' || !row.account_id) return { row };
+        const subject = (await client.query<{ subject: string }>(
+          'select account.subject from auth.accounts account where account.id = $1', [row.account_id])).rows[0]?.subject;
+        return { row, subject };
+      });
+    } catch (error) {
+      throw outreachInvitationProblem(error);
+    }
+    const { row, subject } = answer;
+    if (!row || row.result !== 'ready') throw invitationResultProblem(row?.result);
+    if (!row.account_id || !subject) throw unavailable();
+    return { accountId: row.account_id, subject, facilityId: row.facility_id, membershipId: row.membership_id,
+      roleCode: OUTREACH_VOLUNTEER_ROLE };
+  }
+
   /** A signed-in account accepts (owner decision 5: it may also hold hospital roles elsewhere). */
   async acceptForAccount(context: DataAccessContext, input: SignedInOutreachInvitationDto) {
     const key = this.requireKey();
