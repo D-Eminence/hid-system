@@ -88,11 +88,13 @@ const environmentSchema = z.object({
   // lifetime is capped at it (TokenService), never refused at boot.
   AUTH_PATIENT_REFRESH_TTL_SECONDS: z.coerce.number().int().min(900).max(604800).default(604800),
   AUTH_PATIENT_ABSOLUTE_TTL_SECONDS: z.coerce.number().int().min(3600).max(2592000).default(2592000),
-  // Staff sessions used from an outreach. site (plan PR-3, field critique): a
-  // short idle lock, 15 minutes by default, because volunteers share phones
-  // and laptops at events. Applied at sign-in and at every refresh whose
-  // Origin is an outreach. host; the absolute lifetime is the staff one.
-  AUTH_OUTREACH_REFRESH_TTL_SECONDS: z.coerce.number().int().min(300).max(28800).default(900),
+  // Staff sessions used from an outreach. site: how long a session may sit
+  // unused. Owner decision of 2026-11-14 (event morning): "15 minutes is too
+  // small. Leave them auto login for 24hrs" - so by default a volunteer stays
+  // signed in for the staff absolute lifetime (24 hours from sign-in) however
+  // long the phone sits idle. Applied at sign-in and at every refresh whose
+  // Origin is an outreach. host; never past the absolute lifetime.
+  AUTH_OUTREACH_REFRESH_TTL_SECONDS: z.coerce.number().int().min(300).max(86400).default(86400),
   AUTH_LOGIN_PEPPER: optionalString,
   AUTH_LOGIN_PEPPER_VERSION: z.coerce.number().int().min(1).max(32767).default(1),
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('hid_access'),
