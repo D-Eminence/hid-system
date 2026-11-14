@@ -511,7 +511,8 @@ export class TokenService {
    * platform sessions keep their own pair (8 hours and 24 hours by default).
    * The access token's lifetime is the same for both. A staff session
    * signed in or refreshed from an outreach. site idles out after
-   * AUTH_OUTREACH_REFRESH_TTL_SECONDS (15 minutes by default) instead.
+   * AUTH_OUTREACH_REFRESH_TTL_SECONDS instead (24 hours by default, owner
+   * decision of 2026-11-14), never past the absolute lifetime.
    */
   private lifetimes(kind: 'staff' | 'patient', origin?: string): { refreshSeconds: number; absoluteSeconds: number } {
     if (kind === 'patient') {
@@ -519,7 +520,7 @@ export class TokenService {
         absoluteSeconds: this.environment.AUTH_PATIENT_ABSOLUTE_TTL_SECONDS };
     }
     const refreshSeconds = isOutreachOrigin(origin)
-      ? Math.min(this.environment.AUTH_OUTREACH_REFRESH_TTL_SECONDS, this.environment.AUTH_REFRESH_TTL_SECONDS)
+      ? Math.min(this.environment.AUTH_OUTREACH_REFRESH_TTL_SECONDS, this.environment.AUTH_ABSOLUTE_TTL_SECONDS)
       : this.environment.AUTH_REFRESH_TTL_SECONDS;
     return { refreshSeconds, absoluteSeconds: this.environment.AUTH_ABSOLUTE_TTL_SECONDS };
   }

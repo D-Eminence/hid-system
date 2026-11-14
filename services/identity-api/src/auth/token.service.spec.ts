@@ -266,22 +266,22 @@ describe('TokenService session lifetimes (patients: owner decision of 2026-10-28
     const result = await service.refresh('00000000-0000-4000-8000-000000000001.secret.local', { correlationId: 'staff-refresh' });
     expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 8 * HOUR));
   });
-  it('gives a staff session signed in on outreach. a 15-minute idle lock, keeping the 24-hour absolute expiry', async () => {
+  it('keeps a staff session signed in on outreach. for 24 hours however long it sits idle (owner, 2026-11-14)', async () => {
     const { service, insertedSession } = harness();
     const result = await service.issue({ subject: actor.subject, accountId: actor.accountId, displayName: '',
       facilities: [], authenticationMethod: 'local' },
     { correlationId: 'outreach-ttl', origin: 'https://outreach.healthidentitydirectory.com' });
-    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 15 * 60_000));
-    expect(insertedSession()).toEqual({ issuedAt: now, expiresAt: new Date(now.getTime() + 15 * 60_000),
+    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + DAY));
+    expect(insertedSession()).toEqual({ issuedAt: now, expiresAt: new Date(now.getTime() + DAY),
       absoluteExpiresAt: new Date(now.getTime() + DAY) });
   });
 
-  it('renews for 15 minutes from outreach., and 8 hours again from another staff site', async () => {
+  it('renews from outreach. up to the 24-hour absolute expiry, and for 8 hours idle from another staff site', async () => {
     const absolute = new Date(now.getTime() + 20 * HOUR);
     const outreach = harness(stored('staff', absolute));
     await expect(outreach.service.refresh('00000000-0000-4000-8000-000000000001.secret.local',
       { correlationId: 'outreach-refresh', origin: 'https://outreach.staging.healthidentitydirectory.com' }))
-      .resolves.toMatchObject({ refreshExpiresAt: new Date(now.getTime() + 15 * 60_000) });
+      .resolves.toMatchObject({ refreshExpiresAt: absolute });
     const ehr = harness(stored('staff', absolute));
     await expect(ehr.service.refresh('00000000-0000-4000-8000-000000000001.secret.local',
       { correlationId: 'ehr-refresh', origin: 'https://ehr.healthidentitydirectory.com' }))
