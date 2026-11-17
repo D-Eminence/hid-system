@@ -63,6 +63,7 @@ const { SsoController } = load('auth/sso/sso.controller.ts');
 const { SsoService } = load('auth/sso/sso.service.ts');
 const { SsoProviderClient, SSO_HTTP } = load('auth/sso/sso-provider.client.ts');
 const { createFakeProvider } = load('testing/sso-fake-provider.ts');
+const { requireRecentPatientAuthentication } = load('auth/recent-authentication.ts');
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 5 });
 const asRuntime = async (client) => {
   await client.query('begin');
@@ -185,6 +186,69 @@ try {
   await http().get('/api/v1/auth/session').set('X-HID-Edge-Origin', PORTAL).set('Cookie', `hid_access=${patientAccess}`).expect(401);
   assert.equal((await rows("select count(*)::integer n from auth.sso_spent_tokens where purpose = 'logout_token'"))[0].n, 1);
 
+  // D2. The portal tab that sign-in ended still holds its refresh cookie: its next refresh is an ended sign-in,
+  // refused and recorded as a denied refresh, never as refresh-token reuse; its family is left as it was.
+  const patientRefresh = value(patient, 'hid_access_refresh');
+  const patientCsrf = value(patient, 'hid_access_csrf');
+  await http().post('/api/v1/auth/refresh').set('X-HID-Edge-Origin', PORTAL).set('Origin', PORTAL)
+    .set('X-CSRF-Token', patientCsrf).set('Cookie', `hid_access_refresh=${patientRefresh}; hid_access_csrf=${patientCsrf}`)
+    .expect(401);
+  assert.deepEqual(await rows(`select event_type, outcome, details->>'revocation_reason' as reason from auth.session_events
+    where account_id = $1 and event_type in ('refresh', 'reuse_detected')`, [patientAccount]),
+  [{ event_type: 'refresh', outcome: 'denied', reason: 'sso_logout' }]);
+  assert.deepEqual(await rows("select revocation_reason from auth.sessions where account_id = $1", [patientAccount]),
+    [{ revocation_reason: 'sso_logout' }]);
+
+  // D3. Product sign-out from that browser, with no sign-in left: the provider's end-session address all the same.
+  const noSignIn = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', PORTAL).set('Origin', PORTAL)
+    .set('X-CSRF-Token', patientCsrf)
+    .set('Cookie', `hid_access=${patientAccess}; hid_access_refresh=${patientRefresh}; hid_access_csrf=${patientCsrf}`).expect(200);
+  assert.deepEqual(Object.fromEntries(new URL(noSignIn.body.endSessionUrl).searchParams),
+    { client_id: 'web', post_logout_redirect_uri: `${PORTAL}/` });
+
+  // D4. The patient recent-sign-in check reads 0125's row whether or not single sign-on is configured now: a
+  // hand-off counts from the provider sign-in, so one from an hour ago is not recent even after the switch-off.
+  const recentAt = async (sid) => {
+    const [{ family_id: sessionId }] = await rows('select family_id from auth.session_single_sign_on where provider_sid = $1', [sid]);
+    const ssoIssuer = process.env.AUTH_SSO_ISSUER;
+    delete process.env.AUTH_SSO_ISSUER;
+    try {
+      await database.withSystemTransaction(randomUUID(), client => requireRecentPatientAuthentication(client,
+        { sessionId, accountId: patientAccount, patientId }, 'A recent sign-in is required'));
+      return true;
+    } catch (error) {
+      if (error?.code !== 'PATIENT_RECENT_AUTH_REQUIRED') throw error;
+      return false;
+    } finally {
+      process.env.AUTH_SSO_ISSUER = ssoIssuer;
+    }
+  };
+  await handOff(PORTAL, { sub: patientAccount, sid: 'sso-runtime-patient-sid-fresh', hid_kind: 'patient' });
+  assert.equal(await recentAt('sso-runtime-patient-sid-fresh'), true, 'A hand-off just after the provider sign-in is recent');
+  const earlier = await handOff(PORTAL, { sub: patientAccount, sid: 'sso-runtime-patient-sid-earlier', hid_kind: 'patient',
+    auth_time: Math.floor(Date.now() / 1_000) - 3_600 });
+  assert.equal(await recentAt('sso-runtime-patient-sid-earlier'), false,
+    'A hand-off of a provider sign-in an hour old is not recent, with single sign-on switched off');
+
+  // D5. Product sign-out by the refresh cookie alone (the access token gone): today's sign-out of that sign-in,
+  // audited auth.logout, then every other patient sign-in of the account, and the end-session address.
+  const earlierRefresh = value(earlier, 'hid_access_refresh');
+  const earlierCsrf = value(earlier, 'hid_access_csrf');
+  const byRefresh = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', PORTAL).set('Origin', PORTAL)
+    .set('X-CSRF-Token', earlierCsrf).set('Cookie', `hid_access_refresh=${earlierRefresh}; hid_access_csrf=${earlierCsrf}`)
+    .expect(200);
+  assert.deepEqual(Object.fromEntries(new URL(byRefresh.body.endSessionUrl).searchParams),
+    { client_id: 'web', post_logout_redirect_uri: `${PORTAL}/` });
+  assert.deepEqual(await rows(`select link.provider_sid, session.revocation_reason from auth.sessions session
+      join auth.session_single_sign_on link on link.family_id = session.family_id
+     where session.account_id = $1 order by link.provider_sid`, [patientAccount]),
+  [{ provider_sid: 'sso-runtime-patient-sid', revocation_reason: 'sso_logout' },
+    { provider_sid: 'sso-runtime-patient-sid-earlier', revocation_reason: 'logout' },
+    { provider_sid: 'sso-runtime-patient-sid-fresh', revocation_reason: 'sso_logout' }]);
+  assert.deepEqual(await rows(`select actor_type, action from audit.events where actor_account_id = $1
+    and action in ('auth.logout', 'auth.sso.logout') order by action`, [patientAccount]),
+  [{ actor_type: 'patient', action: 'auth.logout' }, { actor_type: 'patient', action: 'auth.sso.logout' }]);
+
   // E. Product sign-out on outreach.: today's sign-out, then the provider's end-session address, with no token in it.
   const signOut = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', OUTREACH).set('Origin', OUTREACH)
     .set('X-CSRF-Token', outreachCsrf).set('Cookie', `hid_access=${outreachAccess}; hid_access_csrf=${outreachCsrf}`).expect(200);
@@ -199,7 +263,9 @@ try {
   await assert.rejects(pool.query("update auth.session_single_sign_on set provider_sid = 'moved' where account_id = $1", [staffAccount]),
     /SESSION_SINGLE_SIGN_ON_IMMUTABLE/);
   process.stdout.write(`${JSON.stringify({ status: 'passed', patientHandOff: true, staffGateRefusal: 'no_active_facility_membership',
-    outreachAccountOnly: true, backchannelLogout: 'sso_logout', productSignOut: true, provenanceImmutable: true })}\n`);
+    outreachAccountOnly: true, backchannelLogout: 'sso_logout', endedRefresh: 'refresh_denied_not_reuse',
+    signedOutProductSignOut: true, recentSignInWithSsoOff: 'counts_from_provider', productSignOutByRefreshCookie: true,
+    productSignOut: true, provenanceImmutable: true })}\n`);
 } finally {
   await app?.close();
   await pool.end();
