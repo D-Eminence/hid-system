@@ -5339,7 +5339,14 @@ pharmacy and outreach reading codes for their own hospital work (0018, 0023,
 `organization.manage`, and the review-pending administrator below) keeps every
 site of its own organisation. Lab staff, pharmacists, outreach organisers and
 volunteers, and the account-only outreach session are unchanged. A doctor who
-also helps an outreach group signs in on `outreach.` with the group only.
+also helps an outreach group signs in on `outreach.` with the group only. A
+membership that also holds a site's own job keeps that site: one that holds
+`lab.result.enter`, `lab.specimen.receive` or `lab.order-route.receive` (the
+lab role's codes, never seeded to the hospital clinical roles) is admitted on
+`lab.`, and one that holds `pharmacy.dispensing.create`,
+`pharmacy.work-item.accept` or `pharmacy.order-route.receive` (the
+pharmacist's) on `pharmacy.`; for example a nurse also given the lab role at a
+small clinic.
 
 Owner decision 5 (11 November 2026, the same login can also run its own
 outreach group) still holds for these roles. "Start an outreach group"

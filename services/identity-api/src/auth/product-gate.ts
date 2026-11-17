@@ -73,6 +73,20 @@ export const OUTREACH_PERMISSIONS = Object.freeze(['outreach.registration.read',
 export const ADMINISTRATOR_PERMISSIONS = Object.freeze(['organization.manage'] as const);
 /** The hospital clinical code (doctor, clinician, nurse, receptionist): ehr. and migrate. only (Q97). */
 const HOSPITAL_CLINICAL_PERMISSION = 'ehr.encounter.write';
+/**
+ * The codes only a site's own job holds (the seeds give them to lab and
+ * pharmacist, never to doctor, clinician, nurse or receptionist): a
+ * membership that holds one is that site's staff too, for example a nurse
+ * also given the lab role at a small clinic, so Q97 does not refuse it there.
+ * Outreach has none: its own roles (0115) live only at outreach groups.
+ */
+const OWN_JOB_PERMISSIONS: Readonly<Record<StaffProduct, readonly string[]>> = Object.freeze({
+  ehr: [],
+  lab: ['lab.result.enter', 'lab.specimen.receive', 'lab.order-route.receive'],
+  pharmacy: ['pharmacy.dispensing.create', 'pharmacy.work-item.accept', 'pharmacy.order-route.receive'],
+  migrate: [],
+  outreach: [],
+});
 
 const PRODUCT_PERMISSIONS: Readonly<Record<StaffProduct, readonly string[]>> = Object.freeze({
   ehr: HOSPITAL_PERMISSIONS,
@@ -111,12 +125,14 @@ export function facilityFitsProduct(facility: FacilityAssignment, product: Staff
  * A doctor, clinician, nurse or receptionist membership (ehr.encounter.write
  * without organization.manage) on a site that does not admit
  * ehr.encounter.write: it holds that site's reading codes for its own
- * hospital work only, so it is not admitted there (Q97).
+ * hospital work only, so it is not admitted there (Q97), unless it also
+ * holds that site's own job (OWN_JOB_PERMISSIONS).
  */
 function hospitalClinicalElsewhere(facility: FacilityAssignment, product: StaffProduct): boolean {
   return !PRODUCT_PERMISSIONS[product].includes(HOSPITAL_CLINICAL_PERMISSION)
     && facility.permissions.includes(HOSPITAL_CLINICAL_PERMISSION)
-    && !facility.permissions.some((permission) => (ADMINISTRATOR_PERMISSIONS as readonly string[]).includes(permission));
+    && !facility.permissions.some((permission) => (ADMINISTRATOR_PERMISSIONS as readonly string[]).includes(permission))
+    && !facility.permissions.some((permission) => OWN_JOB_PERMISSIONS[product].includes(permission));
 }
 
 /**

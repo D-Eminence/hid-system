@@ -49,6 +49,20 @@ describe('each staff site for its own job (Q97)', () => {
     expect(productsForFacilities([hospital(role)])).toEqual(['ehr', 'migrate']);
   });
 
+  it('a nurse also given the lab role is admitted on lab. too, and a doctor also given the pharmacist role on pharmacy. too', () => {
+    const both = (a: string, b: string) => hospital(a, { roles: [a, b], permissions: [...new Set([...permissionsOf(a), ...permissionsOf(b)])].sort() });
+    expect(admittedOn(both('nurse', 'lab'))).toEqual(['ehr', 'lab', 'migrate']);
+    expect(admittedOn(both('doctor', 'pharmacist'))).toEqual(['ehr', 'pharmacy', 'migrate']);
+  });
+
+  it.each(['doctor', 'clinician', 'nurse', 'receptionist'])('the own-job codes are never seeded to a hospital %s', (role) => {
+    for (const code of ['lab.result.enter', 'lab.specimen.receive', 'lab.order-route.receive', 'pharmacy.dispensing.create', 'pharmacy.work-item.accept', 'pharmacy.order-route.receive']) {
+      expect(permissionsOf(role)).not.toContain(code);
+    }
+    expect(permissionsOf('lab')).toEqual(expect.arrayContaining(['lab.result.enter', 'lab.specimen.receive', 'lab.order-route.receive']));
+    expect(permissionsOf('pharmacist')).toEqual(expect.arrayContaining(['pharmacy.dispensing.create', 'pharmacy.work-item.accept', 'pharmacy.order-route.receive']));
+  });
+
   it.each(['admin', 'org_admin'])('a hospital %s is admitted on every site', (role) => {
     expect(admittedOn(hospital(role))).toEqual(PRODUCTS);
   });
