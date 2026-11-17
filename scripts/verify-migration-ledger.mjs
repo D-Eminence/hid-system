@@ -134,6 +134,8 @@ const acceptedMigrations = new Map([
   ['0119_outreach_health_id.sql', '2ddf1be63db7aaf3e4c9e1006570cc34f9ed5ea0e51d6f14f5ebd9ce116ef3a1'],
   ['0120_outreach_health_id_unclaimed.sql', 'aaaf65e75d00d12f4c88f4c527add6847d0c9254e636fc61f7641c3da0d1a2d5'],
   ['0121_outreach_registration_read_once.sql', 'f03a404acb315e860ccf36c1b123d64d233224be3466def963e6d322e03e43fe'],
+  ['0122_patient_access_pin_day_read_write.sql', 'ad62aff87e768e45693465d8e9d3713a3645d536b10d5a8c1d620ea8cfbc8cfc'],
+  ['0123_sealed_qa_tenant.sql', '72a685d7dd19152accd8f7855cf2f270893c21980d244a0697ff9c0b8da155b0'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
