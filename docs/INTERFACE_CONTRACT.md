@@ -3997,7 +3997,8 @@ confirm OCR jobs, never publishes. Only the answer changes.
    clinician with access to this patient to publish it." Nothing is written.
 
 A Migrate staff member working under the cover, with direct-care read access
-(an approval, Access PIN or share) but no direct-care write, now sees step 4
+(an approval or a share; an Access PIN too until 0122, which made a PIN read
+and write for 24 hours) but no direct-care write, now sees step 4
 instead of the 404 they got before. The cover never publishes; since 0113 the
 patient's dedicated records-processing grant publishes an EHR reading as a
 draft (section 42), checked between steps 3 and 4.
@@ -5127,9 +5128,11 @@ outreach-api waits up to 20 seconds for Identity on start and confirm (start sen
 Owner decision (10 Nov 2026, relayed by Ola, clinical owner): a patient's
 Access PIN gives the staff member who enters it read AND write access to all
 of that patient's records for exactly 24 hours (1440 minutes), whatever
-duration is asked, for the same staff roles as today, with no separate "Ask
-for more access". 0122 is unsigned until the owner signs its declaration
-(`reviewed_by` stays empty). Written as 0121 (hid-system#208), renumbered
+duration is asked, for the same staff roles as today (doctor, clinician and
+nurse: the roles that hold `identity.patient-access-pin.verify`, set by 0033
+and checked by the release rehearsal), with no separate "Ask for more
+access". The owner signed 0122 on 17 Nov 2026 (Q84), and it was released with
+0123 (hid-system#253). Written as 0121 (hid-system#208), renumbered
 0120 by the release order on 2026-11-11, and renumbered 0122 on 2026-11-17
 on staging 91e9fb0a, where 0001-0121 are applied (0120 and 0121 are the
 outreach migrations, section 50 and its read-once follow-up, live in
@@ -5163,7 +5166,10 @@ and requires the payload's `scope`, when present, to be the grant's.
 name the migration said "0121", the number it was written under, then
 "0120", and say 0122 since 17 Nov 2026, changed before the declaration was
 signed, so the md5 is that of the body as renumbered); its signature, result, owner, SECURITY DEFINER, search_path and ACL
-are unchanged. Every other rule is kept: the
+are unchanged. 0123 (section 52), released with it, replaces this function
+again to add the sealed QA tenant boundary: one line, nothing else. From 0123
+on, the live body md5 is `6f44fc5433a8e2ddf1febbb711c88037`, the value 0123's
+post-check and `sealed-demo-tenant.integration.sql` pin. Every other rule is kept: the
 permission, direct care only, the exact active membership, the failure
 windows and locks (0075), the sealed demo boundary (0098), the denial answers
 (`verified: false`) and their audit rows.
@@ -5199,6 +5205,13 @@ A staff member whose role loses `identity.patient-access-pin.verify` keeps a
 PIN grant they already have until it ends (24 hours after it was made), unless the
 patient ends it, turns the PIN off, or the membership at that facility ends:
 `has_active_consent_grant` checks the membership, not the permission.
+
+Re-running 0122 by hand on a database where 0123 is applied refuses with
+"0122: a function this migration relies on differs from 0001-0108:
+identity.access_patient_with_pin(text,text,integer) md5 6f44fc54...", and
+nothing is applied. There it means 0122 is already applied and 0123 changed
+the body since, not that the database has drifted. The runner never re-runs
+an applied migration.
 
 To undo: a follow-up migration that puts back 0098's body (60 minutes,
 `read_records`) and narrows the two PIN constraints again, after every
