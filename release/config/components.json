@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0123",
-    "count": 124,
+    "last": "0124",
+    "count": 125,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -593,6 +593,10 @@
       {
         "name": "0123_sealed_qa_tenant.sql",
         "sha256": "72a685d7dd19152accd8f7855cf2f270893c21980d244a0697ff9c0b8da155b0"
+      },
+      {
+        "name": "0124_organization_staff_kinds.sql",
+        "sha256": "d7445bf1bd8f85cd549155bd66fbcebce0e8db59a7e2c5084f7f90d5e8d08d5c"
       }
     ]
   },
