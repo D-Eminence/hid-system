@@ -165,7 +165,7 @@ resource "aws_iam_role_policy" "release_read" {
       # Read-only look at the deployment lease, so the website's automatic re-pin (health
       # production-backend-repin.yml) never starts a release while either release holds it. GetItem only:
       # this role can never take, extend or release the lease.
-      { Effect   = "Allow", Action = ["dynamodb:GetItem"], Resource = aws_dynamodb_table.deployment_lease[0].arn,
+      { Effect = "Allow", Action = ["dynamodb:GetItem"], Resource = aws_dynamodb_table.deployment_lease[0].arn,
       Condition = { "ForAllValues:StringEquals" = { "dynamodb:LeadingKeys" = ["hid-${local.release_environment}"] } } }
     ]
   })
