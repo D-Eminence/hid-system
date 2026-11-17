@@ -63,7 +63,7 @@ does.
 npm run check:db                 # check prerequisites, then run the rehearsal (about 3 minutes)
 npm run check:db -- --prepare    # first install and build anything missing, then run
 npm run check:db:all             # also identity-api and ehr-api jest and the release tests (about 4 minutes)
-npm run check:db -- --check-only # only check prerequisites
+npm run check:db -- --check-only # only check prerequisites; installs and runs nothing
 ```
 
 It first checks what the rehearsal needs and, for anything missing, prints
@@ -75,24 +75,34 @@ what is wrong and the command that fixes it:
   `PG_CONFIG="$(brew --prefix postgresql@16)/bin/pg_config"` (macOS).
 - **A normal user account.** PostgreSQL will not start as root, so do not use
   `sudo`.
-- **Dependencies for every service** (`services/*`), matching each
-  `package-lock.json`.
+- **Dependencies for every service** (`services/*`) and for `release/` (the
+  rehearsal loads release modules too). Every installed package must match
+  that folder's `package-lock.json`; if not, the check says "dependencies out
+  of date, run with --prepare". It also checks that every npm package the
+  rehearsal itself imports can be found, so it never starts a rehearsal that
+  cannot load.
 - **Built packages** that the services use (`packages/api-client`,
   `packages/server-telemetry`).
 - **git can read the checkout.** Use a clone your own account created. The
   rehearsal runs git without your home folder, so a `--global safe.directory`
   setting does not help.
 
-`--prepare` fixes only the npm items. It runs `npm ci` in each folder that
-needs it and builds missing packages. It changes nothing outside this
-checkout, and it never replaces a `node_modules` folder that is a link.
+`--prepare` fixes only the npm items. It runs `npm ci` in each folder of this
+checkout that needs it and builds missing packages. It never replaces a
+`node_modules` folder that is a link and never changes your git or npm
+settings. Like any `npm ci`, it downloads packages from your configured
+registry, reads your npm settings (`~/.npmrc`) and writes to your npm cache
+and npm log folder (usually `~/.npm`). `--prepare` cannot be combined with
+`--check-only`.
 
 The rehearsal makes its own throwaway PostgreSQL in `/tmp`, reachable only
 through a private socket, fills it with fictional data and deletes it at the
 end. It never connects to any other database. At the end you get a short
-pass/fail summary. On a failure it names the step that failed, the reason and
-the log file. Logs go to a new `/tmp/hid-db-check-*` folder (or `--log-dir`).
-Delete it when you are done.
+pass/fail summary. On a failure it names the failing step (for the rehearsal,
+the rehearsal step inside it), the first error line, the file it points to
+and the full log of that step. Logs go to a new `hid-db-check-*` folder in
+your system temp folder (the summary prints the path), or to the folder you
+give with `--log-dir DIR`. Delete it when you are done.
 
 ## Local development
 
