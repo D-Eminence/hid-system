@@ -2575,8 +2575,10 @@ seal without the seed): Demo Hospital (`DEMO-HOSPITAL`), Demo Laboratory
 `operations@healthidentitydirectory.com` ("Demo Operations"), with a membership
 at each (doctor, lab, pharmacist, nurse) and `org_admin` at each, chosen after
 sign-in as for any member of several facilities; two patient logins,
-`patient1@healthidentitydirectory.com` (`HID-ZDEMAAA2`) and
-`patient2@healthidentitydirectory.com` (`HID-ZDEMAAA3`); eight
+`patientdemo1@healthidentitydirectory.com` (`HID-ZDEMAAA2`) and
+`patientdemo2@healthidentitydirectory.com` (`HID-ZDEMAAA3`) (0098 seeded them at
+`patient1@` and `patient2@`; 0123 moved them, address only, so that those two
+are the QA patients' logins, section 52); eight
 fictional patients without a login or any contact detail (`HID-ZDEMBBB2` to
 `HID-ZDEMBBB9`). Patient One and Patient Two each share their record with the
 demo login at Demo Hospital (doctor) and at Demo Outreach (nurse): the seed
@@ -2638,7 +2640,7 @@ emergency contacts and invitees (each one of the three demo addresses below). To
 test accepting a patient's invitation, the patient invites
 `operations@healthidentitydirectory.com` (the staff login's own address), which
 accepts it at Demo Hospital or Demo Outreach; an invitation to
-`patient1@healthidentitydirectory.com` or `patient2@healthidentitydirectory.com`
+`patientdemo1@healthidentitydirectory.com` or `patientdemo2@healthidentitydirectory.com`
 is delivered to that mailbox but can never be accepted (acceptance needs a staff
 login whose own verified address it is). Migrate's OCR
 job creation (`POST /api/v1/ocr/jobs`) needs a records-processing
@@ -2674,8 +2676,9 @@ real actor and a demo one):
 - A demo patient may invite, add as an emergency contact or change their email to
   the owner's three demo mailboxes only, an exact allowlist (any case, trimmed;
   no pattern and no plus-address): `operations@healthidentitydirectory.com`,
-  `patient1@healthidentitydirectory.com` and
-  `patient2@healthidentitydirectory.com`, the demo logins' own addresses.
+  `patientdemo1@healthidentitydirectory.com` and
+  `patientdemo2@healthidentitydirectory.com`, the demo logins' own addresses
+  (`patient1@` and `patient2@` until 0123, which made them QA addresses).
   Otherwise: invitation 400 `SHARE_INVITATION_EMAIL_INVALID`; email change 409
   `CONTACT_UNAVAILABLE` (nothing recorded, no code sent; each allowlisted address
   already belongs to a demo login, so a demo patient's email change never
@@ -3304,7 +3307,8 @@ covers when all of these hold, and only then:
 - The check's time is from the grant's `starts_at`, before `least(expires_at,
   starts_at + 24 hours)`: never past the grant's end, and never more than 24
   hours from its start (requests last at most 24 hours and PIN grants at most
-  60 minutes today, so today the grant's end comes first). (0108 D-a: from
+  60 minutes today, so today the grant's end comes first; until 0122: since
+  0122 a PIN grant is write_records for exactly 24 hours, section 51). (0108 D-a: from
   `starts_at` before `expires_at`, with no 24-hour bound.)
 - The patient is 18 or over on that day's Africa/Lagos date and has a date of
   birth on record (the request trigger's rule, at each check, since no request
@@ -3317,10 +3321,13 @@ covers when all of these hold, and only then:
   organization, staff member or all, for this action (0012's reading).
 
 Within the cover both `read_records` and `write_records` are allowed for
-records processing, also under a PIN grant, which is read only for direct care:
+records processing, also under a PIN grant, which is read only for direct care
+(until 0122; since 0122 a PIN grant is write_records for exactly 24 hours,
+section 51):
 bringing in paper records means creating, validating, confirming and retrying
 OCR jobs. Direct care itself is unchanged: the PIN still opens the chart for
-reading only, and publishing into the chart still needs the publisher's own
+reading only (until 0122; since 0122 the PIN opens the chart to read and
+write, section 51), and publishing into the chart still needs the publisher's own
 direct-care write grant.
 
 The patient can still say no: denying the request (no grant), revoking the
@@ -3409,7 +3416,8 @@ nothing; unexpired grants (and covers) work again if the code is reactivated. Wh
 Unchanged: `create_access_request`, `approve_access_request` and every other
 function body but `has_active_consent_grant`'s (32.1; their md5 pins stay
 true), policy, role, permission and grant; break-glass (emergency only), the
-PIN command (direct care, read only; its grant covers records processing as
+PIN command (direct care, read only (until 0122; since 0122 read and write
+for exactly 24 hours, section 51); its grant covers records processing as
 32.1 says) and patient shares (direct care, never covering records
 processing; since 0108 an active share covers it, section 36). A pending request is
 not checked again on approval, so a requester whose role changes afterwards
@@ -5113,6 +5121,178 @@ registration that has a Health ID created at the outreach (it was linked); suppo
 The code email never names a group whose name carries a link or a domain ("An outreach team" instead).
 outreach-api waits up to 20 seconds for Identity on start and confirm (start sends the email).
 
+
+## 51. Access PIN: 24 hours, read and write (0122)
+
+Owner decision (10 Nov 2026, relayed by Ola, clinical owner): a patient's
+Access PIN gives the staff member who enters it read AND write access to all
+of that patient's records for exactly 24 hours (1440 minutes), whatever
+duration is asked, for the same staff roles as today, with no separate "Ask
+for more access". 0122 is unsigned until the owner signs its declaration
+(`reviewed_by` stays empty). Written as 0121 (hid-system#208), renumbered
+0120 by the release order on 2026-11-11, and renumbered 0122 on 2026-11-17
+on staging 91e9fb0a, where 0001-0121 are applied (0120 and 0121 are the
+outreach migrations, section 50 and its read-once follow-up, live in
+production). It requires 0001-0121 applied.
+
+Route, unchanged in shape: `POST /identity/standard-access/pin`
+(permission `identity.patient-access-pin.verify`, purpose `direct-care`), body
+`{ hid, pin, durationMinutes? }`, answer
+`{ accessRequestId, consentGrantId, patientId, status, expiresAt, existingGrant }`.
+
+| | Before | From 0122 |
+|---|---|---|
+| `durationMinutes` accepted | 5 to 60 | 5 to 1440 (still checked; outside it, or missing in the database call, is refused as before) |
+| `durationMinutes` left out | 15 | 1440 (24 hours) |
+| How long the grant lasts | the minutes asked | exactly 1440 minutes (24 hours), whatever duration is asked; the access request's `requested_duration_minutes`, the audit's `duration_minutes` and `expiresAt` say so. A reused grant keeps its own 24-hour expiry and its replay audit says 1440 |
+| Grant and request scope | `read_records` | `write_records` (also lets the holder read) |
+| A still-valid PIN grant is reused (`existingGrant: true`) | if `read_records` | if `write_records`; an older read grant is not reused, a new write grant is made and the read one runs out by itself |
+| A patient's deny directive stops the PIN | if it covers reading | if it covers reading or writing (or every action) |
+| Audit `identity.patient-access-pin.verify` / `.replay` details | `access_request_id`, `duration_minutes`, `expires_at`, `existing_grant`, `review_required` | the same plus `scope` |
+| `PatientAccessPinVerified` payload | `{ consentGrantId, reviewRequired }` | `{ consentGrantId, reviewRequired, scope }` |
+
+Database: `access_requests_pin_scope_ck` and `consent_grants_pin_scope_ck`
+allow `read_records` or `write_records` for a PIN row (still direct care,
+never break-glass); `identity_outbox_minimum_necessary` accepts the PIN notice
+with or without `scope` (`read_records` or `write_records`); the insert policy
+`identity_outbox_patient_access_pin_insert` admits a PIN grant of either scope
+and requires the payload's `scope`, when present, to be the grant's.
+`identity.access_patient_with_pin` body md5 is now
+`e17925c512f5f3e9fc79d84faded6ea1` (0098's was
+`830c1baa4bca3df57cc02b7b002a8831`; the two comments inside the body that
+name the migration said "0121", the number it was written under, then
+"0120", and say 0122 since 17 Nov 2026, changed before the declaration was
+signed, so the md5 is that of the body as renumbered); its signature, result, owner, SECURITY DEFINER, search_path and ACL
+are unchanged. Every other rule is kept: the
+permission, direct care only, the exact active membership, the failure
+windows and locks (0075), the sealed demo boundary (0098), the denial answers
+(`verified: false`) and their audit rows.
+
+What the patient keeps: each PIN use is in their access list
+(`access_granted`) and raises the PIN notice; they can end the access at any
+time (`revoke_my_consent_grant`, or turning the PIN off, which ends every PIN
+grant); their deny choices still apply. Records processing (section 36)
+already counted a PIN grant of either scope and now lasts its 24 hours.
+
+Order of release:
+1. The event dispatcher and the notification worker change that accepts the
+   three-key PIN notice (they also accept the two-key one). It is in its own
+   pull request (hid-system#206, branch
+   `claude/fervent-galileo-datz4t-pin-notice-scope`, no migration) and must be
+   merged and released before 0122 (it is live since 2026-11-11). It cannot share a
+   release with 0122: a release that carries a migration applies it before it
+   rolls out the services (`scripts/production_deployment.py`), so a PIN
+   notice raised in between would be refused by the old check and not
+   retried.
+2. 0122 with identity-api (hid-system#208; written as 0121, renumbered 0120
+   and then 0122 by the release order).
+3. The websites, in either order with 0122: hid-system's own `apps/web`
+   (hid-system#207) and health's staff site (health#197) say "see and add to
+   records for 24 hours" and still ask for 60 minutes, which identity-api
+   accepts before this release (at most 60) and after it (5 to 1440). 0122
+   gives 1440 minutes whatever is asked, so neither site breaks the PIN if it
+   ships before identity-api or if identity-api is rolled back. Until 0122 is
+   live, a PIN used there gives the old 60 minutes of read access, so the new
+   wording is ahead of the backend for that time.
+
+A staff member whose role loses `identity.patient-access-pin.verify` keeps a
+PIN grant they already have until it ends (24 hours after it was made), unless the
+patient ends it, turns the PIN off, or the membership at that facility ends:
+`has_active_consent_grant` checks the membership, not the permission.
+
+To undo: a follow-up migration that puts back 0098's body (60 minutes,
+`read_records`) and narrows the two PIN constraints again, after every
+`write_records` PIN grant has ended or run out (at most 24 hours); identity-api's
+default and limit go back to 15 and 60.
+
+The suite is `services/ehr-api/database/tests/patient-access-pin.integration.sql`.
+
+## 52. The sealed QA tenant (0123)
+
+Migration 0123 (`0123_sealed_qa_tenant.sql`; owner decision Q60 of
+2026-11-12) adds a third tenant beside the real ones and the sealed demo
+(section 26), for the owner's own end-to-end testing by hand and with a browser
+agent. Unlike the demo it is not a showcase: every QA login can do every real
+action. Like the demo it is sealed in the database: nothing QA reaches, shares
+with, orders to or finds a real or a demo facility, patient or person, and
+nothing real or demo reaches QA. The marker is the owner-only table
+`identity.sealed_qa_members` (as `identity.sealed_demo_members`; a member is
+never both). 0098's rule ("both demo or neither") is unchanged; 0123 adds the
+same rule for QA at every place 0098 enforces its own, so the three sides are
+sealed from each other. Every answer is one a real tenant already gets for an
+unknown or ineligible value: across the boundary a Health ID is not found, a
+facility is not a destination, a clinician is not in the share directory.
+
+The tenant (seeded only on Amazon RDS, i.e. production; CI and rehearsals get
+the seal without the seed): QA Hospital (`QA-HOSPITAL`), QA Laboratory
+(`QA-LABORATORY`) and QA Pharmacy (`QA-PHARMACY`), verified and active. Seven
+staff logins, each with its own staff record, one mailbox of the owner's domain
+per role:
+
+| Login | Role |
+| --- | --- |
+| `ehr@healthidentitydirectory.com` | doctor at QA Hospital (EHR, Migrate, shares, orders) |
+| `migrate@healthidentitydirectory.com` | clinician at QA Hospital (Migrate) |
+| `lab@healthidentitydirectory.com` | lab at QA Laboratory |
+| `lab2@healthidentitydirectory.com` | lab at QA Laboratory (a result's second check) |
+| `pharmacy@healthidentitydirectory.com` | pharmacist at QA Pharmacy |
+| `admin@healthidentitydirectory.com` | org_admin at QA Hospital, QA Laboratory and QA Pharmacy |
+| `outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
+
+Two patient logins: `patient1@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA
+Patient One) and `patient2@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
+Two). Those were the demo patients' logins (section 26), so in the same
+transaction, before the QA seed, 0123 moves the two demo patient logins to
+`patientdemo1@healthidentitydirectory.com` and `patientdemo2@healthidentitydirectory.com`
+(`identity.demo_patient_logins_move()`, the owner's): address only; their
+passwords, sessions, status, verification, Health IDs, shares and seal stay.
+It refuses (55000, nothing moved, the release stops) a new address held by
+another account, staff record, open organization application or pending staff
+invitation (`DEMO_PATIENT_ADDRESS_TAKEN`), or a demo patient login on neither
+address or whose patient record holds an email of its own
+(`DEMO_PATIENT_LOGIN_UNEXPECTED`), or while a demo patient has a live email
+emergency contact (before 0123 it could only be `operations@`, `patient1@` or
+`patient2@`, and the database holds only its HMAC) or a pending share
+invitation to `patient1@` or `patient2@` (`DEMO_PATIENT_OLD_ADDRESS_IN_USE`;
+the owner removes or cancels them in the app first, and may add contacts again
+with the new addresses afterwards); it writes one audit row
+(`identity.sealed-demo.patient-logins-moved`, correlation id
+`0123-demo-patient-logins`, a count only). The demo's exact allowlist
+(`identity.sealed_demo_recipient`) and seed (`identity.sealed_demo_install`)
+name the new addresses; a demo patient can no longer invite, add as a contact
+or change their email to `patient1@` or `patient2@`. Every account is seeded `pending_reset` without a password,
+its email verified; the owner sets each password with Forgot password. QA
+Patient One shares with the QA clinician at QA Hospital (written as section 26
+writes the demo's shares, with the migration's own audit row,
+`identity.sealed-qa.seed-share`, correlation id `0123-sealed-qa-install`); QA
+Patient Two has no share, so the owner tests the real share flow with it.
+Identity's Health ID generator never issues a code starting `ZQA` or `ZDEM`.
+
+QA Outreach: an outreach group (0115) must hold its organiser's
+contact phone encrypted with Identity's key, which a migration cannot write
+truthfully. The owner starts it with the organiser login through "Start an
+outreach group" (with `outreach_organiser_signup_enabled` on), naming it "QA
+..."; a group whose organiser is a QA account becomes QA as it is made, and its
+name must start with "QA " (else 22023 `OUTREACH_ORGANISER_SIGNUP_INVALID`). A QA
+group invites volunteers at `@healthidentitydirectory.com` addresses only (400
+`OUTREACH_INVITATION_INVALID` otherwise), so no QA invitation email reaches
+anyone outside the owner's domain.
+
+Kept off for QA (coordinator, 2026-11-12): QoreID (a QA account consumes no
+QoreID quota, so no paid lookup; 42501 `QOREID_QUOTA_PERMISSION_DENIED`), a QA
+patient's phone (so no SMS; 400 `PATIENT_CONTACT_CHANGE_INVALID`), platform roles,
+and the platform overview's counts. A QA patient's share invitations, emergency
+contacts and email changes go to `@healthidentitydirectory.com` addresses only
+(plus-addresses allowed); any other domain is refused as the demo refuses a
+non-demo address (400 `SHARE_INVITATION_EMAIL_INVALID`, 409
+`CONTACT_UNAVAILABLE`, `EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED`).
+
+Known limits (accepted): a QA facility admin cannot invite a new login (the new
+account is real, and the seal refuses a real account at a QA facility); no new
+patient is created inside QA (facility registration needs a QoreID NIN check,
+kept off, and app. sign-ups are platform-wide). Testing uses the seeded logins
+and patients.
+
 ## 45. Patient details on this facility's own lab and pharmacy work (0124)
 
 Owner decision 25 of 2026-11-01 (D-Eminence, "all recommended except D5", on
@@ -5123,9 +5303,9 @@ patient's name, sex, date of birth and Health ID ending on their own work,
 not only on work sent from another facility. 0124 is unsigned until the
 owner signs its declaration. It ships after 0123. It was numbered 0121 by
 the coordinator's release order of 2026-11-11 and renumbered 0124 after
-staging's 0117-0121 (0122 and 0123 are other work). Its read consent test is
-the one 0104 left (0105-0121 kept it). Migrations 0122 and 0123 may add
-sections too, so this section's number is fixed at merge.
+staging's 0117-0121 (0122 and 0123 are other work). It needs 0001-0123
+applied. Its read consent test is the one 0104 left (0105-0123 kept it).
+0122 and 0123 are sections 51 and 52, so this section keeps the number 45.
 
 Routes (paths, permissions, requests unchanged):
 `GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/:workItemId`

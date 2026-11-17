@@ -146,7 +146,7 @@ export default function PatientSelfPortal({ page }: { page: 'profile' | 'biodata
       {page === 'profile' && <section aria-labelledby="access-pin-title" style={{ marginTop: 28 }}>
         <h2 id="access-pin-title">Access PIN</h2>
         <p role="status">{profile.accessPinConfigured ? 'Access PIN configured' : 'No Access PIN configured'}</p>
-        <p>A clinician can use your Health ID and Access PIN to request short-lived, read-only record access. Your PIN is separate from your account password and NIN.</p>
+        <p>A clinician who has your Health ID and Access PIN can see and add to your records for 24 hours. You can end this at any time. Your PIN is separate from your account password and NIN.</p>
         <form onSubmit={savePin} style={{ display: 'grid', gap: 10, maxWidth: 360 }}>
           <label htmlFor="patient-access-pin">{profile.accessPinConfigured ? 'New Access PIN' : 'Set an Access PIN'}</label>
           <input id="patient-access-pin" type="password" inputMode="numeric" autoComplete="off" pattern="[0-9]{4,8}" minLength={4} maxLength={8} required value={pin} onChange={event => setPin(event.target.value.replace(/\D/g, '').slice(0, 8))} />
