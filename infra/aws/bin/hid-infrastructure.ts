@@ -10,6 +10,7 @@ const configuration = environmentConfig(
   process.env.HID_STAGING_MODE,
   process.env.HID_QOREID_ENABLED,
   process.env.HID_OWN_WORK_PATIENT_CARD_ENABLED,
+  process.env.HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED,
 );
 const regionalEnvironment = externalAwsEnvironment(process.env.HID_AWS_ACCOUNT, process.env.HID_AWS_REGION);
 
