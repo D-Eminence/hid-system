@@ -77,21 +77,22 @@ const ADMIN = 'https://admin.healthidentitydirectory.com';
 const LOCAL = 'http://localhost:5173';
 const PRODUCTS: StaffProduct[] = ['ehr', 'lab', 'pharmacy', 'migrate', 'outreach'];
 
-// Each place with the kinds identity.organization_staff_kinds (0124) answers
-// for it: QA Hospital has no application (no kind, Q91 A: a hospital), QA
-// Laboratory and QA Pharmacy one governed application each (0123).
+// Each place with the kinds and products identity.organization_staff_kinds
+// (0124) answers for it: QA Hospital has no application (no kind, Q91 A: a
+// hospital) and no product, QA Laboratory and QA Pharmacy one governed
+// application and product each (0123).
 const HOSPITAL = { organization: '30000000-0000-4000-8000-000000000001', facility: '10000000-0000-4000-8000-000000000001',
-  name: 'QA Hospital', kinds: [] };
+  name: 'QA Hospital', kinds: [], products: [] };
 const LABORATORY = { organization: '30000000-0000-4000-8000-000000000002', facility: '10000000-0000-4000-8000-000000000002',
-  name: 'QA Laboratory', kinds: ['laboratory'] };
+  name: 'QA Laboratory', kinds: ['laboratory'], products: ['laboratory'] };
 const PHARMACY = { organization: '30000000-0000-4000-8000-000000000003', facility: '10000000-0000-4000-8000-000000000003',
-  name: 'QA Pharmacy', kinds: ['pharmacy'] };
+  name: 'QA Pharmacy', kinds: ['pharmacy'], products: ['pharmacy'] };
 const OUTREACH_GROUP = { organization: '30000000-0000-4000-8000-000000000004',
-  facility: '10000000-0000-4000-8000-000000000004', name: 'QA Outreach', kinds: [] };
+  facility: '10000000-0000-4000-8000-000000000004', name: 'QA Outreach', kinds: [], products: [] };
 const CLINIC = { organization: '30000000-0000-4000-8000-000000000005', facility: '10000000-0000-4000-8000-000000000005',
-  name: 'New Clinic', kinds: ['clinic'] };
+  name: 'New Clinic', kinds: ['clinic'], products: ['ehr'] };
 
-interface Place { organization: string; facility: string; name: string; kinds: string[] }
+interface Place { organization: string; facility: string; name: string; kinds: string[]; products: string[] }
 interface Account {
   key: string;
   subject: string;
@@ -103,7 +104,7 @@ interface Account {
 
 let accountCounter = 0;
 function membership(place: Place, role: string, options: { primary?: boolean; permissionsRole?: string;
-  review?: string; organizationType?: string; kinds?: string[] } = {}) {
+  review?: string; organizationType?: string; kinds?: string[]; products?: string[] } = {}) {
   accountCounter += 1;
   return {
     facility_id: place.facility,
@@ -117,6 +118,7 @@ function membership(place: Place, role: string, options: { primary?: boolean; pe
     review_state: options.review ?? null,
     organization_type: options.organizationType ?? null,
     organization_kinds: options.kinds ?? place.kinds,
+    organization_products: options.products ?? place.products,
   };
 }
 
@@ -479,9 +481,11 @@ describe('POST /auth/login on each product site (Q88-1, Q88-2)', () => {
       ['a hospital that also runs a laboratory (a reused organisation)', ['hospital', 'laboratory']],
       ['a clinic that also runs a pharmacy', ['clinic', 'pharmacy']],
       ['\'other\' with ehr or migrate (the database answers hospital)', ['hospital']],
-      ['\'other\' with a laboratory product only (the database answers no kind)', []],
+      ['an organisation promoted from the legacy system that a governed approval reused for a laboratory product '
+        + '(the database answers hospital and laboratory)', ['hospital', 'laboratory']],
     ])('the org_admin of %s is a hospital role on every product site', async (_label, kinds) => {
-      const admin = account('hospital-org-admin', [membership(HOSPITAL, 'org_admin', { kinds })]);
+      const admin = account('hospital-org-admin', [membership(HOSPITAL, 'org_admin', { kinds,
+        products: kinds.includes('laboratory') ? ['laboratory'] : [] })]);
       for (const product of PRODUCTS) {
         const { controller } = harness([admin]);
         const answer = await controller.login(login(admin), request(PROD(product)), response());
@@ -489,26 +493,46 @@ describe('POST /auth/login on each product site (Q88-1, Q88-2)', () => {
       }
     });
 
-    it('\'other\' with a pharmacy product beside a laboratory application (the database answers laboratory): lab. only',
-      async () => {
-        const admin = account('other-pharmacy-org-admin', [membership(LABORATORY, 'org_admin', { kinds: ['laboratory'] })]);
-        for (const product of PRODUCTS) {
-          const { controller } = harness([admin]);
-          const attempt = controller.login(login(admin), request(PROD(product)), response());
-          if (product === 'lab') expect((await attempt).actor.facilityIds).toEqual([LABORATORY.facility]);
-          else expect(((await refusal(attempt)) as DomainProblem).code).toBe('PRODUCT_NOT_AUTHORISED');
+    // 0124 reads 'other' as staff_invitable_roles does, and the gate adds the
+    // site of each product the organisation holds.
+    it.each([
+      ['\'other\' with a laboratory product (the database answers laboratory)', ['laboratory'], ['laboratory'], ['lab']],
+      ['\'other\' with a pharmacy product (the database answers pharmacy)', ['pharmacy'], ['pharmacy'], ['pharmacy']],
+      ['a laboratory application beside an \'other\' pharmacy product (laboratory and pharmacy)',
+        ['laboratory', 'pharmacy'], ['laboratory', 'pharmacy'], ['lab', 'pharmacy']],
+      ['a laboratory that bought the migrate product', ['laboratory'], ['migrate'], ['lab', 'migrate']],
+      ['a laboratory that bought the ehr product', ['laboratory'], ['ehr'], ['ehr', 'lab']],
+      ['a pharmacy that bought the migrate product', ['pharmacy'], ['migrate'], ['pharmacy', 'migrate']],
+      ['a laboratory whose only product is suspended (the kind stays recorded, no product is held)', ['laboratory'], [],
+        ['lab']],
+    ] as const)('the org_admin of %s', async (_label, kinds, products, admitted) => {
+      const admin = account('kind-org-admin', [membership(LABORATORY, 'org_admin', { kinds: [...kinds],
+        products: [...products] })]);
+      for (const product of PRODUCTS) {
+        const { controller } = harness([admin]);
+        const attempt = controller.login(login(admin), request(PROD(product)), response());
+        if ((admitted as readonly StaffProduct[]).includes(product)) {
+          expect((await attempt).actor.facilityIds).toEqual([LABORATORY.facility]);
+        } else {
+          expect(((await refusal(attempt)) as DomainProblem).code).toBe('PRODUCT_NOT_AUTHORISED');
         }
-      });
+      }
+    });
 
     it.each([
-      ['a laboratory', ['laboratory'], 'laboratory', ['lab']],
-      ['a pharmacy', ['pharmacy'], 'pharmacy', ['pharmacy']],
-      ['a hospital', ['hospital'], 'hospital', PRODUCTS],
-      ['a clinic', ['clinic'], 'clinic', PRODUCTS],
+      ['a laboratory', ['laboratory'], ['laboratory'], 'laboratory', ['lab']],
+      ['a pharmacy', ['pharmacy'], ['pharmacy'], 'pharmacy', ['pharmacy']],
+      ['a pharmacy that signed up on migrate. for the migrate product', ['pharmacy'], ['migrate'], 'pharmacy',
+        ['pharmacy', 'migrate']],
+      ['a laboratory that signed up on ehr. for the ehr product', ['laboratory'], ['ehr'], 'laboratory', ['ehr', 'lab']],
+      ['an \'other\' organisation that signed up on lab.', ['laboratory'], ['laboratory'], 'other', ['lab']],
+      ['a hospital', ['hospital'], ['ehr'], 'hospital', PRODUCTS],
+      ['a clinic', ['clinic'], ['migrate'], 'clinic', PRODUCTS],
     ] as const)('the administrator of %s awaiting review is admitted where that organisation\'s org_admin is',
-      async (_label, kinds, organizationType, admitted) => {
+      async (_label, kinds, products, organizationType, admitted) => {
         const pending = account('pending-review-admin', [membership(CLINIC, 'org_admin', {
-          permissionsRole: 'org_admin_awaiting_review', review: 'pending', organizationType, kinds: [...kinds] })]);
+          permissionsRole: 'org_admin_awaiting_review', review: 'pending', organizationType, kinds: [...kinds],
+          products: [...products] })]);
         for (const product of PRODUCTS) {
           const { controller } = harness([pending]);
           const attempt = controller.login(login(pending), request(PROD(product)), response());
@@ -540,10 +564,11 @@ describe('POST /auth/login on each product site (Q88-1, Q88-2)', () => {
       });
 
     it('the rule itself: who is an administrator, which organisation is a hospital, and its sites', () => {
-      const facility = (permissionsRole: string, kinds?: string[], review?: 'pending' | 'reviewed') => ({
+      const facility = (permissionsRole: string, kinds?: string[], review?: 'pending' | 'reviewed', products?: string[]) => ({
         id: 'f', membershipId: 'm', organizationId: 'o', name: 'n', roles: [permissionsRole],
         permissions: permissionsOf(permissionsRole), isPrimary: true,
         ...(kinds ? { organizationKinds: kinds as never } : {}),
+        ...(products ? { organizationProducts: products as never } : {}),
         ...(review ? { selfService: { review, organizationType: 'laboratory' as const } } : {}) });
       expect(administratorMembership(facility('org_admin'))).toBe(true);
       expect(administratorMembership(facility('admin'))).toBe(true);
@@ -560,6 +585,17 @@ describe('POST /auth/login on each product site (Q88-1, Q88-2)', () => {
       expect(administratorProducts(facility('org_admin', ['laboratory']))).toEqual(['lab']);
       expect(administratorProducts(facility('org_admin', ['pharmacy']))).toEqual(['pharmacy']);
       expect(administratorProducts(facility('org_admin', ['laboratory', 'pharmacy']))).toEqual(['lab', 'pharmacy']);
+      // The site of each held product is added; at a hospital every site already is.
+      expect(administratorProducts(facility('org_admin', ['laboratory'], undefined, ['laboratory']))).toEqual(['lab']);
+      expect(administratorProducts(facility('org_admin', ['laboratory'], undefined, ['migrate']))).toEqual(['lab', 'migrate']);
+      expect(administratorProducts(facility('org_admin', ['pharmacy'], undefined, ['ehr', 'migrate'])))
+        .toEqual(['ehr', 'pharmacy', 'migrate']);
+      expect(administratorProducts(facility('org_admin', ['pharmacy'], undefined, ['laboratory']))).toEqual(['lab', 'pharmacy']);
+      expect(administratorProducts(facility('org_admin', ['hospital'], undefined, ['laboratory']))).toEqual(PRODUCTS);
+      expect(administratorProducts(facility('org_admin', ['laboratory'], undefined, []))).toEqual(['lab']);
+      // Never outreach. for an organisation that is not a hospital.
+      expect(administratorProducts(facility('org_admin', ['laboratory', 'pharmacy'], undefined,
+        ['ehr', 'migrate', 'laboratory', 'pharmacy']))).toEqual(['ehr', 'lab', 'pharmacy', 'migrate']);
     });
   });
 
@@ -673,6 +709,23 @@ describe('refresh re-applies the gate (POST /auth/refresh)', () => {
       const error = await refusal(controller.refresh(req, answer));
       expect(error.getStatus()).toBe(401);
       expect((answer as unknown as { clearCookie: jest.Mock }).clearCookie).toHaveBeenCalled();
+    });
+
+  it('the administrator awaiting review of a pharmacy that signed up on migrate. refreshes there (it holds migrate)',
+    async () => {
+      const pending = account('pending-pharmacy-migrate', [membership(PHARMACY, 'org_admin', {
+        permissionsRole: 'org_admin_awaiting_review', review: 'pending', organizationType: 'pharmacy',
+        kinds: ['pharmacy'], products: ['migrate'] })]);
+      for (const product of PRODUCTS) {
+        const { tokens } = harness([pending], pending);
+        const attempt = tokens.refresh(refreshToken, { correlationId: 'product-gate-refresh', origin: PROD(product),
+          product });
+        if (product === 'migrate' || product === 'pharmacy') {
+          expect((await attempt).actor.facilityIds).toEqual([PHARMACY.facility]);
+        } else {
+          await expect(attempt).rejects.toBeInstanceOf(UnauthorizedException);
+        }
+      }
     });
 
   it('a refresh on a host with no product keeps every membership', async () => {
@@ -798,7 +851,9 @@ describe('facility selection re-applies the gate (POST /auth/facility)', () => {
     const facilities = who.memberships.map((row) => ({ id: String(row.facility_id), membershipId: String(row.membership_id),
       organizationId: String(row.organization_id), name: String(row.facility_name), roles: row.roles as string[],
       permissions: row.permissions as string[], isPrimary: Boolean(row.is_primary),
-      ...((row.organization_kinds as string[]).length > 0 ? { organizationKinds: row.organization_kinds as never } : {}) }));
+      ...((row.organization_kinds as string[]).length > 0 ? { organizationKinds: row.organization_kinds as never } : {}),
+      ...((row.organization_kinds as string[]).length > 0 && (row.organization_products as string[]).length > 0
+        ? { organizationProducts: row.organization_products as never } : {}) }));
     return { kind: 'staff', id: who.subject, subject: who.subject, accountId: who.accountId, sessionId: 'session',
       roles: facilities[0]?.roles ?? [], permissions: facilities[0]?.permissions ?? [], facilityIds: facilities.map((f) => f.id),
       facilities, facility: facilities[0], authenticationMethod: 'local' };

@@ -5299,7 +5299,7 @@ identity-api (with one new notification-api route) and, for the
 administrator rule decided by the owner as Q90 and Q91, migration 0124
 (`identity.organization_staff_kinds`, below). The gate reads the permissions
 the seeds already grant and, for an administrator, the recorded kinds of its
-organisation; the session carries its product in the signed access token.
+organisation and the products it holds; the session carries its product in the signed access token.
 
 ### The product of a request
 
@@ -5357,42 +5357,60 @@ product seperate environment"; Q91 "Q91 A"). A membership is an
 administrator's when it holds `organization.manage` (admin and org_admin,
 0006) or is the administrator awaiting review above, and does not hold
 `ehr.encounter.write`. Its sites depend only on the recorded kinds of its
-organisation, not on its other codes (org_admin also reads outreach
-registrations, admin also reads lab and pharmacy work):
+organisation and the products it holds, not on its other codes (org_admin
+also reads outreach registrations, admin also reads lab and pharmacy work):
 
 | The organisation's recorded kinds | The administrator is admitted on |
 | --- | --- |
 | none recorded (Q91 A), or any `hospital` or `clinic` | every product site, as a hospital role |
-| `laboratory` only | `lab.` only |
-| `pharmacy` only | `pharmacy.` only |
-| `laboratory` and `pharmacy` (no hospital or clinic) | `lab.` and `pharmacy.` |
+| `laboratory` only | `lab.`, and the site of each product it holds |
+| `pharmacy` only | `pharmacy.`, and the site of each product it holds |
+| `laboratory` and `pharmacy` (no hospital or clinic) | `lab.` and `pharmacy.`, and the site of each product it holds |
 
-The kinds are `identity.organization_staff_kinds(organization_id)` (0124,
-STABLE, SECURITY DEFINER, `search_path` pinned, EXECUTE for
-`hid_identity_runtime` only): the distinct `organization_type`s, sorted, of the
-application behind each of the organisation's active
-`identity.organization_products` rows (an organisation may hold several
-products: a governed approval may reuse an organisation) and of its self
-sign-up application while that is pending or reviewed (the one
-`identity.organization_self_service_state` reads). `other` counts as
-`hospital` when its application's product is `ehr` or `migrate` (as
-`identity.staff_invitable_roles` gives it the hospital roles) and is left out
-otherwise; a suspended product gives nothing. The answer holds only `clinic`,
-`hospital`, `laboratory` and `pharmacy`, and is empty when nothing is
-recorded: the sealed QA Hospital (0123) and Demo Hospital and Demo Outreach
-(0098), outreach groups (0115) and organisations promoted from the legacy
-system have no kind, so they are hospitals. The staff context reads it with
-one lateral call per membership and adds
-`organizationKinds` (sorted, once each) to that facility only when it is not
-empty, so a membership with no recorded kind answers exactly as before.
+A held product's site is `ehr.` for `ehr`, `migrate.` for `migrate`, `lab.`
+for `laboratory` and `pharmacy.` for `pharmacy`; `outreach.` is never one. So
+a laboratory or a pharmacy that bought `ehr` or `migrate` (both sign-up forms
+accept any organisation type with any product) keeps that product's site for
+its administrator, and the administrator awaiting review of a pharmacy that
+signed itself up on `migrate.` can sign in there again.
+
+The kinds and products are `identity.organization_staff_kinds(organization_id)`
+(0124, one row of `organization_kinds text[]` and `organization_products
+text[]`, STABLE, SECURITY DEFINER, `search_path` pinned, EXECUTE for
+`hid_identity_runtime` only). `organization_kinds` is the distinct
+`organization_type`s, sorted, of every approved application of the
+organisation (each governed approval, also one that reused the organisation,
+whose product row already existed or was later suspended, and the self
+sign-up while it is pending or reviewed; a released self sign-up is
+`rejected` and gives nothing). `other` gives the kind its product makes it,
+exactly as `identity.staff_invitable_roles` and identity-api's
+`staffInvitableRoles` read it: `ehr` or `migrate` `hospital`, `laboratory`
+`laboratory`, `pharmacy` `pharmacy`. An organisation promoted from the legacy
+system (`identity.organizations.source_system` `legacy_identity`) also gives
+`hospital`, so the hospital status Q91 A gave it stays when a governed
+approval later reuses it for a laboratory or a pharmacy product. The answer
+holds only `clinic`, `hospital`, `laboratory` and `pharmacy`, and is empty
+when nothing is recorded: the sealed QA Hospital (0123) and Demo Hospital and
+Demo Outreach (0098) and outreach groups (0115) have no kind, so they are
+hospitals. `organization_products` is the distinct product codes, sorted, of
+the organisation's active `identity.organization_products` rows (a suspended
+product is not held, but its application's kind stays recorded, so
+suspending a laboratory's only product narrows its administrator to `lab.`
+instead of widening it to every site). The staff context reads it with one
+lateral call per membership and adds `organizationKinds` (sorted, once each)
+to that facility only when it is not empty, and `organizationProducts`
+(sorted, once each) only beside `organizationKinds` and when it is not empty,
+so a membership with no recorded kind answers exactly as before.
 
 So, at the sealed QA tenant, admin@ (org_admin at QA Hospital, which has no
 application, QA Laboratory and QA Pharmacy) keeps QA Hospital alone on `ehr.`,
 `migrate.` and `outreach.`, QA Hospital and QA Laboratory on `lab.`, and QA
 Hospital and QA Pharmacy on `pharmacy.`. The org_admin of a laboratory-only
 organisation is refused (`403 PRODUCT_NOT_AUTHORISED`) on every site but
-`lab.`. The administrator awaiting review of a self-signed-up laboratory is
-admitted on `lab.` only, of a hospital or clinic on every site. Clinical
+`lab.` (and the site of any other product it holds). The administrator
+awaiting review of a self-signed-up laboratory is admitted on `lab.` (and on
+the site of the product it signed up for), of a hospital or clinic on every
+site. Clinical
 hospital roles (`ehr.encounter.write`: doctor, clinician, nurse, receptionist)
 and the lab, pharmacy and outreach roles are unchanged, at any organisation:
 a hospital receptionist, for example, is still admitted on `migrate.`.

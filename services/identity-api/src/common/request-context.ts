@@ -24,10 +24,21 @@ export interface FacilityAssignment {
    * hospital.
    */
   organizationKinds?: readonly OrganizationKind[];
+  /**
+   * The products the facility's organisation holds (its active
+   * identity.organization_products rows, 0124), present only with
+   * organizationKinds and when at least one is held. The product gate admits
+   * the administrator of an organisation that is not a hospital on each held
+   * product's site as well as on its kinds' sites.
+   */
+  organizationProducts?: readonly OrganizationProduct[];
 }
 
 /** An organisation's effective kind as identity.organization_staff_kinds answers it ('other' already applied). */
 export type OrganizationKind = 'clinic' | 'hospital' | 'laboratory' | 'pharmacy';
+
+/** A product code an organisation holds (identity.organization_products.product_code). */
+export type OrganizationProduct = 'ehr' | 'migrate' | 'laboratory' | 'pharmacy';
 
 export interface FacilitySelfService {
   review: 'pending' | 'reviewed';

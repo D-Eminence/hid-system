@@ -1,5 +1,7 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
-import type { ActorContext, FacilityAssignment, FacilitySelfService, OrganizationKind } from '../common/request-context';
+import type {
+  ActorContext, FacilityAssignment, FacilitySelfService, OrganizationKind, OrganizationProduct,
+} from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CredentialIdentity } from './auth.types';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
@@ -24,6 +26,8 @@ interface StaffContextRow {
   organization_type?: string | null;
   /** identity.organization_staff_kinds (0124): the organisation's effective kinds, empty when none is recorded. */
   organization_kinds?: string[] | null;
+  /** identity.organization_staff_kinds (0124): the organisation's active product codes, empty when it holds none. */
+  organization_products?: string[] | null;
 }
 
 interface PlatformAuthorityRow {
@@ -92,13 +96,15 @@ export const STAFF_MEMBERSHIPS_SQL = `select account.id::text as account_id,
  * organization's self sign-up state, which answers no row for governed and
  * legacy organizations. Owner decisions Q90 and Q91 (17 November 2026) add one
  * lateral call per membership row of identity.organization_staff_kinds (0124,
- * stable, definer): the organisation's recorded kinds, which the product gate
- * reads for an administrator. The order is the old one.
+ * stable, definer, one row): the organisation's recorded kinds and the
+ * products it holds, which the product gate reads for an administrator. The
+ * order is the old one.
  */
-export const STAFF_CONTEXT_SQL = `select grouped.*, state.review_state, state.organization_type, kinds.organization_kinds
+export const STAFF_CONTEXT_SQL = `select grouped.*, state.review_state, state.organization_type, kinds.organization_kinds,
+         kinds.organization_products
          from (${STAFF_MEMBERSHIPS_SQL}) grouped
          left join lateral identity.organization_self_service_state(grouped.organization_id::uuid) state on true
-         left join lateral identity.organization_staff_kinds(grouped.organization_id::uuid) kinds(organization_kinds) on true
+         left join lateral identity.organization_staff_kinds(grouped.organization_id::uuid) kinds on true
         order by grouped.is_primary desc, grouped.facility_name, grouped.facility_id::uuid`;
 
 const SELF_SERVICE_REVIEW_STATES = new Set(['pending', 'reviewed']);
@@ -108,6 +114,14 @@ const ORGANIZATION_KINDS: readonly OrganizationKind[] = ['clinic', 'hospital', '
 function organizationKinds(value: unknown): OrganizationKind[] {
   if (!Array.isArray(value)) return [];
   return ORGANIZATION_KINDS.filter((kind) => value.includes(kind));
+}
+
+const ORGANIZATION_PRODUCTS: readonly OrganizationProduct[] = ['ehr', 'laboratory', 'migrate', 'pharmacy'];
+
+/** The held products the gate knows, sorted and once each; an unknown value is dropped. */
+function organizationProducts(value: unknown): OrganizationProduct[] {
+  if (!Array.isArray(value)) return [];
+  return ORGANIZATION_PRODUCTS.filter((product) => value.includes(product));
 }
 
 /**
@@ -281,6 +295,7 @@ export class CurrentStaffContextService {
 
   private facility(row: StaffContextRow): FacilityAssignment {
     const kinds = organizationKinds(row.organization_kinds);
+    const products = kinds.length > 0 ? organizationProducts(row.organization_products) : [];
     return {
       id: row.facility_id,
       membershipId: row.membership_id,
@@ -298,8 +313,10 @@ export class CurrentStaffContextService {
           organizationType: row.organization_type as FacilitySelfService['organizationType'],
         } } : {}),
       // Q90/Q91: only when a kind is recorded, so a membership with none (a
-      // hospital to the gate) answers exactly as before.
+      // hospital to the gate) answers exactly as before; the held products
+      // only beside a kind, since only an organisation with a kind reads them.
       ...(kinds.length > 0 ? { organizationKinds: kinds } : {}),
+      ...(products.length > 0 ? { organizationProducts: products } : {}),
     };
   }
 }

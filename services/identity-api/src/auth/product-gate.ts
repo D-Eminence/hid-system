@@ -1,5 +1,5 @@
 import { DomainProblem } from '../common/problem';
-import type { FacilityAssignment } from '../common/request-context';
+import type { FacilityAssignment, OrganizationProduct } from '../common/request-context';
 
 /**
  * Each staff product is its own site (owner decision of 17 November 2026,
@@ -102,30 +102,40 @@ export function administratorMembership(facility: FacilityAssignment): boolean {
 
 /**
  * Owner decisions Q90 and Q91 (17 November 2026): an organisation is a
- * hospital when no kind is recorded (Q91 A: legacy, the sealed QA and demo
- * hospitals, outreach groups) or any recorded kind is hospital or clinic. The
- * kinds are identity.organization_staff_kinds' (0124), which already counts
- * 'other' with ehr or migrate as hospital and leaves 'other' out otherwise.
+ * hospital when no kind is recorded (Q91 A: the sealed QA and demo hospitals,
+ * outreach groups) or any recorded kind is hospital or clinic. The kinds are
+ * identity.organization_staff_kinds' (0124), which already reads 'other' as
+ * staff_invitable_roles does (ehr or migrate hospital, laboratory laboratory,
+ * pharmacy pharmacy) and answers hospital for an organisation promoted from
+ * the legacy system, also once a governed approval reused it.
  */
 export function organisationIsHospital(facility: FacilityAssignment): boolean {
   const kinds = facility.organizationKinds ?? [];
   return kinds.length === 0 || kinds.includes('hospital') || kinds.includes('clinic');
 }
 
+/** The site of each product an organisation can hold (identity.organization_products.product_code). */
+const HELD_PRODUCT_SITES: Readonly<Record<OrganizationProduct, StaffProduct>> = Object.freeze({
+  ehr: 'ehr', migrate: 'migrate', laboratory: 'lab', pharmacy: 'pharmacy',
+});
+
 /**
  * The sites an administrator's membership is admitted on (Q90 A, "each
  * product a separate environment"): at a hospital every product site, as a
  * hospital role; otherwise lab. where the organisation is recorded as a
- * laboratory and pharmacy. where it is recorded as a pharmacy (both at an
- * organisation recorded as both). The administrator's other codes (org_admin
- * also reads outreach registrations; admin also reads lab and pharmacy work)
- * add no site.
+ * laboratory, pharmacy. where it is recorded as a pharmacy (both at an
+ * organisation recorded as both), and the site of each product the
+ * organisation holds (a laboratory or pharmacy that bought ehr or migrate,
+ * and whose administrator awaiting review signed up there, keeps that site).
+ * The administrator's other codes (org_admin also reads outreach
+ * registrations; admin also reads lab and pharmacy work) add no site.
  */
 export function administratorProducts(facility: FacilityAssignment): readonly StaffProduct[] {
   if (organisationIsHospital(facility)) return STAFF_PRODUCTS;
   const kinds = facility.organizationKinds ?? [];
+  const held = (facility.organizationProducts ?? []).map((product) => HELD_PRODUCT_SITES[product]);
   return STAFF_PRODUCTS.filter((product) => (product === 'lab' && kinds.includes('laboratory'))
-    || (product === 'pharmacy' && kinds.includes('pharmacy')));
+    || (product === 'pharmacy' && kinds.includes('pharmacy')) || held.includes(product));
 }
 
 /** Whether a membership fits a product. */

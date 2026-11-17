@@ -128,10 +128,11 @@ describe('CurrentStaffContextService self sign-up state (P4b)', () => {
     const orderBy = '\n        order by membership.is_primary desc, facility.name, membership.facility_id';
     expect(PREVIOUS_STAFF_CONTEXT_SQL.endsWith(orderBy)).toBe(true);
     expect(STAFF_MEMBERSHIPS_SQL).toBe(PREVIOUS_STAFF_CONTEXT_SQL.slice(0, -orderBy.length));
-    expect(STAFF_CONTEXT_SQL).toBe('select grouped.*, state.review_state, state.organization_type, kinds.organization_kinds\n'
+    expect(STAFF_CONTEXT_SQL).toBe('select grouped.*, state.review_state, state.organization_type, kinds.organization_kinds,\n'
+      + '         kinds.organization_products\n'
       + `         from (${STAFF_MEMBERSHIPS_SQL}) grouped\n`
       + '         left join lateral identity.organization_self_service_state(grouped.organization_id::uuid) state on true\n'
-      + '         left join lateral identity.organization_staff_kinds(grouped.organization_id::uuid) kinds(organization_kinds) on true\n'
+      + '         left join lateral identity.organization_staff_kinds(grouped.organization_id::uuid) kinds on true\n'
       + '        order by grouped.is_primary desc, grouped.facility_name, grouped.facility_id::uuid');
   });
 
@@ -218,6 +219,23 @@ describe('CurrentStaffContextService organisation kinds (0124, Q90 and Q91)', ()
     expect(context.facility?.organizationKinds).toEqual(['clinic']);
     const unknown = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['other'] }]);
     expect(unknown.facility).not.toHaveProperty('organizationKinds');
+  });
+
+  it('adds organizationProducts (sorted, once each, known codes only) beside a recorded kind', async () => {
+    const lab = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['laboratory'],
+      organization_products: ['migrate', 'laboratory', 'migrate', 'outreach'] }]);
+    expect(lab.facility?.organizationKinds).toEqual(['laboratory']);
+    expect(lab.facility?.organizationProducts).toEqual(['laboratory', 'migrate']);
+    for (const products of [[], null, undefined, ['outreach']]) {
+      const none = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['pharmacy'], organization_products: products }]);
+      expect(none.facility).not.toHaveProperty('organizationProducts');
+    }
+  });
+
+  it('adds no organizationProducts where no kind is recorded (a hospital to the gate answers exactly as before)', async () => {
+    const before = await resolved([STAFF_CONTEXT_ROW]);
+    const held = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: [], organization_products: ['ehr', 'migrate'] }]);
+    expect(JSON.stringify(held)).toBe(JSON.stringify(before));
   });
 
   it('keeps each membership\'s own kinds', async () => {
