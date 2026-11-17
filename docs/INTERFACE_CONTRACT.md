@@ -5389,10 +5389,12 @@ records how urgent a prescription is, the strength and form meant, how long
 it is for and how much to hand over, and this facility's pharmacy sees them
 on its own work. 0125 is unsigned until the owner signs its declaration.
 It was numbered 0122 by the coordinator's release order of 2026-11-11 and
-renumbered 0125 after staging's 0117-0121. It ships after 0124 (section
-45), which ships after 0122 and 0123 (other work), and its read consent test
-is the one 0104 left (0105-0121 kept it). Migrations 0122 and 0123 may add
-sections too, so this section's number is fixed at merge.
+renumbered 0125 after staging's 0117-0121 (0122 and 0123 are other work).
+It ships after 0124 (section 45). It needs 0001-0124 applied. Its read
+consent test is the one 0104 left (0105-0124 kept it). It accepts
+`ehr.send_order_route` as 0098 left it or as 0123 left it (0098's with the
+QA seal on the receiving facility). 0122 and 0123 are sections 51 and 52,
+so this section keeps the number 46.
 
 Routes (paths and permissions unchanged): `POST
 /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions`

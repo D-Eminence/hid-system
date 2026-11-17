@@ -15,7 +15,7 @@
 --      pharmacy.work_items' owner, EXECUTE for the Pharmacy runtime, its API
 --      login and the schema test runtime only; the seven columns nullable
 --      without default and their one CHECK validated; the 0100, 0101, 0098
---      and 0086 bodies untouched;
+--      (or 0123) and 0086 bodies untouched;
 --   2. the CHECK, through the EHR API's INSERT: every value set and range,
 --      both pairs, blank and long texts; all seven given, and none (today's
 --      INSERT, so a row written before 0125 reads null in each); the EHR
@@ -52,7 +52,14 @@
 --      same session, which has already run both guards, an EHR prescription,
 --      its acceptance and its dispensing still pass and the details read
 --      (pharmacy-api's pooled connections re-resolve the row type; the
---      two-session proof is in the release evidence).
+--      two-session proof is in the release evidence);
+--  10. each ehr.send_order_route body 0125 accepts, 0098's and 0123's (0098's
+--      plus the QA seal on the receiving facility): with it live, case 1's
+--      check accepts it, and the EHR's route send reads a prescription with
+--      the seven values through ehr.prescriptions%ROWTYPE (a newer version
+--      than it has is ORDER_ROUTE_VERSION_CONFLICT; its own version to the
+--      sender's own facility passes the version and state checks and is
+--      ORDER_ROUTE_DESTINATION_INELIGIBLE); a third body is refused.
 -- Identity fixtures are inserted as the suite runner with
 -- session_replication_role = replica (CHECK constraints still apply; foreign
 -- keys and guards are skipped), and so are the work items that stand for
@@ -69,6 +76,24 @@ begin
 end
 $f$;
 grant execute on function pg_temp.expect(text, text, text) to public;
+-- The bodies 0125 leaves untouched, as its section 0 and post-check accept
+-- them: null when each is an accepted body, else the ones that are not.
+create function pg_temp.untouched_bodies() returns text language sql as $f$
+  select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; '
+           order by expected.proc)
+    from (values
+      ('pharmacy.validate_work_item()', array['e2411539ee8c95a02dad46c03e24db05']),
+      ('pharmacy.validate_dispensing()', array['17f7e8897bd2ab240332e4d2c9f757b7']),
+      -- 0098's body, or 0123's (the sealed QA tenant: 0098's plus one clause).
+      ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)',
+       array['4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b']),
+      ('ehr.sync_order_routes_on_order_change()', array['8ce6b42450cc06fc02fec8d1cf63af41']),
+      -- 0004's body, or 0112's (OCR source deletion replaces the snapshot writer).
+      ('ehr.capture_record_version()', array['70daa16f05bb3ec28f05292e6358a702', 'cae99883d00e70ab1d20ed6fbc97ad7b']))
+         expected(proc, digests)
+    left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
+   where proc.oid is null or md5(proc.prosrc) <> all (expected.digests)
+$f$;
 
 -- 1. Structure.
 do $$
@@ -131,17 +156,9 @@ begin
          and constraint_row.convalidated and constraint_row.conname = 'prescriptions_dispensing_details_ck') <> 1 then
     raise exception 'prescription dispensing details: the CHECK is not there and validated';
   end if;
-  if (select count(*) from pg_proc proc
-       where (proc.oid::regprocedure::text, md5(proc.prosrc)) in (
-         ('pharmacy.validate_work_item()', 'e2411539ee8c95a02dad46c03e24db05'),
-         ('pharmacy.validate_dispensing()', '17f7e8897bd2ab240332e4d2c9f757b7'),
-         ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)',
-          '4202ba3bbf02abd7db34606d42adca9c'),
-         ('ehr.sync_order_routes_on_order_change()', '8ce6b42450cc06fc02fec8d1cf63af41'),
-         ('ehr.capture_record_version()', '70daa16f05bb3ec28f05292e6358a702'),
-         -- 0112 (OCR source deletion) replaces the snapshot writer's body.
-         ('ehr.capture_record_version()', 'cae99883d00e70ab1d20ed6fbc97ad7b'))) <> 5 then
-    raise exception 'prescription dispensing details: a body 0125 leaves untouched has changed';
+  mismatch := pg_temp.untouched_bodies();
+  if mismatch is not null then
+    raise exception 'prescription dispensing details: a body 0125 leaves untouched has changed: %', mismatch;
   end if;
 end $$;
 
@@ -777,5 +794,92 @@ select pg_temp.expect('its details', pg_temp.details(array['e114000b-0000-4000-8
   '11:urgent/250 mg/tablet/3 day/3.0000 tablet');
 reset role;
 rollback to savepoint later_column;
+
+-- 10. Each ehr.send_order_route body 0125 accepts: 0098's, and 0123's (the
+-- sealed QA tenant: 0098's plus one clause, a receiving facility on the
+-- other side of the QA seal is ineligible). 0123 runs before 0125, so 0123's
+-- is live here; 0098's is 0123's without that clause. With each one live,
+-- case 1's check accepts it, and DR's route send of a1 (all seven values)
+-- reads a1 through ehr.prescriptions%ROWTYPE: a newer version than a1 has is
+-- ORDER_ROUTE_VERSION_CONFLICT; a1's own version, to DR's own facility,
+-- passes the version and state checks and is
+-- ORDER_ROUTE_DESTINATION_INELIGIBLE. Both are refusals, so nothing is sent.
+-- A third body (0123's with one more comment line) is refused by the same
+-- check. Orders between facilities are switched on for this case as the
+-- suite runner (session_replication_role = replica; the route suites use
+-- support's command). Undone.
+savepoint send_bodies;
+set local session_replication_role = replica;
+update platform.control_settings set enabled = true where control_key = 'cross_facility_orders_enabled';
+set local session_replication_role = origin;
+select set_config('details.attestation', (select text_row.version from ehr.order_route_attestation_texts text_row
+  where text_row.kind = 'prescription' order by text_row.created_at desc, text_row.version desc limit 1), true);
+create temporary table send_bodies (name text primary key, definition text not null) on commit drop;
+insert into send_bodies (name, definition)
+select body.name, body.definition
+  from (select pg_get_functiondef('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure)
+                 as live,
+               E'\n     or identity.sealed_qa_facility(receiving_facility.id) <> '
+                 || 'identity.sealed_qa_facility(actor.actor_facility_id) then' as qa_clause,
+               E'begin\n  select * into actor' as first_statement) source,
+       lateral (values ('0123', source.live),
+                       ('0098', replace(source.live, source.qa_clause, ' then')),
+                       ('third', replace(source.live, source.first_statement,
+                          E'begin\n  -- a third body\n  select * into actor'))) body(name, definition);
+select pg_temp.expect('the three send_order_route definitions differ', (select count(distinct definition)::text
+  from send_bodies), '3');
+-- Installs a body as the suite runner (CREATE OR REPLACE keeps the owner,
+-- the attributes and the grants); answers its md5.
+create function pg_temp.install_send_body(body_name text) returns text language plpgsql as $f$
+begin
+  execute (select body.definition from send_bodies body where body.name = body_name);
+  return (select md5(proc.prosrc) from pg_proc proc
+           where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure);
+end $f$;
+-- DR's route send of a1 to F1, at a1's version plus offset, as the EHR API
+-- calls it (a fresh idempotency key each time).
+create function pg_temp.send_a1_sql(version_offset integer) returns text language sql as $f$
+  select format('select * from ehr.send_order_route(%L, %L, %L, %L, %L, %s, %L, %L, %L, %L)',
+    gen_random_uuid(), 'prescription', p.patient_id, p.id, p.encounter_id, p.row_version + version_offset,
+    'e1140001-0000-4000-8000-000000000001', current_setting('details.attestation'),
+    'details-suite-send-' || replace(gen_random_uuid()::text, '-', ''), repeat('d', 64))
+    from ehr.prescriptions p where p.id = 'e1140007-0000-4000-8000-0000000000a1'
+$f$;
+grant execute on function pg_temp.send_a1_sql(integer) to public;
+select pg_temp.expect('0098''s send_order_route installed', pg_temp.install_send_body('0098'),
+  '4202ba3bbf02abd7db34606d42adca9c');
+select pg_temp.expect('0098''s send_order_route accepted', coalesce(pg_temp.untouched_bodies(), 'accepted'), 'accepted');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1, 1);
+select pg_temp.expect('0098''s send_order_route: a1 at a newer version', pg_temp.try(pg_temp.send_a1_sql(1)),
+  'P0001 ORDER_ROUTE_VERSION_CONFLICT');
+select pg_temp.expect('0098''s send_order_route: a1 to DR''s own facility', pg_temp.try(pg_temp.send_a1_sql(0)),
+  'P0001 ORDER_ROUTE_DESTINATION_INELIGIBLE');
+reset role;
+select pg_temp.expect('0123''s send_order_route installed', pg_temp.install_send_body('0123'),
+  '0c2def2b530bcb3d68537ade52787b6b');
+select pg_temp.expect('0123''s send_order_route accepted', coalesce(pg_temp.untouched_bodies(), 'accepted'), 'accepted');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1, 1);
+select pg_temp.expect('0123''s send_order_route: a1 at a newer version', pg_temp.try(pg_temp.send_a1_sql(1)),
+  'P0001 ORDER_ROUTE_VERSION_CONFLICT');
+select pg_temp.expect('0123''s send_order_route: a1 to DR''s own facility', pg_temp.try(pg_temp.send_a1_sql(0)),
+  'P0001 ORDER_ROUTE_DESTINATION_INELIGIBLE');
+reset role;
+select set_config('details.third_body', pg_temp.install_send_body('third'), true);
+select pg_temp.expect('a third send_order_route body is neither accepted one',
+  (current_setting('details.third_body') not in ('4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b'))::text,
+  'true');
+select pg_temp.expect('a third send_order_route body refused', pg_temp.untouched_bodies(),
+  'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) md5 '
+  || current_setting('details.third_body'));
+select pg_temp.expect('a1 unchanged by the refused sends', (select format('%s/%s/%s/%s/%s/%s/%s/%s/%s', row_version,
+    status, priority, medication_strength, medication_dose_form, duration_value, duration_unit, quantity_to_dispense,
+    quantity_unit) from ehr.prescriptions where id = 'e1140007-0000-4000-8000-0000000000a1'),
+  '1/active/urgent/500 mg/capsule/7/day/21.0000/capsule');
+rollback to savepoint send_bodies;
+select pg_temp.expect('0123''s send_order_route back after case 10', (select md5(proc.prosrc) from pg_proc proc
+   where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure),
+  '0c2def2b530bcb3d68537ade52787b6b');
 
 rollback;

@@ -6,11 +6,12 @@
 -- does not compare the two). The declaration is signed separately.
 -- Written as 0114 on 0113 (the own-work patient cards, now 0124) over 0103
 -- (34d69557), numbered 0122 on 11 Nov 2026 and released as 0125, after 0124
--- (staging's 0117-0121 took the earlier numbers; 0122 and 0123 belong to
--- other work). It needs 0001-0121 applied and relies on one body 0104
--- replaced: identity.has_active_consent_grant as 0104 left it (0108 and
--- 0117-0121 kept it), so its records-processing cover counts here as it does
--- in the work items' read policy. It uses nothing else 0104-0121 or 0124 add.
+-- (staging's 0117-0121 took the earlier numbers; 0122 is the Access PIN and
+-- 0123 the sealed QA tenant). It needs 0001-0124 applied and relies on one
+-- body 0104 replaced: identity.has_active_consent_grant as 0104 left it (0108
+-- and 0117-0124 kept it), so its records-processing cover counts here as it
+-- does in the work items' read policy. It uses nothing else 0104-0124 add.
+-- It accepts ehr.send_order_route as 0123 left it, beside 0098's (section 0).
 --
 -- The gap: ehr.prescriptions (0004) records the medicine, dose, route,
 -- frequency, instructions and dates, but not the strength and form the
@@ -109,13 +110,14 @@
 -- audit row: no new person is shown.
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
---    and nothing is applied): 0001-0121 applied (the runner applies every
+--    and nothing is applied): 0001-0124 applied (the runner applies every
 --    earlier file first; this file checks 0103's
 --    identity.organization_application_admin_account body as the marker, and
 --    the tables used); 0125 not applied yet (the function does not exist);
 --    none of the seven columns or the CHECK name exists on ehr.prescriptions;
---    the bodies relied on are the ones 0001-0104 left and 0105-0121 kept (md5
---    of pg_proc.prosrc):
+--    the bodies relied on are the ones 0001-0104 left and 0105-0124 kept (md5
+--    of pg_proc.prosrc; the snapshot writer as 0004 or 0112 left it, and
+--    ehr.send_order_route as 0098 or 0123 left it):
 --    the snapshot writer and its trigger, the consent test (0104's body) and
 --    the membership and permission checks the body calls, the four session
 --    readers, pharmacy.work_item_allows (its attributes and search_path too:
@@ -123,8 +125,8 @@
 --    ehr.context_allows (the snapshot read policy), and the bodies that read
 --    ehr.prescriptions through %ROWTYPE or fire on it and that this file
 --    leaves untouched: pharmacy.validate_work_item (0100),
---    pharmacy.validate_dispensing (0101), ehr.send_order_route (0098) and
---    ehr.sync_order_routes_on_order_change (0086); the three triggers on
+--    pharmacy.validate_dispensing (0101), ehr.send_order_route (0098 or 0123)
+--    and ehr.sync_order_routes_on_order_change (0086); the three triggers on
 --    ehr.prescriptions; the read policies of pharmacy.work_items and
 --    ehr.record_versions (the only ones a SELECT applies), the own-row CHECK
 --    work_items_route_facility_ck, record_versions' one-snapshot-per-version
@@ -149,8 +151,8 @@
 --    then validated.
 -- 5. Post-checks of the table: the seven columns with their types, nullable
 --    and without default; the CHECK validated with this definition;
---    the three triggers, row-level security and the 0100, 0101, 0098 and
---    0086 bodies as before.
+--    the three triggers, row-level security and the 0100, 0101, 0098 (or
+--    0123) and 0086 bodies as before.
 --
 -- Locks (measured with pg_locks before commit on a 0113 copy, as 0114): ACCESS
 -- EXCLUSIVE on ehr.prescriptions, held to commit (and SHARE UPDATE EXCLUSIVE,
@@ -204,7 +206,7 @@
 --
 -- Old services on this schema: every writer and reader of ehr.prescriptions
 -- names its columns (the EHR API, the chat evidence query, the demo story),
--- and the 0100, 0101 and 0098 bodies read the row into ehr.prescriptions%ROWTYPE,
+-- and the 0100, 0101 and 0098 (or 0123) bodies read the row into ehr.prescriptions%ROWTYPE,
 -- which PostgreSQL re-resolves after ADD COLUMN, also in a pooled connection
 -- that ran them before (proved), so today's EHR API, pharmacy-api, Lab and
 -- website answer exactly as before; so do the new images while
@@ -239,7 +241,7 @@ declare
   prescriptions_owner oid;
   work_items_owner oid;
 begin
-  -- a. Prerequisites (0001-0121; 0103's gate body is the marker).
+  -- a. Prerequisites (0001-0124; 0103's gate body is the marker).
   if to_regprocedure('identity.organization_application_admin_account(text)') is null
      or (select md5(proc.prosrc) from pg_proc proc
           where proc.oid = to_regprocedure('identity.organization_application_admin_account(text)'))
@@ -247,7 +249,7 @@ begin
      or to_regclass('ehr.prescriptions') is null
      or to_regclass('ehr.record_versions') is null
      or to_regclass('pharmacy.work_items') is null then
-    raise exception using errcode = '55000', message = '0125: 0001-0121 must be applied first';
+    raise exception using errcode = '55000', message = '0125: 0001-0124 must be applied first';
   end if;
   -- b. Not applied yet, and nothing in the way.
   if exists (select 1 from pg_proc proc
@@ -268,14 +270,14 @@ begin
     raise exception using errcode = '55000',
       message = format('0125: ehr.prescriptions already has a column or CHECK this migration adds: %s', mismatch);
   end if;
-  -- c. The bodies relied on, as 0001-0104 left them and 0105-0121 kept them:
+  -- c. The bodies relied on, as 0001-0104 left them and 0105-0124 kept them:
   -- the snapshot writer (0004), the consent test (0012, as 0104 replaced it;
   -- 0108 kept it), the membership (0008) and permission (0010) checks, the
   -- four session readers (0001), the Pharmacy work items' read-policy
   -- function (0086 H8) and its route branch (0086 H7), the
   -- snapshot read policy's function (0005), and the four bodies that read
   -- ehr.prescriptions into its row type or fire on it, left untouched here
-  -- (0100, 0101, 0098, 0086).
+  -- (0100, 0101, 0098 or 0123, 0086).
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
@@ -300,7 +302,13 @@ begin
      -- 0112 (OCR source deletion) replaces the snapshot writer; it runs 0004's body
      -- unchanged for every call except its own purge, so either body is accepted.
      and not (expected.proc = 'ehr.capture_record_version()'
-              and md5(proc.prosrc) = 'cae99883d00e70ab1d20ed6fbc97ad7b');
+              and md5(proc.prosrc) = 'cae99883d00e70ab1d20ed6fbc97ad7b')
+     -- 0123 (the sealed QA tenant) replaces ehr.send_order_route with 0098's
+     -- body plus one clause: a receiving facility on the other side of the QA
+     -- seal is ORDER_ROUTE_DESTINATION_INELIGIBLE. It reads, locks and updates
+     -- ehr.prescriptions as 0098's body does, so either body is accepted.
+     and not (expected.proc = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'
+              and md5(proc.prosrc) = '0c2def2b530bcb3d68537ade52787b6b');
   -- Lab's and Pharmacy's work_item_allows have the same text; the search_path
   -- tells them apart. The snapshot writer and the two guards are SECURITY
   -- DEFINER plpgsql triggers; the others are SECURITY DEFINER SQL checks.
@@ -387,7 +395,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0125: an object this migration relies on differs from 0001-0121: %s', mismatch);
+      message = format('0125: an object this migration relies on differs from 0001-0124: %s', mismatch);
   end if;
   -- d. The columns read.
   select string_agg(format('%s.%s', expected.relation_name, expected.column_name), '; ') into mismatch
@@ -418,7 +426,7 @@ begin
                         and attribute_row.attnotnull = expected.not_null);
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0125: a column this migration relies on differs from 0001-0121: %s', mismatch);
+      message = format('0125: a column this migration relies on differs from 0001-0124: %s', mismatch);
   end if;
   -- e. Ownership and privileges, never through a superuser's bypass
   -- (production's migrator has none). The applier alters
@@ -726,7 +734,8 @@ begin
       message = '0125: the CHECK is not as this file makes it: prescriptions_dispensing_details_ck';
   end if;
   -- Untouched: the triggers, row-level security, and the bodies that read
-  -- the row type or fire on the table.
+  -- the row type or fire on the table (the snapshot writer as 0004 or 0112
+  -- left it, ehr.send_order_route as 0098 or 0123 left it).
   if (select count(*) from pg_trigger trigger_row
        where trigger_row.tgrelid = 'ehr.prescriptions'::regclass and not trigger_row.tgisinternal
          and trigger_row.tgenabled = 'O') <> 3
@@ -738,6 +747,8 @@ begin
             ('pharmacy.validate_dispensing()'::regprocedure, '17f7e8897bd2ab240332e4d2c9f757b7'),
             ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure,
              '4202ba3bbf02abd7db34606d42adca9c'),
+            ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure,
+             '0c2def2b530bcb3d68537ade52787b6b'),
             ('ehr.sync_order_routes_on_order_change()'::regprocedure, '8ce6b42450cc06fc02fec8d1cf63af41'),
             ('ehr.capture_record_version()'::regprocedure, '70daa16f05bb3ec28f05292e6358a702'),
             ('ehr.capture_record_version()'::regprocedure, 'cae99883d00e70ab1d20ed6fbc97ad7b'))) <> 5 then
