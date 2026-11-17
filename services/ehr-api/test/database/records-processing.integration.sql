@@ -79,8 +79,11 @@ select pg_temp.expect('1d the request list', 't/{"search_path=pg_catalog, pg_tem
             (select string_agg(coalesce(nullif(acl.grantee::regrole::text, '-'), 'public') || ' ' || acl.privilege_type, ', ')
                from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl where acl.grantee <> p.proowner))
      from pg_proc p where p.oid = 'identity.list_my_access_requests()'::regprocedure));
+-- 0128 appends the requester's name and role; 0104's twelve columns are unchanged.
 select pg_temp.expect('1e the list''s columns', 'access_request_id facility_id facility_name scope reason status '
-  || 'requested_duration_minutes requested_at approved_at denied_at denied_reason purpose_of_use',
+  || 'requested_duration_minutes requested_at approved_at denied_at denied_reason purpose_of_use'
+  || case when to_regprocedure('notification.on_identity_pin_outbox_created()') is not null
+          then ' requester_name requester_role' else '' end,
   (select array_to_string(p.proargnames[1:], ' ') from pg_proc p
     where p.oid = 'identity.list_my_access_requests()'::regprocedure));
 select pg_temp.expect('1f who may list', 'identity=t ehr=f lab=f pharmacy=f ocr=f',

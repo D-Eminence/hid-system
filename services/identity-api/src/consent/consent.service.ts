@@ -20,7 +20,11 @@ export interface AccessRequestRow extends QueryResultRow {
   existingRequest: boolean;
 }
 
-/** A row of identity.list_my_access_requests (0072); purpose_of_use from 0104. */
+/**
+ * A row of identity.list_my_access_requests (0072); purpose_of_use from 0104;
+ * requester_name and requester_role from 0128 (the requesting clinician's
+ * staff name and their role at the request's facility, null when unknown).
+ */
 interface PatientAccessRequestRow extends QueryResultRow {
   access_request_id: string;
   facility_id: string;
@@ -34,6 +38,8 @@ interface PatientAccessRequestRow extends QueryResultRow {
   denied_at: Date | null;
   denied_reason: string | null;
   purpose_of_use?: string;
+  requester_name?: string | null;
+  requester_role?: string | null;
 }
 
 export interface BreakGlassRow extends QueryResultRow {
@@ -209,6 +215,9 @@ export class ConsentService {
         requestedDurationMinutes: row.requested_duration_minutes, requestedAt: row.requested_at,
         approvedAt: row.approved_at, deniedAt: row.denied_at, deniedReason: row.denied_reason,
         ...('purpose_of_use' in row ? { purpose: row.purpose_of_use } : {}),
+        // 0128: who asked. Left out on a schema before 0128, null when unknown.
+        ...('requester_name' in row
+          ? { requesterName: row.requester_name ?? null, requesterRole: row.requester_role ?? null } : {}),
       }));
     }, { readOnly: true });
   }

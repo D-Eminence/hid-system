@@ -5469,3 +5469,46 @@ released first. Any other answer is final. A patient account keeps the
 patient email whatever site asked; the patient portal's reset of a staff-only
 account, legacy recovery and SMS keep the generic code message. The start
 still answers every identifier alike.
+
+## 54. The PIN-use notice and the named requester (0128, provisional)
+
+Port of `main` 0091 sections 4 and 5 (NOTIF-PIN-NOTICE, CONSENT-GRANTEE),
+written on this branch's bodies; coordinator's tasks of 17 November 2026 on
+hid-system#258, where the number is booked. It releases after 0124-0127.
+
+### The PIN-use notice
+
+Every time a health worker opens a patient's records with the patient's
+Access PIN (`POST /api/v1/identity/standard-access/pin`, a first use, not a
+replay of the active grant), the patient's in-app inbox (`GET
+/api/v1/identity/me/notifications`, as for every 0037 item) gains one item:
+
+```text
+notification_code: PATIENT_ACCESS_PIN_USED
+resource_type:     consent-grant
+resource_id:       <the grant the PIN created>
+metadata:          { consentGrantId, reviewRequired: true, scope,
+                     clinicianName, clinicianRole, facilityName }
+```
+
+`scope` is the grant's (`write_records` since 0122, which also reads).
+`clinicianName` is the verified staff record's full name, as the access
+history's `clinicianName` for a share; `clinicianRole` is the clinician's
+membership role at that facility (`doctor`, `nurse`, `clinician`, ...);
+`facilityName` is the facility's name. The values are a snapshot at the moment
+of use; one that cannot be read is left out, never invented. A wrong PIN, a
+lock-out and a replay write no outbox event, so no item; a patient without an
+active account gets none. The `PatientAccessPinVerified` outbox event, its
+payload and the EventBridge rule are unchanged. The website shows an unknown
+code as a general account update until it has its own words.
+
+### The named requester
+
+`GET /api/v1/identity/me/access-requests` items gain `requesterName` and
+`requesterRole`: the requesting clinician's staff name and their membership
+role at the request's facility (each `null` when it cannot be read), from the
+thirteenth and fourteenth columns `requester_name` and `requester_role` of
+`identity.list_my_access_requests()`. The function was dropped and recreated
+with the same owner and EXECUTE for `hid_identity_runtime` only. On a
+database before 0128 both fields are left out and the list still answers; an
+earlier Identity image ignores the two columns.

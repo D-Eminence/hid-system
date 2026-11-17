@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0123",
-    "count": 124,
+    "last": "0128",
+    "count": 125,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -593,6 +593,10 @@
       {
         "name": "0123_sealed_qa_tenant.sql",
         "sha256": "72a685d7dd19152accd8f7855cf2f270893c21980d244a0697ff9c0b8da155b0"
+      },
+      {
+        "name": "0128_patient_access_pin_notice_and_named_requester.sql",
+        "sha256": "a6680a546ba38a0df70fb6b3244672875a5d5defe6aad2af5de63f4e803805df"
       }
     ]
   },
