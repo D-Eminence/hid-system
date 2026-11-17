@@ -286,3 +286,41 @@ describe('Session lifetimes (patients: owner decision of 2026-10-28)', () => {
     }
   });
 });
+
+describe('Staff facility selection mode (STAFF_FACILITY_SELECTION_MODE, 0129)', () => {
+  const original = { ...process.env };
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+
+  function mode(value: string | undefined): unknown {
+    delete process.env.STAFF_FACILITY_SELECTION_MODE;
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://ehr.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+    }, value === undefined ? {} : { STAFF_FACILITY_SELECTION_MODE: value });
+    resetEnvironmentForTests();
+    const environment: Record<string, unknown> = getEnvironment();
+    return environment.STAFF_FACILITY_SELECTION_MODE;
+  }
+
+  it('is off (today\'s behaviour) when unset or empty, so an image can ship before 0129', () => {
+    expect(mode(undefined)).toBe('off');
+    expect(mode('')).toBe('off');
+    expect(mode('  ')).toBe('off');
+  });
+
+  it('accepts off, keep and ask', () => {
+    for (const value of ['off', 'keep', 'ask']) expect(mode(value)).toBe(value);
+  });
+
+  it('refuses any other value at boot, naming the setting', () => {
+    for (const value of ['on', 'true', 'false', 'KEEP', ' keep', 'default', 'selected', 'keep,ask']) {
+      expect(() => mode(value)).toThrow(/STAFF_FACILITY_SELECTION_MODE: /);
+    }
+  });
+});
