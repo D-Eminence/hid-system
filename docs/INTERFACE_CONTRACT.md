@@ -5121,10 +5121,10 @@ patient details with the work). Laboratories and pharmacies run as
 stand-alone products for the whole facility, so their staff need the
 patient's name, sex, date of birth and Health ID ending on their own work,
 not only on work sent from another facility. 0124 is unsigned until the
-owner signs its declaration. It ships after 0123 (numbered 0121 by the
-coordinator's release order of 2026-11-11, renumbered 0124 after staging's
-0117-0121; 0122 and 0123 are other work), and its read consent test is the
-one 0104 left (0105-0121 kept it). Migrations 0122 and 0123 may add
+owner signs its declaration. It ships after 0123. It was numbered 0121 by
+the coordinator's release order of 2026-11-11 and renumbered 0124 after
+staging's 0117-0121 (0122 and 0123 are other work). Its read consent test is
+the one 0104 left (0105-0121 kept it). Migrations 0122 and 0123 may add
 sections too, so this section's number is fixed at merge.
 
 Routes (paths, permissions, requests unchanged):
