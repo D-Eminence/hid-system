@@ -1721,8 +1721,9 @@ revoke all on function identity.sealed_qa_ids(text),
   identity.outreach_invitations_sealed_qa(),
   identity.demo_patient_logins_move() from public;
 
--- The kinds of an organisation for the staff sign-in gate (0124, owner decisions Q90 and Q91): the Identity runtime's
--- staff context reads them once per membership, as it reads identity.organization_self_service_state. To the
--- Identity runtime alone; nothing to any other runtime; no grant on the application or product tables.
+-- The kinds and active products of an organisation for the staff sign-in gate (0124, owner decisions Q90 and Q91):
+-- the Identity runtime's staff context reads them once per membership, as it reads
+-- identity.organization_self_service_state. To the Identity runtime alone; nothing to any other runtime; no grant on
+-- the application, product or organisation tables.
 grant execute on function identity.organization_staff_kinds(uuid) to hid_identity_runtime;
 revoke all on function identity.organization_staff_kinds(uuid) from public;
