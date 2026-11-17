@@ -6,13 +6,13 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AuditGateError, REPOSITORY_ROOT, SEVERITIES, evaluateAudit, main, parseAuditResult,
-  parseExceptions } from '../scripts/npm-audit-with-exceptions.mjs'
-import { AWS_AUDIT_GATE } from '../scripts/verify-publication-workflow.mjs'
+  parseExceptions, parseRange, satisfies } from '../scripts/npm-audit-with-exceptions.mjs'
+import { EXCEPTION_GATE_DIRECTORIES } from '../scripts/verify-publication-workflow.mjs'
 
 const SCRIPT = fileURLToPath(new URL('../scripts/npm-audit-with-exceptions.mjs', import.meta.url))
 const reviewedText = await readFile(new URL('../../security/npm-audit-exceptions.json', import.meta.url), 'utf8')
 const reviewed = JSON.parse(reviewedText)
-const NOW = new Date('2026-11-15T12:00:00Z')
+const NOW = new Date('2026-11-17T12:00:00Z')
 const MINIMATCH_PATH = 'node_modules/aws-cdk-lib/node_modules/minimatch'
 
 // Shaped like `npm --prefix infra/aws audit --json` on the 2026-11-01 lockfile.
@@ -33,7 +33,7 @@ const lowAdvisory = (severity = 'low') => ({ name: 'tiny-glob', severity, isDire
   title: 'Lower-severity advisory', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity, cwe: [], cvss: { score: 0, vectorString: null }, range: '<2.0.0' }],
   effects: [], range: '<2.0.0', nodes: ['node_modules/tiny-glob'], fixAvailable: true })
 const withEntries = (...entries) => ({ ...reviewed, exceptions: entries })
-const entry = (changes = {}) => ({ ...structuredClone(reviewed.exceptions[0]), ...changes })
+const entry = (changes = {}) => ({ ...structuredClone(reviewed.exceptions.find(item => item.id === 'GHSA-g3hv-75wg-m249')), ...changes })
 function evaluate(auditReport, file = reviewed, now = NOW, directory = 'infra/aws') {
   const status = Object.keys(auditReport.vulnerabilities).length > 0 ? 1 : 0
   return evaluateAudit({ report: parseAuditResult({ status, stdout: JSON.stringify(auditReport) }),
@@ -46,14 +46,14 @@ test('the reviewed exception covers the real infra/aws minimatch advisory', () =
   const result = evaluate(awsReport())
   assert.equal(result.ok, true, failuresOf(result))
   assert.deepEqual(result.covered.map(({ finding, path }) => [finding.id, finding.package, path]), [['GHSA-g3hv-75wg-m249', 'minimatch', MINIMATCH_PATH]])
-  const [only] = reviewed.exceptions
-  assert.equal(reviewed.exceptions.length, 1)
+  const only = reviewed.exceptions.find(item => item.directory === 'infra/aws')
+  assert.equal(reviewed.exceptions.length, 2)
   assert.deepEqual({ directory: only.directory, id: only.id, package: only.package, vulnerable_range: only.vulnerable_range, severity: only.severity,
     paths: only.paths, approved_by: only.approved_by, approved_at: only.approved_at, expires_at: only.expires_at },
   { directory: 'infra/aws', id: 'GHSA-g3hv-75wg-m249', package: 'minimatch', vulnerable_range: '>=7.0.0 <11.0.1', severity: 'moderate',
     paths: [MINIMATCH_PATH], approved_by: 'D-Eminence (in chat, 2026-11-01; re-approved for the reworded range in chat, 2026-11-04: "Q32 yes")', approved_at: '2026-11-04', expires_at: '2026-12-01' })
-  // The only audited directory using the gate is the only one exceptions may name.
-  assert.ok(reviewed.exceptions.every(item => AWS_AUDIT_GATE.endsWith(` ${item.directory}`)))
+  // Exceptions may name only the directories audited through the gate.
+  assert.ok(reviewed.exceptions.every(item => EXCEPTION_GATE_DIRECTORIES.includes(item.directory)))
 })
 
 test('advisories without a matching exception fail: new advisory, new path, changed range, raised severity, other directory', () => {
@@ -283,4 +283,170 @@ test('the CLI still runs the gate when reached through a symlink, so it cannot p
       assert.match(passed.stdout, /npm audit gate passed for infra\/aws: 1 covered/, name)
     }
   } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+// --- apps/ehr: picomatch (GHSA-fc5q-39xc-vjpf), build tooling under vite ------
+
+const PICOMATCH_DEPENDENTS = ['node_modules/@vitejs/plugin-react', 'node_modules/fdir', 'node_modules/tinyglobby', 'node_modules/vite']
+// Shaped like `npm --prefix apps/ehr audit --json` on 2026-11-17 (staging-novu-ci-20261005 73eae090).
+const picomatchAdvisory = (changes = {}) => ({ source: 1247710, name: 'picomatch', dependency: 'picomatch',
+  title: 'picomatch vulnerable to ReDoS through single-branch repeated extglobs', url: 'https://github.com/advisories/GHSA-fc5q-39xc-vjpf',
+  severity: 'high', cwe: ['CWE-1333'], cvss: { score: 0, vectorString: null }, range: '<=4.0.7', ...changes })
+const through = (name, via, nodes = [`node_modules/${name}`]) => ({ name, severity: 'high', isDirect: false, via, effects: [], range: '*', nodes, fixAvailable: false })
+const ehrVulnerabilities = (advisory = picomatchAdvisory()) => ({
+  '@vitejs/plugin-react': { ...through('@vitejs/plugin-react', ['vite']), isDirect: true },
+  fdir: through('fdir', ['picomatch']),
+  picomatch: { name: 'picomatch', severity: advisory.severity, isDirect: false, via: [advisory], effects: ['fdir', 'tinyglobby', 'vite'],
+    range: advisory.range, nodes: ['node_modules/picomatch'], fixAvailable: false },
+  tinyglobby: through('tinyglobby', ['fdir', 'picomatch']),
+  vite: { ...through('vite', ['picomatch', 'tinyglobby']), isDirect: true },
+})
+const ehrReport = (vulnerabilities = ehrVulnerabilities()) => report(vulnerabilities)
+const ehrLockfile = { lockfileVersion: 3, packages: { '': { name: '@hid/ehr' }, 'node_modules/picomatch': { version: '4.0.7', dev: true } } }
+const picomatchEntry = (changes = {}) => ({ ...structuredClone(reviewed.exceptions.find(item => item.id === 'GHSA-fc5q-39xc-vjpf')), ...changes })
+const REGISTRY = ['2.3.1', '3.0.1', '4.0.6', '4.0.7']
+function evaluateEhr(auditReport = ehrReport(), { file = reviewed, now = NOW, lockfile = ehrLockfile, versions = REGISTRY } = {}) {
+  const status = Object.keys(auditReport.vulnerabilities).length > 0 ? 1 : 0
+  return evaluateAudit({ report: parseAuditResult({ status, stdout: JSON.stringify(auditReport) }), exceptions: parseExceptions(json(file), now),
+    directory: 'apps/ehr', now, lockfile,
+    publishedVersions: versions === null ? undefined : () => { if (versions instanceof Error) throw versions; return versions } })
+}
+
+test('the reviewed exception covers the real apps/ehr picomatch advisory while no fix is published', () => {
+  const result = evaluateEhr()
+  assert.equal(result.ok, true, failuresOf(result))
+  assert.deepEqual(result.covered.map(({ finding, path }) => [finding.id, finding.package, path]), [['GHSA-fc5q-39xc-vjpf', 'picomatch', 'node_modules/picomatch']])
+  assert.match(result.notes.join('\n'), /no fixed version published: no release of picomatch outside <=4\.0\.7 is newer than the installed 4\.0\.7/)
+  const only = picomatchEntry()
+  assert.deepEqual({ directory: only.directory, package: only.package, vulnerable_range: only.vulnerable_range, severity: only.severity, paths: only.paths,
+    dependent_paths: only.dependent_paths, ends_when_fix_published: only.ends_when_fix_published, approved_by: only.approved_by,
+    approved_at: only.approved_at, expires_at: only.expires_at },
+  { directory: 'apps/ehr', package: 'picomatch', vulnerable_range: '<=4.0.7', severity: 'high', paths: ['node_modules/picomatch'],
+    dependent_paths: PICOMATCH_DEPENDENTS, ends_when_fix_published: true, approved_by: 'D-Eminence (owner), in chat 17 Nov 2026: "Q95 A"',
+    approved_at: '2026-11-17', expires_at: '2026-12-01' })
+})
+
+test('the same picomatch advisory fails without the exception, in another directory, or once expired', () => {
+  const without = evaluateEhr(ehrReport(), { file: withEntries(entry()) })
+  assert.equal(without.ok, false)
+  assert.match(failuresOf(without), /no reviewed exception: GHSA-fc5q-39xc-vjpf picomatch <=4\.0\.7 \(high\) at node_modules\/picomatch in apps\/ehr/)
+  const elsewhere = evaluateAudit({ report: ehrReport(), exceptions: reviewed, directory: 'packages/ui', now: NOW })
+  assert.match(failuresOf(elsewhere), /no reviewed exception: GHSA-fc5q-39xc-vjpf .* in packages\/ui/)
+  assert.equal(evaluateEhr(ehrReport(), { now: new Date('2026-11-30T23:59:59Z') }).ok, true)
+  const expired = evaluateEhr(ehrReport(), { now: new Date('2026-12-01T00:00:00Z') })
+  assert.equal(expired.ok, false)
+  assert.match(failuresOf(expired), /expired exception: GHSA-fc5q-39xc-vjpf picomatch .* expired on 2026-12-01/)
+})
+
+test('the picomatch exception ends when a fixed version is published, and fails closed when it cannot tell', () => {
+  const fixed = evaluateEhr(ehrReport(), { versions: [...REGISTRY, '4.0.8'] })
+  assert.equal(fixed.ok, false)
+  assert.match(failuresOf(fixed), /fixed version published: picomatch 4\.0\.8 is outside <=4\.0\.7, .* upgrade from 4\.0\.7 and remove the exception/)
+  assert.match(failuresOf(evaluateEhr(ehrReport(), { versions: [...REGISTRY, '5.0.0'] })), /picomatch 5\.0\.0 is outside/)
+  // A prerelease, or an older line outside the range, is not a fix.
+  assert.equal(evaluateEhr(ehrReport(), { versions: [...REGISTRY, '4.0.8-beta.1', '5.0.0-rc.0'] }).ok, true)
+  const cases = {
+    'registry unreachable': [{ versions: new Error('npm view picomatch failed') }, /npm view picomatch failed/],
+    'registry lists nothing': [{ versions: [] }, /listed no versions/],
+    'no registry lookup': [{ versions: null }, /no registry lookup was given/],
+    'no lockfile': [{ lockfile: null }, /package-lock\.json has no packages map/],
+    'lockfile without the version': [{ lockfile: { packages: {} } }, /package-lock\.json has no version for node_modules\/picomatch/],
+  }
+  for (const [name, [options, message]] of Object.entries(cases)) {
+    const result = evaluateEhr(ehrReport(), options)
+    assert.equal(result.ok, false, name)
+    assert.match(failuresOf(result), /cannot check for a fixed version of picomatch/, name)
+    assert.match(failuresOf(result), message, name)
+  }
+})
+
+test('the picomatch exception fails when the advisory spreads, moves or changes, and when a listed dependent is gone', () => {
+  const spread = ehrVulnerabilities()
+  spread['runtime-lib'] = through('runtime-lib', ['tinyglobby'])
+  const spreadResult = evaluateEhr(ehrReport(spread))
+  assert.equal(spreadResult.ok, false)
+  assert.match(failuresOf(spreadResult), /advisory has spread: GHSA-fc5q-39xc-vjpf picomatch .* now reaches node_modules\/runtime-lib, which dependent_paths does not list/)
+  const nested = ehrVulnerabilities()
+  nested.vite.nodes = ['node_modules/vite', 'node_modules/vitest/node_modules/vite']
+  assert.match(failuresOf(evaluateEhr(ehrReport(nested))), /now reaches node_modules\/vitest\/node_modules\/vite/)
+  const moved = ehrVulnerabilities()
+  moved.picomatch.nodes = ['node_modules/picomatch', 'node_modules/micromatch/node_modules/picomatch']
+  assert.match(failuresOf(evaluateEhr(ehrReport(moved))), /no reviewed exception: GHSA-fc5q-39xc-vjpf .* at node_modules\/micromatch\/node_modules\/picomatch/)
+  const changed = evaluateEhr(ehrReport(ehrVulnerabilities(picomatchAdvisory({ range: '<4.0.8' }))))
+  assert.match(failuresOf(changed), /no reviewed exception: GHSA-fc5q-39xc-vjpf picomatch <4\.0\.8/)
+  assert.match(failuresOf(changed), /stale exception: GHSA-fc5q-39xc-vjpf picomatch/)
+  const fewer = ehrVulnerabilities()
+  delete fewer['@vitejs/plugin-react']
+  const fewerResult = evaluateEhr(ehrReport(fewer))
+  assert.equal(fewerResult.ok, false)
+  assert.match(failuresOf(fewerResult), /stale exception: .* no longer reaches node_modules\/@vitejs\/plugin-react in dependent_paths/)
+  const gone = evaluateEhr(report({}))
+  assert.equal(gone.ok, false)
+  assert.match(failuresOf(gone), /stale exception: GHSA-fc5q-39xc-vjpf picomatch .* no longer matches npm audit at node_modules\/picomatch/)
+})
+
+test('malformed optional fields fail closed', () => {
+  const bad = {
+    'fix check switched off': picomatchEntry({ ends_when_fix_published: false }),
+    'fix check as text': picomatchEntry({ ends_when_fix_published: 'true' }),
+    'fix check on an unreadable range': picomatchEntry({ vulnerable_range: 'latest' }),
+    'fix check on a non-package': picomatchEntry({ package: 'Pico Match' }),
+    'no dependent paths': picomatchEntry({ dependent_paths: [] }),
+    'wildcard dependent path': picomatchEntry({ dependent_paths: ['node_modules/*', 'node_modules/ vite'] }),
+    'escaping dependent path': picomatchEntry({ dependent_paths: ['node_modules/../vite'] }),
+    'repeated dependent path': picomatchEntry({ dependent_paths: ['node_modules/vite', 'node_modules/vite'] }),
+    'dependent path is the package': picomatchEntry({ dependent_paths: ['node_modules/picomatch', 'node_modules/vite'] }),
+  }
+  for (const [name, item] of Object.entries(bad)) assert.throws(() => parseExceptions(json(withEntries(entry(), item)), NOW), AuditGateError, name)
+  assert.doesNotThrow(() => parseExceptions(json(withEntries(entry(), picomatchEntry())), NOW))
+})
+
+test('main audits apps/ehr, then asks the registry for picomatch versions', () => {
+  const lockText = JSON.stringify(ehrLockfile)
+  const run = (viewResult, { lock = lockText, now = NOW } = {}) => {
+    const calls = [], out = [], err = []
+    const code = main(['apps/ehr'], { now, cwd: REPOSITORY_ROOT, out: text => out.push(text), err: text => err.push(text),
+      readText: path => {
+        if (path === resolve(REPOSITORY_ROOT, 'apps/ehr/package-lock.json')) { if (lock === null) throw new Error('ENOENT'); return lock }
+        return reviewedText
+      },
+      spawn: (command, args) => {
+        calls.push([command, ...args])
+        return args.includes('audit') ? { status: 1, stdout: JSON.stringify(ehrReport()) } : viewResult
+      } })
+    return { code, calls, out: out.join(''), err: err.join('') }
+  }
+  const passed = run({ status: 0, stdout: JSON.stringify(REGISTRY) })
+  assert.equal(passed.code, 0, passed.err)
+  const prefix = resolve(REPOSITORY_ROOT, 'apps/ehr')
+  assert.deepEqual(passed.calls, [['npm', '--prefix', prefix, 'audit', '--json'], ['npm', '--prefix', prefix, 'view', 'picomatch', 'versions', '--json']])
+  assert.match(passed.out, /covered: GHSA-fc5q-39xc-vjpf picomatch <=4\.0\.7 \(high\) at node_modules\/picomatch; approved by D-Eminence \(owner\)/)
+  assert.match(passed.out, /no fixed version published/)
+  assert.match(passed.out, /npm audit gate passed for apps\/ehr: 1 covered/)
+  for (const [name, viewResult, options, message] of [
+    ['fix published', { status: 0, stdout: JSON.stringify([...REGISTRY, '4.0.8']) }, {}, /fixed version published: picomatch 4\.0\.8/],
+    ['view failed', { status: 1, stdout: '' }, {}, /cannot check for a fixed version of picomatch .*npm view picomatch failed/],
+    ['view not JSON', { status: 0, stdout: 'oops' }, {}, /did not print JSON/],
+    ['view missing', { error: Object.assign(new Error('spawn npm ENOENT'), { code: 'ENOENT' }), status: null, stdout: '' }, {}, /npm view could not run: ENOENT/],
+    ['lockfile unreadable', { status: 0, stdout: JSON.stringify(REGISTRY) }, { lock: null }, /package-lock\.json has no packages map/],
+  ]) {
+    const result = run(viewResult, options)
+    assert.equal(result.code, 1, name)
+    assert.match(result.err, message, name)
+    assert.match(result.err, /npm audit gate failed for apps\/ehr/, name)
+  }
+  // A single published version comes back as a JSON string.
+  assert.equal(run({ status: 0, stdout: JSON.stringify('4.0.7') }).code, 0)
+})
+
+test('ranges', () => {
+  assert.ok(satisfies('4.0.7', '<=4.0.7'))
+  assert.ok(!satisfies('4.0.8', '<=4.0.7'))
+  assert.ok(satisfies('9.0.0', '>=7.0.0 <11.0.1'))
+  assert.ok(!satisfies('11.0.1', '>=7.0.0 <11.0.1'))
+  assert.ok(satisfies('2.0.5', '<1.0.0 || >=2.0.0 <2.1.0'))
+  assert.ok(satisfies('1.2.3', '*'))
+  assert.ok(satisfies('4.0.8-beta.1', '<4.0.8'))
+  assert.equal(parseRange('1.0.0 - 2.0.0'), null)
+  assert.equal(parseRange('latest'), null)
 })
