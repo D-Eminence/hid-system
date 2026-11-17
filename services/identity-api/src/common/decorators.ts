@@ -49,3 +49,12 @@ export const PATIENT_ONLY = Symbol('PATIENT_ONLY');
  */
 export const PatientOnly = (): MethodDecorator & ClassDecorator =>
   applyDecorators(SetMetadata(PATIENT_ONLY, true), PatientAllowed(), FacilityOptional());
+export const ACCOUNT_ONLY_ALLOWED = Symbol('ACCOUNT_ONLY_ALLOWED');
+/**
+ * A route an account-only session (Q88-2: a verified staff login with no
+ * facility membership, signed in on outreach.) may use: "Start an outreach
+ * group" and the session routes that page needs. SecurityGuard refuses an
+ * account-only session on every other route with 403
+ * NO_ACTIVE_FACILITY_MEMBERSHIP before a handler runs.
+ */
+export const AccountOnlyAllowed = (): MethodDecorator & ClassDecorator => SetMetadata(ACCOUNT_ONLY_ALLOWED, true);

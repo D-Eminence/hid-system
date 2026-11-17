@@ -5,6 +5,7 @@ import { MetaWhatsAppProvider } from '../providers/meta.provider';
 import { emergencyContactAlertContent, outreachHealthIdCodeContent, type OtpMessage, type OtpProvider, type ProviderResult, staffInvitationContent,
   type StaffInvitationRole, staffSiteForRole, staffSiteOrigin } from '../providers/provider.types';
 import { contactChangedContent, emailChangeCodeContent, passwordResetCodeContent, passwordUpdatedContent,
+  staffPasswordResetCodeContent,
   patientWelcomeContent } from '../providers/patient-emails';
 import { accountDeletionContent, type AccountDeletionNoticeKind } from '../providers/account-deletion-emails';
 import { patientShareInvitationContent, recordAccessAlertContent, shareReceivedContent, type ShareDuration,
@@ -153,6 +154,16 @@ export class NotificationService {
       idempotencyKey: input.idempotencyKey,
       content: passwordResetCodeContent({ ...(input.firstName ? { firstName: input.firstName } : {}),
         healthId: input.healthId, code: input.code, expiresInMinutes: input.expiresInMinutes }),
+    }, rawPlan);
+  }
+
+  deliverStaffPasswordResetCode(input: { recipient: string; code: string; firstName?: string;
+    expiresInMinutes: number; idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'PASSWORD_RESET',
+      idempotencyKey: input.idempotencyKey,
+      content: staffPasswordResetCodeContent({ ...(input.firstName ? { firstName: input.firstName } : {}),
+        code: input.code, expiresInMinutes: input.expiresInMinutes }),
     }, rawPlan);
   }
 
