@@ -422,6 +422,10 @@ try {
   // 0104: records processing asked for, approved, used by OCR, fenced from the chart, Lab and Pharmacy, and revoked.
   evidence.checks.records_processing_runtime = JSON.parse(command('exact-role records processing for OCR',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-records-processing-runtime.mjs')], workflowEnvironment));
+  // 0124: the patient on this facility's own lab and pharmacy work, through lab-api and pharmacy-api with
+  // OWN_WORK_PATIENT_CARD_ENABLED=true (they answer 200 whatever the readers do, so only this proves the readers answer).
+  evidence.checks.own_work_patient_cards_runtime = JSON.parse(command('exact-role patient details on own lab and pharmacy work',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-own-work-patient-cards-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
