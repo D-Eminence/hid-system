@@ -1,6 +1,6 @@
 {
   "schema_version": "hid.npm-audit-exceptions/v1",
-  "description": "Reviewed npm audit exceptions, read by release/scripts/npm-audit-with-exceptions.mjs. Only the infra/aws audit steps in .github/workflows/tuf-local-gates.yml and tuf-publish.yml use it; every other npm audit runs plain npm audit --audit-level=moderate. An entry covers one advisory in one package, at npm's exact vulnerable range, severity and installed paths, in one audited directory, until expires_at (00:00 UTC). An uncovered advisory, an expired entry or a stale entry fails the audit. See docs/STAGING_BACKEND_BUILDS.md.",
+  "description": "Reviewed npm audit exceptions, read by release/scripts/npm-audit-with-exceptions.mjs. Only the infra/aws audit steps in .github/workflows/tuf-local-gates.yml and tuf-publish.yml and the apps/ehr audit in tuf-local-gates.yml use it; every other npm audit runs plain npm audit --audit-level=moderate. An entry covers one advisory in one package, at npm's exact vulnerable range, severity and installed paths, in one audited directory, until expires_at (00:00 UTC). An uncovered advisory, an expired entry or a stale entry fails the audit; an entry with dependent_paths also fails when the advisory reaches a package path it does not list, and one with ends_when_fix_published fails once a fixed version is published. See docs/STAGING_BACKEND_BUILDS.md.",
   "exceptions": [
     {
       "directory": "infra/aws",
@@ -16,6 +16,28 @@
       "approved_by": "D-Eminence (in chat, 2026-11-01; re-approved for the reworded range in chat, 2026-11-04: \"Q32 yes\")",
       "approved_at": "2026-11-04",
       "expires_at": "2026-12-01"
+    },
+    {
+      "directory": "apps/ehr",
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "vulnerable_range": "<=4.0.7",
+      "severity": "high",
+      "paths": [
+        "node_modules/picomatch"
+      ],
+      "dependent_paths": [
+        "node_modules/@vitejs/plugin-react",
+        "node_modules/fdir",
+        "node_modules/tinyglobby",
+        "node_modules/vite"
+      ],
+      "justification": "Regular expression denial of service through single-branch repeated extglobs. picomatch 4.0.7 is installed in apps/ehr only as build tooling: npm ls picomatch --all shows it only under vite 8.2.4 (directly and through tinyglobby 0.2.17 and fdir 6.5.0), all devDependencies, and npm also lists @vitejs/plugin-react 6.1.1 because it peers on vite. It matches glob patterns from vite's own configuration and this repository's files at build time, never input from a user. Evidence, 17 November 2026, from origin/staging-novu-ci-20261005 73eae090: npm --prefix apps/ehr test passed, HID_PUBLIC_BASE=/ npm --prefix apps/ehr run build completed and its release-binding check passed, and none of the 10 files in apps/ehr/dist contains picomatch's source strings (picomatch, POSIX_REGEX_SOURCE, REGEX_NON_SPECIAL_CHARS, 'Expected pattern to be a non-empty string'), which the same search finds in apps/ehr/node_modules/picomatch/lib. npm ls picomatch --omit=dev --all is empty for apps/ehr, and npm ls picomatch --package-lock-only --omit=dev --all is empty for every one of the 27 package-lock.json directories, all 11 services (whose images install with npm ci --omit=dev) included; every picomatch in a lockfile is marked dev.",
+      "fix_status": "No fixed version exists: 4.0.7 is picomatch's latest release (dist-tag latest on 17 November 2026) and is in the vulnerable range. The entry has ends_when_fix_published, so the gate fails as soon as a release outside <=4.0.7 is published; then upgrade vite or override picomatch in apps/ehr and remove this entry.",
+      "approved_by": "D-Eminence (owner), in chat 17 Nov 2026: \"Q95 A\"",
+      "approved_at": "2026-11-17",
+      "expires_at": "2026-12-01",
+      "ends_when_fix_published": true
     }
   ]
 }
