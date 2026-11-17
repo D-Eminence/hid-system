@@ -43,6 +43,10 @@ function pgError(message: string, code: string, extra: Record<string, unknown> =
   return Object.assign(new Error(message), { code, ...extra });
 }
 
+// A challenge still open when the test runs (the service replays an open challenge only while it has not
+// expired), so the cases do not start failing once a fixed date has passed.
+const OPEN_UNTIL = new Date(Math.ceil((Date.now() + 10 * 60_000) / 1000) * 1000).toISOString();
+
 describe('OutreachHealthIdService (0119)', () => {
   const original = { ...process.env };
   let registration: Registration;
@@ -112,7 +116,7 @@ describe('OutreachHealthIdService (0119)', () => {
     bound = {};
     rateBlocked = false;
     startResult = () => ({ challenge_id: queries.find((q) => q.sql.includes('outreach_health_id_start('))?.parameters[1],
-      expires_at: new Date('2026-11-14T08:10:00Z') });
+      expires_at: new Date(OPEN_UNTIL) });
     confirmResult = () => ({ outcome: 'created', hid_code: 'HID-AB2CD3', patient_id: 'p' });
     createResult = (parameters) => ({ hid_code: parameters[1], patient_id: 'p',
       claim_expires_at: new Date('2027-05-12T08:00:00Z') });
@@ -139,7 +143,7 @@ describe('OutreachHealthIdService (0119)', () => {
   describe('start', () => {
     it('stores the keyed verifier, the encrypted email and both lookups, then emails the code with the group', async () => {
       const answer = await service().start({ caseId, channel: 'email', email: '  Ada.Example@Example.TEST ' }, context);
-      expect(answer).toEqual({ channel: 'email', expiresAt: '2026-11-14T08:10:00.000Z',
+      expect(answer).toEqual({ channel: 'email', expiresAt: OPEN_UNTIL,
         destinationHint: 'a***@example.test', resendAfterSeconds: 60 });
       const call = queries.find((q) => q.sql.includes('outreach_health_id_start('))!;
       expect(call.system).toBe(false);
@@ -200,7 +204,7 @@ describe('OutreachHealthIdService (0119)', () => {
     it('answers the same 202 for an email already on a patient and a fresh one, and never looks the email up', async () => {
       const answer = async (email: string) => {
         queries.length = 0;
-        startResult = () => ({ challenge_id: 'x', expires_at: new Date('2026-11-14T08:10:00Z') });
+        startResult = () => ({ challenge_id: 'x', expires_at: new Date(OPEN_UNTIL) });
         const result = await service().start({ caseId, channel: 'email', email }, context);
         return { result, statements: queries.filter((q) => !q.sql.includes('outreach_health_id_start('))
           .map((q) => q.sql) };
@@ -208,7 +212,7 @@ describe('OutreachHealthIdService (0119)', () => {
       bound[`email:${createContactLookupHmac('email', 'taken@example.test')}`] = true;
       const taken = await answer('taken@example.test');
       const fresh = await answer('fresh@example.test');
-      expect(taken.result).toEqual({ channel: 'email', expiresAt: '2026-11-14T08:10:00.000Z',
+      expect(taken.result).toEqual({ channel: 'email', expiresAt: OPEN_UNTIL,
         destinationHint: 't***@example.test', resendAfterSeconds: 60 });
       expect({ ...taken.result, destinationHint: '' }).toEqual({ ...fresh.result, destinationHint: '' });
       // The same statements on the same path, and none of them an email lookup.
@@ -317,10 +321,10 @@ describe('OutreachHealthIdService (0119)', () => {
       const key = 'outreach-health-id-key-0001';
       await service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context, key);
       const challengeId = queries.find((q) => q.sql.includes('outreach_health_id_start('))!.parameters[1];
-      open = { challenge_id: challengeId, expires_at: new Date('2026-11-14T08:10:00Z') };
+      open = { challenge_id: challengeId, expires_at: new Date(OPEN_UNTIL) };
       queries.length = 0;
       await expect(service().start({ caseId, channel: 'email', email: 'ada@example.test' }, context, key))
-        .resolves.toMatchObject({ expiresAt: '2026-11-14T08:10:00.000Z', destinationHint: 'a***@example.test' });
+        .resolves.toMatchObject({ expiresAt: OPEN_UNTIL, destinationHint: 'a***@example.test' });
       expect(queries.some((q) => q.sql.includes('outreach_health_id_start('))).toBe(false);
       expect(notification.deliverOutreachHealthIdCode).toHaveBeenCalledTimes(1);
     });

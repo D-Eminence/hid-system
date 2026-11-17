@@ -50,8 +50,9 @@ with available Debian fixes. Seven unique High advisory IDs were then left
 (thirteen package matches) with no packaged fix reported. Each had a runtime
 assessment in `security/production-runtime-assessment.json`; CVE-2026-76844 was
 added on 2026-11-06 after owner approval. The two zlib advisories were fixed by
-DSA-6613-1 and removed on 2026-11-12 (see below), so five High advisory IDs
-remain (eleven package matches):
+DSA-6613-1 and removed on 2026-11-12 (see below). Four OpenSSL advisories in
+libssl3t64 3.5.7-1~deb13u3 were added on 2026-11-17, so nine High advisory IDs
+remain (fifteen package matches):
 
 | Advisory | Package(s) | Current scan result |
 |---|---|---|
@@ -62,6 +63,10 @@ remain (eleven package matches):
 | CVE-2026-102010 | GCC runtime packages including libstdc++6 | not-fixed |
 | CVE-2026-84243 | libc6 | not-fixed; gettext accepts LANGUAGE paths (added 2026-10-31) |
 | CVE-2026-76844 | zlib1g | fixed in 1:1.3.dfsg+really1.3.1-1+deb13u1 (DSA-6613-1); base repinned and assessment removed 2026-11-12 (the gate still rejects any gz* write import) |
+| CVE-2026-95692 | libssl3t64 | not-fixed; AES-GCM-SIV IV length (added 2026-11-17) |
+| CVE-2026-95691 | libssl3t64 | not-fixed; QUIC client CRYPTO frame use-after-free (added 2026-11-17) |
+| CVE-2026-88823 | libssl3t64 | not-fixed; AES-GCM-SIV empty AAD update (added 2026-11-17) |
+| CVE-2026-107496 | libssl3t64 | not-fixed; CMS_encrypt with EC group order 1 (added 2026-11-17) |
 
 Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 [glibc deprecated functions](https://security-tracker.debian.org/tracker/CVE-2026-5435),
@@ -69,7 +74,12 @@ Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 [GCC allocation](https://security-tracker.debian.org/tracker/CVE-2026-95619),
 [GCC queue](https://security-tracker.debian.org/tracker/CVE-2026-102010),
 [glibc gettext](https://security-tracker.debian.org/tracker/CVE-2026-84243),
-[zlib gz_write](https://security-tracker.debian.org/tracker/CVE-2026-76844).
+[zlib gz_write](https://security-tracker.debian.org/tracker/CVE-2026-76844),
+[OpenSSL GCM-SIV IV](https://security-tracker.debian.org/tracker/CVE-2026-95692),
+[OpenSSL QUIC client](https://security-tracker.debian.org/tracker/CVE-2026-95691),
+[OpenSSL GCM-SIV AAD](https://security-tracker.debian.org/tracker/CVE-2026-88823),
+[OpenSSL CMS_encrypt](https://security-tracker.debian.org/tracker/CVE-2026-107496),
+[OpenSSL advisory 20261110](https://openssl-library.org/news/secadv/20261110.txt).
 These are scanner findings, not a claim that each is exploitable through HID.
 No blanket ignore, severity downgrade or security exception is applied.
 
@@ -101,6 +111,20 @@ tzdata and tzdata-legacy 2026e to 2026f. libc6, the GCC runtime and the Node
 as fixed, and these checks are recorded in
 `security/zlib-deb13u1-runtime-evidence.json`. The expected scan of this base is
 the eleven glibc and GCC High matches above and no zlib finding.
+
+On 2026-11-17 Grype began reporting four High OpenSSL advisories (OpenSSL
+severity Low, advisory 20261110, fixed upstream in 3.5.10 due 2026-12-01) in
+libssl3t64 3.5.7-1~deb13u3, which Debian marks vulnerable for trixie with no
+fixed version. The base and its native bytes are unchanged. No process in these
+images loads the system `libssl.so.3` or `libcrypto.so.3`: node links its own
+OpenSSL statically, the Argon2 addon imports no OpenSSL symbol, and the only
+ELFs that need `libcrypto.so.3` are `libssl.so.3` and the two `engines-3`
+modules of the same package. The four entries are assessed as vulnerable code
+not in execute path. They cover only the Debian copy: node 22.23.4's statically
+linked OpenSSL 3.5.9 is also in the affected range, Grype does not report it,
+and it stays open until a Node 22 release ships OpenSSL 3.5.10. HID services
+use only `aes-256-gcm` and no CMS or QUIC API. The expected scan is now fifteen
+High matches: the eleven glibc and GCC matches and the four libssl3t64 matches.
 
 Every staging image with High scan findings (all but the gateway, whose scan is
 clean) is admitted against the same exact-image not-affected assessment as

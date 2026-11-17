@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "test:care-portal": "node --test scripts/care-portal.test.mjs scripts/identity-browser.test.mjs",
+    "test:care-portal": "node --test scripts/care-portal.test.mjs scripts/identity-browser.test.mjs scripts/pin-access.test.mjs",
     "test:pricing-controls": "node --test scripts/pricing-controls.test.mjs",
     "build": "npm run verify:identity && tsc && vite build",
     "preview": "vite preview",
