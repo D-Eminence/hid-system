@@ -31,6 +31,16 @@ export class DeliverPasswordResetCodeDto {
   @IsOptional() @IsObject() plan?: Record<string, unknown>;
 }
 
+/** A staff account's password reset code (Q89): the patient code's design, the first name only, no Health ID. */
+export class DeliverStaffPasswordResetCodeDto {
+  @IsIn(['email']) channel!: 'email';
+  @IsString() @MaxLength(320) recipient!: string;
+  @IsString() @Matches(/^\d{6}$/) code!: string;
+  @IsOptional() @IsString() @Matches(PERSON_NAME) firstName?: string;
+  @IsInt() @Min(1) @Max(60) expiresInMinutes!: number;
+  @IsOptional() @IsObject() plan?: Record<string, unknown>;
+}
+
 /** "Your Health ID password was updated", after a completed reset; the Health ID only for a patient. */
 export class DeliverPasswordUpdatedDto {
   @IsIn(['email']) channel!: 'email';

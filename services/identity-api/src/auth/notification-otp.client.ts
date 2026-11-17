@@ -212,6 +212,36 @@ export class NotificationOtpClient {
   }
 
   /**
+   * A staff account's password reset code (owner decision of 17 November
+   * 2026, Q89): the patient code's design, greeting the staff member by first
+   * name, with no Health ID. An older notification-api, which does not serve
+   * this route yet, answers 404 having sent nothing; the code then goes once
+   * through the generic OTP route under the same idempotency key, so the
+   * release order of the two services does not matter. Any other answer is
+   * final: never sent twice.
+   */
+  async deliverStaffPasswordResetCode(input: {
+    challengeId: string;
+    recipient: string;
+    code: string;
+    firstName?: string;
+    expiresInMinutes: number;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure' };
+    const delivered = await this.post('staff-password-reset-code', `otp:${input.challengeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, code: input.code,
+      ...(input.firstName ? { firstName: input.firstName } : {}),
+      expiresInMinutes: input.expiresInMinutes, plan,
+    }, OTP_TIMEOUT_MS);
+    if (delivered.safeCode !== 'http_404') return delivered;
+    return this.post('otp', `otp:${input.challengeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, code: input.code, purpose: 'PASSWORD_RESET', plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
    * "Your Health ID password was updated", after a completed password reset
    * (owner decision of 2026-10-28, hid-1.0's design): to the account's email,
    * with the patient's first name and Health ID when the account is a patient
@@ -440,7 +470,7 @@ export class NotificationOtpClient {
   }
 
   private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation' | 'patient-welcome'
-    | 'password-reset-code' | 'password-updated' | 'email-change-code' | 'contact-changed'
+    | 'password-reset-code' | 'staff-password-reset-code' | 'password-updated' | 'email-change-code' | 'contact-changed'
     | 'patient-share-invitation' | 'share-received' | 'record-access-alert' | 'account-deletion',
     idempotencyKey: string, correlationId: string,
     body: Record<string, unknown>, timeoutMs: number,
@@ -454,8 +484,8 @@ export class NotificationOtpClient {
       this.unavailableTokens += 1;
       this.logger.warn(`Notification workload token unavailable; nothing was sent `
         + `(event=notification_workload_token_unavailable reason=${credential.unavailable} count=${this.unavailableTokens})`);
-      return { outcome: path === 'otp' || path === 'password-reset-code' || path === 'email-change-code'
-        ? 'definitive_failure' : 'unknown',
+      return { outcome: path === 'otp' || path === 'password-reset-code' || path === 'staff-password-reset-code'
+        || path === 'email-change-code' ? 'definitive_failure' : 'unknown',
         safeCode: 'workload_token_unavailable' };
     }
     let response: Response;
@@ -482,7 +512,8 @@ export class NotificationOtpClient {
       // lasts; a code keeps the definitive mapping.
       // A staff invitation likewise: a 401 is Notification's own key fetch, not
       // the address, so it must not count towards the facility's delivery pause.
-      if (path !== 'otp' && path !== 'password-reset-code' && path !== 'email-change-code' && response.status === 401) {
+      if (path !== 'otp' && path !== 'password-reset-code' && path !== 'staff-password-reset-code'
+        && path !== 'email-change-code' && response.status === 401) {
         return { outcome: 'unknown', safeCode: 'http_401' };
       }
       return { outcome: response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429

@@ -32,6 +32,8 @@ export class OtpController {
       purpose: input.purpose,
       remoteIp: request.ip,
       correlationId: request.correlationId,
+      // Q89: a staff site's or the admin site's reset gets the staff code email.
+      audience: input.turnstileAction === 'staff-reset' || input.turnstileAction === 'admin-reset' ? 'staff' : 'patient',
     });
   }
 
