@@ -119,6 +119,7 @@ export type {
   PharmacyRequestContext,
   PharmacyResourceReference,
   PharmacyWorkItem,
+  PharmacyWorkItemPatient,
   ReversePharmacyDispensingInput,
 } from './pharmacy';
 export { EhrApiClient, EhrApiProblem } from './ehr';
