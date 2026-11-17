@@ -18,6 +18,19 @@
 //   - npm failing to run, exiting other than 0 or 1, printing anything but a
 //     version 2 audit report, or reporting an error.
 // Advisories below moderate pass without an entry, as with --audit-level=moderate.
+//
+// Two optional fields narrow an entry further:
+//   - dependent_paths: the installed paths of every package npm audit reports
+//     as vulnerable only through this entry's package (vite through picomatch,
+//     say). With it, the entry also fails when the advisory reaches a package
+//     path it does not list (it has spread into something new) and, as stale,
+//     when a listed path is no longer reached.
+//   - ends_when_fix_published: true makes the entry end as soon as a fixed
+//     version is published. The gate reads the installed version from the
+//     audited directory's package-lock.json and runs `npm view <package>
+//     versions --json`; any release (not a prerelease) outside the vulnerable
+//     range and above the installed version fails the entry, and so does a
+//     registry or lockfile it cannot read.
 import { spawnSync } from 'node:child_process'
 import { readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
@@ -36,7 +49,9 @@ const ADVISORY_URL = /^https:\/\/github\.com\/advisories\/(GHSA-[a-z0-9]{4}-[a-z
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 const ENTRY_FIELDS = Object.freeze(['directory', 'id', 'package', 'vulnerable_range', 'severity', 'paths',
   'justification', 'fix_status', 'approved_by', 'approved_at', 'expires_at'])
+const OPTIONAL_ENTRY_FIELDS = Object.freeze(['dependent_paths', 'ends_when_fix_published'])
 const FILE_FIELDS = Object.freeze(['schema_version', 'description', 'exceptions'])
+const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/
 
 export class AuditGateError extends Error {}
 const fail = message => { throw new AuditGateError(message) }
@@ -50,6 +65,62 @@ function dayStart(value, field, label) {
   const time = Date.parse(`${value}T00:00:00Z`)
   if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== value) fail(`${label}: ${field} is not a real date`)
   return time
+}
+
+function checkPaths(list, field, label) {
+  if (!Array.isArray(list) || list.length === 0) fail(`${label}: ${field} must list the installed paths`)
+  for (const path of list) {
+    if (!isText(path) || !path.startsWith('node_modules/') || /\s/.test(path) || path.split('/').some(part => part === '' || part === '.' || part === '..')) {
+      fail(`${label}: ${JSON.stringify(path)} is not an installed package path`)
+    }
+  }
+  if (new Set(list).size !== list.length) fail(`${label}: ${field} repeat`)
+}
+
+// --- Versions and ranges: only the comparator ranges npm audit reports -------
+
+function parseVersion(text) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(text)
+  return match ? { parts: [Number(match[1]), Number(match[2]), Number(match[3])], pre: match[4] ?? null } : null
+}
+
+export function compareVersions(a, b) {
+  const x = typeof a === 'string' ? parseVersion(a) : a
+  const y = typeof b === 'string' ? parseVersion(b) : b
+  for (let index = 0; index < 3; index += 1) if (x.parts[index] !== y.parts[index]) return x.parts[index] < y.parts[index] ? -1 : 1
+  if (x.pre === y.pre) return 0
+  if (x.pre === null) return 1
+  if (y.pre === null) return -1
+  return x.pre < y.pre ? -1 : 1
+}
+
+// "<=4.0.7", ">=7.0.0 <11.0.1", "<1.0.0 || >=2.0.0 <2.1.0", "*": comparator sets, or null.
+export function parseRange(text) {
+  if (typeof text !== 'string' || !text.trim()) return null
+  const sets = []
+  for (const part of text.split('||')) {
+    const tokens = part.trim().split(/\s+/)
+    if (tokens.length === 1 && tokens[0] === '*') { sets.push([]); continue }
+    const set = []
+    for (const token of tokens) {
+      const match = /^(<=|>=|<|>|=)?(.+)$/.exec(token)
+      const version = match && parseVersion(match[2])
+      if (!version) return null
+      set.push({ op: match[1] ?? '=', version })
+    }
+    sets.push(set)
+  }
+  return sets
+}
+
+export function satisfies(version, range) {
+  const parsed = parseVersion(version)
+  const sets = typeof range === 'string' ? parseRange(range) : range
+  if (!parsed || !sets) return false
+  return sets.some(set => set.every(({ op, version: bound }) => {
+    const order = compareVersions(parsed, bound)
+    return op === '<' ? order < 0 : op === '<=' ? order <= 0 : op === '>' ? order > 0 : op === '>=' ? order >= 0 : order === 0
+  }))
 }
 
 function describe(entry) {
@@ -70,7 +141,7 @@ export function parseExceptions(text, now) {
   file.exceptions.forEach((entry, index) => {
     const label = `exception ${index + 1}`
     if (!isPlainObject(entry)) fail(`${label} must be an object`)
-    for (const key of Object.keys(entry)) if (!ENTRY_FIELDS.includes(key)) fail(`${label} has unknown field ${key}`)
+    for (const key of Object.keys(entry)) if (!ENTRY_FIELDS.includes(key) && !OPTIONAL_ENTRY_FIELDS.includes(key)) fail(`${label} has unknown field ${key}`)
     for (const key of ENTRY_FIELDS) if (!Object.hasOwn(entry, key)) fail(`${label} is missing ${key}`)
     for (const key of ['directory', 'id', 'package', 'vulnerable_range', 'severity', 'justification', 'fix_status', 'approved_by']) {
       if (!isText(entry[key])) fail(`${label}: ${key} must be non-empty text`)
@@ -81,13 +152,16 @@ export function parseExceptions(text, now) {
     if (!GHSA_ID.test(entry.id)) fail(`${label}: id must be a GHSA id`)
     if (!SEVERITIES.includes(entry.severity)) fail(`${label}: severity must be one of ${SEVERITIES.join(', ')}`)
     if (!gated(entry.severity)) fail(`${label}: severity ${entry.severity} is below ${AUDIT_LEVEL} and needs no exception`)
-    if (!Array.isArray(entry.paths) || entry.paths.length === 0) fail(`${label}: paths must list the installed paths`)
-    for (const path of entry.paths) {
-      if (!isText(path) || !path.startsWith('node_modules/') || /\s/.test(path) || path.split('/').some(part => part === '' || part === '.' || part === '..')) {
-        fail(`${label}: ${JSON.stringify(path)} is not an installed package path`)
-      }
+    checkPaths(entry.paths, 'paths', label)
+    if (Object.hasOwn(entry, 'dependent_paths')) {
+      checkPaths(entry.dependent_paths, 'dependent_paths', label)
+      if (entry.dependent_paths.some(path => entry.paths.includes(path))) fail(`${label}: a path is listed in both paths and dependent_paths`)
     }
-    if (new Set(entry.paths).size !== entry.paths.length) fail(`${label}: paths repeat`)
+    if (Object.hasOwn(entry, 'ends_when_fix_published')) {
+      if (entry.ends_when_fix_published !== true) fail(`${label}: ends_when_fix_published must be true when present`)
+      if (!PACKAGE_NAME.test(entry.package)) fail(`${label}: package must be an npm package name`)
+      if (!parseRange(entry.vulnerable_range)) fail(`${label}: vulnerable_range must be a range of simple comparators, as npm audit reports it`)
+    }
     const approved = dayStart(entry.approved_at, 'approved_at', label)
     const expires = dayStart(entry.expires_at, 'expires_at', label)
     if (expires <= approved) fail(`${label}: expires_at must be after approved_at`)
@@ -155,8 +229,35 @@ export function advisories(report) {
   return found
 }
 
-export function evaluateAudit({ report, exceptions, directory, now }) {
-  const failures = [], covered = [], belowLevel = [], expired = new Set()
+// Packages npm audit reports as vulnerable through `name`, following `via`
+// names transitively; `name` itself is not included.
+function dependentsOf(report, name) {
+  const reaches = (current, seen) => {
+    if (seen.has(current)) return false
+    seen.add(current)
+    return report.vulnerabilities[current].via.some(via => typeof via === 'string' && (via === name || reaches(via, seen)))
+  }
+  return Object.keys(report.vulnerabilities).filter(other => other !== name && reaches(other, new Set()))
+}
+
+// The newest release (not a prerelease) of the entry's package that lies
+// outside its vulnerable range and above every installed copy, or null.
+function publishedFix(entry, lockfile, publishedVersions) {
+  if (!isPlainObject(lockfile?.packages)) fail('package-lock.json has no packages map')
+  const installed = entry.paths.map(path => {
+    const version = lockfile.packages[path]?.version
+    if (typeof version !== 'string' || !parseVersion(version)) fail(`package-lock.json has no version for ${path}`)
+    return version
+  }).sort(compareVersions).at(-1)
+  const versions = publishedVersions(entry.package)
+  if (!Array.isArray(versions) || versions.length === 0 || !versions.every(isText)) fail(`the registry listed no versions of ${entry.package}`)
+  const fixes = versions.filter(version => parseVersion(version)?.pre === null && !satisfies(version, entry.vulnerable_range)
+    && compareVersions(version, installed) > 0).sort(compareVersions)
+  return { installed, fix: fixes.at(-1) ?? null }
+}
+
+export function evaluateAudit({ report, exceptions, directory, now, lockfile, publishedVersions }) {
+  const failures = [], covered = [], belowLevel = [], notes = [], expired = new Set()
   for (const entry of exceptions.exceptions) {
     if (now.getTime() >= dayStart(entry.expires_at, 'expires_at', describe(entry))) {
       expired.add(entry)
@@ -180,8 +281,28 @@ export function evaluateAudit({ report, exceptions, directory, now }) {
     for (const path of entry.paths) {
       if (!paths.has(path)) failures.push(`stale exception: ${describe(entry)} no longer matches npm audit at ${path}; correct or remove it`)
     }
+    if (paths.size === 0) continue
+    if (Object.hasOwn(entry, 'dependent_paths')) {
+      const reached = new Set(dependentsOf(report, entry.package).flatMap(name => report.vulnerabilities[name].nodes))
+      for (const path of [...reached].sort()) {
+        if (!entry.dependent_paths.includes(path)) failures.push(`advisory has spread: ${describe(entry)} now reaches ${path}, which dependent_paths does not list`)
+      }
+      for (const path of entry.dependent_paths) {
+        if (!reached.has(path)) failures.push(`stale exception: ${describe(entry)} no longer reaches ${path} in dependent_paths; correct or remove it`)
+      }
+    }
+    if (entry.ends_when_fix_published === true) {
+      try {
+        if (typeof publishedVersions !== 'function') fail('no registry lookup was given')
+        const { installed, fix } = publishedFix(entry, lockfile, publishedVersions)
+        if (fix) failures.push(`fixed version published: ${entry.package} ${fix} is outside ${entry.vulnerable_range}, so ${describe(entry)} has ended; upgrade from ${installed} and remove the exception`)
+        else notes.push(`no fixed version published: no release of ${entry.package} outside ${entry.vulnerable_range} is newer than the installed ${installed} (${entry.id})`)
+      } catch (error) {
+        failures.push(`cannot check for a fixed version of ${entry.package} for ${describe(entry)}: ${error.message}`)
+      }
+    }
   }
-  return { ok: failures.length === 0, failures, covered, belowLevel }
+  return { ok: failures.length === 0, failures, covered, belowLevel, notes }
 }
 
 export function auditDirectory(argument, cwd = process.cwd(), root = REPOSITORY_ROOT) {
@@ -217,10 +338,25 @@ export function main(argv, { now = new Date(), cwd = process.cwd(), spawn = spaw
     const exceptions = parseExceptions(exceptionsText, now)
     const report = parseAuditResult(spawn('npm', ['--prefix', target.absolute, 'audit', '--json'], { cwd, encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024, timeout: 300_000, stdio: ['ignore', 'pipe', 'inherit'] }))
-    const result = evaluateAudit({ report, exceptions, directory, now })
+    const fixChecked = exceptions.exceptions.some(entry => entry.directory === directory && entry.ends_when_fix_published === true)
+    let lockfile
+    if (fixChecked) {
+      try { lockfile = JSON.parse(readText(resolve(target.absolute, 'package-lock.json'))) } catch { lockfile = null }
+    }
+    const publishedVersions = name => {
+      const result = spawn('npm', ['--prefix', target.absolute, 'view', name, 'versions', '--json'], { cwd, encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024, timeout: 300_000, stdio: ['ignore', 'pipe', 'inherit'] })
+      if (result.error) fail(`npm view could not run: ${result.error.code ?? result.error.message}`)
+      if (result.signal || result.status !== 0) fail(`npm view ${name} failed`)
+      let versions
+      try { versions = JSON.parse(result.stdout) } catch { fail(`npm view ${name} did not print JSON`) }
+      return typeof versions === 'string' ? [versions] : versions
+    }
+    const result = evaluateAudit({ report, exceptions, directory, now, lockfile, publishedVersions })
     for (const { finding, path, entry } of result.covered) {
       out(`covered: ${finding.id} ${finding.package} ${finding.range} (${finding.severity}) at ${path}; approved by ${entry.approved_by} on ${entry.approved_at}, expires ${entry.expires_at}\n`)
     }
+    for (const note of result.notes) out(`${note}\n`)
     for (const finding of result.belowLevel) out(`below ${AUDIT_LEVEL}, not gated: ${finding.id ?? finding.url} ${finding.package} ${finding.range} (${finding.severity})\n`)
     if (!result.ok) {
       for (const failure of result.failures) err(`${failure}\n`)

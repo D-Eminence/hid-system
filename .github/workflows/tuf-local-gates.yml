@@ -346,9 +346,10 @@ jobs:
         run: |
           export PATH="$RUNNER_TOOL_CACHE/node/22.23.2/x64/bin:/usr/bin:/bin"
           test "$(node --version)" = v22.23.2
-          for package in packages/offline packages/telemetry packages/ui apps/ehr; do
+          for package in packages/offline packages/telemetry packages/ui; do
             npm --prefix "${package}" audit --audit-level=moderate
           done
+          node release/scripts/npm-audit-with-exceptions.mjs apps/ehr
         id: gate_2
       - name: Install EHR and shared source dependencies from their lockfiles
         run: |
