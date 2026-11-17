@@ -5341,6 +5341,22 @@ site of its own organisation. Lab staff, pharmacists, outreach organisers and
 volunteers, and the account-only outreach session are unchanged. A doctor who
 also helps an outreach group signs in on `outreach.` with the group only.
 
+Owner decision 5 (11 November 2026, the same login can also run its own
+outreach group) still holds for these roles. "Start an outreach group"
+(`GET .../outreach-organisers/for-my-account/availability` and `POST
+/api/v1/identity/outreach-organisers/for-my-account`) checks no product: any
+staff session on any site may use it, so the website runs the form on `ehr.`
+for a login whose `actor.products` does not list `outreach`, instead of
+linking to `outreach.`, which would refuse it. The new group's organiser
+membership fits `outreach.`; the login then signs in there with the group
+only, and `actor.products` lists `outreach` from the next session read.
+
+In identity-api the Q97 rule is `facilityAdmittedOnProduct` (product-gate.ts):
+the permission rule `facilityFitsProduct`, then the hospital clinical rule.
+Every caller (sign-in, refresh, each request, `POST /auth/facility` and
+`actor.products`) uses `facilityAdmittedOnProduct`, never
+`facilityFitsProduct` alone; `product-gate-own-job.spec.ts` pins this.
+
 From the seeds: `ehr.encounter.write` is held by doctor, clinician, nurse and
 receptionist (0006); `organization.manage` by admin and org_admin (0006);
 `lab.work-item.read` by lab, doctor, clinician, nurse and admin (0018);
