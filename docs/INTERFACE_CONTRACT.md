@@ -5469,3 +5469,217 @@ released first. Any other answer is final. A patient account keeps the
 patient email whatever site asked; the patient portal's reset of a staff-only
 account, legacy recovery and SMS keep the generic code message. The start
 still answers every identifier alike.
+
+## 55. A staff member's chosen facility, kept per sign-in (0129, provisional)
+
+A port of `main` 0089 (hid-system#73), written on this branch's Identity code
+and tables. The coordinator's tasks of 17 November 2026 on hid-system#258
+booked the number. The design note and the decisions on it are on #258. 0129
+is unsigned until the owner signs its declaration. It needs 0001-0123 and
+uses nothing 0124-0128 add; it releases after them because the ledger needs
+every number. The section number is provisional: §54 is claimed by both
+#262 and #264, so this section takes the next free number when it merges.
+
+What changes for staff, once the setting is on: a staff member with two or
+more facilities on one site who chooses one with "Working at" or "Switch
+facility" keeps that choice for the sign-in. A reload, a new tab, a restored
+browser, or a refresh after the 15-minute access token, opens at the chosen
+facility instead of silently moving back to the primary one. If that facility
+is no longer theirs (the membership ended or is held, the facility closed, or
+it no longer fits the site), the website asks "Where are you working?".
+
+### The setting
+
+`STAFF_FACILITY_SELECTION_MODE` in identity-api:
+
+| Value | Effect |
+| --- | --- |
+| `off` (the default; empty is `off`) | Every answer is exactly as before. Nothing is read or stored. |
+| `keep` | The choice is stored and reported. A sign-in that has made no choice gets no field, which is today's answer. |
+| `ask` | As `keep`, and a staff sign-in that has made no choice is answered `default`, so the website asks every multi-facility staff member at every sign-in. This is `main`'s behaviour and a product change. |
+
+Any other value refuses to boot. `infra/aws` passes it to identity-api only,
+from `HID_STAFF_FACILITY_SELECTION_MODE` at synth: `off` unless that is
+`keep` or `ask`; any other value (an empty one, another case, `true`)
+refuses to synthesize. The launch mode is #258's question 1.
+
+Switch it on only once 0129 is applied. With `keep` or `ask`, Identity
+refuses to start while `auth.session_facility_selection` is missing, or while
+its runtime lacks any one of SELECT, INSERT and UPDATE on it (each asked with
+its own `has_table_privilege` call). It refuses only on a definite answer: a
+database it cannot reach at boot is left to `GET /health/ready`. The ECS
+deploy then fails its health checks and rolls back. To withdraw the feature,
+set it to `off`. 0129 has no down migration: the table stays and nothing reads
+it. Do not drop it: 0129 stays recorded, so the runner does not re-create it,
+and runtime-grants.sql's 0129 block would then stop `db:bootstrap`.
+
+### Who keeps a choice
+
+A staff session of an Identity sign-in (it has a session id) with at least one
+facility on its site. These get no read and no `facilitySelection` field in
+any mode:
+
+- patients;
+- account-only outreach sessions (§53, Q88-2);
+- staff with no facility on the site, such as a platform administrator;
+- OIDC bearer callers (`AUTH_MODE=oidc`), which have no session;
+- `GET` and `POST /api/v1/auth/service-session`, which answer exactly as
+  before. EHR, Lab, Pharmacy, OCR and Outreach act on the `X-Facility-ID` the
+  website sends, so they never see the choice.
+
+The provider-enrollment activation, the staff invitation acceptance and the
+outreach organiser sign-ins answer as before.
+
+### `facilitySelection`
+
+A top-level member of the session answer, beside `actor`:
+
+| Value | `actor.facility` | When |
+| --- | --- | --- |
+| `selected` | the chosen facility, with that facility's roles and permissions | the stored facility is still one of the actor's facilities on this site |
+| `default` | the default (the primary facility, else the first by name) | `ask` only: no choice yet |
+| `reselect` | the default | the stored facility is no longer one of the actor's facilities on this site; the row is kept until a new choice replaces it |
+| `unavailable` | the default | the choice could not be read; never treated as "no choice" |
+| (absent) | the default | `off`; `keep` with no choice yet; every sign-in in the list above |
+
+A valid `X-Facility-ID` on `GET /api/v1/auth/session` still decides the
+facility reported, whatever the state.
+
+The stored facility is matched by facility id only, against `actor.facilities`
+as Identity resolved them for this request under the session's own product
+(the access token's product claim; the refresh token's product for a
+refresh), never the request's `Origin`. It takes the first match, the rule
+`SecurityGuard` uses to bind `X-Facility-ID`, so the roles reported are the
+roles every later request at that facility gets. The stored membership is
+used only by the database guard and its foreign key.
+
+### Routes
+
+`POST /api/v1/auth/facility` `{ facilityId }` (no new route). Q88-1's filter
+by the product of the request's `Origin` is unchanged. With `off`, or for an
+OIDC bearer caller, it answers `200 { actor }` and stores nothing, as before.
+With `keep` or `ask`, it stores the choice for the sign-in and writes its
+`auth.facility.select` audit row in the same transaction, and answers
+`200 { actor, facilitySelection: "selected" }` with the actor at that
+facility. A new choice replaces the old.
+
+| Answer | When | Stored |
+| --- | --- | --- |
+| `400 VALIDATION_FAILED` | `facilityId` is not a UUID (unchanged) | nothing |
+| `403 PATIENT_SCOPE_DENIED` | a patient session (unchanged) | nothing |
+| `403 FACILITY_ACCESS_DENIED` | not one of the actor's facilities for the `Origin`'s site (unchanged); or the database guard refused the row because the membership, facility, account or sign-in ended after the request was authorized | nothing |
+| `401 AUTHENTICATION_REQUIRED` | the sign-in ended (signed out, rotated or revoked) while the choice waited at its session row | nothing |
+| `503 DEPENDENCY_UNAVAILABLE` | the store or its audit row failed | nothing |
+
+Known gap, outside 0129 (#258 question 3): today every refusal of this route
+reaches the browser as `503 DEPENDENCY_UNAVAILABLE` when the request carries
+no `X-Facility-ID`, and the website sends none. The audit interceptor's
+failure row then has no facility, and `AuditService` refuses a staff row
+without one, so its error replaces the handler's answer. This already holds
+on staging before 0129, for the `403`, and for a malformed id's `400`. With a
+valid `X-Facility-ID`, the handler's own answer comes through. The fix is a
+separate change; until it lands, the website sees `503` where this table says
+`400`, `401` or `403`.
+
+`GET /api/v1/auth/session` answers `200 { actor, facilitySelection? }`. It
+writes `auth.session.read` at the facility it reports and echoes the CSRF
+token, as before. A failed read answers `200` with `unavailable` at the
+default, never a 5xx (#258 question 2; `main` answers `503`).
+
+`POST /api/v1/auth/refresh` answers `200 { actor, expiresAt,
+facilitySelection? }` with the same states. The choice is read after the
+rotation commits, through the new session of the same sign-in, and
+`auth.refresh` is written at the facility reported. A failed read still
+answers `200` with the rotated cookies and `unavailable`. A refresh from
+another site is `401` with the cookies cleared, as §53 says, before any read.
+
+`POST /api/v1/auth/login` and the staff Google sign-in answer `default` in
+`ask` only, for a staff sign-in with a facility; in `keep` they answer as
+before.
+
+One log event, `auth.facility_selection.unavailable`, is written per failed
+read or store. It carries only the operation (`read` or `store`): no
+session, account, facility or correlation id, and no SQL diagnostic.
+
+### What the choice does not do
+
+It grants nothing. Every facility-scoped request still carries
+`X-Facility-ID`, which Identity checks against the actor's active
+memberships; the access token has no facility claim; nothing new is stored in
+the browser. Because every read re-checks the stored facility against the
+facilities resolved for that request, an ended or held membership, a closed
+facility or a disabled account is never reported.
+
+### Database (0129)
+
+`auth.session_facility_selection`, one row per sign-in:
+
+| Column | |
+| --- | --- |
+| `family_id` | primary key: the sign-in's session family (the id of its first session; a refresh keeps the family) |
+| `account_id` | the account |
+| `facility_id` | the chosen facility |
+| `membership_id` | the membership it was chosen under |
+| `selected_at` | when |
+| `row_version` | `1`, then one more per change |
+
+Four foreign keys, all `ON DELETE RESTRICT`: `auth.sessions`, `auth.accounts`,
+`identity.facilities`, and the membership by `(id, facility_id, account_id)`,
+so the demo and QA seals (0098, 0123) hold through it. No row-level security,
+like `auth.sessions`: access is by grant only. SELECT, INSERT and UPDATE go to
+`hid_identity_runtime` (its API login inherits them), in the migration and in
+runtime-grants.sql; no DELETE or TRUNCATE, nothing to anyone else. Nothing
+deletes rows.
+
+The guard `auth.guard_session_facility_selection_change()` (SECURITY INVOKER,
+`search_path pg_catalog, pg_temp`, revoked from PUBLIC) fires before every row
+insert, update and delete. It refuses a delete, or a move to another sign-in
+or account, with `55000 SESSION_FACILITY_SELECTION_IMMUTABLE`. It admits a row
+only for the first session of a staff sign-in of that account with a live
+session at the account's current token version, an active account that is not
+disabled, and an active, unheld membership of the account at that facility
+with an active, verified staff record, an active organisation and an active
+facility; anything else is `23514 SESSION_FACILITY_SELECTION_INVALID`.
+
+Identity writes with the presented session locked `FOR SHARE` while it is a
+live staff session of the account (this branch has no account lock), so a
+sign-out, rotation or reuse revocation either waits for the write or ends the
+sign-in first; then nothing is written and the answer is `401`. It reads the
+facility id through a live staff session joined on the family and the account,
+so a signed-out sign-in never reads its choice again. The guard is a
+write-time check: account-level ends and workforce changes are not serialised
+with it, so a row can outlive its sign-in or membership; every read re-checks.
+
+### Websites
+
+health already reads `facilitySelection`
+(`apps/patient-web/src/staff/facilitySelection.ts`): absent or `selected` asks
+nothing; `default` asks when there are two or more facilities; `reselect`
+asks; any other value, including `unavailable`, asks as unconfirmed. No
+website change is needed.
+hid-system's own frontends ignore the field and adopt `actor.facility`, as
+today: with the setting on they open at the chosen facility, and on
+`reselect` or `unavailable` they fall back to the default, as now.
+
+### Checks
+
+- The suite `services/ehr-api/test/database/session-facility-selection.integration.sql`
+  runs as the Identity runtimes.
+- The jest specs are `services/identity-api/src/auth/facility-selection*.spec.ts`.
+- Runtime check: `services/identity-api/scripts/verify-facility-selection-runtime.mjs`.
+  It runs in the TUF migration rehearsal (`scripts/tuf-staging-migration-rehearsal.mjs`,
+  `checks.facility_selection_runtime`, after the records-processing check).
+  It calls the real table, grants and guard through Identity's full request
+  pipeline as `hid_identity_api_runtime`, with the setting `off`, `keep` and
+  `ask`.
+  - It fails when a choice is not stored as exactly one row with its audit
+    row, or is not kept across a reload and a refresh.
+  - It fails when another sign-in or another site sees it, or when a refusal
+    stores anything.
+  - It fails when a membership ended through the facility's own staff route
+    does not give `reselect`, when service-session changes, or when a failed
+    read is not `200 unavailable`.
+  - It fails when the start-up check misses a grant, or when the server log
+    shows an unexpected error.
+  - It asserts the `503` of the known gap above and lists each case with
+    the answer it gets after the fix.
