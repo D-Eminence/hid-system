@@ -422,6 +422,11 @@ try {
   // 0104: records processing asked for, approved, used by OCR, fenced from the chart, Lab and Pharmacy, and revoked.
   evidence.checks.records_processing_runtime = JSON.parse(command('exact-role records processing for OCR',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-records-processing-runtime.mjs')], workflowEnvironment));
+  // 0129: a staff member's chosen facility, kept per sign-in, through Identity's full pipeline with
+  // STAFF_FACILITY_SELECTION_MODE off, keep and ask (a failed read answers 200 'unavailable' and keep answers no field
+  // when nothing is stored, so only this proves the choice is stored and read).
+  evidence.checks.facility_selection_runtime = JSON.parse(command('exact-role facility choice kept per sign-in',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-facility-selection-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
