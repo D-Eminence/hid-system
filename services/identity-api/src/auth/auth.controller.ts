@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Optional, Post, Req, Res, ServiceUnavailableException, UnauthorizedException,
+  UseFilters, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
 import { AccountOnlyAllowed, AuditFailuresOnly, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
@@ -14,11 +15,14 @@ import { PatientLoginDto } from './dto/patient-login.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import type { LoginResult } from './auth.types';
-import { setSessionCookies } from './session-cookies';
+import { clearSessionCookies, setSessionCookies } from './session-cookies';
 import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-success-audit';
 import { AccountSuspendedProblem } from './account-suspended';
 import { loginPrincipalKey } from './patient-principal';
 import { facilityFitsProduct, isProductGateRefusal, productForOrigin } from './product-gate';
+import { SsoRouteGuard } from './sso/sso-route.guard';
+import { SsoSessionEndFilter } from './sso/sso-session-end.filter';
+import { SsoService } from './sso/sso.service';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
@@ -58,6 +62,9 @@ export class AuthController {
     private readonly workloadAuth: WorkloadAuthService,
     private readonly turnstile: TurnstileService,
     private readonly google: GoogleAuthenticationService,
+    // Single sign-on (ADR-070, 0125): optional so a controller built without
+    // it (older test harnesses) is today's controller; its only route is dark.
+    @Optional() private readonly sso?: SsoService,
   ) {}
 
   @Post('login')
@@ -306,7 +313,14 @@ export class AuthController {
     }
   }
 
+  /**
+   * On a single sign-on host, a refused check of a sign-in that has nothing
+   * left to renew (ended by back-channel logout, for one) also clears this
+   * host's session cookies (SsoSessionEndFilter, ADR-070). Anywhere else, and
+   * while single sign-on is off, the answer is today's, byte for byte.
+   */
   @Get('session')
+  @UseFilters(SsoSessionEndFilter)
   @FacilityOptional()
   @PatientAllowed()
   @AccountOnlyAllowed()
@@ -368,9 +382,54 @@ export class AuthController {
   @AccountOnlyAllowed()
   @HttpCode(204)
   async logout(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response): Promise<void> {
+    await this.signOut(request, response);
+  }
+
+  /** Today's sign-out (`logout`, above), unchanged; product sign-out runs it first. */
+  private async signOut(request: HidRequest, response: Response): Promise<void> {
     await this.auth.revoke(request.actor?.sessionId, request.actor?.subject, this.event(request));
     if (request.actor) await this.recordSuccess('auth.logout', request.actor, request);
     this.clearCookies(response);
+  }
+
+  /**
+   * Product sign-out while single sign-on is on for this host (ADR-070,
+   * 0125). It is admitted exactly as today's sign-out (`logout`, above): the
+   * same session check, Origin and CSRF checks for a cookie request, and the
+   * same session kinds, an account-only outreach session included. Today's
+   * sign-out ends this sign-in and clears its cookies, with the same audit;
+   * then every other sign-in of the same account and kind ends too
+   * (SsoService.endAccountSignIns), and the answer is the provider's
+   * end-session address for the frontend to navigate to. The provider ends
+   * its own session there and sends back-channel logout to every product, so
+   * signing out of one product signs out of all of them. The address names
+   * only the client and the product's root: no token reaches page JavaScript
+   * or an address (no `id_token_hint`). While single sign-on is off, or on a
+   * host that is not one of its clients, this is no route at all
+   * (SsoRouteGuard), once the request has passed the session check every
+   * route passes first.
+   */
+  @Post('sso/logout')
+  @UseGuards(SsoRouteGuard)
+  @FacilityOptional()
+  @PatientAllowed()
+  @AccountOnlyAllowed()
+  @HttpCode(200)
+  async ssoLogout(@Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response): Promise<{ endSessionUrl: string }> {
+    const sso = this.sso;
+    const client = sso?.clientFor(request);
+    if (!sso || !client) throw new ServiceUnavailableException('Single sign-on is unavailable');
+    const actor = request.actor;
+    await this.signOut(request, response);
+    if (actor) {
+      await sso.endAccountSignIns(client,
+        { accountId: actor.accountId, subject: actor.subject, kind: actor.kind === 'patient' ? 'patient' : 'staff' },
+        this.event(request));
+    }
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('Referrer-Policy', 'no-referrer');
+    return { endSessionUrl: await sso.endSessionUrl(client) };
   }
 
   @Post('facility')
@@ -436,14 +495,9 @@ export class AuthController {
     setSessionCookies(response, result, this.environment);
   }
 
+  /** Clears the session cookies (session-cookies.ts). */
   private clearCookies(response: Response): void {
-    const common = {
-      secure: this.environment.AUTH_COOKIE_SECURE,
-      sameSite: 'strict' as const,
-    };
-    response.clearCookie(this.environment.AUTH_COOKIE_NAME, { ...common, httpOnly: true, path: '/' });
-    response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_refresh`, { ...common, httpOnly: true, path: '/api/v1/auth' });
-    response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, { ...common, httpOnly: false, path: '/' });
+    clearSessionCookies(response, this.environment);
   }
 
   private googleNonceCookieName(): string {

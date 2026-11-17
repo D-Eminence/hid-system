@@ -43,6 +43,32 @@ export interface SessionEventMetadata {
   product?: StaffProduct;
 }
 
+/**
+ * Where a staff or patient sign-in came from when a product issued it after
+ * single sign-on on `auth.` (ADR-070, 0125): the product's client, the
+ * provider's session id (`sid`, which back-channel logout names) and when the
+ * person signed in at the provider (`auth_time`). The ID token itself is not
+ * kept. Stored on the new family in the session's own transaction. The
+ * sign-in's absolute end then counts from `authenticatedAt`, not from the
+ * hand-off, and a patient's recent-sign-in check reads it too
+ * (recent-authentication.ts).
+ */
+export interface SingleSignOnProvenance {
+  clientId: string;
+  providerSid: string;
+  authenticatedAt: Date;
+}
+
+/** A session event a caller records in its own transaction (single sign-on's revocations). */
+export interface SessionEventInput {
+  eventType: 'login_succeeded' | 'login_failed' | 'refresh' | 'rotated' | 'revoked' | 'logout' | 'expired' | 'reuse_detected';
+  outcome: 'success' | 'denied' | 'failure';
+  accountId: string;
+  sessionId?: string;
+  event: SessionEventMetadata;
+  details?: Readonly<Record<string, unknown>>;
+}
+
 /** The product a staff sign-in or refresh is gated by: the event's, else its Origin's. */
 function eventProduct(event: SessionEventMetadata): StaffProduct | undefined {
   return event.product ?? productForOrigin(event.origin);
@@ -76,7 +102,16 @@ export class TokenService {
     private readonly currentPatient?: CurrentPatientContextService,
   ) {}
 
-  async issue(identity: CredentialIdentity, event: SessionEventMetadata): Promise<LoginResult> {
+  /**
+   * A new staff or patient sign-in. `singleSignOn` is set only by a product's
+   * single sign-on callback (ADR-070): the sign-in is then issued exactly as
+   * a password sign-in on that product's site (the same product gate and
+   * product-bound refresh token, from `event`), its lifetimes never run past
+   * the absolute lifetime counted from the provider's auth_time, and its
+   * provenance is stored on the new family in the same transaction.
+   */
+  async issue(identity: CredentialIdentity, event: SessionEventMetadata,
+    singleSignOn?: SingleSignOnProvenance): Promise<LoginResult> {
     const authenticationMethod = identity.authenticationMethod;
     const product = eventProduct(event);
     const resolvedActor = await this.resolveActor(
@@ -100,8 +135,9 @@ export class TokenService {
     const csrfToken = this.deriveRefreshCsrf(refreshToken);
     const now = new Date();
     const lifetimes = this.lifetimes(actor.kind ?? 'staff', event.origin);
-    const expiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
-    const absoluteExpiresAt = new Date(now.getTime() + lifetimes.absoluteSeconds * 1_000);
+    const end = this.singleSignOnEnd(now, lifetimes.absoluteSeconds, singleSignOn);
+    const expiresAt = end(new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000));
+    const absoluteExpiresAt = end(new Date(now.getTime() + lifetimes.absoluteSeconds * 1_000));
     // Never past the family's absolute expiry (auth.sessions CHECK, 0002).
     const refreshExpiresAt = new Date(Math.min(now.getTime() + lifetimes.refreshSeconds * 1_000,
       absoluteExpiresAt.getTime()));
@@ -147,8 +183,10 @@ export class TokenService {
       });
       await this.insertSessionEvent(client, {
         eventType: 'login_succeeded', outcome: 'success', accountId: actor.accountId,
-        sessionId, event, details: { password_upgraded: Boolean(identity.passwordUpgrade) },
+        sessionId, event, details: { password_upgraded: Boolean(identity.passwordUpgrade),
+          ...(singleSignOn ? { sso_client: singleSignOn.clientId } : {}) },
       });
+      if (singleSignOn) await this.recordSingleSignOn(client, sessionId, actor.accountId, singleSignOn);
     });
 
     return { actor: { ...actor, sessionId }, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt };
@@ -342,6 +380,38 @@ export class TokenService {
     });
   }
 
+  /**
+   * The kind of the staff or patient sign-in a refresh token belongs to, read
+   * without rotating it, while refresh() could still renew it: the session is
+   * not revoked or expired and its account is active at the same token
+   * version. Any other token has no kind here and is left to refresh(), which
+   * refuses it and clears its cookies. Read only by single sign-on's session
+   * check (SsoSessionEndFilter), to tell an ended sign-in from an access token
+   * that merely expired.
+   */
+  async refreshSessionKind(refreshToken: string): Promise<'staff' | 'patient' | undefined> {
+    const result = await this.database.query<{ session_kind: 'staff' | 'patient' }>(
+      `select session.session_kind
+         from auth.sessions session
+         join auth.accounts account on account.id = session.account_id
+        where session.refresh_token_sha256 = $1
+          and session.session_kind in ('staff', 'patient')
+          and session.revoked_at is null
+          and session.expires_at > clock_timestamp()
+          and session.absolute_expires_at > clock_timestamp()
+          and account.status = 'active'
+          and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+          and account.token_version = session.account_token_version`,
+      [this.sha256(refreshToken)],
+    );
+    return result.rows[0]?.session_kind;
+  }
+
+  /** Appends a session event in the caller's transaction (never with secrets in details). */
+  recordSessionEvent(client: PoolClient, input: SessionEventInput): Promise<void> {
+    return this.insertSessionEvent(client, input);
+  }
+
   verifyCsrf(claims: HidJwtClaims | JWTPayload, cookieToken: string | undefined, headerToken: string | undefined): boolean {
     if (!('csrf_hash' in claims) || typeof claims.csrf_hash !== 'string' || !cookieToken || !headerToken) return false;
     const cookieHash = this.sha256Base64(cookieToken);
@@ -504,14 +574,7 @@ export class TokenService {
     );
   }
 
-  private async insertSessionEvent(
-    client: PoolClient,
-    input: {
-      eventType: 'login_succeeded' | 'login_failed' | 'refresh' | 'rotated' | 'revoked' | 'logout' | 'expired' | 'reuse_detected';
-      outcome: 'success' | 'denied' | 'failure'; accountId: string; sessionId?: string;
-      event: SessionEventMetadata; details?: Readonly<Record<string, unknown>>;
-    },
-  ): Promise<void> {
+  private async insertSessionEvent(client: PoolClient, input: SessionEventInput): Promise<void> {
     await client.query(
       `insert into auth.session_events (
          session_id, account_id, event_type, outcome, correlation_id,
@@ -578,6 +641,34 @@ export class TokenService {
       ? Math.min(this.environment.AUTH_OUTREACH_REFRESH_TTL_SECONDS, this.environment.AUTH_ABSOLUTE_TTL_SECONDS)
       : this.environment.AUTH_REFRESH_TTL_SECONDS;
     return { refreshSeconds, absoluteSeconds: this.environment.AUTH_ABSOLUTE_TTL_SECONDS };
+  }
+
+  /**
+   * The lifetimes of a new sign-in, as they are for any sign-in, except that
+   * a single sign-on's never run past `absoluteSeconds` after the person
+   * signed in at the provider: a hand-off is not a new sign-in, so the
+   * absolute end counts from the provider's auth_time. Without a single
+   * sign-on every lifetime is returned unchanged.
+   */
+  private singleSignOnEnd(now: Date, absoluteSeconds: number,
+    singleSignOn: SingleSignOnProvenance | undefined): (lifetimeEnd: Date) => Date {
+    if (!singleSignOn) return (lifetimeEnd) => lifetimeEnd;
+    const signInEnd = singleSignOn.authenticatedAt.getTime() + absoluteSeconds * 1_000;
+    if (signInEnd <= now.getTime() + 1_000) {
+      throw new UnauthorizedException('The sign-in at the provider has reached its absolute end');
+    }
+    return (lifetimeEnd) => new Date(Math.min(lifetimeEnd.getTime(), signInEnd));
+  }
+
+  /** Stores a single sign-on's provenance on its new family (0125), in the session's transaction. */
+  private async recordSingleSignOn(client: PoolClient, familyId: string, accountId: string,
+    singleSignOn: SingleSignOnProvenance): Promise<void> {
+    await client.query(
+      `insert into auth.session_single_sign_on
+         (family_id, account_id, client_id, provider_sid, authenticated_at)
+       values ($1, $2, $3, $4, $5)`,
+      [familyId, accountId, singleSignOn.clientId, singleSignOn.providerSid, singleSignOn.authenticatedAt],
+    );
   }
 
   /**

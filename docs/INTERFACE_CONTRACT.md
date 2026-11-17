@@ -5469,3 +5469,152 @@ released first. Any other answer is final. A patient account keeps the
 patient email whatever site asked; the patient portal's reset of a staff-only
 account, legacy recovery and SMS keep the generic code message. The start
 still answers every identifier alike.
+
+## 54. Single sign-on on the product sites, staff with a password only (0125, owner decision Q92 B)
+
+hid-system#142 (ADR-070, written on main as 0102), ported onto production as
+migration 0125. Owner decision Q92 B: single sign-on goes to production with
+staff signing in by password only, as they sign in today. Production has no
+staff authenticator (no `auth.mfa_factors`, `auth.session_assurance`,
+`auth.session_facility_selection`, `MfaService` or `issueStaffSession`), so
+nothing here reads or writes one. The provider on `auth.` (its sign-in page,
+its session, authorize, token, discovery, key set, end-session and sending
+back-channel logout) is not in this change. Each product site is an OpenID
+Connect relying party of it, built with panva's `openid-client` 6.8.8;
+Identity issues each product its own host-only session, as a password
+sign-in there does today. No cookie has a `Domain` (ADR-033), and the session
+cookies of section 53 and before are unchanged. The website switch
+(`VITE_HID_SSO`) is a separate release.
+
+### Off until configured
+
+With `AUTH_SSO_ISSUER` unset (production today), every route below answers
+exactly as a route that does not exist (`404 NOT_FOUND`, no cookie, no audit
+row); sign-in, refresh, the session check and sign-out are unchanged; and
+nothing reads the 0125 tables. `POST /auth/sso/logout` is admitted only with a
+session, as `POST /auth/logout` is, so a request without one is answered `401
+AUTHENTICATION_REQUIRED` first, and one with a session `404`. The same holds
+on a host that is not a configured client (`admin.`, `auth.` itself, a request
+that did not come through the edge). Identity refuses to start with any bad
+setting:
+
+| Setting | Meaning |
+| --- | --- |
+| `AUTH_SSO_ISSUER` | The provider's public issuer, an exact origin (`https://auth.<root>`). HTTPS in production. Requires `AUTH_MODE=local` |
+| `AUTH_SSO_INTERNAL_BASE_URL` | Optional origin through which Identity reads discovery and the key set and calls the token endpoint, without going out through the edge. HTTPS in production. The browser is always sent to the public endpoints |
+| `AUTH_SSO_CLIENTS` | JSON array, one entry per product site: `client_id` (`ehr`, `lab`, `pharmacy`, `migrate`, `outreach` of kind `staff`; `web` of kind `patient`; never `admin`), `host`, `kind`, `token_endpoint_auth_method` (`private_key_jwt` or `client_secret_basic`) and optional `sign_in_path` (default `/provider/sign-in` on staff sites, `/sign-in` on the patients' site) |
+| `AUTH_SSO_CLIENT_CREDENTIALS` | Secret store JSON by client id: `{ "private_jwk": <EC P-256 private JWK with kid> }` or `{ "client_secret": <32+ characters> }` |
+
+A client's `host` is one exact host named in `CORS_ORIGINS` and the client's
+own site. A staff client's host starts with its `client_id`; `web`'s with a
+patients' site label (`app.`, `www.`, or `staging.` or `development.` in those
+environments); no staff client is ever on the patients' site. New for
+production: with `NODE_ENV=production` (production and AWS staging), a staff
+client's host must be one of its own product's sites in section 53's table
+(`lab.healthidentitydirectory.com` or `lab.staging.healthidentitydirectory.com`
+for `lab`, and so on), so its sign-ins pass that product's gate; another host
+is refused at start-up. No wildcard, administration or issuer host; no port or
+IP address in production.
+
+The product site is the origin the edge names in `X-HID-Edge-Origin` (the
+edge deletes any value a client sends). Every answer below carries
+`Cache-Control: no-store` and `Referrer-Policy: no-referrer`; redirects are
+`303` to configured addresses or the checked return path, never to an
+address read from the request.
+
+| Route (under `/api/v1`) | Answer |
+| --- | --- |
+| `GET /auth/sso/start?return_to=<path>[&prompt=none\|login]` | With a live session of this product (the session's kind is the client's and, for staff, it was issued for this site's product), unless `prompt=login`: `303` to `return_to`. Otherwise `303` to the provider's authorization endpoint (`client_id`, `redirect_uri=https://<host>/api/v1/auth/sso/callback`, `response_type=code`, `scope=openid`, `state`, `nonce`, S256 `code_challenge`, `max_age` = the absolute lifetime of the client's kind (`AUTH_ABSOLUTE_TTL_SECONDS` for staff, `AUTH_PATIENT_ABSOLUTE_TTL_SECONDS` for patients), `prompt` when given) with the transaction cookie. `return_to` must be a page path on this host (no other host, scheme, `//`, `\`, dot segment, encoded `/`, `\` or control character, encoded unreserved character, fragment, `/api/` route or Health ID); anything else becomes `/`. Over a live session, `prompt=login` makes the callback accept only that session's account and end the earlier sign-in. Provider unreachable: `303` to the client's `sign_in_path` |
+| `GET /auth/sso/callback` | Signed in: the three session cookies a sign-in sets, `303` to the transaction's return page. A quiet attempt answered `login_required` (or `interaction_required`, `consent_required`, `account_selection_required`): `303` to the provider again, without `prompt`, with a new transaction. Anything else, the product gate's refusals included: no session, `303` to `sign_in_path`, nothing in the address |
+| `POST /auth/sso/backchannel-logout` | Form `logout_token`, server to server, no cookie, CSRF token or Origin. `200` (empty) when accepted; `400 SSO_LOGOUT_TOKEN_INVALID` when refused (also a reused `jti`); `413` over 16 KiB; `503 SSO_PROVIDER_UNAVAILABLE` when the key set cannot be read |
+| `POST /auth/sso/logout` | Product sign-out, admitted exactly as `POST /auth/logout` (a session, by bearer or by cookie with its Origin and CSRF checks; any session kind, an account-only outreach session included). Today's sign-out runs first (the session ends, the cookies are cleared, `auth.logout` is audited); then every other unrevoked sign-in of that account and kind ends too (reason `sso_logout`); then `200 { "endSessionUrl": "<end_session_endpoint>?client_id=…&post_logout_redirect_uri=https%3A%2F%2F<host>%2F" }` for the frontend to open. It never carries `id_token_hint`. Provider unreachable: `503 SSO_PROVIDER_UNAVAILABLE` (this product is signed out all the same). `POST /auth/logout` itself is unchanged (`204`) |
+
+Cookies of the hand-off, each `HttpOnly`, `Secure`, `Path=/`, no `Domain`,
+`SameSite=Lax`: `__Host-hid_sso_tx_<16 hex>` (the transaction: state, nonce,
+PKCE verifier, return page, client; HMAC-signed with a key derived from
+`AUTH_SIGNING_SECRET`; 10 minutes; spent once, by digest, in
+`auth.sso_spent_tokens`; cleared by its callback) and `__Host-hid_sso_fallback=1`
+(2 minutes after start or callback sent the browser to `sign_in_path`; while it
+is present start never hands off quietly, and while the provider stays
+unreachable it sends the browser to `/`, so no page loops).
+
+### The session: a password sign-in on that site (Q88, Q92 B)
+
+The callback issues the session through `TokenService.issue`, the code a
+password sign-in uses, for staff and patients alike:
+
+- **Staff.** The ID token must say the person signed in with a password
+  (`amr` contains `pwd`; a second factor the provider also lists is
+  accepted, never required); otherwise it is refused (`staff_password`). The
+  session's product is the client's site's product (section 53), taken from
+  the configured client and never from the request (a navigation from `auth.`
+  carries no product `Origin`). So the same product gate applies: only the
+  memberships that fit the site; `403 PRODUCT_NOT_AUTHORISED` or `403
+  NO_ACTIVE_FACILITY_MEMBERSHIP` refuse it, recorded exactly as for a password
+  sign-in (one `auth.login.refused` audit row with `reason` and `product`, plus
+  `singleSignOn`; no `login_failed` row, nothing counted towards the lockout),
+  and the browser is sent to the site's own sign-in page with no session; a
+  verified staff login with no membership gets its account-only session on
+  `outreach.` only, with `outreach.`'s short idle lock; and the refresh token
+  is bound to the product (`<session>.<secret>.<product>.local`), so refresh
+  and every request keep the gate exactly as for a password sign-in.
+- **Patients** on the patients' site (`web`), as a patient password sign-in.
+
+The account must be active and not disabled. The family records the client,
+the provider `sid` and the provider `auth_time` (`auth.session_single_sign_on`;
+the ID token is not kept). The sign-in's absolute end, and a patient's
+recent-sign-in check (`PATIENT_RECENT_AUTH_REQUIRED`), count from that
+`auth_time`; idle and absolute lifetimes are otherwise those of a password
+sign-in of that kind and site. A provider sign-in older than the account's
+`password_changed_at` (five seconds' allowance) is refused
+(`stale_provider_sign_in`), so a provider session from before a password
+recovery opens nothing. Every other check of #142 is kept: `state` (single
+use), `nonce`, S256 PKCE, `iss`, `aud`/`azp`, `exp`, `iat` within five
+minutes, `auth_time` against `max_age`, `sid`, `sub` an account id,
+`hid_kind` the client's kind, asymmetric signatures only.
+
+A success is audited as a password sign-in's (`auth.login`, with
+`singleSignOn` and, for staff, `product`); its session event
+`login_succeeded` carries `sso_client`. A refusal other than the product gate
+is a `login_failed` session event with `authentication_method: "sso"`, the
+client and a reason (never a token, code or account value).
+
+### Sign-out everywhere
+
+Back-channel logout ends every unrevoked staff or patient sign-in that the
+provider session `sid` opened, whichever product (revocation reason
+`sso_logout`, a `revoked` session event each, one `auth.sso.backchannel-logout`
+audit row), or, when the token names only `sub`, every staff and patient
+sign-in of that account. Product sign-out also ends every other sign-in of
+the account of the same kind, including one made on a product's own sign-in
+page and the account's sign-ins on other devices. The other sites keep their
+cookies until a request reaches Identity: then a refused `POST /auth/refresh`
+clears them, as today, and so does a refused `GET /auth/session` on a single
+sign-on site when nothing of the sign-in can still renew.
+
+### What the provider must do (to confirm before switching on)
+
+Discovery at `<issuer>/.well-known/openid-configuration` whose `issuer` is
+exactly `AUTH_SSO_ISSUER` and whose authorization, token, key-set and
+end-session endpoints are all on that origin; the code flow; S256 PKCE; ID
+tokens signed with ES256, PS256, RS256 or EdDSA; ID token claims `iss`, `aud`
+= client id, `exp`, `iat`, `nonce`, `sub` = the Identity account id (UUID),
+`sid`, `auth_time`, `hid_kind` (`staff` or `patient`) and, for staff, `amr`
+containing `pwd`; a token response with `access_token` and `token_type` as
+well as `id_token`; logout tokens per Back-Channel Logout 1.0; and, per
+client, `redirect_uris`, `post_logout_redirect_uris` and
+`backchannel_logout_uri` as above, with `backchannel_logout_session_required`,
+PKCE required and no consent screen. The provider ends its sessions whenever
+the account's `token_version` changes (suspension, reactivation, password
+recovery, deletion).
+
+### Database (0125)
+
+`auth.session_single_sign_on` (family, account, client, provider sid,
+authenticated at; one row per sign-in family, only for the root session of a
+staff or patient sign-in of the client's kind, never changed or deleted:
+`auth.guard_session_single_sign_on_change()`) and `auth.sso_spent_tokens`
+(purpose, sha256 digest, expiry). `hid_identity_runtime` holds `SELECT,
+INSERT` on the first and `SELECT, INSERT, DELETE` on the second; no other
+runtime holds anything on either. The suite is
+`services/ehr-api/database/tests/sso-relying-party.integration.sql`.
