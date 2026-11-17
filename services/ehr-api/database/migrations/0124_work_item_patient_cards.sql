@@ -7,11 +7,11 @@
 -- declaration is signed separately.
 -- Written on 0103 (34d69557) as 0113, numbered 0121 on 11 Nov 2026 and
 -- released as 0124, after 0123 (staging's 0117-0121 took the earlier numbers;
--- 0122 and 0123 belong to other work). It needs 0001-0121 applied and relies
+-- 0122 and 0123 belong to other work). It needs 0001-0123 applied and relies
 -- on one body 0104 replaced: identity.has_active_consent_grant as 0104 left
--- it (0108 and 0117-0121 kept it), so its records-processing cover counts
+-- it (0108 and 0117-0123 kept it), so its records-processing cover counts
 -- here as it does in the work items' read policy. It uses nothing else
--- 0104-0121 add.
+-- 0104-0123 add.
 --
 -- The gap: a lab or pharmacy work row shows its patient's name, sex, date of
 -- birth and Health ID ending only when it came from another facility's order
@@ -78,11 +78,11 @@
 -- patient. A failure leaves the rows without a patient.
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
---    and nothing is applied): 0001-0121 applied (the runner applies every
+--    and nothing is applied): 0001-0123 applied (the runner applies every
 --    earlier file first; this file checks 0103's
 --    identity.organization_application_admin_account body as the marker, and
 --    the tables read); 0124 not applied yet (neither function exists); the
---    bodies relied on are the ones 0001-0104 left and 0105-0121 kept (md5 of
+--    bodies relied on are the ones 0001-0104 left and 0105-0123 kept (md5 of
 --    pg_proc.prosrc): the
 --    consent test (0104's body) and the membership and permission checks it
 --    and D2 call, the four session readers, both work_item_allows
@@ -151,7 +151,7 @@ declare
   applier oid := (select oid from pg_roles where rolname = current_user);
   patients_owner oid;
 begin
-  -- a. Prerequisites (0001-0121; 0103's gate body is the marker).
+  -- a. Prerequisites (0001-0123; 0103's gate body is the marker).
   if to_regprocedure('identity.organization_application_admin_account(text)') is null
      or (select md5(proc.prosrc) from pg_proc proc
           where proc.oid = to_regprocedure('identity.organization_application_admin_account(text)'))
@@ -159,7 +159,7 @@ begin
      or to_regclass('identity.patients') is null
      or to_regclass('lab.work_items') is null
      or to_regclass('pharmacy.work_items') is null then
-    raise exception using errcode = '55000', message = '0124: 0001-0121 must be applied first';
+    raise exception using errcode = '55000', message = '0124: 0001-0123 must be applied first';
   end if;
   -- b. Not applied yet.
   if exists (select 1 from pg_proc proc
@@ -167,7 +167,7 @@ begin
                 and proc.pronamespace in ('lab'::regnamespace, 'pharmacy'::regnamespace)) then
     raise exception using errcode = '55000', message = '0124: already applied';
   end if;
-  -- c. The bodies relied on, as 0001-0104 left them and 0105-0121 kept them:
+  -- c. The bodies relied on, as 0001-0104 left them and 0105-0123 kept them:
   -- the consent test (0012, as 0104 replaced it; 0108 kept it) and the
   -- membership (0008) and
   -- permission (0010) checks, the four session readers (0001), both work
@@ -248,7 +248,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0124: an object this migration relies on differs from 0001-0121: %s', mismatch);
+      message = format('0124: an object this migration relies on differs from 0001-0123: %s', mismatch);
   end if;
   -- d. The columns read.
   select string_agg(format('%s.%s', expected.relation_name, expected.column_name), '; ') into mismatch
@@ -274,7 +274,7 @@ begin
                         and attribute_row.attnotnull = expected.not_null);
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0124: a column this migration relies on differs from 0001-0121: %s', mismatch);
+      message = format('0124: a column this migration relies on differs from 0001-0123: %s', mismatch);
   end if;
   -- e. Ownership and privileges, never through a superuser's bypass
   -- (production's migrator has none). The new functions will belong to

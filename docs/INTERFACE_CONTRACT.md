@@ -5303,9 +5303,9 @@ patient's name, sex, date of birth and Health ID ending on their own work,
 not only on work sent from another facility. 0124 is unsigned until the
 owner signs its declaration. It ships after 0123. It was numbered 0121 by
 the coordinator's release order of 2026-11-11 and renumbered 0124 after
-staging's 0117-0121 (0122 and 0123 are other work). Its read consent test is
-the one 0104 left (0105-0121 kept it). Migrations 0122 and 0123 may add
-sections too, so this section's number is fixed at merge.
+staging's 0117-0121 (0122 and 0123 are other work). It needs 0001-0123
+applied. Its read consent test is the one 0104 left (0105-0123 kept it).
+0122 and 0123 are sections 51 and 52, so this section keeps the number 45.
 
 Routes (paths, permissions, requests unchanged):
 `GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/:workItemId`
