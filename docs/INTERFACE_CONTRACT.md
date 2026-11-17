@@ -5718,3 +5718,18 @@ prescriber's values are left out.
 
 The suite is
 `services/ehr-api/test/database/prescription-dispensing-details.integration.sql`.
+
+Runtime check with the setting on: pharmacy-api answers 200 whatever its
+reader does, so the runtime verifier
+`services/ehr-api/scripts/verify-prescription-details-runtime.mjs` calls the
+real function through the real services. It boots Identity, EHR and Pharmacy
+from their own code as their runtime roles, EHR and Pharmacy with
+`PRESCRIPTION_DISPENSING_DETAILS_ENABLED=true`, and runs in the TUF migration
+rehearsal (`scripts/tuf-staging-migration-rehearsal.mjs`, the workspace job of
+`tuf-local-gates.yml`) after the own-work patient verifier (section 45). It
+fails when ehr-api does not take, store and echo the seven details, when an
+own work item the pharmacist may read comes back without exactly the
+prescriber's details (on the list or by id), when a prescription written
+without them gains some, when a pharmacist without consent sees the work or a
+detail, or when route-backed work shows any detail (though its reader holds
+the patient's consent at that facility).
