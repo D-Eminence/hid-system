@@ -2797,7 +2797,9 @@ try {
     'STAFF_INVITATION_ACCOUNT_CHANGED');
   const dormantReopened = await openedAs(byLink(amakaAgain.sent), 'dormant_staff');
   const amakaBefore = (await owner.query('select token_version, row_version from auth.accounts where id=$1', [amakaAccount])).rows[0];
-  expectProblem(await signIn(amakaEmail, invitationPassword), 401);
+  // Q88: the right password for a login with no active facility now says so,
+  // instead of the wrong-password answer.
+  expectProblem(await signIn(amakaEmail, invitationPassword), 403, 'NO_ACTIVE_FACILITY_MEMBERSHIP');
   assert(await count('select count(*)::int n from auth.sessions where account_id=$1 and revoked_at is null', [amakaAccount]) >= 1,
     'The ended member has no session left for the dormant acceptance to end');
   const dormantAccepted = await acceptInvitation(invitationCookie(dormantReopened), newDormantPassword);

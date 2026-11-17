@@ -1508,8 +1508,11 @@ try {
     email: synthetic('wp-lab-receiver'), role: 'lab', licenceBody: 'MLSCN', licenceNumber: 'MLSCN/80077' });
   await owner.query(`insert into auth.roles (code, description) values ('verifier_lab_receiver_only',
     'Order-route verifier: receives lab requests, cannot mark results entered in error') on conflict do nothing`);
+  // Q88: lab. admits a login only with lab.work-item.read or lab.work-item.accept, so the
+  // receive-only role also reads the work list; it still cannot mark results entered in error.
   await owner.query(`insert into auth.role_permissions (role_code, permission_code)
-    values ('verifier_lab_receiver_only', 'lab.order-route.receive') on conflict do nothing`);
+    values ('verifier_lab_receiver_only', 'lab.order-route.receive'),
+      ('verifier_lab_receiver_only', 'lab.work-item.read') on conflict do nothing`);
   await age(`with old as (update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = $2,
         revocation_reason = 'Order-route verifier: a receive-only member'
       where account_id = $1 and role_code = 'lab' and scope_type = 'facility' and revoked_at is null
