@@ -2200,7 +2200,13 @@ export async function fetchStaffDashboard(options: { forceRefresh?: boolean } = 
   return loadCachedView(`staff-dashboard:${authUserId}`, async () => edgeRequest<HidStaffDashboardResponse>('staff-dashboard'))
 }
 
-export async function accessPatientWithPin(patientIdentifier: string, accessPin: string, durationMinutes = 60, staffDisplayName?: string | null) {
+/**
+ * How long a patient's Access PIN opens their records: 24 hours, to see and
+ * add to them (owner decision, 10 Nov 2026; database 0121).
+ */
+export const PATIENT_PIN_ACCESS_MINUTES = 1440
+
+export async function accessPatientWithPin(patientIdentifier: string, accessPin: string, durationMinutes = PATIENT_PIN_ACCESS_MINUTES, staffDisplayName?: string | null) {
   // Staff identity/display data is derived from the authenticated membership;
   // the legacy caller parameter is retained only to avoid a UI-wide signature
   // change and is intentionally never sent to the server.
