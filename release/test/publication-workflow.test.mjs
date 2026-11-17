@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseDocument, stringify } from 'yaml'
-import { AUDIT_PATH, AUDIT_SHELL, AWS_AUDIT_GATE, LOCAL_GATE_AUDITS, NODE_RUNTIME, parseWorkflow, verifyLocalGateWorkflow, verifyPublicationWorkflow } from '../scripts/verify-publication-workflow.mjs'
+import { AUDIT_PATH, AUDIT_SHELL, AWS_AUDIT_GATE, EHR_AUDIT_GATE, LOCAL_GATE_AUDITS, NODE_RUNTIME, parseWorkflow, verifyLocalGateWorkflow, verifyPublicationWorkflow } from '../scripts/verify-publication-workflow.mjs'
 
 const source = await readFile(new URL('../../.github/workflows/tuf-publish.yml', import.meta.url), 'utf8')
 const localGates = await readFile(new URL('../../.github/workflows/tuf-local-gates.yml', import.meta.url), 'utf8')
@@ -51,10 +51,17 @@ test('publisher audits release and Cloudflare as before and only infra/aws throu
     'npm --prefix infra/cloudflare audit --audit-level=moderate',
     'node release/scripts/npm-audit-with-exceptions.mjs infra/aws', ''].join('\n'))
 })
-test('local gates keep every npm audit and run only infra/aws through the exception gate', () => {
+test('local gates keep every npm audit and run only infra/aws and apps/ehr through the exception gate', () => {
   assert.equal(verifyLocalGateWorkflow(localGates), true)
   const step = (w, job) => w.jobs[job].steps.find(s => s.run === LOCAL_GATE_AUDITS[job])
   assert.equal(step(parseWorkflow(localGates), 'aws-release-trust').id, 'gate_2')
+  assert.equal(step(parseWorkflow(localGates), 'ehr-release-cache').run, [
+    `export PATH="$RUNNER_TOOL_CACHE/node/${NODE_RUNTIME}/x64/bin:/usr/bin:/bin"`,
+    `test "$(node --version)" = v${NODE_RUNTIME}`,
+    'for package in packages/offline packages/telemetry packages/ui; do',
+    '  npm --prefix "${package}" audit --audit-level=moderate',
+    'done',
+    'node release/scripts/npm-audit-with-exceptions.mjs apps/ehr', ''].join('\n'))
   const attacks = {
     'plain infra/aws audit kept beside the gate': (w) => { step(w, 'aws-release-trust').run += '\nnpm --prefix infra/aws audit --audit-level=moderate' },
     'infra/aws audit failure ignored': (w) => { step(w, 'aws-release-trust').run += ' || true' },
@@ -65,7 +72,13 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'infra/aws audit may fail': (w) => { step(w, 'aws-release-trust')['continue-on-error'] = true },
     'exception gate for release audit': (w) => { step(w, 'release-contracts').run = 'node release/scripts/npm-audit-with-exceptions.mjs release' },
     'Cloudflare audit removed': (w) => { w.jobs['cloudflare-tuf'].steps = w.jobs['cloudflare-tuf'].steps.filter(s => s.run !== LOCAL_GATE_AUDITS['cloudflare-tuf']) },
-    'EHR audit narrowed': (w) => { step(w, 'ehr-release-cache').run = step(w, 'ehr-release-cache').run.replace(' apps/ehr;', ';') },
+    'EHR audit narrowed': (w) => { step(w, 'ehr-release-cache').run = step(w, 'ehr-release-cache').run.replace(' packages/ui;', ';') },
+    'apps/ehr gate dropped': (w) => { step(w, 'ehr-release-cache').run = step(w, 'ehr-release-cache').run.replace(`${EHR_AUDIT_GATE}\n`, '') },
+    'apps/ehr gate failure ignored': (w) => { step(w, 'ehr-release-cache').run = step(w, 'ehr-release-cache').run.replace(EHR_AUDIT_GATE, `${EHR_AUDIT_GATE} || true`) },
+    'apps/ehr gate with a substitute exception file': (w) => { step(w, 'ehr-release-cache').run = step(w, 'ehr-release-cache').run.replace(EHR_AUDIT_GATE, `${EHR_AUDIT_GATE} --exceptions /tmp/empty.json`) },
+    'apps/ehr back to a plain audit at a higher level': (w) => { step(w, 'ehr-release-cache').run = step(w, 'ehr-release-cache').run.replace(EHR_AUDIT_GATE, 'npm --prefix apps/ehr audit --audit-level=critical') },
+    'exception gate for a shared EHR package': (w) => { step(w, 'ehr-release-cache').run = step(w, 'ehr-release-cache').run.replace(' packages/ui;', ';') + 'node release/scripts/npm-audit-with-exceptions.mjs packages/ui\n' },
+    'conditional EHR audit': (w) => { step(w, 'ehr-release-cache').if = '${{ false }}' },
     'audit added to another job': (w) => { w.jobs['tuf-client'].steps.push({ name: 'Audit', run: AWS_AUDIT_GATE, id: 'gate_99' }) },
     'workflow npm configuration': [(w) => { w.env.npm_config_audit_level = 'none' }, UNLISTED('npm_config_audit_level')],
     'exception file rewritten before audit': (w) => { w.jobs['aws-release-trust'].steps.splice(2, 0, { run: 'cp /tmp/empty.json security/npm-audit-exceptions.json' }) },
