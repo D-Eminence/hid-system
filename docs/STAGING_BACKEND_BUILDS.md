@@ -185,8 +185,9 @@ GHSA id, package, npm vulnerable range, severity and installed path. It fails wh
 
 Advisories below moderate pass without an entry, as they did with
 `--audit-level=moderate`. Every other audit is unchanged: release,
-infra/cloudflare and the EHR and shared-package audits still run plain
-`npm audit --audit-level=moderate`. `release/scripts/verify-publication-workflow.mjs`
+infra/cloudflare and the shared-package audits still run plain
+`npm audit --audit-level=moderate` (apps/ehr has used the gate since
+17 November; see the next section). `release/scripts/verify-publication-workflow.mjs`
 now pins every npm audit command in both workflows. It rejects these changes, and
 the release tests try each one: dropping an audit, sending another directory
 through the exception gate, a different exceptions file, `|| true`, a condition or
@@ -286,3 +287,50 @@ minimatch 11.0.1 or later and delete the entry (left in place it fails as stale)
 or have the owner review the basis again and set new `approved_at` and
 `expires_at` dates. With no entries the gate behaves like the plain audit, so the
 workflows can keep it.
+
+## npm audit exception: picomatch in apps/ehr build tooling (2026-11-17)
+
+The EHR release-bound offline cache job of `tuf-local-gates.yml` now
+fails its apps/ehr audit with five high findings from one advisory,
+[GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf):
+picomatch up to 4.0.7 is open to regular expression denial of service through
+single-branch repeated extglobs. npm reports picomatch 4.0.7 and, through it,
+vite 8.2.4, tinyglobby 0.2.17, fdir 6.5.0 and @vitejs/plugin-react 6.1.1, all
+devDependencies. There is no fix to take: 4.0.7 is picomatch's latest release.
+
+The owner (D-Eminence) approved a narrow exception in chat on 17 November 2026
+("Q95 A"): wherever picomatch is build or test tooling only and in nothing
+shipped, until 2026-12-01, and only while no fixed version is published. The
+evidence, from `origin/staging-novu-ci-20261005` at 73eae090:
+
+- `npm --prefix apps/ehr test` passed, `HID_PUBLIC_BASE=/ npm --prefix apps/ehr
+  run build` completed, and the job's release-binding check passed on the
+  output. None of the 10 files in `apps/ehr/dist` contains picomatch's source
+  strings (`picomatch`, `POSIX_REGEX_SOURCE`, `REGEX_NON_SPECIAL_CHARS`,
+  `Expected pattern to be a non-empty string`); the same search finds them in
+  `apps/ehr/node_modules/picomatch/lib`.
+- `npm ls picomatch --omit=dev --all` is empty for apps/ehr, and
+  `npm ls picomatch --package-lock-only --omit=dev --all` is empty for all 27
+  `package-lock.json` directories, the 11 services included (their images
+  install with `npm ci --omit=dev`). Every picomatch in a lockfile is marked dev.
+
+The audit step of that job now runs the shared-package audits as before and
+`node release/scripts/npm-audit-with-exceptions.mjs apps/ehr`, and the entry in
+`security/npm-audit-exceptions.json` covers `node_modules/picomatch` in
+apps/ehr only. It expires at 00:00 UTC on 2026-12-01, like the minimatch entry.
+It uses two optional fields the gate gained for it:
+
+- `dependent_paths` lists the four package paths npm reports as vulnerable
+  through picomatch. The gate fails if the advisory reaches any other package
+  path (for example a runtime dependency that starts using tinyglobby), and
+  fails as stale if a listed one is no longer reached.
+- `ends_when_fix_published: true` makes the gate run `npm view picomatch
+  versions --json` and read the installed version from
+  `apps/ehr/package-lock.json`. Any release outside `<=4.0.7` newer than the
+  installed copy fails the gate, as does a registry or lockfile it cannot read.
+  When that happens, upgrade vite (or override picomatch) and delete the entry.
+
+`release/scripts/verify-publication-workflow.mjs` pins the new audit command
+(`EHR_AUDIT_GATE`) and the directories an exception may name
+(`EXCEPTION_GATE_DIRECTORIES`: infra/aws and apps/ehr); the release tests try
+dropping, weakening or redirecting it.
