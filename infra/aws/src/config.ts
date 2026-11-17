@@ -9,6 +9,10 @@ export const stagingModes = ['sleep', 'economy', 'fidelity'] as const;
 export type StagingMode = typeof stagingModes[number];
 export type DeploymentProfile = 'development' | StagingMode | 'production';
 
+/** identity-api's STAFF_FACILITY_SELECTION_MODE (0129): off, keep or ask. */
+export const staffFacilitySelectionModes = ['off', 'keep', 'ask'] as const;
+export type StaffFacilitySelectionMode = typeof staffFacilitySelectionModes[number];
+
 export type InterfaceEndpointName =
   | 'ecr-api'
   | 'ecr-docker'
@@ -52,6 +56,12 @@ export interface HidEnvironmentConfig {
   // Deliberately opt-in at synth time. The default task definition contains
   // no QoreID credential reference and application calls remain disabled.
   readonly qoreIdEnabled: boolean;
+  // Off unless HID_STAFF_FACILITY_SELECTION_MODE is keep or ask at synth time:
+  // identity-api then keeps a staff member's chosen facility per sign-in
+  // (0129). Synthesize keep or ask only once 0129 is applied: identity-api
+  // refuses to start while its table or grants are missing, and the deploy
+  // rolls back. To roll back the feature, synthesize off again.
+  readonly staffFacilitySelectionMode: StaffFacilitySelectionMode;
 }
 
 interface ProfileValues {
@@ -159,6 +169,7 @@ export function environmentConfig(
   value: string | undefined,
   stagingModeValue?: string,
   qoreIdEnabledValue?: string,
+  staffFacilitySelectionModeValue?: string,
 ): HidEnvironmentConfig {
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -180,10 +191,15 @@ export function environmentConfig(
   if (!['true', 'false'].includes(qoreIdEnabledInput)) {
     throw new Error('HID_QOREID_ENABLED must be true or false when supplied');
   }
+  const staffFacilitySelectionMode = staffFacilitySelectionModeValue ?? 'off';
+  if (!(staffFacilitySelectionModes as readonly string[]).includes(staffFacilitySelectionMode)) {
+    throw new Error('HID_STAFF_FACILITY_SELECTION_MODE must be off, keep or ask when supplied');
+  }
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
     qoreIdEnabled: qoreIdEnabledInput === 'true',
+    staffFacilitySelectionMode: staffFacilitySelectionMode as StaffFacilitySelectionMode,
   };
 }
 

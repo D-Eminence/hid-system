@@ -45,6 +45,16 @@ const qoreIdStagingApplication = new App();
 const qoreIdStagingRegional = Template.fromStack(new HidRegionalStack(qoreIdStagingApplication, 'QoreIdStagingRegionalTest', {
   configuration: environmentConfig('staging', 'economy', 'true'),
 })).toJSON() as typeof regional;
+const facilitySelectionKeepApplication = new App();
+const facilitySelectionKeepRegional = Template.fromStack(new HidRegionalStack(facilitySelectionKeepApplication,
+  'FacilitySelectionKeepRegionalTest', {
+    configuration: environmentConfig('staging', 'economy', undefined, 'keep'),
+  })).toJSON() as typeof regional;
+const facilitySelectionAskApplication = new App();
+const facilitySelectionAskRegional = Template.fromStack(new HidRegionalStack(facilitySelectionAskApplication,
+  'FacilitySelectionAskRegionalTest', {
+    configuration: environmentConfig('production', undefined, undefined, 'ask'),
+  })).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
   return Object.entries(template.Resources).filter(([, resource]) => resource.Type === type);
@@ -71,6 +81,23 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.throws(() => environmentConfig('staging', 'economy', 'enabled'), /HID_QOREID_ENABLED/);
   assert.equal(environmentConfig('staging', 'economy').qoreIdEnabled, false);
   assert.equal(environmentConfig('staging', 'economy', 'true').qoreIdEnabled, true);
+  // 0129: a staff member's chosen facility, kept per sign-in. Off unless keep
+  // or ask is given at synth time; anything else refuses to synthesize.
+  for (const invalid of ['on', 'true', 'false', 'KEEP', ' keep', 'keep ', '', 'default']) {
+    assert.throws(() => environmentConfig('staging', 'economy', undefined, invalid),
+      /HID_STAFF_FACILITY_SELECTION_MODE must be off, keep or ask when supplied/);
+  }
+  assert.throws(() => environmentConfig('production', undefined, undefined, 'Ask'), /HID_STAFF_FACILITY_SELECTION_MODE/);
+  assert.equal(environmentConfig('development').staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('staging', 'economy').staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('staging', 'sleep').staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('production').staffFacilitySelectionMode, 'off');
+  for (const mode of ['off', 'keep', 'ask'] as const) {
+    assert.equal(environmentConfig('staging', 'economy', undefined, mode).staffFacilitySelectionMode, mode);
+    assert.equal(environmentConfig('production', undefined, undefined, mode).staffFacilitySelectionMode, mode);
+  }
+  assert.equal(environmentConfig('staging', 'economy', 'true').staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('staging', 'economy', undefined, 'keep').qoreIdEnabled, false);
   assert.equal(environmentConfig('staging', 'economy').publicApiSubdomain, 'api.staging');
   assert.deepEqual(environmentConfig('staging', 'economy').browserSubdomains, [
     'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'admin.staging',
@@ -499,6 +526,28 @@ test('an explicit QoreID staging synth injects its distinct server-only secret i
   assert.ok(identityContainer.Secrets.some(item => item.Name === 'NIN_ENCRYPTION_KEY_B64'));
   for (const task of tasks.filter(task => task !== identity)) {
     assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /QOREID_CLIENT_ID|QOREID_CLIENT_SECRET|NIN_LOOKUP_HMAC_KEY_B64/);
+  }
+});
+
+test('the staff facility selection mode (0129) is passed to identity-api only, off unless keep or ask is given', () => {
+  const cases: Array<[typeof regional, string]> = [
+    [regional, 'off'], [stagingRegional, 'off'], [fidelityRegional, 'off'], [sleepRegional, 'off'],
+    [qoreIdStagingRegional, 'off'], [facilitySelectionKeepRegional, 'keep'], [facilitySelectionAskRegional, 'ask'],
+  ];
+  for (const [template, expected] of cases) {
+    const tasks = properties(template, 'AWS::ECS::TaskDefinition');
+    const identity = tasks.find(item => JSON.stringify(item.Family).includes('identity-api'));
+    assert.ok(identity, 'missing identity-api');
+    const api = (identity.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+      .find(item => item.Name === 'identity-api')!;
+    const environment = Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+    assert.equal(environment.STAFF_FACILITY_SELECTION_MODE, expected);
+    const others = tasks.filter(task => task !== identity);
+    assert.ok(others.length > 0);
+    for (const task of others) {
+      assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /STAFF_FACILITY_SELECTION_MODE/,
+        `${JSON.stringify(task.Family)} should not carry STAFF_FACILITY_SELECTION_MODE`);
+    }
   }
 });
 
