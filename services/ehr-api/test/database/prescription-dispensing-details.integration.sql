@@ -73,8 +73,19 @@
 -- keys and guards are skipped), and so are the work items that stand for
 -- rows accepted before 0100 or from another facility. Synthetic values only;
 -- uuid prefix e114.
+-- See provider-self-enrollment.integration.sql for why FORCE is lifted on
+-- the control table when its owner cannot bypass row-level security.
 set plpgsql.variable_conflict = error;
 begin;
+
+do $$
+begin
+  if not (select role_row.rolsuper or role_row.rolbypassrls from pg_proc proc
+            join pg_roles role_row on role_row.oid = proc.proowner
+           where proc.oid = 'platform.control_enabled(text)'::regprocedure) then
+    alter table platform.control_settings no force row level security;
+  end if;
+end $$;
 
 create function pg_temp.expect(label text, got text, want text) returns void language plpgsql as $f$
 begin
