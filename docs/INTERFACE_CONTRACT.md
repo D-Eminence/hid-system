@@ -5344,6 +5344,24 @@ itself up and awaits support's review (membership `org_admin`, permissions
 `organization.manage`, 0086) is admitted wherever org_admin is, so it can sign
 in again on the site it signed up on.
 
+"Hospital roles" is read from the membership's permissions alone, exactly as
+the owner's brief names the codes; the gate does not read what kind of
+organisation the facility belongs to. Two consequences the owner should
+confirm (recorded 17 November 2026, flagged in review):
+
+- every admin and org_admin holds `organization.manage` (0006), including the
+  administrator of a lab-only or pharmacy-only organisation, so that
+  administrator is admitted on all five product sites with that facility (an
+  org_admin at QA Hospital, QA Laboratory and QA Pharmacy sees all three on
+  `ehr.` and `migrate.` too);
+- a receptionist holds `ehr.encounter.write` (0006), so a hospital
+  receptionist is admitted on `migrate.`.
+
+If the owner wants "a hospital's own administrator" only, the change is to
+admit `organization.manage` (and the review-pending administrator) only at a
+facility whose organisation is a hospital or clinic. `product-gate.spec.ts`
+pins today's answers for both cases.
+
 The session's `actor.facilities`, `actor.facilityIds` and the selected
 `actor.facility` hold only fitting memberships. The access token carries the
 product (`product` claim); every request, including the delegated
@@ -5351,10 +5369,26 @@ product (`product` claim); every request, including the delegated
 memberships, and `X-Facility-ID` naming any other facility is `403
 FACILITY_ACCESS_DENIED`. A session that no longer fits its site (its last
 fitting membership ended) ends with `401`, as an ended membership always has.
+This holds on `POST /auth/refresh` too: a refresh that no longer fits its site
+(or, off the product sites, an account whose last membership ended) is `401`
+with the cookies cleared, never one of the 403 sign-in refusals below, so every
+website signs out cleanly.
 `POST /auth/facility` also keeps only the facilities that fit the product of
 its own `Origin` (`403 FACILITY_ACCESS_DENIED` otherwise). An access token
 issued before this release carries no product and keeps today's behaviour
 until its refresh, which applies the gate.
+
+The product is bound to the session, not to the `Origin` of each refresh (the
+`Origin` is the client's to set). A staff session issued on a product site
+carries its product in the server-made refresh token
+(`<session id>.<secret>.<product>.<method>`; the token's hash is what
+`auth.sessions` stores, so it cannot be altered). `POST /auth/refresh`
+re-applies that product, and answers `401` with the cookies cleared when the
+request's `Origin` names any other product or none (for example a session
+issued on `lab.` refreshed with `Origin: https://app.healthidentitydirectory.com`).
+A refresh token with no product (issued before this release, or on a host with
+no product) takes the product of the site it is refreshed on, and keeps it from
+then on.
 
 When the password is right but no membership fits:
 

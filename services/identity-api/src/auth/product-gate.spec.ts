@@ -399,6 +399,35 @@ describe('POST /auth/login on each product site (Q88-1, Q88-2)', () => {
       .toEqual([HOSPITAL.facility, LABORATORY.facility, PHARMACY.facility].sort());
   });
 
+  // Owner's brief (17 Nov): "hospital roles" = ehr.encounter.write or
+  // organization.manage, read from the membership's permissions alone. Every
+  // admin and org_admin holds organization.manage (0006) whatever kind of
+  // organisation it runs, so the administrator of a lab-only or pharmacy-only
+  // organisation is admitted on every product site with that facility.
+  // Recorded in INTERFACE_CONTRACT section 53 for the owner to confirm.
+  it.each(PRODUCTS)('the org_admin of a lab-only organisation is admitted on %s. with the laboratory (organization.manage)',
+    async (product) => {
+      const labOnlyAdmin = account('lab-only-org-admin', [membership(LABORATORY, 'org_admin')]);
+      const { controller } = harness([labOnlyAdmin]);
+      const answer = await controller.login(login(labOnlyAdmin), request(PROD(product)), response());
+      expect(answer.actor.facilityIds).toEqual([LABORATORY.facility]);
+    });
+
+  it.each(PRODUCTS)('the org_admin of a pharmacy-only organisation is admitted on %s. with the pharmacy (organization.manage)',
+    async (product) => {
+      const pharmacyOnlyAdmin = account('pharmacy-only-org-admin', [membership(PHARMACY, 'org_admin')]);
+      const { controller } = harness([pharmacyOnlyAdmin]);
+      const answer = await controller.login(login(pharmacyOnlyAdmin), request(PROD(product)), response());
+      expect(answer.actor.facilityIds).toEqual([PHARMACY.facility]);
+    });
+
+  it('a hospital receptionist holds ehr.encounter.write (0006), so is admitted on migrate. as a hospital role', async () => {
+    const receptionist = account('receptionist', [membership(HOSPITAL, 'receptionist')]);
+    const { controller } = harness([receptionist]);
+    const answer = await controller.login(login(receptionist), request(PROD('migrate')), response());
+    expect(answer.actor.facilityIds).toEqual([HOSPITAL.facility]);
+  });
+
   describe('hosts with no product keep today\'s behaviour', () => {
     it.each([ADMIN, LOCAL])('%s: every membership, and no product in the token', async (origin) => {
       const { controller } = harness();
@@ -475,24 +504,109 @@ describe('refresh re-applies the gate (POST /auth/refresh)', () => {
           facility_ids: result.actor.facilities.map((facility) => facility.id) });
         return;
       }
-      await expect(attempt).rejects.toMatchObject({ code: expected, status: 403 });
+      // A session that no longer fits its site ends with 401, the answer every
+      // website already signs out on (not a 403 that shows an error screen).
+      await expect(attempt).rejects.toBeInstanceOf(UnauthorizedException);
     });
 
-  it('the controller clears the cookies when a refresh is refused by the gate', async () => {
+  it('the controller answers 401 and clears the cookies when a refresh no longer fits the site', async () => {
     const { controller, tokens } = harness(Object.values(accounts), accounts.lab);
     jest.spyOn(tokens, 'verifyRefreshCsrf').mockReturnValue(true);
     const answer = response();
     const req = request(PROD('ehr'), { cookies: { hid_access_refresh: refreshToken, hid_access_csrf: 'csrf' } } as Partial<HidRequest>,
       { 'x-csrf-token': 'csrf' });
     const error = await refusal(controller.refresh(req, answer));
-    expect((error as DomainProblem).code).toBe('PRODUCT_NOT_AUTHORISED');
+    expect(error).toBeInstanceOf(UnauthorizedException);
+    expect(error.getStatus()).toBe(401);
     expect((answer as unknown as { clearCookie: jest.Mock }).clearCookie).toHaveBeenCalled();
   });
+
+  it.each([ADMIN, LOCAL])('a membership that ended, refreshed on %s, ends the session with 401 (as before the gate)',
+    async (origin) => {
+      const { controller, tokens } = harness(Object.values(accounts), accounts.noMembership);
+      jest.spyOn(tokens, 'verifyRefreshCsrf').mockReturnValue(true);
+      const answer = response();
+      const req = request(origin, { cookies: { hid_access_refresh: refreshToken, hid_access_csrf: 'csrf' } } as Partial<HidRequest>,
+        { 'x-csrf-token': 'csrf' });
+      const error = await refusal(controller.refresh(req, answer));
+      expect(error.getStatus()).toBe(401);
+      expect((answer as unknown as { clearCookie: jest.Mock }).clearCookie).toHaveBeenCalled();
+    });
 
   it('a refresh on a host with no product keeps every membership', async () => {
     const result = await refreshed(accounts.orgAdmin, ADMIN);
     expect(result.actor.facilities).toHaveLength(3);
     expect(signedClaims.at(-1)).not.toHaveProperty('product');
+    expect(result.refreshToken.split('.')).toHaveLength(3);
+  });
+});
+
+describe('the product is bound to the session, not to the Origin a refresh names', () => {
+  async function issuedOn(who: Account, origin: string) {
+    const { tokens } = harness(Object.values(accounts), who);
+    const product = productForOrigin(origin);
+    return tokens.issue({ subject: who.subject, accountId: who.accountId, email: `${who.key}@example.test`,
+      displayName: 'Staff', facilities: [], authenticationMethod: 'local' },
+    { correlationId: 'product-gate-bound', origin, ...(product ? { product } : {}) });
+  }
+
+  async function refreshOn(who: Account, token: string, origin: string | undefined) {
+    const { tokens } = harness(Object.values(accounts), who);
+    const product = productForOrigin(origin);
+    return tokens.refresh(token, { correlationId: 'product-gate-bound', ...(origin ? { origin } : {}),
+      ...(product ? { product } : {}) });
+  }
+
+  it('a staff session issued on a product site carries that product in its refresh token', async () => {
+    const lab = await issuedOn(accounts.orgAdmin, PROD('lab'));
+    expect(lab.refreshToken.split('.')).toHaveLength(4);
+    expect(lab.refreshToken.split('.')[2]).toBe('lab');
+    expect(lab.refreshToken.endsWith('.local')).toBe(true);
+    const admin = await issuedOn(accounts.orgAdmin, ADMIN);
+    expect(admin.refreshToken.split('.')).toHaveLength(3);
+  });
+
+  it.each([
+    'https://app.healthidentitydirectory.com', 'https://www.healthidentitydirectory.com', ADMIN, LOCAL,
+    PROD('ehr'), STAGING('outreach'), undefined,
+  ])('a session issued on lab. refreshed with Origin %p ends with 401 and gains nothing', async (origin) => {
+    const issued = await issuedOn(accounts.labAndVolunteer, PROD('lab'));
+    expect(issued.actor.facilityIds).toEqual([LABORATORY.facility]);
+    signedClaims.length = 0;
+    await expect(refreshOn(accounts.labAndVolunteer, issued.refreshToken, origin))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+    expect(signedClaims).toHaveLength(0);
+  });
+
+  it('a login every site admits (org_admin) issued on lab. still cannot be refreshed as another site\'s', async () => {
+    const issued = await issuedOn(accounts.orgAdmin, PROD('lab'));
+    for (const origin of [PROD('ehr'), PROD('migrate'), 'https://app.healthidentitydirectory.com', ADMIN]) {
+      await expect(refreshOn(accounts.orgAdmin, issued.refreshToken, origin)).rejects.toBeInstanceOf(UnauthorizedException);
+    }
+  });
+
+  it('the same session refreshed on lab. keeps lab only, and the new refresh token keeps lab', async () => {
+    const issued = await issuedOn(accounts.labAndVolunteer, PROD('lab'));
+    const result = await refreshOn(accounts.labAndVolunteer, issued.refreshToken, PROD('lab'));
+    expect(result.actor.facilityIds).toEqual([LABORATORY.facility]);
+    expect(signedClaims.at(-1)).toMatchObject({ product: 'lab' });
+    expect(result.refreshToken.split('.')[2]).toBe('lab');
+  });
+
+  it('a refresh token issued before the gate takes the product of the site it is refreshed on, and keeps it', async () => {
+    const legacy = '90000000-0000-4000-8000-000000000001.opaque-refresh-secret-value.local';
+    const result = await refreshOn(accounts.labAndVolunteer, legacy, PROD('outreach'));
+    expect(result.actor.facilityIds).toEqual([OUTREACH_GROUP.facility]);
+    expect(result.refreshToken.split('.')[2]).toBe('outreach');
+    await expect(refreshOn(accounts.labAndVolunteer, result.refreshToken, 'https://app.healthidentitydirectory.com'))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it.each([
+    '90000000-0000-4000-8000-000000000001.opaque.admin.local',
+    '90000000-0000-4000-8000-000000000001.opaque.lab.extra.local',
+  ])('refuses a refresh token naming no product it knows (%s)', async (token) => {
+    await expect(refreshOn(accounts.lab, token, PROD('lab'))).rejects.toBeInstanceOf(UnauthorizedException);
   });
 });
 

@@ -95,7 +95,8 @@ export class TokenService {
     const actor = { ...resolvedActor, authenticationMethod };
     const sessionId = randomUUID();
     const accessJti = randomUUID();
-    const refreshToken = this.newRefreshToken(sessionId, authenticationMethod);
+    const sessionProduct = actor.kind === 'patient' ? undefined : product;
+    const refreshToken = this.newRefreshToken(sessionId, authenticationMethod, sessionProduct);
     const csrfToken = this.deriveRefreshCsrf(refreshToken);
     const now = new Date();
     const lifetimes = this.lifetimes(actor.kind ?? 'staff', event.origin);
@@ -106,7 +107,7 @@ export class TokenService {
       absoluteExpiresAt.getTime()));
     const tokenVersion = await this.accountTokenVersion(actor.accountId);
     const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt,
-      actor.kind === 'patient' ? undefined : product);
+      sessionProduct);
 
     await this.database.withSystemTransaction(event.correlationId, async (client) => {
       if (identity.passwordUpgrade) {
@@ -200,10 +201,28 @@ export class TokenService {
     if (this.databaseMethod(authenticationMethod) !== oldSession.authentication_method) {
       throw new UnauthorizedException('Invalid refresh session');
     }
-    // Q88-1: the refresh re-applies the product gate of the site it comes from.
-    const product = (oldSession.session_kind ?? 'staff') === 'staff' ? eventProduct(event) : undefined;
+    // Q88-1: the refresh re-applies the product gate. The product is the one
+    // the session was issued under, kept in the server-made refresh token
+    // (its hash is what auth.sessions holds, so it cannot be changed). The
+    // request's Origin is the client's to set, so it may only confirm that
+    // product, never replace it: a session issued on lab. refreshed with any
+    // other Origin, or with none that names a product, ends. A refresh token
+    // issued before the gate (no product in it) takes its site's product.
+    const staffSession = (oldSession.session_kind ?? 'staff') === 'staff';
+    const issuedProduct = this.refreshProduct(refreshToken);
+    const requestProduct = staffSession ? eventProduct(event) : undefined;
+    if (staffSession && issuedProduct && requestProduct !== issuedProduct) {
+      throw new UnauthorizedException('Refresh session belongs to another site');
+    }
+    const product = staffSession ? issuedProduct ?? requestProduct : undefined;
+    // A session that no longer fits its site ends as one whose membership
+    // ended always has: 401, the answer every website already signs out on
+    // (verify() does the same for each request).
     const actor = await this.resolveActor(oldSession.actor_subject, authenticationMethod,
-      oldSession.session_kind ?? 'staff', undefined, product);
+      oldSession.session_kind ?? 'staff', undefined, product).catch((error: unknown) => {
+      if (isProductGateRefusal(error)) throw new UnauthorizedException('Session no longer fits this site');
+      throw error;
+    });
     if (actor.accountId !== oldSession.account_id) {
       throw new UnauthorizedException('Invalid refresh session');
     }
@@ -216,7 +235,7 @@ export class TokenService {
     }
     const newSessionId = randomUUID();
     const accessJti = randomUUID();
-    const newRefreshToken = this.newRefreshToken(newSessionId, authenticationMethod);
+    const newRefreshToken = this.newRefreshToken(newSessionId, authenticationMethod, product);
     const csrfToken = this.deriveRefreshCsrf(newRefreshToken);
     const accessExpiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
     const refreshExpiresAt = new Date(Math.min(
@@ -561,8 +580,23 @@ export class TokenService {
     return { refreshSeconds, absoluteSeconds: this.environment.AUTH_ABSOLUTE_TTL_SECONDS };
   }
 
-  private newRefreshToken(sessionId: string, method: 'local' | 'oidc'): string {
-    return `${sessionId}.${randomBytes(48).toString('base64url')}.${method}`;
+  /**
+   * `<session id>.<secret>.<method>`, or `<session id>.<secret>.<product>.<method>`
+   * for a staff session issued on a product site (Q88-1): the product rides in
+   * the token, so a refresh re-applies the product the session was issued
+   * under rather than whatever Origin the refresh request names.
+   */
+  private newRefreshToken(sessionId: string, method: 'local' | 'oidc', product?: StaffProduct): string {
+    const secret = randomBytes(48).toString('base64url');
+    return product ? `${sessionId}.${secret}.${product}.${method}` : `${sessionId}.${secret}.${method}`;
+  }
+
+  /** The product a refresh token was issued under (newRefreshToken), or undefined for one with none. */
+  private refreshProduct(token: string): StaffProduct | undefined {
+    const parts = token.split('.');
+    if (parts.length === 3) return undefined;
+    if (parts.length === 4 && isStaffProduct(parts[2])) return parts[2];
+    throw new UnauthorizedException('Invalid refresh session');
   }
 
   private async resolveActor(
