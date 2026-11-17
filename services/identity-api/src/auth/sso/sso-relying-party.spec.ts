@@ -32,7 +32,7 @@ import { AuthSessionAuditService } from '../auth-session-audit.service';
 import { GoogleAuthenticationService } from '../google-authentication.service';
 import { NoActiveFacilityMembershipProblem, ProductNotAuthorisedProblem, type StaffProduct } from '../product-gate';
 import { SecurityGuard } from '../security.guard';
-import { TokenService, type SingleSignOnProvenance } from '../token.service';
+import { CredentialsChangedDuringSignIn, TokenService, type SingleSignOnProvenance } from '../token.service';
 import { TurnstileService } from '../turnstile.service';
 import { WorkloadAuthService } from '../workload-auth.service';
 import { SSO_FALLBACK_COOKIE, SsoController } from './sso.controller';
@@ -76,9 +76,12 @@ let clockOffset = 0;
 let provider: FakeProvider;
 let store: { accounts: Map<string, string>; sessions: StoredSession[]; links: StoredLink[];
   spent: Set<string>; access: Map<string, { actor: ActorContext; claims: { csrf_hash: string; product?: StaffProduct } }>;
-  passwordChangedAt: Map<string, Date> };
+  passwordChangedAt: Map<string, Date>; tokenVersions: Map<string, number>;
+  /** Runs once, just after the account check is answered: a credential change committing in between. */
+  afterAccountCheck?: () => void };
 let tokens: { issue: jest.Mock; verify: jest.Mock; verifyCsrf: jest.Mock;
-  verifyRefreshCsrf: jest.Mock; recordSessionEvent: jest.Mock; refreshSessionKind: jest.Mock; revoke: jest.Mock };
+  verifyRefreshCsrf: jest.Mock; recordSessionEvent: jest.Mock; refreshSessionKind: jest.Mock; revoke: jest.Mock;
+  revokeByRefreshToken: jest.Mock };
 let auth: { revoke: jest.Mock; refresh: jest.Mock };
 let audit: { record: jest.Mock; recordWithClient: jest.Mock };
 let sessionAudit: { record: jest.Mock };
@@ -119,12 +122,17 @@ async function runQuery(sql: string, values: unknown[] = []) {
     store.spent.add(key);
     return { rows: [], rowCount: 1 };
   }
-  if (sql.includes('select subject, password_changed_at from auth.accounts')) {
+  if (sql.includes('select subject, password_changed_at, token_version::text from auth.accounts')) {
     // Only an active account, as a password sign-in finds one.
     expect(sql).toContain("status = 'active'");
-    const subject = store.accounts.get(String(values[0]));
-    return subject ? { rows: [{ subject, password_changed_at: store.passwordChangedAt.get(String(values[0])) ?? null }],
-      rowCount: 1 } : none;
+    const accountId = String(values[0]);
+    const subject = store.accounts.get(accountId);
+    const answer = subject ? { rows: [{ subject, password_changed_at: store.passwordChangedAt.get(accountId) ?? null,
+      token_version: String(store.tokenVersions.get(accountId) ?? 1) }], rowCount: 1 } : none;
+    const between = store.afterAccountCheck;
+    store.afterAccountCheck = undefined;
+    between?.();
+    return answer;
   }
   // Production has no staff second factor and no account-session lock (0073): neither is ever asked for.
   if (sql.includes('mfa') || sql.includes('lock_account')) throw new Error(`a statement production cannot run: ${sql}`);
@@ -180,13 +188,19 @@ async function buildApp(ssoOn: boolean): Promise<void> {
   store = { accounts: new Map([[STAFF_ACCOUNT, 'synthetic:staff'], [PATIENT_ACCOUNT, 'synthetic:patient'],
     [OTHER_PATIENT_ACCOUNT, 'synthetic:other-patient'], [NOT_LAB_STAFF_ACCOUNT, 'synthetic:not-lab-staff'],
     [NO_MEMBERSHIP_STAFF_ACCOUNT, 'synthetic:no-membership-staff']]),
-    sessions: [], links: [], spent: new Set(), access: new Map(), passwordChangedAt: new Map() };
+    sessions: [], links: [], spent: new Set(), access: new Map(), passwordChangedAt: new Map(), tokenVersions: new Map() };
   tokens = {
     // As TokenService.issue answers a staff or patient sign-in (one path for both, Q92 B), with the product
     // gate of the event's product (current-staff-context.service.ts resolve, Q88): it is this fake's only
     // stand-in, and product-gate.spec.ts proves the real gate.
     issue: jest.fn(async (identity: { actorKind: 'staff' | 'patient'; accountId: string; subject: string },
       event: { product?: StaffProduct }, provenance?: SingleSignOnProvenance) => {
+      // As TokenService.issue: the session would carry the account's token version now, which must be the one
+      // read with the password check.
+      if (provenance?.accountTokenVersion !== undefined
+        && (store.tokenVersions.get(identity.accountId) ?? 1) !== provenance.accountTokenVersion) {
+        throw new CredentialsChangedDuringSignIn();
+      }
       if (identity.actorKind === 'patient') return newSession('patient', identity.accountId, provenance);
       if (identity.accountId === NOT_LAB_STAFF_ACCOUNT && event.product === 'lab') {
         throw new ProductNotAuthorisedProblem('lab', identity.subject);
@@ -213,6 +227,13 @@ async function buildApp(ssoOn: boolean): Promise<void> {
     refreshSessionKind: jest.fn(async (refresh: string) => {
       const session = store.sessions.find((candidate) => candidate.refreshHash === sha256(refresh));
       return session && !session.revoked ? session.kind : undefined;
+    }),
+    // As TokenService.revokeByRefreshToken: today's sign-out of the sign-in of that kind the refresh cookie could renew.
+    revokeByRefreshToken: jest.fn(async (refresh: string, kind: 'staff' | 'patient') => {
+      const session = store.sessions.find((candidate) => candidate.refreshHash === sha256(refresh));
+      if (!session || session.revoked || session.kind !== kind) return undefined;
+      session.revoked = true;
+      return { sessionId: session.id, accountId: session.accountId, subject: store.accounts.get(session.accountId)! };
     }),
     // As TokenService.revoke (today's sign-out): the whole sign-in of that session.
     revoke: jest.fn(async (sessionId: string) => {
@@ -496,7 +517,8 @@ describe('with single sign-on configured', () => {
         expect.objectContaining({ actorKind: 'staff', accountId: STAFF_ACCOUNT, subject: 'synthetic:staff',
           authenticationMethod: 'local' }),
         { correlationId: CORRELATION, sourceIp: expect.any(String), product: 'lab' },
-        { clientId: 'lab', providerSid: 'provider-session-1', authenticatedAt: expect.any(Date) });
+        // The account's token version read with the password check, which the session must carry.
+        { clientId: 'lab', providerSid: 'provider-session-1', authenticatedAt: expect.any(Date), accountTokenVersion: 1 });
       // The refresh token is bound to the lab product, as a password sign-in's on lab. is.
       expect(valueOf(cookieNamed(response, 'hid_access_refresh='))).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]+\.lab\.local$/);
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({
@@ -703,6 +725,31 @@ describe('with single sign-on configured', () => {
       const { callback } = await signIn(PORTAL, { sub: PATIENT_ACCOUNT, sid: 'provider-session-2', hid_kind: 'patient',
         auth_time: nowSeconds() - 600 }, '/');
       await refusedCallback(await callback(), 'stale_provider_sign_in', '/sign-in');
+    });
+
+    it.each<['staff' | 'patient']>([['staff'], ['patient']])('refuses a %s sign-in when the password is reset just after '
+      + 'the check, before the session is issued', async (kind) => {
+      const accountId = kind === 'staff' ? STAFF_ACCOUNT : PATIENT_ACCOUNT;
+      const signedInAt = nowSeconds() - 600;
+      store.passwordChangedAt.set(accountId, new Date(signedInAt * 1_000 - 86_400_000));
+      // The check passes on the old password; a reset (0029) then commits, raising the token version.
+      store.afterAccountCheck = () => {
+        store.passwordChangedAt.set(accountId, new Date());
+        store.tokenVersions.set(accountId, 2);
+      };
+      const { callback } = kind === 'staff' ? await signIn(LAB, staffClaims({ auth_time: signedInAt }))
+        : await signIn(PORTAL, { sub: PATIENT_ACCOUNT, sid: 'provider-session-2', hid_kind: 'patient', auth_time: signedInAt },
+          '/');
+      const response = await callback();
+      expect([response.status, response.headers.location]).toEqual([303, kind === 'staff' ? '/provider/sign-in' : '/sign-in']);
+      expect(cookiesOf(response).some((cookie) => cookie.startsWith('hid_access'))).toBe(false);
+      // The issue was asked for at the version read with the check, and refused: no session, no provenance.
+      expect(tokens.issue).toHaveBeenCalledWith(expect.anything(), expect.anything(),
+        expect.objectContaining({ accountTokenVersion: 1 }));
+      expect(store.sessions.filter((session) => session.accountId === accountId)).toEqual([]);
+      expect(store.links).toEqual([]);
+      expect(sessionAudit.record.mock.calls.at(-1)?.[0]?.details).toMatchObject({ authentication_method: 'sso',
+        reason: 'stale_provider_sign_in' });
     });
 
     it('accepts credentials changed before the provider sign-in, or within five seconds after it', async () => {
@@ -921,22 +968,84 @@ describe('with single sign-on configured', () => {
         details: { client: 'lab', endedSignIns: 2 } }));
     });
 
-    it('needs a live session, as today\'s sign-out does: without one it is refused and nothing ends', async () => {
-      // Production's sign-out (POST /auth/logout) is admitted only with a session; main's product sign-out
-      // also took a refresh cookie alone. Here the frontend refreshes first, as for any other request.
+    const cleared = (response: request.Response) => cookiesOf(response).filter((cookie) => cookie.startsWith('hid_access'))
+      .every((cookie) => /Expires=Thu, 01 Jan 1970/.test(cookie)) && cookiesOf(response).length > 0;
+    const ssoSignOutAudited = () => audit.recordWithClient.mock.calls.some(([, entry]) =>
+      (entry as { action?: string }).action === 'auth.sso.logout');
+
+    it('ends the sign-in by the refresh cookie once the access token has expired, with the same address', async () => {
+      // hid-system#142's behaviour, which the patient website relies on (api.ts endSingleSignOn).
+      const session = await signedIn();
+      const signedInId = session.refresh.split('.')[0];
+      const ownPage = newSession('staff', STAFF_ACCOUNT);
+      const response = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
+        .set('X-CSRF-Token', `csrf-${signedInId}`)
+        .set('Cookie', [`hid_access_csrf=csrf-${signedInId}`, `hid_access_refresh=${session.refresh}`]);
+      expect(response.status).toBe(200);
+      expect(tokens.revokeByRefreshToken).toHaveBeenCalledWith(session.refresh, 'staff', expect.anything());
+      expect([revoked(signedInId), revoked(ownPage.actor.sessionId)]).toEqual([true, true]);
+      expect(cleared(response)).toBe(true);
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.logout', actorType: 'staff',
+        actorSubject: 'synthetic:staff', actorAccountId: STAFF_ACCOUNT, resourceId: signedInId, outcome: 'success' }));
+      expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        action: 'auth.sso.logout', actorSubject: 'synthetic:staff', details: { client: 'lab', endedSignIns: 1 } }));
+      expect(Object.fromEntries(new URL(response.body.endSessionUrl).searchParams))
+        .toEqual({ post_logout_redirect_uri: `${LAB}/`, client_id: 'lab' });
+      // Today's sign-out by session (auth.revoke) never ran: there was no session to name.
+      expect(auth.revoke).not.toHaveBeenCalled();
+    });
+
+    it('answers the same address to a browser with no sign-in left, clearing its cookies and ending nothing', async () => {
       const session = await signedIn();
       const ownPage = newSession('staff', STAFF_ACCOUNT);
-      for (const cookies of [[`hid_access_csrf=csrf-${session.refresh.split('.')[0]}`, `hid_access_refresh=${session.refresh}`],
-        [] as string[]]) {
+      const ended = newSession('staff', STAFF_ACCOUNT);
+      store.sessions.find((each) => each.id === ended.actor.sessionId)!.revoked = true;
+      for (const cookies of [
+        [] as string[],
+        // An access token that no longer verifies (its sign-in ended elsewhere), with no refresh cookie.
+        [`hid_access=${ended.accessToken}`, `hid_access_csrf=${ended.csrfToken}`],
+        // A refresh cookie whose sign-in has already ended.
+        [`hid_access_csrf=${ended.csrfToken}`, `hid_access_refresh=${ended.refreshToken}`],
+      ]) {
         const response = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
-          .set('X-CSRF-Token', `csrf-${session.refresh.split('.')[0]}`).set('Cookie', cookies);
-        expect([response.status, response.body.code, response.body.endSessionUrl])
-          .toEqual([401, 'AUTHENTICATION_REQUIRED', undefined]);
+          .set('X-CSRF-Token', ended.csrfToken).set('Cookie', cookies);
+        expect(response.status).toBe(200);
+        expect(Object.fromEntries(new URL(response.body.endSessionUrl).searchParams))
+          .toEqual({ post_logout_redirect_uri: `${LAB}/`, client_id: 'lab' });
+        expect(cleared(response)).toBe(true);
       }
+      // Nothing proved a live sign-in, so no other sign-in of the account ends.
+      expect([revoked(session.refresh.split('.')[0]), revoked(ownPage.actor.sessionId)]).toEqual([false, false]);
       expect(auth.revoke).not.toHaveBeenCalled();
-      expect(revoked(ownPage.actor.sessionId)).toBe(false);
-      expect(audit.recordWithClient).not.toHaveBeenCalledWith(expect.anything(),
-        expect.objectContaining({ action: 'auth.sso.logout' }));
+      expect(ssoSignOutAudited()).toBe(false);
+    });
+
+    it('refuses a refresh cookie without its CSRF token, or another origin, with no address and nothing cleared', async () => {
+      const session = await signedIn();
+      const ownPage = newSession('staff', STAFF_ACCOUNT);
+      const noCsrf = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
+        .set('Cookie', [`hid_access_refresh=${session.refresh}`]);
+      expect([noCsrf.status, noCsrf.body.code, noCsrf.body.endSessionUrl]).toEqual([403, 'CSRF_VALIDATION_FAILED', undefined]);
+      const otherOrigin = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB)
+        .set('Origin', 'https://evil.invalid');
+      expect([otherOrigin.status, otherOrigin.body.code, otherOrigin.body.endSessionUrl])
+        .toEqual([403, 'ORIGIN_DENIED', undefined]);
+      for (const response of [noCsrf, otherOrigin]) {
+        expect(cookiesOf(response).filter((cookie) => cookie.startsWith('hid_access'))).toEqual([]);
+      }
+      expect([revoked(session.refresh.split('.')[0]), revoked(ownPage.actor.sessionId)]).toEqual([false, false]);
+      expect(tokens.revokeByRefreshToken).not.toHaveBeenCalled();
+      expect(ssoSignOutAudited()).toBe(false);
+    });
+
+    it('ends no sign-in of another kind by its refresh cookie', async () => {
+      const patientSignIn = newSession('patient', PATIENT_ACCOUNT);
+      const response = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
+        .set('X-CSRF-Token', patientSignIn.csrfToken)
+        .set('Cookie', [`hid_access_csrf=${patientSignIn.csrfToken}`, `hid_access_refresh=${patientSignIn.refreshToken}`]);
+      expect(response.status).toBe(200);
+      expect(revoked(patientSignIn.actor.sessionId)).toBe(false);
+      expect(ssoSignOutAudited()).toBe(false);
     });
 
     it('refuses a cookie sign-out without its CSRF token before anything ends', async () => {

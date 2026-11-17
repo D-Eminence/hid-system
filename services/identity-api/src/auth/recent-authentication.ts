@@ -1,7 +1,6 @@
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext } from '../common/request-context';
-import { ssoConfigured } from './sso/sso-config';
 
 export type PatientSessionActor = ActorContext & { patientId: string; sessionId: string };
 
@@ -13,17 +12,23 @@ export type PatientSessionActor = ActorContext & { patientId: string; sessionId:
  * issuance in that family prevents silent refresh from counting as a fresh
  * patient authentication. Fails closed: no answer is not recent.
  *
- * While single sign-on is configured (ADR-070, 0125), a family the patient
- * portal issued after single sign-on counts from when the person signed in at
- * the provider, not from the hand-off: a silent hand-off is not a fresh
- * sign-in either (the portal asks for one with prompt=login). A family without
- * a single sign-on row is checked as before (LEAST ignores the null). While it
- * is not configured, the statement is today's, which reads no 0125 table.
+ * Wherever 0125 is applied (ADR-070), a family the patient portal issued
+ * after single sign-on counts from when the person signed in at the
+ * provider, not from the hand-off: a silent hand-off is not a fresh sign-in
+ * either (the portal asks for one with prompt=login). A family without a
+ * single sign-on row is checked as before (LEAST ignores the null). This
+ * does not depend on whether single sign-on is configured now: a family
+ * issued while it was on keeps its row after it is switched off, and its
+ * hand-off must still not count as a fresh sign-in. Only a database without
+ * 0125 (Identity deployed before the migration), which can hold no such row,
+ * gets today's statement.
  */
 export async function requireRecentPatientAuthentication(client: PoolClient, actor: PatientSessionActor,
   detail: string): Promise<void> {
+  const stored = await client.query<{ stored: boolean }>(
+    `select to_regclass('auth.session_single_sign_on') is not null as stored`);
   const result = await client.query<{ recent: boolean }>(
-    ssoConfigured()
+    stored.rows[0]?.stored !== false
       ? `select coalesce(least(min(family.issued_at), max(single_sign_on.authenticated_at))
                   >= clock_timestamp() - interval '10 minutes', false) as recent
            from auth.sessions current_session

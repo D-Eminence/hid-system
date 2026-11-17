@@ -22,10 +22,25 @@ interface SessionRow {
   expires_at: Date;
   absolute_expires_at: Date;
   revoked_at: Date | null;
+  revocation_reason?: string | null;
   authentication_method: 'password' | 'oidc';
 }
 
 class RefreshRotationConflict extends Error {}
+
+/**
+ * A sign-in single sign-on asked for whose account changed its credentials
+ * after the caller checked them (TokenService.issue with
+ * `singleSignOn.accountTokenVersion`): a password reset or recovery raises
+ * the account's token version in the same statement that sets
+ * password_changed_at (0029, 0096), so a different version means the check
+ * the caller made no longer holds.
+ */
+export class CredentialsChangedDuringSignIn extends UnauthorizedException {
+  constructor() {
+    super('Credentials changed during authentication; retry login');
+  }
+}
 
 export interface SessionEventMetadata {
   correlationId: string;
@@ -57,6 +72,14 @@ export interface SingleSignOnProvenance {
   clientId: string;
   providerSid: string;
   authenticatedAt: Date;
+  /**
+   * The account's token version read in the same statement as the
+   * password_changed_at the caller compared with `authenticatedAt`. When
+   * set, issue() refuses (CredentialsChangedDuringSignIn) unless the session
+   * would carry this very version, so a password change that commits between
+   * that check and the issue is never missed. Not stored.
+   */
+  accountTokenVersion?: number;
 }
 
 /** A session event a caller records in its own transaction (single sign-on's revocations). */
@@ -142,6 +165,9 @@ export class TokenService {
     const refreshExpiresAt = new Date(Math.min(now.getTime() + lifetimes.refreshSeconds * 1_000,
       absoluteExpiresAt.getTime()));
     const tokenVersion = await this.accountTokenVersion(actor.accountId);
+    if (singleSignOn?.accountTokenVersion !== undefined && tokenVersion !== singleSignOn.accountTokenVersion) {
+      throw new CredentialsChangedDuringSignIn();
+    }
     const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt,
       sessionProduct);
 
@@ -199,7 +225,7 @@ export class TokenService {
               account.subject as actor_subject, session.family_id::text,
               session.access_jti::text, session.account_token_version::text as token_version,
               session.authentication_method, session.session_kind, session.patient_id::text,
-              session.expires_at, session.absolute_expires_at, session.revoked_at
+              session.expires_at, session.absolute_expires_at, session.revoked_at, session.revocation_reason
          from auth.sessions session
          join auth.accounts account on account.id = session.account_id
         where session.refresh_token_sha256 = $1
@@ -210,6 +236,23 @@ export class TokenService {
     );
     const oldSession = existing.rows[0];
     if (!oldSession) throw new UnauthorizedException('Invalid refresh session');
+
+    // A sign-in ended by single sign-on sign-out (a product's sign-out
+    // signing out everywhere, or the provider's back-channel logout) leaves
+    // its cookies on the other tabs and devices it ended: their next refresh
+    // is an ordinary ended sign-in, refused and recorded as a denied refresh,
+    // never as a stolen refresh token. Every other ended session is answered
+    // as before.
+    if (oldSession.revoked_at && oldSession.revocation_reason === 'sso_logout') {
+      await this.database.withSystemTransaction(event.correlationId, async (client) => {
+        await this.insertSessionEvent(client, {
+          eventType: 'refresh', outcome: 'denied', accountId: oldSession.account_id, sessionId: oldSession.id, event,
+          details: { reason: 'session_ended', revocation_reason: 'sso_logout',
+            session_kind: oldSession.session_kind ?? 'staff' },
+        });
+      });
+      throw new UnauthorizedException('Refresh session ended');
+    }
 
     if (oldSession.revoked_at) {
       await this.database.withSystemTransaction(event.correlationId, async (client) => {
@@ -377,6 +420,45 @@ export class TokenService {
           details: actorSubject ? { actor_subject: actorSubject } : {},
         });
       }
+    });
+  }
+
+  /**
+   * Today's sign-out (revoke) of the sign-in a refresh token belongs to, for
+   * product sign-out when the access token is gone (POST /auth/sso/logout):
+   * only a `kind` sign-in refresh() could still renew now (not ended or
+   * expired, its account active at the same token version) is ended, with
+   * reason `logout` and a `logout` session event, in one transaction.
+   * Answers the ended session, its account and subject, or nothing when no
+   * such sign-in is found (nothing changes then). The caller has already
+   * checked the request's Origin and the refresh CSRF token.
+   */
+  async revokeByRefreshToken(refreshToken: string, kind: 'staff' | 'patient', event: SessionEventMetadata):
+    Promise<{ sessionId: string; accountId: string; subject: string } | undefined> {
+    return this.database.withSystemTransaction(event.correlationId, async (client) => {
+      const result = await client.query<{ id: string; account_id: string; subject: string }>(
+        `update auth.sessions session
+            set revoked_at = clock_timestamp(), revocation_reason = 'logout', row_version = session.row_version + 1
+           from auth.accounts account
+          where account.id = session.account_id
+            and session.refresh_token_sha256 = $1
+            and session.session_kind = $2
+            and session.revoked_at is null
+            and session.expires_at > clock_timestamp()
+            and session.absolute_expires_at > clock_timestamp()
+            and account.status = 'active'
+            and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+            and account.token_version = session.account_token_version
+          returning session.id::text, session.account_id::text, account.subject`,
+        [this.sha256(refreshToken), kind],
+      );
+      const ended = result.rows[0];
+      if (!ended) return undefined;
+      await this.insertSessionEvent(client, {
+        eventType: 'logout', outcome: 'success', accountId: ended.account_id, sessionId: ended.id, event,
+        details: { actor_subject: ended.subject },
+      });
+      return { sessionId: ended.id, accountId: ended.account_id, subject: ended.subject };
     });
   }
 

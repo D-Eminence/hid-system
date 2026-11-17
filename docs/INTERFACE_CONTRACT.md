@@ -5490,12 +5490,15 @@ cookies of section 53 and before are unchanged. The website switch
 
 With `AUTH_SSO_ISSUER` unset (production today), every route below answers
 exactly as a route that does not exist (`404 NOT_FOUND`, no cookie, no audit
-row); sign-in, refresh, the session check and sign-out are unchanged; and
-nothing reads the 0125 tables. `POST /auth/sso/logout` is admitted only with a
-session, as `POST /auth/logout` is, so a request without one is answered `401
-AUTHENTICATION_REQUIRED` first, and one with a session `404`. The same holds
-on a host that is not a configured client (`admin.`, `auth.` itself, a request
-that did not come through the edge). Identity refuses to start with any bad
+row); sign-in, the session check and sign-out are unchanged. Two reads of the
+0125 tables stay on once 0125 is applied, because a sign-in issued while
+single sign-on was on keeps its rows after it is switched off: the patient
+recent-sign-in check still counts such a family from its provider `auth_time`
+(on a database without 0125 it sends today's statement), and a refresh of a
+sign-in ended with reason `sso_logout` is still answered as an ended sign-in,
+not as reuse (below). `POST /auth/sso/logout` answers `404` with or without a
+session. The same holds on a host that is not a configured client (`admin.`,
+`auth.` itself, a request that did not come through the edge). Identity refuses to start with any bad
 setting:
 
 | Setting | Meaning |
@@ -5527,7 +5530,7 @@ address read from the request.
 | `GET /auth/sso/start?return_to=<path>[&prompt=none\|login]` | With a live session of this product (the session's kind is the client's and, for staff, it was issued for this site's product), unless `prompt=login`: `303` to `return_to`. Otherwise `303` to the provider's authorization endpoint (`client_id`, `redirect_uri=https://<host>/api/v1/auth/sso/callback`, `response_type=code`, `scope=openid`, `state`, `nonce`, S256 `code_challenge`, `max_age` = the absolute lifetime of the client's kind (`AUTH_ABSOLUTE_TTL_SECONDS` for staff, `AUTH_PATIENT_ABSOLUTE_TTL_SECONDS` for patients), `prompt` when given) with the transaction cookie. `return_to` must be a page path on this host (no other host, scheme, `//`, `\`, dot segment, encoded `/`, `\` or control character, encoded unreserved character, fragment, `/api/` route or Health ID); anything else becomes `/`. Over a live session, `prompt=login` makes the callback accept only that session's account and end the earlier sign-in. Provider unreachable: `303` to the client's `sign_in_path` |
 | `GET /auth/sso/callback` | Signed in: the three session cookies a sign-in sets, `303` to the transaction's return page. A quiet attempt answered `login_required` (or `interaction_required`, `consent_required`, `account_selection_required`): `303` to the provider again, without `prompt`, with a new transaction. Anything else, the product gate's refusals included: no session, `303` to `sign_in_path`, nothing in the address |
 | `POST /auth/sso/backchannel-logout` | Form `logout_token`, server to server, no cookie, CSRF token or Origin. `200` (empty) when accepted; `400 SSO_LOGOUT_TOKEN_INVALID` when refused (also a reused `jti`); `413` over 16 KiB; `503 SSO_PROVIDER_UNAVAILABLE` when the key set cannot be read |
-| `POST /auth/sso/logout` | Product sign-out, admitted exactly as `POST /auth/logout` (a session, by bearer or by cookie with its Origin and CSRF checks; any session kind, an account-only outreach session included). Today's sign-out runs first (the session ends, the cookies are cleared, `auth.logout` is audited); then every other unrevoked sign-in of that account and kind ends too (reason `sso_logout`); then `200 { "endSessionUrl": "<end_session_endpoint>?client_id=…&post_logout_redirect_uri=https%3A%2F%2F<host>%2F" }` for the frontend to open. It never carries `id_token_hint`. Provider unreachable: `503 SSO_PROVIDER_UNAVAILABLE` (this product is signed out all the same). `POST /auth/logout` itself is unchanged (`204`) |
+| `POST /auth/sso/logout` | Product sign-out. With a live session it is admitted exactly as `POST /auth/logout` (a session, by bearer or by cookie with its Origin and CSRF checks; any session kind, an account-only outreach session included), and today's sign-out runs first (the session ends, the cookies are cleared, `auth.logout` is audited). With no live access token (none, or one that no longer verifies) it still answers, as hid-system#142 did and the patient website relies on: the request must come from an allowed Origin (`403 ORIGIN_DENIED` otherwise, unless it names a bearer token); a refresh cookie must come with its CSRF token (`403 CSRF_VALIDATION_FAILED` otherwise; nothing ends, nothing is cleared); a sign-in of the client's kind that the refresh cookie could still renew is ended as today's sign-out ends one (reason `logout`, a `logout` session event, `auth.logout` audited), and with none nothing ends; the cookies are cleared. When a sign-in was ended, every other unrevoked sign-in of that account and kind ends too (reason `sso_logout`). Then `200 { "endSessionUrl": "<end_session_endpoint>?client_id=…&post_logout_redirect_uri=https%3A%2F%2F<host>%2F" }` for the frontend to open. It never carries `id_token_hint`. Provider unreachable: `503 SSO_PROVIDER_UNAVAILABLE` (this product is signed out all the same). `POST /auth/logout` itself is unchanged (`204`) |
 
 Cookies of the hand-off, each `HttpOnly`, `Secure`, `Path=/`, no `Domain`,
 `SameSite=Lax`: `__Host-hid_sso_tx_<16 hex>` (the transaction: state, nonce,
@@ -5568,7 +5571,10 @@ recent-sign-in check (`PATIENT_RECENT_AUTH_REQUIRED`), count from that
 sign-in of that kind and site. A provider sign-in older than the account's
 `password_changed_at` (five seconds' allowance) is refused
 (`stale_provider_sign_in`), so a provider session from before a password
-recovery opens nothing. Every other check of #142 is kept: `state` (single
+recovery opens nothing. The session is issued only at the account token
+version read in the same statement as `password_changed_at`; a reset or
+recovery that commits between that check and the issue raises the version, and
+the hand-off is refused the same way (`stale_provider_sign_in`). Every other check of #142 is kept: `state` (single
 use), `nonce`, S256 PKCE, `iss`, `aud`/`azp`, `exp`, `iat` within five
 minutes, `auth_time` against `max_age`, `sid`, `sub` an account id,
 `hid_kind` the client's kind, asymmetric signatures only.
@@ -5590,7 +5596,13 @@ the account of the same kind, including one made on a product's own sign-in
 page and the account's sign-ins on other devices. The other sites keep their
 cookies until a request reaches Identity: then a refused `POST /auth/refresh`
 clears them, as today, and so does a refused `GET /auth/session` on a single
-sign-on site when nothing of the sign-in can still renew.
+sign-on site when nothing of the sign-in can still renew. That refused refresh
+of a sign-in ended with reason `sso_logout` is an ended sign-in, not a stolen
+refresh token: `401`, one `refresh` session event with outcome `denied` and
+details `{ reason: "session_ended", revocation_reason: "sso_logout",
+session_kind }`, and its family is left as it is. No `reuse_detected` event is
+written for it. A refresh of a session ended for any other reason is answered
+as production answers it today.
 
 ### What the provider must do (to confirm before switching on)
 

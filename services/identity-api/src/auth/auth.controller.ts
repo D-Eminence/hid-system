@@ -3,7 +3,8 @@ import { Body, Controller, Get, HttpCode, Optional, Post, Req, Res, ServiceUnava
   UseFilters, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
-import { AccountOnlyAllowed, AuditFailuresOnly, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
+import { AccountOnlyAllowed, AuditFailuresOnly, FacilityOptional, PatientAllowed, Public,
+  SignedOutAllowed } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -394,23 +395,38 @@ export class AuthController {
 
   /**
    * Product sign-out while single sign-on is on for this host (ADR-070,
-   * 0125). It is admitted exactly as today's sign-out (`logout`, above): the
-   * same session check, Origin and CSRF checks for a cookie request, and the
-   * same session kinds, an account-only outreach session included. Today's
-   * sign-out ends this sign-in and clears its cookies, with the same audit;
-   * then every other sign-in of the same account and kind ends too
-   * (SsoService.endAccountSignIns), and the answer is the provider's
-   * end-session address for the frontend to navigate to. The provider ends
-   * its own session there and sends back-channel logout to every product, so
-   * signing out of one product signs out of all of them. The address names
-   * only the client and the product's root: no token reaches page JavaScript
-   * or an address (no `id_token_hint`). While single sign-on is off, or on a
-   * host that is not one of its clients, this is no route at all
-   * (SsoRouteGuard), once the request has passed the session check every
-   * route passes first.
+   * 0125). With a live session it is admitted exactly as today's sign-out
+   * (`logout`, above): the same session check, Origin and CSRF checks for a
+   * cookie request, and the same session kinds, an account-only outreach
+   * session included. Today's sign-out ends this sign-in and clears its
+   * cookies, with the same audit.
+   *
+   * It also answers a browser whose access token is gone or no longer
+   * verifies (SignedOutAllowed), as hid-system#142 did and as the patient
+   * website relies on (api.ts endSingleSignOn: a sign-out after a refused
+   * refresh must still end the provider's session, or the next person at
+   * that browser is handed this sign-in). Such a request must come from an
+   * allowed Origin (unless it names a bearer token); a refresh cookie must
+   * come with its CSRF token, or nothing ends and nothing is cleared (403
+   * CSRF_VALIDATION_FAILED). A sign-in of this client's kind that the
+   * refresh cookie could still renew is ended as today's sign-out ends one
+   * (TokenService.revokeByRefreshToken, audited `auth.logout`); with none,
+   * nothing ends. The cookies are cleared either way.
+   *
+   * Then, when a sign-in was ended here, every other sign-in of the same
+   * account and kind ends too (SsoService.endAccountSignIns), and the answer
+   * is the provider's end-session address for the frontend to navigate to.
+   * The provider ends its own session there and sends back-channel logout to
+   * every product, so signing out of one product signs out of all of them.
+   * The address names only the client and the product's root: no token
+   * reaches page JavaScript or an address (no `id_token_hint`). While single
+   * sign-on is off, or on a host that is not one of its clients, this is no
+   * route at all (SsoRouteGuard), once the request has passed the session
+   * check every route passes first.
    */
   @Post('sso/logout')
   @UseGuards(SsoRouteGuard)
+  @SignedOutAllowed()
   @FacilityOptional()
   @PatientAllowed()
   @AccountOnlyAllowed()
@@ -421,15 +437,52 @@ export class AuthController {
     const client = sso?.clientFor(request);
     if (!sso || !client) throw new ServiceUnavailableException('Single sign-on is unavailable');
     const actor = request.actor;
-    await this.signOut(request, response);
+    let signedOut: { accountId: string; subject: string; kind: 'staff' | 'patient' } | undefined;
     if (actor) {
-      await sso.endAccountSignIns(client,
-        { accountId: actor.accountId, subject: actor.subject, kind: actor.kind === 'patient' ? 'patient' : 'staff' },
-        this.event(request));
+      await this.signOut(request, response);
+      signedOut = { accountId: actor.accountId, subject: actor.subject, kind: actor.kind === 'patient' ? 'patient' : 'staff' };
+    } else {
+      signedOut = await this.signOutByRefreshCookie(request, client.kind);
+      this.clearCookies(response);
     }
+    if (signedOut) await sso.endAccountSignIns(client, signedOut, this.event(request));
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Referrer-Policy', 'no-referrer');
     return { endSessionUrl: await sso.endSessionUrl(client) };
+  }
+
+  /**
+   * Product sign-out of a browser with no live access token (ssoLogout,
+   * above): Origin first (unless the request names a bearer token), then the
+   * refresh cookie with its CSRF token, as POST /auth/refresh checks them.
+   * Ends the `kind` sign-in that cookie could still renew and answers it, or
+   * answers nothing when there is none.
+   */
+  private async signOutByRefreshCookie(request: HidRequest, kind: 'staff' | 'patient'):
+    Promise<{ accountId: string; subject: string; kind: 'staff' | 'patient' } | undefined> {
+    if (!request.header('authorization')?.startsWith('Bearer ')) this.assertAllowedOrigin(request);
+    const cookies = this.cookies(request);
+    const refreshToken = cookies[`${this.environment.AUTH_COOKIE_NAME}_refresh`];
+    if (!refreshToken) return undefined;
+    if (!this.tokens.verifyRefreshCsrf(refreshToken, cookies[`${this.environment.AUTH_COOKIE_NAME}_csrf`],
+      request.header('x-csrf-token'))) {
+      throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'CSRF validation failed');
+    }
+    const ended = await this.tokens.revokeByRefreshToken(refreshToken, kind, this.event(request));
+    if (!ended) return undefined;
+    await this.audit.record({
+      correlationId: request.correlationId,
+      actorType: kind,
+      actorSubject: ended.subject,
+      actorAccountId: ended.accountId,
+      action: 'auth.logout',
+      resourceType: 'session',
+      resourceId: ended.sessionId,
+      outcome: 'success',
+      sourceIp: request.ip,
+      userAgent: request.header('user-agent'),
+    });
+    return { accountId: ended.accountId, subject: ended.subject, kind };
   }
 
   @Post('facility')

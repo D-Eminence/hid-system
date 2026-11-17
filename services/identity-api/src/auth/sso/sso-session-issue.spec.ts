@@ -21,7 +21,7 @@ import { resetEnvironmentForTests } from '../../config/environment';
 import { useTestEnvironment } from '../../testing/sso-test-environment';
 import type { CurrentStaffContextService } from '../current-staff-context.service';
 import { requireRecentPatientAuthentication, type PatientSessionActor } from '../recent-authentication';
-import { TokenService, type SingleSignOnProvenance } from '../token.service';
+import { CredentialsChangedDuringSignIn, TokenService, type SingleSignOnProvenance } from '../token.service';
 
 /**
  * ADR-070 (0125): a product's session issued after single sign-on is today's
@@ -119,6 +119,20 @@ describe('a staff session issued after single sign-on', () => {
     expect(statements.some(({ sql }) => sql.includes('insert into auth.sessions'))).toBe(false);
   });
 
+  it('is issued at the token version read with the password check, and refused at any other', async () => {
+    // The harness's account is at token version 1.
+    const { service, statement } = harness();
+    await service.issue(staffIdentity, labEvent, { ...provenance(new Date(Date.now() - 60_000)), accountTokenVersion: 1 });
+    expect(statement('insert into auth.sessions')).toBeDefined();
+    // A password reset or recovery raised the version after the check (0029): nothing is issued.
+    const changed = harness();
+    await expect(changed.service.issue(staffIdentity, labEvent,
+      { ...provenance(new Date(Date.now() - 60_000)), accountTokenVersion: 0 }))
+      .rejects.toBeInstanceOf(CredentialsChangedDuringSignIn);
+    expect(changed.statements.some(({ sql }) => sql.includes('insert into auth.sessions'))).toBe(false);
+    expect(changed.statements.some(({ sql }) => sql.includes('session_single_sign_on'))).toBe(false);
+  });
+
   it('is today\'s staff session without single sign-on: no provenance, the same statements', async () => {
     const { service, statement, statements } = harness();
     const before = Date.now();
@@ -157,33 +171,55 @@ describe('a patient session issued after single sign-on', () => {
 });
 
 describe('the patient recent-sign-in check', () => {
-  const sqlOf = async () => {
-    const query = jest.fn(async () => ({ rows: [{ recent: true }] }));
+  const SSO_STATEMENT = 'least(min(family.issued_at), max(single_sign_on.authenticated_at))';
+  const TODAY = 'select coalesce(min(family.issued_at) >= clock_timestamp() - interval \'10 minutes\', '
+    + 'false) as recent from auth.sessions current_session join auth.sessions family on family.family_id = '
+    + 'current_session.family_id where current_session.id = $1 and current_session.account_id = $2 and '
+    + 'current_session.patient_id = $3 and current_session.session_kind = \'patient\' and '
+    + 'current_session.revoked_at is null';
+  /** The statement the check sends on a database where 0125 is (or is not) applied. */
+  const sqlOf = async (stored: boolean) => {
+    const query = jest.fn(async (sql: string) => (sql.includes('to_regclass')
+      ? { rows: [{ stored }] } : { rows: [{ recent: true }] }));
     await requireRecentPatientAuthentication({ query } as unknown as PoolClient, { ...patient,
       sessionId: '70000000-0000-4000-8000-0000000000f2' } as PatientSessionActor, 'detail');
-    return String((query.mock.calls[0] as unknown[] | undefined)?.[0]).replace(/\s+/g, ' ');
+    expect(String(query.mock.calls[0]?.[0])).toContain("to_regclass('auth.session_single_sign_on')");
+    return String((query.mock.calls[1] as unknown[] | undefined)?.[0]).replace(/\s+/g, ' ');
+  };
+  const ssoSettings = {
+    CORS_ORIGINS: 'https://app.sso-issue.invalid', AUTH_SSO_ISSUER: 'https://auth.sso-issue.invalid',
+    AUTH_SSO_CLIENTS: JSON.stringify([{ client_id: 'web', host: 'app.sso-issue.invalid', kind: 'patient',
+      token_endpoint_auth_method: 'client_secret_basic' }]),
+    AUTH_SSO_CLIENT_CREDENTIALS: JSON.stringify({ web: { client_secret: 'synthetic-client-secret-0123456789abcdef' } }),
   };
 
   it('counts a single sign-on family from the sign-in at the provider, not from the hand-off', async () => {
-    Object.assign(process.env, {
-      CORS_ORIGINS: 'https://app.sso-issue.invalid', AUTH_SSO_ISSUER: 'https://auth.sso-issue.invalid',
-      AUTH_SSO_CLIENTS: JSON.stringify([{ client_id: 'web', host: 'app.sso-issue.invalid', kind: 'patient',
-        token_endpoint_auth_method: 'client_secret_basic' }]),
-      AUTH_SSO_CLIENT_CREDENTIALS: JSON.stringify({ web: { client_secret: 'synthetic-client-secret-0123456789abcdef' } }),
-    });
+    Object.assign(process.env, ssoSettings);
     resetEnvironmentForTests();
-    const sql = await sqlOf();
-    expect(sql).toContain('least(min(family.issued_at), max(single_sign_on.authenticated_at))');
+    const sql = await sqlOf(true);
+    expect(sql).toContain(SSO_STATEMENT);
     expect(sql).toContain('left join auth.session_single_sign_on single_sign_on on single_sign_on.family_id = '
       + 'current_session.family_id');
-    // The behaviour itself is run against PostgreSQL in sso-relying-party.integration.sql.
+    // The behaviour itself is run against PostgreSQL in sso-relying-party.integration.sql and verify-sso-runtime.mjs.
   });
 
-  it('is today\'s statement, which reads no single sign-on table, while the settings are unset', async () => {
-    expect(await sqlOf()).toBe('select coalesce(min(family.issued_at) >= clock_timestamp() - interval \'10 minutes\', '
-      + 'false) as recent from auth.sessions current_session join auth.sessions family on family.family_id = '
-      + 'current_session.family_id where current_session.id = $1 and current_session.account_id = $2 and '
-      + 'current_session.patient_id = $3 and current_session.session_kind = \'patient\' and '
-      + 'current_session.revoked_at is null');
+  it('still counts from the provider sign-in after single sign-on is switched off, while 0125 is applied', async () => {
+    // A family issued while single sign-on was on keeps its row: its hand-off must not become a fresh sign-in.
+    for (const name of Object.keys(ssoSettings)) delete process.env[name];
+    resetEnvironmentForTests();
+    expect(await sqlOf(true)).toContain(SSO_STATEMENT);
+  });
+
+  it('is today\'s statement, which reads no single sign-on table, only on a database without 0125', async () => {
+    Object.assign(process.env, ssoSettings);
+    resetEnvironmentForTests();
+    expect(await sqlOf(false)).toBe(TODAY);
+  });
+
+  it('fails closed: no answer is not recent', async () => {
+    const query = jest.fn(async (sql: string) => (sql.includes('to_regclass') ? { rows: [{ stored: true }] } : { rows: [] }));
+    await expect(requireRecentPatientAuthentication({ query } as unknown as PoolClient, { ...patient,
+      sessionId: '70000000-0000-4000-8000-0000000000f2' } as PatientSessionActor, 'detail'))
+      .rejects.toMatchObject({ code: 'PATIENT_RECENT_AUTH_REQUIRED' });
   });
 });

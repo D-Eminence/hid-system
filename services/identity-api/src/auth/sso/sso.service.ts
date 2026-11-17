@@ -8,7 +8,8 @@ import { DatabaseService } from '../../database/database.service';
 import { AuthSessionAuditService } from '../auth-session-audit.service';
 import type { LoginResult } from '../auth.types';
 import { isProductGateRefusal, productForOrigin, type StaffProduct } from '../product-gate';
-import { isOutreachOrigin, TokenService, type SessionEventMetadata, type SingleSignOnProvenance } from '../token.service';
+import { CredentialsChangedDuringSignIn, isOutreachOrigin, TokenService, type SessionEventMetadata,
+  type SingleSignOnProvenance } from '../token.service';
 import { ssoClientForRequest, ssoConfiguration, type SsoClient, type SsoConfiguration } from './sso-config';
 import { SsoProviderUnavailable, SsoTokenRefused } from './sso-errors';
 import { SsoProviderClient, type VerifiedIdToken } from './sso-provider.client';
@@ -357,18 +358,19 @@ export class SsoService {
    * NO_ACTIVE_FACILITY_MEMBERSHIP, gives a verified staff login with no
    * membership yet its account-only session on outreach., and binds the
    * refresh token to the product. The provider's sign-in must not be older
-   * than the account's last password change (signedInSinceCredentials). The
-   * success is audited as a password sign-in's (auth.login), naming the
+   * than the account's last password change (signedInSinceCredentials), and
+   * the session is issued only at the token version read with that change
+   * (issueAfterCredentialCheck). The success is audited as a password sign-in's (auth.login), naming the
    * client.
    */
   private async issueStaffSession(client: SsoClient, verified: VerifiedIdToken, provenance: SingleSignOnProvenance,
     event: SessionEventMetadata): Promise<LoginResult> {
     const account = await this.activeAccount(verified.accountId);
     signedInSinceCredentials(verified, account.password_changed_at);
-    const session = await this.tokens.issue({
+    const session = await this.issueAfterCredentialCheck({
       actorKind: 'staff', subject: account.subject, accountId: verified.accountId, displayName: '',
       facilities: [], authenticationMethod: 'local',
-    }, event, provenance);
+    }, event, provenance, account.token_version);
     await this.audit.record({
       ...successAudit('auth.login', session, event),
       details: { singleSignOn: client.id, ...(event.product ? { product: event.product } : {}) },
@@ -379,29 +381,57 @@ export class SsoService {
   /**
    * A patient session from a single sign-on, as a patient sign-in issues one
    * (TokenService.issue), when the provider's sign-in is not older than the
-   * account's password change (signedInSinceCredentials).
+   * account's password change (signedInSinceCredentials), at the token
+   * version read with that change (issueAfterCredentialCheck).
    */
   private async issuePatientSession(client: SsoClient, verified: VerifiedIdToken, provenance: SingleSignOnProvenance,
     event: SessionEventMetadata): Promise<LoginResult> {
     const account = await this.activeAccount(verified.accountId);
     signedInSinceCredentials(verified, account.password_changed_at);
-    const session = await this.tokens.issue({
+    const session = await this.issueAfterCredentialCheck({
       actorKind: 'patient', subject: account.subject, accountId: verified.accountId, displayName: '',
       facilities: [], authenticationMethod: 'local',
-    }, event, provenance);
+    }, event, provenance, account.token_version);
     await this.audit.record({ ...successAudit('auth.login', session, event), details: { singleSignOn: client.id } });
     return session;
   }
 
-  /** The active account the provider named, or the same refusal as an unknown one. */
-  private async activeAccount(accountId: string): Promise<{ subject: string; password_changed_at: Date | string | null }> {
-    const account = (await this.database.query<{ subject: string; password_changed_at: Date | string | null }>(
-      `select subject, password_changed_at from auth.accounts
+  /**
+   * TokenService.issue, refused as a stale provider sign-in when the
+   * account's token version is no longer the one read together with
+   * password_changed_at: a password reset or recovery that commits between
+   * the check and the issue raises it (0029, 0096), so the new session can
+   * never outlive a password change the check did not see. Production has no
+   * account lock for this (main's lock_account_for_mfa is not here); a reset
+   * that commits after the issue read the version leaves the session at the
+   * old version, which every later check refuses.
+   */
+  private async issueAfterCredentialCheck(identity: Parameters<TokenService['issue']>[0], event: SessionEventMetadata,
+    provenance: SingleSignOnProvenance, accountTokenVersion: number): Promise<LoginResult> {
+    try {
+      return await this.tokens.issue(identity, event, { ...provenance, accountTokenVersion });
+    } catch (error) {
+      if (error instanceof CredentialsChangedDuringSignIn) throw new SsoTokenRefused('stale_provider_sign_in');
+      throw error;
+    }
+  }
+
+  /**
+   * The active account the provider named, or the same refusal as an unknown
+   * one, with its password change and token version read in one statement.
+   */
+  private async activeAccount(accountId: string): Promise<{ subject: string; password_changed_at: Date | string | null;
+    token_version: number }> {
+    const account = (await this.database.query<{ subject: string; password_changed_at: Date | string | null;
+      token_version: string }>(
+      `select subject, password_changed_at, token_version::text from auth.accounts
         where id = $1 and status = 'active'
           and (disabled_until is null or disabled_until <= clock_timestamp())`,
       [accountId])).rows[0];
     if (!account) throw new UnauthorizedException('Unknown account');
-    return account;
+    const tokenVersion = Number(account.token_version);
+    if (!Number.isSafeInteger(tokenVersion) || tokenVersion < 1) throw new UnauthorizedException('Unknown account');
+    return { subject: account.subject, password_changed_at: account.password_changed_at, token_version: tokenVersion };
   }
 
   /** A `revoked` session event for each sign-in (family) a single sign-on sign-out ended; answers how many. */
