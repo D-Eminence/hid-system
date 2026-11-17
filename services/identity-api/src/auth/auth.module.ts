@@ -6,6 +6,7 @@ import { LocalAuthProvider } from './local-auth.provider';
 import { SecurityGuard } from './security.guard';
 import { TokenService } from './token.service';
 import { CurrentStaffContextService } from './current-staff-context.service';
+import { FacilitySelectionStartupCheck } from './facility-selection';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileModule } from './turnstile.module';
 import { OtpController } from './otp.controller';
@@ -24,7 +25,9 @@ import { PatientProfileCrypto } from '../patient-profile/patient-profile-crypto'
   imports: [TurnstileModule, IntegrationModule],
   controllers: [AuthController, OtpController, PatientSelfController],
   providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService,
-    PatientProfileCrypto, PatientContactReader],
+    PatientProfileCrypto, PatientContactReader, FacilitySelectionStartupCheck],
+  // FacilitySelectionStartupCheck: with STAFF_FACILITY_SELECTION_MODE on,
+  // Identity refuses to start while 0129's table or one of its grants is missing.
   // AuthService: facility self sign-up signs the new administrator in (P4).
   // LocalAuthProvider and AuthSessionAuditService: the password re-entry of
   // facility staff management (P4b).

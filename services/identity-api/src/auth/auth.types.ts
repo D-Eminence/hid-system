@@ -43,3 +43,20 @@ export interface CredentialIdentity {
     expectedRowVersion: number;
   };
 }
+
+/**
+ * Where the facility a staff session answer reports comes from (0129, with
+ * STAFF_FACILITY_SELECTION_MODE keep or ask; never sent while it is off):
+ * - 'selected': the facility this sign-in chose with POST /auth/facility, still
+ *   one of the actor's facilities on the session's own site;
+ * - 'default': no choice yet, so the primary facility (else the first by
+ *   name); answered only in 'ask', where 'keep' leaves the field out;
+ * - 'reselect': the chosen facility is no longer one of the actor's (the
+ *   membership ended or is held, the facility closed, or it no longer fits the
+ *   site), so the default is reported and the user must choose again;
+ * - 'unavailable': the choice could not be read, so the default is reported
+ *   and it is not a choice: the website asks where the user is working.
+ * Staff sign-ins with a facility only; patients, account-only sessions, OIDC
+ * bearer callers and service-session carry no such field.
+ */
+export type FacilitySelectionState = 'selected' | 'default' | 'reselect' | 'unavailable';
