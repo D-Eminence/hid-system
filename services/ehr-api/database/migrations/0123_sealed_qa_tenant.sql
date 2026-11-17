@@ -113,9 +113,15 @@
 --    pin); 0117-0122 replace none of the other ten; identity.patients has
 --    six policies and patients_registration_read reads as 0098 wrote it; the
 --    applier owns, or is a member of the owner of, each replaced function,
---    identity.patients and the ten tables that get a trigger. Each
---    replaced function's attributes but its body are recorded and compared
---    after the replacement (section 7).
+--    identity.patients and the ten tables that get a trigger; and, as 0098
+--    checks, the owner of each replaced function and of 0119's
+--    identity.outreach_health_id_registration(uuid) holds the applier's
+--    role with INHERIT (or is a superuser), so the replaced bodies, which
+--    run as their owner, may run the applier's new helpers (most are
+--    revoked from PUBLIC; else 42501, nothing applied). Each replaced
+--    function's attributes but its body are recorded and compared after
+--    the replacement (section 7), and section 7 checks that each of those
+--    owners may run every new helper.
 -- 1. SHARE ROW EXCLUSIVE on the ten tables that get a trigger, up front,
 --    NOWAIT every 10 ms for at most 5 seconds (else 55P03).
 -- 2. identity.sealed_qa_members, as 0098's table: (member_kind, member_id,
@@ -409,6 +415,32 @@ begin
   if owner_problem is not null then
     raise exception using errcode = '42501', message = '0123: the applier does not own ' || owner_problem;
   end if;
+  -- As 0098: each replaced body (SECURITY DEFINER, its owner kept) and 0119's
+  -- outreach registration read run as their owner and call this file's
+  -- helpers, which the applier owns and revokes from PUBLIC. So each owner
+  -- must hold the applier's role with INHERIT (the same role, in practice),
+  -- or be a superuser; else every call into them would be refused.
+  select string_agg(format('%s (owner %s)', proc.oid::regprocedure, pg_get_userbyid(proc.proowner)), ', '
+                    order by proc.oid::regprocedure::text) into owner_problem
+    from pg_proc proc
+   where proc.oid in ('identity.create_access_request(text,text,text,integer)'::regprocedure,
+           'identity.activate_break_glass(text,text,integer)'::regprocedure,
+           'identity.access_patient_with_pin(text,text,integer)'::regprocedure,
+           'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure,
+           'identity.search_order_destinations(text,text)'::regprocedure,
+           'identity.search_share_providers(text,uuid,text)'::regprocedure,
+           'identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)'::regprocedure,
+           'identity.admin_platform_overview()'::regprocedure,
+           'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure,
+           'identity.sealed_demo_recipient(text)'::regprocedure,
+           'identity.sealed_demo_install()'::regprocedure,
+           'identity.outreach_health_id_registration(uuid)'::regprocedure)
+     and not pg_has_role(proc.proowner, current_user, 'USAGE')
+     and not exists (select 1 from pg_roles owner_role where owner_role.oid = proc.proowner and owner_role.rolsuper);
+  if owner_problem is not null then
+    raise exception using errcode = '42501',
+      message = '0123: these functions'' owners would not hold ' || current_user || '''s helpers: ' || owner_problem;
+  end if;
 end
 $$;
 
@@ -445,7 +477,8 @@ begin
     exception when lock_not_available then
       if attempt >= 500 then
         raise exception using errcode = '55P03',
-          message = '0123: a table that gets a sealed QA trigger stayed busy for 5 seconds; run the release again later';
+          message = '0123: a table that gets a sealed QA trigger stayed busy for 5 seconds; 0123 is not applied '
+            || '(0122 may be): see the declaration''s RECOVERY before any further release';
       end if;
       perform pg_sleep(0.01);
     end;
@@ -3064,6 +3097,21 @@ begin
                   or not has_function_privilege(role_row.oid, 'identity.sealed_qa_facility(uuid)', 'EXECUTE'))) then
     raise exception using errcode = '55000', message = '0123: a reader of identity.patients cannot run the QA helpers';
   end if;
+  -- Each replaced body and 0119's outreach registration read run as their owner: that owner may run every helper.
+  select string_agg(distinct format('%s (owner %s) cannot run %s', owner_row.what, pg_get_userbyid(owner_row.owner_oid),
+                      helper.signature), ', ') into problem
+    from (select replaced.function_oid::regprocedure::text as what, replaced.proowner as owner_oid
+            from sealed_qa_0123_replaced replaced
+          union all
+          select proc.oid::regprocedure::text, proc.proowner from pg_proc proc
+           where proc.oid = 'identity.outreach_health_id_registration(uuid)'::regprocedure) owner_row
+    cross join (values ('identity.sealed_qa_ids(text)'), ('identity.sealed_qa_facility(uuid)'),
+                       ('identity.sealed_qa_patient(uuid)'), ('identity.sealed_qa_account(uuid)'),
+                       ('identity.sealed_qa_recipient(text)')) helper(signature)
+   where not has_function_privilege(owner_row.owner_oid, helper.signature::regprocedure, 'EXECUTE');
+  if problem is not null then
+    raise exception using errcode = '55000', message = '0123: ' || problem;
+  end if;
   -- The QA triggers, enabled 'O', as written.
   select string_agg(expected.name, ', ') into problem
     from (values
@@ -3171,7 +3219,8 @@ begin
     exception when lock_not_available then
       if attempt >= 500 then
         raise exception using errcode = '55P03',
-          message = '0123: identity.patients stayed busy for 5 seconds; run the release again later';
+          message = '0123: identity.patients stayed busy for 5 seconds; 0123 is not applied (0122 may be): '
+            || 'see the declaration''s RECOVERY before any further release';
       end if;
       perform pg_sleep(0.01);
     end;

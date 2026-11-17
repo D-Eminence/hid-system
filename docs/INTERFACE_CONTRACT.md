@@ -5186,12 +5186,14 @@ Order of release:
    retried.
 2. 0122 with identity-api (hid-system#208; written as 0121, renumbered 0120
    and then 0122 by the release order).
-3. The websites, after 0122 is live: hid-system's own `apps/web`
-   (hid-system#207; its doctor portal sends 60 and its patient portal says
-   "read-only" today) and health's staff site (health#197). They send 1440
-   and say "see and add to records for 24 hours". Until each is changed, a
-   PIN used there still gives 24 hours of read and write access, whatever
-   duration the site asks, but the site's wording is out of date.
+3. The websites, in either order with 0122: hid-system's own `apps/web`
+   (hid-system#207) and health's staff site (health#197) say "see and add to
+   records for 24 hours" and still ask for 60 minutes, which identity-api
+   accepts before this release (at most 60) and after it (5 to 1440). 0122
+   gives 1440 minutes whatever is asked, so neither site breaks the PIN if it
+   ships before identity-api or if identity-api is rolled back. Until 0122 is
+   live, a PIN used there gives the old 60 minutes of read access, so the new
+   wording is ahead of the backend for that time.
 
 A staff member whose role loses `identity.patient-access-pin.verify` keeps a
 PIN grant they already have until it ends (24 hours after it was made), unless the

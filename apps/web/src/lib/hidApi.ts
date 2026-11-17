@@ -2201,12 +2201,15 @@ export async function fetchStaffDashboard(options: { forceRefresh?: boolean } = 
 }
 
 /**
- * How long a patient's Access PIN opens their records: 24 hours, to see and
- * add to them (owner decision, 10 Nov 2026; database 0122).
+ * A patient's Access PIN opens their records for 24 hours, to see and add to
+ * them (owner decision, 10 Nov 2026; database 0122 gives 1440 minutes
+ * whatever duration is asked). The call still asks for 60 minutes, which
+ * identity-api accepts both before 0122's release (at most 60) and after it
+ * (5 to 1440), so this page and identity-api can be released in either order.
  */
-export const PATIENT_PIN_ACCESS_MINUTES = 1440
+export const PATIENT_PIN_REQUEST_MINUTES = 60
 
-export async function accessPatientWithPin(patientIdentifier: string, accessPin: string, durationMinutes = PATIENT_PIN_ACCESS_MINUTES, staffDisplayName?: string | null) {
+export async function accessPatientWithPin(patientIdentifier: string, accessPin: string, durationMinutes = PATIENT_PIN_REQUEST_MINUTES, staffDisplayName?: string | null) {
   // Staff identity/display data is derived from the authenticated membership;
   // the legacy caller parameter is retained only to avoid a UI-wide signature
   // change and is intentionally never sent to the server.

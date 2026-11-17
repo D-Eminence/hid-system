@@ -8,8 +8,9 @@
 --   1. structure: identity.sealed_qa_members (RLS enabled, not forced, one
 --      owner policy, no grant, no update, delete or TRUNCATE); the helpers'
 --      ACLs (sealed_qa_ids and sealed_qa_facility to the Identity and schema
---      test runtimes only, nothing to any other runtime); the twelve
---      triggers; the registration-read policy with its demo and QA clauses;
+--      test runtimes only, nothing to any other runtime); the owner of each
+--      body that calls a helper (the eleven replaced, 0119's outreach
+--      registration read) may run every helper; the twelve triggers; the registration-read policy with its demo and QA clauses;
 --      identity.sealed_qa_recipient (the owner's domain, plus-addresses, any
 --      case; no other domain, subdomain, lookalike, list, '' or null);
 --   2. the install's refusals before the tenant exists, each writing nothing
@@ -356,6 +357,25 @@ begin
     and not has_function_privilege('hid_identity_api_runtime', 'identity.sealed_qa_patient(uuid)', 'EXECUTE')
     and not has_function_privilege('hid_identity_api_runtime', 'identity.sealed_qa_account(uuid)', 'EXECUTE')
     and not has_function_privilege('hid_identity_api_runtime', 'identity.sealed_qa_recipient(text)', 'EXECUTE'));
+  -- The replaced bodies and 0119's outreach registration read run as their owner and call the helpers.
+  perform pg_temp.assert('the owner of each body that calls a QA helper may run every QA helper',
+    not exists (select 1 from pg_proc proc
+                  cross join (values ('identity.sealed_qa_ids(text)'), ('identity.sealed_qa_facility(uuid)'),
+                                     ('identity.sealed_qa_patient(uuid)'), ('identity.sealed_qa_account(uuid)'),
+                                     ('identity.sealed_qa_recipient(text)')) helper(signature)
+                 where proc.oid in ('identity.create_access_request(text,text,text,integer)'::regprocedure,
+                         'identity.activate_break_glass(text,text,integer)'::regprocedure,
+                         'identity.access_patient_with_pin(text,text,integer)'::regprocedure,
+                         'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure,
+                         'identity.search_order_destinations(text,text)'::regprocedure,
+                         'identity.search_share_providers(text,uuid,text)'::regprocedure,
+                         'identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)'::regprocedure,
+                         'identity.admin_platform_overview()'::regprocedure,
+                         'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure,
+                         'identity.sealed_demo_recipient(text)'::regprocedure,
+                         'identity.sealed_demo_install()'::regprocedure,
+                         'identity.outreach_health_id_registration(uuid)'::regprocedure)
+                   and not has_function_privilege(proc.proowner, helper.signature::regprocedure, 'EXECUTE')));
   perform pg_temp.assert('the thirteen QA triggers, enabled',
     (select count(*) from pg_trigger trigger_row where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O'
       and (trigger_row.tgrelid::regclass::text, trigger_row.tgname) in (

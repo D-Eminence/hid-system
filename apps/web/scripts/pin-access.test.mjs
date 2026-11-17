@@ -3,20 +3,23 @@ import { test } from 'node:test'
 import { readFile } from 'node:fs/promises'
 
 // Owner decision (10 Nov 2026; database 0122): a patient's Access PIN opens
-// their records to see and add to for 24 hours (1440 minutes).
+// their records to see and add to for 24 hours (1440 minutes). 0122 gives 1440
+// minutes whatever is asked, so the call asks for 60, which identity-api
+// accepts before and after 0122's release: the two can ship in either order.
 const source = path => readFile(new URL(`../src/${path}`, import.meta.url), 'utf8')
 
-test('the PIN asks for 24 hours by default', async () => {
+test('the PIN asks for 60 minutes by default, which every identity-api accepts', async () => {
   const api = await source('lib/hidApi.ts')
-  assert.match(api, /export const PATIENT_PIN_ACCESS_MINUTES = 1440\b/)
-  assert.match(api, /accessPatientWithPin\([^)]*durationMinutes = PATIENT_PIN_ACCESS_MINUTES\b/)
+  assert.match(api, /export const PATIENT_PIN_REQUEST_MINUTES = 60\b/)
+  assert.match(api, /accessPatientWithPin\([^)]*durationMinutes = PATIENT_PIN_REQUEST_MINUTES\b/)
+  assert.doesNotMatch(api, /PATIENT_PIN_ACCESS_MINUTES|durationMinutes = 1440/)
 })
 
-test('the doctor portal asks for the full 24 hours, not 60 minutes', async () => {
+test('the doctor portal asks for the value both identity-api releases accept', async () => {
   const portal = await source('pages/doctor/DoctorPortal.tsx')
   const calls = portal.match(/await accessPatientWithPin\(.*$/gm) ?? []
   assert.equal(calls.length, 1)
-  assert.match(calls[0], /, PATIENT_PIN_ACCESS_MINUTES, staffName\)$/)
+  assert.match(calls[0], /, PATIENT_PIN_REQUEST_MINUTES, staffName\)$/)
 })
 
 test('the patient is told the PIN lets a clinician see and add to records for 24 hours', async () => {

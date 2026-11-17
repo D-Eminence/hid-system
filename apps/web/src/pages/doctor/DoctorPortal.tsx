@@ -23,7 +23,7 @@ import {
   RECORD_UPLOAD_ACCEPT,
   type UploadDraft,
 } from '../../lib/medicalRecordUtils'
-import { accessPatientWithPin, createMedicalRecordWithUploads, fetchPatientRecordsView, fetchStaffDashboard, PATIENT_PIN_ACCESS_MINUTES } from '../../lib/hidApi'
+import { accessPatientWithPin, createMedicalRecordWithUploads, fetchPatientRecordsView, fetchStaffDashboard, PATIENT_PIN_REQUEST_MINUTES } from '../../lib/hidApi'
 import { formatDateTime } from '../../lib/utils'
 import type { MedicalRecord, MedicalRecordFile, Patient } from '../../types/database'
 
@@ -99,7 +99,7 @@ export default function DoctorPortal() {
     setData(null)
 
     try {
-      const response = await accessPatientWithPin(normalizedHidCode, pin.trim(), PATIENT_PIN_ACCESS_MINUTES, staffName)
+      const response = await accessPatientWithPin(normalizedHidCode, pin.trim(), PATIENT_PIN_REQUEST_MINUTES, staffName)
       setActiveGrantId(response.grant_id)
       const cachedView = readDoctorPatientRecordsSnapshot(session.id, normalizedHidCode)
       if (cachedView) {
