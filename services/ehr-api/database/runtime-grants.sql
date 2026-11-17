@@ -1720,3 +1720,16 @@ revoke all on function identity.sealed_qa_ids(text),
   identity.outreach_organisations_sealed_qa(),
   identity.outreach_invitations_sealed_qa(),
   identity.demo_patient_logins_move() from public;
+
+-- Single sign-on on auth., the product side (0125, hid-system#142's 0102,
+-- ADR-070), exactly as 0125 grants it. The Identity runtime records a sign-in's single sign-on
+-- provenance with the sign-in, and reads it for back-channel logout and the
+-- patient recent-sign-in check; the 0125 guard admits only the root session
+-- of a staff or patient sign-in of the client's kind and refuses any change,
+-- so neither UPDATE nor DELETE is granted. It records spent sign-in
+-- transactions and logout tokens, by digest, and removes those past their
+-- acceptance. No other service reads either table. The guard runs as the
+-- invoker and reads only auth.sessions, which this runtime already reads.
+grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
+grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
+revoke all on function auth.guard_session_single_sign_on_change() from public;
