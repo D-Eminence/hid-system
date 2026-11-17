@@ -355,6 +355,16 @@ grant usage on schema platform, auth, identity, audit to hid_identity_runtime;
 grant select on auth.accounts, auth.roles, auth.permissions,
   auth.role_permissions, auth.account_roles to hid_identity_runtime;
 grant select, insert, update on auth.sessions to hid_identity_runtime;
+-- A staff member's chosen facility per sign-in (0129, port of main 0089),
+-- exactly as 0129 grants it. The Identity runtime records the choice with the
+-- presented session locked FOR SHARE (its UPDATE on auth.sessions, above) and
+-- reads it for GET /auth/session and POST /auth/refresh; the 0129 guard
+-- refuses deletes, so neither DELETE nor TRUNCATE is granted. No other
+-- service reads the table. The guard runs as the invoker and reads only
+-- auth.sessions, auth.accounts and the workforce tables, which this runtime
+-- already reads.
+grant select, insert, update on auth.session_facility_selection to hid_identity_runtime;
+revoke all on function auth.guard_session_facility_selection_change() from public;
 grant select, insert, update, delete on auth.login_attempts to hid_identity_runtime;
 grant select, insert, update on auth.otp_challenges, auth.otp_rate_limits to hid_identity_runtime;
 -- Recovery start cooldowns (0076): no DELETE; each row is overwritten by the
