@@ -5537,6 +5537,20 @@ minutes apart collapse into one). Responses are otherwise unchanged;
 request bodies and error mapping are unchanged. `PharmacyWorkItem` in
 `@hid/api-client` gains the optional `patient`.
 
+Runtime check with the setting on: lab-api and pharmacy-api answer 200
+whatever the reader does, so the runtime verifier
+`services/ehr-api/scripts/verify-own-work-patient-cards-runtime.mjs` calls the
+real functions through the real services. It boots Identity, EHR, Lab and
+Pharmacy from their own code as their runtime roles, Lab and Pharmacy with
+`OWN_WORK_PATIENT_CARD_ENABLED=true`, and runs in the TUF migration rehearsal
+(`scripts/tuf-staging-migration-rehearsal.mjs`, the workspace job of
+`tuf-local-gates.yml`) after the order-routes and records-processing
+verifiers. It fails when an own work item the member may read comes back
+without `patient` (on the list or by id), when the list writes no
+`basis: consent` audit row for it, when a member without consent sees the
+work or a patient, or when route-backed work shows any patient but its route
+card's (none once the route has closed, though its reader holds consent).
+
 Cost while the setting is on: each list load calls the reader once for its
 own rows (at most 200), as a statement of its own, so it does not count
 toward the list query's 15-second limit and does not grow with the size of
