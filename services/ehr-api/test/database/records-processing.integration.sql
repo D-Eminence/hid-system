@@ -91,8 +91,9 @@ select pg_temp.expect('1f who may list', 'identity=t ehr=f lab=f pharmacy=f ocr=
     has_function_privilege('hid_pharmacy_api_runtime', 'identity.list_my_access_requests()', 'EXECUTE'),
     has_function_privilege('hid_ocr_api_runtime', 'identity.list_my_access_requests()', 'EXECUTE')));
 -- The commands around the new trigger are unchanged (the bodies 0091, 0094,
--- 0095 and 0098 pin); the consent gate has 0104's body (decision 34(1), D9).
-select pg_temp.expect('1g bodies', '732d11892dd4e27e1ff9093ae3b7de5a f88923a49a180c2180fdedb29bf2eccf '
+-- 0095 and 0098 pin, create_access_request with 0123's QA clause); the consent gate has 0104's body
+-- (decision 34(1), D9).
+select pg_temp.expect('1g bodies', '732d11892dd4e27e1ff9093ae3b7de5a 2745e91d666f16a6ad79019d31f0380a '
   || 'af9482ccb8b9d9aa8486035478ac4e94 65e3eaff93fe729fd5c5b986b80c9dd6',
   (select string_agg(md5(prosrc), ' ' order by ord) from (values
      (1, 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)'),
