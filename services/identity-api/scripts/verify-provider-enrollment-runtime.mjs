@@ -3132,10 +3132,14 @@ try {
   };
   const busyRows = (await runtime.query(STAFF_CONTEXT_SQL, [busySubject, ['verified', 'approved', 'active']])).rows.length;
   assert.equal(busyRows, 1000);
-  // The wrapped query answers exactly the previous query's rows and order, plus the two state columns.
+  // The wrapped query answers exactly the previous query's rows and order, plus the two state columns and
+  // (0124, owner decisions Q90 and Q91) the organisation's kinds, empty for these organisations with no application.
   const previousRows = (await runtime.query(previousSql, [busySubject, ['verified', 'approved', 'active']])).rows;
   const wrappedRows = (await runtime.query(STAFF_CONTEXT_SQL, [busySubject, ['verified', 'approved', 'active']])).rows;
-  assert.deepEqual(wrappedRows.map(({ review_state: _state, organization_type: _type, ...row }) => row), previousRows);
+  assert(wrappedRows.every(row => Array.isArray(row.organization_kinds) && row.organization_kinds.length === 0),
+    'An organisation with no application answered a kind');
+  assert.deepEqual(wrappedRows.map(({ review_state: _state, organization_type: _type, organization_kinds: _kinds, ...row }) => row),
+    previousRows);
   p4b.timing = { memberships: busyRows, sameRowsAsPrevious: true, p95Ms: { memberships1000: await compare(busySubject),
     memberships1: await compare(hospitalSubject) } };
   const sessionSamples = [];

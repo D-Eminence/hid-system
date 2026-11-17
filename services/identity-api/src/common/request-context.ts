@@ -16,7 +16,18 @@ export interface FacilityAssignment {
    * facilities never carry it, so their session answers are unchanged.
    */
   selfService?: FacilitySelfService;
+  /**
+   * The recorded kinds of the facility's organisation (0124,
+   * identity.organization_staff_kinds), present only when at least one is
+   * recorded. The product gate reads them for an administrator (owner
+   * decisions Q90 and Q91): no kind, or a hospital or clinic kind, is a
+   * hospital.
+   */
+  organizationKinds?: readonly OrganizationKind[];
 }
+
+/** An organisation's effective kind as identity.organization_staff_kinds answers it ('other' already applied). */
+export type OrganizationKind = 'clinic' | 'hospital' | 'laboratory' | 'pharmacy';
 
 export interface FacilitySelfService {
   review: 'pending' | 'reviewed';

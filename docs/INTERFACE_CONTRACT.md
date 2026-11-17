@@ -5295,9 +5295,11 @@ and patients.
 
 ## 53. Each staff product is its own site; the staff reset email (owner decision of 17 November 2026, Q88 and Q89)
 
-identity-api only (with one new notification-api route). No migration: the
-gate reads the permissions the seeds already grant, and the session carries
-its product in the signed access token.
+identity-api (with one new notification-api route) and, for the
+administrator rule decided by the owner as Q90 and Q91, migration 0124
+(`identity.organization_staff_kinds`, below). The gate reads the permissions
+the seeds already grant and, for an administrator, the recorded kinds of its
+organisation; the session carries its product in the signed access token.
 
 ### The product of a request
 
@@ -5330,6 +5332,11 @@ memberships whose permissions fit the product of the site:
 | `migrate.` | `ehr.encounter.write`, `organization.manage` only (lab staff are not admitted, although they hold `ocr.job.*`) |
 | `outreach.` | `outreach.registration.read`, `outreach.campaign.read` (outreach roles, hospital outreach staff), or a hospital role's |
 
+An administrator's membership (`organization.manage`, or the administrator
+awaiting review below) is the one exception: it counts as a hospital role only
+at a hospital organisation, and otherwise fits only the sites of its
+organisation's recorded kinds (owner decisions Q90 and Q91, below).
+
 From the seeds: `ehr.encounter.write` is held by doctor, clinician, nurse and
 receptionist (0006); `organization.manage` by admin and org_admin (0006);
 `lab.work-item.read` by lab, doctor, clinician, nurse and admin (0018);
@@ -5344,23 +5351,53 @@ itself up and awaits support's review (membership `org_admin`, permissions
 `organization.manage`, 0086) is admitted wherever org_admin is, so it can sign
 in again on the site it signed up on.
 
-"Hospital roles" is read from the membership's permissions alone, exactly as
-the owner's brief names the codes; the gate does not read what kind of
-organisation the facility belongs to. Two consequences the owner should
-confirm (recorded 17 November 2026, flagged in review):
+Administrators follow their organisation's kind (owner decisions of 17
+November 2026, verbatim: Q90 "Q90 A since its the best option that gives each
+product seperate environment"; Q91 "Q91 A"). A membership is an
+administrator's when it holds `organization.manage` (admin and org_admin,
+0006) or is the administrator awaiting review above, and does not hold
+`ehr.encounter.write`. Its sites depend only on the recorded kinds of its
+organisation, not on its other codes (org_admin also reads outreach
+registrations, admin also reads lab and pharmacy work):
 
-- every admin and org_admin holds `organization.manage` (0006), including the
-  administrator of a lab-only or pharmacy-only organisation, so that
-  administrator is admitted on all five product sites with that facility (an
-  org_admin at QA Hospital, QA Laboratory and QA Pharmacy sees all three on
-  `ehr.` and `migrate.` too);
-- a receptionist holds `ehr.encounter.write` (0006), so a hospital
-  receptionist is admitted on `migrate.`.
+| The organisation's recorded kinds | The administrator is admitted on |
+| --- | --- |
+| none recorded (Q91 A), or any `hospital` or `clinic` | every product site, as a hospital role |
+| `laboratory` only | `lab.` only |
+| `pharmacy` only | `pharmacy.` only |
+| `laboratory` and `pharmacy` (no hospital or clinic) | `lab.` and `pharmacy.` |
 
-If the owner wants "a hospital's own administrator" only, the change is to
-admit `organization.manage` (and the review-pending administrator) only at a
-facility whose organisation is a hospital or clinic. `product-gate.spec.ts`
-pins today's answers for both cases.
+The kinds are `identity.organization_staff_kinds(organization_id)` (0124,
+STABLE, SECURITY DEFINER, `search_path` pinned, EXECUTE for
+`hid_identity_runtime` only): the distinct `organization_type`s, sorted, of the
+application behind each of the organisation's active
+`identity.organization_products` rows (an organisation may hold several
+products: a governed approval may reuse an organisation) and of its self
+sign-up application while that is pending or reviewed (the one
+`identity.organization_self_service_state` reads). `other` counts as
+`hospital` when its application's product is `ehr` or `migrate` (as
+`identity.staff_invitable_roles` gives it the hospital roles) and is left out
+otherwise; a suspended product gives nothing. The answer holds only `clinic`,
+`hospital`, `laboratory` and `pharmacy`, and is empty when nothing is
+recorded: the sealed QA Hospital (0123) and Demo Hospital and Demo Outreach
+(0098), outreach groups (0115) and organisations promoted from the legacy
+system have no kind, so they are hospitals. The staff context reads it with
+one lateral call per membership and adds
+`organizationKinds` (sorted, once each) to that facility only when it is not
+empty, so a membership with no recorded kind answers exactly as before.
+
+So, at the sealed QA tenant, admin@ (org_admin at QA Hospital, which has no
+application, QA Laboratory and QA Pharmacy) keeps QA Hospital alone on `ehr.`,
+`migrate.` and `outreach.`, QA Hospital and QA Laboratory on `lab.`, and QA
+Hospital and QA Pharmacy on `pharmacy.`. The org_admin of a laboratory-only
+organisation is refused (`403 PRODUCT_NOT_AUTHORISED`) on every site but
+`lab.`. The administrator awaiting review of a self-signed-up laboratory is
+admitted on `lab.` only, of a hospital or clinic on every site. Clinical
+hospital roles (`ehr.encounter.write`: doctor, clinician, nurse, receptionist)
+and the lab, pharmacy and outreach roles are unchanged, at any organisation:
+a hospital receptionist, for example, is still admitted on `migrate.`.
+`product-gate.spec.ts` pins these answers; the database suite
+`organization-staff-kinds.integration.sql` pins the function's.
 
 The session's `actor.facilities`, `actor.facilityIds` and the selected
 `actor.facility` hold only fitting memberships. The access token carries the
