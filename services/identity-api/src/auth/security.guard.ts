@@ -10,6 +10,7 @@ import { AuditService } from '../audit/audit.service';
 import { DatabaseService } from '../database/database.service';
 import { getEnvironment } from '../config/environment';
 import {
+  ACCOUNT_ONLY_ALLOWED,
   DELEGATED_BROWSER_REQUEST,
   FACILITY_OPTIONAL,
   PUBLIC_ROUTE,
@@ -19,6 +20,7 @@ import {
 } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
+import { NoActiveFacilityMembershipProblem } from './product-gate';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 
@@ -56,6 +58,11 @@ export class SecurityGuard implements CanActivate {
       // runs, so the refusal is answered and audited as one (A9).
       if (verified.actor.kind !== 'patient' && this.metadata<boolean>(PATIENT_ONLY, context)) {
         throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
+      }
+      // Q88-2: an account-only session reaches "Start an outreach group" and
+      // the session routes it needs, nothing else.
+      if (verified.actor.accountOnly && this.metadata<boolean>(ACCOUNT_ONLY_ALLOWED, context) !== true) {
+        throw new NoActiveFacilityMembershipProblem();
       }
       if (transport === 'cookie' && !SAFE_METHODS.has(request.method)
         && !(await this.delegatedSafeBrowserRequest(request, context))) {

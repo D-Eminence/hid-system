@@ -1,5 +1,6 @@
 import type { AuditEventInput } from '../audit/audit.service';
 import type { ActorContext, HidRequest } from '../common/request-context';
+import { productForOrigin } from './product-gate';
 import { isOutreachOrigin, type SessionEventMetadata } from './token.service';
 
 /**
@@ -9,12 +10,15 @@ import { isOutreachOrigin, type SessionEventMetadata } from './token.service';
  * facts.
  */
 export function sessionEventFromRequest(request: HidRequest): SessionEventMetadata {
+  const product = productForOrigin(request.header('origin'));
   return {
     correlationId: request.correlationId,
     sourceIp: request.ip,
     userAgent: request.header('user-agent'),
     // Only an outreach. Origin is carried: it gives the session the short idle lock.
     ...(isOutreachOrigin(request.header('origin')) ? { origin: request.header('origin') } : {}),
+    // A staff product site's product: the session keeps only the memberships that fit it (Q88-1).
+    ...(product ? { product } : {}),
   };
 }
 

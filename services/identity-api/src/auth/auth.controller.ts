@@ -2,7 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
-import { AuditFailuresOnly, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
+import { AccountOnlyAllowed, AuditFailuresOnly, FacilityOptional, PatientAllowed, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -18,6 +18,7 @@ import { setSessionCookies } from './session-cookies';
 import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-success-audit';
 import { AccountSuspendedProblem } from './account-suspended';
 import { loginPrincipalKey } from './patient-principal';
+import { facilityFitsProduct, isProductGateRefusal, productForOrigin } from './product-gate';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
@@ -156,6 +157,9 @@ export class AuthController {
       // A refusal raised while issuing the session (an account that is not a
       // patient, deactivated meanwhile) gets the one Google denial, not its
       // internal reason (LOGIN-DETAIL-ORACLE), and is audited as the denial it is.
+      // Q88: a staff Google sign-in this site's product does not admit is
+      // answered as the password sign-in is, and is not a failed sign-in.
+      if (isProductGateRefusal(error)) throw error;
       const answered = error instanceof UnauthorizedException
         ? new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed for this HID account')
         : error;
@@ -231,6 +235,25 @@ export class AuthController {
       response.setHeader('x-csrf-token', result.csrfToken);
       return this.sessionResponse(result.actor, result.expiresAt);
     } catch (error) {
+      if (isProductGateRefusal(error)) {
+        // Q88: the right password, but this site's product admits none of
+        // the account's facilities, or the account has none yet. Not a failed
+        // sign-in: it neither counts towards nor clears the lockout, and no
+        // login_failed row is written. One audit row records the refusal.
+        await this.audit.record({
+          correlationId: request.correlationId,
+          actorType: 'staff',
+          ...(error.accountSubject ? { actorSubject: error.accountSubject } : {}),
+          action: 'auth.login.refused',
+          resourceType: 'authentication',
+          outcome: 'denied',
+          sourceIp: request.ip,
+          userAgent: request.header('user-agent'),
+          details: { reason: error.code.toLowerCase(), ...(productForOrigin(request.header('origin'))
+            ? { product: productForOrigin(request.header('origin')) } : {}) },
+        });
+        throw error;
+      }
       if (error instanceof UnauthorizedException) {
         await this.sessionAudit.recordLoginFailure(loginPrincipalKey(input.email, kind), this.event(request));
       } else if (error instanceof AccountSuspendedProblem) {
@@ -286,6 +309,7 @@ export class AuthController {
   @Get('session')
   @FacilityOptional()
   @PatientAllowed()
+  @AccountOnlyAllowed()
   async session(
     @Req() request: HidRequest,
     @Res({ passthrough: true }) response: Response,
@@ -341,6 +365,7 @@ export class AuthController {
   @Post('logout')
   @FacilityOptional()
   @PatientAllowed()
+  @AccountOnlyAllowed()
   @HttpCode(204)
   async logout(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response): Promise<void> {
     await this.auth.revoke(request.actor?.sessionId, request.actor?.subject, this.event(request));
@@ -358,10 +383,19 @@ export class AuthController {
   ) {
     const actor = request.actor;
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
-    const facility = actor.facilities.find((candidate) => candidate.id === input.facilityId);
+    // Q88-1: the session's facilities already fit the product it was issued
+    // under; a facility choice also keeps only those that fit the product of
+    // the site it comes from (an access token issued before the gate).
+    const product = productForOrigin(request.header('origin'));
+    const facilities = product
+      ? actor.facilities.filter((candidate) => facilityFitsProduct(candidate, product))
+      : actor.facilities;
+    const facility = facilities.find((candidate) => candidate.id === input.facilityId);
     if (!facility) throw new DomainProblem(403, 'FACILITY_ACCESS_DENIED', 'The actor is not active at this facility');
     const selectedActor: ActorContext = {
       ...actor,
+      facilities,
+      facilityIds: facilities.map((candidate) => candidate.id),
       facility,
       roles: facility.roles,
       role: facility.roles[0],

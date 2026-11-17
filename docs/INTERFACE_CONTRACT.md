@@ -916,7 +916,7 @@ code in a URL or subject.
 | Email | When | notification-api route (workload-authenticated, `Idempotency-Key`) |
 | --- | --- | --- |
 | "Your Health ID is ready": greets the patient by first name and shows the Health ID | A first activation, to the verified email (key `patient-welcome:<patientId>`) | `POST /api/v1/notifications/patient-welcome` `{ channel: "email", recipient, firstName?, healthId, plan }` |
-| "Your Health ID password reset code": greets the patient by first name, names their Health ID, shows the code and its expiry in minutes | `POST /api/v1/auth/otp/start` with `PASSWORD_RESET` for a patient account with an email, patients migrated from hid-1.0 included since 0093 (key `otp:<challengeId>`). Staff, admin, legacy recovery and SMS keep the generic code message | `POST /api/v1/notifications/password-reset-code` `{ channel: "email", recipient, code, firstName?, healthId, expiresInMinutes (1-60), plan }` |
+| "Your Health ID password reset code": greets the patient by first name, names their Health ID, shows the code and its expiry in minutes | `POST /api/v1/auth/otp/start` with `PASSWORD_RESET` for a patient account with an email, patients migrated from hid-1.0 included since 0093 (key `otp:<challengeId>`). Staff and admin resets have their own email since Q89 (section 53); legacy recovery and SMS keep the generic code message | `POST /api/v1/notifications/password-reset-code` `{ channel: "email", recipient, code, firstName?, healthId, expiresInMinutes (1-60), plan }` |
 | "Your Health ID password was updated": names the Health ID when known (migrated hid-1.0 patients too, since 0093) and Health ID support's address | After `POST /api/v1/auth/otp/complete` completes, to the account's email (key `password-updated:<challengeId>`); an account without an email gets nothing | `POST /api/v1/notifications/password-updated` `{ channel: "email", recipient, firstName?, healthId?, plan }` |
 
 All three routes take email only and refuse unknown fields (400). `firstName`
@@ -5292,3 +5292,180 @@ account is real, and the seal refuses a real account at a QA facility); no new
 patient is created inside QA (facility registration needs a QoreID NIN check,
 kept off, and app. sign-ups are platform-wide). Testing uses the seeded logins
 and patients.
+
+## 53. Each staff product is its own site; the staff reset email (owner decision of 17 November 2026, Q88 and Q89)
+
+identity-api only (with one new notification-api route). No migration: the
+gate reads the permissions the seeds already grant, and the session carries
+its product in the signed access token.
+
+### The product of a request
+
+The product is the request's `Origin` host, matched exactly (https, no port,
+no path) against the hosts `turnstile.service.ts` names:
+
+| Product | Production host | Staging host |
+| --- | --- | --- |
+| `ehr` | `ehr.healthidentitydirectory.com` | `ehr.staging.healthidentitydirectory.com` |
+| `lab` | `lab.healthidentitydirectory.com` | `lab.staging.healthidentitydirectory.com` |
+| `pharmacy` | `pharmacy.healthidentitydirectory.com` | `pharmacy.staging.healthidentitydirectory.com` |
+| `migrate` | `migrate.healthidentitydirectory.com` | `migrate.staging.healthidentitydirectory.com` |
+| `outreach` | `outreach.healthidentitydirectory.com` | `outreach.staging.healthidentitydirectory.com` |
+
+Every other host (`app.`, `www.`, the apex, `admin.`, and every local or
+development host) has no product and keeps the behaviour before Q88: all the
+account's memberships, and platform administrators sign in as before.
+
+### Which memberships a product site keeps (Q88-1)
+
+`POST /api/v1/auth/login` (and a staff Google sign-in), `POST
+/api/v1/auth/refresh` and `POST /api/v1/auth/facility` keep only the facility
+memberships whose permissions fit the product of the site:
+
+| Site | A membership fits when it holds any of |
+| --- | --- |
+| `ehr.` | `ehr.encounter.write`, `organization.manage` (hospital roles) |
+| `lab.` | `lab.work-item.read`, `lab.work-item.accept` (lab roles), or a hospital role's |
+| `pharmacy.` | `pharmacy.work-item.read`, `pharmacy.dispensing.read` (pharmacy roles), or a hospital role's |
+| `migrate.` | `ehr.encounter.write`, `organization.manage` only (lab staff are not admitted, although they hold `ocr.job.*`) |
+| `outreach.` | `outreach.registration.read`, `outreach.campaign.read` (outreach roles, hospital outreach staff), or a hospital role's |
+
+From the seeds: `ehr.encounter.write` is held by doctor, clinician, nurse and
+receptionist (0006); `organization.manage` by admin and org_admin (0006);
+`lab.work-item.read` by lab, doctor, clinician, nurse and admin (0018);
+`pharmacy.work-item.read` and `pharmacy.dispensing.read` by pharmacist, doctor,
+clinician, nurse and admin (0023); the outreach reads by outreach_organiser and
+outreach_volunteer (0115) and the hospital roles (0024, 0038). So an outreach
+organiser or volunteer is refused on `ehr.`, `lab.`, `pharmacy.` and
+`migrate.`; lab staff (and a lab second checker) only on `lab.`; a pharmacist
+only on `pharmacy.`. One addition: the administrator of a facility that signed
+itself up and awaits support's review (membership `org_admin`, permissions
+`org_admin_awaiting_review`'s, which hold `workforce.manage` but not
+`organization.manage`, 0086) is admitted wherever org_admin is, so it can sign
+in again on the site it signed up on.
+
+"Hospital roles" is read from the membership's permissions alone, exactly as
+the owner's brief names the codes; the gate does not read what kind of
+organisation the facility belongs to. Two consequences the owner should
+confirm (recorded 17 November 2026, flagged in review):
+
+- every admin and org_admin holds `organization.manage` (0006), including the
+  administrator of a lab-only or pharmacy-only organisation, so that
+  administrator is admitted on all five product sites with that facility (an
+  org_admin at QA Hospital, QA Laboratory and QA Pharmacy sees all three on
+  `ehr.` and `migrate.` too);
+- a receptionist holds `ehr.encounter.write` (0006), so a hospital
+  receptionist is admitted on `migrate.`.
+
+If the owner wants "a hospital's own administrator" only, the change is to
+admit `organization.manage` (and the review-pending administrator) only at a
+facility whose organisation is a hospital or clinic. `product-gate.spec.ts`
+pins today's answers for both cases.
+
+The session's `actor.facilities`, `actor.facilityIds` and the selected
+`actor.facility` hold only fitting memberships. The access token carries the
+product (`product` claim); every request, including the delegated
+`/auth/service-session` other services call, keeps only the fitting
+memberships, and `X-Facility-ID` naming any other facility is `403
+FACILITY_ACCESS_DENIED`. A session that no longer fits its site (its last
+fitting membership ended) ends with `401`, as an ended membership always has.
+This holds on `POST /auth/refresh` too: a refresh that no longer fits its site
+(or, off the product sites, an account whose last membership ended) is `401`
+with the cookies cleared, never one of the 403 sign-in refusals below, so every
+website signs out cleanly.
+`POST /auth/facility` also keeps only the facilities that fit the product of
+its own `Origin` (`403 FACILITY_ACCESS_DENIED` otherwise). An access token
+issued before this release carries no product and keeps today's behaviour
+until its refresh, which applies the gate.
+
+The product is bound to the session, not to the `Origin` of each refresh (the
+`Origin` is the client's to set). A staff session issued on a product site
+carries its product in the server-made refresh token
+(`<session id>.<secret>.<product>.<method>`; the token's hash is what
+`auth.sessions` stores, so it cannot be altered). `POST /auth/refresh`
+re-applies that product, and answers `401` with the cookies cleared when the
+request's `Origin` names any other product or none (for example a session
+issued on `lab.` refreshed with `Origin: https://app.healthidentitydirectory.com`).
+A refresh token with no product (issued before this release, or on a host with
+no product) takes the product of the site it is refreshed on, and keeps it from
+then on.
+
+When the password is right but no membership fits:
+
+```json
+{ "status": 403, "code": "PRODUCT_NOT_AUTHORISED",
+  "detail": "This account isn't set up for this Health ID product.", "product": "lab" }
+```
+
+A platform administrator with no fitting membership gets the same answer on a
+product site; on `admin.` (no product) nothing changes.
+
+### A verified staff login with no membership (Q88-2)
+
+An active account with an active, verified staff record, no platform role
+assignment and not one of the sealed demo accounts (0098), that has no
+active membership:
+
+- on `outreach.`, signs in with an account-only session: `actor.accountOnly:
+  true`, no facility, no roles, no permissions. It reaches only `GET
+  /api/v1/auth/session`, `POST /api/v1/auth/logout`, `POST
+  /api/v1/auth/refresh` (public) and "Start an outreach group" (`GET
+  /api/v1/identity/outreach-organisers/for-my-account/availability`, `POST
+  /api/v1/identity/outreach-organisers/for-my-account`); every other route,
+  the delegated service session included, answers `403
+  NO_ACTIVE_FACILITY_MEMBERSHIP` before its handler. The start still needs
+  `outreach_organiser_signup_enabled` on (`423
+  OUTREACH_ORGANISER_SIGNUP_UNAVAILABLE` while it is off). Once the group is
+  started, a refresh gives the normal outreach session at the new group.
+- on every other site (and hosts with no product):
+
+```json
+{ "status": 403, "code": "NO_ACTIVE_FACILITY_MEMBERSHIP",
+  "detail": "You aren't part of a facility or outreach group yet." }
+```
+
+Neither 403 is a failed sign-in: they are answered only after the password
+was checked, they neither count towards nor clear the principal's lockout,
+and no `login_failed` row is written. Each writes one audit row
+(`auth.login.refused`, outcome `denied`, details `reason` and `product`). A
+wrong password, an unknown email, a locked-out principal, and a right password
+for any other account with no membership (a patient login, a sealed demo
+account, an account with a platform role) still answer the one `401` "Invalid
+credentials" and are counted, as before.
+
+"Start an outreach group" (`for-my-account`) no longer writes an interceptor
+audit row: with no `X-Facility-ID` it would be a staff row with no facility,
+which the audit layer refuses (the answer became `503`). The start command
+writes its own success row at the new group (`identity.create_outreach_group`,
+0115), as the signed-in staff invitation routes do (S5).
+
+### The staff password reset code email (Q89)
+
+`POST /api/v1/auth/otp/start` with `PASSWORD_RESET` and the Turnstile action
+`staff-reset` (the five product sites) or `admin-reset` (`admin.`), for an
+account with an email that is not a patient the patient email could name,
+sends the code through a new notification-api route under the same key
+(`otp:<challengeId>`):
+
+```text
+POST /api/v1/notifications/staff-password-reset-code
+{ channel: "email", recipient, code, firstName?, expiresInMinutes (1-60), plan }
+```
+
+Workload-authenticated, `Idempotency-Key`, email only, unknown fields refused
+(no `healthId`). The email is the patient reset code's layout: subject "Your
+Health ID password reset code", header "Health ID Security", "Hello <first
+name>," (or "Hello there,"), "A password reset was requested for your Health
+ID staff account. Use the code below to continue.", the boxed "Verification
+Code", and "This code expires in <N> minutes. If you did not request this
+reset, ignore this message and consider changing your password after you sign
+in.", with N from `OTP_EXPIRY_SECONDS`. The first name is the first word of
+`auth.accounts.display_name` after any leading titles (Dr, Dr., Prof,
+Professor, Mr, Mrs, Ms, Miss, Nurse), cut to notification-api's person-name
+pattern. A notification-api that does not serve the route yet answers 404
+having sent nothing; Identity then sends the code once through `POST
+/api/v1/notifications/otp` under the same key, so either service may be
+released first. Any other answer is final. A patient account keeps the
+patient email whatever site asked; the patient portal's reset of a staff-only
+account, legacy recovery and SMS keep the generic code message. The start
+still answers every identifier alike.
