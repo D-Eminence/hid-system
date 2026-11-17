@@ -63,7 +63,7 @@ export function isStaffProduct(value: unknown): value is StaffProduct {
  * pharmacy and outreach reading codes for their own hospital work (0018,
  * 0023, 0024, 0038), so a membership that holds ehr.encounter.write without
  * organization.manage is a hospital clinical membership and is admitted on
- * ehr. and migrate. only (see facilityFitsProduct).
+ * ehr. and migrate. only (see facilityAdmittedOnProduct).
  */
 export const HOSPITAL_PERMISSIONS = Object.freeze(['ehr.encounter.write', 'organization.manage'] as const);
 export const LAB_PERMISSIONS = Object.freeze(['lab.work-item.read', 'lab.work-item.accept'] as const);
@@ -100,33 +100,44 @@ function pendingReviewAdministrator(facility: FacilityAssignment): boolean {
   return facility.selfService?.review === 'pending' && facility.permissions.includes('workforce.manage');
 }
 
+/** Whether a membership's permissions fit a product. */
+export function facilityFitsProduct(facility: FacilityAssignment, product: StaffProduct): boolean {
+  const admitted = PRODUCT_PERMISSIONS[product];
+  return facility.permissions.some((permission) => admitted.includes(permission))
+    || pendingReviewAdministrator(facility);
+}
+
 /**
  * A doctor, clinician, nurse or receptionist membership (ehr.encounter.write
  * without organization.manage) on a site that does not admit
  * ehr.encounter.write: it holds that site's reading codes for its own
  * hospital work only, so it is not admitted there (Q97).
  */
-function hospitalClinicalElsewhere(facility: FacilityAssignment, admitted: readonly string[]): boolean {
-  return !admitted.includes(HOSPITAL_CLINICAL_PERMISSION)
+function hospitalClinicalElsewhere(facility: FacilityAssignment, product: StaffProduct): boolean {
+  return !PRODUCT_PERMISSIONS[product].includes(HOSPITAL_CLINICAL_PERMISSION)
     && facility.permissions.includes(HOSPITAL_CLINICAL_PERMISSION)
     && !facility.permissions.some((permission) => (ADMINISTRATOR_PERMISSIONS as readonly string[]).includes(permission));
 }
 
-/** Whether a membership's permissions fit a product. */
-export function facilityFitsProduct(facility: FacilityAssignment, product: StaffProduct): boolean {
-  const admitted = PRODUCT_PERMISSIONS[product];
-  return (facility.permissions.some((permission) => admitted.includes(permission))
-    && !hospitalClinicalElsewhere(facility, admitted))
-    || pendingReviewAdministrator(facility);
+/**
+ * Whether a membership is admitted on a product site: the gate every
+ * sign-in, refresh, request and facility choice applies. It is
+ * facilityFitsProduct (the permission rule above) and then Q97's own rule,
+ * kept apart from it on purpose: a hospital clinical membership is not
+ * admitted on a site that does not admit ehr.encounter.write, whatever
+ * reading codes it holds. Callers use this, never facilityFitsProduct alone.
+ */
+export function facilityAdmittedOnProduct(facility: FacilityAssignment, product: StaffProduct): boolean {
+  return facilityFitsProduct(facility, product) && !hospitalClinicalElsewhere(facility, product);
 }
 
 /**
  * The staff product sites a login can open (Q97), in STAFF_PRODUCTS order:
- * every product at least one of its active memberships fits, by the same rule
- * the sign-in applies. The website shows only these sites.
+ * every product at least one of its active memberships is admitted on, by the
+ * same rule the sign-in applies. The website shows only these sites.
  */
 export function productsForFacilities(facilities: readonly FacilityAssignment[]): StaffProduct[] {
-  return STAFF_PRODUCTS.filter((product) => facilities.some((facility) => facilityFitsProduct(facility, product)));
+  return STAFF_PRODUCTS.filter((product) => facilities.some((facility) => facilityAdmittedOnProduct(facility, product)));
 }
 
 export const PRODUCT_NOT_AUTHORISED = 'PRODUCT_NOT_AUTHORISED';

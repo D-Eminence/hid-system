@@ -3,7 +3,7 @@ import type { ActorContext, FacilityAssignment, FacilitySelfService } from '../c
 import { DatabaseService } from '../database/database.service';
 import type { CredentialIdentity } from './auth.types';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
-import { facilityFitsProduct, NoActiveFacilityMembershipProblem, ProductNotAuthorisedProblem, productsForFacilities,
+import { facilityAdmittedOnProduct, NoActiveFacilityMembershipProblem, ProductNotAuthorisedProblem, productsForFacilities,
   type StaffProduct } from './product-gate';
 
 interface StaffContextRow {
@@ -153,7 +153,7 @@ export class CurrentStaffContextService {
       const products = productsForFacilities(identity.facilities);
       if (product) {
         // Q88-1: only the memberships whose permissions fit this site's product.
-        const fitting = identity.facilities.filter((facility) => facilityFitsProduct(facility, product));
+        const fitting = identity.facilities.filter((facility) => facilityAdmittedOnProduct(facility, product));
         if (fitting.length === 0) throw new ProductNotAuthorisedProblem(product, identity.subject);
         identity = { ...identity, facilities: fitting };
       }

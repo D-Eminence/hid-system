@@ -32,8 +32,8 @@ import { CurrentStaffContextService, STAFF_CONTEXT_SQL, VERIFIED_STAFF_WITHOUT_M
   from './current-staff-context.service';
 import type { GoogleAuthenticationService } from './google-authentication.service';
 import type { LocalAuthProvider } from './local-auth.provider';
-import { ADMINISTRATOR_PERMISSIONS, facilityFitsProduct, HOSPITAL_PERMISSIONS, LAB_PERMISSIONS, OUTREACH_PERMISSIONS,
-  PHARMACY_PERMISSIONS, PRODUCT_HOSTS, productForOrigin, productPermissions, productsForFacilities, type StaffProduct }
+import { ADMINISTRATOR_PERMISSIONS, facilityAdmittedOnProduct, facilityFitsProduct, HOSPITAL_PERMISSIONS, LAB_PERMISSIONS,
+  OUTREACH_PERMISSIONS, PHARMACY_PERMISSIONS, PRODUCT_HOSTS, productForOrigin, productPermissions, productsForFacilities, type StaffProduct }
   from './product-gate';
 import { TokenService } from './token.service';
 import type { TurnstileService } from './turnstile.service';
@@ -324,24 +324,24 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
       expect(permissions).not.toContain('organization.manage');
       expect(permissions).toEqual(expect.arrayContaining(['outreach.registration.read']));
       const facility = assignment([role], permissions);
-      expect(PRODUCTS.filter((product) => facilityFitsProduct(facility, product))).toEqual(['ehr', 'migrate']);
+      expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(['ehr', 'migrate']);
     });
 
   it('a membership holding both ehr.encounter.write and organization.manage (doctor and admin) fits every site', () => {
     const facility = assignment(['admin', 'doctor'], [...new Set([...permissionsOf('admin'), ...permissionsOf('doctor')])]);
-    expect(PRODUCTS.filter((product) => facilityFitsProduct(facility, product))).toEqual(PRODUCTS);
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(PRODUCTS);
   });
 
   it.each(['admin', 'org_admin'])('a hospital %s membership fits every site', (role) => {
     const facility = assignment([role], permissionsOf(role));
-    expect(PRODUCTS.filter((product) => facilityFitsProduct(facility, product))).toEqual(PRODUCTS);
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(PRODUCTS);
   });
 
   it.each([
     ['lab', ['lab']], ['pharmacist', ['pharmacy']], ['outreach_organiser', ['outreach']], ['outreach_volunteer', ['outreach']],
   ] as const)('a %s membership fits %j only (unchanged)', (role, expected) => {
     const facility = assignment([role], permissionsOf(role));
-    expect(PRODUCTS.filter((product) => facilityFitsProduct(facility, product))).toEqual(expected);
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(expected);
   });
 
   it('productsForFacilities lists every site any membership fits, in site order', () => {
