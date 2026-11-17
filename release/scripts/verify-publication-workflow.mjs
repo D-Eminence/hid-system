@@ -53,10 +53,13 @@ export function parseWorkflow(source) {
   return doc.toJS({ maxAliasCount: 0 })
 }
 
-// Only the infra/aws audit runs through the reviewed exception gate
-// (release/scripts/npm-audit-with-exceptions.mjs reading
+// Only the infra/aws and apps/ehr audits run through the reviewed exception
+// gate (release/scripts/npm-audit-with-exceptions.mjs reading
 // security/npm-audit-exceptions.json); every other audit is plain npm audit.
 export const AWS_AUDIT_GATE = 'node release/scripts/npm-audit-with-exceptions.mjs infra/aws'
+export const EHR_AUDIT_GATE = 'node release/scripts/npm-audit-with-exceptions.mjs apps/ehr'
+// The directories an exception may name: the ones audited through the gate.
+export const EXCEPTION_GATE_DIRECTORIES = Object.freeze(['infra/aws', 'apps/ehr'])
 // Every audit step starts by pinning PATH to the Node runtime the reviewed
 // setup-node step installs (the runner's tool cache, which a workflow cannot
 // redirect: RUNNER_* variables cannot be overwritten) and the system
@@ -80,7 +83,7 @@ export const LOCAL_GATE_AUDITS = Object.freeze({
   'release-contracts': AUDIT_PATH + 'npm --prefix release audit --audit-level=moderate\n',
   'aws-release-trust': AUDIT_PATH + AWS_AUDIT_GATE + '\n',
   'cloudflare-tuf': AUDIT_PATH + 'npm --prefix infra/cloudflare audit --audit-level=moderate\n',
-  'ehr-release-cache': AUDIT_PATH + 'for package in packages/offline packages/telemetry packages/ui apps/ehr; do\n  npm --prefix "${package}" audit --audit-level=moderate\ndone\n',
+  'ehr-release-cache': AUDIT_PATH + 'for package in packages/offline packages/telemetry packages/ui; do\n  npm --prefix "${package}" audit --audit-level=moderate\ndone\n' + EHR_AUDIT_GATE + '\n',
 })
 // The only environment variables the workflow, an audit job or one of its
 // steps may set: the ones these workflows use today. Anything else is
