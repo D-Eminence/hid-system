@@ -117,7 +117,8 @@
 --    none of the seven columns or the CHECK name exists on ehr.prescriptions;
 --    the bodies relied on are the ones 0001-0104 left and 0105-0124 kept (md5
 --    of pg_proc.prosrc; the snapshot writer as 0004 or 0112 left it, and
---    ehr.send_order_route as 0098 or 0123 left it):
+--    ehr.send_order_route as 0098 or 0123 left it; a function missing at its
+--    signature fails as a mismatch):
 --    the snapshot writer and its trigger, the consent test (0104's body) and
 --    the membership and permission checks the body calls, the four session
 --    readers, pharmacy.work_item_allows (its attributes and search_path too:
@@ -298,17 +299,21 @@ begin
       ('ehr.sync_order_routes_on_order_change()', '8ce6b42450cc06fc02fec8d1cf63af41'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
-   where md5(proc.prosrc) is distinct from expected.digest
-     -- 0112 (OCR source deletion) replaces the snapshot writer; it runs 0004's body
-     -- unchanged for every call except its own purge, so either body is accepted.
-     and not (expected.proc = 'ehr.capture_record_version()'
-              and md5(proc.prosrc) = 'cae99883d00e70ab1d20ed6fbc97ad7b')
-     -- 0123 (the sealed QA tenant) replaces ehr.send_order_route with 0098's
-     -- body plus one clause: a receiving facility on the other side of the QA
-     -- seal is ORDER_ROUTE_DESTINATION_INELIGIBLE. It reads, locks and updates
-     -- ehr.prescriptions as 0098's body does, so either body is accepted.
-     and not (expected.proc = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'
-              and md5(proc.prosrc) = '0c2def2b530bcb3d68537ade52787b6b');
+   -- A function missing at its signature (dropped, renamed or re-signatured)
+   -- is a mismatch by itself: its md5 is null, so the two exceptions below
+   -- would be null too and would drop the row.
+   where proc.oid is null
+      or (md5(proc.prosrc) is distinct from expected.digest
+          -- 0112 (OCR source deletion) replaces the snapshot writer; it runs 0004's body
+          -- unchanged for every call except its own purge, so either body is accepted.
+          and not (expected.proc = 'ehr.capture_record_version()'
+                   and md5(proc.prosrc) = 'cae99883d00e70ab1d20ed6fbc97ad7b')
+          -- 0123 (the sealed QA tenant) replaces ehr.send_order_route with 0098's
+          -- body plus one clause: a receiving facility on the other side of the QA
+          -- seal is ORDER_ROUTE_DESTINATION_INELIGIBLE. It reads, locks and updates
+          -- ehr.prescriptions as 0098's body does, so either body is accepted.
+          and not (expected.proc = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'
+                   and md5(proc.prosrc) = '0c2def2b530bcb3d68537ade52787b6b'));
   -- Lab's and Pharmacy's work_item_allows have the same text; the search_path
   -- tells them apart. The snapshot writer and the two guards are SECURITY
   -- DEFINER plpgsql triggers; the others are SECURITY DEFINER SQL checks.
@@ -375,16 +380,18 @@ begin
                             ('ehr.record_versions'::regclass, 'record_versions_read'::name)))) then
     mismatch := 'the pharmacy.work_items and ehr.record_versions read policies';
   end if;
+  -- Counted one by one: the key is found by its definition, not its name, so
+  -- a second key of the same columns must not stand in for a missing CHECK.
   if mismatch is null
-     and (select count(*) from pg_constraint constraint_row
-           where (constraint_row.conrelid = 'pharmacy.work_items'::regclass and constraint_row.contype = 'c'
-                  and constraint_row.convalidated and constraint_row.conname = 'work_items_route_facility_ck'
-                  and pg_get_constraintdef(constraint_row.oid) =
-                    'CHECK ((((order_route_id IS NULL) AND (facility_id = ordering_facility_id)) OR '
-                    || '((order_route_id IS NOT NULL) AND (facility_id <> ordering_facility_id))))')
-              or (constraint_row.conrelid = 'ehr.record_versions'::regclass and constraint_row.contype = 'u'
-                  and pg_get_constraintdef(constraint_row.oid) = 'UNIQUE (resource_type, resource_id, version_no)'))
-         <> 2 then
+     and ((select count(*) from pg_constraint constraint_row
+            where constraint_row.conrelid = 'pharmacy.work_items'::regclass and constraint_row.contype = 'c'
+              and constraint_row.convalidated and constraint_row.conname = 'work_items_route_facility_ck'
+              and pg_get_constraintdef(constraint_row.oid) =
+                'CHECK ((((order_route_id IS NULL) AND (facility_id = ordering_facility_id)) OR '
+                || '((order_route_id IS NOT NULL) AND (facility_id <> ordering_facility_id))))') <> 1
+       or (select count(*) from pg_constraint constraint_row
+            where constraint_row.conrelid = 'ehr.record_versions'::regclass and constraint_row.contype = 'u'
+              and pg_get_constraintdef(constraint_row.oid) = 'UNIQUE (resource_type, resource_id, version_no)') <> 1) then
     mismatch := 'the CHECK work_items_route_facility_ck of pharmacy.work_items or the snapshot key of ehr.record_versions';
   end if;
   if mismatch is null

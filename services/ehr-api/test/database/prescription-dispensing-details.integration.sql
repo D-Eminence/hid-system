@@ -59,7 +59,15 @@
 --      the seven values through ehr.prescriptions%ROWTYPE (a newer version
 --      than it has is ORDER_ROUTE_VERSION_CONFLICT; its own version to the
 --      sender's own facility passes the version and state checks and is
---      ORDER_ROUTE_DESTINATION_INELIGIBLE); a third body is refused.
+--      ORDER_ROUTE_DESTINATION_INELIGIBLE); a third body is refused;
+--  11. a missing object is refused by name, not passed over: an
+--      ehr.send_order_route renamed, dropped or re-signatured, and an
+--      ehr.capture_record_version renamed, are each named missing by case 1's
+--      check of the bodies; with work_items_route_facility_ck dropped, a
+--      second snapshot key on ehr.record_versions does not stand in for it
+--      (the CHECK and the key are counted one by one, as 0125's section 0
+--      counts them). The runner's dry run of 0125 on such a database stops at
+--      section 0 with nothing applied (the release evidence).
 -- Identity fixtures are inserted as the suite runner with
 -- session_replication_role = replica (CHECK constraints still apply; foreign
 -- keys and guards are skipped), and so are the work items that stand for
@@ -881,5 +889,78 @@ rollback to savepoint send_bodies;
 select pg_temp.expect('0123''s send_order_route back after case 10', (select md5(proc.prosrc) from pg_proc proc
    where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure),
   '0c2def2b530bcb3d68537ade52787b6b');
+
+-- 11. A missing object is a mismatch by itself. 0125's section 0 joins each
+-- pinned body by to_regprocedure, so a function missing at its signature
+-- joins as null; it must be named missing, not dropped from the list because
+-- the comparisons with the accepted second bodies (0112's snapshot writer,
+-- 0123's ehr.send_order_route) turn null. Case 1's check, which mirrors that
+-- one, is asked with ehr.send_order_route renamed, dropped and re-signatured
+-- (0123's body with one more parameter), and with ehr.capture_record_version
+-- renamed (its triggers follow it by oid). The own-row CHECK and the snapshot
+-- key are counted one by one as section 0 counts them: with the CHECK dropped,
+-- a second key of the same columns on ehr.record_versions (both found by
+-- definition) must not make up the count. Each change is undone.
+create function pg_temp.relied_on_constraints() returns text language sql as $f$
+  select nullif(concat_ws('; ',
+    case when (select count(*) from pg_constraint constraint_row
+                where constraint_row.conrelid = 'pharmacy.work_items'::regclass and constraint_row.contype = 'c'
+                  and constraint_row.convalidated and constraint_row.conname = 'work_items_route_facility_ck'
+                  and pg_get_constraintdef(constraint_row.oid) =
+                    'CHECK ((((order_route_id IS NULL) AND (facility_id = ordering_facility_id)) OR '
+                    || '((order_route_id IS NOT NULL) AND (facility_id <> ordering_facility_id))))') <> 1
+         then 'work_items_route_facility_ck' end,
+    case when (select count(*) from pg_constraint constraint_row
+                where constraint_row.conrelid = 'ehr.record_versions'::regclass and constraint_row.contype = 'u'
+                  and pg_get_constraintdef(constraint_row.oid) = 'UNIQUE (resource_type, resource_id, version_no)') <> 1
+         then 'the snapshot key' end), '')
+$f$;
+select pg_temp.expect('the CHECK and the snapshot key as 0125 relies on them',
+  coalesce(pg_temp.relied_on_constraints(), 'as relied on'), 'as relied on');
+select pg_temp.expect('every untouched body accepted before case 11', coalesce(pg_temp.untouched_bodies(), 'accepted'),
+  'accepted');
+savepoint missing_objects;
+alter function ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) rename to send_order_route_moved;
+select pg_temp.expect('ehr.send_order_route renamed', pg_temp.untouched_bodies(),
+  'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) md5 none (missing)');
+rollback to savepoint missing_objects;
+drop function ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character);
+select pg_temp.expect('ehr.send_order_route dropped', pg_temp.untouched_bodies(),
+  'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) md5 none (missing)');
+rollback to savepoint missing_objects;
+do $$
+declare
+  definition text := pg_get_functiondef('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure);
+  changed text := regexp_replace(definition, '\)\n RETURNS ', ', suite_extra integer DEFAULT NULL::integer)' || chr(10) || ' RETURNS ');
+begin
+  if changed = definition then
+    raise exception 'prescription dispensing details: no end of the ehr.send_order_route signature';
+  end if;
+  drop function ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character);
+  execute changed;
+end $$;
+select pg_temp.expect('ehr.send_order_route re-signatured, its body kept',
+  (select count(*) from pg_proc proc where proc.proname = 'send_order_route'
+      and proc.pronamespace = 'ehr'::regnamespace and md5(proc.prosrc) = '0c2def2b530bcb3d68537ade52787b6b'
+      and proc.pronargs = 11)::text, '1');
+select pg_temp.expect('ehr.send_order_route re-signatured', pg_temp.untouched_bodies(),
+  'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) md5 none (missing)');
+rollback to savepoint missing_objects;
+alter function ehr.capture_record_version() rename to capture_record_version_moved;
+select pg_temp.expect('ehr.capture_record_version renamed', pg_temp.untouched_bodies(),
+  'ehr.capture_record_version() md5 none (missing)');
+rollback to savepoint missing_objects;
+alter table pharmacy.work_items drop constraint work_items_route_facility_ck;
+alter table ehr.record_versions add constraint details_suite_second_key unique (resource_type, resource_id, version_no);
+select pg_temp.expect('the CHECK dropped beside a second snapshot key', pg_temp.relied_on_constraints(),
+  'work_items_route_facility_ck; the snapshot key');
+rollback to savepoint missing_objects;
+alter table pharmacy.work_items drop constraint work_items_route_facility_ck;
+select pg_temp.expect('the CHECK dropped', pg_temp.relied_on_constraints(), 'work_items_route_facility_ck');
+rollback to savepoint missing_objects;
+select pg_temp.expect('every untouched body accepted after case 11', coalesce(pg_temp.untouched_bodies(), 'accepted'),
+  'accepted');
+select pg_temp.expect('the CHECK and the snapshot key after case 11',
+  coalesce(pg_temp.relied_on_constraints(), 'as relied on'), 'as relied on');
 
 rollback;
