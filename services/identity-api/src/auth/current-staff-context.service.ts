@@ -3,7 +3,7 @@ import type { ActorContext, FacilityAssignment, FacilitySelfService } from '../c
 import { DatabaseService } from '../database/database.service';
 import type { CredentialIdentity } from './auth.types';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
-import { facilityFitsProduct, NoActiveFacilityMembershipProblem, ProductNotAuthorisedProblem,
+import { facilityFitsProduct, NoActiveFacilityMembershipProblem, ProductNotAuthorisedProblem, productsForFacilities,
   type StaffProduct } from './product-gate';
 
 interface StaffContextRow {
@@ -149,19 +149,21 @@ export class CurrentStaffContextService {
     const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
     const product = resolution.product;
     if (hasMembership) {
+      // Q97: every site the login can open, from all its memberships, before this site's filter.
+      const products = productsForFacilities(identity.facilities);
       if (product) {
         // Q88-1: only the memberships whose permissions fit this site's product.
         const fitting = identity.facilities.filter((facility) => facilityFitsProduct(facility, product));
         if (fitting.length === 0) throw new ProductNotAuthorisedProblem(product, identity.subject);
         identity = { ...identity, facilities: fitting };
       }
-      return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
+      return { ...this.toActor(identity, platformAuthority, sessionId, preferredFacilityId), products };
     }
     // No active membership. A platform administrator keeps today's session
     // on a site with no product (admin.); on a product site no facility fits.
     if (platformAuthority.permissions.includes('platform.admin.access')) {
       if (product) throw new ProductNotAuthorisedProblem(product, identity.subject);
-      return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
+      return { ...this.toActor(identity, platformAuthority, sessionId, preferredFacilityId), products: [] };
     }
     // Q88-2: a verified staff login with no membership yet. On outreach. it
     // gets an account-only session (no facility) for "Start an outreach
@@ -171,7 +173,8 @@ export class CurrentStaffContextService {
       throw new UnauthorizedException('Staff account or facility membership is inactive');
     }
     if (product !== 'outreach') throw new NoActiveFacilityMembershipProblem(identity.subject);
-    return { ...this.toActor(identity, platformAuthority, sessionId, undefined, true), accountOnly: true as const };
+    return { ...this.toActor(identity, platformAuthority, sessionId, undefined, true), accountOnly: true as const,
+      products: ['outreach'] };
   }
 
   /** Q88-2's eligibility, read only for an active account that has no active membership. */

@@ -55,19 +55,32 @@ export function isStaffProduct(value: unknown): value is StaffProduct {
  * - outreach roles: outreach.registration.read or outreach.campaign.read
  *   (outreach_organiser and outreach_volunteer, 0115; hospital outreach staff,
  *   0024 and 0038).
+ *
+ * Each staff site is for its own job (owner decision Q97): lab., pharmacy.
+ * and outreach. admit their own roles' codes and a hospital administrator
+ * (organization.manage), not the hospital roles' ehr.encounter.write. The
+ * seeds also grant doctor, clinician, nurse and receptionist the lab,
+ * pharmacy and outreach reading codes for their own hospital work (0018,
+ * 0023, 0024, 0038), so a membership that holds ehr.encounter.write without
+ * organization.manage is a hospital clinical membership and is admitted on
+ * ehr. and migrate. only (see facilityFitsProduct).
  */
 export const HOSPITAL_PERMISSIONS = Object.freeze(['ehr.encounter.write', 'organization.manage'] as const);
 export const LAB_PERMISSIONS = Object.freeze(['lab.work-item.read', 'lab.work-item.accept'] as const);
 export const PHARMACY_PERMISSIONS = Object.freeze(['pharmacy.work-item.read', 'pharmacy.dispensing.read'] as const);
 export const OUTREACH_PERMISSIONS = Object.freeze(['outreach.registration.read', 'outreach.campaign.read'] as const);
+/** A hospital administrator (admin, org_admin): admitted on every site of its own organisation (Q97). */
+export const ADMINISTRATOR_PERMISSIONS = Object.freeze(['organization.manage'] as const);
+/** The hospital clinical code (doctor, clinician, nurse, receptionist): ehr. and migrate. only (Q97). */
+const HOSPITAL_CLINICAL_PERMISSION = 'ehr.encounter.write';
 
 const PRODUCT_PERMISSIONS: Readonly<Record<StaffProduct, readonly string[]>> = Object.freeze({
   ehr: HOSPITAL_PERMISSIONS,
-  lab: [...LAB_PERMISSIONS, ...HOSPITAL_PERMISSIONS],
-  pharmacy: [...PHARMACY_PERMISSIONS, ...HOSPITAL_PERMISSIONS],
+  lab: [...LAB_PERMISSIONS, ...ADMINISTRATOR_PERMISSIONS],
+  pharmacy: [...PHARMACY_PERMISSIONS, ...ADMINISTRATOR_PERMISSIONS],
   // Hospital roles only: lab staff hold ocr.job.* by design but are not admitted on migrate.
   migrate: HOSPITAL_PERMISSIONS,
-  outreach: [...OUTREACH_PERMISSIONS, ...HOSPITAL_PERMISSIONS],
+  outreach: [...OUTREACH_PERMISSIONS, ...ADMINISTRATOR_PERMISSIONS],
 });
 
 /** Every permission code a product admits a membership by (for the contract and the tests). */
@@ -87,11 +100,33 @@ function pendingReviewAdministrator(facility: FacilityAssignment): boolean {
   return facility.selfService?.review === 'pending' && facility.permissions.includes('workforce.manage');
 }
 
+/**
+ * A doctor, clinician, nurse or receptionist membership (ehr.encounter.write
+ * without organization.manage) on a site that does not admit
+ * ehr.encounter.write: it holds that site's reading codes for its own
+ * hospital work only, so it is not admitted there (Q97).
+ */
+function hospitalClinicalElsewhere(facility: FacilityAssignment, admitted: readonly string[]): boolean {
+  return !admitted.includes(HOSPITAL_CLINICAL_PERMISSION)
+    && facility.permissions.includes(HOSPITAL_CLINICAL_PERMISSION)
+    && !facility.permissions.some((permission) => (ADMINISTRATOR_PERMISSIONS as readonly string[]).includes(permission));
+}
+
 /** Whether a membership's permissions fit a product. */
 export function facilityFitsProduct(facility: FacilityAssignment, product: StaffProduct): boolean {
   const admitted = PRODUCT_PERMISSIONS[product];
-  return facility.permissions.some((permission) => admitted.includes(permission))
+  return (facility.permissions.some((permission) => admitted.includes(permission))
+    && !hospitalClinicalElsewhere(facility, admitted))
     || pendingReviewAdministrator(facility);
+}
+
+/**
+ * The staff product sites a login can open (Q97), in STAFF_PRODUCTS order:
+ * every product at least one of its active memberships fits, by the same rule
+ * the sign-in applies. The website shows only these sites.
+ */
+export function productsForFacilities(facilities: readonly FacilityAssignment[]): StaffProduct[] {
+  return STAFF_PRODUCTS.filter((product) => facilities.some((facility) => facilityFitsProduct(facility, product)));
 }
 
 export const PRODUCT_NOT_AUTHORISED = 'PRODUCT_NOT_AUTHORISED';

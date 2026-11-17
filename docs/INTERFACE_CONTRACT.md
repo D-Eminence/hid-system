@@ -5293,7 +5293,7 @@ patient is created inside QA (facility registration needs a QoreID NIN check,
 kept off, and app. sign-ups are platform-wide). Testing uses the seeded logins
 and patients.
 
-## 53. Each staff product is its own site; the staff reset email (owner decision of 17 November 2026, Q88 and Q89)
+## 53. Each staff product is its own site; the staff reset email (owner decision of 17 November 2026, Q88, Q89 and Q97)
 
 identity-api only (with one new notification-api route). No migration: the
 gate reads the permissions the seeds already grant, and the session carries
@@ -5325,10 +5325,21 @@ memberships whose permissions fit the product of the site:
 | Site | A membership fits when it holds any of |
 | --- | --- |
 | `ehr.` | `ehr.encounter.write`, `organization.manage` (hospital roles) |
-| `lab.` | `lab.work-item.read`, `lab.work-item.accept` (lab roles), or a hospital role's |
-| `pharmacy.` | `pharmacy.work-item.read`, `pharmacy.dispensing.read` (pharmacy roles), or a hospital role's |
+| `lab.` | `lab.work-item.read`, `lab.work-item.accept` (lab roles), or `organization.manage` (an administrator) |
+| `pharmacy.` | `pharmacy.work-item.read`, `pharmacy.dispensing.read` (pharmacy roles), or `organization.manage` |
 | `migrate.` | `ehr.encounter.write`, `organization.manage` only (lab staff are not admitted, although they hold `ocr.job.*`) |
-| `outreach.` | `outreach.registration.read`, `outreach.campaign.read` (outreach roles, hospital outreach staff), or a hospital role's |
+| `outreach.` | `outreach.registration.read`, `outreach.campaign.read` (outreach roles), or `organization.manage` |
+
+Each staff site is for its own job (owner decision Q97, "Q97 A", 17 November
+2026): a membership that holds `ehr.encounter.write` without
+`organization.manage` (doctor, clinician, nurse and receptionist) fits `ehr.`
+and `migrate.` only, although the seeds also grant those roles the lab,
+pharmacy and outreach reading codes for their own hospital work (0018, 0023,
+0024, 0038). A hospital administrator (`admin`, `org_admin`, which hold
+`organization.manage`, and the review-pending administrator below) keeps every
+site of its own organisation. Lab staff, pharmacists, outreach organisers and
+volunteers, and the account-only outreach session are unchanged. A doctor who
+also helps an outreach group signs in on `outreach.` with the group only.
 
 From the seeds: `ehr.encounter.write` is held by doctor, clinician, nurse and
 receptionist (0006); `organization.manage` by admin and org_admin (0006);
@@ -5336,9 +5347,10 @@ receptionist (0006); `organization.manage` by admin and org_admin (0006);
 `pharmacy.work-item.read` and `pharmacy.dispensing.read` by pharmacist, doctor,
 clinician, nurse and admin (0023); the outreach reads by outreach_organiser and
 outreach_volunteer (0115) and the hospital roles (0024, 0038). So an outreach
-organiser or volunteer is refused on `ehr.`, `lab.`, `pharmacy.` and
-`migrate.`; lab staff (and a lab second checker) only on `lab.`; a pharmacist
-only on `pharmacy.`. One addition: the administrator of a facility that signed
+organiser or volunteer is admitted only on `outreach.`; lab staff (and a lab
+second checker) only on `lab.`; a pharmacist only on `pharmacy.`; a doctor,
+clinician, nurse or receptionist only on `ehr.` and `migrate.` (Q97). One
+addition: the administrator of a facility that signed
 itself up and awaits support's review (membership `org_admin`, permissions
 `org_admin_awaiting_review`'s, which hold `workforce.manage` but not
 `organization.manage`, 0086) is admitted wherever org_admin is, so it can sign
@@ -5376,7 +5388,39 @@ website signs out cleanly.
 `POST /auth/facility` also keeps only the facilities that fit the product of
 its own `Origin` (`403 FACILITY_ACCESS_DENIED` otherwise). An access token
 issued before this release carries no product and keeps today's behaviour
-until its refresh, which applies the gate.
+until its refresh, which applies the gate. After Q97, a doctor's, clinician's,
+nurse's or receptionist's session issued on `lab.`, `pharmacy.` or `outreach.`
+no longer fits its site: its next request or refresh answers `401` and the
+website signs out, the mechanism above, unchanged.
+
+### The sites a login can open: `actor.products` (Q97)
+
+Every staff session answer carries the staff product sites this login can
+open, so the website shows only those:
+
+```ts
+actor.products: ('ehr' | 'lab' | 'pharmacy' | 'migrate' | 'outreach')[]
+```
+
+- Always present on a staff actor; never on a patient actor.
+- Order is fixed: `ehr`, `lab`, `pharmacy`, `migrate`, `outreach`; no
+  duplicates.
+- Computed with the gate's own rule over **all** the account's active
+  memberships, before the current site's filter, so it is the same whatever
+  site (or no-product host such as `admin.`) the session was issued on. A site
+  is listed when at least one membership fits it.
+- `["outreach"]` for the account-only outreach session (Q88-2).
+- `[]` for a platform administrator with no membership (it opens `admin.`,
+  which is not a staff product site).
+- Carried in the answers of `POST /api/v1/auth/login`, a staff Google sign-in,
+  `POST /api/v1/auth/refresh`, `GET /api/v1/auth/session` and `POST
+  /api/v1/auth/facility` (each `{ actor, ... }`). It is not an access-token
+  claim; it is read from the database on every request with the rest of the
+  actor.
+
+Examples (fictional): a doctor `["ehr", "migrate"]`; a doctor who also helps
+an outreach group `["ehr", "migrate", "outreach"]`; lab staff `["lab"]`; a
+hospital `org_admin` `["ehr", "lab", "pharmacy", "migrate", "outreach"]`.
 
 The product is bound to the session, not to the `Origin` of each refresh (the
 `Origin` is the client's to set). A staff session issued on a product site
