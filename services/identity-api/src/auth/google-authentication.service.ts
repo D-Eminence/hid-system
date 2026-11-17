@@ -14,6 +14,7 @@ import type { SessionEventMetadata } from './token.service';
 import { TokenService } from './token.service';
 import { recordAccountSecurityNotice } from './account-security-notice';
 import { loginPrincipalKey } from './patient-principal';
+import { isProductGateRefusal } from './product-gate';
 import { createContactLookupHmac } from '../identity/contact-lookup';
 
 const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.com'] as const;
@@ -362,7 +363,10 @@ export class GoogleAuthenticationService {
         actorKind,
         authenticationMethod: 'oidc',
       }, event);
-    } catch {
+    } catch (error) {
+      // Q88: a staff account this site's product does not admit, or one with
+      // no membership yet, is told so, as after a right password.
+      if (actorKind === 'staff' && isProductGateRefusal(error)) throw error;
       // A link can point to an inactive or wrong-kind account. It must not
       // trigger a fallback account/patient creation or reveal why it failed.
       throw this.denied();

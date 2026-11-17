@@ -4,7 +4,7 @@ import { AuthService } from '../auth/auth.service';
 import type { LoginDto } from '../auth/dto/login.dto';
 import { setSessionCookies } from '../auth/session-cookies';
 import { TurnstileService } from '../auth/turnstile.service';
-import { AuditAction, AuditFailuresOnly, FacilityOptional, Public } from '../common/decorators';
+import { AccountOnlyAllowed, AuditAction, AuditFailuresOnly, FacilityOptional, NoAudit, Public } from '../common/decorators';
 import { assertAccountless, assertAllowedOrigin, singleCookie } from '../common/public-flow-guards';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -147,9 +147,19 @@ export class OutreachOrganiserController {
  * decision 5): the same login runs an outreach group beside any hospital
  * roles it holds. A staff session with CSRF; no X-Facility-ID and no
  * permission, because the account does not yet belong to the new group.
+ *
+ * Q88-2: an account-only session (a verified staff login with no membership
+ * yet, signed in on outreach.) may use both routes. No interceptor row (as
+ * the signed-in staff invitation routes, S5): with no X-Facility-ID the row
+ * would be a staff row with no facility, which the audit layer refuses, so
+ * the answer became 503. The start command writes its own success row at the
+ * new group (identity.create_outreach_group, 0115); availability reads only
+ * the public switch.
  */
 @Controller('identity/outreach-organisers/for-my-account')
 @FacilityOptional()
+@AccountOnlyAllowed()
+@NoAudit()
 export class OutreachOrganiserAccountController {
   constructor(private readonly organisers: OutreachOrganiserService) {}
 

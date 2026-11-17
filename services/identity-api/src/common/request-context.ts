@@ -41,6 +41,14 @@ export interface ActorContext {
   facility?: FacilityAssignment;
   role?: string;
   authenticationMethod: 'local' | 'oidc';
+  /**
+   * A verified staff login with no facility membership yet, signed in on
+   * outreach. (Q88-2): no facility, no permission. The security guard lets it
+   * reach only the routes marked @AccountOnlyAllowed ("Start an outreach
+   * group" and the session routes it needs) and answers every other route
+   * 403 NO_ACTIVE_FACILITY_MEMBERSHIP.
+   */
+  accountOnly?: true;
 }
 
 export interface HidRequest extends Request {

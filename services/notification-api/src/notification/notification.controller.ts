@@ -9,7 +9,7 @@ import { DeliverAccountDeletionDto } from './dto/deliver-account-deletion.dto';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
 import { DeliverContactChangedDto, DeliverEmailChangeCodeDto, DeliverPasswordResetCodeDto, DeliverPasswordUpdatedDto,
-  DeliverPatientWelcomeDto } from './dto/deliver-patient-emails.dto';
+  DeliverPatientWelcomeDto, DeliverStaffPasswordResetCodeDto } from './dto/deliver-patient-emails.dto';
 import { DeliverPatientShareInvitationDto, DeliverRecordAccessAlertDto, DeliverShareReceivedDto }
   from './dto/deliver-sharing-emails.dto';
 import { DeliverStaffInvitationDto } from './dto/deliver-staff-invitation.dto';
@@ -133,6 +133,22 @@ export class NotificationController {
     await this.authenticateEmailRequest(request, idempotencyKey, input);
     const result = await this.notifications.deliverPasswordResetCode({ recipient: input.recipient,
       code: input.code, ...(input.firstName ? { firstName: input.firstName } : {}), healthId: input.healthId,
+      expiresInMinutes: input.expiresInMinutes, idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /**
+   * A staff account's password reset code in the patient code's design (owner
+   * decision of 17 November 2026, Q89). Its own route, so an older
+   * notification-api answers a newer Identity 404 and Identity sends the
+   * generic code instead.
+   */
+  @Post('staff-password-reset-code') @HttpCode(202)
+  async staffPasswordResetCode(@Body() input: DeliverStaffPasswordResetCodeDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverStaffPasswordResetCode({ recipient: input.recipient,
+      code: input.code, ...(input.firstName ? { firstName: input.firstName } : {}),
       expiresInMinutes: input.expiresInMinutes, idempotencyKey: idempotencyKey! }, input.plan);
     return this.response(result);
   }

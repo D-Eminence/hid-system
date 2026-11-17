@@ -3,6 +3,8 @@ import type { ActorContext, FacilityAssignment, FacilitySelfService } from '../c
 import { DatabaseService } from '../database/database.service';
 import type { CredentialIdentity } from './auth.types';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
+import { facilityFitsProduct, NoActiveFacilityMembershipProblem, ProductNotAuthorisedProblem,
+  type StaffProduct } from './product-gate';
 
 interface StaffContextRow {
   account_id: string;
@@ -95,6 +97,30 @@ export const STAFF_CONTEXT_SQL = `select grouped.*, state.review_state, state.or
 
 const SELF_SERVICE_REVIEW_STATES = new Set(['pending', 'reviewed']);
 
+/**
+ * Whether an active account with no facility membership is a verified staff
+ * login (Q88-2): an active staff record with a verified status, no platform
+ * role assignment at all (revoked ones aside) and not one of the sealed demo
+ * tenant's accounts (0098's identity.sealed_demo_ids, granted to this
+ * runtime). The same conditions identity.activate_outreach_organiser_for_account
+ * (0115) checks before it starts an outreach group for an account.
+ */
+export const VERIFIED_STAFF_WITHOUT_MEMBERSHIP_SQL = `select
+         exists (select 1 from identity.staff staff
+                  where staff.account_id = $1::uuid
+                    and staff.active
+                    and lower(btrim(staff.verification_status)) = any($2::text[])) as verified_staff,
+         exists (select 1 from auth.account_roles assignment
+                  where assignment.account_id = $1::uuid
+                    and assignment.scope_type = 'platform'
+                    and assignment.revoked_at is null) as platform_role,
+         ($1::uuid = any(coalesce((select identity.sealed_demo_ids('account'))::uuid[], array[]::uuid[]))) as sealed_demo`;
+
+/** How a staff session is resolved: the product of the site it is used on, when that site is a product site. */
+export interface StaffResolution {
+  product?: StaffProduct;
+}
+
 @Injectable()
 export class CurrentStaffContextService {
   constructor(private readonly database: DatabaseService) {}
@@ -104,8 +130,10 @@ export class CurrentStaffContextService {
     authenticationMethod: ActorContext['authenticationMethod'],
     sessionId?: string,
     preferredFacilityId?: string,
+    resolution: StaffResolution = {},
   ): Promise<ActorContext> {
     let identity = await this.resolvePostgres(subject, authenticationMethod);
+    const hasMembership = identity !== undefined && identity.facilities.length > 0;
     if (!identity) {
       const account = await this.database.query<{ id: string; email: string | null; display_name: string | null }>(
         `select id::text, email, display_name from auth.accounts
@@ -119,7 +147,40 @@ export class CurrentStaffContextService {
         displayName: row.display_name ?? subject, facilities: [], authenticationMethod };
     }
     const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
-    return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
+    const product = resolution.product;
+    if (hasMembership) {
+      if (product) {
+        // Q88-1: only the memberships whose permissions fit this site's product.
+        const fitting = identity.facilities.filter((facility) => facilityFitsProduct(facility, product));
+        if (fitting.length === 0) throw new ProductNotAuthorisedProblem(product, identity.subject);
+        identity = { ...identity, facilities: fitting };
+      }
+      return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
+    }
+    // No active membership. A platform administrator keeps today's session
+    // on a site with no product (admin.); on a product site no facility fits.
+    if (platformAuthority.permissions.includes('platform.admin.access')) {
+      if (product) throw new ProductNotAuthorisedProblem(product, identity.subject);
+      return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
+    }
+    // Q88-2: a verified staff login with no membership yet. On outreach. it
+    // gets an account-only session (no facility) for "Start an outreach
+    // group"; on every other site it is told so. Anyone else keeps the
+    // wrong-password answer (LOGIN-DETAIL-ORACLE).
+    if (!(await this.verifiedStaffWithoutMembership(identity.accountId))) {
+      throw new UnauthorizedException('Staff account or facility membership is inactive');
+    }
+    if (product !== 'outreach') throw new NoActiveFacilityMembershipProblem(identity.subject);
+    return { ...this.toActor(identity, platformAuthority, sessionId, undefined, true), accountOnly: true as const };
+  }
+
+  /** Q88-2's eligibility, read only for an active account that has no active membership. */
+  private async verifiedStaffWithoutMembership(accountId: string | undefined): Promise<boolean> {
+    if (!accountId) return false;
+    const result = await this.database.query<{ verified_staff: boolean; platform_role: boolean; sealed_demo: boolean }>(
+      VERIFIED_STAFF_WITHOUT_MEMBERSHIP_SQL, [accountId, [...ACTIVE_STAFF_VERIFICATION_STATUSES]]);
+    const row = result?.rows?.[0];
+    return row?.verified_staff === true && row.platform_role === false && row.sealed_demo === false;
   }
 
   private async resolvePostgres(
@@ -174,6 +235,7 @@ export class CurrentStaffContextService {
     platformAuthority: PlatformAuthorityRow,
     sessionId?: string,
     preferredFacilityId?: string,
+    accountOnly = false,
   ): ActorContext {
     const facilities = [...identity.facilities].sort((left, right) => {
       if (left.isPrimary !== right.isPrimary) return left.isPrimary ? -1 : 1;
@@ -182,7 +244,7 @@ export class CurrentStaffContextService {
     const selected = facilities.find((facility) => facility.id === preferredFacilityId)
       ?? facilities.find((facility) => facility.isPrimary)
       ?? facilities[0];
-    if (!selected && !platformAuthority.permissions.includes('platform.admin.access')) {
+    if (!selected && !accountOnly && !platformAuthority.permissions.includes('platform.admin.access')) {
       throw new UnauthorizedException('Staff account or facility membership is inactive');
     }
     return {

@@ -8,6 +8,7 @@ import type { ActorContext } from '../common/request-context';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
 import { CurrentStaffContextService } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
+import { isProductGateRefusal, isStaffProduct, productForOrigin, type StaffProduct } from './product-gate';
 
 interface SessionRow {
   session_kind?: 'staff' | 'patient';
@@ -34,6 +35,17 @@ export interface SessionEventMetadata {
   pepperVersion?: number;
   /** The browser's Origin, when it sent one: an outreach. origin gets the short idle lock. */
   origin?: string;
+  /**
+   * The staff product of the site the request came from (product-gate.ts),
+   * when it is a product site: a staff session keeps only the memberships
+   * that fit it (Q88-1). Read from `origin` when not given.
+   */
+  product?: StaffProduct;
+}
+
+/** The product a staff sign-in or refresh is gated by: the event's, else its Origin's. */
+function eventProduct(event: SessionEventMetadata): StaffProduct | undefined {
+  return event.product ?? productForOrigin(event.origin);
 }
 
 /** Whether an Origin is an outreach. site (production, staging or a sub-environment). */
@@ -66,10 +78,13 @@ export class TokenService {
 
   async issue(identity: CredentialIdentity, event: SessionEventMetadata): Promise<LoginResult> {
     const authenticationMethod = identity.authenticationMethod;
+    const product = eventProduct(event);
     const resolvedActor = await this.resolveActor(
       identity.subject,
       identity.authenticationMethod,
       identity.actorKind ?? 'staff',
+      undefined,
+      product,
     );
     if (identity.accountId && identity.accountId !== resolvedActor.accountId) {
       throw new UnauthorizedException('Resolved account does not match the authenticated identity');
@@ -90,7 +105,8 @@ export class TokenService {
     const refreshExpiresAt = new Date(Math.min(now.getTime() + lifetimes.refreshSeconds * 1_000,
       absoluteExpiresAt.getTime()));
     const tokenVersion = await this.accountTokenVersion(actor.accountId);
-    const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt);
+    const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt,
+      actor.kind === 'patient' ? undefined : product);
 
     await this.database.withSystemTransaction(event.correlationId, async (client) => {
       if (identity.passwordUpgrade) {
@@ -184,7 +200,10 @@ export class TokenService {
     if (this.databaseMethod(authenticationMethod) !== oldSession.authentication_method) {
       throw new UnauthorizedException('Invalid refresh session');
     }
-    const actor = await this.resolveActor(oldSession.actor_subject, authenticationMethod, oldSession.session_kind ?? 'staff');
+    // Q88-1: the refresh re-applies the product gate of the site it comes from.
+    const product = (oldSession.session_kind ?? 'staff') === 'staff' ? eventProduct(event) : undefined;
+    const actor = await this.resolveActor(oldSession.actor_subject, authenticationMethod,
+      oldSession.session_kind ?? 'staff', undefined, product);
     if (actor.accountId !== oldSession.account_id) {
       throw new UnauthorizedException('Invalid refresh session');
     }
@@ -205,7 +224,7 @@ export class TokenService {
       oldSession.absolute_expires_at.getTime(),
     ));
     const accessToken = await this.signAccessToken(
-      actor, newSessionId, accessJti, accountTokenVersion, csrfToken, accessExpiresAt,
+      actor, newSessionId, accessJti, accountTokenVersion, csrfToken, accessExpiresAt, product,
     );
 
     try {
@@ -264,7 +283,14 @@ export class TokenService {
     }).catch(() => { throw new UnauthorizedException('Invalid or expired access token'); });
     const claims = this.parseInternalClaims(payload);
     await this.assertSessionActive(claims);
-    const actor = await this.resolveActor(claims.sub, claims.auth_method, claims.actor_kind ?? 'staff', claims.sid);
+    // Q88-1: every request keeps the product gate the session was issued
+    // under. A session that no longer fits it (a membership ended meanwhile)
+    // ends as one whose membership ended always has: 401.
+    const actor = await this.resolveActor(claims.sub, claims.auth_method, claims.actor_kind ?? 'staff', claims.sid,
+      claims.actor_kind === 'patient' ? undefined : claims.product).catch((error: unknown) => {
+      if (isProductGateRefusal(error)) throw new UnauthorizedException('Session no longer fits this site');
+      throw error;
+    });
     if (actor.kind === 'patient' && actor.patientId !== claims.patient_id) {
       throw new UnauthorizedException('Patient account association changed');
     }
@@ -320,7 +346,11 @@ export class TokenService {
       algorithms: ['RS256', 'ES256'],
     }).catch(() => { throw new UnauthorizedException('Invalid or expired access token'); });
     if (!payload.sub) throw new UnauthorizedException('Token subject is missing');
-    return { claims: payload, actor: await this.currentStaff.resolve(payload.sub, 'oidc') };
+    const actor = await this.currentStaff.resolve(payload.sub, 'oidc').catch((error: unknown) => {
+      if (isProductGateRefusal(error)) throw new UnauthorizedException('Staff account or facility membership is inactive');
+      throw error;
+    });
+    return { claims: payload, actor };
   }
 
   private async signAccessToken(
@@ -330,6 +360,7 @@ export class TokenService {
     tokenVersion: number,
     csrfToken: string,
     expiresAt: Date,
+    product?: StaffProduct,
   ): Promise<string> {
     if (!this.signingKey) throw new Error('Internal token signing is not configured');
     return new SignJWT({
@@ -346,6 +377,7 @@ export class TokenService {
       auth_method: actor.authenticationMethod,
       csrf_hash: this.sha256Base64(csrfToken),
       token_version: tokenVersion,
+      ...(product ? { product } : {}),
     } satisfies Omit<HidJwtClaims, keyof JWTPayload>)
       .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
       .setSubject(actor.subject)
@@ -370,6 +402,9 @@ export class TokenService {
     if (payload.actor_kind === 'patient' && typeof payload.patient_id !== 'string') {
       throw new UnauthorizedException('Patient identity binding is missing');
     }
+    if (payload.product !== undefined && !isStaffProduct(payload.product)) {
+      throw new UnauthorizedException('Invalid product');
+    }
     return {
       ...payload,
       sub: payload.sub,
@@ -384,6 +419,7 @@ export class TokenService {
       patient_id: typeof payload.patient_id === 'string' ? payload.patient_id : undefined,
       csrf_hash: typeof payload.csrf_hash === 'string' ? payload.csrf_hash : undefined,
       token_version: payload.token_version,
+      product: isStaffProduct(payload.product) ? payload.product : undefined,
     };
   }
 
@@ -534,13 +570,16 @@ export class TokenService {
     method: ActorContext['authenticationMethod'],
     kind: 'staff' | 'patient',
     sessionId?: string,
+    product?: StaffProduct,
   ): Promise<ActorContext> {
     if (kind === 'patient') {
       if (!this.currentPatient) throw new UnauthorizedException('Patient session is unavailable');
       const patient = await this.currentPatient.resolve(subject, sessionId);
       return { ...patient, authenticationMethod: method };
     }
-    return this.currentStaff.resolve(subject, method, sessionId);
+    return product
+      ? this.currentStaff.resolve(subject, method, sessionId, undefined, { product })
+      : this.currentStaff.resolve(subject, method, sessionId);
   }
 
   private refreshMethod(token: string): 'local' | 'oidc' {

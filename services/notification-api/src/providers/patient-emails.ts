@@ -48,6 +48,29 @@ export function passwordResetCodeContent(input: {
 }
 
 /**
+ * A staff account's password reset code (owner decision of 17 November 2026,
+ * Q89), in the patient reset code's layout: the same subject, header, code
+ * box and expiry line, the staff member greeted by first name (or "Hello
+ * there,") and no Health ID, which a staff account does not have.
+ */
+export function staffPasswordResetCodeContent(input: {
+  firstName?: string;
+  code: string;
+  expiresInMinutes: number;
+}): MessageContent {
+  const minutes = `${input.expiresInMinutes} minute${input.expiresInMinutes === 1 ? '' : 's'}`;
+  return content('Your Health ID password reset code', {
+    accent: '#1a6fd4',
+    heading: 'Health ID Security',
+    ...(input.firstName ? { greetingName: input.firstName } : {}),
+    paragraphs: ['A password reset was requested for your Health ID staff account. Use the code below to continue.'],
+    codeBox: { label: 'Verification Code', value: input.code, letterSpacing: '0.24em' },
+    closing: [`This code expires in ${minutes}. If you did not request this reset, ignore this message `
+      + 'and consider changing your password after you sign in.'],
+  });
+}
+
+/**
  * "Your Health ID password was updated", after a completed reset (hid-1.0
  * renderPasswordResetConfirmationEmail). It names the Health ID when Identity
  * sent one, and Health ID support's address.

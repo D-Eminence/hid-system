@@ -1,5 +1,6 @@
 import type { JWTPayload } from 'jose';
 import type { ActorContext, FacilityAssignment } from '../common/request-context';
+import type { StaffProduct } from './product-gate';
 
 export interface HidJwtClaims extends JWTPayload {
   actor_kind?: 'staff' | 'patient';
@@ -16,6 +17,8 @@ export interface HidJwtClaims extends JWTPayload {
   auth_method: 'local' | 'oidc';
   csrf_hash?: string;
   token_version: number;
+  /** The staff product site the session was issued or refreshed on (Q88-1); absent elsewhere. */
+  product?: StaffProduct;
 }
 
 export interface LoginResult {

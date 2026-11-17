@@ -7,7 +7,7 @@ import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { RecoveryOtpPurpose } from './dto/otp.dto';
-import { emailFirstName } from './email-first-name';
+import { emailFirstName, staffEmailFirstName } from './email-first-name';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
 import { consumeRateLimit, lockRateLimitBucket, rateLimitBlocked } from './rate-limit';
 import { recordAccountSecurityNotice } from './account-security-notice';
@@ -32,6 +32,10 @@ const NO_ACCOUNT = '00000000-0000-0000-0000-000000000000';
 interface RecoveryRecipient { channel: 'email' | 'sms'; value: string }
 /** Who a patient email names: their first name (if any) and Health ID. */
 interface PatientNaming { firstName?: string; healthId: string }
+/** Who a staff reset email greets (Q89): the display name's first name, if any. */
+interface StaffNaming { firstName?: string }
+/** Who asked for the code: a staff site's reset (staff-reset, admin-reset) or the patient portal's. */
+export type RecoveryAudience = 'staff' | 'patient';
 interface ActiveChallengeRow { id: string; cooling: boolean }
 interface StartCooldownRow { challenge_id: string; cooling: boolean }
 interface ChallengeRow {
@@ -98,6 +102,8 @@ export class OtpService implements BeforeApplicationShutdown {
     purpose: RecoveryOtpPurpose;
     remoteIp?: string;
     correlationId: string;
+    /** 'staff' for a staff site's or the admin site's reset (Q89); the patient portal's otherwise. */
+    audience?: RecoveryAudience;
   }): Promise<{
     accepted: true;
     challengeId: string;
@@ -124,7 +130,7 @@ export class OtpService implements BeforeApplicationShutdown {
     const candidateChallengeId = randomUUID();
 
     const challenge = await this.database.withSystemTransaction(input.correlationId, async (client): Promise<
-      { kind: 'challenge'; id: string; recipient: RecoveryRecipient; patient?: PatientNaming }
+      { kind: 'challenge'; id: string; recipient: RecoveryRecipient; patient?: PatientNaming; staff?: StaffNaming }
       | { kind: 'none' }
       | { kind: 'rate_limited' }
       | { kind: 'cooldown'; id: string }
@@ -247,9 +253,16 @@ export class OtpService implements BeforeApplicationShutdown {
       // "Someone asked to reset your Health ID password" in the patient's
       // inbox, in this transaction (0093; nothing for a staff-only account,
       // at most once an hour).
+      // Q89: a staff site's or the admin site's reset code by email, for an
+      // account that is not a patient the email could name, greets the staff
+      // member by the first name of the account's display name.
+      const staff = !patient && input.audience === 'staff' && input.purpose === 'PASSWORD_RESET'
+        && recipient.channel === 'email'
+        ? await this.staffNaming(client, account.id) : undefined;
       await recordAccountSecurityNotice(client, account.id, 'SECURITY_PASSWORD_RESET_REQUESTED', this.logger,
         input.correlationId);
-      return { kind: 'challenge', id: candidateChallengeId, recipient, ...(patient ? { patient } : {}) };
+      return { kind: 'challenge', id: candidateChallengeId, recipient, ...(patient ? { patient } : {}),
+        ...(staff ? { staff } : {}) };
     });
 
     if (challenge.kind === 'rate_limited') throw this.rateLimited();
@@ -258,12 +271,18 @@ export class OtpService implements BeforeApplicationShutdown {
       // wait for it: its timing would tell that the account exists. The
       // delivery request starts here, synchronously; its outcome is recorded
       // after the response.
-      const { id, recipient, patient } = challenge;
+      const { id, recipient, patient, staff } = challenge;
       this.deliveries.run(input.correlationId, async () => {
         const delivery = patient
           ? await this.notification.deliverPasswordResetCode({
             challengeId: id, recipient: recipient.value, code,
             ...(patient.firstName ? { firstName: patient.firstName } : {}), healthId: patient.healthId,
+            expiresInMinutes: Math.ceil(this.environment.OTP_EXPIRY_SECONDS / 60),
+            correlationId: input.correlationId,
+          })
+          : staff ? await this.notification.deliverStaffPasswordResetCode({
+            challengeId: id, recipient: recipient.value, code,
+            ...(staff.firstName ? { firstName: staff.firstName } : {}),
             expiresInMinutes: Math.ceil(this.environment.OTP_EXPIRY_SECONDS / 60),
             correlationId: input.correlationId,
           })
@@ -449,6 +468,14 @@ export class OtpService implements BeforeApplicationShutdown {
   }
 
   /** A patient's first name and Health ID as an email names them, or undefined without a valid Health ID. */
+  /** The staff reset email's greeting (Q89): auth.accounts.display_name's first name, titles dropped. */
+  private async staffNaming(client: PoolClient, accountId: string): Promise<StaffNaming> {
+    const row = (await client.query<{ display_name: string | null }>(
+      'select display_name from auth.accounts where id = $1::uuid', [accountId])).rows[0];
+    const firstName = staffEmailFirstName(row?.display_name);
+    return firstName ? { firstName } : {};
+  }
+
   private patientNaming(firstName: string | null | undefined, hidCode: string | null | undefined): PatientNaming | undefined {
     if (!hidCode || !/^HID-[A-HJ-NP-Z2-9]{6,32}$/.test(hidCode)) return undefined;
     const name = emailFirstName(firstName);
