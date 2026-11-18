@@ -110,6 +110,26 @@ export class VersionedUpdateDto {
   changeReason!: string;
 }
 
+/**
+ * FR-1 (18 Nov 2026): the reason may be left out, but only where the service
+ * can record a fixed reason instead (the first signature of a draft note, the
+ * first activation of a draft prescription; see shared/change-reason.ts).
+ * Every other change without a reason answers 400 CHANGE_REASON_REQUIRED
+ * ("Please say why you are changing this."). When given, the same rules as
+ * VersionedUpdateDto apply (trimmed, 3 to 500 characters, never null).
+ */
+export class OptionalReasonVersionedUpdateDto {
+  @IsInt()
+  @Min(1)
+  expectedRowVersion!: number;
+
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(3, 500)
+  changeReason?: string;
+}
+
 export class CreateEncounterDto {
   @IsOptionalButNotNull()
   @Transform(trim)
@@ -174,7 +194,7 @@ export class CreateClinicalNoteDto {
   content!: string;
 }
 
-export class UpdateClinicalNoteDto extends VersionedUpdateDto {
+export class UpdateClinicalNoteDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()
   @Transform(trim)
   @IsString()
@@ -461,7 +481,7 @@ export class CreatePrescriptionWithDetailsDto extends CreatePrescriptionDto {
   quantityUnit?: string;
 }
 
-export class UpdatePrescriptionDto extends VersionedUpdateDto {
+export class UpdatePrescriptionDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()
   @IsEnum(OrderStatus)
   status?: OrderStatus;
@@ -565,7 +585,7 @@ export class CreateLabRequestDto {
   externalOrderReference?: string;
 }
 
-export class UpdateLabRequestDto extends VersionedUpdateDto {
+export class UpdateLabRequestDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()
   @IsEnum(LabPriority)
   priority?: LabPriority;

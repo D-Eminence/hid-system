@@ -11,6 +11,7 @@ import {
   UpdateLabRequestDto,
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { requireChangeReason } from '../shared/change-reason';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
@@ -314,6 +315,9 @@ export class LabRequestsService {
     if (input.priority === undefined && input.status === undefined && input.clinicalInformation === undefined) {
       throw new DomainProblem(400, 'EMPTY_UPDATE', 'At least one clinical field must be supplied');
     }
+    // FR-1: every lab-request change still needs a typed reason. The first
+    // activation of a lab request waits for owner question 6.
+    const changeReason = requireChangeReason(input.changeReason);
     const { row, routedBefore, orderRoute } = await this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.lab-request.update', resourceType: 'lab-request', resourceId: requestId },
@@ -325,7 +329,7 @@ export class LabRequestsService {
         // Read under the row lock, which C1 takes first, so no route can be
         // sent between this read and the update (SPEC-FINAL §8.9).
         const before = await this.orderRoutes.summary(client, context, 'lab_request', patientId, requestId);
-        await this.repository.setChangeReason(client, input.changeReason);
+        await this.repository.setChangeReason(client, changeReason);
         const result = await client.query<CreatedLabRequestRow>(
           `update ehr.lab_requests set
              priority = coalesce($1, priority), status = coalesce($2, status),

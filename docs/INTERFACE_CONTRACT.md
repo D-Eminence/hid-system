@@ -6022,3 +6022,65 @@ staff or patient sign-in of the client's kind, never changed or deleted:
 INSERT` on the first and `SELECT, INSERT, DELETE` on the second; no other
 runtime holds anything on either. The suite is
 `services/ehr-api/database/tests/sso-relying-party.integration.sql`.
+
+## FR-1. No typed reason for a first signature or a first activation (wave 1, no migration)
+
+Owner decision of 18 November 2026: signing a note or activating a
+prescription for the first time needs no typed reason. A reason is still
+needed to change anything already signed or active. ehr-api only; no
+migration, no new setting. `schema.integration.sql` is unchanged.
+
+### Request bodies
+
+`changeReason` becomes optional in three bodies only: `PATCH
+/ehr/patients/:patientId/encounters/:encounterId/clinical-notes/:noteId`
+(UpdateClinicalNote), `PATCH .../prescriptions/:prescriptionId`
+(UpdatePrescription) and `PATCH .../lab-requests/:requestId`
+(UpdateLabRequest). When it is sent, the rules are unchanged: a string,
+trimmed, 3 to 500 characters, never `null` (`400` from validation
+otherwise). Every other body that carries `changeReason` (visits,
+diagnoses, note revisions, vitals corrections) still requires it.
+
+### When the server records a fixed reason
+
+| Change | Typed reason | What is recorded in `ehr.record_versions.change_reason` |
+| --- | --- | --- |
+| A draft note signed (`status: "signed"`) with no other field (no `title`), and the note's version history shows it was never signed or amended | Not needed | `First signature (no reason needed)` |
+| A draft prescription activated (`status: "active"`) with no other field (no `frequency`, `instructions` or `endsOn`; `allergyAcknowledgement` may be sent), and its version history shows it was never active, on hold or completed | Not needed | `First activation (no reason needed)` |
+| Either of the above with a typed reason | Optional | The typed reason |
+| Anything else: amend, hold, resume after a hold, stop or cancel, entered in error, any edit (drafts included), any lab-request change | **Required** | The typed reason |
+
+"First" is checked against the record's version history, not only its
+current status, and fails closed: if the record's create version cannot be
+read, a reason is required. The `record_versions` row still records who
+changed it and when, as before.
+
+A missing reason where one is required answers:
+
+```
+400 { "code": "CHANGE_REASON_REQUIRED", "detail": "Please say why you are changing this.", ... }
+```
+
+before anything is written. For prescriptions the reason rule is decided
+before the allergy check; the allergy check itself is unchanged, so an
+allergy match on a first activation still answers `409
+ALLERGY_ACKNOWLEDGEMENT_REQUIRED` until the acknowledgement is sent. For lab
+requests the `400` answers before the request reaches the database.
+
+### Audit
+
+When a fixed reason is used, the update's audit row (`ehr.note.update` or
+`ehr.prescription.update`) carries `fixedReason: "first_signature"` or
+`"first_activation"`. With a typed reason the audit details are unchanged
+(the typed text is never in the audit row).
+
+### Not yet covered (owner question 6, pending)
+
+The first activation of a lab request, starting and completing a visit, and
+edits to drafts still need a typed reason.
+
+### Screen change needed (Akos frontend branch)
+
+The note "Sign" and prescription "Activate" actions may send no
+`changeReason`. Every other change keeps asking for a reason and shows the
+server's plain message on `CHANGE_REASON_REQUIRED`.

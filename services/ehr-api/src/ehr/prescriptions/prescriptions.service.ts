@@ -5,6 +5,7 @@ import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import { AcceptPrescriptionForPharmacyDto, OrderStatus, TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
@@ -205,6 +206,17 @@ export class PrescriptionsService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
         }
+        // FR-1: the first activation of a draft, with no other change, needs no
+        // typed reason; the fixed one is recorded. "First" is checked against
+        // the version history (a resume after a hold is not first). Decided
+        // before the allergy check, whose 409 is unchanged.
+        const firstActivation = input.changeReason === undefined
+          && current.status === OrderStatus.Draft && input.status === OrderStatus.Active
+          && input.frequency === undefined && input.instructions === undefined && input.endsOn === undefined
+          && await neverReachedBefore(client, 'prescriptions', prescriptionId,
+            [OrderStatus.Active, OrderStatus.OnHold, OrderStatus.Completed]);
+        const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason,
+          firstActivation ? 'first_activation' : undefined);
         // 0117: Activate (draft) and Resume (on hold) check the allergies again: one may have been
         // recorded since the prescription was saved. A match already covered by a stored reason for
         // this prescription needs none.
@@ -213,7 +225,7 @@ export class PrescriptionsService {
           ? await checkPrescriptionAllergies(client, context, patientId,
             { display: current.medicationDisplay, code: current.medicationCode }, input.allergyAcknowledgement, current.id)
           : [];
-        await this.repository.setChangeReason(client, input.changeReason);
+        await this.repository.setChangeReason(client, reason);
         const result = await client.query<PrescriptionRow>(
           `update ehr.prescriptions set
              status = coalesce($1, status), frequency = coalesce($2, frequency),
@@ -231,9 +243,10 @@ export class PrescriptionsService {
           const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
             current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement);
           return { value: this.details.project(row), resourceId: prescriptionId,
-            details: { rowVersion: row.rowVersion, ...override } };
+            details: { rowVersion: row.rowVersion, ...reasonDetails, ...override } };
         }
-        return { value: this.details.project(row), resourceId: prescriptionId, details: { rowVersion: row.rowVersion } };
+        return { value: this.details.project(row), resourceId: prescriptionId,
+          details: { rowVersion: row.rowVersion, ...reasonDetails } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );

@@ -11,6 +11,7 @@ import {
   UpdateClinicalNoteDto,
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
 
 export interface ClinicalNoteRow extends QueryResultRow {
   id: string;
@@ -327,8 +328,14 @@ export class ClinicalNotesService {
       async (client) => {
         const current = await this.lockNote(client, context, patientId, encounterId, noteId);
         this.validateTransition(current, input);
-        await this.repository.setChangeReason(client, input.changeReason);
         const signing = input.status === NoteStatus.Signed && current.status === 'draft';
+        // FR-1: the first signature of a draft, with no other change, needs no
+        // typed reason; the fixed one is recorded. Anything else needs one.
+        const firstSignature = signing && input.title === undefined && input.changeReason === undefined
+          && await neverReachedBefore(client, 'clinical_notes', noteId, ['signed', 'amended']);
+        const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason,
+          firstSignature ? 'first_signature' : undefined);
+        await this.repository.setChangeReason(client, reason);
         const result = await client.query<ClinicalNoteRow>(
           `update ehr.clinical_notes set
              title = coalesce($1, title), status = coalesce($2, status),
@@ -350,7 +357,7 @@ export class ClinicalNotesService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Clinical note changed since it was loaded');
-        return { value: row, resourceId: noteId, details: { rowVersion: row.rowVersion } };
+        return { value: row, resourceId: noteId, details: { rowVersion: row.rowVersion, ...reasonDetails } };
       },
       (client) => this.repository.exists(client, 'clinical_notes', noteId, patientId, context.facilityId, encounterId),
     );
