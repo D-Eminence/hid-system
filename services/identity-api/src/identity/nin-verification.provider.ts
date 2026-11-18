@@ -41,16 +41,15 @@ export function assertSafeNinVerificationResult(
       && !['female', 'male', 'intersex', 'other', 'unknown'].includes(demographics.gender))) throw invalid();
 }
 
+/** What the desk sees when NIN checks are switched off (NIN_PROVIDER_MODE=unavailable). */
+export const NIN_NOT_CONFIGURED_DETAIL = 'NIN verification is not configured';
+
 @Injectable()
 export class UnavailableNinVerificationProvider implements NinVerificationProvider {
   readonly name = 'unavailable';
 
   async verify(_request: NinVerificationRequest): Promise<NinVerificationResult> {
-    throw new DomainProblem(
-      503,
-      'NIN_PROVIDER_UNAVAILABLE',
-      'NIN verification is not configured',
-    );
+    throw new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', NIN_NOT_CONFIGURED_DETAIL);
   }
 }
 

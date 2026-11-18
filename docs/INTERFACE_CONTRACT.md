@@ -6284,3 +6284,217 @@ completed is answered as before.
 Offer "Entered in error" on a completed visit, ask for the reason, and show
 the plain message of each `409` (for open orders, link to the visit's
 prescriptions and lab requests).
+
+## ID-0. NIN status on staff answers, and the NIN service breaker (Akos wave 1, no migration)
+
+Owner decision of 18 November 2026: screens say "NIN Verified" or "NIN Not
+Verified". The service answers one field with two values and the screen
+shows the words.
+
+### `ninStatus`
+
+`ninStatus` is `"verified"` or `"not_verified"`. No other value is ever
+returned, and no stored verification value is passed through as it is.
+
+- `"verified"`: the patient holds a NIN that was checked and has not been
+  revoked (`identity.patient_identifiers`: `identifier_type = 'nin'`,
+  `verified`, `revoked_at is null`).
+- `"not_verified"`: everything else, including a NIN that was revoked.
+
+Added to:
+
+- `POST /api/v1/identity/patient-lookup`: `patient.ninStatus`, beside
+  `patient.version`. The lookup is audited as before
+  (`identity.patient.lookup`).
+- Every registration-case answer (`POST identity/nin/resolve`,
+  `GET identity/registration-cases/:caseId`, `approve-new`,
+  `link-existing`, and their replays): top-level `ninStatus`. A case is
+  `"verified"` when its NIN was checked and, once the case points at a
+  patient, that patient still holds a checked NIN that is not revoked. Every
+  case today has a checked NIN; `"not_verified"` cases arrive with ID-2.
+- Desk search cards (ID-3a, lane B) use the same rule:
+  `services/identity-api/src/identity/nin-status.ts` exports
+  `patientHasVerifiedNinSql()` and `ninStatusOf()`.
+
+### `GET /api/v1/identity/registration-capabilities`
+
+Same permission and headers as before (`identity.registration.write`,
+`X-Facility-Id`). The answer gains `nin.available` and `withoutNin`:
+
+```json
+{
+  "nin": { "enabled": true, "state": "test-only", "available": true },
+  "withoutNin": { "enabled": false },
+  "newPatientRegistrationRequiresNin": true
+}
+```
+
+Staging (deferred) answers
+`{"nin":{"enabled":false,"state":"deferred","available":false},"withoutNin":{"enabled":false},"newPatientRegistrationRequiresNin":true}`.
+
+- `nin.available` is `false` when NIN checks are off (`enabled: false`) or the
+  breaker below is tripped; otherwise `true`.
+- `withoutNin.enabled` is `false` until ID-2 (0130) ships desk registration
+  without a NIN. `newPatientRegistrationRequiresNin` stays `true` until then.
+
+### The breaker
+
+Kept in memory in each Identity process (no table, no secret, no setting).
+
+- A `503` from the NIN service trips it at once.
+- Three other failures (a `5xx`, a bad answer, a network error) within 5
+  minutes trip it.
+- A NIN that does not match (`422 NIN_VERIFICATION_FAILED`) is an answer, not
+  a failure, and does not count. Nor does a `4xx`.
+- While tripped, `POST identity/nin/resolve` answers `503` with code
+  `NIN_PROVIDER_UNAVAILABLE` and detail "The NIN service is not answering
+  right now. Please try again in a minute." without calling the service. The
+  refusal is audited (`identity.nin.verify`, outcome `failure`). A replay of
+  an earlier request is still answered.
+- After 60 seconds one check is let through. While that check waits for its
+  answer, other checks are refused as above (so a busy desk does not send a
+  burst of charged checks to a service that may still be down). Success
+  closes the breaker and clears the count; a failure trips it again; a `4xx`
+  leaves it as it was and lets the next check through. A check with no
+  answer after 60 seconds no longer holds the place.
+- NIN checks switched off (`NIN_PROVIDER_MODE=unavailable`) are a setting,
+  not an outage: the breaker is not touched and no warning is logged. The
+  desk gets `503` `NIN_PROVIDER_UNAVAILABLE`, "NIN verification is not
+  configured", every time (not "try again in a minute"), audited as below.
+  Deferred staging is unchanged (`NIN_PROVIDER_DEFERRED`).
+
+Every failed `identity.nin.verify` audit row says whether the NIN was sent
+to the NIN service. Details are `{ provider, errorType, code, providerCalled }`:
+`providerCalled: true` when the service was asked and the check failed;
+`providerCalled: false` when nothing was sent (deferred, switched off, or the
+breaker refused it, which also adds `breaker: "open"`). `code` is the problem
+code (for example `NIN_PROVIDER_UNAVAILABLE`). No NIN is ever written.
+
+Every counted failure writes one warning log line with
+`event: "identity.nin_provider.unavailable"`, the provider name, the error
+code, the HTTP status, the failures in the last 5 minutes, the breaker state
+and the correlation id. It never holds a NIN, a name or a date of birth.
+
+### Screen change (Akos's frontend branch)
+
+Show `ninStatus` as "NIN Verified" or "NIN Not Verified" on the patient
+lookup and registration-case screens. When `nin.available` is `false`, tell
+the desk the NIN service is not answering and to try again in a minute. Do
+not offer registration without a NIN until `withoutNin.enabled` is `true`.
+
+### Tests
+
+`services/identity-api/src/identity/nin-status.spec.ts` (verified,
+not_verified and revoked on the lookup and the case answer; breaker trip,
+window, retry, recovery, log event; one check at a time while retrying, with
+two desks at once; checks switched off do not trip it; the audit row says
+whether the NIN was sent; capabilities; no answer contains the word the
+owner ruled out). `nin-deferred-staging.spec.ts` exact bodies updated.
+
+## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
+
+Default agreed in the 18 November plan: the desk sees its own cases, approvers
+see every case at the facility.
+
+```text
+GET /api/v1/identity/registration-cases?view=mine|facility[&status=...][&limit=...][&cursor=...]
+```
+
+- Permission `identity.registration.write`, `X-Facility-Id`, and
+  `X-Purpose-Of-Use` (`direct-care`, `emergency` or `healthcare-operations`,
+  as on `GET registration-cases/:caseId`). `Cache-Control: no-store`.
+- `view=mine` (the default): the cases this member's account started at this
+  facility.
+- `view=facility`: every case at this facility. It also needs
+  `identity.registration.approve`; without it the answer is `403`
+  `REGISTRATION_CASE_LIST_DENIED`, "Only staff who approve registrations can
+  see every case at this facility." (audited, outcome `denied`).
+- `status` (optional): one of `pending_new_identity_approval`,
+  `review_required`, `resolved_existing_identity`, `linked_existing`,
+  `approved_new_identity`, `rejected`, `cancelled`.
+- `limit`: 1 to 100, default 50. `cursor`: the `nextCursor` of the previous
+  page, as given. A cursor that is not one we gave answers `400`
+  `REGISTRATION_CASE_CURSOR_INVALID`, "This page link is not valid. Start
+  again from the first page."
+- Any other query parameter (for example a Health ID) answers `400`. Health
+  IDs are never taken in the URL.
+- Only cases of the facility in `X-Facility-Id` are read, whatever else the
+  member may read; another facility sees nothing.
+
+Answer, newest first:
+
+```json
+{
+  "view": "mine",
+  "cases": [
+    {
+      "caseId": "uuid",
+      "status": "approved_new_identity",
+      "version": 2,
+      "candidateCount": 0,
+      "contactRecorded": true,
+      "ninStatus": "verified",
+      "patient": { "patientId": "uuid", "hid": "HID-QX7K2M" },
+      "fullName": "Ada Fictional",
+      "dateOfBirth": "1991-04-05",
+      "createdAt": "2026-11-18T10:00:58.000Z",
+      "updatedAt": "2026-11-18T10:05:58.000Z",
+      "createdByMe": true
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+The item has the same fields as `GET registration-cases/:caseId` (with
+`ninStatus` from ID-0; `patient` only once the case points at a patient), plus
+`fullName`, `dateOfBirth`, `createdAt`, `updatedAt` and `createdByMe`. No NIN
+digits are read or returned (not even the last four), and candidates are not
+listed; open one case for them.
+
+Audit: one `identity.registration-case.list` row per answer, outcome
+`success`, details `{ view, status, page: "first" | "next", count, caseIds,
+patientIds }` (the patients the page shows). No names or dates of birth are
+written to the audit row.
+
+The facility view uses `registration_cases_facility_status_idx`
+(facility, status, created_at desc) when filtered by status; the mine view
+filters on the facility and the creating account.
+
+### Screen change (Akos's frontend branch)
+
+A "My registrations" list for the desk (`view=mine`) and an "All
+registrations" list for approvers (`view=facility`), with "NIN Verified" /
+"NIN Not Verified" from `ninStatus`, and "Load more" while `nextCursor` is
+not null. Opening a row calls `GET registration-cases/:caseId`.
+
+### Tests
+
+`services/identity-api/src/identity/registration-case-list.spec.ts`: mine and
+facility views, another facility sees nothing, the refusal and its audit row,
+the success audit row, no NIN digits in the answer or the query, paging and
+bad cursors, and query parameters (a Health ID is refused). Those run on a
+fake database; one test checks that the Postgres suite below runs the read
+the service sends, word for word.
+
+`services/ehr-api/test/database/registration-case-list.integration.sql`
+(rollback-only, run with the other ported suites by
+`scripts/run-container-database-acceptance.sh`): the exact read, under
+row-level security as `hid_identity_api_runtime` in Identity's transaction
+context. A registration member of facility B reads none of facility A's
+cases (also when naming facility A); a member without
+`identity.registration.write` reads nothing; a platform reviewer, whom
+row-level security lets read every facility, still gets only A's cases in
+A's list; `view=mine` shows only the member's own cases; the status filter;
+paging one case at a time through two cases with the same `created_at`, with
+the cursor's text in Africa/Lagos time; and `ninStatus` for a case with no
+patient yet (verified), a patient with a checked NIN (verified), a patient
+whose NIN was revoked (not verified) and one with none (not verified).
+
+`services/identity-api/src/identity/registration-case-list.http.spec.ts`
+(supertest, the real security guard, audit interceptor and the global
+validation pipe as `main.ts` sets it): `200` with `Cache-Control: no-store`
+and the audit row; `403 PERMISSION_DENIED` without
+`identity.registration.write`; `400 VALIDATION_FAILED` for
+`?hid=HID-QX7K2M`, with nothing read and the Health ID written nowhere;
+`400 PURPOSE_OF_USE_REQUIRED` without `X-Purpose-Of-Use`.

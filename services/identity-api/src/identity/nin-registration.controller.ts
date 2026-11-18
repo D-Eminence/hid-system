@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Header, Headers, Optional, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { AuditAction, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
@@ -6,20 +6,30 @@ import { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto'
 import { LinkRegistrationCaseDto } from './dto/link-registration-case.dto';
 import { ResolveNinDto } from './dto/resolve-nin.dto';
 import { EnrollPatientDto } from './dto/enroll-patient.dto';
+import { ListRegistrationCasesDto } from './dto/list-registration-cases.dto';
 import { NinRegistrationService } from './nin-registration.service';
 import { getEnvironment } from '../config/environment';
+import { NinProviderBreaker } from './nin-provider-breaker';
 
 @Controller('identity')
 export class NinRegistrationController {
-  constructor(private readonly registrations: NinRegistrationService) {}
+  constructor(
+    private readonly registrations: NinRegistrationService,
+    @Optional() private readonly ninBreaker: NinProviderBreaker = new NinProviderBreaker(),
+  ) {}
 
   @Get('registration-capabilities')
   @RequirePermissions('identity.registration.write')
   @AuditAction('identity.registration-capabilities.read')
   capabilities() {
     const mode = getEnvironment().NIN_PROVIDER_MODE;
+    const enabled = mode === 'test';
     return {
-      nin: { enabled: mode === 'test', state: mode === 'test' ? 'test-only' : mode },
+      // ID-0: `available` is false while the NIN service breaker is tripped
+      // (or NIN checks are off), so the desk knows before it asks.
+      nin: { enabled, state: enabled ? 'test-only' : mode, available: enabled && this.ninBreaker.available() },
+      // ID-0: registration without a NIN stays off until ID-2 ships.
+      withoutNin: { enabled: false },
       newPatientRegistrationRequiresNin: true,
     };
   }
@@ -35,6 +45,18 @@ export class NinRegistrationController {
     requireIdempotencyKey(idempotencyKey);
     const context = requireRequestContext(request, input.purpose);
     return this.registrations.resolve(input, idempotencyKey, context);
+  }
+
+  /**
+   * SX-10: the desk's own cases (view=mine, the default) or, for approvers,
+   * every case at this facility (view=facility). No NIN digits; audited.
+   */
+  @Get('registration-cases')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions('identity.registration.write')
+  @AuditAction('identity.registration-case.list.request')
+  listCases(@Query() query: ListRegistrationCasesDto, @Req() request: HidRequest) {
+    return this.registrations.listCases(query, requireRequestContext(request));
   }
 
   @Get('registration-cases/:caseId')

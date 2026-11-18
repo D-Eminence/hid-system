@@ -11,6 +11,7 @@ import type {
 } from './identity.types';
 import { IDENTITY_PROVIDER } from './identity.types';
 import { RecordAccessNoticeService } from './record-access-notice.service';
+import { ninStatusOf } from './nin-status';
 
 @Injectable()
 export class IdentityService {
@@ -78,6 +79,8 @@ export class IdentityService {
         dateOfBirth: patient.dateOfBirth,
         gender: patient.gender,
         version: patient.rowVersion,
+        // ID-0: "NIN Verified" or "NIN Not Verified" on screen.
+        ninStatus: ninStatusOf(patient.ninVerified),
       },
       authorization: {
         decision: 'allow' as const,
