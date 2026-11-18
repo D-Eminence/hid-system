@@ -6391,6 +6391,88 @@ two desks at once; checks switched off do not trip it; the audit row says
 whether the NIN was sent; capabilities; no answer contains the word the
 owner ruled out). `nin-deferred-staging.spec.ts` exact bodies updated.
 
+## Q108. Desk NIN check through QoreID (owner "Q108 A", no migration)
+
+`POST /api/v1/identity/nin/resolve` can now check the NIN with QoreID, the
+same check app. patient enrollment makes. No Terraform change: it is chosen
+from settings production already has.
+
+### When the desk uses QoreID
+
+- `NIN_PROVIDER_MODE=deferred` (staging) and `NIN_PROVIDER_MODE=test` are
+  unchanged.
+- `NIN_PROVIDER_MODE=unavailable` with `QOREID_ENABLED=true`: the desk uses
+  QoreID. Before every check Identity reads QoreID's switch, the same gate as
+  patient enrollment: `QOREID_ENABLED`, `QOREID_NIN_ONLY_ENROLLMENT_ENABLED`
+  and the admin integration control for QoreID NIN checks
+  (`platform.integration_runtime_provider('qoreid','patient_nin')`), never a
+  cached answer. While the switch is off the desk gets today's answer: `503`
+  `NIN_PROVIDER_UNAVAILABLE`, "NIN verification is not configured", nothing
+  sent, the breaker not touched, audited with `provider: "qoreid"` and
+  `providerCalled: false`.
+- `NIN_PROVIDER_MODE=unavailable` with `QOREID_ENABLED=false`: NIN checks stay
+  off, as before.
+
+Pausing QoreID NIN checks in the admin console pauses the desk check, app.
+patient enrollment and the patient's own NIN check together (they share the
+`patient_nin` control).
+
+### The check
+
+Only the NIN is sent (QoreID's NIN-only check). Identity compares the record
+QoreID returns with the name and date of birth the desk entered (letter case
+and spacing ignored, first and last name in that order):
+
+| QoreID's answer | Desk answer | Audit `ninCheck` |
+| --- | --- | --- |
+| the record matches | the case is recorded with `verification_provider = 'qoreid'`, QoreID's reference and the time; `ninStatus: "verified"` ("NIN Verified") | `match` (`identity.nin.verify`, `success`, written before the case; and on `identity.nin.resolve`) |
+| the NIN is not confirmed | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `no_match` (`identity.nin.verify`, `denied`) |
+| the name or date of birth differs | `422 NIN_VERIFICATION_FAILED`, "The name or date of birth does not match the NIN record. Check the spelling and the date of birth." | `name_mismatch` (`identity.nin.verify`, `denied`) |
+| QoreID fails (5xx, timeout, network, bad answer) | QoreID's own `5xx` problem; counts toward the breaker | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
+
+The case keeps the desk's spelling of the name (it equals the record's but
+for letter case and spacing) and the desk's sex, or the record's when the desk
+gave none and the record's is not "unknown". Nothing else from the record is
+kept, returned or logged. The answer never names the record's details.
+
+### Request limits
+
+Each QoreID check is charged. 0049's QoreID counters have no desk operation
+(adding one needs a migration), so desk checks are counted in the keyed
+request windows (`auth.otp_rate_limits`, HMAC buckets, no identifiers
+stored): 20 per staff account per hour, 100 per staff account per day, 300
+per facility per day. At a limit the desk gets `429 NIN_CHECK_LIMIT_REACHED`,
+"The limit of NIN checks has been reached for now. Please try again later.",
+before anything is sent; audited with `providerCalled: false`. The breaker is
+not touched.
+
+### The breaker with QoreID
+
+As ID-0: a `503` from QoreID trips it at once; three other failures within 5
+minutes trip it; QoreID's own `429` and other `4xx` answers do not count.
+QoreID switched off (before or during the check) and a request limit are not
+outages: they free the one retry place without counting. A switch that cannot
+be read answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started
+right now. Please try again in a minute.", without touching the breaker.
+
+### `GET /api/v1/identity/registration-capabilities` with QoreID
+
+- QoreID's switch on: `"nin": { "enabled": true, "state": "live", "available": <breaker> }`.
+- QoreID's switch off: `"nin": { "enabled": false, "state": "unavailable", "available": false }` (as today).
+- The switch cannot be read: `"nin": { "enabled": true, "state": "live", "available": false }`.
+
+`withoutNin` and `newPatientRegistrationRequiresNin` are unchanged here
+(Release A's lane turns `withoutNin` on).
+
+### Tests
+
+`services/identity-api/src/identity/qoreid-nin-desk.spec.ts` (choosing the
+check; match, case and spacing, no match, name and date-of-birth mismatch,
+bad records, QoreID failures; the switch off, unreadable, and switched off
+during the check; request limits; the breaker; the audit rows; capabilities;
+no NIN in an audit row or log line). The QoreID adapter is mocked: no test
+calls QoreID.
+
 ## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
 
 Default agreed in the 18 November plan: the desk sees its own cases, approvers

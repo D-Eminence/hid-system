@@ -9,7 +9,7 @@ import { DatabaseService } from '../database/database.service';
 import { CollectedFieldProtector, registrationCaseContactLabel } from './collected-field-protector';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
-import { assertSafeNinVerificationResult, NIN_NOT_CONFIGURED_DETAIL } from './nin-verification.provider';
+import { assertSafeNinVerificationResult, isNinNotConfigured, ninNotConfigured } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
@@ -183,12 +183,28 @@ export class NinRegistrationService {
       ...(input.gender ? { gender: input.gender } : {}),
     };
 
-    if (this.provider.name === 'unavailable') {
-      // ID-0: NIN checks are switched off here (NIN_PROVIDER_MODE=unavailable).
-      // That is a setting, not an outage: the breaker is not touched, nothing
-      // is logged as a failure, and the desk keeps the true message
-      // ("NIN verification is not configured"). Nothing is sent anywhere.
-      const error = new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', NIN_NOT_CONFIGURED_DETAIL);
+    // Q108: a live provider (QoreID) asks its switch for every check: the
+    // admin control and its settings, never a cached answer.
+    let switchedOn = this.provider.name !== 'unavailable';
+    if (switchedOn && this.provider.isEnabled) {
+      try {
+        switchedOn = await this.provider.isEnabled();
+      } catch (error) {
+        // The switch could not be read: nothing was sent, the breaker is not
+        // touched (this is not the NIN service failing).
+        const problem = new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE',
+          'NIN checks cannot be started right now. Please try again in a minute.');
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw problem;
+      }
+    }
+    if (!switchedOn) {
+      // ID-0: NIN checks are switched off here (NIN_PROVIDER_MODE=unavailable,
+      // or, Q108, QoreID's switch is off). That is a setting, not an outage:
+      // the breaker is not touched, nothing is logged as a failure, and the
+      // desk keeps the true message ("NIN verification is not configured").
+      // Nothing is sent anywhere.
+      const error = ninNotConfigured();
       await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
       throw error;
     }
@@ -202,6 +218,18 @@ export class NinRegistrationService {
       await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, breaker: 'open' });
       throw error;
     }
+    if (this.provider.reserve) {
+      try {
+        // Q108: each live check is charged; the request limits come first.
+        await this.provider.reserve({ correlationId: context.correlationId,
+          accountId: context.actor.accountId, facilityId: context.facilityId });
+      } catch (error) {
+        // Not sent: free the breaker's place without counting a failure.
+        this.ninBreaker.release();
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw error;
+      }
+    }
     try {
       verification = await this.provider.verify({
         nin: input.nin,
@@ -210,12 +238,20 @@ export class NinRegistrationService {
       });
       assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
     } catch (error) {
+      if (isNinNotConfigured(error)) {
+        // Q108: switched off between the switch check and the check; nothing
+        // was sent. A setting, not an outage.
+        this.ninBreaker.release();
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw error;
+      }
       this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
-      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true });
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true, ninCheck: 'provider_error' });
       throw error;
     }
     this.ninBreaker.recordSuccess();
     if (!verification.verified) {
+      const ninCheck = verification.outcome === 'name_mismatch' ? 'name_mismatch' : 'no_match';
       await this.audit.record({
         correlationId: context.correlationId,
         actorType: 'staff',
@@ -228,10 +264,29 @@ export class NinRegistrationService {
         resourceType: 'registration-case',
         outcome: 'denied',
         purposeOfUse: context.purposeOfUse,
-        details: { provider: verification.provider },
+        details: { provider: verification.provider, ninCheck },
       });
-      throw new DomainProblem(422, 'NIN_VERIFICATION_FAILED', 'The NIN could not be verified');
+      throw new DomainProblem(422, 'NIN_VERIFICATION_FAILED', ninCheck === 'name_mismatch'
+        ? 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.'
+        : 'The NIN could not be verified');
     }
+    // Q108: every NIN check is audited on its own, before the case is
+    // written, so a charged check that matched is on record even when the
+    // case then cannot be created (for example, already in a workflow).
+    await this.audit.record({
+      correlationId: context.correlationId,
+      actorType: 'staff',
+      actorSubject: context.actor.subject,
+      actorAccountId: context.actor.accountId,
+      actorMembershipId: context.membershipId,
+      organizationId: context.actor.facility?.organizationId,
+      facilityId: context.facilityId,
+      action: 'identity.nin.verify',
+      resourceType: 'registration-case',
+      outcome: 'success',
+      purposeOfUse: context.purposeOfUse,
+      details: { provider: verification.provider, ninCheck: 'match' },
+    });
 
     const caseId = randomUUID();
     let protectedNin: ProtectedNin;
@@ -371,6 +426,7 @@ export class NinRegistrationService {
         purposeOfUse: context.purposeOfUse,
         details: {
           provider: verification.provider,
+          ninCheck: 'match',
           status,
           candidateCount: candidates.length,
           matchedExistingIdentity: Boolean(existingPatient),
@@ -898,7 +954,7 @@ export class NinRegistrationService {
    * service was asked and the check failed.
    */
   private async auditFailure(context: DataAccessContext, action: string, error: unknown,
-    extra: { providerCalled?: boolean; breaker?: 'open' } = {}) {
+    extra: { providerCalled?: boolean; breaker?: 'open'; ninCheck?: 'provider_error' } = {}) {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',

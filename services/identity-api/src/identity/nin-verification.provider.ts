@@ -44,12 +44,26 @@ export function assertSafeNinVerificationResult(
 /** What the desk sees when NIN checks are switched off (NIN_PROVIDER_MODE=unavailable). */
 export const NIN_NOT_CONFIGURED_DETAIL = 'NIN verification is not configured';
 
+/** The refusal for NIN checks switched off: a setting, not an outage. */
+export function ninNotConfigured(): DomainProblem {
+  return new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', NIN_NOT_CONFIGURED_DETAIL);
+}
+
+/**
+ * Q108: true for the "switched off" refusal, which must not trip the NIN
+ * service breaker or be logged as a failure.
+ */
+export function isNinNotConfigured(error: unknown): boolean {
+  return error instanceof DomainProblem && error.code === 'NIN_PROVIDER_UNAVAILABLE'
+    && error.message === NIN_NOT_CONFIGURED_DETAIL;
+}
+
 @Injectable()
 export class UnavailableNinVerificationProvider implements NinVerificationProvider {
   readonly name = 'unavailable';
 
   async verify(_request: NinVerificationRequest): Promise<NinVerificationResult> {
-    throw new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', NIN_NOT_CONFIGURED_DETAIL);
+    throw ninNotConfigured();
   }
 }
 
