@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,copyFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding,assertGatewayVex,gatewayVexPath,
   gatewayBoundFiles,gatewayBoundFileHashes,loadGatewayVex} from './production-backend-build.mjs';
@@ -181,4 +182,30 @@ test('pack copies the committed gateway VEX into the gateway build evidence',()=
     assert.ok(text.includes("if(gatewayIgnored) writeFileSync(`${directory}/gateway-runtime.vex.json`,readFileSync(gatewayVexPath));"),script);
     assert.ok(text.includes('const gatewayVex=loadGatewayVex(c,assessment,scan);'),script);
   }
+});
+
+// The release candidate step re-checks every published scan (scripts/production-deployment.mjs).
+// It must admit the gateway exactly as the build step did: the committed VEX, bound by hash.
+test('the release candidate step admits the gateway scan only with the committed, hash-bound VEX',async()=>{
+  const {validatePublication}=await import('./production-deployment.mjs');
+  const vexFile=join(repoRoot,gatewayVexPath);
+  const vex=JSON.parse(readFileSync(vexFile));
+  const ignored=vex.statements.flatMap(s=>['libssl3','libcrypto3'].map(n=>gatewayMatch(s.vulnerability.name,n)));
+  const dir=mkdtempSync(join(tmpdir(),'hid-candidate-gw-'));
+  const write=(receipt,scan)=>{writeFileSync(join(dir,'publication.json'),JSON.stringify(receipt));writeFileSync(join(dir,'grype.json'),JSON.stringify(scan));};
+  const scan={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:ignored};
+  const sha=createHash('sha256').update(readFileSync(vexFile)).digest('hex');
+  const realNow=Date.now; Date.now=()=>Date.parse('2026-11-20T00:00:00Z');
+  try {
+    write({component:'gateway',assessment_sha256:null,vex_sha256:sha},scan);
+    assert.equal(validatePublication(dir,repoRoot).component,'gateway');
+    write({component:'gateway',assessment_sha256:null,vex_sha256:'0'.repeat(64)},scan);
+    assert.throws(()=>validatePublication(dir,repoRoot),/ASSESSMENT_BINDING_DIFFERS/);
+    write({component:'gateway',assessment_sha256:null,vex_sha256:sha},{...scan,ignoredMatches:[...ignored,gatewayMatch('CVE-2026-99999')]});
+    assert.throws(()=>validatePublication(dir,repoRoot));
+    write({component:'identity-api',assessment_sha256:null,vex_sha256:null},scan);
+    assert.throws(()=>validatePublication(dir,repoRoot),/runtime assessment required/i);
+    write({component:'gateway',assessment_sha256:null,vex_sha256:null},{...scan,ignoredMatches:[]});
+    assert.equal(validatePublication(dir,repoRoot).component,'gateway');
+  } finally { Date.now=realNow; }
 });
