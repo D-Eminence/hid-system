@@ -41,11 +41,26 @@ describe('EHR-C3 GET ehr/patients/:patientId/vitals/latest', () => {
     expect(sql).toContain('order by x.measure, effective.recorded_at desc, effective.created_at desc, effective.id desc');
   });
 
+  // Review finding 4: `corrected` is worked out per measure, from the keys the current correction set.
+  it('says a measure is corrected only when the current correction set that measure', () => {
+    const sql = squash(LATEST_VITALS_SQL);
+    expect(sql).toContain("coalesce(c.replacement_values, '{}'::jsonb) as r");
+    expect(sql).not.toContain('c.id is not null as corrected');
+    for (const [measure, key] of [['heightCm', 'height_cm'], ['weightKg', 'weight_kg'], ['temperatureC', 'temperature_c'],
+      ['pulseBpm', 'pulse_bpm'], ['respiratoryRate', 'respiratory_rate'],
+      ['oxygenSaturationPercent', 'oxygen_saturation_percent']]) {
+      expect(sql).toContain(`('${measure}', effective.m->'${key}', effective.r ? '${key}')`);
+    }
+    expect(sql).toContain("end, effective.r ?| array['systolic_mmhg', 'diastolic_mmhg'])");
+    expect(sql).toContain('as x(measure, value, corrected)');
+    expect(sql).toContain('effective.encounter_id as "encounterId", x.corrected');
+  });
+
   it('keeps blood pressure as one measure, only when both halves of the same reading are present', () => {
     const sql = squash(LATEST_VITALS_SQL);
     expect(sql).toContain("('bloodPressure', case when jsonb_typeof(effective.m->'systolic_mmhg') = 'number' and "
       + "jsonb_typeof(effective.m->'diastolic_mmhg') = 'number' then jsonb_build_object('systolicMmhg', "
-      + "effective.m->'systolic_mmhg', 'diastolicMmhg', effective.m->'diastolic_mmhg') end)");
+      + "effective.m->'systolic_mmhg', 'diastolicMmhg', effective.m->'diastolic_mmhg') end, ");
     expect(sql).not.toMatch(/'systolicMmhg', effective\.m->'systolic_mmhg'\),/);
   });
 
@@ -81,6 +96,18 @@ describe('EHR-C3 GET ehr/patients/:patientId/vitals/latest', () => {
     } });
     expect(calls[0]?.values).toEqual([patientId, facilityId]);
     expect(audits).toEqual([{ access: 'read_records', action: 'ehr.vital.latest', details: { measureCount: 3 } }]);
+  });
+
+  it('answers a partly corrected reading measure by measure (weight as taken, pulse corrected)', async () => {
+    const recordedAt = new Date('2026-11-18T09:00:00Z');
+    const { service } = setup([
+      { measure: 'pulseBpm', value: 80, recordedAt, vitalId: vitalA, encounterId, corrected: true },
+      { measure: 'weightKg', value: 70, recordedAt, vitalId: vitalA, encounterId, corrected: false },
+    ]);
+    await expect(service.latest(context, patientId)).resolves.toEqual({ facilityId, measures: {
+      pulseBpm: { value: 80, recordedAt, vitalId: vitalA, encounterId, corrected: true },
+      weightKg: { value: 70, recordedAt, vitalId: vitalA, encounterId, corrected: false },
+    } });
   });
 
   it('answers no measures when there are none', async () => {

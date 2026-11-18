@@ -71,7 +71,11 @@ export const LATEST_VITAL_MEASURES = [
 ] as const;
 export type LatestVitalMeasure = (typeof LATEST_VITAL_MEASURES)[number];
 
-/** One measure's newest value: where and when it was taken, and whether a correction set it. */
+/**
+ * One measure's newest value: where and when it was taken, and whether the
+ * reading's current correction set this measure (review finding 4: per
+ * measure, not per reading; for bloodPressure, either half of the pair).
+ */
 export interface LatestVitalValue {
   /** A number, or for bloodPressure `{ systolicMmhg, diastolicMmhg }` (always the pair). */
   value: number | { systolicMmhg: number; diastolicMmhg: number };
@@ -106,7 +110,7 @@ export const LATEST_VITALS_SQL = `
   with effective as (
     select v.id, v.encounter_id, v.recorded_at, v.created_at,
            to_jsonb(v) || coalesce(c.replacement_values, '{}'::jsonb) as m,
-           c.id is not null as corrected
+           coalesce(c.replacement_values, '{}'::jsonb) as r
     from ehr.vitals v
     join ehr.encounters e
       on e.id = v.encounter_id and e.patient_id = v.patient_id and e.facility_id = v.facility_id
@@ -117,20 +121,20 @@ export const LATEST_VITALS_SQL = `
   )
   select distinct on (x.measure)
          x.measure, x.value, effective.recorded_at as "recordedAt", effective.id as "vitalId",
-         effective.encounter_id as "encounterId", effective.corrected
+         effective.encounter_id as "encounterId", x.corrected
   from effective
   cross join lateral (values
-    ('heightCm', effective.m->'height_cm'),
-    ('weightKg', effective.m->'weight_kg'),
-    ('temperatureC', effective.m->'temperature_c'),
-    ('pulseBpm', effective.m->'pulse_bpm'),
-    ('respiratoryRate', effective.m->'respiratory_rate'),
+    ('heightCm', effective.m->'height_cm', effective.r ? 'height_cm'),
+    ('weightKg', effective.m->'weight_kg', effective.r ? 'weight_kg'),
+    ('temperatureC', effective.m->'temperature_c', effective.r ? 'temperature_c'),
+    ('pulseBpm', effective.m->'pulse_bpm', effective.r ? 'pulse_bpm'),
+    ('respiratoryRate', effective.m->'respiratory_rate', effective.r ? 'respiratory_rate'),
     ('bloodPressure', case
       when jsonb_typeof(effective.m->'systolic_mmhg') = 'number' and jsonb_typeof(effective.m->'diastolic_mmhg') = 'number'
       then jsonb_build_object('systolicMmhg', effective.m->'systolic_mmhg', 'diastolicMmhg', effective.m->'diastolic_mmhg')
-    end),
-    ('oxygenSaturationPercent', effective.m->'oxygen_saturation_percent')
-  ) as x(measure, value)
+    end, effective.r ?| array['systolic_mmhg', 'diastolic_mmhg']),
+    ('oxygenSaturationPercent', effective.m->'oxygen_saturation_percent', effective.r ? 'oxygen_saturation_percent')
+  ) as x(measure, value, corrected)
   where x.value is not null and jsonb_typeof(x.value) <> 'null'
   order by x.measure, effective.recorded_at desc, effective.created_at desc, effective.id desc`;
 

@@ -6185,7 +6185,10 @@ Rules:
   with no reading is left out of `measures`.
 - The vital's current correction is applied first (the correction's values
   over the original ones, as the patient record already applies them);
-  `corrected` says whether a correction set the value.
+  `corrected` says whether the reading's current correction set this measure
+  (per measure, not per reading: a correction that changes only the pulse
+  leaves the weight of the same reading `corrected: false`; for
+  `bloodPressure`, true when the correction set either half of the pair).
 - Blood pressure is one measure and is always the systolic and diastolic
   pair from the same reading; it is never mixed across readings.
 - Vitals of a visit entered in error are left out. (A single vital entered
