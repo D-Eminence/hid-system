@@ -141,6 +141,12 @@ export class PrescriptionsService {
    * (0125) it may carry the dispensing details (CreatePrescriptionBodyPipe),
    * each pair together, stored with it and echoed when set; a body without
    * them keeps today's Idempotency-Key digest. Off, exactly as before.
+   *
+   * Written as active, it goes to this hospital's own pharmacy (0133) and the
+   * answer carries `pharmacyHandoff`. A replay of the same request (the same
+   * Idempotency-Key) answers the prescription as it is now and asks the send
+   * again, which sends once: the hand-off as it stands now (a pending send is
+   * tried again), recorded in the replay's audit row as on the first run.
    */
   create(context: DataAccessContext, patientId: string, encounterId: string, input: CreatePrescriptionInput, key: string) {
     if ((input.doseQuantity === undefined) !== (input.doseUnit === undefined)) {
@@ -152,52 +158,64 @@ export class PrescriptionsService {
     return this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.prescription.create', resourceType: 'prescription' },
-      (client) => this.repository.executeCreate(
-        client, context, patientId, key, operation, digest, 'prescription',
-        async () => {
-          // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
-          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
-          // 0117: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
-          // the warning they were shown (its warningToken); without it nothing is written (the whole
-          // transaction, idempotency key included, rolls back).
-          const matches = await checkPrescriptionAllergies(client, context, patientId,
-            { display: input.medicationDisplay, code: input.medicationCode ?? null }, input.allergyAcknowledgement);
-          const result = await client.query<PrescriptionRow>(
-            `insert into ehr.prescriptions (
-               encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
-               medication_code_system, medication_code, medication_display, dose_quantity, dose_unit,
-               route_code, frequency, instructions, starts_on, ends_on, status${this.details.insertColumns()}
-             ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${this.details.insertPlaceholders()})
-             returning ${this.columns()}`,
-            [
-              encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
-              input.medicationCodeSystem ?? null, input.medicationCode ?? null, input.medicationDisplay,
-              input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null,
-              input.frequency, input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.status,
-              ...this.details.insertValues(input),
-            ],
-          );
-          const row = this.single(result.rows[0]);
-          // 0133: a prescription written as active goes to this hospital's own pharmacy at once.
-          const handoff = row.status === OrderStatus.Active
-            ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
-          const value = withHandoff(this.details.project(row), handoff);
-          if (matches.length > 0 && input.allergyAcknowledgement) {
-            // The audit says the prescriber went ahead after a warning: flags and counts only,
-            // never the substance or the reason text.
-            const details = await recordAllergyAcknowledgement(client, context, patientId, row.id, 'create', matches,
-              input.allergyAcknowledgement);
-            return { value, id: row.id, details: { ...details, ...handoffDetails(handoff) } };
-          }
-          return { value, id: row.id, details: handoffDetails(handoff) };
-        },
-        async (id) => {
-          const row = await this.findById(client, context, patientId, id);
-          return row && this.details.project(row);
-        },
-      ),
+      (client) => this.createOrReplay(client, context, patientId, encounterId, input, key, operation, digest),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+  }
+
+  private async createOrReplay(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string,
+    input: CreatePrescriptionInput, key: string, operation: string, digest: string) {
+    // The replay's hand-off, for its audit row (executeCreate records only that it was a replay).
+    let replayHandoff: PharmacyHandoff | undefined;
+    const created = await this.repository.executeCreate(
+      client, context, patientId, key, operation, digest, 'prescription',
+      async () => {
+        // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
+        await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
+        // 0117: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
+        // the warning they were shown (its warningToken); without it nothing is written (the whole
+        // transaction, idempotency key included, rolls back).
+        const matches = await checkPrescriptionAllergies(client, context, patientId,
+          { display: input.medicationDisplay, code: input.medicationCode ?? null }, input.allergyAcknowledgement);
+        const result = await client.query<PrescriptionRow>(
+          `insert into ehr.prescriptions (
+             encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+             medication_code_system, medication_code, medication_display, dose_quantity, dose_unit,
+             route_code, frequency, instructions, starts_on, ends_on, status${this.details.insertColumns()}
+           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${this.details.insertPlaceholders()})
+           returning ${this.columns()}`,
+          [
+            encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
+            input.medicationCodeSystem ?? null, input.medicationCode ?? null, input.medicationDisplay,
+            input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null,
+            input.frequency, input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.status,
+            ...this.details.insertValues(input),
+          ],
+        );
+        const row = this.single(result.rows[0]);
+        // 0133: a prescription written as active goes to this hospital's own pharmacy at once.
+        const handoff = row.status === OrderStatus.Active
+          ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
+        const value = withHandoff(this.details.project(row), handoff);
+        if (matches.length > 0 && input.allergyAcknowledgement) {
+          // The audit says the prescriber went ahead after a warning: flags and counts only,
+          // never the substance or the reason text.
+          const details = await recordAllergyAcknowledgement(client, context, patientId, row.id, 'create', matches,
+            input.allergyAcknowledgement);
+          return { value, id: row.id, details: { ...details, ...handoffDetails(handoff) } };
+        }
+        return { value, id: row.id, details: handoffDetails(handoff) };
+      },
+      async (id) => {
+        const row = await this.findById(client, context, patientId, id);
+        if (!row) return undefined;
+        // 0133: a request written as active answers its hand-off on a replay too.
+        replayHandoff = input.status === OrderStatus.Active
+          ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
+        return withHandoff(this.details.project(row), replayHandoff);
+      },
+    );
+    return replayHandoff ? { ...created, details: { ...created.details, ...handoffDetails(replayHandoff) } } : created;
   }
 
   update(
@@ -260,11 +278,13 @@ export class PrescriptionsService {
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Prescription changed since it was loaded');
         // 0133: activating a draft sends it to this hospital's own pharmacy in this transaction
-        // (a failure never undoes the activation); holding, cancelling or entering it in error
-        // marks a sent one withdrawn, and Pharmacy can no longer dispense it (0101).
+        // (a failure never undoes the activation). Any other change of a prescription that left
+        // draft (it may have been sent) asks the database whether its send is now withdrawn:
+        // holding, cancelling or entering it in error, and editing or resuming it (the pharmacy
+        // item keeps the version sent), and Pharmacy can no longer dispense it (0101).
         const handoff = current.status === OrderStatus.Draft && row.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
-        const withdrawn = current.status !== row.status && STOPPING.includes(row.status)
+        const withdrawn = current.status !== OrderStatus.Draft
           ? await this.ownPharmacy.withdraw(client, row.id, context.correlationId) : undefined;
         const sendDetails = { ...handoffDetails(handoff), ...(withdrawn ? { pharmacySendWithdrawn: true } : {}) };
         if (matches.length > 0 && input.allergyAcknowledgement) {
