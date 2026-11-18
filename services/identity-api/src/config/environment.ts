@@ -215,7 +215,7 @@ const environmentSchema = z.object({
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
-  QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(10_000).default(5_000),
+  QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(20_000).default(12_000),
   // QoreID's POST endpoints do not publish an idempotency contract. Keep
   // retries explicitly disabled rather than risking duplicate verification.
   QOREID_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),
