@@ -6046,7 +6046,11 @@ the clinician's own consent grant (row-level security and Identity's
 decision), never on a pharmacist's or laboratory member's grant. Because the
 browser request behind them is a read, the guard does not ask Identity for
 the browser-write (Origin and CSRF) check of a forwarded cookie on these two
-routes only (`ReadOnlyPost`). Answer `200`, `Cache-Control: no-store`.
+routes only (`ReadOnlyPost`), and the patient check
+(`service/authorization/check`, scope `read_records`) reports the browser
+method as `GET` (`X-HID-Original-Method`), not the POST of the internal
+call: the website sends no CSRF token on a read, so a reported POST would be
+refused. Answer `200`, `Cache-Control: no-store`.
 
 Request (ids only, in the body; never a Health ID, never in the URL):
 
@@ -6087,8 +6091,18 @@ own work is read: work on an order route to another facility is left out
 
 Refusals: `401` without the internal caller proof; `403 PERMISSION_DENIED`
 without the EHR read permission; `403 PHARMACY_ACCESS_DENIED` or
-`403 LAB_WORK_ITEM_ACCESS_DENIED` when Identity refuses the patient read
-(audited with outcome `denied`); `400` for a bad body or purpose.
+`403 LAB_WORK_ITEM_ACCESS_DENIED` when Identity refuses the patient read,
+or Identity's own `403` passed on (both audited with outcome `denied`); `400`
+for a bad body or purpose.
+
+Runtime proof: `services/ehr-api/scripts/verify-order-routes-runtime.mjs`
+step 10b signs a doctor in with the cookie, reads through ehr-api a
+prescription dispensed by the hospital's own pharmacist (`dispensed`, with
+the dispensing's time) and a lab request with results released by its own
+laboratory (`results_ready`), each under the doctor's own grant only; a
+routed prescription and lab request stay `not_received`; a doctor without a
+grant gets `403` from ehr-api, pharmacy-api and lab-api, and the denials are
+audited with the patient.
 
 Audit: every lookup writes one row naming the patient,
 `pharmacy.work-item.progress.read` or `lab.work-item.progress.read`
