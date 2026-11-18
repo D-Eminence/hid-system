@@ -63,7 +63,7 @@ The Identity API uses these configuration names for QoreID verification; no cred
 | `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` | Separate patient NIN-only gate; keep disabled until remaining release and security gates are cleared. Entitled sandbox transport and response shape are empirically verified. |
 | `QOREID_BASE_URL` | Approved QoreID API origin. |
 | `QOREID_CLIENT_ID`, `QOREID_CLIENT_SECRET` | Server-only OAuth credentials supplied through the Identity task's secret configuration. |
-| `QOREID_TIMEOUT_MS` | Bounded provider request timeout. |
+| `QOREID_TIMEOUT_MS` | Bounded provider request timeout: 12000 ms by default, 250–20000 allowed. Production sets none, so it uses the default. |
 | `QOREID_MAX_RETRIES` | Must remain `0` for general provider retries; the adapter's single re-authentication retry after an explicit verification `401` is separate. |
 | `NIN_LOOKUP_HMAC_KEY_B64`, `NIN_ENCRYPTION_KEY_B64` | Server-only keys for duplicate lookup and encrypted NIN/profile storage. |
 | `NIN_KEY_VERSION` | Version identifier for encrypted NIN material. |
