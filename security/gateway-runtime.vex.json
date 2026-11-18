@@ -1,0 +1,81 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://healthidentitydirectory.com/security/assessments/gateway-alpine-3.24.2-openssl-3.5.9-r0",
+  "author": "HID production runtime applicability assessment",
+  "timestamp": "2026-11-18T00:00:00Z",
+  "version": 1,
+  "hid_expires_at": "2026-12-01T00:00:00Z",
+  "hid_scope": "gateway image only; exact libssl3 and libcrypto3 3.5.9-r0 aarch64 Alpine 3.24.2 purls; original findings retained in grype.raw.json; no risk-acceptance waiver",
+  "hid_bound_files": {
+    "gateway/Dockerfile": "c9a3f12417bff3b94e332947b092a3fcd2f8558da793850aec354dcb4b18c2ae",
+    "gateway/nginx.conf.template": "058bffd804832b70daff36d57d6ad71528d2943d8a29e1c24e6a9c6c684691fb",
+    "gateway/proxy-headers.conf": "17f90e70dedbc21f01e24a40f721541e234e91b0dd1907b3e0c9428957ed273e"
+  },
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-88823"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected AES-GCM-SIV incremental AAD update is in the libcrypto3 default provider and is reached only by fetching AES-GCM-SIV by name and feeding AAD in pieces; it is not a TLS cipher. nginx and njs import only the legacy EVP_aes_*_{cbc,ctr,gcm}, aes_128_ccm and chacha20(-poly1305) constructors, and neither imports EVP_CIPHER_fetch or EVP_get_cipherbyname. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.6-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols); c_rehash is never run, and the wget health check is plain http://127.0.0.1:3000, so busybox's ssl_client is not started. Assessed 2026-11-18 from the base layers fetched by digest. Alpine 3.24 serves no libssl3/libcrypto3 newer than 3.5.9-r0; OpenSSL 3.5.10 is due 2026-12-01. Expires 2026-12-01: replace with a pinned fixed Alpine 3.24 package, do not renew."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-95692"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected AES-GCM-SIV IV-length handling (EVP_CipherInit_ex into ossl_aes_gcm_siv_init) is in the libcrypto3 default provider and is reached only by fetching AES-GCM-SIV by name; it is not a TLS cipher. nginx and njs import only the legacy EVP_aes_*_{cbc,ctr,gcm}, aes_128_ccm and chacha20(-poly1305) constructors, and neither imports EVP_CIPHER_fetch or EVP_get_cipherbyname. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.6-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols); c_rehash is never run, and the wget health check is plain http://127.0.0.1:3000, so busybox's ssl_client is not started. Assessed 2026-11-18 from the base layers fetched by digest. Alpine 3.24 serves no libssl3/libcrypto3 newer than 3.5.9-r0; OpenSSL 3.5.10 is due 2026-12-01. Expires 2026-12-01: replace with a pinned fixed Alpine 3.24 package, do not renew."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-95691"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected CRYPTO frame retransmission handling is in the OpenSSL QUIC client (OSSL_QUIC_client_method, OSSL_QUIC_client_thread_method). No ELF in the image imports an OSSL_QUIC_* method; nginx's HTTP/3 uses its own QUIC stack through SSL_set_quic_tls_cbs and is not configured. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.6-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols); c_rehash is never run, and the wget health check is plain http://127.0.0.1:3000, so busybox's ssl_client is not started. Assessed 2026-11-18 from the base layers fetched by digest. Alpine 3.24 serves no libssl3/libcrypto3 newer than 3.5.9-r0; OpenSSL 3.5.10 is due 2026-12-01. Expires 2026-12-01: replace with a pinned fixed Alpine 3.24 package, do not renew."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-107496"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected code is CMS_encrypt and CMS_encrypt_ex with an EC recipient of group order 1; TLS and QUIC do not use it. nginx, njs, libapk and ssl_client import no CMS_* function. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.6-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols); c_rehash is never run, and the wget health check is plain http://127.0.0.1:3000, so busybox's ssl_client is not started. Assessed 2026-11-18 from the base layers fetched by digest. Alpine 3.24 serves no libssl3/libcrypto3 newer than 3.5.9-r0; OpenSSL 3.5.10 is due 2026-12-01. Expires 2026-12-01: replace with a pinned fixed Alpine 3.24 package, do not renew."
+    }
+  ],
+  "hid_owner_approval": "D-Eminence, verbatim in chat on 2026-11-18 at about 12:57 UTC: \"Q99 A\""
+}

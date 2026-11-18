@@ -43,6 +43,16 @@ def elf_imports(data):
                 result.append(names[name:names.find(b'\0', name)].decode('utf8'))
     return result
 
+def finding_current(expires_at, now=None):
+    """True only before a finding's timezone-aware expires_at; malformed values are expired."""
+    try:
+        expires = datetime.datetime.fromisoformat(expires_at)
+    except (TypeError, ValueError):
+        return False
+    if expires.tzinfo is None:
+        return False
+    return (now or datetime.datetime.now(datetime.timezone.utc)) < expires
+
 def assess(component, image, scan, directory, *, policy_file=None, author='HID staging runtime assessment'):
     selected_policy = policy_file or policy_path(component)
     policy = json.loads(selected_policy.read_text())
@@ -97,6 +107,9 @@ def assess(component, image, scan, directory, *, policy_file=None, author='HID s
                       and entry['versions'][artifact['name']] == artifact['version']), None)
         if not found or vulnerability['severity'] == 'Critical':
             raise RuntimeError('Unassessed High/Critical finding blocks publication')
+        # Optional per-finding expiry, on top of the policy-wide expires_at.
+        if 'expires_at' in found and not finding_current(found['expires_at']):
+            raise RuntimeError('Finding assessment expired for ' + vulnerability['id'] + '; remove or re-assess it')
         reviewed.append({'id': vulnerability['id'], 'package': artifact['name'],
                          'version': artifact['version'], 'purl': artifact['purl']})
         statements.append({'vulnerability': {'name': vulnerability['id']},

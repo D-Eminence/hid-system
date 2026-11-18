@@ -66,6 +66,26 @@ class AssessmentGuards(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Unassessed'):self.exercise(lambda p,s,m:s['matches'][0]['vulnerability'].update(severity='Critical'))
     def test_expired_assessment_blocks(self):
         with self.assertRaisesRegex(RuntimeError,'expired'):self.exercise(lambda p,s,m:p.update(expires_at='2020-01-01T00:00:00+00:00'))
+    def test_unexpired_per_finding_expiry_passes(self):
+        future=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).isoformat()
+        self.exercise(lambda p,s,m:p['findings'][0].update(expires_at=future))
+        self.exercise(lambda p,s,m:p['findings'][0].update(expires_at=future),production=True)
+    def test_expired_per_finding_expiry_blocks_only_that_finding(self):
+        def expire(p,s,m):
+            p['findings'][0]['expires_at']='2020-01-01T00:00:00+00:00'
+        with self.assertRaisesRegex(RuntimeError,'Finding assessment expired for CVE-ASSESSMENT'):self.exercise(expire)
+        with self.assertRaisesRegex(RuntimeError,'Finding assessment expired'):self.exercise(expire,production=True)
+        def other_expired(p,s,m):
+            p['findings'].append(dict(p['findings'][0],id='CVE-OTHER',expires_at='2020-01-01T00:00:00+00:00'))
+        self.exercise(other_expired)
+    def test_malformed_per_finding_expiry_blocks(self):
+        for value in ('2099-01-01T00:00:00','not-a-date',None):
+            with self.subTest(value=value), self.assertRaisesRegex(RuntimeError,'Finding assessment expired'):
+                self.exercise(lambda p,s,m:p['findings'][0].update(expires_at=value))
+    def test_per_finding_expiry_boundary(self):
+        at=datetime.datetime(2026,12,1,tzinfo=datetime.timezone.utc)
+        self.assertTrue(a.finding_current('2026-12-01T00:00:00+00:00',at-datetime.timedelta(seconds=1)))
+        self.assertFalse(a.finding_current('2026-12-01T00:00:00+00:00',at))
     def test_other_platform_blocks(self):
         with self.assertRaisesRegex(RuntimeError,'ARM64'):self.exercise(lambda p,s,m:m.update(Architecture='amd64'))
 
