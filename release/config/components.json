@@ -612,11 +612,11 @@
       },
       {
         "name": "0133_own_facility_pharmacy_and_lab_work.sql",
-        "sha256": "8c39bc94f1ac4b99fb563882d2515a2caae4e022e6cdfdde17f58b00715459ae"
+        "sha256": "3249f2c3a69e5a601c1123843981969bc443a999fede30305d0a514c5c62ac04"
       },
       {
         "name": "0134_sealed_qa_hospital_pharmacy_lab_staff.sql",
-        "sha256": "1c0ee88cb30b8deb703bf961fdc2a8a884f94b143fddcecbfba6633293ceb75e"
+        "sha256": "c82517f5ab3bd876355c55a0427200f8849647089807199a8ce18e93d9a54241"
       }
     ]
   },

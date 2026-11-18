@@ -140,8 +140,8 @@ const acceptedMigrations = new Map([
   ['0125_prescription_dispensing_details.sql', '819afe2de86c400f2ad648ed928eb8318e55fdf0cd17952583b1fd1c52b25bd4'],
   ['0126_organization_staff_kinds.sql', '783f34c54d5289426f47e8c101378209f155ef499ad4e0c1290e17579190fe97'],
   ['0127_sso_relying_party.sql', '9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d'],
-  ['0133_own_facility_pharmacy_and_lab_work.sql', '8c39bc94f1ac4b99fb563882d2515a2caae4e022e6cdfdde17f58b00715459ae'],
-  ['0134_sealed_qa_hospital_pharmacy_lab_staff.sql', '1c0ee88cb30b8deb703bf961fdc2a8a884f94b143fddcecbfba6633293ceb75e'],
+  ['0133_own_facility_pharmacy_and_lab_work.sql', '3249f2c3a69e5a601c1123843981969bc443a999fede30305d0a514c5c62ac04'],
+  ['0134_sealed_qa_hospital_pharmacy_lab_staff.sql', 'c82517f5ab3bd876355c55a0427200f8849647089807199a8ce18e93d9a54241'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
