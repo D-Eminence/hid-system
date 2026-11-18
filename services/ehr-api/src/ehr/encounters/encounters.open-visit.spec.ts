@@ -201,7 +201,14 @@ describe('EHR-C1 create with reuseOpenVisit', () => {
     await expect(service.create(context, patientId, createBody(), 'visit-key-00000001'))
       .resolves.toEqual({ ...visit(), reusedOpenVisit: reused });
     const key = calls.find((call) => /from ehr\.idempotency_keys key_row/.test(call.sql));
-    expect(key?.sql).toMatch(/encounter_row\.created_at < key_row\.created_at/);
+    // Review finding 5: decided by whether the visit's create version and the key's create version were
+    // written by the same request (correlation id and account); creation times only when they cannot be seen.
+    const sql = key?.sql.replace(/\s+/g, ' ') ?? '';
+    expect(sql).toContain('encounter_version.correlation_id is distinct from key_version.correlation_id');
+    expect(sql).toContain('encounter_version.changed_by is distinct from key_version.changed_by');
+    expect(sql).toContain("encounter_version.resource_type = 'encounters' and encounter_version.resource_id = encounter_row.id::text and encounter_version.version_no = 1");
+    expect(sql).toContain("key_version.resource_type = 'idempotency_keys' and key_version.resource_id = key_row.id::text and key_version.version_no = 1");
+    expect(sql).toMatch(/coalesce\(.*, encounter_row\.created_at < key_row\.created_at\) as reused/);
     expect(key?.values).toEqual([openVisitId, patientId, facilityId, accountId, 'encounter.create', 'visit-key-00000001']);
   });
 
@@ -239,6 +246,48 @@ describe('EHR-C1 create with reuseOpenVisit', () => {
         .toThrow(expect.objectContaining({ status: 400, code: 'REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS' }));
       expect(repository.run).not.toHaveBeenCalled();
     });
+
+  // Review finding 3: the visit a reuse request would create must start on the day the lookup is for.
+  it.each([
+    ['a desk clock 2 hours behind just after midnight (yesterday 22:30 in Lagos)', '2026-11-18T23:30:00Z',
+      '2026-11-18T21:30:00.000Z'],
+    ['a planned visit for tomorrow', '2026-11-18T10:00:00Z', '2026-11-19T09:00:00.000Z'],
+  ])('refuses reuseOpenVisit with a start time that is not today: %s', async (_label, now, startedAt) => {
+    const { service, repository } = fakeDatabase([visit()]);
+    service.now = () => new Date(now);
+    expect(() => service.create(context, patientId, createBody({ startedAt, status: EncounterStatus.Planned }),
+      'visit-key-00000001')).toThrow(expect.objectContaining({ status: 400, code: 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY',
+      message: 'To use the open visit today, the visit must start today (Lagos time). Check the date and time on this device.' }));
+    expect(repository.run).not.toHaveBeenCalled();
+  });
+
+  it('a double tap with a slow clock no longer creates two visits dated yesterday (both are refused)', async () => {
+    const { service, createdCount } = fakeDatabase();
+    service.now = () => new Date('2026-11-18T23:30:00Z'); // 00:30 on the 19th in Lagos
+    const body = createBody({ startedAt: '2026-11-18T21:30:00.000Z' }); // 22:30 on the 18th in Lagos
+    for (const key of ['visit-key-00000001', 'visit-key-00000002']) {
+      expect(() => service.create(context, patientId, body, key)).toThrow(expect.objectContaining({ status: 400 }));
+    }
+    expect(createdCount()).toBe(0);
+  });
+
+  it('accepts a start time anywhere in today\'s Lagos day, its edges included', async () => {
+    for (const [now, startedAt] of [['2026-11-18T23:30:00Z', '2026-11-18T23:00:00.000Z'],
+      ['2026-11-18T10:00:00Z', '2026-11-18T22:59:59.999Z']]) {
+      const { service, createdCount } = fakeDatabase();
+      service.now = () => new Date(now as string);
+      await expect(service.create(context, patientId, createBody({ startedAt: startedAt as string }), 'visit-key-00000001'))
+        .resolves.toMatchObject({ reusedOpenVisit: false });
+      expect(createdCount()).toBe(1);
+    }
+  });
+
+  it('without reuseOpenVisit any start time is accepted, as before', async () => {
+    const { service, createdCount } = fakeDatabase();
+    await service.create(context, patientId, createBody({ reuseOpenVisit: undefined, startedAt: '2026-11-25T09:00:00.000Z',
+      status: EncounterStatus.Planned }), 'visit-key-00000001');
+    expect(createdCount()).toBe(1);
+  });
 
   it('accepts reuseOpenVisit only as a boolean, never null', async () => {
     const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, forbidUnknownValues: true, transform: true });

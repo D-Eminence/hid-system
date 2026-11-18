@@ -139,10 +139,19 @@ export class EncountersService {
       throw new DomainProblem(400, 'REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS',
         'To use the open visit today, start the visit as planned or in progress.');
     }
+    const day = reuse ? lagosCalendarDate(this.now()) : undefined;
+    // EHR-C1 (review finding 3): the lookup is for today's open visit, so the
+    // visit a reuse request would create must start today too. Otherwise a
+    // device whose clock is behind (just after midnight) would create a visit
+    // dated yesterday that no later lookup finds, and a future booking would
+    // get today's visit back instead of being created.
+    if (day !== undefined && lagosCalendarDate(new Date(input.startedAt)) !== day) {
+      throw new DomainProblem(400, 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY',
+        'To use the open visit today, the visit must start today (Lagos time). Check the date and time on this device.');
+    }
     // A body without reuseOpenVisit keeps the Idempotency-Key digest it had before EHR-C1.
     const { reuseOpenVisit: _reuse, ...withoutReuse } = input;
     const digest = requestDigest(operation, { patientId, input: input.reuseOpenVisit === undefined ? withoutReuse : input });
-    const day = reuse ? lagosCalendarDate(this.now()) : undefined;
     return this.repository.run(
       context,
       patientId,
@@ -324,8 +333,17 @@ export class EncountersService {
 
   /**
    * EHR-C1: an idempotent replay of a create that asked for the open visit:
-   * the same visit, with `reusedOpenVisit` true when the visit is older than
-   * the request's Idempotency-Key (it was found, not created).
+   * the same visit, with `reusedOpenVisit` false only when the original
+   * request created it.
+   *
+   * Review finding 5: decided from facts recorded in the original
+   * transaction, not from timestamps (a request's key row is written before
+   * it waits on the advisory lock, so a visit another request created while
+   * it waited is younger than the key). The request created the visit when
+   * the visit's create version (ehr.record_versions, version_no 1) carries
+   * the same correlation id and account as the Idempotency-Key's create
+   * version: both are written by the same request. If either version cannot
+   * be seen, the old comparison of creation times is the fallback.
    */
   private async findReplay(
     client: PoolClient,
@@ -339,7 +357,17 @@ export class EncountersService {
     if (!row) return undefined;
     // Compared in the database, at full (microsecond) precision.
     const key = await client.query<{ reused: boolean }>(
-      `select encounter_row.created_at < key_row.created_at as reused
+      `select coalesce(
+                (select encounter_version.correlation_id is distinct from key_version.correlation_id
+                        or encounter_version.changed_by is distinct from key_version.changed_by
+                 from ehr.record_versions encounter_version, ehr.record_versions key_version
+                 where encounter_version.resource_type = 'encounters'
+                   and encounter_version.resource_id = encounter_row.id::text
+                   and encounter_version.version_no = 1
+                   and key_version.resource_type = 'idempotency_keys'
+                   and key_version.resource_id = key_row.id::text
+                   and key_version.version_no = 1),
+                encounter_row.created_at < key_row.created_at) as reused
        from ehr.idempotency_keys key_row
        join ehr.encounters encounter_row
          on encounter_row.id = $1 and encounter_row.patient_id = $2 and encounter_row.facility_id = key_row.facility_id

@@ -6117,7 +6117,14 @@ The create body gains `reuseOpenVisit` (optional boolean, never `null`).
   without it is unchanged, and the answer has no new field).
 - `true`: only with `status` `planned` or `in_progress` (otherwise `400
   REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS`, "To use the open visit today, start
-  the visit as planned or in progress."). The server takes a transaction
+  the visit as planned or in progress."), and only with a `startedAt` on
+  today's Lagos day by the server's clock (otherwise `400
+  REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY`, "To use the open visit today, the
+  visit must start today (Lagos time). Check the date and time on this
+  device."). So a device whose clock is behind cannot create a visit dated
+  yesterday that no later lookup finds, and a planned visit for another day
+  is booked without `reuseOpenVisit`. Both checks run before the database
+  is touched. The server takes a transaction
   lock for this patient at this facility
   (`pg_advisory_xact_lock(hashtextextended('ehr.open-visit:<facility>:<patient>', 0))`)
   **before** it looks for today's open visit, and holds it until the
@@ -6126,9 +6133,18 @@ The create body gains `reuseOpenVisit` (optional boolean, never `null`).
   same moment therefore give one visit.
 
 The answer is `201` with the visit plus `reusedOpenVisit: true` (an
-existing visit) or `false` (a new one). An idempotent replay of the same
-request answers the same visit, with `reusedOpenVisit` worked out from
-whether the visit is older than the request's Idempotency-Key. The audit row
+existing visit) or `false` (a new one). When `reusedOpenVisit` is `true`,
+the answer is the existing visit as it is: its `encounterType`, `status`,
+`startedAt` and `chiefComplaint` are the existing visit's, not the request's
+(an `emergency` request can get back an `ambulatory` visit that is
+`on_hold`); the screen shows the visit it got back. An idempotent replay of
+the same request answers the same visit, with `reusedOpenVisit: false` only
+when that request created it: the visit's create version in
+`ehr.record_versions` has the same correlation id and account as the
+Idempotency-Key's create version (both are written by the request that
+created them). Only if either version cannot be read does the replay fall
+back to comparing creation times. A client must not send the same
+`X-Correlation-Id` on two different requests. The audit row
 (`ehr.encounter.create`) carries `reusedOpenVisit` and `day`.
 
 ### Screen change needed (Akos frontend branch)
