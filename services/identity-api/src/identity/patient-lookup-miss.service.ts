@@ -29,6 +29,18 @@ import { DatabaseService } from '../database/database.service';
  * stays personal once issued). No migration and no new setting: the HMAC key
  * is the existing OTP_HMAC_KEY_B64 (required in production).
  *
+ * The seals (0098 demo, 0123 QA): nothing in a sealed tenant ever finds a real
+ * patient, and nothing real finds a sealed one. Because the check reads past
+ * row-level security, it is asked only when the Health ID and the member's
+ * facility are on the same side: a real facility for a real-looking Health
+ * ID, the demo tenant for HID-ZDEM and four more characters, the QA tenant
+ * for HID-ZQA and five more (the sealed Health IDs have 8 characters, which
+ * Identity has never issued). Any other pairing, and any other Health ID
+ * starting ZDEM or ZQA, gets today's 404, so no side learns whether another
+ * side's Health ID exists. The side of the facility is read with
+ * identity.sealed_demo_facility (0098) and identity.sealed_qa_facility (0123),
+ * which identity-api's runtime may already execute.
+ *
  * Fails closed to today's answer: when the member cannot be counted or the
  * check cannot be read, the answer is today's 404, never "No such patient".
  */
@@ -41,6 +53,23 @@ export const patientNotFound = () => new DomainProblem(404, PATIENT_NOT_FOUND_CO
 
 /** A Health ID as identity.patients' CHECK (0002) and the lookup body require it. */
 const HEALTH_ID = /^HID-[A-HJ-NP-Z2-9]{6,32}$/;
+/** The sealed tenants' Health IDs (0098 D7, 0123 D7): 8 characters, ZDEM or ZQA first. */
+const DEMO_HEALTH_ID = /^HID-ZDEM[A-HJ-NP-Z2-9]{4}$/;
+const QA_HEALTH_ID = /^HID-ZQA[A-HJ-NP-Z2-9]{5}$/;
+const SEALED_PREFIX = /^HID-(ZDEM|ZQA)/;
+
+export type LookupSide = 'real' | 'demo' | 'qa';
+
+/**
+ * Which side a Health ID belongs to, or undefined for one starting ZDEM or
+ * ZQA that is not a sealed tenant's 8-character Health ID (never answered
+ * "No such patient" for anyone).
+ */
+export function healthIdSide(candidate: string): LookupSide | undefined {
+  if (DEMO_HEALTH_ID.test(candidate)) return 'demo';
+  if (QA_HEALTH_ID.test(candidate)) return 'qa';
+  return SEALED_PREFIX.test(candidate) ? undefined : 'real';
+}
 
 const localKey = randomBytes(32);
 
@@ -77,13 +106,36 @@ export class PatientLookupMissService {
   }
 
   /**
+   * The side of the member's facility: real, the sealed demo tenant or the
+   * sealed QA tenant; undefined when that cannot be told.
+   */
+  async facilitySide(facilityId: string): Promise<LookupSide | undefined> {
+    try {
+      const result = await this.database.query<{ demo: boolean; qa: boolean }>(
+        'select identity.sealed_demo_facility($1::uuid) as demo, identity.sealed_qa_facility($1::uuid) as qa',
+        [facilityId]);
+      const row = result.rows[0];
+      if (result.rows.length !== 1 || typeof row.demo !== 'boolean' || typeof row.qa !== 'boolean') return undefined;
+      if (row.demo && row.qa) return undefined;
+      return row.demo ? 'demo' : row.qa ? 'qa' : 'real';
+    } catch {
+      this.logger.warn({ message: 'Facility side is unavailable for the Health ID issued check' });
+      return undefined;
+    }
+  }
+
+  /**
    * Whether any patient record, of any status, has this Health ID: true or
    * false, or undefined when that cannot be told (the answer is then today's).
-   * Logs no Health ID.
+   * Asked only when the Health ID is on the member's facility's side (the
+   * seals). Logs no Health ID.
    */
-  async issued(hid: string): Promise<boolean | undefined> {
+  async issued(hid: string, context: DataAccessContext): Promise<boolean | undefined> {
     const candidate = hid.trim().toUpperCase();
     if (!HEALTH_ID.test(candidate)) return undefined;
+    const side = healthIdSide(candidate);
+    if (!side || !context.facilityId) return undefined;
+    if (await this.facilitySide(context.facilityId) !== side) return undefined;
     try {
       const result = await this.database.query<{ health_id: string }>(
         'select health_id from identity.support_health_id_matches($1::text[])', [[candidate]]);

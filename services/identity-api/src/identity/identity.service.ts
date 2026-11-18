@@ -67,7 +67,7 @@ export class IdentityService {
       // open record on 403 or 404 (its verify() before every save), so a new
       // status would leave a record open after access has ended.
       const limited = await this.misses?.countMiss(context);
-      const issued = limited === false ? await this.misses?.issued(hid) : undefined;
+      const issued = limited === false ? await this.misses?.issued(hid, context) : undefined;
       const result: LookupMissResult = limited === true ? 'limited' : issued === false ? 'no_such_patient' : 'not_available';
       await this.record(context, 'identity.patient.lookup', 'denied', undefined, purpose, { lookupResult: result });
       if (result === 'no_such_patient') throw patientNotFound();
