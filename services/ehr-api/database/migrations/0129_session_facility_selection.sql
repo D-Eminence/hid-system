@@ -106,7 +106,9 @@
 -- 5. Post-checks: the columns, the primary key, the four foreign keys and
 --    their actions, no row-level security; the guard's body (md5),
 --    attributes, owner and ACL; the trigger, enabled, the only one; the
---    table's exact privileges; then the guard is fired once with random ids
+--    table's exact privileges, whether or not hid_identity_runtime exists (a
+--    default privilege to any other role stops the file, naming the ACL);
+--    then the guard is fired once with random ids
 --    and must answer exactly 23514 SESSION_FACILITY_SELECTION_INVALID (plpgsql
 --    plans a query only when it first runs, so this proves every column the
 --    guard reads exists, and the foreign keys, checked after a BEFORE
@@ -446,16 +448,22 @@ begin
   end if;
   -- The table's privileges: its owner, and SELECT, INSERT and UPDATE (not
   -- grantable) for hid_identity_runtime when that role exists; nothing else,
-  -- PUBLIC included.
+  -- PUBLIC included. "is not distinct from": on a fresh install the role does
+  -- not exist yet, runtime is null, and every grantee but the owner must stop
+  -- the file (with "=" the comparison would be null and let a default
+  -- privilege's SELECT, INSERT or UPDATE to another role through).
   if exists (select 1 from pg_class relation, aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) privilege
               where relation.oid = 'auth.session_facility_selection'::regclass
                 and privilege.grantee <> relation.relowner
-                and not (privilege.grantee = runtime and privilege.privilege_type in ('SELECT', 'INSERT', 'UPDATE')
-                         and not privilege.is_grantable))
+                and not (privilege.grantee is not distinct from runtime
+                         and privilege.privilege_type in ('SELECT', 'INSERT', 'UPDATE') and not privilege.is_grantable))
      or (runtime is not null
          and (select count(*) from pg_class relation, aclexplode(relation.relacl) privilege
                where relation.oid = 'auth.session_facility_selection'::regclass and privilege.grantee = runtime) <> 3) then
-    raise exception using errcode = '55000', message = '0129: the privileges on auth.session_facility_selection are not section 4''s';
+    raise exception using errcode = '55000',
+      message = format('0129: the privileges on auth.session_facility_selection are not section 4''s: %s',
+        (select coalesce(relation.relacl::text, 'null') from pg_class relation
+          where relation.oid = 'auth.session_facility_selection'::regclass));
   end if;
   -- Fire the guard once, with random ids: no such sign-in, so it must refuse
   -- with exactly 23514 SESSION_FACILITY_SELECTION_INVALID. Its first run plans
