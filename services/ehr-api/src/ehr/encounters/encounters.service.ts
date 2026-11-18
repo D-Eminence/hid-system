@@ -259,7 +259,7 @@ export class EncountersService {
 
   /**
    * EHR-C8a: the checks before a completed visit is entered in error, run
-   * under the visit's FOR UPDATE lock. The imported paper records visit (0113)
+   * under the visit's row lock (taken FOR UPDATE). The imported paper records visit (0113)
    * is refused, and so is a visit that still has:
    * - a draft, active or on-hold prescription or lab request: those are
    *   cancelled, stopped or entered in error first, so no pharmacy or lab keeps

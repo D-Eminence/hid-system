@@ -74,7 +74,7 @@ describe('EHR-C8a a completed visit entered in error', () => {
     expect(orders?.sql).toMatch(/from ehr\.lab_requests\s+where encounter_id = \$1 and patient_id = \$2 and facility_id = \$3\s+and status in \('draft', 'active', 'on_hold'\)/);
     // Review finding 2: signed notes are entered in error first.
     expect(orders?.sql).toMatch(/from ehr\.clinical_notes\s+where encounter_id = \$1 and patient_id = \$2 and facility_id = \$3\s+and status in \('signed', 'amended'\)/);
-    // The count runs after the visit's FOR UPDATE lock.
+    // The count runs after the visit's row lock (taken FOR UPDATE).
     const lock = calls.findIndex((call) => /for update/.test(call.sql));
     expect(lock).toBeGreaterThanOrEqual(0);
     expect(lock).toBeLessThan(calls.indexOf(orders!));
