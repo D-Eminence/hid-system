@@ -10,9 +10,12 @@ import { PharmacyOrderRouteCards } from './order-route-cards';
 import { PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
 import { PharmacyPrescriptionDetails } from './prescription-dispensing-details';
 import { HealthIdInUrlRefusalModule } from './health-id-in-url';
+// ORD-3: read-only progress of this facility's own work items, for ehr-api.
+import { PharmacyWorkItemProgressController } from './work-item-progress.controller';
+import { PharmacyWorkItemProgressService } from './work-item-progress.service';
 
-@Module({ imports: [PharmacyIdentityModule, HealthIdInUrlRefusalModule], controllers: [PharmacyController, PharmacyOrderRoutesController],
-  providers: [PharmacyService, PharmacyOrderRoutesService, PharmacyOrderRouteAccess, PharmacyOrderRouteCards,
+@Module({ imports: [PharmacyIdentityModule, HealthIdInUrlRefusalModule], controllers: [PharmacyController, PharmacyOrderRoutesController, PharmacyWorkItemProgressController],
+  providers: [PharmacyService, PharmacyOrderRoutesService, PharmacyWorkItemProgressService, PharmacyOrderRouteAccess, PharmacyOrderRouteCards,
     // The patient on own work (0124), on only while OWN_WORK_PATIENT_CARD_ENABLED is true.
     { provide: PharmacyOwnWorkPatientCards,
       useFactory: () => new PharmacyOwnWorkPatientCards(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED) },

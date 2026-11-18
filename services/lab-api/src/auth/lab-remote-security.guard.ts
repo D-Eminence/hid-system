@@ -3,7 +3,7 @@ import { createHash,timingSafeEqual } from 'node:crypto';
 import { Reflector } from '@nestjs/core';
 import { IdentityApiClient,IdentityApiProblem } from '@hid/api-client';
 import { FACILITY_OPTIONAL,PUBLIC_ROUTE,REQUIRED_PERMISSIONS } from '../common/decorators';
-import { INTERNAL_CALLER } from '../common/decorators';
+import { INTERNAL_CALLER,READ_ONLY_POST } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext,HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -21,10 +21,12 @@ export class LabRemoteSecurityGuard implements CanActivate {
   const internalCaller=this.reflector.getAllAndOverride<'ehr-api'|'ocr-api'>(INTERNAL_CALLER,[execution.getHandler(),execution.getClass()]);
   if(internalCaller){const environment=getEnvironment();if(request.header('x-hid-internal-caller')!==internalCaller)throw new DomainProblem(401,'INTERNAL_SERVICE_AUTH_REQUIRED','Authenticated internal service identity is required');if(environment.LAB_SERVICE_IDENTITY_MODE==='jwt')await this.workloadIdentity.authenticate(internalCaller,request.header('x-hid-service-authorization'));else if(!environment.LAB_INTERNAL_SERVICE_TOKEN||!this.equal(request.header('x-hid-service-token'),environment.LAB_INTERNAL_SERVICE_TOKEN))throw new DomainProblem(401,'INTERNAL_SERVICE_AUTH_REQUIRED','Authenticated internal service identity is required');}
   const authorization=request.header('authorization');const cookie=request.header('cookie');
+  // ORD-3: an internal-caller POST that only reads is not a browser write.
+  const readOnlyPost=Boolean(internalCaller&&this.reflector.getAllAndOverride<boolean>(READ_ONLY_POST,[execution.getHandler(),execution.getClass()]));
   if(!authorization?.startsWith('Bearer ')&&!cookie)throw new DomainProblem(401,'AUTHENTICATION_REQUIRED','Valid Identity authentication is required by the Lab service');
   const actor=await this.identity.authenticateActor({authorization,cookie,
     csrfToken:request.header('x-csrf-token'),origin:request.header('origin'),
-    validateMutation:Boolean(cookie&&!authorization&&!['GET','HEAD','OPTIONS'].includes(request.method)),
+    validateMutation:Boolean(cookie&&!authorization&&!readOnlyPost&&!['GET','HEAD','OPTIONS'].includes(request.method)),
     correlationId:request.correlationId,facilityId:request.header('x-facility-id')})
     .catch(error=>{if(error instanceof IdentityApiProblem)throw new DomainProblem(error.status,error.code??'AUTHENTICATION_REQUIRED',error.message);throw new DomainProblem(503,'IDENTITY_SERVICE_UNAVAILABLE','Identity authentication service is unavailable');}) as ActorContext;
   const facilityId=request.header('x-facility-id');const optional=this.reflector.getAllAndOverride<boolean>(FACILITY_OPTIONAL,[execution.getHandler(),execution.getClass()]);
