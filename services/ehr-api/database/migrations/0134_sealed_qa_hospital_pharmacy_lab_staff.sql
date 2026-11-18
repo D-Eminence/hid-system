@@ -36,53 +36,153 @@
 --    updated; one audit row with counts only when something was written; a
 --    second call writes nothing. 0123's seal (G2q: a QA account only at a
 --    QA facility; G3q: no platform role) applies to both rows.
--- D3 The migration calls it once (section 2). On production the QA tenant
---    exists (0123 seeded it), so the two memberships are written there and
---    nowhere real or demo; on every other database nothing is written.
+-- D3 The migration calls it once (section 2). Where 0123 installed the
+--    sealed QA tenant (0123 section 10 seeds it on Amazon RDS only, where
+--    the rds_superuser role exists: production and staging), the two
+--    memberships are written there and nowhere real or demo; on every other
+--    database (CI, acceptance, rehearsals, throwaway clusters) nothing is
+--    written and the function answers 0.
 --
--- 0. Preconditions (catalog reads only; 55000 or 42501, nothing applied):
---    0123's identity.sealed_qa_install() and identity.sealed_qa_facility(uuid)
---    and 0133's identity.facility_work_member_allows exist; this file's
---    function does not; the applier owns identity.staff_facility_memberships
---    and auth.account_roles or may SET ROLE to their owner.
+-- 0. Preconditions (catalog reads only, from pg_class, pg_proc,
+--    pg_namespace and pg_attribute; each is a presence check that raises
+--    when the thing is absent, never a comparison that can be null; each
+--    failure raises 55000 or 42501 and nothing is applied):
+--    a. 0001-0133 applied (the markers: 0123's identity.sealed_qa_install(),
+--       identity.sealed_qa_facility(uuid) and identity.sealed_qa_account(uuid),
+--       and 0133's identity.facility_work_member_allows and
+--       pharmacy.own_prescription_sends);
+--    b. 0134 not applied (no function of this file's name);
+--    c. every column the function reads or writes, by name and type;
+--    d. 0123's two helpers the function calls are byte for byte 0123's
+--       (md5 of pg_proc.prosrc; a missing one counts as a mismatch);
+--    e. one owner (identity.staff_facility_memberships') owns
+--       auth.account_roles, audit.events, identity.facilities,
+--       identity.staff, auth.accounts and 0123's install and two helpers;
+--       the applier is that owner, or a member that inherits it and may SET
+--       ROLE to it (else 42501).
 -- 1. The function, as that owner.
 -- 2. The call.
--- 3. Post-checks: the function's owner, SECURITY DEFINER, search_path and
---    ACL (its owner only); where the QA tenant is installed, both rows exist
---    exactly as D1 says.
+-- 3. Post-checks: the function's body (md5), owner, SECURITY DEFINER,
+--    volatility, language, not STRICT, search_path and ACL (its owner only,
+--    PUBLIC included, decided by EXISTS); where the QA tenant is installed,
+--    both memberships and roles exist exactly as D1 says; where it is not,
+--    neither fixed id exists.
 --
--- Locks: none on existing data beyond the rows written (ROW EXCLUSIVE on
--- identity.staff_facility_memberships, auth.account_roles and audit.events
--- where the QA tenant is installed) and 0123's advisory install lock.
--- Old services are unaffected: two more memberships of two existing QA
--- logins. Applied migrations before 0134 are immutable.
+-- Locks: no table lock beyond the rows written (ROW EXCLUSIVE on
+-- identity.staff_facility_memberships, auth.account_roles and audit.events,
+-- where the QA tenant is installed; it waits only behind DDL on them, and
+-- the runner's 5 s lock_timeout stops it there with nothing applied) and
+-- 0123's advisory install lock. Old services are unaffected: two more
+-- memberships of two existing QA logins. Applied migrations before 0134 are
+-- immutable.
 
 -- 0. Preconditions.
 do $$
 declare
-  applier oid := (select oid from pg_roles where rolname = current_user);
-  owner_oid oid := (select relation.relowner from pg_class relation
-                     where relation.oid = 'identity.staff_facility_memberships'::regclass);
+  found_absent boolean;
+  missing text;
+  applier oid := (select role_row.oid from pg_roles role_row where role_row.rolname = current_user);
+  owner_oid oid;
 begin
-  if to_regprocedure('identity.sealed_qa_install()') is null
-     or to_regprocedure('identity.sealed_qa_facility(uuid)') is null
-     or to_regprocedure('identity.sealed_qa_account(uuid)') is null
-     or to_regprocedure('identity.facility_work_member_allows(text,uuid,uuid,text)') is null then
+  -- a. 0001-0133 applied.
+  if not exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+                  where (namespace.nspname, proc.proname, pg_catalog.oidvectortypes(proc.proargtypes)) in (
+                    ('identity', 'sealed_qa_install', ''),
+                    ('identity', 'sealed_qa_facility', 'uuid'),
+                    ('identity', 'sealed_qa_account', 'uuid'),
+                    ('identity', 'facility_work_member_allows', 'text, uuid, uuid, text'))
+                 having count(distinct proc.oid) = 4)
+     or not exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
+                     where namespace.nspname = 'pharmacy' and relation.relname = 'own_prescription_sends'
+                       and relation.relkind = 'r') then
     raise exception using errcode = '55000', message = '0134: 0001-0133 must be applied first';
   end if;
-  if to_regprocedure('identity.sealed_qa_hospital_work_staff_install()') is not null then
+  -- b. Not applied yet.
+  if exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+              where namespace.nspname = 'identity' and proc.proname = 'sealed_qa_hospital_work_staff_install') then
     raise exception using errcode = '55000', message = '0134: already applied';
   end if;
-  if (select relation.relowner from pg_class relation where relation.oid = 'auth.account_roles'::regclass) <> owner_oid
-     or (select proc.proowner from pg_proc proc where proc.oid = 'identity.sealed_qa_install()'::regprocedure)
-        <> owner_oid then
+  -- c. Every column the function reads or writes, by name and type.
+  with expected(schema_name, relation_name, column_names) as (values
+         ('identity', 'facilities', array['id uuid', 'organization_id uuid']),
+         ('auth', 'accounts', array['id uuid', 'status text']),
+         ('identity', 'staff', array['id uuid', 'account_id uuid']),
+         ('identity', 'staff_facility_memberships', array['id uuid', 'staff_id uuid', 'account_id uuid',
+           'organization_id uuid', 'facility_id uuid', 'membership_role text', 'app_role text', 'is_primary boolean',
+           'active boolean', 'source_system text']),
+         ('auth', 'account_roles', array['id uuid', 'account_id uuid', 'role_code text', 'scope_type text',
+           'membership_id uuid', 'facility_id uuid', 'grant_reason text', 'revoked_at timestamp with time zone']),
+         ('audit', 'events', array['correlation_id text', 'actor_type text', 'action text', 'outcome text',
+           'resource_type text', 'provenance text', 'source_system text', 'details jsonb'])),
+       absent as (
+         select expected.schema_name, expected.relation_name, wanted.column_name
+           from expected cross join unnest(expected.column_names) wanted(column_name)
+          where not exists (
+            select 1 from pg_attribute attribute_row
+              join pg_class relation on relation.oid = attribute_row.attrelid
+              join pg_namespace namespace on namespace.oid = relation.relnamespace
+             where namespace.nspname = expected.schema_name and relation.relname = expected.relation_name
+               and relation.relkind in ('r', 'p') and attribute_row.attnum > 0 and not attribute_row.attisdropped
+               and attribute_row.attname || ' ' || format_type(attribute_row.atttypid, attribute_row.atttypmod)
+                   = wanted.column_name))
+  select exists (select 1 from absent),
+         (select string_agg(format('%s.%s.%s', absent.schema_name, absent.relation_name, absent.column_name), '; ')
+            from absent)
+    into found_absent, missing;
+  if found_absent then
     raise exception using errcode = '55000',
-      message = '0134: identity.staff_facility_memberships, auth.account_roles and 0123''s install have different owners';
+      message = format('0134: a column this migration relies on is missing or of another type: %s', missing);
   end if;
-  if applier <> owner_oid and not pg_has_role(applier, owner_oid, 'SET') then
+  -- d. 0123's helpers, byte for byte.
+  with expected(proc_name, digest) as (values
+         ('sealed_qa_facility', 'fe9846d94cd744bf37c3f72053d9931f'),
+         ('sealed_qa_account', '2c19c76bff02b394097724f99e09fc9d')),
+       differing as (
+         select expected.* from expected
+          where not exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+                             where namespace.nspname = 'identity' and proc.proname = expected.proc_name
+                               and pg_catalog.oidvectortypes(proc.proargtypes) = 'uuid'
+                               and md5(proc.prosrc) = expected.digest))
+  select exists (select 1 from differing), (select string_agg(differing.proc_name, ', ') from differing)
+    into found_absent, missing;
+  if found_absent then
+    raise exception using errcode = '55000',
+      message = format('0134: 0123''s helpers differ from 0123 or are missing: %s', missing);
+  end if;
+  -- e. One owner, and an applier that is it or may act as it.
+  owner_oid := (select relation.relowner from pg_class relation
+                  join pg_namespace namespace on namespace.oid = relation.relnamespace
+                 where namespace.nspname = 'identity' and relation.relname = 'staff_facility_memberships'
+                   and relation.relkind = 'r');
+  with foreign_owned as (
+         select format('%s.%s', expected.schema_name, expected.relation_name) as what
+           from (values ('auth', 'account_roles'), ('audit', 'events'), ('identity', 'facilities'), ('identity', 'staff'),
+                        ('auth', 'accounts')) expected(schema_name, relation_name)
+          where not exists (select 1 from pg_class relation
+                              join pg_namespace namespace on namespace.oid = relation.relnamespace
+                             where namespace.nspname = expected.schema_name
+                               and relation.relname = expected.relation_name and relation.relowner = owner_oid)
+         union all
+         select format('identity.%s()', expected.proc_name)
+           from (values ('sealed_qa_install'), ('sealed_qa_facility'), ('sealed_qa_account')) expected(proc_name)
+          where not exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+                             where namespace.nspname = 'identity' and proc.proname = expected.proc_name
+                               and proc.proowner = owner_oid))
+  select exists (select 1 from foreign_owned), (select string_agg(foreign_owned.what, ', ') from foreign_owned)
+    into found_absent, missing;
+  if found_absent then
     raise exception using errcode = '42501',
-      message = format('0134: %s is not %s and may not SET ROLE to it', current_user, pg_get_userbyid(owner_oid));
+      message = format('0134: these are not owned by %s, the owner of identity.staff_facility_memberships: %s',
+        coalesce(pg_get_userbyid(owner_oid), 'nobody'), missing);
   end if;
+  if not (applier = owner_oid
+          or (pg_has_role(applier, owner_oid, 'USAGE') and pg_has_role(applier, owner_oid, 'SET'))) then
+    raise exception using errcode = '42501',
+      message = format('0134: %s must own, or inherit from and be able to SET ROLE to, %s, the owner of '
+        || 'identity.staff_facility_memberships, auth.account_roles and 0123''s sealed QA install', current_user,
+        pg_get_userbyid(owner_oid));
+  end if;
+  raise notice '0134: preconditions checked; applier %; owner %', current_user, pg_get_userbyid(owner_oid);
 end
 $$;
 
@@ -184,27 +284,45 @@ do $$
 declare
   owner_oid oid := (select relation.relowner from pg_class relation
                      where relation.oid = 'identity.staff_facility_memberships'::regclass);
+  install oid := 'identity.sealed_qa_hospital_work_staff_install()'::regprocedure;
 begin
-  if not exists (select 1 from pg_proc proc
-                  where proc.oid = 'identity.sealed_qa_hospital_work_staff_install()'::regprocedure
-                    and proc.proowner = owner_oid and proc.prosecdef and proc.provolatile = 'v'
-                    and proc.proconfig = '{"search_path=pg_catalog, pg_temp"}'::text[])
-     or exists (select 1 from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
-                 where proc.oid = 'identity.sealed_qa_hospital_work_staff_install()'::regprocedure
-                   and acl.grantee <> proc.proowner) then
+  -- The function: this file's body, plpgsql, SECURITY DEFINER, volatile, not
+  -- STRICT, this search_path, owned with the memberships, executable by its
+  -- owner only (PUBLIC included).
+  if not exists (
+       select 1 from pg_proc proc join pg_language language_row on language_row.oid = proc.prolang
+        where proc.oid = install and language_row.lanname = 'plpgsql' and proc.prosecdef and proc.provolatile = 'v'
+          and not proc.proisstrict and proc.proowner = owner_oid
+          and proc.proconfig = array['search_path=pg_catalog, pg_temp']
+          and md5(proc.prosrc) = '3f2a9fe05ae323d6d5fab279e533f8c2')
+     or (select count(*) from pg_proc proc
+          where proc.pronamespace = 'identity'::regnamespace and proc.proname = 'sealed_qa_hospital_work_staff_install') <> 1
+     or exists (select 1 from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) privilege
+                 where proc.oid = install and privilege.grantee <> proc.proowner) then
     raise exception using errcode = '55000', message = '0134: the function is not as this file makes it';
   end if;
-  if identity.sealed_qa_facility('c0a00002-0000-4000-8000-000000000001')
-     and (select count(*) from identity.staff_facility_memberships membership
-            join auth.account_roles assignment on assignment.id = membership.id
-             and assignment.membership_id = membership.id and assignment.revoked_at is null
-           where (membership.id, membership.account_id, assignment.role_code) in
-                 (('c0a00005-0000-4000-8000-000000000032'::uuid, 'c0a00003-0000-4000-8000-000000000003'::uuid, 'lab'),
-                  ('c0a00005-0000-4000-8000-000000000052'::uuid, 'c0a00003-0000-4000-8000-000000000005'::uuid,
-                   'pharmacist'))
-             and membership.facility_id = 'c0a00002-0000-4000-8000-000000000001'
-             and membership.active) <> 2 then
-    raise exception using errcode = '55000', message = '0134: the QA Hospital memberships are not written';
+  -- Where the QA tenant is installed, both rows exactly; elsewhere, neither
+  -- fixed id exists.
+  if identity.sealed_qa_facility('c0a00002-0000-4000-8000-000000000001') then
+    if (select count(*) from identity.staff_facility_memberships membership
+          join auth.account_roles assignment on assignment.id = membership.id
+           and assignment.membership_id = membership.id and assignment.revoked_at is null
+         where (membership.id, membership.account_id, membership.staff_id, assignment.role_code) in
+               (('c0a00005-0000-4000-8000-000000000032'::uuid, 'c0a00003-0000-4000-8000-000000000003'::uuid,
+                 'c0a00004-0000-4000-8000-000000000003'::uuid, 'lab'),
+                ('c0a00005-0000-4000-8000-000000000052'::uuid, 'c0a00003-0000-4000-8000-000000000005'::uuid,
+                 'c0a00004-0000-4000-8000-000000000005'::uuid, 'pharmacist'))
+           and membership.facility_id = 'c0a00002-0000-4000-8000-000000000001'
+           and membership.organization_id = 'c0a00001-0000-4000-8000-000000000001'
+           and assignment.facility_id = 'c0a00002-0000-4000-8000-000000000001' and assignment.scope_type = 'facility'
+           and membership.active and not membership.is_primary) <> 2 then
+      raise exception using errcode = '55000', message = '0134: the QA Hospital memberships are not written';
+    end if;
+  elsif exists (select 1 from identity.staff_facility_memberships membership
+                 where membership.id in ('c0a00005-0000-4000-8000-000000000032', 'c0a00005-0000-4000-8000-000000000052'))
+     or exists (select 1 from auth.account_roles assignment
+                 where assignment.id in ('c0a00005-0000-4000-8000-000000000032', 'c0a00005-0000-4000-8000-000000000052')) then
+    raise exception using errcode = '55000', message = '0134: QA Hospital rows exist where the QA tenant is not installed';
   end if;
 end
 $$;

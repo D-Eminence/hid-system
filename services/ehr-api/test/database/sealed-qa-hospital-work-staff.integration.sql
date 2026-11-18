@@ -2,9 +2,12 @@
 -- 0134 (Q102 of 18 November 2026): sealed QA only, a fictional pharmacist
 -- and a fictional lab scientist at QA Hospital. Rollback-only.
 -- Cases:
---   1. structure: the function is the owner's alone (no EXECUTE for any
---      runtime), SECURITY DEFINER, search_path pg_catalog, pg_temp;
---   2. without the QA tenant it writes nothing (0);
+--   1. structure: the function is 0134's body (md5), the owner's alone (no
+--      EXECUTE for any runtime), SECURITY DEFINER, search_path pg_catalog,
+--      pg_temp;
+--   2. without the QA tenant (every database but Amazon RDS, where 0123
+--      seeds it) the migration wrote nothing and the function writes
+--      nothing (0): neither fixed id exists, no audit row;
 --   3. after 0123's install (as the owner, as its suite does): it writes the
 --      two memberships and roles at QA Hospital (4 rows, one audit row with
 --      counts only), the existing QA Laboratory and QA Pharmacy memberships
@@ -39,19 +42,28 @@ $f$;
 grant execute on function pg_temp.expect(text, text, text), pg_temp.try(text) to public;
 
 -- 1. Structure.
-select pg_temp.expect('the function''s attributes and ACL',
-  (select format('%s/%s/%s/%s', proc.prosecdef, proc.provolatile, proc.proconfig,
+select pg_temp.expect('the function''s body, attributes and ACL',
+  (select format('%s/%s/%s/%s/%s', md5(proc.prosrc), proc.prosecdef, proc.provolatile, proc.proconfig,
      (select count(*) from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
        where acl.grantee <> proc.proowner))
      from pg_proc proc where proc.oid = 'identity.sealed_qa_hospital_work_staff_install()'::regprocedure),
-  't/v/{"search_path=pg_catalog, pg_temp"}/0');
+  '3f2a9fe05ae323d6d5fab279e533f8c2/t/v/{"search_path=pg_catalog, pg_temp"}/0');
 select pg_temp.expect('no runtime role may execute it',
   (select count(*)::text from pg_roles role_row
     where role_row.rolname ~ '^hid_.*(runtime|worker|writer|dispatcher|commands|scanner)$'
       and has_function_privilege(role_row.oid, 'identity.sealed_qa_hospital_work_staff_install()', 'EXECUTE')), '0');
 
 -- 2. Without the QA tenant.
+select pg_temp.expect('the migration wrote nothing here (no QA tenant)',
+  (select format('%s/%s/%s', (select count(*) from identity.staff_facility_memberships
+       where id in ('c0a00005-0000-4000-8000-000000000032', 'c0a00005-0000-4000-8000-000000000052')),
+     (select count(*) from auth.account_roles
+       where id in ('c0a00005-0000-4000-8000-000000000032', 'c0a00005-0000-4000-8000-000000000052')),
+     (select count(*) from audit.events where action = 'identity.sealed-qa.hospital-work-staff'))), '0/0/0');
 select pg_temp.expect('nothing without the QA tenant', identity.sealed_qa_hospital_work_staff_install()::text, '0');
+select pg_temp.expect('and still nothing written',
+  (select count(*)::text from identity.staff_facility_memberships
+    where id in ('c0a00005-0000-4000-8000-000000000032', 'c0a00005-0000-4000-8000-000000000052')), '0');
 
 -- 3. With it.
 update platform.control_settings set enabled = true where control_key = 'outreach_organiser_signup_enabled';
