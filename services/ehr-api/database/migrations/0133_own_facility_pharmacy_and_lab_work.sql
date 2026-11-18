@@ -111,8 +111,13 @@
 --      not_active    the prescription is not active;
 --      changed       it is not at the given version;
 --      routed        it has a live route to another facility;
---      already_in_pharmacy  a work item already exists for it (a
---                    pharmacist accepted it, or an earlier send);
+--      already_in_pharmacy  a work item already exists for it at this
+--                    version (a pharmacist accepted it, or an earlier send);
+--      superseded    a work item already exists for it, but for an earlier
+--                    version, or its send was withdrawn: the prescription
+--                    was changed or resumed after it was sent, and the
+--                    pharmacy (one item per prescription) holds a version
+--                    0101 no longer dispenses; nothing is sent;
 --      no_pharmacy   nobody at this facility can work on pharmacy items
 --                    (no active member holds pharmacy.work-item.read and
 --                    pharmacy.order-route.receive here);
@@ -131,15 +136,18 @@
 --    attempt runs in a subtransaction, so a failure never undoes the
 --    activation; a serialization failure or deadlock is raised, so the
 --    caller's retry runs the whole transaction again. A second call for a
---    sent prescription answers already_in_pharmacy and writes nothing. A
---    pending send is tried again by the next call (the prescriber's "Send
---    to pharmacy").
+--    sent prescription answers already_in_pharmacy (superseded once it
+--    changed) and writes nothing. A pending send is tried again by the next
+--    call (the prescriber's "Send to pharmacy").
 -- D8 ehr.withdraw_own_pharmacy_send(prescription) (SECURITY
---    DEFINER), for the EHR runtime, in the transaction that puts the
---    prescription on hold, cancels it or enters it in error: the same
---    session test as D7; marks the send withdrawn (once) when the
---    prescription, as the session reads it, is no longer active. Dispensing
---    is refused anyway by 0101 (the version or status changed).
+--    DEFINER), for the EHR runtime, in the transaction that changes a
+--    prescription that may have been sent (holds, cancels, enters in error,
+--    resumes or edits it): the same session test as D7; marks the send
+--    withdrawn (once) when the prescription, as the session reads it, is on
+--    hold, cancelled or entered in error, or is active at another version
+--    than the one sent (edited or resumed: the pharmacy item keeps the
+--    version sent). A completed prescription is not marked. Dispensing is
+--    refused anyway by 0101 (the version or status changed).
 -- D9 pharmacy.own_work_access_for(resource, id, action) and
 --    lab.own_work_access_for(resource, id, action) (SECURITY DEFINER,
 --    STABLE), for their runtimes: the own work item (no route) the
@@ -939,6 +947,7 @@ declare
   fixed_reason constant text := 'Sent automatically when the prescription was activated';
   source ehr.prescriptions%rowtype;
   existing_item uuid;
+  existing_version bigint;
   send_row pharmacy.own_prescription_sends%rowtype;
   created pharmacy.work_items%rowtype;
   failure_state text;
@@ -981,8 +990,18 @@ begin
     return query select 'routed'::text, null::uuid;
     return;
   end if;
-  select item.id into existing_item from pharmacy.work_items item where item.source_ehr_prescription_id = source.id;
+  select item.id, item.source_ehr_prescription_version into existing_item, existing_version
+    from pharmacy.work_items item where item.source_ehr_prescription_id = source.id;
   if existing_item is not null then
+    -- One item per prescription: an item of an earlier version (the
+    -- prescription was edited or resumed after it was sent), or a withdrawn
+    -- send, is not this version in the pharmacy.
+    if existing_version is distinct from source.row_version
+       or exists (select 1 from pharmacy.own_prescription_sends send
+                   where send.prescription_id = source.id and send.withdrawn_at is not null) then
+      return query select 'superseded'::text, existing_item;
+      return;
+    end if;
     return query select 'already_in_pharmacy'::text, existing_item;
     return;
   end if;
@@ -1007,7 +1026,9 @@ begin
   select send.* into send_row from pharmacy.own_prescription_sends send
    where send.prescription_id = source.id for update;
   if send_row.state = 'sent' then
-    return query select 'already_in_pharmacy'::text, send_row.work_item_id;
+    return query select case when send_row.withdrawn_at is not null
+                               or send_row.prescription_version is distinct from source.row_version
+                             then 'superseded' else 'already_in_pharmacy' end::text, send_row.work_item_id;
     return;
   end if;
   begin
@@ -1071,6 +1092,7 @@ declare
   session_membership uuid := platform.current_membership_id();
   session_subject text := platform.current_actor_subject();
   source_status text;
+  source_version bigint;
   marked integer;
 begin
   if requested_prescription_id is null then
@@ -1082,18 +1104,21 @@ begin
           'ehr.prescription.write'), false) then
     raise exception using errcode = '42501', message = 'OWN_PHARMACY_SEND_DENIED';
   end if;
-  select prescription.status into source_status
+  select prescription.status, prescription.row_version into source_status, source_version
     from ehr.prescriptions prescription
    where prescription.id = requested_prescription_id and prescription.facility_id = session_facility;
-  if source_status is null or source_status not in ('on_hold', 'cancelled', 'entered_in_error') then
+  if source_status is null or source_status not in ('active', 'on_hold', 'cancelled', 'entered_in_error') then
     return false;
   end if;
+  -- Stopped, or still active at another version than the one sent (edited
+  -- or resumed): the pharmacy item keeps the version sent.
   update pharmacy.own_prescription_sends send
      set withdrawn_at = clock_timestamp()
    where send.prescription_id = requested_prescription_id
      and send.facility_id = session_facility
      and send.state = 'sent'
-     and send.withdrawn_at is null;
+     and send.withdrawn_at is null
+     and (source_status <> 'active' or send.prescription_version is distinct from source_version);
   get diagnostics marked = row_count;
   return marked > 0;
 end;
@@ -1315,9 +1340,9 @@ comment on table pharmacy.own_prescription_sends is
 comment on function pharmacy.own_work_source_prescription(uuid, uuid, uuid) is
   '0133 D5: the prescription is the source of an own pharmacy work item the session works on as this facility''s pharmacy staff. Used by two ehr.prescriptions policies for the owner of pharmacy.validate_dispensing only.';
 comment on function ehr.send_prescription_to_own_pharmacy(uuid, bigint) is
-  '0133 D7: sends the prescriber''s active prescription to this facility''s own pharmacy (a work item accepted by the prescriber with the fixed reason), in the caller''s transaction; answers not_found, not_prescriber, not_active, changed, routed, already_in_pharmacy, no_pharmacy, sent or pending.';
+  '0133 D7: sends the prescriber''s active prescription to this facility''s own pharmacy (a work item accepted by the prescriber with the fixed reason), in the caller''s transaction; answers not_found, not_prescriber, not_active, changed, routed, already_in_pharmacy, superseded, no_pharmacy, sent or pending.';
 comment on function ehr.withdraw_own_pharmacy_send(uuid) is
-  '0133 D8: marks a sent prescription withdrawn once it is on hold, cancelled or entered in error.';
+  '0133 D8: marks a sent prescription withdrawn once it is on hold, cancelled or entered in error, or active at another version than the one sent.';
 comment on function pharmacy.own_work_access_for(text, uuid, text) is
   '0133 D9: the own work item (no route) a work item or dispensing belongs to, when the session works for this facility''s pharmacy.';
 comment on function lab.own_work_access_for(text, uuid, text) is
@@ -1357,9 +1382,9 @@ begin
            'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'own_work_source_prescription', 'uuid, uuid, uuid', '41a9afd4ea6f708425b98d1fb6e6eb87', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),
-         ('ehr', 'send_prescription_to_own_pharmacy', 'uuid, bigint', 'b97d8e5f79a384060f3558ed4b26bdaf', 'v', 'plpgsql',
+         ('ehr', 'send_prescription_to_own_pharmacy', 'uuid, bigint', 'ea6e547d05979779c9765f7dcc70c377', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
-         ('ehr', 'withdraw_own_pharmacy_send', 'uuid', '0d6717beb1e28897e40e378a242042db', 'v', 'plpgsql',
+         ('ehr', 'withdraw_own_pharmacy_send', 'uuid', 'c5762916ddfe74e467e84c6d7ed08fd4', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'own_work_access_for', 'text, uuid, text', 'bb03e692d187fe85783fed28cc40413c', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
