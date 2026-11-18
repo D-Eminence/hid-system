@@ -1,7 +1,11 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn(), SignJWT: jest.fn() }));
 import 'reflect-metadata';
-import { RequestMethod } from '@nestjs/common';
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { type CallHandler, type ExecutionContext, type NestInterceptor, RequestMethod } from '@nestjs/common';
+import { INTERCEPTORS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { Reflector } from '@nestjs/core';
+import { defer, firstValueFrom, type Observable } from 'rxjs';
+import { AuditInterceptor } from '../audit/audit.interceptor';
+import { AuditService } from '../audit/audit.service';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { PoolClient } from 'pg';
@@ -108,5 +112,63 @@ describe('GET identity/facility-staff-names (SX-9)', () => {
     const answer = await setup(rows).service.list(context, undefined);
     expect(answer.staff).toHaveLength(FACILITY_STAFF_NAMES_LIMIT);
     expect(answer.complete).toBe(false);
+  });
+});
+
+/**
+ * The request-level audit row as served: the real global AuditInterceptor
+ * and AuditService, then the route's own interceptors from its metadata (as
+ * Nest runs them), then the handler. The row records the purpose the read
+ * is made under, whatever the browser sent.
+ */
+describe('GET identity/facility-staff-names (SX-9) request audit purpose', () => {
+  function served(headers: Record<string, string>, query: Record<string, unknown>, fail = false) {
+    const inserts: unknown[][] = [];
+    const database = { query: jest.fn(async (_text: string, values: unknown[] = []) => {
+      inserts.push(values);
+      return { rows: [] };
+    }) } as unknown as DatabaseService;
+    const list = jest.fn(async () => {
+      if (fail) throw new Error('names read failed');
+      return { facilityId: FACILITY, staff: [], complete: true };
+    });
+    const controller = new FacilityStaffNamesController({ list } as unknown as FacilityStaffNamesService);
+    const request = { method: 'GET', correlationId: 'names-purpose', route: { path: '/api/v1/identity/facility-staff-names' },
+      params: {}, ip: '192.0.2.10', headers: { ...headers }, query: { ...query },
+      actor: { ...actor, facility: actor.facilities[0] }, facilityId: FACILITY } as Record<string, unknown>;
+    request.header = (name: string) => (request.headers as Record<string, string>)[name.toLowerCase()];
+    const handler = FacilityStaffNamesController.prototype.list;
+    const context = { getHandler: () => handler, getClass: () => FacilityStaffNamesController,
+      switchToHttp: () => ({ getRequest: () => request, getResponse: () => ({ statusCode: 200 }) }) } as unknown as ExecutionContext;
+    const routeInterceptors = (Reflect.getMetadata(INTERCEPTORS_METADATA, handler) ?? []) as NestInterceptor[];
+    const chain = routeInterceptors.reduceRight<CallHandler>((next, interceptor) =>
+      ({ handle: () => interceptor.intercept(context, next) as Observable<unknown> }),
+    { handle: () => defer(() => controller.list({}, request as unknown as HidRequest)) });
+    const global = new AuditInterceptor(new Reflector(), new AuditService(database));
+    // values(): 8 action, 11 outcome, 12 purpose of use.
+    const rows = () => inserts.map((values) => ({ action: values[8], outcome: values[11], purposeOfUse: values[12] }));
+    return { run: () => firstValueFrom(global.intercept(context, chain)), rows, request, routeInterceptors };
+  }
+
+  it('records healthcare-operations when the browser sends X-Purpose-Of-Use: emergency', async () => {
+    const s = served({ 'x-purpose-of-use': 'emergency' }, {});
+    expect(s.routeInterceptors).toHaveLength(1);
+    await s.run();
+    expect(s.rows()).toEqual([{ action: 'api.identity.facility-staff-names.read', outcome: 'success',
+      purposeOfUse: 'healthcare-operations' }]);
+  });
+
+  it('records healthcare-operations on failure too, and leaves a ?purpose key for validation to refuse', async () => {
+    const s = served({ 'x-purpose-of-use': 'emergency' }, { purpose: 'emergency' }, true);
+    await expect(s.run()).rejects.toThrow('names read failed');
+    expect(s.rows()).toEqual([{ action: 'api.identity.facility-staff-names.read', outcome: 'failure',
+      purposeOfUse: 'healthcare-operations' }]);
+    expect(Object.keys(s.request.query as object)).toEqual(['purpose']);
+  });
+
+  it('records healthcare-operations when no purpose is sent', async () => {
+    const s = served({}, {});
+    await s.run();
+    expect(s.rows()).toEqual([expect.objectContaining({ purposeOfUse: 'healthcare-operations' })]);
   });
 });

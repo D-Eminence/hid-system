@@ -1,8 +1,11 @@
 import 'reflect-metadata';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { RequestMethod } from '@nestjs/common';
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { type CallHandler, type ExecutionContext, type NestInterceptor, RequestMethod } from '@nestjs/common';
+import { INTERCEPTORS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { Reflector } from '@nestjs/core';
+import { defer, firstValueFrom, type Observable } from 'rxjs';
+import { AuditInterceptor } from '../../audit/audit.interceptor';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { PoolClient } from 'pg';
@@ -254,5 +257,58 @@ describe('GET ocr/job-list (SX-9) through the transaction and the audit insert',
     }, { readOnly: true }).catch((error: unknown) => error);
     expect((failure as { code?: string }).code).toBe('25006');
     expect(db.statements.at(-1)).toBe('ROLLBACK');
+  });
+});
+
+/**
+ * The request-level audit row (api.ocr.job.list.request) as served: the real
+ * global AuditInterceptor and AuditService, then the route's own
+ * interceptors from its metadata (as Nest runs them), then the handler.
+ */
+describe('GET ocr/job-list (SX-9) request audit purpose', () => {
+  function served(headers: Record<string, string>, query: Record<string, unknown>, fail = false) {
+    const inserts: unknown[][] = [];
+    const database = { query: jest.fn(async (_text: string, values: unknown[] = []) => {
+      inserts.push(values);
+      return { rows: [] };
+    }) } as unknown as DatabaseService;
+    const list = jest.fn(async () => {
+      if (fail) throw new DomainProblem(400, 'OCR_JOB_LIST_CURSOR_INVALID', 'Start the list again.');
+      return { items: [], nextCursor: null };
+    });
+    const controller = new OcrJobListController({ list } as unknown as OcrJobListService);
+    const request = { method: 'GET', correlationId: 'job-list-purpose', route: { path: '/api/v1/ocr/job-list' },
+      params: {}, ip: '192.0.2.10', headers: { ...headers }, query: { ...query }, actor: context.actor,
+      facilityId: FACILITY } as Record<string, unknown>;
+    request.header = (name: string) => (request.headers as Record<string, string>)[name.toLowerCase()];
+    const handler = OcrJobListController.prototype.list;
+    const execution = { getHandler: () => handler, getClass: () => OcrJobListController,
+      switchToHttp: () => ({ getRequest: () => request, getResponse: () => ({ statusCode: 200 }) }) } as unknown as ExecutionContext;
+    const routeInterceptors = (Reflect.getMetadata(INTERCEPTORS_METADATA, handler) ?? []) as NestInterceptor[];
+    const chain = routeInterceptors.reduceRight<CallHandler>((next, interceptor) =>
+      ({ handle: () => interceptor.intercept(execution, next) as Observable<unknown> }),
+    { handle: () => defer(() => controller.list({}, request as unknown as HidRequest)) });
+    const global = new AuditInterceptor(new Reflector(), new AuditService(database));
+    // values(): 8 action, 11 outcome, 12 purpose of use.
+    const rows = () => inserts.map((values) => ({ action: values[8], outcome: values[11], purposeOfUse: values[12] }));
+    return { run: () => firstValueFrom(global.intercept(execution, chain)), rows, request, routeInterceptors, list };
+  }
+
+  it('records healthcare-operations when the browser sends X-Purpose-Of-Use: emergency', async () => {
+    const s = served({ 'x-purpose-of-use': 'emergency' }, {});
+    expect(s.routeInterceptors).toHaveLength(1);
+    await s.run();
+    expect(s.list).toHaveBeenCalledWith({}, expect.objectContaining({ purposeOfUse: 'healthcare-operations' }));
+    expect(s.rows()).toEqual([{ action: 'api.ocr.job.list.request', outcome: 'success',
+      purposeOfUse: 'healthcare-operations' }]);
+  });
+
+  it('records healthcare-operations on a refusal too, and leaves a ?purpose key for validation to refuse', async () => {
+    const s = served({ 'x-purpose-of-use': 'emergency' }, { purpose: 'emergency' }, true);
+    await expect(s.run()).rejects.toBeInstanceOf(DomainProblem);
+    expect(s.rows()).toEqual([{ action: 'api.ocr.job.list.request', outcome: 'failure',
+      purposeOfUse: 'healthcare-operations' }]);
+    expect(Object.keys(s.request.query as object)).toEqual(['purpose']);
+    expect(validate(s.request.query as Record<string, unknown>)).not.toEqual([]);
   });
 });

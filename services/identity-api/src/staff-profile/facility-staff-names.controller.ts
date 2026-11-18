@@ -1,6 +1,7 @@
-import { Controller, Get, Query, Req } from '@nestjs/common';
+import { Controller, Get, Query, Req, UseInterceptors } from '@nestjs/common';
 import { AuditAction } from '../common/decorators';
 import { type HidRequest, requireRequestContext } from '../common/request-context';
+import { AuditPurposeInterceptor } from './audit-purpose.interceptor';
 import { FacilityStaffNamesQueryDto } from './facility-staff-names.dto';
 import { FacilityStaffNamesService } from './facility-staff-names.service';
 
@@ -10,7 +11,9 @@ import { FacilityStaffNamesService } from './facility-staff-names.service';
  * the caller is not active at is refused 403 FACILITY_ACCESS_DENIED by the
  * guard). No permission beyond membership: names only, of the caller's own
  * colleagues. Success and failure are audited
- * (api.identity.facility-staff-names.read).
+ * (api.identity.facility-staff-names.read) with purpose
+ * healthcare-operations, the purpose it always reads under, not the
+ * browser's X-Purpose-Of-Use.
  */
 @Controller('identity')
 export class FacilityStaffNamesController {
@@ -18,6 +21,7 @@ export class FacilityStaffNamesController {
 
   @Get('facility-staff-names')
   @AuditAction('identity.facility-staff-names.read')
+  @UseInterceptors(new AuditPurposeInterceptor('healthcare-operations'))
   list(@Query() query: FacilityStaffNamesQueryDto, @Req() request: HidRequest) {
     return this.names.list(requireRequestContext(request, 'healthcare-operations'), query.membershipIds?.split(','));
   }

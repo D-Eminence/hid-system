@@ -6133,8 +6133,10 @@ only the jobs the caller started at this facility. `limit` defaults to 25.
   READ COMMITTED transaction, not a read-only one: PostgreSQL refuses an
   insert in a read-only transaction), with the count, the job ids shown, the
   filters and whether it was the first page; if that row cannot be written
-  nothing is answered. The route changes no job. The request itself is audited as
-  `api.ocr.job.list.request`.
+  nothing is answered. The route changes no job. The request itself is
+  audited as `api.ocr.job.list.request`, on success and failure, with
+  purpose `healthcare-operations` whatever `X-Purpose-Of-Use` or a `purpose`
+  query key says (a `purpose` key is still refused as an unknown key).
 
 ```json
 {
@@ -6156,7 +6158,9 @@ only the jobs the caller started at this facility. `limit` defaults to 25.
 - Without `membershipIds`, at most 500 names; `complete` is `false` when
   there are more, and the screen then asks for the ids on its page with
   `membershipIds`.
-- Audited on success and refusal as `api.identity.facility-staff-names.read`.
+- Audited on success and refusal as `api.identity.facility-staff-names.read`,
+  with purpose `healthcare-operations` (the purpose it always reads under)
+  whatever `X-Purpose-Of-Use` says.
 
 Screen change (Akos frontend branch): the Migrate desk gains a "Documents
 read here" list (status filter, "Only mine", "Load more"), showing "Started
