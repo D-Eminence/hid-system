@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 export const components = ['identity-api','ehr-api','lab-api','pharmacy-api','ocr-api','ocr-worker',
   'outreach-api','notification-api','notification-worker','event-dispatcher','gateway','support-api','database-migration'];
@@ -14,13 +15,27 @@ export function assertPublicationContext(e) {
 export const runtimePolicyPath = () => 'security/production-runtime-assessment.json';
 // Committed OpenVEX for the gateway's Alpine OpenSSL. The gateway has no ELF
 // inventory assessment, so only these exact package statements may suppress a
-// gateway finding, and only until hid_expires_at.
+// gateway finding, only until hid_expires_at, and only while the gateway files
+// it was reviewed against (hid_bound_files: path -> sha256) are unchanged.
 export const gatewayVexPath = 'security/gateway-runtime.vex.json';
-export function assertGatewayVex(ignored, vex, now=Date.now()) {
+export const gatewayBoundFiles = ['gateway/Dockerfile','gateway/nginx.conf.template','gateway/proxy-headers.conf'];
+const repoRoot = fileURLToPath(new URL('../',import.meta.url));
+const highCritical = report => (report?.ignoredMatches??[]).filter(m=>['High','Critical'].includes(m.vulnerability?.severity));
+export function gatewayBoundFileHashes(root=repoRoot) {
+  return Object.fromEntries(gatewayBoundFiles.map(p=>[p,createHash('sha256').update(readFileSync(join(root,p))).digest('hex')]));
+}
+export function assertGatewayVex(ignored, vex, now=Date.now(), root=repoRoot) {
   const expires=Date.parse(vex?.hid_expires_at), issued=Date.parse(vex?.timestamp);
   if(vex?.['@context']!=='https://openvex.dev/ns/v0.2.0'||!Array.isArray(vex.statements)
     ||!Number.isFinite(expires)||!Number.isFinite(issued)||now>=expires||expires-issued>30*86400000)
     throw Error('Reviewed unexpired gateway OpenVEX required');
+  const bound=vex.hid_bound_files;
+  let current;
+  try { current=gatewayBoundFileHashes(root); } catch { throw Error('Gateway OpenVEX bound files missing'); }
+  if(!bound||typeof bound!=='object'||Array.isArray(bound)
+    ||JSON.stringify(Object.keys(bound).sort())!==JSON.stringify([...gatewayBoundFiles].sort())
+    ||gatewayBoundFiles.some(p=>bound[p]!==current[p]))
+    throw Error('Gateway changed since its OpenVEX was reviewed');
   for(const m of ignored){
     const covered=vex.statements.some(s=>s.vulnerability?.name===m.vulnerability.id&&s.status==='not_affected'
       &&s.justification==='vulnerable_code_not_in_execute_path'&&s.products?.some(p=>p['@id']===m.artifact.purl));
@@ -28,6 +43,13 @@ export function assertGatewayVex(ignored, vex, now=Date.now()) {
       ||!m.appliedIgnoreRules?.some(r=>r.namespace==='vex'&&r['vex-status']==='not_affected'))
       throw Error('Unassessed or incorrectly suppressed High/Critical finding');
   }
+}
+// The committed gateway VEX is read only for a gateway scan with ignored High/Critical
+// rows and no native assessment; a clean gateway scan needs no VEX file at all.
+export function loadGatewayVex(component, assessment, scan, root=repoRoot) {
+  const file=join(root,gatewayVexPath);
+  if(component!=='gateway'||assessment||!highCritical(scan).length||!existsSync(file)) return null;
+  return JSON.parse(readFileSync(file));
 }
 const run = (command,args,options={}) => (execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options})??'').trim();
 export function selectComponents(paths, requested='changed') {
@@ -62,7 +84,7 @@ export function componentConfig(c) {
 export function assertScan(report, assessment=null, policy=null, gatewayVex=null) {
   if(!Array.isArray(report.matches) || !report.descriptor?.version || !report.distro?.name || !report.distro?.version) throw Error('Complete Grype report with OS distribution required');
   if(report.matches.some(m=>['High','Critical'].includes(m.vulnerability?.severity))) throw Error('High/Critical vulnerabilities block publication');
-  const ignored=(report.ignoredMatches??[]).filter(m=>['High','Critical'].includes(m.vulnerability?.severity));
+  const ignored=highCritical(report);
   if(!ignored.length) return;
   if(!assessment&&gatewayVex) return assertGatewayVex(ignored,gatewayVex);
   if(!assessment||!policy||!Number.isFinite(Date.parse(assessment.expires_at))||Date.now()>=Date.parse(assessment.expires_at)
@@ -72,7 +94,9 @@ export function assertScan(report, assessment=null, policy=null, gatewayVex=null
     throw Error('Image-bound unexpired runtime assessment required');
   for(const m of ignored){
     const finding=policy.findings.find(f=>f.id===m.vulnerability.id&&f.packages.includes(m.artifact.name));
+    // Optional per-finding expires_at: refused at and after that instant (or if unparsable).
     if(m.vulnerability.severity==='Critical'||!finding||finding.versions[m.artifact.name]!==m.artifact.version
+      ||('expires_at' in finding&&!(Date.now()<Date.parse(finding.expires_at)))
       ||!assessment.reviewed_not_affected.some(r=>r.id===m.vulnerability.id&&r.package===m.artifact.name&&r.version===m.artifact.version&&r.purl===m.artifact.purl)
       ||!m.appliedIgnoreRules?.some(r=>r.namespace==='vex'&&r['vex-status']==='not_affected'))
       throw Error('Unassessed or incorrectly suppressed High/Critical finding');
@@ -141,14 +165,15 @@ function main(){
   const policy=assessment?JSON.parse(readFileSync(runtimePolicyPath(c))):null;
   if(assessment&&(assessment.component!==c||assessment.policy_sha256!==hashFile(runtimePolicyPath(c)))) throw Error('Runtime assessment policy binding changed');
   if(assessment) assertAssessmentBinding(assessment,c,source.source_commit,assessment.image_id,hashFile(`${directory}/grype.raw.json`));
-  const gatewayVex=c==='gateway'&&!assessment?JSON.parse(readFileSync(gatewayVexPath)):null;
+  const gatewayVex=loadGatewayVex(c,assessment,scan);
   assertScan(scan,assessment,policy,gatewayVex);
-  const gatewayIgnored=gatewayVex?(scan.ignoredMatches??[]).filter(m=>['High','Critical'].includes(m.vulnerability?.severity)).length:0;
+  const gatewayIgnored=gatewayVex?highCritical(scan).length:0;
   if(mode==='pack') {
     const image=JSON.parse(run('docker',['image','inspect',local]))[0];
     if(image.Os!=='linux'||image.Architecture!=='arm64'||image.Config.Labels?.['org.opencontainers.image.revision']!==source.source_commit) throw Error('Image provenance mismatch');
     if(assessment&&assessment.image_id!==image.Id) throw Error('Assessment covers a different image');
     run('docker',['save','--output',`${directory}/image.tar`,local]);
+    if(gatewayIgnored) writeFileSync(`${directory}/gateway-runtime.vex.json`,readFileSync(gatewayVexPath));
     const receipt={schema:'hid.production-component-build/v1',...source,...config,local_tag:local,image_id:image.Id,
       architecture:'arm64',os:'linux',archive_sha256:hashFile(`${directory}/image.tar`),
       sbom_sha256:hashFile(`${directory}/sbom.spdx.json`),scan_sha256:hashFile(`${directory}/grype.json`),

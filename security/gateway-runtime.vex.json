@@ -6,6 +6,11 @@
   "version": 1,
   "hid_expires_at": "2026-12-01T00:00:00Z",
   "hid_scope": "gateway image only; exact libssl3 and libcrypto3 3.5.9-r0 aarch64 Alpine 3.24.2 purls; original findings retained in grype.raw.json; no risk-acceptance waiver",
+  "hid_bound_files": {
+    "gateway/Dockerfile": "c9a3f12417bff3b94e332947b092a3fcd2f8558da793850aec354dcb4b18c2ae",
+    "gateway/nginx.conf.template": "058bffd804832b70daff36d57d6ad71528d2943d8a29e1c24e6a9c6c684691fb",
+    "gateway/proxy-headers.conf": "17f90e70dedbc21f01e24a40f721541e234e91b0dd1907b3e0c9428957ed273e"
+  },
   "statements": [
     {
       "vulnerability": {

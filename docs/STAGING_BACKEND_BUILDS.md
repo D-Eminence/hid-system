@@ -143,9 +143,13 @@ are assessed on the same basis as the four above (no process loads the system
 `libssl.so.3` or `libcrypto.so.3`). Node's static OpenSSL 3.5.9 is also in their
 range; the Node 22.23.4 source has no `PEM_X509_INFO_read*`, `OSSL_QUIC_*` or
 `SSL_new_listener` call outside `deps/openssl`. The expected scan is now
-seventeen High matches. The assessment has one `expires_at` (2026-12-12), not a
-per-finding expiry; all six libssl3t64 entries should be removed once a Debian
-3.5.10 package is in the base rather than renewed past 2026-12-01.
+seventeen High matches. The policy `expires_at` stays 2026-12-12, but these two
+entries carry a per-finding `expires_at` of 2026-12-01T00:00:00+00:00: the
+assessor (`scripts/assess-staging-runtime.py`, also used by production) and
+`assertScan` in both build scripts refuse a match against them from that instant,
+and production refuses a per-finding expiry later than the policy's. Findings
+without one are unchanged. All six libssl3t64 entries should be removed once a
+Debian 3.5.10 package is in the base rather than renewed past 2026-12-01.
 
 The gateway (nginx-unprivileged on Alpine 3.24.2) has no ELF inventory
 assessment. Earlier gateway findings were fixed by pinning a fixed package from the
@@ -160,7 +164,12 @@ function, and no module is loaded. Both workflows therefore apply the committed
 `security/gateway-runtime.vex.json` to the gateway scan only. It names those four
 CVEs for the exact libssl3 and libcrypto3 3.5.9-r0 aarch64 Alpine 3.24.2 purls,
 and `assertGatewayVex` in `scripts/production-backend-build.mjs` refuses it after
-`hid_expires_at` (2026-12-01) or for any other package, CVE or Critical finding.
+`hid_expires_at` (2026-12-01), for any other package, CVE or Critical finding, or
+when the sha256 of `gateway/Dockerfile`, `gateway/nginx.conf.template` or
+`gateway/proxy-headers.conf` differs from its `hid_bound_files`, so any gateway
+change needs the VEX re-reviewed. The build scripts read the VEX only for a gateway
+scan with ignored High/Critical rows (a clean gateway scan needs no file), and
+`pack` copies it into the gateway build evidence as `gateway-runtime.vex.json`.
 Replace it with a pinned fixed Alpine 3.24 package when one is served, and do not
 renew it. When Grype starts matching CVE-2026-107493 and CVE-2026-124709 to the
 gateway packages, the gateway scan fails again until they are assessed or fixed.

@@ -1,7 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
-import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding,assertGatewayVex,gatewayVexPath} from './production-backend-build.mjs';
+import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,copyFileSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding,assertGatewayVex,gatewayVexPath,
+  gatewayBoundFiles,gatewayBoundFileHashes,loadGatewayVex} from './production-backend-build.mjs';
 
 test('publication accepts only the approved Novu backend branch and exact repository context',()=>{
   const env={GITHUB_REPOSITORY:'D-Eminence/hid-system',GITHUB_REPOSITORY_ID:'1317340803',
@@ -65,6 +69,11 @@ test('only verified not-affected VEX matches can pass; unknowns and changed pack
   assert.throws(()=>assertScan({...report,matches:[m]},assessment,policy));
   const proposedOnly={...policy,findings:[],proposed_findings:{findings:policy.findings}};
   assert.throws(()=>assertScan(report,assessment,proposedOnly),/Unassessed/);
+  const withExpiry=v=>({...policy,findings:[{...policy.findings[0],expires_at:v}]});
+  assertScan(report,assessment,withExpiry(new Date(Date.now()+3600000).toISOString()));
+  for(const v of [new Date(Date.now()-1).toISOString(),'invalid',null])
+    assert.throws(()=>assertScan(report,assessment,withExpiry(v)),/Unassessed/);
+  assertScan(report,assessment,{...policy,findings:[...policy.findings,{id:'CVE-OTHER',packages:['libc6'],versions:{libc6:'x'},expires_at:'2020-01-01T00:00:00Z'}]});
 });
 
 test('production applicability cannot transfer between images, sources, components or raw reports',()=>{
@@ -89,12 +98,13 @@ test('committed gateway VEX covers only the reviewed Alpine OpenSSL findings and
     assert.deepEqual(s.products.map(p=>p['@id']).sort(),[gatewayPurl('libcrypto3'),gatewayPurl('libssl3')]);
   }
   const reviewed=vex.statements.flatMap(s=>['libssl3','libcrypto3'].map(n=>gatewayMatch(s.vulnerability.name,n)));
+  assert.deepEqual(vex.hid_bound_files,gatewayBoundFileHashes());
   assertGatewayVex(reviewed,vex,Date.parse('2026-11-20T00:00:00Z'));
   assert.throws(()=>assertGatewayVex(reviewed,vex,Date.parse('2026-12-01T00:00:00Z')),/unexpired gateway OpenVEX/);
 });
 test('gateway VEX suppresses only exact, High, VEX-applied Alpine package matches',()=>{
   const now=Date.now(),vex={'@context':'https://openvex.dev/ns/v0.2.0',timestamp:new Date(now-86400000).toISOString(),
-    hid_expires_at:new Date(now+86400000).toISOString(),statements:[{vulnerability:{name:'CVE-2026-88823'},
+    hid_expires_at:new Date(now+86400000).toISOString(),hid_bound_files:gatewayBoundFileHashes(),statements:[{vulnerability:{name:'CVE-2026-88823'},
     products:[{'@id':gatewayPurl('libssl3')}],status:'not_affected',justification:'vulnerable_code_not_in_execute_path'}]};
   const report={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:[gatewayMatch('CVE-2026-88823')]};
   assertScan(report,null,null,vex);
@@ -107,7 +117,9 @@ test('gateway VEX suppresses only exact, High, VEX-applied Alpine package matche
   for(const change of [{hid_expires_at:new Date(now-1).toISOString()},{hid_expires_at:undefined},
     {timestamp:new Date(now-40*86400000).toISOString(),hid_expires_at:new Date(now+86400000).toISOString()},
     {'@context':'https://openvex.dev/ns/v0.0.1'},{statements:[{...vex.statements[0],status:'affected'}]},
-    {statements:[{...vex.statements[0],justification:'inline_mitigations_already_exist'}]}])
+    {statements:[{...vex.statements[0],justification:'inline_mitigations_already_exist'}]},
+    {hid_bound_files:undefined},{hid_bound_files:{...vex.hid_bound_files,'gateway/Dockerfile':'0'.repeat(64)}},
+    {hid_bound_files:{...vex.hid_bound_files,'gateway/README.md':'0'.repeat(64)}}])
     assert.throws(()=>assertScan(report,null,null,{...vex,...change}));
   assert.throws(()=>assertScan({...report,matches:[gatewayMatch('CVE-2026-88823')]},null,null,vex),/block publication/);
 });
@@ -118,5 +130,55 @@ test('only the gateway scan applies the committed VEX, and it keeps --fail-on hi
     assert.equal(text.split('--vex security/gateway-runtime.vex.json --output json --fail-on high').length,2,workflow);
     assert.ok(/elif \[ "\$scan_status" -eq 2 \]; then\n\s+python3 scripts\/assess-(production|staging)-runtime\.py/.test(text),workflow);
     assert.ok(text.includes("'security/gateway-runtime.vex.json'"),workflow);
+  }
+});
+
+const repoRoot=fileURLToPath(new URL('../',import.meta.url));
+const gatewayFixture=()=>{
+  const root=mkdtempSync(join(tmpdir(),'hid-gateway-vex-'));
+  mkdirSync(join(root,'gateway'));mkdirSync(join(root,'security'));
+  for(const p of [...gatewayBoundFiles,gatewayVexPath]) copyFileSync(join(repoRoot,p),join(root,p));
+  return root;
+};
+test('the gateway VEX is bound to the gateway Dockerfile, nginx template and proxy headers it was reviewed against',()=>{
+  const now=Date.parse('2026-11-20T00:00:00Z');
+  for(const changed of gatewayBoundFiles){
+    const root=gatewayFixture();
+    try{
+      const vex=JSON.parse(readFileSync(join(root,gatewayVexPath)));
+      const reviewed=vex.statements.map(s=>gatewayMatch(s.vulnerability.name));
+      assertGatewayVex(reviewed,vex,now,root);
+      writeFileSync(join(root,changed),readFileSync(join(root,changed),'utf8')+'\n# changed\n');
+      assert.throws(()=>assertGatewayVex(reviewed,vex,now,root),/Gateway changed since its OpenVEX was reviewed/,changed);
+      rmSync(join(root,changed));
+      assert.throws(()=>assertGatewayVex(reviewed,vex,now,root),/bound files missing/,changed);
+    }finally{rmSync(root,{recursive:true,force:true});}
+  }
+});
+test('the gateway VEX is read only for a gateway scan with ignored High rows; a clean scan needs no file',()=>{
+  const root=gatewayFixture();
+  try{
+    const clean={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:[]};
+    const suppressed={...clean,ignoredMatches:[gatewayMatch('CVE-2026-88823')]};
+    const lowOnly={...clean,ignoredMatches:[{...gatewayMatch('CVE-2026-88823'),vulnerability:{id:'CVE-2026-88823',severity:'Medium'}}]};
+    assert.deepEqual(loadGatewayVex('gateway',null,suppressed,root),JSON.parse(readFileSync(join(root,gatewayVexPath))));
+    assert.equal(loadGatewayVex('ehr-api',null,suppressed,root),null);
+    assert.equal(loadGatewayVex('gateway',{component:'gateway'},suppressed,root),null);
+    assert.equal(loadGatewayVex('gateway',null,clean,root),null);
+    rmSync(join(root,gatewayVexPath));
+    for(const scan of [clean,lowOnly,{...clean,ignoredMatches:undefined}]){
+      const vex=loadGatewayVex('gateway',null,scan,root);
+      assert.equal(vex,null);
+      assertScan(scan,null,null,vex);
+    }
+    assert.equal(loadGatewayVex('gateway',null,suppressed,root),null);
+    assert.throws(()=>assertScan(suppressed,null,null,loadGatewayVex('gateway',null,suppressed,root)),/runtime assessment required/);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+test('pack copies the committed gateway VEX into the gateway build evidence',()=>{
+  for(const script of ['production-backend-build.mjs','staging-backend-build.mjs']){
+    const text=readFileSync(new URL(script,import.meta.url),'utf8');
+    assert.ok(text.includes("if(gatewayIgnored) writeFileSync(`${directory}/gateway-runtime.vex.json`,readFileSync(gatewayVexPath));"),script);
+    assert.ok(text.includes('const gatewayVex=loadGatewayVex(c,assessment,scan);'),script);
   }
 });
