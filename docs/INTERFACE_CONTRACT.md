@@ -6028,11 +6028,12 @@ runtime holds anything on either. The suite is
 A port of `main` 0089 (hid-system#73), written on this branch's Identity code
 and tables. The coordinator's tasks of 17 November 2026 on hid-system#258
 booked the number. The design note and the decisions on it are on #258. 0129
-is unsigned until the owner signs its declaration. It needs 0001-0123 and
-uses nothing 0124-0128 add; it releases after them because the ledger needs
-every number. The section number is provisional: §54 went to #262 (single
-sign-on, 0127) and #264 (0128) has not merged yet, so this section takes the
-next free number when it merges.
+is unsigned until the owner signs its declaration. It needs 0001-0127, the
+base it is proved on, and checks that in its section 0 as 0125-0127 check the
+migrations before them; it uses nothing 0124-0128 add, and releases after 0128
+because the ledger needs every number. The section number is provisional: §54
+went to #262 (single sign-on, 0127) and #264 (0128) has not merged yet, so
+this section takes the next free number when it merges.
 
 What changes for staff, once the setting is on: a staff member with two or
 more facilities on one site who chooses one with "Working at" or "Switch

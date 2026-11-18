@@ -3,8 +3,9 @@
 -- booked there; the design note on #258 and the decisions on it: the setting
 -- STAFF_FACILITY_SELECTION_MODE off | keep | ask, off by default; a failed
 -- read answers 'unavailable'; foreign keys as #262's). The declaration is
--- signed separately. It needs 0001-0123 applied; it uses nothing 0124-0128
--- add.
+-- signed separately. It needs 0001-0127 applied, the base it is proved on
+-- (section 0 checks an object each of 0123-0127 adds, as 0125-0127 check the
+-- migrations before them); it uses nothing 0124-0128 add.
 --
 -- The gap: a staff member with two or more facilities on one site chooses
 -- one with POST /auth/facility, and the Identity API stores nothing. A reload,
@@ -69,7 +70,7 @@
 -- D4 SECURITY INVOKER (the Identity runtime already reads every table the
 --    guard reads), search_path pg_catalog, pg_temp with every name
 --    schema-qualified, revoked from PUBLIC and granted to no role (a trigger
---    needs no EXECUTE to fire). No function of 0001-0123 is replaced or
+--    needs no EXECUTE to fire). No function of 0001-0127 is replaced or
 --    called, so there are no md5 pins of earlier bodies.
 -- D5 Grants, here when the role exists and identically in runtime-grants.sql
 --    (production never re-runs runtime-grants.sql): SELECT, INSERT, UPDATE on
@@ -90,8 +91,12 @@
 --
 -- 0. Preconditions (catalog reads only; each is a presence check that raises
 --    when the thing is absent, never a comparison that can be null; each
---    failure raises 55000 or 42501 and nothing is applied): 0001-0123
---    applied (0123's identity.sealed_qa_members as the marker); 0129 not
+--    failure raises 55000 or 42501 and nothing is applied): 0001-0127
+--    applied (the markers: 0123's identity.sealed_qa_members, 0124's
+--    lab.work_item_patient_cards(uuid[]), 0125's
+--    pharmacy.work_item_prescription_details(uuid[]), 0126's
+--    identity.organization_staff_kinds(uuid) and 0127's
+--    auth.session_single_sign_on); 0129 not
 --    applied (no table, guard or trigger of that name); every column the
 --    guard and the keys read, by name and type; the primary keys on id of
 --    auth.sessions, auth.accounts and identity.facilities, and the unique
@@ -144,11 +149,18 @@ declare
   missing text;
   applier oid := (select role_row.oid from pg_roles role_row where role_row.rolname = current_user);
 begin
-  -- a. 0001-0123 applied: 0123's sealed QA members table.
+  -- a. 0001-0127 applied: 0123's sealed QA members table, 0124's and 0125's
+  -- readers, 0126's organisation kinds and 0127's single sign-on table.
   if not exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
                   where namespace.nspname = 'identity' and relation.relname = 'sealed_qa_members'
-                    and relation.relkind = 'r') then
-    raise exception using errcode = '55000', message = '0129: 0001-0123 must be applied first';
+                    and relation.relkind = 'r')
+     or to_regprocedure('lab.work_item_patient_cards(uuid[])') is null
+     or to_regprocedure('pharmacy.work_item_prescription_details(uuid[])') is null
+     or to_regprocedure('identity.organization_staff_kinds(uuid)') is null
+     or not exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
+                     where namespace.nspname = 'auth' and relation.relname = 'session_single_sign_on'
+                       and relation.relkind = 'r') then
+    raise exception using errcode = '55000', message = '0129: 0001-0127 must be applied first';
   end if;
   -- b. Not applied yet.
   if exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
