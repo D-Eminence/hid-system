@@ -21,7 +21,6 @@ import type { PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } fro
 import {
   DESK_NIN_CHECK_ANSWER_SECONDS,
   DESK_NIN_CHECK_CLAIM_SECONDS,
-  DESK_NIN_CHECK_LIMITS,
   QoreIdNinVerificationProvider,
   selectNinVerificationProvider,
 } from './qoreid-nin-verification.provider';
@@ -268,92 +267,48 @@ describe('Q108 QoreID NIN check for the desk', () => {
       status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
   });
 
-  describe('request limits', () => {
+  describe('no request limits (Q109)', () => {
     const reservation = { correlationId: 'correlation-q108', accountId: context.actor.accountId,
-      facilityId: context.facilityId, idempotencyKey: 'resolve-key-q108-limits', requestSha256: 'b'.repeat(64) };
+      facilityId: context.facilityId, idempotencyKey: 'resolve-key-q109-limits', requestSha256: 'b'.repeat(64) };
     /** A different desk request (its own Idempotency-Key) by `accountId` at the facility. */
     const check = (index: number, accountId = context.actor.accountId) =>
-      ({ ...reservation, accountId, idempotencyKey: `resolve-key-q108-limit-${index}` });
+      ({ ...reservation, accountId, idempotencyKey: `resolve-key-q109-check-${index}` });
     const account = (index: number) => `f0e1d2c3-b4a5-4968-8776-${String(index).padStart(12, '0')}`;
 
-    it('claims the request and counts it per account (hour and day) and per facility (day), in keyed buckets', async () => {
+    it('claims the request in one keyed bucket and counts nothing per account or facility', async () => {
       const { database, statements } = rateLimitTable();
       await expect(qoreIdProvider(gate(), database).reserve(reservation)).resolves.toEqual({});
       expect(database.withSystemTransaction).toHaveBeenCalledWith('correlation-q108', expect.any(Function));
       const writes = statements.filter(({ sql }) => /insert into auth\.otp_rate_limits/.test(sql));
-      expect(writes).toHaveLength(4);
-      const buckets = writes.map(({ values }) => values.find((value) => /^[0-9a-f]{64}$/.test(String(value))));
-      expect(new Set(buckets).size).toBe(4);
-      // The buckets are keyed: no identifier, key or digest is stored.
+      expect(writes).toHaveLength(1);
+      // The bucket is keyed: no identifier, key or digest is stored.
       for (const value of [context.actor.accountId, context.facilityId, reservation.idempotencyKey, 'b'.repeat(64)]) {
         expect(JSON.stringify(statements)).not.toContain(value);
       }
-      expect(DESK_NIN_CHECK_LIMITS).toEqual({ accountPerHour: 20, accountPerDay: 100, facilityPerDay: 300 });
     });
 
-    it('refuses the 21st check of one account within the hour', async () => {
+    it('lets one staff account check as many NINs as the desk needs, in an hour and in a day', async () => {
       const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      for (let index = 0; index < 20; index += 1) await expect(provider.reserve(check(index))).resolves.toEqual({});
-      await expect(provider.reserve(check(20))).rejects.toMatchObject({
-        status: 429, code: 'NIN_CHECK_LIMIT_REACHED',
-        message: 'The limit of NIN checks has been reached for now. Please try again later.' });
+      // More than the 20 an hour and 100 a day the review build allowed.
+      for (let index = 0; index < 150; index += 1) await expect(provider.reserve(check(index))).resolves.toEqual({});
     });
 
-    it('refuses the 101st check of one account within the day', async () => {
+    it('lets one facility check as many NINs as its desks need in a day', async () => {
       const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      const start = Date.parse('2026-11-18T06:00:00Z');
-      const now = jest.spyOn(Date, 'now');
-      for (let index = 0; index < 100; index += 1) {
-        now.mockReturnValue(start + Math.floor(index / 20) * 61 * 60 * 1000);
-        await expect(provider.reserve(check(index))).resolves.toEqual({});
-      }
-      now.mockReturnValue(start + 5 * 61 * 60 * 1000);
-      await expect(provider.reserve(check(100))).rejects.toMatchObject({ status: 429, code: 'NIN_CHECK_LIMIT_REACHED' });
-    });
-
-    it('refuses the 301st check at one facility within the day', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      for (let index = 0; index < 300; index += 1) {
-        await expect(provider.reserve(check(index, account(Math.floor(index / 20))))).resolves.toEqual({});
-      }
-      await expect(provider.reserve(check(300, account(15)))).rejects.toMatchObject({
-        status: 429, code: 'NIN_CHECK_LIMIT_REACHED' });
-    });
-
-    it('does not let one account\'s refused checks fill the facility\'s limit for every other desk', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      for (let index = 0; index < 20; index += 1) await expect(provider.reserve(check(index))).resolves.toEqual({});
-      // A stuck button: 300 more clicks, every one refused.
-      for (let index = 20; index < 320; index += 1) {
-        await expect(provider.reserve(check(index))).rejects.toMatchObject({ status: 429 });
-      }
-      // The facility counted 20, so the other desks still have 280 checks today.
-      for (let index = 0; index < 280; index += 1) {
-        await expect(provider.reserve(check(1000 + index, account(1 + Math.floor(index / 20))))).resolves.toEqual({});
-      }
-      await expect(provider.reserve(check(2000, account(20)))).rejects.toMatchObject({ status: 429 });
-    });
-
-    it('does not count a refused hourly check toward the account\'s day', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      const start = Date.parse('2026-11-18T06:00:00Z');
-      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
-      for (let index = 0; index < 20; index += 1) await provider.reserve(check(index));
-      for (let index = 20; index < 120; index += 1) await expect(provider.reserve(check(index))).rejects.toBeDefined();
-      // The next four hours give the account its other 80 checks of the day.
-      for (let index = 0; index < 80; index += 1) {
-        now.mockReturnValue(start + (1 + Math.floor(index / 20)) * 61 * 60 * 1000);
-        await expect(provider.reserve(check(500 + index))).resolves.toEqual({});
+      // More than the 300 a day the review build allowed, across 40 accounts.
+      for (let index = 0; index < 400; index += 1) {
+        await expect(provider.reserve(check(index, account(index % 40)))).resolves.toEqual({});
       }
     });
 
-    it('refuses with a plain 503 when the limits cannot be read', async () => {
+    it('answers "cannot be started" when the claim cannot be read, with no SQL detail', async () => {
       const database = { withSystemTransaction: jest.fn(async () => {
         throw Object.assign(new Error('relation "auth.otp_rate_limits" does not exist'), { code: '42P01' });
       }) };
       const refusal = qoreIdProvider(gate(), database).reserve(reservation);
-      await expect(refusal).rejects.toMatchObject({ status: 503, code: 'NIN_CHECK_LIMIT_UNAVAILABLE' });
-      await refusal.catch((error: Error) => expect(error.message).not.toMatch(/relation|otp_rate_limits/));
+      await expect(refusal).rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+        message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+      await refusal.catch((error) => expect(isNinCheckNotStarted(error)).toBe(true));
     });
   });
 
@@ -560,30 +515,15 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       details: expect.objectContaining({ provider: 'qoreid', code: 'INTEGRATION_UNAVAILABLE', providerCalled: false }) })]);
   });
 
-  it('refuses at the request limit without sending the NIN or counting a failure, and frees the retry place', async () => {
-    const { database } = rateLimitTable();
+  it('sends every check one desk account makes, with no hourly, daily or facility limit (Q109)', async () => {
     const qoreId = gate();
-    const provider = qoreIdProvider(qoreId, database);
-    const breaker = new NinProviderBreaker();
-    const start = Date.parse('2026-11-18T10:00:00Z');
-    const now = jest.spyOn(Date, 'now').mockReturnValue(start);
-    // This account has made its 20 checks this hour.
-    for (let index = 0; index < 20; index += 1) {
-      await provider.reserve({ correlationId: 'correlation-q108', accountId: context.actor.accountId,
-        facilityId: context.facilityId, idempotencyKey: `resolve-key-q108-earlier-${index}`, requestSha256: 'e'.repeat(64) });
+    const { service, audit } = desk(qoreIdProvider(qoreId, rateLimitTable().database));
+    for (let index = 0; index < 25; index += 1) {
+      await expect(service.resolve(input, `resolve-key-q109-${String(index).padStart(6, '0')}`, context))
+        .resolves.toMatchObject({ caseId });
     }
-    breaker.recordFailure(new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'down'));
-    warn.mockClear();
-    now.mockReturnValue(start + NIN_BREAKER_RETRY_AFTER_MS);
-    const { service, audit } = desk(provider, breaker);
-    await expect(service.resolve(input, 'resolve-key-q108-000010', context)).rejects.toMatchObject({
-      status: 429, code: 'NIN_CHECK_LIMIT_REACHED' });
-    expect(qoreId.verifyNin).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
-    // The place the refused check took is free again for the next desk.
-    expect(breaker.available()).toBe(true);
-    expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
-      details: { provider: 'qoreid', errorType: 'DomainProblem', code: 'NIN_CHECK_LIMIT_REACHED', providerCalled: false } })]);
+    expect(qoreId.verifyNin).toHaveBeenCalledTimes(25);
+    expect(JSON.stringify(auditRows(audit))).not.toMatch(/LIMIT/);
   });
 
   it('trips the breaker when QoreID is down, logs no NIN, and stops sending checks', async () => {

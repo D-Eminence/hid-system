@@ -71,8 +71,8 @@ export class NinProviderBreaker {
 
   /**
    * Q108: the check that took the place was never sent (NIN checks switched
-   * off, or a request limit reached). Frees the place without counting a
-   * failure or logging.
+   * off, or the check refused before sending). Frees the place without
+   * counting a failure or logging.
    */
   release(): void {
     this.probeStartedAt = null;

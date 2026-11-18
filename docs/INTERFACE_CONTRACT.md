@@ -6453,8 +6453,8 @@ kept, returned or logged. The answer never names the record's details.
 ### Details refused before any check
 
 A date of birth in the future or before 1900, or a first or last name with a
-control character (a tab, a line break), is refused before anything is sent,
-counted or charged. The request body check answers `400 VALIDATION_FAILED`;
+control character (a tab, a line break), is refused before anything is sent
+or charged. The request body check answers `400 VALIDATION_FAILED`;
 any other caller gets `400 NIN_DETAILS_INVALID`, "Check the name and the date
 of birth. The date of birth cannot be in the future or before 1900.",
 audited with `providerCalled: false`. Neither touches the breaker.
@@ -6479,28 +6479,26 @@ facility) is checked at most once:
   new request.
 
 The claim and the stored answer are keyed rows of `auth.otp_rate_limits`
-(HMAC buckets; no NIN, name, identifier, key or digest stored).
+(HMAC buckets; no NIN, name, identifier, key or digest stored). When the claim
+cannot be read or written nothing is sent: `503 NIN_PROVIDER_UNAVAILABLE`,
+"NIN checks cannot be started right now. Please try again in a minute.",
+audited with `providerCalled: false`, the breaker not touched.
 
-### Request limits
+### No request limits (Q109)
 
-0049's QoreID counters have no desk operation (adding one needs a migration),
-so desk checks are counted in the keyed request windows
-(`auth.otp_rate_limits`, HMAC buckets, no identifiers stored): 20 per staff
-account per hour, 100 per staff account per day, 300 per facility per day.
-At a limit the desk gets `429 NIN_CHECK_LIMIT_REACHED`, "The limit of NIN
-checks has been reached for now. Please try again later.", before anything
-is sent; audited with `providerCalled: false`. The breaker is not touched.
-A refused check counts toward no limit: the three are read first, and a
-check is counted only when none is reached (if counting it reaches one, the
-counts already taken are given back). So one account's refused clicks never
-use up its facility's limit for the other desks.
+The owner wants no per-staff, per-facility or Health ID-wide limit on desk
+NIN checks (18 November 2026). The review build's limits (20 per staff
+account per hour, 100 per day, 300 per facility per day, `429
+NIN_CHECK_LIMIT_REACHED`, and `503 NIN_CHECK_LIMIT_UNAVAILABLE` when they
+could not be read) are removed; the desk never answers either code. What
+stops a NIN being paid for twice is the check itself, not a count.
 
 ### The breaker with QoreID
 
 As ID-0: a `503` from QoreID trips it at once; three other failures within 5
 minutes trip it; QoreID's own `429` and other `4xx` answers do not count.
-QoreID switched off (before or during the check) and a request limit are not
-outages: they free the one retry place without counting. A switch that cannot
+QoreID switched off (before or during the check) is not an outage: it frees
+the one retry place without counting. A switch that cannot
 be read, before the check or when it is read again just before sending,
 answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right
 now. Please try again in a minute.", without touching the breaker, audited
@@ -6520,8 +6518,8 @@ with `providerCalled: false`.
 `services/identity-api/src/identity/qoreid-nin-desk.spec.ts` (choosing the
 check; match, case and spacing, no match, name and date-of-birth mismatch,
 bad records, QoreID failures; the switch off, unreadable, and switched off
-during the check, or unreadable just before sending; request limits,
-including one account's refused clicks not filling the facility's limit;
+during the check, or unreadable just before sending; no request limits (Q109:
+one account's and one facility's checks are never refused for volume);
 one check per desk request (a resend while waiting, at the same moment, after
 "could not be verified" or "does not match", after a failure); details
 refused before any check; the breaker; the audit rows; capabilities; no NIN

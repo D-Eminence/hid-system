@@ -64,8 +64,7 @@ export interface NinVerificationProvider {
   /**
    * Q108, live providers only, before any NIN is sent: claims the desk
    * request (409 while the same request is still being checked; the stored
-   * answer when it was already answered), then counts the check against the
-   * request limits (429 when a limit is reached, counting nothing).
+   * answer when it was already answered). Q109: desk checks have no limits.
    */
   reserve?(reservation: NinCheckReservation): Promise<NinCheckReservationResult>;
   /**

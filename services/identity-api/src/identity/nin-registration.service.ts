@@ -237,8 +237,8 @@ export class NinRegistrationService {
       try {
         // Q108: each live check is charged. The same request (Idempotency-Key
         // and body) is checked at most once at a time, and a resend of one
-        // already answered gets that answer again; the request limits come
-        // next. All before anything is sent.
+        // already answered gets that answer again, before anything is sent.
+        // Q109: no limit per staff account, per facility or across Health ID.
         reserved = await this.provider.reserve(reservation);
       } catch (error) {
         // Not sent: free the breaker's place without counting a failure.
