@@ -6829,7 +6829,7 @@ chosen and show `message` with the matches (medicine, status, dates) above
 Save; Save stays enabled. After Save, show `duplicateMedicines.message` if
 present.
 
-## 0133. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (ORD-2; Akos Release A, migration 0133)
+## ORD-2. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (Akos Release A, migration 0133)
 
 Owner decisions of 18 November 2026: activated prescriptions go
 automatically to the hospital's own pharmacy (YES); pharmacy and lab staff
@@ -6851,9 +6851,18 @@ the patient is active; and no deny directive of the patient covers the
 member. It gives the work item, its patient card (name, sex, date of birth,
 last 4 of the Health ID), its events, accessions, specimens, executions,
 results, dispensings and reversals at that facility, never the chart: no
-EHR table, no version snapshot, and the 0125 prescription details still need
-the member's consent. Every read and write is audited as before, with
-`basis: 'own-work'` where the member has no personal grant.
+EHR table, no version snapshot, none of the patient's imported Lab or
+Pharmacy evidence (OCR-imported outside records, which keep needing the
+member's consent), and the 0125 prescription details still need the
+member's consent. It is decided item by item: a row of the work chain is
+given only when it belongs to an own work item (no order route) of that
+patient at that facility, so the rows of another facility's order (a
+route-backed item) stay as that route allows, even for the same patient.
+It gives reads of the work item and reads and writes of its chain; accepting
+a new item into the pharmacy or the lab still needs the member's consent
+(own prescriptions arrive by the automatic send below). Every read and write
+is audited as before, with `basis: 'own-work'` where the member has no
+personal grant.
 
 ### Pharmacy API and Lab API changes (no new route)
 
@@ -6892,8 +6901,14 @@ hospital's own pharmacy in the same transaction and the answer gains:
 
 Only the prescriber's own activation sends. The pharmacy work item is
 accepted by the prescriber (never recorded as a pharmacist's acceptance) with
-the fixed reason "Sent automatically when the prescription was activated". A
-failed send never undoes the activation. Without 0133 in the database the
+the fixed reason "Sent automatically when the prescription was activated", and
+Pharmacy's `PharmacyWorkItemCreated` event carries the same payload as
+pharmacy-api's own acceptance (`workItemId`, `sourceEhrPrescriptionId`,
+`sourceEhrPrescriptionVersion`, `status: "accepted"`). A
+failed send never undoes the activation. Once sent, the prescription is in
+this hospital's pharmacy and can no longer be routed to another facility's
+pharmacy: the order-route send answers `ORDER_ROUTE_ORDER_IN_WORK`, as for any
+prescription Pharmacy holds. Without 0133 in the database the
 answer has no `pharmacyHandoff`. Resuming after a hold does not send again (the
 pharmacy keeps one item per prescription). Putting a sent prescription on
 hold, cancelling it or entering it in error marks the send withdrawn. The
@@ -6922,10 +6937,11 @@ Screen change (Akos frontend branch): after Activate, show
 `not_sent` with reason `unavailable`. On the pharmacy list, show a withdrawn
 item as "Withdrawn by the prescriber" with Dispense disabled.
 
-## 0134. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
+## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 
 Owner decision Q102 of 18 November 2026. No new login, address or password:
 0123's fictional "QA Pharmacist" (pharmacy@) and "QA Lab Scientist" (lab@)
 gain a second membership, at QA Hospital (pharmacist and lab roles; not
-primary). Pick QA Hospital when signing in. Written only where the sealed QA
-tenant is installed (production); nowhere else. No API change.
+primary). Pick QA Hospital when signing in. Written only where 0123 installed
+the sealed QA tenant (Amazon RDS: production and staging); on every other
+database (CI, acceptance, rehearsals) nothing is written. No API change.
