@@ -6448,18 +6448,33 @@ and spacing ignored, first and last name in that order):
 
 The case keeps the desk's spelling of the name (it equals the record's but
 for letter case and spacing) and the desk's sex, or the record's when the desk
-gave none and the record's is not "unknown". Nothing else from the record is
-kept, returned or logged. The answer never names the record's details.
+gave none and the record's is known and not "unknown". The case keeps nothing
+else from the record but QoreID's reference; the desk's answers, audit rows
+and logs never name the record's details. QoreID's answer itself is kept by
+0137's guard, encrypted, as on every path (docs/QOREID_VERIFICATION_CONTRACT.md,
+"One QoreID check per NIN"): the NIN-only record (name, date of birth, sex,
+and the middle name, phone, home address and photo when QoreID sends them) for
+as long as 0137 keeps a record (90 days, Q110) when it matched the desk's
+details, and 24 hours when it did not (probably someone else's NIN, as a
+profile check keeps a record it did not match); "no record" for 24 hours.
 
 ### One QoreID check per NIN (0137, Q109)
 
 The desk's check goes through 0137's once-per-NIN guard (`NinCheckOnce`;
 docs/QOREID_VERIFICATION_CONTRACT.md, "One QoreID check per NIN") as
-`verifyNin(nin, { correlationId: <this request's>, path: 'desk' })`. QoreID
-is asked at most once for a NIN whichever path asks (sign-up, the profile,
-the desk), and the stored answer is reused. A stored record is compared with
-the desk's name and date of birth as a fresh one is, so correcting a name or
-a date of birth after "does not match" is not charged again. The guard writes
+`verifyNinRecord(nin, { correlationId: <this request's>, path: 'desk' })`:
+the same gate and guard as sign-up's `verifyNin`, but any record QoreID
+returned for the NIN will do, complete or not, because the desk compares only
+the name and date of birth. A record kept as incomplete (no recognised sex, a
+photo or a home address HID cannot read; a sign-up cannot enrol from it) by
+any path, or kept as unusable with a readable name and date of birth, is
+compared, not paid for again, and such a record checked at the desk is
+answered, not refused with `502`. QoreID is asked at most once for a NIN
+whichever path asks (sign-up, the profile, the desk) while its answer is kept
+or its check is running, and the stored answer is reused. A stored record is
+compared with the desk's name and date of birth as a fresh one is, so
+correcting a name or a date of birth after "does not match" is not charged
+again. The guard writes
 its own audit row (`identity.qoreid.nin-check`, `path: "desk"`, the same
 `correlationId` as the desk's `identity.nin.verify` row) saying whether
 QoreID was called or a stored answer reused; never the NIN or its HMAC.

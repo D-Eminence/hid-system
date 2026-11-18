@@ -9,7 +9,17 @@ export interface NinVerificationRequest {
   nin: string;
   claimedDemographics: NinClaimedDemographics;
   correlationId: string;
+  /**
+   * 0137: called once when a check this request sent to the NIN service ends,
+   * even after the request stopped waiting for it (504 QOREID_TIMEOUT, the
+   * check goes on). Not called when nothing was sent for this request (a
+   * stored answer, a refusal before sending).
+   */
+  onSettled?: (settlement: NinCheckSettlement) => void;
 }
+
+/** How a check sent to the NIN service ended: an answer, or the failure. */
+export type NinCheckSettlement = { answered: true } | { answered: false; error: unknown };
 
 /**
  * Q108: what the NIN check found, for the audit row. A provider that does not
@@ -28,6 +38,11 @@ export interface NinVerificationResult {
   verifiedAt: string;
   demographics: NinClaimedDemographics;
   outcome?: NinCheckOutcome;
+  /**
+   * 0137: true when this is an answer the NIN service gave before and HID
+   * kept: nothing was sent for this request.
+   */
+  stored?: boolean;
 }
 
 export interface NinVerificationProvider {

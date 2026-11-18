@@ -3,18 +3,20 @@ jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }
 import { Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { fakeNinCheckStore } from '../testing/nin-check-store.fake';
-import { NIN_CHECK_HOLD_SECONDS, NinCheckOnce } from './nin-check-once';
+import { NIN_CHECK_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS, NIN_RECORD_ANSWER_SECONDS,
+  NinCheckOnce } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { NinRegistrationService } from './nin-registration.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 import { QoreIdNinVerificationProvider } from './qoreid-nin-verification.provider';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
+import { QoreIdVerificationService } from './qoreid-verification.service';
 
 /**
  * Q108 with 0137 (Q109: "the same NIN must never be paid for twice; every
@@ -46,48 +48,87 @@ function deskContext(index = 1): DataAccessContext {
   } as unknown as DataAccessContext;
 }
 
-type QoreIdMode = 'verified' | 'no_record' | 'late' | 'reset' | 'forbidden';
+/**
+ * 'late': answers after the desk's wait but within the ceiling; 'slow': never
+ * answers (HID gives up at QOREID_NIN_ANSWER_CEILING_MS); 'no_gender': a record
+ * without a recognised sex, and 'address_break': one whose home address holds
+ * a line break (a sign-up cannot enrol from either; the name and date of birth
+ * are fine); 'not_found': QoreID's 404; 'unavailable': its 503.
+ */
+type QoreIdMode = 'verified' | 'no_record' | 'late' | 'slow' | 'reset' | 'forbidden' | 'no_gender' | 'address_break'
+  | 'not_found' | 'unavailable';
 
-/** A QoreID that bills every NIN request it receives, answered or not. */
-function fakeQoreId(leaseHeld: () => boolean) {
+/** A QoreID that bills every NIN request it receives, answered or not, and answers with the asked NIN's record. */
+function fakeQoreId(leaseHeld: (nin: string) => boolean) {
   const state = { charged: 0, outsideGuard: 0, modes: [] as QoreIdMode[], fallback: 'verified' as QoreIdMode,
     delayMs: 0 };
   let transaction = 8000;
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-  const fetch = jest.fn(async (url: string) => {
+  const fetch = jest.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith('/token')) return json({ accessToken: 'fixture-access-token', expiresIn: 7200, tokenType: 'Bearer' });
     if (!url.includes('/v1/ng/identities/nin/')) throw new Error('unexpected QoreID path');
+    const nin = decodeURIComponent(url.slice(url.lastIndexOf('/') + 1));
     // Every NIN request must be sent while 0137's guard holds the NIN's lease.
-    if (!leaseHeld()) state.outsideGuard += 1;
+    if (!leaseHeld(nin)) state.outsideGuard += 1;
     const mode = state.modes.shift() ?? state.fallback;
     state.charged += 1;
     if (state.delayMs) await new Promise((resolve) => setTimeout(resolve, state.delayMs));
     if (mode === 'late') await new Promise((resolve) => setTimeout(resolve, 500));
+    if (mode === 'slow') {
+      // QoreID keeps working (and bills) after HID stops waiting.
+      await new Promise((_resolve, reject) => init?.signal?.addEventListener('abort',
+        () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+    }
     if (mode === 'reset') {
       throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('reset'), { code: 'ECONNRESET' }) });
     }
     if (mode === 'forbidden') return json({ message: 'insufficient balance' }, 403);
+    if (mode === 'not_found') return json({ message: 'not found' }, 404);
+    if (mode === 'unavailable') return json({ message: 'unavailable' }, 503);
     transaction += 1;
     if (mode === 'no_record') {
       return json({ id: transaction, status: { state: 'complete', status: 'not_verified' },
         summary: { nin_check: 'not_verified' } });
     }
+    const bio = { ...RECORD, nin,
+      ...(mode === 'no_gender' ? { gender: '' } : {}),
+      ...(mode === 'address_break' ? { residence: { ...RECORD.residence, address1: '2 Fixture Road\nBack Gate' } } : {}) };
+    // The profile's check sends the patient's name and date of birth and gets the record with field matches.
+    const claims = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, string> : undefined;
+    const upper = (value: string | undefined) => (value ?? '').trim().toLocaleUpperCase('en-NG');
+    const matches = { firstname: upper(claims?.firstname) === upper(RECORD.firstname),
+      lastname: upper(claims?.lastname) === upper(RECORD.lastname), dob: claims?.dob === '1988-07-14' };
     return json({ id: transaction, status: { state: 'complete', status: 'verified' },
-      summary: { nin_check: 'verified' }, nin: RECORD });
+      summary: { nin_check: claims ? { status: matches.firstname && matches.lastname && matches.dob ? 'EXACT_MATCH'
+        : 'NO_MATCH', fieldMatches: matches } : 'verified' }, nin: bio });
   });
   return { state, fetch };
+}
+
+/** The patient whose profile adds the NIN (QoreIdVerificationService.verifyPatientNin), fictional. */
+const PROFILE = { patientId: 'a8000000-0000-4000-8000-000000000001', firstName: 'Bisola', lastName: 'Fixture',
+  dateOfBirth: '1988-07-14' };
+
+/** The profile path's own tables (its claims, eligibility and evidence), in memory. */
+function profileTables(sql: string, values: readonly unknown[]) {
+  if (sql.includes('patient_self_profile')) return { rows: [{ profile: PROFILE }] };
+  if (sql.includes('patient_self_nin_eligibility')) return { rows: [{ state: 'legacy_unbound' }] };
+  if (sql.includes('bind_my_verified_nin') || sql.includes('record_my_nin_verification_evidence')) {
+    return { rows: [{ evidenceId: String(values[2] ?? 'a8000000-0000-4000-8000-0000000000e1'), recordedAt: new Date() }] };
+  }
+  return undefined;
 }
 
 function system() {
   const protector = new NinIdentifierProtector();
   const lookup = protector.lookup(NIN);
   const store = fakeNinCheckStore();
-  const qoreId = fakeQoreId(() => store.rows.get(lookup)?.state === 'checking');
+  const qoreId = fakeQoreId((nin) => store.rows.get(protector.lookup(nin))?.state === 'checking');
   const audits: unknown[][] = [];
   const checkDatabase = {
     withSystemTransaction: jest.fn(async (_correlation: string, work: (client: PoolClient) => Promise<unknown>) =>
       work({ query: jest.fn(async (sql: string, values: readonly unknown[] = []) =>
-        store.query(sql, values) ?? { rows: [], rowCount: 0 }) } as unknown as PoolClient)),
+        store.query(sql, values) ?? profileTables(sql, values) ?? { rows: [], rowCount: 0 }) } as unknown as PoolClient)),
     query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
       if (sql.includes('insert into audit.events')) audits.push([...values]);
       return { rows: [], rowCount: 1 };
@@ -98,9 +139,16 @@ function system() {
   const adapter = new QoreIdVerificationAdapter({ baseUrl: 'https://qoreid.fixture.invalid', clientId: 'fixture-client',
     clientSecret: 'fixture-secret', timeoutMs: 100, ninOnlyEnrollmentEnabled: true },
   qoreId.fetch as unknown as typeof globalThis.fetch);
-  const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined) } as unknown as IntegrationRuntimeService;
+  const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined),
+    consumePatientQuota: jest.fn().mockResolvedValue(undefined) } as unknown as IntegrationRuntimeService;
   const ninOnly = new QoreIdPublicPatientIdentityProvider(adapter, integrations, ninCheck);
   const provider = new QoreIdNinVerificationProvider(ninOnly);
+  // The patient's own "Add NIN" on the profile, as it really asks (its name and date of birth, any record).
+  const profile = new QoreIdVerificationService(checkDatabase, adapter, integrations, protector, ninCheck);
+  const verifyProfile = () => profile.verifyPatientNin({ correlationId: 'profile-check', actor: { kind: 'patient',
+    patientId: PROFILE.patientId, accountId: 'a8000000-0000-4000-8000-000000000002', subject: 'patient:fixture',
+    sessionId: 'a8000000-0000-4000-8000-000000000003', roles: [], permissions: [], facilityIds: [], facilities: [] },
+  header: () => undefined } as unknown as HidRequest, NIN);
   const cases: unknown[][] = [];
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
     if (/insert into identity\.registration_cases \(/.test(sql)) {
@@ -127,7 +175,8 @@ function system() {
   /** The desk's own identity.nin.verify rows (details). */
   const deskChecks = () => deskAudit.record.mock.calls.map(([row]) => row)
     .filter((row) => row.action === 'identity.nin.verify').map((row) => row.details);
-  return { qoreId, store, ninCheck, ninOnly, resolve, breaker, cases, checkAudits, deskChecks, deskAudit, lookup };
+  return { qoreId, store, ninCheck, ninOnly, resolve, breaker, cases, checkAudits, deskChecks, deskAudit, lookup,
+    verifyProfile, protector };
 }
 
 describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')', () => {
@@ -143,7 +192,7 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
       QOREID_ENABLED: 'true', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
       QOREID_CLIENT_ID: 'fixture-client', QOREID_CLIENT_SECRET: 'fixture-secret', QOREID_TIMEOUT_MS: '250',
-      QOREID_NIN_ANSWER_CEILING_MS: '1000',
+      QOREID_NIN_ANSWER_CEILING_MS: '1000', QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true',
     });
     resetEnvironmentForTests();
     warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -218,7 +267,8 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     const s = system();
     await s.ninOnly.verifyNin(NIN, { correlationId: 'signup-check', path: 'enrollment' });
     await expect(s.resolve('desk-once-key-000009')).resolves.toMatchObject({ caseId });
-    await s.ninOnly.verifyNin(NIN, { correlationId: 'profile-check', path: 'profile' });
+    // The profile's own check (its name and date of birth, any record), as the patient's "Add NIN" makes it.
+    await expect(s.verifyProfile()).resolves.toMatchObject({ state: 'verified' });
     expect(s.qoreId.state.charged).toBe(1);
     expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'record', 'signup-check'],
       ['desk', 'stored', 'record', 'desk-once-1'], ['profile', 'stored', 'record', 'profile-check']]);
@@ -319,5 +369,69 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       expect(text).not.toContain(s.lookup);
     }
     expect(s.qoreId.state.outsideGuard).toBe(0);
+  });
+
+  describe('any record will do: the desk compares only the name and date of birth', () => {
+    it('uses a record a profile check kept without a recognised sex, without paying again', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['no_gender'];
+      await expect(s.verifyProfile()).resolves.toMatchObject({ state: 'verified' });
+      expect([...s.store.rows.values()][0]).toMatchObject({ outcome: 'record', record_complete: false });
+      await expect(s.resolve('desk-once-key-000101')).resolves.toMatchObject({ caseId, ninStatus: 'verified' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits().map(([path, source, result]) => [path, source, result])).toEqual([
+        ['profile', 'qoreid', 'record'], ['desk', 'stored', 'record']]);
+    });
+
+    it('asks QoreID once when the profile and the desk check such a NIN at the same moment', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['no_gender'];
+      s.qoreId.state.delayMs = 40;
+      const results = await Promise.allSettled([s.verifyProfile(), s.resolve('desk-once-key-000102')]);
+      expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled']);
+      expect(s.qoreId.state.charged).toBe(1);
+    });
+
+    it.each([
+      ['no recognised sex', 'no_gender'],
+      ['a home address with a line break', 'address_break'],
+    ] as const)('checks a NIN whose record has %s once, and answers it, not 502', async (_label, mode) => {
+      const s = system();
+      s.qoreId.state.modes = [mode];
+      await expect(s.resolve('desk-once-key-000103')).resolves.toMatchObject({ caseId, ninStatus: 'verified' });
+      // Kept as 0137 keeps it on every path (unusable for a sign-up, with its name and date of birth).
+      expect([...s.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'unusable' });
+      await expect(s.resolve('desk-once-key-000104')).resolves.toMatchObject({ caseId });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.breaker.state()).toBe('closed');
+      // The sex came from neither: the desk gave none and the record's is not usable.
+      expect(s.cases[0]?.[9]).toBeNull();
+      // A sign-up still cannot enrol from it, and is refused from storage without paying again.
+      await expect(s.ninOnly.verifyNin(NIN, { correlationId: 'signup-check', path: 'enrollment' }))
+        .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      expect(s.qoreId.state.charged).toBe(1);
+    });
+
+    it('lets the profile reuse the record the desk paid for', async () => {
+      const s = system();
+      await expect(s.resolve('desk-once-key-000105')).resolves.toMatchObject({ caseId });
+      await expect(s.verifyProfile()).resolves.toMatchObject({ state: 'verified' });
+      expect(s.qoreId.state.charged).toBe(1);
+    });
+
+    it('keeps a record the desk did not match (perhaps someone else\'s NIN) 24 hours, a matched one 90 days', async () => {
+      const mismatch = system();
+      const before = Date.now();
+      await expect(mismatch.resolve('desk-once-key-000106', deskContext(), { ...input, lastName: 'Fixtura' }))
+        .rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED' });
+      const kept = [...mismatch.store.rows.values()][0];
+      expect(kept).toMatchObject({ state: 'answered', outcome: 'record' });
+      expect(kept!.until).toBeGreaterThanOrEqual(before + NIN_NO_RECORD_ANSWER_SECONDS * 1000);
+      expect(kept!.until).toBeLessThan(Date.now() + NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 5_000);
+      const matched = system();
+      await expect(matched.resolve('desk-once-key-000107')).resolves.toMatchObject({ caseId });
+      expect([...matched.store.rows.values()][0]!.until)
+        .toBeGreaterThanOrEqual(before + NIN_RECORD_ANSWER_SECONDS * 1000);
+    });
   });
 });

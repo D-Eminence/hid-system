@@ -17,13 +17,14 @@ import {
   isNinCheckNotStarted,
   isNinCheckRefusedUnsent,
   isNinNotConfigured,
+  isStoredNinAnswer,
   NIN_NOT_CONFIGURED_DETAIL,
   UnavailableNinVerificationProvider,
 } from './nin-verification.provider';
 import { NIN_BREAKER_RETRY_AFTER_MS, NIN_PROVIDER_UNAVAILABLE_EVENT, NinProviderBreaker } from './nin-provider-breaker';
 import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavailable } from './nin-check-once';
 import { NIN_VERIFICATION_PROVIDER, type NinVerificationProvider, type NinVerificationRequest } from './nin.types';
-import type { PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
+import type { NinRecordCheck, PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import {
   QoreIdNinVerificationProvider,
   selectNinVerificationProvider,
@@ -52,14 +53,30 @@ function record(overrides: Partial<VerifiedPublicPatientIdentity> = {}): Verifie
     providerReference: '700123', ...overrides };
 }
 
+/** The guard's answer for the desk: the record (names, date of birth, sex) and QoreID's reference. */
+function found(overrides: Partial<VerifiedPublicPatientIdentity> = {},
+  source: NinRecordCheck['source'] = 'qoreid'): NinRecordCheck {
+  const { providerReference, ...names } = record(overrides);
+  return { source, outcome: 'record', record: names, providerReference };
+}
+
+function noRecord(source: NinRecordCheck['source'] = 'qoreid'): NinRecordCheck {
+  return { source, outcome: 'no_record' };
+}
+
 function gate(overrides: Partial<Record<keyof PublicPatientIdentityProvider, jest.Mock>> = {}) {
   return {
     assertAvailable: jest.fn(async () => undefined),
     isAvailable: jest.fn(async () => true),
-    verifyNin: jest.fn(async () => record()),
+    // The desk never uses sign-up's check, which needs a complete record.
+    verifyNin: jest.fn(async () => { throw new Error('the desk asks verifyNinRecord'); }),
+    verifyNinRecord: jest.fn(async () => found()),
     ...overrides,
   };
 }
+
+/** What the desk hands the guard: the request's correlation id, path 'desk' and its own details to expect. */
+const deskCheck = { correlationId: 'correlation-q108', path: 'desk', expects: expect.any(Function) };
 
 function qoreIdProvider(qoreId = gate()) {
   return new QoreIdNinVerificationProvider(qoreId as never);
@@ -106,8 +123,10 @@ describe('Q108 QoreID NIN check for the desk', () => {
     const qoreId = gate();
     const answer = await qoreIdProvider(qoreId).verify(request);
     // The request's correlation id and path 'desk' go to the guard (its audit row); nothing else but the NIN.
-    expect(qoreId.verifyNin).toHaveBeenCalledTimes(1);
-    expect(qoreId.verifyNin).toHaveBeenCalledWith(NIN, { correlationId: 'correlation-q108', path: 'desk' });
+    expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(1);
+    expect(qoreId.verifyNinRecord).toHaveBeenCalledWith(NIN, deskCheck);
+    expect(Object.keys(qoreId.verifyNinRecord.mock.calls[0][1]).sort()).toEqual(['correlationId', 'expects', 'path']);
+    expect(qoreId.verifyNin).not.toHaveBeenCalled();
     expect(answer).toEqual({
       verified: true, outcome: 'match', provider: 'qoreid', reference: '700123',
       verifiedAt: expect.any(String),
@@ -116,7 +135,7 @@ describe('Q108 QoreID NIN check for the desk', () => {
   });
 
   it('matches names whatever the letter case and spacing', async () => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => record({ firstName: ' ada ', lastName: 'fictional' })) });
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => found({ firstName: ' ada ', lastName: 'fictional' })) });
     const answer = await qoreIdProvider(qoreId).verify({ ...request,
       claimedDemographics: { ...claimed, firstName: 'Ada' } });
     expect(answer).toMatchObject({ verified: true, outcome: 'match' });
@@ -125,9 +144,45 @@ describe('Q108 QoreID NIN check for the desk', () => {
   it('keeps the sex the desk gave, and leaves out an unknown one from the record', async () => {
     const given = await qoreIdProvider().verify({ ...request, claimedDemographics: { ...claimed, gender: 'male' } });
     expect(given.demographics.gender).toBe('male');
-    const unknown = await qoreIdProvider(gate({ verifyNin: jest.fn(async () => record({ gender: 'unknown' })) }))
+    const unknown = await qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => found({ gender: 'unknown' })) }))
       .verify(request);
     expect(unknown.demographics).not.toHaveProperty('gender');
+  });
+
+  it('uses a record without a recognised sex (one a sign-up could not use) for its name and date of birth', async () => {
+    // 0137 keeps such a record as incomplete or unusable; the desk needs only the name and date of birth.
+    const { gender: _gender, providerReference, ...names } = record();
+    const qoreId = gate({ verifyNinRecord: jest.fn(async (): Promise<NinRecordCheck> => ({ source: 'qoreid',
+      outcome: 'record', record: names, providerReference })) });
+    const answer = await qoreIdProvider(qoreId).verify(request);
+    expect(answer).toMatchObject({ verified: true, outcome: 'match', reference: '700123' });
+    expect(answer.demographics).not.toHaveProperty('gender');
+    const given = await qoreIdProvider(qoreId).verify({ ...request, claimedDemographics: { ...claimed, gender: 'female' } });
+    expect(given.demographics.gender).toBe('female');
+  });
+
+  it('hands the guard the desk\'s own details, so a record that is someone else\'s is kept only 24 hours', async () => {
+    const qoreId = gate();
+    await qoreIdProvider(qoreId).verify(request);
+    const { expects } = qoreId.verifyNinRecord.mock.calls[0][1] as { expects: (record: unknown) => boolean };
+    expect(expects({ nin: NIN, firstName: ' ada ', lastName: 'FICTIONAL', dateOfBirth: '1991-04-05' })).toBe(true);
+    expect(expects({ nin: NIN, firstName: 'ADA', lastName: 'OTHER', dateOfBirth: '1991-04-05' })).toBe(false);
+    expect(expects({ nin: NIN, firstName: 'ADA', lastName: 'FICTIONAL', dateOfBirth: '1991-04-06' })).toBe(false);
+  });
+
+  it('says when an answer is one 0137 kept, so nothing was sent for this request', async () => {
+    const stored = (answer: NinRecordCheck) => qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => answer) }))
+      .verify(request);
+    await expect(stored(found({}, 'stored'))).resolves.toMatchObject({ verified: true, stored: true });
+    await expect(stored(found({ lastName: 'OTHER' }, 'stored'))).resolves.toMatchObject({ verified: false,
+      outcome: 'name_mismatch', stored: true });
+    await expect(stored(noRecord('stored'))).resolves.toMatchObject({ verified: false, outcome: 'no_match',
+      stored: true });
+    await expect(stored(found())).resolves.not.toHaveProperty('stored');
+    const bad = await stored(found({ firstName: ' ' }, 'stored')).catch((error: unknown) => error);
+    expect(bad).toMatchObject({ status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+    expect(isStoredNinAnswer(bad)).toBe(true);
+    expect(isStoredNinAnswer(await stored(found({ firstName: ' ' })).catch((error: unknown) => error))).toBe(false);
   });
 
   it.each([
@@ -136,15 +191,13 @@ describe('Q108 QoreID NIN check for the desk', () => {
     ['the names the other way round', { firstName: 'FICTIONAL', lastName: 'ADA' }],
     ['a different date of birth', { dateOfBirth: '1991-04-06' }],
   ])('answers a name mismatch for %s', async (_label, overrides) => {
-    const answer = await qoreIdProvider(gate({ verifyNin: jest.fn(async () => record(overrides)) })).verify(request);
+    const answer = await qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => found(overrides)) })).verify(request);
     expect(answer).toMatchObject({ verified: false, outcome: 'name_mismatch', provider: 'qoreid', reference: '700123',
       demographics: claimed });
   });
 
   it('answers no match when QoreID does not confirm the NIN', async () => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => {
-      throw new DomainProblem(422, 'NIN_NOT_VERIFIED', 'The NIN could not be verified');
-    }) });
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => noRecord()) });
     const answer = await qoreIdProvider(qoreId).verify(request);
     expect(answer).toMatchObject({ verified: false, outcome: 'no_match', provider: 'qoreid', demographics: claimed });
     expect(answer.reference).not.toContain(NIN);
@@ -152,7 +205,7 @@ describe('Q108 QoreID NIN check for the desk', () => {
 
   it.each(['QOREID_DISABLED', 'QOREID_NIN_ONLY_DISABLED', 'INTEGRATION_PAUSED', 'QOREID_CONFIGURATION_INVALID'])(
     'answers "not configured" when the gate refuses with %s', async (code) => {
-      const qoreId = gate({ verifyNin: jest.fn(async () => { throw new DomainProblem(503, code, 'off'); }) });
+      const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw new DomainProblem(503, code, 'off'); }) });
       const refusal = qoreIdProvider(qoreId).verify(request);
       await expect(refusal).rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
         message: NIN_NOT_CONFIGURED_DETAIL });
@@ -160,7 +213,7 @@ describe('Q108 QoreID NIN check for the desk', () => {
     });
 
   it('answers "cannot be started" when the gate\'s control cannot be read just before sending', async () => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => {
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => {
       throw new DomainProblem(503, 'INTEGRATION_UNAVAILABLE', 'Delivery provider is temporarily unavailable');
     }) });
     const refusal = qoreIdProvider(qoreId).verify(request);
@@ -177,7 +230,7 @@ describe('Q108 QoreID NIN check for the desk', () => {
     ['QOREID_PROVIDER_RESPONSE_INVALID', 502],
     ['QOREID_RATE_LIMITED', 429],
   ])('passes QoreID\'s %s on as a provider error', async (code, status) => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => { throw new DomainProblem(status, code, 'External verification is unavailable'); }) });
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw new DomainProblem(status, code, 'External verification is unavailable'); }) });
     const refusal = qoreIdProvider(qoreId).verify(request);
     await expect(refusal).rejects.toMatchObject({ status, code });
     await refusal.catch((error) => expect(isNinNotConfigured(error)).toBe(false));
@@ -190,7 +243,7 @@ describe('Q108 QoreID NIN check for the desk', () => {
       ['this NIN is held after a check QoreID may have charged', () => ninCheckHeld(held), 409, 'NIN_CHECK_HELD', 300],
       ['the check is still running after the wait', () => ninCheckStillRunning(), 504, 'QOREID_TIMEOUT', 60],
     ] as const)('passes "%s" on with retryAfterSeconds', async (_label, refusal, status, code, retryAfterSeconds) => {
-      const qoreId = gate({ verifyNin: jest.fn(async () => { throw refusal(); }) });
+      const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw refusal(); }) });
       const answer = await qoreIdProvider(qoreId).verify(request).catch((error: unknown) => error) as DomainProblem;
       expect(answer).toMatchObject({ status, code });
       expect(answer.extensions?.retryAfterSeconds).toBeGreaterThanOrEqual(retryAfterSeconds - 1);
@@ -199,7 +252,7 @@ describe('Q108 QoreID NIN check for the desk', () => {
     });
 
     it('answers "cannot be started" when the guard\'s store cannot be read', async () => {
-      const qoreId = gate({ verifyNin: jest.fn(async () => { throw ninCheckUnavailable(); }) });
+      const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw ninCheckUnavailable(); }) });
       const refusal = qoreIdProvider(qoreId).verify(request);
       await expect(refusal).rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
         message: 'NIN checks cannot be started right now. Please try again in a minute.' });
@@ -216,7 +269,7 @@ describe('Q108 QoreID NIN check for the desk', () => {
     ['a future date of birth', { dateOfBirth: '2999-01-01' }],
     ['an unknown sex value', { gender: 'x' as never }],
   ])('refuses a record with %s as a bad answer', async (_label, overrides) => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => record(overrides)) });
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => found(overrides)) });
     await expect(qoreIdProvider(qoreId).verify(request)).rejects.toMatchObject({
       status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
   });
@@ -289,9 +342,9 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it.each([
-    ['no match', 'NIN_NOT_VERIFIED', 'no_match', 'The NIN could not be verified'],
-  ])('answers %s as "could not be verified" and audits it', async (_label, code, ninCheck, message) => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => { throw new DomainProblem(422, code, 'x'); }) });
+    ['no match', 'no_match', 'The NIN could not be verified'],
+  ])('answers %s as "could not be verified" and audits it', async (_label, ninCheck, message) => {
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => noRecord()) });
     const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
     await expect(service.resolve(input, 'resolve-key-q108-000003', context)).rejects.toMatchObject({
       status: 422, code: 'NIN_VERIFICATION_FAILED', message });
@@ -302,7 +355,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it('tells the desk the name or date of birth does not match, and audits a name mismatch', async () => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => record({ lastName: 'OTHER' })) });
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => found({ lastName: 'OTHER' })) });
     const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
     const refusal = service.resolve(input, 'resolve-key-q108-000004', context);
     await expect(refusal).rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED',
@@ -323,7 +376,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       await expect(service.resolve(input, key, context)).rejects.toMatchObject({
         status: 503, code: 'NIN_PROVIDER_UNAVAILABLE', message: NIN_NOT_CONFIGURED_DETAIL });
     }
-    expect(qoreId.verifyNin).not.toHaveBeenCalled();
+    expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
     expect(breaker.state()).toBe('closed');
     expect(warn).not.toHaveBeenCalled();
     expect(auditRows(audit)).toHaveLength(4);
@@ -340,7 +393,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     await expect(service.resolve(input, 'resolve-key-q108-000009', context)).rejects.toMatchObject({
       status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
       message: 'NIN checks cannot be started right now. Please try again in a minute.' });
-    expect(qoreId.verifyNin).not.toHaveBeenCalled();
+    expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
     expect(breaker.state()).toBe('closed');
     expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
       details: expect.objectContaining({ provider: 'qoreid', code: 'INTEGRATION_UNAVAILABLE', providerCalled: false }) })]);
@@ -353,12 +406,12 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       await expect(service.resolve(input, `resolve-key-q109-${String(index).padStart(6, '0')}`, context))
         .resolves.toMatchObject({ caseId });
     }
-    expect(qoreId.verifyNin).toHaveBeenCalledTimes(25);
+    expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(25);
     expect(JSON.stringify(auditRows(audit))).not.toMatch(/LIMIT/);
   });
 
   it('trips the breaker when QoreID is down, logs no NIN, and stops sending checks', async () => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => {
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => {
       throw new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'External verification is unavailable');
     }) });
     const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
@@ -366,7 +419,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(breaker.state()).toBe('open');
     await expect(service.resolve(input, 'resolve-key-q108-000012', context)).rejects.toMatchObject({
       code: 'NIN_PROVIDER_UNAVAILABLE', message: 'The NIN service is not answering right now. Please try again in a minute.' });
-    expect(qoreId.verifyNin).toHaveBeenCalledTimes(1);
+    expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: NIN_PROVIDER_UNAVAILABLE_EVENT,
       provider: 'qoreid', code: 'QOREID_PROVIDER_UNAVAILABLE', status: 503, correlationId: 'correlation-q108' }));
@@ -387,7 +440,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID', 'External verification returned an invalid response'),
       new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out'),
     ];
-    const qoreId = gate({ verifyNin: jest.fn(async () => { throw failures.shift(); }) });
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw failures.shift(); }) });
     const { service, breaker } = desk(qoreIdProvider(qoreId));
     for (const key of ['resolve-key-q108-000013', 'resolve-key-q108-000014']) {
       await expect(service.resolve(input, key, context)).rejects.toBeInstanceOf(DomainProblem);
@@ -398,7 +451,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it('does not count QoreID\'s own rate limit (429) as an outage', async () => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => {
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => {
       throw new DomainProblem(429, 'QOREID_RATE_LIMITED', 'External verification is temporarily rate limited');
     }) });
     const { service, breaker } = desk(qoreIdProvider(qoreId));
@@ -411,7 +464,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it('treats QoreID switched off during the check as a setting, not an outage', async () => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => {
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => {
       throw new DomainProblem(503, 'INTEGRATION_PAUSED', 'External verification is temporarily unavailable');
     }) });
     const breaker = new NinProviderBreaker();
@@ -427,7 +480,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it('frees the retry place when QoreID is switched off during the retried check', async () => {
-    const qoreId = gate({ verifyNin: jest.fn(async () => {
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => {
       throw new DomainProblem(503, 'QOREID_DISABLED', 'off');
     }) });
     const breaker = new NinProviderBreaker();
@@ -444,28 +497,28 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it('hands every resend to 0137\'s guard, which decides whether QoreID is asked: no claim or stored answer of its own', async () => {
-    const verifyNin = jest.fn(async () => { throw new DomainProblem(422, 'NIN_NOT_VERIFIED', 'x'); });
-    const { service, audit, breaker } = desk(qoreIdProvider(gate({ verifyNin })));
+    const verifyNinRecord = jest.fn(async () => noRecord());
+    const { service, audit, breaker } = desk(qoreIdProvider(gate({ verifyNinRecord })));
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await expect(service.resolve(input, 'resolve-key-q109-000041', context)).rejects.toMatchObject({
         status: 422, code: 'NIN_VERIFICATION_FAILED', message: 'The NIN could not be verified' });
     }
     // The guard answers the second from the answer it stored (qoreid-nin-desk-once.spec.ts).
-    expect(verifyNin).toHaveBeenCalledTimes(2);
-    expect(verifyNin).toHaveBeenNthCalledWith(2, NIN, { correlationId: 'correlation-q108', path: 'desk' });
+    expect(verifyNinRecord).toHaveBeenCalledTimes(2);
+    expect(verifyNinRecord).toHaveBeenNthCalledWith(2, NIN, deskCheck);
     expect(breaker.state()).toBe('closed');
     expect(auditRows(audit)).toEqual([0, 1].map(() => expect.objectContaining({ action: 'identity.nin.verify',
       outcome: 'denied', details: { provider: 'qoreid', ninCheck: 'no_match' } })));
   });
 
   it('lets the desk resend a request whose check failed', async () => {
-    const qoreId = gate({ verifyNin: jest.fn()
+    const qoreId = gate({ verifyNinRecord: jest.fn()
       .mockRejectedValueOnce(new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out'))
-      .mockResolvedValueOnce(record()) });
+      .mockResolvedValueOnce(found()) });
     const { service } = desk(qoreIdProvider(qoreId));
     await expect(service.resolve(input, 'resolve-key-q108-000042', context)).rejects.toMatchObject({ status: 504 });
     await expect(service.resolve(input, 'resolve-key-q108-000042', context)).resolves.toMatchObject({ caseId });
-    expect(qoreId.verifyNin).toHaveBeenCalledTimes(2);
+    expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -481,7 +534,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
         status: 400, code: 'NIN_DETAILS_INVALID',
         message: 'Check the name and the date of birth. The date of birth cannot be in the future or before 1900.' });
     }
-    expect(qoreId.verifyNin).not.toHaveBeenCalled();
+    expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
     expect(breaker.state()).toBe('closed');
     expect(warn).not.toHaveBeenCalled();
     expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'identity.nin.verify',
@@ -489,9 +542,9 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it('does not trip the breaker or record a call when the switch cannot be read again just before sending', async () => {
-    const qoreId = gate({ verifyNin: jest.fn()
+    const qoreId = gate({ verifyNinRecord: jest.fn()
       .mockRejectedValueOnce(new DomainProblem(503, 'INTEGRATION_UNAVAILABLE', 'Delivery provider is temporarily unavailable'))
-      .mockResolvedValueOnce(record()) });
+      .mockResolvedValueOnce(found()) });
     const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
     await expect(service.resolve(input, 'resolve-key-q108-000046', context)).rejects.toMatchObject({
       status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
@@ -524,9 +577,9 @@ describe('Q108 desk NIN resolve through QoreID', () => {
         'NIN protection keys are unavailable'), 503],
     ] as const)('answers the guard\'s %s as sent nothing: no breaker count, the retry place freed', async (code, refusal,
       status) => {
-      const verifyNin = jest.fn().mockRejectedValueOnce(refusal()).mockResolvedValueOnce(record());
+      const verifyNinRecord = jest.fn().mockRejectedValueOnce(refusal()).mockResolvedValueOnce(found());
       const breaker = retryingBreaker();
-      const { service, audit } = desk(qoreIdProvider(gate({ verifyNin })), breaker);
+      const { service, audit } = desk(qoreIdProvider(gate({ verifyNinRecord })), breaker);
       const answer = await service.resolve(input, 'resolve-key-q109-000050', context).catch((error: unknown) => error);
       expect(answer).toMatchObject({ status, code });
       if (status === 409) expect((answer as DomainProblem).extensions?.retryAfterSeconds).toBeGreaterThan(0);
@@ -539,7 +592,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     });
 
     it('answers the guard\'s store being unreadable as "cannot be started", without touching the breaker', async () => {
-      const qoreId = gate({ verifyNin: jest.fn(async () => { throw ninCheckUnavailable(); }) });
+      const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw ninCheckUnavailable(); }) });
       const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
       await expect(service.resolve(input, 'resolve-key-q109-000051', context)).rejects.toMatchObject({
         status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
@@ -552,7 +605,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     });
 
     it('passes on 504 QOREID_TIMEOUT with retryAfterSeconds as a sent check that counts toward the breaker', async () => {
-      const qoreId = gate({ verifyNin: jest.fn(async () => { throw ninCheckStillRunning(); }) });
+      const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw ninCheckStillRunning(); }) });
       const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
       const answer = await service.resolve(input, 'resolve-key-q109-000052', context).catch((error: unknown) => error);
       expect(answer).toMatchObject({ status: 504, code: 'QOREID_TIMEOUT', extensions: { retryAfterSeconds: 60 } });

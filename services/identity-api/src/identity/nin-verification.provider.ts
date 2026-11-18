@@ -95,6 +95,39 @@ export function isNinCheckRefusedUnsent(error: unknown): boolean {
 }
 
 /**
+ * 0137: refusals that repeat an answer the NIN service gave before and HID
+ * kept (QoreID's "not found", an answer HID cannot use): nothing was sent for
+ * this request, so they are not an outage and do not count toward the
+ * breaker.
+ */
+const STORED_ANSWERS = new WeakSet<object>();
+
+export function markStoredNinAnswer<T extends object>(error: T): T {
+  STORED_ANSWERS.add(error);
+  return error;
+}
+
+export function isStoredNinAnswer(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && STORED_ANSWERS.has(error);
+}
+
+/**
+ * 0137: this request's wait ended while the NIN service was still answering
+ * (504 QOREID_TIMEOUT). The check goes on and its answer is kept for the
+ * retry; how it ends is reported through NinVerificationRequest.onSettled.
+ */
+const STILL_RUNNING = new WeakSet<object>();
+
+export function markNinCheckStillRunning<T extends object>(error: T): T {
+  STILL_RUNNING.add(error);
+  return error;
+}
+
+export function isNinCheckStillRunning(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && STILL_RUNNING.has(error);
+}
+
+/**
  * Q108: the details the desk typed cannot be anyone's: a date of birth that
  * is not a real date, is in the future or is before 1900, or a name that is
  * blank, longer than 100 characters or holds a control character (such as a

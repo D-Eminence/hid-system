@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
-import { ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
+import { markStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
 import type {
   NinClaimedDemographics,
   NinVerificationProvider,
@@ -8,11 +8,12 @@ import type {
   NinVerificationResult,
 } from './nin.types';
 import {
+  type NinRecordCheck,
+  type NinRecordNames,
   PUBLIC_PATIENT_IDENTITY_PROVIDER,
   type PublicPatientIdentityProvider,
-  type VerifiedPublicPatientIdentity,
 } from './patient-enrollment.provider';
-import { QOREID_PROVIDER } from './qoreid-verification.types';
+import { QOREID_PROVIDER, type QoreIdNinBinding } from './qoreid-verification.types';
 
 /** The gate's refusals while it is closed. Anything else is a fault, not a setting. */
 const CLOSED_GATE_CODES = new Set(['QOREID_DISABLED', 'QOREID_NIN_ONLY_DISABLED', 'INTEGRATION_PAUSED',
@@ -28,14 +29,18 @@ const GENDERS = new Set(['female', 'male', 'intersex', 'other', 'unknown']);
  * control for QoreID NIN checks, read for every check (never cached).
  *
  * Only the NIN is sent. The record QoreID returns is compared here with the
- * name and date of birth the desk entered; nothing from the record other than
- * QoreID's reference is kept, and nothing is logged.
+ * name and date of birth the desk entered; the desk returns and logs nothing
+ * from it. 0137's guard keeps QoreID's answer (encrypted, as for every path):
+ * a record that matched for as long as 0137 keeps a record (Q110), one that
+ * did not match (probably someone else's NIN) for 24 hours.
  *
- * Its only way to QoreID is PUBLIC_PATIENT_IDENTITY_PROVIDER.verifyNin, which
- * is 0137's once-per-NIN guard: one desk request, a resend of it, another
- * desk's request and a sign-up or profile check of the same NIN together make
- * at most one QoreID call while the answer is kept or the check is running.
- * No per-request claim and no limit (Q109) is kept beside it.
+ * Its only way to QoreID is PUBLIC_PATIENT_IDENTITY_PROVIDER.verifyNinRecord,
+ * 0137's once-per-NIN guard as path 'desk'. Any record the guard holds for the
+ * NIN will do, complete or not (the desk needs no photo, address or
+ * recognised gender), so a desk request, a resend of it, another desk's
+ * request and a sign-up or profile check of the same NIN together make one
+ * QoreID call while the answer is kept or the check is running. No
+ * per-request claim and no limit (Q109) is kept beside it.
  */
 @Injectable()
 export class QoreIdNinVerificationProvider implements NinVerificationProvider {
@@ -49,23 +54,30 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
 
   /**
    * 0137 (Q109): the check goes through the once-per-NIN guard (NinCheckOnce)
-   * as the desk's: QoreID is asked at most once for a NIN whichever path asks
-   * (sign-up, the profile, the desk), a stored answer is reused, and the
-   * guard's audit row (`identity.qoreid.nin-check`, path 'desk') carries this
-   * request's correlation id. The guard's answers become the desk's:
+   * as the desk's, and the guard's audit row (`identity.qoreid.nin-check`,
+   * path 'desk') carries this request's correlation id. The guard's answers
+   * become the desk's:
+   * - a stored answer: compared as a fresh one, and said to be stored
+   *   (`stored`, or isStoredNinAnswer on a refusal): nothing was sent;
    * - 409 NIN_CHECK_IN_PROGRESS (this NIN is being checked) and 409
    *   NIN_CHECK_HELD (held after a check QoreID may have charged), with
    *   `retryAfterSeconds`: passed on; nothing was sent for this request.
-   * - 504 QOREID_TIMEOUT with `retryAfterSeconds`: passed on; the check was
-   *   sent and goes on, and its answer is kept for the retry.
+   * - 504 QOREID_TIMEOUT with `retryAfterSeconds` (isNinCheckStillRunning):
+   *   passed on; the check was sent and goes on, its answer is kept for the
+   *   retry and `request.onSettled` hears how it ended.
    * - 503 NIN_CHECK_UNAVAILABLE (the guard's store could not be read):
    *   "NIN checks cannot be started right now", as the desk answers any check
    *   that could not be started; nothing was sent.
    */
   async verify(request: NinVerificationRequest): Promise<NinVerificationResult> {
-    let identity: VerifiedPublicPatientIdentity;
+    const claimed = request.claimedDemographics;
+    let checked: NinRecordCheck;
     try {
-      identity = await this.qoreId.verifyNin(request.nin, { correlationId: request.correlationId, path: 'desk' });
+      checked = await this.qoreId.verifyNinRecord(request.nin, {
+        correlationId: request.correlationId, path: 'desk',
+        expects: (record) => sameDetails(record, claimed),
+        ...(request.onSettled ? { onQoreIdSettled: request.onSettled } : {}),
+      });
     } catch (error) {
       if (error instanceof DomainProblem && CLOSED_GATE_CODES.has(error.code)) {
         // Switched off between the gate and the check: nothing was sent.
@@ -81,20 +93,18 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
         // check: nothing was sent.
         throw ninCheckNotStarted();
       }
-      if (error instanceof DomainProblem && error.code === 'NIN_NOT_VERIFIED') {
-        return this.notVerified(request, 'no_match');
-      }
       throw error;
     }
-    if (!validIdentity(identity, request.nin)) {
-      throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
+    const stored = checked.source === 'stored';
+    if (checked.outcome === 'no_record') return this.notVerified(request, 'no_match', stored);
+    const identity = checked.record;
+    if (!validIdentity(identity, checked.providerReference, request.nin)) {
+      const invalid = new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
         'External verification returned an invalid response');
+      throw stored ? markStoredNinAnswer(invalid) : invalid;
     }
-    const claimed = request.claimedDemographics;
-    if (normalizedName(identity.firstName) !== normalizedName(claimed.firstName)
-      || normalizedName(identity.lastName) !== normalizedName(claimed.lastName)
-      || identity.dateOfBirth !== claimed.dateOfBirth) {
-      return this.notVerified(request, 'name_mismatch', identity.providerReference);
+    if (!sameDetails(identity, claimed)) {
+      return this.notVerified(request, 'name_mismatch', stored, checked.providerReference);
     }
     // The desk's spelling is kept: it equals the record's but for letter case
     // and spacing. The record's sex is used only when the desk gave none.
@@ -103,19 +113,20 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
       lastName: claimed.lastName,
       dateOfBirth: identity.dateOfBirth,
       ...(claimed.gender ? { gender: claimed.gender }
-        : identity.gender !== 'unknown' ? { gender: identity.gender } : {}),
+        : identity.gender && identity.gender !== 'unknown' ? { gender: identity.gender } : {}),
     };
     return {
       verified: true,
       outcome: 'match',
       provider: this.name,
-      reference: identity.providerReference,
+      reference: checked.providerReference,
       verifiedAt: new Date().toISOString(),
       demographics,
+      ...(stored ? { stored: true } : {}),
     };
   }
 
-  private notVerified(request: NinVerificationRequest, outcome: 'no_match' | 'name_mismatch',
+  private notVerified(request: NinVerificationRequest, outcome: 'no_match' | 'name_mismatch', stored: boolean,
     reference = 'qoreid-not-verified'): NinVerificationResult {
     return {
       verified: false,
@@ -124,6 +135,7 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
       reference,
       verifiedAt: new Date().toISOString(),
       demographics: request.claimedDemographics,
+      ...(stored ? { stored: true } : {}),
     };
   }
 }
@@ -153,8 +165,15 @@ function normalizedName(value: string): string {
   return value.trim().replace(/\s+/g, ' ').toLocaleUpperCase('en-NG');
 }
 
+/** The record's first and last name (in that order) and date of birth are the ones the desk entered. */
+function sameDetails(record: QoreIdNinBinding, claimed: NinClaimedDemographics): boolean {
+  return normalizedName(record.firstName) === normalizedName(claimed.firstName)
+    && normalizedName(record.lastName) === normalizedName(claimed.lastName)
+    && record.dateOfBirth === claimed.dateOfBirth;
+}
+
 /** The record QoreID returned is for this NIN and well formed (as patient enrollment checks it). */
-function validIdentity(identity: VerifiedPublicPatientIdentity, nin: string): boolean {
+function validIdentity(identity: NinRecordNames, providerReference: string, nin: string): boolean {
   const validName = (value: unknown): value is string => typeof value === 'string'
     && value.trim().length >= 1 && value.trim().length <= 100 && !/[\x00-\x1f\x7f]/.test(value);
   const date = typeof identity?.dateOfBirth === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(identity.dateOfBirth)
@@ -163,8 +182,9 @@ function validIdentity(identity: VerifiedPublicPatientIdentity, nin: string): bo
     && identity.nin === nin && validName(identity.firstName) && validName(identity.lastName)
     && Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === identity.dateOfBirth
     && date.getUTCFullYear() >= 1900 && date.getTime() <= Date.now()
-    && GENDERS.has(identity.gender)
-    && typeof identity.providerReference === 'string' && PROVIDER_REFERENCE.test(identity.providerReference)
+    // A record without a recognised sex is used for its name and date of birth.
+    && (identity.gender === undefined || GENDERS.has(identity.gender))
+    && typeof providerReference === 'string' && PROVIDER_REFERENCE.test(providerReference)
     // The reference is QoreID's own transaction number, never the NIN.
-    && !identity.providerReference.includes(nin);
+    && !providerReference.includes(nin);
 }

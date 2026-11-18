@@ -3,9 +3,13 @@ import { Injectable } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
-import { NinCheckOnce, type NinCheckAnswer, type NinCheckPath, qoreIdRejected, unusableAnswer } from './nin-check-once';
+import { NIN_NO_RECORD_ANSWER_SECONDS, NinCheckOnce, type NinCheckAnswer, type NinCheckPath, type NinCheckResult,
+  qoreIdRejected, recordNames, unusableAnswer } from './nin-check-once';
+import { markNinCheckStillRunning, markStoredNinAnswer } from './nin-verification.provider';
+import type { NinCheckSettlement } from './nin.types';
+import { qoreIdDelivery } from './qoreid-delivery';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
-import type { QoreIdNinEnrollmentBinding, QoreIdVerificationResult } from './qoreid-verification.types';
+import type { QoreIdNinBinding, QoreIdNinEnrollmentBinding, QoreIdVerificationResult } from './qoreid-verification.types';
 
 export const PUBLIC_PATIENT_IDENTITY_PROVIDER = Symbol('PUBLIC_PATIENT_IDENTITY_PROVIDER');
 
@@ -37,6 +41,51 @@ export interface PublicPatientIdentityProvider {
    * 'other'.
    */
   verifyNin(nin: string, context?: NinCheckContext): Promise<VerifiedPublicPatientIdentity>;
+  /**
+   * Q108, the registration desk: the same gate and the same once-per-NIN
+   * check (NinCheckOnce, 0137) as verifyNin, but any record QoreID returned
+   * for the NIN will do, complete or not, because the desk compares only its
+   * name and date of birth. A record kept as incomplete (no recognised
+   * gender, a photo or an address HID cannot read) by any path, or an answer
+   * kept as unusable that still gives a readable name and date of birth, is
+   * used, not paid for again.
+   *
+   * Says whether the answer came from QoreID for this request or from
+   * storage. QoreID's "not found" and an answer without a readable name are
+   * thrown as by verifyNin, marked isStoredNinAnswer when they come from
+   * storage; the guard's 504 (this request's wait ended, the check goes on)
+   * is marked isNinCheckStillRunning.
+   */
+  verifyNinRecord(nin: string, context?: NinRecordContext): Promise<NinRecordCheck>;
+}
+
+/**
+ * Q108: what the desk compares from a NIN's record: the name and date of
+ * birth, and the sex when the record is complete. Nothing else from the
+ * record leaves the provider.
+ */
+export interface NinRecordNames extends QoreIdNinBinding {
+  gender?: QoreIdNinEnrollmentBinding['gender'];
+}
+
+export type NinRecordCheck = {
+  /** 'stored': 0137's stored answer; QoreID was not asked for this request. */
+  source: 'qoreid' | 'stored';
+} & ({ outcome: 'record'; record: NinRecordNames; providerReference: string } | { outcome: 'no_record' });
+
+export interface NinRecordContext extends NinCheckContext {
+  /**
+   * The record the caller expects (the desk: the name and date of birth it
+   * typed). A fresh record that is not it, probably someone else's NIN, is
+   * kept 24 hours (NIN_NO_RECORD_ANSWER_SECONDS), as a profile check keeps a
+   * record it did not match, not as long as a matched one.
+   */
+  expects?: (record: QoreIdNinBinding) => boolean;
+  /**
+   * Called once when this request's own QoreID request ends, even after the
+   * caller stopped waiting. Not called for a stored answer.
+   */
+  onQoreIdSettled?: (settlement: NinCheckSettlement) => void;
 }
 
 /** The request a NIN check belongs to and where it comes from (never the NIN). */
@@ -85,6 +134,80 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
     });
     return identityFromAnswer(checked.answer, nin);
   }
+
+  async verifyNinRecord(nin: string, context: NinRecordContext = {}): Promise<NinRecordCheck> {
+    await this.assertAvailable();
+    if (!/^\d{11}$/.test(nin)) throw new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required');
+    let checked: NinCheckResult<undefined>;
+    try {
+      checked = await this.ninCheck.check({
+        nin, correlationId: context.correlationId ?? `nin-check-${randomUUID()}`, path: context.path ?? 'other',
+        needsCompleteRecord: false,
+        ask: async ({ timeoutMs }) => {
+          let answer: NinCheckAnswer;
+          try {
+            answer = enrollmentAnswer(await this.adapter.verifyNinEnrollment(nin, { timeoutMs }), nin);
+          } catch (error) {
+            // A record HID cannot enrol from still has a name and date of
+            // birth: kept as 'unusable', exactly as NinCheckOnce keeps it for
+            // every path, and used here.
+            const named = namedUnusableAnswer(error);
+            if (!named) {
+              context.onQoreIdSettled?.({ answered: false, error });
+              throw error;
+            }
+            answer = named;
+          }
+          context.onQoreIdSettled?.({ answered: true });
+          const names = answerNames(answer);
+          return { answer, value: undefined,
+            ...(names && context.expects && !context.expects(names.record)
+              ? { keepSeconds: NIN_NO_RECORD_ANSWER_SECONDS } : {}) };
+        },
+      });
+    } catch (error) {
+      // The guard's own 504 (QoreID's own timeout is marked as sent): this
+      // request's wait ended and the check goes on.
+      if (error instanceof DomainProblem && error.code === 'QOREID_TIMEOUT' && !qoreIdDelivery(error)) {
+        throw markNinCheckStillRunning(error);
+      }
+      throw error;
+    }
+    const stored = checked.source === 'stored';
+    const refuse = (problem: DomainProblem) => stored ? markStoredNinAnswer(problem) : problem;
+    const answer = checked.answer;
+    if (answer.outcome === 'rejected') throw refuse(qoreIdRejected());
+    if (answer.outcome === 'no_record') return { source: checked.source, outcome: 'no_record' };
+    const names = answerNames(answer);
+    if (!names || names.record.nin !== nin) throw refuse(invalidResponse());
+    return { source: checked.source, outcome: 'record', record: names.record,
+      providerReference: names.providerReference };
+  }
+}
+
+/**
+ * The name and date of birth (and the sex of a complete record) on a kept or
+ * fresh answer, with QoreID's reference: a record, or an unusable answer that
+ * kept them.
+ */
+function answerNames(answer: NinCheckAnswer): { record: NinRecordNames; providerReference: string } | undefined {
+  if (answer.outcome === 'record') {
+    const names: NinRecordNames = recordNames(answer.record);
+    return { record: answer.record.complete ? { ...names, gender: answer.record.binding.gender } : names,
+      providerReference: answer.providerReference };
+  }
+  if (answer.outcome === 'unusable' && answer.record && answer.providerReference) {
+    return { record: recordNames(answer.record), providerReference: answer.providerReference };
+  }
+  return undefined;
+}
+
+/** QoreID's full answer that HID cannot enrol from but whose name and date of birth could be read. */
+function namedUnusableAnswer(error: unknown): NinCheckAnswer | undefined {
+  const facts = qoreIdDelivery(error);
+  if (!(error instanceof DomainProblem) || error.code !== 'QOREID_PROVIDER_RESPONSE_INVALID'
+    || facts?.delivery !== 'answered' || !facts.record || !facts.providerReference) return undefined;
+  return { outcome: 'unusable', record: facts.record, providerReference: facts.providerReference };
 }
 
 /** What a NIN-only check keeps: the record, "no record", or (thrown) an answer HID cannot use. */
