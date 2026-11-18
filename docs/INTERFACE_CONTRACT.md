@@ -6519,10 +6519,16 @@ was called is the guard's row's `qoreidCalled`. A `5xx` problem's `detail` is re
 filter ("The service could not complete the request."); its `code` and
 `retryAfterSeconds` are always sent. A client shows the plain message, offers
 to try again after `retryAfterSeconds`, sends the same `Idempotency-Key` on
-that retry, and never retries on its own. A desk request answers within
-`QOREID_TIMEOUT_MS` of sending its own check, or `QOREID_TIMEOUT_MS` + 3 s
-when it waits for another check of the same NIN; the website waits at least
-15 s.
+that retry, and never retries on its own. How long a desk request takes:
+after a few database reads (the replay, QoreID's switch, the hold, a Health
+ID's record, the gate), about `QOREID_TIMEOUT_MS` when it sends its own
+check, and up to `QOREID_TIMEOUT_MS` + 3 s when it waits for another check of
+the same NIN (0137's guard). With the code default (12 s, #271) a waiting
+request can answer a little after 15 s, so the website's timer for this
+request must allow at least 20 s (the gateway allows 30 s); with the 5 s
+`QOREID_TIMEOUT_MS` that infra/aws/src/hid-regional-stack.ts sets it is about
+8 s. A request the website stopped waiting for is answered from storage on
+its retry with the same `Idempotency-Key`.
 
 ### Details refused before any check
 
@@ -6628,22 +6634,37 @@ with `providerCalled: false`.
 check; match, case and spacing, no match, name and date-of-birth mismatch,
 bad records, QoreID failures; the switch off, unreadable, and switched off
 during the check, or unreadable just before sending; no request limits (Q109:
-one account's and one facility's checks are never refused for volume);
+25 checks by one account, and 400 by 40 accounts at one facility, are never
+refused for volume); the privacy hold (ten mismatches for one NIN to one
+account, then held for that account only, a day; matches and "could not be
+verified" never count; an unreadable hold sends nothing); a NIN already on a
+Health ID (matched from the record without the NIN service, other details
+left to it, a patient changed before the write, not read while switched off);
+any record will do (no recognised sex), and stored answers said to be stored;
 no claim or stored answer of the desk's own (every resend goes to the guard);
 details
 refused before any check, over HTTP with the same validation pipe and problem
 filter as `main.ts` (`400 NIN_DETAILS_INVALID`, and `VALIDATION_FAILED` only
-for a malformed body); the breaker; the audit rows; capabilities; no NIN
-in an audit row or log line; 0137's answers as the desk's). The QoreID
+for a malformed body); the breaker (a stored answer neither counts nor closes
+it; a 504 is counted when its check ends); the audit rows; capabilities; no
+NIN in an audit row or log line; 0137's answers as the desk's). The QoreID
 adapter is mocked: no test calls QoreID.
 `services/identity-api/src/identity/qoreid-nin-desk-once.spec.ts` drives the
-real desk service and providers, 0137's guard and the real QoreID adapter
-against a fake QoreID that bills every NIN request (two desks at once; the
-same request twice at once; a resend after "could not be verified"; a
-corrected name; a sign-up and the
-desk, one after the other and at once; a timeout and the retry with the same
-`Idempotency-Key`; held, in progress, store unreachable; every NIN request
-sent under the guard's lease; no NIN in an audit row or log line).
+real desk service and providers, 0137's guard, the real profile check
+(`QoreIdVerificationService`) and the real QoreID adapter against a fake
+QoreID that bills every NIN request (two desks at once; the same request
+twice at once; a resend after "could not be verified"; a corrected name; a
+sign-up or the profile and the desk, one after the other and at once; a
+record without a recognised sex or with a line break in its address, kept by
+the profile or met at the desk, one charge; a record the desk did not match
+kept 24 hours, a matched one 90 days; a NIN on a Health ID after the stored
+answer ended, no charge; slow answers that do not trip the breaker, answers
+that never come that do; a stored 404 counted once; a stored answer that does
+not close a retrying breaker; a date-of-birth search stopped after ten tries;
+a timeout and the retry with the same `Idempotency-Key`; held, in progress,
+store unreachable; every NIN request sent under the guard's lease; no NIN in
+an audit row or log line). `services/identity-api/src/config/env-example-qoreid.spec.ts`
+keeps `.env.example`'s QoreID waits at the code defaults.
 
 ## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
 

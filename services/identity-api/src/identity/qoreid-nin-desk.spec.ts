@@ -426,6 +426,23 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(JSON.stringify(auditRows(audit))).not.toMatch(/LIMIT/);
   });
 
+  it('lets one facility check as many NINs as its desks need in a day: no facility limit (Q109)', async () => {
+    const qoreId = gate();
+    const { service, audit } = desk(qoreIdProvider(qoreId));
+    // 40 desk accounts at one facility, 10 checks each: 400 checks, more than the review build's 300 a day.
+    for (let account = 0; account < 40; account += 1) {
+      const suffix = String(account).padStart(12, '0');
+      const member = { ...context, membershipId: `c3d4e5f6-a7b8-4c9d-8e0f-${suffix}`,
+        actor: { ...context.actor, accountId: `f0e1d2c3-b4a5-4968-8776-${suffix}` } } as DataAccessContext;
+      for (let check = 0; check < 10; check += 1) {
+        await expect(service.resolve(input, `resolve-key-fac-${String(account * 10 + check).padStart(6, '0')}`, member))
+          .resolves.toMatchObject({ caseId });
+      }
+    }
+    expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(400);
+    expect(JSON.stringify(auditRows(audit))).not.toMatch(/LIMIT|NIN_CHECK_HELD/);
+  });
+
   it('trips the breaker when QoreID is down, logs no NIN, and stops sending checks', async () => {
     const qoreId = gate({ verifyNinRecord: jest.fn(async () => {
       throw new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'External verification is unavailable');
