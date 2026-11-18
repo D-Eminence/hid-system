@@ -12,16 +12,18 @@ import { DatabaseService } from '../database/database.service';
  * distinctly (404 PATIENT_NOT_FOUND). A patient that exists but is not
  * available to this facility keeps today's answer.
  *
- * Every lookup that does not open a patient (no such patient, not available,
- * or not authorized) is counted for the person, in an `account` bucket of
- * auth.otp_rate_limits keyed by an HMAC of the staff account: 30 in 10
- * minutes, whichever of the account's facilities X-Facility-ID names, so a
- * member of several facilities gets no fresh 30 by changing facility. From
- * the 31st, the lookup is answered with today's refusal for 10 minutes (404
- * NOT_FOUND, or 403 for a patient this lookup may see but not open), never
- * "No such patient", before anything is said about the Health ID. It is never
- * a 429: every client closes an open record on 403 or 404. A lookup that
- * opens a patient is not counted.
+ * Every lookup answered 404 (no such patient, or not available) is counted
+ * for the person, in an `account` bucket of auth.otp_rate_limits keyed by an
+ * HMAC of the staff account: 30 in 10 minutes, whichever of the account's
+ * facilities X-Facility-ID names, so a member of several facilities gets no
+ * fresh 30 by changing facility. From the 31st, a lookup that finds no
+ * patient is answered with today's 404 NOT_FOUND for 10 minutes, never "No
+ * such patient", before anything is said about the Health ID. It is never a
+ * 429: every client closes an open record on 403 or 404. A lookup that opens
+ * a patient is not counted, and neither is today's 403 for a patient this
+ * lookup may see but not open: the issued check is never asked there, so it
+ * says nothing new, and counting it would limit a desk working through
+ * patients who have not yet given consent.
  *
  * Whether a Health ID was ever issued is read with
  * identity.support_health_id_matches (0109): it reads past the patients'

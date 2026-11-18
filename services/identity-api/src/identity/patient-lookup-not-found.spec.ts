@@ -27,10 +27,10 @@ import {
  * has answers 404 PATIENT_NOT_FOUND "No patient has this Health ID."; a
  * patient that exists but is not available here keeps today's answer. Both
  * are counted (30 in 10 minutes per staff account, whichever of its
- * facilities it works at) and audited without the Health ID. The issued
- * check is asked only when the Health ID and the member's facility are on
- * the same side of the seals (real, demo 0098, QA 0123). Fictional people
- * and Health IDs only.
+ * facilities it works at; a 403 is never counted) and audited without the
+ * Health ID. The issued check is asked only when the Health ID and the
+ * member's facility are on the same side of the seals (real, demo 0098,
+ * QA 0123). Fictional people and Health IDs only.
  */
 const patientId = '7c1f0d2e-3c4a-4b5d-8e6f-7a8b9c0d1e2f';
 const membershipId = 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f';
@@ -102,11 +102,14 @@ describe('Q100 B: staff Health ID lookup (IdentityService.lookupPatient)', () =>
       details: { lookupResult: 'not_available' } }));
   });
 
-  it('keeps today\'s 403 for a patient this lookup may see but not open, and counts it', async () => {
+  it('keeps today\'s 403 for a patient this lookup may see but not open, and does not count it', async () => {
     const { service, audit, misses } = setup(patient, deny);
     await expect(service.lookupPatient(KNOWN, 'direct-care', context))
       .rejects.toMatchObject({ status: 403, message: 'Patient access is not authorized' });
-    expect(misses?.countMiss).toHaveBeenCalledTimes(1);
+    // A 403 says nothing Q100 B added (the issued check is never asked), so
+    // counting it would only limit a desk working through patients who have
+    // not yet given consent.
+    expect(misses?.countMiss).not.toHaveBeenCalled();
     expect(misses?.issued).not.toHaveBeenCalled();
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied', patientId,
       details: { lookupResult: 'not_authorized' } }));
@@ -123,16 +126,17 @@ describe('Q100 B: staff Health ID lookup (IdentityService.lookupPatient)', () =>
       details: { lookupResult: 'limited' } }));
   });
 
-  it('gives a limited member today\'s 403 for a patient this lookup may not open (a closed record still closes)',
+  it('gives a limited member today\'s 403 for a patient this lookup may not open, counting nothing (a record still closes)',
     async () => {
       const { service, audit, misses } = setup(patient, deny,
         { countMiss: jest.fn(async () => true), issued: jest.fn(async () => false) });
       const failure = await service.lookupPatient(KNOWN, 'direct-care', context).catch((error: unknown) => error);
       expect(failure).not.toBeInstanceOf(DomainProblem);
       expect(failure).toMatchObject({ status: 403, message: 'Patient access is not authorized' });
+      expect(misses?.countMiss).not.toHaveBeenCalled();
       expect(misses?.issued).not.toHaveBeenCalled();
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied', patientId,
-        details: { lookupResult: 'limited' } }));
+        details: { lookupResult: 'not_authorized' } }));
     });
 
   it.each([
@@ -422,6 +426,16 @@ describe('Q100 B: the miss limit, end to end through IdentityService and the rat
     expect(provider.lookupExactHid).toHaveBeenCalledTimes(PATIENT_LOOKUP_MISS_WINDOW.maxRequests + memberships.length);
   });
 
+  it('still answers "No patient has this Health ID." after 40 lookups refused 403 for want of consent', async () => {
+    const { service, provider, audit } = identityWith(patient, deny);
+    for (let refused = 0; refused < 40; refused += 1) {
+      await expect(answerTo(service, KNOWN, context)).resolves.toMatchObject({ status: 403 });
+    }
+    (provider.lookupExactHid as jest.Mock).mockResolvedValue(null);
+    await expect(answerTo(service, NOBODY, context))
+      .resolves.toMatchObject({ status: 404, code: 'PATIENT_NOT_FOUND', message: PATIENT_NOT_FOUND_MESSAGE });
+    expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ details: { lookupResult: 'no_such_patient' } }));
+  });
 });
 
 describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {
@@ -574,9 +588,12 @@ describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {
       fullName: 'Ada Fictional', dateOfBirth: '1991-04-05', gender: 'female', rowVersion: 3, ninVerified: false });
     provider.authorize.mockResolvedValue({ allowed: false, patientId, facilityId, membershipId, scope: 'read_records',
       purpose: 'direct-care', breakGlass: false });
+    query.mockClear();
     const refused = await lookup(KNOWN);
     expect(refused.status).toBe(403);
-    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied',
-      details: { lookupResult: 'limited' } }));
+    // The 403 is today's, never counted, so it touches no rate-limit row.
+    expect(query).not.toHaveBeenCalledWith(expect.stringMatching(/otp_rate_limits|pg_advisory_xact_lock/), expect.anything());
+    expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ outcome: 'denied', patientId,
+      details: { lookupResult: 'not_authorized' } }));
   });
 });

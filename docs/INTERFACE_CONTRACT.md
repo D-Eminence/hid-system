@@ -6904,8 +6904,8 @@ Body unchanged (`hid` in the body, never in a URL; `purpose`). Answers:
 | No patient record of any status has this Health ID, and the Health ID is on the member's facility's side of the seals (below) | `404` | `{ "code": "PATIENT_NOT_FOUND", "detail": "No patient has this Health ID." }` |
 | The patient exists but is not available here (another facility's patient without consent, not active, sealed tenant) | `404` | today's answer, unchanged (`code` `NOT_FOUND`, "Patient was not found or is not available") |
 | The Health ID is on another side of the seals than the member's facility, or starts `ZDEM` or `ZQA` without being a sealed one, or the facility's side cannot be told (below) | `404` | today's answer, whether or not any record has the Health ID, never `PATIENT_NOT_FOUND` |
-| The patient can be seen here but this lookup is not authorized | `403` | today's answer, unchanged |
-| The staff account has had 30 lookups that opened no patient in 10 minutes, at any of its facilities | `404` or `403` | today's answer for 10 minutes (`404` `NOT_FOUND`, or `403` for a patient this lookup may see but not open), never `PATIENT_NOT_FOUND` and never a `429` |
+| The patient can be seen here but this lookup is not authorized | `403` | today's answer, unchanged; never counted toward the limit below |
+| The staff account has had 30 lookups answered `404` in 10 minutes, at any of its facilities | `404` | today's answer (`404` `NOT_FOUND`) for 10 minutes to every lookup that finds no patient, never `PATIENT_NOT_FOUND` and never a `429`; a `403` stays today's `403` |
 
 "No record has this Health ID" is read with
 `identity.support_health_id_matches` (0109), which identity-api's runtime
@@ -6914,16 +6914,18 @@ issued (any status), nothing else about any patient. Note: 0109's comment
 names the support route as its caller; this is a second caller of the same
 function, with no database change.
 
-Every lookup that does not open a patient is counted for the person before
-anything is said about the Health ID (`auth.otp_rate_limits`, `account`
-bucket keyed by an HMAC of the staff account with the existing
+Every lookup that finds no patient (every `404`) is counted for the person
+before anything is said about the Health ID (`auth.otp_rate_limits`,
+`account` bucket keyed by an HMAC of the staff account with the existing
 `OTP_HMAC_KEY_B64`). It is one limit per account, not per membership: a
 member of several facilities gets no fresh 30 by changing `X-Facility-ID`.
-A lookup that opens a patient is not counted. A limited member keeps getting
-today's refusals, never a new status: the
-website ends access and closes an open record on any `403` or `404` from this
-lookup (its check before every save), so a `429` there would leave a record
-open after access has ended. If the member cannot be counted, the side of
+A lookup that opens a patient is not counted, and neither is today's `403`:
+the issued check is never asked for it and a limited account gets the same
+`403`, so counting it would only limit a desk working through patients who
+have not yet given consent. A limited account keeps getting today's `404`,
+never a new status: the website ends access and closes an open record on any
+`403` or `404` from this lookup (its check before every save), so a `429`
+there would leave a record open after access has ended. If the member cannot be counted, the side of
 the member's facility cannot be told, or the issued check cannot be read
 (or answers anything but the one Health ID or nothing), the answer is
 today's `404`, never `PATIENT_NOT_FOUND`.
@@ -6964,7 +6966,8 @@ without being a sealed one.
 Every answer writes `identity.patient.lookup` as before (`success`, or
 `denied`), never with the Health ID. A `denied` row now carries
 `details.lookupResult`: `no_such_patient`, `not_available`,
-`not_authorized` (with the patient id, as before) or `limited`.
+`not_authorized` (with the patient id, as before; a `403`, never counted)
+or `limited` (a `404` while the account is limited).
 `not_available` is every `404` that is not `PATIENT_NOT_FOUND` and not
 limited: a record has the Health ID, the Health ID is of another side of the
 seals, or it could not be told.

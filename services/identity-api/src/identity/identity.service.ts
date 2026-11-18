@@ -17,9 +17,10 @@ import { PatientLookupMissService, patientNotFound } from './patient-lookup-miss
 /**
  * How a staff Health ID lookup that opened no patient ended, as its audit row
  * says it (never the Health ID): no patient record has the Health ID (Q100 B),
- * the patient is not available here, the lookup was not authorized, or the
- * member was limited (then the answer is today's 404 or 403, never "No such
- * patient" and never a 429: every client closes a record on 403 or 404).
+ * the patient is not available here, the lookup was not authorized (today's
+ * 403, never counted), or the account was limited (then the answer is today's
+ * 404, never "No such patient" and never a 429: every client closes a record
+ * on 403 or 404).
  */
 type LookupMissResult = 'no_such_patient' | 'not_available' | 'not_authorized' | 'limited';
 
@@ -80,10 +81,12 @@ export class IdentityService {
       context,
     });
     if (!decision.allowed) {
-      // The patient exists but this lookup may not open them: today's 403,
-      // limited or not, counted with the other lookups that open no patient.
-      const limited = await this.misses?.countMiss(context);
-      const result: LookupMissResult = limited === true ? 'limited' : 'not_authorized';
+      // The patient exists and this lookup may see them but not open them:
+      // today's 403, not counted. The 403 says nothing Q100 B added (the
+      // issued check is never asked here, and a limited account would get the
+      // same 403), so counting it would only limit a desk working through
+      // patients who have not yet given consent.
+      const result: LookupMissResult = 'not_authorized';
       await this.record(context, 'identity.patient.lookup', 'denied', patient.id, purpose, { lookupResult: result });
       throw new ForbiddenException('Patient access is not authorized');
     }
