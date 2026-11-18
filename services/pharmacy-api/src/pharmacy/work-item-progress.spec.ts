@@ -111,6 +111,38 @@ describe('POST pharmacy/work-items/progress (ORD-3)', () => {
       'denied');
   });
 
+  it('asks Identity as a GET read, whatever the internal call\'s method, and keeps the clinician\'s cookie', async () => {
+    const { service, identity } = harness([]);
+    const cookieOnly: DataAccessContext = { ...context, authorization: undefined, userCookie: 'hid_access=opaque',
+      requestMethod: 'POST' };
+    await service.read(cookieOnly, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA] });
+    expect(identity.authorize).toHaveBeenCalledWith(ids.patient, 'read_records',
+      expect.objectContaining({ requestMethod: 'GET', userCookie: 'hid_access=opaque' }));
+    expect(identity.authorize.mock.calls[0][2]).not.toHaveProperty('csrfToken', expect.anything());
+    expect(cookieOnly.requestMethod).toBe('POST');
+  });
+
+  it('audits Identity\'s own 403 as a denied read of the patient, and passes it on', async () => {
+    const { DomainProblem } = await import('../common/problem');
+    const { service, identity, query, audit } = harness([]);
+    identity.authorize.mockRejectedValue(new DomainProblem(403, 'CONSENT_REQUIRED', 'Consent is required'));
+    await expect(service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA] }))
+      .rejects.toMatchObject({ status: 403, code: 'CONSENT_REQUIRED' });
+    expect(query).not.toHaveBeenCalledWith(WORK_ITEM_PROGRESS_QUERY, expect.anything());
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context, 'pharmacy.work-item.progress.read',
+      expect.objectContaining({ patientId: ids.patient }), expect.objectContaining({ reason: 'identity_refusal' }),
+      'denied');
+  });
+
+  it('does not audit an unreachable Identity as a denial', async () => {
+    const { DomainProblem } = await import('../common/problem');
+    const { service, identity, audit } = harness([]);
+    identity.authorize.mockRejectedValue(new DomainProblem(503, 'IDENTITY_SERVICE_UNAVAILABLE', 'Unavailable'));
+    await expect(service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA] }))
+      .rejects.toMatchObject({ status: 503 });
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
   it('reads this facility\'s own work only, read-only, under row-level security', () => {
     expect(WORK_ITEM_PROGRESS_QUERY).toMatch(/w\.order_route_id is null/);
     expect(WORK_ITEM_PROGRESS_QUERY).toMatch(/w\.facility_id=\$2::uuid/);

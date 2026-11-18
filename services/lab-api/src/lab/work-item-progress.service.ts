@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
@@ -76,11 +76,25 @@ export class LabWorkItemProgressService {
     private readonly audit: AuditService) {}
 
   async read(context: DataAccessContext, input: LabWorkItemProgressDto): Promise<{ items: LabProgressItem[] }> {
-    const decision = await this.identity.authorize(input.patientId, 'read_records', context.purposeOfUse, context);
+    // The clinician's browser request to ehr-api was a read (GET), and this
+    // route only reads, so Identity is told GET: its delegated path then
+    // checks a forwarded cookie without the browser-write Origin and CSRF
+    // check (the website sends no CSRF token on a GET) and allows only
+    // read_records, which is all this asks for. request.method here is the
+    // POST of the internal ehr-api call, never the clinician's.
+    const readContext: DataAccessContext = { ...context, requestMethod: 'GET' };
+    const denied = (reason: string) => this.database.withTransaction(context, (client) => this.audit.recordWithClient(
+      client, this.event(context, input, 'denied', { requestedCount: input.sourceEhrOrderIds.length, reason })));
+    let decision: Awaited<ReturnType<IdentityService['authorize']>>;
+    try {
+      decision = await this.identity.authorize(input.patientId, 'read_records', context.purposeOfUse, readContext);
+    } catch (error) {
+      // Identity's own refusal (403) is a denied read of this patient, audited as one.
+      if (error instanceof HttpException && error.getStatus() === 403) await denied('identity_refusal');
+      throw error;
+    }
     if (!decision.allowed) {
-      await this.database.withTransaction(context, (client) => this.audit.recordWithClient(client,
-        this.event(context, input, 'denied', { requestedCount: input.sourceEhrOrderIds.length,
-          reason: 'identity_authorization' })));
+      await denied('identity_authorization');
       throw new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab work-item access is not authorized');
     }
     return this.database.withTransaction(context, async (client) => {

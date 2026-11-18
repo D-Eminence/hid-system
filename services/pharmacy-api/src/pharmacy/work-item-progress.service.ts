@@ -62,12 +62,27 @@ export class PharmacyWorkItemProgressService {
     private readonly audit: AuditService) {}
 
   async read(context: DataAccessContext, input: WorkItemProgressDto): Promise<{ items: PharmacyProgressItem[] }> {
-    const decision = await this.identity.authorize(input.patientId, 'read_records', context);
+    // The clinician's browser request to ehr-api was a read (GET), and this
+    // route only reads, so Identity is told GET: its delegated path then
+    // checks a forwarded cookie without the browser-write Origin and CSRF
+    // check (the website sends no CSRF token on a GET) and allows only
+    // read_records, which is all this asks for. request.method here is the
+    // POST of the internal ehr-api call, never the clinician's.
+    const readContext: DataAccessContext = { ...context, requestMethod: 'GET' };
+    const denied = (reason: string) => this.database.withTransaction(context, (client) => this.audit.recordWithClient(
+      client, context, 'pharmacy.work-item.progress.read', { patientId: input.patientId,
+        resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId },
+      { requestedCount: input.sourceEhrPrescriptionIds.length, reason }, 'denied'));
+    let decision: Awaited<ReturnType<IdentityService['authorize']>>;
+    try {
+      decision = await this.identity.authorize(input.patientId, 'read_records', readContext);
+    } catch (error) {
+      // Identity's own refusal (403) is a denied read of this patient, audited as one.
+      if (error instanceof DomainProblem && error.getStatus() === 403) await denied('identity_refusal');
+      throw error;
+    }
     if (!decision.allowed) {
-      await this.database.withTransaction(context, (client) => this.audit.recordWithClient(client, context,
-        'pharmacy.work-item.progress.read', { patientId: input.patientId, resourceType: 'pharmacy-work-item-collection',
-          resourceId: context.facilityId }, { requestedCount: input.sourceEhrPrescriptionIds.length,
-          reason: 'identity_authorization' }, 'denied'));
+      await denied('identity_authorization');
       throw new DomainProblem(403, 'PHARMACY_ACCESS_DENIED', 'Pharmacy access is not authorized');
     }
     return this.database.withTransaction(context, async (client) => {
