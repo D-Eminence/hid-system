@@ -6828,3 +6828,106 @@ Screen change (Akos frontend branch): run the check when a medicine is
 chosen and show `message` with the matches (medicine, status, dates) above
 Save; Save stays enabled. After Save, show `duplicateMedicines.message` if
 present.
+
+## 0136. Who can do what: five role-table changes (Release A, owner decision Q103 A)
+
+Owner decision, verbatim: "Q103 A" (all five changes; the admin's "approve
+new patient" and the nurse's note writing unchanged). Migration
+`0136_role_permission_changes.sql` changes rows of `auth.role_permissions`
+only: no route, body, error code, function or table changes. Permissions are
+read on every request, so each change applies from a staff member's next
+request; nobody is signed out. Nurses, clinicians, pharmacists and
+`org_admin` are not changed.
+
+### The exact rows
+
+| Role | Gains | Loses |
+| --- | --- | --- |
+| `receptionist` (front desk) | `ehr.document.write`, `ehr.document.read`, `ocr.job.write`, `ocr.job.read` (scanning paper records into the patient's file); `ehr.vital.read` (seeing vitals) | nothing |
+| `doctor` | nothing | `ocr.job.write`; `outreach.campaign.read`, `outreach.campaign.write`, `outreach.registration.read`, `outreach.registration.write`; `lab.work-item.read`, `pharmacy.work-item.read` |
+| `lab` | nothing | `ehr.encounter.read`; `ocr.job.read`, `ocr.job.write`, `ocr.validation.write` |
+| `admin` (hospital administrator) | nothing | `lab.work-item.read`, `pharmacy.work-item.read` |
+
+Kept on purpose: `admin` `identity.registration.approve`, `workforce.manage`,
+`organization.manage`, `audit.read`; `nurse` `ehr.note.write`.
+
+### What answers 403 PERMISSION_DENIED from now on
+
+| Who | Routes (under `/api/v1`) |
+| --- | --- |
+| Doctor | `POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`; every Outreach route of outreach-api (campaigns, registrations, screening, exports, Health ID steps) and `GET`/`POST /identity/outreach-invitations` and its revoke; `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
+| Laboratory staff | `GET /ehr/patients/:patientId/encounters`, `.../encounters/open-today`, `.../encounters/:encounterId`; every `ocr/*` route (`ocr/jobs`, `ocr/job-list`, validations, extractions) |
+| Hospital administrator | `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
+
+The front desk now passes the permission check on `POST
+/ehr/documents/upload-intents`, `POST /ehr/documents/:id/complete`, `GET
+/ehr/documents`, `GET /ehr/documents/:id/download`, `POST /ocr/jobs`, `POST
+/ocr/jobs/:jobId/retry`, `GET /ocr/jobs`, `GET /ocr/jobs/:jobId` and its
+extraction and validation lists, `GET /ocr/job-list` (SX-9: its "Who" is now
+doctor, clinician, nurse, receptionist and admin; no longer lab), and the
+vitals reads (`GET /ehr/patients/:patientId/vitals/latest`, `GET
+.../encounters/:encounterId/vitals`, `/:vitalId`, `/:vitalId/corrections`).
+Every one of these still needs the patient's access exactly as for anyone
+else (a consent grant, or the records-processing cover of 0104/0108/0113),
+and is audited as today, refusals included. The front desk does not get
+`ocr.validation.write`, `ocr.patient.confirm` or `ocr.publication.write`:
+checking a reading and putting it into the chart stay clinical.
+
+### What still works (checked route by route)
+
+- A doctor's own orders' progress (ORD-3): `POST /lab/work-items/progress`
+  and `POST /pharmacy/work-items/progress` need `ehr.lab-request.read` /
+  `ehr.prescription.read`, which doctors keep.
+- Activating a lab request still sends it to the hospital's own laboratory:
+  that hand-off needs `lab.work-item.accept`, which doctors keep. 0133's
+  automatic send to the own pharmacy uses its definer function and adds no
+  doctor row, as planned.
+- Released results: `lab.result.released.read`, kept by doctors.
+- Laboratory staff keep their whole own job: work list, accept, accessions,
+  specimens, runs, results, verification, release, receiving from other
+  facilities, and `ehr.lab-request.read`/`write`.
+- Pharmacists are unchanged. Administrators keep staff, settings, audit and
+  approving new patients. Sign-in sites (Q97's product gate) are unchanged:
+  the lab site admits lab staff by `lab.work-item.read`/`accept`, which they
+  keep, and administrators by `organization.manage`.
+
+### What doctors lose with `ocr.job.write` (please read before signing)
+
+Checking a reading (`POST /ocr/jobs/:jobId/validation`) and confirming its
+patient run only under records processing (purpose `healthcare-operations`),
+and records processing needs `ocr.job.write` for the staff member at each use
+(0104 D8, 0108, 0113). So doctors also stop checking readings, confirming
+their patient and asking a patient for records processing (`POST
+/identity/access-requests` with that purpose answers 403
+`RECORDS_PROCESSING_NOT_ALLOWED`). Doctors still read jobs and publish a
+checked reading into the chart under direct care with their own grant.
+Nurses and clinicians keep checking; the front desk scans. Laboratory staff
+also stop asking for records processing (this reverses the earlier "lab
+included" choice for records processing).
+
+### Staff counts before signing
+
+`docs/rollback/0136_affected_staff_counts.sql` is a read-only query (its
+first statement makes the session read only). For each of the 18 rows it
+answers: whether the row is there now, how many active staff memberships at
+real facilities hold the role, how many of those actually gain or lose the
+permission (a membership whose other role keeps it is not counted), how many
+distinct staff logins that is, and the same two numbers for the sealed QA and
+demo tenants. Numbers only: no name, email or id. 0136 prints the same
+numbers, from the same query text, as `0136 count n: ...` NOTICE lines in the
+release's dry-run and apply logs.
+
+### Undo
+
+`docs/rollback/0136_rollback.sql` (not in the ledger) puts back exactly the
+13 removed rows and leaves the 5 front-desk rows; it can run twice safely.
+It becomes a migration (next free number, ledger entry, owner signature)
+only if needed.
+
+Screen change (Akos frontend branch): show the scan steps (upload, "Extract
+with OCR", the job list) and vitals to the front desk; hide the Laboratory
+and Pharmacy department pages (work list, results, prescriptions) from
+doctors and administrators; hide Outreach from doctors; hide visits and the
+Migrate desk from laboratory staff; show doctors the "check reading" step
+only when they hold `ocr.job.write` (today: never). Screens already follow
+the permissions list in the session, so most of this happens by itself.
