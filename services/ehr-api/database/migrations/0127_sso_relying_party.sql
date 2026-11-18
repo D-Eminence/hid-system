@@ -58,9 +58,10 @@ begin
      or not exists (select 1 from pg_attribute attribute
                      where attribute.attrelid = 'auth.sessions'::regclass
                        and attribute.attname = 'session_kind' and not attribute.attisdropped)
-     -- 0123 (the sealed QA tenant), 0125 (prescription dispensing details) and 0126 (organisation staff kinds,
-     -- the last migration this file follows; it requires 0124 and 0125 itself).
+     -- 0123 (the sealed QA tenant), 0124 (patient details on own work), 0125 (prescription dispensing details)
+     -- and 0126 (organisation staff kinds, the last migration this file follows).
      or to_regclass('identity.sealed_qa_members') is null
+     or to_regprocedure('lab.work_item_patient_cards(uuid[])') is null
      or to_regprocedure('pharmacy.work_item_prescription_details(uuid[])') is null
      or to_regprocedure('identity.organization_staff_kinds(uuid)') is null then
     raise exception using errcode = '55000', message = '0127: 0001-0126 must be applied first';

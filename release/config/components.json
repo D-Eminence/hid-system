@@ -604,11 +604,11 @@
       },
       {
         "name": "0126_organization_staff_kinds.sql",
-        "sha256": "0e6c40eea3212735bf4e46eda90bb979918fef5ec407da34f9075af46b301b7a"
+        "sha256": "783f34c54d5289426f47e8c101378209f155ef499ad4e0c1290e17579190fe97"
       },
       {
         "name": "0127_sso_relying_party.sql",
-        "sha256": "2213800a5241f87fa210117c4b752686b26efd3002d6d19a2f922798b6917514"
+        "sha256": "9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d"
       }
     ]
   },

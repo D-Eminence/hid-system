@@ -72,8 +72,9 @@
 -- before that image runs (a release applies its migrations before it rolls
 -- out the services).
 --
--- 0. Preconditions (catalog reads only; 55000 and nothing applied): 0123
---    and 0125 applied (identity.sealed_qa_facility(uuid) and
+-- 0. Preconditions (catalog reads only; 55000 and nothing applied): 0123,
+--    0124 and 0125 applied (identity.sealed_qa_facility(uuid),
+--    lab.work_item_patient_cards(uuid[]) and
 --    pharmacy.work_item_prescription_details(uuid[]) exist), else "0126:
 --    0001-0125 must be applied first"; not applied yet (no
 --    identity.organization_staff_kinds(uuid)), else "0126: already applied";
@@ -95,6 +96,7 @@ declare
   mismatch text;
 begin
   if to_regprocedure('identity.sealed_qa_facility(uuid)') is null
+     or to_regprocedure('lab.work_item_patient_cards(uuid[])') is null
      or to_regprocedure('pharmacy.work_item_prescription_details(uuid[])') is null then
     raise exception using errcode = '55000', message = '0126: 0001-0125 must be applied first';
   end if;
