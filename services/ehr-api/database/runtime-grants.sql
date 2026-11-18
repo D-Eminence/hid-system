@@ -1760,3 +1760,17 @@ revoke all on function identity.organization_staff_kinds(uuid) from public;
 grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
 grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
 revoke all on function auth.guard_session_single_sign_on_change() from public;
+
+-- The waiting list (0135, EHR-C7, owner decisions of 18 November 2026),
+-- exactly as 0135 grants it: check-in, the list and the stage and assignee
+-- change to the EHR runtime alone. No runtime role has any privilege on
+-- ehr.visit_queue (only these functions read and write it, as its owner),
+-- and the card helper is executed by no role.
+grant execute on function ehr.visit_queue_check_in(text, uuid),
+  ehr.visit_queue_list(boolean),
+  ehr.visit_queue_update(uuid, bigint, text, smallint, boolean, uuid, boolean) to hid_ehr_runtime;
+revoke all on function ehr.visit_queue_check_in(text, uuid),
+  ehr.visit_queue_list(boolean),
+  ehr.visit_queue_update(uuid, bigint, text, smallint, boolean, uuid, boolean),
+  ehr.visit_queue_cards(uuid[], uuid, uuid, uuid) from public;
+revoke all on ehr.visit_queue from public;
