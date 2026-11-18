@@ -6111,3 +6111,87 @@ not_verified and revoked on the lookup and the case answer; breaker trip,
 window, retry, recovery, log event; capabilities; no answer contains the
 word the owner ruled out). `nin-deferred-staging.spec.ts` exact bodies
 updated.
+
+## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
+
+Default agreed in the 18 November plan: the desk sees its own cases, approvers
+see every case at the facility.
+
+```text
+GET /api/v1/identity/registration-cases?view=mine|facility[&status=...][&limit=...][&cursor=...]
+```
+
+- Permission `identity.registration.write`, `X-Facility-Id`, and
+  `X-Purpose-Of-Use` (`direct-care`, `emergency` or `healthcare-operations`,
+  as on `GET registration-cases/:caseId`). `Cache-Control: no-store`.
+- `view=mine` (the default): the cases this member's account started at this
+  facility.
+- `view=facility`: every case at this facility. It also needs
+  `identity.registration.approve`; without it the answer is `403`
+  `REGISTRATION_CASE_LIST_DENIED`, "Only staff who approve registrations can
+  see every case at this facility." (audited, outcome `denied`).
+- `status` (optional): one of `pending_new_identity_approval`,
+  `review_required`, `resolved_existing_identity`, `linked_existing`,
+  `approved_new_identity`, `rejected`, `cancelled`.
+- `limit`: 1 to 100, default 50. `cursor`: the `nextCursor` of the previous
+  page, as given. A cursor that is not one we gave answers `400`
+  `REGISTRATION_CASE_CURSOR_INVALID`, "This page link is not valid. Start
+  again from the first page."
+- Any other query parameter (for example a Health ID) answers `400`. Health
+  IDs are never taken in the URL.
+- Only cases of the facility in `X-Facility-Id` are read, whatever else the
+  member may read; another facility sees nothing.
+
+Answer, newest first:
+
+```json
+{
+  "view": "mine",
+  "cases": [
+    {
+      "caseId": "uuid",
+      "status": "approved_new_identity",
+      "version": 2,
+      "candidateCount": 0,
+      "contactRecorded": true,
+      "ninStatus": "verified",
+      "patient": { "patientId": "uuid", "hid": "HID-QX7K2M" },
+      "fullName": "Ada Fictional",
+      "dateOfBirth": "1991-04-05",
+      "createdAt": "2026-11-18T10:00:58.000Z",
+      "updatedAt": "2026-11-18T10:05:58.000Z",
+      "createdByMe": true
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+The item has the same fields as `GET registration-cases/:caseId` (with
+`ninStatus` from ID-0; `patient` only once the case points at a patient), plus
+`fullName`, `dateOfBirth`, `createdAt`, `updatedAt` and `createdByMe`. No NIN
+digits are read or returned (not even the last four), and candidates are not
+listed; open one case for them.
+
+Audit: one `identity.registration-case.list` row per answer, outcome
+`success`, details `{ view, status, page: "first" | "next", count, caseIds,
+patientIds }` (the patients the page shows). No names or dates of birth are
+written to the audit row.
+
+The facility view uses `registration_cases_facility_status_idx`
+(facility, status, created_at desc) when filtered by status; the mine view
+filters on the facility and the creating account.
+
+### Screen change (Akos's frontend branch)
+
+A "My registrations" list for the desk (`view=mine`) and an "All
+registrations" list for approvers (`view=facility`), with "NIN Verified" /
+"NIN Not Verified" from `ninStatus`, and "Load more" while `nextCursor` is
+not null. Opening a row calls `GET registration-cases/:caseId`.
+
+### Tests
+
+`services/identity-api/src/identity/registration-case-list.spec.ts`: mine and
+facility views, another facility sees nothing, the refusal and its audit row,
+the success audit row, no NIN digits in the answer or the query, paging and
+bad cursors, and query parameters (a Health ID is refused).
