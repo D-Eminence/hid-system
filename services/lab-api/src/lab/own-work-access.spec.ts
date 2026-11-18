@@ -4,6 +4,7 @@ import { AuditService } from '../audit/audit.service';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
+import { LabImportsService } from './lab-imports.service';
 import { LabModule } from './lab.module';
 import { LabWorkItemsService, WORK_LIST_QUERY } from './lab-work-items.service';
 import { basisDetails, LabOrderRouteAccess } from './order-route-access';
@@ -186,6 +187,35 @@ describe('own lab work (0133)', () => {
     const { service, statements } = harness({ basesError: conflict });
     await expect(service.list(scientist)).rejects.toBe(conflict);
     expect(statements).not.toContain('rollback to savepoint lab_own_work_bases');
+  });
+
+  it('never gives a new acceptance on the own-work basis: Identity\'s consent decides', async () => {
+    const { service, statements, identity } = harness();
+    (identity.authorize as jest.Mock).mockResolvedValue({ allowed: false, breakGlass: false });
+    const accepting = { ...scientist, actor: { ...scientist.actor, permissions: ['lab.work-item.read', 'lab.work-item.accept'] } };
+    await expect(service.acceptEhrOrder(accepting, { sourceEhrOrderId: '30000000-0000-4000-8000-000000000009',
+      sourceEhrOrderVersion: 1, sourceEncounterId: '70000000-0000-4000-8000-000000000001', patientId: ada,
+      orderingFacilityId: facilityId, testCodeSystem: 'http://loinc.org', testCode: '718-7', testName: 'Haemoglobin',
+      priority: 'routine', requestedBy: accountId, requestedAt: '2026-11-18T09:00:00Z' } as never))
+      .rejects.toMatchObject({ status: 403 });
+    expect(identity.authorize).toHaveBeenCalledWith(ada, 'write_records', 'direct-care', accepting);
+    expect(statements.some((sql) => ACCESS.test(sql) || BASES.test(sql))).toBe(false);
+  });
+
+  it('never gives imported Lab evidence on the own-work basis: the imports service has no such check at all', async () => {
+    expect(Reflect.getMetadata('design:paramtypes', LabImportsService)).not.toContain(LabOwnWork);
+    expect(Reflect.getMetadata('design:paramtypes', LabImportsService)).not.toContain(LabOrderRouteAccess);
+    const client = { query: jest.fn(async () => ({ rows: [{ id: id(9), patient_id: ada, facility_id: facilityId }] })) };
+    const database = { withTransaction: async <T>(_c: DataAccessContext, fn: (c: PoolClient) => Promise<T>) =>
+      fn(client as unknown as PoolClient) } as unknown as DatabaseService;
+    const identity = { authorize: jest.fn().mockResolvedValue({ allowed: false, breakGlass: false }) } as unknown as
+      IdentityService;
+    const audit = { recordWithClient: jest.fn() };
+    const imports = new LabImportsService(database, identity, audit as unknown as AuditService);
+    await expect(imports.get(scientist, id(9))).rejects.toMatchObject({ status: 403, code: 'LAB_IMPORT_ACCESS_DENIED' });
+    await expect(imports.listForPatient(scientist, { patientId: ada } as never))
+      .rejects.toMatchObject({ status: 403, code: 'LAB_IMPORT_ACCESS_DENIED' });
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
 
   it('off, asks nothing new', async () => {

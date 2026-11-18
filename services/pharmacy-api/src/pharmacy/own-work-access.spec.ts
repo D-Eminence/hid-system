@@ -96,6 +96,9 @@ const harness = (options: Options = {}) => {
         work_item_id: values[3], patient_id: values[4], facility_id: values[5], status: 'reversed', reversed_by: accountId,
         reversed_at: new Date(), row_version: '1', created_at: new Date() }] };
     }
+    if (/from pharmacy\.imported_medication_evidence where id=\$1/.test(sql)) {
+      return { rows: [{ id: '66000000-0000-4000-8000-000000000001', patient_id: ada, facility_id: facilityId }] };
+    }
     if (CARDS.test(sql)) {
       return { rows: (values[0] as string[]).map((item) => ({ work_item_id: item,
         patient_full_name: item === id(2) ? 'Bisi Own' : 'Ada Own', patient_sex: null, patient_date_of_birth: null,
@@ -296,6 +299,23 @@ describe('own pharmacy work (0133)', () => {
     await call(service);
     expect(asked).toEqual([[resource, resourceId, action]]);
     expect(identity.authorize).not.toHaveBeenCalled();
+  });
+
+  it('never gives imported medication evidence or a new acceptance on the own-work basis (consent decides)', async () => {
+    const { service, statements, identity, audited } = harness({ identityAllowed: false });
+    await expect(service.getImport(pharmacist, '66000000-0000-4000-8000-000000000001'))
+      .rejects.toMatchObject({ status: 403, code: 'PHARMACY_ACCESS_DENIED' });
+    await expect(service.listImports(pharmacist, { patientId: ada } as never))
+      .rejects.toMatchObject({ status: 403, code: 'PHARMACY_ACCESS_DENIED' });
+    await expect(service.acceptPrescription(pharmacist, { patientId: ada, orderingFacilityId: facilityId,
+      sourceEhrPrescriptionId: '30000000-0000-4000-8000-000000000009', sourceEhrPrescriptionVersion: 2,
+      sourceEncounterId: '70000000-0000-4000-8000-000000000001', sourceStatus: 'active',
+      medicationDisplay: 'Amoxicillin 500 mg capsule', frequency: 'Every 8 hours', instructions: 'After food',
+      prescribedBy: accountId, prescribedAt: '2026-11-18T09:00:00Z', acceptanceReason: 'Accepted' } as never, 'own-key-0004'))
+      .rejects.toMatchObject({ status: 403, code: 'PHARMACY_ACCESS_DENIED' });
+    expect(statements.some((sql) => ACCESS.test(sql) || STATES.test(sql))).toBe(false);
+    expect(identity.authorize).toHaveBeenCalledTimes(3);
+    expect(audited()).toEqual([]);
   });
 
   it('off, asks nothing new and keeps Identity\'s consent', async () => {
