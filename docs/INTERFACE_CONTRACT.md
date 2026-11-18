@@ -6161,10 +6161,18 @@ What is compared: only this patient's prescriptions at this facility that
 the clinician may read under consent, and only current ones (draft, active
 or on hold, not ended before today in Lagos), at most 500, newest first.
 They match when the codes are the same (and the code systems are the same,
-or one is missing), or when the medicine names are the same once strength,
-units, dose form and anything in brackets are set aside ("Amoxicillin 500 mg
-capsules" and "amoxicillin 250mg" match; "Amoxicillin" and "Ampicillin" do
-not).
+or one is missing), or when the two name a medicine in common once
+numbers, units, dose form and anything in brackets are set aside
+(`matchedBy: name`). A strength ends the name of its medicine and a
+separator (`/`, `+`, `&`, `,`, "and", "with", "plus") starts the next, so a
+combination product names each of its medicines. A number is set aside on
+its own: the word after it is kept, and a name such as B12 or D3 keeps its
+digits. Examples: "Amoxicillin 500 mg capsules" and "amoxicillin 250mg"
+match; "Codeine 30 paracetamol 500" and "Paracetamol 1 g" match (both hold
+paracetamol); "Amoxicillin" and "Ampicillin" do not; "Vitamin B12 1000 mcg"
+and "Vitamin B6 50mg" do not; "Insulin 70/30 mixtard" and "Insulin" do not
+(words after the last strength with no separator before them belong to the
+medicine before it).
 
 Refusals: `403 CONSENT_REQUIRED` when Identity refuses the read, or when the
 database does not allow this patient's records to be read here (so "no

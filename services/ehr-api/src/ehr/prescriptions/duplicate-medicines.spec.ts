@@ -5,7 +5,7 @@ import { validate } from 'class-validator';
 import { REQUIRED_PERMISSIONS } from '../../common/decorators';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import { CURRENT_PRESCRIPTIONS_QUERY, DUPLICATE_CHECK_NOT_RUN, DuplicateMedicineCheckDto, DuplicateMedicineChecker,
-  DuplicateMedicinesController, duplicateMessage, matchKind, medicineName } from './duplicate-medicines';
+  DuplicateMedicinesController, duplicateMessage, matchKind, medicineIngredients, medicineName } from './duplicate-medicines';
 import { PrescriptionsController } from './prescriptions.controller';
 
 // Fictional ids and medicines only.
@@ -49,7 +49,44 @@ describe('the medicine name (ORD-10 phase 1)', () => {
     ['Artemether/Lumefantrine 20/120 mg', 'artemether lumefantrine'],
     ['Metformin 500 mg extended release', 'metformin'],
     ['500 mg', ''],
+    // A number takes only itself and a unit word with it, never the next medicine's name.
+    ['Codeine 30 paracetamol 500', 'codeine paracetamol'],
+    ['Paracetamol 500 caffeine 65', 'paracetamol caffeine'],
+    ['Paracetamol 500mg + Caffeine 65mg', 'paracetamol caffeine'],
+    // A name such as b12 or d3 keeps its digits.
+    ['Vitamin B12 1000 mcg', 'vitamin b12'],
+    ['Vitamin B6 50mg', 'vitamin b6'],
+    ['Vitamin B1', 'vitamin b1'],
+    ['Vitamin D3 1000 IU', 'vitamin d3'],
+    // A ratio is one number; a word after it with no separator qualifies the medicine.
+    ['Insulin 70/30 mixtard', 'insulin mixtard'],
+    ['Amoxicillin 250 mg/5 ml suspension', 'amoxicillin'],
+    ['Paracetamol 1,000 mg x30', 'paracetamol'],
   ])('%s is %s', (display, name) => expect(medicineName(display)).toBe(name));
+
+  it.each([
+    ['Codeine 30 paracetamol 500', ['codeine', 'paracetamol']],
+    ['Artemether/Lumefantrine 20/120 mg', ['artemether', 'lumefantrine']],
+    ['Amoxicillin and clavulanic acid 625 mg', ['amoxicillin', 'clavulanic acid']],
+    ['Vitamin B12 1000 mcg', ['vitamin b12']],
+    ['Insulin 70/30 mixtard', ['insulin mixtard']],
+  ])('%s names the medicines %j', (display, names) => expect(medicineIngredients(display)).toEqual(names));
+
+  const free = (medicationDisplay: string) => ({ medicationDisplay, medicationCodeSystem: null, medicationCode: null });
+  it.each([
+    // A combination product and one of its medicines: the double-dosing case, either way round.
+    ['Paracetamol 1 g', 'Codeine 30 paracetamol 500', 'name'],
+    ['Codeine 30 paracetamol 500', 'Paracetamol 500 mg tablets', 'name'],
+    ['Paracetamol 1 g', 'Paracetamol 500 caffeine 65', 'name'],
+    ['Artemether 80 mg injection', 'Artemether/Lumefantrine 20/120 mg', 'name'],
+    ['Codeine 30 paracetamol 500', 'Codeine 30 paracetamol 500', 'name'],
+    // Different medicines that only share a word or a number.
+    ['Vitamin B12 1000 mcg', 'Vitamin B6 50mg', undefined],
+    ['Vitamin B1', 'Vitamin B12 1000 mcg', undefined],
+    ['Insulin', 'Insulin 70/30 mixtard', undefined],
+    ['Codeine 30 mg', 'Paracetamol 500 caffeine 65', undefined],
+  ])('%s against a current %s matches by %s', (display, current, kind) =>
+    expect(matchKind({ medicationDisplay: display }, free(current))).toBe(kind));
 
   it('matches by code within the same code system, or by name', () => {
     expect(matchKind({ medicationDisplay: 'Amoxil', medicationCodeSystem: 'ATC', medicationCode: 'J01CA04' },

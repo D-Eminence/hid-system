@@ -94,19 +94,60 @@ const FORM_WORDS = new Set(['mg', 'g', 'mcg', 'ug', 'µg', 'microgram', 'microgr
   'dispersible', 'extended', 'release', 'modified', 'sr', 'er', 'xr', 'mr', 'cr', 'dt', 'ds', 'forte', 'per',
   'in', 'of', 'and', 'x', 'by', 'w', 'v']);
 
+/** Words that join the medicines of a combination product. */
+const JOIN_WORDS = new Set(['and', 'with', 'plus']);
+
 /**
- * The medicine name of a free-text display: lower case, without anything in
- * brackets, numbers, strengths, units and dose forms, so "Amoxicillin 500 mg
- * capsules" and "amoxicillin 250mg" are the same medicine. Answers '' when
- * nothing is left (then the name cannot match). Exported for the tests.
+ * One token of a display: a number (with a decimal part or a ratio such as
+ * "70/30"), a word that starts with a letter (kept whole, so "b12" and "d3"
+ * stay names), a separator between medicines, or a percent sign.
+ */
+const TOKEN = /[0-9]+(?:[.,][0-9]+)?(?:\/[0-9]+(?:[.,][0-9]+)?)*|[a-zà-ɏµ][a-zà-ɏµ0-9]*|[/+&,;]|%/g;
+
+/**
+ * The medicines named in a free-text display, each lower case and without
+ * anything in brackets, numbers, units and dose forms. A strength ends the
+ * name of its medicine and a separator ("/", "+", "&", ",", "and", "with")
+ * starts the next, so "Codeine 30 paracetamol 500" names codeine and
+ * paracetamol, while "Vitamin B12 1000 mcg" names one, vitamin b12. Words
+ * after the last strength with no separator before them qualify the medicine
+ * before it ("Insulin 70/30 mixtard" names insulin mixtard). Only bare
+ * numbers and FORM_WORDS are dropped; the word after a number is kept. A
+ * number glued to a unit is split first ("500mg" is "500 mg"). Exported for
+ * the tests.
+ */
+export function medicineIngredients(display: string): string[] {
+  const text = display.toLowerCase()
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    // "500mg" -> "500 mg"; a digit after a letter ("b12") is left alone.
+    .replace(/(^|[^a-zà-ɏµ0-9.,])([0-9]+(?:[.,][0-9]+)?)(?=[a-zà-ɏµ%])/g, '$1$2 ');
+  const ingredients: string[] = [];
+  let current: string[] = [];
+  let lastBoundary: 'number' | 'separator' | null = null;
+  const flush = () => { if (current.length > 0) ingredients.push(current.join(' ')); current = []; };
+  for (const token of text.match(TOKEN) ?? []) {
+    if (/^[/+&,;]$/.test(token) || JOIN_WORDS.has(token)) { flush(); lastBoundary = 'separator'; continue; }
+    // A strength, a percent sign or a pack count ("x30") ends the name before it.
+    if (/^[0-9]/.test(token) || token === '%' || /^x[0-9]+$/.test(token)) { flush(); lastBoundary = 'number'; continue; }
+    if (FORM_WORDS.has(token)) continue;
+    current.push(token);
+  }
+  if (current.length > 0 && lastBoundary === 'number' && ingredients.length > 0) {
+    ingredients[ingredients.length - 1] = `${ingredients[ingredients.length - 1]} ${current.join(' ')}`;
+  } else {
+    flush();
+  }
+  return ingredients;
+}
+
+/**
+ * The medicine name of a free-text display: its medicines, in order, joined
+ * by a space, so "Amoxicillin 500 mg capsules" and "amoxicillin 250mg" are
+ * the same medicine. Answers '' when nothing is left (then the name cannot
+ * match). Exported for the tests.
  */
 export function medicineName(display: string): string {
-  return display.toLowerCase()
-    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
-    .replace(/[0-9]+(?:[.,][0-9]+)?\s*(?:%|[a-zµ]+)?/g, ' ')
-    .split(/[^a-zÀ-ɏ]+/)
-    .filter((word) => word.length > 0 && !FORM_WORDS.has(word))
-    .join(' ');
+  return medicineIngredients(display).join(' ');
 }
 
 const key = (value: string | null | undefined) => (value ?? '').trim().toLowerCase();
@@ -121,8 +162,10 @@ export function matchKind(candidate: { medicationDisplay: string; medicationCode
     const rowSystem = key(row.medicationCodeSystem);
     if (!system || !rowSystem || system === rowSystem) return 'code';
   }
-  const name = medicineName(candidate.medicationDisplay);
-  return name && name === medicineName(row.medicationDisplay) ? 'name' : undefined;
+  // The same medicine name, or one medicine named in both (a combination
+  // product and one of its medicines: the double-dosing case).
+  const rowIngredients = new Set(medicineIngredients(row.medicationDisplay));
+  return medicineIngredients(candidate.medicationDisplay).some((name) => rowIngredients.has(name)) ? 'name' : undefined;
 }
 
 /** The plain words the form shows. Exported for the tests. */
