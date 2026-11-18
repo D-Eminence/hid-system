@@ -39,8 +39,9 @@
 --      without a purpose of use; a revoked or an expired grant; an active
 --      deny directive; a disabled account; a held membership; a malformed
 --      facility setting is refused 22023; the EHR and Lab runtimes may not
---      call it (42501); a doctor with consent and the read permission gets
---      its row;
+--      call it (42501); a doctor with consent gets nothing, since doctors
+--      hold no pharmacy.work-item.read after 0136 (owner decision Q103 A;
+--      before 0136 the doctor got its row);
 --   6. emergency (D8): a break-glass grant under purpose 'emergency' gets the
 --      rows it can read (also under a deny directive), nothing under direct
 --      care;
@@ -662,14 +663,14 @@ select pg_temp.as_member(2, 1), set_config('app.membership_id', 'e1140004-0000-4
 select pg_temp.expect('PH''s subject with PE''s membership', pg_temp.details(pg_temp.items()), '');
 select pg_temp.as_member(2, 1), set_config('app.facility_id', 'not-a-uuid', true);
 select pg_temp.expect('a malformed facility setting', left(pg_temp.refusal(pg_temp.items()), 5), '22023');
--- Consent without pharmacy.work-item.read (a laboratory scientist), and a
--- doctor with both.
+-- Consent without pharmacy.work-item.read: a laboratory scientist, and a
+-- doctor (doctors lost the pharmacy work list in 0136, owner decision Q103 A).
 select pg_temp.as_member(3, 1);
 select pg_temp.expect('LS: row-level security shows Ngozi''s own rows', pg_temp.visible_own(), '01 02 08 09 10');
 select pg_temp.expect('LS holds no pharmacy.work-item.read', pg_temp.details(pg_temp.items()), '');
 select pg_temp.as_member(1, 1);
-select pg_temp.expect('DR with consent and the read permission',
-  pg_temp.details(array['e114000b-0000-4000-8000-000000000004'::uuid]), '04:asap/10 mg/tablet/1 month/30.0000 tablet');
+select pg_temp.expect('DR with consent holds no pharmacy.work-item.read since 0136',
+  pg_temp.details(array['e114000b-0000-4000-8000-000000000004'::uuid]), '');
 -- Another facility's pharmacist.
 select pg_temp.as_member(4, 2);
 select pg_temp.expect('P2 at F2', pg_temp.details(pg_temp.items()), '05:routine/400 mg/tablet/5 day/10.0000 tablet');

@@ -109,9 +109,10 @@ begin
   end if;
 end $$;
 
--- 2. Fictional fixtures: one organization; Clinic One (F1) with doctors A
--- (a campaign member) and B (not a member) and nurse D (a member, not an
--- admin); Clinic Two (F2) with doctor C.
+-- 2. Fictional fixtures: one organization; Clinic One (F1) with front-desk
+-- staff (receptionists) A (a campaign member) and B (not a member) and nurse D
+-- (a member, not an admin); Clinic Two (F2) with receptionist C. (Doctors held
+-- the Outreach permissions until 0136; receptionists and nurses still do.)
 -- Campaigns: K1 active registration at F1 (A admin, D enumerator), K2 active
 -- registration at F2 (C admin), K3 planned at F1 (A admin). R1 is a pending registration A
 -- captured into K1 earlier (kept, local command e128...02), and P1 the
@@ -135,33 +136,33 @@ insert into auth.accounts (id, subject, email, display_name, status) values
    'Outreach 0110 D', 'active');
 insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
   ('e1220000-0000-4000-8000-000000000001', 'e1210000-0000-4000-8000-000000000001', 'Outreach 0110 A',
-   'outreach-0110-a@example.invalid', 'verified', 'doctor'),
+   'outreach-0110-a@example.invalid', 'verified', 'receptionist'),
   ('e1220000-0000-4000-8000-000000000002', 'e1210000-0000-4000-8000-000000000002', 'Outreach 0110 B',
-   'outreach-0110-b@example.invalid', 'verified', 'doctor'),
+   'outreach-0110-b@example.invalid', 'verified', 'receptionist'),
   ('e1220000-0000-4000-8000-000000000003', 'e1210000-0000-4000-8000-000000000003', 'Outreach 0110 C',
-   'outreach-0110-c@example.invalid', 'verified', 'doctor'),
+   'outreach-0110-c@example.invalid', 'verified', 'receptionist'),
   ('e1220000-0000-4000-8000-000000000004', 'e1210000-0000-4000-8000-000000000004', 'Outreach 0110 D',
    'outreach-0110-d@example.invalid', 'verified', 'nurse');
 insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
   membership_role, app_role) values
   ('e1230000-0000-4000-8000-000000000001', 'e1220000-0000-4000-8000-000000000001',
    'e1210000-0000-4000-8000-000000000001', 'e1200000-0000-4000-8000-000000000001',
-   'e1200000-0000-4000-8000-000000000002', 'doctor', 'doctor'),
+   'e1200000-0000-4000-8000-000000000002', 'receptionist', 'receptionist'),
   ('e1230000-0000-4000-8000-000000000002', 'e1220000-0000-4000-8000-000000000002',
    'e1210000-0000-4000-8000-000000000002', 'e1200000-0000-4000-8000-000000000001',
-   'e1200000-0000-4000-8000-000000000002', 'doctor', 'doctor'),
+   'e1200000-0000-4000-8000-000000000002', 'receptionist', 'receptionist'),
   ('e1230000-0000-4000-8000-000000000003', 'e1220000-0000-4000-8000-000000000003',
    'e1210000-0000-4000-8000-000000000003', 'e1200000-0000-4000-8000-000000000001',
-   'e1200000-0000-4000-8000-000000000003', 'doctor', 'doctor'),
+   'e1200000-0000-4000-8000-000000000003', 'receptionist', 'receptionist'),
   ('e1230000-0000-4000-8000-000000000004', 'e1220000-0000-4000-8000-000000000004',
    'e1210000-0000-4000-8000-000000000004', 'e1200000-0000-4000-8000-000000000001',
    'e1200000-0000-4000-8000-000000000002', 'nurse', 'nurse');
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
-  ('e1240000-0000-4000-8000-000000000001', 'e1210000-0000-4000-8000-000000000001', 'doctor', 'facility',
+  ('e1240000-0000-4000-8000-000000000001', 'e1210000-0000-4000-8000-000000000001', 'receptionist', 'facility',
    'e1230000-0000-4000-8000-000000000001', 'e1200000-0000-4000-8000-000000000002', 'Synthetic 0110 suite role'),
-  ('e1240000-0000-4000-8000-000000000002', 'e1210000-0000-4000-8000-000000000002', 'doctor', 'facility',
+  ('e1240000-0000-4000-8000-000000000002', 'e1210000-0000-4000-8000-000000000002', 'receptionist', 'facility',
    'e1230000-0000-4000-8000-000000000002', 'e1200000-0000-4000-8000-000000000002', 'Synthetic 0110 suite role'),
-  ('e1240000-0000-4000-8000-000000000003', 'e1210000-0000-4000-8000-000000000003', 'doctor', 'facility',
+  ('e1240000-0000-4000-8000-000000000003', 'e1210000-0000-4000-8000-000000000003', 'receptionist', 'facility',
    'e1230000-0000-4000-8000-000000000003', 'e1200000-0000-4000-8000-000000000003', 'Synthetic 0110 suite role'),
   ('e1240000-0000-4000-8000-000000000004', 'e1210000-0000-4000-8000-000000000004', 'nurse', 'facility',
    'e1230000-0000-4000-8000-000000000004', 'e1200000-0000-4000-8000-000000000002', 'Synthetic 0110 suite role');

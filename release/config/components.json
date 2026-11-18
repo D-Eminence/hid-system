@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0135",
-    "count": 134,
+    "last": "0136",
+    "count": 135,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -633,6 +633,10 @@
       {
         "name": "0135_visit_queue.sql",
         "sha256": "39460f4fba0714849b156ee5a3be2e12861f819924bc98e5d97b1b9d0cb80095"
+      },
+      {
+        "name": "0136_role_permission_changes.sql",
+        "sha256": "8d2f4e08d5108dc5511b4cecd71058eaa74c968bda2b3ba6e9dd963e45c79831"
       }
     ]
   },

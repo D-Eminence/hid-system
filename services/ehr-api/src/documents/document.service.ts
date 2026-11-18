@@ -15,6 +15,24 @@ import type { ResolveScanTargetDto } from './dto/resolve-scan-target.dto';
 import { downloadFileName, isSupportedDocumentMediaType, SNIFF_PREFIX_BYTES, sniffMediaType } from './media-sniff';
 import { scanRefusalProblem } from './scan-errors';
 
+/**
+ * Owner decision Q112 A (migration 0136): the front desk holds only the
+ * "own uploads" reads, ehr.document.read-own and ocr.job.read-own. A staff
+ * member without the full read (ehr.document.read for the list and download,
+ * ocr.job.read for the OCR source read) sees and opens only the documents its
+ * own login uploaded at this facility. Any other document answers 404, as an
+ * unknown one does, before Identity is asked about its patient. A login that
+ * holds the full read through any role keeps it.
+ */
+export const FULL_DOCUMENT_READ = 'ehr.document.read';
+export const OWN_DOCUMENT_READ = 'ehr.document.read-own';
+export const FULL_OCR_READ = 'ocr.job.read';
+export const OWN_OCR_READ = 'ocr.job.read-own';
+
+function ownUploadsOnly(context: DataAccessContext, fullRead: string): boolean {
+  return !(context.actor.permissions ?? []).includes(fullRead);
+}
+
 interface WorkloadActor {
   subject: string;
   accountId: string;
@@ -183,6 +201,9 @@ export class DocumentService {
       // ehr.documents_effective counts only scans bound to the document's
       // version and SHA-256, as download and OCR do; the media type is the one
       // the scan detected (owner decision D3) once there is one.
+      // Q112 A: without ehr.document.read (the front desk's
+      // ehr.document.read-own), only the documents this login uploaded here.
+      const uploadedBy = ownUploadsOnly(context, FULL_DOCUMENT_READ) ? context.actor.accountId : null;
       const result = await client.query(
         `select document.id::text as "id", document.patient_id::text as "patientId",
                 document.encounter_id::text as "encounterId", document.original_file_name as "fileName",
@@ -192,8 +213,9 @@ export class DocumentService {
                 document.created_at as "createdAt"
            from ehr.documents_effective document
           where document.patient_id=$1 and document.encounter_id=$2 and document.facility_id=$3
+            and ($4::uuid is null or document.created_by=$4::uuid)
           order by document.created_at desc,document.id desc`,
-        [patientId, encounterId, context.facilityId],
+        [patientId, encounterId, context.facilityId, uploadedBy],
       );
       await this.audit.recordWithClient(client, this.auditEvent(
         context, 'ehr.document.list', 'success', patientId, encounterId,
@@ -208,6 +230,9 @@ export class DocumentService {
       (client) => this.findById(client, documentId, context.facilityId),
       { readOnly: true },
     );
+    // Q112 A: without ocr.job.read (the front desk's ocr.job.read-own), only a
+    // document this login uploaded; any other answers 404 before Identity is asked.
+    if (ownUploadsOnly(context, FULL_OCR_READ)) this.assertUploader(document, context);
     const authorization = await this.identity.authorize(
       document.patient_id, 'read_records', context.purposeOfUse, context,
     );
@@ -287,6 +312,10 @@ export class DocumentService {
       (client) => this.findById(client, documentId, context.facilityId),
       { readOnly: true },
     );
+    // Q112 A: without ehr.document.read (the front desk's
+    // ehr.document.read-own), only a document this login uploaded; any other
+    // answers 404 before Identity is asked about its patient.
+    if (ownUploadsOnly(context, FULL_DOCUMENT_READ)) this.assertUploader(document, context);
     const authorization = await this.identity.authorize(document.patient_id, 'read_records', context.purposeOfUse, context);
     if (!authorization.allowed) throw new ForbiddenException('Patient read access is not authorized');
     // The OCR worker deletes (source_deleting) or deleted (source_deleted) every stored version 7 days after the
@@ -477,8 +506,10 @@ export class DocumentService {
 
   /**
    * Only the account that created the upload intent completes it (current
-   * default; INTERFACE_CONTRACT.md §16). Anyone else gets the same 404 as an
-   * unknown document, a document at another facility or one they cannot read.
+   * default; INTERFACE_CONTRACT.md §16), and only it lists, downloads or has
+   * OCR read a document when it holds just the "own uploads" read (Q112 A).
+   * Anyone else gets the same 404 as an unknown document, a document at
+   * another facility or one they cannot read.
    */
   private assertUploader(row: DocumentRow, context: DataAccessContext): void {
     if (row.created_by !== context.actor.accountId) throw new NotFoundException('Document not found');

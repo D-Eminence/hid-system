@@ -80,6 +80,28 @@ select pg_temp.expect('1f the marker', 'boolean not null false; unique (patient_
       and exists (select 1 from pg_index i where i.indexrelid = 'ehr.encounters_imported_paper_records_key'::regclass
                     and i.indisunique)));
 
+-- The role table as these cases were written for it (before 0136). 0136
+-- (owner decisions Q103 A, Q111 A) took ocr.job.write from laboratory staff
+-- and gave it to the front desk (doctors keep it), so a lab member can no
+-- longer ask for or hold records processing. This suite pins records
+-- processing's own rules (0104, 0108, 0113), not who holds ocr.job.write:
+-- for its own transaction, which is rolled back, it puts back the rows 0136
+-- removed and takes away the front-desk rows 0136 added. What 0136 changes,
+-- including who may ask for records processing now, is proven by
+-- role-permission-changes.integration.sql.
+insert into auth.role_permissions (role_code, permission_code)
+select role_code, permission_code
+  from (values ('doctor', 'outreach.campaign.read'), ('doctor', 'outreach.campaign.write'),
+               ('doctor', 'outreach.registration.read'), ('doctor', 'outreach.registration.write'),
+               ('doctor', 'lab.work-item.read'), ('doctor', 'pharmacy.work-item.read'), ('lab', 'ehr.encounter.read'),
+               ('lab', 'ocr.job.read'), ('lab', 'ocr.job.write'), ('lab', 'ocr.validation.write'),
+               ('admin', 'lab.work-item.read'), ('admin', 'pharmacy.work-item.read')) removed(role_code, permission_code)
+on conflict do nothing;
+delete from auth.role_permissions
+ where role_code = 'receptionist'
+   and permission_code in ('ehr.document.write', 'ehr.document.read-own', 'ocr.job.write', 'ocr.job.start',
+                           'ocr.job.read-own', 'ehr.vital.read');
+
 -- 2. Fixtures: one organization, facilities A and B; staff at A: 1 doctor
 -- (also 2, the same doctor at B), 3 nurse, 4 clinician, 5 doctor, 6
 -- doctor, 7 nurse, 8 clinician, 9 doctor; patients P1 (40, login and live

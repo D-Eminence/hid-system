@@ -7459,3 +7459,257 @@ facility (from the registration-case list, a just-registered patient, or this fa
 `patientId`. The waiting list polls `GET ehr/visit-queue`, shows name, sex, date of birth, `•••• healthIdLast4`, stage
 and triage level, marks `chartBlocked` as "Chart cannot be opened", and sends `expectedRowVersion` with every change.
 On 403 `CHECK_IN_NEEDS_SEARCH` show the message and the search box.
+
+## 0136. Who can do what: role-table changes (Release A, owner decisions Q103 A, Q111 A, Q112 A, Q113 A)
+
+Owner decisions, verbatim: "Q103 A" (the five changes; the admin's "approve
+new patient" and the nurse's note writing unchanged), then "Q111 A, Q112 A,
+Q113 A":
+
+- **Q111 A**: doctors keep checking a scanned paper record and confirming its
+  patient; only starting a new scan (a reading) moves from doctors to the
+  front desk.
+- **Q112 A**: the front desk uploads scans and sees its own uploads, but does
+  not open other stored documents or read the text taken from them (and still
+  reads no note, diagnosis, prescription or lab request).
+- **Q113 A**: no real (non-sealed) staff are active yet, so 0136 may touch
+  none. Its maximums are 0 at real facilities on every line, written in the
+  file; nothing is filled in at signing. At apply the release prints the
+  counts and stops, changing nothing, if any real staff would be affected.
+
+Migration `0136_role_permission_changes.sql` adds three permission codes,
+changes rows of `auth.role_permissions` and closes the open records-processing
+requests that the change makes useless (see "Open records-processing requests"
+below). ehr-api and ocr-api change with it (see "What the services check"); no
+function, policy, grant or table changes, so `runtime-grants.sql` is
+unchanged. Permissions are read on every request, so each change applies from
+a staff member's next request; nobody is signed out. Pharmacists and
+`org_admin` are not changed; nurses and clinicians only gain the new
+`ocr.job.start`, which keeps them starting readings as today.
+
+### The three new permission codes
+
+| Code | Gives | Held by |
+| --- | --- | --- |
+| `ocr.job.start` | starting or retrying a reading (`POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`), together with `ocr.job.write` | receptionist, nurse, clinician |
+| `ocr.job.read-own` | following the readings of documents this login uploaded at the facility (`GET /ocr/jobs/:jobId`, `GET /ocr/jobs?documentId=`, `GET /ocr/job-list`, which then lists only the readings it started), and letting ocr-api read such a document to start its reading. Never the text: extractions, validations and publications still need `ocr.job.read` | receptionist |
+| `ehr.document.read-own` | listing and opening only the documents this login uploaded at the facility (`GET /ehr/documents`, `GET /ehr/documents/:id/download`) | receptionist |
+
+A login that holds the full code (`ehr.document.read`, `ocr.job.read`)
+through any role keeps the full read; the "-own" codes narrow nobody.
+
+**Why a new code for Q111 A.** Checking a reading and confirming its patient
+run under records processing, and records processing needs `ocr.job.write` at
+each use (0104 D8, 0108, 0113), so the doctor's `ocr.job.write` row has to
+stay. Starting a reading therefore needs a second code that doctors do not
+hold. A permission row (rather than a check on the role's name in ocr-api) is
+read the same way by every service and screen, shows in the role table the
+owner reviews, applies to a doctor who is also a nurse exactly as to anyone
+else (the nurse role gives `ocr.job.start`), and is undone by a row.
+
+### Permission keys before and after, per role (only the codes 0136 touches)
+
+| Role | Before 0136 | After 0136 |
+| --- | --- | --- |
+| `receptionist` (front desk) | none of these | `ehr.document.write`, `ehr.document.read-own`, `ocr.job.write`, `ocr.job.start`, `ocr.job.read-own`, `ehr.vital.read`. Not `ehr.document.read`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` |
+| `doctor` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write`; `outreach.campaign.read`, `outreach.campaign.write`, `outreach.registration.read`, `outreach.registration.write`; `lab.work-item.read`, `pharmacy.work-item.read` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` (all kept, Q111 A); no `ocr.job.start`; no Outreach code; neither work list |
+| `nurse` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` | the same, plus `ocr.job.start` |
+| `clinician` | the same as the nurse | the same, plus `ocr.job.start` |
+| `lab` | `ehr.encounter.read`, `ocr.job.read`, `ocr.job.write`, `ocr.validation.write` | none of these |
+| `admin` (hospital administrator) | `lab.work-item.read`, `pharmacy.work-item.read`, `ocr.job.read` | `ocr.job.read` only |
+
+Rows: twelve removed (doctor's four Outreach codes and two work lists; lab's
+`ehr.encounter.read`, `ocr.job.read`, `ocr.job.write`,
+`ocr.validation.write`; admin's two work lists), eight added (the six
+front-desk rows, nurse and clinician `ocr.job.start`). Kept on purpose and
+asserted: `admin` `identity.registration.approve`, `workforce.manage`,
+`organization.manage`, `audit.read`; `nurse` `ehr.note.write`; `doctor`
+`ocr.job.write`, `ocr.validation.write`, `ocr.patient.confirm`.
+
+### What the services check (same release)
+
+- ocr-api: `POST /ocr/jobs` and `POST /ocr/jobs/:jobId/retry` need
+  `ocr.job.write` and `ocr.job.start`. `GET /ocr/jobs/:jobId`, `GET
+  /ocr/jobs?documentId=` and `GET /ocr/job-list` need `ocr.job.read` or
+  `ocr.job.read-own` (a new any-of check in ocr-api's guard, as ehr-api
+  already has). With `ocr.job.read-own` only, the job list shows only the
+  readings this member started (as `mine=true`), and a job whose document
+  this login did not upload answers 404 `OCR_JOB_NOT_FOUND`.
+  `GET /ocr/jobs/:jobId/extractions`, `GET /ocr/jobs/:jobId/validations` and
+  `GET /ocr/validations/:validationId/publications` still need
+  `ocr.job.read`.
+- ehr-api: `GET /ehr/documents` and `GET /ehr/documents/:id/download` need
+  `ehr.document.read` or `ehr.document.read-own`; with the "-own" code only,
+  the list holds only the documents this login uploaded here (bound in the
+  query), and any other document answers 404 "Document not found", as an
+  unknown one does, before Identity is asked about its patient. ocr-api's
+  source read (`GET /ehr/internal/ocr/documents/:id/source`) needs
+  `ocr.job.read` or `ocr.job.read-own`, with the same "own uploads only"
+  rule for the "-own" code. Uploading (`ehr.document.write`) is unchanged:
+  only the uploader completes an upload.
+- Every refusal is audited as today (`security.authorization.denied` for a
+  403, the request row with outcome failure for a 404). The release applies
+  migrations before it starts the new service images, so the new checks
+  never run against the old role table. If a release stopped after the
+  migration and before the new images, the old images would be narrower for
+  the desk (no full read) and doctors could still start readings until the
+  new images run.
+
+### What answers 403 PERMISSION_DENIED from now on
+
+| Who | Routes (under `/api/v1`) |
+| --- | --- |
+| Doctor | `POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry` (no `ocr.job.start`); every Outreach route of outreach-api (campaigns, registrations, screening, exports, Health ID steps) and `GET`/`POST /identity/outreach-invitations` and its revoke; `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
+| Laboratory staff | `GET /ehr/patients/:patientId/encounters`, `.../encounters/open-today`, `.../encounters/:encounterId`; every `ocr/*` route (`ocr/jobs`, `ocr/job-list`, validations, extractions) |
+| Hospital administrator | `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
+| Front desk | `GET /ocr/jobs/:jobId/extractions`, `GET /ocr/jobs/:jobId/validations`, `GET /ocr/validations/:validationId/publications`, `POST /ocr/jobs/:jobId/validation(s)`, `POST /ocr/jobs/:jobId/patient-confirmation`, `POST /ocr/validations/:validationId/publications`, and every note, diagnosis, prescription and lab-request read |
+
+The front desk now passes the permission check on `POST
+/ehr/documents/upload-intents`, `POST /ehr/documents/:id/complete`, `GET
+/ehr/documents` and `GET /ehr/documents/:id/download` (its own uploads only),
+`POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`, `GET /ocr/jobs`, `GET
+/ocr/jobs/:jobId` (readings of its own uploads), `GET /ocr/job-list` (SX-9:
+its "Who" is now doctor, clinician, nurse, admin and, for its own readings,
+receptionist; no longer lab), and the vitals reads (`GET
+/ehr/patients/:patientId/vitals/latest`, `GET
+.../encounters/:encounterId/vitals`, `/:vitalId`, `/:vitalId/corrections`).
+Every one of these still needs the patient's access exactly as for anyone
+else (a consent grant, or the records-processing cover of 0104/0108/0113),
+and is audited as today, refusals included.
+
+### What still works (checked route by route)
+
+- Doctors check readings (`POST /ocr/jobs/:jobId/validation`), confirm their
+  patient and ask a patient for records processing (`POST
+  /identity/access-requests`, purpose `healthcare-operations`), as before
+  (Q111 A); they read jobs and publish a checked reading into the chart.
+- A doctor's own orders' progress (ORD-3): `POST /lab/work-items/progress`
+  and `POST /pharmacy/work-items/progress` need `ehr.lab-request.read` /
+  `ehr.prescription.read`, which doctors keep.
+- Activating a lab request still sends it to the hospital's own laboratory:
+  that hand-off needs `lab.work-item.accept`, which doctors keep. 0133's
+  automatic send to the own pharmacy uses its definer function and adds no
+  doctor row, as planned.
+- Released results: `lab.result.released.read`, kept by doctors.
+- Laboratory staff keep their whole own job: work list, accept, accessions,
+  specimens, runs, results, verification, release, receiving from other
+  facilities, and `ehr.lab-request.read`/`write`.
+- Nurses and clinicians start, check, confirm and publish readings as today.
+  Pharmacists are unchanged. Administrators keep staff, settings, audit,
+  approving new patients and reading jobs (`ocr.job.read`, unchanged by
+  Q112 A). Sign-in sites (Q97's product gate) are unchanged: the lab site
+  admits lab staff by `lab.work-item.read`/`accept`, which they keep, and
+  administrators by `organization.manage`.
+
+**Facilities left with nobody who can check a reading.** Doctors keep
+checking, so a clinic with doctors still checks its readings. A laboratory
+loses checking for readings its staff already started, and a facility whose
+only staff with paper readings are the front desk can start a reading (it
+uses the facility's paid OCR pages, 0107) that nobody there can check or
+confirm, so it is never put into the chart and its scan is deleted after 7
+days (0112). The counts' lines 22 to 26 show how many facilities and
+readings this touches.
+
+**Open records-processing requests.** 0104's trigger checks `ocr.job.write`
+only when a request is made, and 0104 D8, 0108 and 0113 check it again at
+each use. A request a laboratory member made before 0136 that the patient has
+not answered would, if approved, show in the patient's access history but
+never work. 0136 closes those requests (status `expired`, as 0086 and 0096
+do), writing one audit row each (`identity.access-request.close`, system
+actor, reason "This staff member can no longer process records", ids only).
+Doctors keep `ocr.job.write`, so their requests stay open. A request whose
+staff member keeps `ocr.job.write` through another role, a direct-care
+request and an answered request are left as they are. The undo does not
+reopen them. Locks: 0136 takes SHARE ROW EXCLUSIVE on `auth.permissions`,
+`auth.role_permissions` and `identity.access_requests`, so a new access
+request or a patient's answer waits for the few seconds 0136 runs.
+
+### Staff counts and the stop (Q113 A: no real staff affected)
+
+In plain words: the owner says no real (non-sealed) staff are active yet,
+so 0136 may touch none of them. When the release applies 0136 it counts how
+many staff each change would touch; if any real staff member (or, for lines
+22-24, any real facility) would be affected, 0136 stops and changes nothing,
+and the owner decides again with the printed counts. The sealed QA and demo
+tenants' fictional staff are counted apart and never stop it.
+
+`docs/rollback/0136_affected_staff_counts.sql` is the counts file. It is read
+only (its first statement makes the session read only, and it holds no write
+statement), prints numbers only (no name, email or id), takes a few seconds
+and stops nobody's work. It prints a short header saying what each line
+means, then:
+
+- **Table 1**, 26 lines, each with a number at real facilities, the distinct
+  staff logins behind it (lines 1-21) and the same number at the sealed QA
+  and demo tenants (fictional staff, printed only):
+  1-8 what the front desk, nurses and clinicians gain; 9-20 what doctors,
+  laboratory staff and administrators lose (a membership that keeps the code
+  through another role is not counted); 21 doctors who can start a reading
+  today and cannot after 0136; 22 facilities where someone can check a
+  reading today and nobody can after; 23 facilities where after 0136 someone
+  can start a reading and nobody can check it; 24 the same for confirming its
+  patient; 25 open records-processing requests 0136 closes; 26 readings not
+  yet checked at the facilities of line 22.
+- **Table 2**, lines 1-24 in the exact form the owner writes into 0136:
+  `(line, at real facilities, staff logins)`, with `null` for staff logins on
+  lines 22-24 (they count facilities).
+
+DevOps runs it once, with the database owner's login (the one the migrations
+use) in a read-only session (row security hides rows from any other login;
+the file then stops with a plain message instead of printing numbers that are
+too low):
+
+    psql "<production, database owner's login, read-only session>" -v ON_ERROR_STOP=1 \
+      -f docs/rollback/0136_affected_staff_counts.sql
+
+and sends both tables to the owner. If 0136 has already run on that
+database, the file says so and counts nothing.
+
+**Nothing is filled in at signing.** In 0136, section "1. THE OWNER'S
+MAXIMUMS" holds the 24 rows `( 1, 0, 0),` to `(21, 0, 0),` and `(22, 0, null),`
+to `(24, 0, null)` (lines 22-24 count facilities). DevOps may run the counts
+file against production before signing to see that lines 1-24 are 0 at real
+facilities; if any is not, 0136 would stop, and the owner decides first. A
+changed number changes the file and needs a new signature. An ehr-api test
+checks the 24 rows' shape and that 0136's count block is the counts file's
+block, character for character.
+
+**What happens at apply.** Before changing anything, 0136 runs the same count
+block (the same text as the counts file) and prints each line as a NOTICE
+`0136 count n: ...: N at real facilities (M staff logins), S at the sealed QA
+and demo tenants; the owner's maximum: ...`, in the release's dry-run and apply
+logs. Then, for lines 1-24, if a number at real facilities (or its staff
+logins) is above the owner's 0, 0136 stops with error 55000 "0136 stopped,
+nothing was changed: real staff would be affected, and the owner approved
+0136 only while none are active (Q113 A): line N (...) is now ..., more than
+the owner's 0 (0)". The release's dry run runs
+first, so the stop shows there and the apply never starts; the release stops
+before starting new service images. The sealed tenants and lines 25-26
+(requests and readings, which change by the hour) are printed, not compared.
+A fresh database (tests, rehearsals) has only the sealed tenants' fictional
+staff, so 0136 applies there; in production it applies while no real staff
+would be affected.
+
+### Undo
+
+`docs/rollback/0136_rollback.sql` (not in the ledger) gives doctors,
+laboratory staff and administrators back exactly what they could do before
+0136: it puts back the twelve removed rows and adds `ocr.job.start` for
+doctors and laboratory staff (from this release on, starting a reading needs
+it). It leaves the three codes, the nurse's and clinician's `ocr.job.start`
+and the six front-desk rows (the desk keeps scanning with its own uploads
+only; the file shows the delete that would take those back too). It can run
+twice safely. It becomes a migration (next free number, ledger entry, owner
+signature) only if needed.
+
+Screen change (Akos frontend branch): show the scan steps (upload, "Extract
+with OCR", the job list) and vitals to the front desk, with the document and
+reading lists showing its own uploads only (`ehr.document.read-own`,
+`ocr.job.read-own`) and no extracted text, checking or publishing; show "start
+reading" only to staff holding `ocr.job.start` (front desk, nurses,
+clinicians), and keep doctors' "check reading" and "confirm patient" (they
+hold `ocr.job.write` and `ocr.validation.write`); hide the Laboratory and
+Pharmacy department pages (work list, results, prescriptions) from doctors
+and administrators; hide Outreach from doctors; hide visits and the Migrate
+desk from laboratory staff. Screens already follow the permissions list in the
+session, so most of this happens by itself.

@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Req, UseGuards } from '@nestjs/common';
 import { OcrInternalCallerGuard } from '../../auth/ocr-internal-caller.guard';
-import { AuditAction, RequirePermissions } from '../../common/decorators';
+import { AuditAction, RequireAnyPermission, RequirePermissions } from '../../common/decorators';
 import { DomainProblem } from '../../common/problem';
 import { requireRequestContext, type HidRequest } from '../../common/request-context';
 import { DocumentService } from '../../documents/document.service';
@@ -16,8 +16,10 @@ export class OcrIntegrationController {
     private readonly clinicalNotes: ClinicalNotesService,
   ) {}
 
+  // ocr.job.read, or the front desk's ocr.job.read-own: then only a document
+  // its own login uploaded (owner decision Q112 A, migration 0136).
   @Get('documents/:documentId/source')
-  @RequirePermissions('ocr.job.read')
+  @RequireAnyPermission('ocr.job.read', 'ocr.job.read-own')
   @AuditAction('ehr.ocr-source.read.request')
   source(
     @Param('documentId', new ParseUUIDPipe({ version: '4' })) documentId: string,
