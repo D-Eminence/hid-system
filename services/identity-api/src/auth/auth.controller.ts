@@ -20,7 +20,7 @@ import { clearSessionCookies, setSessionCookies } from './session-cookies';
 import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-success-audit';
 import { AccountSuspendedProblem } from './account-suspended';
 import { loginPrincipalKey } from './patient-principal';
-import { facilityFitsProduct, isProductGateRefusal, productForOrigin } from './product-gate';
+import { facilityAdmittedOnProduct, isProductGateRefusal, productForOrigin } from './product-gate';
 import { SsoRouteGuard } from './sso/sso-route.guard';
 import { SsoSessionEndFilter } from './sso/sso-session-end.filter';
 import { SsoService } from './sso/sso.service';
@@ -63,7 +63,7 @@ export class AuthController {
     private readonly workloadAuth: WorkloadAuthService,
     private readonly turnstile: TurnstileService,
     private readonly google: GoogleAuthenticationService,
-    // Single sign-on (ADR-070, 0125): optional so a controller built without
+    // Single sign-on (ADR-070, 0127): optional so a controller built without
     // it (older test harnesses) is today's controller; its only route is dark.
     @Optional() private readonly sso?: SsoService,
   ) {}
@@ -395,7 +395,7 @@ export class AuthController {
 
   /**
    * Product sign-out while single sign-on is on for this host (ADR-070,
-   * 0125). With a live session it is admitted exactly as today's sign-out
+   * 0127). With a live session it is admitted exactly as today's sign-out
    * (`logout`, above): the same session check, Origin and CSRF checks for a
    * cookie request, and the same session kinds, an account-only outreach
    * session included. Today's sign-out ends this sign-in and clears its
@@ -500,7 +500,7 @@ export class AuthController {
     // the site it comes from (an access token issued before the gate).
     const product = productForOrigin(request.header('origin'));
     const facilities = product
-      ? actor.facilities.filter((candidate) => facilityFitsProduct(candidate, product))
+      ? actor.facilities.filter((candidate) => facilityAdmittedOnProduct(candidate, product))
       : actor.facilities;
     const facility = facilities.find((candidate) => candidate.id === input.facilityId);
     if (!facility) throw new DomainProblem(403, 'FACILITY_ACCESS_DENIED', 'The actor is not active at this facility');

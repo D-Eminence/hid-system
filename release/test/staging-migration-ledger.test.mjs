@@ -2,12 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfiguration, verifyMachineConfiguration } from '../scripts/verify-release-contract.mjs';
 
-// 0124 (organisation kinds, Q90) is built on another branch. Until this branch merges it, the release contract refuses
-// the gap ("missing migration prefix"), so this branch cannot be released before 0124: that refusal is intended.
-test('release accepts 125 retained filenames through 0125, including duplicate prefixes and the unused 0065 slot', async () => {
+test('release accepts 128 retained filenames through 0127, including duplicate prefixes and the unused 0065 slot', async () => {
   const configuration = await loadConfiguration();
-  assert.equal(configuration.components.migration.count, 125);
-  assert.equal(configuration.components.migration.last, '0125');
+  assert.equal(configuration.components.migration.count, 128);
+  assert.equal(configuration.components.migration.last, '0127');
   assert.ok(!configuration.components.migration.files.some(file => file.name.startsWith('0065_')));
   await verifyMachineConfiguration(configuration);
 });

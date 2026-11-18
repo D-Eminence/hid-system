@@ -19,12 +19,13 @@ import type { ActorContext } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
 import { resetEnvironmentForTests } from '../../config/environment';
 import { useTestEnvironment } from '../../testing/sso-test-environment';
-import type { CurrentStaffContextService } from '../current-staff-context.service';
+import { CurrentStaffContextService } from '../current-staff-context.service';
+import { ProductNotAuthorisedProblem, type StaffProduct } from '../product-gate';
 import { requireRecentPatientAuthentication, type PatientSessionActor } from '../recent-authentication';
 import { CredentialsChangedDuringSignIn, TokenService, type SingleSignOnProvenance } from '../token.service';
 
 /**
- * ADR-070 (0125): a product's session issued after single sign-on is today's
+ * ADR-070 (0127): a product's session issued after single sign-on is today's
  * session (TokenService.issue, for staff as for patients: staff sign in with
  * a password only, owner decision Q92 B), with three differences that each
  * have a test that fails without them: its provenance (client, provider sid,
@@ -51,7 +52,7 @@ const staffIdentity = { actorKind: 'staff' as const, subject: staff.subject, acc
 
 useTestEnvironment();
 
-function harness() {
+function harness(realStaff?: CurrentStaffContextService) {
   const statements: Array<{ sql: string; values: unknown[] }> = [];
   const clientQuery = jest.fn(async (sql: string, values: unknown[] = []) => {
     statements.push({ sql: String(sql), values });
@@ -67,7 +68,7 @@ function harness() {
   const currentStaff = { resolve: jest.fn().mockResolvedValue(staff) };
   const currentPatient = { resolve: jest.fn().mockResolvedValue(patient) };
   const service = new TokenService(database as unknown as DatabaseService,
-    currentStaff as unknown as CurrentStaffContextService, currentPatient as never);
+    realStaff ?? currentStaff as unknown as CurrentStaffContextService, currentPatient as never);
   const statement = (fragment: string) => statements.find(({ sql }) => sql.includes(fragment));
   return { service, client, statements, statement, currentStaff };
 }
@@ -146,6 +147,68 @@ describe('a staff session issued after single sign-on', () => {
   });
 });
 
+/**
+ * The same gate as a password sign-in, through the real staff context
+ * (current-staff-context.service.ts resolve) rather than a stand-in: a staff
+ * session issued after single sign-on keeps only the memberships admitted on
+ * its site (facilityAdmittedOnProduct: the Q88/Q90 rule, then Q97's own-job
+ * rule) and carries actor.products, every site the login can open, exactly
+ * as a password sign-in on that site does. Synthetic, fictional rows only.
+ */
+describe('the product gate of a staff session issued after single sign-on (Q88, Q90, Q97)', () => {
+  const HOSPITAL = '10000000-0000-4000-8000-0000000000a1';
+  const membership = (overrides: Record<string, unknown>) => ({
+    account_id: staff.accountId, subject: staff.subject, email: 'sso-staff@example.invalid',
+    display_name: 'Synthetic SSO Staff', facility_id: '30000000-0000-4000-8000-0000000000a1',
+    membership_id: '40000000-0000-4000-8000-0000000000a1', organization_id: HOSPITAL,
+    facility_name: 'Fictional General Hospital', facility_code: 'FGH', is_primary: true, ...overrides,
+  });
+  // A hospital doctor as the seeds grant it: its own ehr. code and the lab, pharmacy and outreach reading codes
+  // for its own hospital work (0018, 0023, 0024, 0038), which Q97 does not let open those sites.
+  const doctor = membership({ roles: ['doctor'], permissions: ['ehr.encounter.write', 'lab.work-item.read',
+    'outreach.registration.read', 'pharmacy.work-item.read'] });
+  // A laboratory scientist at a second, fictional laboratory organisation (Q90: recorded as a laboratory).
+  const scientist = membership({ facility_id: '30000000-0000-4000-8000-0000000000b2',
+    membership_id: '40000000-0000-4000-8000-0000000000b2', organization_id: '10000000-0000-4000-8000-0000000000b2',
+    facility_name: 'Fictional Laboratory', facility_code: 'FLB', is_primary: false, roles: ['lab'],
+    permissions: ['lab.result.enter', 'lab.specimen.receive', 'lab.work-item.accept', 'lab.work-item.read'],
+    organization_kinds: ['laboratory'] });
+
+  function gatedHarness(rows: Record<string, unknown>[]) {
+    // The staff context's own reads: its memberships, then the platform authority (none here).
+    const staffQuery = jest.fn(async (sql: string) => (String(sql).includes("assignment.scope_type = 'platform'")
+      ? { rows: [{ roles: [], permissions: [] }], rowCount: 1 } : { rows, rowCount: rows.length }));
+    return harness(new CurrentStaffContextService({ query: staffQuery } as unknown as DatabaseService));
+  }
+  const signIn = (rows: Record<string, unknown>[], product: StaffProduct) => gatedHarness(rows).service
+    .issue(staffIdentity, { ...event, product }, provenance(new Date(Date.now() - 60_000), product));
+
+  it.each(['lab', 'pharmacy', 'outreach'] as const)('refuses a hospital doctor on %s. (Q97), as a password sign-in there',
+    async (product) => {
+      const { service, statements } = gatedHarness([doctor]);
+      await expect(service.issue(staffIdentity, { ...event, product }, provenance(new Date(Date.now() - 60_000), product)))
+        .rejects.toBeInstanceOf(ProductNotAuthorisedProblem);
+      expect(statements.some(({ sql }) => sql.includes('insert into auth.sessions'))).toBe(false);
+      expect(statements.some(({ sql }) => sql.includes('session_single_sign_on'))).toBe(false);
+    });
+
+  it.each(['ehr', 'migrate'] as const)('admits a hospital doctor on %s. with actor.products set', async (product) => {
+    const issued = await signIn([doctor], product);
+    expect(issued.actor.products).toEqual(['ehr', 'migrate']);
+    expect(issued.actor.facilities.map((facility) => facility.id)).toEqual([doctor.facility_id]);
+    expect(issued.refreshToken).toMatch(new RegExp(`^[0-9a-f-]{36}\\.[A-Za-z0-9_-]+\\.${product}\\.local$`));
+  });
+
+  it('keeps only the memberships admitted on the site, and lists every site the login can open', async () => {
+    const onLab = await signIn([doctor, scientist], 'lab');
+    expect(onLab.actor.facilities.map((facility) => facility.id)).toEqual([scientist.facility_id]);
+    expect(onLab.actor.products).toEqual(['ehr', 'lab', 'migrate']);
+    const onEhr = await signIn([doctor, scientist], 'ehr');
+    expect(onEhr.actor.facilities.map((facility) => facility.id)).toEqual([doctor.facility_id]);
+    expect(onEhr.actor.products).toEqual(['ehr', 'lab', 'migrate']);
+  });
+});
+
 describe('a patient session issued after single sign-on', () => {
   const identity = { actorKind: 'patient' as const, subject: patient.subject, accountId: patient.accountId,
     displayName: '', facilities: [], authenticationMethod: 'local' as const };
@@ -177,7 +240,7 @@ describe('the patient recent-sign-in check', () => {
     + 'current_session.family_id where current_session.id = $1 and current_session.account_id = $2 and '
     + 'current_session.patient_id = $3 and current_session.session_kind = \'patient\' and '
     + 'current_session.revoked_at is null';
-  /** The statement the check sends on a database where 0125 is (or is not) applied. */
+  /** The statement the check sends on a database where 0127 is (or is not) applied. */
   const sqlOf = async (stored: boolean) => {
     const query = jest.fn(async (sql: string) => (sql.includes('to_regclass')
       ? { rows: [{ stored }] } : { rows: [{ recent: true }] }));
@@ -203,14 +266,14 @@ describe('the patient recent-sign-in check', () => {
     // The behaviour itself is run against PostgreSQL in sso-relying-party.integration.sql and verify-sso-runtime.mjs.
   });
 
-  it('still counts from the provider sign-in after single sign-on is switched off, while 0125 is applied', async () => {
+  it('still counts from the provider sign-in after single sign-on is switched off, while 0127 is applied', async () => {
     // A family issued while single sign-on was on keeps its row: its hand-off must not become a fresh sign-in.
     for (const name of Object.keys(ssoSettings)) delete process.env[name];
     resetEnvironmentForTests();
     expect(await sqlOf(true)).toContain(SSO_STATEMENT);
   });
 
-  it('is today\'s statement, which reads no single sign-on table, only on a database without 0125', async () => {
+  it('is today\'s statement, which reads no single sign-on table, only on a database without 0127', async () => {
     Object.assign(process.env, ssoSettings);
     resetEnvironmentForTests();
     expect(await sqlOf(false)).toBe(TODAY);

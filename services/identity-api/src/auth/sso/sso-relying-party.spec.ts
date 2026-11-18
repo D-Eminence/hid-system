@@ -42,7 +42,7 @@ import { newTransaction, sealTransaction, transactionCookieName } from './sso-tr
 
 /**
  * ADR-070, contract v2 "The relying party in identity-api", ported onto
- * production as 0125 (owner decision Q92 B: staff sign in with a password
+ * production as 0127 (owner decision Q92 B: staff sign in with a password
  * only), through the real controllers, guard, interceptor and problem filter,
  * with the session store and the provider faked. The staff hosts are
  * production's product sites (product-gate.ts PRODUCT_HOSTS), so a staff

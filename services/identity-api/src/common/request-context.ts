@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import type { StaffProduct } from '../auth/product-gate';
 import { DomainProblem } from './problem';
 
 export interface FacilityAssignment {
@@ -16,7 +17,29 @@ export interface FacilityAssignment {
    * facilities never carry it, so their session answers are unchanged.
    */
   selfService?: FacilitySelfService;
+  /**
+   * The recorded kinds of the facility's organisation (0126,
+   * identity.organization_staff_kinds), present only when at least one is
+   * recorded. The product gate reads them for an administrator (owner
+   * decisions Q90 and Q91): no kind, or a hospital or clinic kind, is a
+   * hospital.
+   */
+  organizationKinds?: readonly OrganizationKind[];
+  /**
+   * The products the facility's organisation holds (its active
+   * identity.organization_products rows, 0126), present only with
+   * organizationKinds and when at least one is held. The product gate admits
+   * the administrator of an organisation that is not a hospital on each held
+   * product's site as well as on its kinds' sites.
+   */
+  organizationProducts?: readonly OrganizationProduct[];
 }
+
+/** An organisation's effective kind as identity.organization_staff_kinds answers it ('other' already applied). */
+export type OrganizationKind = 'clinic' | 'hospital' | 'laboratory' | 'pharmacy';
+
+/** A product code an organisation holds (identity.organization_products.product_code). */
+export type OrganizationProduct = 'ehr' | 'migrate' | 'laboratory' | 'pharmacy';
 
 export interface FacilitySelfService {
   review: 'pending' | 'reviewed';
@@ -49,6 +72,15 @@ export interface ActorContext {
    * 403 NO_ACTIVE_FACILITY_MEMBERSHIP.
    */
   accountOnly?: true;
+  /**
+   * Staff sessions only: the staff product sites this login can open (Q97),
+   * in the order ehr, lab, pharmacy, migrate, outreach. Read from every
+   * active membership by the product gate's own rule, whatever site the
+   * session was issued on; 'outreach' alone for an account-only session; empty
+   * for a platform administrator with no membership. The website shows only
+   * these sites.
+   */
+  products?: readonly StaffProduct[];
 }
 
 export interface HidRequest extends Request {

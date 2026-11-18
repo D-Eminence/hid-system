@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Single sign-on on the product sites (0125, hid-system#142's ADR-070, owner decision Q92 B), run against the owned
+// Single sign-on on the product sites (0127, hid-system#142's ADR-070, owner decision Q92 B), run against the owned
 // disposable synthetic rehearsal only, as the exact Identity runtime role. The provider on auth. is the in-process fake
 // (src/testing/sso-fake-provider.ts), reached through SSO_HTTP: no network, no cloud call, no delivery. Proves with the
 // real statements and grants that a hand-off issues today's session (staff through the site's product gate, patients
@@ -206,7 +206,7 @@ try {
   assert.deepEqual(Object.fromEntries(new URL(noSignIn.body.endSessionUrl).searchParams),
     { client_id: 'web', post_logout_redirect_uri: `${PORTAL}/` });
 
-  // D4. The patient recent-sign-in check reads 0125's row whether or not single sign-on is configured now: a
+  // D4. The patient recent-sign-in check reads 0127's row whether or not single sign-on is configured now: a
   // hand-off counts from the provider sign-in, so one from an hour ago is not recent even after the switch-off.
   const recentAt = async (sid) => {
     const [{ family_id: sessionId }] = await rows('select family_id from auth.session_single_sign_on where provider_sid = $1', [sid]);

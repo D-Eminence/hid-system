@@ -1,5 +1,9 @@
--- 0125: single sign-on on auth., the product side (hid-system#142, written on
--- main as 0102, ADR-070). Each product host (ehr., lab., pharmacy., migrate.,
+-- 0127: single sign-on on auth., the product side (hid-system#142, written on
+-- main as 0102, ADR-070). Ported onto production as 0125 and renumbered 0127
+-- after hid-system#254's 0124, #255's 0125 and #259's 0126 (booked on
+-- hid-system#258). This file requires 0001-0126 applied.
+--
+-- Each product host (ehr., lab., pharmacy., migrate.,
 -- outreach., and the patients' site for the patient portal) becomes an OpenID
 -- Connect relying party of the provider on auth. and, after a sign-in there,
 -- issues its own host-only session exactly as its own sign-in does today: a
@@ -24,18 +28,19 @@
 --    longer be accepted anyway, then removed.
 --
 -- Differences from main's 0102: the number; this header; a precondition that
--- 0001-0123 are applied and this file is not; and the comments no longer name
+-- 0001-0126 are applied and this file is not; and the comments no longer name
 -- main's auth.session_assurance (0069) or auth.session_facility_selection
 -- (0089), which production does not have. The tables, index, guard, trigger
 -- and checks are 0102's, unchanged.
 --
--- Applied migrations 0001 through 0123 are immutable. This migration only adds
+-- Applied migrations 0001 through 0126 are immutable. This migration only adds
 -- two tables, two indexes, a guard and its trigger, and grants the Identity
 -- runtime what it uses of them: no existing row, function, policy or grant
--- changes. It reads nothing 0124 adds or changes. Production releases apply
--- migrations only and never re-run runtime-grants.sql, so the grants are made
--- here, for each runtime role that exists, and also in runtime-grants.sql (the
--- role bootstrap of a new installation), which grants exactly the same.
+-- changes. It reads nothing 0124, 0125 or 0126 adds or changes. Production
+-- releases apply migrations only and never re-run runtime-grants.sql, so the
+-- grants are made here, for each runtime role that exists, and also in
+-- runtime-grants.sql (the role bootstrap of a new installation), which grants
+-- exactly the same.
 -- Locks: SHARE ROW EXCLUSIVE on auth.sessions and auth.accounts for the two
 -- foreign keys, until commit (behind another lock the runner stops after its
 -- 5 s lock_timeout with nothing applied).
@@ -46,16 +51,19 @@ begin
   if to_regclass('auth.session_single_sign_on') is not null
      or to_regclass('auth.sso_spent_tokens') is not null
      or to_regprocedure('auth.guard_session_single_sign_on_change()') is not null then
-    raise exception using errcode = '55000', message = '0125: already applied';
+    raise exception using errcode = '55000', message = '0127: already applied';
   end if;
   if to_regclass('auth.sessions') is null
      or to_regclass('auth.accounts') is null
      or not exists (select 1 from pg_attribute attribute
                      where attribute.attrelid = 'auth.sessions'::regclass
                        and attribute.attname = 'session_kind' and not attribute.attisdropped)
-     -- 0123 (the sealed QA tenant) is the last migration this file follows.
-     or to_regclass('identity.sealed_qa_members') is null then
-    raise exception using errcode = '55000', message = '0125: 0001-0123 must be applied first';
+     -- 0123 (the sealed QA tenant), 0125 (prescription dispensing details) and 0126 (organisation staff kinds,
+     -- the last migration this file follows; it requires 0124 and 0125 itself).
+     or to_regclass('identity.sealed_qa_members') is null
+     or to_regprocedure('pharmacy.work_item_prescription_details(uuid[])') is null
+     or to_regprocedure('identity.organization_staff_kinds(uuid)') is null then
+    raise exception using errcode = '55000', message = '0127: 0001-0126 must be applied first';
   end if;
 end
 $$;
@@ -140,7 +148,7 @@ begin
                 and (privilege.privilege_type in ('SELECT', 'INSERT')
                      or (privilege.privilege_type = 'DELETE' and table_row.oid = 'auth.sso_spent_tokens'::regclass)))
   ) then
-    raise exception using errcode = '55000', message = '0125: a role holds a privilege on a single sign-on table it must not';
+    raise exception using errcode = '55000', message = '0127: a role holds a privilege on a single sign-on table it must not';
   end if;
 end
 $$;

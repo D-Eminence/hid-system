@@ -2,7 +2,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { getEnvironment, resetEnvironmentForTests } from '../../config/environment';
 import { parseSsoConfiguration, ssoClientForRequest, ssoConfiguration, type SsoEnvironment } from './sso-config';
 
-// ADR-070 (0125): the relying party's configuration. All unset is off;
+// ADR-070 (0127): the relying party's configuration. All unset is off;
 // anything set is checked at start-up, and a bad configuration never starts.
 // The lab host is production's lab product site, the one a staff client may
 // be on in production (product-gate.ts PRODUCT_HOSTS, Q88); every other host

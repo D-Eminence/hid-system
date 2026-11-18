@@ -12,7 +12,7 @@ export type PatientSessionActor = ActorContext & { patientId: string; sessionId:
  * issuance in that family prevents silent refresh from counting as a fresh
  * patient authentication. Fails closed: no answer is not recent.
  *
- * Wherever 0125 is applied (ADR-070), a family the patient portal issued
+ * Wherever 0127 is applied (ADR-070), a family the patient portal issued
  * after single sign-on counts from when the person signed in at the
  * provider, not from the hand-off: a silent hand-off is not a fresh sign-in
  * either (the portal asks for one with prompt=login). A family without a
@@ -20,7 +20,7 @@ export type PatientSessionActor = ActorContext & { patientId: string; sessionId:
  * does not depend on whether single sign-on is configured now: a family
  * issued while it was on keeps its row after it is switched off, and its
  * hand-off must still not count as a fresh sign-in. Only a database without
- * 0125 (Identity deployed before the migration), which can hold no such row,
+ * 0127 (Identity deployed before the migration), which can hold no such row,
  * gets today's statement.
  */
 export async function requireRecentPatientAuthentication(client: PoolClient, actor: PatientSessionActor,

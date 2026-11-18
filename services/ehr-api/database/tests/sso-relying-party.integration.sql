@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Single sign-on on auth., the product side (0125, hid-system#142's 0102,
+-- Single sign-on on auth., the product side (0127, hid-system#142's 0102,
 -- ADR-070). A product that
 -- issues its own sign-in after the provider on auth. records where it came
 -- from in auth.session_single_sign_on (client, provider sid, the provider's

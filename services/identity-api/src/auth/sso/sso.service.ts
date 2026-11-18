@@ -449,7 +449,7 @@ export class SsoService {
   }
 
   /**
-   * Records a transaction or logout token as spent (0125); false when it was
+   * Records a transaction or logout token as spent (0127); false when it was
    * spent before. Rows past the moment their token could still be accepted
    * are removed first: such a token is refused by its own expiry.
    */

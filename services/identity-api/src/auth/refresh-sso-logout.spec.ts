@@ -22,7 +22,7 @@ import type { CurrentStaffContextService } from './current-staff-context.service
 import { TokenService } from './token.service';
 
 /**
- * Single sign-on sign-out (ADR-070, 0125) ends sign-ins on other products and
+ * Single sign-on sign-out (ADR-070, 0127) ends sign-ins on other products and
  * other devices with reason `sso_logout` (SsoService.endAccountSignIns and
  * backchannelLogout), and those browsers keep their refresh cookie. Their
  * next refresh is an ordinary ended sign-in: refused and recorded as a denied

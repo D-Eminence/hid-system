@@ -26,7 +26,7 @@ import { SsoService } from './sso/sso.service';
 @Module({
   imports: [TurnstileModule, IntegrationModule],
   // SsoController's routes, and AuthController's POST /auth/sso/logout, exist
-  // only while single sign-on is configured (SsoRouteGuard, ADR-070, 0125).
+  // only while single sign-on is configured (SsoRouteGuard, ADR-070, 0127).
   controllers: [AuthController, OtpController, PatientSelfController, SsoController],
   providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService,
     PatientProfileCrypto, PatientContactReader, SsoProviderClient, SsoService],

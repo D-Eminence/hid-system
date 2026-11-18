@@ -5293,11 +5293,13 @@ patient is created inside QA (facility registration needs a QoreID NIN check,
 kept off, and app. sign-ups are platform-wide). Testing uses the seeded logins
 and patients.
 
-## 53. Each staff product is its own site; the staff reset email (owner decision of 17 November 2026, Q88 and Q89)
+## 53. Each staff product is its own site; the staff reset email (owner decision of 17 November 2026, Q88, Q89 and Q97)
 
-identity-api only (with one new notification-api route). No migration: the
-gate reads the permissions the seeds already grant, and the session carries
-its product in the signed access token.
+identity-api (with one new notification-api route) and, for the
+administrator rule decided by the owner as Q90 and Q91, migration 0126
+(`identity.organization_staff_kinds`, below). The gate reads the permissions
+the seeds already grant and, for an administrator, the recorded kinds of its
+organisation and the products it holds; the session carries its product in the signed access token.
 
 ### The product of a request
 
@@ -5325,10 +5327,49 @@ memberships whose permissions fit the product of the site:
 | Site | A membership fits when it holds any of |
 | --- | --- |
 | `ehr.` | `ehr.encounter.write`, `organization.manage` (hospital roles) |
-| `lab.` | `lab.work-item.read`, `lab.work-item.accept` (lab roles), or a hospital role's |
-| `pharmacy.` | `pharmacy.work-item.read`, `pharmacy.dispensing.read` (pharmacy roles), or a hospital role's |
+| `lab.` | `lab.work-item.read`, `lab.work-item.accept` (lab roles), or `organization.manage` (an administrator) |
+| `pharmacy.` | `pharmacy.work-item.read`, `pharmacy.dispensing.read` (pharmacy roles), or `organization.manage` |
 | `migrate.` | `ehr.encounter.write`, `organization.manage` only (lab staff are not admitted, although they hold `ocr.job.*`) |
-| `outreach.` | `outreach.registration.read`, `outreach.campaign.read` (outreach roles, hospital outreach staff), or a hospital role's |
+| `outreach.` | `outreach.registration.read`, `outreach.campaign.read` (outreach roles), or `organization.manage` |
+
+Each staff site is for its own job (owner decision Q97, "Q97 A", 17 November
+2026): a membership that holds `ehr.encounter.write` without
+`organization.manage` (doctor, clinician, nurse and receptionist) fits `ehr.`
+and `migrate.` only, although the seeds also grant those roles the lab,
+pharmacy and outreach reading codes for their own hospital work (0018, 0023,
+0024, 0038). A hospital administrator (`admin`, `org_admin`, which hold
+`organization.manage`, and the review-pending administrator below) keeps every
+site of its own organisation. Lab staff, pharmacists, outreach organisers and
+volunteers, and the account-only outreach session are unchanged. A doctor who
+also helps an outreach group signs in on `outreach.` with the group only. A
+membership that also holds a site's own job keeps that site: one that holds
+`lab.result.enter`, `lab.specimen.receive` or `lab.order-route.receive` (the
+lab role's codes, never seeded to the hospital clinical roles) is admitted on
+`lab.`, and one that holds `pharmacy.dispensing.create`,
+`pharmacy.work-item.accept` or `pharmacy.order-route.receive` (the
+pharmacist's) on `pharmacy.`; for example a nurse also given the lab role at a
+small clinic.
+
+Owner decision 5 (11 November 2026, the same login can also run its own
+outreach group) still holds for these roles. "Start an outreach group"
+(`GET .../outreach-organisers/for-my-account/availability` and `POST
+/api/v1/identity/outreach-organisers/for-my-account`) checks no product: any
+staff session on any site may use it, so the website runs the form on `ehr.`
+for a login whose `actor.products` does not list `outreach`, instead of
+linking to `outreach.`, which would refuse it. The new group's organiser
+membership fits `outreach.`; the login then signs in there with the group
+only, and `actor.products` lists `outreach` from the next session read.
+
+In identity-api the Q97 rule is `facilityAdmittedOnProduct` (product-gate.ts):
+the permission rule `facilityFitsProduct`, then the hospital clinical rule.
+Every caller (sign-in, refresh, each request, `POST /auth/facility` and
+`actor.products`) uses `facilityAdmittedOnProduct`, never
+`facilityFitsProduct` alone; `product-gate-own-job.spec.ts` pins this.
+
+An administrator's membership (`organization.manage`, or the administrator
+awaiting review below) is the one exception: it counts as a hospital role only
+at a hospital organisation, and otherwise fits only the sites of its
+organisation's recorded kinds (owner decisions Q90 and Q91, below).
 
 From the seeds: `ehr.encounter.write` is held by doctor, clinician, nurse and
 receptionist (0006); `organization.manage` by admin and org_admin (0006);
@@ -5336,31 +5377,80 @@ receptionist (0006); `organization.manage` by admin and org_admin (0006);
 `pharmacy.work-item.read` and `pharmacy.dispensing.read` by pharmacist, doctor,
 clinician, nurse and admin (0023); the outreach reads by outreach_organiser and
 outreach_volunteer (0115) and the hospital roles (0024, 0038). So an outreach
-organiser or volunteer is refused on `ehr.`, `lab.`, `pharmacy.` and
-`migrate.`; lab staff (and a lab second checker) only on `lab.`; a pharmacist
-only on `pharmacy.`. One addition: the administrator of a facility that signed
+organiser or volunteer is admitted only on `outreach.`; lab staff (and a lab
+second checker) only on `lab.`; a pharmacist only on `pharmacy.`; a doctor,
+clinician, nurse or receptionist only on `ehr.` and `migrate.` (Q97). One
+addition: the administrator of a facility that signed
 itself up and awaits support's review (membership `org_admin`, permissions
 `org_admin_awaiting_review`'s, which hold `workforce.manage` but not
 `organization.manage`, 0086) is admitted wherever org_admin is, so it can sign
 in again on the site it signed up on.
 
-"Hospital roles" is read from the membership's permissions alone, exactly as
-the owner's brief names the codes; the gate does not read what kind of
-organisation the facility belongs to. Two consequences the owner should
-confirm (recorded 17 November 2026, flagged in review):
+Administrators follow their organisation's kind (owner decisions of 17
+November 2026, verbatim: Q90 "Q90 A since its the best option that gives each
+product seperate environment"; Q91 "Q91 A"). A membership is an
+administrator's when it holds `organization.manage` (admin and org_admin,
+0006) or is the administrator awaiting review above, and does not hold
+`ehr.encounter.write`. Its sites depend only on the recorded kinds of its
+organisation and the products it holds, not on its other codes (org_admin
+also reads outreach registrations, admin also reads lab and pharmacy work):
 
-- every admin and org_admin holds `organization.manage` (0006), including the
-  administrator of a lab-only or pharmacy-only organisation, so that
-  administrator is admitted on all five product sites with that facility (an
-  org_admin at QA Hospital, QA Laboratory and QA Pharmacy sees all three on
-  `ehr.` and `migrate.` too);
-- a receptionist holds `ehr.encounter.write` (0006), so a hospital
-  receptionist is admitted on `migrate.`.
+| The organisation's recorded kinds | The administrator is admitted on |
+| --- | --- |
+| none recorded (Q91 A), or any `hospital` or `clinic` | every product site, as a hospital role |
+| `laboratory` only | `lab.`, and the site of each product it holds |
+| `pharmacy` only | `pharmacy.`, and the site of each product it holds |
+| `laboratory` and `pharmacy` (no hospital or clinic) | `lab.` and `pharmacy.`, and the site of each product it holds |
 
-If the owner wants "a hospital's own administrator" only, the change is to
-admit `organization.manage` (and the review-pending administrator) only at a
-facility whose organisation is a hospital or clinic. `product-gate.spec.ts`
-pins today's answers for both cases.
+A held product's site is `ehr.` for `ehr`, `migrate.` for `migrate`, `lab.`
+for `laboratory` and `pharmacy.` for `pharmacy`; `outreach.` is never one. So
+a laboratory or a pharmacy that bought `ehr` or `migrate` (both sign-up forms
+accept any organisation type with any product) keeps that product's site for
+its administrator, and the administrator awaiting review of a pharmacy that
+signed itself up on `migrate.` can sign in there again.
+
+The kinds and products are `identity.organization_staff_kinds(organization_id)`
+(0126, one row of `organization_kinds text[]` and `organization_products
+text[]`, STABLE, SECURITY DEFINER, `search_path` pinned, EXECUTE for
+`hid_identity_runtime` only). `organization_kinds` is the distinct
+`organization_type`s, sorted, of every approved application of the
+organisation (each governed approval, also one that reused the organisation,
+whose product row already existed or was later suspended, and the self
+sign-up while it is pending or reviewed; a released self sign-up is
+`rejected` and gives nothing). `other` gives the kind its product makes it,
+exactly as `identity.staff_invitable_roles` and identity-api's
+`staffInvitableRoles` read it: `ehr` or `migrate` `hospital`, `laboratory`
+`laboratory`, `pharmacy` `pharmacy`. An organisation promoted from the legacy
+system (`identity.organizations.source_system` `legacy_identity`) also gives
+`hospital`, so the hospital status Q91 A gave it stays when a governed
+approval later reuses it for a laboratory or a pharmacy product. The answer
+holds only `clinic`, `hospital`, `laboratory` and `pharmacy`, and is empty
+when nothing is recorded: the sealed QA Hospital (0123) and Demo Hospital and
+Demo Outreach (0098) and outreach groups (0115) have no kind, so they are
+hospitals. `organization_products` is the distinct product codes, sorted, of
+the organisation's active `identity.organization_products` rows (a suspended
+product is not held, but its application's kind stays recorded, so
+suspending a laboratory's only product narrows its administrator to `lab.`
+instead of widening it to every site). The staff context reads it with one
+lateral call per membership and adds `organizationKinds` (sorted, once each)
+to that facility only when it is not empty, and `organizationProducts`
+(sorted, once each) only beside `organizationKinds` and when it is not empty,
+so a membership with no recorded kind answers exactly as before.
+
+So, at the sealed QA tenant, admin@ (org_admin at QA Hospital, which has no
+application, QA Laboratory and QA Pharmacy) keeps QA Hospital alone on `ehr.`,
+`migrate.` and `outreach.`, QA Hospital and QA Laboratory on `lab.`, and QA
+Hospital and QA Pharmacy on `pharmacy.`. The org_admin of a laboratory-only
+organisation is refused (`403 PRODUCT_NOT_AUTHORISED`) on every site but
+`lab.` (and the site of any other product it holds). The administrator
+awaiting review of a self-signed-up laboratory is admitted on `lab.` (and on
+the site of the product it signed up for), of a hospital or clinic on every
+site. Clinical
+hospital roles (`ehr.encounter.write`: doctor, clinician, nurse, receptionist)
+and the lab, pharmacy and outreach roles are unchanged, at any organisation:
+a hospital receptionist, for example, is still admitted on `migrate.`.
+`product-gate.spec.ts` pins these answers; the database suite
+`organization-staff-kinds.integration.sql` pins the function's.
 
 The session's `actor.facilities`, `actor.facilityIds` and the selected
 `actor.facility` hold only fitting memberships. The access token carries the
@@ -5376,7 +5466,39 @@ website signs out cleanly.
 `POST /auth/facility` also keeps only the facilities that fit the product of
 its own `Origin` (`403 FACILITY_ACCESS_DENIED` otherwise). An access token
 issued before this release carries no product and keeps today's behaviour
-until its refresh, which applies the gate.
+until its refresh, which applies the gate. After Q97, a doctor's, clinician's,
+nurse's or receptionist's session issued on `lab.`, `pharmacy.` or `outreach.`
+no longer fits its site: its next request or refresh answers `401` and the
+website signs out, the mechanism above, unchanged.
+
+### The sites a login can open: `actor.products` (Q97)
+
+Every staff session answer carries the staff product sites this login can
+open, so the website shows only those:
+
+```ts
+actor.products: ('ehr' | 'lab' | 'pharmacy' | 'migrate' | 'outreach')[]
+```
+
+- Always present on a staff actor; never on a patient actor.
+- Order is fixed: `ehr`, `lab`, `pharmacy`, `migrate`, `outreach`; no
+  duplicates.
+- Computed with the gate's own rule over **all** the account's active
+  memberships, before the current site's filter, so it is the same whatever
+  site (or no-product host such as `admin.`) the session was issued on. A site
+  is listed when at least one membership fits it.
+- `["outreach"]` for the account-only outreach session (Q88-2).
+- `[]` for a platform administrator with no membership (it opens `admin.`,
+  which is not a staff product site).
+- Carried in the answers of `POST /api/v1/auth/login`, a staff Google sign-in,
+  `POST /api/v1/auth/refresh`, `GET /api/v1/auth/session` and `POST
+  /api/v1/auth/facility` (each `{ actor, ... }`). It is not an access-token
+  claim; it is read from the database on every request with the rest of the
+  actor.
+
+Examples (fictional): a doctor `["ehr", "migrate"]`; a doctor who also helps
+an outreach group `["ehr", "migrate", "outreach"]`; lab staff `["lab"]`; a
+hospital `org_admin` `["ehr", "lab", "pharmacy", "migrate", "outreach"]`.
 
 The product is bound to the session, not to the `Origin` of each refresh (the
 `Origin` is the client's to set). A staff session issued on a product site
@@ -5470,10 +5592,276 @@ patient email whatever site asked; the patient portal's reset of a staff-only
 account, legacy recovery and SMS keep the generic code message. The start
 still answers every identifier alike.
 
-## 54. Single sign-on on the product sites, staff with a password only (0125, owner decision Q92 B)
+## 45. Patient details on this facility's own lab and pharmacy work (0124)
+
+Owner decision 25 of 2026-11-01 (D-Eminence, "all recommended except D5", on
+the Akos handover backend plan, item 3a; D8: emergency sessions see the
+patient details with the work). Laboratories and pharmacies run as
+stand-alone products for the whole facility, so their staff need the
+patient's name, sex, date of birth and Health ID ending on their own work,
+not only on work sent from another facility. 0124 is unsigned until the
+owner signs its declaration. It ships after 0123. It was numbered 0121 by
+the coordinator's release order of 2026-11-11 and renumbered 0124 after
+staging's 0117-0121 (0122 and 0123 are other work). It needs 0001-0123
+applied. Its read consent test is the one 0104 left (0105-0123 kept it).
+0122 and 0123 are sections 51 and 52, so this section keeps the number 45.
+
+Routes (paths, permissions, requests unchanged):
+`GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/:workItemId`
+(`lab.work-item.read`), `GET /api/v1/pharmacy/work-items` and
+`GET /api/v1/pharmacy/work-items/:workItemId` (`pharmacy.work-item.read`).
+
+While `OWN_WORK_PATIENT_CARD_ENABLED` is `true` in lab-api or pharmacy-api, a
+work item that is this facility's own work (it has `sourceEhrOrderId` or
+`sourceEhrPrescriptionId`, and no `orderRoute`) carries the existing
+optional `patient` that route-backed work items already carry:
+
+| Field | Value |
+| --- | --- |
+| `patient.fullName` | the patient's full name |
+| `patient.sex` | as recorded, or `null` |
+| `patient.dateOfBirth` | `YYYY-MM-DD`, or `null` |
+| `patient.healthIdLast4` | the last 4 characters of the Health ID |
+
+It is left out when the member may not read the work now (no read grant at
+this facility for this purpose, a revoked or expired grant, a deny
+directive, no work-list read permission, a disabled account), when the
+database read fails (it runs in a savepoint and never fails the answer), and
+whenever the setting is off. Off is the default and answers exactly as
+before. `infra/aws` passes the setting to lab-api and pharmacy-api only, from
+`HID_OWN_WORK_PATIENT_CARD_ENABLED` at synth: `false` unless that is `true`
+(production's environment switches are made in `dev`'s Terraform). An
+emergency session with an active break-glass grant gets it, because its work
+rows are shown too. Route-backed work items are unchanged: their patient
+still comes from the route card, only while the route allows a read.
+
+Database (0124, functions only): `lab.work_item_patient_cards(uuid[])` and
+`pharmacy.work_item_patient_cards(uuid[])`, SECURITY DEFINER, owned by
+`identity.patients`' owner, at most 200 ids (else 22023
+`WORK_ITEM_PATIENT_CARDS_INVALID`). A row is answered only for own work at
+the session's facility whose member holds the work-list read permission
+there and passes the read consent test of the work items' read policy.
+EXECUTE: the Lab one to `hid_lab_runtime`, the Pharmacy one to
+`hid_pharmacy_runtime`, both to `hid_schema_test_runtime`; nobody else. No
+table, column, policy or existing function changes.
+
+Audit rows, in the request's transaction, ids only:
+
+| Route | Rows added while the setting is on |
+| --- | --- |
+| `GET /lab/work-items` | one `lab.work-item.list` per patient shown on own work: `patient_id` that patient, `resource_id` the first of their work items, `details` `{ "basis": "consent", "workItemIds": [...] }` |
+| `GET /pharmacy/work-items` | the collection row as before, then one `pharmacy.work-item.list` per patient shown on own work, the same shape |
+| `GET .../work-items/:workItemId` | none: the existing `lab.work-item.read` or `pharmacy.work-item.read` row already names the patient |
+
+The patient's access log (`identity.patient_self_access_log`, 0093) shows
+these names as views by the member at the facility (entries less than 10
+minutes apart collapse into one). Responses are otherwise unchanged;
+request bodies and error mapping are unchanged. `PharmacyWorkItem` in
+`@hid/api-client` gains the optional `patient`.
+
+Runtime check with the setting on: lab-api and pharmacy-api answer 200
+whatever the reader does, so the runtime verifier
+`services/ehr-api/scripts/verify-own-work-patient-cards-runtime.mjs` calls the
+real functions through the real services. It boots Identity, EHR, Lab and
+Pharmacy from their own code as their runtime roles, Lab and Pharmacy with
+`OWN_WORK_PATIENT_CARD_ENABLED=true`, and runs in the TUF migration rehearsal
+(`scripts/tuf-staging-migration-rehearsal.mjs`, the workspace job of
+`tuf-local-gates.yml`) after the order-routes and records-processing
+verifiers. It fails when an own work item the member may read comes back
+without `patient` (on the list or by id), when the list writes no
+`basis: consent` audit row for it, when a member without consent sees the
+work or a patient, or when route-backed work shows any patient but its route
+card's (none once the route has closed, though its reader holds consent).
+
+Cost while the setting is on: each list load calls the reader once for its
+own rows (at most 200), as a statement of its own, so it does not count
+toward the list query's 15-second limit and does not grow with the size of
+the laboratory or pharmacy. Under a NOBYPASSRLS owner, as in production, each
+of those rows pays the work items' read policy and then the same consent
+test again (0124's header, D5). Measured on PostgreSQL 16 on a shared 4-CPU
+2.8 GHz Xeon with 200 own rows: the Lab reader 0.7-1.1 s against 0.8-1.2 s
+for the Lab list query, the Pharmacy reader 0.6-1.0 s against about 0.6 s
+for the Pharmacy list query. So the setting roughly doubles a list's
+database time. The Lab list's known limit (about 2,000 work items) is
+unchanged.
+
+0124 has no down migration. To withdraw the feature, set
+`OWN_WORK_PATIENT_CARD_ENABLED=false` in lab-api and pharmacy-api; the two
+functions stay and nothing calls them. Do not drop them: 0124 stays
+recorded, so the runner does not re-create them, and runtime-grants.sql's
+0124 block would then stop `db:bootstrap` with 42883. The suite is
+`services/ehr-api/test/database/work-item-patient-cards.integration.sql`.
+
+## 46. Prescription strength, form, duration, quantity and priority for the pharmacy (0125)
+
+Owner decision 25 of 2026-11-01 (D-Eminence, "all recommended except D5", on
+the Akos handover backend plan, items 3b and 4; D6: no drug picture until the
+price list; D9: the quantity to dispense is the prescriber's suggestion, the
+pharmacist still confirms it and nothing compares the two). The prescriber
+records how urgent a prescription is, the strength and form meant, how long
+it is for and how much to hand over, and this facility's pharmacy sees them
+on its own work. 0125 is unsigned until the owner signs its declaration.
+It was numbered 0122 by the coordinator's release order of 2026-11-11 and
+renumbered 0125 after staging's 0117-0121 (0122 and 0123 are other work).
+It ships after 0124 (section 45). It needs 0001-0124 applied. Its read
+consent test is the one 0104 left (0105-0124 kept it). It accepts
+`ehr.send_order_route` as 0098 left it or as 0123 left it (0098's with the
+QA seal on the receiving facility). 0122 and 0123 are sections 51 and 52,
+so this section keeps the number 46.
+
+Routes (paths and permissions unchanged): `POST
+/api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions`
+(`ehr.prescription.write`), the prescription reads and update, and
+`GET /api/v1/pharmacy/work-items` and `GET
+/api/v1/pharmacy/work-items/:workItemId` (`pharmacy.work-item.read`).
+
+While `PRESCRIPTION_DISPENSING_DETAILS_ENABLED` is `true` in ehr-api, the
+create body takes these optional fields, at creation only (the update body is
+unchanged and never changes them):
+
+| Field | Value |
+| --- | --- |
+| `priority` | `routine`, `urgent`, `asap` or `stat` |
+| `strength` | as written, 1-80 characters after trimming ("500 mg") |
+| `doseForm` | `tablet`, `capsule`, `liquid`, `injection`, `cream`, `inhaler`, `drops` or `other` |
+| `durationValue`, `durationUnit` | a whole number 1-3650 and `day`, `week` or `month`, both or neither |
+| `quantityToDispense`, `quantityUnit` | a number above 0 with at most 4 decimals (at most 99,999,999.9999) and 1-80 characters, both or neither |
+
+`null` for any of them is refused, as for every optional field. A pair sent
+half answers 400 `DURATION_INCOMPLETE` ("Duration value and unit must be
+supplied together") or `QUANTITY_INCOMPLETE` ("Quantity to dispense and its
+unit must be supplied together"); a bad value answers 400
+`VALIDATION_FAILED` naming the field. Every prescription answer (list, read,
+create, update and an idempotent replay) adds each of the seven that is set,
+under the same name (`quantityToDispense` as a number), and the list answer
+adds `dispensingDetails: true`, which tells the website it may send them. A
+create body without them keeps its Idempotency-Key digest, so a retry across
+the deploy replays.
+
+While the setting is off (the default), the routes answer exactly as
+before: the create body is validated against today's fields with the
+validation the app installs globally, so each new field answers 400
+`VALIDATION_FAILED`, `"property priority should not exist"`, word for word;
+no statement names the new columns, and no answer or list carries a new key.
+
+`infra/aws` passes the setting to ehr-api and pharmacy-api only, from
+`HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED` at synth: `false` unless that
+is `true` (production's environment switches are made in `dev`'s Terraform).
+It switches both services at once, so set it to `true` only after 0125 is
+applied (the ehr-api setting needs the schema, below).
+
+While `PRESCRIPTION_DISPENSING_DETAILS_ENABLED` is `true` in pharmacy-api, a
+work item that is this facility's own work (it has
+`sourceEhrPrescriptionId`, and no `orderRoute`) carries, each only when there
+is a value:
+
+| Field | Value |
+| --- | --- |
+| `medication.strength`, `medication.doseForm` | as the prescriber gave them |
+| `priority` | as the prescriber gave it |
+| `duration` | `{ "value": n, "unit": "day" \| "week" \| "month" }` as the prescriber gave it; else, when the work item has both a start and an end date, the whole days from one to the other, both included, as `day` |
+| `quantityToDispense`, `quantityUnit` | as the prescriber gave them; the dispensing form starts with them and the pharmacist confirms the quantity |
+
+The values are those of the prescription version Pharmacy accepted, so they
+do not change when the prescription later changes (the work item is then not
+dispensable, as before). A prescription written before 0125, or without
+them, gives none (only the duration from the dates). The prescriber's values
+are left out when the member may not read the work now and when the database
+read fails (it runs in a savepoint and never fails the answer); the duration
+from the work item's own dates is still given then. Nothing is added while
+the setting is off.
+Route-backed work items and the acceptance answer are unchanged (the same
+details on work from another facility need the route to carry them, item 4b,
+later). An emergency session with an active break-glass grant gets them,
+because its work rows are shown too. No audit row is added: no new person is
+shown. `PharmacyWorkItem` in `@hid/api-client` gains the optional fields.
+
+Database (0125): seven nullable columns on `ehr.prescriptions` (`priority`,
+`medication_strength`, `medication_dose_form`, `duration_value`,
+`duration_unit`, `quantity_to_dispense` numeric(12,4), `quantity_unit`), no
+default, and one CHECK, `prescriptions_dispensing_details_ck`, for the value
+sets, the lengths, the ranges and the two pairs, added NOT VALID and then
+validated (one CHECK, so the table is scanned once). Nothing is copied into
+`pharmacy.work_items`, so the 0100 and 0101 guards are unchanged.
+`pharmacy.work_item_prescription_details(uuid[])`, SECURITY DEFINER, owned by
+`pharmacy.work_items`' owner, at most 200 ids (else 22023
+`WORK_ITEM_PRESCRIPTION_DETAILS_INVALID`), reads the accepted version's
+snapshot (`ehr.record_versions`, resource type `prescriptions`, the work
+item's prescription id and version, its patient, facility and encounter) for
+own work at the session's facility whose member holds
+`pharmacy.work-item.read` there and passes the read consent test of the work
+items' read policy. It joins the snapshot by its key (the work item's ids
+are turned into text first, so the join can use the key under the snapshot
+table's forced read policy), so that policy runs once per work item whatever
+the prescription history. EXECUTE: `hid_pharmacy_runtime` and
+`hid_schema_test_runtime`; nobody else. The EHR runtime's privileges on
+`ehr.prescriptions` are table-wide, so they cover the new columns.
+
+Locks: 0125 takes ACCESS EXCLUSIVE on `ehr.prescriptions` NOWAIT, retrying
+for at most 5 seconds (an open Pharmacy acceptance or any open read of the
+table makes it wait and then stop the release with nothing applied; it never
+blocks them), and holds it to commit. Once taken, EHR prescription reads and
+writes and Pharmacy acceptances and dispensings wait while the one
+validation scans the table: about 0.07 s for 200,000 prescriptions and 0.5 s
+for 1,000,000, measured on synthetic tables (nine separate CHECKs took 0.43 s
+and 3.05 s there, one scan each).
+
+Cost while the pharmacy-api setting is on: each list load calls the reader
+once for its own rows (at most 200), as a statement of its own. Under a
+NOBYPASSRLS owner, as in production, each row pays the work items' read
+policy, the same consent test again and the snapshot table's read policy,
+once each: 1.0-1.7 s for 200 own rows, against 0.4-0.7 s for reading the same
+200 rows under row-level security, with 1, 5, 20 or 50 prescription
+snapshots per patient and with 300,000 other snapshots at the facility
+(fictional data, PostgreSQL 16 on a shared 4-CPU machine). The reader is
+called under pharmacy-api's 15 s statement limit, so its cost must not grow
+with the history: the first draft joined on the prescription id cast to text
+inside the join, which the planner cannot use under the read policy; it took
+8.8 s with 20 snapshots per patient and passed the 15 s limit with 100,000
+other prescription snapshots at the facility.
+
+0125 has no down migration. To withdraw the feature, set
+`PRESCRIPTION_DISPENSING_DETAILS_ENABLED=false` in ehr-api and pharmacy-api:
+the EHR API then refuses the fields again and pharmacy-api stops reading
+them; the columns, the values already written and the function stay, and
+nothing reads them. Do not drop the function: 0125 stays recorded, so the
+runner does not re-create it, and runtime-grants.sql's 0125 block would then
+stop `db:bootstrap` with 42883.
+
+The ehr-api setting needs the schema. Switch
+`PRESCRIPTION_DISPENSING_DETAILS_ENABLED` on in ehr-api only after 0125 is
+applied, and switch it off before restoring ehr-api's database to a point
+before 0125 or pointing ehr-api at a database without it. While it is on
+without the seven columns, every statement of the prescription routes names
+them and fails (42703), so every prescription list, read, create, update and
+Pharmacy acceptance hand-off from the EHR answers 500. pharmacy-api is safe
+either way: without 0125 its read fails inside the savepoint and only the
+prescriber's values are left out.
+
+The suite is
+`services/ehr-api/test/database/prescription-dispensing-details.integration.sql`.
+
+Runtime check with the setting on: pharmacy-api answers 200 whatever its
+reader does, so the runtime verifier
+`services/ehr-api/scripts/verify-prescription-details-runtime.mjs` calls the
+real function through the real services. It boots Identity, EHR and Pharmacy
+from their own code as their runtime roles, EHR and Pharmacy with
+`PRESCRIPTION_DISPENSING_DETAILS_ENABLED=true`, and runs in the TUF migration
+rehearsal (`scripts/tuf-staging-migration-rehearsal.mjs`, the workspace job of
+`tuf-local-gates.yml`) after the own-work patient verifier (section 45). It
+fails when ehr-api does not take, store and echo the seven details, when an
+own work item the pharmacist may read comes back without exactly the
+prescriber's details (on the list or by id), when a prescription written
+without them gains some, when a pharmacist without consent sees the work or a
+detail, or when route-backed work shows any detail (though its reader holds
+the patient's consent at that facility).
+
+## 54. Single sign-on on the product sites, staff with a password only (0127, owner decision Q92 B)
 
 hid-system#142 (ADR-070, written on main as 0102), ported onto production as
-migration 0125. Owner decision Q92 B: single sign-on goes to production with
+migration 0125 and renumbered 0127 after hid-system#254's 0124, #255's 0125
+and #259's 0126 (booked on hid-system#258); it needs 0001-0126 applied and
+reads nothing 0124-0126 add. Owner decision Q92 B: single sign-on goes to production with
 staff signing in by password only, as they sign in today. Production has no
 staff authenticator (no `auth.mfa_factors`, `auth.session_assurance`,
 `auth.session_facility_selection`, `MfaService` or `issueStaffSession`), so
@@ -5491,10 +5879,10 @@ cookies of section 53 and before are unchanged. The website switch
 With `AUTH_SSO_ISSUER` unset (production today), every route below answers
 exactly as a route that does not exist (`404 NOT_FOUND`, no cookie, no audit
 row); sign-in, the session check and sign-out are unchanged. Two reads of the
-0125 tables stay on once 0125 is applied, because a sign-in issued while
+0127 tables stay on once 0127 is applied, because a sign-in issued while
 single sign-on was on keeps its rows after it is switched off: the patient
 recent-sign-in check still counts such a family from its provider `auth_time`
-(on a database without 0125 it sends today's statement), and a refresh of a
+(on a database without 0127 it sends today's statement), and a refresh of a
 sign-in ended with reason `sso_logout` is still answered as an ended sign-in,
 not as reuse (below). `POST /auth/sso/logout` answers `404` with or without a
 session. The same holds on a host that is not a configured client (`admin.`,
@@ -5552,7 +5940,11 @@ password sign-in uses, for staff and patients alike:
   session's product is the client's site's product (section 53), taken from
   the configured client and never from the request (a navigation from `auth.`
   carries no product `Origin`). So the same product gate applies: only the
-  memberships that fit the site; `403 PRODUCT_NOT_AUTHORISED` or `403
+  memberships admitted on the site (section 53's `facilityAdmittedOnProduct`:
+  the Q88/Q90 permission and kind rule, then Q97's own-job rule, so a
+  hospital clinical membership opens only `ehr.` and `migrate.` through
+  single sign-on too), and the session's `actor.products` lists every site
+  the login can open, as for a password sign-in; `403 PRODUCT_NOT_AUTHORISED` or `403
   NO_ACTIVE_FACILITY_MEMBERSHIP` refuse it, recorded exactly as for a password
   sign-in (one `auth.login.refused` audit row with `reason` and `product`, plus
   `singleSignOn`; no `login_failed` row, nothing counted towards the lockout),
@@ -5620,7 +6012,7 @@ PKCE required and no consent screen. The provider ends its sessions whenever
 the account's `token_version` changes (suspension, reactivation, password
 recovery, deletion).
 
-### Database (0125)
+### Database (0127)
 
 `auth.session_single_sign_on` (family, account, client, provider sid,
 authenticated at; one row per sign-in family, only for the root session of a

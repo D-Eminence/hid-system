@@ -60,7 +60,7 @@ export interface SessionEventMetadata {
 
 /**
  * Where a staff or patient sign-in came from when a product issued it after
- * single sign-on on `auth.` (ADR-070, 0125): the product's client, the
+ * single sign-on on `auth.` (ADR-070, 0127): the product's client, the
  * provider's session id (`sid`, which back-channel logout names) and when the
  * person signed in at the provider (`auth_time`). The ID token itself is not
  * kept. Stored on the new family in the session's own transaction. The
@@ -742,7 +742,7 @@ export class TokenService {
     return (lifetimeEnd) => new Date(Math.min(lifetimeEnd.getTime(), signInEnd));
   }
 
-  /** Stores a single sign-on's provenance on its new family (0125), in the session's transaction. */
+  /** Stores a single sign-on's provenance on its new family (0127), in the session's transaction. */
   private async recordSingleSignOn(client: PoolClient, familyId: string, accountId: string,
     singleSignOn: SingleSignOnProvenance): Promise<void> {
     await client.query(

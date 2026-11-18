@@ -1,7 +1,7 @@
 import { resetEnvironmentForTests } from '../config/environment';
 
 /**
- * The environment of a single sign-on test (ADR-070, 0125), set before each
+ * The environment of a single sign-on test (ADR-070, 0127), set before each
  * test and restored after it: a local test environment with no single
  * sign-on settings, which a test may add to (overrides). From main's
  * testing/platform-assurance.ts useTestEnvironment, which production does not

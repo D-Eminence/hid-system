@@ -31,7 +31,7 @@ const accountOnly: ActorContext = {
 const ALLOWED = [
   'AuthController.session',
   'AuthController.logout',
-  // Product sign-out while single sign-on is on (0125): today's sign-out, then the provider's end-session
+  // Product sign-out while single sign-on is on (0127): today's sign-out, then the provider's end-session
   // address, so an account-only session on outreach. can sign out there as it does today.
   'AuthController.ssoLogout',
   'OutreachOrganiserAccountController.availability',

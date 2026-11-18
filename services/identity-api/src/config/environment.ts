@@ -101,7 +101,7 @@ const environmentSchema = z.object({
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('hid_access'),
   AUTH_COOKIE_SECURE: booleanString,
   AUTH_COOKIE_DOMAIN: optionalString,
-  // Single sign-on on auth. (ADR-070; 0125; the product side): each product
+  // Single sign-on on auth. (ADR-070; 0127; the product side): each product
   // host is an OpenID Connect relying party of the provider on auth. Off
   // unless AUTH_SSO_ISSUER is set; with all four unset, no SSO route exists
   // and sign-in, refresh and sign-out are exactly as before. Every cookie
