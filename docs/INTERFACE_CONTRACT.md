@@ -6124,3 +6124,66 @@ for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
 "Results ready 11:05"; show "Progress not available right now" for
 `unknown`, and nothing for `not_received` on a draft.
 
+## ORD-10 phase 1. Same-medicine warning when prescribing (wave 1, no migration)
+
+Akos items N-9c and P0-5 (build plan of 18 November 2026, lane D). A
+warning, never a block. Phase 2 (with Release B) adds medicines of the same
+class (ATC).
+
+### The check before saving
+
+`POST /api/v1/ehr/patients/:patientId/duplicate-medicine-check`, direct care
+only, permission `ehr.prescription.write` (as the allergy check). Read-only;
+answer `200`, `Cache-Control: no-store`.
+
+Request: `medicationDisplay` (1-500 characters), optional
+`medicationCodeSystem` (up to 255), `medicationCode` (up to 100) and
+`excludePrescriptionId` (a UUID: the prescription being changed or
+activated, left out). Any other field is refused.
+
+Answer:
+
+| Field | Value |
+| --- | --- |
+| `checked` | `true` when the check ran |
+| `matches` | the current prescriptions of the same medicine, newest first |
+| `message` | plain words for the form, or `null` when there are no matches |
+
+Each match: `prescriptionId`, `encounterId`, `medicationDisplay`, `status`
+(`draft`, `active` or `on_hold`), `startsOn`, `endsOn` (`YYYY-MM-DD` or
+`null`), `createdAt`, `matchedBy` (`code` or `name`).
+
+Messages: "This patient already has a current prescription for this
+medicine. Check it before you continue." or "This patient already has N
+current prescriptions for this medicine. Check them before you continue."
+
+What is compared: only this patient's prescriptions at this facility that
+the clinician may read under consent, and only current ones (draft, active
+or on hold, not ended before today in Lagos), at most 500, newest first.
+They match when the codes are the same (and the code systems are the same,
+or one is missing), or when the medicine names are the same once strength,
+units, dose form and anything in brackets are set aside ("Amoxicillin 500 mg
+capsules" and "amoxicillin 250mg" match; "Amoxicillin" and "Ampicillin" do
+not).
+
+Refusals: `403 CONSENT_REQUIRED` when Identity refuses the read, or when the
+database does not allow this patient's records to be read here (so "no
+match" never stands for "could not read"); `400` for a bad body or purpose.
+
+Audit: `ehr.prescription.duplicate-check` naming the patient, with
+`comparedCount` and `matchCount` only, never the medicine.
+
+### On a new prescription
+
+`POST .../encounters/:encounterId/prescriptions` (unchanged request and
+status) gains `duplicateMedicines` with the same shape, compared with the
+patient's other current prescriptions (the new one left out). It never
+fails the create: when the check cannot run, `duplicateMedicines` is
+`{ "checked": false, "matches": [], "message": null }`. A prescription
+created already cancelled, completed or entered in error gets
+`{ "checked": true, "matches": [], "message": null }` without a check.
+
+Screen change (Akos frontend branch): run the check when a medicine is
+chosen and show `message` with the matches (medicine, status, dates) above
+Save; Save stays enabled. After Save, show `duplicateMedicines.message` if
+present.

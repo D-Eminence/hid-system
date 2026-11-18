@@ -10,11 +10,13 @@ import {
 import { CreatePrescriptionBodyPipe, type CreatePrescriptionInput } from './prescription-dispensing-details';
 import { PrescriptionsService } from './prescriptions.service';
 import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
+import { DuplicateMedicineChecker } from './duplicate-medicines';
 
 @Controller('ehr/patients/:patientId/encounters/:encounterId/prescriptions')
 export class PrescriptionsController {
   constructor(private readonly prescriptions: PrescriptionsService,
-    @Optional() private readonly progress?: WorkItemProgressService) {}
+    @Optional() private readonly progress?: WorkItemProgressService,
+    @Optional() private readonly duplicates?: DuplicateMedicineChecker) {}
 
   /** Each item carries `ownProgress` in this facility's own pharmacy (ORD-3), read after the list. */
   @Get()
@@ -46,13 +48,14 @@ export class PrescriptionsController {
   @Post()
   @HttpCode(201)
   @RequirePermissions('ehr.prescription.write')
-  create(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
+  async create(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
     @Headers('idempotency-key') key: string | undefined,
     @Body(CreatePrescriptionBodyPipe) input: CreatePrescriptionInput) {
-    return this.prescriptions.create(
-      clinicalContext(request), patientId, encounterId, input, requireIdempotencyKey(key),
-    );
+    const context = clinicalContext(request);
+    const created = await this.prescriptions.create(context, patientId, encounterId, input, requireIdempotencyKey(key));
+    // ORD-10 phase 1: the same-medicine warning, after the write; it never fails the create.
+    return this.duplicates ? this.duplicates.afterCreate(context, patientId, created) : created;
   }
 
   @Patch(':prescriptionId')
