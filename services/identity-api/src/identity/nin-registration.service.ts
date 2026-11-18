@@ -970,18 +970,9 @@ export class NinRegistrationService {
     }
   }
 
-  /**
-   * Q110: the active patient who holds this NIN verified (not revoked), when
-   * the name and date of birth the desk entered are the ones on that
-   * patient's record (letter case and spacing ignored, first and last name
-   * in that order): a match from HID's own checked answer, with that
-   * answer's provider, reference and time. Null otherwise, and then the NIN
-   * service decides, as before; a desk that typed other details learns
-   * nothing here.
-   */
-  private async verifiedNinOnHealthId(context: DataAccessContext, ninLookupHmac: string,
-    claimed: NinClaimedDemographics): Promise<{ patientId: string; verification: NinVerificationResult } | null> {
-    const row = await this.database.withTransaction(context, async (client) => {
+  /** The active patient who holds this NIN verified and not revoked, with that check's evidence. */
+  private readNinHolder(context: DataAccessContext, ninLookupHmac: string) {
+    return this.database.withTransaction(context, async (client) => {
       const result = await client.query<{
         patient_id: string; first_name: string | null; last_name: string | null; dob: string | null;
         gender: string | null; verification_provider: string | null; verification_reference: string | null;
@@ -1002,6 +993,32 @@ export class NinRegistrationService {
       );
       return result.rows[0];
     });
+  }
+
+  /**
+   * Q110: the active patient who holds this NIN verified (not revoked), when
+   * the name and date of birth the desk entered are the ones on that
+   * patient's record (letter case and spacing ignored, first and last name
+   * in that order): a match from HID's own checked answer, with that
+   * answer's provider, reference and time. Null otherwise, and then the NIN
+   * service decides, as before; a desk that typed other details learns
+   * nothing here.
+   */
+  private async verifiedNinOnHealthId(context: DataAccessContext, ninLookupHmac: string,
+    claimed: NinClaimedDemographics): Promise<{ patientId: string; verification: NinVerificationResult } | null> {
+    type HolderRow = {
+      patient_id: string; first_name: string | null; last_name: string | null; dob: string | null;
+      gender: string | null; verification_provider: string | null; verification_reference: string | null;
+      verified_at: Date | string | null;
+    };
+    let row: HolderRow | undefined;
+    try {
+      row = await this.readNinHolder(context, ninLookupHmac);
+    } catch (error) {
+      // Nothing was compared or sent: "cannot be started", the breaker untouched.
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw ninCheckNotStarted();
+    }
     const verifiedAt = row?.verified_at ? new Date(row.verified_at) : undefined;
     if (!row || typeof row.first_name !== 'string' || typeof row.last_name !== 'string'
       || normalizedPersonName(row.first_name) !== normalizedPersonName(claimed.firstName)

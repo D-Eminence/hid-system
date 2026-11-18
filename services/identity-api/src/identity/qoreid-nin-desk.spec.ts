@@ -296,7 +296,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
    * none by default.
    */
   function desk(provider: NinVerificationProvider, breaker = new NinProviderBreaker(),
-    holders: Array<Record<string, unknown> | undefined> = [], rateLimits = fakeRateLimitTable()) {
+    holders: Array<Record<string, unknown> | Error | undefined> = [], rateLimits = fakeRateLimitTable()) {
     const statements: Array<{ sql: string; values: unknown[] }> = [];
     const query = jest.fn(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql: sql.replace(/\s+/g, ' '), values });
@@ -304,6 +304,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       if (limited) return limited;
       if (sql.includes('from identity.patient_identifiers identifier')) {
         const holder = holders.shift();
+        if (holder instanceof Error) throw holder;
         return { rows: holder ? [holder] : [] };
       }
       if (/insert into identity\.registration_cases \(/.test(sql)) return { rows: [{ id: caseId }] };
@@ -699,6 +700,20 @@ describe('Q108 desk NIN resolve through QoreID', () => {
         status: 409, code: 'NIN_CHECK_IN_PROGRESS' });
       expect(statements.some(({ sql }) => sql.includes('insert into identity.registration_cases ('))).toBe(false);
       expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+    });
+
+    it('answers "cannot be started", sending nothing, when the record cannot be read', async () => {
+      const qoreId = gate();
+      const lost = Object.assign(new Error('connection reset'), { code: '08006' });
+      const { service, audit, breaker } = desk(qoreIdProvider(qoreId), undefined, [lost]);
+      await expect(service.resolve(input, 'resolve-key-q110-000005', context)).rejects.toMatchObject({
+        status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+        message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+      expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+      expect(breaker.state()).toBe('closed');
+      expect(JSON.stringify(auditRows(audit))).not.toContain('connection reset');
+      expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'identity.nin.verify',
+        outcome: 'failure', details: expect.objectContaining({ providerCalled: false }) }));
     });
 
     it('is not read while NIN checks are switched off', async () => {
