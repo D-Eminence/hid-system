@@ -15,6 +15,7 @@ import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NinRegistrationService } from './nin-registration.service';
 import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER } from './nin.types';
+import { NinProviderBreaker } from './nin-provider-breaker';
 import {
   QOREID_ADAPTER_CONFIGURATION,
   QOREID_FETCH,
@@ -78,6 +79,8 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
     OutreachHealthIdService,
     RecordAccessNoticeService,
     NinRegistrationService,
+    // ID-0: one NIN service breaker per process, shared by resolve and registration-capabilities.
+    NinProviderBreaker,
     FacilityProfileService,
     NinIdentifierProtector,
     HidCodeGenerator,

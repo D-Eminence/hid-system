@@ -24,7 +24,7 @@ const OPTIONAL_FIELDS: readonly [DtoConstructor, readonly string[]][] = [
   [TimelineQueryDto, ['limit', 'cursor']],
   [CreateEncounterDto, ['encounterNumber', 'endedAt', 'chiefComplaint']],
   [UpdateEncounterDto, ['status', 'endedAt', 'chiefComplaint']],
-  [UpdateClinicalNoteDto, ['title', 'status']],
+  [UpdateClinicalNoteDto, ['title', 'status', 'changeReason']],
   [VitalMeasurementsDto, [
     'heightCm', 'weightKg', 'temperatureC', 'pulseBpm', 'respiratoryRate',
     'systolicMmhg', 'diastolicMmhg', 'oxygenSaturationPercent',
@@ -36,10 +36,10 @@ const OPTIONAL_FIELDS: readonly [DtoConstructor, readonly string[]][] = [
     'medicationCodeSystem', 'medicationCode', 'doseQuantity', 'doseUnit',
     'routeCode', 'startsOn', 'endsOn', 'allergyAcknowledgement',
   ]],
-  [UpdatePrescriptionDto, ['status', 'frequency', 'instructions', 'endsOn', 'allergyAcknowledgement']],
+  [UpdatePrescriptionDto, ['status', 'frequency', 'instructions', 'endsOn', 'allergyAcknowledgement', 'changeReason']],
   [AcceptPrescriptionForPharmacyDto, ['allergyAcknowledgement']],
   [CreateLabRequestDto, ['priority', 'specimenTypeCode', 'clinicalInformation', 'externalOrderReference']],
-  [UpdateLabRequestDto, ['priority', 'status', 'clinicalInformation']],
+  [UpdateLabRequestDto, ['priority', 'status', 'clinicalInformation', 'changeReason']],
 ];
 
 describe('clinical DTO optional-field semantics', () => {

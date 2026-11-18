@@ -16,3 +16,12 @@ export const AuditAction = (action: string): MethodDecorator & ClassDecorator =>
 export const NoAudit = (): MethodDecorator & ClassDecorator => SetMetadata(NO_AUDIT, true);
 export const AuditFailuresOnly = (): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_FAILURES_ONLY, true);
 export const InternalCaller = (caller:'ehr-api'|'ocr-api'):MethodDecorator => SetMetadata(INTERNAL_CALLER,caller);
+
+/**
+ * A POST that only reads (ORD-3): its ids travel in the body, not the URL. The
+ * guard does not ask Identity for the browser-write (Origin and CSRF) check of
+ * a forwarded cookie, because the clinician's browser request was a read. Only
+ * on internal-caller routes, which a browser cannot reach.
+ */
+export const READ_ONLY_POST = Symbol('READ_ONLY_POST');
+export const ReadOnlyPost = (): MethodDecorator => SetMetadata(READ_ONLY_POST, true);

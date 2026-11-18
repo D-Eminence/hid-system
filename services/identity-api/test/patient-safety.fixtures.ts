@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { clientAnsweringSingleSignOnProbe } from '../src/testing/recent-sign-in-probe';
 import { resetEnvironmentForTests } from '../src/config/environment';
 import type { HidRequest } from '../src/common/request-context';
 import type { DatabaseService } from '../src/database/database.service';
@@ -41,7 +42,7 @@ export const patientSession = ['patient:safety', '80000000-0000-4000-8000-000000
 
 export function fakeDatabase() {
   const query = jest.fn();
-  const client = { query } as unknown as PoolClient;
+  const client = clientAnsweringSingleSignOnProbe(query);
   const withSystemTransaction = jest.fn(
     async (_correlationId: string, operation: (transactionClient: PoolClient) => Promise<unknown>) => operation(client),
   );

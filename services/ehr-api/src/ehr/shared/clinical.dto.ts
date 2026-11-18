@@ -1,6 +1,7 @@
 import { Transform, Type, type TransformFnParams } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsDateString,
   IsEnum,
   IsInt,
@@ -110,6 +111,26 @@ export class VersionedUpdateDto {
   changeReason!: string;
 }
 
+/**
+ * FR-1 (18 Nov 2026): the reason may be left out, but only where the service
+ * can record a fixed reason instead (the first signature of a draft note, the
+ * first activation of a draft prescription; see shared/change-reason.ts).
+ * Every other change without a reason answers 400 CHANGE_REASON_REQUIRED
+ * ("Please say why you are changing this."). When given, the same rules as
+ * VersionedUpdateDto apply (trimmed, 3 to 500 characters, never null).
+ */
+export class OptionalReasonVersionedUpdateDto {
+  @IsInt()
+  @Min(1)
+  expectedRowVersion!: number;
+
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(3, 500)
+  changeReason?: string;
+}
+
 export class CreateEncounterDto {
   @IsOptionalButNotNull()
   @Transform(trim)
@@ -135,6 +156,16 @@ export class CreateEncounterDto {
   @IsString()
   @MaxLength(4000)
   chiefComplaint?: string;
+
+  /**
+   * EHR-C1: true asks for this patient's open visit today at this facility
+   * (planned, in progress or on hold, started on today's Lagos calendar day)
+   * instead of a new one; a new visit is created only when there is none.
+   * Only with status planned or in_progress. Absent or false: as before.
+   */
+  @IsOptionalButNotNull()
+  @IsBoolean()
+  reuseOpenVisit?: boolean;
 }
 
 export class UpdateEncounterDto extends VersionedUpdateDto {
@@ -174,7 +205,7 @@ export class CreateClinicalNoteDto {
   content!: string;
 }
 
-export class UpdateClinicalNoteDto extends VersionedUpdateDto {
+export class UpdateClinicalNoteDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()
   @Transform(trim)
   @IsString()
@@ -385,7 +416,83 @@ export class CreatePrescriptionDto {
   allergyAcknowledgement?: AllergyAcknowledgementDto;
 }
 
-export class UpdatePrescriptionDto extends VersionedUpdateDto {
+/** How urgent a prescription is (0125): the Lab request priorities. */
+export enum PrescriptionPriority {
+  Routine = 'routine',
+  Urgent = 'urgent',
+  Asap = 'asap',
+  Stat = 'stat',
+}
+
+/** The forms a prescriber chooses from (0125), as the pharmacy queue draws them. */
+export enum PrescriptionDoseForm {
+  Tablet = 'tablet',
+  Capsule = 'capsule',
+  Liquid = 'liquid',
+  Injection = 'injection',
+  Cream = 'cream',
+  Inhaler = 'inhaler',
+  Drops = 'drops',
+  Other = 'other',
+}
+
+export enum PrescriptionDurationUnit {
+  Day = 'day',
+  Week = 'week',
+  Month = 'month',
+}
+
+/**
+ * A new prescription with the optional dispensing details (0125): its
+ * priority, its strength and form as the prescriber means them, how long it
+ * is for, and how much to hand over (the pharmacist still confirms what is
+ * dispensed). Set at creation only: UpdatePrescriptionDto has none of them.
+ * durationValue and durationUnit go together, as do quantityToDispense and
+ * quantityUnit (PrescriptionsService.create). Used only while
+ * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (CreatePrescriptionBodyPipe);
+ * off, a body is checked against CreatePrescriptionDto as before, so each of
+ * these fields is refused like any unknown field.
+ */
+export class CreatePrescriptionWithDetailsDto extends CreatePrescriptionDto {
+  @IsOptionalButNotNull()
+  @IsEnum(PrescriptionPriority)
+  priority?: PrescriptionPriority;
+
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(1, 80)
+  strength?: string;
+
+  @IsOptionalButNotNull()
+  @IsEnum(PrescriptionDoseForm)
+  doseForm?: PrescriptionDoseForm;
+
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  durationValue?: number;
+
+  @IsOptionalButNotNull()
+  @IsEnum(PrescriptionDurationUnit)
+  durationUnit?: PrescriptionDurationUnit;
+
+  /** ehr.prescriptions.quantity_to_dispense is numeric(12,4). */
+  @IsOptionalButNotNull()
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0.0001)
+  @Max(99_999_999.9999)
+  quantityToDispense?: number;
+
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(1, 80)
+  quantityUnit?: string;
+}
+
+export class UpdatePrescriptionDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()
   @IsEnum(OrderStatus)
   status?: OrderStatus;
@@ -489,7 +596,7 @@ export class CreateLabRequestDto {
   externalOrderReference?: string;
 }
 
-export class UpdateLabRequestDto extends VersionedUpdateDto {
+export class UpdateLabRequestDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()
   @IsEnum(LabPriority)
   priority?: LabPriority;

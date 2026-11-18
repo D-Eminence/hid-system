@@ -4,6 +4,7 @@ import type { HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import { PatientSelfService, publishAccessHistory } from './patient-self.service';
 import type { PatientContactReader } from '../patient-profile/patient-contact-reader';
+import { clientAnsweringSingleSignOnProbe } from '../testing/recent-sign-in-probe';
 
 const request = { actor: { kind: 'patient', patientId: 'patient-id', accountId: 'account-id',
   subject: 'patient-subject', sessionId: 'session-id' }, correlationId: 'self-test-request',
@@ -11,7 +12,7 @@ const request = { actor: { kind: 'patient', patientId: 'patient-id', accountId: 
 
 function setup(value: unknown, auditFailure = false) {
   const query = jest.fn().mockResolvedValue({ rows: [{ value }] });
-  const client = { query } as unknown as PoolClient;
+  const client = clientAnsweringSingleSignOnProbe(query);
   const transaction = jest.fn(async (_id: string, callback: (c: PoolClient) => Promise<unknown>) => callback(client));
   const record = auditFailure ? jest.fn().mockRejectedValue(new Error('audit unavailable')) : jest.fn().mockResolvedValue(undefined);
   const service = new PatientSelfService({ withSystemTransaction: transaction } as unknown as DatabaseService,

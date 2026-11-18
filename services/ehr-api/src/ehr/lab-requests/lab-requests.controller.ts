@@ -9,24 +9,33 @@ import {
   UpdateLabRequestDto,
 } from '../shared/clinical.dto';
 import { LabRequestsService } from './lab-requests.service';
+import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
 
 @Controller('ehr/patients/:patientId/encounters/:encounterId/lab-requests')
 export class LabRequestsController {
-  constructor(private readonly labRequests: LabRequestsService) {}
+  // Required: a missing provider fails at start, never silently drops ownProgress.
+  constructor(private readonly labRequests: LabRequestsService,
+    private readonly progress: WorkItemProgressService) {}
 
+  /** Each item carries `ownProgress` in this facility's own laboratory (ORD-3), read after the list. */
   @Get()
   @RequirePermissions('ehr.lab-request.read')
-  list(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
+  async list(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string, @Query() query: TimelineQueryDto) {
-    return this.labRequests.list(clinicalContext(request), patientId, encounterId, query);
+    const context = clinicalContext(request);
+    const page = await this.labRequests.list(context, patientId, encounterId, query);
+    return this.progress.withLabRequestProgress(context, patientId, page);
   }
 
+  /** With `ownProgress` (ORD-3), read after the lab request. */
   @Get(':requestId')
   @RequirePermissions('ehr.lab-request.read')
-  get(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
+  async get(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
     @Param('requestId', new ParseUUIDPipe()) requestId: string) {
-    return this.labRequests.get(clinicalContext(request), patientId, encounterId, requestId);
+    const context = clinicalContext(request);
+    const labRequest = await this.labRequests.get(context, patientId, encounterId, requestId);
+    return this.progress.withLabRequest(context, patientId, labRequest);
   }
 
   @Post()

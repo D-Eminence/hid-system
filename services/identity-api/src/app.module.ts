@@ -16,10 +16,13 @@ import { PatientSafetyModule } from './patient-safety/patient-safety.module';
 import { PatientProfileModule } from './patient-profile/patient-profile.module';
 import { OutreachOrganisersModule } from './outreach-organisers/outreach-organisers.module';
 import { WebPushModule } from './web-push/web-push.module';
+// SX-5 and SX-9 (lane B): own staff profile and facility staff names.
+import { StaffProfileModule } from './staff-profile/staff-profile.module';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule,
-    PatientSafetyModule, PatientProfileModule, WebPushModule, OutreachOrganisersModule],
+    PatientSafetyModule, PatientProfileModule, WebPushModule, OutreachOrganisersModule,
+    StaffProfileModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

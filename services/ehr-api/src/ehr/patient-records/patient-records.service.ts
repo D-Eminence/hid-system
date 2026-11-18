@@ -73,12 +73,20 @@ export class PatientRecordsService {
     const encounters = await client.query(`select id,facility_id as "facilityId",encounter_type as "encounterType",
       status,started_at as "startedAt",ended_at as "endedAt",imported_paper_records as "importedPaperRecords" from ehr.encounters
       where patient_id=$1 and status='completed'${facility}${importedHidden} order by started_at desc,id desc limit 50`,values);
+    // EHR-C8a: a note of a visit entered in error is left out wherever that
+    // visit can be seen (the emergency read). The patient-self policy on
+    // ehr.encounters shows the patient only completed visits, so for the
+    // patient this filter changes nothing: notes of open visits are listed as
+    // before. A completed visit is entered in error only after its signed notes
+    // are (VISIT_HAS_SIGNED_NOTES), so its notes never reach the patient.
     const notes = await client.query(`select n.id,n.encounter_id as "encounterId",n.facility_id as "facilityId",
       n.note_type as "noteType",n.title,n.status,n.current_revision_no as "revisionNo",r.content,n.signed_at as "signedAt"
       from ehr.clinical_notes n join ehr.clinical_note_revisions r
         on r.clinical_note_id=n.id and r.revision_no=n.current_revision_no
         and r.patient_id=n.patient_id and r.facility_id=n.facility_id
       where n.patient_id=$1 and n.status in ('signed','amended')${facilityId ? ' and n.facility_id=$2' : ''}
+        and not exists(select 1 from ehr.encounters e where e.id=n.encounter_id and e.patient_id=n.patient_id
+          and e.facility_id=n.facility_id and e.status='entered_in_error')
       order by n.signed_at desc,n.id desc limit 50`,values);
     return { encounters: encounters.rows, notes: notes.rows, importedRecords: await readImportedRecords(client,patientId),
       importedHealthProfile: await readImportedHealthProfile(client,patientId), limit: 50 };

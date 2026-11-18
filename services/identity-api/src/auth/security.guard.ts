@@ -1,6 +1,7 @@
 import {
   CanActivate,
   ExecutionContext,
+  HttpException,
   Injectable,
   Optional,
 } from '@nestjs/common';
@@ -17,6 +18,7 @@ import {
   PATIENT_ALLOWED,
   PATIENT_ONLY,
   REQUIRED_PERMISSIONS,
+  SIGNED_OUT_ALLOWED,
 } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
@@ -25,6 +27,11 @@ import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/** A refusal that means "no valid sign-in": 401, nothing else. */
+function unauthenticated(error: unknown): boolean {
+  return error instanceof HttpException && error.getStatus() === 401;
+}
 
 @Injectable()
 export class SecurityGuard implements CanActivate {
@@ -46,8 +53,10 @@ export class SecurityGuard implements CanActivate {
     if (this.metadata<boolean>(PUBLIC_ROUTE, context)) return true;
 
     try {
-      const { token, transport } = this.extractToken(request);
-      const verified = await this.tokens.verify(token);
+      const signedIn = await this.signedIn(request, this.metadata<boolean>(SIGNED_OUT_ALLOWED, context) === true);
+      // A route that answers a browser with no live sign-in (SignedOutAllowed): admitted with no actor.
+      if (!signedIn) return true;
+      const { verified, transport } = signedIn;
       request.actor = verified.actor;
       request.authTransport = transport;
       await this.enforceRuntimeControls(request);
@@ -154,6 +163,22 @@ export class SecurityGuard implements CanActivate {
       }
       if (error instanceof DomainProblem) throw error;
       throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+    }
+  }
+
+  /**
+   * The request's verified access token. On a SignedOutAllowed route only, a
+   * request with no access token, or one that does not verify (401), is no
+   * sign-in (undefined) rather than a refusal; any other fault still throws.
+   */
+  private async signedIn(request: HidRequest, signedOutAllowed: boolean): Promise<{
+    verified: Awaited<ReturnType<TokenService['verify']>>; transport: 'bearer' | 'cookie' } | undefined> {
+    try {
+      const { token, transport } = this.extractToken(request);
+      return { verified: await this.tokens.verify(token), transport };
+    } catch (error) {
+      if (signedOutAllowed && unauthenticated(error)) return undefined;
+      throw error;
     }
   }
 

@@ -3,15 +3,18 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
-import { AcceptPrescriptionForPharmacyDto, CreatePrescriptionDto, OrderStatus,
-  TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
+import { AcceptPrescriptionForPharmacyDto, OrderStatus, TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
+import { requireVisitOpenForWork } from '../shared/visit-guard';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
 import { calendarDate } from '../shared/calendar-date';
 import { checkPrescriptionAllergies, readAllergyAcknowledgements,
   recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
+import { type CreatePrescriptionInput, PRESCRIPTION_DISPENSING_DETAILS_OFF,
+  PrescriptionDispensingDetails } from './prescription-dispensing-details';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -53,13 +56,22 @@ const TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   [OrderStatus.EnteredInError]: [],
 };
 
+/** EHR-C8a: the only changes allowed on a visit entered in error: stopping the order. */
+const STOPPING: readonly OrderStatus[] = [OrderStatus.OnHold, OrderStatus.Cancelled, OrderStatus.EnteredInError];
+
 @Injectable()
 export class PrescriptionsService {
   constructor(
     private readonly repository: ClinicalRepository,
     private readonly pharmacyApi: PharmacyApiService,
     private readonly orderRoutes: OrderRouteReader,
+    private readonly details: PrescriptionDispensingDetails = PRESCRIPTION_DISPENSING_DETAILS_OFF,
   ) {}
+
+  /** The answer's columns: today's, plus the dispensing details while they are on (0125). */
+  private columns(): string {
+    return COLUMNS + this.details.selectList();
+  }
 
   /**
    * One page of the encounter's prescriptions, each with its latest route to
@@ -69,7 +81,10 @@ export class PrescriptionsService {
    * accepted for someone who was not the patient (item 3, 0088), so the
    * website may ask a clinician to have it ended there first (D15); and
    * `lateCorrection: true`: it can also reverse, after the prescription
-   * ended, a dispensing it recorded for the wrong person (D17, 0090).
+   * ended, a dispensing it recorded for the wrong person (D17, 0090). While
+   * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (0125), each item carries
+   * the dispensing details it was written with, and `dispensingDetails: true`
+   * says a create may carry them; off, neither.
    */
   async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.prescriptions', patientId, encounterId };
@@ -79,7 +94,7 @@ export class PrescriptionsService {
       { action: 'ehr.prescription.list', resourceType: 'prescription', resourceId: encounterId },
       async (client) => {
         const result = await client.query<PrescriptionRow & { cursorAt: string }>(
-          `select ${COLUMNS}, ${timelineCursorSql('created_at')} as "cursorAt" from ehr.prescriptions
+          `select ${this.columns()}, ${timelineCursorSql('created_at')} as "cursorAt" from ehr.prescriptions
            where encounter_id = $1 and patient_id = $2 and facility_id = $3
              and ($4::timestamptz is null or (created_at, id) < ($4::timestamptz, $5::uuid))
            order by created_at desc, id desc limit $6`,
@@ -90,7 +105,7 @@ export class PrescriptionsService {
         const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, ids);
         // 0117: each prescription's stored allergy acknowledgements (audited as a count, never the reason).
         const acknowledgements = await readAllergyAcknowledgements(client, context, patientId, ids);
-        const items = page.items.map((item) => ({ ...withOrderRoute(item, routes),
+        const items = page.items.map((item) => ({ ...withOrderRoute(this.details.project(item), routes),
           allergyAcknowledgements: acknowledgements.get(item.id) ?? [] }));
         return { value: { ...page, items },
           details: { resultCount: page.items.length, allergyAcknowledgementCount: countValues(acknowledgements) } };
@@ -98,7 +113,7 @@ export class PrescriptionsService {
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
     return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true,
-      lateCorrection: true };
+      lateCorrection: true, ...this.details.flag() };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string) {
@@ -111,25 +126,34 @@ export class PrescriptionsService {
         // 0117: the allergy acknowledgements stored for it, so whoever activates or resumes a draft
         // sees the earlier reason (audited as a count, never the reason).
         const acknowledgements = (await readAllergyAcknowledgements(client, context, patientId, [row.id])).get(row.id) ?? [];
-        return { value: { ...withOrderRoute(row, routes), allergyAcknowledgements: acknowledgements },
+        return { value: { ...withOrderRoute(this.details.project(row), routes), allergyAcknowledgements: acknowledgements },
           details: { allergyAcknowledgementCount: acknowledgements.length } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
   }
 
-  create(context: DataAccessContext, patientId: string, encounterId: string, input: CreatePrescriptionDto, key: string) {
+  /**
+   * A new prescription. While PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on
+   * (0125) it may carry the dispensing details (CreatePrescriptionBodyPipe),
+   * each pair together, stored with it and echoed when set; a body without
+   * them keeps today's Idempotency-Key digest. Off, exactly as before.
+   */
+  create(context: DataAccessContext, patientId: string, encounterId: string, input: CreatePrescriptionInput, key: string) {
     if ((input.doseQuantity === undefined) !== (input.doseUnit === undefined)) {
       throw new DomainProblem(400, 'DOSE_INCOMPLETE', 'Dose quantity and unit must be supplied together');
     }
+    this.details.requirePairs(input);
     const operation = 'prescription.create';
-    const digest = requestDigest(operation, { patientId, encounterId, input });
+    const digest = requestDigest(operation, { patientId, encounterId, input: this.details.digestInput(input) });
     return this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.prescription.create', resourceType: 'prescription' },
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'prescription',
         async () => {
+          // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
           // 0117: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
           // the warning they were shown (its warningToken); without it nothing is written (the whole
           // transaction, idempotency key included, rolls back).
@@ -139,14 +163,15 @@ export class PrescriptionsService {
             `insert into ehr.prescriptions (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
                medication_code_system, medication_code, medication_display, dose_quantity, dose_unit,
-               route_code, frequency, instructions, starts_on, ends_on, status
-             ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-             returning ${COLUMNS}`,
+               route_code, frequency, instructions, starts_on, ends_on, status${this.details.insertColumns()}
+             ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${this.details.insertPlaceholders()})
+             returning ${this.columns()}`,
             [
               encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
               input.medicationCodeSystem ?? null, input.medicationCode ?? null, input.medicationDisplay,
               input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null,
               input.frequency, input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.status,
+              ...this.details.insertValues(input),
             ],
           );
           const row = this.single(result.rows[0]);
@@ -155,11 +180,14 @@ export class PrescriptionsService {
             // never the substance or the reason text.
             const details = await recordAllergyAcknowledgement(client, context, patientId, row.id, 'create', matches,
               input.allergyAcknowledgement);
-            return { value: row, id: row.id, details };
+            return { value: this.details.project(row), id: row.id, details };
           }
-          return { value: row, id: row.id };
+          return { value: this.details.project(row), id: row.id };
         },
-        (id) => this.findById(client, context, patientId, id),
+        async (id) => {
+          const row = await this.findById(client, context, patientId, id);
+          return row && this.details.project(row);
+        },
       ),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
@@ -180,10 +208,28 @@ export class PrescriptionsService {
       context, patientId, 'write_records',
       { action: 'ehr.prescription.update', resourceType: 'prescription', resourceId: prescriptionId },
       async (client) => {
+        // EHR-C8a: on a visit entered in error a prescription can only be put
+        // on hold, cancelled or entered in error; anything else (activate,
+        // resume, complete, edit) is 409 VISIT_ENTERED_IN_ERROR. The visit is
+        // locked before the prescription, as in every order path.
+        if (!STOPPING.includes(input.status as OrderStatus)) {
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
+        }
         const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
         }
+        // FR-1: the first activation of a draft, with no other change, needs no
+        // typed reason; the fixed one is recorded. "First" is checked against
+        // the version history (a resume after a hold is not first). Decided
+        // before the allergy check, whose 409 is unchanged.
+        const firstActivation = input.changeReason === undefined
+          && current.status === OrderStatus.Draft && input.status === OrderStatus.Active
+          && input.frequency === undefined && input.instructions === undefined && input.endsOn === undefined
+          && await neverReachedBefore(client, 'prescriptions', prescriptionId,
+            [OrderStatus.Active, OrderStatus.OnHold, OrderStatus.Completed]);
+        const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason,
+          firstActivation ? 'first_activation' : undefined);
         // 0117: Activate (draft) and Resume (on hold) check the allergies again: one may have been
         // recorded since the prescription was saved. A match already covered by a stored reason for
         // this prescription needs none.
@@ -192,13 +238,13 @@ export class PrescriptionsService {
           ? await checkPrescriptionAllergies(client, context, patientId,
             { display: current.medicationDisplay, code: current.medicationCode }, input.allergyAcknowledgement, current.id)
           : [];
-        await this.repository.setChangeReason(client, input.changeReason);
+        await this.repository.setChangeReason(client, reason);
         const result = await client.query<PrescriptionRow>(
           `update ehr.prescriptions set
              status = coalesce($1, status), frequency = coalesce($2, frequency),
              instructions = coalesce($3, instructions), ends_on = coalesce($4::date, ends_on)
            where id = $5 and encounter_id = $6 and patient_id = $7 and facility_id = $8 and row_version = $9
-           returning ${COLUMNS}`,
+           returning ${this.columns()}`,
           [
             input.status ?? null, input.frequency ?? null, input.instructions ?? null, input.endsOn ?? null,
             prescriptionId, encounterId, patientId, context.facilityId, input.expectedRowVersion,
@@ -209,9 +255,11 @@ export class PrescriptionsService {
         if (matches.length > 0 && input.allergyAcknowledgement) {
           const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
             current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement);
-          return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion, ...override } };
+          return { value: this.details.project(row), resourceId: prescriptionId,
+            details: { rowVersion: row.rowVersion, ...reasonDetails, ...override } };
         }
-        return { value: row, resourceId: prescriptionId, details: { rowVersion: row.rowVersion } };
+        return { value: this.details.project(row), resourceId: prescriptionId,
+          details: { rowVersion: row.rowVersion, ...reasonDetails } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
@@ -236,6 +284,8 @@ export class PrescriptionsService {
         details: { expectedPrescriptionVersion: input.expectedRowVersion },
       },
       async (client) => {
+        // EHR-C8a: never sent to the pharmacy from a visit entered in error.
+        await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
         const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
         if (Number(current.rowVersion) !== input.expectedRowVersion) {
           throw new DomainProblem(
@@ -311,7 +361,7 @@ export class PrescriptionsService {
 
   private async find(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
     const result = await client.query<PrescriptionRow>(
-      `select ${COLUMNS} from ehr.prescriptions
+      `select ${this.columns()} from ehr.prescriptions
        where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4`,
       [id, encounterId, patientId, context.facilityId],
     );
@@ -320,7 +370,7 @@ export class PrescriptionsService {
 
   private async findById(client: PoolClient, context: DataAccessContext, patientId: string, id: string) {
     const result = await client.query<PrescriptionRow>(
-      `select ${COLUMNS} from ehr.prescriptions where id = $1 and patient_id = $2 and facility_id = $3`,
+      `select ${this.columns()} from ehr.prescriptions where id = $1 and patient_id = $2 and facility_id = $3`,
       [id, patientId, context.facilityId],
     );
     return result.rows[0];
@@ -328,7 +378,7 @@ export class PrescriptionsService {
 
   private async lock(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
     const result = await client.query<PrescriptionRow>(
-      `select ${COLUMNS} from ehr.prescriptions
+      `select ${this.columns()} from ehr.prescriptions
        where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 for update`,
       [id, encounterId, patientId, context.facilityId],
     );

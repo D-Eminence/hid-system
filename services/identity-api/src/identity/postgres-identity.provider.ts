@@ -8,6 +8,7 @@ import type {
   IdentityProvider,
 } from './identity.types';
 import type { DataAccessContext, PurposeOfUse } from '../common/request-context';
+import { patientHasVerifiedNinSql } from './nin-status';
 
 interface PatientRow {
   id: string;
@@ -18,6 +19,7 @@ interface PatientRow {
   dob: string | null;
   gender: string | null;
   row_version: string;
+  nin_verified?: boolean;
 }
 
 interface GrantRow {
@@ -34,11 +36,12 @@ export class PostgresIdentityProvider implements IdentityProvider {
   async lookupExactHid(hid: string, context: DataAccessContext): Promise<IdentityPatient | null> {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<PatientRow>(
-        `select id::text, hid_code, first_name, last_name, full_name,
-                dob::text, gender, row_version::text
-           from identity.patients
-          where upper(hid_code) = upper($1)
-            and status = 'active'
+        `select patient_row.id::text, patient_row.hid_code, patient_row.first_name, patient_row.last_name,
+                patient_row.full_name, patient_row.dob::text, patient_row.gender, patient_row.row_version::text,
+                ${patientHasVerifiedNinSql('patient_row.id')} as nin_verified
+           from identity.patients patient_row
+          where upper(patient_row.hid_code) = upper($1)
+            and patient_row.status = 'active'
           limit 1`,
         [hid],
       );
@@ -159,6 +162,7 @@ export class PostgresIdentityProvider implements IdentityProvider {
       dateOfBirth: row.dob,
       gender: row.gender,
       rowVersion: Number(row.row_version),
+      ...(row.nin_verified === undefined ? {} : { ninVerified: row.nin_verified === true }),
     };
   }
 }

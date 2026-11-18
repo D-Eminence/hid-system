@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PoolClient } from 'pg';
+import { clientAnsweringSingleSignOnProbe } from '../testing/recent-sign-in-probe';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
@@ -27,7 +28,7 @@ const context: DataAccessContext = {
 
 describe('ConsentService', () => {
   const query = jest.fn();
-  const client = { query } as unknown as PoolClient;
+  const client = clientAnsweringSingleSignOnProbe(query);
   const withTransaction = jest.fn(
     async (_context: DataAccessContext, operation: (transactionClient: PoolClient) => Promise<unknown>) =>
       operation(client),
@@ -562,7 +563,7 @@ describe('ConsentService', () => {
 
 describe('ConsentService patient revocation (0087)', () => {
   const query = jest.fn();
-  const client = { query } as unknown as PoolClient;
+  const client = clientAnsweringSingleSignOnProbe(query);
   const withSystemTransaction = jest.fn(
     async (_correlationId: string, operation: (transactionClient: PoolClient) => Promise<unknown>) => operation(client),
   );

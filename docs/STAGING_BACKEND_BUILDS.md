@@ -51,8 +51,8 @@ with available Debian fixes. Seven unique High advisory IDs were then left
 assessment in `security/production-runtime-assessment.json`; CVE-2026-76844 was
 added on 2026-11-06 after owner approval. The two zlib advisories were fixed by
 DSA-6613-1 and removed on 2026-11-12 (see below). Four OpenSSL advisories in
-libssl3t64 3.5.7-1~deb13u3 were added on 2026-11-17, so nine High advisory IDs
-remain (fifteen package matches):
+libssl3t64 3.5.7-1~deb13u3 were added on 2026-11-17 and two more on 2026-11-18,
+so eleven High advisory IDs remain (seventeen package matches):
 
 | Advisory | Package(s) | Current scan result |
 |---|---|---|
@@ -67,6 +67,8 @@ remain (fifteen package matches):
 | CVE-2026-95691 | libssl3t64 | not-fixed; QUIC client CRYPTO frame use-after-free (added 2026-11-17) |
 | CVE-2026-88823 | libssl3t64 | not-fixed; AES-GCM-SIV empty AAD update (added 2026-11-17) |
 | CVE-2026-107496 | libssl3t64 | not-fixed; CMS_encrypt with EC group order 1 (added 2026-11-17) |
+| CVE-2026-107493 | libssl3t64 | not-fixed; PEM_X509_INFO_read_bio_ex with a caller-supplied stack (added 2026-11-18) |
+| CVE-2026-124709 | libssl3t64 | not-fixed; QUIC server keeps rejected streams (added 2026-11-18) |
 
 Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 [glibc deprecated functions](https://security-tracker.debian.org/tracker/CVE-2026-5435),
@@ -79,7 +81,10 @@ Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 [OpenSSL QUIC client](https://security-tracker.debian.org/tracker/CVE-2026-95691),
 [OpenSSL GCM-SIV AAD](https://security-tracker.debian.org/tracker/CVE-2026-88823),
 [OpenSSL CMS_encrypt](https://security-tracker.debian.org/tracker/CVE-2026-107496),
-[OpenSSL advisory 20261110](https://openssl-library.org/news/secadv/20261110.txt).
+[OpenSSL advisory 20261110](https://openssl-library.org/news/secadv/20261110.txt),
+[OpenSSL PEM_X509_INFO](https://security-tracker.debian.org/tracker/CVE-2026-107493),
+[OpenSSL QUIC server](https://security-tracker.debian.org/tracker/CVE-2026-124709),
+[OpenSSL advisory 20261117](https://openssl-library.org/news/secadv/20261117.txt).
 These are scanner findings, not a claim that each is exploitable through HID.
 No blanket ignore, severity downgrade or security exception is applied.
 
@@ -126,8 +131,50 @@ and it stays open until a Node 22 release ships OpenSSL 3.5.10. HID services
 use only `aes-256-gcm` and no CMS or QUIC API. The expected scan is now fifteen
 High matches: the eleven glibc and GCC matches and the four libssl3t64 matches.
 
-Every staging image with High scan findings (all but the gateway, whose scan is
-clean) is admitted against the same exact-image not-affected assessment as
+On 2026-11-18 Grype (database built 2026-11-18T06:21Z) added two more High
+libssl3t64 3.5.7-1~deb13u3 findings from OpenSSL advisory 20261117 (OpenSSL
+severity Low, High in Grype only from the CISA-ADP CVSS score, fixed in 3.5.10 due
+2026-12-01, Debian vulnerable with no fixed version): CVE-2026-107493, a
+use-after-free in `PEM_X509_INFO_read_bio_ex()` that needs a caller-supplied
+non-NULL stack, and CVE-2026-124709, unbounded memory retention in the OpenSSL
+QUIC server. Staging run `44300202434` confirmed that all twelve native
+inventories are unchanged and that these two were the only unassessed rows. Both
+are assessed on the same basis as the four above (no process loads the system
+`libssl.so.3` or `libcrypto.so.3`). Node's static OpenSSL 3.5.9 is also in their
+range; the Node 22.23.4 source has no `PEM_X509_INFO_read*`, `OSSL_QUIC_*` or
+`SSL_new_listener` call outside `deps/openssl`. The expected scan is now
+seventeen High matches. The policy `expires_at` stays 2026-12-12, but these two
+entries carry a per-finding `expires_at` of 2026-12-01T00:00:00+00:00: the
+assessor (`scripts/assess-staging-runtime.py`, also used by production) and
+`assertScan` in both build scripts refuse a match against them from that instant,
+and production refuses a per-finding expiry later than the policy's. Findings
+without one are unchanged. All six libssl3t64 entries should be removed once a
+Debian 3.5.10 package is in the base rather than renewed past 2026-12-01.
+
+The gateway (nginx-unprivileged on Alpine 3.24.2) has no ELF inventory
+assessment. Earlier gateway findings were fixed by pinning a fixed package from the
+signed Alpine 3.24 repository (see `gateway/Dockerfile`). On 2026-11-18 Grype
+began reporting CVE-2026-88823, CVE-2026-95691, CVE-2026-95692 and
+CVE-2026-107496 against libssl3 and libcrypto3 3.5.9-r0 (eight High matches,
+through NVD CPE data). Alpine 3.24 serves no newer package; only edge has 3.5.9-r1,
+and it does not fix the 20261117 advisories. The gateway serves plain HTTP on port
+3000 and proxies only to `http://` upstreams, so it never creates a TLS or QUIC
+session; nginx and njs import no AES-GCM-SIV fetch, QUIC method or `CMS_*`
+function, and no module is loaded. Both workflows therefore apply the committed
+`security/gateway-runtime.vex.json` to the gateway scan only. It names those four
+CVEs for the exact libssl3 and libcrypto3 3.5.9-r0 aarch64 Alpine 3.24.2 purls,
+and `assertGatewayVex` in `scripts/production-backend-build.mjs` refuses it after
+`hid_expires_at` (2026-12-01), for any other package, CVE or Critical finding, or
+when the sha256 of `gateway/Dockerfile`, `gateway/nginx.conf.template` or
+`gateway/proxy-headers.conf` differs from its `hid_bound_files`, so any gateway
+change needs the VEX re-reviewed. The build scripts read the VEX only for a gateway
+scan with ignored High/Critical rows (a clean gateway scan needs no file), and
+`pack` copies it into the gateway build evidence as `gateway-runtime.vex.json`.
+Replace it with a pinned fixed Alpine 3.24 package when one is served, and do not
+renew it. When Grype starts matching CVE-2026-107493 and CVE-2026-124709 to the
+gateway packages, the gateway scan fails again until they are assessed or fixed.
+
+Every staging image with High scan findings except the gateway (see above) is admitted against the same exact-image not-affected assessment as
 production, `security/production-runtime-assessment.json`, which covers all
 twelve assessed components. Editing it rebuilds every staging image.
 The earlier per-component staging assessments (first for the Novu update, see
@@ -334,3 +381,19 @@ It uses two optional fields the gate gained for it:
 (`EHR_AUDIT_GATE`) and the directories an exception may name
 (`EXCEPTION_GATE_DIRECTORIES`: infra/aws and apps/ehr); the release tests try
 dropping, weakening or redirecting it.
+
+**18 November 2026: entry removed.** npm audit stopped reporting
+GHSA-fc5q-39xc-vjpf while picomatch was still 4.0.7, its latest release, so the
+advisory was withdrawn or changed upstream rather than fixed:
+`npm --prefix apps/ehr audit --json` now reports 0 vulnerabilities. The gate then
+failed the entry as stale on every branch (`stale exception: GHSA-fc5q-39xc-vjpf
+picomatch <=4.0.7 (high) in apps/ehr no longer matches npm audit at
+node_modules/picomatch; correct or remove it`), so the entry was deleted, as
+the stale rule above requires; the infra/aws minimatch entry is the only one
+left. The apps/ehr audit stays on the gate (`EHR_AUDIT_GATE`, with apps/ehr
+still in `EXCEPTION_GATE_DIRECTORIES`), so a future exception needs no workflow
+change.
+With no apps/ehr entry it behaves like the plain audit at moderate: if npm
+reports the advisory again, the job fails until it is reviewed again. The
+release tests keep the removed entry as a fixture, to go on covering
+`dependent_paths`, `ends_when_fix_published` and the registry lookup.

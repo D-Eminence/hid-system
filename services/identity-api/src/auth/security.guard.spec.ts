@@ -1,7 +1,8 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn(), SignJWT: jest.fn() }));
-import type { ExecutionContext } from '@nestjs/common';
+import { type ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { AuditService } from '../audit/audit.service';
+import { FacilityOptional, PatientAllowed, SignedOutAllowed } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
@@ -124,5 +125,66 @@ describe('SecurityGuard: patient-only routes refuse any other session as 403 PAT
     const { guard } = guardFor(staff);
     await expect(guard.canActivate(context(httpRequest({ authorization: 'Bearer signed' }),
       PatientSelfController.prototype.profile, PatientSelfController))).resolves.toBe(true);
+  });
+});
+
+describe('SecurityGuard: a SignedOutAllowed route (product sign-out) also admits a browser with no live sign-in', () => {
+  class SignOutController {
+    @SignedOutAllowed()
+    @FacilityOptional()
+    @PatientAllowed()
+    signOut(): void { /* the handler does its own Origin and CSRF checks */ }
+
+    @FacilityOptional()
+    @PatientAllowed()
+    plain(): void { /* any other route */ }
+  }
+  const owner = SignOutController;
+  const signOut = SignOutController.prototype.signOut as (...args: never[]) => unknown;
+  const plain = SignOutController.prototype.plain as (...args: never[]) => unknown;
+
+  function guardWith(verify: jest.Mock, verifyCsrf = jest.fn(() => true)) {
+    const audit = { record: jest.fn(async () => undefined) };
+    const database = { query: jest.fn(async (_sql: string, parameters: unknown[]) =>
+      ({ rows: [{ enabled: parameters[0] !== 'maintenance_mode' }], rowCount: 1 })) };
+    const guard = new SecurityGuard(new Reflector(), { verify, verifyCsrf } as unknown as TokenService,
+      audit as unknown as AuditService, database as unknown as DatabaseService);
+    return { guard, audit };
+  }
+  const withCookie = (request: HidRequest, cookies: Record<string, string>) =>
+    Object.assign(request, { cookies }) as HidRequest;
+
+  it('admits a request with no access token, with no actor, and refuses it anywhere else', async () => {
+    const { guard } = guardWith(jest.fn());
+    const request = httpRequest({ Origin: 'http://localhost:5173' }, 'POST');
+    await expect(guard.canActivate(context(request, signOut, owner))).resolves.toBe(true);
+    expect(request.actor).toBeUndefined();
+    expect((await refusal(guard.canActivate(context(httpRequest({}, 'POST'), plain, owner)))).getStatus()).toBe(401);
+  });
+
+  it('admits an access token that no longer verifies (401), with no actor', async () => {
+    const { guard } = guardWith(jest.fn(async () => { throw new UnauthorizedException('Invalid or expired access token'); }));
+    const request = withCookie(httpRequest({}, 'POST'), { hid_access: 'ended-access-token' });
+    await expect(guard.canActivate(context(request, signOut, owner))).resolves.toBe(true);
+    expect(request.actor).toBeUndefined();
+  });
+
+  it('still answers any other fault while reading the sign-in', async () => {
+    const { guard } = guardWith(jest.fn(async () => { throw new DomainProblem(503, 'IDENTITY_UNAVAILABLE', 'down'); }));
+    const request = withCookie(httpRequest({}, 'POST'), { hid_access: 'access-token' });
+    expect((await refusal(guard.canActivate(context(request, signOut, owner)))).getStatus()).toBe(503);
+  });
+
+  it('checks a live cookie session exactly as on any other route: a write without its CSRF token is refused', async () => {
+    const { guard } = guardWith(jest.fn(async () => ({ actor: staff, claims: {} })), jest.fn(() => false));
+    const request = withCookie(httpRequest({ Origin: 'http://localhost:5173' }, 'POST'), { hid_access: 'access-token' });
+    expect((await refusal(guard.canActivate(context(request, signOut, owner)))).code).toBe('CSRF_VALIDATION_FAILED');
+  });
+
+  it('sets the actor of a live session, as on any other route', async () => {
+    const { guard } = guardWith(jest.fn(async () => ({ actor: patient, claims: {} })));
+    const request = httpRequest({ Authorization: 'Bearer access-token' }, 'POST');
+    await expect(guard.canActivate(context(request, signOut, owner))).resolves.toBe(true);
+    expect(request.actor?.subject).toBe(patient.subject);
   });
 });
