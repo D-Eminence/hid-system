@@ -136,6 +136,8 @@ const acceptedMigrations = new Map([
   ['0121_outreach_registration_read_once.sql', 'f03a404acb315e860ccf36c1b123d64d233224be3466def963e6d322e03e43fe'],
   ['0122_patient_access_pin_day_read_write.sql', 'ad62aff87e768e45693465d8e9d3713a3645d536b10d5a8c1d620ea8cfbc8cfc'],
   ['0123_sealed_qa_tenant.sql', '72a685d7dd19152accd8f7855cf2f270893c21980d244a0697ff9c0b8da155b0'],
+  ['0124_work_item_patient_cards.sql', 'd0f6e5d640f6e92cddaa12fb88b7f387e9e4f9f00c474e4ee331e5d94c71a2a1'],
+  ['0125_prescription_dispensing_details.sql', '819afe2de86c400f2ad648ed928eb8318e55fdf0cd17952583b1fd1c52b25bd4'],
   ['0124_organization_staff_kinds.sql', 'fed8f7483efdd901257cf06f3bd4e2ed3e419d3c5a66089afc8347ae84a741a8'],
 ])
 

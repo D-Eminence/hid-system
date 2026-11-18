@@ -1721,6 +1721,26 @@ revoke all on function identity.sealed_qa_ids(text),
   identity.outreach_invitations_sealed_qa(),
   identity.demo_patient_logins_move() from public;
 
+-- Patient details on this facility's own lab and pharmacy work (0124), as
+-- that migration grants them (its section 2): the Lab reader to the Lab
+-- runtime and the Pharmacy reader to the Pharmacy runtime, each also to the
+-- schema test runtime; nothing to the EHR, Identity, OCR, Outreach or
+-- Notification runtimes, and no table privilege to anyone (both read
+-- identity.patients as its owner).
+grant execute on function lab.work_item_patient_cards(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.work_item_patient_cards(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function lab.work_item_patient_cards(uuid[]), pharmacy.work_item_patient_cards(uuid[]) from public;
+
+-- Prescription strength, form, duration, quantity and priority for the
+-- pharmacy (0125), as that migration grants them (its section 2): the
+-- Pharmacy reader to the Pharmacy runtime and the schema test runtime;
+-- nothing to the EHR, Lab, Identity, OCR, Outreach or Notification runtimes
+-- (it reads pharmacy.work_items and ehr.record_versions as its owner). The
+-- seven new ehr.prescriptions columns need no grant: the EHR runtime's
+-- privileges on that table above are table-wide.
+grant execute on function pharmacy.work_item_prescription_details(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function pharmacy.work_item_prescription_details(uuid[]) from public;
+
 -- The kinds and active products of an organisation for the staff sign-in gate (0124, owner decisions Q90 and Q91):
 -- the Identity runtime's staff context reads them once per membership, as it reads
 -- identity.organization_self_service_state. To the Identity runtime alone; nothing to any other runtime; no grant on
