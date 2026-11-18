@@ -6070,3 +6070,83 @@ Screen change (Akos frontend branch): the account menu gains "My profile",
 which shows these fields; the licence is shown as "Licence number ending
 4567".
 
+## SX-9. Saved lists: this facility's OCR jobs and staff names (no migration)
+
+Akos P1-10. OCR jobs no longer disappear when the page is left: the Migrate
+desk reads this facility's jobs, newest first, a page at a time, and shows
+who started each one by name. (The registration-case list is SX-10, lane A;
+it uses the same names route.)
+
+| Route (under `/api/v1`) | Who | Answer |
+| --- | --- | --- |
+| `GET /ocr/job-list[?status=<status>][&mine=true][&limit=<1-50>][&cursor=<nextCursor>]` | Staff with `ocr.job.read` at the `X-Facility-ID` facility (doctor, clinician, nurse, lab, admin). Purpose is always `healthcare-operations`, whatever `X-Purpose-Of-Use` says. | `200 { items, nextCursor }` below. No `X-Facility-ID`: `400 FACILITY_REQUIRED`. A facility the caller is not active at: `403 FACILITY_ACCESS_DENIED`. No `ocr.job.read`: `403 PERMISSION_DENIED`. Any other query key, a status that does not exist, `mine` other than `true`, a limit outside 1-50: `400 VALIDATION_FAILED`. A cursor this route did not make: `400 OCR_JOB_LIST_CURSOR_INVALID`, "This page of the list can no longer be opened. Start the list again." |
+| `GET /identity/facility-staff-names[?membershipIds=<id>,<id>,…]` | Any staff member active at the `X-Facility-ID` facility. No permission beyond membership. | `200 { facilityId, staff, complete }` below. No `X-Facility-ID`: `400 FACILITY_REQUIRED`. A facility the caller is not active at: `403 FACILITY_ACCESS_DENIED`. A patient session: `403 PATIENT_SCOPE_DENIED`. More than 100 ids, or anything but comma-separated UUIDs: `400 VALIDATION_FAILED`. |
+
+`status` is one of `queued`, `processing`, `extracted`,
+`awaiting_validation`, `validated`, `failed`, `cancelled`. `mine=true` lists
+only the jobs the caller started at this facility. `limit` defaults to 25.
+
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "documentId": "uuid",
+      "status": "awaiting_validation",
+      "createdAt": "2026-11-18T10:00:00.123Z",
+      "createdByMembershipId": "uuid",
+      "createdByMe": false,
+      "attemptCount": 1,
+      "maxAttempts": 3,
+      "completedAt": null,
+      "failedAt": null,
+      "failureCode": null
+    }
+  ],
+  "nextCursor": "opaque string, or null on the last page"
+}
+```
+
+- Only this facility's jobs are read: the query filters on the request's
+  facility, and row-level security on `ocr.jobs` (0013) allows only that
+  facility as well. Another facility's jobs are never listed.
+- No patient field is answered and no patient or document table is read.
+  A job's patient is shown only when the job is opened with
+  `GET /ocr/jobs/:jobId`, which checks access to that patient as today.
+  No Health ID is ever accepted in this URL.
+- `failureCode` is the stored code only (for example `PROVIDER_TIMEOUT`); the
+  stored free-text summary is not answered.
+- Paging is by `(createdAt, id)`, newest first, kept to the microsecond, so a
+  page never repeats or skips a job. Pass `nextCursor` back as `cursor` with
+  the same filters.
+- Each answer writes one audit row, `ocr.job.list` (resource
+  `ocr-job-list`), in the same read-only transaction, with the count, the
+  job ids shown, the filters and whether it was the first page; if that row
+  cannot be written nothing is answered. The request itself is audited as
+  `api.ocr.job.list.request`.
+
+```json
+{
+  "facilityId": "uuid",
+  "staff": [
+    { "membershipId": "uuid", "name": "Bola Fictional", "current": true },
+    { "membershipId": "uuid", "name": null, "current": false }
+  ],
+  "complete": true
+}
+```
+
+- The facility is the request's own, never one the caller names.
+- `staff` holds the facility's members past and present, current members
+  first, then by name. `current` is `false` once the membership, the staff
+  record or the login has ended. `name` is `null` for a login that was
+  deleted; the screen shows "Former staff member".
+- Only names are answered: no email, role, licence or account id.
+- Without `membershipIds`, at most 500 names; `complete` is `false` when
+  there are more, and the screen then asks for the ids on its page with
+  `membershipIds`.
+- Audited on success and refusal as `api.identity.facility-staff-names.read`.
+
+Screen change (Akos frontend branch): the Migrate desk gains a "Documents
+read here" list (status filter, "Only mine", "Load more"), showing "Started
+by <name>" from the names route; a row opens the job as today.
