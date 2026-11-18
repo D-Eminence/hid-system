@@ -15,9 +15,12 @@ import { DatabaseService } from '../database/database.service';
  * Every lookup that does not open a patient (no such patient, not available,
  * or not authorized) is counted for the member in an `account` bucket of
  * auth.otp_rate_limits keyed by an HMAC of the membership (as Order
- * destinations count searches): 30 in 10 minutes. The 31st answers 429
- * PATIENT_LOOKUP_LIMITED for 10 minutes, before anything is said about the
- * Health ID. A lookup that opens a patient is not counted.
+ * destinations count searches): 30 in 10 minutes. From the 31st, the lookup
+ * is answered with today's refusal for 10 minutes (404 NOT_FOUND, or 403 for a
+ * patient this lookup may see but not open), never "No such patient", before
+ * anything is said about the Health ID. It is never a 429: every client
+ * closes an open record on 403 or 404. A lookup that opens a patient is not
+ * counted.
  *
  * Whether a Health ID was ever issued is read with
  * identity.support_health_id_matches (0109): it reads past the patients'
@@ -33,13 +36,8 @@ export const PATIENT_LOOKUP_MISS_WINDOW: RateLimitWindow = { windowSeconds: 600,
 
 export const PATIENT_NOT_FOUND_CODE = 'PATIENT_NOT_FOUND';
 export const PATIENT_NOT_FOUND_MESSAGE = 'No patient has this Health ID.';
-export const PATIENT_LOOKUP_LIMITED_CODE = 'PATIENT_LOOKUP_LIMITED';
-export const PATIENT_LOOKUP_LIMITED_MESSAGE =
-  'Too many Health IDs could not be opened. Wait 10 minutes, then try again.';
 
 export const patientNotFound = () => new DomainProblem(404, PATIENT_NOT_FOUND_CODE, PATIENT_NOT_FOUND_MESSAGE);
-export const patientLookupLimited = () => new DomainProblem(429, PATIENT_LOOKUP_LIMITED_CODE,
-  PATIENT_LOOKUP_LIMITED_MESSAGE);
 
 /** A Health ID as identity.patients' CHECK (0002) and the lookup body require it. */
 const HEALTH_ID = /^HID-[A-HJ-NP-Z2-9]{6,32}$/;

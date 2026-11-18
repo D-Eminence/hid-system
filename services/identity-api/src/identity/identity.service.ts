@@ -12,13 +12,14 @@ import type {
 import { IDENTITY_PROVIDER } from './identity.types';
 import { RecordAccessNoticeService } from './record-access-notice.service';
 import { ninStatusOf } from './nin-status';
-import { PatientLookupMissService, patientLookupLimited, patientNotFound } from './patient-lookup-miss.service';
+import { PatientLookupMissService, patientNotFound } from './patient-lookup-miss.service';
 
 /**
  * How a staff Health ID lookup that opened no patient ended, as its audit row
  * says it (never the Health ID): no patient record has the Health ID (Q100 B),
  * the patient is not available here, the lookup was not authorized, or the
- * member was limited.
+ * member was limited (then the answer is today's 404 or 403, never "No such
+ * patient" and never a 429: every client closes a record on 403 or 404).
  */
 type LookupMissResult = 'no_such_patient' | 'not_available' | 'not_authorized' | 'limited';
 
@@ -62,11 +63,13 @@ export class IdentityService {
     if (!patient) {
       // Q100 B: counted first, so a limited member learns nothing about the
       // Health ID; then "No such patient" only when no record has it at all.
+      // A limited member gets today's 404, never a 429: the website closes an
+      // open record on 403 or 404 (its verify() before every save), so a new
+      // status would leave a record open after access has ended.
       const limited = await this.misses?.countMiss(context);
       const issued = limited === false ? await this.misses?.issued(hid) : undefined;
       const result: LookupMissResult = limited === true ? 'limited' : issued === false ? 'no_such_patient' : 'not_available';
       await this.record(context, 'identity.patient.lookup', 'denied', undefined, purpose, { lookupResult: result });
-      if (result === 'limited') throw patientLookupLimited();
       if (result === 'no_such_patient') throw patientNotFound();
       throw new NotFoundException('Patient was not found or is not available');
     }
@@ -77,12 +80,11 @@ export class IdentityService {
       context,
     });
     if (!decision.allowed) {
-      // The patient exists but this lookup may not open them: today's answer,
-      // counted with the other lookups that open no patient.
+      // The patient exists but this lookup may not open them: today's 403,
+      // limited or not, counted with the other lookups that open no patient.
       const limited = await this.misses?.countMiss(context);
       const result: LookupMissResult = limited === true ? 'limited' : 'not_authorized';
       await this.record(context, 'identity.patient.lookup', 'denied', patient.id, purpose, { lookupResult: result });
-      if (result === 'limited') throw patientLookupLimited();
       throw new ForbiddenException('Patient access is not authorized');
     }
     await this.record(context, 'identity.patient.lookup', 'success', patient.id, purpose, {

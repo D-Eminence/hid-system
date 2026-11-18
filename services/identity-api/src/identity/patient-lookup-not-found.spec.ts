@@ -93,18 +93,26 @@ describe('Q100 B: staff Health ID lookup (IdentityService.lookupPatient)', () =>
       details: { lookupResult: 'not_authorized' } }));
   });
 
-  it.each([
-    ['a missing Health ID', null, allow],
-    ['a refused patient', patient, deny],
-  ] as const)('answers 429 PATIENT_LOOKUP_LIMITED for %s once the member is limited, saying nothing about it',
-    async (_label, found, decision) => {
-      const { service, audit, misses } = setup(found, decision,
+  it('gives a limited member today\'s 404 for a missing Health ID: never 429, never "No such patient"', async () => {
+    const { service, audit, misses } = setup(null, allow,
+      { countMiss: jest.fn(async () => true), issued: jest.fn(async () => false) });
+    const failure = await service.lookupPatient(NOBODY, 'direct-care', context).catch((error: unknown) => error);
+    expect(failure).not.toBeInstanceOf(DomainProblem);
+    expect(failure).toMatchObject({ status: 404, message: 'Patient was not found or is not available' });
+    expect(misses?.issued).not.toHaveBeenCalled();
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied', patientId: undefined,
+      details: { lookupResult: 'limited' } }));
+  });
+
+  it('gives a limited member today\'s 403 for a patient this lookup may not open (a closed record still closes)',
+    async () => {
+      const { service, audit, misses } = setup(patient, deny,
         { countMiss: jest.fn(async () => true), issued: jest.fn(async () => false) });
-      await expect(service.lookupPatient(found ? KNOWN : NOBODY, 'direct-care', context)).rejects.toMatchObject({
-        status: 429, code: 'PATIENT_LOOKUP_LIMITED',
-        message: 'Too many Health IDs could not be opened. Wait 10 minutes, then try again.' });
+      const failure = await service.lookupPatient(KNOWN, 'direct-care', context).catch((error: unknown) => error);
+      expect(failure).not.toBeInstanceOf(DomainProblem);
+      expect(failure).toMatchObject({ status: 403, message: 'Patient access is not authorized' });
       expect(misses?.issued).not.toHaveBeenCalled();
-      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied',
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied', patientId,
         details: { lookupResult: 'limited' } }));
     });
 
@@ -213,8 +221,12 @@ describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {
   const provider = { lookupExactHid: jest.fn(), authorize: jest.fn(), consentStatus: jest.fn() };
   const audit = { record: jest.fn(async () => undefined), recordWithClient: jest.fn() };
   const issuedRows: { rows: { health_id: string }[] } = { rows: [] };
+  // The member's bucket, as auth.otp_rate_limits holds it (blocked: limited for 10 minutes).
+  const bucket: { blocked: boolean } = { blocked: false };
   const query = jest.fn(async (sql: string) => /support_health_id_matches/.test(sql) ? issuedRows
-    : { rows: [], rowCount: 0 });
+    : /from auth\.otp_rate_limits/.test(sql) && bucket.blocked
+      ? { rows: [{ request_count: 31, window_started_at: new Date(), blocked_until: new Date(Date.now() + 600_000) }] }
+      : { rows: [], rowCount: 0 });
   const database = { query, withTransaction: jest.fn(async (_c: unknown, work: (client: unknown) => unknown) =>
     work({ query })) };
 
@@ -249,7 +261,7 @@ describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {
     await app.init();
   });
   afterAll(async () => { await app?.close(); resetEnvironmentForTests(); });
-  beforeEach(() => { jest.clearAllMocks(); issuedRows.rows = []; });
+  beforeEach(() => { jest.clearAllMocks(); issuedRows.rows = []; bucket.blocked = false; });
 
   const lookup = (hid: string) => request(app.getHttpServer()).post('/api/v1/identity/patient-lookup')
     .send({ hid, purpose: 'direct-care' });
@@ -271,5 +283,24 @@ describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {
     expect(response.status).toBe(404);
     expect(response.body.code).not.toBe('PATIENT_NOT_FOUND');
     expect(response.body.detail).toBe('Patient was not found or is not available');
+  });
+
+  it('answers a limited member with today\'s 404 and 403, never 429, so an open record still closes', async () => {
+    bucket.blocked = true;
+    provider.lookupExactHid.mockResolvedValue(null);
+    const missing = await lookup(NOBODY);
+    expect(missing.status).toBe(404);
+    expect(missing.body.code).not.toBe('PATIENT_NOT_FOUND');
+    expect(missing.body.detail).toBe('Patient was not found or is not available');
+    expect(query).not.toHaveBeenCalledWith(expect.stringMatching(/support_health_id_matches/), expect.anything());
+
+    provider.lookupExactHid.mockResolvedValue({ id: patientId, hidCode: KNOWN, firstName: 'Ada', lastName: 'Fictional',
+      fullName: 'Ada Fictional', dateOfBirth: '1991-04-05', gender: 'female', rowVersion: 3, ninVerified: false });
+    provider.authorize.mockResolvedValue({ allowed: false, patientId, facilityId, membershipId, scope: 'read_records',
+      purpose: 'direct-care', breakGlass: false });
+    const refused = await lookup(KNOWN);
+    expect(refused.status).toBe(403);
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied',
+      details: { lookupResult: 'limited' } }));
   });
 });

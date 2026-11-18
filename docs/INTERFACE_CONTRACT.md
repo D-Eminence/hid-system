@@ -6904,7 +6904,7 @@ Body unchanged (`hid` in the body, never in a URL; `purpose`). Answers:
 | No patient record of any status has this Health ID | `404` | `{ "code": "PATIENT_NOT_FOUND", "detail": "No patient has this Health ID." }` |
 | The patient exists but is not available here (another facility's patient without consent, not active, sealed tenant) | `404` | today's answer, unchanged (`code` `NOT_FOUND`, "Patient was not found or is not available") |
 | The patient can be seen here but this lookup is not authorized | `403` | today's answer, unchanged |
-| The member has had 30 lookups that opened no patient in 10 minutes | `429` | `{ "code": "PATIENT_LOOKUP_LIMITED", "detail": "Too many Health IDs could not be opened. Wait 10 minutes, then try again." }` for 10 minutes |
+| The member has had 30 lookups that opened no patient in 10 minutes | `404` or `403` | today's answer for 10 minutes (`404` `NOT_FOUND`, or `403` for a patient this lookup may see but not open), never `PATIENT_NOT_FOUND` and never a `429` |
 
 "No record has this Health ID" is read with
 `identity.support_health_id_matches` (0109), which identity-api's runtime
@@ -6916,9 +6916,13 @@ function, with no database change.
 Every lookup that does not open a patient is counted for the member before
 anything is said about the Health ID (`auth.otp_rate_limits`, `account`
 bucket keyed by an HMAC of the membership with the existing
-`OTP_HMAC_KEY_B64`). A lookup that opens a patient is not counted. If the
-member cannot be counted, or the issued check cannot be read, the answer is
-today's `404`, never `PATIENT_NOT_FOUND`.
+`OTP_HMAC_KEY_B64`). A lookup that opens a patient is not counted. A
+limited member keeps getting today's refusals, never a new status: the
+website ends access and closes an open record on any `403` or `404` from this
+lookup (its check before every save), so a `429` there would leave a record
+open after access has ended. If the member cannot be counted, or the issued
+check cannot be read, the answer is today's `404`, never
+`PATIENT_NOT_FOUND`.
 
 ### Audit
 
