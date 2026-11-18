@@ -1760,3 +1760,18 @@ revoke all on function identity.organization_staff_kinds(uuid) from public;
 grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
 grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
 revoke all on function auth.guard_session_single_sign_on_change() from public;
+
+-- QoreID NIN checks asked once per NIN (0137, Q109), exactly as 0137 grants
+-- them: the Identity runtime begins a check (the stored answer, a wait, a hold
+-- or the lease to ask QoreID), records its outcome as the lease holder, and its
+-- patient lifecycle sweeper erases expired rows and the answers for a NIN whose
+-- patient's login was deleted; also the schema test runtime. Nothing to any
+-- other runtime; no grant on identity.qoreid_nin_checks or on the erasure test,
+-- which the commands call as their owner.
+grant execute on function identity.begin_qoreid_nin_check(char, char, boolean, text, uuid, integer),
+  identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer),
+  identity.prune_qoreid_nin_checks(integer) to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.begin_qoreid_nin_check(char, char, boolean, text, uuid, integer),
+  identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer),
+  identity.prune_qoreid_nin_checks(integer), identity.qoreid_nin_check_erased(char) from public;
+revoke all on identity.qoreid_nin_checks from public;
