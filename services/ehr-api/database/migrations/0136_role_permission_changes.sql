@@ -16,14 +16,13 @@
 --   Q112 A  the front desk uploads scans and sees its own uploads, but does
 --           not open other stored documents or read the text taken from them
 --           (and still reads no note, diagnosis, prescription or lab request).
---   Q113 A  DevOps runs docs/rollback/0136_affected_staff_counts.sql once
---           against production before signing (numbers only); the owner
---           writes its numbers below as the most staff 0136 may touch; at
---           apply 0136 prints the counts again and stops, changing nothing, if
---           more would be touched.
+--   Q113 A  no real (non-sealed) staff are active yet, so 0136 may touch
+--           none: at apply it prints the counts and stops, changing
+--           nothing, if any of lines 1-24 at real facilities is above 0
+--           (coordinator's hand-over on hid-system#258, 18 November 2026).
+--           Nothing is filled in at signing; the maximums below are 0.
 -- The declaration in config/production-schema-compatibility.json is signed
--- separately: its reviewed_by stays empty until the owner signs it there,
--- after writing the maximums below.
+-- separately: its reviewed_by stays empty until the owner signs it there.
 --
 -- Rows (auth.role_permissions, role_code / permission_code) and three new
 -- permission codes (auth.permissions). The only other change is closing open
@@ -116,7 +115,7 @@
 -- ocr.patient.confirm. org_admin holds neither queue read, so it is not
 -- touched.
 --
--- Staff counts and the owner's maximums (Q113 A). Before changing anything,
+-- Staff counts and the stop (Q113 A). Before changing anything,
 -- the block do $count_0136$ (the same text, character for character, as in
 -- docs/rollback/0136_affected_staff_counts.sql) counts 26 lines and prints
 -- each as a NOTICE "0136 count n: ..." with the owner's maximum: lines 1-20,
@@ -127,8 +126,8 @@
 -- nobody who can check a reading or confirm its patient, line 25 the open
 -- records-processing requests step 4 closes, line 26 readings not yet checked
 -- at the facilities of line 22. Then, for lines 1-24, if a number at real
--- facilities is higher than the owner's maximum below (or its maximum is not
--- filled in and the number is above 0), 0136 stops with error 55000 and
+-- facilities is above the owner's maximum below, which is 0 for every line
+-- (Q113 A: no real staff are active yet), 0136 stops with error 55000 and
 -- changes nothing. The sealed QA and demo tenants (fictional staff) and lines
 -- 25-26 (they move by the hour) are printed only. Numbers only: no name,
 -- email, account, membership, facility or patient id. The migration runner
@@ -231,46 +230,45 @@ begin
 end
 $preconditions$;
 
--- 1. THE OWNER'S MAXIMUMS (owner decision Q113 A). Filled in at signing,
--- from DevOps' run of docs/rollback/0136_affected_staff_counts.sql against
--- production: its table 2 prints these 24 rows with the numbers; they replace
--- the rows below, exactly as printed (line, at real facilities, staff logins;
--- lines 22-24 count facilities and keep null for staff logins). 0136 stops
--- and changes nothing if any of lines 1-24 is higher at apply than written
--- here. A row left as "null, null" allows nobody: it stops wherever that line
--- touches anyone at a real facility (so, in production, 0136 cannot apply
--- until the owner fills them in). The owner signs the file with the numbers
--- in it; changing a number afterwards changes the file and needs a new
--- signature.
+-- 1. THE OWNER'S MAXIMUMS (owner decision Q113 A): 0 at real facilities on
+-- every line. The owner says no real (non-sealed) staff are active yet, so
+-- 0136 may touch none of them: it stops and changes nothing if any of lines
+-- 1-24 counts anyone (or, for lines 22-24, any facility) at a real facility.
+-- The sealed QA and demo tenants' fictional staff are counted apart and
+-- never stop it. Nothing is filled in at signing. If real staff are active by
+-- the time 0136 applies, it stops in the release's dry run, and the owner
+-- decides again with the printed counts (a changed number changes the file
+-- and needs a new signature). Lines 22-24 count facilities, so their staff
+-- logins stay null.
 select set_config('zero136.owner_maximums', (
   select jsonb_agg(jsonb_build_object('line', maximum.line, 'real_count', maximum.real_count,
                                       'logins', maximum.logins))::text
     from (values
       -- line, at real facilities, staff logins at real facilities
-      ( 1, null, null),
-      ( 2, null, null),
-      ( 3, null, null),
-      ( 4, null, null),
-      ( 5, null, null),
-      ( 6, null, null),
-      ( 7, null, null),
-      ( 8, null, null),
-      ( 9, null, null),
-      (10, null, null),
-      (11, null, null),
-      (12, null, null),
-      (13, null, null),
-      (14, null, null),
-      (15, null, null),
-      (16, null, null),
-      (17, null, null),
-      (18, null, null),
-      (19, null, null),
-      (20, null, null),
-      (21, null, null),
-      (22, null, null),
-      (23, null, null),
-      (24, null, null)
+      ( 1, 0, 0),
+      ( 2, 0, 0),
+      ( 3, 0, 0),
+      ( 4, 0, 0),
+      ( 5, 0, 0),
+      ( 6, 0, 0),
+      ( 7, 0, 0),
+      ( 8, 0, 0),
+      ( 9, 0, 0),
+      (10, 0, 0),
+      (11, 0, 0),
+      (12, 0, 0),
+      (13, 0, 0),
+      (14, 0, 0),
+      (15, 0, 0),
+      (16, 0, 0),
+      (17, 0, 0),
+      (18, 0, 0),
+      (19, 0, 0),
+      (20, 0, 0),
+      (21, 0, 0),
+      (22, 0, null),
+      (23, 0, null),
+      (24, 0, null)
     ) maximum(line, real_count, logins)), true);
 
 -- 2. Counts, before the change, and the comparison with the owner's maximums
@@ -555,7 +553,7 @@ end
 $count_0136$;
 
 -- The stop (Q113 A): nothing below runs unless every line 1-24 is within the
--- owner's maximum.
+-- owner's maximum, 0 at real facilities.
 do $owner_maximums$
 begin
   if coalesce(current_setting('zero136.maximums_checked', true), '') <> 'yes' then
@@ -564,9 +562,10 @@ begin
   end if;
   if coalesce(current_setting('zero136.over_maximums', true), '') <> '' then
     raise exception using errcode = '55000',
-      message = '0136 stopped, nothing was changed: more staff would be affected than the owner approved: '
+      message = '0136 stopped, nothing was changed: real staff would be affected, and the owner approved 0136 '
+        || 'only while none are active (Q113 A): '
         || current_setting('zero136.over_maximums')
-        || '. Run docs/rollback/0136_affected_staff_counts.sql again, show the owner the new numbers, and sign 0136 again with them.';
+        || '. Show the owner these counts (docs/rollback/0136_affected_staff_counts.sql prints them read-only); 0136 changes nothing until the owner decides again.';
   end if;
 end
 $owner_maximums$;

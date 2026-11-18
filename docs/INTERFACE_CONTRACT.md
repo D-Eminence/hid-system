@@ -6841,11 +6841,10 @@ Q113 A":
 - **Q112 A**: the front desk uploads scans and sees its own uploads, but does
   not open other stored documents or read the text taken from them (and still
   reads no note, diagnosis, prescription or lab request).
-- **Q113 A**: before signing, DevOps runs the read-only counts file once
-  against production (numbers only, no names). The owner writes those numbers
-  into 0136 as the most staff it may touch. At apply the release prints the
-  counts again and stops, changing nothing, if more staff would be affected
-  than the owner saw.
+- **Q113 A**: no real (non-sealed) staff are active yet, so 0136 may touch
+  none. Its maximums are 0 at real facilities on every line, written in the
+  file; nothing is filled in at signing. At apply the release prints the
+  counts and stops, changing nothing, if any real staff would be affected.
 
 Migration `0136_role_permission_changes.sql` adds three permission codes,
 changes rows of `auth.role_permissions` and closes the open records-processing
@@ -6994,13 +6993,14 @@ reopen them. Locks: 0136 takes SHARE ROW EXCLUSIVE on `auth.permissions`,
 `auth.role_permissions` and `identity.access_requests`, so a new access
 request or a patient's answer waits for the few seconds 0136 runs.
 
-### Staff counts, the owner's maximums and the stop (Q113 A)
+### Staff counts and the stop (Q113 A: no real staff affected)
 
-In plain words: before the owner signs, DevOps counts, in production, how many
-staff each change would touch. The owner writes those numbers into 0136 as
-the most it may touch. When the release applies 0136 (days later, perhaps)
-0136 counts again; if any number has grown past what the owner wrote, 0136
-stops and changes nothing, and the owner looks again.
+In plain words: the owner says no real (non-sealed) staff are active yet,
+so 0136 may touch none of them. When the release applies 0136 it counts how
+many staff each change would touch; if any real staff member (or, for lines
+22-24, any real facility) would be affected, 0136 stops and changes nothing,
+and the owner decides again with the printed counts. The sealed QA and demo
+tenants' fictional staff are counted apart and never stop it.
 
 `docs/rollback/0136_affected_staff_counts.sql` is the counts file. It is read
 only (its first statement makes the session read only, and it holds no write
@@ -7034,31 +7034,30 @@ too low):
 and sends both tables to the owner. If 0136 has already run on that
 database, the file says so and counts nothing.
 
-**What the owner (or whoever prepares the signature) fills in at signing.** In
-0136, section "1. THE OWNER'S MAXIMUMS", the 24 rows `( 1, null, null),` to
-`(24, null, null)` are replaced by table 2's 24 rows exactly as printed (the
-spacing does not matter). Nothing else in the file changes. Then the file's
-SHA-256 is measured again for its ledger entry (`scripts/verify-migration-ledger.mjs`)
-and the declaration (`config/production-schema-compatibility.json`), and the
-owner signs that file. A number changed later changes the file and needs a
-new signature. An ehr-api test checks the 24 rows' shape and that 0136's
-count block is the counts file's block, character for character.
+**Nothing is filled in at signing.** In 0136, section "1. THE OWNER'S
+MAXIMUMS" holds the 24 rows `( 1, 0, 0),` to `(21, 0, 0),` and `(22, 0, null),`
+to `(24, 0, null)` (lines 22-24 count facilities). DevOps may run the counts
+file against production before signing to see that lines 1-24 are 0 at real
+facilities; if any is not, 0136 would stop, and the owner decides first. A
+changed number changes the file and needs a new signature. An ehr-api test
+checks the 24 rows' shape and that 0136's count block is the counts file's
+block, character for character.
 
 **What happens at apply.** Before changing anything, 0136 runs the same count
 block (the same text as the counts file) and prints each line as a NOTICE
 `0136 count n: ...: N at real facilities (M staff logins), S at the sealed QA
 and demo tenants; the owner's maximum: ...`, in the release's dry-run and apply
 logs. Then, for lines 1-24, if a number at real facilities (or its staff
-logins) is higher than the owner's, or the owner's row is still `null` while
-the line touches anyone, 0136 stops with error 55000 "0136 stopped, nothing
-was changed: more staff would be affected than the owner approved: line N
-(...) is now ..., more than the owner's ...". The release's dry run runs
+logins) is above the owner's 0, 0136 stops with error 55000 "0136 stopped,
+nothing was changed: real staff would be affected, and the owner approved
+0136 only while none are active (Q113 A): line N (...) is now ..., more than
+the owner's 0 (0)". The release's dry run runs
 first, so the stop shows there and the apply never starts; the release stops
 before starting new service images. The sealed tenants and lines 25-26
 (requests and readings, which change by the hour) are printed, not compared.
-A fresh, empty database (tests, rehearsals) has nobody to touch, so 0136
-applies there even unfilled; in production, with real staff, it cannot apply
-until the owner fills the rows in.
+A fresh database (tests, rehearsals) has only the sealed tenants' fictional
+staff, so 0136 applies there; in production it applies while no real staff
+would be affected.
 
 ### Undo
 

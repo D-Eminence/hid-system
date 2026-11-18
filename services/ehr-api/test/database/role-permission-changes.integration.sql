@@ -23,9 +23,12 @@
 --      apart); with the owner's maximums set as 0136 sets them, the same
 --      block passes at the counted numbers and names each line that is
 --      higher, or not filled in (Q113 A);
---   4. 0136 itself, run here as written: with the maximums not filled in and
---      real staff affected it stops (55000, "0136 stopped, nothing was
---      changed"), and its count is the counts file's, number for number. The
+--   4. 0136 itself, run here as written: its maximums are 0 at real
+--      facilities (Q113 A: no real staff active yet), so with fictional
+--      staff at real facilities affected it stops (55000, "0136 stopped,
+--      nothing was changed"), and its count is the counts file's, number for
+--      number. (A fresh build, with only the sealed tenants' staff, applies
+--      it: see 1.) The
 --      suite then lets the rest of the file run (psql ON_ERROR_ROLLBACK
 --      undoes only the stop; the migration runner, which runs the file as
 --      one transaction, applies nothing) and checks, for each fictional
@@ -450,9 +453,9 @@ select pg_temp.expect('3j maximums missing a line are refused',
   '0136: the owner''s maximums must list lines 1 to 24, once each; nothing was changed.', :'LAST_ERROR_MESSAGE');
 select set_config('zero136.owner_maximums', '', false);
 
--- 4. 0136 as written, on the table before it. Its maximums are not filled in
--- and the fictional staff are affected, so it stops before changing
--- anything. ON_ERROR_ROLLBACK undoes only that statement here, so the suite
+-- 4. 0136 as written, on the table before it. Its maximums are 0 at real
+-- facilities (Q113 A) and the fictional staff at real facilities are
+-- affected, so it stops before changing anything. ON_ERROR_ROLLBACK undoes only that statement here, so the suite
 -- can go on and check the change itself; the migration runner runs the file
 -- as one transaction and applies nothing.
 \set ON_ERROR_STOP off
@@ -462,15 +465,16 @@ select set_config('zero136.owner_maximums', '', false);
 \set QUIET off
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP on
-select pg_temp.expect('4a with the owner''s maximums not filled in, 0136 stops on line 1 and names every line it touches',
-  '0136 stopped, nothing was changed: more staff would be affected than the owner approved: line 1 '
-  || '(receptionist gains ehr.document.write) is now ' || (select real_count from counts_seen
+select pg_temp.expect('4a with the owner''s maximums at 0 (Q113 A), 0136 stops on line 1 and names every line it touches',
+  '0136 stopped, nothing was changed: real staff would be affected, and the owner approved 0136 only while none are '
+  || 'active (Q113 A): line 1 (receptionist gains ehr.document.write) is now ' || (select real_count from counts_seen
      where label = 'before' and line = 1) || ' (' || (select logins from counts_seen where label = 'before' and line = 1)
-  || ' staff logins) and the owner''s maximum is not filled in; ',
-  left(:'LAST_ERROR_MESSAGE', length('0136 stopped, nothing was changed: more staff would be affected than the owner '
-  || 'approved: line 1 (receptionist gains ehr.document.write) is now ' || (select real_count from counts_seen
-     where label = 'before' and line = 1) || ' (' || (select logins from counts_seen where label = 'before' and line = 1)
-  || ' staff logins) and the owner''s maximum is not filled in; ')));
+  || ' staff logins), more than the owner''s 0 (0); ',
+  left(:'LAST_ERROR_MESSAGE', length('0136 stopped, nothing was changed: real staff would be affected, and the owner '
+  || 'approved 0136 only while none are active (Q113 A): line 1 (receptionist gains ehr.document.write) is now '
+  || (select real_count from counts_seen where label = 'before' and line = 1) || ' ('
+  || (select logins from counts_seen where label = 'before' and line = 1)
+  || ' staff logins), more than the owner''s 0 (0); ')));
 select pg_temp.expect('4b the stop names lines 1-24 that touch anyone, never 25 or 26',
   (select string_agg(line::text, ' ' order by line) from counts_seen
     where label = 'before' and line <= 24 and (real_count > 0 or coalesce(logins, 0) > 0)),

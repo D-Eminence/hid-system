@@ -1,9 +1,11 @@
 -- 0136 staff counts, read only (owner decisions Q103 A, Q111 A, Q112 A,
 -- Q113 A). How many staff each of 0136's changes touches, and what follows
--- for paper readings and records processing. DevOps runs it ONCE against
--- production before the owner signs 0136; the owner writes the numbers it
--- prints into 0136 as the most staff 0136 may touch, and 0136 stops at apply
--- if more would be touched by then.
+-- for paper readings and records processing. The owner says no real
+-- (non-sealed) staff are active yet (Q113 A), so 0136 may touch none: its
+-- maximums are 0 at real facilities, and at apply it stops, changing
+-- nothing, if any line 1-24 counts anyone there. DevOps may run this file
+-- against production before signing to see that every line 1-24 is 0 at
+-- real facilities; nothing is written into 0136.
 --
 -- It reads; it never writes. The first statement makes every later
 -- transaction of this session read only, so even a mistaken edit below cannot
@@ -23,15 +25,16 @@
 -- stops anybody's work.
 --
 -- What it prints: a short header, then table 1 (one row per line, 26 lines)
--- and table 2 (lines 1 to 24 again, in the exact form the owner writes into
--- 0136). Send both tables to the owner. They hold numbers only.
+-- and table 2 (lines 1 to 24 again, as "(line, at real facilities, staff
+-- logins)"). Send both tables to the owner if any line 1-24 is above 0 at
+-- real facilities: 0136 would stop. They hold numbers only.
 --
 -- The count itself is the block do $count_0136$ below. 0136 carries the same
 -- block, character for character (a test in ehr-api checks this), so the
 -- numbers DevOps reads and the numbers the release prints at apply come from
 -- the same text. When 0136 runs it, the block also compares each line with
--- the owner's maximum; when this file runs it, no maximum is given and the
--- block only counts.
+-- the owner's maximum (0 at real facilities); when this file runs it, no
+-- maximum is given and the block only counts.
 
 set session characteristics as transaction read only;
 
@@ -59,9 +62,9 @@ set session characteristics as transaction read only;
 \echo '  24     the same for confirming a reading''s patient.'
 \echo '  25     open records-processing requests that 0136 closes (their staff member can no longer use them).'
 \echo '  26     readings not yet checked at the facilities of line 22.'
-\echo 'Table 2: lines 1 to 24 as "(line, at real facilities, staff logins)". The owner writes these rows into'
-\echo '0136 (section "The owner''s maximums") before signing. At apply, 0136 prints the counts again and stops,'
-\echo 'changing nothing, if any of lines 1 to 24 is higher than the number written there. Lines 25 and 26'
+\echo 'Table 2: lines 1 to 24 as "(line, at real facilities, staff logins)". The owner allows 0 at real'
+\echo 'facilities on every line (Q113 A: no real staff are active yet). At apply, 0136 prints the counts again'
+\echo 'and stops, changing nothing, if any of lines 1 to 24 is above 0 at real facilities. Lines 25 and 26'
 \echo 'change by the hour, so they are printed only.'
 \echo ''
 
