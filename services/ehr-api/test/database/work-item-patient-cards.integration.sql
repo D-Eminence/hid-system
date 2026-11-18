@@ -31,7 +31,12 @@
 --      a disabled account; a second membership of the same account, or
 --      another member's membership, in the session; another facility's
 --      member sees only its own facility's own work; a malformed facility
---      setting is refused 22023;
+--      setting is refused 22023. Since 0133 the facility's lab and pharmacy
+--      staff (the read and the receive permission) see their own work without
+--      a grant, so a revoked or expired grant, or a missing one, no longer
+--      hides it from them; CR, a member holding the two read permissions but
+--      no receive permission, reads by consent only and keeps showing that a
+--      revoked or an expired grant, and a deny directive, hide the card;
 --   4. emergency (D8): a member with an active reasoned break-glass grant and
 --      purpose 'emergency' gets the card of exactly the rows it can read,
 --      and nothing under direct-care;
@@ -131,17 +136,26 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
    'CARDS-TEST-1', 'Africa/Lagos', true, 'verified'),
   ('e1130001-0000-4000-8000-000000000002', 'e1130000-0000-4000-8000-000000000001', 'Cards Test Annex',
    'CARDS-TEST-2', 'Africa/Lagos', true, 'verified');
+-- CR (8) holds a synthetic role with the two work-list read permissions and
+-- neither receive permission: it reads own work by consent only (0133's
+-- own-work branch needs the receive permission too), so its cards still show
+-- what revoking or expiring a grant does.
+insert into auth.roles (code, description) values
+  ('cards_consent_reader', 'Cards suite: lab.work-item.read and pharmacy.work-item.read, no receive permission');
+insert into auth.role_permissions (role_code, permission_code) values
+  ('cards_consent_reader', 'lab.work-item.read'), ('cards_consent_reader', 'pharmacy.work-item.read');
 insert into auth.accounts (id, subject, email, display_name, status)
 select ('e1130002-0000-4000-8000-00000000000' || member.n)::uuid, 'synthetic:cards-' || member.code,
        'cards-' || member.code || '@example.invalid', member.full_name, 'active'
   from (values (1, 'ls', 'Card Lab Scientist'), (2, 'ph', 'Card Pharmacist'), (3, 'rc', 'Card Receptionist'),
                (4, 'l2', 'Card Annex Scientist'), (5, 'p2', 'Card Annex Pharmacist'),
-               (6, 'le', 'Card Emergency Scientist'), (7, 'pe', 'Card Emergency Pharmacist')) member(n, code, full_name);
+               (6, 'le', 'Card Emergency Scientist'), (7, 'pe', 'Card Emergency Pharmacist'),
+               (8, 'cr', 'Card Consent Reader')) member(n, code, full_name);
 insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
 select ('e1130003-0000-4000-8000-00000000000' || member.n)::uuid, ('e1130002-0000-4000-8000-00000000000' || member.n)::uuid,
        account.display_name, account.email, 'verified', member.role_code
   from (values (1, 'lab'), (2, 'pharmacist'), (3, 'receptionist'), (4, 'lab'), (5, 'pharmacist'), (6, 'lab'),
-               (7, 'pharmacist')) member(n, role_code)
+               (7, 'pharmacist'), (8, 'cards_consent_reader')) member(n, role_code)
   join auth.accounts account on account.id = ('e1130002-0000-4000-8000-00000000000' || member.n)::uuid;
 insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
   membership_role, app_role, is_primary, active)
@@ -149,13 +163,13 @@ select ('e1130004-0000-4000-8000-00000000000' || member.n)::uuid, ('e1130003-000
        ('e1130002-0000-4000-8000-00000000000' || member.n)::uuid, 'e1130000-0000-4000-8000-000000000001',
        ('e1130001-0000-4000-8000-00000000000' || member.site)::uuid, member.role_code, member.role_code, true, true
   from (values (1, 1, 'lab'), (2, 1, 'pharmacist'), (3, 1, 'receptionist'), (4, 2, 'lab'), (5, 2, 'pharmacist'),
-               (6, 1, 'lab'), (7, 1, 'pharmacist')) member(n, site, role_code);
+               (6, 1, 'lab'), (7, 1, 'pharmacist'), (8, 1, 'cards_consent_reader')) member(n, site, role_code);
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
 select ('e1130005-0000-4000-8000-00000000000' || member.n)::uuid, ('e1130002-0000-4000-8000-00000000000' || member.n)::uuid,
        member.role_code, 'facility', ('e1130004-0000-4000-8000-00000000000' || member.n)::uuid,
        ('e1130001-0000-4000-8000-00000000000' || member.site)::uuid, 'Cards suite role'
   from (values (1, 1, 'lab'), (2, 1, 'pharmacist'), (3, 1, 'receptionist'), (4, 2, 'lab'), (5, 2, 'pharmacist'),
-               (6, 1, 'lab'), (7, 1, 'pharmacist')) member(n, site, role_code);
+               (6, 1, 'lab'), (7, 1, 'pharmacist'), (8, 1, 'cards_consent_reader')) member(n, site, role_code);
 insert into auth.accounts (id, subject, email, display_name, status) values
   ('e1130002-0000-4000-8000-000000000011', 'synthetic:cards-patient-amaka', 'cards-amaka@example.invalid',
    'Amaka Card', 'active');
@@ -173,9 +187,9 @@ insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, acce
    md5('cards-session-1') || md5('cards-session-1'), gen_random_uuid(), 1, 'password', clock_timestamp(),
    clock_timestamp() + interval '1 hour', clock_timestamp() + interval '2 hours', 'patient',
    'e1130006-0000-4000-8000-000000000001');
--- Direct-care write grants (which also allow reads): LS, PH for Amaka, Bode
--- and Dupe at F1; RC for Amaka at F1; L2 and P2 for Amaka at F2. Break-glass
--- read grants: LE and PE for Amaka at F1.
+-- Direct-care write grants (which also allow reads): LS, PH and CR for Amaka,
+-- Bode and Dupe at F1; RC for Amaka at F1; L2 and P2 for Amaka at F2.
+-- Break-glass read grants: LE and PE for Amaka at F1.
 insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope,
   purpose_of_use, status, reason, starts_at, expires_at, break_glass)
 select ('e1130008-0000-4000-8000-0000000000' || grant_row.member || grant_row.patient)::uuid,
@@ -190,7 +204,8 @@ select ('e1130008-0000-4000-8000-0000000000' || grant_row.member || grant_row.pa
        clock_timestamp() - interval '1 hour', clock_timestamp() + interval '30 days', grant_row.emergency
   from (values (1, 1, 1, false), (1, 2, 1, false), (1, 4, 1, false), (2, 1, 1, false), (2, 2, 1, false),
                (2, 4, 1, false), (3, 1, 1, false), (4, 1, 2, false), (5, 1, 2, false), (6, 1, 1, true),
-               (7, 1, 1, true)) grant_row(member, patient, site, emergency);
+               (7, 1, 1, true), (8, 1, 1, false), (8, 2, 1, false), (8, 4, 1, false))
+       grant_row(member, patient, site, emergency);
 -- Lab work items (e113000a...0n) and pharmacy work items (e113000b...0n):
 -- 1 own work for Amaka at F1, 2 for Bode at F1, 3 for Chidi at F1, 4 routed
 -- to F1 from F2 for Amaka (order route e113000c...01), 5 own work for Amaka
@@ -232,7 +247,7 @@ set local session_replication_role = origin;
 create function pg_temp.as_member(member integer, site integer, purpose text default 'direct-care') returns void
 language sql as $f$
   select set_config('app.actor_subject', 'synthetic:cards-'
-           || (array['ls', 'ph', 'rc', 'l2', 'p2', 'le', 'pe'])[member], true),
+           || (array['ls', 'ph', 'rc', 'l2', 'p2', 'le', 'pe', 'cr'])[member], true),
          set_config('app.facility_id', 'e1130001-0000-4000-8000-00000000000' || site, true),
          set_config('app.correlation_id', 'cards-suite-' || substr(md5(random()::text), 1, 12), true),
          set_config('app.membership_id', 'e1130004-0000-4000-8000-00000000000' || member, true),
@@ -396,15 +411,33 @@ select pg_temp.expect('PE: the cards are exactly its own rows', pg_temp.card_ids
 select pg_temp.as_member(7, 1);
 select pg_temp.expect('PE under direct care (0133: as the facility''s pharmacy staff)', pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
 reset role;
+-- CR, consent only: its granted patients, never Chidi (no grant; no receive
+-- permission, so 0133's own-work branch gives it nothing).
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(8, 1);
+select pg_temp.expect('CR (consent only) reads its granted patients'' lab cards', pg_temp.cards('lab', pg_temp.items('lab')),
+  '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
+select pg_temp.expect('CR: the lab cards are exactly its own rows', pg_temp.card_ids('lab'), pg_temp.visible('lab', true));
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(8, 1);
+select pg_temp.expect('CR (consent only) reads its granted patients'' pharmacy cards',
+  pg_temp.cards('pharmacy', pg_temp.items('pharmacy')),
+  '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
+select pg_temp.expect('CR: the pharmacy cards are exactly its own rows', pg_temp.card_ids('pharmacy'),
+  pg_temp.visible('pharmacy', true));
+reset role;
 
 -- 3. A revoked or an expired grant, a disabled account (as the owner, then
 -- the runtime again; each undone).
 savepoint grant_changes;
 update identity.consent_grants set status = 'revoked', revoked_at = clock_timestamp()
- where id in ('e1130008-0000-4000-8000-000000000012', 'e1130008-0000-4000-8000-000000000022');
+ where id in ('e1130008-0000-4000-8000-000000000012', 'e1130008-0000-4000-8000-000000000022',
+   'e1130008-0000-4000-8000-000000000082');
 update identity.consent_grants set starts_at = clock_timestamp() - interval '2 hours',
   expires_at = clock_timestamp() - interval '1 hour'
- where id in ('e1130008-0000-4000-8000-000000000014', 'e1130008-0000-4000-8000-000000000024');
+ where id in ('e1130008-0000-4000-8000-000000000014', 'e1130008-0000-4000-8000-000000000024',
+   'e1130008-0000-4000-8000-000000000084');
 set local role hid_lab_api_runtime;
 select pg_temp.as_member(1, 1);
 select pg_temp.expect('LS after Bode''s grant is revoked and Dupe''s expired (0133: still the facility''s lab staff)', pg_temp.cards('lab', pg_temp.items('lab')),
@@ -415,6 +448,17 @@ set local role hid_pharmacy_api_runtime;
 select pg_temp.as_member(2, 1);
 select pg_temp.expect('PH after Bode''s grant is revoked and Dupe''s expired (0133: still the facility''s pharmacy staff)',
   pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
+select pg_temp.as_member(8, 1);
+select pg_temp.expect('CR (consent only) after its Bode grant is revoked and its Dupe grant expired: Amaka only',
+  pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '1:Amaka Card/female/1991-02-03/AAA2');
+select pg_temp.expect('CR: still exactly its own pharmacy rows', pg_temp.card_ids('pharmacy'),
+  pg_temp.visible('pharmacy', true));
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(8, 1);
+select pg_temp.expect('CR (consent only) after the revocation and the expiry: Amaka''s lab card only',
+  pg_temp.cards('lab', pg_temp.items('lab')), '1:Amaka Card/female/1991-02-03/AAA2');
+select pg_temp.expect('CR: still exactly its own lab rows', pg_temp.card_ids('lab'), pg_temp.visible('lab', true));
 reset role;
 rollback to savepoint grant_changes;
 savepoint account_change;
@@ -460,6 +504,9 @@ select pg_temp.expect('PH with a deny directive on Amaka', pg_temp.cards('pharma
   '2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
 select pg_temp.expect('PH deny: still exactly its own rows', pg_temp.card_ids('pharmacy'),
   pg_temp.visible('pharmacy', true));
+select pg_temp.as_member(8, 1);
+select pg_temp.expect('CR (consent only) with a deny directive on Amaka', pg_temp.cards('pharmacy',
+  pg_temp.items('pharmacy')), '2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
 reset role;
 rollback to savepoint deny_directive;
 

@@ -56,6 +56,20 @@
 --      hidden from them (the nurse alike) and is read with a consent grant
 --      only; Pharmacy's events about an own dispensing are written, about a
 --      routed one refused;
+--   7b. the Lab chain on the own-work basis, with lab-api's own statements
+--      as LS and L3 (no grant): a second specimen requirement and specimen on
+--      W1's accession, collect and receive (update, command key, event,
+--      outbox), an execution started and completed, a result entered and
+--      corrected, checked by L3 and released by LS; each row reads back for
+--      LS and stays hidden from the nurse and from F2's lab scientist; none
+--      of these writes reaches R1's chain (routed);
+--   7c. the deny directive, scope by scope (D1, as consent's own test): the
+--      facility (this one or another), the organization (this one or
+--      another), the staff member (the pharmacist, not the lab scientist),
+--      the directive's facility, its actions (read or write only), its
+--      purposes (emergency only, direct care), not yet started or expired;
+--   7d. 0125's prescription details still need the member's consent: none
+--      for PH, the item's details for PG;
 --   8. the owner-run definer functions that read ehr.prescriptions give the
 --      pharmacist nothing more through the EHR runtime: the order-route send,
 --      the own-pharmacy send and the withdrawal refuse the pharmacist first.
@@ -207,6 +221,7 @@ end $$;
 --   11 L2 lab F2     12 CL clinician F1   13 DN doctor F1 (no grant)
 --   14 RO receive-only F1 (a synthetic role holding pharmacy.order-route.receive
 --      and lab.order-route.receive, not the two read permissions)
+--   15 L3 lab F1 (no grant; the second person who checks LS's result)
 -- Patients (e1330006...n): 1 Ada (active), 2 Bisi (a deny directive later),
 -- 3 Chike (made inactive later). DR, D2 and PG hold write grants for all
 -- three at F1, D3 for Ada at F3.
@@ -225,7 +240,7 @@ create temporary table own_members (n integer primary key, code text, role_code 
 insert into own_members values (1, 'dr', 'doctor', 1), (2, 'ph', 'pharmacist', 1), (3, 'ls', 'lab', 1),
   (4, 'nu', 'nurse', 1), (5, 'ad', 'admin', 1), (6, 'p2', 'pharmacist', 2), (7, 'rc', 'receptionist', 1),
   (8, 'd2', 'doctor', 1), (9, 'd3', 'doctor', 3), (10, 'pg', 'pharmacist', 1), (11, 'l2', 'lab', 2),
-  (12, 'cl', 'clinician', 1), (13, 'dn', 'doctor', 1), (14, 'ro', 'own_work_receive_only', 1);
+  (12, 'cl', 'clinician', 1), (13, 'dn', 'doctor', 1), (14, 'ro', 'own_work_receive_only', 1), (15, 'l3', 'lab', 1);
 grant select on own_members to public;
 insert into auth.roles (code, description) values
   ('own_work_receive_only', 'Own work suite: the two receive permissions without the two read permissions');
@@ -873,6 +888,291 @@ select pg_temp.expect('PH cannot dispense RP',
 select pg_temp.as_member(10);
 select pg_temp.expect('PG (pharmacist with a grant for Ada) reads her imported medication evidence (consent)',
   (select count(*)::text from pharmacy.imported_medication_evidence), '1');
+reset role;
+
+-- 7b. LS (and L3, the second person) works W1's chain with lab-api's own
+-- statements (LabAccessionsService, LabExecutionsService), without a grant.
+-- A statement's rows changed, or 'SQLSTATE message'.
+create function pg_temp.changed(statement text) returns text language plpgsql as $f$
+declare answer bigint;
+begin
+  execute 'with changed as (' || statement || ') select count(*) from changed' into answer;
+  return 'rows=' || answer;
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+grant execute on function pg_temp.changed(text) to public;
+-- The ids: W1's accession A1 e133000b...01 and requested test T1
+-- e133000c...01; new requirement e133000d...02, specimen e133000e...02,
+-- execution e133000f...02, result e1330010...02. Ada at F1; LS member 3, L3 15.
+create function pg_temp.lab_sql(step text) returns text language sql immutable as $f$
+  select case step
+    when 'requirement' then $i$insert into lab.specimen_requirements(id,accession_id,patient_id,facility_id,ordinal,
+      specimen_type,container_type,notes) values('e133000d-0000-4000-8000-000000000002','e133000b-0000-4000-8000-000000000001',
+      'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',2,'urine',null,null)$i$
+    when 'specimen' then $i$insert into lab.specimens(id,requirement_id,accession_id,patient_id,facility_id,specimen_type,
+      container_type) values('e133000e-0000-4000-8000-000000000002','e133000d-0000-4000-8000-000000000002',
+      'e133000b-0000-4000-8000-000000000001','e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',
+      'urine',null) returning id$i$
+    when 'collect' then $i$update lab.specimens set status='collected',collected_at=clock_timestamp(),
+      collected_by='e1330002-0000-4000-8000-000000000003',collected_by_membership_id='e1330004-0000-4000-8000-000000000003',
+      collection_notes=null,row_version=row_version+1 where id='e133000e-0000-4000-8000-000000000002'
+      and accession_id='e133000b-0000-4000-8000-000000000001' and facility_id='e1330001-0000-4000-8000-000000000001'
+      and row_version=1 returning id$i$
+    when 'receive' then $i$update lab.specimens set status='received',received_at=clock_timestamp(),
+      received_by='e1330002-0000-4000-8000-000000000003',received_by_membership_id='e1330004-0000-4000-8000-000000000003',
+      receipt_condition=null,row_version=row_version+1 where id='e133000e-0000-4000-8000-000000000002'
+      and accession_id='e133000b-0000-4000-8000-000000000001' and facility_id='e1330001-0000-4000-8000-000000000001'
+      and row_version=2 returning id$i$
+    when 'start' then $i$insert into lab.test_executions(id,accession_id,specimen_id,requested_test_id,patient_id,facility_id,
+      method,started_by,started_by_membership_id,started_at,idempotency_key,request_sha256,correlation_id)
+      values('e133000f-0000-4000-8000-000000000002','e133000b-0000-4000-8000-000000000001',
+      'e133000e-0000-4000-8000-000000000002','e133000c-0000-4000-8000-000000000001','e1330006-0000-4000-8000-000000000001',
+      'e1330001-0000-4000-8000-000000000001',null,'e1330002-0000-4000-8000-000000000003',
+      'e1330004-0000-4000-8000-000000000003',clock_timestamp(),'own-work-start-0002',repeat('f',64),
+      current_setting('app.correlation_id')) returning id$i$
+    when 'complete' then $i$update lab.test_executions set status='completed',completed_at=clock_timestamp(),
+      completed_by='e1330002-0000-4000-8000-000000000003',completed_by_membership_id='e1330004-0000-4000-8000-000000000003',
+      completion_notes=null,completed_idempotency_key='own-work-complete-0002',completed_request_sha256=repeat('f',64),
+      row_version=row_version+1 where id='e133000f-0000-4000-8000-000000000002' and status='in_progress' and row_version=1
+      returning id$i$
+    when 'result' then $i$insert into lab.results(id,execution_id,patient_id,facility_id,created_by,created_by_membership_id)
+      values('e1330010-0000-4000-8000-000000000002','e133000f-0000-4000-8000-000000000002',
+      'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001','e1330002-0000-4000-8000-000000000003',
+      'e1330004-0000-4000-8000-000000000003') returning id$i$
+    when 'revision1' then $i$insert into lab.result_revisions(result_id,execution_id,patient_id,facility_id,version,
+      result_type,numeric_value,text_value,unit,reference_range,abnormal_flag,entered_by,entered_by_membership_id,
+      correction_reason,idempotency_key,request_sha256,correlation_id,revision_kind,supersedes_version)
+      values('e1330010-0000-4000-8000-000000000002','e133000f-0000-4000-8000-000000000002',
+      'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',1,'numeric',1.015,null,null,
+      '1.005-1.030','normal','e1330002-0000-4000-8000-000000000003','e1330004-0000-4000-8000-000000000003',null,
+      'own-work-result-0002',repeat('9',64),current_setting('app.correlation_id'),'original',null) returning id$i$
+    when 'correct' then $i$update lab.results set current_version=current_version+1
+      where id='e1330010-0000-4000-8000-000000000002' and execution_id='e133000f-0000-4000-8000-000000000002'
+      and current_version=1 and (not exists(select 1 from lab.result_releases
+        where result_id='e1330010-0000-4000-8000-000000000002' and result_version=1) or false)
+      returning current_version$i$
+    when 'revision2' then $i$insert into lab.result_revisions(result_id,execution_id,patient_id,facility_id,version,
+      result_type,numeric_value,text_value,unit,reference_range,abnormal_flag,entered_by,entered_by_membership_id,
+      correction_reason,idempotency_key,request_sha256,correlation_id,revision_kind,supersedes_version)
+      values('e1330010-0000-4000-8000-000000000002','e133000f-0000-4000-8000-000000000002',
+      'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',2,'numeric',1.020,null,null,
+      '1.005-1.030','normal','e1330002-0000-4000-8000-000000000003','e1330004-0000-4000-8000-000000000003',
+      'Read again after calibration','own-work-result-0003',repeat('9',64),current_setting('app.correlation_id'),
+      'correction',1) returning id$i$
+    when 'verify' then $i$insert into lab.result_verifications(result_id,execution_id,patient_id,facility_id,result_version,
+      verified_by,verified_by_membership_id,verified_at,reason,idempotency_key,request_sha256,correlation_id)
+      values('e1330010-0000-4000-8000-000000000002','e133000f-0000-4000-8000-000000000002',
+      'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',2,
+      'e1330002-0000-4000-8000-000000000015','e1330004-0000-4000-8000-000000000015',clock_timestamp(),'Checked',
+      'own-work-verify-0002',repeat('8',64),current_setting('app.correlation_id')) returning id$i$
+    when 'release' then $i$insert into lab.result_releases(verification_id,result_id,execution_id,patient_id,facility_id,
+      result_version,released_by,released_by_membership_id,released_at,reason,idempotency_key,request_sha256,correlation_id)
+      select verification.id,'e1330010-0000-4000-8000-000000000002','e133000f-0000-4000-8000-000000000002',
+      'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',2,
+      'e1330002-0000-4000-8000-000000000003','e1330004-0000-4000-8000-000000000003',clock_timestamp(),'Released',
+      'own-work-release-0002',repeat('7',64),current_setting('app.correlation_id')
+      from lab.result_verifications verification
+      where verification.result_id='e1330010-0000-4000-8000-000000000002' and verification.result_version=2
+      returning id$i$
+  end
+$f$;
+-- A specimen, execution or result event as lab-api writes it, and its outbox event.
+create function pg_temp.lab_event_sql(kind text, version integer, event_type text) returns text language sql immutable as $f$
+  select case kind
+    when 'specimen' then format($i$insert into lab.specimen_events(specimen_id,accession_id,patient_id,facility_id,
+      event_version,event_type,actor_id,actor_membership_id,reason,correlation_id)
+      values('e133000e-0000-4000-8000-000000000002','e133000b-0000-4000-8000-000000000001',
+      'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',%s,%L,
+      'e1330002-0000-4000-8000-000000000003','e1330004-0000-4000-8000-000000000003','Own work suite',
+      current_setting('app.correlation_id')) returning id$i$, version, event_type)
+    when 'command' then format($i$insert into lab.specimen_command_idempotency(facility_id,patient_id,actor_id,
+      idempotency_key,operation,specimen_id,request_sha256,result_version)
+      values('e1330001-0000-4000-8000-000000000001','e1330006-0000-4000-8000-000000000001',
+      'e1330002-0000-4000-8000-000000000003',%L,%L,'e133000e-0000-4000-8000-000000000002',repeat('a',64),%s)
+      returning specimen_id$i$, 'own-work-' || event_type || '-0002', event_type, version)
+    when 'execution' then format($i$insert into lab.execution_events(execution_id,patient_id,facility_id,event_version,
+      event_type,actor_id,actor_membership_id,reason,correlation_id) values('e133000f-0000-4000-8000-000000000002',
+      'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',%s,%L,
+      'e1330002-0000-4000-8000-000000000003','e1330004-0000-4000-8000-000000000003','Own work suite',
+      current_setting('app.correlation_id')) returning execution_id$i$, version, event_type)
+    when 'result' then format($i$insert into lab.result_events(result_id,execution_id,patient_id,facility_id,event_version,
+      event_type,actor_id,actor_membership_id,reason,correlation_id) values('e1330010-0000-4000-8000-000000000002',
+      'e133000f-0000-4000-8000-000000000002','e1330006-0000-4000-8000-000000000001',
+      'e1330001-0000-4000-8000-000000000001',%s,%L,'e1330002-0000-4000-8000-000000000003',
+      'e1330004-0000-4000-8000-000000000003','Own work suite',current_setting('app.correlation_id')) returning result_id$i$,
+      version, event_type)
+    when 'outbox' then format($i$insert into lab.outbox_events(event_type,aggregate_id,aggregate_version,facility_id,
+      patient_id,correlation_id,payload) values(%L,'e133000e-0000-4000-8000-000000000002',%s,
+      'e1330001-0000-4000-8000-000000000001','e1330006-0000-4000-8000-000000000001',current_setting('app.correlation_id'),
+      '{"status":"own-work-suite"}'::jsonb) returning id$i$, event_type, version)
+  end
+$f$;
+-- W1's chain rows as the session reads them (counts per table, new rows only).
+create function pg_temp.lab_chain_written() returns text language sql as $f$
+  select format('requirements=%s specimens=%s specimen_events=%s commands=%s executions=%s execution_events=%s '
+      || 'results=%s revisions=%s result_events=%s verifications=%s releases=%s',
+    (select count(*) from lab.specimen_requirements where id = 'e133000d-0000-4000-8000-000000000002'),
+    (select string_agg(status || ':' || row_version, ',') from lab.specimens where id = 'e133000e-0000-4000-8000-000000000002'),
+    (select count(*) from lab.specimen_events where specimen_id = 'e133000e-0000-4000-8000-000000000002'),
+    (select count(*) from lab.specimen_command_idempotency where specimen_id = 'e133000e-0000-4000-8000-000000000002'),
+    (select string_agg(status || ':' || row_version, ',') from lab.test_executions
+      where id = 'e133000f-0000-4000-8000-000000000002'),
+    (select count(*) from lab.execution_events where execution_id = 'e133000f-0000-4000-8000-000000000002'),
+    (select string_agg(current_version::text, ',') from lab.results where id = 'e1330010-0000-4000-8000-000000000002'),
+    (select count(*) from lab.result_revisions where result_id = 'e1330010-0000-4000-8000-000000000002'),
+    (select count(*) from lab.result_events where result_id = 'e1330010-0000-4000-8000-000000000002'),
+    (select count(*) from lab.result_verifications where result_id = 'e1330010-0000-4000-8000-000000000002'),
+    (select count(*) from lab.result_releases where result_id = 'e1330010-0000-4000-8000-000000000002'))
+$f$;
+grant execute on function pg_temp.lab_sql(text), pg_temp.lab_event_sql(text, integer, text),
+  pg_temp.lab_chain_written() to public;
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(3);
+select pg_temp.expect('LS: a second specimen requirement and specimen on W1''s accession, with their event',
+  format('%s %s %s', pg_temp.try(pg_temp.lab_sql('requirement')), pg_temp.changed(pg_temp.lab_sql('specimen')),
+    pg_temp.changed(pg_temp.lab_event_sql('specimen', 1, 'specimen_required'))), 'ok rows=1 rows=1');
+select pg_temp.expect('LS collects it: the update, its command key, its event and its outbox event',
+  format('%s %s %s %s', pg_temp.changed(pg_temp.lab_sql('collect')), pg_temp.changed(pg_temp.lab_event_sql('command', 2,
+    'collect')), pg_temp.changed(pg_temp.lab_event_sql('specimen', 2, 'specimen_collected')),
+    pg_temp.changed(pg_temp.lab_event_sql('outbox', 2, 'LabSpecimenCollected'))), 'rows=1 rows=1 rows=1 rows=1');
+select pg_temp.expect('LS receives it',
+  format('%s %s %s', pg_temp.changed(pg_temp.lab_sql('receive')), pg_temp.changed(pg_temp.lab_event_sql('command', 3,
+    'receive')), pg_temp.changed(pg_temp.lab_event_sql('specimen', 3, 'specimen_received'))), 'rows=1 rows=1 rows=1');
+select pg_temp.expect('LS starts and completes an execution on it, with their events',
+  format('%s %s %s %s', pg_temp.changed(pg_temp.lab_sql('start')),
+    pg_temp.changed(pg_temp.lab_event_sql('execution', 1, 'execution_started')), pg_temp.changed(pg_temp.lab_sql('complete')),
+    pg_temp.changed(pg_temp.lab_event_sql('execution', 2, 'execution_completed'))), 'rows=1 rows=1 rows=1 rows=1');
+select pg_temp.expect('LS enters a result and corrects it (the head''s update), with their events',
+  format('%s %s %s %s %s %s', pg_temp.changed(pg_temp.lab_sql('result')), pg_temp.changed(pg_temp.lab_sql('revision1')),
+    pg_temp.changed(pg_temp.lab_event_sql('result', 1, 'result_entered')), pg_temp.changed(pg_temp.lab_sql('correct')),
+    pg_temp.changed(pg_temp.lab_sql('revision2')), pg_temp.changed(pg_temp.lab_event_sql('result', 2, 'result_corrected'))),
+  'rows=1 rows=1 rows=1 rows=1 rows=1 rows=1');
+select pg_temp.expect('LS may not check its own result (0021, two people)',
+  (split_part(pg_temp.changed(pg_temp.lab_sql('verify')), ' ', 1) <> 'rows=1')::text, 'true');
+select pg_temp.as_member(15);
+select pg_temp.expect('L3 (no grant) checks it', pg_temp.changed(pg_temp.lab_sql('verify')), 'rows=1');
+select pg_temp.as_member(3);
+select pg_temp.expect('LS releases it', pg_temp.changed(pg_temp.lab_sql('release')), 'rows=1');
+select pg_temp.expect('LS reads back every row it wrote', pg_temp.lab_chain_written(),
+  'requirements=1 specimens=received:3 specimen_events=3 commands=2 executions=completed:2 execution_events=2 '
+  || 'results=2 revisions=2 result_events=2 verifications=1 releases=1');
+select pg_temp.expect('LS cannot change R1''s specimen or execution (routed): nothing is updated',
+  format('%s %s', pg_temp.changed($u$update lab.specimens set row_version=row_version+1
+      where id='e133000e-0000-4000-8000-000000000003' returning id$u$),
+    pg_temp.changed($u$update lab.test_executions set row_version=row_version+1
+      where id='e133000f-0000-4000-8000-000000000003' returning id$u$)), 'rows=0 rows=0');
+select pg_temp.expect('LS cannot write a result revision onto R1''s result (routed)',
+  (pg_temp.changed($i$insert into lab.result_revisions(result_id,execution_id,patient_id,facility_id,version,result_type,
+    numeric_value,unit,abnormal_flag,entered_by,entered_by_membership_id,idempotency_key,request_sha256,correlation_id,
+    revision_kind) values('e1330010-0000-4000-8000-000000000003','e133000f-0000-4000-8000-000000000003',
+    'e1330006-0000-4000-8000-000000000001','e1330001-0000-4000-8000-000000000001',1,'numeric',5.5,'mmol/L','normal',
+    'e1330002-0000-4000-8000-000000000003','e1330004-0000-4000-8000-000000000003','own-work-routed-result',
+    repeat('9',64),current_setting('app.correlation_id'),'original') returning id$i$) ~ '^(42501|23514) ')::text, 'true');
+select pg_temp.as_member(4);
+select pg_temp.expect('NU (nurse) reads none of it', pg_temp.lab_chain_written(),
+  'requirements=0 specimens= specimen_events=0 commands=0 executions= execution_events=0 results= '
+  || 'revisions=0 result_events=0 verifications=0 releases=0');
+select pg_temp.as_member(11, 1);
+select pg_temp.expect('L2 (lab at F2) in a session at F1 reads none of it', pg_temp.lab_chain_written(),
+  'requirements=0 specimens= specimen_events=0 commands=0 executions= execution_events=0 results= '
+  || 'revisions=0 result_events=0 verifications=0 releases=0');
+reset role;
+
+-- 7c. The deny directive, scope by scope. One directive for Ada at a time,
+-- written as replica and undone (a subtransaction rolled back on purpose),
+-- each answered as PH's and LS's sessions would see rx1's pharmacy item and
+-- W1 through D9 (D1 is consent's own deny test, so the same scope rules).
+create function pg_temp.deny_scope(grantee_kind text, grantee uuid, site uuid, deny_actions text[], deny_purposes text[],
+  starts interval default interval '-1 hour', ends interval default null) returns text language plpgsql as $f$
+declare answer text;
+begin
+  begin
+    if grantee_kind is null then
+      raise exception using errcode = 'P0002', message = 'own work suite: no directive';
+    end if;
+    perform set_config('session_replication_role', 'replica', true);
+    insert into identity.consent_directives (id, patient_id, current_version)
+    values ('e1330009-0000-4000-8000-000000000002', 'e1330006-0000-4000-8000-000000000001', 1);
+    insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status, provision_type,
+      grantee_type, grantee_id, facility_id, purposes, actions, starts_at, expires_at, source_reference, reason,
+      content_sha256)
+    values (gen_random_uuid(), 'e1330009-0000-4000-8000-000000000002', 'e1330006-0000-4000-8000-000000000001', 1,
+      'active', 'deny', grantee_kind, grantee, site, deny_purposes, deny_actions, clock_timestamp() + starts,
+      clock_timestamp() + ends, 'own-work-suite', 'Synthetic scoped deny directive', repeat('c', 64));
+    perform set_config('session_replication_role', 'origin', true);
+    answer := pg_temp.own_work_answers();
+    raise exception using errcode = 'P0001', message = 'own work suite: undo the directive';
+  exception
+    when sqlstate 'P0001' then
+      null;
+    when sqlstate 'P0002' then
+      answer := pg_temp.own_work_answers();
+  end;
+  return answer;
+end $f$;
+-- PH's and LS's answers from D9 on rx1's pharmacy item and W1, in their sessions.
+create function pg_temp.own_work_answers() returns text language plpgsql as $f$
+declare answer text;
+begin
+  perform pg_temp.as_member(2);
+  answer := format('PH read=%s write=%s',
+    (select count(*) from pharmacy.own_work_access_for('work_item', pg_temp.work_item_of(pg_temp.rx(1)), 'read_records')),
+    (select count(*) from pharmacy.own_work_access_for('work_item', pg_temp.work_item_of(pg_temp.rx(1)), 'write_records')));
+  perform pg_temp.as_member(3);
+  answer := answer || format(' LS read=%s', (select count(*) from lab.own_work_access_for('work_item',
+    'e133000a-0000-4000-8000-000000000001', 'read_records')));
+  return answer;
+end $f$;
+select pg_temp.expect('without a directive both work on Ada''s items',
+  pg_temp.deny_scope(null, null, null, '{}', '{}'), 'PH read=1 write=1 LS read=1');
+-- A directive on reads only: D9 also answers no write where the schema's
+-- owner is under forced row-level security (production), since it cannot
+-- read the item; where the owner bypasses it, D9 answers the write. The APIs
+-- read the item first either way, so the case reads "either".
+select pg_temp.expect('each scope of a deny directive for Ada',
+  regexp_replace((select string_agg(label || ': ' || pg_temp.deny_scope(kind, grantee, site, deny_actions, deny_purposes,
+     starts, ends), '; ' order by n)
+     from (values
+       (0, 'everyone', 'all', null, null, '{}', '{}', interval '-1 hour', null),
+       (1, 'this facility', 'facility', 'e1330001-0000-4000-8000-000000000001'::uuid, null::uuid, '{}'::text[], '{}'::text[],
+         interval '-1 hour', null::interval),
+       (2, 'another facility', 'facility', 'e1330001-0000-4000-8000-000000000002', null, '{}', '{}', interval '-1 hour', null),
+       (3, 'this organization', 'organization', 'e1330000-0000-4000-8000-000000000001', null, '{}', '{}', interval '-1 hour',
+         null),
+       (4, 'another organization', 'organization', gen_random_uuid(), null, '{}', '{}', interval '-1 hour', null),
+       (5, 'PH as staff', 'staff', 'e1330003-0000-4000-8000-000000000002', null, '{}', '{}', interval '-1 hour', null),
+       (6, 'everyone at F2 only', 'all', null, 'e1330001-0000-4000-8000-000000000002', '{}', '{}', interval '-1 hour', null),
+       (7, 'everyone at F1 only', 'all', null, 'e1330001-0000-4000-8000-000000000001', '{}', '{}', interval '-1 hour', null),
+       (8, 'writes only', 'all', null, null, '{write_records}', '{}', interval '-1 hour', null),
+       (9, 'reads only', 'all', null, null, '{read_records}', '{}', interval '-1 hour', null),
+       (10, 'emergency only', 'all', null, null, '{}', '{emergency}', interval '-1 hour', null),
+       (11, 'direct care', 'all', null, null, '{}', '{direct-care}', interval '-1 hour', null),
+       (12, 'not yet started', 'all', null, null, '{}', '{}', interval '1 hour', null),
+       (13, 'expired', 'all', null, null, '{}', '{}', interval '-2 hours', interval '-1 hour'))
+       scope(n, label, kind, grantee, site, deny_actions, deny_purposes, starts, ends)),
+    'reads only: PH read=0 write=[01]', 'reads only: PH read=0 write=either'),
+  'everyone: PH read=0 write=0 LS read=0; '
+  || 'this facility: PH read=0 write=0 LS read=0; another facility: PH read=1 write=1 LS read=1; '
+  || 'this organization: PH read=0 write=0 LS read=0; another organization: PH read=1 write=1 LS read=1; '
+  || 'PH as staff: PH read=0 write=0 LS read=1; everyone at F2 only: PH read=1 write=1 LS read=1; '
+  || 'everyone at F1 only: PH read=0 write=0 LS read=0; writes only: PH read=1 write=0 LS read=1; '
+  || 'reads only: PH read=0 write=either LS read=0; emergency only: PH read=1 write=1 LS read=1; '
+  || 'direct care: PH read=0 write=0 LS read=0; not yet started: PH read=1 write=1 LS read=1; '
+  || 'expired: PH read=1 write=1 LS read=1');
+select pg_temp.expect('the directives were undone', (select count(*)::text from identity.consent_directives
+  where id = 'e1330009-0000-4000-8000-000000000002'), '0');
+
+-- 7d. 0125's prescription details read the chart's version snapshots, so
+-- they still need the member's consent: none for PH, rx1's for PG.
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select pg_temp.expect('PH (own work, no grant) reads no prescription details', (select count(*)::text
+  from pharmacy.work_item_prescription_details(array[pg_temp.work_item_of(pg_temp.rx(1))])), '0');
+select pg_temp.as_member(10);
+select pg_temp.expect('PG (a grant for Ada) reads rx1''s details', (select count(*)::text
+  from pharmacy.work_item_prescription_details(array[pg_temp.work_item_of(pg_temp.rx(1))])), '1');
 reset role;
 
 -- 8. The owner-run definer functions that read ehr.prescriptions (case 1
