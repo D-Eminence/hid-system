@@ -26,10 +26,11 @@ import {
  * Q100 B (owner decision of 18 Nov 2026): a Health ID that no patient record
  * has answers 404 PATIENT_NOT_FOUND "No patient has this Health ID."; a
  * patient that exists but is not available here keeps today's answer. Both
- * are counted (30 in 10 minutes per member) and audited without the Health
- * ID. The issued check is asked only when the Health ID and the member's
- * facility are on the same side of the seals (real, demo 0098, QA 0123).
- * Fictional people and Health IDs only.
+ * are counted (30 in 10 minutes per staff account, whichever of its
+ * facilities it works at) and audited without the Health ID. The issued
+ * check is asked only when the Health ID and the member's facility are on
+ * the same side of the seals (real, demo 0098, QA 0123). Fictional people
+ * and Health IDs only.
  */
 const patientId = '7c1f0d2e-3c4a-4b5d-8e6f-7a8b9c0d1e2f';
 const membershipId = 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f';
@@ -302,23 +303,125 @@ describe('Q100 B: PatientLookupMissService', () => {
     });
   });
 
-  it('counts a miss in the member\'s HMAC bucket: 30 in 10 minutes', async () => {
+  it('counts a miss in the staff account\'s HMAC bucket: 30 in 10 minutes', async () => {
     const { service, queries } = missService({ rows: [] });
     await expect(service.countMiss(context)).resolves.toBe(false);
-    const bucket = service.bucket(membershipId);
+    const bucket = service.bucket(context.actor.accountId);
     expect(bucket).toMatch(/^[0-9a-f]{64}$/);
+    expect(bucket).not.toContain(context.actor.accountId);
     expect(bucket).not.toContain(membershipId);
     const insert = queries.find((query) => /insert into auth\.otp_rate_limits/.test(query.sql));
     expect(insert?.values.slice(0, 2)).toEqual(['account', bucket]);
     expect(PATIENT_LOOKUP_MISS_WINDOW).toEqual({ windowSeconds: 600, maxRequests: 30 });
   });
 
-  it('cannot count (undefined) when the database fails or there is no membership', async () => {
+  it('cannot count (undefined) when the database fails, or there is no account or no membership', async () => {
     await expect(missService(new Error('down')).service.countMiss(context)).resolves.toBeUndefined();
     const { service, database } = missService({ rows: [] });
     await expect(service.countMiss({ ...context, membershipId: '' })).resolves.toBeUndefined();
+    await expect(service.countMiss({ ...context, actor: { ...context.actor, accountId: '' } })).resolves.toBeUndefined();
     expect(database.withTransaction).not.toHaveBeenCalled();
   });
+
+  it('keeps one limit per staff account across its facilities: changing X-Facility-ID gives no fresh 30', async () => {
+    const { service } = rateLimitedMissService();
+    const memberships = MEMBERSHIPS.map(([member, facility]) => atFacility(member, facility));
+    const answers: (boolean | undefined)[] = [];
+    for (let miss = 0; miss < PATIENT_LOOKUP_MISS_WINDOW.maxRequests; miss += 1) {
+      answers.push(await service.countMiss(memberships[miss % memberships.length]!));
+    }
+    expect(answers).toEqual(Array(PATIENT_LOOKUP_MISS_WINDOW.maxRequests).fill(false));
+    // The 31st miss is limited at every facility of the account, not only at the one that had most.
+    for (const member of memberships) await expect(service.countMiss(member)).resolves.toBe(true);
+    // Another staff account at the same facility keeps its own limit.
+    await expect(service.countMiss({ ...context, actor: { ...context.actor, accountId: OTHER_ACCOUNT } }))
+      .resolves.toBe(false);
+  });
+});
+
+/** auth.otp_rate_limits in memory, as consumeRateLimit (auth/rate-limit.ts) reads and writes it. */
+function rateLimitTable() {
+  const rows = new Map<string, { request_count: number; window_started_at: Date; blocked_until: Date | null }>();
+  const query = jest.fn(async (sql: string, values: unknown[] = []) => {
+    const key = `${String(values[0])}:${String(values[1])}`;
+    if (/select request_count/.test(sql)) {
+      const row = rows.get(key);
+      return { rows: row ? [row] : [] };
+    }
+    if (/insert into auth\.otp_rate_limits/.test(sql)) {
+      const [, , windowExpired, nextCount, blocked, windowSeconds] = values as [string, string, boolean, number, boolean, number];
+      const existing = rows.get(key);
+      rows.set(key, existing
+        ? { request_count: nextCount, window_started_at: windowExpired ? new Date() : existing.window_started_at,
+          blocked_until: blocked ? new Date(Date.now() + windowSeconds * 1000) : null }
+        : { request_count: 1, window_started_at: new Date(), blocked_until: null });
+    }
+    return { rows: [] };
+  });
+  return { rows, query };
+}
+
+/** A miss service on the in-memory rate-limit table; every Health ID is unissued at a real facility. */
+function rateLimitedMissService() {
+  const table = rateLimitTable();
+  const query = jest.fn(async (sql: string, values: unknown[] = []) => {
+    if (/sealed_demo_facility/.test(sql)) return FACILITY_ROWS.real;
+    if (/support_health_id_matches/.test(sql)) return { rows: [] };
+    return table.query(sql, values);
+  });
+  const database = { query, withTransaction: jest.fn(async (_c: unknown, work: (client: unknown) => unknown) =>
+    work({ query })) };
+  return { service: new PatientLookupMissService(database as unknown as DatabaseService), table, query };
+}
+
+/** The same fictional staff account signed in at another of its facilities (X-Facility-ID). */
+const MEMBERSHIPS: readonly (readonly [string, string])[] = [
+  [membershipId, facilityId],
+  ['d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70', '1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e'],
+  ['e5f6a7b8-c9d0-4e1f-8a2b-3c4d5e6f7081', '2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f'],
+];
+const OTHER_ACCOUNT = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+function atFacility(member: string, facility: string): DataAccessContext {
+  return { ...context, membershipId: member, facilityId: facility,
+    actor: { ...context.actor, facility: { organizationId: 'org', membershipId: member } } } as unknown as DataAccessContext;
+}
+
+describe('Q100 B: the miss limit, end to end through IdentityService and the rate-limit table', () => {
+  beforeAll(() => {
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      DATABASE_SSL: 'false', CORS_ORIGINS: 'https://healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901', AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+      STORAGE_MODE: 'disabled' });
+    resetEnvironmentForTests();
+  });
+  afterAll(() => { resetEnvironmentForTests(); });
+
+  function identityWith(found: IdentityPatient | null, decision: AuthorizationDecision) {
+    const { service: misses } = rateLimitedMissService();
+    const provider: IdentityProvider = { lookupExactHid: jest.fn(async () => found),
+      authorize: jest.fn(async () => decision), consentStatus: jest.fn() };
+    const audit = { record: jest.fn(async () => undefined) };
+    const service = new IdentityService(provider, audit as never, undefined, misses);
+    return { service, provider, audit };
+  }
+  const answerTo = (service: IdentityService, hid: string, at: DataAccessContext) =>
+    service.lookupPatient(hid, 'direct-care', at).catch((error: unknown) => error);
+
+  it('limits an account that spreads 31 unknown Health IDs over three facilities', async () => {
+    const { service, provider } = identityWith(null, allow);
+    const memberships = MEMBERSHIPS.map(([member, facility]) => atFacility(member, facility));
+    for (let miss = 0; miss < PATIENT_LOOKUP_MISS_WINDOW.maxRequests; miss += 1) {
+      await expect(answerTo(service, NOBODY, memberships[miss % memberships.length]!))
+        .resolves.toMatchObject({ status: 404, code: 'PATIENT_NOT_FOUND' });
+    }
+    for (const member of memberships) {
+      const limited = await answerTo(service, NOBODY, member);
+      expect(limited).toMatchObject({ status: 404, message: 'Patient was not found or is not available' });
+      expect(limited).not.toBeInstanceOf(DomainProblem);
+    }
+    expect(provider.lookupExactHid).toHaveBeenCalledTimes(PATIENT_LOOKUP_MISS_WINDOW.maxRequests + memberships.length);
+  });
+
 });
 
 describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {

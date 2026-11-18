@@ -6905,7 +6905,7 @@ Body unchanged (`hid` in the body, never in a URL; `purpose`). Answers:
 | The patient exists but is not available here (another facility's patient without consent, not active, sealed tenant) | `404` | today's answer, unchanged (`code` `NOT_FOUND`, "Patient was not found or is not available") |
 | The Health ID is on another side of the seals than the member's facility, or starts `ZDEM` or `ZQA` without being a sealed one, or the facility's side cannot be told (below) | `404` | today's answer, whether or not any record has the Health ID, never `PATIENT_NOT_FOUND` |
 | The patient can be seen here but this lookup is not authorized | `403` | today's answer, unchanged |
-| The member has had 30 lookups that opened no patient in 10 minutes | `404` or `403` | today's answer for 10 minutes (`404` `NOT_FOUND`, or `403` for a patient this lookup may see but not open), never `PATIENT_NOT_FOUND` and never a `429` |
+| The staff account has had 30 lookups that opened no patient in 10 minutes, at any of its facilities | `404` or `403` | today's answer for 10 minutes (`404` `NOT_FOUND`, or `403` for a patient this lookup may see but not open), never `PATIENT_NOT_FOUND` and never a `429` |
 
 "No record has this Health ID" is read with
 `identity.support_health_id_matches` (0109), which identity-api's runtime
@@ -6914,11 +6914,13 @@ issued (any status), nothing else about any patient. Note: 0109's comment
 names the support route as its caller; this is a second caller of the same
 function, with no database change.
 
-Every lookup that does not open a patient is counted for the member before
+Every lookup that does not open a patient is counted for the person before
 anything is said about the Health ID (`auth.otp_rate_limits`, `account`
-bucket keyed by an HMAC of the membership with the existing
-`OTP_HMAC_KEY_B64`). A lookup that opens a patient is not counted. A
-limited member keeps getting today's refusals, never a new status: the
+bucket keyed by an HMAC of the staff account with the existing
+`OTP_HMAC_KEY_B64`). It is one limit per account, not per membership: a
+member of several facilities gets no fresh 30 by changing `X-Facility-ID`.
+A lookup that opens a patient is not counted. A limited member keeps getting
+today's refusals, never a new status: the
 website ends access and closes an open record on any `403` or `404` from this
 lookup (its check before every save), so a `429` there would leave a record
 open after access has ended. If the member cannot be counted, the side of

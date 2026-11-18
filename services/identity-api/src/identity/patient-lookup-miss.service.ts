@@ -13,14 +13,15 @@ import { DatabaseService } from '../database/database.service';
  * available to this facility keeps today's answer.
  *
  * Every lookup that does not open a patient (no such patient, not available,
- * or not authorized) is counted for the member in an `account` bucket of
- * auth.otp_rate_limits keyed by an HMAC of the membership (as Order
- * destinations count searches): 30 in 10 minutes. From the 31st, the lookup
- * is answered with today's refusal for 10 minutes (404 NOT_FOUND, or 403 for a
- * patient this lookup may see but not open), never "No such patient", before
- * anything is said about the Health ID. It is never a 429: every client
- * closes an open record on 403 or 404. A lookup that opens a patient is not
- * counted.
+ * or not authorized) is counted for the person, in an `account` bucket of
+ * auth.otp_rate_limits keyed by an HMAC of the staff account: 30 in 10
+ * minutes, whichever of the account's facilities X-Facility-ID names, so a
+ * member of several facilities gets no fresh 30 by changing facility. From
+ * the 31st, the lookup is answered with today's refusal for 10 minutes (404
+ * NOT_FOUND, or 403 for a patient this lookup may see but not open), never
+ * "No such patient", before anything is said about the Health ID. It is never
+ * a 429: every client closes an open record on 403 or 404. A lookup that
+ * opens a patient is not counted.
  *
  * Whether a Health ID was ever issued is read with
  * identity.support_health_id_matches (0109): it reads past the patients'
@@ -87,18 +88,24 @@ export class PatientLookupMissService {
 
   constructor(private readonly database: DatabaseService) {}
 
-  /** The member's bucket: HMAC-SHA-256 with the OTP key over 'patient-lookup-miss\0' + membership id. */
-  bucket(membershipId: string): string | null {
-    if (!this.key || !membershipId) return null;
-    return createHmac('sha256', this.key).update('patient-lookup-miss\0').update(membershipId).digest('hex');
+  /**
+   * The person's bucket: HMAC-SHA-256 with the OTP key over
+   * 'patient-lookup-miss-account\0' + staff account id. One bucket per
+   * account, not per membership: the security guard takes the membership from
+   * whichever of the account's facilities X-Facility-ID names.
+   */
+  bucket(accountId: string): string | null {
+    if (!this.key || !accountId) return null;
+    return createHmac('sha256', this.key).update('patient-lookup-miss-account\0').update(accountId).digest('hex');
   }
 
   /**
-   * Counts one lookup that did not open a patient. True when the member is
-   * (now) limited, false when not, undefined when it could not be counted.
+   * Counts one lookup that did not open a patient, for the staff account. True
+   * when the account is (now) limited, false when not, undefined when it could
+   * not be counted (no account, no membership, or the database failed).
    */
   async countMiss(context: DataAccessContext): Promise<boolean | undefined> {
-    const bucket = this.bucket(context.membershipId);
+    const bucket = context.membershipId ? this.bucket(context.actor.accountId) : null;
     if (!bucket) return undefined;
     try {
       return await this.database.withTransaction(context, (client) =>
