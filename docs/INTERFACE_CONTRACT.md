@@ -6211,4 +6211,28 @@ not null. Opening a row calls `GET registration-cases/:caseId`.
 `services/identity-api/src/identity/registration-case-list.spec.ts`: mine and
 facility views, another facility sees nothing, the refusal and its audit row,
 the success audit row, no NIN digits in the answer or the query, paging and
-bad cursors, and query parameters (a Health ID is refused).
+bad cursors, and query parameters (a Health ID is refused). Those run on a
+fake database; one test checks that the Postgres suite below runs the read
+the service sends, word for word.
+
+`services/ehr-api/test/database/registration-case-list.integration.sql`
+(rollback-only, run with the other ported suites by
+`scripts/run-container-database-acceptance.sh`): the exact read, under
+row-level security as `hid_identity_api_runtime` in Identity's transaction
+context. A registration member of facility B reads none of facility A's
+cases (also when naming facility A); a member without
+`identity.registration.write` reads nothing; a platform reviewer, whom
+row-level security lets read every facility, still gets only A's cases in
+A's list; `view=mine` shows only the member's own cases; the status filter;
+paging one case at a time through two cases with the same `created_at`, with
+the cursor's text in Africa/Lagos time; and `ninStatus` for a case with no
+patient yet (verified), a patient with a checked NIN (verified), a patient
+whose NIN was revoked (not verified) and one with none (not verified).
+
+`services/identity-api/src/identity/registration-case-list.http.spec.ts`
+(supertest, the real security guard, audit interceptor and the global
+validation pipe as `main.ts` sets it): `200` with `Cache-Control: no-store`
+and the audit row; `403 PERMISSION_DENIED` without
+`identity.registration.write`; `400 VALIDATION_FAILED` for
+`?hid=HID-QX7K2M`, with nothing read and the Health ID written nowhere;
+`400 PURPOSE_OF_USE_REQUIRED` without `X-Purpose-Of-Use`.

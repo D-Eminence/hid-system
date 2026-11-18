@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import type { DataAccessContext } from '../common/request-context';
@@ -180,6 +182,24 @@ describe('SX-10 registration-case list', () => {
     await expect(service.listCases(query({ cursor }), desk)).rejects.toMatchObject({
       status: 400, code: 'REGISTRATION_CASE_CURSOR_INVALID' });
     expect(database.withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('runs, in the database suite, the read the list sends, word for word', async () => {
+    // The fake database above applies the list's filters itself. The Postgres
+    // suite (registration-case-list.integration.sql) runs this exact read under
+    // row-level security as Identity's runtime role: another facility, the
+    // mine and facility views, status, paging two cases with the same
+    // created_at, and ninStatus with a revoked NIN. It must keep testing the
+    // read the code sends.
+    const { service, statements } = fakeDatabase(table);
+    await service.listCases(query({ view: 'facility' }), approver);
+    const sent = statements.find((statement) => statement.sql.includes('from identity.registration_cases registration'));
+    const words = (text: string) => text.replace(/\s+/g, ' ').trim();
+    const suite = readFileSync(
+      join(__dirname, '../../../ehr-api/test/database/registration-case-list.integration.sql'), 'utf8');
+    const suiteRead = /create function pg_temp\.registration_case_list\([\s\S]*?as \$\$([\s\S]*?)\$\$/.exec(suite)?.[1];
+    expect(words(suiteRead ?? 'pg_temp.registration_case_list is missing'))
+      .toBe(words(sent?.sql ?? 'no list read was sent'));
   });
 
   describe('query parameters', () => {
