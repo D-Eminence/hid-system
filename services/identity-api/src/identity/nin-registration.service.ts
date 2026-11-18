@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Optional } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
@@ -11,6 +11,8 @@ import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
 import { assertSafeNinVerificationResult } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
+import { NinProviderBreaker } from './nin-provider-breaker';
+import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
 import type { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto';
 import type { LinkRegistrationCaseDto } from './dto/link-registration-case.dto';
 import type { EnrollPatientDto } from './dto/enroll-patient.dto';
@@ -33,6 +35,8 @@ interface RegistrationCaseRow extends QueryResultRow {
   resolved_hid_code: string | null;
   candidate_count: string;
   contact_recorded?: boolean;
+  /** ID-0: see CASE_NIN_VERIFIED. */
+  nin_verified?: boolean;
 }
 
 /**
@@ -76,9 +80,21 @@ export interface RegistrationCaseResult {
   candidateCount: number;
   /** 0114: the desk recorded the patient's phone and address (never returned). */
   contactRecorded: boolean;
+  /** ID-0: "NIN Verified" or "NIN Not Verified" on screen; never the stored verification value. */
+  ninStatus: NinStatus;
   candidates?: Array<{ patientId: string; fullName: string; dateOfBirth: string | null }>;
   patient?: { patientId: string; hid: string };
 }
+
+/**
+ * ID-0: the case's NIN was checked, and, once the case points at a patient,
+ * that patient still holds a checked NIN that has not been revoked.
+ */
+const CASE_NIN_VERIFIED = `case
+      when registration.verified_at is null then false
+      when registration.resolved_patient_id is null then true
+      else ${patientHasVerifiedNinSql('registration.resolved_patient_id')}
+    end as nin_verified`;
 
 const CASE_SELECT = `
   select
@@ -89,7 +105,8 @@ const CASE_SELECT = `
     patient.hid_code as resolved_hid_code,
     (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count,
     exists (select 1 from identity.registration_case_contacts contact
-             where contact.registration_case_id = registration.id and contact.erased_at is null) as contact_recorded
+             where contact.registration_case_id = registration.id and contact.erased_at is null) as contact_recorded,
+    ${CASE_NIN_VERIFIED}
   from identity.registration_cases registration
   left join identity.patients patient on patient.id = registration.resolved_patient_id
 `;
@@ -104,6 +121,7 @@ export class NinRegistrationService {
     private readonly protector: NinIdentifierProtector,
     private readonly hidGenerator: HidCodeGenerator,
     @Inject(NIN_VERIFICATION_PROVIDER) private readonly provider: NinVerificationProvider,
+    @Optional() private readonly ninBreaker: NinProviderBreaker = new NinProviderBreaker(),
   ) {}
 
   async resolve(input: ResolveNinDto, idempotencyHeader: string | undefined, context: DataAccessContext): Promise<RegistrationCaseResult> {
@@ -140,6 +158,13 @@ export class NinRegistrationService {
 
     let verification;
     try {
+      // ID-0: while the NIN service breaker is tripped, no check is sent.
+      this.ninBreaker.assertAvailable();
+    } catch (error) {
+      await this.auditFailure(context, 'identity.nin.verify', error);
+      throw error;
+    }
+    try {
       verification = await this.provider.verify({
         nin: input.nin,
         claimedDemographics,
@@ -147,9 +172,11 @@ export class NinRegistrationService {
       });
       assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
     } catch (error) {
+      this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
       await this.auditFailure(context, 'identity.nin.verify', error);
       throw error;
     }
+    this.ninBreaker.recordSuccess();
     if (!verification.verified) {
       await this.audit.record({
         correlationId: context.correlationId,
@@ -675,6 +702,7 @@ export class NinRegistrationService {
               exists (select 1 from identity.registration_case_contacts contact
                        where contact.registration_case_id = registration.id
                          and contact.erased_at is null) as has_contact,
+              ${CASE_NIN_VERIFIED},
               (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count
          from identity.registration_cases registration
          left join identity.patients patient on patient.id = registration.resolved_patient_id
@@ -716,6 +744,7 @@ export class NinRegistrationService {
       version: Number(row.row_version),
       candidateCount: Number(row.candidate_count),
       contactRecorded: row.contact_recorded === true,
+      ninStatus: ninStatusOf(row.nin_verified),
       ...(row.resolved_patient_id && row.resolved_hid_code
         ? { patient: { patientId: row.resolved_patient_id, hid: row.resolved_hid_code } }
         : {}),

@@ -172,7 +172,8 @@ describe('explicitly deferred staging NIN', () => {
     await startModule();
     const response = await request(app!.getHttpServer()).get('/api/v1/identity/registration-capabilities');
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ nin: { enabled: false, state: 'deferred' }, newPatientRegistrationRequiresNin: true });
+    expect(response.body).toEqual({ nin: { enabled: false, state: 'deferred', available: false },
+      withoutNin: { enabled: false }, newPatientRegistrationRequiresNin: true });
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
@@ -272,7 +273,8 @@ describe('explicitly deferred staging NIN', () => {
     const response = await request(app!.getHttpServer()).get('/api/v1/identity/registration-capabilities')
       .set('authorization', 'Bearer synthetic-token').set('x-facility-id', facilityId);
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ nin: { enabled: false, state: 'deferred' }, newPatientRegistrationRequiresNin: true });
+    expect(response.body).toEqual({ nin: { enabled: false, state: 'deferred', available: false },
+      withoutNin: { enabled: false }, newPatientRegistrationRequiresNin: true });
     expect(tokens.verify).toHaveBeenCalledWith('synthetic-token');
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });

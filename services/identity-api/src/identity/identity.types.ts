@@ -11,6 +11,8 @@ export interface IdentityPatient {
   dateOfBirth: string | null;
   gender: string | null;
   rowVersion: number;
+  /** ID-0: the patient holds a checked NIN that has not been revoked. */
+  ninVerified?: boolean;
 }
 
 export interface AuthorizationRequest {

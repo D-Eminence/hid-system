@@ -6022,3 +6022,92 @@ staff or patient sign-in of the client's kind, never changed or deleted:
 INSERT` on the first and `SELECT, INSERT, DELETE` on the second; no other
 runtime holds anything on either. The suite is
 `services/ehr-api/database/tests/sso-relying-party.integration.sql`.
+
+## ID-0. NIN status on staff answers, and the NIN service breaker (Akos wave 1, no migration)
+
+Owner decision of 18 November 2026: screens say "NIN Verified" or "NIN Not
+Verified". The service answers one field with two values and the screen
+shows the words.
+
+### `ninStatus`
+
+`ninStatus` is `"verified"` or `"not_verified"`. No other value is ever
+returned, and no stored verification value is passed through as it is.
+
+- `"verified"`: the patient holds a NIN that was checked and has not been
+  revoked (`identity.patient_identifiers`: `identifier_type = 'nin'`,
+  `verified`, `revoked_at is null`).
+- `"not_verified"`: everything else, including a NIN that was revoked.
+
+Added to:
+
+- `POST /api/v1/identity/patient-lookup`: `patient.ninStatus`, beside
+  `patient.version`. The lookup is audited as before
+  (`identity.patient.lookup`).
+- Every registration-case answer (`POST identity/nin/resolve`,
+  `GET identity/registration-cases/:caseId`, `approve-new`,
+  `link-existing`, and their replays): top-level `ninStatus`. A case is
+  `"verified"` when its NIN was checked and, once the case points at a
+  patient, that patient still holds a checked NIN that is not revoked. Every
+  case today has a checked NIN; `"not_verified"` cases arrive with ID-2.
+- Desk search cards (ID-3a, lane B) use the same rule:
+  `services/identity-api/src/identity/nin-status.ts` exports
+  `patientHasVerifiedNinSql()` and `ninStatusOf()`.
+
+### `GET /api/v1/identity/registration-capabilities`
+
+Same permission and headers as before (`identity.registration.write`,
+`X-Facility-Id`). The answer gains `nin.available` and `withoutNin`:
+
+```json
+{
+  "nin": { "enabled": true, "state": "test-only", "available": true },
+  "withoutNin": { "enabled": false },
+  "newPatientRegistrationRequiresNin": true
+}
+```
+
+Staging (deferred) answers
+`{"nin":{"enabled":false,"state":"deferred","available":false},"withoutNin":{"enabled":false},"newPatientRegistrationRequiresNin":true}`.
+
+- `nin.available` is `false` when NIN checks are off (`enabled: false`) or the
+  breaker below is tripped; otherwise `true`.
+- `withoutNin.enabled` is `false` until ID-2 (0130) ships desk registration
+  without a NIN. `newPatientRegistrationRequiresNin` stays `true` until then.
+
+### The breaker
+
+Kept in memory in each Identity process (no table, no secret, no setting).
+
+- A `503` from the NIN service trips it at once.
+- Three other failures (a `5xx`, a bad answer, a network error) within 5
+  minutes trip it.
+- A NIN that does not match (`422 NIN_VERIFICATION_FAILED`) is an answer, not
+  a failure, and does not count. Nor does a `4xx`.
+- While tripped, `POST identity/nin/resolve` answers `503` with code
+  `NIN_PROVIDER_UNAVAILABLE` and detail "The NIN service is not answering
+  right now. Please try again in a minute." without calling the service. The
+  refusal is audited (`identity.nin.verify`, outcome `failure`). A replay of
+  an earlier request is still answered.
+- After 60 seconds one check is let through. Success closes the breaker and
+  clears the count; a failure trips it again.
+
+Every counted failure writes one warning log line with
+`event: "identity.nin_provider.unavailable"`, the provider name, the error
+code, the HTTP status, the failures in the last 5 minutes, the breaker state
+and the correlation id. It never holds a NIN, a name or a date of birth.
+
+### Screen change (Akos's frontend branch)
+
+Show `ninStatus` as "NIN Verified" or "NIN Not Verified" on the patient
+lookup and registration-case screens. When `nin.available` is `false`, tell
+the desk the NIN service is not answering and to try again in a minute. Do
+not offer registration without a NIN until `withoutNin.enabled` is `true`.
+
+### Tests
+
+`services/identity-api/src/identity/nin-status.spec.ts` (verified,
+not_verified and revoked on the lookup and the case answer; breaker trip,
+window, retry, recovery, log event; capabilities; no answer contains the
+word the owner ruled out). `nin-deferred-staging.spec.ts` exact bodies
+updated.
