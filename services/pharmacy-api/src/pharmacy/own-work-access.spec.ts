@@ -53,8 +53,20 @@ interface Options {
   accessRows?: { work_item_id: string }[];
   accessError?: Error & { code?: string };
   statesError?: Error & { code?: string };
+  /** The ids 0133's states answer (default: every one asked). */
+  statesFor?: (ids: string[]) => string[];
   identityAllowed?: boolean;
+  /** 0124's OWN_WORK_PATIENT_CARD_ENABLED (default on). */
+  cards?: boolean;
+  dispenseError?: Error & { code?: string };
 }
+
+const DISPENSING_ID = '64000000-0000-4000-8000-000000000001';
+const dispensingRow = (workItemId: string) => ({ id: DISPENSING_ID, work_item_id: workItemId, work_item_version: '1',
+  patient_id: ada, facility_id: facilityId, medication_code_system: null, medication_code: null,
+  medication_display: 'Amoxicillin 500 mg capsule', quantity_dispensed: '21', quantity_unit: 'capsule',
+  status: 'dispensed', dispensed_by: accountId, dispensed_at: new Date(), row_version: '1', created_at: new Date(),
+  request_sha256: 'x', reversal_id: null, reversed_at: null });
 
 const harness = (options: Options = {}) => {
   const rows = [row(1, ada), row(2, bisi), row(3, ada)];
@@ -72,8 +84,17 @@ const harness = (options: Options = {}) => {
     }
     if (STATES.test(sql)) {
       if (options.statesError) throw options.statesError;
-      return { rows: (values[0] as string[]).map((item) => ({ work_item_id: item,
+      const asked = values[0] as string[];
+      return { rows: (options.statesFor ? options.statesFor(asked) : asked).map((item) => ({ work_item_id: item,
         basis: item === id(2) ? 'consent' : 'own-work', withdrawn: item === id(3) })) };
+    }
+    if (/from pharmacy\.dispensings d left join/.test(sql) && /where d\.id=\$1/.test(sql)) {
+      return { rows: values[0] === DISPENSING_ID ? [dispensingRow(id(1))] : [] };
+    }
+    if (/insert into pharmacy\.dispensing_reversals/.test(sql)) {
+      return { rows: [{ id: '65000000-0000-4000-8000-000000000001', dispensing_id: values[1], dispensing_version: '1',
+        work_item_id: values[3], patient_id: values[4], facility_id: values[5], status: 'reversed', reversed_by: accountId,
+        reversed_at: new Date(), row_version: '1', created_at: new Date() }] };
     }
     if (CARDS.test(sql)) {
       return { rows: (values[0] as string[]).map((item) => ({ work_item_id: item,
@@ -81,6 +102,7 @@ const harness = (options: Options = {}) => {
         patient_health_id_last4: 'AAA2' })) };
     }
     if (/insert into pharmacy\.dispensings/.test(sql)) {
+      if (options.dispenseError) throw options.dispenseError;
       return { rows: [{ id: '64000000-0000-4000-8000-000000000001', work_item_id: values[1], work_item_version: '1',
         patient_id: values[3], facility_id: values[4], medication_code_system: null, medication_code: null,
         medication_display: 'Amoxicillin 500 mg capsule', quantity_dispensed: '21', quantity_unit: 'capsule',
@@ -97,7 +119,7 @@ const harness = (options: Options = {}) => {
   const ownWork = options.ownWork === false ? OWN_WORK_OFF : new PharmacyOwnWork(true);
   const service = new PharmacyService(database, identity, audit as unknown as AuditService,
     new PharmacyOrderRouteAccess(identity, ownWork), new PharmacyOrderRouteCards(database),
-    new PharmacyOwnWorkPatientCards(true), PRESCRIPTION_DETAILS_OFF, ownWork);
+    new PharmacyOwnWorkPatientCards(options.cards ?? true), PRESCRIPTION_DETAILS_OFF, ownWork);
   const audited = () => audit.recordWithClient.mock.calls.map((call) => {
     const [, , action, resource, details] = call as unknown as [unknown, unknown, string,
       { patientId?: string; resourceType: string; resourceId: string }, Record<string, unknown> | undefined];
@@ -170,12 +192,110 @@ describe('own pharmacy work (0133)', () => {
       [bisi, { basis: 'consent', workItemIds: [id(2)] }]]);
   });
 
-  it('keeps basis consent and no withdrawn flag when the states cannot be read', async () => {
-    const missing = Object.assign(new Error('function pharmacy.own_work_item_states does not exist'), { code: '42883' });
-    const { service, audited } = harness({ statesError: missing });
+  it('records every own patient listed with 0133\'s basis while the patient card is off (0124 flag off)', async () => {
+    const { service, statements, audited } = harness({ cards: false });
     const page = await service.listWorkItems(pharmacist);
+    expect(statements.some((sql) => CARDS.test(sql))).toBe(false);
+    expect(page.items.map((item) => 'patient' in item)).toEqual([false, false, false]);
+    expect(audited().map((event) => [event.patientId, event.details])).toEqual([
+      [null, { returnedCount: 3 }],
+      [ada, { basis: 'own-work', workItemIds: [id(1), id(3)] }],
+      [bisi, { basis: 'consent', workItemIds: [id(2)] }]]);
+  });
+
+  it('records a row 0133 no longer answers (a grant ended meanwhile) with the list read\'s basis, consent', async () => {
+    const { service, audited } = harness({ cards: false, statesFor: (ids) => ids.filter((item) => item !== id(3)) });
+    await service.listWorkItems(pharmacist);
+    expect(audited().slice(1).map((event) => [event.patientId, event.details])).toEqual([
+      [ada, { basis: 'own-work', workItemIds: [id(1)] }],
+      [bisi, { basis: 'consent', workItemIds: [id(2)] }],
+      [ada, { basis: 'consent', workItemIds: [id(3)] }]]);
+  });
+
+  it('on a schema without 0133 records as 0124 did: shown patients with basis consent, no withdrawn flag', async () => {
+    const missing = Object.assign(new Error('function pharmacy.own_work_item_states does not exist'), { code: '42883' });
+    const shown = harness({ statesError: missing });
+    const page = await shown.service.listWorkItems(pharmacist);
     expect(page.items.some((item) => 'withdrawn' in item)).toBe(false);
-    expect(audited().slice(1).map((event) => event.details?.basis)).toEqual(['consent', 'consent']);
+    expect(shown.statements).toContain('rollback to savepoint pharmacy_own_work_states');
+    expect(shown.audited().slice(1).map((event) => [event.patientId, event.details])).toEqual([
+      [ada, { basis: 'consent', workItemIds: [id(1), id(3)] }], [bisi, { basis: 'consent', workItemIds: [id(2)] }]]);
+    const hidden = harness({ statesError: missing, cards: false });
+    await hidden.service.listWorkItems(pharmacist);
+    expect(hidden.audited().map((event) => event.patientId)).toEqual([null]);
+  });
+
+  it('fails the list rather than record a basis it could not read', async () => {
+    const timeout = Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+    const { service, statements, audited } = harness({ statesError: timeout, cards: false });
+    await expect(service.listWorkItems(pharmacist)).rejects.toBe(timeout);
+    expect(statements).toContain('rollback to savepoint pharmacy_own_work_states');
+    expect(audited().filter((event) => event.patientId)).toEqual([]);
+  });
+
+  it('passes a serialization failure of the states on, so the list is run again', async () => {
+    const conflict = Object.assign(new Error('could not serialize access'), { code: '40001' });
+    const { service, statements } = harness({ statesError: conflict });
+    await expect(service.listWorkItems(pharmacist)).rejects.toBe(conflict);
+    expect(statements).not.toContain('rollback to savepoint pharmacy_own_work_states');
+  });
+
+  it('reads one withdrawn own item with the flag, and without it (still answering) when the states fail', async () => {
+    await expect(harness().service.getWorkItem(pharmacist, id(3))).resolves.toMatchObject({ id: id(3), withdrawn: true });
+    const failing = harness({ statesError: Object.assign(new Error('timeout'), { code: '57014' }) });
+    const item = await failing.service.getWorkItem(pharmacist, id(3));
+    expect('withdrawn' in item).toBe(false);
+    expect(failing.audited().map((event) => event.details)).toEqual([{ basis: 'own-work' }]);
+  });
+
+  it('answers 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE when a withdrawn item is dispensed (0101)', async () => {
+    const { service, identity, audited } = harness({ dispenseError: Object.assign(
+      new Error('PRESCRIPTION_SOURCE_NOT_DISPENSABLE'), { code: '23514' }) });
+    await expect(service.dispense(pharmacist, id(3), { expectedWorkItemVersion: 1, quantityDispensed: 21,
+      quantityUnit: 'capsule', reason: 'Dispensed to the patient' }, 'own-work-dispense-key-0003'))
+      .rejects.toMatchObject({ status: 409, code: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
+        message: 'This prescription can no longer be dispensed here' });
+    expect(identity.authorize).not.toHaveBeenCalled();
+    expect(audited()).toEqual([]);
+  });
+
+  it('reads and reverses an own dispensing on the own-work basis, asking about the dispensing', async () => {
+    const read = harness();
+    await read.service.getDispensing(pharmacist, DISPENSING_ID);
+    expect(read.identity.authorize).not.toHaveBeenCalled();
+    expect(read.audited()).toEqual([{ action: 'pharmacy.dispensing.read', patientId: ada,
+      resourceType: 'medication-dispensing', details: { basis: 'own-work' } }]);
+    const reverse = harness();
+    await reverse.service.reverse(pharmacist, DISPENSING_ID, { expectedDispensingVersion: 1,
+      reason: 'Dispensed to the wrong patient' }, 'own-work-reverse-key-0001');
+    expect(reverse.identity.authorize).not.toHaveBeenCalled();
+    expect(reverse.audited()).toEqual([{ action: 'pharmacy.dispensing.reverse', patientId: ada,
+      resourceType: 'medication-dispensing-reversal', details: { dispensingId: DISPENSING_ID, dispensingVersion: 1,
+        status: 'reversed', basis: 'own-work' } }]);
+  });
+
+  it.each([
+    ['getWorkItem', 'work_item', id(1), 'read_records', (service: PharmacyService) => service.getWorkItem(pharmacist, id(1))],
+    ['dispense', 'work_item', id(1), 'write_records', (service: PharmacyService) => service.dispense(pharmacist, id(1),
+      { expectedWorkItemVersion: 1, quantityDispensed: 21, quantityUnit: 'capsule', reason: 'Dispensed' }, 'own-key-0002')],
+    ['getDispensing', 'dispensing', DISPENSING_ID, 'read_records', (service: PharmacyService) =>
+      service.getDispensing(pharmacist, DISPENSING_ID)],
+    ['reverse', 'dispensing', DISPENSING_ID, 'write_records', (service: PharmacyService) =>
+      service.reverse(pharmacist, DISPENSING_ID, { expectedDispensingVersion: 1, reason: 'Reversed' }, 'own-key-0003')],
+  ] as const)('%s asks pharmacy.own_work_access_for about its %s', async (_name, resource, resourceId, action, call) => {
+    const { service, identity } = harness();
+    const asked: unknown[][] = [];
+    const client = (service as unknown as { database: { withTransaction: (c: unknown, fn: (c: PoolClient) => unknown) =>
+      unknown } }).database;
+    const original = client.withTransaction;
+    client.withTransaction = async (c, fn) => original(c, (pool: PoolClient) => fn({ query: async (sql: string,
+      values?: unknown[]) => {
+      if (ACCESS.test(sql)) asked.push(values ?? []);
+      return (pool.query as unknown as (s: string, v?: unknown[]) => Promise<unknown>)(sql, values);
+    } } as unknown as PoolClient));
+    await call(service);
+    expect(asked).toEqual([[resource, resourceId, action]]);
+    expect(identity.authorize).not.toHaveBeenCalled();
   });
 
   it('off, asks nothing new and keeps Identity\'s consent', async () => {

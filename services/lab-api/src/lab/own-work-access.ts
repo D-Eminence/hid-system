@@ -26,15 +26,19 @@ const STATE_BATCH = 200;
  * facility's laboratory (direct care, lab.work-item.read and
  * lab.order-route.receive here, the patient active and no deny directive) on
  * the own work item (no order route) a work item, accession, specimen,
- * execution or result belongs to. `states` asks `lab.own_work_item_bases`
- * why the session sees each own row ('consent' or 'own-work').
+ * execution or result belongs to. `bases` asks `lab.own_work_item_bases`
+ * why the session sees each own row ('consent' or 'own-work'), for the work
+ * list's per-patient audit rows.
  *
- * Each runs in the caller's transaction, in a savepoint: a schema without
- * 0133 (42883) or any other refusal answers "no own-work basis" and an empty
- * map, so the command falls back to Identity's consent as before. A
- * serialization failure or deadlock is passed on, so DatabaseService runs the
- * whole transaction again. The module provides it on; the tests' default is
- * off (no statement).
+ * Each runs in the caller's transaction, in a savepoint. `allows`: a schema
+ * without 0133 (42883) or any other refusal answers "no own-work basis", so
+ * the command falls back to Identity's consent as before. `bases`: undefined
+ * on a schema without 0133 (the list then records as 0124 did); any other
+ * failure is passed on, so the list fails rather than record a basis it
+ * could not read. A serialization failure or deadlock is passed on in every
+ * case, so DatabaseService runs the whole transaction again. The module
+ * provides it on; the tests' default is off (no statement, and the list
+ * records as 0124 did).
  */
 export class LabOwnWork {
   private readonly logger = new Logger(LabOwnWork.name);
@@ -61,10 +65,11 @@ export class LabOwnWork {
     }
   }
 
-  async states(client: PoolClient, workItemIds: readonly string[], correlationId: string):
-  Promise<Map<string, OwnWorkState>> {
+  async bases(client: PoolClient, workItemIds: readonly string[], correlationId: string):
+  Promise<Map<string, OwnWorkState> | undefined> {
+    if (!this.enabled) return undefined;
     const found = new Map<string, OwnWorkState>();
-    if (!this.enabled || workItemIds.length === 0) return found;
+    if (workItemIds.length === 0) return found;
     await client.query('savepoint lab_own_work_bases');
     try {
       for (let start = 0; start < workItemIds.length; start += STATE_BATCH) {
@@ -83,9 +88,10 @@ export class LabOwnWork {
     } catch (error) {
       if (mustRetry(error)) throw error;
       await client.query('rollback to savepoint lab_own_work_bases');
-      this.logger.warn({ message: 'Own lab work bases could not be read', sqlState: sqlState(error),
-        correlationId });
-      return new Map();
+      const code = sqlState(error);
+      if (code === '42883') return undefined;
+      this.logger.warn({ message: 'Own lab work bases could not be read', sqlState: code, correlationId });
+      throw error;
     }
     return found;
   }

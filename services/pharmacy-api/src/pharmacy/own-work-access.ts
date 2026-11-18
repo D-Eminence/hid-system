@@ -30,15 +30,21 @@ const STATE_BATCH = 200;
  * directive) on the own work item (no order route) a work item or
  * dispensing belongs to. `states` asks `pharmacy.own_work_item_states` why
  * the session sees each own row ('consent' or 'own-work') and whether its
- * automatic send was withdrawn (the prescription was held, cancelled or
- * entered in error after it was sent).
+ * automatic send was withdrawn (the prescription was held, cancelled,
+ * entered in error, edited or resumed after it was sent).
  *
- * Each runs in the caller's transaction, in a savepoint: a schema without
- * 0133 (42883) or any other refusal answers "no own-work basis" and an empty
- * map, so the command falls back to Identity's consent as before. A
- * serialization failure or deadlock is passed on, so DatabaseService runs the
- * whole transaction again. The module provides it on; the tests' default is
- * off (no statement).
+ * Each runs in the caller's transaction, in a savepoint. `allows`: a schema
+ * without 0133 (42883) or any other refusal answers "no own-work basis", so
+ * the command falls back to Identity's consent as before. `states` has two
+ * modes. For the work list ('audit'), whose per-patient audit rows carry the
+ * basis, it answers undefined on a schema without 0133 (the list then
+ * records as 0124 did) and passes any other failure on, so the list fails
+ * rather than record a basis it could not read. For one item's withdrawn
+ * flag ('flag') any failure answers an empty map (no flag; dispensing is
+ * refused by 0101 anyway). A serialization failure or deadlock is passed on
+ * in every case, so DatabaseService runs the whole transaction again. The
+ * module provides it on; the tests' default is off (no statement, and the
+ * list records as 0124 did).
  */
 export class PharmacyOwnWork {
   private readonly logger = new Logger(PharmacyOwnWork.name);
@@ -65,10 +71,17 @@ export class PharmacyOwnWork {
     }
   }
 
-  async states(client: PoolClient, workItemIds: readonly string[], correlationId: string):
-  Promise<Map<string, OwnWorkState>> {
+  /** One item's withdrawn flag: an empty map when the states cannot be read. */
+  async states(client: PoolClient, workItemIds: readonly string[], correlationId: string, mode: 'flag'):
+  Promise<Map<string, OwnWorkState>>;
+  /** The work list's audit bases: undefined without 0133 (42883); any other failure is passed on. */
+  async states(client: PoolClient, workItemIds: readonly string[], correlationId: string, mode: 'audit'):
+  Promise<Map<string, OwnWorkState> | undefined>;
+  async states(client: PoolClient, workItemIds: readonly string[], correlationId: string, mode: 'flag' | 'audit'):
+  Promise<Map<string, OwnWorkState> | undefined> {
     const found = new Map<string, OwnWorkState>();
-    if (!this.enabled || workItemIds.length === 0) return found;
+    if (!this.enabled) return mode === 'audit' ? undefined : found;
+    if (workItemIds.length === 0) return found;
     await client.query('savepoint pharmacy_own_work_states');
     try {
       for (let start = 0; start < workItemIds.length; start += STATE_BATCH) {
@@ -87,8 +100,10 @@ export class PharmacyOwnWork {
     } catch (error) {
       if (mustRetry(error)) throw error;
       await client.query('rollback to savepoint pharmacy_own_work_states');
-      this.logger.warn({ message: 'Own pharmacy work states could not be read', sqlState: sqlState(error),
-        correlationId });
+      const code = sqlState(error);
+      if (mode === 'audit' && code === '42883') return undefined;
+      this.logger.warn({ message: 'Own pharmacy work states could not be read', sqlState: code, correlationId });
+      if (mode === 'audit') throw error;
       return new Map();
     }
     return found;

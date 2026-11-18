@@ -44,7 +44,13 @@ const BASES = /from lab\.own_work_item_bases\(\$1::uuid\[\]\)/;
 const CARDS = /from lab\.work_item_patient_cards\(\$1::uuid\[\]\)/;
 const RECEIVES = 'select lab.order_route_receives_here() as receives, lab.order_routes_here() as routes_here';
 
-interface Options { ownWork?: boolean; accessRows?: { work_item_id: string }[]; accessError?: Error }
+interface Options {
+  ownWork?: boolean; accessRows?: { work_item_id: string }[]; accessError?: Error;
+  /** 0133's bases: a failure, or the ids answered (default: every one asked). */
+  basesError?: Error & { code?: string }; basesFor?: (ids: string[]) => string[];
+  /** 0124's OWN_WORK_PATIENT_CARD_ENABLED (default on). */
+  cards?: boolean;
+}
 
 const harness = (options: Options = {}) => {
   const rows = [row(1, ada), row(2, bisi), row(3, ada)];
@@ -59,7 +65,9 @@ const harness = (options: Options = {}) => {
       return { rows: options.accessRows ?? [{ work_item_id: values[1] }] };
     }
     if (BASES.test(sql)) {
-      return { rows: (values[0] as string[]).map((item) => ({ work_item_id: item,
+      if (options.basesError) throw options.basesError;
+      const asked = values[0] as string[];
+      return { rows: (options.basesFor ? options.basesFor(asked) : asked).map((item) => ({ work_item_id: item,
         basis: item === id(2) ? 'consent' : 'own-work' })) };
     }
     if (CARDS.test(sql)) {
@@ -77,7 +85,7 @@ const harness = (options: Options = {}) => {
   const ownWork = options.ownWork === false ? OWN_WORK_OFF : new LabOwnWork(true);
   const routeAccess = new LabOrderRouteAccess(identity, ownWork);
   const service = new LabWorkItemsService(database, identity, audit as unknown as AuditService, routeAccess,
-    new LabOrderRouteCards(database), new LabOwnWorkPatientCards(true), ownWork);
+    new LabOrderRouteCards(database), new LabOwnWorkPatientCards(options.cards ?? true), ownWork);
   const audited = () => audit.recordWithClient.mock.calls.map((call) => {
     const event = (call as unknown[])[1] as { action: string; patientId?: string; details?: Record<string, unknown> };
     return { action: event.action, patientId: event.patientId ?? null, details: event.details };
@@ -132,6 +140,52 @@ describe('own lab work (0133)', () => {
     expect(audited().filter((event) => event.patientId).map((event) => [event.patientId, event.details])).toEqual([
       [ada, { basis: 'own-work', workItemIds: [id(1), id(3)] }],
       [bisi, { basis: 'consent', workItemIds: [id(2)] }]]);
+  });
+
+  it('records every own patient listed with 0133\'s basis while the patient card is off (0124 flag off)', async () => {
+    const { service, statements, audited } = harness({ cards: false });
+    await service.list(scientist);
+    expect(statements.some((sql) => CARDS.test(sql))).toBe(false);
+    expect(audited().filter((event) => event.patientId).map((event) => [event.patientId, event.details])).toEqual([
+      [ada, { basis: 'own-work', workItemIds: [id(1), id(3)] }],
+      [bisi, { basis: 'consent', workItemIds: [id(2)] }]]);
+  });
+
+  it('records a row 0133 no longer answers (a grant ended meanwhile) with the list read\'s basis, consent', async () => {
+    const { service, audited } = harness({ cards: false, basesFor: (ids) => ids.filter((item) => item !== id(3)) });
+    await service.list(scientist);
+    expect(audited().filter((event) => event.patientId).map((event) => [event.patientId, event.details])).toEqual([
+      [ada, { basis: 'own-work', workItemIds: [id(1)] }],
+      [bisi, { basis: 'consent', workItemIds: [id(2)] }],
+      [ada, { basis: 'consent', workItemIds: [id(3)] }]]);
+  });
+
+  it('on a schema without 0133 records as 0124 did: shown patients with basis consent, none while cards are off',
+    async () => {
+      const missing = Object.assign(new Error('function lab.own_work_item_bases does not exist'), { code: '42883' });
+      const shown = harness({ basesError: missing });
+      await shown.service.list(scientist);
+      expect(shown.statements).toContain('rollback to savepoint lab_own_work_bases');
+      expect(shown.audited().filter((event) => event.patientId).map((event) => [event.patientId, event.details]))
+        .toEqual([[ada, { basis: 'consent', workItemIds: [id(1), id(3)] }], [bisi, { basis: 'consent', workItemIds: [id(2)] }]]);
+      const hidden = harness({ basesError: missing, cards: false });
+      await hidden.service.list(scientist);
+      expect(hidden.audited().filter((event) => event.patientId)).toEqual([]);
+    });
+
+  it('fails the list rather than record a basis it could not read', async () => {
+    const timeout = Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+    const { service, statements, audited } = harness({ basesError: timeout, cards: false });
+    await expect(service.list(scientist)).rejects.toBe(timeout);
+    expect(statements).toContain('rollback to savepoint lab_own_work_bases');
+    expect(audited().filter((event) => event.patientId)).toEqual([]);
+  });
+
+  it('passes a serialization failure of the bases on, so the list is run again', async () => {
+    const conflict = Object.assign(new Error('could not serialize access'), { code: '40001' });
+    const { service, statements } = harness({ basesError: conflict });
+    await expect(service.list(scientist)).rejects.toBe(conflict);
+    expect(statements).not.toContain('rollback to savepoint lab_own_work_bases');
   });
 
   it('off, asks nothing new', async () => {

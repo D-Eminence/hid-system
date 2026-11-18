@@ -281,13 +281,14 @@ export class PharmacyService {
         context.correlationId);
       const ownIds = result.rows.filter((row) => !row.order_route_id).map((row) => row.id);
       const own = await this.ownPatients.patients(client, ownIds, context.correlationId);
-      // 0133: why each own row is seen (consent or own-work) and whether its automatic send was withdrawn.
-      const states = await this.ownWork.states(client, ownIds, context.correlationId);
+      // 0133: why each own row is seen (consent or own-work) and whether its automatic send was
+      // withdrawn; undefined without 0133. A failure fails the list: its audit rows need the basis.
+      const states = await this.ownWork.states(client, ownIds, context.correlationId, 'audit');
       await this.auditShownPatients(client, context, result.rows, cards, own, states);
       const details = await this.prescriptionDetails.details(client, ownIds, context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
-        this.prescriptionDetails.forRow(row, details.get(row.id)), states.get(row.id))), ...receiving,
+        this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id))), ...receiving,
         ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
@@ -299,16 +300,22 @@ export class PharmacyService {
    * row per patient shown, naming the patient, with the work items and routes
    * (ids only, §12) and basis 'order-route', in the list's transaction (no
    * answer without its audit). Rows without a patient on the card name no
-   * one; the collection row above stays as it was. Own work whose patient is
-   * shown (0124) gets the same: one row per patient, with the work items (ids
-   * only) and basis 'consent', which the patient's access log shows as a view;
-   * none while OWN_WORK_PATIENT_CARD_ENABLED is off. Since 0133 an own row seen
-   * by the facility's pharmacy staff without a personal grant is recorded with
-   * basis 'own-work' (one row per patient and basis).
+   * one; the collection row above stays as it was.
+   *
+   * This facility's own work: with 0133 (`states` read), every own row is
+   * recorded, whether or not its patient card is shown (0124's
+   * OWN_WORK_PATIENT_CARD_ENABLED): one row per patient and basis, with the
+   * work items (ids only) and the basis 0133 gives ('consent', or 'own-work'
+   * for the facility's pharmacy staff without a personal grant), which the
+   * patient's access log shows as a view. A row 0133 no longer returns (a
+   * grant that ended between the two statements) keeps 'consent', the basis
+   * the list's read had. Without 0133 (`states` undefined) only a row whose
+   * patient is shown is recorded, with basis 'consent', as 0124 did; a
+   * member then sees own rows under consent only.
    */
   private async auditShownPatients(client: PoolClient, context: DataAccessContext, rows: readonly WorkItemRow[],
     cards: ReadonlyMap<string, OrderRouteCard>, own: ReadonlyMap<string, WorkItemRoutePatient>,
-    states: ReadonlyMap<string, OwnWorkState> = new Map()) {
+    states: ReadonlyMap<string, OwnWorkState> | undefined) {
     const shown = new Map<string, { first: WorkItemRow; workItemIds: string[]; orderRouteIds: string[] }>();
     for (const row of rows) {
       const card = cards.get(row.id);
@@ -326,8 +333,9 @@ export class PharmacyService {
     const ownShown = new Map<string, { patientId: string; basis: 'consent' | 'own-work'; first: WorkItemRow;
       workItemIds: string[] }>();
     for (const row of rows) {
-      if (row.order_route_id || !own.has(row.id)) continue;
-      const basis = states.get(row.id)?.basis ?? 'consent';
+      if (row.order_route_id) continue;
+      const basis = states ? states.get(row.id)?.basis ?? 'consent' : own.has(row.id) ? 'consent' : undefined;
+      if (!basis) continue;
       const key = `${row.patient_id}:${basis}`;
       const entry = ownShown.get(key) ?? { patientId: row.patient_id, basis, first: row, workItemIds: [] };
       entry.workItemIds.push(row.id);
@@ -356,8 +364,9 @@ export class PharmacyService {
       // Its prescription details (0125, PRESCRIPTION_DISPENSING_DETAILS_ENABLED).
       const details = row.order_route_id ? undefined
         : await this.prescriptionDetails.details(client, [row.id], context.correlationId);
-      // 0133: whether its automatic send was withdrawn.
-      const states = row.order_route_id ? undefined : await this.ownWork.states(client, [row.id], context.correlationId);
+      // 0133: whether its automatic send was withdrawn (no flag when it cannot be read).
+      const states = row.order_route_id ? undefined
+        : await this.ownWork.states(client, [row.id], context.correlationId, 'flag');
       return this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
         this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id));
     });

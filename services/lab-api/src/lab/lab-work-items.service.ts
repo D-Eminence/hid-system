@@ -252,8 +252,9 @@ export class LabWorkItemsService {
       const cards = await this.routeCards.cards(client, routed, context.correlationId);
       const ownIds = result.rows.filter((row) => !row.order_route_id).map((row) => row.id);
       const own = await this.ownPatients.patients(client, ownIds, context.correlationId);
-      // 0133: why each own row is seen (consent or own-work), for its audit row.
-      const bases = await this.ownWork.states(client, ownIds, context.correlationId);
+      // 0133: why each own row is seen (consent or own-work), for its audit row; undefined without
+      // 0133. A failure fails the list: its audit rows need the basis.
+      const bases = await this.ownWork.bases(client, ownIds, context.correlationId);
       await this.auditShownPatients(client, context, result.rows, cards, own, bases);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id), own.get(row.id)),testName:row.test_name,
@@ -270,16 +271,22 @@ export class LabWorkItemsService {
    * row per patient shown, naming the patient, with the work items and routes
    * (ids only, §12) and basis 'order-route', in the list's transaction (no
    * answer without its audit). Rows without a patient on the card (the route
-   * allows no read now, or C12 failed) name no one. Own work whose patient is
-   * shown (0124) gets the same: one row per patient, with the work items (ids
-   * only) and basis 'consent', which the patient's access log shows as a view;
-   * none while OWN_WORK_PATIENT_CARD_ENABLED is off. Since 0133 an own row seen
-   * by the facility's lab staff without a personal grant is recorded with basis
-   * 'own-work' (one row per patient and basis).
+   * allows no read now, or C12 failed) name no one.
+   *
+   * This facility's own work: with 0133 (`bases` read), every own row is
+   * recorded, whether or not its patient card is shown (0124's
+   * OWN_WORK_PATIENT_CARD_ENABLED): one row per patient and basis, with the
+   * work items (ids only) and the basis 0133 gives ('consent', or 'own-work'
+   * for the facility's lab staff without a personal grant), which the
+   * patient's access log shows as a view. A row 0133 no longer returns (a
+   * grant that ended between the two statements) keeps 'consent', the basis
+   * the list's read had. Without 0133 (`bases` undefined) only a row whose
+   * patient is shown is recorded, with basis 'consent', as 0124 did; a
+   * member then sees own rows under consent only.
    */
   private async auditShownPatients(client: PoolClient, context: DataAccessContext, rows: readonly WorkItemRow[],
     cards: ReadonlyMap<string, OrderRouteCard>, own: ReadonlyMap<string, WorkItemRoutePatient>,
-    bases: ReadonlyMap<string, OwnWorkState> = new Map()) {
+    bases: ReadonlyMap<string, OwnWorkState> | undefined) {
     const shown = new Map<string, { first: WorkItemRow; workItemIds: string[]; orderRouteIds: string[] }>();
     for (const row of rows) {
       const card = cards.get(row.id);
@@ -295,8 +302,9 @@ export class LabWorkItemsService {
     }
     const ownShown = new Map<string, { basis: 'consent' | 'own-work'; first: WorkItemRow; workItemIds: string[] }>();
     for (const row of rows) {
-      if (row.order_route_id || !own.has(row.id)) continue;
-      const basis = bases.get(row.id)?.basis ?? 'consent';
+      if (row.order_route_id) continue;
+      const basis = bases ? bases.get(row.id)?.basis ?? 'consent' : own.has(row.id) ? 'consent' : undefined;
+      if (!basis) continue;
       const key = `${row.patient_id}:${basis}`;
       const entry = ownShown.get(key) ?? { basis, first: row, workItemIds: [] };
       entry.workItemIds.push(row.id);
