@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { IdentityApiClient, IdentityApiProblem } from '@hid/api-client';
-import { FACILITY_OPTIONAL, INTERNAL_CALLER, PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../common/decorators';
+import { FACILITY_OPTIONAL, INTERNAL_CALLER, PUBLIC_ROUTE, READ_ONLY_POST, REQUIRED_PERMISSIONS } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -38,11 +38,14 @@ export class PharmacySecurityGuard implements CanActivate {
     }
     const authorization = request.header('authorization');
     const cookie = request.header('cookie');
+    // ORD-3: an internal-caller POST that only reads is not a browser write.
+    const readOnlyPost = Boolean(internal && this.reflector.getAllAndOverride<boolean>(READ_ONLY_POST,
+      [execution.getHandler(), execution.getClass()]));
     if (!authorization?.startsWith('Bearer ') && !cookie) throw new DomainProblem(401,
       'AUTHENTICATION_REQUIRED', 'Valid Identity authentication is required by the Pharmacy service');
     const actor = await this.identity.authenticateActor({ authorization, cookie,
       csrfToken: request.header('x-csrf-token'), origin: request.header('origin'),
-      validateMutation: Boolean(cookie && !authorization
+      validateMutation: Boolean(cookie && !authorization && !readOnlyPost
         && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)),
       correlationId: request.correlationId, facilityId: request.header('x-facility-id') })
       .catch((error) => { if (error instanceof IdentityApiProblem) throw new DomainProblem(error.status,
