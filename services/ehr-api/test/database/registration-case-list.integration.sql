@@ -114,10 +114,11 @@ set local session_replication_role = origin;
 set local timezone = 'Africa/Lagos';
 
 -- The list read, word for word as NinRegistrationService.listCases sends it:
--- $1 view, $2 the member's account, $3 status, $4/$5 the cursor, $6 limit + 1.
-create function pg_temp.registration_case_list(text, uuid, text, timestamptz, uuid, integer)
+-- $1 view, $2 the member's account, $3 status, $4/$5 the cursor, $6 limit + 1,
+-- $7 the evidence filter (0130: 'none' or 'nin_verified', null for every case).
+create function pg_temp.registration_case_list(text, uuid, text, timestamptz, uuid, integer, text default null)
 returns table (id text, status text, row_version text, resolved_patient_id text, resolved_hid_code text,
-  candidate_count text, contact_recorded boolean, nin_verified boolean, full_name text, dob text,
+  candidate_count text, contact_recorded boolean, nin_verified boolean, identity_evidence text, full_name text, dob text,
   created_at timestamptz, updated_at timestamptz, created_at_cursor text, created_by_me boolean)
 language sql stable as $$
   select
@@ -139,6 +140,7 @@ language sql stable as $$
          and nin_identifier.verified
          and nin_identifier.revoked_at is null)
       end as nin_verified,
+             registration.identity_evidence,
              registration.full_name,
              registration.dob::text as dob,
              registration.created_at,
@@ -151,10 +153,11 @@ language sql stable as $$
             and ($1::text = 'facility' or registration.created_by_account_id = $2::uuid)
             and ($3::text is null or registration.status = $3::text)
             and ($4::timestamptz is null or (registration.created_at, registration.id) < ($4::timestamptz, $5::uuid))
+            and ($7::text is null or registration.identity_evidence = $7::text)
           order by registration.created_at desc, registration.id desc
           limit $6
 $$;
-grant execute on function pg_temp.registration_case_list(text, uuid, text, timestamptz, uuid, integer)
+grant execute on function pg_temp.registration_case_list(text, uuid, text, timestamptz, uuid, integer, text)
   to hid_identity_api_runtime;
 
 create temporary table list_outcomes (seq serial, name text primary key, expected text not null, actual text)
@@ -222,6 +225,26 @@ select pg_temp.list_case('2e approver, view=facility, status approved_new_identi
   pg_temp.list_as(3, 'a5100000-0000-4000-8000-000000000002', 'facility', 'approved_new_identity', 101));
 select pg_temp.list_case('2f desk 1, view=mine, status linked_existing (desk 2''s)', 'none',
   pg_temp.list_as(1, 'a5100000-0000-4000-8000-000000000002', 'mine', 'linked_existing', 101));
+
+-- 2g/2h (0130): the evidence filter. Every fixture case has a checked NIN.
+do $$
+begin
+  set local role hid_identity_api_runtime;
+  perform set_config('app.actor_subject', 'synthetic:list-member-3', true),
+    set_config('app.facility_id', 'a5100000-0000-4000-8000-000000000002', true),
+    set_config('app.correlation_id', 'list-suite-3', true),
+    set_config('app.membership_id', 'a5100300-0000-4000-8000-000000000003', true),
+    set_config('app.purpose_of_use', 'healthcare-operations', true);
+  perform pg_temp.list_case('2g approver, view=facility, evidence none: no case without a NIN here', '0',
+    (select count(*)::text from pg_temp.registration_case_list('facility', 'a5100100-0000-4000-8000-000000000003',
+       null, null, null, 101, 'none')));
+  perform pg_temp.list_case('2h approver, view=facility, evidence nin_verified: every case at A, each nin_verified',
+    '4/nin_verified',
+    (select count(*)::text || '/' || string_agg(distinct listed.identity_evidence, ',')
+       from pg_temp.registration_case_list('facility', 'a5100100-0000-4000-8000-000000000003',
+         null, null, null, 101, 'nin_verified') listed));
+  reset role;
+end $$;
 
 -- 3. Paging one case at a time (limit 1, so $6 = 2) through desk 1's cases,
 -- two of which share created_at: each page continues from the cursor of the

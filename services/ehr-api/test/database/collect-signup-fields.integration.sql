@@ -43,6 +43,20 @@ insert into auth.account_roles (id, account_id, role_code, scope_type, grant_rea
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, status) values
   ('c1220600-0000-4000-8000-000000000001', 'HID-CLCTAB', 'Collect', 'Patient', 'Collect Patient', 'active'),
   ('c1220600-0000-4000-8000-000000000002', 'HID-CLCTAC', 'Other', 'Patient', 'Other Patient', 'active');
+-- 0130: a case the desk resolves to an existing identity names the patient
+-- who already holds the case's checked NIN, so each fixture patient holds the
+-- NIN its case below records (fixture rows, written without triggers).
+set local session_replication_role = replica;
+insert into identity.patient_identifiers (id, patient_id, identifier_type, value_ciphertext, lookup_hmac,
+  encryption_key_version, display_hint, verified, verified_at, verification_provider, verification_reference,
+  registration_case_id) values
+  ('c1220700-0000-4000-8000-000000000001', 'c1220600-0000-4000-8000-000000000001', 'nin', decode(repeat('00', 40), 'hex'),
+   encode(sha256('collect-nin-1'::bytea), 'hex'), 'v1', '****0001', true, clock_timestamp(), 'fixture', 'ref-1',
+   'c1227000-0000-4000-8000-000000000001'),
+  ('c1220700-0000-4000-8000-000000000002', 'c1220600-0000-4000-8000-000000000002', 'nin', decode(repeat('00', 40), 'hex'),
+   encode(sha256('collect-nin-2'::bytea), 'hex'), 'v1', '****0002', true, clock_timestamp(), 'fixture', 'ref-2',
+   'c1227000-0000-4000-8000-000000000002');
+set local session_replication_role = origin;
 
 create function pg_temp.profile(trading text) returns jsonb language sql as $f$
   select jsonb_build_object(
