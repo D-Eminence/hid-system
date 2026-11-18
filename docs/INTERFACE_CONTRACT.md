@@ -6867,15 +6867,20 @@ personal grant.
 ### Pharmacy API and Lab API changes (no new route)
 
 - `GET /pharmacy/work-items`, `GET /lab/work-items`: the facility's own items
-  appear for its pharmacy or lab staff. The list's per-patient audit row
-  carries `basis: 'consent'` or `basis: 'own-work'`.
+  appear for its pharmacy or lab staff. Every own item listed is recorded in
+  one audit row per patient (`pharmacy.work-item.list` or
+  `lab.work-item.list`, the work item ids only, as 0124's rows), whether or
+  not 0124's patient card is shown, with `basis: 'consent'` or
+  `basis: 'own-work'` as the database gives it for that member. If the basis
+  cannot be read the list fails (no answer without its audit) rather than
+  record one it could not read. Without 0133 the list records as 0124 did.
 - Every command on an own work item or its chain (pharmacy: read, dispense,
   reverse; lab: read, accession, specimen, execution, result) is allowed on
   the own-work basis without asking Identity; else Identity's consent decides
   as before (403 as before). Audit details gain `basis: 'own-work'`.
 - An own pharmacy item whose automatic send was withdrawn (the prescription
-  was put on hold, cancelled or entered in error after it was sent) carries
-  `"withdrawn": true`; dispensing it answers 409
+  was put on hold, cancelled, entered in error, edited or resumed after it
+  was sent) carries `"withdrawn": true`; dispensing it answers 409
   `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` "This prescription can no longer be
   dispensed here" (0101, unchanged).
 
@@ -6896,7 +6901,9 @@ hospital's own pharmacy in the same transaction and the answer gains:
 | `not_sent` | `no_pharmacy` | Not sent: nobody at this facility works on pharmacy orders on Health ID. |
 | `not_sent` | `routed` | Not sent: this prescription has been sent to another pharmacy. |
 | `not_sent` | `not_prescriber` | Not sent: only the person who wrote this prescription can send it to the pharmacy. |
-| `not_sent` | `changed` | Not sent: this prescription changed. Reload it and try again. |
+| `not_sent` | `changed` | Not sent: this prescription changed. Reload it and try again. (It is not at the version sent, no longer active, or not found.) |
+| `not_sent` | `changed` | Not sent: this hospital's pharmacy has an earlier version of this prescription, which it can no longer dispense. (It was edited or resumed after it was sent.) |
+| `not_sent` | `not_allowed` | Not sent: your role at this facility does not allow sending prescriptions to the pharmacy. |
 | `not_sent` | `unavailable` | Not sent: the pharmacy could not be reached. Use Send to pharmacy to try again. |
 
 Only the prescriber's own activation sends. The pharmacy work item is
@@ -6909,11 +6916,24 @@ failed send never undoes the activation. Once sent, the prescription is in
 this hospital's pharmacy and can no longer be routed to another facility's
 pharmacy: the order-route send answers `ORDER_ROUTE_ORDER_IN_WORK`, as for any
 prescription Pharmacy holds. Without 0133 in the database the
-answer has no `pharmacyHandoff`. Resuming after a hold does not send again (the
+answer has no `pharmacyHandoff`. `not_allowed` is the database refusing the
+session (every prescription route is direct care, so it is the membership:
+it no longer holds `ehr.prescription.write` here); trying again cannot help.
+A replay of a create as active (the same Idempotency-Key) answers the
+prescription as it is now with its `pharmacyHandoff` as the send stands now
+(it asks the send again, which sends once: a pending send is tried again); a
+create as a draft answers none. Resuming after a hold does not send again (the
 pharmacy keeps one item per prescription). Putting a sent prescription on
-hold, cancelling it or entering it in error marks the send withdrawn. The
-audit row of the update records `pharmacyHandoff` (status and reason code, no
-message) and `pharmacySendWithdrawn`.
+hold, cancelling it or entering it in error marks the send withdrawn, and so
+does editing it while it stays active (frequency, instructions, end date) or
+resuming it: the pharmacy item keeps the version that was sent, which 0101 no
+longer dispenses, and "Send to pharmacy" then answers the "earlier version"
+row above, never "already has". Completing a prescription marks nothing.
+Whether the pharmacy item should follow the new version instead is open for
+the owner (review S3 of 18 November). The audit row of the create, the update
+and the send records `pharmacyHandoff` (the status) and
+`pharmacyHandoffReason` (the reason code), never the message, and the update's
+`pharmacySendWithdrawn: true` when it marked the send withdrawn.
 
 ### `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/own-pharmacy-send`
 
@@ -6929,12 +6949,16 @@ Idempotency-Key (sending twice sends once).
 hand-off (0117). Answer `200 { "pharmacyHandoff": { ... } }` as above.
 Errors: 412 `PRESCRIPTION_VERSION_CONFLICT`, 409 `PRESCRIPTION_NOT_ELIGIBLE`
 (not active), 409 `PRESCRIPTION_ROUTED`, 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED`,
-503 `OWN_PHARMACY_SEND_UNAVAILABLE` (no 0133 yet), 403 `CONSENT_REQUIRED`.
-Audit action `ehr.prescription.own-pharmacy-send`.
+503 `OWN_PHARMACY_SEND_UNAVAILABLE` (no 0133 yet), 403 `CONSENT_REQUIRED`, and
+as every prescription command 404 `CLINICAL_RESOURCE_NOT_FOUND` and 409
+`VISIT_ENTERED_IN_ERROR`. Audit action `ehr.prescription.own-pharmacy-send`
+(details: `expectedPrescriptionVersion`, `prescriptionVersion`, the allergy
+acknowledgement's flags and counts when one was stored for the `handoff`
+stage, `pharmacyHandoff`, `pharmacyHandoffReason`).
 
 Screen change (Akos frontend branch): after Activate, show
 `pharmacyHandoff.message`; show "Send to pharmacy" when it is `pending` or
-`not_sent` with reason `unavailable`. On the pharmacy list, show a withdrawn
+`not_sent` with reason `unavailable` (never for `changed` or `not_allowed`). On the pharmacy list, show a withdrawn
 item as "Withdrawn by the prescriber" with Dispense disabled.
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
