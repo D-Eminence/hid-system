@@ -198,6 +198,9 @@ describe('EHR-C1 create with reuseOpenVisit', () => {
         ({ value: await load(openVisitId), resourceId: openVisitId, details: { idempotentReplay: true } })),
     };
     const service = new EncountersService(repository as never);
+    // The same fixed Lagos day as every other case here: createBody() starts the visit on 18 November 2026,
+    // which the service compares with today (Lagos), so the real clock fails from midnight in Lagos.
+    service.now = () => new Date('2026-11-18T10:00:00Z');
     await expect(service.create(context, patientId, createBody(), 'visit-key-00000001'))
       .resolves.toEqual({ ...visit(), reusedOpenVisit: reused });
     const key = calls.find((call) => /from ehr\.idempotency_keys key_row/.test(call.sql));
