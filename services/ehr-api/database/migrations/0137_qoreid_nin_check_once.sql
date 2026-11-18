@@ -23,7 +23,9 @@
 --      instead of being paid again.
 --    state 'answered': QoreID's answer, AES-256-GCM ciphertext under
 --      Identity's NIN encryption key (key_version), reused by every path until
---      `until`: a record for 30 days (24 hours when a profile check did not
+--      `until`: a record for 90 days (owner Q110: an answer for a NIN not yet
+--      on a Health ID is kept 90 days; once on a Health ID the NIN's checked
+--      answer stays with the record) (24 hours when a profile check did not
 --      match it), "no record", QoreID's "not found" or an answer HID cannot
 --      use for 24 hours. A record answers every question; another outcome
 --      answers the question it was asked (question_hmac, an HMAC of the
@@ -161,8 +163,8 @@ create table identity.qoreid_nin_checks (
     and (state = 'answered') = (key_version is not null)
     and (outcome is not distinct from 'record') = (record_complete is not null)
     and (outcome is distinct from 'record' or question_hmac is null)),
-  -- Never kept longer than a record's 30 days (and a day's margin).
-  constraint qoreid_nin_checks_until_ck check (until <= updated_at + interval '31 days')
+  -- Never kept longer than a record's 90 days (Q110) and a day's margin.
+  constraint qoreid_nin_checks_until_ck check (until <= updated_at + interval '91 days')
 );
 create index qoreid_nin_checks_until_idx on identity.qoreid_nin_checks (until);
 comment on table identity.qoreid_nin_checks is
@@ -291,7 +293,7 @@ revoke all on function identity.begin_qoreid_nin_check(char, char, boolean, text
 -- The holder of the lease records what came of its check, and only while it
 -- still holds it (another attempt that took over an expired lease wins):
 --   'record', 'no_record', 'rejected', 'unusable'  the answer, kept
---     requested_seconds (a record at most 31 days, the others at most 7
+--     requested_seconds (a record at most 91 days, the others at most 7
 --     days); never kept for a NIN whose patient's login was deleted (the
 --     holder's row is removed instead);
 --   'held'      sent with no answer HID could keep: no new check for
@@ -321,7 +323,7 @@ begin
            or (requested_result = 'record') <> (requested_complete is not null)
            or requested_seconds is null
            or requested_seconds not between 60 and
-              case when requested_result = 'record' then 31 * 86400 else 7 * 86400 end))
+              case when requested_result = 'record' then 91 * 86400 else 7 * 86400 end))
      or (requested_result = 'held' and (requested_seconds is null or requested_seconds not between 1 and 86400)) then
     raise exception using errcode = '22023', message = 'QOREID_NIN_CHECK_INVALID';
   end if;
@@ -379,31 +381,40 @@ begin
   if requested_limit is null or requested_limit not between 1 and 1000 then
     raise exception using errcode = '22023', message = 'QOREID_NIN_CHECK_INVALID';
   end if;
+  -- Each delete picks its rows once, in a materialized CTE: as
+  -- "where ... in (select ... limit n for update skip locked)" the subquery
+  -- can run again for each row the delete looks at, skip the rows this
+  -- statement already deleted, and so delete more than requested_limit.
+  with picked as materialized (
+    select candidate.nin_lookup_hmac
+      from identity.qoreid_nin_checks candidate
+     where candidate.until <= clock_timestamp()
+       -- A lease that ended without an outcome stands as a hold (begin's
+       -- 6 hours after its end) until then: never pruned into a free check.
+       and (candidate.state <> 'checking' or candidate.until <= clock_timestamp() - interval '6 hours')
+     order by candidate.until
+     limit requested_limit
+     for update skip locked)
   delete from identity.qoreid_nin_checks check_row
-   where check_row.nin_lookup_hmac in (
-     select candidate.nin_lookup_hmac
-       from identity.qoreid_nin_checks candidate
-      where candidate.until <= clock_timestamp()
-        -- A lease that ended without an outcome stands as a hold (begin's
-        -- 6 hours after its end) until then: never pruned into a free check.
-        and (candidate.state <> 'checking' or candidate.until <= clock_timestamp() - interval '6 hours')
-      order by candidate.until
-      limit requested_limit
-      for update skip locked);
+   using picked
+   where check_row.nin_lookup_hmac = picked.nin_lookup_hmac;
   get diagnostics removed = row_count;
+  with picked as materialized (
+    select candidate.nin_lookup_hmac
+      from identity.patient_account_deletion_requests request_row
+      join identity.patient_identifiers identifier
+        on identifier.patient_id = request_row.patient_id and identifier.identifier_type = 'nin'
+      join identity.qoreid_nin_checks candidate
+        on candidate.nin_lookup_hmac = identifier.lookup_hmac and candidate.state = 'answered'
+     where request_row.state = 'completed'
+       and request_row.completed_at > clock_timestamp() - interval '1 day'
+       and identity.qoreid_nin_check_erased(candidate.nin_lookup_hmac)
+     limit requested_limit
+     for update of candidate skip locked)
   delete from identity.qoreid_nin_checks check_row
-   where check_row.nin_lookup_hmac in (
-     select candidate.nin_lookup_hmac
-       from identity.patient_account_deletion_requests request_row
-       join identity.patient_identifiers identifier
-         on identifier.patient_id = request_row.patient_id and identifier.identifier_type = 'nin'
-       join identity.qoreid_nin_checks candidate
-         on candidate.nin_lookup_hmac = identifier.lookup_hmac and candidate.state = 'answered'
-      where request_row.state = 'completed'
-        and request_row.completed_at > clock_timestamp() - interval '1 day'
-        and identity.qoreid_nin_check_erased(candidate.nin_lookup_hmac)
-      limit requested_limit
-      for update of candidate skip locked);
+   using picked
+   where check_row.nin_lookup_hmac = picked.nin_lookup_hmac
+     and check_row.state = 'answered';
   get diagnostics erased = row_count;
   return removed + erased;
 end

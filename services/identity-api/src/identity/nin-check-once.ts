@@ -14,12 +14,15 @@ import type { QoreIdNinBinding, QoreIdNinEnrollmentBinding, QoreIdNinRecord } fr
  * not, so the same NIN is never sent to QoreID twice while HID has, or is
  * getting, its answer. No limit on staff, facilities or Health ID is added.
  *
- * A QoreID answer is reused for 30 days when QoreID returned the NIN's
- * record: a record does not change from one day to the next, and a person who
- * starts again after the 24-hour enrollment ends, adds the NIN on the profile
- * after a sign-up, or is checked at a desk, is the same NIN.
+ * A QoreID answer is reused for 90 days when QoreID returned the NIN's
+ * record (owner Q110, 18 November 2026: an answer for a NIN not yet on a
+ * Health ID is kept 90 days; once the NIN is on a Health ID its checked
+ * answer stays with the record): a record does not change from one day to
+ * the next, and a person who starts again after the 24-hour enrollment ends,
+ * adds the NIN on the profile after a sign-up, or is checked at a desk, is
+ * the same NIN. 0137 refuses to keep one longer than 91 days.
  */
-export const NIN_RECORD_ANSWER_SECONDS = 30 * 24 * 60 * 60;
+export const NIN_RECORD_ANSWER_SECONDS = 90 * 24 * 60 * 60;
 /**
  * "No record", QoreID's "not found" (404) and an answer HID could not use are
  * charged too, so they are reused for 24 hours: long enough that a person
