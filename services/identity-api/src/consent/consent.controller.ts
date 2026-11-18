@@ -10,6 +10,8 @@ import { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import { CreateBreakGlassDto } from './dto/create-break-glass.dto';
 import { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
 import { RevokeConsentGrantDto } from './dto/revoke-consent-grant.dto';
+import { OpenOwnFacilityDto } from './dto/open-own-facility.dto';
+import { DomainProblem } from '../common/problem';
 
 @Controller('identity')
 export class ConsentController {
@@ -100,6 +102,24 @@ export class ConsentController {
   @AuditAction('identity.patient-access-pin.verify.command')
   verifyPatientAccessPin(@Req() request: HidRequest, @Body() input: VerifyPatientAccessPinDto) {
     return this.consent.verifyPatientAccessPin(consentContext(request, ['direct-care']), input);
+  }
+
+  /**
+   * 0131 (ID-4, owner Q101 of 18 November 2026): a doctor, nurse or
+   * clinician opens a patient of this facility (registered at its desk, or a
+   * consented visit here in the last 24 months) for 24 hours without a PIN.
+   * The answer's authorization.basis is 'own-facility'. A Health ID that
+   * does not exist answers 404 "No such patient" (owner Q100 B).
+   */
+  @Post('own-facility-access')
+  @HttpCode(200)
+  @RequirePermissions('identity.patient.open-own-facility')
+  @AuditAction('identity.patient.open-own-facility.command')
+  openOwnFacilityPatient(@Req() request: HidRequest, @Body() input: OpenOwnFacilityDto) {
+    if ((input.hid === undefined) === (input.patientId === undefined)) {
+      throw new DomainProblem(400, 'PATIENT_IDENTIFIER_REQUIRED', 'Give the patient\'s Health ID or the patient id, not both.');
+    }
+    return this.consent.openOwnFacilityPatient(consentContext(request, ['direct-care']), input);
   }
 
   @Post('consent-grants/:grantId/close')

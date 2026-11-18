@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0129",
-    "count": 130,
+    "last": "0135",
+    "count": 134,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -617,6 +617,22 @@
       {
         "name": "0129_session_facility_selection.sql",
         "sha256": "9386e156364330ee76ba0f6483f8b53336e817a6210dd4de2ca137ff3816cb4f"
+      },
+      {
+        "name": "0130_desk_registration_without_nin.sql",
+        "sha256": "a9f071ee6c1c916c440e8b05f4f64fda359c4b7fff63087f59bcc1904899b9dd"
+      },
+      {
+        "name": "0131_own_facility_patient_access.sql",
+        "sha256": "2e3a83c9ad1188095ecb1342f80ed735a882c969ce43663edae912cfbe22c7fa"
+      },
+      {
+        "name": "0132_staff_patient_search.sql",
+        "sha256": "4649c518228c80720262e3187462824ba190b2efba73afcec0e7c8804f0eee6b"
+      },
+      {
+        "name": "0135_visit_queue.sql",
+        "sha256": "39460f4fba0714849b156ee5a3be2e12861f819924bc98e5d97b1b9d0cb80095"
       }
     ]
   },

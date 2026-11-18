@@ -103,6 +103,11 @@ describe('GET /identity/me/access-log (0093; owner decision of 2026-10-28)', () 
       nextBefore: null });
     expect(publishAccessLog(null)).toEqual({ events: [], nextBefore: null });
   });
+
+  it('publishes an emergency search that found the patient (0132, owner Q104)', () => {
+    const found = event({ action: 'found_in_emergency_search', facilityName: 'Lagos General' });
+    expect(publishAccessLog({ events: [found], next: null })).toEqual({ events: [found], nextBefore: null });
+  });
 });
 
 describe('GET /identity/me/notifications/unread-count (0093)', () => {
