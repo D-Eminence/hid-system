@@ -6498,3 +6498,146 @@ and the audit row; `403 PERMISSION_DENIED` without
 `identity.registration.write`; `400 VALIDATION_FAILED` for
 `?hid=HID-QX7K2M`, with nothing read and the Health ID written nowhere;
 `400 PURPOSE_OF_USE_REQUIRED` without `X-Purpose-Of-Use`.
+
+## SX-5. My staff profile, read only (no migration)
+
+Akos P1-8, read part. The account menu's "My profile" for staff. Changing a
+password while signed in (SX-6), preferences and home shortcuts (SX-7) come
+later; until then `canChange` answers `false` for each, and the screen shows
+no edit control.
+
+| Route (under `/api/v1`) | Who | Answer |
+| --- | --- | --- |
+| `GET /identity/me/staff-profile` | Any staff session, by bearer or cookie, including a platform administrator with no facility membership. `X-Facility-ID` is optional; when sent it must be one of the caller's own facilities and only marks that facility as current. No permission is needed: it reads the caller's own account. | `200` below. A patient session: `403 PATIENT_SCOPE_DENIED`. An outreach account-only session (no facility membership): `403 NO_ACTIVE_FACILITY_MEMBERSHIP`. An `X-Facility-ID` that is not one of the caller's own facilities: `403 FACILITY_ACCESS_DENIED`. An account that is no longer active: `401 AUTHENTICATION_REQUIRED`. |
+
+```json
+{
+  "accountId": "uuid",
+  "name": "Ada Fictional",
+  "email": "ada@example.test",
+  "signIn": { "method": "password", "hasPassword": true, "passwordChangedAt": "2026-10-01T09:00:00.000Z" },
+  "licence": { "numberHint": "4567" },
+  "memberSince": "2026-01-05T08:00:00.000Z",
+  "currentFacilityId": "uuid or null",
+  "facilities": [
+    { "id": "uuid", "membershipId": "uuid", "name": "Fictional Clinic", "roles": ["doctor"], "isPrimary": true, "isCurrent": true }
+  ],
+  "products": ["ehr", "migrate"],
+  "canChange": { "name": false, "password": false, "preferences": false }
+}
+```
+
+- `name` is the account's display name, else the staff record's full name.
+- `signIn.method` is `password` or `single_sign_on` (how this session was
+  signed in). `hasPassword` is `false` for a login that has never set one
+  (Google only); `passwordChangedAt` is then `null`.
+- `licence` is `null` when no licence number is recorded, or when the
+  recorded one has no letter or digit (for example `--`), so `numberHint` is
+  never `null`. Only the last four letters or digits are answered (the same
+  rule as `identity.licence_number_hint`), never the full number.
+- `facilities` and `products` are the session's own (every active
+  membership this site admits, section 53), so the profile never shows a
+  facility the session itself cannot use.
+- The read is by the session's account id and subject together, active
+  accounts only. The password hash is never selected.
+- `currentFacilityId` is `null`, and every `isCurrent` is `false`, when no
+  `X-Facility-ID` is sent.
+- Audited on success and on refusal or failure (one row each time) as
+  `auth.staff-profile.read`, resource `session`, at the `X-Facility-ID`
+  facility when one is sent and with no facility otherwise; outcome
+  `success`, `denied` (401 or 403) or `failure`. It is not audited as an
+  `api.` request row: such a staff row needs a facility, and this route must
+  answer without one. No patient is read.
+
+Screen change (Akos frontend branch): the account menu gains "My profile",
+which shows these fields; the licence is shown as "Licence number ending
+4567".
+
+## SX-9. Saved lists: this facility's OCR jobs and staff names (no migration)
+
+Akos P1-10. OCR jobs no longer disappear when the page is left: the Migrate
+desk reads this facility's jobs, newest first, a page at a time, and shows
+who started each one by name. (The registration-case list is SX-10, lane A;
+it uses the same names route.)
+
+| Route (under `/api/v1`) | Who | Answer |
+| --- | --- | --- |
+| `GET /ocr/job-list[?status=<status>][&mine=true][&limit=<1-50>][&cursor=<nextCursor>]` | Staff with `ocr.job.read` at the `X-Facility-ID` facility (doctor, clinician, nurse, lab, admin). Purpose is always `healthcare-operations`, whatever `X-Purpose-Of-Use` says. | `200 { items, nextCursor }` below. No `X-Facility-ID`: `400 FACILITY_REQUIRED`. A facility the caller is not active at: `403 FACILITY_ACCESS_DENIED`. No `ocr.job.read`: `403 PERMISSION_DENIED`. Any other query key, a status that does not exist, `mine` other than `true`, a limit outside 1-50: `400 VALIDATION_FAILED`. A cursor this route did not make: `400 OCR_JOB_LIST_CURSOR_INVALID`, "This page of the list can no longer be opened. Start the list again." |
+| `GET /identity/facility-staff-names[?membershipIds=<id>,<id>,…]` | Any staff member active at the `X-Facility-ID` facility. No permission beyond membership. | `200 { facilityId, staff, complete }` below. No `X-Facility-ID`: `400 FACILITY_REQUIRED`. A facility the caller is not active at: `403 FACILITY_ACCESS_DENIED`. A patient session: `403 PATIENT_SCOPE_DENIED`. More than 100 ids, or anything but comma-separated UUIDs: `400 VALIDATION_FAILED`. |
+
+`status` is one of `queued`, `processing`, `extracted`,
+`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled` (the
+`ocr.jobs` status check as 0016 left it); an item's `status` is always one of
+these. `mine=true` lists
+only the jobs the caller started at this facility. `limit` defaults to 25.
+
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "documentId": "uuid",
+      "status": "awaiting_validation",
+      "createdAt": "2026-11-18T10:00:00.123Z",
+      "createdByMembershipId": "uuid",
+      "createdByMe": false,
+      "attemptCount": 1,
+      "maxAttempts": 3,
+      "completedAt": null,
+      "failedAt": null,
+      "failureCode": null
+    }
+  ],
+  "nextCursor": "opaque string, or null on the last page"
+}
+```
+
+- Only this facility's jobs are read: the query filters on the request's
+  facility, and row-level security on `ocr.jobs` (0013) allows only that
+  facility as well. Another facility's jobs are never listed.
+- No patient field is answered and no patient or document table is read.
+  A job's patient is shown only when the job is opened with
+  `GET /ocr/jobs/:jobId`, which checks access to that patient as today.
+  No Health ID is ever accepted in this URL.
+- `failureCode` is the stored code only (for example `PROVIDER_TIMEOUT`); the
+  stored free-text summary is not answered.
+- Paging is by `(createdAt, id)`, newest first, kept to the microsecond, so a
+  page never repeats or skips a job. Pass `nextCursor` back as `cursor` with
+  the same filters.
+- Each answer writes one audit row, `ocr.job.list` (resource
+  `ocr-job-list`), in the same transaction as the read (an ordinary
+  READ COMMITTED transaction, not a read-only one: PostgreSQL refuses an
+  insert in a read-only transaction), with the count, the job ids shown, the
+  filters and whether it was the first page; if that row cannot be written
+  nothing is answered. The route changes no job. The request itself is
+  audited as `api.ocr.job.list.request`, on success and failure, with
+  purpose `healthcare-operations` whatever `X-Purpose-Of-Use` or a `purpose`
+  query key says (a `purpose` key is still refused as an unknown key).
+
+```json
+{
+  "facilityId": "uuid",
+  "staff": [
+    { "membershipId": "uuid", "name": "Bola Fictional", "current": true },
+    { "membershipId": "uuid", "name": null, "current": false }
+  ],
+  "complete": true
+}
+```
+
+- The facility is the request's own, never one the caller names.
+- `staff` holds the facility's members past and present, current members
+  first, then by name. `current` is `false` once the membership, the staff
+  record or the login has ended. `name` is `null` for a login that was
+  deleted; the screen shows "Former staff member".
+- Only names are answered: no email, role, licence or account id.
+- Without `membershipIds`, at most 500 names; `complete` is `false` when
+  there are more, and the screen then asks for the ids on its page with
+  `membershipIds`.
+- Audited on success and refusal as `api.identity.facility-staff-names.read`,
+  with purpose `healthcare-operations` (the purpose it always reads under)
+  whatever `X-Purpose-Of-Use` says.
+
+Screen change (Akos frontend branch): the Migrate desk gains a "Documents
+read here" list (status filter, "Only mine", "Load more"), showing "Started
+by <name>" from the names route; a row opens the job as today.
