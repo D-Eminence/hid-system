@@ -6513,18 +6513,19 @@ rows.
   same NIN: the second waits for the first's answer and reuses it, or gets
   `409 NIN_CHECK_IN_PROGRESS` when that answer does not come within its wait.
 - A resend of a request answered "could not be verified": the stored "no
-  record" (24 hours), the same `422`.
+  record", the same `422`, for as long as 0137 keeps it.
 - A resend after "does not match", with the same body or a corrected name or
   date of birth (a new body, under the same key or a new one): the stored
-  record (30 days, as 0137 keeps it), compared again. A corrected request is
-  no longer a new charge.
+  record, compared again, for as long as 0137 keeps it (Q110 sets how long
+  an unattached record is kept). A corrected request is no longer a new
+  charge.
 - A resend of a request that matched: the case it created (as before).
 - A resend after a check that may have been charged without an answer HID
   could keep: `409 NIN_CHECK_HELD` until the hold ends; after a check that
   sent nothing (switched off, the switch or the guard's store unreadable, the
   connection refused before sending): a new check at once.
-- QoreID's "incomplete" answer is kept for 5 minutes only, as for every path
-  (its check is not finished and may change).
+- QoreID's "incomplete" answer is kept only as long as 0137's short hold, as
+  for every path (its check is not finished and may change).
 
 The desk's `identity.nin.verify` rows no longer carry `replay: true`; a
 reused answer is the guard's row with `source: "stored"`.
