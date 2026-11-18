@@ -32,17 +32,21 @@ import { DatabaseService } from '../database/database.service';
  * The seals (0098 demo, 0123 QA): nothing in a sealed tenant ever finds a real
  * patient, and nothing real finds a sealed one. Because the check reads past
  * row-level security, it is asked only when the Health ID and the member's
- * facility are on the same side: a real facility for a real-looking Health
- * ID, the demo tenant for HID-ZDEM and four more characters, the QA tenant
- * for HID-ZQA and five more (the sealed Health IDs have 8 characters, which
- * Identity has never issued). Any other pairing, and any other Health ID
- * starting ZDEM or ZQA, gets today's 404, so no side learns whether another
- * side's Health ID exists. The side of the facility is read with
+ * facility are on the same side: a real facility for a real Health ID (any
+ * Health ID not starting ZDEM or ZQA), the demo tenant for HID-ZDEM and four
+ * more characters, the QA tenant for HID-ZQA and five more (the sealed Health
+ * IDs have 8 characters, which Identity's generator has never issued; since
+ * Q60 it never starts one with ZDEM or ZQA either). Any other pairing, and
+ * any other Health ID starting ZDEM or ZQA (a real one issued before Q60
+ * included), gets today's 404, so no side learns whether another side's
+ * Health ID exists. The side of the facility is read with
  * identity.sealed_demo_facility (0098) and identity.sealed_qa_facility (0123),
- * which identity-api's runtime may already execute.
+ * which identity-api's runtime may already execute: a facility neither marks
+ * is real; one both mark, or one they cannot answer for, has no side.
  *
- * Fails closed to today's answer: when the member cannot be counted or the
- * check cannot be read, the answer is today's 404, never "No such patient".
+ * Fails closed to today's answer: when the member cannot be counted, the side
+ * of the facility cannot be told, or the check cannot be read, the answer is
+ * today's 404, never "No such patient".
  */
 export const PATIENT_LOOKUP_MISS_WINDOW: RateLimitWindow = { windowSeconds: 600, maxRequests: 30 };
 
@@ -107,19 +111,23 @@ export class PatientLookupMissService {
 
   /**
    * The side of the member's facility: real, the sealed demo tenant or the
-   * sealed QA tenant; undefined when that cannot be told.
+   * sealed QA tenant; undefined when that cannot be told (no facility, the
+   * functions cannot be read, or they do not answer one boolean each, or both
+   * say yes).
    */
-  async facilitySide(facilityId: string): Promise<LookupSide | undefined> {
+  async facilitySide(facilityId: string, correlationId?: string): Promise<LookupSide | undefined> {
+    if (!facilityId) return undefined;
     try {
-      const result = await this.database.query<{ demo: boolean; qa: boolean }>(
+      const result = await this.database.query<{ demo: unknown; qa: unknown }>(
         'select identity.sealed_demo_facility($1::uuid) as demo, identity.sealed_qa_facility($1::uuid) as qa',
         [facilityId]);
-      const row = result.rows[0];
-      if (result.rows.length !== 1 || typeof row.demo !== 'boolean' || typeof row.qa !== 'boolean') return undefined;
-      if (row.demo && row.qa) return undefined;
+      const row = result.rows.length === 1 ? result.rows[0] : undefined;
+      if (!row || typeof row.demo !== 'boolean' || typeof row.qa !== 'boolean' || (row.demo && row.qa)) {
+        return undefined;
+      }
       return row.demo ? 'demo' : row.qa ? 'qa' : 'real';
     } catch {
-      this.logger.warn({ message: 'Facility side is unavailable for the Health ID issued check' });
+      this.logger.warn({ message: 'Facility side is unavailable for the Health ID issued check', correlationId });
       return undefined;
     }
   }
@@ -128,14 +136,16 @@ export class PatientLookupMissService {
    * Whether any patient record, of any status, has this Health ID: true or
    * false, or undefined when that cannot be told (the answer is then today's).
    * Asked only when the Health ID is on the member's facility's side (the
-   * seals). Logs no Health ID.
+   * seals): for a Health ID of another side, or one starting ZDEM or ZQA that
+   * is not a sealed tenant's, nothing is asked and the answer is undefined.
+   * Logs no Health ID.
    */
   async issued(hid: string, context: DataAccessContext): Promise<boolean | undefined> {
     const candidate = hid.trim().toUpperCase();
     if (!HEALTH_ID.test(candidate)) return undefined;
     const side = healthIdSide(candidate);
-    if (!side || !context.facilityId) return undefined;
-    if (await this.facilitySide(context.facilityId) !== side) return undefined;
+    if (!side) return undefined;
+    if (await this.facilitySide(context.facilityId, context.correlationId) !== side) return undefined;
     try {
       const result = await this.database.query<{ health_id: string }>(
         'select health_id from identity.support_health_id_matches($1::text[])', [[candidate]]);
@@ -143,7 +153,7 @@ export class PatientLookupMissService {
       if (result.rows.length > 1 || result.rows.some((row) => row.health_id !== candidate)) return undefined;
       return result.rows.length === 1;
     } catch {
-      this.logger.warn({ message: 'Health ID issued check is unavailable' });
+      this.logger.warn({ message: 'Health ID issued check is unavailable', correlationId: context.correlationId });
       return undefined;
     }
   }

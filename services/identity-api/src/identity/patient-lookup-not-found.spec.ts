@@ -15,6 +15,8 @@ import { IdentityController } from './identity.controller';
 import { IdentityService } from './identity.service';
 import { IDENTITY_PROVIDER, type AuthorizationDecision, type IdentityPatient, type IdentityProvider } from './identity.types';
 import {
+  healthIdSide,
+  type LookupSide,
   PATIENT_LOOKUP_MISS_WINDOW,
   PATIENT_NOT_FOUND_MESSAGE,
   PatientLookupMissService,
@@ -25,13 +27,29 @@ import {
  * has answers 404 PATIENT_NOT_FOUND "No patient has this Health ID."; a
  * patient that exists but is not available here keeps today's answer. Both
  * are counted (30 in 10 minutes per member) and audited without the Health
- * ID. Fictional people and Health IDs only.
+ * ID. The issued check is asked only when the Health ID and the member's
+ * facility are on the same side of the seals (real, demo 0098, QA 0123).
+ * Fictional people and Health IDs only.
  */
 const patientId = '7c1f0d2e-3c4a-4b5d-8e6f-7a8b9c0d1e2f';
 const membershipId = 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f';
 const facilityId = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const KNOWN = 'HID-QX7K2M';
 const NOBODY = 'HID-NEWPAT';
+/** Fictional sealed-tenant Health IDs in the 0098 and 0123 shapes, none of them seeded. */
+const DEMO_NOBODY = 'HID-ZDEMQQQ7';
+const QA_NOBODY = 'HID-ZQAQQQQ7';
+const SIDE_HEALTH_ID: Readonly<Record<LookupSide, string>> = { real: NOBODY, demo: DEMO_NOBODY, qa: QA_NOBODY };
+const FACILITY_SIDE_SQL =
+  'select identity.sealed_demo_facility($1::uuid) as demo, identity.sealed_qa_facility($1::uuid) as qa';
+const ISSUED_SQL = 'select health_id from identity.support_health_id_matches($1::text[])';
+/** identity.sealed_demo_facility and identity.sealed_qa_facility's answer for each side. */
+const FACILITY_ROWS: Readonly<Record<LookupSide, { rows: { demo: boolean; qa: boolean }[] }>> = {
+  real: { rows: [{ demo: false, qa: false }] },
+  demo: { rows: [{ demo: true, qa: false }] },
+  qa: { rows: [{ demo: false, qa: true }] },
+};
+const SIDES: readonly LookupSide[] = ['real', 'demo', 'qa'];
 const context = {
   actor: { kind: 'staff', subject: 'synthetic:desk', accountId: 'f0e1d2c3-b4a5-4968-8776-655443322110',
     permissions: ['identity.patient.read'], facility: { organizationId: 'org', membershipId } },
@@ -65,7 +83,7 @@ describe('Q100 B: staff Health ID lookup (IdentityService.lookupPatient)', () =>
     expect(failure).toBeInstanceOf(DomainProblem);
     expect(failure).toMatchObject({ status: 404, code: 'PATIENT_NOT_FOUND', message: 'No patient has this Health ID.' });
     expect(misses?.countMiss).toHaveBeenCalledWith(context);
-    expect(misses?.issued).toHaveBeenCalledWith(NOBODY);
+    expect(misses?.issued).toHaveBeenCalledWith(NOBODY, context);
     // Audited, denied, with the result and never the Health ID.
     expect(audit.record).toHaveBeenCalledTimes(1);
     const row = (audit.record.mock.calls[0] as unknown as [Record<string, unknown>])[0];
@@ -158,43 +176,130 @@ describe('Q100 B: PatientLookupMissService', () => {
   beforeAll(() => { Object.assign(process.env, env); resetEnvironmentForTests(); });
   afterAll(() => { resetEnvironmentForTests(); });
 
-  function missService(answer: { rows: unknown[] } | Error) {
+  type Answer = { rows: readonly unknown[] } | Error;
+
+  /** The issued check answers `answer`; the facility's side query answers `facility` (a real facility by default). */
+  function missService(answer: Answer, facility: Answer = FACILITY_ROWS.real) {
     const queries: { sql: string; values: unknown[] }[] = [];
     const query = jest.fn(async (sql: string, values: unknown[] = []) => {
       queries.push({ sql, values });
-      if (answer instanceof Error) throw answer;
-      return answer;
+      const reply = /sealed_demo_facility|sealed_qa_facility/.test(sql) ? facility : answer;
+      if (reply instanceof Error) throw reply;
+      return reply;
     });
     const database = { query, withTransaction: jest.fn(async (_c: unknown, work: (client: unknown) => unknown) =>
       work({ query })) };
     return { service: new PatientLookupMissService(database as unknown as DatabaseService), queries, database };
   }
+  const issuedAsked = (queries: { sql: string }[]) => queries.some((query) => query.sql === ISSUED_SQL);
 
-  it('asks 0109\'s issued check with the one Health ID, upper case', async () => {
+  it('asks the facility\'s side, then 0109\'s issued check with the one Health ID, upper case', async () => {
     const { service, queries } = missService({ rows: [] });
-    await expect(service.issued(' hid-newpat ')).resolves.toBe(false);
-    expect(queries).toEqual([{ sql: 'select health_id from identity.support_health_id_matches($1::text[])',
-      values: [[NOBODY]] }]);
+    await expect(service.issued(' hid-newpat ', context)).resolves.toBe(false);
+    expect(queries).toEqual([
+      { sql: FACILITY_SIDE_SQL, values: [facilityId] },
+      { sql: ISSUED_SQL, values: [[NOBODY]] },
+    ]);
   });
 
   it('says issued when the check names the Health ID (any status: the function reads every patient)', async () => {
     const { service } = missService({ rows: [{ health_id: KNOWN }] });
-    await expect(service.issued(KNOWN)).resolves.toBe(true);
+    await expect(service.issued(KNOWN, context)).resolves.toBe(true);
   });
 
-  it.each([
-    ['another Health ID', { rows: [{ health_id: 'HID-OTHER2' }] }],
-    ['two rows', { rows: [{ health_id: KNOWN }, { health_id: KNOWN }] }],
-    ['a database failure', new Error('connection reset')],
-  ])('cannot tell (undefined) on %s', async (_label, answer) => {
-    const { service } = missService(answer);
-    await expect(service.issued(KNOWN)).resolves.toBeUndefined();
+  it.each(SIDES.flatMap((side) => [
+    [side, 'another Health ID', { rows: [{ health_id: 'HID-OTHER2' }] }],
+    [side, 'two rows', { rows: [{ health_id: SIDE_HEALTH_ID[side] }, { health_id: SIDE_HEALTH_ID[side] }] }],
+    [side, 'a null row', { rows: [{ health_id: null }] }],
+    [side, 'a database failure', new Error('connection reset')],
+  ] as const))('cannot tell (undefined) for a %s Health ID at its own side on %s', async (side, _label, answer) => {
+    const { service, queries } = missService(answer, FACILITY_ROWS[side]);
+    await expect(service.issued(SIDE_HEALTH_ID[side], context)).resolves.toBeUndefined();
+    expect(issuedAsked(queries)).toBe(true);
   });
 
   it('cannot tell for a malformed Health ID, without asking the database', async () => {
     const { service, queries } = missService({ rows: [] });
-    await expect(service.issued('HID-OOOO11')).resolves.toBeUndefined();
+    await expect(service.issued('HID-OOOO11', context)).resolves.toBeUndefined();
+    await expect(service.issued('HID-ZDEMOOO1', context)).resolves.toBeUndefined();
     expect(queries).toEqual([]);
+  });
+
+  describe('the seals: real, demo (0098) and QA (0123) Health IDs and facilities', () => {
+    it.each([
+      ['HID-QX7K2M', 'real'], ['HID-NEWPAT', 'real'], ['HID-AB2CD3EF4GH5JK6M', 'real'], ['HID-ABCD2345', 'real'],
+      // Near the sealed prefixes but not them: real.
+      ['HID-ZDE234', 'real'], ['HID-ZDEQAA22', 'real'], ['HID-ZQ2345', 'real'], ['HID-ZQBAAAA2', 'real'],
+      // The sealed shapes (0098 D7, 0123 D7): 8 characters, ZDEM or ZQA first.
+      ['HID-ZDEMAAA2', 'demo'], ['HID-ZDEMBBB9', 'demo'], [DEMO_NOBODY, 'demo'],
+      ['HID-ZQAAAAA2', 'qa'], ['HID-ZQAAAAA3', 'qa'], [QA_NOBODY, 'qa'],
+      // ZDEM or ZQA first but not a sealed shape (a real one issued before Q60 included): no side.
+      ['HID-ZDEM27', undefined], ['HID-ZDEMAAA', undefined], ['HID-ZDEMAAA22', undefined],
+      ['HID-ZDEM2345ABCD6789', undefined], ['HID-ZQA234', undefined], ['HID-ZQAAAAA', undefined],
+      ['HID-ZQAAAAAA2', undefined], ['HID-ZQA2345ABCDE6789', undefined],
+    ] as const)('healthIdSide(%s) is %s', (candidate, side) => {
+      expect(healthIdSide(candidate)).toBe(side);
+    });
+
+    it.each(SIDES.flatMap((side) => [[side, false], [side, true]] as const))(
+      'asks the issued check for a %s Health ID at a facility on the same side (issued: %s)', async (side, issued) => {
+        const hid = SIDE_HEALTH_ID[side];
+        const { service, queries } = missService({ rows: issued ? [{ health_id: hid }] : [] }, FACILITY_ROWS[side]);
+        await expect(service.issued(hid.toLowerCase(), context)).resolves.toBe(issued);
+        expect(queries).toEqual([
+          { sql: FACILITY_SIDE_SQL, values: [facilityId] },
+          { sql: ISSUED_SQL, values: [[hid]] },
+        ]);
+      });
+
+    it.each(SIDES.flatMap((hidSide) => SIDES.filter((facilitySide) => facilitySide !== hidSide)
+      .map((facilitySide) => [hidSide, facilitySide] as const)))(
+      'never asks the issued check for a %s Health ID at a %s facility (undefined: today\'s 404)',
+      async (hidSide, facilitySide) => {
+        // Even when the check would say "not issued", it is never asked across the seals.
+        const { service, queries } = missService({ rows: [] }, FACILITY_ROWS[facilitySide]);
+        await expect(service.issued(SIDE_HEALTH_ID[hidSide], context)).resolves.toBeUndefined();
+        expect(queries).toEqual([{ sql: FACILITY_SIDE_SQL, values: [facilityId] }]);
+      });
+
+    it.each(SIDES.flatMap((side) => ['HID-ZDEM27', 'HID-ZDEMAAA22', 'HID-ZDEM2345ABCD6789', 'HID-ZQA234',
+      'HID-ZQAAAAAA2', 'HID-ZQA2345ABCDE6789'].map((hid) => [hid, side] as const)))(
+      'never answers %s (ZDEM or ZQA first, not a sealed shape) at a %s facility, asking nothing', async (hid, side) => {
+        const { service, queries } = missService({ rows: [] }, FACILITY_ROWS[side]);
+        await expect(service.issued(hid, context)).resolves.toBeUndefined();
+        expect(queries).toEqual([]);
+      });
+
+    it.each([
+      ['both seals mark it', { rows: [{ demo: true, qa: true }] }],
+      ['no row', { rows: [] }],
+      ['two rows', { rows: [{ demo: false, qa: false }, { demo: false, qa: false }] }],
+      ['nulls (a function returned null)', { rows: [{ demo: null, qa: false }] }],
+      ['text, not booleans', { rows: [{ demo: 'f', qa: 'f' }] }],
+      ['a missing column', { rows: [{ demo: false }] }],
+      ['a database failure (0123 not installed, or no EXECUTE)', new Error('function does not exist')],
+    ] as const)('cannot tell the facility\'s side when %s: undefined, the issued check never asked',
+      async (_label, facility) => {
+        for (const side of SIDES) {
+          const { service, queries } = missService({ rows: [] }, facility);
+          await expect(service.facilitySide(facilityId)).resolves.toBeUndefined();
+          await expect(service.issued(SIDE_HEALTH_ID[side], context)).resolves.toBeUndefined();
+          expect(issuedAsked(queries)).toBe(false);
+        }
+      });
+
+    it('cannot tell the side of no facility, and asks nothing', async () => {
+      const { service, queries } = missService({ rows: [] });
+      await expect(service.facilitySide('')).resolves.toBeUndefined();
+      await expect(service.issued(NOBODY, { ...context, facilityId: '' })).resolves.toBeUndefined();
+      expect(queries).toEqual([]);
+    });
+
+    it.each(SIDES)('reads a %s facility\'s side from the two seal functions', async (side) => {
+      const { service, queries } = missService({ rows: [] }, FACILITY_ROWS[side]);
+      await expect(service.facilitySide(facilityId)).resolves.toBe(side);
+      expect(queries).toEqual([{ sql: FACILITY_SIDE_SQL, values: [facilityId] }]);
+    });
   });
 
   it('counts a miss in the member\'s HMAC bucket: 30 in 10 minutes', async () => {
@@ -223,10 +328,18 @@ describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {
   const issuedRows: { rows: { health_id: string }[] } = { rows: [] };
   // The member's bucket, as auth.otp_rate_limits holds it (blocked: limited for 10 minutes).
   const bucket: { blocked: boolean } = { blocked: false };
-  const query = jest.fn(async (sql: string) => /support_health_id_matches/.test(sql) ? issuedRows
-    : /from auth\.otp_rate_limits/.test(sql) && bucket.blocked
-      ? { rows: [{ request_count: 31, window_started_at: new Date(), blocked_until: new Date(Date.now() + 600_000) }] }
-      : { rows: [], rowCount: 0 });
+  // The member's facility's side of the seals (a real facility unless a test says otherwise).
+  const facility: { side: LookupSide | 'unknown' } = { side: 'real' };
+  const query = jest.fn(async (sql: string) => {
+    if (/sealed_demo_facility/.test(sql)) {
+      if (facility.side === 'unknown') throw new Error('function identity.sealed_qa_facility(uuid) does not exist');
+      return FACILITY_ROWS[facility.side];
+    }
+    return /support_health_id_matches/.test(sql) ? issuedRows
+      : /from auth\.otp_rate_limits/.test(sql) && bucket.blocked
+        ? { rows: [{ request_count: 31, window_started_at: new Date(), blocked_until: new Date(Date.now() + 600_000) }] }
+        : { rows: [], rowCount: 0 };
+  });
   const database = { query, withTransaction: jest.fn(async (_c: unknown, work: (client: unknown) => unknown) =>
     work({ query })) };
 
@@ -261,7 +374,7 @@ describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {
     await app.init();
   });
   afterAll(async () => { await app?.close(); resetEnvironmentForTests(); });
-  beforeEach(() => { jest.clearAllMocks(); issuedRows.rows = []; bucket.blocked = false; });
+  beforeEach(() => { jest.clearAllMocks(); issuedRows.rows = []; bucket.blocked = false; facility.side = 'real'; });
 
   const lookup = (hid: string) => request(app.getHttpServer()).post('/api/v1/identity/patient-lookup')
     .send({ hid, purpose: 'direct-care' });
@@ -273,7 +386,67 @@ describe('Q100 B over HTTP: POST /api/v1/identity/patient-lookup', () => {
     expect(response.body).toMatchObject({ status: 404, code: 'PATIENT_NOT_FOUND', detail: 'No patient has this Health ID.' });
     expect(JSON.stringify(response.body)).not.toContain(NOBODY);
     expect(JSON.stringify(response.body)).not.toMatch(UNVERIFIED);
-    expect(query).toHaveBeenCalledWith('select health_id from identity.support_health_id_matches($1::text[])', [[NOBODY]]);
+    expect(query).toHaveBeenCalledWith(FACILITY_SIDE_SQL, [facilityId]);
+    expect(query).toHaveBeenCalledWith(ISSUED_SQL, [[NOBODY]]);
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied', patientId: undefined,
+      details: { lookupResult: 'no_such_patient' } }));
+  });
+
+  it.each([['demo', DEMO_NOBODY], ['qa', QA_NOBODY]] as const)(
+    'answers PATIENT_NOT_FOUND to a %s facility\'s member for a missing Health ID of its own tenant',
+    async (side, hid) => {
+      facility.side = side;
+      provider.lookupExactHid.mockResolvedValue(null);
+      const response = await lookup(hid);
+      expect(response.status).toBe(404);
+      expect(response.body).toMatchObject({ code: 'PATIENT_NOT_FOUND', detail: 'No patient has this Health ID.' });
+      expect(query).toHaveBeenCalledWith(ISSUED_SQL, [[hid]]);
+    });
+
+  it.each(SIDES.flatMap((hidSide) => SIDES.filter((facilitySide) => facilitySide !== hidSide)
+    .map((facilitySide) => [hidSide, facilitySide] as const)))(
+    'answers today\'s 404 for a %s Health ID looked up at a %s facility, never asking whether it was issued',
+    async (hidSide, facilitySide) => {
+      facility.side = facilitySide;
+      provider.lookupExactHid.mockResolvedValue(null);
+      const response = await lookup(SIDE_HEALTH_ID[hidSide]);
+      expect(response.status).toBe(404);
+      expect(response.body.code).not.toBe('PATIENT_NOT_FOUND');
+      expect(response.body.detail).toBe('Patient was not found or is not available');
+      expect(query).not.toHaveBeenCalledWith(ISSUED_SQL, expect.anything());
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied',
+        details: { lookupResult: 'not_available' } }));
+    });
+
+  it('answers today\'s 404 for a Health ID starting ZDEM or ZQA that is not a sealed one, asking nothing', async () => {
+    provider.lookupExactHid.mockResolvedValue(null);
+    for (const hid of ['HID-ZDEM27', 'HID-ZQAAAAAA2']) {
+      const response = await lookup(hid);
+      expect(response.status).toBe(404);
+      expect(response.body.code).not.toBe('PATIENT_NOT_FOUND');
+    }
+    expect(query).not.toHaveBeenCalledWith(FACILITY_SIDE_SQL, expect.anything());
+    expect(query).not.toHaveBeenCalledWith(ISSUED_SQL, expect.anything());
+  });
+
+  it('answers today\'s 404 when the facility\'s side cannot be read (fails closed)', async () => {
+    facility.side = 'unknown';
+    provider.lookupExactHid.mockResolvedValue(null);
+    const response = await lookup(NOBODY);
+    expect(response.status).toBe(404);
+    expect(response.body.code).not.toBe('PATIENT_NOT_FOUND');
+    expect(response.body.detail).toBe('Patient was not found or is not available');
+    expect(query).not.toHaveBeenCalledWith(ISSUED_SQL, expect.anything());
+    expect(JSON.stringify(response.body)).not.toMatch(/sealed|function/);
+  });
+
+  it('answers today\'s 404 when the issued check answers what 0109 never does (fails closed, nothing leaks)', async () => {
+    provider.lookupExactHid.mockResolvedValue(null);
+    issuedRows.rows = [{ health_id: 'HID-OTHER2' }];
+    const response = await lookup(NOBODY);
+    expect(response.status).toBe(404);
+    expect(response.body.code).not.toBe('PATIENT_NOT_FOUND');
+    expect(JSON.stringify(response.body)).not.toContain('HID-OTHER2');
   });
 
   it('keeps today\'s answer, distinct from PATIENT_NOT_FOUND, for a Health ID that exists', async () => {

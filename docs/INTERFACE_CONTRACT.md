@@ -6901,8 +6901,9 @@ Body unchanged (`hid` in the body, never in a URL; `purpose`). Answers:
 | Case | Status | Body |
 | --- | --- | --- |
 | The patient opens (unchanged) | `200` | as before |
-| No patient record of any status has this Health ID | `404` | `{ "code": "PATIENT_NOT_FOUND", "detail": "No patient has this Health ID." }` |
+| No patient record of any status has this Health ID, and the Health ID is on the member's facility's side of the seals (below) | `404` | `{ "code": "PATIENT_NOT_FOUND", "detail": "No patient has this Health ID." }` |
 | The patient exists but is not available here (another facility's patient without consent, not active, sealed tenant) | `404` | today's answer, unchanged (`code` `NOT_FOUND`, "Patient was not found or is not available") |
+| The Health ID is on another side of the seals than the member's facility, or starts `ZDEM` or `ZQA` without being a sealed one, or the facility's side cannot be told (below) | `404` | today's answer, whether or not any record has the Health ID, never `PATIENT_NOT_FOUND` |
 | The patient can be seen here but this lookup is not authorized | `403` | today's answer, unchanged |
 | The member has had 30 lookups that opened no patient in 10 minutes | `404` or `403` | today's answer for 10 minutes (`404` `NOT_FOUND`, or `403` for a patient this lookup may see but not open), never `PATIENT_NOT_FOUND` and never a `429` |
 
@@ -6920,9 +6921,41 @@ bucket keyed by an HMAC of the membership with the existing
 limited member keeps getting today's refusals, never a new status: the
 website ends access and closes an open record on any `403` or `404` from this
 lookup (its check before every save), so a `429` there would leave a record
-open after access has ended. If the member cannot be counted, or the issued
-check cannot be read, the answer is today's `404`, never
-`PATIENT_NOT_FOUND`.
+open after access has ended. If the member cannot be counted, the side of
+the member's facility cannot be told, or the issued check cannot be read
+(or answers anything but the one Health ID or nothing), the answer is
+today's `404`, never `PATIENT_NOT_FOUND`.
+
+### The seals (demo 0098, QA 0123)
+
+Nothing in a sealed tenant ever finds a real patient, and nothing real finds
+a sealed one (0098 D2, 0123). The issued check reads past row-level
+security, so it is asked only when the Health ID and the member's facility
+are on the same side:
+
+| Health ID | Its side |
+| --- | --- |
+| `HID-ZDEM` and 4 more Health ID characters (8 in all, 0098 D7) | demo |
+| `HID-ZQA` and 5 more Health ID characters (8 in all, 0123 D7) | QA |
+| Any other Health ID starting `ZDEM` or `ZQA` (any length) | none: always today's `404` |
+| Every other Health ID | real |
+
+Identity's generator has never issued an 8-character Health ID and, since
+Q60, never starts one with `ZDEM` or `ZQA`; a real Health ID issued earlier
+that starts so is never answered `PATIENT_NOT_FOUND` (it gets today's `404`
+when it does not open).
+
+The member's facility's side is read with `identity.sealed_demo_facility`
+(0098) and `identity.sealed_qa_facility` (0123), which identity-api's runtime
+may already execute: demo when only the first says yes, QA when only the
+second does, real when neither does. When both say yes, when either cannot
+be read, or when the request has no facility, the side cannot be told and
+the answer is today's `404`. So a demo or QA member learns nothing about
+real Health IDs, a real member nothing about demo or QA ones, and the demo
+and QA tenants nothing about each other; each learns only whether a Health
+ID of its own side is issued. Nothing is asked about the Health ID (no side
+query and no issued check) when it is malformed or starts `ZDEM` or `ZQA`
+without being a sealed one.
 
 ### Audit
 
@@ -6930,6 +6963,9 @@ Every answer writes `identity.patient.lookup` as before (`success`, or
 `denied`), never with the Health ID. A `denied` row now carries
 `details.lookupResult`: `no_such_patient`, `not_available`,
 `not_authorized` (with the patient id, as before) or `limited`.
+`not_available` is every `404` that is not `PATIENT_NOT_FOUND` and not
+limited: a record has the Health ID, the Health ID is of another side of the
+seals, or it could not be told.
 
 ### Not changed
 
