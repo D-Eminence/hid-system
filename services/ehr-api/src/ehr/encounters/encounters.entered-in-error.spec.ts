@@ -122,12 +122,18 @@ describe('EHR-C8a a completed visit entered in error', () => {
     expect(audits[0]?.details).toEqual({ rowVersion: '4' });
   });
 
-  it('needs a reason (the visit body still requires changeReason)', async () => {
+  it('needs a reason (Q105 frees only starting and finishing: the service answers 400 CHANGE_REASON_REQUIRED)', async () => {
     const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, forbidUnknownValues: true, transform: true });
-    await expect(pipe.transform({ expectedRowVersion: 3, status: 'entered_in_error' }, { type: 'body', metatype: UpdateEncounterDto }))
-      .rejects.toMatchObject({ status: 400 });
+    // The body may leave the reason out now (Q105), but a short one is still refused by validation.
     await expect(pipe.transform({ expectedRowVersion: 3, status: 'entered_in_error', changeReason: 'ab' },
       { type: 'body', metatype: UpdateEncounterDto })).rejects.toMatchObject({ status: 400 });
+    const body = await pipe.transform({ expectedRowVersion: 3, status: 'entered_in_error' },
+      { type: 'body', metatype: UpdateEncounterDto }) as UpdateEncounterDto;
+    const { service, calls, reasons } = setup(visit(EncounterStatus.Completed));
+    await expect(service.update(context, patientId, encounterId, body))
+      .rejects.toMatchObject({ status: 400, code: 'CHANGE_REASON_REQUIRED', message: 'Please say why you are changing this.' });
+    expect(reasons).toEqual([]);
+    expect(updated(calls)).toBe(false);
   });
 });
 

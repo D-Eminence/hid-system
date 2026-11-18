@@ -9,6 +9,7 @@ import {
   UpdateEncounterDto,
 } from '../shared/clinical.dto';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
+import { hasTypedReason, neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { lagosCalendarDate, lagosDaySql, VISIT_DAY_TIME_ZONE } from './lagos-day';
 
@@ -60,7 +61,8 @@ const TRANSITIONS: Readonly<Record<EncounterStatus, readonly EncounterStatus[]>>
   [EncounterStatus.InProgress]: [EncounterStatus.OnHold, EncounterStatus.Completed, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
   [EncounterStatus.OnHold]: [EncounterStatus.InProgress, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
   // EHR-C8a: a completed visit may be entered in error, with a reason
-  // (UpdateEncounterDto requires one); never the imported paper records visit.
+  // (a typed one: Q105 frees only starting and finishing); never the imported
+  // paper records visit.
   [EncounterStatus.Completed]: [EncounterStatus.EnteredInError],
   [EncounterStatus.Cancelled]: [],
   [EncounterStatus.EnteredInError]: [],
@@ -230,7 +232,14 @@ export class EncountersService {
         const completedInError = current.status === EncounterStatus.Completed
           && input.status === EncounterStatus.EnteredInError;
         if (completedInError) await this.assertCompletedVisitCanBeEnteredInError(client, context, patientId, current);
-        await this.repository.setChangeReason(client, input.changeReason);
+        // Q105: starting a planned visit (nothing else changed) and finishing
+        // a visit in progress (with its end time, nothing else) need no typed
+        // reason; the fixed one is recorded. "First" is checked against the
+        // version history and fails closed. Holds, resumes, cancels, entered
+        // in error and edits still need a typed reason.
+        const fixed = hasTypedReason(input.changeReason) ? undefined : await this.fixedVisitReason(client, current, input);
+        const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason, fixed);
+        await this.repository.setChangeReason(client, reason);
         const result = await client.query<EncounterRow>(
           `update ehr.encounters set
              status = coalesce($1, status),
@@ -251,7 +260,8 @@ export class EncountersService {
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Encounter changed since it was loaded');
         return { value: row, resourceId: encounterId,
-          details: { rowVersion: row.rowVersion, ...(completedInError ? { completedVisitEnteredInError: true } : {}) } };
+          details: { rowVersion: row.rowVersion, ...reasonDetails,
+            ...(completedInError ? { completedVisitEnteredInError: true } : {}) } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
@@ -402,6 +412,27 @@ export class EncountersService {
   private single(row: EncounterRow | undefined): EncounterRow {
     if (!row) throw new DomainProblem(404, 'ENCOUNTER_NOT_FOUND', 'Encounter was not found');
     return row;
+  }
+
+  /**
+   * Q105: the fixed reason for starting or finishing a visit, or undefined
+   * when the change needs a typed one. Start: planned to in progress with no
+   * other field, never in progress, on hold or completed before. Finish: in
+   * progress to completed with at most its end time, never completed before.
+   */
+  private async fixedVisitReason(client: PoolClient, current: EncounterRow, input: UpdateEncounterDto)
+    : Promise<'visit_start' | 'visit_finish' | undefined> {
+    if (input.chiefComplaint !== undefined) return undefined;
+    if (current.status === EncounterStatus.Planned && input.status === EncounterStatus.InProgress
+      && input.endedAt === undefined) {
+      return await neverReachedBefore(client, 'encounters', current.id,
+        [EncounterStatus.InProgress, EncounterStatus.OnHold, EncounterStatus.Completed]) ? 'visit_start' : undefined;
+    }
+    if (current.status === EncounterStatus.InProgress && input.status === EncounterStatus.Completed) {
+      return await neverReachedBefore(client, 'encounters', current.id, [EncounterStatus.Completed])
+        ? 'visit_finish' : undefined;
+    }
+    return undefined;
   }
 
   private requireMutation(input: object, keys: readonly string[]): void {
