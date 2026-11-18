@@ -58,3 +58,15 @@ export const ACCOUNT_ONLY_ALLOWED = Symbol('ACCOUNT_ONLY_ALLOWED');
  * NO_ACTIVE_FACILITY_MEMBERSHIP before a handler runs.
  */
 export const AccountOnlyAllowed = (): MethodDecorator & ClassDecorator => SetMetadata(ACCOUNT_ONLY_ALLOWED, true);
+export const SIGNED_OUT_ALLOWED = Symbol('SIGNED_OUT_ALLOWED');
+/**
+ * A route that also answers a request with no live sign-in: product sign-out
+ * (POST /auth/sso/logout, ADR-070), which must still give the browser the
+ * provider's end-session address after its sign-in has already ended. When
+ * the request's access token verifies, every check runs exactly as on any
+ * other route (Origin and CSRF for a cookie write, runtime controls, session
+ * kind). Only when there is no access token, or it does not verify (401),
+ * does SecurityGuard admit the request with no actor; any other fault is
+ * answered as before. The handler then does its own Origin and CSRF checks.
+ */
+export const SignedOutAllowed = (): MethodDecorator => SetMetadata(SIGNED_OUT_ALLOWED, true);

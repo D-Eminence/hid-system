@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath} from './staging-backend-build.mjs';
+import {gatewayBoundFileHashes} from './production-backend-build.mjs';
 test('every staging component is admitted against the reviewed production inventory policy',()=>{
   for(const c of components) assert.equal(runtimePolicyPath(c),'security/production-runtime-assessment.json');
 });
@@ -43,4 +44,34 @@ test('only verified not-affected VEX matches can pass; unknowns and changed pack
   assert.throws(()=>assertScan(report,{...assessment,expires_at:'invalid'}, {...policy,expires_at:'invalid'}));
   assert.throws(()=>assertScan(report,{...assessment,glibc_affected_imports:1},policy));
   assert.throws(()=>assertScan({...report,matches:[m]},assessment,policy));
+});
+test('gateway VEX edits rebuild only the staging gateway',()=>assert.deepEqual(selectComponents(['security/gateway-runtime.vex.json']),['gateway']));
+test('staging gateway scans accept only exact VEX-applied statements from the committed gateway VEX',()=>{
+  const purl='pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl',now=Date.now();
+  const m={vulnerability:{id:'CVE-2026-88823',severity:'High'},artifact:{name:'libssl3',version:'3.5.9-r0',type:'apk',purl},
+    appliedIgnoreRules:[{namespace:'vex','vex-status':'not_affected'}]};
+  const vex={'@context':'https://openvex.dev/ns/v0.2.0',timestamp:new Date(now-86400000).toISOString(),hid_expires_at:new Date(now+86400000).toISOString(),
+    hid_bound_files:gatewayBoundFileHashes(),
+    statements:[{vulnerability:{name:m.vulnerability.id},products:[{'@id':purl}],status:'not_affected',justification:'vulnerable_code_not_in_execute_path'}]};
+  const report={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:[m]};
+  assertScan(report,null,null,vex);
+  assert.throws(()=>assertScan(report));
+  assert.throws(()=>assertScan(report,null,null,{...vex,hid_expires_at:new Date(now-1).toISOString()}));
+  assert.throws(()=>assertScan({...report,ignoredMatches:[{...m,vulnerability:{id:'CVE-2026-95691',severity:'High'}}]},null,null,vex));
+  assert.throws(()=>assertScan(report,null,null,{...vex,hid_bound_files:{...vex.hid_bound_files,'gateway/nginx.conf.template':'0'.repeat(64)}}),/Gateway changed/);
+  assert.throws(()=>assertScan(report,null,null,{...vex,hid_bound_files:undefined}),/Gateway changed/);
+});
+test('staging enforces a per-finding expires_at and leaves findings without one unchanged',()=>{
+  const m={vulnerability:{id:'CVE-2026-107493',severity:'High'},artifact:{name:'libssl3t64',version:'3.5.7-1~deb13u3',purl:'pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3'},
+    appliedIgnoreRules:[{namespace:'vex','vex-status':'not_affected'}]};
+  const expiry=new Date(Date.now()+86400000).toISOString();
+  const assessment={component:'ehr-api',expires_at:expiry,native_binary_count:1,glibc_affected_imports:0,raw_high_matches:1,
+    reviewed_not_affected:[{id:m.vulnerability.id,package:m.artifact.name,version:m.artifact.version,purl:m.artifact.purl}]};
+  const finding={id:m.vulnerability.id,packages:['libssl3t64'],versions:{libssl3t64:'3.5.7-1~deb13u3'}};
+  const policy=f=>({expires_at:expiry,elf_inventory:{'ehr-api':{node:'hash'}},findings:[f]});
+  const report={descriptor:{version:'test'},distro:{name:'debian',version:'13'},matches:[],ignoredMatches:[m]};
+  assertScan(report,assessment,policy(finding));
+  assertScan(report,assessment,policy({...finding,expires_at:new Date(Date.now()+3600000).toISOString()}));
+  for(const v of [new Date(Date.now()-1).toISOString(),'2020-01-01T00:00:00Z','invalid'])
+    assert.throws(()=>assertScan(report,assessment,policy({...finding,expires_at:v})),/Unassessed/);
 });

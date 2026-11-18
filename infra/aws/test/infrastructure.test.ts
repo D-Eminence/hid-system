@@ -45,15 +45,25 @@ const qoreIdStagingApplication = new App();
 const qoreIdStagingRegional = Template.fromStack(new HidRegionalStack(qoreIdStagingApplication, 'QoreIdStagingRegionalTest', {
   configuration: environmentConfig('staging', 'economy', 'true'),
 })).toJSON() as typeof regional;
+const ownWorkPatientCardApplication = new App();
+const ownWorkPatientCardRegional = Template.fromStack(new HidRegionalStack(ownWorkPatientCardApplication,
+  'OwnWorkPatientCardRegionalTest', {
+    configuration: environmentConfig('staging', 'economy', undefined, 'true'),
+  })).toJSON() as typeof regional;
+const prescriptionDispensingDetailsApplication = new App();
+const prescriptionDispensingDetailsRegional = Template.fromStack(new HidRegionalStack(prescriptionDispensingDetailsApplication,
+  'PrescriptionDispensingDetailsRegionalTest', {
+    configuration: environmentConfig('staging', 'economy', undefined, undefined, 'true'),
+  })).toJSON() as typeof regional;
 const facilitySelectionKeepApplication = new App();
 const facilitySelectionKeepRegional = Template.fromStack(new HidRegionalStack(facilitySelectionKeepApplication,
   'FacilitySelectionKeepRegionalTest', {
-    configuration: environmentConfig('staging', 'economy', undefined, 'keep'),
+    configuration: environmentConfig('staging', 'economy', undefined, undefined, undefined, 'keep'),
   })).toJSON() as typeof regional;
 const facilitySelectionAskApplication = new App();
 const facilitySelectionAskRegional = Template.fromStack(new HidRegionalStack(facilitySelectionAskApplication,
   'FacilitySelectionAskRegionalTest', {
-    configuration: environmentConfig('production', undefined, undefined, 'ask'),
+    configuration: environmentConfig('production', undefined, undefined, undefined, undefined, 'ask'),
   })).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
@@ -81,23 +91,52 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.throws(() => environmentConfig('staging', 'economy', 'enabled'), /HID_QOREID_ENABLED/);
   assert.equal(environmentConfig('staging', 'economy').qoreIdEnabled, false);
   assert.equal(environmentConfig('staging', 'economy', 'true').qoreIdEnabled, true);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, 'enabled'),
+    /HID_OWN_WORK_PATIENT_CARD_ENABLED must be true or false when supplied/);
+  assert.throws(() => environmentConfig('production', undefined, undefined, 'TRUE'), /HID_OWN_WORK_PATIENT_CARD_ENABLED/);
+  assert.equal(environmentConfig('staging', 'economy').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('production').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, 'false').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, 'true').ownWorkPatientCardEnabled, true);
+  assert.equal(environmentConfig('production', undefined, undefined, 'true').ownWorkPatientCardEnabled, true);
+  assert.equal(environmentConfig('staging', 'economy', undefined, 'true').qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', 'true').ownWorkPatientCardEnabled, false);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, 'enabled'),
+    /HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED must be true or false when supplied/);
+  assert.throws(() => environmentConfig('production', undefined, undefined, undefined, 'TRUE'),
+    /HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED/);
+  assert.equal(environmentConfig('staging', 'economy').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('production').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'false').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').prescriptionDispensingDetailsEnabled, true);
+  assert.equal(environmentConfig('production', undefined, undefined, undefined, 'true').prescriptionDispensingDetailsEnabled, true);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', 'true', 'true').prescriptionDispensingDetailsEnabled, false);
   // 0129: a staff member's chosen facility, kept per sign-in. Off unless keep
   // or ask is given at synth time; anything else refuses to synthesize.
   for (const invalid of ['on', 'true', 'false', 'KEEP', ' keep', 'keep ', '', 'default']) {
-    assert.throws(() => environmentConfig('staging', 'economy', undefined, invalid),
+    assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, undefined, invalid),
       /HID_STAFF_FACILITY_SELECTION_MODE must be off, keep or ask when supplied/);
   }
-  assert.throws(() => environmentConfig('production', undefined, undefined, 'Ask'), /HID_STAFF_FACILITY_SELECTION_MODE/);
+  assert.throws(() => environmentConfig('production', undefined, undefined, undefined, undefined, 'Ask'), /HID_STAFF_FACILITY_SELECTION_MODE/);
   assert.equal(environmentConfig('development').staffFacilitySelectionMode, 'off');
   assert.equal(environmentConfig('staging', 'economy').staffFacilitySelectionMode, 'off');
   assert.equal(environmentConfig('staging', 'sleep').staffFacilitySelectionMode, 'off');
   assert.equal(environmentConfig('production').staffFacilitySelectionMode, 'off');
   for (const mode of ['off', 'keep', 'ask'] as const) {
-    assert.equal(environmentConfig('staging', 'economy', undefined, mode).staffFacilitySelectionMode, mode);
-    assert.equal(environmentConfig('production', undefined, undefined, mode).staffFacilitySelectionMode, mode);
+    assert.equal(environmentConfig('staging', 'economy', undefined, undefined, undefined, mode).staffFacilitySelectionMode, mode);
+    assert.equal(environmentConfig('production', undefined, undefined, undefined, undefined, mode).staffFacilitySelectionMode, mode);
   }
   assert.equal(environmentConfig('staging', 'economy', 'true').staffFacilitySelectionMode, 'off');
-  assert.equal(environmentConfig('staging', 'economy', undefined, 'keep').qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, undefined, 'keep').qoreIdEnabled, false);
+  // Each opt-in leaves the others as they were.
+  assert.equal(environmentConfig('staging', 'economy', undefined, 'true', 'true').staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, undefined, 'keep').ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, undefined, 'keep').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('production', undefined, undefined, 'true', 'true', 'ask').staffFacilitySelectionMode, 'ask');
+  assert.equal(environmentConfig('production', undefined, undefined, 'true', 'true', 'ask').ownWorkPatientCardEnabled, true);
+  assert.equal(environmentConfig('production', undefined, undefined, 'true', 'true', 'ask').prescriptionDispensingDetailsEnabled, true);
   assert.equal(environmentConfig('staging', 'economy').publicApiSubdomain, 'api.staging');
   assert.deepEqual(environmentConfig('staging', 'economy').browserSubdomains, [
     'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'admin.staging',
@@ -529,10 +568,73 @@ test('an explicit QoreID staging synth injects its distinct server-only secret i
   }
 });
 
+test('own-work patient cards are passed to lab-api and pharmacy-api only, false unless explicitly enabled', () => {
+  const carriers = ['lab-api', 'pharmacy-api'];
+  const cases: Array<[typeof regional, string]> = [
+    [regional, 'false'], [stagingRegional, 'false'], [fidelityRegional, 'false'], [sleepRegional, 'false'],
+    [qoreIdStagingRegional, 'false'], [ownWorkPatientCardRegional, 'true'], [facilitySelectionKeepRegional, 'false'],
+    [facilitySelectionAskRegional, 'false'],
+  ];
+  for (const [template, expected] of cases) {
+    const tasks = properties(template, 'AWS::ECS::TaskDefinition');
+    for (const name of carriers) {
+      const task = tasks.find(item => JSON.stringify(item.Family).includes(name));
+      assert.ok(task, `missing ${name}`);
+      const api = (task.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+        .find(item => item.Name === name)!;
+      const environment = Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+      assert.equal(environment.OWN_WORK_PATIENT_CARD_ENABLED, expected, `${name} should carry ${expected}`);
+    }
+    const others = tasks.filter(task => !carriers.some(name => JSON.stringify(task.Family).includes(name)));
+    assert.ok(others.length > 0);
+    for (const task of others) {
+      assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /OWN_WORK_PATIENT_CARD_ENABLED/,
+        `${JSON.stringify(task.Family)} should not carry OWN_WORK_PATIENT_CARD_ENABLED`);
+    }
+    const carrying = tasks.filter(task => JSON.stringify(task.ContainerDefinitions).includes('OWN_WORK_PATIENT_CARD_ENABLED'));
+    assert.equal(carrying.length, carriers.length);
+  }
+});
+
+test('prescription dispensing details are passed to ehr-api and pharmacy-api only, false unless explicitly enabled', () => {
+  const carriers = ['ehr-api', 'pharmacy-api'];
+  const cases: Array<[typeof regional, string]> = [
+    [regional, 'false'], [stagingRegional, 'false'], [fidelityRegional, 'false'], [sleepRegional, 'false'],
+    [qoreIdStagingRegional, 'false'], [ownWorkPatientCardRegional, 'false'], [prescriptionDispensingDetailsRegional, 'true'],
+    [facilitySelectionKeepRegional, 'false'], [facilitySelectionAskRegional, 'false'],
+  ];
+  function environmentOf(tasks: Array<Record<string, unknown>>, name: string) {
+    const task = tasks.find(item => JSON.stringify(item.Family).includes(name));
+    assert.ok(task, `missing ${name}`);
+    const api = (task.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+      .find(item => item.Name === name)!;
+    return Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+  }
+  for (const [template, expected] of cases) {
+    const tasks = properties(template, 'AWS::ECS::TaskDefinition');
+    for (const name of carriers) {
+      assert.equal(environmentOf(tasks, name).PRESCRIPTION_DISPENSING_DETAILS_ENABLED, expected, `${name} should carry ${expected}`);
+    }
+    const others = tasks.filter(task => !carriers.some(name => JSON.stringify(task.Family).includes(name)));
+    assert.ok(others.length > 0);
+    for (const task of others) {
+      assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /PRESCRIPTION_DISPENSING_DETAILS_ENABLED/,
+        `${JSON.stringify(task.Family)} should not carry PRESCRIPTION_DISPENSING_DETAILS_ENABLED`);
+    }
+    const carrying = tasks.filter(task => JSON.stringify(task.ContainerDefinitions).includes('PRESCRIPTION_DISPENSING_DETAILS_ENABLED'));
+    assert.equal(carrying.length, carriers.length);
+  }
+  // Switching it on changes no other setting.
+  const tasks = properties(prescriptionDispensingDetailsRegional, 'AWS::ECS::TaskDefinition');
+  assert.equal(environmentOf(tasks, 'identity-api').QOREID_ENABLED, 'false');
+  for (const name of ['lab-api', 'pharmacy-api']) assert.equal(environmentOf(tasks, name).OWN_WORK_PATIENT_CARD_ENABLED, 'false');
+});
+
 test('the staff facility selection mode (0129) is passed to identity-api only, off unless keep or ask is given', () => {
   const cases: Array<[typeof regional, string]> = [
     [regional, 'off'], [stagingRegional, 'off'], [fidelityRegional, 'off'], [sleepRegional, 'off'],
-    [qoreIdStagingRegional, 'off'], [facilitySelectionKeepRegional, 'keep'], [facilitySelectionAskRegional, 'ask'],
+    [qoreIdStagingRegional, 'off'], [ownWorkPatientCardRegional, 'off'], [prescriptionDispensingDetailsRegional, 'off'],
+    [facilitySelectionKeepRegional, 'keep'], [facilitySelectionAskRegional, 'ask'],
   ];
   for (const [template, expected] of cases) {
     const tasks = properties(template, 'AWS::ECS::TaskDefinition');

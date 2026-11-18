@@ -416,12 +416,24 @@ try {
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-emergency-contacts-runtime.mjs')], workflowEnvironment));
   evidence.checks.provider_enrollment_runtime = JSON.parse(command('exact-role facility self sign-up workflow, gate, cap and review',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs')], workflowEnvironment));
+  // 0127: single sign-on hand-off, product gate, back-channel logout and product sign-out, with the in-process fake provider.
+  evidence.checks.sso_runtime = JSON.parse(command('exact-role single sign-on hand-off, product gate and sign-out',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-sso-runtime.mjs')], workflowEnvironment));
   // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
   evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));
   // 0104: records processing asked for, approved, used by OCR, fenced from the chart, Lab and Pharmacy, and revoked.
   evidence.checks.records_processing_runtime = JSON.parse(command('exact-role records processing for OCR',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-records-processing-runtime.mjs')], workflowEnvironment));
+  // 0124: the patient on this facility's own lab and pharmacy work, through lab-api and pharmacy-api with
+  // OWN_WORK_PATIENT_CARD_ENABLED=true (they answer 200 whatever the readers do, so only this proves the readers answer).
+  evidence.checks.own_work_patient_cards_runtime = JSON.parse(command('exact-role patient details on own lab and pharmacy work',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-own-work-patient-cards-runtime.mjs')], workflowEnvironment));
+  // 0125: the prescriber's priority, strength, form, duration and quantity on this facility's own pharmacy work,
+  // through ehr-api and pharmacy-api with PRESCRIPTION_DISPENSING_DETAILS_ENABLED=true (pharmacy-api answers 200
+  // whatever its reader does, so only this proves the reader answers).
+  evidence.checks.prescription_details_runtime = JSON.parse(command('exact-role prescription details on own pharmacy work',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-prescription-details-runtime.mjs')], workflowEnvironment));
   // 0129: a staff member's chosen facility, kept per sign-in, through Identity's full pipeline with
   // STAFF_FACILITY_SELECTION_MODE off, keep and ask (a failed read answers 200 'unavailable' and keep answers no field
   // when nothing is stored, so only this proves the choice is stored and read).

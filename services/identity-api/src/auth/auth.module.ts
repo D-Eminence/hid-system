@@ -19,13 +19,18 @@ import { GoogleAuthenticationService } from './google-authentication.service';
 import { IntegrationModule } from '../integrations/integration.module';
 import { PatientContactReader } from '../patient-profile/patient-contact-reader';
 import { PatientProfileCrypto } from '../patient-profile/patient-profile-crypto';
+import { SsoController } from './sso/sso.controller';
+import { SsoProviderClient } from './sso/sso-provider.client';
+import { SsoService } from './sso/sso.service';
 
 @Global()
 @Module({
   imports: [TurnstileModule, IntegrationModule],
-  controllers: [AuthController, OtpController, PatientSelfController],
+  // SsoController's routes, and AuthController's POST /auth/sso/logout, exist
+  // only while single sign-on is configured (SsoRouteGuard, ADR-070, 0127).
+  controllers: [AuthController, OtpController, PatientSelfController, SsoController],
   providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService,
-    PatientProfileCrypto, PatientContactReader, FacilitySelectionStartupCheck],
+    PatientProfileCrypto, PatientContactReader, SsoProviderClient, SsoService, FacilitySelectionStartupCheck],
   // FacilitySelectionStartupCheck: with STAFF_FACILITY_SELECTION_MODE on,
   // Identity refuses to start while 0129's table or one of its grants is missing.
   // AuthService: facility self sign-up signs the new administrator in (P4).

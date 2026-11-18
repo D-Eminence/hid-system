@@ -78,7 +78,7 @@ describe('each staff site for its own job (Q97)', () => {
   });
 
   it('every caller of the gate applies Q97 (facilityAdmittedOnProduct, never facilityFitsProduct alone)', () => {
-    for (const file of ['auth.controller.ts', 'current-staff-context.service.ts', 'token.service.ts']) {
+    for (const file of ['auth.controller.ts', 'current-staff-context.service.ts', 'token.service.ts', 'sso/sso.service.ts']) {
       const source = readFileSync(join(__dirname, file), 'utf8');
       expect(source).not.toMatch(/facilityFitsProduct\s*\(/);
     }

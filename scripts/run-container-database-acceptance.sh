@@ -96,6 +96,9 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/patient-access-pin.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/sso-relying-party.integration.sql" >/dev/null
 # Suites ported from main live outside services/ehr-api/database/, which the
 # production release admits only new reviewed migration files into.
 for acceptance_ported_suite in "$acceptance_repository"/services/ehr-api/test/database/*.integration.sql; do

@@ -45,4 +45,22 @@ class ProductionAssessmentTests(unittest.TestCase):
                 args=copy.deepcopy(self.inputs());mutate(args)
                 with self.assertRaises(RuntimeError):a.validate_inputs(*args)
 
+    def test_per_finding_expiry_must_be_valid_and_within_policy(self):
+        def with_expiry(value):
+            args=self.inputs()
+            args[4]['findings']=[{'id':'CVE-OTHER'},{'id':'CVE-EXPIRING','expires_at':value}]
+            return args
+        now=datetime.datetime.now(datetime.timezone.utc)
+        a.validate_inputs(*with_expiry((now+datetime.timedelta(days=3)).isoformat()))
+        # An already-past per-finding expiry does not block other findings here; native.assess refuses its matches.
+        a.validate_inputs(*with_expiry((now-datetime.timedelta(days=1)).isoformat()))
+        for value in ((now+datetime.timedelta(days=8)).isoformat(),'2026-12-01T00:00:00','not-a-date',None):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):a.validate_inputs(*with_expiry(value))
+
+    def test_committed_policy_expires_only_the_two_20261117_findings_on_2026_12_01(self):
+        import json
+        policy=json.loads(a.POLICY.read_text())
+        expiring={f['id']:f['expires_at'] for f in policy['findings'] if 'expires_at' in f}
+        self.assertEqual(expiring,{'CVE-2026-107493':'2026-12-01T00:00:00+00:00','CVE-2026-124709':'2026-12-01T00:00:00+00:00'})
+
 if __name__=='__main__':unittest.main()

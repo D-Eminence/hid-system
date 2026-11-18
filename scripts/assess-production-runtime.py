@@ -40,6 +40,16 @@ def validate_inputs(component, image, scan, metadata, policy, source):
     expires = datetime.datetime.fromisoformat(policy['expires_at'])
     if not assessed <= now < expires or not datetime.timedelta(0) < expires - assessed <= datetime.timedelta(days=30):
         raise RuntimeError('Current bounded production assessment required')
+    # A per-finding expires_at may only shorten the policy's; native.assess refuses a match after it.
+    for finding in policy.get('findings', []):
+        if 'expires_at' not in finding:
+            continue
+        try:
+            finding_expires = datetime.datetime.fromisoformat(finding['expires_at'])
+        except (TypeError, ValueError):
+            raise RuntimeError('Malformed per-finding expires_at') from None
+        if finding_expires.tzinfo is None or finding_expires > expires:
+            raise RuntimeError('Per-finding expires_at must be timezone-aware and within the policy expiry')
 
 def assess(component, image, raw_file, directory):
     policy = json.loads(POLICY.read_text())
