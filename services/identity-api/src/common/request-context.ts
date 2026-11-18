@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import type { StaffProduct } from '../auth/product-gate';
 import { DomainProblem } from './problem';
 
 export interface FacilityAssignment {
@@ -49,6 +50,15 @@ export interface ActorContext {
    * 403 NO_ACTIVE_FACILITY_MEMBERSHIP.
    */
   accountOnly?: true;
+  /**
+   * Staff sessions only: the staff product sites this login can open (Q97),
+   * in the order ehr, lab, pharmacy, migrate, outreach. Read from every
+   * active membership by the product gate's own rule, whatever site the
+   * session was issued on; 'outreach' alone for an account-only session; empty
+   * for a platform administrator with no membership. The website shows only
+   * these sites.
+   */
+  products?: readonly StaffProduct[];
 }
 
 export interface HidRequest extends Request {

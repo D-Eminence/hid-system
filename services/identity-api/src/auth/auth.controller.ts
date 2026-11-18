@@ -18,7 +18,7 @@ import { setSessionCookies } from './session-cookies';
 import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-success-audit';
 import { AccountSuspendedProblem } from './account-suspended';
 import { loginPrincipalKey } from './patient-principal';
-import { facilityFitsProduct, isProductGateRefusal, productForOrigin } from './product-gate';
+import { facilityAdmittedOnProduct, isProductGateRefusal, productForOrigin } from './product-gate';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
@@ -388,7 +388,7 @@ export class AuthController {
     // the site it comes from (an access token issued before the gate).
     const product = productForOrigin(request.header('origin'));
     const facilities = product
-      ? actor.facilities.filter((candidate) => facilityFitsProduct(candidate, product))
+      ? actor.facilities.filter((candidate) => facilityAdmittedOnProduct(candidate, product))
       : actor.facilities;
     const facility = facilities.find((candidate) => candidate.id === input.facilityId);
     if (!facility) throw new DomainProblem(403, 'FACILITY_ACCESS_DENIED', 'The actor is not active at this facility');
