@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, HttpCode, Optional, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import { RequirePermissions } from '../../common/decorators';
 import type { HidRequest } from '../../common/request-context';
 import { clinicalContext, requireIdempotencyKey } from '../shared/clinical-context';
@@ -13,8 +13,9 @@ import { WorkItemProgressService } from '../../integrations/work-item-progress.s
 
 @Controller('ehr/patients/:patientId/encounters/:encounterId/lab-requests')
 export class LabRequestsController {
+  // Required: a missing provider fails at start, never silently drops ownProgress.
   constructor(private readonly labRequests: LabRequestsService,
-    @Optional() private readonly progress?: WorkItemProgressService) {}
+    private readonly progress: WorkItemProgressService) {}
 
   /** Each item carries `ownProgress` in this facility's own laboratory (ORD-3), read after the list. */
   @Get()
@@ -23,7 +24,7 @@ export class LabRequestsController {
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string, @Query() query: TimelineQueryDto) {
     const context = clinicalContext(request);
     const page = await this.labRequests.list(context, patientId, encounterId, query);
-    return this.progress ? this.progress.withLabRequestProgress(context, patientId, page) : page;
+    return this.progress.withLabRequestProgress(context, patientId, page);
   }
 
   /** With `ownProgress` (ORD-3), read after the lab request. */
@@ -34,7 +35,7 @@ export class LabRequestsController {
     @Param('requestId', new ParseUUIDPipe()) requestId: string) {
     const context = clinicalContext(request);
     const labRequest = await this.labRequests.get(context, patientId, encounterId, requestId);
-    return this.progress ? this.progress.withLabRequest(context, patientId, labRequest) : labRequest;
+    return this.progress.withLabRequest(context, patientId, labRequest);
   }
 
   @Post()

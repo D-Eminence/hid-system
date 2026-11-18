@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, HttpCode, Optional, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import { RequirePermissions } from '../../common/decorators';
 import type { HidRequest } from '../../common/request-context';
 import { clinicalContext, requireIdempotencyKey } from '../shared/clinical-context';
@@ -14,9 +14,10 @@ import { DuplicateMedicineChecker } from './duplicate-medicines';
 
 @Controller('ehr/patients/:patientId/encounters/:encounterId/prescriptions')
 export class PrescriptionsController {
+  // Both are required: a missing provider fails at start, never silently drops ownProgress or duplicateMedicines.
   constructor(private readonly prescriptions: PrescriptionsService,
-    @Optional() private readonly progress?: WorkItemProgressService,
-    @Optional() private readonly duplicates?: DuplicateMedicineChecker) {}
+    private readonly progress: WorkItemProgressService,
+    private readonly duplicates: DuplicateMedicineChecker) {}
 
   /** Each item carries `ownProgress` in this facility's own pharmacy (ORD-3), read after the list. */
   @Get()
@@ -25,7 +26,7 @@ export class PrescriptionsController {
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string, @Query() query: TimelineQueryDto) {
     const context = clinicalContext(request);
     const page = await this.prescriptions.list(context, patientId, encounterId, query);
-    return this.progress ? this.progress.withPrescriptionProgress(context, patientId, page) : page;
+    return this.progress.withPrescriptionProgress(context, patientId, page);
   }
 
   /** With `ownProgress` (ORD-3), read after the prescription. */
@@ -36,7 +37,7 @@ export class PrescriptionsController {
     @Param('prescriptionId', new ParseUUIDPipe()) prescriptionId: string) {
     const context = clinicalContext(request);
     const prescription = await this.prescriptions.get(context, patientId, encounterId, prescriptionId);
-    return this.progress ? this.progress.withPrescription(context, patientId, prescription) : prescription;
+    return this.progress.withPrescription(context, patientId, prescription);
   }
 
   /**
@@ -55,7 +56,7 @@ export class PrescriptionsController {
     const context = clinicalContext(request);
     const created = await this.prescriptions.create(context, patientId, encounterId, input, requireIdempotencyKey(key));
     // ORD-10 phase 1: the same-medicine warning, after the write; it never fails the create.
-    return this.duplicates ? this.duplicates.afterCreate(context, patientId, created) : created;
+    return this.duplicates.afterCreate(context, patientId, created);
   }
 
   @Patch(':prescriptionId')

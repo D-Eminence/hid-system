@@ -154,7 +154,7 @@ describe('the EHR list and get answers carry ownProgress (ORD-3)', () => {
     const prescriptions = { list: jest.fn().mockResolvedValue({ items: [{ id: rx(1), status: 'active' },
       { id: rx(2), status: 'draft' }], nextCursor: null, crossFacilityOrders: false }),
     get: jest.fn().mockResolvedValue({ id: rx(1), status: 'active' }) };
-    const controller = new PrescriptionsController(prescriptions as never, service());
+    const controller = new PrescriptionsController(prescriptions as never, service(), {} as never);
     const page = await controller.list(request, patientId, encounterId, { limit: 50 } as never);
     expect(page).toMatchObject({ nextCursor: null, crossFacilityOrders: false, items: [
       { id: rx(1), ownProgress: { status: 'dispensed', dispensedAt: '2026-11-18T11:05:00.000Z' } },

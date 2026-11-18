@@ -180,7 +180,7 @@ describe('a new prescription carries the warning, and never fails because of it'
   it('adds duplicateMedicines, leaving the new prescription itself out', async () => {
     const { checker, query } = harness([row(1, 'Amoxicillin 250 mg')]);
     const prescriptions = { create: jest.fn().mockResolvedValue(created) };
-    const controller = new PrescriptionsController(prescriptions as never, undefined, checker);
+    const controller = new PrescriptionsController(prescriptions as never, {} as never, checker);
     const answer = await controller.create(request, patientId, encounterId, 'idempotency-key-123456', {} as never);
     expect(answer).toMatchObject({ ...created, duplicateMedicines: { checked: true, matches: [{ prescriptionId: id(1) }] } });
     expect(query).toHaveBeenCalledWith(CURRENT_PRESCRIPTIONS_QUERY, [patientId, facilityId, id(5), 500]);
@@ -189,7 +189,7 @@ describe('a new prescription carries the warning, and never fails because of it'
   it('says the check did not run when it cannot, and still answers the create', async () => {
     const repository = { run: jest.fn().mockRejectedValue(new Error('identity down')) };
     const prescriptions = { create: jest.fn().mockResolvedValue(created) };
-    const controller = new PrescriptionsController(prescriptions as never, undefined,
+    const controller = new PrescriptionsController(prescriptions as never, {} as never,
       new DuplicateMedicineChecker(repository as never));
     expect(await controller.create(request, patientId, encounterId, 'idempotency-key-123456', {} as never))
       .toEqual({ ...created, duplicateMedicines: DUPLICATE_CHECK_NOT_RUN });
