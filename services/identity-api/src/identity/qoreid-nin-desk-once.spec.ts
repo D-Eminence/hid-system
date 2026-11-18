@@ -100,10 +100,7 @@ function system() {
   qoreId.fetch as unknown as typeof globalThis.fetch);
   const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined) } as unknown as IntegrationRuntimeService;
   const ninOnly = new QoreIdPublicPatientIdentityProvider(adapter, integrations, ninCheck);
-  // The desk's per-request claim (auth.otp_rate_limits) is always free here: the guard is what is tested.
-  const claims = { withSystemTransaction: jest.fn(async (_c: string, work: (client: unknown) => Promise<unknown>) =>
-    work({ query: jest.fn(async () => ({ rows: [] })) })) };
-  const provider = new QoreIdNinVerificationProvider(ninOnly, claims as never);
+  const provider = new QoreIdNinVerificationProvider(ninOnly);
   const cases: unknown[][] = [];
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
     if (/insert into identity\.registration_cases \(/.test(sql)) {
@@ -182,6 +179,15 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     expect(s.checkAudits().map(([path, source]) => [path, source])).toEqual([['desk', 'qoreid'], ['desk', 'stored']]);
   });
 
+  it('asks QoreID once when the same request arrives twice at once (a double click)', async () => {
+    const s = system();
+    s.qoreId.state.delayMs = 40;
+    const results = await Promise.allSettled([s.resolve('desk-once-key-000017'), s.resolve('desk-once-key-000017')]);
+    expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect(s.qoreId.state.charged).toBe(1);
+    expect(s.checkAudits().map(([path, source]) => [path, source])).toEqual([['desk', 'qoreid'], ['desk', 'stored']]);
+  });
+
   it('answers a resend after "could not be verified" from the stored answer, with the same key or a new one', async () => {
     const s = system();
     s.qoreId.state.fallback = 'no_record';
@@ -191,6 +197,8 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     }
     expect(s.qoreId.state.charged).toBe(1);
     expect(s.breaker.state()).toBe('closed');
+    expect(s.checkAudits().map(([path, source, result]) => [path, source, result])).toEqual([
+      ['desk', 'qoreid', 'no_record'], ['desk', 'stored', 'no_record'], ['desk', 'stored', 'no_record']]);
   });
 
   it('does not charge again when the desk corrects a name or date of birth that did not match', async () => {

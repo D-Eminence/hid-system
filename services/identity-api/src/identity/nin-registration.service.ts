@@ -11,8 +11,7 @@ import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
 import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinCheckNotStarted,
   isNinCheckRefusedUnsent, isNinNotConfigured, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
-import { NIN_VERIFICATION_PROVIDER, type NinCheckReservation, type NinCheckReservationResult,
-  type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
+import { NIN_VERIFICATION_PROVIDER, type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
 import type { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto';
@@ -231,29 +230,11 @@ export class NinRegistrationService {
       await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, breaker: 'open' });
       throw error;
     }
-    const reservation: NinCheckReservation = { correlationId: context.correlationId,
-      accountId: context.actor.accountId, facilityId: context.facilityId, idempotencyKey, requestSha256 };
-    if (this.provider.reserve) {
-      let reserved: NinCheckReservationResult;
-      try {
-        // Q108: each live check is charged. The same request (Idempotency-Key
-        // and body) is checked at most once at a time, and a resend of one
-        // already answered gets that answer again, before anything is sent.
-        // Q109: no limit per staff account, per facility or across Health ID.
-        reserved = await this.provider.reserve(reservation);
-      } catch (error) {
-        // Not sent: free the breaker's place without counting a failure.
-        this.ninBreaker.release();
-        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
-        throw error;
-      }
-      if (reserved.stored) {
-        // Already answered for this request: no new check, nothing charged.
-        this.ninBreaker.release();
-        throw await this.ninNotVerified(context, this.provider.name, reserved.stored, { providerCalled: false,
-          replay: true });
-      }
-    }
+    // Q108/Q109: each live check is charged. QoreID's check (the only live
+    // one) is 0137's once-per-NIN guard, so a resend of this request, another
+    // desk's request and any other path's check of the same NIN make at most
+    // one QoreID call; a match is answered by the case it created (above).
+    // No limit per staff account, per facility or across Health ID.
     try {
       verification = await this.provider.verify({
         nin: input.nin,
@@ -262,13 +243,13 @@ export class NinRegistrationService {
       });
       assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
     } catch (error) {
-      await this.provider.settle?.(reservation, 'not_answered');
       if (isNinNotConfigured(error) || isNinCheckNotStarted(error) || isNinCheckRefusedUnsent(error)) {
         // Q108: switched off, or the switch could not be read, between the
         // switch check and the check; 0137: the once-per-NIN guard refused
         // it (this NIN is being checked or is held, or the guard's store or
         // keys are unavailable). Nothing was sent for this request: not an
-        // outage, and the breaker's retry place is freed.
+        // outage, and the breaker's retry place is freed. The request may be
+        // sent again; the guard decides whether QoreID is asked.
         this.ninBreaker.release();
         await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
         throw error;
@@ -280,10 +261,8 @@ export class NinRegistrationService {
     this.ninBreaker.recordSuccess();
     if (!verification.verified) {
       const ninCheck = verification.outcome === 'name_mismatch' ? 'name_mismatch' : 'no_match';
-      await this.provider.settle?.(reservation, ninCheck);
       throw await this.ninNotVerified(context, verification.provider, ninCheck);
     }
-    await this.provider.settle?.(reservation, 'match');
     // Q108: every NIN check is audited on its own, before the case is
     // written, so a charged check that matched is on record even when the
     // case then cannot be created (for example, already in a workflow).
@@ -834,8 +813,8 @@ export class NinRegistrationService {
   }
 
   /** Audits a NIN that was not verified (denied) and returns the desk's 422. */
-  private async ninNotVerified(context: DataAccessContext, provider: string, ninCheck: 'no_match' | 'name_mismatch',
-    extra: Record<string, unknown> = {}): Promise<DomainProblem> {
+  private async ninNotVerified(context: DataAccessContext, provider: string, ninCheck: 'no_match' | 'name_mismatch'):
+    Promise<DomainProblem> {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',
@@ -848,7 +827,7 @@ export class NinRegistrationService {
       resourceType: 'registration-case',
       outcome: 'denied',
       purposeOfUse: context.purposeOfUse,
-      details: { provider, ninCheck, ...extra },
+      details: { provider, ninCheck },
     });
     return new DomainProblem(422, 'NIN_VERIFICATION_FAILED', ninCheck === 'name_mismatch'
       ? 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.'

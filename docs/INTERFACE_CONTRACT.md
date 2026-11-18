@@ -6501,28 +6501,33 @@ that is not a real `YYYY-MM-DD` date, an NIN that is not 11 digits).
 
 ### One check per desk request
 
-Each QoreID check is charged, so one desk request (the same
-`Idempotency-Key` and the same body, from the same staff account at the same
-facility) is checked at most once:
+0137's guard (above) is what keeps one desk request from being paid for
+twice, and more: it is per NIN, not per request. The review build's own
+per-request claim (a keyed row of `auth.otp_rate_limits` per facility,
+account, `Idempotency-Key` and body, with its stored "could not be verified"
+or "does not match" answer for 24 hours) is removed: every case it covered
+the guard covers with no second QoreID call, and it no longer writes those
+rows.
 
-- A resend while the first is still waiting for its answer: `409
-  NIN_CHECK_IN_PROGRESS`, "This NIN check is already in progress. Please wait
-  for its answer.", nothing sent or counted, audited with `providerCalled:
-  false`. After 2 minutes without an answer the request may be sent again.
-- A resend of a request answered "could not be verified" or "does not
-  match" (within 24 hours): the same `422` answer, no new check, audited
-  `denied` with `ninCheck`, `providerCalled: false` and `replay: true`.
+- The same request twice at once (a double click), or two desks with the
+  same NIN: the second waits for the first's answer and reuses it, or gets
+  `409 NIN_CHECK_IN_PROGRESS` when that answer does not come within its wait.
+- A resend of a request answered "could not be verified": the stored "no
+  record" (24 hours), the same `422`.
+- A resend after "does not match", with the same body or a corrected name or
+  date of birth (a new body, under the same key or a new one): the stored
+  record (30 days, as 0137 keeps it), compared again. A corrected request is
+  no longer a new charge.
 - A resend of a request that matched: the case it created (as before).
-- A resend of a request whose check failed (QoreID error, timeout, switched
-  off, or the switch could not be read): a new check.
-- The same key with a different body (for example a corrected name) is a
-  new request.
+- A resend after a check that may have been charged without an answer HID
+  could keep: `409 NIN_CHECK_HELD` until the hold ends; after a check that
+  sent nothing (switched off, the switch or the guard's store unreadable, the
+  connection refused before sending): a new check at once.
+- QoreID's "incomplete" answer is kept for 5 minutes only, as for every path
+  (its check is not finished and may change).
 
-The claim and the stored answer are keyed rows of `auth.otp_rate_limits`
-(HMAC buckets; no NIN, name, identifier, key or digest stored). When the claim
-cannot be read or written nothing is sent: `503 NIN_PROVIDER_UNAVAILABLE`,
-"NIN checks cannot be started right now. Please try again in a minute.",
-audited with `providerCalled: false`, the breaker not touched.
+The desk's `identity.nin.verify` rows no longer carry `replay: true`; a
+reused answer is the guard's row with `source: "stored"`.
 
 ### No request limits (Q109)
 
@@ -6560,8 +6565,8 @@ check; match, case and spacing, no match, name and date-of-birth mismatch,
 bad records, QoreID failures; the switch off, unreadable, and switched off
 during the check, or unreadable just before sending; no request limits (Q109:
 one account's and one facility's checks are never refused for volume);
-one check per desk request (a resend while waiting, at the same moment, after
-"could not be verified" or "does not match", after a failure); details
+no claim or stored answer of the desk's own (every resend goes to the guard);
+details
 refused before any check, over HTTP with the same validation pipe and problem
 filter as `main.ts` (`400 NIN_DETAILS_INVALID`, and `VALIDATION_FAILED` only
 for a malformed body); the breaker; the audit rows; capabilities; no NIN
@@ -6569,8 +6574,9 @@ in an audit row or log line; 0137's answers as the desk's). The QoreID
 adapter is mocked: no test calls QoreID.
 `services/identity-api/src/identity/qoreid-nin-desk-once.spec.ts` drives the
 real desk service and providers, 0137's guard and the real QoreID adapter
-against a fake QoreID that bills every NIN request (two desks at once; a
-resend after "could not be verified"; a corrected name; a sign-up and the
+against a fake QoreID that bills every NIN request (two desks at once; the
+same request twice at once; a resend after "could not be verified"; a
+corrected name; a sign-up and the
 desk, one after the other and at once; a timeout and the retry with the same
 `Idempotency-Key`; held, in progress, store unreachable; every NIN request
 sent under the guard's lease; no NIN in an audit row or log line).

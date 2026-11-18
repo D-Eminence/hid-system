@@ -25,8 +25,6 @@ import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavail
 import { NIN_VERIFICATION_PROVIDER, type NinVerificationProvider, type NinVerificationRequest } from './nin.types';
 import type { PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import {
-  DESK_NIN_CHECK_ANSWER_SECONDS,
-  DESK_NIN_CHECK_CLAIM_SECONDS,
   QoreIdNinVerificationProvider,
   selectNinVerificationProvider,
 } from './qoreid-nin-verification.provider';
@@ -63,88 +61,12 @@ function gate(overrides: Partial<Record<keyof PublicPatientIdentityProvider, jes
   };
 }
 
-interface WindowRow { request_count: number; window_started_at: Date; blocked_until: Date | null }
-
-/**
- * A stand-in for `auth.otp_rate_limits` that answers the statements the
- * request limits, the claim and the stored answers use, as Postgres would.
- * Transactions run one at a time, as the bucket locks make them in Postgres.
- */
-function rateLimitTable() {
-  const rows = new Map<string, WindowRow>();
-  const statements: Array<{ sql: string; values: unknown[] }> = [];
-  const at = (scope: unknown, bucket: unknown) => `${String(scope)}:${String(bucket)}`;
-  const recent = (row: WindowRow | undefined, seconds: unknown) => row !== undefined
-    && row.request_count > 0 && row.window_started_at.getTime() > Date.now() - Number(seconds) * 1000;
-  const query = jest.fn(async (sql: string, values: unknown[] = []) => {
-    const flat = sql.replace(/\s+/g, ' ').trim();
-    statements.push({ sql: flat, values });
-    if (/pg_advisory_xact_lock/.test(flat)) return { rows: [] };
-    if (/as blocked from auth\.otp_rate_limits/.test(flat)) {
-      const row = rows.get(at(values[0], values[1]));
-      return { rows: row ? [{ blocked: Boolean(row.blocked_until && row.blocked_until.getTime() > Date.now()) }] : [] };
-    }
-    if (/for update$/.test(flat)) {
-      const row = rows.get(at(values[0], values[1]));
-      return { rows: row ? [{ ...row }] : [] };
-    }
-    if (/bucket_hmac = any\(\$1::text\[\]\)/.test(flat)) {
-      return { rows: (values[0] as string[]).filter((bucket) => recent(rows.get(at('account', bucket)), values[1]))
-        .map((bucket) => ({ bucket_hmac: bucket })) };
-    }
-    if (/as held from auth\.otp_rate_limits/.test(flat)) {
-      const row = rows.get(at('account', values[0]));
-      return { rows: row ? [{ held: recent(row, values[1]) }] : [] };
-    }
-    if (/greatest\(request_count - 1, 0\)/.test(flat)) {
-      const row = rows.get(at(values[0], values[1]));
-      if (row && row.request_count > 0 && (!row.blocked_until || row.blocked_until.getTime() <= Date.now())) {
-        row.request_count -= 1;
-      }
-      return { rows: [] };
-    }
-    if (/set request_count = 0,/.test(flat)) {
-      const row = rows.get(at('account', values[0]));
-      if (row) row.request_count = 0;
-      return { rows: [] };
-    }
-    if (/^insert into auth\.otp_rate_limits .* values \('account', \$1,/.test(flat)) {
-      rows.set(at('account', values[0]), { request_count: 1, window_started_at: new Date(Date.now()), blocked_until: null });
-      return { rows: [] };
-    }
-    if (/^insert into auth\.otp_rate_limits/.test(flat)) {
-      const [scope, bucket, expired, count, blocked, seconds] = values as [string, string, boolean, number, boolean, number];
-      const current = rows.get(at(scope, bucket));
-      rows.set(at(scope, bucket), {
-        request_count: current ? count : 1,
-        window_started_at: !current || expired ? new Date(Date.now()) : current.window_started_at,
-        blocked_until: current && blocked ? new Date(Date.now() + seconds * 1000) : null,
-      });
-      return { rows: [] };
-    }
-    throw new Error(`unexpected statement: ${flat}`);
-  });
-  let queue: Promise<unknown> = Promise.resolve();
-  const database = {
-    withSystemTransaction: jest.fn((_c: string, work: (client: unknown) => Promise<unknown>) => {
-      const run = queue.then(() => work({ query }));
-      queue = run.catch(() => undefined);
-      return run;
-    }),
-  };
-  /** The request count a bucket holds now (0 for none). */
-  const counts = () => [...rows.values()].map((row) => row.request_count);
-  return { database, rows, statements, counts };
+function qoreIdProvider(qoreId = gate()) {
+  return new QoreIdNinVerificationProvider(qoreId as never);
 }
 
-function qoreIdProvider(qoreId = gate(), database: unknown = rateLimitTable().database) {
-  return new QoreIdNinVerificationProvider(qoreId as never, database as never);
-}
-
-// A fictional local key for the keyed request-limit buckets (never a deployed value).
 beforeEach(() => {
-  jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NIN_PROVIDER_MODE: 'unavailable',
-    OTP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64') } as never);
+  jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NIN_PROVIDER_MODE: 'unavailable' } as never);
 });
 afterEach(() => jest.restoreAllMocks());
 
@@ -299,113 +221,10 @@ describe('Q108 QoreID NIN check for the desk', () => {
       status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
   });
 
-  describe('no request limits (Q109)', () => {
-    const reservation = { correlationId: 'correlation-q108', accountId: context.actor.accountId,
-      facilityId: context.facilityId, idempotencyKey: 'resolve-key-q109-limits', requestSha256: 'b'.repeat(64) };
-    /** A different desk request (its own Idempotency-Key) by `accountId` at the facility. */
-    const check = (index: number, accountId = context.actor.accountId) =>
-      ({ ...reservation, accountId, idempotencyKey: `resolve-key-q109-check-${index}` });
-    const account = (index: number) => `f0e1d2c3-b4a5-4968-8776-${String(index).padStart(12, '0')}`;
-
-    it('claims the request in one keyed bucket and counts nothing per account or facility', async () => {
-      const { database, statements } = rateLimitTable();
-      await expect(qoreIdProvider(gate(), database).reserve(reservation)).resolves.toEqual({});
-      expect(database.withSystemTransaction).toHaveBeenCalledWith('correlation-q108', expect.any(Function));
-      const writes = statements.filter(({ sql }) => /insert into auth\.otp_rate_limits/.test(sql));
-      expect(writes).toHaveLength(1);
-      // The bucket is keyed: no identifier, key or digest is stored.
-      for (const value of [context.actor.accountId, context.facilityId, reservation.idempotencyKey, 'b'.repeat(64)]) {
-        expect(JSON.stringify(statements)).not.toContain(value);
-      }
-    });
-
-    it('lets one staff account check as many NINs as the desk needs, in an hour and in a day', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      // More than the 20 an hour and 100 a day the review build allowed.
-      for (let index = 0; index < 150; index += 1) await expect(provider.reserve(check(index))).resolves.toEqual({});
-    });
-
-    it('lets one facility check as many NINs as its desks need in a day', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      // More than the 300 a day the review build allowed, across 40 accounts.
-      for (let index = 0; index < 400; index += 1) {
-        await expect(provider.reserve(check(index, account(index % 40)))).resolves.toEqual({});
-      }
-    });
-
-    it('answers "cannot be started" when the claim cannot be read, with no SQL detail', async () => {
-      const database = { withSystemTransaction: jest.fn(async () => {
-        throw Object.assign(new Error('relation "auth.otp_rate_limits" does not exist'), { code: '42P01' });
-      }) };
-      const refusal = qoreIdProvider(gate(), database).reserve(reservation);
-      await expect(refusal).rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
-        message: 'NIN checks cannot be started right now. Please try again in a minute.' });
-      await refusal.catch((error) => expect(isNinCheckNotStarted(error)).toBe(true));
-    });
-  });
-
-  describe('one check per desk request', () => {
-    const reservation = { correlationId: 'correlation-q108', accountId: context.actor.accountId,
-      facilityId: context.facilityId, idempotencyKey: 'resolve-key-q108-once', requestSha256: 'c'.repeat(64) };
-
-    it('refuses a resend while the first check is still waiting for its answer, counting nothing', async () => {
-      const table = rateLimitTable();
-      const provider = qoreIdProvider(gate(), table.database);
-      await expect(provider.reserve(reservation)).resolves.toEqual({});
-      const counted = table.counts();
-      await expect(provider.reserve(reservation)).rejects.toMatchObject({ status: 409, code: 'NIN_CHECK_IN_PROGRESS',
-        message: 'This NIN check is already in progress. Please wait for its answer.' });
-      expect(table.counts()).toEqual(counted);
-    });
-
-    it('lets only one of two requests sent at the same moment through', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      const results = await Promise.allSettled([provider.reserve(reservation), provider.reserve(reservation)]);
-      expect(results.map((result) => result.status).sort()).toEqual(['fulfilled', 'rejected']);
-      expect(results.find((result) => result.status === 'rejected')).toMatchObject({
-        reason: expect.objectContaining({ code: 'NIN_CHECK_IN_PROGRESS' }) });
-    });
-
-    it.each(['no_match', 'name_mismatch'] as const)('gives a resend the stored %s answer, counting nothing', async (outcome) => {
-      const table = rateLimitTable();
-      const provider = qoreIdProvider(gate(), table.database);
-      await provider.reserve(reservation);
-      await provider.settle(reservation, outcome);
-      const counted = table.counts();
-      await expect(provider.reserve(reservation)).resolves.toEqual({ stored: outcome });
-      expect(table.counts()).toEqual(counted);
-    });
-
-    it('lets the desk try again when nothing usable came back', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      await provider.reserve(reservation);
-      await provider.settle(reservation, 'not_answered');
-      await expect(provider.reserve(reservation)).resolves.toEqual({});
-    });
-
-    it('treats the same key with a different body as a different request', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      await provider.reserve(reservation);
-      await provider.settle(reservation, 'no_match');
-      await expect(provider.reserve({ ...reservation, requestSha256: 'd'.repeat(64) })).resolves.toEqual({});
-    });
-
-    it('lets a claim go after two minutes, and a stored answer after a day', async () => {
-      const provider = qoreIdProvider(gate(), rateLimitTable().database);
-      const start = Date.parse('2026-11-18T09:00:00Z');
-      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
-      await provider.reserve(reservation);
-      now.mockReturnValue(start + DESK_NIN_CHECK_CLAIM_SECONDS * 1000 + 1000);
-      await expect(provider.reserve(reservation)).resolves.toEqual({});
-      await provider.settle(reservation, 'no_match');
-      now.mockReturnValue(start + (DESK_NIN_CHECK_CLAIM_SECONDS + DESK_NIN_CHECK_ANSWER_SECONDS) * 1000 + 2000);
-      await expect(provider.reserve(reservation)).resolves.toEqual({});
-    });
-
-    it('never throws while recording how a check ended', async () => {
-      const database = { withSystemTransaction: jest.fn(async () => { throw new Error('connection reset'); }) };
-      await expect(qoreIdProvider(gate(), database).settle(reservation, 'no_match')).resolves.toBeUndefined();
-    });
+  it('has no claim, stored answer or limit of its own: only the NIN check (Q109, 0137)', () => {
+    const provider = qoreIdProvider();
+    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(provider)).sort())
+      .toEqual(['constructor', 'isEnabled', 'notVerified', 'verify']);
   });
 });
 
@@ -469,23 +288,6 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(qoreId.isAvailable).toHaveBeenCalledTimes(1);
   });
 
-  it('charges the check to the desk account and facility before sending the NIN', async () => {
-    const provider = qoreIdProvider();
-    const order: string[] = [];
-    jest.spyOn(provider, 'reserve').mockImplementation(async (reservation) => {
-      order.push('reserve');
-      expect(reservation).toEqual({ correlationId: 'correlation-q108', accountId: context.actor.accountId,
-        facilityId: context.facilityId, idempotencyKey: 'resolve-key-q108-000002',
-        requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
-      return {};
-    });
-    const verify = jest.spyOn(provider, 'verify');
-    verify.mockImplementation(async (checked) => { order.push('verify'); return { verified: true, outcome: 'match',
-      provider: 'qoreid', reference: '700123', verifiedAt: new Date().toISOString(), demographics: checked.claimedDemographics }; });
-    await desk(provider).service.resolve(input, 'resolve-key-q108-000002', context);
-    expect(order).toEqual(['reserve', 'verify']);
-  });
-
   it.each([
     ['no match', 'NIN_NOT_VERIFIED', 'no_match', 'The NIN could not be verified'],
   ])('answers %s as "could not be verified" and audits it', async (_label, code, ninCheck, message) => {
@@ -515,16 +317,13 @@ describe('Q108 desk NIN resolve through QoreID', () => {
 
   it('keeps today\'s "not configured" answer while QoreID\'s switch is off, sending nothing', async () => {
     const qoreId = gate({ isAvailable: jest.fn(async () => false) });
-    const provider = qoreIdProvider(qoreId);
-    const reserve = jest.spyOn(provider, 'reserve');
-    const { service, audit, breaker } = desk(provider);
+    const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
     for (const key of ['resolve-key-q108-000005', 'resolve-key-q108-000006', 'resolve-key-q108-000007',
       'resolve-key-q108-000008']) {
       await expect(service.resolve(input, key, context)).rejects.toMatchObject({
         status: 503, code: 'NIN_PROVIDER_UNAVAILABLE', message: NIN_NOT_CONFIGURED_DETAIL });
     }
     expect(qoreId.verifyNin).not.toHaveBeenCalled();
-    expect(reserve).not.toHaveBeenCalled();
     expect(breaker.state()).toBe('closed');
     expect(warn).not.toHaveBeenCalled();
     expect(auditRows(audit)).toHaveLength(4);
@@ -549,7 +348,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
 
   it('sends every check one desk account makes, with no hourly, daily or facility limit (Q109)', async () => {
     const qoreId = gate();
-    const { service, audit } = desk(qoreIdProvider(qoreId, rateLimitTable().database));
+    const { service, audit } = desk(qoreIdProvider(qoreId));
     for (let index = 0; index < 25; index += 1) {
       await expect(service.resolve(input, `resolve-key-q109-${String(index).padStart(6, '0')}`, context))
         .resolves.toMatchObject({ caseId });
@@ -644,49 +443,19 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('sends one check, not two, when the same request arrives twice at once', async () => {
-    let answer: (identity: VerifiedPublicPatientIdentity) => void = () => undefined;
-    const qoreId = gate({ verifyNin: jest.fn(() => new Promise<VerifiedPublicPatientIdentity>((resolve) => {
-      answer = resolve;
-    })) });
-    const { service, audit } = desk(qoreIdProvider(qoreId));
-    const first = service.resolve(input, 'resolve-key-q108-000040', context);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await expect(service.resolve(input, 'resolve-key-q108-000040', context)).rejects.toMatchObject({
-      status: 409, code: 'NIN_CHECK_IN_PROGRESS' });
-    answer(record());
-    await expect(first).resolves.toMatchObject({ caseId, ninStatus: 'verified' });
-    expect(qoreId.verifyNin).toHaveBeenCalledTimes(1);
-    expect(auditRows(audit)).toContainEqual(expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
-      details: expect.objectContaining({ code: 'NIN_CHECK_IN_PROGRESS', providerCalled: false }) }));
-  });
-
-  it.each([
-    ['could not be verified', jest.fn(async () => {
-      throw new DomainProblem(422, 'NIN_NOT_VERIFIED', 'The NIN could not be verified');
-    }), 'no_match', 'The NIN could not be verified'],
-    ['does not match', jest.fn(async () => record({ lastName: 'OTHER' })), 'name_mismatch',
-      'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.'],
-  ])('gives a resend of a request answered "%s" the same answer without a new check', async (_label, verifyNin,
-    ninCheck, message) => {
-    verifyNin.mockClear();
-    const qoreId = gate({ verifyNin });
-    const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
+  it('hands every resend to 0137\'s guard, which decides whether QoreID is asked: no claim or stored answer of its own', async () => {
+    const verifyNin = jest.fn(async () => { throw new DomainProblem(422, 'NIN_NOT_VERIFIED', 'x'); });
+    const { service, audit, breaker } = desk(qoreIdProvider(gate({ verifyNin })));
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      await expect(service.resolve(input, 'resolve-key-q108-000041', context)).rejects.toMatchObject({
-        status: 422, code: 'NIN_VERIFICATION_FAILED', message });
+      await expect(service.resolve(input, 'resolve-key-q109-000041', context)).rejects.toMatchObject({
+        status: 422, code: 'NIN_VERIFICATION_FAILED', message: 'The NIN could not be verified' });
     }
-    expect(verifyNin).toHaveBeenCalledTimes(1);
-    expect(breaker.state()).toBe('closed');
-    expect(auditRows(audit)).toEqual([
-      expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied', details: { provider: 'qoreid', ninCheck } }),
-      expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied',
-        details: { provider: 'qoreid', ninCheck, providerCalled: false, replay: true } }),
-    ]);
-    // A corrected request (another body) is a new check.
-    await expect(service.resolve({ ...input, lastName: 'Corrected' }, 'resolve-key-q108-000041', context))
-      .rejects.toMatchObject({ status: 422 });
+    // The guard answers the second from the answer it stored (qoreid-nin-desk-once.spec.ts).
     expect(verifyNin).toHaveBeenCalledTimes(2);
+    expect(verifyNin).toHaveBeenNthCalledWith(2, NIN, { correlationId: 'correlation-q108', path: 'desk' });
+    expect(breaker.state()).toBe('closed');
+    expect(auditRows(audit)).toEqual([0, 1].map(() => expect.objectContaining({ action: 'identity.nin.verify',
+      outcome: 'denied', details: { provider: 'qoreid', ninCheck: 'no_match' } })));
   });
 
   it('lets the desk resend a request whose check failed', async () => {
@@ -704,17 +473,14 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     ['a date of birth before 1900', { dateOfBirth: '1899-12-31' }],
     ['a name with a tab', { firstName: 'Ada\tBola' }],
     ['a blank name', { lastName: '   ' }],
-  ])('refuses %s before anything is sent, counted or charged', async (_label, overrides) => {
+  ])('refuses %s before anything is sent or charged', async (_label, overrides) => {
     const qoreId = gate();
-    const provider = qoreIdProvider(qoreId);
-    const reserve = jest.spyOn(provider, 'reserve');
-    const { service, audit, breaker } = desk(provider);
+    const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
     for (const key of ['resolve-key-q108-000043', 'resolve-key-q108-000044', 'resolve-key-q108-000045']) {
       await expect(service.resolve({ ...input, ...overrides }, key, context)).rejects.toMatchObject({
         status: 400, code: 'NIN_DETAILS_INVALID',
         message: 'Check the name and the date of birth. The date of birth cannot be in the future or before 1900.' });
     }
-    expect(reserve).not.toHaveBeenCalled();
     expect(qoreId.verifyNin).not.toHaveBeenCalled();
     expect(breaker.state()).toBe('closed');
     expect(warn).not.toHaveBeenCalled();
@@ -842,8 +608,7 @@ describe('Q108 desk NIN details refused before any check, over HTTP', () => {
 
   /** POST identity/nin/resolve with the global pipe and problem filter main.ts uses. */
   async function post(body: Record<string, unknown>) {
-    const provider = { name: 'qoreid', isEnabled: jest.fn(async () => true), reserve: jest.fn(async () => ({})),
-      settle: jest.fn(async () => undefined), verify: jest.fn() };
+    const provider = { name: 'qoreid', isEnabled: jest.fn(async () => true), verify: jest.fn() };
     const audit = { record: jest.fn(async () => undefined), recordWithClient: jest.fn(async () => undefined) };
     const database = { withTransaction: jest.fn(async (_c: unknown, work: (c: unknown) => unknown) =>
       work({ query: jest.fn(async () => ({ rows: [] })) })) };
@@ -884,7 +649,6 @@ describe('Q108 desk NIN details refused before any check, over HTTP', () => {
     expect(response.status).toBe(400);
     expect(response.body).toMatchObject({ code: 'NIN_DETAILS_INVALID',
       detail: 'Check the name and the date of birth. The date of birth cannot be in the future or before 1900.' });
-    expect(provider.reserve).not.toHaveBeenCalled();
     expect(provider.verify).not.toHaveBeenCalled();
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'identity.nin.verify',
       outcome: 'failure', details: expect.objectContaining({ code: 'NIN_DETAILS_INVALID', providerCalled: false }) }));
@@ -905,6 +669,6 @@ describe('Q108 desk NIN details refused before any check, over HTTP', () => {
 
   it('passes a real date of birth and plain names on to the check', async () => {
     const { provider } = await post({ ...input, dateOfBirth: '1900-01-01', firstName: '  Ada  Bola ' });
-    expect(provider.reserve).toHaveBeenCalledTimes(1);
+    expect(provider.verify).toHaveBeenCalledTimes(1);
   });
 });
