@@ -8,12 +8,16 @@
 -- the session the services set.
 -- Cases:
 --   1. structure: the new and replaced functions' bodies (md5), owner,
---      SECURITY DEFINER, volatility, search_path; who may execute each; the
---      sends table has no grant; the two ehr.prescriptions policies name only
---      the dispensing validator's owner;
+--      SECURITY DEFINER, volatility, search_path; who may execute each; 0086's
+--      context_allows bodies unchanged; the 42 own-work policies and none on
+--      the imported evidence tables; the sends table has no grant; the two
+--      ehr.prescriptions policies name only the dispensing validator's owner,
+--      no runtime role is its member, and the owner-run definer functions
+--      that read ehr.prescriptions are the seven known ones;
 --   2. the send: the prescriber's activated prescription becomes a work item
 --      accepted by the prescriber with the fixed reason, one event, one
---      outbox event, a sent row; a second send writes nothing; a failed
+--      outbox event with pharmacy-api's own four payload keys (what the event
+--      dispatcher admits), a sent row; a second send writes nothing; a failed
 --      attempt leaves the prescription active and the send pending with the
 --      SQLSTATE, and the next send sends it; not the prescriber, a draft, a
 --      changed version, a facility with nobody to work on pharmacy items;
@@ -23,17 +27,35 @@
 --      event, may work on it (own_work_access_for), its basis is
 --      'own-work', and dispenses it; it reads nothing of the chart
 --      (ehr.context_allows is false, ehr.prescriptions is not readable);
---   4. not for: a nurse, an admin or a receptionist of the facility (they
---      hold the read permission but not the receive one), a lab scientist
---      (pharmacy items), a pharmacist of another facility, an emergency
---      session, a patient with a deny directive, an inactive patient;
---      a pharmacist with a grant keeps the basis 'consent';
+--      a second work item for a sent prescription is refused (one item per
+--      prescription), and so is accepting a prescription nobody sent;
+--   4. not for: a nurse, an admin, a receptionist, a clinician and a doctor
+--      without a grant (they hold the read permission but not the receive
+--      one), a member whose role holds the receive permission but not the
+--      read one, a lab scientist (pharmacy items), a pharmacist of another
+--      facility, an emergency session, a patient with a deny directive (her
+--      item and its events), an inactive patient; a pharmacist with a grant
+--      keeps the basis 'consent';
 --   5. stopping after the send: the withdrawal is marked once, the item
 --      reads withdrawn, and dispensing it is refused
 --      (PRESCRIPTION_SOURCE_NOT_DISPENSABLE);
 --   6. lab: the facility's lab scientist without a grant sees the own lab
 --      work item and its card, may work on it, its basis is 'own-work', and
---      accessions it; another facility's lab scientist and the nurse do not.
+--      accessions it; another facility's lab scientist, the nurse and an
+--      emergency session do not;
+--   7. item by item, never the imported evidence: at the same facility and
+--      for the same patient, a route-backed Lab item's chain (its requested
+--      test, accession, specimen requirement, specimen, execution and
+--      result) and a route-backed Pharmacy item's dispensing stay hidden
+--      from the own-work staff, who cannot write onto them either, while the
+--      own items' chains are visible (and lockable for update where the API
+--      updates); the patient's imported Lab and Pharmacy evidence stays
+--      hidden from them (the nurse alike) and is read with a consent grant
+--      only; Pharmacy's events about an own dispensing are written, about a
+--      routed one refused;
+--   8. the owner-run definer functions that read ehr.prescriptions give the
+--      pharmacist nothing more through the EHR runtime: the order-route send,
+--      the own-pharmacy send and the withdrawal refuse the pharmacist first.
 -- Fixtures inserted as the suite runner with session_replication_role =
 -- replica where the services would not write them (identity rows, the lab
 -- work item). Synthetic values only; uuid prefix e133.
@@ -61,14 +83,14 @@ begin
     into mismatch
     from (values
       ('identity.facility_work_member_allows(text,uuid,uuid,text)', '474875a22f8c5e7b46846f1ddb1d5046', 's'),
-      ('lab.work_item_allows(uuid,uuid,uuid,text)', '21012693fb2d89bb3714450655610702', 's'),
-      ('pharmacy.work_item_allows(uuid,uuid,uuid,text)', 'f618d09522d3cba380da9e3d1508140b', 's'),
-      ('lab.context_allows(uuid,uuid,text)', 'bb7622fd781f95899b467ec606c32d2f', 's'),
-      ('pharmacy.context_allows(uuid,uuid,text)', '76e3f4819113fb2cac080e2d0851324b', 's'),
+      ('lab.work_item_allows(uuid,uuid,uuid,text)', 'a194e2b4437efd5bb1db5e3bf482aa69', 's'),
+      ('pharmacy.work_item_allows(uuid,uuid,uuid,text)', '2c2236b85397574aefc131ebca4196cc', 's'),
+      ('lab.own_work_chain_allows(text,uuid,uuid,uuid,text)', 'cd166869d06a2c9a9cddbb6a04292c00', 's'),
+      ('pharmacy.own_work_chain_allows(text,uuid,uuid,uuid,text)', 'bef3a9a843481841f315b3af175f86d1', 's'),
       ('lab.work_item_patient_cards(uuid[])', '91e157a7d6f89edd46c14dbb095d1bc6', 's'),
       ('pharmacy.work_item_patient_cards(uuid[])', '0dc38390c3c40a1883b87345ce0d35bd', 's'),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', '41a9afd4ea6f708425b98d1fb6e6eb87', 's'),
-      ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'f85c9c7a40c96f09510573b30912caff', 'v'),
+      ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'b97d8e5f79a384060f3558ed4b26bdaf', 'v'),
       ('ehr.withdraw_own_pharmacy_send(uuid)', '0d6717beb1e28897e40e378a242042db', 'v'),
       ('pharmacy.own_work_access_for(text,uuid,text)', 'bb03e692d187fe85783fed28cc40413c', 's'),
       ('lab.own_work_access_for(text,uuid,text)', '89336895a7a4878211fc44c45197e454', 's'),
@@ -86,6 +108,10 @@ begin
     from (values
       ('identity.facility_work_member_allows(text,uuid,uuid,text)', array[]::text[]),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', array[]::text[]),
+      ('lab.own_work_chain_allows(text,uuid,uuid,uuid,text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
+        'hid_schema_test_runtime']),
+      ('pharmacy.own_work_chain_allows(text,uuid,uuid,uuid,text)', array['hid_pharmacy_runtime',
+        'hid_pharmacy_api_runtime', 'hid_schema_test_runtime']),
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', array['hid_ehr_runtime', 'hid_ehr_api_runtime',
         'hid_schema_test_runtime']),
       ('ehr.withdraw_own_pharmacy_send(uuid)', array['hid_ehr_runtime', 'hid_ehr_api_runtime',
@@ -117,10 +143,54 @@ begin
     raise exception 'own facility work: the ehr.prescriptions policies do not name only the validator''s owner';
   end if;
   if exists (select 1 from pg_roles role_row
-              where role_row.rolname ~ '^hid_.*(runtime|worker|writer|dispatcher|commands|scanner)$'
+              where role_row.rolname like 'hid\_%'
+                and role_row.oid <> (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure)
                 and pg_has_role(role_row.oid, (select proowner from pg_proc
-                                                where oid = 'pharmacy.validate_dispensing()'::regprocedure), 'USAGE')) then
-    raise exception 'own facility work: a runtime role is a member of the validator''s owner';
+                                                where oid = 'pharmacy.validate_dispensing()'::regprocedure), 'MEMBER')) then
+    raise exception 'own facility work: a hid_ role is a member of the validator''s owner';
+  end if;
+  -- 0086's chain policy functions are untouched (B1: the imported evidence
+  -- keeps them as its only policies).
+  if (select string_agg(md5(prosrc), ',' order by oid::regprocedure::text) from pg_proc
+       where oid in ('lab.context_allows(uuid,uuid,text)'::regprocedure,
+                     'pharmacy.context_allows(uuid,uuid,text)'::regprocedure))
+     is distinct from '57e689661a6227e34d3bde9562468951,958a6e5cd2a534d158c82fe399b8f381' then
+    raise exception 'own facility work: 0086''s context_allows bodies changed';
+  end if;
+  -- The own-work policies: 42, on the work chain only, never on the imported
+  -- evidence, the Lab outbox or the route reports.
+  if (select count(*) from pg_policy policy_row where policy_row.polname like 'own\_work\_%') <> 42
+     or exists (select 1 from pg_policy policy_row
+                 where policy_row.polname like 'own\_work\_%'
+                   and policy_row.polrelid in ('lab.imported_evidence'::regclass, 'lab.imported_observations'::regclass,
+                     'pharmacy.imported_medication_evidence'::regclass, 'lab.outbox_events'::regclass,
+                     'lab.order_route_result_reports'::regclass, 'pharmacy.order_route_dispensing_reports'::regclass,
+                     'lab.work_items'::regclass, 'pharmacy.work_items'::regclass))
+     or exists (select 1 from pg_policy policy_row
+                 where policy_row.polrelid in ('lab.imported_evidence'::regclass, 'lab.imported_observations'::regclass,
+                         'pharmacy.imported_medication_evidence'::regclass)
+                   and coalesce(pg_get_expr(policy_row.polqual, policy_row.polrelid), '')
+                       || coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '') ~ 'own_work') then
+    raise exception 'own facility work: the own-work policies are not 0133''s 42 on the work chain';
+  end if;
+  -- S7: the owner-run SECURITY DEFINER functions that read ehr.prescriptions
+  -- (each sees D5's rows in a pharmacist's session) are exactly these seven;
+  -- case 8 shows each gives the pharmacist nothing more. A new one must be
+  -- added here, and to case 8, by whoever writes it.
+  if (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
+       where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions'
+         and proc.proowner = (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure))
+     is distinct from 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
+       || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
+       || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item()' then
+    raise exception 'own facility work: the owner-run definer functions that read ehr.prescriptions changed: %',
+      (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
+        where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions');
+  end if;
+  if exists (select 1 from pg_roles role_row
+              where role_row.rolname like 'hid\_%'
+                and has_function_privilege(role_row.oid, 'identity.demo_story_install(text)', 'EXECUTE')) then
+    raise exception 'own facility work: a hid_ role may execute identity.demo_story_install(text)';
   end if;
 end $$;
 
@@ -131,7 +201,9 @@ end $$;
 --   1 DR doctor F1   2 PH pharmacist F1   3 LS lab F1   4 NU nurse F1
 --   5 AD admin F1    6 P2 pharmacist F2   7 RC receptionist F1
 --   8 D2 doctor F1   9 D3 doctor F3       10 PG pharmacist F1 (with grants)
---   11 L2 lab F2
+--   11 L2 lab F2     12 CL clinician F1   13 DN doctor F1 (no grant)
+--   14 RO receive-only F1 (a synthetic role holding pharmacy.order-route.receive
+--      and lab.order-route.receive, not the two read permissions)
 -- Patients (e1330006...n): 1 Ada (active), 2 Bisi (a deny directive later),
 -- 3 Chike (made inactive later). DR, D2 and PG hold write grants for all
 -- three at F1, D3 for Ada at F3.
@@ -149,8 +221,13 @@ select ('e1330001-0000-4000-8000-00000000000' || n)::uuid, 'e1330000-0000-4000-8
 create temporary table own_members (n integer primary key, code text, role_code text, site integer) on commit drop;
 insert into own_members values (1, 'dr', 'doctor', 1), (2, 'ph', 'pharmacist', 1), (3, 'ls', 'lab', 1),
   (4, 'nu', 'nurse', 1), (5, 'ad', 'admin', 1), (6, 'p2', 'pharmacist', 2), (7, 'rc', 'receptionist', 1),
-  (8, 'd2', 'doctor', 1), (9, 'd3', 'doctor', 3), (10, 'pg', 'pharmacist', 1), (11, 'l2', 'lab', 2);
+  (8, 'd2', 'doctor', 1), (9, 'd3', 'doctor', 3), (10, 'pg', 'pharmacist', 1), (11, 'l2', 'lab', 2),
+  (12, 'cl', 'clinician', 1), (13, 'dn', 'doctor', 1), (14, 'ro', 'own_work_receive_only', 1);
 grant select on own_members to public;
+insert into auth.roles (code, description) values
+  ('own_work_receive_only', 'Own work suite: the two receive permissions without the two read permissions');
+insert into auth.role_permissions (role_code, permission_code) values
+  ('own_work_receive_only', 'pharmacy.order-route.receive'), ('own_work_receive_only', 'lab.order-route.receive');
 insert into auth.accounts (id, subject, email, display_name, status)
 select ('e1330002-0000-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid, 'synthetic:own-work-' || code,
        'own-work-' || code || '@example.invalid', 'Own Work ' || upper(code), 'active'
@@ -239,6 +316,26 @@ create function pg_temp.dispense_sql(work_item uuid, member integer) returns tex
     current_setting('app.correlation_id'))
   from pharmacy.work_items w where w.id = work_item
 $f$;
+-- pharmacy-api's acceptance INSERT (PharmacyService.accept) of prescription n
+-- by the session's member, with the prescription's own values.
+create function pg_temp.accept_sql(n integer, member integer) returns text language sql security definer as $f$
+  select format($i$insert into pharmacy.work_items (
+        id,patient_id,facility_id,ordering_facility_id,source_ehr_prescription_id,
+        source_ehr_prescription_version,source_encounter_id,source_status,medication_code_system,
+        medication_code,medication_display,dose_quantity,dose_unit,route_code,frequency,instructions,
+        starts_on,ends_on,prescribed_by,prescribed_at,accepted_by,accepted_by_membership_id,
+        acceptance_reason,idempotency_key,request_sha256,correlation_id
+      ) values (%L,%L,%L,%L,%L,%s,%L,'active',%L,%L,%L,%s,%L,%L,%L,%L,%L,%L,%L,%L,%L,%L,
+        'Accepted by the pharmacist',%L,%L,%L)$i$,
+    gen_random_uuid(), p.patient_id, p.facility_id, p.facility_id, p.id, p.row_version, p.encounter_id,
+    p.medication_code_system, p.medication_code, p.medication_display, p.dose_quantity, p.dose_unit, p.route_code,
+    p.frequency, p.instructions, p.starts_on, p.ends_on, p.created_by, p.created_at,
+    'e1330002-0000-4000-8000-0000000000' || lpad(member::text, 2, '0'),
+    'e1330004-0000-4000-8000-0000000000' || lpad(member::text, 2, '0'),
+    'own-work-accept-' || replace(gen_random_uuid()::text, '-', ''), repeat('a', 64),
+    current_setting('app.correlation_id'))
+  from ehr.prescriptions p where p.id = pg_temp.rx(n)
+$f$;
 do $$
 declare proc record;
 begin
@@ -306,14 +403,19 @@ select pg_temp.expect('rx1''s work item: accepted by the prescriber, the fixed r
      w.source_ehr_prescription_version, w.order_route_id is null)
      from pharmacy.work_items w where w.source_ehr_prescription_id = pg_temp.rx(1)),
   't/t/Sent automatically when the prescription was activated/2/t');
-select pg_temp.expect('rx1: one event, one outbox event (auto_send), a sent row',
+select pg_temp.expect('rx1: one event, one outbox event with pharmacy-api''s four payload keys, a sent row',
   (select format('%s/%s/%s', (select count(*) from pharmacy.work_item_events e where e.work_item_id = w.id),
-     (select string_agg(o.event_type || ':' || (o.payload ->> 'acceptedVia'), ',') from pharmacy.outbox_events o
-       where o.aggregate_id = w.id),
+     (select string_agg(o.event_type || ':' || o.aggregate_type || ':' || o.aggregate_version || ':'
+        || (select string_agg(key, ',' order by key) from jsonb_object_keys(o.payload) key) || ':'
+        || (o.payload ->> 'status') || ':' || (o.payload ->> 'workItemId' = w.id::text) || ':'
+        || (o.payload ->> 'sourceEhrPrescriptionId' = w.source_ehr_prescription_id::text) || ':'
+        || (o.payload -> 'sourceEhrPrescriptionVersion')::text, ',')
+        from pharmacy.outbox_events o where o.aggregate_id = w.id),
      (select s.state || ':' || s.attempts || ':' || (s.work_item_id = w.id) || ':' || coalesce(s.last_failure_sqlstate, '-')
         from pharmacy.own_prescription_sends s where s.prescription_id = pg_temp.rx(1)))
      from pharmacy.work_items w where w.source_ehr_prescription_id = pg_temp.rx(1)),
-  '1/PharmacyWorkItemCreated:auto_send/sent:1:true:-');
+  '1/PharmacyWorkItemCreated:pharmacy-work-item:1:sourceEhrPrescriptionId,sourceEhrPrescriptionVersion,status,'
+  || 'workItemId:accepted:true:true:2/sent:1:true:-');
 set local role hid_ehr_api_runtime;
 select pg_temp.as_member(1);
 select pg_temp.expect('a second send writes nothing', pg_temp.send(pg_temp.rx(1), 2), 'already_in_pharmacy:item');
@@ -375,6 +477,17 @@ select pg_temp.expect('PH reads rx1''s event', (select count(*)::text from pharm
 select pg_temp.expect('PH dispenses rx1', pg_temp.try(pg_temp.dispense_sql(pg_temp.work_item_of(pg_temp.rx(1)), 2)), 'ok');
 select pg_temp.expect('PH reads the dispensing', (select count(*)::text from pharmacy.dispensings d
   where d.work_item_id = pg_temp.work_item_of(pg_temp.rx(1))), '1');
+-- One pharmacy item per prescription, and no acceptance without consent: a
+-- second item for the sent rx1, and rx5 (active, never sent). On a database
+-- whose owner bypasses row-level security the validator finds rx5 and the
+-- work items' insert policy refuses it (0133's branch is for reads only);
+-- under forced row-level security (production) the validator, reading as
+-- its owner in PH's session, does not find rx5 at all.
+select pg_temp.expect('PH: a second work item for rx1 is refused',
+  pg_temp.try(pg_temp.accept_sql(1, 2)), '42501 new row violates row-level security policy for table "work_items"');
+select pg_temp.expect('PH: accepting rx5 (never sent) without a grant is refused',
+  pg_temp.try(pg_temp.accept_sql(5, 2)) in ('42501 new row violates row-level security policy for table "work_items"',
+    '23514 PRESCRIPTION_SOURCE_NOT_FOUND')::text, 'true');
 select pg_temp.expect('the Pharmacy runtime cannot read the chart',
   pg_temp.try('select count(*) from ehr.prescriptions'), '42501 permission denied for schema ehr');
 select pg_temp.expect('PH: a Lab resource type is refused', pg_temp.try($s$select * from pharmacy.own_work_access_for(
@@ -406,10 +519,26 @@ begin
   return answer;
 end $f$;
 grant execute on function pg_temp.pharmacy_view(integer, integer, text) to public;
+create function pg_temp.lab_view(member integer) returns text language plpgsql as $f$
+declare answer text;
+begin
+  perform pg_temp.as_member(member);
+  select format('items=%s cards=%s access=%s', (select count(*) from lab.work_items),
+           (select count(*) from lab.work_item_patient_cards(array['e133000a-0000-4000-8000-000000000001'::uuid])),
+           (select count(*) from lab.own_work_access_for('work_item', 'e133000a-0000-4000-8000-000000000001',
+              'read_records')))
+    into answer;
+  return answer;
+end $f$;
+grant execute on function pg_temp.lab_view(integer) to public;
 set local role hid_pharmacy_api_runtime;
 select pg_temp.expect('NU (nurse) sees nothing', pg_temp.pharmacy_view(4), 'items=0 cards=0 access=0');
 select pg_temp.expect('AD (admin) sees nothing', pg_temp.pharmacy_view(5), 'items=0 cards=0 access=0');
 select pg_temp.expect('RC (receptionist) sees nothing', pg_temp.pharmacy_view(7), 'items=0 cards=0 access=0');
+select pg_temp.expect('CL (clinician) sees nothing', pg_temp.pharmacy_view(12), 'items=0 cards=0 access=0');
+select pg_temp.expect('DN (doctor without a grant) sees nothing', pg_temp.pharmacy_view(13), 'items=0 cards=0 access=0');
+select pg_temp.expect('RO (receive permission without the read one) sees nothing', pg_temp.pharmacy_view(14),
+  'items=0 cards=0 access=0');
 select pg_temp.expect('LS (lab) sees no pharmacy item', pg_temp.pharmacy_view(3), 'items=0 cards=0 access=0');
 select pg_temp.expect('P2 (pharmacist at F2) sees nothing of F1', pg_temp.pharmacy_view(6), 'items=0 cards=0 access=0');
 select pg_temp.expect('P2''s membership in a session at F1 sees nothing', pg_temp.pharmacy_view(6, 1),
@@ -439,6 +568,12 @@ select pg_temp.expect('PH: Bisi (deny directive) and Chike (inactive) are hidden
      from pharmacy.work_items w), '01 02 03 04 06');
 select pg_temp.expect('PH may not work on Bisi''s item', (select count(*)::text from pharmacy.own_work_access_for(
   'work_item', pg_temp.work_item_of(pg_temp.rx(7)), 'write_records')), '0');
+select pg_temp.expect('PH reads no event of Bisi''s or Chike''s items', (select count(*)::text
+  from pharmacy.work_item_events e where e.work_item_id in (pg_temp.work_item_of(pg_temp.rx(7)),
+    pg_temp.work_item_of(pg_temp.rx(8)))), '0');
+select pg_temp.expect('PH sees no card for Bisi''s or Chike''s items', (select count(*)::text
+  from pharmacy.work_item_patient_cards(array[pg_temp.work_item_of(pg_temp.rx(7)), pg_temp.work_item_of(pg_temp.rx(8))])),
+  '0');
 reset role;
 
 -- 5. Stopping after the send: DR holds rx3; the send is withdrawn once, and
@@ -503,8 +638,220 @@ select pg_temp.expect('L2 (lab at F2) sees only F2''s item', (select string_agg(
   '2');
 select pg_temp.as_member(4);
 select pg_temp.expect('NU (nurse) sees no lab item', (select count(*)::text from lab.work_items), '0');
+select pg_temp.expect('AD (admin) sees no lab item', pg_temp.lab_view(5), 'items=0 cards=0 access=0');
+select pg_temp.expect('RC (receptionist) sees no lab item', pg_temp.lab_view(7), 'items=0 cards=0 access=0');
+select pg_temp.expect('CL (clinician) sees no lab item', pg_temp.lab_view(12), 'items=0 cards=0 access=0');
+select pg_temp.expect('DN (doctor without a grant) sees no lab item', pg_temp.lab_view(13), 'items=0 cards=0 access=0');
+select pg_temp.expect('RO (receive permission without the read one) sees no lab item', pg_temp.lab_view(14),
+  'items=0 cards=0 access=0');
 select pg_temp.as_member(3, purpose => 'emergency');
 select pg_temp.expect('LS in an emergency session sees no lab item', (select count(*)::text from lab.work_items), '0');
+reset role;
+
+-- 7. Item by item, never the imported evidence. Fixtures as replica, as the
+-- services would have written them: for Ada at F1, the own lab item's chain
+-- (W1: requested test, specimen requirement, specimen, execution, result on
+-- LS's accession of case 6); a route-backed lab item (R1, an order from F3;
+-- its route is unknown here, so its route branch is false) with the same
+-- chain; a route-backed pharmacy item (RP, from F3) with a dispensing; and
+-- the patient's imported Lab and Pharmacy evidence (OCR-imported outside
+-- records).
+set local session_replication_role = replica;
+insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, order_route_id, source_ehr_order_id,
+  source_ehr_order_version, source_encounter_id, status, priority, test_code_system, test_code, test_name,
+  requested_by, requested_at, accepted_by, accepted_by_membership_id, idempotency_key, request_sha256, correlation_id)
+values ('e133000a-0000-4000-8000-000000000003', 'e1330006-0000-4000-8000-000000000001',
+  'e1330001-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000003', gen_random_uuid(), gen_random_uuid(), 1,
+  gen_random_uuid(), 'accepted', 'routine', 'http://loinc.org', '2345-7', 'Glucose (routed)',
+  'e1330002-0000-4000-8000-000000000009', clock_timestamp(), 'e1330002-0000-4000-8000-000000000003',
+  'e1330004-0000-4000-8000-000000000003', 'own-work-routed-lab-item-key', repeat('b', 64), 'own-work-suite-routed');
+insert into lab.accessions (id, work_item_id, patient_id, facility_id, priority, created_by, created_by_membership_id,
+  idempotency_key, request_sha256, correlation_id)
+values ('e133000b-0000-4000-8000-000000000003', 'e133000a-0000-4000-8000-000000000003',
+  'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'routine',
+  'e1330002-0000-4000-8000-000000000003', 'e1330004-0000-4000-8000-000000000003', 'own-work-routed-accession',
+  repeat('c', 64), 'own-work-suite-routed');
+-- n = 1: W1 (own, accession e133000b...01); n = 3: R1 (routed, accession e133000b...03).
+insert into lab.work_item_requested_tests (id, work_item_id, facility_id, patient_id, ordinal, code_system, code, name)
+select ('e133000c-0000-4000-8000-00000000000' || n)::uuid, ('e133000a-0000-4000-8000-00000000000' || n)::uuid,
+       'e1330001-0000-4000-8000-000000000001', 'e1330006-0000-4000-8000-000000000001', 1, 'http://loinc.org', '718-7',
+       'Haemoglobin'
+  from unnest(array[1, 3]) n;
+insert into lab.specimen_requirements (id, accession_id, patient_id, facility_id, ordinal, specimen_type)
+select ('e133000d-0000-4000-8000-00000000000' || n)::uuid, ('e133000b-0000-4000-8000-00000000000' || n)::uuid,
+       'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 1, 'blood'
+  from unnest(array[1, 3]) n;
+insert into lab.specimens (id, specimen_identifier, requirement_id, accession_id, patient_id, facility_id,
+  collection_ordinal, specimen_type)
+select ('e133000e-0000-4000-8000-00000000000' || n)::uuid, 'OWN-WORK-SPECIMEN-' || n,
+       ('e133000d-0000-4000-8000-00000000000' || n)::uuid, ('e133000b-0000-4000-8000-00000000000' || n)::uuid,
+       'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 1, 'blood'
+  from unnest(array[1, 3]) n;
+insert into lab.test_executions (id, accession_id, specimen_id, requested_test_id, patient_id, facility_id,
+  started_by, started_by_membership_id, started_at, idempotency_key, request_sha256, correlation_id)
+select ('e133000f-0000-4000-8000-00000000000' || n)::uuid, ('e133000b-0000-4000-8000-00000000000' || n)::uuid,
+       ('e133000e-0000-4000-8000-00000000000' || n)::uuid, ('e133000c-0000-4000-8000-00000000000' || n)::uuid,
+       'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001',
+       'e1330002-0000-4000-8000-000000000003', 'e1330004-0000-4000-8000-000000000003', clock_timestamp(),
+       'own-work-execution-' || n, repeat('f', 64), 'own-work-suite-chain'
+  from unnest(array[1, 3]) n;
+insert into lab.results (id, execution_id, patient_id, facility_id, created_by, created_by_membership_id)
+select ('e1330010-0000-4000-8000-00000000000' || n)::uuid, ('e133000f-0000-4000-8000-00000000000' || n)::uuid,
+       'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001',
+       'e1330002-0000-4000-8000-000000000003', 'e1330004-0000-4000-8000-000000000003'
+  from unnest(array[1, 3]) n;
+insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, order_route_id,
+  source_ehr_prescription_id, source_ehr_prescription_version, source_encounter_id, source_status, medication_display,
+  frequency, instructions, prescribed_by, prescribed_at, accepted_by, accepted_by_membership_id, acceptance_reason,
+  idempotency_key, request_sha256, correlation_id)
+values ('e1330011-0000-4000-8000-000000000001', 'e1330006-0000-4000-8000-000000000001',
+  'e1330001-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000003', gen_random_uuid(), gen_random_uuid(), 1,
+  gen_random_uuid(), 'active', 'Metformin 500 mg tablet (routed)', 'Twice a day', 'Take with food',
+  'e1330002-0000-4000-8000-000000000009', clock_timestamp(), 'e1330002-0000-4000-8000-000000000002',
+  'e1330004-0000-4000-8000-000000000002', 'Accepted from Own Work Clinic', 'own-work-routed-pharmacy-key',
+  repeat('b', 64), 'own-work-suite-routed');
+insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id, medication_display,
+  quantity_dispensed, quantity_unit, dispensed_by, dispensed_by_membership_id, reason, idempotency_key, request_sha256,
+  correlation_id)
+values ('e1330012-0000-4000-8000-000000000001', 'e1330011-0000-4000-8000-000000000001', 1,
+  'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'Metformin 500 mg tablet (routed)',
+  60, 'tablet', 'e1330002-0000-4000-8000-000000000002', 'e1330004-0000-4000-8000-000000000002',
+  'Dispensed to the patient', 'own-work-routed-dispensing', repeat('d', 64), 'own-work-suite-routed');
+insert into lab.imported_evidence (patient_id, facility_id, source_document_id, reviewed_by, created_by,
+  created_by_membership_id, idempotency_key, request_sha256, correlation_id, external_lab_name)
+values ('e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', gen_random_uuid(),
+  'e1330002-0000-4000-8000-000000000001', 'e1330002-0000-4000-8000-000000000001', 'e1330004-0000-4000-8000-000000000001',
+  'own-work-imported-lab-0001', repeat('e', 64), 'own-work-suite-imported', 'Synthetic Outside Lab');
+insert into pharmacy.imported_medication_evidence (patient_id, facility_id, source_document_id, ocr_job_id,
+  extraction_id, validation_id, validation_version, publication_id, medication_text, reviewed_by, created_by,
+  created_by_membership_id, idempotency_key, request_sha256, correlation_id)
+values ('e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', gen_random_uuid(),
+  gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, gen_random_uuid(), 'Synthetic imported medicine',
+  'e1330002-0000-4000-8000-000000000001', 'e1330002-0000-4000-8000-000000000001', 'e1330004-0000-4000-8000-000000000001',
+  'own-work-imported-medication-0001', repeat('e', 64), 'own-work-suite-imported');
+set local session_replication_role = origin;
+-- The chain of lab item n (1: W1, 3: R1) as the session reads it, and as it
+-- may lock it for update (what the API's updates need).
+create function pg_temp.lab_chain(n integer) returns text language plpgsql as $f$
+declare answer text;
+begin
+  select format('tests=%s accessions=%s requirements=%s specimens=%s executions=%s results=%s locked=%s/%s/%s',
+           (select count(*) from lab.work_item_requested_tests where id = ('e133000c-0000-4000-8000-00000000000' || n)::uuid),
+           (select count(*) from lab.accessions where id = ('e133000b-0000-4000-8000-00000000000' || n)::uuid),
+           (select count(*) from lab.specimen_requirements where id = ('e133000d-0000-4000-8000-00000000000' || n)::uuid),
+           (select count(*) from lab.specimens where id = ('e133000e-0000-4000-8000-00000000000' || n)::uuid),
+           (select count(*) from lab.test_executions where id = ('e133000f-0000-4000-8000-00000000000' || n)::uuid),
+           (select count(*) from lab.results where id = ('e1330010-0000-4000-8000-00000000000' || n)::uuid),
+           (select count(*) from (select 1 from lab.specimens
+               where id = ('e133000e-0000-4000-8000-00000000000' || n)::uuid for update) locked),
+           (select count(*) from (select 1 from lab.test_executions
+               where id = ('e133000f-0000-4000-8000-00000000000' || n)::uuid for update) locked),
+           (select count(*) from (select 1 from lab.results
+               where id = ('e1330010-0000-4000-8000-00000000000' || n)::uuid for update) locked))
+    into answer;
+  return answer;
+end $f$;
+grant execute on function pg_temp.lab_chain(integer) to public;
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(3);
+select pg_temp.expect('LS: W1''s chain is visible and lockable', pg_temp.lab_chain(1),
+  'tests=1 accessions=1 requirements=1 specimens=1 executions=1 results=1 locked=1/1/1');
+select pg_temp.expect('LS: R1 (routed, same patient and facility) and its chain stay hidden',
+  (select count(*) from lab.work_items where id = 'e133000a-0000-4000-8000-000000000003') || ' ' || pg_temp.lab_chain(3),
+  '0 tests=0 accessions=0 requirements=0 specimens=0 executions=0 results=0 locked=0/0/0');
+select pg_temp.expect('LS: R1''s accession, execution and result give no own work item',
+  (select count(*)::text from (select * from lab.own_work_access_for('accession', 'e133000b-0000-4000-8000-000000000003',
+     'read_records') union all select * from lab.own_work_access_for('execution', 'e133000f-0000-4000-8000-000000000003',
+     'read_records') union all select * from lab.own_work_access_for('result', 'e1330010-0000-4000-8000-000000000003',
+     'read_records')) found), '0');
+select pg_temp.expect('LS cannot write an accession onto R1',
+  (pg_temp.try($i$insert into lab.accessions (id, work_item_id, patient_id, facility_id, priority, created_by,
+    created_by_membership_id, idempotency_key, request_sha256, correlation_id)
+    values (gen_random_uuid(), 'e133000a-0000-4000-8000-000000000003', 'e1330006-0000-4000-8000-000000000001',
+    'e1330001-0000-4000-8000-000000000001', 'routine', 'e1330002-0000-4000-8000-000000000003',
+    'e1330004-0000-4000-8000-000000000003', 'own-work-routed-accession-2', repeat('c', 64),
+    current_setting('app.correlation_id'))$i$) ~ '^(42501|23514) ')::text, 'true');
+select pg_temp.expect('LS cannot write a specimen event onto R1''s accession',
+  (pg_temp.try($i$insert into lab.specimen_events (specimen_id, accession_id, patient_id, facility_id, event_version,
+    event_type, actor_id, actor_membership_id, reason, correlation_id)
+    values ('e133000e-0000-4000-8000-000000000003', 'e133000b-0000-4000-8000-000000000003',
+    'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 1, 'collected',
+    'e1330002-0000-4000-8000-000000000003', 'e1330004-0000-4000-8000-000000000003', 'Collected',
+    current_setting('app.correlation_id'))$i$) ~ '^(42501|23514) ')::text, 'true');
+select pg_temp.expect('LS (no grant) reads none of Ada''s imported Lab evidence',
+  (select count(*)::text from lab.imported_evidence), '0');
+select pg_temp.as_member(4);
+select pg_temp.expect('NU reads none of it and none of W1''s chain',
+  (select count(*) from lab.imported_evidence) || ' ' || pg_temp.lab_chain(1),
+  '0 tests=0 accessions=0 requirements=0 specimens=0 executions=0 results=0 locked=0/0/0');
+select pg_temp.as_member(11);
+select pg_temp.expect('L2 (lab at F2) in a session at F1 reads nothing of W1''s chain',
+  (select count(*) from lab.imported_evidence) || ' ' || pg_temp.lab_chain(1),
+  '0 tests=0 accessions=0 requirements=0 specimens=0 executions=0 results=0 locked=0/0/0');
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select pg_temp.expect('PH: the own dispensings visible, RP and its dispensing hidden',
+  format('%s/%s/%s', (select count(*) from pharmacy.dispensings d
+     where d.work_item_id in (pg_temp.work_item_of(pg_temp.rx(1)), pg_temp.work_item_of(pg_temp.rx(4)))),
+    (select count(*) from pharmacy.work_items where id = 'e1330011-0000-4000-8000-000000000001'),
+    (select count(*) from pharmacy.dispensings where id = 'e1330012-0000-4000-8000-000000000001')), '2/0/0');
+select pg_temp.expect('PH: RP''s dispensing gives no own work item', (select count(*)::text
+  from pharmacy.own_work_access_for('dispensing', 'e1330012-0000-4000-8000-000000000001', 'read_records')), '0');
+select pg_temp.expect('PH (no grant) reads none of Ada''s imported medication evidence',
+  (select count(*)::text from pharmacy.imported_medication_evidence), '0');
+select pg_temp.expect('PH writes Pharmacy''s event about its own dispensing of rx1',
+  (select pg_temp.try(format($i$insert into pharmacy.outbox_events (event_type, aggregate_type, aggregate_id,
+     aggregate_version, facility_id, patient_id, correlation_id, payload) values ('MedicationDispensed',
+     'medication-dispensing', %L, 1, 'e1330001-0000-4000-8000-000000000001', 'e1330006-0000-4000-8000-000000000001',
+     current_setting('app.correlation_id'), jsonb_build_object('dispensingId', %L::uuid, 'workItemId', %L::uuid,
+     'status', 'dispensed'))$i$, d.id, d.id, d.work_item_id))
+     from pharmacy.dispensings d where d.work_item_id = pg_temp.work_item_of(pg_temp.rx(1))), 'ok');
+select pg_temp.expect('PH cannot write an event about RP''s dispensing',
+  pg_temp.try($i$insert into pharmacy.outbox_events (event_type, aggregate_type, aggregate_id, aggregate_version,
+    facility_id, patient_id, correlation_id, payload) values ('MedicationDispensed', 'medication-dispensing',
+    'e1330012-0000-4000-8000-000000000001', 1, 'e1330001-0000-4000-8000-000000000001',
+    'e1330006-0000-4000-8000-000000000001', current_setting('app.correlation_id'),
+    '{"status": "dispensed"}')$i$), '42501 new row violates row-level security policy for table "outbox_events"');
+select pg_temp.expect('PH cannot write an event of another kind about its own work item',
+  pg_temp.try(format($i$insert into pharmacy.outbox_events (event_type, aggregate_type, aggregate_id, aggregate_version,
+    facility_id, patient_id, correlation_id, payload) values ('PharmacyImportedMedicationEvidenceCreated',
+    'pharmacy-imported-medication-evidence', %L, 1, 'e1330001-0000-4000-8000-000000000001',
+    'e1330006-0000-4000-8000-000000000001', current_setting('app.correlation_id'), '{"status": "created"}')$i$,
+    pg_temp.work_item_of(pg_temp.rx(1)))), '42501 new row violates row-level security policy for table "outbox_events"');
+select pg_temp.expect('PH cannot dispense RP',
+  (pg_temp.try(pg_temp.dispense_sql('e1330011-0000-4000-8000-000000000001', 2)) ~ '^(42501|23514) ')::text, 'true');
+select pg_temp.as_member(10);
+select pg_temp.expect('PG (pharmacist with a grant for Ada) reads her imported medication evidence (consent)',
+  (select count(*)::text from pharmacy.imported_medication_evidence), '1');
+reset role;
+
+-- 8. The owner-run definer functions that read ehr.prescriptions (case 1
+-- lists them) give PH nothing more through the EHR runtime: each refuses
+-- the pharmacist before it reads (the two validators are cases 3 and 5).
+create function pg_temp.rows_of(statement text) returns text language plpgsql as $f$
+declare answer bigint;
+begin
+  execute 'select count(*) from (' || statement || ') listed' into answer;
+  return 'rows=' || answer;
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+grant execute on function pg_temp.rows_of(text) to public;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(2);
+select pg_temp.expect('PH: ehr.send_order_route refuses', pg_temp.try(format($s$select * from ehr.send_order_route(
+  gen_random_uuid(), 'prescription', 'e1330006-0000-4000-8000-000000000001', %L, 'e1330008-0000-4000-8000-000000000001',
+  2, 'e1330001-0000-4000-8000-000000000002', 'v1', 'own-work-route-probe', repeat('a', 64))$s$, pg_temp.rx(4))),
+  '42501 ORDER_ROUTE_PERMISSION_DENIED');
+select pg_temp.expect('PH: the own-pharmacy send refuses',
+  pg_temp.send(pg_temp.rx(4), 2), '42501 OWN_PHARMACY_SEND_DENIED');
+select pg_temp.expect('PH: the withdrawal refuses', pg_temp.try(format(
+  'select ehr.withdraw_own_pharmacy_send(%L)', pg_temp.rx(4))), '42501 OWN_PHARMACY_SEND_DENIED');
+-- (The list is the patient's own: a staff session is refused.)
+select pg_temp.expect('PH: the patient''s own route list answers nothing for a staff session',
+  pg_temp.rows_of('select * from ehr.patient_list_order_routes()'), '42501 PATIENT_SESSION_REQUIRED');
 reset role;
 
 rollback;

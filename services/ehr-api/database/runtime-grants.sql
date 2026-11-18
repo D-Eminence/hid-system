@@ -1763,19 +1763,25 @@ revoke all on function auth.guard_session_single_sign_on_change() from public;
 
 -- This facility's own pharmacy and lab work (0133, ORD-2, owner decisions of
 -- 18 November 2026), exactly as 0133 grants it: the send and the withdrawal
--- to the EHR runtime; the own-work access check and the list's states to the
--- Pharmacy and Lab runtimes; each also to the schema test runtime. The
--- policy helpers (identity.facility_work_member_allows and
--- pharmacy.own_work_source_prescription) are executed by no role: the
--- policy functions run them as their owner. No role has any privilege on
--- pharmacy.own_prescription_sends.
+-- to the EHR runtime; the work chain's own-work test (its policies call it,
+-- with the querying role's privileges, as 0086's context_allows), the
+-- own-work access check and the list's states to the Lab and Pharmacy
+-- runtimes; each also to the schema test runtime. The helpers
+-- identity.facility_work_member_allows and
+-- pharmacy.own_work_source_prescription are executed by no role: the
+-- functions that call them run them as their owner. No role has any
+-- privilege on pharmacy.own_prescription_sends.
 grant execute on function ehr.send_prescription_to_own_pharmacy(uuid, bigint),
   ehr.withdraw_own_pharmacy_send(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
-grant execute on function pharmacy.own_work_access_for(text, uuid, text),
+grant execute on function pharmacy.own_work_chain_allows(text, uuid, uuid, uuid, text),
+  pharmacy.own_work_access_for(text, uuid, text),
   pharmacy.own_work_item_states(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
-grant execute on function lab.own_work_access_for(text, uuid, text),
+grant execute on function lab.own_work_chain_allows(text, uuid, uuid, uuid, text),
+  lab.own_work_access_for(text, uuid, text),
   lab.own_work_item_bases(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
 revoke all on function identity.facility_work_member_allows(text, uuid, uuid, text),
+  lab.own_work_chain_allows(text, uuid, uuid, uuid, text),
+  pharmacy.own_work_chain_allows(text, uuid, uuid, uuid, text),
   pharmacy.own_work_source_prescription(uuid, uuid, uuid),
   ehr.send_prescription_to_own_pharmacy(uuid, bigint),
   ehr.withdraw_own_pharmacy_send(uuid),
