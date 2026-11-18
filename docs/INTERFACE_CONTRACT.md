@@ -6136,3 +6136,48 @@ whether the visit is older than the request's Idempotency-Key. The audit row
 Before "Start visit", read `open-today` and offer to continue the open
 visit; when starting, send `reuseOpenVisit: true` so a double tap or two
 staff at once do not make two visits.
+
+## EHR-C3. Latest vitals for a patient (wave 1, no migration)
+
+Akos P1-14. ehr-api only; no migration, no new setting.
+
+### `GET /ehr/patients/:patientId/vitals/latest`
+
+Permission `ehr.vital.read`. `patientId` is the UUID (never a Health ID).
+Read under the patient's consent (`read_records`), like every vitals read.
+A refusal answers `403 CONSENT_REQUIRED` and is audited (`ehr.vital.latest`,
+outcome `denied`); a read is audited as `ehr.vital.latest` with
+`measureCount` (never the values). Answers `200`:
+
+```json
+{
+  "facilityId": "<uuid>",
+  "measures": {
+    "bloodPressure": { "value": { "systolicMmhg": 128, "diastolicMmhg": 84 }, "recordedAt": "...", "vitalId": "<uuid>", "encounterId": "<uuid>", "corrected": false },
+    "pulseBpm": { "value": 76, "recordedAt": "...", "vitalId": "<uuid>", "encounterId": "<uuid>", "corrected": true },
+    "temperatureC": { "value": 37.2, "...": "..." }
+  }
+}
+```
+
+Rules:
+
+- Only this facility's vitals for this patient.
+- For each measure (`heightCm`, `weightKg`, `temperatureC`, `pulseBpm`,
+  `respiratoryRate`, `bloodPressure`, `oxygenSaturationPercent`) the newest
+  reading (by `recordedAt`, then entry time) that has that measure. A measure
+  with no reading is left out of `measures`.
+- The vital's current correction is applied first (the correction's values
+  over the original ones, as the patient record already applies them);
+  `corrected` says whether a correction set the value.
+- Blood pressure is one measure and is always the systolic and diastolic
+  pair from the same reading; it is never mixed across readings.
+- Vitals of a visit entered in error are left out. (A single vital entered
+  in error waits for EHR-C8b, migration 0142.)
+- Values are JSON numbers (the per-visit vitals list still returns numeric
+  columns as strings, unchanged).
+
+### Screen change needed (Akos frontend branch)
+
+The patient header or chart may show "Latest vitals" from this route, one
+call per patient, and label each value with its date.

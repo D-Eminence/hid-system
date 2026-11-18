@@ -65,9 +65,102 @@ const CORRECTION_COLUMNS = `
   created_by as "createdBy", created_by_membership_id as "createdByMembershipId",
   content_sha256 as "contentSha256", created_at as "createdAt"`;
 
+/** EHR-C3: the measures `latest` answers, each the newest corrected value. */
+export const LATEST_VITAL_MEASURES = [
+  'heightCm', 'weightKg', 'temperatureC', 'pulseBpm', 'respiratoryRate', 'bloodPressure', 'oxygenSaturationPercent',
+] as const;
+export type LatestVitalMeasure = (typeof LATEST_VITAL_MEASURES)[number];
+
+/** One measure's newest value: where and when it was taken, and whether a correction set it. */
+export interface LatestVitalValue {
+  /** A number, or for bloodPressure `{ systolicMmhg, diastolicMmhg }` (always the pair). */
+  value: number | { systolicMmhg: number; diastolicMmhg: number };
+  recordedAt: Date;
+  vitalId: string;
+  encounterId: string;
+  corrected: boolean;
+}
+
+export interface LatestVitals {
+  facilityId: string;
+  measures: Partial<Record<LatestVitalMeasure, LatestVitalValue>>;
+}
+
+interface LatestVitalRow extends QueryResultRow {
+  measure: LatestVitalMeasure;
+  value: unknown;
+  recordedAt: Date;
+  vitalId: string;
+  encounterId: string;
+  corrected: boolean;
+}
+
+/**
+ * EHR-C3: for each measure, the newest value at this facility, after the
+ * vital's current correction is applied (as the patient record evidence
+ * applies it: the correction's values over the original ones). Blood pressure
+ * is one measure, kept as its systolic and diastolic pair from the same
+ * reading. Vitals of a visit entered in error are left out.
+ */
+export const LATEST_VITALS_SQL = `
+  with effective as (
+    select v.id, v.encounter_id, v.recorded_at, v.created_at,
+           to_jsonb(v) || coalesce(c.replacement_values, '{}'::jsonb) as m,
+           c.id is not null as corrected
+    from ehr.vitals v
+    join ehr.encounters e
+      on e.id = v.encounter_id and e.patient_id = v.patient_id and e.facility_id = v.facility_id
+    left join ehr.vital_corrections c
+      on c.vital_id = v.id and c.correction_no = v.current_correction_no
+     and c.patient_id = v.patient_id and c.facility_id = v.facility_id
+    where v.patient_id = $1 and v.facility_id = $2 and e.status <> 'entered_in_error'
+  )
+  select distinct on (x.measure)
+         x.measure, x.value, effective.recorded_at as "recordedAt", effective.id as "vitalId",
+         effective.encounter_id as "encounterId", effective.corrected
+  from effective
+  cross join lateral (values
+    ('heightCm', effective.m->'height_cm'),
+    ('weightKg', effective.m->'weight_kg'),
+    ('temperatureC', effective.m->'temperature_c'),
+    ('pulseBpm', effective.m->'pulse_bpm'),
+    ('respiratoryRate', effective.m->'respiratory_rate'),
+    ('bloodPressure', case
+      when jsonb_typeof(effective.m->'systolic_mmhg') = 'number' and jsonb_typeof(effective.m->'diastolic_mmhg') = 'number'
+      then jsonb_build_object('systolicMmhg', effective.m->'systolic_mmhg', 'diastolicMmhg', effective.m->'diastolic_mmhg')
+    end),
+    ('oxygenSaturationPercent', effective.m->'oxygen_saturation_percent')
+  ) as x(measure, value)
+  where x.value is not null and jsonb_typeof(x.value) <> 'null'
+  order by x.measure, effective.recorded_at desc, effective.created_at desc, effective.id desc`;
+
 @Injectable()
 export class VitalsService {
   constructor(private readonly repository: ClinicalRepository) {}
+
+  /**
+   * EHR-C3: the newest value of each measure for the patient at this
+   * facility (GET ehr/patients/:patientId/vitals/latest). Read under the
+   * patient's consent and audited (`ehr.vital.latest`, with the count of
+   * measures, never the values); a refusal is audited by the repository.
+   */
+  latest(context: DataAccessContext, patientId: string): Promise<LatestVitals> {
+    return this.repository.run(
+      context, patientId, 'read_records',
+      { action: 'ehr.vital.latest', resourceType: 'vital' },
+      async (client) => {
+        const result = await client.query<LatestVitalRow>(LATEST_VITALS_SQL, [patientId, context.facilityId]);
+        const measures: Partial<Record<LatestVitalMeasure, LatestVitalValue>> = {};
+        for (const row of result.rows) {
+          if (!LATEST_VITAL_MEASURES.includes(row.measure)) continue;
+          measures[row.measure] = { value: latestValue(row.value), recordedAt: row.recordedAt, vitalId: row.vitalId,
+            encounterId: row.encounterId, corrected: row.corrected === true };
+        }
+        return { value: { facilityId: context.facilityId, measures },
+          details: { measureCount: Object.keys(measures).length } };
+      },
+    );
+  }
 
   list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.vitals', patientId, encounterId };
@@ -262,6 +355,14 @@ const VITAL_STORAGE_KEYS = {
   diastolicMmhg: 'diastolic_mmhg',
   oxygenSaturationPercent: 'oxygen_saturation_percent',
 } as const;
+
+function latestValue(value: unknown): LatestVitalValue['value'] {
+  if (value && typeof value === 'object') {
+    const pair = value as { systolicMmhg: unknown; diastolicMmhg: unknown };
+    return { systolicMmhg: Number(pair.systolicMmhg), diastolicMmhg: Number(pair.diastolicMmhg) };
+  }
+  return Number(value);
+}
 
 export function vitalMeasurementsToStorage(
   measurements: VitalMeasurementsDto,
