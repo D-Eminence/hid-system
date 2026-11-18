@@ -25,6 +25,9 @@
 --    where role_code = 'receptionist'
 --      and permission_code in ('ehr.document.write', 'ehr.document.read',
 --                              'ocr.job.write', 'ocr.job.read', 'ehr.vital.read');
+-- It does not reopen the records-processing requests 0136 closed (status
+-- expired, with an audit row each): after the undo, the staff member asks the
+-- patient again.
 -- Takes effect on each staff member's next request, as 0136 did. It prints
 -- one NOTICE line per row put back with how many active memberships hold the
 -- role (numbers only, the same rule as 0136's counts).

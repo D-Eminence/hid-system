@@ -33,7 +33,16 @@
 --      RECORDS_PROCESSING_NOT_ALLOWED, a nurse still may;
 --   6. the undo puts back exactly the thirteen rows (and leaves the five
 --      front-desk rows), the doctor, laboratory member and administrator get
---      their permissions back, and running it a second time changes nothing.
+--      their permissions back, and running it a second time changes nothing;
+--   7. what follows (the counts' lines 19-23 and 0136's step 3): a clinic with
+--      doctors and a front desk only, and a laboratory, are counted as left
+--      with nobody who can check a reading; the clinic as one where a reading
+--      can be started but never checked or its patient confirmed; their
+--      readings not yet checked are counted; and the open records-processing
+--      requests of a doctor and a laboratory member are counted, then closed
+--      by 0136 (status expired, one audit row each with the plain reason),
+--      while a doctor with a nurse role, a direct-care request and an approved
+--      request are left as they are.
 -- Synthetic values only: uuid prefix c136, @example.invalid addresses.
 set plpgsql.variable_conflict = error;
 begin;
@@ -127,10 +136,36 @@ create temporary table counts_seen (
   label text, position integer, change text, row_there_now boolean, real_with_role integer, real_changing integer,
   real_logins integer, sealed_with_role integer, sealed_changing integer
 ) on commit drop;
-create temporary table counts_load (
-  position integer, change text, row_there_now boolean, real_with_role integer, real_changing integer,
-  real_logins integer, sealed_with_role integer, sealed_changing integer
+-- The query answers two tables (lines 1-18 with eight columns, lines 19-22
+-- with four), which psql writes into one CSV file, read back line by line,
+-- and line 23 as a NOTICE and in the session setting
+-- zero136.unchecked_readings.
+create temporary table counts_raw (line text) on commit drop;
+create temporary table consequences_seen (
+  label text, position integer, consequence text, real_count bigint, sealed_count bigint
 ) on commit drop;
+create function pg_temp.load_counts(label text) returns void language plpgsql as $$
+begin
+  insert into counts_seen
+  select label, field[1]::integer, field[2], field[3]::boolean, field[4]::integer, field[5]::integer,
+         field[6]::integer, field[7]::integer, field[8]::integer
+    from (select string_to_array(raw.line, ',') as field from counts_raw raw) parsed
+   where cardinality(field) = 8;
+  insert into consequences_seen
+  select label, field[1]::integer, field[2], field[3]::bigint, field[4]::bigint
+    from (select string_to_array(raw.line, ',') as field from counts_raw raw) parsed
+   where cardinality(field) = 4;
+  -- Line 23 comes from the query's last block, through its session setting.
+  insert into consequences_seen
+  select label, 23, 'readings not yet checked at the facilities of line 19',
+         split_part(current_setting('zero136.unchecked_readings'), '/', 1)::bigint,
+         split_part(current_setting('zero136.unchecked_readings'), '/', 2)::bigint;
+  if (select count(*) from counts_raw) <> 22
+     or (select count(*) from counts_raw raw where cardinality(string_to_array(raw.line, ',')) not in (4, 8)) > 0 then
+    raise exception 'the counts query answered % lines, expected 18 and 4', (select count(*) from counts_raw);
+  end if;
+  truncate counts_raw;
+end $$;
 
 -- 3a. The counts before the fictional staff exist (whatever the database
 -- already holds), so 3c compares only what the fixtures add.
@@ -142,16 +177,21 @@ create temporary table counts_load (
 \o
 \pset format aligned
 \pset tuples_only off
-\copy counts_load from '/tmp/hid-0136-counts.csv' with (format csv)
-insert into counts_seen select 'baseline', * from counts_load;
-truncate counts_load;
+\copy counts_raw from '/tmp/hid-0136-counts.csv'
+select pg_temp.load_counts('baseline');
 \set QUIET off
 
 -- Fixtures. Organisation O; Hospital F1 (real) and QA Hospital F2 (recorded
--- as a sealed QA facility). Members (n): 1 receptionist; 2 receptionist and
--- nurse; 3 doctor; 4 doctor and nurse; 5 doctor, membership inactive; 6
--- doctor, login disabled; 7 lab; 8 lab, role revoked; 9 admin; 10 admin and
--- doctor; 11 doctor at the sealed F2; 12 nurse. Patient P1, 40 years old.
+-- as a sealed QA facility); Clinic F4 (real: doctors and a front desk, no
+-- nurse or clinician) and Laboratory F5 (real: laboratory staff only).
+-- Members (n): 1 receptionist; 2 receptionist and nurse; 3 doctor; 4 doctor
+-- and nurse; 5 doctor, membership inactive; 6 doctor, login disabled; 7 lab;
+-- 8 lab, role revoked; 9 admin; 10 admin and doctor; 11 doctor at the sealed
+-- F2; 12 nurse; 13 doctor at F4; 14 receptionist at F4; 15 lab at F5.
+-- Patient P1, 40 years old. OCR jobs: not yet checked at F1 (1), F2 (1), F4
+-- (2) and F5 (1); one already checked at F4. Access requests from P1's
+-- point of view: pending records processing from 3, 4, 7 and 11; a pending
+-- direct-care request from 3; an approved records-processing request from 3.
 set local session_replication_role = replica;
 insert into identity.organizations (id, name, slug) values
   ('c1366000-0000-4000-8000-000000000001', 'Role Change Test Org', 'role-change-test-org');
@@ -159,7 +199,11 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
   ('c1366000-0000-4000-8000-000000000002', 'c1366000-0000-4000-8000-000000000001', 'Role Change Hospital',
    'RC-136-A', 'Africa/Lagos', true, 'verified'),
   ('c1366000-0000-4000-8000-000000000003', 'c1366000-0000-4000-8000-000000000001', 'Role Change QA Hospital',
-   'RC-136-Q', 'Africa/Lagos', true, 'verified');
+   'RC-136-Q', 'Africa/Lagos', true, 'verified'),
+  ('c1366000-0000-4000-8000-000000000004', 'c1366000-0000-4000-8000-000000000001', 'Role Change Clinic',
+   'RC-136-C', 'Africa/Lagos', true, 'verified'),
+  ('c1366000-0000-4000-8000-000000000005', 'c1366000-0000-4000-8000-000000000001', 'Role Change Laboratory',
+   'RC-136-L', 'Africa/Lagos', true, 'verified');
 insert into identity.sealed_qa_members (member_kind, member_id) values
   ('facility', 'c1366000-0000-4000-8000-000000000003');
 create temporary table rc_member (n integer primary key, facility text, roles text[], membership_active boolean,
@@ -177,7 +221,10 @@ insert into rc_member values
   (9, '2', array['admin'], true, 'active', false),
   (10, '2', array['admin', 'doctor'], true, 'active', false),
   (11, '3', array['doctor'], true, 'active', false),
-  (12, '2', array['nurse'], true, 'active', false);
+  (12, '2', array['nurse'], true, 'active', false),
+  (13, '4', array['doctor'], true, 'active', false),
+  (14, '4', array['receptionist'], true, 'active', false),
+  (15, '5', array['lab'], true, 'active', false);
 create function pg_temp.rc_id(kind text, n integer) returns uuid language sql immutable as $$
   select ('c136' || kind || '000-0000-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid;
 $$;
@@ -209,6 +256,32 @@ select ('c1364000-0000-4000-8000-0000000' || lpad((member.n * 10 + role_row.k)::
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, status) values
   ('c1365000-0000-4000-8000-000000000001', 'HID-ZQRPCX', 'Role', 'Change Patient', 'Role Change Patient',
    ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '40 years')::date, 'active');
+-- OCR jobs (k, facility, member who started it, status).
+insert into ocr.jobs (id, facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex, status,
+  idempotency_key, request_sha256, provider, created_by, created_by_membership_id, correlation_id, completed_at)
+select ('c1367000-0000-4000-8000-0000000000' || lpad(job.k::text, 2, '0'))::uuid,
+  ('c1366000-0000-4000-8000-00000000000' || job.facility)::uuid,
+  ('c1368000-0000-4000-8000-0000000000' || lpad(job.k::text, 2, '0'))::uuid,
+  'c1365000-0000-4000-8000-000000000001', 'role-change-version-' || job.k, repeat('a', 64), job.status,
+  'role-change-job-0136-' || job.k, repeat('b', 64), 'textract', pg_temp.rc_id('1', job.member),
+  pg_temp.rc_id('3', job.member), 'role-change-job-' || job.k,
+  case when job.status = 'validated' then clock_timestamp() end
+  from (values (1, '2', 2, 'awaiting_validation'), (2, '3', 11, 'awaiting_validation'), (3, '4', 13, 'awaiting_validation'),
+               (4, '4', 13, 'queued'), (5, '4', 13, 'validated'), (6, '5', 15, 'extracted'))
+       job(k, facility, member, status);
+-- Access requests (k, member, purpose, status).
+insert into identity.access_requests (id, patient_id, staff_id, membership_id, facility_id, scope, reason, status,
+  requested_duration_minutes, purpose_of_use, approved_by_patient_id, approved_at, correlation_id)
+select ('c1369000-0000-4000-8000-0000000000' || lpad(request.k::text, 2, '0'))::uuid,
+  'c1365000-0000-4000-8000-000000000001', pg_temp.rc_id('2', request.member), pg_temp.rc_id('3', request.member),
+  ('c1366000-0000-4000-8000-00000000000' || (select facility from rc_member where n = request.member))::uuid,
+  'read_records', 'Turn paper records into the digital record (OCR)', request.status, 60, request.purpose,
+  case when request.status = 'approved' then 'c1365000-0000-4000-8000-000000000001'::uuid end,
+  case when request.status = 'approved' then clock_timestamp() end, 'role-change-request-' || request.k
+  from (values (1, 3, 'healthcare-operations', 'pending'), (2, 4, 'healthcare-operations', 'pending'),
+               (3, 7, 'healthcare-operations', 'pending'), (4, 11, 'healthcare-operations', 'pending'),
+               (5, 3, 'direct-care', 'pending'), (6, 3, 'healthcare-operations', 'approved'))
+       request(k, member, purpose, status);
 set local session_replication_role = origin;
 
 -- 3b. The counts with the fictional staff, before 0136.
@@ -220,9 +293,8 @@ set local session_replication_role = origin;
 \o
 \pset format aligned
 \pset tuples_only off
-\copy counts_load from '/tmp/hid-0136-counts.csv' with (format csv)
-insert into counts_seen select 'before', * from counts_load;
-truncate counts_load;
+\copy counts_raw from '/tmp/hid-0136-counts.csv'
+select pg_temp.load_counts('before');
 \set QUIET off
 
 -- 3c. What the fixtures add to each count: real memberships with the role,
@@ -238,24 +310,42 @@ select pg_temp.expect('3c ' || lpad(wanted.position::text, 2, '0') || ' ' || wan
     where before.label = 'before' and baseline.label = 'baseline' and before.position = wanted.position
       and before.change = wanted.change and baseline.change = wanted.change))
   from (values
-    (1, 'receptionist gains ehr.document.write', '2/1/1/0/0', false),
-    (2, 'receptionist gains ehr.document.read', '2/1/1/0/0', false),
-    (3, 'receptionist gains ocr.job.write', '2/1/1/0/0', false),
-    (4, 'receptionist gains ocr.job.read', '2/1/1/0/0', false),
-    (5, 'receptionist gains ehr.vital.read', '2/1/1/0/0', false),
-    (6, 'doctor loses ocr.job.write', '3/2/2/1/1', true),
-    (7, 'doctor loses outreach.campaign.read', '3/1/1/1/1', true),
-    (8, 'doctor loses outreach.campaign.write', '3/1/1/1/1', true),
-    (9, 'doctor loses outreach.registration.read', '3/1/1/1/1', true),
-    (10, 'doctor loses outreach.registration.write', '3/1/1/1/1', true),
-    (11, 'doctor loses lab.work-item.read', '3/2/2/1/1', true),
-    (12, 'doctor loses pharmacy.work-item.read', '3/2/2/1/1', true),
-    (13, 'lab loses ehr.encounter.read', '1/1/1/0/0', true),
-    (14, 'lab loses ocr.job.read', '1/1/1/0/0', true),
-    (15, 'lab loses ocr.job.write', '1/1/1/0/0', true),
-    (16, 'lab loses ocr.validation.write', '1/1/1/0/0', true),
+    (1, 'receptionist gains ehr.document.write', '3/2/2/0/0', false),
+    (2, 'receptionist gains ehr.document.read', '3/2/2/0/0', false),
+    (3, 'receptionist gains ocr.job.write', '3/2/2/0/0', false),
+    (4, 'receptionist gains ocr.job.read', '3/2/2/0/0', false),
+    (5, 'receptionist gains ehr.vital.read', '3/2/2/0/0', false),
+    (6, 'doctor loses ocr.job.write', '4/3/3/1/1', true),
+    (7, 'doctor loses outreach.campaign.read', '4/2/2/1/1', true),
+    (8, 'doctor loses outreach.campaign.write', '4/2/2/1/1', true),
+    (9, 'doctor loses outreach.registration.read', '4/2/2/1/1', true),
+    (10, 'doctor loses outreach.registration.write', '4/2/2/1/1', true),
+    (11, 'doctor loses lab.work-item.read', '4/3/3/1/1', true),
+    (12, 'doctor loses pharmacy.work-item.read', '4/3/3/1/1', true),
+    (13, 'lab loses ehr.encounter.read', '2/2/2/0/0', true),
+    (14, 'lab loses ocr.job.read', '2/2/2/0/0', true),
+    (15, 'lab loses ocr.job.write', '2/2/2/0/0', true),
+    (16, 'lab loses ocr.validation.write', '2/2/2/0/0', true),
     (17, 'admin loses lab.work-item.read', '2/2/2/0/0', true),
     (18, 'admin loses pharmacy.work-item.read', '2/2/2/0/0', true)) wanted(position, change, counts, there);
+-- 3e. What follows: real/sealed counts the fixtures add to lines 19-23.
+select pg_temp.expect('3e ' || wanted.position || ' ' || wanted.consequence, wanted.counts,
+  (select (before.real_count - baseline.real_count) || '/' || (before.sealed_count - baseline.sealed_count)
+     from consequences_seen before join consequences_seen baseline on baseline.position = before.position
+    where before.label = 'before' and baseline.label = 'baseline' and before.position = wanted.position
+      and before.consequence = wanted.consequence and baseline.consequence = wanted.consequence))
+  from (values
+    -- F4 (doctors and a desk) and F5 (laboratory); sealed F2 (a doctor only). F1 keeps its nurses.
+    (19, 'facilities where staff can check a reading today and nobody can after 0136', '2/1'),
+    -- F4: the desk can start a reading there and nobody can check it. F5 and F2: nobody can start one.
+    (20, 'facilities where after 0136 staff can start a reading and nobody can check it', '1/0'),
+    (21, 'facilities where after 0136 staff can start a reading and nobody can confirm its patient', '1/0'),
+    -- The doctor (3) and the laboratory member (7); the sealed doctor (11). Not the doctor with
+    -- a nurse role (4), the direct-care request or the approved one.
+    (22, 'open records-processing requests from staff who lose ocr.job.write (0136 closes them)', '2/1'),
+    -- F4's two and F5's one (F4's checked job and F1's job are not counted); F2's one.
+    (23, 'readings not yet checked at the facilities of line 19', '3/1'))
+    wanted(position, consequence, counts);
 select pg_temp.expect('3d the counts answer eighteen rows, numbers only',
   '18 rows; columns position change row_there_now real_with_role real_changing real_logins sealed_with_role sealed_changing',
   (select count(*) || ' rows' from counts_seen where label = 'before')
@@ -265,6 +355,21 @@ select pg_temp.expect('3d the counts answer eighteen rows, numbers only',
 \ir ../../database/migrations/0136_role_permission_changes.sql
 select pg_temp.expect('4a 0136 applied: removed rows', '0', pg_temp.removed_present()::text);
 select pg_temp.expect('4b 0136 applied: added rows', '5', pg_temp.added_present()::text);
+select pg_temp.expect('4c 0136 closed the records-processing requests of the doctor, the laboratory member and the sealed doctor',
+  '1 expired, 2 pending, 3 expired, 4 expired, 5 pending, 6 approved',
+  (select string_agg(right(id::text, 1) || ' ' || status, ', ' order by id) from identity.access_requests
+    where id::text like 'c1369000-%'));
+select pg_temp.expect('4d one audit row per closed request: system, the plain reason, no staff or patient detail beyond ids',
+  '3 system identity.access-request.close success This staff member can no longer process records migration',
+  (select count(*) || ' ' || min(actor_type) || ' ' || min(action) || ' ' || min(outcome) || ' ' || min(reason) || ' '
+          || min(provenance)
+     from audit.events
+    where resource_type = 'access-request' and resource_id like 'c1369000-%' and correlation_id = '0136-role-permission-changes'
+      and actor_subject is null and patient_id = 'c1365000-0000-4000-8000-000000000001'));
+select pg_temp.expect('4e the count 0136 printed for line 22 is the number it closed', '3',
+  (select (sum(before.real_count + before.sealed_count) - sum(baseline.real_count + baseline.sealed_count))::text
+     from consequences_seen before join consequences_seen baseline on baseline.position = before.position
+    where before.label = 'before' and baseline.label = 'baseline' and before.position = 22));
 
 -- Each fictional member's permissions at its facility, as every service reads
 -- them.
@@ -329,6 +434,16 @@ begin
       || ' ' || pg_temp.holding(8, array['lab.work-item.read']));
 end $$;
 select pg_temp.check_members('after 0136');
+
+-- What the owner signs for the front desk (contract, "Before signing"): with
+-- the patient's access, the desk can open the patient's stored documents at
+-- the facility (ehr.document.read: list and download) and the text read from
+-- them (ocr.job.read: extractions, validations, publications), but holds no
+-- clinical note, diagnosis or prescription read.
+select pg_temp.expect('4f the front desk (1) reads documents and reading text, and no clinical record',
+  'ehr.document.read ocr.job.read - - - -',
+  pg_temp.holding(1, array['ehr.document.read', 'ocr.job.read', 'ehr.note.read', 'ehr.diagnosis.read',
+    'ehr.prescription.read', 'ehr.lab-request.read']));
 
 -- 5. Records processing (0104's trigger), as the Identity API runtime.
 create function pg_temp.ask_records_processing(n integer) returns text language plpgsql as $$
