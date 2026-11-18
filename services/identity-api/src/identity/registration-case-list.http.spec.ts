@@ -127,10 +127,10 @@ describe('SX-10 registration-case list over HTTP', () => {
     expect(answer.headers['cache-control']).toBe('no-store');
     expect(answer.body).toEqual({ view: 'mine', nextCursor: null, cases: [{
       caseId, status: 'pending_new_identity_approval', version: 1, candidateCount: 0, contactRecorded: true,
-      ninStatus: 'verified', fullName: 'Ada Fictional', dateOfBirth: '1991-04-05',
+      ninStatus: 'verified', identityEvidence: 'nin', fullName: 'Ada Fictional', dateOfBirth: '1991-04-05',
       createdAt: '2026-11-18T10:00:58.000Z', updatedAt: '2026-11-18T10:05:58.000Z', createdByMe: true }] });
     expect(listQueries()).toHaveLength(1);
-    expect(listQueries()[0]?.values).toEqual(['mine', accountId, null, null, null, 11]);
+    expect(listQueries()[0]?.values).toEqual(['mine', accountId, null, null, null, 11, null]);
     expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'identity.registration-case.list', outcome: 'success', facilityId,
       details: { view: 'mine', status: null, page: 'first', count: 1, caseIds: [caseId], patientIds: [] } }));

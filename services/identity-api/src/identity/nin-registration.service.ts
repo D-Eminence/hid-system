@@ -38,6 +38,9 @@ interface RegistrationCaseRow extends QueryResultRow {
   contact_recorded?: boolean;
   /** ID-0: see CASE_NIN_VERIFIED. */
   nin_verified?: boolean;
+  /** 0130: 'none' for a registration without a NIN. */
+  identity_evidence?: 'nin_verified' | 'none';
+  created_by_account_id?: string;
 }
 
 /**
@@ -83,6 +86,8 @@ export interface RegistrationCaseResult {
   contactRecorded: boolean;
   /** ID-0: "NIN Verified" or "NIN Not Verified" on screen; never the stored verification value. */
   ninStatus: NinStatus;
+  /** 0130: 'none' when the desk registered the patient without a NIN, else 'nin' (the NIN was checked). */
+  identityEvidence: 'nin' | 'none';
   candidates?: Array<{ patientId: string; fullName: string; dateOfBirth: string | null }>;
   patient?: { patientId: string; hid: string };
 }
@@ -133,7 +138,9 @@ const CASE_SELECT = `
     (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count,
     exists (select 1 from identity.registration_case_contacts contact
              where contact.registration_case_id = registration.id and contact.erased_at is null) as contact_recorded,
-    ${CASE_NIN_VERIFIED}
+    ${CASE_NIN_VERIFIED},
+    registration.identity_evidence,
+    registration.created_by_account_id::text as created_by_account_id
   from identity.registration_cases registration
   left join identity.patients patient on patient.id = registration.resolved_patient_id
 `;
@@ -412,9 +419,18 @@ export class NinRegistrationService {
         resourceId: caseId,
         outcome: 'success',
         purposeOfUse: context.purposeOfUse,
-        details: { status: row.status },
+        details: { status: row.status, candidatesShown: row.status === 'review_required'
+          && (row.identity_evidence !== 'none' || (context.actor.permissions.includes('identity.registration.approve')
+            && row.created_by_account_id !== context.actor.accountId)) },
       });
-      const candidates = row.status === 'review_required' ? (await client.query<{
+      // 0130 (owner Q106): for a registration without a NIN, only an approver
+      // who did not start the case sees who might be the same person; the
+      // desk sees the outcome only.
+      const showsCandidates = row.status === 'review_required'
+        && (row.identity_evidence !== 'none'
+          || (context.actor.permissions.includes('identity.registration.approve')
+            && row.created_by_account_id !== context.actor.accountId));
+      const candidates = showsCandidates ? (await client.query<{
         patientId: string; fullName: string; dateOfBirth: string | null;
       }>(`select patient.id::text as "patientId", patient.full_name as "fullName", patient.dob::text as "dateOfBirth"
            from identity.registration_case_candidates candidate
@@ -464,6 +480,7 @@ export class NinRegistrationService {
            exists (select 1 from identity.registration_case_contacts contact
                     where contact.registration_case_id = registration.id and contact.erased_at is null) as contact_recorded,
            ${CASE_NIN_VERIFIED},
+           registration.identity_evidence,
            registration.full_name,
            registration.dob::text as dob,
            registration.created_at,
@@ -476,9 +493,11 @@ export class NinRegistrationService {
           and ($1::text = 'facility' or registration.created_by_account_id = $2::uuid)
           and ($3::text is null or registration.status = $3::text)
           and ($4::timestamptz is null or (registration.created_at, registration.id) < ($4::timestamptz, $5::uuid))
+          and ($7::text is null or registration.identity_evidence = $7::text)
         order by registration.created_at desc, registration.id desc
         limit $6`,
-        [view, context.actor.accountId, input.status ?? null, cursor?.createdAt ?? null, cursor?.caseId ?? null, limit + 1],
+        [view, context.actor.accountId, input.status ?? null, cursor?.createdAt ?? null, cursor?.caseId ?? null, limit + 1,
+          input.evidence === undefined ? null : input.evidence === 'none' ? 'none' : 'nin_verified'],
       );
       const rows = result.rows.slice(0, limit);
       const last = rows[rows.length - 1];
@@ -497,6 +516,7 @@ export class NinRegistrationService {
         details: {
           view,
           status: input.status ?? null,
+          ...(input.evidence ? { evidence: input.evidence } : {}),
           page: cursor ? 'next' : 'first',
           count: cases.length,
           caseIds: cases.map((item) => item.caseId),
@@ -866,6 +886,7 @@ export class NinRegistrationService {
       candidateCount: Number(row.candidate_count),
       contactRecorded: row.contact_recorded === true,
       ninStatus: ninStatusOf(row.nin_verified),
+      identityEvidence: row.identity_evidence === 'none' ? 'none' : 'nin',
       ...(row.resolved_patient_id && row.resolved_hid_code
         ? { patient: { patientId: row.resolved_patient_id, hid: row.resolved_hid_code } }
         : {}),
