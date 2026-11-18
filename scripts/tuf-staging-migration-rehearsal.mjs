@@ -105,6 +105,8 @@ function quote(identifier) {
 const addedColumns = {
   'ehr.encounters': ['imported_paper_records'], // 0113, default false
   'ocr.publications': ['publication_basis'], // 0113, default NULL (read as direct care)
+  // 0130, default 'nin_verified' and NULL: every historical case was registered with a checked NIN.
+  'identity.registration_cases': ['identity_evidence', 'no_nin_reason'],
 };
 
 async function snapshot(db) {
@@ -391,6 +393,7 @@ try {
     const historicalDefaults = [
       ['ehr.encounters', 'imported_paper_records is distinct from false'],
       ['ocr.publications', 'publication_basis is not null'],
+      ['identity.registration_cases', "identity_evidence is distinct from 'nin_verified' or no_nin_reason is not null"],
     ];
     for (const [table, offending] of historicalDefaults) {
       const { rows } = await client.query(`select count(*)::int as n from ${table} where ${offending}`);
