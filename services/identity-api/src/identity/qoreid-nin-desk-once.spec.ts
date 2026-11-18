@@ -151,7 +151,13 @@ function system() {
     sessionId: 'a8000000-0000-4000-8000-000000000003', roles: [], permissions: [], facilityIds: [], facilities: [] },
   header: () => undefined } as unknown as HidRequest, NIN);
   const cases: unknown[][] = [];
+  /** Active patients holding a NIN verified, by NIN lookup HMAC (identity.patient_identifiers). */
+  const healthIds = new Map<string, Record<string, unknown>>();
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
+    if (sql.includes('from identity.patient_identifiers identifier')) {
+      const patient = healthIds.get(String(values[0]));
+      return { rows: patient ? [patient] : [] };
+    }
     if (/insert into identity\.registration_cases \(/.test(sql)) {
       cases.push(values);
       return { rows: [{ id: caseId }] };
@@ -177,7 +183,7 @@ function system() {
   const deskChecks = () => deskAudit.record.mock.calls.map(([row]) => row)
     .filter((row) => row.action === 'identity.nin.verify').map((row) => row.details);
   return { qoreId, store, ninCheck, ninOnly, resolve, breaker, cases, checkAudits, deskChecks, deskAudit, lookup,
-    verifyProfile, protector };
+    verifyProfile, protector, healthIds };
 }
 
 describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')', () => {
@@ -505,6 +511,43 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       expect(s.qoreId.state.charged).toBe(2);
       expect(burst.filter((answer) => (answer as DomainProblem).code === 'NIN_PROVIDER_UNAVAILABLE')).toHaveLength(2);
       expect(s.breaker.state()).toBe('open');
+    });
+  });
+
+  describe('a NIN already on a Health ID (Q110: its checked answer stays with the record)', () => {
+    /** The patient a sign-up with NIN created: their record's name and date of birth are the NIN record's. */
+    function onHealthId(s: ReturnType<typeof system>) {
+      s.healthIds.set(s.lookup, { patient_id: 'a8000000-0000-4000-8000-0000000000aa', hid_code: 'HID-FIXTURE-0001',
+        first_name: 'BISOLA', last_name: 'FIXTURE', dob: '1988-07-14', gender: 'female',
+        verification_provider: 'qoreid', verification_reference: '8001', verified_at: new Date('2026-12-01T09:00:00Z') });
+    }
+
+    it('matches a returning patient from the record, without paying QoreID again after the stored answer ends', async () => {
+      const s = system();
+      await s.ninOnly.verifyNin(NIN, { correlationId: 'signup-check', path: 'enrollment' });
+      onHealthId(s);
+      // Weeks later, at a second hospital: 0137's stored answer has ended.
+      s.store.clock.offsetMs = NIN_RECORD_ANSWER_SECONDS * 1000 + 1000;
+      await expect(s.resolve('desk-once-key-000301', deskContext(2))).resolves.toMatchObject({ caseId });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits().map(([path, source]) => [path, source])).toEqual([['enrollment', 'qoreid']]);
+      // status, provider, reference and time: HID's own checked answer; the case points at the patient.
+      expect([s.cases[0]?.[4], ...(s.cases[0] ?? []).slice(14, 17), s.cases[0]?.[19]]).toEqual([
+        'resolved_existing_identity', 'qoreid', '8001', '2026-12-01T09:00:00.000Z',
+        'a8000000-0000-4000-8000-0000000000aa']);
+      expect(s.cases[0]?.slice(5, 10)).toEqual(['Bisola', 'Fixture', 'Bisola Fixture', '1988-07-14', 'female']);
+      expect(s.deskChecks()).toEqual([{ provider: 'qoreid', ninCheck: 'match', providerCalled: false,
+        healthIdRecord: true }]);
+    });
+
+    it('leaves a desk that typed other details to the NIN check, as before, telling it nothing', async () => {
+      const s = system();
+      onHealthId(s);
+      await expect(s.resolve('desk-once-key-000302', deskContext(), { ...input, dateOfBirth: '1988-07-15' }))
+        .rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED',
+          message: 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.cases).toHaveLength(0);
     });
   });
 });

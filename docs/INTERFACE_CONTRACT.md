@@ -6458,6 +6458,26 @@ as long as 0137 keeps a record (90 days, Q110) when it matched the desk's
 details, and 24 hours when it did not (probably someone else's NIN, as a
 profile check keeps a record it did not match); "no record" for 24 hours.
 
+### A NIN already on a Health ID (Q110)
+
+Owner Q110: once a NIN is on a Health ID, its checked answer stays with the
+record. Before the NIN service is asked (after the switch check, so not while
+NIN checks are off), Identity reads the active patient who holds this NIN
+verified and not revoked. When the name and date of birth the desk entered are
+the ones on that patient's record (letter case and spacing ignored, first and
+last name in that order), the desk is answered from the record: the case is
+`resolved_existing_identity` for that patient, with the identifier's own
+`verification_provider`, `verification_reference` and time; nothing is sent
+to the NIN service and QoreID is not paid again, however long ago the NIN was
+checked (0137's stored answer may have ended), and the breaker is neither
+asked nor touched. Audit: `identity.nin.verify`, `success`, `ninCheck:
+"match"`, `providerCalled: false`, `healthIdRecord: true`. Any other request
+(no such patient, other details, a record without a date of birth or without
+its check's reference) goes to the NIN service as below, and learns nothing
+from this read. If the patient or the NIN changes between this read and the
+case being written, nothing is written: `409 NIN_CHECK_IN_PROGRESS` (with
+`retryAfterSeconds`), and the retry decides again.
+
 ### One QoreID check per NIN (0137, Q109)
 
 The desk's check goes through 0137's once-per-NIN guard (`NinCheckOnce`;

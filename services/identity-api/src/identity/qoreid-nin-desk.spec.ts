@@ -289,10 +289,19 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   beforeEach(() => { warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined); });
   afterEach(() => jest.restoreAllMocks());
 
-  function desk(provider: NinVerificationProvider, breaker = new NinProviderBreaker()) {
+  /**
+   * `holders`: what each read of the NIN's verified holder (identity.patient_identifiers) finds, in turn;
+   * none by default.
+   */
+  function desk(provider: NinVerificationProvider, breaker = new NinProviderBreaker(),
+    holders: Array<Record<string, unknown> | undefined> = []) {
     const statements: Array<{ sql: string; values: unknown[] }> = [];
     const query = jest.fn(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql: sql.replace(/\s+/g, ' '), values });
+      if (sql.includes('from identity.patient_identifiers identifier')) {
+        const holder = holders.shift();
+        return { rows: holder ? [holder] : [] };
+      }
       if (/insert into identity\.registration_cases \(/.test(sql)) return { rows: [{ id: caseId }] };
       if (/where registration\.id = \$1/.test(sql)) {
         return { rows: [{ id: caseId, status: 'pending_new_identity_approval', row_version: '1',
@@ -560,6 +569,59 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(JSON.stringify(audit.record.mock.calls)).not.toContain('provider_error');
     // Nothing was sent, so the same request may be sent again.
     await expect(service.resolve(input, 'resolve-key-q108-000046', context)).resolves.toMatchObject({ caseId });
+  });
+
+  describe('a NIN already on a Health ID (Q110)', () => {
+    const holder = { patient_id: 'b1000000-0000-4000-8000-000000000001', hid_code: 'HID-FIXTURE-0002',
+      first_name: 'ADA', last_name: ' fictional ', dob: '1991-04-05', gender: 'female',
+      verification_provider: 'qoreid', verification_reference: '700001', verified_at: '2026-10-01T08:00:00.000Z' };
+
+    it('matches the patient from the record without asking the NIN service, even with the breaker tripped', async () => {
+      const qoreId = gate();
+      const breaker = new NinProviderBreaker();
+      breaker.recordFailure(new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'down'));
+      warn.mockClear();
+      const { service, audit, statements } = desk(qoreIdProvider(qoreId), breaker, [holder, holder]);
+      await expect(service.resolve(input, 'resolve-key-q110-000001', context)).resolves.toMatchObject({ caseId });
+      expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+      const insert = statements.find(({ sql }) => sql.includes('insert into identity.registration_cases ('));
+      expect(insert?.values[4]).toBe('resolved_existing_identity');
+      expect(insert?.values.slice(14, 17)).toEqual(['qoreid', '700001', '2026-10-01T08:00:00.000Z']);
+      expect(insert?.values[19]).toBe(holder.patient_id);
+      expect(auditRows(audit)[0]).toMatchObject({ action: 'identity.nin.verify', outcome: 'success',
+        details: { provider: 'qoreid', ninCheck: 'match', providerCalled: false, healthIdRecord: true } });
+      expect(breaker.state()).toBe('open');
+    });
+
+    it.each([
+      ['another first name', { first_name: 'BOLA' }],
+      ['the names the other way round', { first_name: 'FICTIONAL', last_name: 'ADA' }],
+      ['another date of birth', { dob: '1991-04-06' }],
+      ['no date of birth', { dob: null }],
+      ['no recorded check', { verification_reference: null }],
+    ])('leaves a record with %s to the NIN service', async (_label, overrides) => {
+      const qoreId = gate();
+      const { service } = desk(qoreIdProvider(qoreId), undefined, [{ ...holder, ...overrides }, { ...holder, ...overrides }]);
+      await expect(service.resolve(input, 'resolve-key-q110-000002', context)).resolves.toMatchObject({ caseId });
+      expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(1);
+    });
+
+    it('writes nothing when the patient changed between the read and the write', async () => {
+      const qoreId = gate();
+      const { service, statements } = desk(qoreIdProvider(qoreId), undefined, [holder, undefined]);
+      await expect(service.resolve(input, 'resolve-key-q110-000003', context)).rejects.toMatchObject({
+        status: 409, code: 'NIN_CHECK_IN_PROGRESS' });
+      expect(statements.some(({ sql }) => sql.includes('insert into identity.registration_cases ('))).toBe(false);
+      expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+    });
+
+    it('is not read while NIN checks are switched off', async () => {
+      const { service, statements } = desk(qoreIdProvider(gate({ isAvailable: jest.fn(async () => false) })),
+        undefined, [holder, holder]);
+      await expect(service.resolve(input, 'resolve-key-q110-000004', context)).rejects.toMatchObject({
+        status: 503, message: NIN_NOT_CONFIGURED_DETAIL });
+      expect(statements.some(({ sql }) => sql.includes('from identity.patient_identifiers identifier'))).toBe(false);
+    });
   });
 
   describe('0137\'s once-per-NIN guard', () => {
