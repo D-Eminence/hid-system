@@ -434,6 +434,11 @@ try {
   // whatever its reader does, so only this proves the reader answers).
   evidence.checks.prescription_details_runtime = JSON.parse(command('exact-role prescription details on own pharmacy work',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-prescription-details-runtime.mjs')], workflowEnvironment));
+  // 0129: a staff member's chosen facility, kept per sign-in, through Identity's full pipeline with
+  // STAFF_FACILITY_SELECTION_MODE off, keep and ask (a failed read answers 200 'unavailable' and keep answers no field
+  // when nothing is stored, so only this proves the choice is stored and read).
+  evidence.checks.facility_selection_runtime = JSON.parse(command('exact-role facility choice kept per sign-in',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-facility-selection-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);

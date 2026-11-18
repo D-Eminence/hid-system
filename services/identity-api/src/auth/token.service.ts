@@ -92,6 +92,27 @@ export interface SessionEventInput {
   details?: Readonly<Record<string, unknown>>;
 }
 
+/** A staff sign-in's choice of working facility (0129), and the membership it was made under. */
+export interface FacilitySelectionInput {
+  sessionId: string;
+  accountId: string;
+  facilityId: string;
+  membershipId: string;
+}
+
+/**
+ * How recordFacilitySelection ended: stored, with the caller's audit row; the
+ * presented session is no longer a live staff session of the account (a
+ * sign-out, rotation or revocation got there first); or 0129's guard refused
+ * the row (23514 SESSION_FACILITY_SELECTION_INVALID), because the membership,
+ * facility, account or sign-in ended after the request was authorized. Only
+ * 'selected' wrote anything.
+ */
+export type FacilitySelectionOutcome = 'selected' | 'session_ended' | 'refused';
+
+/** 0129's guard refusal of a row it does not admit (raised with SQLSTATE 23514). */
+const FACILITY_SELECTION_INVALID = 'SESSION_FACILITY_SELECTION_INVALID';
+
 /** The product a staff sign-in or refresh is gated by: the event's, else its Origin's. */
 function eventProduct(event: SessionEventMetadata): StaffProduct | undefined {
   return event.product ?? productForOrigin(event.origin);
@@ -421,6 +442,87 @@ export class TokenService {
         });
       }
     });
+  }
+
+  /**
+   * Stores a staff sign-in's choice of working facility (0129), keyed by its
+   * session family, so a refresh (which keeps the family) keeps it and another
+   * sign-in of the account does not see it. A new choice replaces the old.
+   *
+   * The presented session is locked FOR SHARE while it is a live staff session
+   * of the account. Sign-out, rotation and reuse revocation update that row, so
+   * each either waits for this transaction or has ended the session first, and
+   * then nothing is written ('session_ended'). (Staging has no account lock,
+   * main 0073, and this runtime only reads auth.accounts.) 0129's guard admits
+   * the row only for a live staff sign-in of an active account and an active,
+   * unheld membership of it at that facility. `withinTransaction` runs on the
+   * same transaction once the row is written (the caller's audit row), so a
+   * choice is stored only with it. Every other failure is rethrown, and the
+   * transaction is rolled back.
+   */
+  async recordFacilitySelection(input: FacilitySelectionInput, event: SessionEventMetadata,
+    withinTransaction: (client: PoolClient) => Promise<void>): Promise<FacilitySelectionOutcome> {
+    try {
+      return await this.database.withSystemTransaction(event.correlationId, async (client) => {
+        const presented = await client.query<{ family_id: string }>(
+          `select session.family_id::text
+             from auth.sessions session
+            where session.id = $1
+              and session.account_id = $2
+              and session.session_kind = 'staff'
+              and session.revoked_at is null
+              and session.expires_at > clock_timestamp()
+              and session.absolute_expires_at > clock_timestamp()
+              for share`,
+          [input.sessionId, input.accountId],
+        );
+        const familyId = presented.rows[0]?.family_id;
+        if (presented.rowCount !== 1 || !familyId) return 'session_ended' as const;
+        const stored = await client.query<{ family_id: string }>(
+          `insert into auth.session_facility_selection (family_id, account_id, facility_id, membership_id)
+           values ($1::uuid, $2::uuid, $3::uuid, $4::uuid)
+           on conflict (family_id) do update
+              set facility_id = excluded.facility_id, membership_id = excluded.membership_id,
+                  selected_at = clock_timestamp(), row_version = auth.session_facility_selection.row_version + 1
+           returning family_id::text`,
+          [familyId, input.accountId, input.facilityId, input.membershipId],
+        );
+        if (stored.rowCount !== 1) throw new Error('Facility selection was not stored');
+        await withinTransaction(client);
+        return 'selected' as const;
+      });
+    } catch (error) {
+      if (isDatabaseError(error) && error.code === '23514' && error.message === FACILITY_SELECTION_INVALID) {
+        return 'refused';
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The facility a staff sign-in chose (0129), read through the presented
+   * session only while it is a live staff session of the account, so a
+   * signed-out or revoked sign-in never reads its choice again. The facility
+   * id only: the caller matches it against the actor's current facilities by
+   * id, as SecurityGuard matches X-Facility-ID. It authorizes nothing. A plain
+   * read on the pool, taking no row lock; a failure is rethrown for the caller
+   * to report.
+   */
+  async selectedFacilityId(sessionId: string, accountId: string): Promise<string | undefined> {
+    const result = await this.database.query<{ facility_id: string }>(
+      `select selection.facility_id::text
+         from auth.sessions session
+         join auth.session_facility_selection selection
+           on selection.family_id = session.family_id and selection.account_id = session.account_id
+        where session.id = $1
+          and session.account_id = $2
+          and session.session_kind = 'staff'
+          and session.revoked_at is null
+          and session.expires_at > clock_timestamp()
+          and session.absolute_expires_at > clock_timestamp()`,
+      [sessionId, accountId],
+    );
+    return result.rows[0]?.facility_id;
   }
 
   /**
@@ -824,4 +926,8 @@ export class TokenService {
     const secondBuffer = Buffer.from(second);
     return firstBuffer.length === secondBuffer.length && timingSafeEqual(firstBuffer, secondBuffer);
   }
+}
+
+function isDatabaseError(value: unknown): value is { code: string; message: string } {
+  return value instanceof Error && typeof (value as { code?: unknown }).code === 'string';
 }

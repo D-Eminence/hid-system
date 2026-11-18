@@ -1,12 +1,12 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Body, Controller, Get, HttpCode, Optional, Post, Req, Res, ServiceUnavailableException, UnauthorizedException,
-  UseFilters, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Logger, Optional, Post, Req, Res, ServiceUnavailableException,
+  UnauthorizedException, UseFilters, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { AuditService } from '../audit/audit.service';
+import { AuditService, type AuditEventInput } from '../audit/audit.service';
 import { AccountOnlyAllowed, AuditFailuresOnly, FacilityOptional, PatientAllowed, Public,
   SignedOutAllowed } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
-import type { ActorContext, HidRequest } from '../common/request-context';
+import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
@@ -15,7 +15,8 @@ import { LoginDto } from './dto/login.dto';
 import { PatientLoginDto } from './dto/patient-login.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
-import type { LoginResult } from './auth.types';
+import type { FacilitySelectionState, LoginResult } from './auth.types';
+import { actorAtFacility, FACILITY_SELECTION_UNAVAILABLE_EVENT, keepsFacilityChoice } from './facility-selection';
 import { clearSessionCookies, setSessionCookies } from './session-cookies';
 import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-success-audit';
 import { AccountSuspendedProblem } from './account-suspended';
@@ -24,7 +25,7 @@ import { facilityAdmittedOnProduct, isProductGateRefusal, productForOrigin } fro
 import { SsoRouteGuard } from './sso/sso-route.guard';
 import { SsoSessionEndFilter } from './sso/sso-session-end.filter';
 import { SsoService } from './sso/sso.service';
-import { TokenService } from './token.service';
+import { TokenService, type FacilitySelectionOutcome } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
 
@@ -48,12 +49,21 @@ function credentialRefusal(error: unknown): unknown {
   return error instanceof UnauthorizedException ? new UnauthorizedException('Invalid credentials') : error;
 }
 
+/** The actor a session answer reports and, for a sign-in that keeps a facility choice (0129), where its facility comes from. */
+interface SessionReport {
+  actor: ActorContext;
+  facilitySelection?: FacilitySelectionState;
+}
+
 @Controller('auth')
 @AuditFailuresOnly()
 export class AuthController {
   private static readonly GOOGLE_NONCE_TTL_MS = 5 * 60 * 1_000;
   private readonly environment = getEnvironment();
   private readonly allowedOrigins = new Set(this.environment.CORS_ORIGINS.split(',').map((origin) => origin.trim()));
+  /** 0129: off (today's answers), keep or ask. */
+  private readonly facilitySelectionMode = this.environment.STAFF_FACILITY_SELECTION_MODE;
+  private readonly logger = new Logger(AuthController.name);
 
   constructor(
     private readonly auth: AuthService,
@@ -160,7 +170,7 @@ export class AuthController {
       await this.recordSuccess('auth.google.login', result.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(result.actor, result.expiresAt);
+      return this.sessionResponse(result.actor, result.expiresAt, this.newSignInSelection(result.actor));
     } catch (error) {
       // A refusal raised while issuing the session (an account that is not a
       // patient, deactivated meanwhile) gets the one Google denial, not its
@@ -241,7 +251,7 @@ export class AuthController {
       await this.recordSuccess('auth.login', result.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(result.actor, result.expiresAt);
+      return this.sessionResponse(result.actor, result.expiresAt, this.newSignInSelection(result.actor));
     } catch (error) {
       if (isProductGateRefusal(error)) {
         // Q88: the right password, but this site's product admits none of
@@ -304,10 +314,15 @@ export class AuthController {
     }
     try {
       const result = await this.auth.refresh(refreshToken, this.event(request));
-      await this.recordSuccess('auth.refresh', result.actor, request);
+      // 0129: the choice is read once the rotation has committed, through the
+      // new session of the same sign-in, under the product the refresh token
+      // carries (a refresh from another site has ended with 401 above). A
+      // failed read never fails the refresh: it answers 'unavailable'.
+      const reported = await this.withFacilitySelection(result.actor);
+      await this.recordSuccess('auth.refresh', reported.actor, request);
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(result.actor, result.expiresAt);
+      return this.sessionResponse(reported.actor, result.expiresAt, reported.facilitySelection);
     } catch (error) {
       this.clearCookies(response);
       throw error;
@@ -331,24 +346,11 @@ export class AuthController {
   ) {
     const actor = request.actor;
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
-    await this.audit.record({
-      correlationId: request.correlationId,
-      actorType: actor.kind === 'patient' ? 'patient' : 'staff',
-      actorSubject: actor.subject,
-      actorAccountId: actor.accountId,
-      actorMembershipId: actor.facility?.membershipId,
-      organizationId: actor.facility?.organizationId,
-      facilityId: actor.facility?.id,
-      action: 'auth.session.read',
-      resourceType: 'session',
-      resourceId: actor.sessionId,
-      outcome: 'success',
-      sourceIp: request.ip,
-      userAgent: request.header('user-agent'),
-    });
-    const csrfToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
-    if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
-    return this.sessionResponse(actor);
+    // 0129: the sign-in's chosen facility, re-checked against the actor's
+    // facilities as verify() resolved them under the session's own product; a
+    // valid X-Facility-ID still decides. A failed read answers 'unavailable'.
+    const reported = await this.withFacilitySelection(actor, request.facilityId);
+    return this.answerSession(request, response, reported.actor, reported.facilitySelection);
   }
 
   @Get('service-session')
@@ -363,7 +365,10 @@ export class AuthController {
       request.header('x-hid-service-authorization'),
       request.header('x-hid-service-token'),
     );
-    return this.session(request, response);
+    // Answered exactly as before 0129: the services (EHR, Lab, Pharmacy, OCR,
+    // Outreach) act on the X-Facility-ID the website sends, so no facility
+    // choice is read or reported here.
+    return this.answerSession(request, response, request.actor);
   }
 
   @Post('service-session')
@@ -513,7 +518,7 @@ export class AuthController {
       role: facility.roles[0],
       permissions: facility.permissions,
     };
-    await this.audit.record({
+    const selectionAudit: AuditEventInput = {
       correlationId: request.correlationId,
       actorType: 'staff',
       actorSubject: actor.subject,
@@ -527,17 +532,115 @@ export class AuthController {
       outcome: 'success',
       sourceIp: request.ip,
       userAgent: request.header('user-agent'),
-    });
+    };
     const csrfToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
+    if (this.facilitySelectionMode === 'off' || !keepsFacilityChoice(actor)) {
+      // Today's answer, nothing stored: the setting is off, or there is no
+      // Identity sign-in to keep the choice for (an OIDC bearer caller).
+      await this.audit.record(selectionAudit);
+      if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
+      return this.sessionResponse(selectedActor);
+    }
+    // 0129: stored for this sign-in with its audit row, in one transaction.
+    const outcome = await this.storeFacilityChoice(actor, facility, selectionAudit, request);
+    if (outcome === 'session_ended') {
+      throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+    }
+    if (outcome === 'refused') {
+      throw new DomainProblem(403, 'FACILITY_ACCESS_DENIED', 'The actor is not active at this facility');
+    }
     if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
-    return this.sessionResponse(selectedActor);
+    return this.sessionResponse(selectedActor, undefined, 'selected');
   }
 
-  private sessionResponse(actor: ActorContext, expiresAt?: Date) {
+  private sessionResponse(actor: ActorContext, expiresAt?: Date, facilitySelection?: FacilitySelectionState) {
     return {
       actor,
       ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
+      ...(facilitySelection ? { facilitySelection } : {}),
     };
+  }
+
+  /**
+   * The answer of GET /auth/session and of the service-session routes: the
+   * auth.session.read audit row at the facility reported, the CSRF token
+   * echoed, and the actor (with `facilitySelection` only when given).
+   */
+  private async answerSession(request: HidRequest, response: Response, actor: ActorContext | undefined,
+    facilitySelection?: FacilitySelectionState) {
+    if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
+    await this.audit.record({
+      correlationId: request.correlationId,
+      actorType: actor.kind === 'patient' ? 'patient' : 'staff',
+      actorSubject: actor.subject,
+      actorAccountId: actor.accountId,
+      actorMembershipId: actor.facility?.membershipId,
+      organizationId: actor.facility?.organizationId,
+      facilityId: actor.facility?.id,
+      action: 'auth.session.read',
+      resourceType: 'session',
+      resourceId: actor.sessionId,
+      outcome: 'success',
+      sourceIp: request.ip,
+      userAgent: request.header('user-agent'),
+    });
+    const csrfToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
+    if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
+    return this.sessionResponse(actor, undefined, facilitySelection);
+  }
+
+  /**
+   * A new sign-in's answer (password or Google): 'default' in ask mode for a
+   * staff sign-in with a facility, which has made no choice yet; nothing in
+   * keep mode (today's answer) or for any other sign-in.
+   */
+  private newSignInSelection(actor: ActorContext): FacilitySelectionState | undefined {
+    return this.facilitySelectionMode === 'ask' && keepsFacilityChoice(actor) ? 'default' : undefined;
+  }
+
+  /**
+   * The actor at the facility its sign-in chose (0129), matched by facility id
+   * against the actor's facilities as resolved on this request (under the
+   * session's own product, never the request's Origin), taking the first
+   * match, as SecurityGuard binds X-Facility-ID. `boundFacilityId` is the
+   * facility a valid X-Facility-ID bound, which keeps the actor there. A
+   * stored facility no longer among them is 'reselect' at the default, and
+   * the row is kept. Nothing stored is today's answer in keep mode and
+   * 'default' in ask mode. A failed read is 'unavailable' at the default,
+   * never "no choice", and is logged once with no identifiers. Never throws.
+   */
+  private async withFacilitySelection(actor: ActorContext, boundFacilityId?: string): Promise<SessionReport> {
+    if (this.facilitySelectionMode === 'off' || !keepsFacilityChoice(actor)) return { actor };
+    let selectedId: string | undefined;
+    try {
+      selectedId = await this.tokens.selectedFacilityId(actor.sessionId, actor.accountId);
+    } catch {
+      this.logger.warn({ event: FACILITY_SELECTION_UNAVAILABLE_EVENT, operation: 'read' });
+      return { actor, facilitySelection: 'unavailable' };
+    }
+    if (!selectedId) return this.facilitySelectionMode === 'ask' ? { actor, facilitySelection: 'default' } : { actor };
+    const selected = actor.facilities.find((candidate) => candidate.id === selectedId);
+    if (!selected) return { actor, facilitySelection: 'reselect' };
+    return { actor: boundFacilityId ? actor : actorAtFacility(actor, selected), facilitySelection: 'selected' };
+  }
+
+  /**
+   * Stores the choice with its audit row on one transaction (TokenService).
+   * Any failure other than the store's own answers (the guard's refusal, a
+   * sign-in that ended) is 503 DEPENDENCY_UNAVAILABLE with nothing stored,
+   * whether the store or the audit row failed, and is logged once with no
+   * identifiers.
+   */
+  private async storeFacilityChoice(actor: ActorContext & { sessionId: string }, facility: FacilityAssignment,
+    selectionAudit: AuditEventInput, request: HidRequest): Promise<FacilitySelectionOutcome> {
+    try {
+      return await this.tokens.recordFacilitySelection({
+        sessionId: actor.sessionId, accountId: actor.accountId, facilityId: facility.id, membershipId: facility.membershipId,
+      }, this.event(request), (client) => this.audit.recordWithClient(client, selectionAudit));
+    } catch {
+      this.logger.warn({ event: FACILITY_SELECTION_UNAVAILABLE_EVENT, operation: 'store' });
+      throw new DomainProblem(503, 'DEPENDENCY_UNAVAILABLE', 'The facility choice could not be saved; try again');
+    }
   }
 
   private recordSuccess(action: string, actor: ActorContext, request: HidRequest): Promise<void> {
