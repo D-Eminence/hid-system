@@ -1760,3 +1760,31 @@ revoke all on function identity.organization_staff_kinds(uuid) from public;
 grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
 grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
 revoke all on function auth.guard_session_single_sign_on_change() from public;
+
+-- This facility's own pharmacy and lab work (0133, ORD-2, owner decisions of
+-- 18 November 2026), exactly as 0133 grants it: the send and the withdrawal
+-- to the EHR runtime; the own-work access check and the list's states to the
+-- Pharmacy and Lab runtimes; each also to the schema test runtime. The
+-- policy helpers (identity.facility_work_member_allows and
+-- pharmacy.own_work_source_prescription) are executed by no role: the
+-- policy functions run them as their owner. No role has any privilege on
+-- pharmacy.own_prescription_sends.
+grant execute on function ehr.send_prescription_to_own_pharmacy(uuid, bigint),
+  ehr.withdraw_own_pharmacy_send(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.own_work_access_for(text, uuid, text),
+  pharmacy.own_work_item_states(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+grant execute on function lab.own_work_access_for(text, uuid, text),
+  lab.own_work_item_bases(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
+revoke all on function identity.facility_work_member_allows(text, uuid, uuid, text),
+  pharmacy.own_work_source_prescription(uuid, uuid, uuid),
+  ehr.send_prescription_to_own_pharmacy(uuid, bigint),
+  ehr.withdraw_own_pharmacy_send(uuid),
+  pharmacy.own_work_access_for(text, uuid, text),
+  pharmacy.own_work_item_states(uuid[]),
+  lab.own_work_access_for(text, uuid, text),
+  lab.own_work_item_bases(uuid[]) from public;
+revoke all on pharmacy.own_prescription_sends from public;
+
+-- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):
+-- its install is the owner's alone.
+revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;

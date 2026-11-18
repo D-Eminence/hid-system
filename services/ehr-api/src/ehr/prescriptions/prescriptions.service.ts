@@ -15,6 +15,8 @@ import { checkPrescriptionAllergies, readAllergyAcknowledgements,
   recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
 import { type CreatePrescriptionInput, PRESCRIPTION_DISPENSING_DETAILS_OFF,
   PrescriptionDispensingDetails } from './prescription-dispensing-details';
+import { OWN_PHARMACY_SEND_OFF, OwnPharmacySend, type PharmacyHandoff } from './own-pharmacy-send';
+import type { SendPrescriptionToOwnPharmacyDto } from './own-pharmacy-send.dto';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -66,6 +68,7 @@ export class PrescriptionsService {
     private readonly pharmacyApi: PharmacyApiService,
     private readonly orderRoutes: OrderRouteReader,
     private readonly details: PrescriptionDispensingDetails = PRESCRIPTION_DISPENSING_DETAILS_OFF,
+    private readonly ownPharmacy: OwnPharmacySend = OWN_PHARMACY_SEND_OFF,
   ) {}
 
   /** The answer's columns: today's, plus the dispensing details while they are on (0125). */
@@ -175,14 +178,18 @@ export class PrescriptionsService {
             ],
           );
           const row = this.single(result.rows[0]);
+          // 0133: a prescription written as active goes to this hospital's own pharmacy at once.
+          const handoff = row.status === OrderStatus.Active
+            ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
+          const value = withHandoff(this.details.project(row), handoff);
           if (matches.length > 0 && input.allergyAcknowledgement) {
             // The audit says the prescriber went ahead after a warning: flags and counts only,
             // never the substance or the reason text.
             const details = await recordAllergyAcknowledgement(client, context, patientId, row.id, 'create', matches,
               input.allergyAcknowledgement);
-            return { value: this.details.project(row), id: row.id, details };
+            return { value, id: row.id, details: { ...details, ...handoffDetails(handoff) } };
           }
-          return { value: this.details.project(row), id: row.id };
+          return { value, id: row.id, details: handoffDetails(handoff) };
         },
         async (id) => {
           const row = await this.findById(client, context, patientId, id);
@@ -252,14 +259,22 @@ export class PrescriptionsService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Prescription changed since it was loaded');
+        // 0133: activating a draft sends it to this hospital's own pharmacy in this transaction
+        // (a failure never undoes the activation); holding, cancelling or entering it in error
+        // marks a sent one withdrawn, and Pharmacy can no longer dispense it (0101).
+        const handoff = current.status === OrderStatus.Draft && row.status === OrderStatus.Active
+          ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
+        const withdrawn = current.status !== row.status && STOPPING.includes(row.status)
+          ? await this.ownPharmacy.withdraw(client, row.id, context.correlationId) : undefined;
+        const sendDetails = { ...handoffDetails(handoff), ...(withdrawn ? { pharmacySendWithdrawn: true } : {}) };
         if (matches.length > 0 && input.allergyAcknowledgement) {
           const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
             current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement);
-          return { value: this.details.project(row), resourceId: prescriptionId,
-            details: { rowVersion: row.rowVersion, ...reasonDetails, ...override } };
+          return { value: withHandoff(this.details.project(row), handoff), resourceId: prescriptionId,
+            details: { rowVersion: row.rowVersion, ...reasonDetails, ...override, ...sendDetails } };
         }
-        return { value: this.details.project(row), resourceId: prescriptionId,
-          details: { rowVersion: row.rowVersion, ...reasonDetails } };
+        return { value: withHandoff(this.details.project(row), handoff), resourceId: prescriptionId,
+          details: { rowVersion: row.rowVersion, ...reasonDetails, ...sendDetails } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
@@ -359,6 +374,55 @@ export class PrescriptionsService {
     }, idempotencyKey);
   }
 
+  /**
+   * "Send to pharmacy" for the prescriber (0133): sends their active
+   * prescription to this hospital's own pharmacy, or tries a pending send
+   * again. The prescription is locked and must be at the version the client
+   * read (412) and active (409); a route to another facility in force is 409
+   * PRESCRIPTION_ROUTED; an allergy recorded since activation is checked as
+   * the pharmacy hand-off checks it (0117), its acknowledgement stored for the
+   * hand-off stage. The database decides the rest and the answer is the
+   * prescription's `pharmacyHandoff`. On a schema without 0133 it is 503
+   * OWN_PHARMACY_SEND_UNAVAILABLE. Sending twice sends once.
+   */
+  sendToOwnPharmacy(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string,
+    input: SendPrescriptionToOwnPharmacyDto) {
+    return this.repository.run(
+      context, patientId, 'write_records',
+      { action: 'ehr.prescription.own-pharmacy-send', resourceType: 'prescription', resourceId: prescriptionId,
+        details: { expectedPrescriptionVersion: input.expectedRowVersion } },
+      async (client) => {
+        await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
+        const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
+        if (Number(current.rowVersion) !== input.expectedRowVersion) {
+          throw new DomainProblem(412, 'PRESCRIPTION_VERSION_CONFLICT',
+            'This prescription changed since it was read; reload it and send it again');
+        }
+        if (current.status !== OrderStatus.Active) {
+          throw new DomainProblem(409, 'PRESCRIPTION_NOT_ELIGIBLE', 'Only an active prescription can go to the pharmacy');
+        }
+        if (routeInForce(await this.orderRoutes.summary(client, context, 'prescription', patientId, prescriptionId))) {
+          throw new DomainProblem(409, 'PRESCRIPTION_ROUTED',
+            'This prescription has been sent to another pharmacy; withdraw it there first');
+        }
+        const matches = await checkPrescriptionAllergies(client, context, patientId,
+          { display: current.medicationDisplay, code: current.medicationCode }, input.allergyAcknowledgement, current.id);
+        const allergyOverride = matches.length > 0 && input.allergyAcknowledgement
+          ? await recordAllergyAcknowledgement(client, context, patientId, current.id, 'handoff', matches,
+            input.allergyAcknowledgement)
+          : {};
+        const handoff = await this.ownPharmacy.send(client, current.id, Number(current.rowVersion), context.correlationId);
+        if (!handoff) {
+          throw new DomainProblem(503, 'OWN_PHARMACY_SEND_UNAVAILABLE',
+            'Sending to this hospital\'s pharmacy is not available yet');
+        }
+        return { value: { pharmacyHandoff: handoff }, resourceId: prescriptionId,
+          details: { prescriptionVersion: Number(current.rowVersion), ...allergyOverride, ...handoffDetails(handoff) } };
+      },
+      (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
+    );
+  }
+
   private async find(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
     const result = await client.query<PrescriptionRow>(
       `select ${this.columns()} from ehr.prescriptions
@@ -389,6 +453,18 @@ export class PrescriptionsService {
     if (!row) throw new DomainProblem(404, 'PRESCRIPTION_NOT_FOUND', 'Prescription was not found');
     return row;
   }
+}
+
+/** The prescription with its hand-off to this hospital's pharmacy (0133), when there was one. */
+function withHandoff<T extends object>(value: T, handoff: PharmacyHandoff | undefined): T | (T & { pharmacyHandoff: PharmacyHandoff }) {
+  return handoff ? { ...value, pharmacyHandoff: handoff } : value;
+}
+
+/** The audit details of a hand-off: its status and reason code, never the message. */
+function handoffDetails(handoff: PharmacyHandoff | undefined): Record<string, string> {
+  if (!handoff) return {};
+  return handoff.reason ? { pharmacyHandoff: handoff.status, pharmacyHandoffReason: handoff.reason }
+    : { pharmacyHandoff: handoff.status };
 }
 
 function countValues(map: ReadonlyMap<string, readonly unknown[]>): number {

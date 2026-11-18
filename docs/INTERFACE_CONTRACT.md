@@ -6828,3 +6828,104 @@ Screen change (Akos frontend branch): run the check when a medicine is
 chosen and show `message` with the matches (medicine, status, dates) above
 Save; Save stays enabled. After Save, show `duplicateMedicines.message` if
 present.
+
+## 0133. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (ORD-2; Akos Release A, migration 0133)
+
+Owner decisions of 18 November 2026: activated prescriptions go
+automatically to the hospital's own pharmacy (YES); pharmacy and lab staff
+get their own facility's work items only, never the chart. Needs 0001-0127
+(0128 and 0129 replace nothing it touches). It fixes finding F2 of the plan:
+before 0133 a pharmacist or lab scientist without a personal consent grant
+saw "To dispense 0" and a card with no name for their own facility's work.
+
+### Who works on this facility's own work
+
+A member works on this facility's own pharmacy (or lab) work items, those
+with no order route from another facility, when all hold: direct care (an
+emergency session keeps break-glass and does not use this rule); the item is
+at the session's facility; the member holds there `pharmacy.work-item.read`
+and `pharmacy.order-route.receive` (or `lab.work-item.read` and
+`lab.order-route.receive`), which today means the pharmacist and lab roles
+only, so doctors, nurses, clinicians, receptionists and admins gain nothing;
+the patient is active; and no deny directive of the patient covers the
+member. It gives the work item, its patient card (name, sex, date of birth,
+last 4 of the Health ID), its events, accessions, specimens, executions,
+results, dispensings and reversals at that facility, never the chart: no
+EHR table, no version snapshot, and the 0125 prescription details still need
+the member's consent. Every read and write is audited as before, with
+`basis: 'own-work'` where the member has no personal grant.
+
+### Pharmacy API and Lab API changes (no new route)
+
+- `GET /pharmacy/work-items`, `GET /lab/work-items`: the facility's own items
+  appear for its pharmacy or lab staff. The list's per-patient audit row
+  carries `basis: 'consent'` or `basis: 'own-work'`.
+- Every command on an own work item or its chain (pharmacy: read, dispense,
+  reverse; lab: read, accession, specimen, execution, result) is allowed on
+  the own-work basis without asking Identity; else Identity's consent decides
+  as before (403 as before). Audit details gain `basis: 'own-work'`.
+- An own pharmacy item whose automatic send was withdrawn (the prescription
+  was put on hold, cancelled or entered in error after it was sent) carries
+  `"withdrawn": true`; dispensing it answers 409
+  `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` "This prescription can no longer be
+  dispensed here" (0101, unchanged).
+
+### EHR API: `pharmacyHandoff`
+
+Activating a draft prescription (`PATCH .../prescriptions/:prescriptionId`
+with `status: "active"`), or creating one as active, sends it to this
+hospital's own pharmacy in the same transaction and the answer gains:
+
+```json
+{ "pharmacyHandoff": { "status": "sent", "message": "Sent to this hospital's pharmacy." } }
+```
+
+| status | reason | message |
+|---|---|---|
+| `sent` | | Sent to this hospital's pharmacy. / This hospital's pharmacy already has this prescription. |
+| `pending` | | Not sent to the pharmacy yet. Use Send to pharmacy to try again. |
+| `not_sent` | `no_pharmacy` | Not sent: nobody at this facility works on pharmacy orders on Health ID. |
+| `not_sent` | `routed` | Not sent: this prescription has been sent to another pharmacy. |
+| `not_sent` | `not_prescriber` | Not sent: only the person who wrote this prescription can send it to the pharmacy. |
+| `not_sent` | `changed` | Not sent: this prescription changed. Reload it and try again. |
+| `not_sent` | `unavailable` | Not sent: the pharmacy could not be reached. Use Send to pharmacy to try again. |
+
+Only the prescriber's own activation sends. The pharmacy work item is
+accepted by the prescriber (never recorded as a pharmacist's acceptance) with
+the fixed reason "Sent automatically when the prescription was activated". A
+failed send never undoes the activation. Without 0133 in the database the
+answer has no `pharmacyHandoff`. Resuming after a hold does not send again (the
+pharmacy keeps one item per prescription). Putting a sent prescription on
+hold, cancelling it or entering it in error marks the send withdrawn. The
+audit row of the update records `pharmacyHandoff` (status and reason code, no
+message) and `pharmacySendWithdrawn`.
+
+### `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/own-pharmacy-send`
+
+"Send to pharmacy" for the prescriber: sends their active prescription, or
+tries a pending send again. Permission `ehr.prescription.write`. No
+Idempotency-Key (sending twice sends once).
+
+```json
+{ "expectedRowVersion": 2, "allergyAcknowledgement": { "warningToken": "...", "reason": "..." } }
+```
+
+`allergyAcknowledgement` only after the allergy warning, as on the pharmacy
+hand-off (0117). Answer `200 { "pharmacyHandoff": { ... } }` as above.
+Errors: 412 `PRESCRIPTION_VERSION_CONFLICT`, 409 `PRESCRIPTION_NOT_ELIGIBLE`
+(not active), 409 `PRESCRIPTION_ROUTED`, 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED`,
+503 `OWN_PHARMACY_SEND_UNAVAILABLE` (no 0133 yet), 403 `CONSENT_REQUIRED`.
+Audit action `ehr.prescription.own-pharmacy-send`.
+
+Screen change (Akos frontend branch): after Activate, show
+`pharmacyHandoff.message`; show "Send to pharmacy" when it is `pending` or
+`not_sent` with reason `unavailable`. On the pharmacy list, show a withdrawn
+item as "Withdrawn by the prescriber" with Dispense disabled.
+
+## 0134. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
+
+Owner decision Q102 of 18 November 2026. No new login, address or password:
+0123's fictional "QA Pharmacist" (pharmacy@) and "QA Lab Scientist" (lab@)
+gain a second membership, at QA Hospital (pharmacist and lab roles; not
+primary). Pick QA Hospital when signing in. Written only where the sealed QA
+tenant is installed (production); nowhere else. No API change.

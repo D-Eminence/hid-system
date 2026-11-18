@@ -11,6 +11,7 @@ import { LabWorkItemsService, WORK_LIST_QUERY } from './lab-work-items.service';
 import { LabOrderRouteAccess } from './order-route-access';
 import { LabOrderRouteCards } from './order-route-cards';
 import { LabOwnWorkPatientCards, OWN_WORK_PATIENT_CARDS_OFF } from './own-work-patient-cards';
+import { LabOwnWork, OWN_WORK_OFF } from './own-work-access';
 
 /*
  * The patient on this facility's own work (0124, owner decision 25 of
@@ -242,7 +243,9 @@ describe('OWN_WORK_PATIENT_CARD_ENABLED', () => {
     const moduleRef = await Test.createTestingModule({ providers: [LabWorkItemsService,
       { provide: DatabaseService, useValue: {} }, { provide: IdentityService, useValue: {} },
       { provide: AuditService, useValue: {} }, { provide: LabOrderRouteAccess, useValue: {} },
-      { provide: LabOrderRouteCards, useValue: {} }, { provide: LabOwnWorkPatientCards, useValue: reader }] }).compile();
+      { provide: LabOrderRouteCards, useValue: {} }, { provide: LabOwnWorkPatientCards, useValue: reader },
+      // 0133's own-work reader, which the service takes after it.
+      { provide: LabOwnWork, useValue: OWN_WORK_OFF }] }).compile();
     expect((moduleRef.get(LabWorkItemsService) as unknown as { ownPatients: unknown }).ownPatients).toBe(reader);
   });
 

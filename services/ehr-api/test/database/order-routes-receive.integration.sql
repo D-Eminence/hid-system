@@ -929,8 +929,11 @@ values ('e4c90000-0000-4000-8000-000000000001', 'e4c30000-0000-4000-8000-0000000
 set local session_replication_role = origin;
 set local role hid_lab_api_runtime;
 select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
-select pg_temp.assert('a non-route row of the same patient stays hidden',
-  not exists (select 1 from lab.work_items item where item.id = 'e4c90000-0000-4000-8000-000000000001'));
+-- 0133 (finding F2): L1's lab staff (LB2 holds lab.work-item.read and
+-- lab.order-route.receive at L1) now see L1's own work without a grant;
+-- before 0133 this row stayed hidden.
+select pg_temp.assert('a non-route row of the same patient is L1''s own work, which its lab staff see (0133)',
+  exists (select 1 from lab.work_items item where item.id = 'e4c90000-0000-4000-8000-000000000001'));
 select pg_temp.assert('route-backed items visible without consent', (select count(*) from lab.work_items item
   where item.order_route_id is not null) = 3);
 select pg_temp.assert('the second member may write the route-backed item', lab.work_item_allows(
@@ -1068,9 +1071,11 @@ select pg_temp.assert('the review gate keeps a receiving role out of the pending
 -- resource-based.
 set local role hid_lab_api_runtime;
 select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
-select pg_temp.assert('residual: the chain branch is per patient', lab.context_allows(
+-- 0133: an own (non-route) work item is now allowed to L1's lab staff too.
+select pg_temp.assert('residual: the chain branch is per patient (and, since 0133, L1''s own work is its lab staff''s)',
+  lab.context_allows(
   'e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid, 'read_records')
-  and not lab.work_item_allows('e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid,
+  and lab.work_item_allows('e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid,
     null, 'read_records'));
 reset role;
 

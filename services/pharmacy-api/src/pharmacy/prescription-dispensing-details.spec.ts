@@ -13,6 +13,7 @@ import { PharmacyOrderRouteCards } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
 import { inclusiveDays, PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF,
   type PrescriptionDetailsRow } from './prescription-dispensing-details';
+import { OWN_WORK_OFF, PharmacyOwnWork } from './own-work-access';
 
 /*
  * The prescriber's priority, strength, form, duration and quantity to
@@ -264,7 +265,9 @@ describe('PRESCRIPTION_DISPENSING_DETAILS_ENABLED', () => {
       { provide: AuditService, useValue: {} }, { provide: PharmacyOrderRouteAccess, useValue: {} },
       { provide: PharmacyOrderRouteCards, useValue: {} },
       { provide: PharmacyOwnWorkPatientCards, useValue: OWN_WORK_PATIENT_CARDS_OFF },
-      { provide: PharmacyPrescriptionDetails, useValue: details }] }).compile();
+      { provide: PharmacyPrescriptionDetails, useValue: details },
+      // 0133's own-work reader, which the service takes after it.
+      { provide: PharmacyOwnWork, useValue: OWN_WORK_OFF }] }).compile();
     expect((moduleRef.get(PharmacyService) as unknown as { prescriptionDetails: unknown }).prescriptionDetails).toBe(details);
   });
 

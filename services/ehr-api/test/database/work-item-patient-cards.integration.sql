@@ -67,8 +67,8 @@ begin
            expected.proc_name, coalesce(md5(proc.prosrc), 'none (missing)'), pg_get_userbyid(proc.proowner), proc.prosecdef, proc.provolatile,
            language_row.lanname, proc.proisstrict, proc.proconfig), '; ')
     into mismatch
-    from (values ('lab.work_item_patient_cards(uuid[])', '69b1836bb8d9493bdc0d6d7cc5e96515'),
-                 ('pharmacy.work_item_patient_cards(uuid[])', '5a944e144033d04f86771a33ef41247b')) expected(proc_name, digest)
+    from (values ('lab.work_item_patient_cards(uuid[])', '91e157a7d6f89edd46c14dbb095d1bc6'),
+                 ('pharmacy.work_item_patient_cards(uuid[])', '0dc38390c3c40a1883b87345ce0d35bd')) expected(proc_name, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc_name)
     left join pg_language language_row on language_row.oid = proc.prolang
    where proc.oid is null or md5(proc.prosrc) <> expected.digest
@@ -76,7 +76,7 @@ begin
       or not proc.prosecdef or proc.provolatile <> 's' or language_row.lanname <> 'plpgsql' or proc.proisstrict
       or proc.proconfig is distinct from '{"search_path=pg_catalog, pg_temp"}'::text[];
   if mismatch is not null then
-    raise exception 'work item patient cards: the functions are not 0124''s: %', mismatch;
+    raise exception 'work item patient cards: the functions are not 0133''s (0124''s with the own-work branch): %', mismatch;
   end if;
   select string_agg(format('%s %s', proc.oid::regprocedure, acl.grantee::regrole), '; ') into mismatch
     from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
@@ -315,12 +315,12 @@ set local role hid_lab_api_runtime;
 select pg_temp.as_member(1, 1);
 select pg_temp.expect('LS reads its own rows'' patients',
   pg_temp.cards('lab', pg_temp.items('lab')),
-  '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
-select pg_temp.expect('LS: row-level security shows the routed row 4 too', pg_temp.visible('lab', false), '1 2 4 6');
+  '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
+select pg_temp.expect('LS: row-level security shows the routed row 4 too', pg_temp.visible('lab', false), '1 2 3 4 6');
 select pg_temp.expect('LS: the cards are exactly its own rows under row-level security',
   pg_temp.card_ids('lab'), pg_temp.visible('lab', true));
 select pg_temp.expect('LS: one routed row alone', pg_temp.cards('lab', array['e113000a-0000-4000-8000-000000000004'::uuid]), '');
-select pg_temp.expect('LS: Chidi, without a grant', pg_temp.cards('lab', array['e113000a-0000-4000-8000-000000000003'::uuid]), '');
+select pg_temp.expect('LS: Chidi, without a grant (0133: the facility''s lab staff see their own work)', pg_temp.cards('lab', array['e113000a-0000-4000-8000-000000000003'::uuid]), '3:Chidi Card/male/1988-07-14/CCC4');
 select pg_temp.expect('LS: F2''s own row', pg_temp.cards('lab', array['e113000a-0000-4000-8000-000000000005'::uuid]), '');
 select pg_temp.expect('LS: repeated and unknown ids', pg_temp.cards('lab', array['e113000a-0000-4000-8000-000000000001'::uuid,
   'e113000a-0000-4000-8000-000000000001'::uuid, 'e113000a-0000-4000-8000-000000000009'::uuid, null]),
@@ -362,7 +362,7 @@ select pg_temp.as_member(6, 1, 'emergency');
 select pg_temp.expect('LE under emergency', pg_temp.cards('lab', pg_temp.items('lab')), '1:Amaka Card/female/1991-02-03/AAA2');
 select pg_temp.expect('LE: the cards are exactly its own rows', pg_temp.card_ids('lab'), pg_temp.visible('lab', true));
 select pg_temp.as_member(6, 1);
-select pg_temp.expect('LE under direct care', pg_temp.cards('lab', pg_temp.items('lab')), '');
+select pg_temp.expect('LE under direct care (0133: as the facility''s lab staff)', pg_temp.cards('lab', pg_temp.items('lab')), '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
 reset role;
 
 -- 2-5. Pharmacy, through pharmacy-api's runtime.
@@ -370,8 +370,8 @@ set local role hid_pharmacy_api_runtime;
 select pg_temp.as_member(2, 1);
 select pg_temp.expect('PH reads its own rows'' patients',
   pg_temp.cards('pharmacy', pg_temp.items('pharmacy')),
-  '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
-select pg_temp.expect('PH: row-level security shows the routed row 4 too', pg_temp.visible('pharmacy', false), '1 2 4 6');
+  '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
+select pg_temp.expect('PH: row-level security shows the routed row 4 too', pg_temp.visible('pharmacy', false), '1 2 3 4 6');
 select pg_temp.expect('PH: the cards are exactly its own rows under row-level security',
   pg_temp.card_ids('pharmacy'), pg_temp.visible('pharmacy', true));
 select pg_temp.expect('PH: one routed row alone',
@@ -394,7 +394,7 @@ select pg_temp.expect('PE under emergency', pg_temp.cards('pharmacy', pg_temp.it
   '1:Amaka Card/female/1991-02-03/AAA2');
 select pg_temp.expect('PE: the cards are exactly its own rows', pg_temp.card_ids('pharmacy'), pg_temp.visible('pharmacy', true));
 select pg_temp.as_member(7, 1);
-select pg_temp.expect('PE under direct care', pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '');
+select pg_temp.expect('PE under direct care (0133: as the facility''s pharmacy staff)', pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
 reset role;
 
 -- 3. A revoked or an expired grant, a disabled account (as the owner, then
@@ -407,14 +407,14 @@ update identity.consent_grants set starts_at = clock_timestamp() - interval '2 h
  where id in ('e1130008-0000-4000-8000-000000000014', 'e1130008-0000-4000-8000-000000000024');
 set local role hid_lab_api_runtime;
 select pg_temp.as_member(1, 1);
-select pg_temp.expect('LS after Bode''s grant is revoked and Dupe''s expired', pg_temp.cards('lab', pg_temp.items('lab')),
-  '1:Amaka Card/female/1991-02-03/AAA2');
+select pg_temp.expect('LS after Bode''s grant is revoked and Dupe''s expired (0133: still the facility''s lab staff)', pg_temp.cards('lab', pg_temp.items('lab')),
+  '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
 select pg_temp.expect('LS: still exactly its own rows', pg_temp.card_ids('lab'), pg_temp.visible('lab', true));
 reset role;
 set local role hid_pharmacy_api_runtime;
 select pg_temp.as_member(2, 1);
-select pg_temp.expect('PH after Bode''s grant is revoked and Dupe''s expired',
-  pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '1:Amaka Card/female/1991-02-03/AAA2');
+select pg_temp.expect('PH after Bode''s grant is revoked and Dupe''s expired (0133: still the facility''s pharmacy staff)',
+  pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
 reset role;
 rollback to savepoint grant_changes;
 savepoint account_change;
@@ -447,7 +447,7 @@ set local session_replication_role = origin;
 set local role hid_lab_api_runtime;
 select pg_temp.as_member(1, 1);
 select pg_temp.expect('LS with a deny directive on Amaka', pg_temp.cards('lab', pg_temp.items('lab')),
-  '2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
+  '2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
 select pg_temp.expect('LS deny: still exactly its own rows', pg_temp.card_ids('lab'), pg_temp.visible('lab', true));
 select pg_temp.as_member(6, 1, 'emergency');
 select pg_temp.expect('LE under emergency with a deny directive', pg_temp.cards('lab', pg_temp.items('lab')),
@@ -457,7 +457,7 @@ reset role;
 set local role hid_pharmacy_api_runtime;
 select pg_temp.as_member(2, 1);
 select pg_temp.expect('PH with a deny directive on Amaka', pg_temp.cards('pharmacy', pg_temp.items('pharmacy')),
-  '2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
+  '2:Bode Card/male/1979-12-30/XYZ7 3:Chidi Card/male/1988-07-14/CCC4 6:Dupe Card/-/-/DDD5');
 select pg_temp.expect('PH deny: still exactly its own rows', pg_temp.card_ids('pharmacy'),
   pg_temp.visible('pharmacy', true));
 reset role;
@@ -499,8 +499,8 @@ set local role hid_lab_api_runtime;
 select pg_temp.as_member(1, 1), set_config('app.membership_id', 'e1130004-0000-4000-8000-000000000009', true);
 select pg_temp.expect('LS''s F2 membership at F1', pg_temp.cards('lab', pg_temp.items('lab')), '');
 select pg_temp.as_member(1, 2), set_config('app.membership_id', 'e1130004-0000-4000-8000-000000000009', true);
-select pg_temp.expect('LS''s F2 membership at F2 (its grants name its F1 membership)',
-  pg_temp.cards('lab', pg_temp.items('lab')), '');
+select pg_temp.expect('LS''s F2 membership at F2 (0133: F2''s lab staff see F2''s own work) (its grants name its F1 membership)',
+  pg_temp.cards('lab', pg_temp.items('lab')), '5:Amaka Card/female/1991-02-03/AAA2');
 select pg_temp.as_member(1, 1), set_config('app.membership_id', 'e1130004-0000-4000-8000-000000000002', true);
 select pg_temp.expect('LS''s subject with PH''s membership', pg_temp.cards('lab', pg_temp.items('lab')), '');
 select pg_temp.as_member(1, 1), set_config('app.facility_id', 'not-a-uuid', true);

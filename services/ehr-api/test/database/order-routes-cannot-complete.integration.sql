@@ -1752,7 +1752,10 @@ insert into d18_pins values
   -- 0108 (owner decisions D-a and D-b) replaced the cover's body: no 24-hour
   -- bound, and an active patient share covers too.
   ('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamp with time zone)', '6928763d3b69f0e4b4acf96a6a255736'),
-  ('lab.context_allows(uuid,uuid,text)', '57e689661a6227e34d3bde9562468951'),
+  -- 0133 gave the chain tables' policy the own-work branch (the facility's
+  -- lab staff), which reaches identity.facility_work_member_allows.
+  ('identity.facility_work_member_allows(text,uuid,uuid,text)', '474875a22f8c5e7b46846f1ddb1d5046'),
+  ('lab.context_allows(uuid,uuid,text)', 'bb7622fd781f95899b467ec606c32d2f'),
   ('lab.patient_self_context(uuid)', '39aeca12d2c59b69877800a9a3a7c50b'),
   ('notification.enqueue_patient_inbox_item(uuid,text,text,uuid,jsonb)', '0b5689f31a3ce00f9313fe1e55244fad'),
   -- 0115 (outreach organisers) added the key outreach_organiser_signup_enabled.
@@ -1765,13 +1768,13 @@ insert into d18_pins values
   ('platform.current_purpose_of_use()', '74f7f2ea17dbbe825f7cfe543ad3e83f'),
   ('platform.reject_mutation()', '398738f39f6eebed2c54da5009495def'),
   ('platform.require_control_enabled(text)', '90887489d15eab24f8f71b145bb02320');
-select pg_temp.assert('d18: the functions the new and replaced bodies reach are exactly the 42 pins for them (the 40 of 0091, the due check of 0096 and the cover of 0104)',
+select pg_temp.assert('d18: the functions the new and replaced bodies reach are exactly the 43 pins for them (the 40 of 0091, the due check of 0096, the cover of 0104 and 0133''s own-work test)',
   (select array_agg(reached order by reached) from d18_reached)
   = (select array_agg(signature order by signature) from d18_pins),
   (select string_agg(reached, ', ' order by reached) from d18_reached));
-select pg_temp.assert('d18: each reached function still has the body 0091 pinned (the patient session as 0096 replaced it, the consent gate as 0104 did, the cover as 0108 did)',
+select pg_temp.assert('d18: each reached function still has the body 0091 pinned (the patient session as 0096 replaced it, the consent gate as 0104 did, the cover as 0108 did, the chain policy as 0133 did)',
   (select count(*) from d18_pins pinned
-     join pg_proc proc on proc.oid = pinned.signature::regprocedure and md5(proc.prosrc) = pinned.digest) = 42);
+     join pg_proc proc on proc.oid = pinned.signature::regprocedure and md5(proc.prosrc) = pinned.digest) = 43);
 -- The three CHECKs 0091 changed: their definitions, validated while the
 -- route table's heap held at most 117,145,600 bytes when 0091 ran, NOT VALID
 -- above (the form 0091 chose; the suite's own writes never move a copy

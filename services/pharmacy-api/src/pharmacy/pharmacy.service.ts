@@ -14,6 +14,7 @@ import { IMPORT_PAGE_DEFAULT, type ListImportedMedicationsQueryDto, type OcrMedi
 import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
+import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-access';
 import { PRESCRIPTION_DETAILS_OFF, PharmacyPrescriptionDetails,
   type WorkItemDispensingDetails } from './prescription-dispensing-details';
 
@@ -192,7 +193,8 @@ export class PharmacyService {
     private readonly audit: AuditService, private readonly routeAccess: PharmacyOrderRouteAccess,
     private readonly routeCards: PharmacyOrderRouteCards,
     private readonly ownPatients: PharmacyOwnWorkPatientCards = OWN_WORK_PATIENT_CARDS_OFF,
-    private readonly prescriptionDetails: PharmacyPrescriptionDetails = PRESCRIPTION_DETAILS_OFF) {}
+    private readonly prescriptionDetails: PharmacyPrescriptionDetails = PRESCRIPTION_DETAILS_OFF,
+    private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
 
   async acceptPrescription(context: DataAccessContext, input: AcceptEhrPrescriptionDto, key: string) {
     if (input.orderingFacilityId !== context.facilityId) throw new DomainProblem(403,
@@ -279,11 +281,13 @@ export class PharmacyService {
         context.correlationId);
       const ownIds = result.rows.filter((row) => !row.order_route_id).map((row) => row.id);
       const own = await this.ownPatients.patients(client, ownIds, context.correlationId);
-      await this.auditShownPatients(client, context, result.rows, cards, own);
+      // 0133: why each own row is seen (consent or own-work) and whether its automatic send was withdrawn.
+      const states = await this.ownWork.states(client, ownIds, context.correlationId);
+      await this.auditShownPatients(client, context, result.rows, cards, own, states);
       const details = await this.prescriptionDetails.details(client, ownIds, context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
-        this.prescriptionDetails.forRow(row, details.get(row.id)))), ...receiving,
+        this.prescriptionDetails.forRow(row, details.get(row.id)), states.get(row.id))), ...receiving,
         ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
@@ -298,10 +302,13 @@ export class PharmacyService {
    * one; the collection row above stays as it was. Own work whose patient is
    * shown (0124) gets the same: one row per patient, with the work items (ids
    * only) and basis 'consent', which the patient's access log shows as a view;
-   * none while OWN_WORK_PATIENT_CARD_ENABLED is off.
+   * none while OWN_WORK_PATIENT_CARD_ENABLED is off. Since 0133 an own row seen
+   * by the facility's pharmacy staff without a personal grant is recorded with
+   * basis 'own-work' (one row per patient and basis).
    */
   private async auditShownPatients(client: PoolClient, context: DataAccessContext, rows: readonly WorkItemRow[],
-    cards: ReadonlyMap<string, OrderRouteCard>, own: ReadonlyMap<string, WorkItemRoutePatient>) {
+    cards: ReadonlyMap<string, OrderRouteCard>, own: ReadonlyMap<string, WorkItemRoutePatient>,
+    states: ReadonlyMap<string, OwnWorkState> = new Map()) {
     const shown = new Map<string, { first: WorkItemRow; workItemIds: string[]; orderRouteIds: string[] }>();
     for (const row of rows) {
       const card = cards.get(row.id);
@@ -316,17 +323,20 @@ export class PharmacyService {
         patientId, resourceType: 'pharmacy-work-item', resourceId: entry.first.id,
       }, { basis: 'order-route', workItemIds: entry.workItemIds, orderRouteIds: entry.orderRouteIds });
     }
-    const ownShown = new Map<string, { first: WorkItemRow; workItemIds: string[] }>();
+    const ownShown = new Map<string, { patientId: string; basis: 'consent' | 'own-work'; first: WorkItemRow;
+      workItemIds: string[] }>();
     for (const row of rows) {
       if (row.order_route_id || !own.has(row.id)) continue;
-      const entry = ownShown.get(row.patient_id) ?? { first: row, workItemIds: [] };
+      const basis = states.get(row.id)?.basis ?? 'consent';
+      const key = `${row.patient_id}:${basis}`;
+      const entry = ownShown.get(key) ?? { patientId: row.patient_id, basis, first: row, workItemIds: [] };
       entry.workItemIds.push(row.id);
-      ownShown.set(row.patient_id, entry);
+      ownShown.set(key, entry);
     }
-    for (const [patientId, entry] of ownShown) {
+    for (const entry of ownShown.values()) {
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
-        patientId, resourceType: 'pharmacy-work-item', resourceId: entry.first.id,
-      }, { basis: 'consent', workItemIds: entry.workItemIds });
+        patientId: entry.patientId, resourceType: 'pharmacy-work-item', resourceId: entry.first.id,
+      }, { basis: entry.basis, workItemIds: entry.workItemIds });
     }
   }
 
@@ -346,8 +356,10 @@ export class PharmacyService {
       // Its prescription details (0125, PRESCRIPTION_DISPENSING_DETAILS_ENABLED).
       const details = row.order_route_id ? undefined
         : await this.prescriptionDetails.details(client, [row.id], context.correlationId);
+      // 0133: whether its automatic send was withdrawn.
+      const states = row.order_route_id ? undefined : await this.ownWork.states(client, [row.id], context.correlationId);
       return this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
-        this.prescriptionDetails.forRow(row, details?.get(row.id)));
+        this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id));
     });
   }
 
@@ -618,10 +630,13 @@ export class PharmacyService {
    * an own row's prescription details (0125, PRESCRIPTION_DISPENSING_DETAILS_ENABLED
    * on): its medication gains `strength` and `doseForm`, and the item
    * `priority`, `duration`, `quantityToDispense` and `quantityUnit`, each only
-   * when there is a value, after today's fields.
+   * when there is a value, after today's fields. An own item whose automatic
+   * send was withdrawn (0133: the prescription was held, cancelled or entered
+   * in error after it was sent) carries `withdrawn: true`; dispensing it is
+   * refused (409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE).
    */
   private projectWorkItem(row: WorkItemRow, card?: OrderRouteCard, ownPatient?: WorkItemRoutePatient,
-    details?: WorkItemDispensingDetails) {
+    details?: WorkItemDispensingDetails, ownState?: OwnWorkState) {
     const source = row.order_route_id ? {} : { sourceEhrPrescriptionId: row.source_ehr_prescription_id,
       sourceEncounterId: row.source_encounter_id };
     const route = row.order_route_id
@@ -641,7 +656,8 @@ export class PharmacyService {
       ...(details?.priority ? { priority: details.priority } : {}),
       ...(details?.duration ? { duration: details.duration } : {}),
       ...(details?.quantityToDispense === undefined ? {}
-        : { quantityToDispense: details.quantityToDispense, quantityUnit: details.quantityUnit }) };
+        : { quantityToDispense: details.quantityToDispense, quantityUnit: details.quantityUnit }),
+      ...(ownState?.withdrawn ? { withdrawn: true } : {}) };
   }
 
   private projectDispensing(row: DispensingRow) {

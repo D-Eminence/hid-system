@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0127",
-    "count": 128,
+    "last": "0134",
+    "count": 130,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -609,6 +609,14 @@
       {
         "name": "0127_sso_relying_party.sql",
         "sha256": "9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d"
+      },
+      {
+        "name": "0133_own_facility_pharmacy_and_lab_work.sql",
+        "sha256": "8c39bc94f1ac4b99fb563882d2515a2caae4e022e6cdfdde17f58b00715459ae"
+      },
+      {
+        "name": "0134_sealed_qa_hospital_pharmacy_lab_staff.sql",
+        "sha256": "1c0ee88cb30b8deb703bf961fdc2a8a884f94b143fddcecbfba6633293ceb75e"
       }
     ]
   },
