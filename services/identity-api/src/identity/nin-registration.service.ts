@@ -9,8 +9,8 @@ import { DatabaseService } from '../database/database.service';
 import { CollectedFieldProtector, registrationCaseContactLabel } from './collected-field-protector';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
-import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinCheckNotStarted, isNinNotConfigured,
-  ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
+import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinCheckNotStarted,
+  isNinCheckRefusedUnsent, isNinNotConfigured, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinCheckReservation, type NinCheckReservationResult,
   type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
 import { NinProviderBreaker } from './nin-provider-breaker';
@@ -262,9 +262,12 @@ export class NinRegistrationService {
       assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
     } catch (error) {
       await this.provider.settle?.(reservation, 'not_answered');
-      if (isNinNotConfigured(error) || isNinCheckNotStarted(error)) {
+      if (isNinNotConfigured(error) || isNinCheckNotStarted(error) || isNinCheckRefusedUnsent(error)) {
         // Q108: switched off, or the switch could not be read, between the
-        // switch check and the check; nothing was sent. Not an outage.
+        // switch check and the check; 0137: the once-per-NIN guard refused
+        // it (this NIN is being checked or is held, or the guard's store or
+        // keys are unavailable). Nothing was sent for this request: not an
+        // outage, and the breaker's retry place is freed.
         this.ninBreaker.release();
         await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
         throw error;

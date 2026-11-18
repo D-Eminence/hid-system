@@ -11,11 +11,13 @@ import {
   DeferredNinVerificationProvider,
   DeterministicTestNinVerificationProvider,
   isNinCheckNotStarted,
+  isNinCheckRefusedUnsent,
   isNinNotConfigured,
   NIN_NOT_CONFIGURED_DETAIL,
   UnavailableNinVerificationProvider,
 } from './nin-verification.provider';
 import { NIN_BREAKER_RETRY_AFTER_MS, NIN_PROVIDER_UNAVAILABLE_EVENT, NinProviderBreaker } from './nin-provider-breaker';
+import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavailable } from './nin-check-once';
 import type { NinVerificationProvider, NinVerificationRequest } from './nin.types';
 import type { PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import {
@@ -174,10 +176,12 @@ describe('Q108 QoreID NIN check for the desk', () => {
     expect(qoreId.isAvailable).toHaveBeenCalledTimes(2);
   });
 
-  it('sends only the NIN and answers a match with QoreID\'s reference', async () => {
+  it('sends only the NIN, through 0137\'s once-per-NIN guard as the desk, and answers a match with QoreID\'s reference', async () => {
     const qoreId = gate();
     const answer = await qoreIdProvider(qoreId).verify(request);
-    expect(qoreId.verifyNin).toHaveBeenCalledWith(NIN);
+    // The request's correlation id and path 'desk' go to the guard (its audit row); nothing else but the NIN.
+    expect(qoreId.verifyNin).toHaveBeenCalledTimes(1);
+    expect(qoreId.verifyNin).toHaveBeenCalledWith(NIN, { correlationId: 'correlation-q108', path: 'desk' });
     expect(answer).toEqual({
       verified: true, outcome: 'match', provider: 'qoreid', reference: '700123',
       verifiedAt: expect.any(String),
@@ -251,6 +255,30 @@ describe('Q108 QoreID NIN check for the desk', () => {
     const refusal = qoreIdProvider(qoreId).verify(request);
     await expect(refusal).rejects.toMatchObject({ status, code });
     await refusal.catch((error) => expect(isNinNotConfigured(error)).toBe(false));
+  });
+
+  describe('the answers of 0137\'s once-per-NIN guard', () => {
+    const held = new Date(Date.now() + 5 * 60 * 1000);
+    it.each([
+      ['this NIN is being checked', () => ninCheckInProgress(), 409, 'NIN_CHECK_IN_PROGRESS', 60],
+      ['this NIN is held after a check QoreID may have charged', () => ninCheckHeld(held), 409, 'NIN_CHECK_HELD', 300],
+      ['the check is still running after the wait', () => ninCheckStillRunning(), 504, 'QOREID_TIMEOUT', 60],
+    ] as const)('passes "%s" on with retryAfterSeconds', async (_label, refusal, status, code, retryAfterSeconds) => {
+      const qoreId = gate({ verifyNin: jest.fn(async () => { throw refusal(); }) });
+      const answer = await qoreIdProvider(qoreId).verify(request).catch((error: unknown) => error) as DomainProblem;
+      expect(answer).toMatchObject({ status, code });
+      expect(answer.extensions?.retryAfterSeconds).toBeGreaterThanOrEqual(retryAfterSeconds - 1);
+      expect(answer.extensions?.retryAfterSeconds).toBeLessThanOrEqual(retryAfterSeconds);
+      expect(isNinCheckRefusedUnsent(answer)).toBe(code !== 'QOREID_TIMEOUT');
+    });
+
+    it('answers "cannot be started" when the guard\'s store cannot be read', async () => {
+      const qoreId = gate({ verifyNin: jest.fn(async () => { throw ninCheckUnavailable(); }) });
+      const refusal = qoreIdProvider(qoreId).verify(request);
+      await expect(refusal).rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+        message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+      await refusal.catch((error) => expect(isNinCheckNotStarted(error)).toBe(true));
+    });
   });
 
   it.each([
@@ -706,6 +734,65 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(JSON.stringify(audit.record.mock.calls)).not.toContain('provider_error');
     // Nothing was sent, so the same request may be sent again.
     await expect(service.resolve(input, 'resolve-key-q108-000046', context)).resolves.toMatchObject({ caseId });
+  });
+
+  describe('0137\'s once-per-NIN guard', () => {
+    /** A breaker tripped a minute ago, now letting one check through. */
+    function retryingBreaker() {
+      const breaker = new NinProviderBreaker();
+      breaker.recordFailure(new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'down'), {},
+        Date.now() - NIN_BREAKER_RETRY_AFTER_MS);
+      warn.mockClear();
+      expect(breaker.state()).toBe('retrying');
+      return breaker;
+    }
+
+    it.each([
+      ['NIN_CHECK_IN_PROGRESS', () => ninCheckInProgress(), 409],
+      ['NIN_CHECK_HELD', () => ninCheckHeld(new Date(Date.now() + 6 * 60 * 60 * 1000)), 409],
+      ['NIN_PROTECTION_UNAVAILABLE', () => new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE',
+        'NIN protection keys are unavailable'), 503],
+    ] as const)('answers the guard\'s %s as sent nothing: no breaker count, the retry place freed', async (code, refusal,
+      status) => {
+      const verifyNin = jest.fn().mockRejectedValueOnce(refusal()).mockResolvedValueOnce(record());
+      const breaker = retryingBreaker();
+      const { service, audit } = desk(qoreIdProvider(gate({ verifyNin })), breaker);
+      const answer = await service.resolve(input, 'resolve-key-q109-000050', context).catch((error: unknown) => error);
+      expect(answer).toMatchObject({ status, code });
+      if (status === 409) expect((answer as DomainProblem).extensions?.retryAfterSeconds).toBeGreaterThan(0);
+      expect(warn).not.toHaveBeenCalled();
+      expect(breaker.available()).toBe(true);
+      expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
+        details: { provider: 'qoreid', errorType: 'DomainProblem', code, providerCalled: false } })]);
+      // Nothing was sent, so the same request may be sent again.
+      await expect(service.resolve(input, 'resolve-key-q109-000050', context)).resolves.toMatchObject({ caseId });
+    });
+
+    it('answers the guard\'s store being unreadable as "cannot be started", without touching the breaker', async () => {
+      const qoreId = gate({ verifyNin: jest.fn(async () => { throw ninCheckUnavailable(); }) });
+      const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
+      await expect(service.resolve(input, 'resolve-key-q109-000051', context)).rejects.toMatchObject({
+        status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+        message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+      // A 503 from QoreID itself would have tripped it at once.
+      expect(breaker.state()).toBe('closed');
+      expect(warn).not.toHaveBeenCalled();
+      expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
+        details: expect.objectContaining({ provider: 'qoreid', providerCalled: false }) })]);
+    });
+
+    it('passes on 504 QOREID_TIMEOUT with retryAfterSeconds as a sent check that counts toward the breaker', async () => {
+      const qoreId = gate({ verifyNin: jest.fn(async () => { throw ninCheckStillRunning(); }) });
+      const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
+      const answer = await service.resolve(input, 'resolve-key-q109-000052', context).catch((error: unknown) => error);
+      expect(answer).toMatchObject({ status: 504, code: 'QOREID_TIMEOUT', extensions: { retryAfterSeconds: 60 } });
+      // One slow answer does not trip it; three within five minutes do (as before).
+      expect(breaker.state()).toBe('closed');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
+        details: { provider: 'qoreid', errorType: 'DomainProblem', code: 'QOREID_TIMEOUT', providerCalled: true,
+          ninCheck: 'provider_error' } })]);
+    });
   });
 });
 

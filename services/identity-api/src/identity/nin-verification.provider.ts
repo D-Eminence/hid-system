@@ -77,6 +77,24 @@ export function isNinCheckNotStarted(error: unknown): boolean {
 }
 
 /**
+ * 0137 (Q109): the once-per-NIN guard's refusals that send nothing for this
+ * request: the same NIN is being checked (409 NIN_CHECK_IN_PROGRESS), it is
+ * held after a check QoreID may have charged (409 NIN_CHECK_HELD), or the
+ * NIN keys the guard needs are missing (503 NIN_PROTECTION_UNAVAILABLE).
+ */
+const NIN_CHECK_REFUSED_UNSENT_CODES = new Set(['NIN_CHECK_IN_PROGRESS', 'NIN_CHECK_HELD',
+  'NIN_PROTECTION_UNAVAILABLE']);
+
+/**
+ * True when the NIN check was refused before anything was sent for this
+ * request (0137's guard). Not an outage of the NIN service: it must not trip
+ * the breaker, and the audit row says the NIN was not sent.
+ */
+export function isNinCheckRefusedUnsent(error: unknown): boolean {
+  return error instanceof DomainProblem && NIN_CHECK_REFUSED_UNSENT_CODES.has(error.code);
+}
+
+/**
  * Q108: the details the desk typed cannot be anyone's: a date of birth that
  * is not a real date, is in the future or is before 1900, or a name that is
  * blank, longer than 100 characters or holds a control character (such as a

@@ -6444,11 +6444,49 @@ and spacing ignored, first and last name in that order):
 | the NIN is not confirmed | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `no_match` (`identity.nin.verify`, `denied`) |
 | the name or date of birth differs | `422 NIN_VERIFICATION_FAILED`, "The name or date of birth does not match the NIN record. Check the spelling and the date of birth." | `name_mismatch` (`identity.nin.verify`, `denied`) |
 | QoreID fails (5xx, timeout, network, bad answer) | QoreID's own `5xx` problem; counts toward the breaker | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
+| (0137) the guard refuses or reuses an answer | see "One QoreID check per NIN" below | |
 
 The case keeps the desk's spelling of the name (it equals the record's but
 for letter case and spacing) and the desk's sex, or the record's when the desk
 gave none and the record's is not "unknown". Nothing else from the record is
 kept, returned or logged. The answer never names the record's details.
+
+### One QoreID check per NIN (0137, Q109)
+
+The desk's check goes through 0137's once-per-NIN guard (`NinCheckOnce`;
+docs/QOREID_VERIFICATION_CONTRACT.md, "One QoreID check per NIN") as
+`verifyNin(nin, { correlationId: <this request's>, path: 'desk' })`. QoreID
+is asked at most once for a NIN whichever path asks (sign-up, the profile,
+the desk), and the stored answer is reused. A stored record is compared with
+the desk's name and date of birth as a fresh one is, so correcting a name or
+a date of birth after "does not match" is not charged again. The guard writes
+its own audit row (`identity.qoreid.nin-check`, `path: "desk"`, the same
+`correlationId` as the desk's `identity.nin.verify` row) saying whether
+QoreID was called or a stored answer reused; never the NIN or its HMAC.
+
+The guard's answers, as the desk gives them:
+
+| The guard | Desk answer | `identity.nin.verify` audit | Breaker |
+| --- | --- | --- | --- |
+| a stored record | compared as a fresh one: the case, or `422` name mismatch | as for a fresh answer | as for a fresh answer |
+| a stored "no record" | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `denied`, `ninCheck: "no_match"` | not counted |
+| another check of this NIN is still running when this request's wait ends | `409 NIN_CHECK_IN_PROGRESS`, "We are still checking this NIN. Please wait a minute, then try again.", `retryAfterSeconds: 60` | `failure`, `providerCalled: false` | not counted; the retry place is freed |
+| the NIN is held after a check QoreID may have charged | `409 NIN_CHECK_HELD`, "We could not finish checking this NIN. Please try again in 5 minutes." (or "... in 6 hours."), `retryAfterSeconds`: the time left | `failure`, `providerCalled: false` | not counted; the retry place is freed |
+| this request's wait (`QOREID_TIMEOUT_MS`) ended before QoreID answered | `504 QOREID_TIMEOUT`, `retryAfterSeconds: 60`; the check goes on and its answer is kept for the retry | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | counts, as any QoreID timeout |
+| its store could not be read (`NIN_CHECK_UNAVAILABLE`) | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." | `failure`, `providerCalled: false` | not counted |
+| its NIN keys are missing | `503 NIN_PROTECTION_UNAVAILABLE` | `failure`, `providerCalled: false` | not counted |
+| a stored QoreID "not found" (404) or an answer HID cannot use | `502 QOREID_PROVIDER_REJECTED` or `502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | counts, as the first time |
+
+`providerCalled` says whether the desk's check was handed to the NIN service
+(for QoreID, to the guard); whether QoreID itself was called is the guard's
+row's `qoreidCalled`. A `5xx` problem's `detail` is replaced by the problem
+filter ("The service could not complete the request."); its `code` and
+`retryAfterSeconds` are always sent. A client shows the plain message, offers
+to try again after `retryAfterSeconds`, sends the same `Idempotency-Key` on
+that retry, and never retries on its own. A desk request answers within
+`QOREID_TIMEOUT_MS` of sending its own check, or `QOREID_TIMEOUT_MS` + 3 s
+when it waits for another check of the same NIN; the website waits at least
+15 s.
 
 ### Details refused before any check
 
@@ -6523,8 +6561,15 @@ one account's and one facility's checks are never refused for volume);
 one check per desk request (a resend while waiting, at the same moment, after
 "could not be verified" or "does not match", after a failure); details
 refused before any check; the breaker; the audit rows; capabilities; no NIN
-in an audit row or log line). The QoreID adapter is mocked: no test calls
-QoreID.
+in an audit row or log line; 0137's answers as the desk's). The QoreID
+adapter is mocked: no test calls QoreID.
+`services/identity-api/src/identity/qoreid-nin-desk-once.spec.ts` drives the
+real desk service and providers, 0137's guard and the real QoreID adapter
+against a fake QoreID that bills every NIN request (two desks at once; a
+resend after "could not be verified"; a corrected name; a sign-up and the
+desk, one after the other and at once; a timeout and the retry with the same
+`Idempotency-Key`; held, in progress, store unreachable; every NIN request
+sent under the guard's lease; no NIN in an audit row or log line).
 
 ## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
 

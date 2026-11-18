@@ -151,10 +151,25 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
     }
   }
 
+  /**
+   * 0137 (Q109): the check goes through the once-per-NIN guard (NinCheckOnce)
+   * as the desk's: QoreID is asked at most once for a NIN whichever path asks
+   * (sign-up, the profile, the desk), a stored answer is reused, and the
+   * guard's audit row (`identity.qoreid.nin-check`, path 'desk') carries this
+   * request's correlation id. The guard's answers become the desk's:
+   * - 409 NIN_CHECK_IN_PROGRESS (this NIN is being checked) and 409
+   *   NIN_CHECK_HELD (held after a check QoreID may have charged), with
+   *   `retryAfterSeconds`: passed on; nothing was sent for this request.
+   * - 504 QOREID_TIMEOUT with `retryAfterSeconds`: passed on; the check was
+   *   sent and goes on, and its answer is kept for the retry.
+   * - 503 NIN_CHECK_UNAVAILABLE (the guard's store could not be read):
+   *   "NIN checks cannot be started right now", as the desk answers any check
+   *   that could not be started; nothing was sent.
+   */
   async verify(request: NinVerificationRequest): Promise<NinVerificationResult> {
     let identity: VerifiedPublicPatientIdentity;
     try {
-      identity = await this.qoreId.verifyNin(request.nin);
+      identity = await this.qoreId.verifyNin(request.nin, { correlationId: request.correlationId, path: 'desk' });
     } catch (error) {
       if (error instanceof DomainProblem && CLOSED_GATE_CODES.has(error.code)) {
         // Switched off between the gate and the check: nothing was sent.
@@ -163,6 +178,11 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
       if (error instanceof DomainProblem && error.code === 'INTEGRATION_UNAVAILABLE') {
         // The gate's admin control could not be read (only the gate, which
         // runs before anything is sent, raises this code): nothing was sent.
+        throw ninCheckNotStarted();
+      }
+      if (error instanceof DomainProblem && error.code === 'NIN_CHECK_UNAVAILABLE') {
+        // 0137's store of checks could not be read or written before the
+        // check: nothing was sent.
         throw ninCheckNotStarted();
       }
       if (error instanceof DomainProblem && error.code === 'NIN_NOT_VERIFIED') {
