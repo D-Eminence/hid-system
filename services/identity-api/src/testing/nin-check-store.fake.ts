@@ -11,12 +11,15 @@ export interface FakeNinCheckRow {
   state: 'checking' | 'held' | 'answered';
   attempt_id: string;
   question_hmac: string | null;
-  outcome: 'record' | 'no_record' | 'rejected' | null;
+  outcome: 'record' | 'no_record' | 'rejected' | 'unusable' | null;
   record_complete: boolean | null;
   answer_ciphertext: Buffer | null;
   key_version: string | null;
   until: number;
 }
+
+/** 0137's hold for a lease that ended without an outcome. */
+const LOST_LEASE_HOLD_MS = 6 * 60 * 60 * 1000;
 
 export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolean; now?: () => number } = {}) {
   const rows = new Map<string, FakeNinCheckRow>();
@@ -37,6 +40,10 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
       return { decision: 'call', outcome: null, record_complete: null, answer_ciphertext: null, until: new Date(leaseEnd) };
     };
     if (!row) return take();
+    if (row.state === 'checking' && row.until <= now() && row.until + LOST_LEASE_HOLD_MS > now()) {
+      Object.assign(row, { state: 'held', until: row.until + LOST_LEASE_HOLD_MS });
+      return { decision: 'held', outcome: null, record_complete: null, answer_ciphertext: null, until: new Date(row.until) };
+    }
     if (row.until > now()) {
       if (row.state === 'checking') return { decision: 'wait', outcome: null, record_complete: null,
         answer_ciphertext: null, until: new Date(row.until) };
@@ -59,19 +66,29 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
     if (!row || row.attempt_id !== attempt || row.state !== 'checking') return false;
     if (result === 'released') { rows.delete(lookup); return true; }
     if (result === 'held') { Object.assign(row, { state: 'held', until: now() + Number(seconds) * 1000 }); return true; }
+    if (erased(lookup)) { rows.delete(lookup); return false; }
     Object.assign(row, { state: 'answered', outcome: result, question_hmac: result === 'record' ? null : question,
       record_complete: result === 'record' ? complete : null, answer_ciphertext: ciphertext, key_version: keyVersion,
       until: now() + Number(seconds) * 1000 });
     return true;
   }
 
+  /** Expired rows by `until`, then (separately limited) answers for erased NINs, as 0137's two deletes. */
   function prune(values: readonly unknown[]) {
+    const limit = Number(values[0]);
     let removed = 0;
-    for (const [lookup, row] of [...rows]) {
-      if (removed >= Number(values[0])) break;
-      if (row.until <= now() || (row.state === 'answered' && erased(lookup))) { rows.delete(lookup); removed += 1; }
+    for (const [lookup, row] of [...rows].sort(([, a], [, b]) => a.until - b.until)) {
+      if (removed >= limit) break;
+      if (row.until <= now() && (row.state !== 'checking' || row.until + LOST_LEASE_HOLD_MS <= now())) {
+        rows.delete(lookup); removed += 1;
+      }
     }
-    return removed;
+    let erasedCount = 0;
+    for (const [lookup, row] of [...rows]) {
+      if (erasedCount >= limit) break;
+      if (row.state === 'answered' && erased(lookup)) { rows.delete(lookup); erasedCount += 1; }
+    }
+    return removed + erasedCount;
   }
 
   /** Answers the 0137 statements; undefined for any other statement. */
@@ -96,8 +113,8 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
  */
 export function passThroughNinCheck() {
   return {
-    check: jest.fn(async (request: { ask: () => Promise<{ answer: unknown; value: unknown }> }) => {
-      const asked = await request.ask();
+    check: jest.fn(async (request: { ask: (options: { timeoutMs: number }) => Promise<{ answer: unknown; value: unknown }> }) => {
+      const asked = await request.ask({ timeoutMs: 1_000 });
       return { source: 'qoreid' as const, answer: asked.answer, value: asked.value };
     }),
     prune: jest.fn(async () => 0),

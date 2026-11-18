@@ -11,8 +11,8 @@ import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { fakeNinCheckStore } from '../testing/nin-check-store.fake';
 import type { HidCodeGenerator } from './hid-code-generator.service';
-import { NIN_CHECK_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS, NIN_RECORD_ANSWER_SECONDS,
-  NinCheckOnce } from './nin-check-once';
+import { NIN_CHECK_HOLD_SECONDS, NIN_CHECK_NO_ANSWER_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS,
+  NIN_RECORD_ANSWER_SECONDS, NinCheckOnce } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
@@ -39,8 +39,20 @@ const RECORD = { nin: NIN, firstname: 'Adaeze', lastname: 'Fictional', middlenam
   gender: 'F', birthdate: '02-03-1990', phone: '08000000000', photo: 'Zml4dHVyZQ==',
   residence: { address1: '1 Fixture Road', town: 'Fixture Town', lga: 'Fixture LGA', state: 'Fixture State' } };
 const originalEnvironment = { ...process.env };
+/** Every NinCheckOnce a test made, so checks still reading an answer finish before the next test. */
+const created: NinCheckOnce[] = [];
 
-type QoreIdMode = 'verified' | 'no_record' | 'not_found' | 'slow' | 'unavailable';
+/**
+ * 'slow': never answers (HID gives up at QOREID_NIN_ANSWER_CEILING_MS);
+ * 'late': answers after the caller's wait but within the ceiling;
+ * 'refused': the connection is refused before anything is sent (not billed);
+ * 'reset': the connection drops after the request was sent;
+ * 'forbidden': 403, an account-level refusal (wallet, product, allowlist);
+ * 'no_gender': a verified record without a usable gender (HID cannot enroll with it);
+ * 'no_id': a verified answer whose transaction id is not a safe integer.
+ */
+type QoreIdMode = 'verified' | 'no_record' | 'not_found' | 'slow' | 'late' | 'unavailable' | 'refused' | 'reset'
+  | 'forbidden' | 'no_gender' | 'no_id';
 
 /** A QoreID that bills every NIN request it receives, as the owner's logs show. */
 function fakeQoreId() {
@@ -50,16 +62,24 @@ function fakeQoreId() {
   const fetch = jest.fn(async (url: string, init: RequestInit) => {
     if (url.endsWith('/token')) return json({ accessToken: 'fixture-access-token', expiresIn: 7200, tokenType: 'Bearer' });
     if (!url.includes('/v1/ng/identities/nin/')) throw new Error('unexpected QoreID path');
-    state.charged += 1;
     const mode = state.modes.shift() ?? state.fallback;
+    if (mode === 'refused') {
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }) });
+    }
+    state.charged += 1;
     if (state.delayMs) await new Promise((resolve) => setTimeout(resolve, state.delayMs));
+    if (mode === 'late') await new Promise((resolve) => setTimeout(resolve, 500));
     if (mode === 'slow') {
       // QoreID keeps working (and bills) after HID stops waiting.
       await new Promise((_resolve, reject) => init.signal?.addEventListener('abort',
         () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
     }
+    if (mode === 'reset') {
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('reset'), { code: 'ECONNRESET' }) });
+    }
     if (mode === 'unavailable') return json({ message: 'unavailable' }, 503);
     if (mode === 'not_found') return json({ message: 'not found' }, 404);
+    if (mode === 'forbidden') return json({ message: 'insufficient balance' }, 403);
     transaction += 1;
     const claims = typeof init.body === 'string' ? JSON.parse(init.body) as Record<string, string> : undefined;
     if (mode === 'no_record') {
@@ -71,10 +91,10 @@ function fakeQoreId() {
     const firstname = upper(claims?.firstname) === upper(RECORD.firstname);
     const lastname = upper(claims?.lastname) === upper(RECORD.lastname);
     const dob = claims?.dob === '1990-03-02';
-    return json({ id: transaction, status: { state: 'complete', status: 'verified' },
+    return json({ id: mode === 'no_id' ? 'not-a-number' : transaction, status: { state: 'complete', status: 'verified' },
       summary: { nin_check: claims ? { status: firstname && lastname && dob ? 'EXACT_MATCH' : 'NO_MATCH',
         fieldMatches: { firstname, lastname, dob } } : 'verified' },
-      nin: RECORD });
+      nin: mode === 'no_gender' ? { ...RECORD, gender: '' } : RECORD });
   });
   return { state, fetch };
 }
@@ -162,6 +182,7 @@ function system() {
     consumePatientQuota: jest.fn().mockResolvedValue(undefined) } as unknown as IntegrationRuntimeService;
   const protector = new NinIdentifierProtector();
   const ninCheck = new NinCheckOnce(db.database, protector, new AuditService(db.database));
+  created.push(ninCheck);
   const provider = new QoreIdPublicPatientIdentityProvider(adapter, integrations, ninCheck);
   const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
   const enrollment = new PatientEnrollmentService(db.database, protector, provider,
@@ -193,11 +214,13 @@ describe('the same NIN is sent to QoreID once', () => {
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 3).toString('base64'),
       QOREID_ENABLED: 'true', QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
       QOREID_CLIENT_ID: 'fixture-client', QOREID_CLIENT_SECRET: 'fixture-secret', QOREID_TIMEOUT_MS: '250',
+      QOREID_NIN_ANSWER_CEILING_MS: '1000',
     });
     resetEnvironmentForTests();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await Promise.all(created.splice(0).map((check) => check.settle()));
     for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
     Object.assign(process.env, originalEnvironment);
     resetEnvironmentForTests();
@@ -217,7 +240,7 @@ describe('the same NIN is sent to QoreID once', () => {
       const s = system();
       s.qoreId.state.modes = ['slow'];
       await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_TIMEOUT' });
-      await expect(s.start(KEY_A)).rejects.toMatchObject({ status: 409, code: 'NIN_CHECK_IN_PROGRESS' });
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ status: 409, code: 'NIN_CHECK_HELD' });
       expect(s.qoreId.state.charged).toBe(1);
     });
 
@@ -288,7 +311,7 @@ describe('the same NIN is sent to QoreID once', () => {
       const s = system();
       s.qoreId.state.modes = ['slow'];
       await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'QOREID_TIMEOUT' });
-      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'NIN_CHECK_IN_PROGRESS' });
+      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'NIN_CHECK_HELD' });
       expect(s.qoreId.state.charged).toBe(1);
     });
 
@@ -362,27 +385,190 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.qoreId.state.charged).toBe(2);
     });
 
-    it('after a timeout the NIN is held for a few minutes, then a new check asks QoreID', async () => {
+    it('an answer that arrives after the caller stopped waiting is kept, and the retry reuses it (28 October)', async () => {
+      const s = system();
+      // Production's 5 s timeout and a 6 s answer with a photo, scaled down.
+      s.qoreId.state.modes = ['late'];
+      const first = await s.start(KEY_A).catch((error: unknown) => error);
+      expect(first).toMatchObject({ status: 504, code: 'QOREID_TIMEOUT',
+        message: 'The NIN check is taking longer than usual. Please wait a minute, then try again.' });
+      await s.ninCheck.settle();
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'timeout'], ['enrollment', 'late', 'record'],
+        ['enrollment', 'stored', 'record']]);
+    });
+
+    it('a retry while the late answer is still on its way waits for it instead of asking again', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['late'];
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_TIMEOUT' });
+      // Sent at once: it finds the check still running and waits for its answer.
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(1);
+    });
+
+    it('with no answer by the ceiling the NIN is held for hours, not 5 minutes, and the message says so', async () => {
       const s = system();
       s.qoreId.state.modes = ['slow'];
       await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_TIMEOUT' });
-      const held = await s.start(KEY_A).catch((error: unknown) => error);
-      expect(held).toMatchObject({ status: 409, code: 'NIN_CHECK_IN_PROGRESS',
-        message: 'We are still checking this NIN. Please wait a few minutes, then try again.' });
+      await s.ninCheck.settle();
+      // The old 5-minute hold has passed: still held, still no second charge.
       s.db.store.clock.offsetMs = NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
+      const held = await s.start(KEY_A).catch((error: unknown) => error) as { message: string;
+        extensions: { retryAfterSeconds: number } };
+      expect(held).toMatchObject({ status: 409, code: 'NIN_CHECK_HELD',
+        message: 'We could not finish checking this NIN. Please try again in 6 hours.' });
+      expect(held.extensions.retryAfterSeconds).toBeGreaterThan(5 * 60 * 60);
+      expect(s.qoreId.state.charged).toBe(1);
+      s.db.store.clock.offsetMs = NIN_CHECK_NO_ANSWER_HOLD_SECONDS * 1000 + 1000;
       await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
       expect(s.qoreId.state.charged).toBe(2);
-      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'timeout'], ['enrollment', 'none', 'held'],
-        ['enrollment', 'qoreid', 'record']]);
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'timeout'], ['enrollment', 'late', 'no_answer'],
+        ['enrollment', 'none', 'held'], ['enrollment', 'qoreid', 'record']]);
     });
 
-    it('a QoreID outage is not kept: the next check asks again', async () => {
+    it('a QoreID 5xx is held for 5 minutes, then the next check asks again', async () => {
       const s = system();
       s.qoreId.state.modes = ['unavailable'];
       await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_UNAVAILABLE' });
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ status: 409, code: 'NIN_CHECK_HELD',
+        message: 'We could not finish checking this NIN. Please try again in 5 minutes.' });
+      expect(s.qoreId.state.charged).toBe(1);
+      s.db.store.clock.offsetMs = NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
       await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
       expect(s.qoreId.state.charged).toBe(2);
-      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'not_answered'], ['enrollment', 'qoreid', 'record']]);
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'not_answered'], ['enrollment', 'none', 'held'],
+        ['enrollment', 'qoreid', 'record']]);
+    });
+
+    it('a connection lost after the request was sent is held, not asked again at once', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['reset'];
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_NETWORK_UNAVAILABLE' });
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'NIN_CHECK_HELD' });
+      expect(s.qoreId.state.charged).toBe(1);
+    });
+
+    it('a connection refused before anything was sent is let go: the next check asks at once', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['refused'];
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_NETWORK_UNAVAILABLE' });
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'not_sent'], ['enrollment', 'qoreid', 'record']]);
+      const notSent = s.db.audits.filter((values) => values[8] === 'identity.qoreid.nin-check')
+        .map((values) => JSON.parse(String(values[16])) as Record<string, unknown>)[0];
+      expect(notSent).toMatchObject({ qoreidCalled: false, result: 'not_sent' });
+    });
+
+    it('an account-level refusal (403) is not kept as a refusal of the NIN for a day', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['forbidden'];
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
+      // Held briefly (it may have been charged), then the NIN is checked again once the account is fixed.
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'NIN_CHECK_HELD' });
+      s.db.store.clock.offsetMs = NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(2);
+      expect([...s.db.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'record' });
+    });
+
+    it('a complete answer HID cannot use is kept for a day: never re-sent, every path refuses it without a call', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['no_gender'];
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      s.db.store.clock.offsetMs = NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
+      await expect(s.start(KEY_B)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      await expect(s.provider.verifyNin(NIN, { correlationId: 'desk-check', path: 'desk' }))
+        .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      // The name and date of birth on it still serve a profile check.
+      await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect([...s.db.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'unusable' });
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'unusable'], ['enrollment', 'stored', 'unusable'],
+        ['desk', 'stored', 'unusable'], ['profile', 'stored', 'unusable']]);
+      s.db.store.clock.offsetMs = NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 1000;
+      s.db.enrollments.length = 0;
+      s.db.bound.clear();
+      await expect(s.start(KEY_C)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(2);
+    });
+
+    it('a verified profile answer without a usable QoreID id is kept as unusable, never as a details mismatch', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['no_id'];
+      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.db.evidence.map((row) => row.result)).not.toContain('not_verified');
+      expect([...s.db.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'unusable' });
+    });
+
+    it('a profile check that did not match keeps the record for 24 hours, not 30 days', async () => {
+      const s = system();
+      const before = Date.now();
+      await expect(s.verifyProfile('1990-02-03')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
+      const row = [...s.db.store.rows.values()][0]!;
+      expect(row).toMatchObject({ state: 'answered', outcome: 'record' });
+      expect(row.until - before).toBeLessThanOrEqual(NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 5_000);
+      // Within the day a sign-up with that NIN still reuses it (P5); after it, the record is gone.
+      s.db.store.clock.offsetMs = NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 1000;
+      await expect(s.ninCheck.prune('sweep', 500)).resolves.toBe(1);
+      expect(s.db.store.rows.size).toBe(0);
+    });
+
+    it('a profile check that matched keeps the record for 30 days', async () => {
+      const s = system();
+      const before = Date.now();
+      await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
+      const row = [...s.db.store.rows.values()][0]!;
+      expect(row.until - before).toBeGreaterThan((NIN_RECORD_ANSWER_SECONDS - 60) * 1000);
+    });
+
+    it('an answer charged but never recorded (the lease ended) holds the NIN instead of being asked again', async () => {
+      const s = system();
+      s.db.store.fail('finish_qoreid_nin_check');
+      // The answer still reaches this caller; four tries to record it all fail.
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      s.db.store.fail(undefined);
+      expect(s.db.store.calls.filter(({ sql }) => sql.includes('finish_qoreid_nin_check'))).toHaveLength(4);
+      s.db.enrollments.length = 0;
+      // After the lease ends, a new check is held, not paid again.
+      s.db.store.clock.offsetMs = 300_000;
+      // (The fake store's clock runs 5 minutes ahead of the process's, so the hours are rounded up to 7 here.)
+      await expect(s.start(KEY_B)).rejects.toMatchObject({ status: 409, code: 'NIN_CHECK_HELD',
+        message: expect.stringMatching(/^We could not finish checking this NIN\. Please try again in [67] hours\.$/) });
+      expect(s.qoreId.state.charged).toBe(1);
+      s.db.store.clock.offsetMs = 300_000 + NIN_CHECK_NO_ANSWER_HOLD_SECONDS * 1000;
+      await expect(s.start(KEY_B)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(2);
+    }, 20_000);
+
+    it('recording an outcome is tried again when the database is briefly busy', async () => {
+      const s = system();
+      let failures = 2;
+      const query = s.db.store.query;
+      s.db.store.query = (sql: string, values?: readonly unknown[]) => {
+        if (sql.includes('finish_qoreid_nin_check') && failures > 0) {
+          failures -= 1;
+          throw Object.assign(new Error('pool exhausted'), { code: '53300' });
+        }
+        return query(sql, values);
+      };
+      await s.start(KEY_A);
+      s.db.store.query = query;
+      expect([...s.db.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'record' });
+      s.db.enrollments.length = 0;
+      await s.start(KEY_B);
+      expect(s.qoreId.state.charged).toBe(1);
+    });
+
+    it('an answer for a NIN whose patient\'s login was deleted is never kept', async () => {
+      const s = system();
+      s.db.deletedLogins.add(s.lookup);
+      await s.provider.verifyNin(NIN, { correlationId: 'desk-check', path: 'desk' });
+      expect(s.db.store.rows.size).toBe(0);
     });
 
     it('a check whose first attempt is still running past the wait gets the plain message, not a second call', async () => {
@@ -446,8 +632,10 @@ describe('the same NIN is sent to QoreID once', () => {
       }
       s.qoreId.state.modes = ['slow', 'unavailable'];
       await s.start(KEY_A).catch(() => undefined);
-      s.db.store.clock.offsetMs = NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
+      await s.ninCheck.settle();
+      s.db.store.clock.offsetMs = NIN_CHECK_NO_ANSWER_HOLD_SECONDS * 1000 + 1000;
       await s.start(KEY_A).catch(() => undefined);
+      s.db.store.clock.offsetMs += NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
       await s.start(KEY_A);
       s.db.store.fail('finish_qoreid_nin_check');
       s.db.store.clock.offsetMs = 2 * NIN_RECORD_ANSWER_SECONDS * 1000;
@@ -470,7 +658,7 @@ describe('the same NIN is sent to QoreID once', () => {
         expect(text(audit)).not.toContain(s.lookup);
       }
       expect(logged.some((line) => line.includes('nin-check.finish.failed'))).toBe(true);
-    });
+    }, 20_000);
 
     it('a stored record is compared with the profile exactly as QoreID\'s answer was: a wrong date is still refused', async () => {
       const s = system();

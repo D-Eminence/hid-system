@@ -267,8 +267,10 @@ export class PatientEnrollmentService implements BeforeApplicationShutdown {
     // QoreID charges every check (Q109): the provider asks it once per NIN
     // (NinCheckOnce, 0137). A start that finds another start for the same NIN
     // checking waits for its answer; a stored answer (30 days for a record,
-    // so also after this enrollment's 24 hours end) is reused; a timeout
-    // holds the NIN for a few minutes. Verification is not retried after
+    // so also after this enrollment's 24 hours end) is reused; an answer
+    // slower than QOREID_TIMEOUT_MS is still read and kept for the retry, and
+    // a check QoreID may have charged without an answer holds the NIN (5
+    // minutes, or 6 hours with no answer at all). Verification is not retried after
     // transport or result failures; the adapter may replay once after an
     // explicit 401 with a fresh access token. Unique HMAC constraints still
     // settle which concurrent start keeps the enrollment.

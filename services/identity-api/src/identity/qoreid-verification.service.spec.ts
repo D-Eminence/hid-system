@@ -121,7 +121,7 @@ describe('QoreID verification service', () => {
     });
     expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', {
       firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04',
-    }, 'exact');
+    }, 'exact', { timeoutMs: expect.any(Number) });
     expect(integrations.consumePatientQuota).toHaveBeenCalledWith(patientRequest.correlationId,
       'patient:subject', patientRequest.actor!.sessionId);
     expect(query.mock.calls.some(([sql]) => sql.includes('record_my_verified_nin_date_of_birth'))).toBe(false);
@@ -172,7 +172,8 @@ describe('QoreID verification service', () => {
     await expect(service.verifyPatientNin(patientRequest, '12345678901', '1990-02-03'))
       .resolves.toMatchObject({ state: 'verified' });
     expect(provider.verifyNin).toHaveBeenCalledWith('12345678901',
-      { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1990-02-03' }, 'either');
+      { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1990-02-03' }, 'either',
+      { timeoutMs: expect.any(Number) });
     const dateCall = query.mock.calls.find(([sql]) => sql.includes('record_my_verified_nin_date_of_birth'));
     expect(dateCall?.[1]).toEqual(['patient:subject', patientRequest.actor!.sessionId, expect.any(String), '1990-02-03']);
     const bindingCall = query.mock.calls.find(([sql]) => sql.includes('bind_my_verified_nin'));
@@ -198,7 +199,8 @@ describe('QoreID verification service', () => {
     expect(integrations.consumePatientQuota).not.toHaveBeenCalled();
     await expect(service.verifyPatientNin(patientRequest, '12345678901', '1991-03-04'))
       .resolves.toMatchObject({ state: 'verified' });
-    expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', expect.anything(), 'exact');
+    expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', expect.anything(), 'exact',
+      { timeoutMs: expect.any(Number) });
   });
 
   it('keeps today\'s answer for a profile with a date of birth whose record does not match (state not_verified)', async () => {

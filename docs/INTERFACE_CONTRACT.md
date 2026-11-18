@@ -662,12 +662,17 @@ credentials or tokens. `GET /api/v1/identity/me` answers `ninVerified`
 QoreID is asked once per NIN (0137, Q109; docs/QOREID_VERIFICATION_CONTRACT.md,
 "One QoreID check per NIN"): this route, `POST
 /api/v1/identity/patient-enrollments` and the registration desk reuse a stored
-answer, and a check of a NIN another request is checking, or that timed out in
-the last 5 minutes, answers 409 `NIN_CHECK_IN_PROGRESS` with the plain message
-"We are still checking this NIN. Please wait a few minutes, then try again."
-(no QoreID call, no evidence row). 503 `NIN_CHECK_UNAVAILABLE` means nothing
-was sent. A client shows the message and offers to try again later; it never
-retries on its own.
+answer. A check of a NIN another request is checking answers 409
+`NIN_CHECK_IN_PROGRESS` ("We are still checking this NIN. Please wait a minute,
+then try again."); a NIN held after a check QoreID may have charged without an
+answer HID could keep answers 409 `NIN_CHECK_HELD` ("We could not finish
+checking this NIN. Please try again in 5 minutes." or "... in 6 hours.");
+both carry `retryAfterSeconds` and make no QoreID call and no evidence row. A
+caller whose wait ends before QoreID answers gets 504 `QOREID_TIMEOUT` ("The NIN
+check is taking longer than usual. Please wait a minute, then try again."): the
+check goes on and its answer is kept for the retry. 503 `NIN_CHECK_UNAVAILABLE`
+means nothing was sent. A client shows the message and offers to try again
+after `retryAfterSeconds`; it never retries on its own.
 
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing

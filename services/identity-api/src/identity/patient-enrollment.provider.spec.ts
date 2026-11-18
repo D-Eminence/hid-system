@@ -64,7 +64,7 @@ describe('QoreID public patient identity provider', () => {
     const f = provider({ state: 'verified', providerReference: 'transaction-1', ninEnrollmentBinding: binding });
     await expect(f.service.verifyNin(nin)).resolves.toEqual({ ...binding, providerReference: 'transaction-1' });
     expect(f.integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'patient_nin');
-    expect(f.adapter.verifyNinEnrollment).toHaveBeenCalledWith(nin);
+    expect(f.adapter.verifyNinEnrollment).toHaveBeenCalledWith(nin, { timeoutMs: expect.any(Number) });
     f.adapter.verifyNinEnrollment.mockResolvedValue({ state: 'verified', providerReference: 'transaction-2',
       ninEnrollmentBinding: { ...binding, nin: '99999999999' } });
     await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });

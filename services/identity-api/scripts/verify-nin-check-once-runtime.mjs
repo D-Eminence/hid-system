@@ -4,7 +4,8 @@
 // and grants, separate connection pools (as separate Identity tasks), and a fake QoreID in this process that counts the
 // checks it is asked for. Proves: two and ten simultaneous checks of one NIN ask once; checks of different NINs do not
 // wait for each other; no database connection is held while QoreID answers; a timeout holds the NIN; the audit rows
-// carry no NIN or lookup HMAC; the sweeper's prune erases expired rows. Fictional values only; nothing leaves the
+// carry no NIN or lookup HMAC; an answer that arrives after the caller stopped waiting is kept and reused; the
+// sweeper's prune erases expired rows. Fictional values only; nothing leaves the
 // machine. Usage: NODE_ENV=test DATABASE_URL=postgresql://<runtime login>@127.0.0.1:<port>/<db>
 //   DATABASE_ADMIN_URL=postgresql://<owner>@127.0.0.1:<port>/<db> node scripts/verify-nin-check-once-runtime.mjs
 import assert from 'node:assert/strict';
@@ -45,7 +46,7 @@ const tasks = Array.from({ length: 3 }, () => {
 const record = (nin) => ({ outcome: 'record', providerReference: '9001',
   record: { complete: true, binding: { nin, firstName: 'Synthetic', lastName: 'Person', dateOfBirth: '1990-01-01',
     gender: 'female' } } });
-const nins = Array.from({ length: 8 }, (_, index) => `7999999${String(index).padStart(4, '0')}`);
+const nins = Array.from({ length: 9 }, (_, index) => `7999999${String(index).padStart(4, '0')}`);
 const lookups = nins.map((nin) => protector.lookup(nin));
 const qoreId = { asked: new Map() };
 const inUse = () => tasks.reduce((sum, task) => sum + task.database.pool.totalCount - task.database.pool.idleCount, 0);
@@ -91,33 +92,45 @@ try {
   for (const nin of nins.slice(2, 6)) assert.equal(qoreId.asked.get(nin), 1);
   results.push(`four different NINs at once: 4 calls in ${elapsed} ms`);
 
-  // 4. A timeout holds the NIN: the next check is told so and QoreID is not asked.
+  // 4. No answer by the ceiling holds the NIN for hours: the next check is told when to try again, QoreID is not asked.
   const timeout = new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out');
   await assert.rejects(request(0, nins[7], { ask: ask(nins[7], 10, timeout) }), { code: 'QOREID_TIMEOUT' });
-  await assert.rejects(request(1, nins[7]), { code: 'NIN_CHECK_IN_PROGRESS', status: 409 });
+  await assert.rejects(request(1, nins[7]), { code: 'NIN_CHECK_HELD', status: 409,
+    message: 'We could not finish checking this NIN. Please try again in 6 hours.' });
   assert.equal(qoreId.asked.get(nins[7]), 1);
-  results.push('timeout then resubmit: 1 QoreID call, plain message');
+  results.push('no answer then resubmit: 1 QoreID call, held 6 hours with a plain message');
+
+  // 4b. An answer slower than the caller's wait (QOREID_TIMEOUT_MS 1000) is still read, kept, and reused by
+  // another task's retry: the 28 October case.
+  await assert.rejects(request(0, nins[8], { ask: ask(nins[8], 1500) }), { code: 'QOREID_TIMEOUT', status: 504 });
+  await tasks[0].check.settle();
+  const retried = await request(1, nins[8]);
+  assert.equal(retried.source, 'stored');
+  assert.equal(qoreId.asked.get(nins[8]), 1);
+  results.push('late answer kept: the retry reused it, 1 QoreID call');
 
   // 5. What is stored: encrypted, keyed by the lookup HMAC, never the NIN.
   const rows = (await admin.query(
     `select nin_lookup_hmac, state, outcome, encode(answer_ciphertext, 'escape') as ciphertext, key_version,
             until - updated_at as kept
        from identity.qoreid_nin_checks where nin_lookup_hmac = any($1) order by nin_lookup_hmac`, [lookups])).rows;
-  assert.equal(rows.length, 8);
+  assert.equal(rows.length, 9);
   for (const row of rows) {
     assert(lookups.includes(row.nin_lookup_hmac));
     assert(!nins.some((nin) => JSON.stringify(row).includes(nin)), 'a NIN is stored');
     assert(!JSON.stringify(row).includes('Synthetic'), 'a record is stored in clear');
   }
-  assert.equal(rows.filter((row) => row.state === 'answered' && row.outcome === 'record').length, 7);
-  results.push('stored: 7 encrypted records and 1 hold, keyed by lookup HMAC only');
+  assert.equal(rows.filter((row) => row.state === 'answered' && row.outcome === 'record').length, 8);
+  results.push('stored: 8 encrypted records and 1 hold, keyed by lookup HMAC only');
 
   // 6. The audit: one row per attempt, QoreID called or not, without NIN or lookup HMAC.
   const audits = (await admin.query(
     `select details from audit.events where action = 'identity.qoreid.nin-check'
         and correlation_id like $1`, [`${run}-%`])).rows;
-  assert.equal(audits.length, 1 + 2 + 10 + 4 + 2);
-  assert.equal(audits.filter((row) => row.details.qoreidCalled === true).length, 1 + 1 + 1 + 4 + 1);
+  // Step 4b: the call's timeout, its late answer, and the retry's stored answer.
+  assert.equal(audits.length, 1 + 2 + 10 + 4 + 2 + 3);
+  assert.equal(audits.filter((row) => row.details.qoreidCalled === true).length, 1 + 1 + 1 + 4 + 1 + 1);
+  assert.equal(audits.filter((row) => row.details.source === 'late').length, 1);
   for (const row of audits) {
     const text = JSON.stringify(row.details);
     assert(!nins.some((nin) => text.includes(nin)) && !lookups.some((lookup) => text.includes(lookup)));
@@ -131,7 +144,7 @@ try {
   assert(removed >= 4);
   const left = (await admin.query('select count(*)::int as n from identity.qoreid_nin_checks where nin_lookup_hmac = any($1)',
     [lookups])).rows[0].n;
-  assert.equal(left, 4);
+  assert.equal(left, 5);
   results.push(`prune: ${removed} expired rows erased, live answers kept`);
   assert(NIN_RECORD_ANSWER_SECONDS === 30 * 24 * 3600);
 } finally {

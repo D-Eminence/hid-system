@@ -222,6 +222,13 @@ const environmentSchema = z.object({
   // gateway's 30 s read timeout. Production sets its own value in its
   // infrastructure configuration; changing that needs the owner's apply.
   QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(20_000).default(15_000),
+  // How long a patient NIN check keeps reading QoreID's answer after the
+  // caller stopped waiting (QOREID_TIMEOUT_MS) (0137, Q109): QoreID charges the
+  // check whether or not HID reads the answer, so the answer is read and kept
+  // for the resubmit instead of being thrown away. Never less than
+  // QOREID_TIMEOUT_MS. Not set in production's infrastructure configuration:
+  // the default applies.
+  QOREID_NIN_ANSWER_CEILING_MS: z.coerce.number().int().min(1_000).max(120_000).default(90_000),
   // QoreID's POST endpoints do not publish an idempotency contract. Keep
   // retries explicitly disabled rather than risking duplicate verification.
   QOREID_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),

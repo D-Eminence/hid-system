@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
 import { DomainProblem } from '../common/problem';
+import { failedBeforeSending, markQoreIdDelivery } from './qoreid-delivery';
 import {
   QOREID_PROVIDER,
   type QoreIdNinClaims,
@@ -22,6 +23,16 @@ export interface QoreIdAdapterConfiguration {
 type FetchImplementation = typeof globalThis.fetch;
 
 export const QOREID_ADAPTER_CONFIGURATION = Symbol('QOREID_ADAPTER_CONFIGURATION');
+
+/**
+ * One NIN check's options. `timeoutMs` replaces the configured timeout for the
+ * check request only (never the token request): NinCheckOnce (0137) keeps
+ * reading QoreID's answer after the caller stops waiting, because QoreID
+ * charges for the check either way.
+ */
+export interface QoreIdNinCheckOptions {
+  timeoutMs?: number;
+}
 export const QOREID_FETCH = Symbol('QOREID_FETCH');
 
 interface JsonRecord {
@@ -75,7 +86,7 @@ export class QoreIdVerificationAdapter {
    * than on its field matches; anything else is not_verified.
    */
   async verifyNin(nin: string, claims: QoreIdNinClaims,
-    nameOrder: 'exact' | 'either' = 'exact'): Promise<QoreIdVerificationResult> {
+    nameOrder: 'exact' | 'either' = 'exact', options: QoreIdNinCheckOptions = {}): Promise<QoreIdVerificationResult> {
     // QoreID requires first and last name claims. The caller derives these
     // from the session-bound canonical patient (and, for a profile without a
     // date of birth, the date the patient states), never other browser input.
@@ -83,34 +94,55 @@ export class QoreIdVerificationAdapter {
       `/v1/ng/identities/nin/${encodeURIComponent(nin)}`,
       JSON.stringify({ firstname: claims.firstName, lastname: claims.lastName,
         dob: claims.dateOfBirth }),
+      options.timeoutMs,
     );
-    return nameOrder === 'either' ? this.declaredNinVerification(response, nin, claims)
-      : this.normalizedNinVerification(response, nin, claims);
+    // QoreID answered in full: an answer HID cannot use is the same answer next time.
+    try {
+      return nameOrder === 'either' ? this.declaredNinVerification(response, nin, claims)
+        : this.normalizedNinVerification(response, nin, claims);
+    } catch (error) {
+      throw markQoreIdDelivery(error, { delivery: 'answered' });
+    }
   }
 
   /**
    * Public enrollment deliberately sends no applicant demographics. The
    * provider-confirmed NIN-only transport remains behind an explicit gate.
    */
-  async verifyNinEnrollment(nin: string): Promise<QoreIdVerificationResult> {
+  async verifyNinEnrollment(nin: string, options: QoreIdNinCheckOptions = {}): Promise<QoreIdVerificationResult> {
     if (!this.configuration.ninOnlyEnrollmentEnabled) {
-      throw new DomainProblem(503, 'QOREID_NIN_ONLY_DISABLED',
-        'Patient identity enrollment is temporarily unavailable');
+      throw markQoreIdDelivery(new DomainProblem(503, 'QOREID_NIN_ONLY_DISABLED',
+        'Patient identity enrollment is temporarily unavailable'), { delivery: 'not_sent' });
     }
     if (!/^\d{11}$/.test(nin)) {
-      throw new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required');
+      throw markQoreIdDelivery(new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required'),
+        { delivery: 'not_sent' });
     }
     const response = await this.requestVerification(
       `/v1/ng/identities/nin/${encodeURIComponent(nin)}`,
+      undefined,
+      options.timeoutMs,
     );
-    const result = this.normalizedVerification(response);
-    if (result.state !== 'verified') return result;
-    if (!result.providerReference) throw this.invalidProviderResponse();
-    const summary = this.record(this.record(response)?.summary);
-    if (typeof summary?.nin_check !== 'string') throw this.invalidProviderResponse();
-    if (summary.nin_check !== 'verified') return { ...result, state: 'not_verified' };
-    const binding = this.ninEnrollmentBinding(response, nin);
-    return { ...result, ninEnrollmentBinding: binding, ninRecord: { complete: true, binding } };
+    // QoreID answered in full: an answer HID cannot use is the same answer
+    // next time. The name and date of birth on it are kept with the error when
+    // they can be read, so a profile check of the NIN can still use them.
+    let providerReference: string | undefined;
+    try {
+      const result = this.normalizedVerification(response);
+      providerReference = result.providerReference;
+      if (result.state !== 'verified') return result;
+      if (!result.providerReference) throw this.invalidProviderResponse();
+      const summary = this.record(this.record(response)?.summary);
+      if (typeof summary?.nin_check !== 'string') throw this.invalidProviderResponse();
+      if (summary.nin_check !== 'verified') return { ...result, state: 'not_verified' };
+      const binding = this.ninEnrollmentBinding(response, nin);
+      return { ...result, ninEnrollmentBinding: binding, ninRecord: { complete: true, binding } };
+    } catch (error) {
+      const record = this.ninRecord(response, nin);
+      throw markQoreIdDelivery(error, { delivery: 'answered',
+        ...(record && !record.complete ? { record } : {}),
+        ...(providerReference ? { providerReference } : {}) });
+    }
   }
 
   async verifyCac(regNumber: string): Promise<QoreIdVerificationResult> {
@@ -123,7 +155,12 @@ export class QoreIdVerificationAdapter {
     return this.normalizedCacVerification(response, submitted);
   }
 
-  private async requestVerification(path: string, body?: string): Promise<unknown> {
+  /**
+   * Every error is marked with how far the check got (qoreid-delivery.ts):
+   * a token failure never sent the NIN; the check request marks its own.
+   */
+  private async requestVerification(path: string, body?: string, timeoutMs?: number): Promise<unknown> {
+    const notSent = (error: unknown) => markQoreIdDelivery(error, { delivery: 'not_sent' });
     const send = (token: AccessTokenLease) => this.requestJson(path, {
       method: 'POST',
       headers: {
@@ -132,8 +169,8 @@ export class QoreIdVerificationAdapter {
         authorization: `Bearer ${token.value}`,
       },
       ...(body === undefined ? {} : { body }),
-    }, 'verification');
-    const token = await this.accessToken();
+    }, 'verification', timeoutMs);
+    const token = await this.accessToken().catch((error: unknown) => { throw notSent(error); });
     try {
       return await send(token);
     } catch (error) {
@@ -141,7 +178,7 @@ export class QoreIdVerificationAdapter {
       // A simultaneous request may already have replaced this lease. Do not
       // invalidate its fresh token when a request using an older lease fails.
       if (this.cachedToken === token) this.cachedToken = undefined;
-      const replacement = await this.accessToken();
+      const replacement = await this.accessToken().catch((tokenError: unknown) => { throw notSent(tokenError); });
       try {
         return await send(replacement);
       } catch (retryError) {
@@ -204,30 +241,47 @@ export class QoreIdVerificationAdapter {
     return lease;
   }
 
-  private async requestJson(path: string, init: RequestInit, operation: 'token' | 'verification'): Promise<unknown> {
+  /**
+   * One request. A verification request's errors are marked with how far it
+   * got (qoreid-delivery.ts): 401 and 429 were refused unchecked; 404 is
+   * QoreID's "not found" answer; another 4xx or a 5xx may have been charged;
+   * a 2xx body HID cannot read is an answer; a network failure before the
+   * request was written sent nothing, any other may have reached QoreID.
+   */
+  private async requestJson(path: string, init: RequestInit, operation: 'token' | 'verification',
+    timeoutMs = this.configuration.timeoutMs): Promise<unknown> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.configuration.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const mark = <T>(error: T, delivery: 'not_sent' | 'sent' | 'answered', status?: number): T =>
+      operation === 'verification'
+        ? markQoreIdDelivery(error, { delivery, ...(status === undefined ? {} : { status }) }) : error;
+    let responded = false;
     try {
       // Provider credentials and the path-bound NIN must never be forwarded to
       // an unexpected redirect destination.
       const response = await this.request(this.url(path), { ...init, redirect: 'error', signal: controller.signal });
+      responded = true;
       if (!response.ok) {
-        if (response.status === 401) {
-          throw new DomainProblem(503, 'QOREID_AUTHENTICATION_FAILED', 'External verification is unavailable');
+        const status = response.status;
+        if (status === 401) {
+          throw mark(new DomainProblem(503, 'QOREID_AUTHENTICATION_FAILED', 'External verification is unavailable'),
+            'not_sent', status);
         }
-        if (response.status === 429) {
-          throw new DomainProblem(429, 'QOREID_RATE_LIMITED', 'External verification is temporarily rate limited');
+        if (status === 429) {
+          throw mark(new DomainProblem(429, 'QOREID_RATE_LIMITED', 'External verification is temporarily rate limited'),
+            'not_sent', status);
         }
-        if (response.status >= 500) {
-          throw new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'External verification is unavailable');
+        if (status >= 500) {
+          throw mark(new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'External verification is unavailable'),
+            'sent', status);
         }
-        throw new DomainProblem(502, operation === 'token' ? 'QOREID_TOKEN_REJECTED' : 'QOREID_PROVIDER_REJECTED',
-          'External verification could not be completed');
+        throw mark(new DomainProblem(502, operation === 'token' ? 'QOREID_TOKEN_REJECTED' : 'QOREID_PROVIDER_REJECTED',
+          'External verification could not be completed'), status === 404 ? 'answered' : 'sent', status);
       }
       // Keep the deadline active while consuming the body. NIN responses may
       // contain a photo, but no provider can send unbounded data to this API.
       const reader = response.body?.getReader();
-      if (!reader) throw this.invalidProviderResponse();
+      if (!reader) throw mark(this.invalidProviderResponse(), 'answered', response.status);
       const chunks: Uint8Array[] = [];
       let bytes = 0;
       while (true) {
@@ -236,7 +290,7 @@ export class QoreIdVerificationAdapter {
         bytes += chunk.value.byteLength;
         if (bytes > 262_144) {
           controller.abort();
-          throw this.invalidProviderResponse();
+          throw mark(this.invalidProviderResponse(), 'answered', response.status);
         }
         chunks.push(chunk.value);
       }
@@ -244,15 +298,16 @@ export class QoreIdVerificationAdapter {
         const body = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
         return JSON.parse(body) as unknown;
       }
-      catch { throw this.invalidProviderResponse(); }
+      catch { throw mark(this.invalidProviderResponse(), 'answered', response.status); }
     } catch (error) {
       if (error instanceof DomainProblem) throw error;
       if (controller.signal.aborted) {
-        throw new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out');
+        throw mark(new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out'), 'sent');
       }
       // Never propagate a provider/network error string: it can contain a URL,
       // body fragment, token, or identifier.
-      throw new DomainProblem(503, 'QOREID_NETWORK_UNAVAILABLE', 'External verification is unavailable');
+      throw mark(new DomainProblem(503, 'QOREID_NETWORK_UNAVAILABLE', 'External verification is unavailable'),
+        !responded && failedBeforeSending(error) ? 'not_sent' : 'sent');
     } finally {
       clearTimeout(timeout);
     }
