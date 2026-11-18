@@ -9,7 +9,7 @@
 // machine. Usage: NODE_ENV=test DATABASE_URL=postgresql://<runtime login>@127.0.0.1:<port>/<db>
 //   DATABASE_ADMIN_URL=postgresql://<owner>@127.0.0.1:<port>/<db> node scripts/verify-nin-check-once-runtime.mjs
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 
@@ -22,7 +22,8 @@ for (const name of ['DATABASE_URL', 'DATABASE_ADMIN_URL']) {
 }
 Object.assign(process.env, {
   DATABASE_SSL: 'false', CORS_ORIGINS: 'https://app.nin-once.invalid', AUTH_MODE: 'local',
-  AUTH_SIGNING_SECRET: 'synthetic-nin-once-signing-secret-000001', AUTH_LOGIN_PEPPER: 'synthetic-nin-once-pepper-00000001',
+  // Session keys for this run only, never written anywhere (as verify-outreach-organisers-runtime does).
+  AUTH_SIGNING_SECRET: randomBytes(32).toString('base64url'), AUTH_LOGIN_PEPPER: randomBytes(32).toString('base64url'),
   NIN_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
   NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 8).toString('base64'), NIN_KEY_VERSION: 'synthetic-v1',
   QOREID_TIMEOUT_MS: '1000',
@@ -146,7 +147,7 @@ try {
     [lookups])).rows[0].n;
   assert.equal(left, 5);
   results.push(`prune: ${removed} expired rows erased, live answers kept`);
-  assert(NIN_RECORD_ANSWER_SECONDS === 30 * 24 * 3600);
+  assert(NIN_RECORD_ANSWER_SECONDS === 90 * 24 * 3600); // Q110: a matched answer not yet on a Health ID is kept 90 days
 } finally {
   await admin.query('delete from identity.qoreid_nin_checks where nin_lookup_hmac = any($1)', [lookups]);
   await admin.end();
