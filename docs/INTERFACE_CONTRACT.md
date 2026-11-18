@@ -6492,10 +6492,12 @@ when it waits for another check of the same NIN; the website waits at least
 
 A date of birth in the future or before 1900, or a first or last name with a
 control character (a tab, a line break), is refused before anything is sent
-or charged. The request body check answers `400 VALIDATION_FAILED`;
-any other caller gets `400 NIN_DETAILS_INVALID`, "Check the name and the date
-of birth. The date of birth cannot be in the future or before 1900.",
-audited with `providerCalled: false`. Neither touches the breaker.
+or charged: `400 NIN_DETAILS_INVALID`, "Check the name and the date of birth.
+The date of birth cannot be in the future or before 1900.", audited with
+`providerCalled: false`, the breaker not touched. This is the answer the
+website gets: the request body check only refuses a malformed body (`400
+VALIDATION_FAILED` with `errors`: a blank or over-100-character name, a date
+that is not a real `YYYY-MM-DD` date, an NIN that is not 11 digits).
 
 ### One check per desk request
 
@@ -6560,7 +6562,9 @@ during the check, or unreadable just before sending; no request limits (Q109:
 one account's and one facility's checks are never refused for volume);
 one check per desk request (a resend while waiting, at the same moment, after
 "could not be verified" or "does not match", after a failure); details
-refused before any check; the breaker; the audit rows; capabilities; no NIN
+refused before any check, over HTTP with the same validation pipe and problem
+filter as `main.ts` (`400 NIN_DETAILS_INVALID`, and `VALIDATION_FAILED` only
+for a malformed body); the breaker; the audit rows; capabilities; no NIN
 in an audit row or log line; 0137's answers as the desk's). The QoreID
 adapter is mocked: no test calls QoreID.
 `services/identity-api/src/identity/qoreid-nin-desk-once.spec.ts` drives the

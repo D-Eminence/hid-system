@@ -185,11 +185,12 @@ export class NinRegistrationService {
       ...(input.gender ? { gender: input.gender } : {}),
     };
 
-    // Q108: details that cannot be anyone's (a date of birth in the future,
-    // a name with a control character) are refused before anything is sent
-    // or counted. The request body is checked the same way; this covers any
-    // other caller. Otherwise a (charged) check would be made, and its
-    // answer read as a bad provider answer that trips the breaker.
+    // Q108: details that cannot be anyone's (a date of birth in the future
+    // or before 1900, a name with a control character) are refused before
+    // anything is sent, with 400 NIN_DETAILS_INVALID: the request body
+    // checks only their shape, so this answers the website too. Otherwise a
+    // (charged) check would be made, and its answer read as a bad provider
+    // answer that trips the breaker.
     if (implausibleClaimedDemographics(claimedDemographics)) {
       const error = new DomainProblem(400, 'NIN_DETAILS_INVALID',
         'Check the name and the date of birth. The date of birth cannot be in the future or before 1900.');

@@ -2,7 +2,6 @@ import { Transform, type TransformFnParams } from 'class-transformer';
 import { IsBoolean, IsDateString, IsIn, IsOptional, IsString, Length, Matches, registerDecorator,
   ValidateIf, type ValidationArguments } from 'class-validator';
 import type { PurposeOfUse } from '../../common/request-context';
-import { plausibleBirthDate } from '../nin-verification.provider';
 import { COLLECTED_PHONE_E164, NIGERIA_STATE_CODES, toCollectedPhone } from './facility-profile.dto';
 
 // Legacy governed-registration input. QoreID self-verification instead derives
@@ -42,22 +41,13 @@ export function hasAnyDeskField(body: object): boolean {
   return DESK_FIELDS.some((field) => values[field] !== undefined && values[field] !== null);
 }
 
-/** Q108: a name with no control character (a tab, a line break); refused before any NIN check is sent. */
-const NO_CONTROL_CHARACTERS = /^[^\x00-\x1f\x7f]*$/;
-
 /**
- * Q108: a date of birth that can be someone's: not in the future and not
- * before 1900. Refused before any (charged) NIN check is sent; otherwise a
- * typo such as 2062 for 1962 would be checked, then read as a bad answer.
+ * Q108: the body check refuses a malformed name or date. A well-formed one
+ * that cannot be anyone's (a date of birth in the future or before 1900, a
+ * name with a control character) passes here and is refused by
+ * NinRegistrationService before any (charged) NIN check is sent, with the
+ * desk's own answer, 400 NIN_DETAILS_INVALID, which the website shows as is.
  */
-function PlausibleBirthDate() {
-  return (target: object, propertyName: string) => registerDecorator({
-    name: 'plausibleBirthDate', target: target.constructor, propertyName,
-    options: { message: 'dateOfBirth must not be in the future or before 1900' },
-    validator: { validate: (value: unknown) => plausibleBirthDate(value) },
-  });
-}
-
 export class ResolveNinDto {
   @Transform(normalizeNin)
   @IsString()
@@ -67,19 +57,16 @@ export class ResolveNinDto {
   @Transform(trim)
   @IsString()
   @Length(1, 100)
-  @Matches(NO_CONTROL_CHARACTERS, { message: 'firstName must not contain control characters' })
   firstName!: string;
 
   @Transform(trim)
   @IsString()
   @Length(1, 100)
-  @Matches(NO_CONTROL_CHARACTERS, { message: 'lastName must not contain control characters' })
   lastName!: string;
 
   @IsString()
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   @IsDateString({ strict: true })
-  @PlausibleBirthDate()
   dateOfBirth!: string;
 
   @IsOptional()

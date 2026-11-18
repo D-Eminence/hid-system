@@ -1,10 +1,14 @@
-import { Logger } from '@nestjs/common';
-import { plainToInstance } from 'class-transformer';
-import { validate } from 'class-validator';
+import { type INestApplication, Logger, ValidationPipe } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import type { NextFunction, Response } from 'express';
+import supertest from 'supertest';
+import { AuditService } from '../audit/audit.service';
 import * as environment from '../config/environment';
-import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
-import { ResolveNinDto } from './dto/resolve-nin.dto';
+import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
+import { DatabaseService } from '../database/database.service';
+import { HidCodeGenerator } from './hid-code-generator.service';
+import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NinRegistrationController } from './nin-registration.controller';
 import { NinRegistrationService } from './nin-registration.service';
 import {
@@ -18,7 +22,7 @@ import {
 } from './nin-verification.provider';
 import { NIN_BREAKER_RETRY_AFTER_MS, NIN_PROVIDER_UNAVAILABLE_EVENT, NinProviderBreaker } from './nin-provider-breaker';
 import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavailable } from './nin-check-once';
-import type { NinVerificationProvider, NinVerificationRequest } from './nin.types';
+import { NIN_VERIFICATION_PROVIDER, type NinVerificationProvider, type NinVerificationRequest } from './nin.types';
 import type { PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import {
   DESK_NIN_CHECK_ANSWER_SECONDS,
@@ -832,25 +836,75 @@ describe('Q108 registration-capabilities with QoreID', () => {
   });
 });
 
-describe('Q108 desk NIN details the request refuses before any check', () => {
-  async function refusedFields(body: Record<string, unknown>) {
-    const errors = await validate(plainToInstance(ResolveNinDto, body), { whitelist: true, forbidNonWhitelisted: true });
-    return errors.map((error) => error.property);
+describe('Q108 desk NIN details refused before any check, over HTTP', () => {
+  let app: INestApplication | undefined;
+  afterEach(async () => { await app?.close(); app = undefined; });
+
+  /** POST identity/nin/resolve with the global pipe and problem filter main.ts uses. */
+  async function post(body: Record<string, unknown>) {
+    const provider = { name: 'qoreid', isEnabled: jest.fn(async () => true), reserve: jest.fn(async () => ({})),
+      settle: jest.fn(async () => undefined), verify: jest.fn() };
+    const audit = { record: jest.fn(async () => undefined), recordWithClient: jest.fn(async () => undefined) };
+    const database = { withTransaction: jest.fn(async (_c: unknown, work: (c: unknown) => unknown) =>
+      work({ query: jest.fn(async () => ({ rows: [] })) })) };
+    const module = await Test.createTestingModule({ controllers: [NinRegistrationController], providers: [
+      NinRegistrationService, NinProviderBreaker,
+      { provide: DatabaseService, useValue: database },
+      { provide: AuditService, useValue: audit },
+      { provide: NinIdentifierProtector, useValue: { lookup: jest.fn(() => 'a'.repeat(64)), protect: jest.fn() } },
+      { provide: HidCodeGenerator, useValue: {} },
+      { provide: NIN_VERIFICATION_PROVIDER, useValue: provider },
+    ] }).compile();
+    app = module.createNestApplication({ logger: false });
+    app.setGlobalPrefix('api/v1');
+    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, forbidUnknownValues: true,
+      transform: true, transformOptions: { enableImplicitConversion: false }, stopAtFirstError: false,
+      exceptionFactory: (errors) => new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.',
+        errors.map((error) => ({ field: error.property, messages: Object.values(error.constraints ?? {}) }))) }));
+    app.useGlobalFilters(new ProblemDetailsFilter());
+    app.use((incoming: HidRequest, _response: Response, next: NextFunction) => {
+      incoming.correlationId = 'correlation-q108-http';
+      incoming.actor = context.actor;
+      incoming.facilityId = context.facilityId;
+      next();
+    });
+    await app.init();
+    const response = await supertest(app.getHttpServer()).post('/api/v1/identity/nin/resolve')
+      .set('idempotency-key', 'resolve-key-q108-http-01').send(body);
+    return { response, provider, audit };
   }
 
-  it('accepts a real date of birth and plain names', async () => {
-    expect(await refusedFields(input)).toEqual([]);
-    expect(await refusedFields({ ...input, dateOfBirth: '1900-01-01' })).toEqual([]);
-    expect(await refusedFields({ ...input, firstName: '  Ada  Bola ' })).toEqual([]);
+  it.each([
+    ['a date of birth in the future', { dateOfBirth: '2062-03-01' }],
+    ['a date of birth before 1900', { dateOfBirth: '1899-12-31' }],
+    ['a first name with a tab', { firstName: 'Ada\tBola' }],
+    ['a last name with a line break', { lastName: 'Fic\ntional' }],
+  ])('answers %s with 400 NIN_DETAILS_INVALID and the plain message, sending nothing', async (_label, overrides) => {
+    const { response, provider, audit } = await post({ ...input, ...overrides });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ code: 'NIN_DETAILS_INVALID',
+      detail: 'Check the name and the date of birth. The date of birth cannot be in the future or before 1900.' });
+    expect(provider.reserve).not.toHaveBeenCalled();
+    expect(provider.verify).not.toHaveBeenCalled();
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'identity.nin.verify',
+      outcome: 'failure', details: expect.objectContaining({ code: 'NIN_DETAILS_INVALID', providerCalled: false }) }));
+    expect(JSON.stringify(response.body)).not.toContain(NIN);
   });
 
   it.each([
-    ['a date of birth in the future', { dateOfBirth: '2062-03-01' }, 'dateOfBirth'],
-    ['a date of birth before 1900', { dateOfBirth: '1899-12-31' }, 'dateOfBirth'],
-    ['a first name with a tab', { firstName: 'Ada\tBola' }, 'firstName'],
-    ['a last name with a line break', { lastName: 'Fic\ntional' }, 'lastName'],
+    ['a date that is not a real date', { dateOfBirth: '1991-02-30' }, 'dateOfBirth'],
+    ['a date in another format', { dateOfBirth: '05/04/1991' }, 'dateOfBirth'],
     ['a blank name', { firstName: '   ' }, 'firstName'],
-  ])('refuses %s', async (_label, overrides, field) => {
-    expect(await refusedFields({ ...input, ...overrides })).toEqual([field]);
+    ['a name over 100 characters', { lastName: 'x'.repeat(101) }, 'lastName'],
+  ])('still refuses %s as a malformed body (400 VALIDATION_FAILED)', async (_label, overrides, field) => {
+    const { response, provider } = await post({ ...input, ...overrides });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ code: 'VALIDATION_FAILED', errors: [expect.objectContaining({ field })] });
+    expect(provider.verify).not.toHaveBeenCalled();
+  });
+
+  it('passes a real date of birth and plain names on to the check', async () => {
+    const { provider } = await post({ ...input, dateOfBirth: '1900-01-01', firstName: '  Ada  Bola ' });
+    expect(provider.reserve).toHaveBeenCalledTimes(1);
   });
 });
