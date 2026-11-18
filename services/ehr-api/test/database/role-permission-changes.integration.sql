@@ -1,48 +1,57 @@
 \set ON_ERROR_STOP on
--- 0136 (owner decision Q103 A): the role table's five changes, the staff
--- counts the owner sees before signing, and the prepared undo. Rollback-only.
---   1. after 0001-0136: the thirteen removed rows are gone, the five added
---      rows are there, admin identity.registration.approve and nurse
---      ehr.note.write are kept; each of the five roles holds exactly the
+-- 0136 (owner decisions Q103 A, Q111 A, Q112 A, Q113 A): the role table's
+-- changes, the staff counts DevOps runs before signing, the owner's maximums
+-- and the stop, and the prepared undo. Rollback-only.
+--   1. after 0001-0136: the twelve removed rows are gone, the eight added rows
+--      and the three new codes are there, the rows kept on purpose are there
+--      (doctors keep ocr.job.write, ocr.validation.write and
+--      ocr.patient.confirm, Q111 A); each of the six roles holds exactly the
 --      permissions listed here (the role-matrix pin for these roles; 0131's
 --      identity.patient.open-own-facility row, which 0131's suite pins, is
 --      left out);
 --   2. back to the table before 0136 for this transaction (the prepared undo
---      docs/rollback/0136_rollback.sql, run here as written, plus taking the
---      five front-desk rows away), and fictional staff at a real hospital and
---      at a sealed QA hospital: one-role and two-role memberships, an
+--      docs/rollback/0136_rollback.sql, run here as written, then the rows
+--      and codes 0136 added taken away), and fictional staff at a real
+--      hospital, a real clinic, a real laboratory, a real front-desk-only
+--      clinic and a sealed QA hospital: one-role and two-role memberships, an
 --      inactive membership, a disabled login, a revoked role;
---   3. the read-only counts query docs/rollback/0136_affected_staff_counts.sql,
---      run here as written: for each change, the fictional staff it adds are
---      counted exactly (a membership whose other role keeps the permission
---      after 0136 does not change; an inactive membership, a disabled login
+--   3. the read-only counts file docs/rollback/0136_affected_staff_counts.sql,
+--      run here as written: for each of its 26 lines, what the fictional
+--      staff add is counted exactly (a membership whose other role keeps the
+--      permission does not change; an inactive membership, a disabled login
 --      and a revoked role are not counted; the sealed hospital is counted
---      apart); its rows say whether each role row is there now;
---   4. 0136 itself, run here as written, applies on that table (its NOTICE
---      lines carry the same numbers), and then for each fictional member,
---      through auth.membership_has_permission (what every service checks):
---      the front desk scans and sees vitals; a doctor loses scan writing,
---      Outreach and the lab and pharmacy work lists but keeps reading jobs
---      and publishing readings, sending to the own laboratory, and the reads
---      of its own orders' progress (ORD-3); a laboratory member loses visits and
---      OCR but keeps its own work; an administrator loses the two work lists
---      but keeps approving new patients and running staff; a member with a
---      second role keeps what that role grants; the nurse is unchanged;
---   5. records processing (0104's trigger, as the Identity runtime): the front
---      desk may now ask for it, doctors and laboratory staff are refused
+--      apart); with the owner's maximums set as 0136 sets them, the same
+--      block passes at the counted numbers and names each line that is
+--      higher, or not filled in (Q113 A);
+--   4. 0136 itself, run here as written: with the maximums not filled in and
+--      real staff affected it stops (55000, "0136 stopped, nothing was
+--      changed"), and its count is the counts file's, number for number. The
+--      suite then lets the rest of the file run (psql ON_ERROR_ROLLBACK
+--      undoes only the stop; the migration runner, which runs the file as
+--      one transaction, applies nothing) and checks, for each fictional
+--      member, through auth.membership_has_permission (what every service
+--      checks): the front desk scans, starts readings and sees its own
+--      uploads and vitals, with neither full read nor any clinical read;
+--      doctors keep checking and confirming (ocr.job.write) but cannot start
+--      a reading (no ocr.job.start); nurses and clinicians start readings as
+--      before; laboratory staff lose visits and OCR; administrators lose the
+--      two work lists; a member with a second role keeps what that role
+--      grants;
+--   5. records processing (0104's trigger, as the Identity runtime): the
+--      front desk and doctors may ask for it, laboratory staff are refused
 --      RECORDS_PROCESSING_NOT_ALLOWED, a nurse still may;
---   6. the undo puts back exactly the thirteen rows (and leaves the five
---      front-desk rows), the doctor, laboratory member and administrator get
---      their permissions back, and running it a second time changes nothing;
---   7. what follows (the counts' lines 19-23 and 0136's step 3): a clinic with
---      doctors and a front desk only, and a laboratory, are counted as left
---      with nobody who can check a reading; the clinic as one where a reading
---      can be started but never checked or its patient confirmed; their
---      readings not yet checked are counted; and the open records-processing
---      requests of a doctor and a laboratory member are counted, then closed
---      by 0136 (status expired, one audit row each with the plain reason),
---      while a doctor with a nurse role, a direct-care request and an approved
---      request are left as they are.
+--   6. the undo, as written, gives doctors, laboratory staff and
+--      administrators back what they could do before 0136 (with ocr.job.start
+--      for doctors and laboratory staff), leaves the front-desk rows, and a
+--      second run changes nothing;
+--   7. what follows: the laboratory is counted as left with nobody who can
+--      check a reading, the front-desk-only clinic as one where a reading can
+--      be started but never checked or its patient confirmed, the
+--      laboratory's reading not yet checked is counted, and the laboratory
+--      member's open records-processing request is counted and closed by
+--      0136 (status expired, one audit row with the plain reason), while the
+--      doctors' requests, a direct-care request and an approved request are
+--      left as they are; after 0136 the counts file refuses to count again.
 -- Synthetic values only: uuid prefix c136, @example.invalid addresses.
 set plpgsql.variable_conflict = error;
 begin;
@@ -62,11 +71,10 @@ create function pg_temp.role_line(role text) returns text language sql as $$
   select string_agg(permission_code, ' ' order by permission_code) from auth.role_permissions
    where role_code = role and permission_code <> 'identity.patient.open-own-facility';
 $$;
--- The thirteen rows 0136 removes and the five it adds.
+-- The twelve rows 0136 removes, the eight it adds and the three codes it creates.
 create function pg_temp.removed_present() returns integer language sql as $$
   select count(*)::integer from auth.role_permissions
    where (role_code, permission_code) in (
-     ('doctor', 'ocr.job.write'),
      ('doctor', 'outreach.campaign.read'), ('doctor', 'outreach.campaign.write'),
      ('doctor', 'outreach.registration.read'), ('doctor', 'outreach.registration.write'),
      ('doctor', 'lab.work-item.read'), ('doctor', 'pharmacy.work-item.read'),
@@ -76,27 +84,37 @@ create function pg_temp.removed_present() returns integer language sql as $$
 $$;
 create function pg_temp.added_present() returns integer language sql as $$
   select count(*)::integer from auth.role_permissions
-   where role_code = 'receptionist'
-     and permission_code in ('ehr.document.write', 'ehr.document.read', 'ocr.job.write', 'ocr.job.read',
-                             'ehr.vital.read');
+   where (role_code, permission_code) in (
+     ('receptionist', 'ehr.document.write'), ('receptionist', 'ehr.document.read-own'),
+     ('receptionist', 'ocr.job.write'), ('receptionist', 'ocr.job.start'),
+     ('receptionist', 'ocr.job.read-own'), ('receptionist', 'ehr.vital.read'),
+     ('nurse', 'ocr.job.start'), ('clinician', 'ocr.job.start'));
+$$;
+create function pg_temp.codes_present() returns integer language sql as $$
+  select count(*)::integer from auth.permissions
+   where code in ('ocr.job.start', 'ocr.job.read-own', 'ehr.document.read-own') and active;
 $$;
 
 -- 1. The role table after 0001-0136.
-select pg_temp.expect('1a the thirteen removed rows are gone', '0', pg_temp.removed_present()::text);
-select pg_temp.expect('1b the five front-desk rows are there', '5', pg_temp.added_present()::text);
-select pg_temp.expect('1c admin approves new patients, the nurse writes notes', '2',
-  (select count(*)::text from auth.role_permissions
-    where (role_code, permission_code) in (('admin', 'identity.registration.approve'), ('nurse', 'ehr.note.write'))));
-select pg_temp.expect('1d receptionist', 'ehr.document.read ehr.document.write ehr.encounter.read ehr.encounter.write '
-  || 'ehr.vital.read identity.authorization.check identity.consent.read identity.consent.write identity.patient.read '
-  || 'identity.registration.write ocr.job.read ocr.job.write outreach.campaign.read outreach.campaign.write '
-  || 'outreach.registration.read outreach.registration.write', pg_temp.role_line('receptionist'));
+select pg_temp.expect('1a the twelve removed rows are gone', '0', pg_temp.removed_present()::text);
+select pg_temp.expect('1b the eight added rows and the three new codes are there', '8 3',
+  pg_temp.added_present() || ' ' || pg_temp.codes_present());
+select pg_temp.expect('1c kept: admin approves new patients, the nurse writes notes, doctors check and confirm readings',
+  '5', (select count(*)::text from auth.role_permissions
+    where (role_code, permission_code) in (('admin', 'identity.registration.approve'), ('nurse', 'ehr.note.write'),
+                                           ('doctor', 'ocr.job.write'), ('doctor', 'ocr.validation.write'),
+                                           ('doctor', 'ocr.patient.confirm'))));
+select pg_temp.expect('1d receptionist', 'ehr.document.read-own ehr.document.write ehr.encounter.read '
+  || 'ehr.encounter.write ehr.vital.read identity.authorization.check identity.consent.read identity.consent.write '
+  || 'identity.patient.read identity.registration.write ocr.job.read-own ocr.job.start ocr.job.write '
+  || 'outreach.campaign.read outreach.campaign.write outreach.registration.read outreach.registration.write',
+  pg_temp.role_line('receptionist'));
 select pg_temp.expect('1e doctor', 'ehr.diagnosis.read ehr.diagnosis.write ehr.document.read ehr.document.write '
   || 'ehr.encounter.read ehr.encounter.write ehr.lab-request.read ehr.lab-request.write ehr.note.read ehr.note.write '
   || 'ehr.order-route.send ehr.prescription.read ehr.prescription.write ehr.vital.read ehr.vital.write '
   || 'identity.authorization.check identity.break-glass.write identity.consent.read identity.consent.write '
   || 'identity.patient-access-pin.verify identity.patient.read identity.registration.write lab.import.read '
-  || 'lab.import.write lab.result.released.read lab.work-item.accept ocr.job.read ocr.patient.confirm '
+  || 'lab.import.write lab.result.released.read lab.work-item.accept ocr.job.read ocr.job.write ocr.patient.confirm '
   || 'ocr.publication.write ocr.validation.write pharmacy.dispensing.read pharmacy.import.read pharmacy.import.write',
   pg_temp.role_line('doctor'));
 select pg_temp.expect('1f lab', 'ehr.document.read ehr.document.write ehr.lab-request.read ehr.lab-request.write '
@@ -106,90 +124,101 @@ select pg_temp.expect('1f lab', 'ehr.document.read ehr.document.write ehr.lab-re
   || 'lab.result.entered-in-error lab.result.release lab.result.released.read lab.result.revise-released '
   || 'lab.result.verify lab.specimen.collect lab.specimen.receive lab.specimen.reject lab.work-item.accept '
   || 'lab.work-item.read', pg_temp.role_line('lab'));
-select pg_temp.expect('1g admin', 'audit.read identity.registration.approve identity.registration.write '
-  || 'lab.accession.read lab.execution.read lab.import.read lab.result.released.read ocr.job.read organization.manage '
-  || 'outreach.campaign.read outreach.campaign.write outreach.registration.read outreach.registration.write '
-  || 'pharmacy.dispensing.read pharmacy.import.read workforce.manage', pg_temp.role_line('admin'));
-select pg_temp.expect('1h nurse (unchanged by 0136)', 'ehr.diagnosis.read ehr.document.read ehr.document.write '
+select pg_temp.expect('1g admin (keeps ocr.job.read: unchanged by Q112 A)', 'audit.read identity.registration.approve '
+  || 'identity.registration.write lab.accession.read lab.execution.read lab.import.read lab.result.released.read '
+  || 'ocr.job.read organization.manage outreach.campaign.read outreach.campaign.write outreach.registration.read '
+  || 'outreach.registration.write pharmacy.dispensing.read pharmacy.import.read workforce.manage',
+  pg_temp.role_line('admin'));
+select pg_temp.expect('1h nurse (gains ocr.job.start only)', 'ehr.diagnosis.read ehr.document.read ehr.document.write '
   || 'ehr.encounter.read ehr.encounter.write ehr.lab-request.read ehr.note.read ehr.note.write ehr.prescription.read '
   || 'ehr.vital.read ehr.vital.write identity.authorization.check identity.break-glass.write identity.consent.read '
   || 'identity.consent.write identity.patient-access-pin.verify identity.patient.read identity.registration.write '
   || 'lab.import.read lab.import.write lab.result.released.read lab.work-item.accept lab.work-item.read ocr.job.read '
-  || 'ocr.job.write ocr.patient.confirm ocr.publication.write ocr.validation.write outreach.campaign.read '
+  || 'ocr.job.start ocr.job.write ocr.patient.confirm ocr.publication.write ocr.validation.write outreach.campaign.read '
   || 'outreach.campaign.write outreach.registration.read outreach.registration.write pharmacy.dispensing.read '
   || 'pharmacy.import.read pharmacy.import.write pharmacy.work-item.read', pg_temp.role_line('nurse'));
-select pg_temp.expect('1i org_admin holds neither work list (untouched)', '0',
+select pg_temp.expect('1i clinician (gains ocr.job.start only)', 'ehr.diagnosis.read ehr.diagnosis.write '
+  || 'ehr.document.read ehr.document.write ehr.encounter.read ehr.encounter.write ehr.lab-request.read '
+  || 'ehr.lab-request.write ehr.note.read ehr.note.write ehr.order-route.send ehr.prescription.read '
+  || 'ehr.prescription.write ehr.vital.read ehr.vital.write identity.authorization.check identity.break-glass.write '
+  || 'identity.consent.read identity.consent.write identity.patient-access-pin.verify identity.patient.read '
+  || 'identity.registration.write lab.import.read lab.import.write lab.result.released.read lab.work-item.accept '
+  || 'lab.work-item.read ocr.job.read ocr.job.start ocr.job.write ocr.patient.confirm ocr.publication.write '
+  || 'ocr.validation.write outreach.campaign.read outreach.campaign.write outreach.registration.read '
+  || 'outreach.registration.write pharmacy.dispensing.read pharmacy.import.read pharmacy.import.write '
+  || 'pharmacy.work-item.read', pg_temp.role_line('clinician'));
+select pg_temp.expect('1j who holds the new codes', 'ehr.document.read-own: receptionist | ocr.job.read-own: '
+  || 'receptionist | ocr.job.start: clinician nurse receptionist',
+  (select string_agg(code || ': ' || holders, ' | ' order by code)
+     from (select permission_code as code, string_agg(role_code, ' ' order by role_code) as holders
+             from auth.role_permissions
+            where permission_code in ('ocr.job.start', 'ocr.job.read-own', 'ehr.document.read-own')
+            group by permission_code) held));
+select pg_temp.expect('1k org_admin holds neither work list (untouched)', '0',
   (select count(*)::text from auth.role_permissions
     where role_code = 'org_admin' and permission_code in ('lab.work-item.read', 'pharmacy.work-item.read')));
 
 -- 2. Back to the table before 0136, for this transaction: the prepared undo as
--- written, then the five front-desk rows taken away.
+-- written, then everything 0136 added taken away.
 \ir ../../../../docs/rollback/0136_rollback.sql
 delete from auth.role_permissions
- where role_code = 'receptionist'
-   and permission_code in ('ehr.document.write', 'ehr.document.read', 'ocr.job.write', 'ocr.job.read', 'ehr.vital.read');
-select pg_temp.expect('2a before 0136: the thirteen rows are there', '13', pg_temp.removed_present()::text);
-select pg_temp.expect('2b before 0136: no front-desk row yet', '0', pg_temp.added_present()::text);
+ where permission_code in ('ocr.job.start', 'ocr.job.read-own', 'ehr.document.read-own')
+    or (role_code = 'receptionist' and permission_code in ('ehr.document.write', 'ocr.job.write', 'ehr.vital.read'));
+delete from auth.permissions where code in ('ocr.job.start', 'ocr.job.read-own', 'ehr.document.read-own');
+select pg_temp.expect('2a before 0136: the twelve rows are there', '12', pg_temp.removed_present()::text);
+select pg_temp.expect('2b before 0136: no added row or new code yet', '0 0',
+  pg_temp.added_present() || ' ' || pg_temp.codes_present());
 
--- The counts query's answer, kept as rows.
+-- The counts file's answer, kept by label: the count block leaves it in the
+-- session setting zero136.counts (one JSON object per line).
 create temporary table counts_seen (
-  label text, position integer, change text, row_there_now boolean, real_with_role integer, real_changing integer,
-  real_logins integer, sealed_with_role integer, sealed_changing integer
+  label text, line integer, what text, real_count bigint, logins bigint, sealed_count bigint
 ) on commit drop;
--- The query answers two tables (lines 1-18 with eight columns, lines 19-22
--- with four), which psql writes into one CSV file, read back line by line,
--- and line 23 as a NOTICE and in the session setting
--- zero136.unchecked_readings.
-create temporary table counts_raw (line text) on commit drop;
-create temporary table consequences_seen (
-  label text, position integer, consequence text, real_count bigint, sealed_count bigint
-) on commit drop;
-create function pg_temp.load_counts(label text) returns void language plpgsql as $$
-begin
+create function pg_temp.keep_counts(label text) returns void language sql as $$
   insert into counts_seen
-  select label, field[1]::integer, field[2], field[3]::boolean, field[4]::integer, field[5]::integer,
-         field[6]::integer, field[7]::integer, field[8]::integer
-    from (select string_to_array(raw.line, ',') as field from counts_raw raw) parsed
-   where cardinality(field) = 8;
-  insert into consequences_seen
-  select label, field[1]::integer, field[2], field[3]::bigint, field[4]::bigint
-    from (select string_to_array(raw.line, ',') as field from counts_raw raw) parsed
-   where cardinality(field) = 4;
-  -- Line 23 comes from the query's last block, through its session setting.
-  insert into consequences_seen
-  select label, 23, 'readings not yet checked at the facilities of line 19',
-         split_part(current_setting('zero136.unchecked_readings'), '/', 1)::bigint,
-         split_part(current_setting('zero136.unchecked_readings'), '/', 2)::bigint;
-  if (select count(*) from counts_raw) <> 22
-     or (select count(*) from counts_raw raw where cardinality(string_to_array(raw.line, ',')) not in (4, 8)) > 0 then
-    raise exception 'the counts query answered % lines, expected 18 and 4', (select count(*) from counts_raw);
-  end if;
-  truncate counts_raw;
-end $$;
+  select label, counted.line, counted.what, counted.real_count, counted.logins, counted.sealed_count
+    from jsonb_to_recordset(current_setting('zero136.counts')::jsonb)
+         counted(line integer, what text, real_count bigint, logins bigint, sealed_count bigint);
+$$;
+-- The owner's maximums as 0136 carries them, built from a kept count; the
+-- caller may lower one line or leave one unfilled.
+create function pg_temp.set_maximums(label text, lower_line integer default null, lower_logins boolean default false,
+                                     unfilled_line integer default null) returns void language sql as $$
+  select set_config('zero136.owner_maximums', jsonb_agg(jsonb_build_object(
+           'line', seen.line,
+           'real_count', case when seen.line = unfilled_line then null
+                              when seen.line = lower_line and not lower_logins then seen.real_count - 1
+                              else seen.real_count end,
+           'logins', case when seen.line = unfilled_line then null
+                          when seen.line = lower_line and lower_logins then seen.logins - 1
+                          else seen.logins end))::text, false)
+    from counts_seen seen where seen.label = set_maximums.label and seen.line <= 24;
+$$;
 
 -- 3a. The counts before the fictional staff exist (whatever the database
--- already holds), so 3c compares only what the fixtures add.
+-- already holds), so 3c compares only what the fixtures add. No maximums:
+-- the count block only counts, as when DevOps runs the file.
+select set_config('zero136.owner_maximums', '', false);
 \set QUIET on
-\pset format csv
-\pset tuples_only on
-\o /tmp/hid-0136-counts.csv
+\o /dev/null
 \ir ../../../../docs/rollback/0136_affected_staff_counts.sql
 \o
-\pset format aligned
-\pset tuples_only off
-\copy counts_raw from '/tmp/hid-0136-counts.csv'
-select pg_temp.load_counts('baseline');
 \set QUIET off
+select pg_temp.keep_counts('baseline');
+select pg_temp.expect('3a the counts file answers 26 lines and compares nothing without maximums', '26 no',
+  (select count(*) from counts_seen where label = 'baseline') || ' ' || current_setting('zero136.maximums_checked'));
 
 -- Fixtures. Organisation O; Hospital F1 (real) and QA Hospital F2 (recorded
 -- as a sealed QA facility); Clinic F4 (real: doctors and a front desk, no
--- nurse or clinician) and Laboratory F5 (real: laboratory staff only).
+-- nurse or clinician), Laboratory F5 (real: laboratory staff only) and
+-- Desk F6 (real: a front desk only).
 -- Members (n): 1 receptionist; 2 receptionist and nurse; 3 doctor; 4 doctor
 -- and nurse; 5 doctor, membership inactive; 6 doctor, login disabled; 7 lab;
 -- 8 lab, role revoked; 9 admin; 10 admin and doctor; 11 doctor at the sealed
--- F2; 12 nurse; 13 doctor at F4; 14 receptionist at F4; 15 lab at F5.
--- Patient P1, 40 years old. OCR jobs: not yet checked at F1 (1), F2 (1), F4
--- (2) and F5 (1); one already checked at F4. Access requests from P1's
+-- F2; 12 nurse; 13 doctor at F4; 14 receptionist at F4; 15 lab at F5;
+-- 16 clinician; 17 receptionist at F6.
+-- Patient P1, 40 years old. OCR readings: not yet checked at F1 (1), F2 (1),
+-- F4 (2) and F5 (1); one already checked at F4. Access requests from P1's
 -- point of view: pending records processing from 3, 4, 7 and 11; a pending
 -- direct-care request from 3; an approved records-processing request from 3.
 set local session_replication_role = replica;
@@ -203,7 +232,9 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
   ('c1366000-0000-4000-8000-000000000004', 'c1366000-0000-4000-8000-000000000001', 'Role Change Clinic',
    'RC-136-C', 'Africa/Lagos', true, 'verified'),
   ('c1366000-0000-4000-8000-000000000005', 'c1366000-0000-4000-8000-000000000001', 'Role Change Laboratory',
-   'RC-136-L', 'Africa/Lagos', true, 'verified');
+   'RC-136-L', 'Africa/Lagos', true, 'verified'),
+  ('c1366000-0000-4000-8000-000000000006', 'c1366000-0000-4000-8000-000000000001', 'Role Change Desk',
+   'RC-136-D', 'Africa/Lagos', true, 'verified');
 insert into identity.sealed_qa_members (member_kind, member_id) values
   ('facility', 'c1366000-0000-4000-8000-000000000003');
 create temporary table rc_member (n integer primary key, facility text, roles text[], membership_active boolean,
@@ -224,7 +255,9 @@ insert into rc_member values
   (12, '2', array['nurse'], true, 'active', false),
   (13, '4', array['doctor'], true, 'active', false),
   (14, '4', array['receptionist'], true, 'active', false),
-  (15, '5', array['lab'], true, 'active', false);
+  (15, '5', array['lab'], true, 'active', false),
+  (16, '2', array['clinician'], true, 'active', false),
+  (17, '6', array['receptionist'], true, 'active', false);
 create function pg_temp.rc_id(kind text, n integer) returns uuid language sql immutable as $$
   select ('c136' || kind || '000-0000-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid;
 $$;
@@ -256,7 +289,7 @@ select ('c1364000-0000-4000-8000-0000000' || lpad((member.n * 10 + role_row.k)::
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, status) values
   ('c1365000-0000-4000-8000-000000000001', 'HID-ZQRPCX', 'Role', 'Change Patient', 'Role Change Patient',
    ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '40 years')::date, 'active');
--- OCR jobs (k, facility, member who started it, status).
+-- OCR readings (k, facility, member who started it, status).
 insert into ocr.jobs (id, facility_id, document_id, patient_id, source_object_version_id, source_sha256_hex, status,
   idempotency_key, request_sha256, provider, created_by, created_by_membership_id, correlation_id, completed_at)
 select ('c1367000-0000-4000-8000-0000000000' || lpad(job.k::text, 2, '0'))::uuid,
@@ -286,90 +319,187 @@ set local session_replication_role = origin;
 
 -- 3b. The counts with the fictional staff, before 0136.
 \set QUIET on
-\pset format csv
-\pset tuples_only on
-\o /tmp/hid-0136-counts.csv
+\o /dev/null
 \ir ../../../../docs/rollback/0136_affected_staff_counts.sql
 \o
-\pset format aligned
-\pset tuples_only off
-\copy counts_raw from '/tmp/hid-0136-counts.csv'
-select pg_temp.load_counts('before');
 \set QUIET off
+select pg_temp.keep_counts('before');
 
--- 3c. What the fixtures add to each count: real memberships with the role,
--- real memberships that change, real logins that change, sealed memberships
--- with the role, sealed memberships that change; and whether the row is there.
-select pg_temp.expect('3c ' || lpad(wanted.position::text, 2, '0') || ' ' || wanted.change,
-  wanted.counts || ' there=' || wanted.there,
-  (select (before.real_with_role - baseline.real_with_role) || '/' || (before.real_changing - baseline.real_changing)
-          || '/' || (before.real_logins - baseline.real_logins) || '/'
-          || (before.sealed_with_role - baseline.sealed_with_role) || '/'
-          || (before.sealed_changing - baseline.sealed_changing) || ' there=' || before.row_there_now
-     from counts_seen before join counts_seen baseline on baseline.position = before.position
-    where before.label = 'before' and baseline.label = 'baseline' and before.position = wanted.position
-      and before.change = wanted.change and baseline.change = wanted.change))
+-- 3c. What the fixtures add to each line: at real facilities / staff logins
+-- at real facilities / at the sealed QA and demo tenants.
+select pg_temp.expect('3c ' || lpad(wanted.line::text, 2, '0') || ' ' || wanted.what, wanted.counts,
+  (select (before.real_count - baseline.real_count) || '/'
+          || coalesce((before.logins - baseline.logins)::text, '-') || '/'
+          || (before.sealed_count - baseline.sealed_count)
+     from counts_seen before join counts_seen baseline on baseline.line = before.line
+    where before.label = 'before' and baseline.label = 'baseline' and before.line = wanted.line
+      and before.what = wanted.what and baseline.what = wanted.what))
   from (values
-    (1, 'receptionist gains ehr.document.write', '3/2/2/0/0', false),
-    (2, 'receptionist gains ehr.document.read', '3/2/2/0/0', false),
-    (3, 'receptionist gains ocr.job.write', '3/2/2/0/0', false),
-    (4, 'receptionist gains ocr.job.read', '3/2/2/0/0', false),
-    (5, 'receptionist gains ehr.vital.read', '3/2/2/0/0', false),
-    (6, 'doctor loses ocr.job.write', '4/3/3/1/1', true),
-    (7, 'doctor loses outreach.campaign.read', '4/2/2/1/1', true),
-    (8, 'doctor loses outreach.campaign.write', '4/2/2/1/1', true),
-    (9, 'doctor loses outreach.registration.read', '4/2/2/1/1', true),
-    (10, 'doctor loses outreach.registration.write', '4/2/2/1/1', true),
-    (11, 'doctor loses lab.work-item.read', '4/3/3/1/1', true),
-    (12, 'doctor loses pharmacy.work-item.read', '4/3/3/1/1', true),
-    (13, 'lab loses ehr.encounter.read', '2/2/2/0/0', true),
-    (14, 'lab loses ocr.job.read', '2/2/2/0/0', true),
-    (15, 'lab loses ocr.job.write', '2/2/2/0/0', true),
-    (16, 'lab loses ocr.validation.write', '2/2/2/0/0', true),
-    (17, 'admin loses lab.work-item.read', '2/2/2/0/0', true),
-    (18, 'admin loses pharmacy.work-item.read', '2/2/2/0/0', true)) wanted(position, change, counts, there);
--- 3e. What follows: real/sealed counts the fixtures add to lines 19-23.
-select pg_temp.expect('3e ' || wanted.position || ' ' || wanted.consequence, wanted.counts,
-  (select (before.real_count - baseline.real_count) || '/' || (before.sealed_count - baseline.sealed_count)
-     from consequences_seen before join consequences_seen baseline on baseline.position = before.position
-    where before.label = 'before' and baseline.label = 'baseline' and before.position = wanted.position
-      and before.consequence = wanted.consequence and baseline.consequence = wanted.consequence))
-  from (values
-    -- F4 (doctors and a desk) and F5 (laboratory); sealed F2 (a doctor only). F1 keeps its nurses.
-    (19, 'facilities where staff can check a reading today and nobody can after 0136', '2/1'),
-    -- F4: the desk can start a reading there and nobody can check it. F5 and F2: nobody can start one.
-    (20, 'facilities where after 0136 staff can start a reading and nobody can check it', '1/0'),
-    (21, 'facilities where after 0136 staff can start a reading and nobody can confirm its patient', '1/0'),
-    -- The doctor (3) and the laboratory member (7); the sealed doctor (11). Not the doctor with
-    -- a nurse role (4), the direct-care request or the approved one.
-    (22, 'open records-processing requests from staff who lose ocr.job.write (0136 closes them)', '2/1'),
-    -- F4's two and F5's one (F4's checked job and F1's job are not counted); F2's one.
-    (23, 'readings not yet checked at the facilities of line 19', '3/1'))
-    wanted(position, consequence, counts);
-select pg_temp.expect('3d the counts answer eighteen rows, numbers only',
-  '18 rows; columns position change row_there_now real_with_role real_changing real_logins sealed_with_role sealed_changing',
-  (select count(*) || ' rows' from counts_seen where label = 'before')
-  || '; columns position change row_there_now real_with_role real_changing real_logins sealed_with_role sealed_changing');
+    -- The desk members 1, 14 and 17; 2 is a nurse too, who already holds
+    -- write, vitals and the full reads, but not the two new -own codes or
+    -- ocr.job.start.
+    (1, 'receptionist gains ehr.document.write', '3/3/0'),
+    (2, 'receptionist gains ehr.document.read-own', '4/4/0'),
+    (3, 'receptionist gains ocr.job.write', '3/3/0'),
+    (4, 'receptionist gains ocr.job.start', '4/4/0'),
+    (5, 'receptionist gains ocr.job.read-own', '4/4/0'),
+    (6, 'receptionist gains ehr.vital.read', '3/3/0'),
+    -- Nurses 2, 4 and 12, clinician 16.
+    (7, 'nurse gains ocr.job.start', '3/3/0'),
+    (8, 'clinician gains ocr.job.start', '1/1/0'),
+    -- Doctors 3, 4, 10 and 13 (5 and 6 are not active), and 11 sealed: 4
+    -- keeps Outreach and the lab and pharmacy lists as a nurse, 10 keeps
+    -- Outreach as an administrator.
+    (9, 'doctor loses outreach.campaign.read', '2/2/1'),
+    (10, 'doctor loses outreach.campaign.write', '2/2/1'),
+    (11, 'doctor loses outreach.registration.read', '2/2/1'),
+    (12, 'doctor loses outreach.registration.write', '2/2/1'),
+    (13, 'doctor loses lab.work-item.read', '3/3/1'),
+    (14, 'doctor loses pharmacy.work-item.read', '3/3/1'),
+    -- Laboratory members 7 and 15 (8's role is revoked).
+    (15, 'lab loses ehr.encounter.read', '2/2/0'),
+    (16, 'lab loses ocr.job.read', '2/2/0'),
+    (17, 'lab loses ocr.job.write', '2/2/0'),
+    (18, 'lab loses ocr.validation.write', '2/2/0'),
+    -- Administrators 9 and 10.
+    (19, 'admin loses lab.work-item.read', '2/2/0'),
+    (20, 'admin loses pharmacy.work-item.read', '2/2/0'),
+    -- Doctors 3, 10 and 13, and 11 sealed; not 4, who starts readings as a nurse.
+    (21, 'doctors who can start a reading today and cannot after 0136', '3/3/1'),
+    -- F5 (the laboratory). F4's doctor and F2's sealed doctor keep checking (Q111 A).
+    (22, 'facilities where staff can check a reading today and nobody can after 0136', '1/-/0'),
+    -- F6 (a front desk only): the desk can start a reading there and nobody can check it.
+    (23, 'facilities where after 0136 staff can start a reading and nobody can check it', '1/-/0'),
+    (24, 'facilities where after 0136 staff can start a reading and nobody can confirm its patient', '1/-/0'),
+    -- The laboratory member 7 only; doctors 3, 4 and 11 keep ocr.job.write.
+    (25, 'open records-processing requests from staff who lose ocr.job.write (0136 closes them)', '1/-/0'),
+    -- F5's one reading (F1's, F2's and F4's facilities can still check theirs).
+    (26, 'readings not yet checked at the facilities of line 22', '1/-/0'))
+    wanted(line, what, counts);
+select pg_temp.expect('3d the counts hold numbers only: five fields per line, no id', '26 lines; line what real_count logins sealed_count',
+  (select count(*) || ' lines' from counts_seen where label = 'before')
+  || '; ' || (select string_agg(key, ' ' order by array_position(array['line', 'what', 'real_count', 'logins',
+                                                                        'sealed_count'], key))
+                from (select distinct jsonb_object_keys(value) as key
+                        from jsonb_array_elements(current_setting('zero136.counts')::jsonb)) keys));
 
--- 4. 0136 as written, on the table before it (its NOTICE lines are the counts).
+-- 3e. The owner's maximums (Q113 A), through the same count block: at the
+-- counted numbers it passes; one line higher than its maximum, in either
+-- number, or not filled in while it touches anyone, is named.
+select pg_temp.set_maximums('before');
+\set QUIET on
+\o /dev/null
+\ir ../../../../docs/rollback/0136_affected_staff_counts.sql
+\o
+\set QUIET off
+select pg_temp.expect('3e at the counted numbers: compared, nothing over', 'yes []',
+  current_setting('zero136.maximums_checked') || ' [' || current_setting('zero136.over_maximums') || ']');
+select pg_temp.set_maximums('before', lower_line => 3);
+\set QUIET on
+\o /dev/null
+\ir ../../../../docs/rollback/0136_affected_staff_counts.sql
+\o
+\set QUIET off
+select pg_temp.expect('3f one more front-desk member than the owner saw: line 3 is named',
+  format('line 3 (receptionist gains ocr.job.write) is now %s (%s staff logins), more than the owner''s %s (%s)',
+         seen.real_count, seen.logins, seen.real_count - 1, seen.logins),
+  current_setting('zero136.over_maximums'))
+  from counts_seen seen where seen.label = 'before' and seen.line = 3;
+select pg_temp.set_maximums('before', lower_line => 21, lower_logins => true);
+\set QUIET on
+\o /dev/null
+\ir ../../../../docs/rollback/0136_affected_staff_counts.sql
+\o
+\set QUIET off
+select pg_temp.expect('3g more staff logins than the owner saw, same memberships: line 21 is named',
+  format('line 21 (doctors who can start a reading today and cannot after 0136) is now %s (%s staff logins), '
+         || 'more than the owner''s %s (%s)', seen.real_count, seen.logins, seen.real_count, seen.logins - 1),
+  current_setting('zero136.over_maximums'))
+  from counts_seen seen where seen.label = 'before' and seen.line = 21;
+select pg_temp.set_maximums('before', unfilled_line => 23);
+\set QUIET on
+\o /dev/null
+\ir ../../../../docs/rollback/0136_affected_staff_counts.sql
+\o
+\set QUIET off
+select pg_temp.expect('3h a line not filled in while it touches a facility: line 23 is named',
+  format('line 23 (facilities where after 0136 staff can start a reading and nobody can check it) is now %s '
+         || 'and the owner''s maximum is not filled in', seen.real_count),
+  current_setting('zero136.over_maximums'))
+  from counts_seen seen where seen.label = 'before' and seen.line = 23;
+select pg_temp.set_maximums('before', lower_line => 25);
+\set QUIET on
+\o /dev/null
+\ir ../../../../docs/rollback/0136_affected_staff_counts.sql
+\o
+\set QUIET off
+select pg_temp.expect('3i lines 25 and 26 are printed only, never compared', 'yes []',
+  current_setting('zero136.maximums_checked') || ' [' || current_setting('zero136.over_maximums') || ']');
+-- A list missing a line is refused before any comparison.
+select set_config('zero136.owner_maximums', (current_setting('zero136.owner_maximums')::jsonb - 23)::text, false);
+\set ON_ERROR_STOP off
+\set ON_ERROR_ROLLBACK on
+\set QUIET on
+\o /dev/null
+\ir ../../../../docs/rollback/0136_affected_staff_counts.sql
+\o
+\set QUIET off
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on
+select pg_temp.expect('3j maximums missing a line are refused',
+  '0136: the owner''s maximums must list lines 1 to 24, once each; nothing was changed.', :'LAST_ERROR_MESSAGE');
+select set_config('zero136.owner_maximums', '', false);
+
+-- 4. 0136 as written, on the table before it. Its maximums are not filled in
+-- and the fictional staff are affected, so it stops before changing
+-- anything. ON_ERROR_ROLLBACK undoes only that statement here, so the suite
+-- can go on and check the change itself; the migration runner runs the file
+-- as one transaction and applies nothing.
+\set ON_ERROR_STOP off
+\set ON_ERROR_ROLLBACK on
+\set QUIET on
 \ir ../../database/migrations/0136_role_permission_changes.sql
-select pg_temp.expect('4a 0136 applied: removed rows', '0', pg_temp.removed_present()::text);
-select pg_temp.expect('4b 0136 applied: added rows', '5', pg_temp.added_present()::text);
-select pg_temp.expect('4c 0136 closed the records-processing requests of the doctor, the laboratory member and the sealed doctor',
-  '1 expired, 2 pending, 3 expired, 4 expired, 5 pending, 6 approved',
+\set QUIET off
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on
+select pg_temp.expect('4a with the owner''s maximums not filled in, 0136 stops on line 1 and names every line it touches',
+  '0136 stopped, nothing was changed: more staff would be affected than the owner approved: line 1 '
+  || '(receptionist gains ehr.document.write) is now ' || (select real_count from counts_seen
+     where label = 'before' and line = 1) || ' (' || (select logins from counts_seen where label = 'before' and line = 1)
+  || ' staff logins) and the owner''s maximum is not filled in; ',
+  left(:'LAST_ERROR_MESSAGE', length('0136 stopped, nothing was changed: more staff would be affected than the owner '
+  || 'approved: line 1 (receptionist gains ehr.document.write) is now ' || (select real_count from counts_seen
+     where label = 'before' and line = 1) || ' (' || (select logins from counts_seen where label = 'before' and line = 1)
+  || ' staff logins) and the owner''s maximum is not filled in; ')));
+select pg_temp.expect('4b the stop names lines 1-24 that touch anyone, never 25 or 26',
+  (select string_agg(line::text, ' ' order by line) from counts_seen
+    where label = 'before' and line <= 24 and (real_count > 0 or coalesce(logins, 0) > 0)),
+  (select string_agg(found[1], ' ' order by found[1]::integer)
+     from regexp_matches(:'LAST_ERROR_MESSAGE', 'line (\d+) \(', 'g') found));
+select pg_temp.expect('4c 0136 counted what the counts file counted, number for number', '0',
+  (select count(*)::text from (
+     select line, what, real_count, logins, sealed_count from counts_seen where label = 'before'
+     except
+     select counted.line, counted.what, counted.real_count, counted.logins, counted.sealed_count
+       from jsonb_to_recordset(current_setting('zero136.counts')::jsonb)
+            counted(line integer, what text, real_count bigint, logins bigint, sealed_count bigint)) differing));
+select pg_temp.expect('4d the change itself (the rest of the file): removed, added, new codes', '0 8 3',
+  pg_temp.removed_present() || ' ' || pg_temp.added_present() || ' ' || pg_temp.codes_present());
+select pg_temp.expect('4e 0136 closed the laboratory member''s records-processing request only',
+  '1 pending, 2 pending, 3 expired, 4 pending, 5 pending, 6 approved',
   (select string_agg(right(id::text, 1) || ' ' || status, ', ' order by id) from identity.access_requests
     where id::text like 'c1369000-%'));
-select pg_temp.expect('4d one audit row per closed request: system, the plain reason, no staff or patient detail beyond ids',
-  '3 system identity.access-request.close success This staff member can no longer process records migration',
+select pg_temp.expect('4f one audit row per closed request: system, the plain reason, no staff or patient detail beyond ids',
+  '1 system identity.access-request.close success This staff member can no longer process records migration',
   (select count(*) || ' ' || min(actor_type) || ' ' || min(action) || ' ' || min(outcome) || ' ' || min(reason) || ' '
           || min(provenance)
      from audit.events
     where resource_type = 'access-request' and resource_id like 'c1369000-%' and correlation_id = '0136-role-permission-changes'
       and actor_subject is null and patient_id = 'c1365000-0000-4000-8000-000000000001'));
-select pg_temp.expect('4e the count 0136 printed for line 22 is the number it closed', '3',
-  (select (sum(before.real_count + before.sealed_count) - sum(baseline.real_count + baseline.sealed_count))::text
-     from consequences_seen before join consequences_seen baseline on baseline.position = before.position
-    where before.label = 'before' and baseline.label = 'baseline' and before.position = 22));
+select pg_temp.expect('4g the count 0136 printed for line 25 is the number it closed', '1',
+  (select (before.real_count + before.sealed_count - baseline.real_count - baseline.sealed_count)::text
+     from counts_seen before join counts_seen baseline on baseline.line = before.line
+    where before.label = 'before' and baseline.label = 'baseline' and before.line = 25));
 
 -- Each fictional member's permissions at its facility, as every service reads
 -- them.
@@ -387,71 +517,70 @@ grant execute on function pg_temp.holds(integer, text), pg_temp.holding(integer,
 
 create function pg_temp.check_members(stage text) returns void language plpgsql as $$
 declare
-  desk text[] := array['ehr.document.write', 'ehr.document.read', 'ocr.job.write', 'ocr.job.read', 'ehr.vital.read'];
-  doctor_lost text[] := array['ocr.job.write', 'outreach.campaign.read', 'outreach.campaign.write',
-    'outreach.registration.read', 'outreach.registration.write', 'lab.work-item.read', 'pharmacy.work-item.read'];
-  doctor_kept text[] := array['ocr.job.read', 'ocr.validation.write', 'ocr.patient.confirm', 'ocr.publication.write',
-    'lab.work-item.accept', 'ehr.lab-request.read', 'ehr.prescription.read', 'lab.result.released.read',
-    'ehr.prescription.write', 'ehr.lab-request.write', 'ehr.order-route.send', 'ehr.document.write'];
+  desk text[] := array['ehr.document.write', 'ehr.document.read-own', 'ocr.job.write', 'ocr.job.start',
+    'ocr.job.read-own', 'ehr.vital.read'];
+  desk_never text[] := array['ehr.document.read', 'ocr.job.read', 'ocr.validation.write', 'ocr.patient.confirm',
+    'ocr.publication.write', 'ehr.note.read', 'ehr.diagnosis.read', 'ehr.prescription.read', 'ehr.lab-request.read'];
+  doctor_lost text[] := array['outreach.campaign.read', 'outreach.campaign.write', 'outreach.registration.read',
+    'outreach.registration.write', 'lab.work-item.read', 'pharmacy.work-item.read'];
+  doctor_kept text[] := array['ocr.job.write', 'ocr.job.read', 'ocr.validation.write', 'ocr.patient.confirm',
+    'ocr.publication.write', 'lab.work-item.accept', 'ehr.lab-request.read', 'ehr.prescription.read',
+    'lab.result.released.read', 'ehr.prescription.write', 'ehr.lab-request.write', 'ehr.order-route.send',
+    'ehr.document.read', 'ehr.document.write'];
   lab_lost text[] := array['ehr.encounter.read', 'ocr.job.read', 'ocr.job.write', 'ocr.validation.write'];
   lab_kept text[] := array['lab.work-item.read', 'lab.work-item.accept', 'lab.order-route.receive', 'lab.result.enter',
     'lab.result.release', 'ehr.lab-request.read', 'ehr.lab-request.write'];
   admin_lost text[] := array['lab.work-item.read', 'pharmacy.work-item.read'];
-  admin_kept text[] := array['identity.registration.approve', 'workforce.manage', 'organization.manage', 'audit.read'];
-  nurse_all text[] := array['ehr.note.write', 'ocr.job.write', 'outreach.campaign.read', 'lab.work-item.read',
-    'pharmacy.work-item.read', 'ehr.vital.read'];
-  after boolean := stage = 'after 0136';
-  function_of text;
+  admin_kept text[] := array['identity.registration.approve', 'workforce.manage', 'organization.manage', 'audit.read',
+    'ocr.job.read'];
+  starts text[] := array['ocr.job.write', 'ocr.job.start'];
+  nurse_all text[] := array['ehr.note.write', 'ocr.job.write', 'ocr.job.start', 'ocr.job.read', 'ocr.validation.write',
+    'outreach.campaign.read', 'lab.work-item.read', 'pharmacy.work-item.read', 'ehr.vital.read', 'ehr.document.read'];
 begin
-  function_of := array_to_string(desk, ' ');
-  perform pg_temp.expect(stage || ': front desk (1) scans and sees vitals',
-    case when after then function_of else '- - - - -' end, pg_temp.holding(1, desk));
-  perform pg_temp.expect(stage || ': front desk with a nurse role (2) has them either way', function_of,
-    pg_temp.holding(2, desk));
-  perform pg_temp.expect(stage || ': doctor (3) loses scan writing, Outreach and the work lists',
-    case when after then '- - - - - - -' else array_to_string(doctor_lost, ' ') end, pg_temp.holding(3, doctor_lost));
-  perform pg_temp.expect(stage || ': doctor (3) keeps reading jobs, publishing, sending and its orders'' progress',
+  perform pg_temp.expect(stage || ': front desk (1) scans, starts readings, sees its own uploads and vitals',
+    array_to_string(desk, ' '), pg_temp.holding(1, desk));
+  perform pg_temp.expect(stage || ': front desk (1) holds neither full read nor any clinical read (Q112 A)',
+    '- - - - - - - - -', pg_temp.holding(1, desk_never));
+  perform pg_temp.expect(stage || ': front desk with a nurse role (2) keeps the full reads through the nurse role',
+    'ehr.document.read ocr.job.read', pg_temp.holding(2, array['ehr.document.read', 'ocr.job.read']));
+  perform pg_temp.expect(stage || ': doctor (3) loses Outreach and the work lists', '- - - - - -',
+    pg_temp.holding(3, doctor_lost));
+  perform pg_temp.expect(stage || ': doctor (3) keeps checking, confirming, publishing, sending and its orders'' progress (Q111 A)',
     array_to_string(doctor_kept, ' '), pg_temp.holding(3, doctor_kept));
-  perform pg_temp.expect(stage || ': doctor with a nurse role (4) keeps them through the nurse role',
-    array_to_string(doctor_lost, ' '), pg_temp.holding(4, doctor_lost));
-  perform pg_temp.expect(stage || ': lab member (7) loses visits and OCR',
-    case when after then '- - - -' else array_to_string(lab_lost, ' ') end, pg_temp.holding(7, lab_lost));
+  perform pg_temp.expect(stage || ': doctor (3) cannot start a reading (no ocr.job.start)', 'ocr.job.write -',
+    pg_temp.holding(3, starts));
+  perform pg_temp.expect(stage || ': doctor with a nurse role (4) keeps everything and starts readings as a nurse',
+    array_to_string(doctor_lost || starts, ' '), pg_temp.holding(4, doctor_lost || starts));
+  perform pg_temp.expect(stage || ': lab member (7) loses visits and OCR', '- - - -', pg_temp.holding(7, lab_lost));
   perform pg_temp.expect(stage || ': lab member (7) keeps its own work', array_to_string(lab_kept, ' '),
     pg_temp.holding(7, lab_kept));
-  perform pg_temp.expect(stage || ': admin (9) loses the two work lists',
-    case when after then '- -' else array_to_string(admin_lost, ' ') end, pg_temp.holding(9, admin_lost));
-  perform pg_temp.expect(stage || ': admin (9) keeps approving new patients and running staff',
+  perform pg_temp.expect(stage || ': admin (9) loses the two work lists', '- -', pg_temp.holding(9, admin_lost));
+  perform pg_temp.expect(stage || ': admin (9) keeps approving new patients, running staff and reading jobs',
     array_to_string(admin_kept, ' '), pg_temp.holding(9, admin_kept));
-  perform pg_temp.expect(stage || ': admin and doctor (10) loses the work lists from both roles',
-    case when after then '- -' else array_to_string(admin_lost, ' ') end, pg_temp.holding(10, admin_lost));
+  perform pg_temp.expect(stage || ': admin and doctor (10) loses the work lists from both roles', '- -',
+    pg_temp.holding(10, admin_lost));
   perform pg_temp.expect(stage || ': admin and doctor (10) keeps Outreach through the admin role',
     'outreach.campaign.read outreach.registration.write',
     pg_temp.holding(10, array['outreach.campaign.read', 'outreach.registration.write']));
-  perform pg_temp.expect(stage || ': nurse (12) unchanged', array_to_string(nurse_all, ' '),
+  perform pg_temp.expect(stage || ': nurse (12) keeps everything and starts readings', array_to_string(nurse_all, ' '),
     pg_temp.holding(12, nurse_all));
+  perform pg_temp.expect(stage || ': clinician (16) starts and checks readings', 'ocr.job.write ocr.job.start ocr.validation.write',
+    pg_temp.holding(16, array['ocr.job.write', 'ocr.job.start', 'ocr.validation.write']));
   perform pg_temp.expect(stage || ': inactive membership (5), disabled login (6), revoked role (8) hold nothing',
     '- - -', pg_temp.holding(5, array['ehr.encounter.read']) || ' ' || pg_temp.holding(6, array['ehr.encounter.read'])
       || ' ' || pg_temp.holding(8, array['lab.work-item.read']));
 end $$;
 select pg_temp.check_members('after 0136');
 
--- What the owner signs for the front desk (contract, "Before signing"): with
--- the patient's access, the desk can open the patient's stored documents at
--- the facility (ehr.document.read: list and download) and the text read from
--- them (ocr.job.read: extractions, validations, publications), but holds no
--- clinical note, diagnosis or prescription read.
-select pg_temp.expect('4f the front desk (1) reads documents and reading text, and no clinical record',
-  'ehr.document.read ocr.job.read - - - -',
-  pg_temp.holding(1, array['ehr.document.read', 'ocr.job.read', 'ehr.note.read', 'ehr.diagnosis.read',
-    'ehr.prescription.read', 'ehr.lab-request.read']));
-
--- 5. Records processing (0104's trigger), as the Identity API runtime.
+-- 5. Records processing (0104's trigger), as the Identity API runtime, at each
+-- member's own facility.
 create function pg_temp.ask_records_processing(n integer) returns text language plpgsql as $$
 declare
   outcome record;
 begin
   perform set_config('app.actor_subject', 'staff:role-change-' || n, true),
-    set_config('app.facility_id', 'c1366000-0000-4000-8000-000000000002', true),
+    set_config('app.facility_id', 'c1366000-0000-4000-8000-00000000000'
+      || (select facility from rc_member where rc_member.n = ask_records_processing.n), true),
     set_config('app.membership_id', pg_temp.rc_id('3', n)::text, true),
     set_config('app.purpose_of_use', 'healthcare-operations', true),
     set_config('app.correlation_id', 'role-change-records-processing-' || n, true);
@@ -465,28 +594,51 @@ grant execute on function pg_temp.ask_records_processing(integer) to public;
 set local role hid_identity_api_runtime;
 select pg_temp.expect('5a the front desk (1) may ask for records processing', 'ok pending healthcare-operations',
   pg_temp.ask_records_processing(1));
-select pg_temp.expect('5b a doctor (3) is refused', '42501 RECORDS_PROCESSING_NOT_ALLOWED',
-  pg_temp.ask_records_processing(3));
+select pg_temp.expect('5b a doctor (13) still may (Q111 A: doctors keep checking readings)',
+  'ok pending healthcare-operations', pg_temp.ask_records_processing(13));
 select pg_temp.expect('5c a laboratory member (7) is refused', '42501 RECORDS_PROCESSING_NOT_ALLOWED',
   pg_temp.ask_records_processing(7));
 select pg_temp.expect('5d a nurse (12) still may', 'ok pending healthcare-operations',
   pg_temp.ask_records_processing(12));
 reset role;
 
--- 6. The prepared undo, as written: exactly the thirteen rows back, the five
--- front-desk rows left; twice changes nothing.
+-- 7. After 0136 the counts file refuses to count again (its numbers would mean
+-- nothing).
+\set ON_ERROR_STOP off
+\set ON_ERROR_ROLLBACK on
+\set QUIET on
+\o /dev/null
+\ir ../../../../docs/rollback/0136_affected_staff_counts.sql
+\o
+\set QUIET off
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on
+select pg_temp.expect('7a after 0136 the counts file says there is nothing left to count',
+  '0136 counts: this database already has 0136''s new permissions, so 0136 has already run here and there is nothing left to count.',
+  :'LAST_ERROR_MESSAGE');
+
+-- 6. The prepared undo, as written: the twelve rows and the doctor's and
+-- laboratory member's ocr.job.start back, the front-desk rows left; twice
+-- changes nothing.
 \ir ../../../../docs/rollback/0136_rollback.sql
-select pg_temp.expect('6a undo: the thirteen rows are back', '13', pg_temp.removed_present()::text);
-select pg_temp.expect('6b undo: the front-desk rows stay', '5', pg_temp.added_present()::text);
-select pg_temp.expect('6c undo: doctor, lab member and admin get their permissions back',
-  'ocr.job.write lab.work-item.read | ehr.encounter.read ocr.job.write | lab.work-item.read pharmacy.work-item.read',
-  pg_temp.holding(3, array['ocr.job.write', 'lab.work-item.read']) || ' | '
-  || pg_temp.holding(7, array['ehr.encounter.read', 'ocr.job.write']) || ' | '
+select pg_temp.expect('6a undo: the twelve rows are back', '12', pg_temp.removed_present()::text);
+select pg_temp.expect('6b undo: the front-desk, nurse and clinician rows and the three codes stay', '8 3',
+  pg_temp.added_present() || ' ' || pg_temp.codes_present());
+select pg_temp.expect('6c undo: doctor, lab member and admin can do again what they did before 0136',
+  'ocr.job.write ocr.job.start lab.work-item.read outreach.campaign.read | ehr.encounter.read ocr.job.read ocr.job.write '
+  || 'ocr.job.start ocr.validation.write | lab.work-item.read pharmacy.work-item.read',
+  pg_temp.holding(3, array['ocr.job.write', 'ocr.job.start', 'lab.work-item.read', 'outreach.campaign.read']) || ' | '
+  || pg_temp.holding(7, array['ehr.encounter.read', 'ocr.job.read', 'ocr.job.write', 'ocr.job.start',
+                              'ocr.validation.write']) || ' | '
   || pg_temp.holding(9, array['lab.work-item.read', 'pharmacy.work-item.read']));
+select pg_temp.expect('6d undo: the front desk keeps scanning with its own uploads only',
+  'ehr.document.write ehr.document.read-own ocr.job.write ocr.job.start ocr.job.read-own ehr.vital.read - -',
+  pg_temp.holding(1, array['ehr.document.write', 'ehr.document.read-own', 'ocr.job.write', 'ocr.job.start',
+    'ocr.job.read-own', 'ehr.vital.read', 'ehr.document.read', 'ocr.job.read']));
 create temporary table rows_after_undo on commit drop as
   select role_code, permission_code from auth.role_permissions;
 \ir ../../../../docs/rollback/0136_rollback.sql
-select pg_temp.expect('6d undo a second time: the table is the same', '0 0',
+select pg_temp.expect('6e undo a second time: the table is the same', '0 0',
   (select count(*) from (select role_code, permission_code from auth.role_permissions
                          except select role_code, permission_code from rows_after_undo) more)
   || ' ' || (select count(*) from (select role_code, permission_code from rows_after_undo

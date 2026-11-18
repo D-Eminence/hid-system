@@ -1417,19 +1417,20 @@ begin
         ('98d00005-0000-4000-8000-00000000000' || wanted.site)::uuid,
         ('98d00002-0000-4000-8000-00000000000' || wanted.site)::uuid, wanted.permission))
        from (values (1, 'ehr.encounter.write'), (1, 'ehr.order-route.send'), (1, 'identity.break-glass.write'),
-                    (1, 'identity.consent.write'), (1, 'identity.registration.write'),
+                    (1, 'identity.consent.write'), (1, 'identity.registration.write'), (1, 'ocr.job.write'),
                     (1, 'ocr.publication.write'), (1, 'lab.import.write'), (1, 'pharmacy.import.write'),
                     (1, 'audit.read'), (1, 'workforce.manage'), (2, 'lab.order-route.receive'),
                     (2, 'lab.result.enter'), (2, 'lab.result.release'), (3, 'pharmacy.order-route.receive'),
                     (3, 'pharmacy.dispensing.create'), (4, 'outreach.registration.write'), (4, 'outreach.campaign.write'),
                     (4, 'identity.break-glass.write'), (4, 'audit.read')) wanted(site, permission)));
-  -- 0136 (owner decision Q103 A): doctors no longer start paper-record
-  -- readings, so the staff login (doctor and org_admin at Demo Hospital) holds
-  -- no ocr.job.write there; it still checks nothing under records processing
-  -- either (0104 D8 needs ocr.job.write) but publishes under direct care.
-  perform pg_temp.assert('0136: no paper-scan writing for the staff login at Demo Hospital',
+  -- 0136 (owner decisions Q103 A, Q111 A): doctors no longer start
+  -- paper-record readings (that needs ocr.job.start, which doctors and
+  -- org_admin lack), so the staff login (doctor and org_admin at Demo
+  -- Hospital) cannot start one there; it keeps ocr.job.write (above), so it
+  -- still checks readings and confirms their patient under records processing.
+  perform pg_temp.assert('0136: the staff login at Demo Hospital cannot start a reading',
     not auth.membership_has_permission('sealed-demo:98d00003-0000-4000-8000-000000000001',
-      '98d00005-0000-4000-8000-000000000001', '98d00002-0000-4000-8000-000000000001', 'ocr.job.write'));
+      '98d00005-0000-4000-8000-000000000001', '98d00002-0000-4000-8000-000000000001', 'ocr.job.start'));
   perform pg_temp.assert('the patient logins resolve',
     (select count(*) from identity.current_patient_account('patient:98d00008-0000-4000-8000-000000000001')) = 1
     and (select count(*) from identity.current_patient_account('patient:98d00008-0000-4000-8000-000000000002')) = 1);

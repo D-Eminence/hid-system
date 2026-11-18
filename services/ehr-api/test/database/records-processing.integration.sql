@@ -115,17 +115,17 @@ select pg_temp.expect('1h the cover and the gate', 'cover: t/s/{"search_path=pg_
      join pg_proc p on p.oid = wanted.signature::regprocedure));
 
 -- The role table as these cases were written for it (before 0136). 0136
--- (owner decision Q103 A) took ocr.job.write from doctors and laboratory
--- staff and gave it to the front desk, so a doctor or a lab member can no
+-- (owner decisions Q103 A, Q111 A) took ocr.job.write from laboratory staff
+-- and gave it to the front desk (doctors keep it), so a lab member can no
 -- longer ask for or hold records processing. This suite pins records
 -- processing's own rules (0104, 0108, 0113), not who holds ocr.job.write:
 -- for its own transaction, which is rolled back, it puts back the rows 0136
--- removed and takes away the rows 0136 added. What 0136 changes, including
--- who may ask for records processing now, is proven by
+-- removed and takes away the front-desk rows 0136 added. What 0136 changes,
+-- including who may ask for records processing now, is proven by
 -- role-permission-changes.integration.sql.
 insert into auth.role_permissions (role_code, permission_code)
 select role_code, permission_code
-  from (values ('doctor', 'ocr.job.write'), ('doctor', 'outreach.campaign.read'), ('doctor', 'outreach.campaign.write'),
+  from (values ('doctor', 'outreach.campaign.read'), ('doctor', 'outreach.campaign.write'),
                ('doctor', 'outreach.registration.read'), ('doctor', 'outreach.registration.write'),
                ('doctor', 'lab.work-item.read'), ('doctor', 'pharmacy.work-item.read'), ('lab', 'ehr.encounter.read'),
                ('lab', 'ocr.job.read'), ('lab', 'ocr.job.write'), ('lab', 'ocr.validation.write'),
@@ -133,7 +133,8 @@ select role_code, permission_code
 on conflict do nothing;
 delete from auth.role_permissions
  where role_code = 'receptionist'
-   and permission_code in ('ehr.document.write', 'ehr.document.read', 'ocr.job.write', 'ocr.job.read', 'ehr.vital.read');
+   and permission_code in ('ehr.document.write', 'ehr.document.read-own', 'ocr.job.write', 'ocr.job.start',
+                           'ocr.job.read-own', 'ehr.vital.read');
 
 -- 2. Fixtures: one facility; a doctor, clinician, nurse, lab member,
 -- pharmacist and receptionist there; patients aged 40 (P1, with a login and a
