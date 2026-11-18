@@ -6032,14 +6032,16 @@ migration, no new setting. `schema.integration.sql` is unchanged.
 
 ### Request bodies
 
-`changeReason` becomes optional in three bodies only: `PATCH
+`changeReason` becomes optional in three bodies: `PATCH
 /ehr/patients/:patientId/encounters/:encounterId/clinical-notes/:noteId`
 (UpdateClinicalNote), `PATCH .../prescriptions/:prescriptionId`
 (UpdatePrescription) and `PATCH .../lab-requests/:requestId`
-(UpdateLabRequest). When it is sent, the rules are unchanged: a string,
-trimmed, 3 to 500 characters, never `null` (`400` from validation
-otherwise). Every other body that carries `changeReason` (visits,
-diagnoses, note revisions, vitals corrections) still requires it.
+(UpdateLabRequest). Q105 adds two more: `PATCH
+/ehr/patients/:patientId/encounters/:encounterId` (UpdateEncounter) and
+`POST .../clinical-notes/:noteId/revisions` (new note text). When it is
+sent, the rules are unchanged: a string, trimmed, 3 to 500 characters,
+never `null` (`400` from validation otherwise). Diagnosis updates and
+vitals corrections still require it in the body.
 
 ### When the server records a fixed reason
 
@@ -6048,7 +6050,8 @@ diagnoses, note revisions, vitals corrections) still requires it.
 | A draft note signed (`status: "signed"`) with no other field (no `title`), and the note's version history shows it was never signed or amended | Not needed | `First signature (no reason needed)` |
 | A draft prescription activated (`status: "active"`) with no other field (no `frequency`, `instructions` or `endsOn`; `allergyAcknowledgement` may be sent), and its version history shows it was never active, on hold or completed | Not needed | `First activation (no reason needed)` |
 | Either of the above with a typed reason | Optional | The typed reason |
-| Anything else: amend, hold, resume after a hold, stop or cancel, entered in error, any edit (drafts included), any lab-request change | **Required** | The typed reason |
+| Q105 adds: a lab request's first activation, starting and finishing a visit, and edits to a draft note, prescription or lab request that was never signed or active (see the Q105 section for the conditions and the recorded reasons) | Not needed | The Q105 fixed reason |
+| Anything else: amend, hold, resume after a hold, stop or cancel (drafts included), entered in error (drafts and visits included), completing an order, any change to something already signed or active, a visit's chief complaint | **Required** | The typed reason |
 
 "First" is checked against the record's version history, not only its
 current status, and fails closed: if the record's create version cannot be
@@ -6065,21 +6068,27 @@ before anything is written. For prescriptions the reason rule is decided
 before the allergy check; the allergy check itself is unchanged, so an
 allergy match on a first activation still answers `409
 ALLERGY_ACKNOWLEDGEMENT_REQUIRED` until the acknowledgement is sent. For lab
-requests the `400` answers before the request reaches the database.
+requests and visits, a change that can never go without a typed reason
+answers the `400` before the request reaches the database; one that might
+(a lab request's first activation or draft edit, a visit's start or finish)
+is decided under the row lock (Q105).
 
 ### Audit
 
 When a fixed reason is used, the update's audit row (`ehr.note.update` or
 `ehr.prescription.update`) carries `fixedReason: "first_signature"` or
-`"first_activation"`. With a typed reason the audit details are unchanged
-(the typed text is never in the audit row).
+`"first_activation"`. Q105 adds `"draft_edit"`, `"visit_start"` and
+`"visit_finish"`, and the same field on `ehr.lab-request.update`,
+`ehr.encounter.update` and `ehr.note-revision.create`. With a typed reason
+the audit details are unchanged (the typed text is never in the audit row).
 
 ### Extended by Q105
 
 Owner question 6 was answered yes on 18 November 2026: the first activation
 of a lab request, starting and finishing a visit, and edits to drafts no
-longer need a typed reason. See the Q105 section. The table above is
-unchanged for notes and prescriptions except that a draft edit (and an edit
+longer need a typed reason. The request bodies, the table, the `400` and
+the audit above include it; the Q105 section has the conditions and the
+recorded reasons. For notes and prescriptions, a draft edit (and an edit
 sent with the first signature or first activation) now records a fixed
 reason too.
 
@@ -6990,5 +6999,8 @@ their answers (`404 CONSENT_RESOURCE_NOT_FOUND` and so on). They are lane A's
 
 ### Website
 
-Find a patient shows "No patient has the Health ID ..." with "Register a new
-patient" for roles that register (health repo, `PatientsWorkspace.tsx`).
+Find a patient shows the owner's words, "No patient has this Health ID."
+(the answer's `detail`), with Register for roles that register (health repo,
+`PatientsWorkspace.tsx`), only on `PATIENT_NOT_FOUND`. Every other `404` and
+every `403` stays a refused lookup, as today. A limited account gets today's
+`404`, never a `429`.
