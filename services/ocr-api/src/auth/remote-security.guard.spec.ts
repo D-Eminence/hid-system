@@ -6,7 +6,7 @@ import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AuditInterceptor } from '../audit/audit.interceptor';
 import { AuditService } from '../audit/audit.service';
-import { RequirePermissions } from '../common/decorators';
+import { RequireAnyPermission, RequirePermissions } from '../common/decorators';
 import { CorrelationMiddleware } from '../common/correlation.middleware';
 import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
 import { DatabaseService } from '../database/database.service';
@@ -81,6 +81,11 @@ class ProbeController {
   @Get()
   @RequirePermissions('ocr.job.read')
   read() { return { ok: true }; }
+
+  // Either code (0136, owner decision Q112 A: the front desk's ocr.job.read-own).
+  @Get('any')
+  @RequireAnyPermission('ocr.job.read-own', 'ocr.job.read')
+  readAny() { return { ok: true }; }
 }
 
 let app: INestApplication;
@@ -127,9 +132,9 @@ beforeEach(async () => {
 
 afterEach(async () => { await app.close(); });
 
-function probe(headers: Record<string, string> = {}): Promise<{ status: number; code?: string }> {
+function probe(headers: Record<string, string> = {}, path = 'probe'): Promise<{ status: number; code?: string }> {
   return new Promise((resolve, reject) => {
-    const outgoing = httpRequest(`${baseUrl}/api/v1/probe`, { headers: { 'User-Agent': USER_AGENT, ...headers } }, (response) => {
+    const outgoing = httpRequest(`${baseUrl}/api/v1/${path}`, { headers: { 'User-Agent': USER_AGENT, ...headers } }, (response) => {
       let text = '';
       response.setEncoding('utf8');
       response.on('data', (chunk: string) => { text += chunk; });
@@ -196,6 +201,13 @@ describe('RemoteSecurityGuard requests that bind a facility, or have no actor', 
       action: 'security.authorization.denied', resourceType: 'http-request', outcome: 'denied', facilityId: SECOND_FACILITY.id,
       actorMembershipId: SECOND_FACILITY.membershipId, organizationId: SECOND_FACILITY.organizationId, provenance: 'application',
       ...requestEvidence })]);
+  });
+
+  it('passes a route needing any of several codes when the facility grants one, and refuses it with none', async () => {
+    expect((await probe({ 'X-Facility-ID': DEFAULT_FACILITY.id }, 'probe/any')).status).toBe(200);
+    expect(await probe({ 'X-Facility-ID': SECOND_FACILITY.id }, 'probe/any'))
+      .toEqual({ status: 403, code: 'PERMISSION_DENIED' });
+    expect(rows.map((row) => row.action)).toEqual(['api.get./api/v1/probe/any', 'security.authorization.denied']);
   });
 
   it('records an unauthenticated request as a system refusal', async () => {

@@ -323,7 +323,16 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
       'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
     expect(holders('outreach.campaign.read')).toEqual(['admin', 'clinician', 'nurse', 'org_admin',
       'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
-    expect(holders('ocr.job.write')).toEqual(['clinician', 'nurse', 'receptionist']);
+    // Q111 A: doctors keep ocr.job.write (checking readings, confirming their
+    // patient); starting a reading also needs ocr.job.start, which they lack.
+    expect(holders('ocr.job.write')).toEqual(['clinician', 'doctor', 'nurse', 'receptionist']);
+    expect(holders('ocr.job.start')).toEqual(['clinician', 'nurse', 'receptionist']);
+    // Q112 A: only the front desk holds the "own uploads" reads, and it holds
+    // neither full read.
+    expect(holders('ehr.document.read-own')).toEqual(['receptionist']);
+    expect(holders('ocr.job.read-own')).toEqual(['receptionist']);
+    expect(holders('ehr.document.read')).toEqual(['clinician', 'doctor', 'lab', 'nurse']);
+    expect(holders('ocr.job.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse']);
   });
 
   it('admits by exactly these codes on each site (Q97: lab., pharmacy. and outreach. take organization.manage, not ehr.encounter.write)', () => {
@@ -398,31 +407,33 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
 
   // 0136 (owner decision Q103 A): the model reads 0136's DELETE as well as
   // every INSERT, so these are the sets the roles hold in production after it.
-  it('the front desk holds the five 0136 codes and still fits ehr. and migrate. only', () => {
+  it('the front desk holds the six 0136 codes and still fits ehr. and migrate. only', () => {
     const permissions = permissionsOf('receptionist');
-    expect(permissions).toEqual(expect.arrayContaining(['ehr.document.write', 'ehr.document.read', 'ocr.job.write',
-      'ocr.job.read', 'ehr.vital.read']));
-    for (const code of ['ocr.validation.write', 'ocr.patient.confirm', 'ocr.publication.write']) {
+    expect(permissions).toEqual(expect.arrayContaining(['ehr.document.write', 'ehr.document.read-own', 'ocr.job.write',
+      'ocr.job.start', 'ocr.job.read-own', 'ehr.vital.read']));
+    for (const code of ['ehr.document.read', 'ocr.job.read', 'ocr.validation.write', 'ocr.patient.confirm',
+      'ocr.publication.write', 'ehr.note.read', 'ehr.diagnosis.read', 'ehr.prescription.read', 'ehr.lab-request.read']) {
       expect(permissions).not.toContain(code);
     }
     const facility = assignment(['receptionist'], permissions);
     expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(['ehr', 'migrate']);
   });
 
-  it('doctors and administrators lose the 0136 rows; the kept rows stay', () => {
+  it('doctors and administrators lose the 0136 rows; the kept rows stay (doctors keep checking, Q111 A)', () => {
     const doctor = permissionsOf('doctor');
-    for (const code of ['ocr.job.write', 'outreach.campaign.read', 'outreach.campaign.write', 'outreach.registration.read',
+    for (const code of ['ocr.job.start', 'outreach.campaign.read', 'outreach.campaign.write', 'outreach.registration.read',
       'outreach.registration.write', 'lab.work-item.read', 'pharmacy.work-item.read']) {
       expect(doctor).not.toContain(code);
     }
-    expect(doctor).toEqual(expect.arrayContaining(['ocr.job.read', 'ocr.validation.write', 'ocr.publication.write',
-      'lab.work-item.accept', 'ehr.lab-request.read', 'ehr.prescription.read', 'lab.result.released.read']));
+    expect(doctor).toEqual(expect.arrayContaining(['ocr.job.write', 'ocr.job.read', 'ocr.validation.write',
+      'ocr.patient.confirm', 'ocr.publication.write', 'lab.work-item.accept', 'ehr.lab-request.read',
+      'ehr.prescription.read', 'lab.result.released.read']));
     const admin = permissionsOf('admin');
     expect(admin).not.toContain('lab.work-item.read');
     expect(admin).not.toContain('pharmacy.work-item.read');
     expect(admin).toEqual(expect.arrayContaining(['identity.registration.approve', 'organization.manage',
       'workforce.manage', 'audit.read']));
-    expect(permissionsOf('nurse')).toEqual(expect.arrayContaining(['ehr.note.write', 'ocr.job.write',
+    expect(permissionsOf('nurse')).toEqual(expect.arrayContaining(['ehr.note.write', 'ocr.job.write', 'ocr.job.start',
       'ocr.validation.write', 'lab.work-item.read', 'pharmacy.work-item.read']));
     // A doctor membership is still a hospital clinical membership: ehr. and migrate. only.
     expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(assignment(['doctor'], doctor), product)))

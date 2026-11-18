@@ -75,7 +75,9 @@ export class OcrJobListService {
   async list(query: OcrJobListQueryDto, context: DataAccessContext) {
     const limit = query.limit ? Number(query.limit) : OCR_JOB_LIST_DEFAULT_LIMIT;
     const cursor = query.cursor ? decodeCursor(query.cursor) : undefined;
-    const mine = query.mine === 'true';
+    // Without ocr.job.read (the front desk's ocr.job.read-own, Q112 A): only
+    // the readings this member started, whatever the query asks.
+    const mine = query.mine === 'true' || !(context.actor.permissions ?? []).includes('ocr.job.read');
     if (mine && !context.membershipId) {
       throw new DomainProblem(403, 'FACILITY_ACCESS_DENIED', 'The actor is not active at this facility');
     }
