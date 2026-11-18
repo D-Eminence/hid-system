@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding} from './production-backend-build.mjs';
+import {readFileSync} from 'node:fs';
+import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding,assertGatewayVex,gatewayVexPath} from './production-backend-build.mjs';
 
 test('publication accepts only the approved Novu backend branch and exact repository context',()=>{
   const env={GITHUB_REPOSITORY:'D-Eminence/hid-system',GITHUB_REPOSITORY_ID:'1317340803',
@@ -73,4 +74,49 @@ test('production applicability cannot transfer between images, sources, componen
   for(const change of [{assessment_scope:'staging'},{component:'identity-api'},
     {source_commit:'d'.repeat(40)},{image_id:'sha256:'+'e'.repeat(64)},{raw_scan_sha256:'f'.repeat(64)}])
     assert.throws(()=>assertAssessmentBinding({...assessment,...change},'ehr-api',source,image,raw));
+});
+
+const gatewayPurl=n=>`pkg:apk/alpine/${n}@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl`;
+const gatewayMatch=(id,n='libssl3')=>({vulnerability:{id,severity:'High'},artifact:{name:n,version:'3.5.9-r0',type:'apk',purl:gatewayPurl(n)},
+  appliedIgnoreRules:[{namespace:'vex','vex-status':'not_affected'}]});
+test('gateway VEX edits rebuild only the gateway',()=>assert.deepEqual(selectComponents([gatewayVexPath]),['gateway']));
+test('committed gateway VEX covers only the reviewed Alpine OpenSSL findings and expires by 2026-12-01',()=>{
+  const vex=JSON.parse(readFileSync(new URL('../'+gatewayVexPath,import.meta.url)));
+  assert.ok(Date.parse(vex.hid_expires_at)<=Date.parse('2026-12-01T00:00:00Z'));
+  assert.deepEqual(vex.statements.map(s=>s.vulnerability.name).sort(),['CVE-2026-107496','CVE-2026-88823','CVE-2026-95691','CVE-2026-95692']);
+  for(const s of vex.statements){
+    assert.equal(s.status,'not_affected');assert.equal(s.justification,'vulnerable_code_not_in_execute_path');
+    assert.deepEqual(s.products.map(p=>p['@id']).sort(),[gatewayPurl('libcrypto3'),gatewayPurl('libssl3')]);
+  }
+  const reviewed=vex.statements.flatMap(s=>['libssl3','libcrypto3'].map(n=>gatewayMatch(s.vulnerability.name,n)));
+  assertGatewayVex(reviewed,vex,Date.parse('2026-11-20T00:00:00Z'));
+  assert.throws(()=>assertGatewayVex(reviewed,vex,Date.parse('2026-12-01T00:00:00Z')),/unexpired gateway OpenVEX/);
+});
+test('gateway VEX suppresses only exact, High, VEX-applied Alpine package matches',()=>{
+  const now=Date.now(),vex={'@context':'https://openvex.dev/ns/v0.2.0',timestamp:new Date(now-86400000).toISOString(),
+    hid_expires_at:new Date(now+86400000).toISOString(),statements:[{vulnerability:{name:'CVE-2026-88823'},
+    products:[{'@id':gatewayPurl('libssl3')}],status:'not_affected',justification:'vulnerable_code_not_in_execute_path'}]};
+  const report={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:[gatewayMatch('CVE-2026-88823')]};
+  assertScan(report,null,null,vex);
+  assert.throws(()=>assertScan(report),/runtime assessment required/);
+  for(const alter of [x=>x.vulnerability.id='CVE-2026-95691',x=>x.vulnerability.severity='Critical',
+    x=>x.artifact.purl=gatewayPurl('libcrypto3'),x=>x.artifact.purl=x.artifact.purl.replace('3.5.9-r0','3.5.9-r1'),
+    x=>x.artifact.purl=x.artifact.purl.replace('alpine-3.24.2','alpine-3.25.0'),x=>x.artifact.type='deb',x=>x.appliedIgnoreRules=[]]){
+    const changed=structuredClone(report);alter(changed.ignoredMatches[0]);assert.throws(()=>assertScan(changed,null,null,vex),/Unassessed/);
+  }
+  for(const change of [{hid_expires_at:new Date(now-1).toISOString()},{hid_expires_at:undefined},
+    {timestamp:new Date(now-40*86400000).toISOString(),hid_expires_at:new Date(now+86400000).toISOString()},
+    {'@context':'https://openvex.dev/ns/v0.0.1'},{statements:[{...vex.statements[0],status:'affected'}]},
+    {statements:[{...vex.statements[0],justification:'inline_mitigations_already_exist'}]}])
+    assert.throws(()=>assertScan(report,null,null,{...vex,...change}));
+  assert.throws(()=>assertScan({...report,matches:[gatewayMatch('CVE-2026-88823')]},null,null,vex),/block publication/);
+});
+test('only the gateway scan applies the committed VEX, and it keeps --fail-on high',()=>{
+  for(const workflow of ['production-backend-images.yml','staging-backend-images.yml']){
+    const text=readFileSync(new URL(`../.github/workflows/${workflow}`,import.meta.url),'utf8');
+    assert.ok(text.includes(`if [ "$scan_status" -eq 2 ] && [ "$COMPONENT" = 'gateway' ]; then`),workflow);
+    assert.equal(text.split('--vex security/gateway-runtime.vex.json --output json --fail-on high').length,2,workflow);
+    assert.ok(/elif \[ "\$scan_status" -eq 2 \]; then\n\s+python3 scripts\/assess-(production|staging)-runtime\.py/.test(text),workflow);
+    assert.ok(text.includes("'security/gateway-runtime.vex.json'"),workflow);
+  }
 });

@@ -12,6 +12,23 @@ export function assertPublicationContext(e) {
     ||e.GITHUB_REF!=='refs/heads/staging-novu-ci-20261005') throw Error('Publication context rejected');
 }
 export const runtimePolicyPath = () => 'security/production-runtime-assessment.json';
+// Committed OpenVEX for the gateway's Alpine OpenSSL. The gateway has no ELF
+// inventory assessment, so only these exact package statements may suppress a
+// gateway finding, and only until hid_expires_at.
+export const gatewayVexPath = 'security/gateway-runtime.vex.json';
+export function assertGatewayVex(ignored, vex, now=Date.now()) {
+  const expires=Date.parse(vex?.hid_expires_at), issued=Date.parse(vex?.timestamp);
+  if(vex?.['@context']!=='https://openvex.dev/ns/v0.2.0'||!Array.isArray(vex.statements)
+    ||!Number.isFinite(expires)||!Number.isFinite(issued)||now>=expires||expires-issued>30*86400000)
+    throw Error('Reviewed unexpired gateway OpenVEX required');
+  for(const m of ignored){
+    const covered=vex.statements.some(s=>s.vulnerability?.name===m.vulnerability.id&&s.status==='not_affected'
+      &&s.justification==='vulnerable_code_not_in_execute_path'&&s.products?.some(p=>p['@id']===m.artifact.purl));
+    if(m.vulnerability.severity!=='High'||m.artifact.type!=='apk'||!covered
+      ||!m.appliedIgnoreRules?.some(r=>r.namespace==='vex'&&r['vex-status']==='not_affected'))
+      throw Error('Unassessed or incorrectly suppressed High/Critical finding');
+  }
+}
 const run = (command,args,options={}) => (execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options})??'').trim();
 export function selectComponents(paths, requested='changed') {
   if(requested==='patient-chat-update') return ['identity-api','ehr-api','lab-api','database-migration'];
@@ -22,6 +39,7 @@ export function selectComponents(paths, requested='changed') {
   const result=new Set();
   for(const p of paths){
     if(p==='security/production-runtime-assessment.json') return components;
+    if(p===gatewayVexPath){ result.add('gateway'); continue; }
     if(p==='security/staging-novu-runtime-assessment.json'){
       result.add('notification-worker');result.add('database-migration');continue;
     }
@@ -41,11 +59,12 @@ export function componentConfig(c) {
     dockerfile:c==='gateway'?'gateway/Dockerfile':`services/${c==='database-migration'?'ehr-api':c}/Dockerfile`,
     target:c==='database-migration'?'migration':'runtime'};
 }
-export function assertScan(report, assessment=null, policy=null) {
+export function assertScan(report, assessment=null, policy=null, gatewayVex=null) {
   if(!Array.isArray(report.matches) || !report.descriptor?.version || !report.distro?.name || !report.distro?.version) throw Error('Complete Grype report with OS distribution required');
   if(report.matches.some(m=>['High','Critical'].includes(m.vulnerability?.severity))) throw Error('High/Critical vulnerabilities block publication');
   const ignored=(report.ignoredMatches??[]).filter(m=>['High','Critical'].includes(m.vulnerability?.severity));
   if(!ignored.length) return;
+  if(!assessment&&gatewayVex) return assertGatewayVex(ignored,gatewayVex);
   if(!assessment||!policy||!Number.isFinite(Date.parse(assessment.expires_at))||Date.now()>=Date.parse(assessment.expires_at)
     ||assessment.expires_at!==policy.expires_at||!policy.elf_inventory[assessment.component]
     ||assessment.native_binary_count!==Object.keys(policy.elf_inventory[assessment.component]).length
@@ -122,7 +141,9 @@ function main(){
   const policy=assessment?JSON.parse(readFileSync(runtimePolicyPath(c))):null;
   if(assessment&&(assessment.component!==c||assessment.policy_sha256!==hashFile(runtimePolicyPath(c)))) throw Error('Runtime assessment policy binding changed');
   if(assessment) assertAssessmentBinding(assessment,c,source.source_commit,assessment.image_id,hashFile(`${directory}/grype.raw.json`));
-  assertScan(scan,assessment,policy);
+  const gatewayVex=c==='gateway'&&!assessment?JSON.parse(readFileSync(gatewayVexPath)):null;
+  assertScan(scan,assessment,policy,gatewayVex);
+  const gatewayIgnored=gatewayVex?(scan.ignoredMatches??[]).filter(m=>['High','Critical'].includes(m.vulnerability?.severity)).length:0;
   if(mode==='pack') {
     const image=JSON.parse(run('docker',['image','inspect',local]))[0];
     if(image.Os!=='linux'||image.Architecture!=='arm64'||image.Config.Labels?.['org.opencontainers.image.revision']!==source.source_commit) throw Error('Image provenance mismatch');
@@ -131,9 +152,9 @@ function main(){
     const receipt={schema:'hid.production-component-build/v1',...source,...config,local_tag:local,image_id:image.Id,
       architecture:'arm64',os:'linux',archive_sha256:hashFile(`${directory}/image.tar`),
       sbom_sha256:hashFile(`${directory}/sbom.spdx.json`),scan_sha256:hashFile(`${directory}/grype.json`),
-      high_critical_findings:0,raw_high_matches:assessment?.raw_high_matches??0,
+      high_critical_findings:0,raw_high_matches:assessment?.raw_high_matches??gatewayIgnored,
       assessment_sha256:assessment?hashFile(`${directory}/runtime-assessment.json`):null,
-      vex_sha256:assessment?hashFile(`${directory}/runtime.vex.json`):null,
+      vex_sha256:assessment?hashFile(`${directory}/runtime.vex.json`):gatewayIgnored?hashFile(gatewayVexPath):null,
       raw_scan_sha256:hashFile(`${directory}/grype.raw.json`),deployment_authorized:false};
     writeFileSync(`${directory}/build.json`,JSON.stringify(receipt,null,2)+'\n');return;
   }
@@ -145,7 +166,8 @@ function main(){
     ||receipt.sbom_sha256!==hashFile(`${directory}/sbom.spdx.json`)||receipt.scan_sha256!==hashFile(`${directory}/grype.json`)) throw Error('Build evidence mismatch');
   if(receipt.raw_scan_sha256!==hashFile(`${directory}/grype.raw.json`)
     ||(assessment&&(receipt.assessment_sha256!==hashFile(`${directory}/runtime-assessment.json`)
-      ||receipt.vex_sha256!==hashFile(`${directory}/runtime.vex.json`)))) throw Error('Assessment evidence changed in transfer');
+      ||receipt.vex_sha256!==hashFile(`${directory}/runtime.vex.json`)))
+    ||(gatewayIgnored&&receipt.vex_sha256!==hashFile(gatewayVexPath))) throw Error('Assessment evidence changed in transfer');
   const aws=(...args)=>JSON.parse(run('aws',[...args,'--region','eu-west-1','--output','json','--no-cli-pager']));
   if(aws('sts','get-caller-identity').Account!=='659225405023') throw Error('Wrong AWS account');
   const repo=aws('ecr','describe-repositories','--repository-names',config.repository).repositories[0];

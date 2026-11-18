@@ -44,3 +44,16 @@ test('only verified not-affected VEX matches can pass; unknowns and changed pack
   assert.throws(()=>assertScan(report,{...assessment,glibc_affected_imports:1},policy));
   assert.throws(()=>assertScan({...report,matches:[m]},assessment,policy));
 });
+test('gateway VEX edits rebuild only the staging gateway',()=>assert.deepEqual(selectComponents(['security/gateway-runtime.vex.json']),['gateway']));
+test('staging gateway scans accept only exact VEX-applied statements from the committed gateway VEX',()=>{
+  const purl='pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl',now=Date.now();
+  const m={vulnerability:{id:'CVE-2026-88823',severity:'High'},artifact:{name:'libssl3',version:'3.5.9-r0',type:'apk',purl},
+    appliedIgnoreRules:[{namespace:'vex','vex-status':'not_affected'}]};
+  const vex={'@context':'https://openvex.dev/ns/v0.2.0',timestamp:new Date(now-86400000).toISOString(),hid_expires_at:new Date(now+86400000).toISOString(),
+    statements:[{vulnerability:{name:m.vulnerability.id},products:[{'@id':purl}],status:'not_affected',justification:'vulnerable_code_not_in_execute_path'}]};
+  const report={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:[m]};
+  assertScan(report,null,null,vex);
+  assert.throws(()=>assertScan(report));
+  assert.throws(()=>assertScan(report,null,null,{...vex,hid_expires_at:new Date(now-1).toISOString()}));
+  assert.throws(()=>assertScan({...report,ignoredMatches:[{...m,vulnerability:{id:'CVE-2026-95691',severity:'High'}}]},null,null,vex));
+});
