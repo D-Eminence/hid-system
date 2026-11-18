@@ -82,8 +82,14 @@
 --    if any hid_ role is that owner's member. Every SECURITY DEFINER function
 --    that owner runs sees, in a pharmacist's session, the source
 --    prescriptions of that facility's own pharmacy work the pharmacist works
---    on, and nothing else (the validators, ehr.send_order_route and the two
---    of D7-D8 refuse a pharmacist first; the suite shows each).
+--    on, and nothing else. Of the seven that read ehr.prescriptions today:
+--    validate_dispensing is the reader D5 is for; validate_work_item finds
+--    such a prescription only when it is already in the pharmacy, and one
+--    item per prescription and the work items' insert policy then refuse;
+--    ehr.send_order_route, D7 and D8 refuse a pharmacist before they read;
+--    ehr.patient_list_order_routes answers patient sessions only; and
+--    identity.demo_story_install has no runtime grant (the suite lists the
+--    seven and shows each).
 -- D6 pharmacy.own_prescription_sends: one row per prescription sent by
 --    itself to this facility's pharmacy: the version, patient, facility and
 --    encounter, who sent it (the prescriber's account and membership), the
