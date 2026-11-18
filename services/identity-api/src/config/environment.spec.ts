@@ -101,6 +101,18 @@ describe('Identity production database transport', () => {
     expect(getEnvironment().QOREID_MAX_RETRIES).toBe(0);
   });
 
+  it('waits 12 s for QoreID by default, at most 20 s (production sets no QOREID_TIMEOUT_MS)', () => {
+    // A NIN answer often takes longer than 5 s. QoreID charges for a check it finishes even when HID has
+    // stopped waiting, so a short wait made people press again and pay twice (owner, 28 Oct 2026). 12 s stays
+    // under the website's 15 s request limit and the gateway's 30 s read timeout.
+    production(); resetEnvironmentForTests();
+    expect(getEnvironment().QOREID_TIMEOUT_MS).toBe(12_000);
+    production(); process.env.QOREID_TIMEOUT_MS = '20000'; resetEnvironmentForTests();
+    expect(getEnvironment().QOREID_TIMEOUT_MS).toBe(20_000);
+    production(); process.env.QOREID_TIMEOUT_MS = '20001'; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/QOREID_TIMEOUT_MS/);
+  });
+
   it('turns emergency-contact delivery on by default in production, every 60 s, and lets it be switched off (main refuses it there)', () => {
     // Production's task definitions set none of these keys (owner approval, 2026-10-24).
     production(); resetEnvironmentForTests();
