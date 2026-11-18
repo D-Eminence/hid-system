@@ -1760,3 +1760,17 @@ revoke all on function identity.organization_staff_kinds(uuid) from public;
 grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
 grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
 revoke all on function auth.guard_session_single_sign_on_change() from public;
+
+-- Registration at the front desk without a NIN (0130, ID-2, owner Q106 of
+-- 18 November 2026), exactly as 0130 grants it: the desk command and the
+-- approver command to the Identity runtime alone. No runtime role has any
+-- privilege on identity.no_nin_case_writes or
+-- identity.desk_registration_phone_lookups (both are written and read only by
+-- the two commands as their owner), and no new table privilege is granted.
+grant execute on function identity.register_patient_without_nin(uuid, text, text, date, text, text, text, bytea, bytea, text, text, text, text, text),
+  identity.review_patient_without_nin(uuid, bigint, text, uuid, text, text, text, text) to hid_identity_runtime;
+revoke all on function identity.register_patient_without_nin(uuid, text, text, date, text, text, text, bytea, bytea, text, text, text, text, text),
+  identity.review_patient_without_nin(uuid, bigint, text, uuid, text, text, text, text),
+  identity.forget_desk_registration_phone_lookup() from public;
+revoke all on identity.no_nin_case_writes, identity.desk_registration_phone_lookups from public;
+
