@@ -233,6 +233,13 @@ describe('FR-1 clinical notes: first signature needs no typed reason', () => {
     const { service } = setup('draft', null);
     await expect(service.update(context, patientId, encounterId, resourceId, sign)).rejects.toMatchObject(REQUIRED);
   });
+
+  it('Q105: needs a reason for a title edit of a draft whose history cannot be seen', async () => {
+    const { service, reasons } = setup('draft', null);
+    await expect(service.update(context, patientId, encounterId, resourceId, { expectedRowVersion: 1, title: 'New title' }))
+      .rejects.toMatchObject(REQUIRED);
+    expect(reasons).toEqual([]);
+  });
 });
 
 describe('FR-1 prescriptions: first activation needs no typed reason', () => {
@@ -309,6 +316,13 @@ describe('FR-1 prescriptions: first activation needs no typed reason', () => {
   it('needs a reason when the history cannot be seen', async () => {
     const { service } = setup(OrderStatus.Draft, null);
     await expect(service.update(context, patientId, encounterId, resourceId, activate)).rejects.toMatchObject(REQUIRED);
+  });
+
+  it('Q105: needs a reason for an edit of a draft whose history cannot be seen', async () => {
+    const { service, calls } = setup(OrderStatus.Draft, null);
+    await expect(service.update(context, patientId, encounterId, resourceId, { expectedRowVersion: 1, endsOn: '2026-11-25' }))
+      .rejects.toMatchObject(REQUIRED);
+    expect(updated(calls)).toBe(false);
   });
 
   it('still answers 409 for an allergy match on a first activation without a reason', async () => {
@@ -440,12 +454,18 @@ describe('Q105 lab requests: first activation and draft edits need no typed reas
   });
 
   it.each([
-    ['a hold', { expectedRowVersion: 1, status: OrderStatus.OnHold }],
-    ['a cancel', { expectedRowVersion: 1, status: OrderStatus.Cancelled }],
-    ['entering in error', { expectedRowVersion: 1, status: OrderStatus.EnteredInError }],
-    ['a completion', { expectedRowVersion: 1, status: OrderStatus.Completed }],
-  ])('refuses %s without a reason before touching the database', async (_label, input) => {
-    const { service, repository } = setup(OrderStatus.Active);
+    ['a hold', OrderStatus.Active, { expectedRowVersion: 1, status: OrderStatus.OnHold }],
+    ['a cancel', OrderStatus.Active, { expectedRowVersion: 1, status: OrderStatus.Cancelled }],
+    ['entering in error', OrderStatus.Active, { expectedRowVersion: 1, status: OrderStatus.EnteredInError }],
+    ['a completion', OrderStatus.Active, { expectedRowVersion: 1, status: OrderStatus.Completed }],
+    ['a cancel of a draft', OrderStatus.Draft, { expectedRowVersion: 1, status: OrderStatus.Cancelled }],
+    ['entering a draft in error', OrderStatus.Draft, { expectedRowVersion: 1, status: OrderStatus.EnteredInError }],
+    ['a cancel of a draft with an edit', OrderStatus.Draft,
+      { expectedRowVersion: 1, status: OrderStatus.Cancelled, priority: 'stat' }],
+    ['a blank typed reason on a hold', OrderStatus.Active,
+      { expectedRowVersion: 1, status: OrderStatus.OnHold, changeReason: '   ' }],
+  ])('refuses %s without a reason before touching the database', async (_label, status, input) => {
+    const { service, repository } = setup(status);
     await expect(service.update(context, patientId, encounterId, resourceId, input as never)).rejects.toMatchObject(REQUIRED);
     expect(repository.run).not.toHaveBeenCalled();
   });
@@ -455,6 +475,10 @@ describe('Q105 lab requests: first activation and draft edits need no typed reas
     ['a priority change on an active request', OrderStatus.Active, { expectedRowVersion: 1, priority: 'stat' }, CLEAN],
     ['a second activation (the history shows it was active)', OrderStatus.Draft, activate, { createdSeen: 1, reached: 1 }],
     ['a draft whose history cannot be seen', OrderStatus.Draft, activate, null],
+    ['an edit of a draft that was active before', OrderStatus.Draft, { expectedRowVersion: 1, priority: 'stat' },
+      { createdSeen: 1, reached: 1 }],
+    ['an edit of a draft whose history cannot be seen', OrderStatus.Draft,
+      { expectedRowVersion: 1, clinicalInformation: 'Fever for 5 days' }, null],
   ] as const)('refuses %s without a reason, writing nothing', async (_label, status, input, history) => {
     const { service, reasons, calls } = setup(status, history);
     await expect(service.update(context, patientId, encounterId, resourceId, input as never)).rejects.toMatchObject(REQUIRED);
@@ -517,6 +541,14 @@ describe('Q105 visits: starting and finishing need no typed reason', () => {
     ['a start the history shows happened before', EncounterStatus.Planned, { status: EncounterStatus.InProgress },
       { createdSeen: 1, reached: 1 }],
     ['a finish whose history cannot be seen', EncounterStatus.InProgress, { status: EncounterStatus.Completed }, null],
+    ['a start that also sets an end time', EncounterStatus.Planned,
+      { status: EncounterStatus.InProgress, endedAt: '2026-11-18T09:00:00Z' }, CLEAN],
+    ['a start whose history cannot be seen', EncounterStatus.Planned, { status: EncounterStatus.InProgress }, null],
+    ['a finish the history shows happened before', EncounterStatus.InProgress, { status: EncounterStatus.Completed },
+      { createdSeen: 1, reached: 1 }],
+    ['entering a planned visit in error', EncounterStatus.Planned, { status: EncounterStatus.EnteredInError }, CLEAN],
+    ['cancelling a visit in progress', EncounterStatus.InProgress, { status: EncounterStatus.Cancelled }, CLEAN],
+    ['an end time alone', EncounterStatus.InProgress, { endedAt: '2026-11-18T09:00:00Z' }, CLEAN],
   ] as const)('refuses %s without a reason, writing nothing', async (_label, status, change, history) => {
     const { service, reasons, calls } = setup(status, history);
     await expect(service.update(context, patientId, encounterId, { expectedRowVersion: 1, ...change } as never))
