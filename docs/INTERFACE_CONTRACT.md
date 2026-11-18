@@ -6032,7 +6032,7 @@ no edit control.
 
 | Route (under `/api/v1`) | Who | Answer |
 | --- | --- | --- |
-| `GET /identity/me/staff-profile` | Any staff session, by bearer or cookie. `X-Facility-ID` is optional; when sent it must be one of the caller's own facilities and only marks that facility as current. No permission is needed: it reads the caller's own account. | `200` below. A patient session: `403 PATIENT_SCOPE_DENIED`. An outreach account-only session (no facility membership): `403 NO_ACTIVE_FACILITY_MEMBERSHIP`. An account that is no longer active: `401 AUTHENTICATION_REQUIRED`. |
+| `GET /identity/me/staff-profile` | Any staff session, by bearer or cookie, including a platform administrator with no facility membership. `X-Facility-ID` is optional; when sent it must be one of the caller's own facilities and only marks that facility as current. No permission is needed: it reads the caller's own account. | `200` below. A patient session: `403 PATIENT_SCOPE_DENIED`. An outreach account-only session (no facility membership): `403 NO_ACTIVE_FACILITY_MEMBERSHIP`. An `X-Facility-ID` that is not one of the caller's own facilities: `403 FACILITY_ACCESS_DENIED`. An account that is no longer active: `401 AUTHENTICATION_REQUIRED`. |
 
 ```json
 {
@@ -6055,16 +6055,23 @@ no edit control.
 - `signIn.method` is `password` or `single_sign_on` (how this session was
   signed in). `hasPassword` is `false` for a login that has never set one
   (Google only); `passwordChangedAt` is then `null`.
-- `licence` is `null` when no licence number is recorded. Only the last four
-  letters or digits are answered (the same rule as
-  `identity.licence_number_hint`), never the full number.
+- `licence` is `null` when no licence number is recorded, or when the
+  recorded one has no letter or digit (for example `--`), so `numberHint` is
+  never `null`. Only the last four letters or digits are answered (the same
+  rule as `identity.licence_number_hint`), never the full number.
 - `facilities` and `products` are the session's own (every active
   membership this site admits, section 53), so the profile never shows a
   facility the session itself cannot use.
 - The read is by the session's account id and subject together, active
   accounts only. The password hash is never selected.
-- Audited on success and refusal as `api.identity.staff-profile.read`.
-  No patient is read.
+- `currentFacilityId` is `null`, and every `isCurrent` is `false`, when no
+  `X-Facility-ID` is sent.
+- Audited on success and on refusal or failure (one row each time) as
+  `auth.staff-profile.read`, resource `session`, at the `X-Facility-ID`
+  facility when one is sent and with no facility otherwise; outcome
+  `success`, `denied` (401 or 403) or `failure`. It is not audited as an
+  `api.` request row: such a staff row needs a facility, and this route must
+  answer without one. No patient is read.
 
 Screen change (Akos frontend branch): the account menu gains "My profile",
 which shows these fields; the licence is shown as "Licence number ending

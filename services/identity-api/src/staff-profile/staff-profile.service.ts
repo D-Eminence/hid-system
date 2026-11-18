@@ -65,6 +65,8 @@ export class StaffProfileService {
     const row = result.rows[0];
     if (!row) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
     const name = row.display_name?.trim() || row.full_name?.trim() || actor.displayName || actor.subject;
+    // A stored number with no letter or digit ('--') has no hint: no licence is shown.
+    const licenceHint = licenceNumberHint(row.licence_number);
     return {
       accountId: row.account_id,
       name,
@@ -74,7 +76,7 @@ export class StaffProfileService {
         hasPassword: row.has_password === true,
         passwordChangedAt: iso(row.password_changed_at),
       },
-      licence: row.licence_number ? { numberHint: licenceNumberHint(row.licence_number) } : null,
+      licence: licenceHint ? { numberHint: licenceHint } : null,
       memberSince: iso(row.account_created_at),
       currentFacilityId: currentFacilityId ?? null,
       facilities: actor.facilities.map((facility) => ({
