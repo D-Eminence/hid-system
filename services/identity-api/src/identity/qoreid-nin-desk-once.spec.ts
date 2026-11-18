@@ -411,18 +411,21 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     ] as const)('checks a NIN whose record has %s once, and answers it, not 502', async (_label, mode) => {
       const s = system();
       s.qoreId.state.modes = [mode];
+      const before = Date.now();
       await expect(s.resolve('desk-once-key-000103')).resolves.toMatchObject({ caseId, ninStatus: 'verified' });
-      // Kept as 0137 keeps it on every path (unusable for a sign-up, with its name and date of birth).
-      expect([...s.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'unusable' });
+      // Kept as a profile check keeps such a record: incomplete, for as long as a record (Q110), not 24 hours.
+      const kept = [...s.store.rows.values()][0];
+      expect(kept).toMatchObject({ state: 'answered', outcome: 'record', record_complete: false });
+      expect(kept!.until).toBeGreaterThanOrEqual(before + NIN_RECORD_ANSWER_SECONDS * 1000);
       await expect(s.resolve('desk-once-key-000104')).resolves.toMatchObject({ caseId });
+      // Two days later, another desk (or the profile) still reuses it.
+      s.store.clock.offsetMs = 2 * NIN_NO_RECORD_ANSWER_SECONDS * 1000;
+      await expect(s.resolve('desk-once-key-000108', deskContext(2))).resolves.toMatchObject({ caseId });
+      await expect(s.verifyProfile()).resolves.toMatchObject({ state: 'verified' });
       expect(s.qoreId.state.charged).toBe(1);
       expect(s.breaker.state()).toBe('closed');
       // The sex came from neither: the desk gave none and the record's is not usable.
       expect(s.cases[0]?.[9]).toBeNull();
-      // A sign-up still cannot enrol from it, and is refused from storage without paying again.
-      await expect(s.ninOnly.verifyNin(NIN, { correlationId: 'signup-check', path: 'enrollment' }))
-        .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
-      expect(s.qoreId.state.charged).toBe(1);
     });
 
     it('lets the profile reuse the record the desk paid for', async () => {

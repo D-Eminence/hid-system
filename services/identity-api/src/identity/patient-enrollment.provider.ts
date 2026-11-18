@@ -48,7 +48,8 @@ export interface PublicPatientIdentityProvider {
    * name and date of birth. A record kept as incomplete (no recognised
    * gender, a photo or an address HID cannot read) by any path, or an answer
    * kept as unusable that still gives a readable name and date of birth, is
-   * used, not paid for again.
+   * used, not paid for again; such a record QoreID returns here is kept as
+   * an incomplete record, as a profile check keeps it.
    *
    * Says whether the answer came from QoreID for this request or from
    * storage. QoreID's "not found" and an answer without a readable name are
@@ -148,10 +149,14 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
           try {
             answer = enrollmentAnswer(await this.adapter.verifyNinEnrollment(nin, { timeoutMs }), nin);
           } catch (error) {
-            // A record HID cannot enrol from still has a name and date of
-            // birth: kept as 'unusable', exactly as NinCheckOnce keeps it for
-            // every path, and used here.
-            const named = namedUnusableAnswer(error);
+            // A record a sign-up cannot enrol from (no recognised sex, a
+            // photo or an address HID cannot read) still has the name and
+            // date of birth the desk compares: kept as an incomplete record,
+            // as a profile check keeps one (as long as a record, Q110), not as
+            // 'unusable' for 24 hours, so the desk, the profile and a later
+            // desk use it without paying again. A sign-up needs a complete
+            // record and asks QoreID itself, as after a profile check.
+            const named = namedIncompleteRecord(error);
             if (!named) {
               context.onQoreIdSettled?.({ answered: false, error });
               throw error;
@@ -202,12 +207,12 @@ function answerNames(answer: NinCheckAnswer): { record: NinRecordNames; provider
   return undefined;
 }
 
-/** QoreID's full answer that HID cannot enrol from but whose name and date of birth could be read. */
-function namedUnusableAnswer(error: unknown): NinCheckAnswer | undefined {
+/** QoreID's full answer that a sign-up cannot enrol from but whose name and date of birth could be read. */
+function namedIncompleteRecord(error: unknown): NinCheckAnswer | undefined {
   const facts = qoreIdDelivery(error);
   if (!(error instanceof DomainProblem) || error.code !== 'QOREID_PROVIDER_RESPONSE_INVALID'
     || facts?.delivery !== 'answered' || !facts.record || !facts.providerReference) return undefined;
-  return { outcome: 'unusable', record: facts.record, providerReference: facts.providerReference };
+  return { outcome: 'record', record: facts.record, providerReference: facts.providerReference };
 }
 
 /** What a NIN-only check keeps: the record, "no record", or (thrown) an answer HID cannot use. */

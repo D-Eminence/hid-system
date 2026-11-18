@@ -6489,7 +6489,11 @@ the name and date of birth. A record kept as incomplete (no recognised sex, a
 photo or a home address HID cannot read; a sign-up cannot enrol from it) by
 any path, or kept as unusable with a readable name and date of birth, is
 compared, not paid for again, and such a record checked at the desk is
-answered, not refused with `502`. QoreID is asked at most once for a NIN
+answered, not refused with `502`. The desk keeps one it gets from QoreID as an
+incomplete record, as a profile check does (as long as a record, Q110; 24
+hours when it is not the desk's patient), so later desk and profile checks of
+that NIN reuse it; a sign-up, which needs a complete record, asks QoreID
+itself for that NIN, as after a profile check. QoreID is asked at most once for a NIN
 whichever path asks (sign-up, the profile, the desk) while its answer is kept
 or its check is running, and the stored answer is reused. A stored record is
 compared with the desk's name and date of birth as a fresh one is, so
