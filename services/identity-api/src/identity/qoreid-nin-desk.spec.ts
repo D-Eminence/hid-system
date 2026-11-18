@@ -18,12 +18,15 @@ import {
   isNinCheckRefusedUnsent,
   isNinNotConfigured,
   isStoredNinAnswer,
+  markNinCheckStillRunning,
+  markStoredNinAnswer,
   NIN_NOT_CONFIGURED_DETAIL,
   UnavailableNinVerificationProvider,
 } from './nin-verification.provider';
 import { NIN_BREAKER_RETRY_AFTER_MS, NIN_PROVIDER_UNAVAILABLE_EVENT, NinProviderBreaker } from './nin-provider-breaker';
-import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavailable } from './nin-check-once';
-import { NIN_VERIFICATION_PROVIDER, type NinVerificationProvider, type NinVerificationRequest } from './nin.types';
+import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavailable, qoreIdRejected } from './nin-check-once';
+import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinVerificationProvider,
+  type NinVerificationRequest } from './nin.types';
 import type { NinRecordCheck, PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import {
   QoreIdNinVerificationProvider,
@@ -505,7 +508,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     }
     // The guard answers the second from the answer it stored (qoreid-nin-desk-once.spec.ts).
     expect(verifyNinRecord).toHaveBeenCalledTimes(2);
-    expect(verifyNinRecord).toHaveBeenNthCalledWith(2, NIN, deskCheck);
+    expect(verifyNinRecord).toHaveBeenNthCalledWith(2, NIN, { ...deskCheck, onQoreIdSettled: expect.any(Function) });
     expect(breaker.state()).toBe('closed');
     expect(auditRows(audit)).toEqual([0, 1].map(() => expect.objectContaining({ action: 'identity.nin.verify',
       outcome: 'denied', details: { provider: 'qoreid', ninCheck: 'no_match' } })));
@@ -604,17 +607,66 @@ describe('Q108 desk NIN resolve through QoreID', () => {
         details: expect.objectContaining({ provider: 'qoreid', providerCalled: false }) })]);
     });
 
-    it('passes on 504 QOREID_TIMEOUT with retryAfterSeconds as a sent check that counts toward the breaker', async () => {
-      const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw ninCheckStillRunning(); }) });
-      const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
-      const answer = await service.resolve(input, 'resolve-key-q109-000052', context).catch((error: unknown) => error);
-      expect(answer).toMatchObject({ status: 504, code: 'QOREID_TIMEOUT', extensions: { retryAfterSeconds: 60 } });
-      // One slow answer does not trip it; three within five minutes do (as before).
+    it('passes on 504 QOREID_TIMEOUT with retryAfterSeconds without counting the wait, and counts the check when it ends', async () => {
+      const settles: Array<(settlement: NinCheckSettlement) => void> = [];
+      const verifyNinRecord = jest.fn(async (_nin: string, check: { onQoreIdSettled: (settlement: NinCheckSettlement) => void }) => {
+        settles.push(check.onQoreIdSettled);
+        throw markNinCheckStillRunning(ninCheckStillRunning());
+      });
+      const { service, audit, breaker } = desk(qoreIdProvider(gate({ verifyNinRecord })));
+      for (const key of ['resolve-key-q109-000052', 'resolve-key-q109-000053', 'resolve-key-q109-000054']) {
+        const answer = await service.resolve(input, key, context).catch((error: unknown) => error);
+        expect(answer).toMatchObject({ status: 504, code: 'QOREID_TIMEOUT', extensions: { retryAfterSeconds: 60 } });
+      }
+      // Three slow checks are not three failures: the breaker waits for how they end.
       expect(breaker.state()).toBe('closed');
+      expect(warn).not.toHaveBeenCalled();
+      expect(auditRows(audit)).toEqual([0, 1, 2].map(() => expect.objectContaining({ action: 'identity.nin.verify',
+        outcome: 'failure', details: { provider: 'qoreid', errorType: 'DomainProblem', code: 'QOREID_TIMEOUT',
+          providerCalled: true, ninCheck: 'provider_error' } })));
+      // QoreID answered two of them late, and the third never did: that one counts, once.
+      settles[0]!({ answered: true });
+      settles[1]!({ answered: true });
+      expect(breaker.state()).toBe('closed');
+      settles[2]!({ answered: false, error: new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out') });
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
-        details: { provider: 'qoreid', errorType: 'DomainProblem', code: 'QOREID_TIMEOUT', providerCalled: true,
-          ninCheck: 'provider_error' } })]);
+      expect(breaker.state()).toBe('closed');
+      // QoreID down when the check finally ends trips it, as a 503 in time would.
+      const { service: other, breaker: tripped } = desk(qoreIdProvider(gate({ verifyNinRecord })));
+      await other.resolve(input, 'resolve-key-q109-000055', context).catch(() => undefined);
+      settles[3]!({ answered: false, error: new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'down') });
+      expect(tripped.state()).toBe('open');
+    });
+
+    it('answers a stored QoreID refusal again without counting it, freeing the retry place', async () => {
+      const breaker = retryingBreaker();
+      const verifyNinRecord = jest.fn(async () => { throw markStoredNinAnswer(qoreIdRejected()); });
+      const { service, audit } = desk(qoreIdProvider(gate({ verifyNinRecord })), breaker);
+      for (const key of ['resolve-key-q109-000056', 'resolve-key-q109-000057', 'resolve-key-q109-000058']) {
+        await expect(service.resolve(input, key, context)).rejects.toMatchObject({ status: 502,
+          code: 'QOREID_PROVIDER_REJECTED' });
+      }
+      expect(breaker.state()).toBe('retrying');
+      expect(breaker.available()).toBe(true);
+      expect(warn).not.toHaveBeenCalled();
+      expect(auditRows(audit)).toEqual([0, 1, 2].map(() => expect.objectContaining({ action: 'identity.nin.verify',
+        outcome: 'failure', details: expect.objectContaining({ code: 'QOREID_PROVIDER_REJECTED', providerCalled: true,
+          ninCheck: 'provider_error', storedAnswer: true }) })));
+    });
+
+    it('frees the retry place for a stored answer but does not close the breaker with it', async () => {
+      const breaker = retryingBreaker();
+      const verifyNinRecord = jest.fn(async () => found({}, 'stored'));
+      const { service, audit } = desk(qoreIdProvider(gate({ verifyNinRecord })), breaker);
+      await expect(service.resolve(input, 'resolve-key-q109-000059', context)).resolves.toMatchObject({ caseId });
+      expect(breaker.state()).toBe('retrying');
+      expect(breaker.available()).toBe(true);
+      expect(auditRows(audit)[0]).toMatchObject({ action: 'identity.nin.verify', outcome: 'success',
+        details: { provider: 'qoreid', ninCheck: 'match', storedAnswer: true } });
+      // A check QoreID answers now does close it.
+      verifyNinRecord.mockResolvedValueOnce(found());
+      await expect(service.resolve(input, 'resolve-key-q109-000060', context)).resolves.toMatchObject({ caseId });
+      expect(breaker.state()).toBe('closed');
     });
   });
 });

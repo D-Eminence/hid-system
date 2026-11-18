@@ -3,6 +3,7 @@ jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }
 import { Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
+import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
@@ -11,7 +12,7 @@ import { fakeNinCheckStore } from '../testing/nin-check-store.fake';
 import { NIN_CHECK_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS, NIN_RECORD_ANSWER_SECONDS,
   NinCheckOnce } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
-import { NinProviderBreaker } from './nin-provider-breaker';
+import { NIN_BREAKER_RETRY_AFTER_MS, NinProviderBreaker } from './nin-provider-breaker';
 import { NinRegistrationService } from './nin-registration.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 import { QoreIdNinVerificationProvider } from './qoreid-nin-verification.provider';
@@ -259,8 +260,10 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       .rejects.toMatchObject({ status: 422 });
     await expect(s.resolve('desk-once-key-000008')).resolves.toMatchObject({ caseId, ninStatus: 'verified' });
     expect(s.qoreId.state.charged).toBe(1);
+    // The second and third are compared with the stored record: nothing was sent for them.
     expect(s.deskChecks()).toEqual([{ provider: 'qoreid', ninCheck: 'name_mismatch' },
-      { provider: 'qoreid', ninCheck: 'name_mismatch' }, { provider: 'qoreid', ninCheck: 'match' }]);
+      { provider: 'qoreid', ninCheck: 'name_mismatch', storedAnswer: true },
+      { provider: 'qoreid', ninCheck: 'match', storedAnswer: true }]);
   });
 
   it('reuses the answer of a sign-up or profile check of the same NIN, and the other paths reuse the desk\'s', async () => {
@@ -296,7 +299,7 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       ['desk', 'qoreid', 'timeout'], ['desk', 'late', 'record'], ['desk', 'stored', 'record']]);
     expect(s.deskChecks()).toEqual([
       expect.objectContaining({ code: 'QOREID_TIMEOUT', providerCalled: true, ninCheck: 'provider_error' }),
-      { provider: 'qoreid', ninCheck: 'match' }]);
+      { provider: 'qoreid', ninCheck: 'match', storedAnswer: true }]);
   });
 
   it('answers 409 NIN_CHECK_HELD with retryAfterSeconds for a NIN held after a check QoreID may have charged', async () => {
@@ -432,6 +435,76 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       await expect(matched.resolve('desk-once-key-000107')).resolves.toMatchObject({ caseId });
       expect([...matched.store.rows.values()][0]!.until)
         .toBeGreaterThanOrEqual(before + NIN_RECORD_ANSWER_SECONDS * 1000);
+    });
+  });
+
+  describe('the breaker counts what QoreID did, never a stored answer or the desk\'s wait', () => {
+    const NINS = ['70000000003', '70000000004', '70000000005'];
+
+    it('is not tripped by slow answers QoreID does give; the retries are answered from storage', async () => {
+      const s = system();
+      s.qoreId.state.fallback = 'late';
+      const first = await Promise.all(NINS.map((nin, index) => s.resolve(`desk-once-key-00020${index}`,
+        deskContext(index + 1), { ...input, nin }).catch((error: unknown) => error)));
+      expect(first).toEqual(NINS.map(() => expect.objectContaining({ status: 504, code: 'QOREID_TIMEOUT' })));
+      await s.ninCheck.settle();
+      expect(s.breaker.state()).toBe('closed');
+      // The website resends with the same Idempotency-Key after retryAfterSeconds.
+      const retries = await Promise.all(NINS.map((nin, index) => s.resolve(`desk-once-key-00020${index}`,
+        deskContext(index + 1), { ...input, nin }).catch((error: unknown) => error)));
+      expect(retries).toEqual(NINS.map(() => expect.objectContaining({ caseId })));
+      expect(s.qoreId.state.charged).toBe(3);
+      expect(s.qoreId.state.outsideGuard).toBe(0);
+    });
+
+    it('is still tripped by checks QoreID never answers, when the ceiling ends them', async () => {
+      const s = system();
+      s.qoreId.state.fallback = 'slow';
+      for (const [index, nin] of NINS.entries()) {
+        await expect(s.resolve(`desk-once-key-00021${index}`, deskContext(index + 1), { ...input, nin }))
+          .rejects.toMatchObject({ status: 504, code: 'QOREID_TIMEOUT' });
+      }
+      expect(s.breaker.state()).toBe('closed');
+      await s.ninCheck.settle();
+      expect(s.breaker.state()).toBe('open');
+      await expect(s.resolve('desk-once-key-000219', deskContext(4), { ...input, nin: '70000000006' }))
+        .rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE' });
+      expect(s.qoreId.state.charged).toBe(3);
+    });
+
+    it('counts QoreID\'s "not found" once, not each time it is given again from storage', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['not_found'];
+      for (const key of ['desk-once-key-000220', 'desk-once-key-000220', 'desk-once-key-000221']) {
+        await expect(s.resolve(key)).rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
+      }
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.breaker.state()).toBe('closed');
+      expect(s.deskChecks()).toEqual([
+        expect.not.objectContaining({ storedAnswer: true }),
+        expect.objectContaining({ code: 'QOREID_PROVIDER_REJECTED', storedAnswer: true }),
+        expect.objectContaining({ code: 'QOREID_PROVIDER_REJECTED', storedAnswer: true })]);
+      // Another desk's new NIN is still checked.
+      await expect(s.resolve('desk-once-key-000222', deskContext(2), { ...input, nin: NINS[0]! }))
+        .resolves.toMatchObject({ caseId });
+    });
+
+    it('does not let a stored answer close a breaker letting one check through', async () => {
+      const s = system();
+      await expect(s.resolve('desk-once-key-000230')).resolves.toMatchObject({ caseId });
+      // QoreID went down a minute ago: one check may go through now.
+      s.breaker.recordFailure(new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'down'), {},
+        Date.now() - NIN_BREAKER_RETRY_AFTER_MS);
+      expect(s.breaker.state()).toBe('retrying');
+      await expect(s.resolve('desk-once-key-000231', deskContext(2))).resolves.toMatchObject({ caseId });
+      expect(s.breaker.state()).toBe('retrying');
+      // Three desks with three new NINs while QoreID is still down: one is let through, not three.
+      s.qoreId.state.fallback = 'unavailable';
+      const burst = await Promise.all(NINS.map((nin, index) => s.resolve(`desk-once-key-00023${index + 2}`,
+        deskContext(index + 3), { ...input, nin }).catch((error: unknown) => error)));
+      expect(s.qoreId.state.charged).toBe(2);
+      expect(burst.filter((answer) => (answer as DomainProblem).code === 'NIN_PROVIDER_UNAVAILABLE')).toHaveLength(2);
+      expect(s.breaker.state()).toBe('open');
     });
   });
 });

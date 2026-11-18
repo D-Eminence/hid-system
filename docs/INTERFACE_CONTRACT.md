@@ -6483,18 +6483,19 @@ The guard's answers, as the desk gives them:
 
 | The guard | Desk answer | `identity.nin.verify` audit | Breaker |
 | --- | --- | --- | --- |
-| a stored record | compared as a fresh one: the case, or `422` name mismatch | as for a fresh answer | as for a fresh answer |
-| a stored "no record" | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `denied`, `ninCheck: "no_match"` | not counted |
+| a stored record | compared as a fresh one: the case, or `422` name mismatch | as for a fresh answer, with `storedAnswer: true` | not counted: the retry place is freed, but the breaker is neither closed nor its failures cleared (QoreID was not asked) |
+| a stored "no record" | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `denied`, `ninCheck: "no_match"`, `storedAnswer: true` | not counted; the retry place is freed |
 | another check of this NIN is still running when this request's wait ends | `409 NIN_CHECK_IN_PROGRESS`, "We are still checking this NIN. Please wait a minute, then try again.", `retryAfterSeconds: 60` | `failure`, `providerCalled: false` | not counted; the retry place is freed |
 | the NIN is held after a check QoreID may have charged | `409 NIN_CHECK_HELD`, "We could not finish checking this NIN. Please try again in 5 minutes." (or "... in 6 hours."), `retryAfterSeconds`: the time left | `failure`, `providerCalled: false` | not counted; the retry place is freed |
-| this request's wait (`QOREID_TIMEOUT_MS`) ended before QoreID answered | `504 QOREID_TIMEOUT`, `retryAfterSeconds: 60`; the check goes on and its answer is kept for the retry | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | counts, as any QoreID timeout |
+| this request's wait (`QOREID_TIMEOUT_MS`) ended before QoreID answered | `504 QOREID_TIMEOUT`, `retryAfterSeconds: 60`; the check goes on and its answer is kept for the retry | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | the wait is not counted; the check is counted when it ends: QoreID's answer as a success, no answer by `QOREID_NIN_ANSWER_CEILING_MS` or a failure as a failure (a `503` trips it at once). A retry-place check keeps the place until then |
 | its store could not be read (`NIN_CHECK_UNAVAILABLE`) | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." | `failure`, `providerCalled: false` | not counted |
 | its NIN keys are missing | `503 NIN_PROTECTION_UNAVAILABLE` | `failure`, `providerCalled: false` | not counted |
-| a stored QoreID "not found" (404) or an answer HID cannot use | `502 QOREID_PROVIDER_REJECTED` or `502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | counts, as the first time |
+| a stored QoreID "not found" (404) or an answer HID cannot use (one without a readable name and date of birth) | `502 QOREID_PROVIDER_REJECTED` or `502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time | `failure`, `providerCalled: true`, `ninCheck: "provider_error"`, `storedAnswer: true` | not counted (the first time counted once); the retry place is freed |
 
 `providerCalled` says whether the desk's check was handed to the NIN service
-(for QoreID, to the guard); whether QoreID itself was called is the guard's
-row's `qoreidCalled`. A `5xx` problem's `detail` is replaced by the problem
+(for QoreID, to the guard); `storedAnswer: true` says the guard answered from
+an answer it kept, so nothing was sent for this request; whether QoreID itself
+was called is the guard's row's `qoreidCalled`. A `5xx` problem's `detail` is replaced by the problem
 filter ("The service could not complete the request."); its `code` and
 `retryAfterSeconds` are always sent. A client shows the plain message, offers
 to try again after `retryAfterSeconds`, sends the same `Idempotency-Key` on
@@ -6543,7 +6544,8 @@ rows.
   for every path (its check is not finished and may change).
 
 The desk's `identity.nin.verify` rows no longer carry `replay: true`; a
-reused answer is the guard's row with `source: "stored"`.
+reused answer is marked `storedAnswer: true` there, and is the guard's row
+with `source: "stored"`.
 
 ### No request limits (Q109)
 
@@ -6558,6 +6560,12 @@ stops a NIN being paid for twice is the check itself, not a count.
 
 As ID-0: a `503` from QoreID trips it at once; three other failures within 5
 minutes trip it; QoreID's own `429` and other `4xx` answers do not count.
+With 0137 it counts only what QoreID did for a request that asked it: an
+answer the guard kept (any outcome) neither counts nor closes the breaker
+(it frees the one retry place), and a check still running when the desk's
+wait ends is counted when it ends, not as a timeout at the wait, so slow
+answers that QoreID does give (and that the retries reuse) never lock the
+desks out, while checks that QoreID never answers still trip it.
 QoreID switched off (before or during the check) is not an outage: it frees
 the one retry place without counting. A switch that cannot
 be read, before the check or when it is read again just before sending,

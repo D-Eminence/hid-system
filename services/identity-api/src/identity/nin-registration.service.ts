@@ -10,8 +10,10 @@ import { CollectedFieldProtector, registrationCaseContactLabel } from './collect
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
 import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinCheckNotStarted,
-  isNinCheckRefusedUnsent, isNinNotConfigured, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
-import { NIN_VERIFICATION_PROVIDER, type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
+  isNinCheckRefusedUnsent, isNinCheckStillRunning, isNinNotConfigured, isStoredNinAnswer, ninCheckNotStarted,
+  ninNotConfigured } from './nin-verification.provider';
+import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinClaimedDemographics,
+  type NinVerificationProvider } from './nin.types';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
 import type { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto';
@@ -235,11 +237,21 @@ export class NinRegistrationService {
     // desk's request and any other path's check of the same NIN make at most
     // one QoreID call; a match is answered by the case it created (above).
     // No limit per staff account, per facility or across Health ID.
+    //
+    // 0137: the breaker counts what the NIN service did, never a stored
+    // answer or this request's wait. A check still running when the wait
+    // ends (504) is counted when it ends (onSettled), answered or not.
+    const late: { waiting: boolean; settlement?: NinCheckSettlement } = { waiting: false };
+    const onSettled = (settlement: NinCheckSettlement) => {
+      if (late.waiting) this.countSettled(settlement, context.correlationId);
+      else late.settlement = settlement;
+    };
     try {
       verification = await this.provider.verify({
         nin: input.nin,
         claimedDemographics,
         correlationId: context.correlationId,
+        onSettled,
       });
       assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
     } catch (error) {
@@ -254,14 +266,38 @@ export class NinRegistrationService {
         await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
         throw error;
       }
+      if (isStoredNinAnswer(error)) {
+        // 0137: the NIN service's earlier answer, kept (QoreID's "not found",
+        // an answer HID cannot use), given again. Nothing was sent for this
+        // request: not counted, and the retry place is freed.
+        this.ninBreaker.release();
+        await this.auditFailure(context, 'identity.nin.verify', error,
+          { providerCalled: true, ninCheck: 'provider_error', storedAnswer: true });
+        throw error;
+      }
+      if (isNinCheckStillRunning(error)) {
+        // 0137: this request's wait ended; the check goes on and its answer
+        // is kept for the retry. A slow answer is not an outage: the breaker
+        // counts how the check ends, and the retry place stays taken until
+        // then (or until it lapses).
+        if (late.settlement) this.countSettled(late.settlement, context.correlationId);
+        else late.waiting = true;
+        await this.auditFailure(context, 'identity.nin.verify', error,
+          { providerCalled: true, ninCheck: 'provider_error' });
+        throw error;
+      }
       this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
       await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true, ninCheck: 'provider_error' });
       throw error;
     }
-    this.ninBreaker.recordSuccess();
+    // A stored answer is not the NIN service answering now: it neither
+    // clears the failures nor closes a breaker that is letting one check
+    // through; it only frees that place.
+    if (verification.stored) this.ninBreaker.release();
+    else this.ninBreaker.recordSuccess();
     if (!verification.verified) {
       const ninCheck = verification.outcome === 'name_mismatch' ? 'name_mismatch' : 'no_match';
-      throw await this.ninNotVerified(context, verification.provider, ninCheck);
+      throw await this.ninNotVerified(context, verification.provider, ninCheck, verification.stored === true);
     }
     // Q108: every NIN check is audited on its own, before the case is
     // written, so a charged check that matched is on record even when the
@@ -278,7 +314,8 @@ export class NinRegistrationService {
       resourceType: 'registration-case',
       outcome: 'success',
       purposeOfUse: context.purposeOfUse,
-      details: { provider: verification.provider, ninCheck: 'match' },
+      details: { provider: verification.provider, ninCheck: 'match',
+        ...(verification.stored ? { storedAnswer: true } : {}) },
     });
 
     const caseId = randomUUID();
@@ -813,8 +850,14 @@ export class NinRegistrationService {
   }
 
   /** Audits a NIN that was not verified (denied) and returns the desk's 422. */
-  private async ninNotVerified(context: DataAccessContext, provider: string, ninCheck: 'no_match' | 'name_mismatch'):
-    Promise<DomainProblem> {
+  /** 0137: how a check that outlived its request's wait ended, counted as if it had answered in time. */
+  private countSettled(settlement: NinCheckSettlement, correlationId: string): void {
+    if (settlement.answered) this.ninBreaker.recordSuccess();
+    else this.ninBreaker.recordFailure(settlement.error, { correlationId, provider: this.provider.name });
+  }
+
+  private async ninNotVerified(context: DataAccessContext, provider: string, ninCheck: 'no_match' | 'name_mismatch',
+    storedAnswer = false): Promise<DomainProblem> {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',
@@ -827,7 +870,7 @@ export class NinRegistrationService {
       resourceType: 'registration-case',
       outcome: 'denied',
       purposeOfUse: context.purposeOfUse,
-      details: { provider, ninCheck },
+      details: { provider, ninCheck, ...(storedAnswer ? { storedAnswer: true } : {}) },
     });
     return new DomainProblem(422, 'NIN_VERIFICATION_FAILED', ninCheck === 'name_mismatch'
       ? 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.'
@@ -969,7 +1012,7 @@ export class NinRegistrationService {
    * service was asked and the check failed.
    */
   private async auditFailure(context: DataAccessContext, action: string, error: unknown,
-    extra: { providerCalled?: boolean; breaker?: 'open'; ninCheck?: 'provider_error' } = {}) {
+    extra: { providerCalled?: boolean; breaker?: 'open'; ninCheck?: 'provider_error'; storedAnswer?: true } = {}) {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',
