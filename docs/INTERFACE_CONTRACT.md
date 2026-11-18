@@ -6828,3 +6828,76 @@ Screen change (Akos frontend branch): run the check when a medicine is
 chosen and show `message` with the matches (medicine, status, dates) above
 Save; Save stays enabled. After Save, show `duplicateMedicines.message` if
 present.
+
+## EHR-C7. The waiting list: check-in, stage and assignee (0135, owner decisions of 18 November 2026)
+
+Owner, 18 November 2026: YES to patient names on the waiting list before consent. A check-in is never a basis for
+opening the chart without a PIN (Q101: check-in-only visits do not count). Defaults the owner did not object to: five
+triage levels; a patient with a deny directive stays on the list, marked "Chart cannot be opened".
+
+Who: members holding both `ehr.encounter.read` and `ehr.encounter.write` at the session facility (front desk, nurse,
+clinician, doctor). Lab and pharmacy staff hold read only and are refused (403 `VISIT_QUEUE_NOT_PERMITTED`, "Only the
+front desk, nurses, clinicians and doctors of this facility can use the waiting list."). `X-Purpose-Of-Use:
+direct-care` on every route. No Health ID in any path, query, body or answer. No new setting or platform control.
+
+The card (every answer):
+
+```json
+{ "entryId": "uuid", "patientId": "uuid", "fullName": "Amaka Queueone", "sex": "female", "dateOfBirth": "1990-01-02",
+  "healthIdLast4": "AA22", "stage": "waiting", "triageLevel": null, "assignedMembershipId": null,
+  "checkInBasis": "search", "checkedInAt": "2026-11-18T09:00:00.000Z", "checkInDay": "2026-11-18",
+  "stageChangedAt": "2026-11-18T09:00:00.000Z", "closedAt": null, "rowVersion": 1, "chartBlocked": false }
+```
+
+- `stage`: `waiting`, `triage`, `ready`, `with_clinician` (open); `finished`, `left`, `cancelled` (closed).
+- `triageLevel`: 1 (most urgent) to 5, or null. `checkInBasis`: `search` or `own-facility`.
+- `checkInDay`: the Lagos calendar day of the check-in. `chartBlocked`: an active deny directive covers this facility.
+- No clinical content. `patientId` opens the chart only through the usual consent check (PIN, approval or 0131's
+  own-facility rule); the card itself gives no access.
+
+`POST ehr/visit-queue/check-in`, body exactly one of:
+
+| Field | Rule |
+|---|---|
+| `matchRef` | a match reference from this member's own staff patient search (`POST identity/patient-search`, direct care, 0132) made in the last 10 minutes at this facility |
+| `patientId` | the UUID of a patient who is already this facility's own (0131: registered at this desk, or a consented visit here in the last 24 months) |
+
+Never a bare patient id: an unknown, inactive, merged or sealed patient, a patient who is not this facility's own, and
+a matchRef that is another member's, another facility's, expired, from an emergency search or made up all get the one
+answer 403 `CHECK_IN_NEEDS_SEARCH`, "Search for the patient first, then check them in. A search result can be used for
+10 minutes." Both or neither: 400 `CHECK_IN_NEEDS_ONE_PATIENT`. Answer 200
+`{ "outcome": "checked_in" | "already_on_list", "entry": card }` (a patient already on this facility's open list gets
+that row back). No visit is written.
+
+`GET ehr/visit-queue[?includeClosedToday=true]`: this facility's open rows, most urgent first (triage level 1-5, then
+no level; then the earliest check-in), and with the flag also the rows closed today (after the open ones). Answer
+`{ "items": [card], "hasMore": false, "limit": 200 }`; at most 200 cards, `hasMore` when there are more.
+
+`PATCH ehr/visit-queue/:entryId`, body `{ "expectedRowVersion": 1, "stage"?, "triageLevel"? (null clears),
+"assignedMembershipId"? (null clears) }`, at least one change. The assignee is a nurse, clinician or doctor of this
+facility (`ehr.encounter.write` and `ehr.note.write`). Answer 200 with the card. Refusals: 400
+`VISIT_QUEUE_NOTHING_TO_CHANGE`, `VISIT_QUEUE_UPDATE_INVALID`, `VISIT_QUEUE_ASSIGNEE_INVALID` ("Choose a nurse,
+clinician or doctor who works at this facility."); 404 `VISIT_QUEUE_ENTRY_NOT_FOUND` (also another facility's row);
+409 `VISIT_QUEUE_ENTRY_CHANGED` ("Someone else changed this patient's place on the waiting list. Reload the list and
+try again."), `VISIT_QUEUE_ENTRY_CLOSED` ("This patient is no longer on the waiting list. Check them in again if they
+are back."). 503 `VISIT_QUEUE_UNAVAILABLE` on a database without 0135.
+
+Audit, written by the database functions in the request's transaction (refusals included): `ehr.visit-queue.check-in`
+(success with the patient; denied with the internal refusal kind, naming the patient only when one was found and is
+not this facility's own), `ehr.visit-queue.list` (one collection row: count, `hasMore`, the patient ids shown) plus
+`ehr.visit-queue.list.shown` (one row per patient shown, on every read), `ehr.visit-queue.update` (success, denied
+with the outcome, or failure for not found). No name, date of birth or Health ID in any audit row.
+
+Shared function contract with 0132 (lane B owns it; 0135 only calls it, as its owner):
+`identity.resolve_patient_search_ref(requested_ref text, requested_purpose text) returns uuid` (SECURITY DEFINER,
+STABLE): the patient id of an unexpired matchRef made by a search of the session's account, membership and facility
+for that purpose (which must be the session's), while the patient is active and the facility's seal allows them;
+null otherwise; writes nothing. 0135 checks its signature and return type before applying and calls it with
+`'direct-care'`. 0131's `identity.own_facility_basis(patient uuid, facility uuid) returns text` (null when not this
+facility's own) is used the same way.
+
+Screen change (Akos frontend branch): "Check in" on a search card sends that card's `matchRef`; on a patient of this
+facility (from the registration-case list, a just-registered patient, or this facility's own patient) it may send
+`patientId`. The waiting list polls `GET ehr/visit-queue`, shows name, sex, date of birth, `•••• healthIdLast4`, stage
+and triage level, marks `chartBlocked` as "Chart cannot be opened", and sends `expectedRowVersion` with every change.
+On 403 `CHECK_IN_NEEDS_SEARCH` show the message and the search box.
