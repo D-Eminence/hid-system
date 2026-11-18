@@ -15,6 +15,7 @@ import { Pool, type PoolClient } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
+import { MATCH_REF_PATTERN } from './visit-queue.dto';
 import { VisitQueueService } from './visit-queue.service';
 
 const url = process.env.EHR_VISIT_QUEUE_REHEARSAL_URL;
@@ -29,7 +30,8 @@ const id = (block: string, n: number) => `e1351${block}-0000-4000-8000-${String(
 const searchedPatient = id('400', 1);
 const ownPatient = id('400', 2);
 const strangerPatient = id('400', 3);
-const matchRef = `psr_${'Q'.repeat(43)}`;
+/** Handed out by the desk's own standard search (0132) in beforeAll, as identity-api does. */
+let matchRef: string;
 
 function contextFor(member: { n: number; role: string }): DataAccessContext {
   const membershipId = id('300', member.n);
@@ -90,12 +92,21 @@ describeRehearsal('EHR-C7 the waiting list on PostgreSQL (0135)', () => {
       encounter_type, status, started_at, ended_at, chief_complaint, created_at) values ($1, $2, $3, $4, $5, 'ambulatory',
       'completed', now() - interval '30 days 1 hour', now() - interval '30 days', 'Fixture visit', now() - interval '30 days 1 hour')`,
       [id('800', 2), ownPatient, facilityId, id('100', nurse.n), id('300', nurse.n)]);
-    // A matchRef the desk's search handed out a minute ago (0132's table; only its SHA-256 is stored).
-    await client.query(`insert into identity.patient_search_refs (token_sha256, patient_id, account_id, membership_id,
-      facility_id, purpose_of_use, search_mode, created_at, expires_at) values (encode(sha256(convert_to($1, 'UTF8')), 'hex'),
-      $2, $3, $4, $5, 'direct-care', 'standard', statement_timestamp(), statement_timestamp() + interval '10 minutes')`,
-      [matchRef, searchedPatient, id('100', desk.n), id('300', desk.n), facilityId]);
     await client.query('set local session_replication_role = origin');
+    // The matchRef: the desk's own standard search (0132, first name + last name + date of birth), run as
+    // identity-api's login role in the desk's context, exactly as POST identity/patient-search does.
+    await client.query('savepoint desk_search');
+    await client.query('set local role hid_identity_api_runtime');
+    await client.query(`select set_config('app.actor_subject', $1, true), set_config('app.facility_id', $2, true),
+      set_config('app.correlation_id', 'visit-queue-pg-search', true), set_config('app.membership_id', $3, true),
+      set_config('app.purpose_of_use', 'direct-care', true)`, [`synthetic:queue-pg-${desk.n}`, facilityId, id('300', desk.n)]);
+    const search = await client.query<{ outcome: string; match_ref: string | null }>(`select outcome, match_ref
+      from identity.staff_patient_search('standard', 'Ada', 'Searched', date '1990-01-02', null, null, null, null)`);
+    await client.query('reset role');
+    await client.query('release savepoint desk_search');
+    expect(search.rows.map((row) => row.outcome)).toEqual(['found']);
+    matchRef = String(search.rows[0]?.match_ref);
+    expect(matchRef).toMatch(MATCH_REF_PATTERN);
 
     let savepoint = 0;
     const database = {

@@ -91,6 +91,10 @@ describe('EHR-C7 the waiting list (0135)', () => {
       await expect(validate(CheckInToVisitQueueDto, { matchRef })).resolves.toMatchObject({ matchRef });
       await expect(validate(CheckInToVisitQueueDto, { patientId })).resolves.toMatchObject({ patientId });
       await expect(validate(CheckInToVisitQueueDto, { matchRef: 'not a ref' })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+      // Only 0132's shape: 'psr_' and exactly 43 base64url characters.
+      for (const wrong of [`psr_${'a'.repeat(42)}`, `psr_${'a'.repeat(44)}`, `abc_${'a'.repeat(43)}`, 'a'.repeat(47)]) {
+        await expect(validate(CheckInToVisitQueueDto, { matchRef: wrong })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+      }
       await expect(validate(CheckInToVisitQueueDto, { patientId: 'p1' })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
       await expect(validate(CheckInToVisitQueueDto, { matchRef: null })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
     });

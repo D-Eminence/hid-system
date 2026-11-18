@@ -11,6 +11,14 @@ const trim = ({ value }: TransformFnParams): unknown => typeof value === 'string
 const queryFlag = ({ value }: TransformFnParams): unknown => value === 'true' ? true : value === 'false' ? false : value;
 
 /**
+ * A matchRef exactly as 0132 makes it: 'psr_' and 43 base64url characters.
+ * The same pattern as identity-api's MATCH_REF_PATTERN
+ * (services/identity-api/src/patient-search/match-ref.ts) and 0132's
+ * identity.resolve_patient_search_ref; keep the three the same.
+ */
+export const MATCH_REF_PATTERN = /^psr_[A-Za-z0-9_-]{43}$/;
+
+/**
  * POST ehr/visit-queue/check-in. Exactly one of:
  * - `matchRef`: a match reference from this member's own staff patient search
  *   (POST identity/patient-search, direct care) in the last 10 minutes; or
@@ -22,8 +30,8 @@ export class CheckInToVisitQueueDto {
   @IsOptionalButNotNull()
   @Transform(trim)
   @IsString()
-  @MaxLength(200)
-  @Matches(/^[A-Za-z0-9_-]+$/, { message: 'matchRef must be the match reference a patient search gave' })
+  @MaxLength(47)
+  @Matches(MATCH_REF_PATTERN, { message: 'matchRef must be the match reference a patient search gave' })
   matchRef?: string;
 
   @IsOptionalButNotNull()
