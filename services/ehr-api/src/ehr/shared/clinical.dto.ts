@@ -1,6 +1,7 @@
 import { Transform, Type, type TransformFnParams } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsDateString,
   IsEnum,
   IsInt,
@@ -155,6 +156,16 @@ export class CreateEncounterDto {
   @IsString()
   @MaxLength(4000)
   chiefComplaint?: string;
+
+  /**
+   * EHR-C1: true asks for this patient's open visit today at this facility
+   * (planned, in progress or on hold, started on today's Lagos calendar day)
+   * instead of a new one; a new visit is created only when there is none.
+   * Only with status planned or in_progress. Absent or false: as before.
+   */
+  @IsOptionalButNotNull()
+  @IsBoolean()
+  reuseOpenVisit?: boolean;
 }
 
 export class UpdateEncounterDto extends VersionedUpdateDto {

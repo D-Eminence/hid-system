@@ -6084,3 +6084,55 @@ edits to drafts still need a typed reason.
 The note "Sign" and prescription "Activate" actions may send no
 `changeReason`. Every other change keeps asking for a reason and shows the
 server's plain message on `CHANGE_REASON_REQUIRED`.
+
+## EHR-C1. The open visit today, and starting a visit without a duplicate (wave 1, no migration)
+
+Akos P0-2 and N-3. ehr-api only; no migration, no new setting. "Today" is
+the calendar day in Lagos (`Africa/Lagos`, UTC+1) until international
+settings (P2-4). Both routes still need the patient's consent (normal
+`read_records` or `write_records` grant) until the waiting list (EHR-C7)
+lands; a refusal is `403 CONSENT_REQUIRED` and is audited as today.
+
+### `GET /ehr/patients/:patientId/encounters/open-today`
+
+Permission `ehr.encounter.read`. `patientId` is the UUID (never a Health
+ID). Answers `200`:
+
+```json
+{ "day": "2026-11-18", "timeZone": "Africa/Lagos", "encounter": { ...visit... } }
+```
+
+`encounter` is the newest visit of this patient at this facility that is
+open (`planned`, `in_progress` or `on_hold`) and was started on today's Lagos
+day (from 00:00 to before 24:00 Lagos time), or `null` when there is none.
+The imported paper records visit is never returned. The visit has the same
+fields as `GET .../encounters/:encounterId`. Audited as
+`ehr.encounter.open-today` with `day` and `found` (true or false).
+
+### `POST /ehr/patients/:patientId/encounters` with `reuseOpenVisit`
+
+The create body gains `reuseOpenVisit` (optional boolean, never `null`).
+
+- Absent or `false`: exactly as before (the Idempotency-Key digest of a body
+  without it is unchanged, and the answer has no new field).
+- `true`: only with `status` `planned` or `in_progress` (otherwise `400
+  REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS`, "To use the open visit today, start
+  the visit as planned or in progress."). The server takes a transaction
+  lock for this patient at this facility
+  (`pg_advisory_xact_lock(hashtextextended('ehr.open-visit:<facility>:<patient>', 0))`)
+  **before** it looks for today's open visit, and holds it until the
+  transaction ends. If an open visit today exists, it is answered and
+  nothing is created; otherwise the visit is created. Two requests at the
+  same moment therefore give one visit.
+
+The answer is `201` with the visit plus `reusedOpenVisit: true` (an
+existing visit) or `false` (a new one). An idempotent replay of the same
+request answers the same visit, with `reusedOpenVisit` worked out from
+whether the visit is older than the request's Idempotency-Key. The audit row
+(`ehr.encounter.create`) carries `reusedOpenVisit` and `day`.
+
+### Screen change needed (Akos frontend branch)
+
+Before "Start visit", read `open-today` and offer to continue the open
+visit; when starting, send `reuseOpenVisit: true` so a double tap or two
+staff at once do not make two visits.

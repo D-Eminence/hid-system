@@ -19,6 +19,20 @@ export class EncountersController {
     return this.encounters.list(clinicalContext(request), patientId, query);
   }
 
+  /**
+   * EHR-C1: the patient's open visit today (Lagos calendar day) at this
+   * facility, or `encounter: null`. Declared before `:encounterId` so the
+   * word is not read as an id.
+   */
+  @Get('open-today')
+  @RequirePermissions('ehr.encounter.read')
+  openToday(
+    @Req() request: HidRequest,
+    @Param('patientId', new ParseUUIDPipe()) patientId: string,
+  ) {
+    return this.encounters.openToday(clinicalContext(request), patientId);
+  }
+
   @Get(':encounterId')
   @RequirePermissions('ehr.encounter.read')
   get(

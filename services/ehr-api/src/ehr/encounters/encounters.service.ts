@@ -10,6 +10,7 @@ import {
 } from '../shared/clinical.dto';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { lagosCalendarDate, lagosDaySql, VISIT_DAY_TIME_ZONE } from './lagos-day';
 
 export interface EncounterRow extends QueryResultRow {
   id: string;
@@ -26,7 +27,25 @@ export interface EncounterRow extends QueryResultRow {
   rowVersion: string;
   createdAt: Date;
   updatedAt: Date;
+  importedPaperRecords?: boolean;
 }
+
+/** EHR-C1: the answer of a create that asked for the open visit today. */
+export type EncounterCreated = EncounterRow & { reusedOpenVisit?: boolean };
+
+/** EHR-C1: what the visit desk reads before starting a visit. */
+export interface OpenVisitToday {
+  /** Today's Lagos calendar date (YYYY-MM-DD). */
+  day: string;
+  timeZone: typeof VISIT_DAY_TIME_ZONE;
+  /** The newest open visit started today at this facility, or null. */
+  encounter: EncounterRow | null;
+}
+
+/** Statuses of a visit still open (not completed, cancelled or entered in error). */
+export const OPEN_VISIT_STATUSES: readonly EncounterStatus[] = [
+  EncounterStatus.Planned, EncounterStatus.InProgress, EncounterStatus.OnHold,
+];
 
 const ENCOUNTER_COLUMNS = `
   id, patient_id as "patientId", facility_id as "facilityId",
@@ -47,7 +66,30 @@ const TRANSITIONS: Readonly<Record<EncounterStatus, readonly EncounterStatus[]>>
 
 @Injectable()
 export class EncountersService {
+  /** The clock "today" is read from; tests replace it. */
+  now: () => Date = () => new Date();
+
   constructor(private readonly repository: ClinicalRepository) {}
+
+  /**
+   * EHR-C1: the patient's open visit today (Lagos calendar day) at this
+   * facility, or null. Read under the patient's consent like every visit
+   * read, and audited (`ehr.encounter.open-today`, with `found`).
+   */
+  openToday(context: DataAccessContext, patientId: string): Promise<OpenVisitToday> {
+    const day = lagosCalendarDate(this.now());
+    return this.repository.run(
+      context,
+      patientId,
+      'read_records',
+      { action: 'ehr.encounter.open-today', resourceType: 'encounter', details: { day } },
+      async (client) => {
+        const encounter = (await this.findOpenToday(client, patientId, context.facilityId, day)) ?? null;
+        return { value: { day, timeZone: VISIT_DAY_TIME_ZONE, encounter },
+          ...(encounter ? { resourceId: encounter.id } : {}), details: { found: encounter !== null } };
+      },
+    );
+  }
 
   list(context: DataAccessContext, patientId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.encounters', patientId };
@@ -88,9 +130,17 @@ export class EncountersService {
     patientId: string,
     input: CreateEncounterDto,
     idempotencyKey: string,
-  ): Promise<EncounterRow> {
+  ): Promise<EncounterCreated> {
     const operation = 'encounter.create';
-    const digest = requestDigest(operation, { patientId, input });
+    const reuse = input.reuseOpenVisit === true;
+    if (reuse && input.status !== EncounterStatus.Planned && input.status !== EncounterStatus.InProgress) {
+      throw new DomainProblem(400, 'REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS',
+        'To use the open visit today, start the visit as planned or in progress.');
+    }
+    // A body without reuseOpenVisit keeps the Idempotency-Key digest it had before EHR-C1.
+    const { reuseOpenVisit: _reuse, ...withoutReuse } = input;
+    const digest = requestDigest(operation, { patientId, input: input.reuseOpenVisit === undefined ? withoutReuse : input });
+    const day = reuse ? lagosCalendarDate(this.now()) : undefined;
     return this.repository.run(
       context,
       patientId,
@@ -105,6 +155,19 @@ export class EncountersService {
         digest,
         'encounter',
         async () => {
+          if (day) {
+            // EHR-C1: one open visit per patient per facility per Lagos day.
+            // The lock is taken before the lookup, so two requests at once
+            // cannot both find none and both create one; it is held until
+            // this transaction ends (READ COMMITTED: the lookup after the
+            // wait sees the other request's committed visit).
+            await this.lockOpenVisit(client, context.facilityId, patientId);
+            const open = await this.findOpenToday(client, patientId, context.facilityId, day);
+            if (open) {
+              return { value: { ...open, reusedOpenVisit: true }, id: open.id,
+                details: { reusedOpenVisit: true, day } };
+            }
+          }
           const result = await client.query<EncounterRow>(
             `insert into ehr.encounters (
                patient_id, facility_id, created_by, created_by_membership_id,
@@ -125,9 +188,13 @@ export class EncountersService {
             ],
           );
           const row = this.single(result.rows[0]);
-          return { value: row, id: row.id };
+          return day
+            ? { value: { ...row, reusedOpenVisit: false }, id: row.id, details: { reusedOpenVisit: false, day } }
+            : { value: row, id: row.id };
         },
-        (id) => this.findRow(client, patientId, context.facilityId, id),
+        (id) => day
+          ? this.findReplay(client, context, patientId, idempotencyKey, operation, id)
+          : this.findRow(client, patientId, context.facilityId, id),
       ),
     );
   }
@@ -173,6 +240,61 @@ export class EncountersService {
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+  }
+
+  /** EHR-C1: serialises the open-visit lookup and create for one patient at one facility. */
+  private async lockOpenVisit(client: PoolClient, facilityId: string, patientId: string): Promise<void> {
+    await client.query(
+      `select pg_advisory_xact_lock(hashtextextended('ehr.open-visit:' || $1::text || ':' || $2::text, 0))`,
+      [facilityId, patientId],
+    );
+  }
+
+  /** EHR-C1: the newest open visit started on the given Lagos day at this facility. */
+  private async findOpenToday(
+    client: PoolClient,
+    patientId: string,
+    facilityId: string,
+    day: string,
+  ): Promise<EncounterRow | undefined> {
+    const result = await client.query<EncounterRow>(
+      `select ${ENCOUNTER_COLUMNS} from ehr.encounters
+       where patient_id = $1 and facility_id = $2
+         and status = any($4::text[]) and not imported_paper_records
+         and ${lagosDaySql('started_at', 3)}
+       order by started_at desc, created_at desc, id desc
+       limit 1`,
+      [patientId, facilityId, day, OPEN_VISIT_STATUSES],
+    );
+    return result.rows[0];
+  }
+
+  /**
+   * EHR-C1: an idempotent replay of a create that asked for the open visit:
+   * the same visit, with `reusedOpenVisit` true when the visit is older than
+   * the request's Idempotency-Key (it was found, not created).
+   */
+  private async findReplay(
+    client: PoolClient,
+    context: DataAccessContext,
+    patientId: string,
+    idempotencyKey: string,
+    operation: string,
+    id: string,
+  ): Promise<EncounterCreated | undefined> {
+    const row = await this.findRow(client, patientId, context.facilityId, id);
+    if (!row) return undefined;
+    // Compared in the database, at full (microsecond) precision.
+    const key = await client.query<{ reused: boolean }>(
+      `select encounter_row.created_at < key_row.created_at as reused
+       from ehr.idempotency_keys key_row
+       join ehr.encounters encounter_row
+         on encounter_row.id = $1 and encounter_row.patient_id = $2 and encounter_row.facility_id = key_row.facility_id
+       where key_row.facility_id = $3 and key_row.created_by = $4 and key_row.operation = $5
+         and key_row.idempotency_key = $6`,
+      [row.id, patientId, context.facilityId, context.actor.accountId, operation, idempotencyKey],
+    );
+    return { ...row, reusedOpenVisit: key.rows[0]?.reused === true };
   }
 
   private async findRow(client: PoolClient, patientId: string, facilityId: string, id: string): Promise<EncounterRow | undefined> {
