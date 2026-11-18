@@ -1,16 +1,19 @@
 import 'reflect-metadata';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { RequestMethod } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { PoolClient } from 'pg';
-import type { AuditService } from '../../audit/audit.service';
+import { AuditService } from '../../audit/audit.service';
 import { AUDIT_ACTION, FACILITY_OPTIONAL, PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../../common/decorators';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
-import type { DatabaseService } from '../../database/database.service';
+import { DatabaseService } from '../../database/database.service';
+import type { OcrJobStatus } from '../ocr.types';
 import { OcrJobListController } from './ocr-job-list.controller';
-import { OcrJobListQueryDto } from './ocr-job-list.dto';
+import { OCR_JOB_STATUSES, OcrJobListQueryDto } from './ocr-job-list.dto';
 import { decodeCursor, encodeCursor, OCR_JOB_LIST_SQL, OcrJobListService } from './ocr-job-list.service';
 
 const FACILITY = '10000000-0000-4000-8000-000000000001';
@@ -53,7 +56,7 @@ function setup(rows: Record<string, unknown>[]) {
   }) } as unknown as DatabaseService;
   const recordWithClient = jest.fn().mockResolvedValue(undefined);
   const audit = { recordWithClient } as unknown as AuditService;
-  return { service: new OcrJobListService(database, audit), queries, transactions, recordWithClient };
+  return { service: new OcrJobListService(database, audit), queries, transactions, recordWithClient, client };
 }
 
 function validate(query: Record<string, unknown>) {
@@ -88,7 +91,7 @@ describe('GET ocr/job-list (SX-9)', () => {
     expect(validate({ status: 'failed', mine: 'true', limit: '50', cursor: encodeCursor({ at: '2026-11-18T10:00:00.000001Z',
       id: '70000000-0000-4000-8000-000000000001' }) })).toEqual([]);
     for (const query of [{ healthId: 'HID-ABC123' }, { patientId: '50000000-0000-4000-8000-000000000001' },
-      { facilityId: OTHER_FACILITY }, { status: 'deleted' }, { mine: 'false' }, { limit: '0' }, { limit: '51' },
+      { facilityId: OTHER_FACILITY }, { status: 'deleted' }, { status: 'Rejected' }, { mine: 'false' }, { limit: '0' }, { limit: '51' },
       { limit: '10.5' }, { cursor: 'short' }, { cursor: 'has spaces in it and more' }]) {
       expect(validate(query)).not.toEqual([]);
     }
@@ -99,7 +102,9 @@ describe('GET ocr/job-list (SX-9)', () => {
       last_error_code: 'PROVIDER_TIMEOUT' })];
     const s = setup(rows);
     const answer = await s.service.list({}, context);
-    expect(s.transactions).toEqual([{ context, options: { readOnly: true } }]);
+    // Not read-only: the audit row is inserted in this same transaction.
+    expect(s.transactions).toEqual([{ context, options: undefined }]);
+    expect(s.recordWithClient.mock.calls[0]![0]).toBe(s.client);
     expect(s.queries[0]).toEqual({ text: OCR_JOB_LIST_SQL, values: [FACILITY, null, null, null, null, 26] });
     expect(OCR_JOB_LIST_SQL).toMatch(/where facility_id = \$1::uuid/);
     expect(OCR_JOB_LIST_SQL).toMatch(/order by created_at desc, id desc/);
@@ -167,5 +172,87 @@ describe('GET ocr/job-list (SX-9)', () => {
     const s = setup([jobRow(1)]);
     s.recordWithClient.mockRejectedValueOnce(new Error('audit down'));
     await expect(s.service.list({}, context)).rejects.toThrow('audit down');
+  });
+
+  it('filters by every status a job can have, rejected included', () => {
+    for (const status of OCR_JOB_STATUSES) expect(validate({ status })).toEqual([]);
+    expect(validate({ status: 'rejected' })).toEqual([]);
+  });
+
+  it('keeps its status list the same as OcrJobStatus and the database\'s jobs_status_check', () => {
+    const every: Record<OcrJobStatus, true> = { queued: true, processing: true, extracted: true,
+      awaiting_validation: true, validated: true, rejected: true, failed: true, cancelled: true };
+    expect([...OCR_JOB_STATUSES].sort()).toEqual(Object.keys(every).sort());
+    // The latest definition of ocr.jobs jobs_status_check among the migrations (0016 today).
+    const directory = join(__dirname, '../../../../ehr-api/database/migrations');
+    const definitions = readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()
+      .flatMap((name) => [...readFileSync(join(directory, name), 'utf8')
+        .matchAll(/add constraint jobs_status_check check \(status in \(([^)]*)\)\)/g)]
+        .map((match) => ({ name, statuses: [...match[1]!.matchAll(/'([a-z_]+)'/g)].map((value) => value[1]!) })));
+    expect(definitions.length).toBeGreaterThan(0);
+    const latest = definitions.at(-1)!;
+    expect(latest.name).toMatch(/^0016_/);
+    expect([...OCR_JOB_STATUSES].sort()).toEqual([...latest.statuses].sort());
+  });
+});
+
+/**
+ * The list through the real DatabaseService transaction and the real
+ * AuditService, over a client that keeps PostgreSQL's rule for READ ONLY
+ * transactions: any INSERT is refused with SQLSTATE 25006 ("cannot execute
+ * INSERT in a read-only transaction") and the transaction rolls back.
+ */
+describe('GET ocr/job-list (SX-9) through the transaction and the audit insert', () => {
+  function readOnlyEnforcingDatabase(rows: Record<string, unknown>[]) {
+    const statements: string[] = [];
+    const clients = new Set<object>();
+    let readOnly = false;
+    const client = {
+      query: async (text: string) => {
+        const sql = text.trim().replace(/\s+/g, ' ');
+        statements.push(sql);
+        if (sql === 'BEGIN') readOnly = false;
+        if (sql === 'SET TRANSACTION READ ONLY') readOnly = true;
+        if (/^insert /i.test(sql) && readOnly) {
+          throw Object.assign(new Error('cannot execute INSERT in a read-only transaction'), { code: '25006' });
+        }
+        if (sql.startsWith('select id::text, document_id::text')) return { rows, rowCount: rows.length };
+        return { rows: [], rowCount: 0 };
+      },
+      release: () => undefined,
+    };
+    const pool = { connect: async () => { clients.add(client); return client; } };
+    const database = Object.create(DatabaseService.prototype) as DatabaseService;
+    Object.assign(database, { pool });
+    return { database, statements, clients };
+  }
+
+  it('commits the read and its audit row in one writable transaction', async () => {
+    const rows = [jobRow(1), jobRow(2, { status: 'rejected', completed_at: new Date('2026-11-18T10:02:00Z') })];
+    const db = readOnlyEnforcingDatabase(rows);
+    const service = new OcrJobListService(db.database, new AuditService(db.database));
+    const answer = await service.list({}, context);
+    expect(answer.items.map((item) => item.status)).toEqual(['awaiting_validation', 'rejected']);
+    expect(db.clients.size).toBe(1);
+    expect(db.statements).not.toContain('SET TRANSACTION READ ONLY');
+    const kinds = db.statements.map((sql) => sql.split(' ')[0]!.toLowerCase());
+    expect(kinds[0]).toBe('begin');
+    expect(kinds.at(-1)).toBe('commit');
+    expect(kinds).not.toContain('rollback');
+    const read = db.statements.findIndex((sql) => sql.startsWith('select id::text, document_id::text'));
+    const insert = db.statements.findIndex((sql) => sql.startsWith('insert into audit.events'));
+    expect(read).toBeGreaterThan(0);
+    expect(insert).toBeGreaterThan(read);
+  });
+
+  it('would fail on every call in a read-only transaction (the model refuses the audit insert as PostgreSQL does)', async () => {
+    const db = readOnlyEnforcingDatabase([jobRow(1)]);
+    const audit = new AuditService(db.database);
+    const failure = await db.database.withTransaction(context, async (client) => {
+      await audit.recordWithClient(client, { correlationId: 'c', actorSubject: 's', facilityId: FACILITY,
+        action: 'ocr.job.list', outcome: 'success' });
+    }, { readOnly: true }).catch((error: unknown) => error);
+    expect((failure as { code?: string }).code).toBe('25006');
+    expect(db.statements.at(-1)).toBe('ROLLBACK');
   });
 });

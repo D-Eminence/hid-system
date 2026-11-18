@@ -1,10 +1,14 @@
 import { IsIn, IsOptional, Matches } from 'class-validator';
+import type { OcrJobStatus } from '../ocr.types';
 
-/** The statuses an OCR job can have (0013 ocr.jobs.status). */
+/**
+ * The statuses an OCR job can have: ocr.jobs jobs_status_check as 0016
+ * replaced it (0013's list plus 'rejected'), the same as OcrJobStatus.
+ */
 export const OCR_JOB_STATUSES = [
-  'queued', 'processing', 'extracted', 'awaiting_validation', 'validated', 'failed', 'cancelled',
-] as const;
-export type OcrJobStatus = typeof OCR_JOB_STATUSES[number];
+  'queued', 'processing', 'extracted', 'awaiting_validation', 'validated', 'rejected', 'failed', 'cancelled',
+] as const satisfies readonly OcrJobStatus[];
+export type { OcrJobStatus };
 
 export const OCR_JOB_LIST_DEFAULT_LIMIT = 25;
 export const OCR_JOB_LIST_MAX_LIMIT = 50;

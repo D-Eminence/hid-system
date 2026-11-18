@@ -60,9 +60,13 @@ export function decodeCursor(value: string): Cursor {
 
 /**
  * SX-9 (Akos P1-10): this facility's OCR jobs, newest first, paged, so the
- * Migrate desk keeps its work after the page is left. Read-only, purpose
- * healthcare-operations. Each answer is audited (ocr.job.list) with the job
- * ids shown; no patient is named because none is read.
+ * Migrate desk keeps its work after the page is left. It changes no job;
+ * purpose healthcare-operations. Each answer is audited (ocr.job.list) with
+ * the job ids shown; no patient is named because none is read. The audit row
+ * is inserted in the same transaction as the read, so that transaction is
+ * not read-only (PostgreSQL refuses an INSERT in a READ ONLY transaction,
+ * 25006); the default READ COMMITTED transaction is used, as every other OCR
+ * reader that audits through recordWithClient does.
  */
 @Injectable()
 export class OcrJobListService {
@@ -115,6 +119,6 @@ export class OcrJobListService {
         })),
         nextCursor,
       };
-    }, { readOnly: true });
+    });
   }
 }

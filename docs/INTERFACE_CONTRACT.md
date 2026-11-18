@@ -6083,7 +6083,9 @@ it uses the same names route.)
 | `GET /identity/facility-staff-names[?membershipIds=<id>,<id>,…]` | Any staff member active at the `X-Facility-ID` facility. No permission beyond membership. | `200 { facilityId, staff, complete }` below. No `X-Facility-ID`: `400 FACILITY_REQUIRED`. A facility the caller is not active at: `403 FACILITY_ACCESS_DENIED`. A patient session: `403 PATIENT_SCOPE_DENIED`. More than 100 ids, or anything but comma-separated UUIDs: `400 VALIDATION_FAILED`. |
 
 `status` is one of `queued`, `processing`, `extracted`,
-`awaiting_validation`, `validated`, `failed`, `cancelled`. `mine=true` lists
+`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled` (the
+`ocr.jobs` status check as 0016 left it); an item's `status` is always one of
+these. `mine=true` lists
 only the jobs the caller started at this facility. `limit` defaults to 25.
 
 ```json
@@ -6120,9 +6122,11 @@ only the jobs the caller started at this facility. `limit` defaults to 25.
   page never repeats or skips a job. Pass `nextCursor` back as `cursor` with
   the same filters.
 - Each answer writes one audit row, `ocr.job.list` (resource
-  `ocr-job-list`), in the same read-only transaction, with the count, the
-  job ids shown, the filters and whether it was the first page; if that row
-  cannot be written nothing is answered. The request itself is audited as
+  `ocr-job-list`), in the same transaction as the read (an ordinary
+  READ COMMITTED transaction, not a read-only one: PostgreSQL refuses an
+  insert in a read-only transaction), with the count, the job ids shown, the
+  filters and whether it was the first page; if that row cannot be written
+  nothing is answered. The route changes no job. The request itself is audited as
   `api.ocr.job.list.request`.
 
 ```json
