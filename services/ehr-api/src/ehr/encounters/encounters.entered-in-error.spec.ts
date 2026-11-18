@@ -152,7 +152,7 @@ describe('EHR-C8a what the patient sees afterwards (patient-self re-run)', () =>
 
   // Review finding 2: the filter is "no visit entered in error can be seen", not "a visit not entered in
   // error can be seen", so the patient (who sees only completed visits) still gets notes of open visits as
-  // before.
+  // before. src/ehr/shared/wave1-clinical.pg.spec.ts runs this read on PostgreSQL (EHR_SCRATCH_DATABASE_URL).
   it('the patient\'s own record lists only completed visits; notes are filtered only against a visit entered in error', async () => {
     const { service, query } = patientRecords();
     await service.self(request);
