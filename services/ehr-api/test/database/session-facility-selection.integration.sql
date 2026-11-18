@@ -67,7 +67,20 @@
 --      a rotated sign-in whose first session is revoked, with a later session
 --      live, is admitted on its first choice (an INSERT): the row is keyed to
 --      the revoked first session, which the foreign key pins, while the
---      liveness check uses the live one.
+--      liveness check uses the live one;
+--   9. single sign-on (0127): a staff sign-in a product issued after single
+--      sign-on is a root staff session with its provenance row (written by
+--      the Identity runtime, as TokenService.issue writes it), so it keeps a
+--      choice exactly as a password sign-in does, through a refresh too; a
+--      back-channel logout of its provider session (revocation_reason
+--      'sso_logout', SsoService's own UPDATE, as the Identity runtime) ends
+--      it as sign-out does: nothing reads the choice, the API's write finds
+--      no live session, the row cannot be changed (23514) and stays, and the
+--      provenance row stays; a password sign-in of the same account outside
+--      that provider session keeps reading its own choice until product
+--      sign-out ends every staff sign-in of the account ('sso_logout' too),
+--      after which it is answered the same way; the sign-in's first session
+--      cannot be deleted while either row refers to it (23503).
 -- Synthetic values only; uuid prefix f129; .invalid addresses.
 set plpgsql.variable_conflict = error;
 begin;
@@ -1029,6 +1042,162 @@ begin
                  or selection.account_id = 'f1292000-0000-4000-8000-0000000000c0') then
     raise exception 'a refused sign-in has a stored choice';
   end if;
+end $$;
+
+-- 9. Single sign-on (0127). SS: A's sign-in issued on ehr. after single
+-- sign-on (provider session sid 'synthetic-provider-sid-0129'), first
+-- session SS1; PW: A's password sign-in on ehr., first session PW1, outside
+-- that provider session. Both are root staff sessions, as TokenService.issue
+-- writes every sign-in, single sign-on or not.
+insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
+    authentication_method, issued_at, expires_at, absolute_expires_at, session_kind)
+select fixture.session_id::uuid, 'f1292000-0000-4000-8000-00000000000a', fixture.session_id::uuid,
+  md5(fixture.session_id) || md5(fixture.session_id || 'refresh'), gen_random_uuid(), 1, 'password',
+  now(), now() + interval '15 minutes', now() + interval '24 hours', 'staff'
+from (values ('f1296000-0000-4000-8000-000000000901'), ('f1296000-0000-4000-8000-000000000911'))
+  as fixture(session_id);
+
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'system:auth', true),
+       set_config('app.correlation_id', 'facility-selection-0129-suite-0009', true);
+do $$
+declare
+  recorded uuid;
+begin
+  -- SS's provenance, written by the Identity runtime with the sign-in
+  -- (TokenService.recordSingleSignOn); 0127's guard admits it for the root
+  -- staff session of a staff client.
+  insert into auth.session_single_sign_on (family_id, account_id, client_id, provider_sid, authenticated_at)
+  values ('f1296000-0000-4000-8000-000000000901', 'f1292000-0000-4000-8000-00000000000a', 'ehr',
+    'synthetic-provider-sid-0129', clock_timestamp() - interval '1 minute');
+  -- Each sign-in chooses through the API's write, as a password sign-in does.
+  recorded := pg_temp.select_facility('f1296000-0000-4000-8000-000000000901', 'f1292000-0000-4000-8000-00000000000a',
+    'f1291000-0000-4000-8000-0000000000f2', 'f1295000-0000-4000-8000-0000000000a2');
+  if recorded is distinct from 'f1296000-0000-4000-8000-000000000901' then
+    raise exception 'a single sign-on sign-in could not keep a choice (answered %)', recorded;
+  end if;
+  recorded := pg_temp.select_facility('f1296000-0000-4000-8000-000000000911', 'f1292000-0000-4000-8000-00000000000a',
+    'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1');
+  if recorded is distinct from 'f1296000-0000-4000-8000-000000000911' then
+    raise exception 'a password sign-in could not keep a choice (answered %)', recorded;
+  end if;
+end $$;
+reset role;
+
+-- SS refreshes: SS2 joins the family and SS1 is revoked as rotated (as
+-- TokenService.refresh rotates a single sign-on sign-in like any other).
+insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
+    authentication_method, issued_at, expires_at, absolute_expires_at, session_kind)
+values ('f1296000-0000-4000-8000-000000000902', 'f1292000-0000-4000-8000-00000000000a',
+  'f1296000-0000-4000-8000-000000000901', md5('f129-902') || md5('f129-902-refresh'), gen_random_uuid(), 1, 'password',
+  now(), now() + interval '15 minutes', now() + interval '24 hours', 'staff');
+update auth.sessions set revoked_at = clock_timestamp(), revocation_reason = 'rotated',
+    replaced_by_session_id = 'f1296000-0000-4000-8000-000000000902', row_version = row_version + 1
+ where id = 'f1296000-0000-4000-8000-000000000901';
+
+set local role hid_identity_api_runtime;
+do $$
+declare
+  reads text[];
+  ended integer;
+begin
+  select array_agg(presented_session.label || '=' || coalesce(pg_temp.selected_facility(presented_session.presented::uuid,
+      'f1292000-0000-4000-8000-00000000000a')::text, 'none') order by presented_session.label)
+    into reads
+    from (values ('PW1', 'f1296000-0000-4000-8000-000000000911'), ('SS1', 'f1296000-0000-4000-8000-000000000901'),
+                 ('SS2', 'f1296000-0000-4000-8000-000000000902')) as presented_session(label, presented);
+  if reads is distinct from array['PW1=f1291000-0000-4000-8000-0000000000f1', 'SS1=none',
+                                  'SS2=f1291000-0000-4000-8000-0000000000f2'] then
+    raise exception 'a single sign-on sign-in must read its choice through its live session, as a password one: %', reads;
+  end if;
+
+  -- The provider's back-channel logout of that provider session, exactly as
+  -- SsoService.backchannelLogout ends its sign-ins (by sid, any account).
+  with logged_out as (
+    update auth.sessions session
+       set revoked_at = clock_timestamp(), revocation_reason = 'sso_logout', row_version = session.row_version + 1
+      from auth.session_single_sign_on single_sign_on
+     where single_sign_on.family_id = session.family_id
+       and single_sign_on.provider_sid = 'synthetic-provider-sid-0129'
+       and (null::uuid is null or single_sign_on.account_id = null::uuid)
+       and session.revoked_at is null
+    returning session.id)
+  select count(*) into ended from logged_out;
+  if ended <> 1 then
+    raise exception 'the back-channel logout should end SS2 alone, it ended %', ended;
+  end if;
+
+  -- Ended as a sign-out ends one (section 5): no session of it reads the
+  -- choice, the API's write finds no live session, and the row cannot be
+  -- changed.
+  if pg_temp.selected_facility('f1296000-0000-4000-8000-000000000902', 'f1292000-0000-4000-8000-00000000000a') is not null
+     or pg_temp.selected_facility('f1296000-0000-4000-8000-000000000901', 'f1292000-0000-4000-8000-00000000000a') is not null then
+    raise exception 'a sign-in ended by back-channel logout still reads its choice';
+  end if;
+  if pg_temp.select_facility('f1296000-0000-4000-8000-000000000902', 'f1292000-0000-4000-8000-00000000000a',
+       'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1') is not null then
+    raise exception 'the API''s write found a sign-in ended by back-channel logout';
+  end if;
+  begin
+    update auth.session_facility_selection set facility_id = 'f1291000-0000-4000-8000-0000000000f1',
+        membership_id = 'f1295000-0000-4000-8000-0000000000a1', row_version = row_version + 1
+     where family_id = 'f1296000-0000-4000-8000-000000000901';
+    raise exception 'the choice of a sign-in ended by back-channel logout was changed';
+  exception when check_violation then
+    if sqlerrm <> 'SESSION_FACILITY_SELECTION_INVALID' then raise; end if;
+  end;
+  -- The password sign-in was not in that provider session: it still reads
+  -- its own choice.
+  if pg_temp.selected_facility('f1296000-0000-4000-8000-000000000911', 'f1292000-0000-4000-8000-00000000000a')
+       is distinct from 'f1291000-0000-4000-8000-0000000000f1' then
+    raise exception 'the back-channel logout ended a sign-in outside its provider session';
+  end if;
+
+  -- Product sign-out signs out everywhere (SsoService.endAccountSignIns):
+  -- every live staff sign-in of the account ends with 'sso_logout', the
+  -- password sign-in included, and is then answered the same way.
+  update auth.sessions
+     set revoked_at = clock_timestamp(), revocation_reason = 'sso_logout', row_version = row_version + 1
+   where account_id = 'f1292000-0000-4000-8000-00000000000a' and session_kind = 'staff' and revoked_at is null;
+  if pg_temp.selected_facility('f1296000-0000-4000-8000-000000000911', 'f1292000-0000-4000-8000-00000000000a') is not null then
+    raise exception 'a sign-in ended by product sign-out still reads its choice';
+  end if;
+  if pg_temp.select_facility('f1296000-0000-4000-8000-000000000911', 'f1292000-0000-4000-8000-00000000000a',
+       'f1291000-0000-4000-8000-0000000000f2', 'f1295000-0000-4000-8000-0000000000a2') is not null then
+    raise exception 'the API''s write found a sign-in ended by product sign-out';
+  end if;
+  begin
+    update auth.session_facility_selection set facility_id = 'f1291000-0000-4000-8000-0000000000f2',
+        membership_id = 'f1295000-0000-4000-8000-0000000000a2', row_version = row_version + 1
+     where family_id = 'f1296000-0000-4000-8000-000000000911';
+    raise exception 'the choice of a sign-in ended by product sign-out was changed';
+  exception when check_violation then
+    if sqlerrm <> 'SESSION_FACILITY_SELECTION_INVALID' then raise; end if;
+  end;
+end $$;
+reset role;
+do $$ begin
+  -- Both rows and the provenance stay; sign-out of any kind deletes nothing.
+  if (select string_agg(selection.family_id::text || '=' || selection.facility_id::text, ',' order by selection.family_id)
+        from auth.session_facility_selection selection
+       where selection.family_id in ('f1296000-0000-4000-8000-000000000901', 'f1296000-0000-4000-8000-000000000911'))
+     is distinct from 'f1296000-0000-4000-8000-000000000901=f1291000-0000-4000-8000-0000000000f2,'
+                   || 'f1296000-0000-4000-8000-000000000911=f1291000-0000-4000-8000-0000000000f1' then
+    raise exception 'a choice was removed or changed when its sign-in ended';
+  end if;
+  if not exists (select 1 from auth.session_single_sign_on
+                  where family_id = 'f1296000-0000-4000-8000-000000000901' and provider_sid = 'synthetic-provider-sid-0129') then
+    raise exception 'the single sign-on provenance was removed';
+  end if;
+  if (select revocation_reason from auth.sessions where id = 'f1296000-0000-4000-8000-000000000902') is distinct from 'sso_logout'
+     or (select revocation_reason from auth.sessions where id = 'f1296000-0000-4000-8000-000000000911') is distinct from 'sso_logout' then
+    raise exception 'the sign-ins were not ended as single sign-on ends them';
+  end if;
+  -- The first session cannot be deleted while either row refers to it.
+  delete from auth.sessions where id = 'f1296000-0000-4000-8000-000000000901';
+  raise exception 'a sign-in''s first session with a choice and a provenance was deleted';
+exception when foreign_key_violation then
+  null;
 end $$;
 
 rollback;

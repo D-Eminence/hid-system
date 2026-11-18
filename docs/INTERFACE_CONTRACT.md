@@ -6072,8 +6072,15 @@ and runtime-grants.sql's 0129 block would then stop `db:bootstrap`.
 ### Who keeps a choice
 
 A staff session of an Identity sign-in (it has a session id) with at least one
-facility on its site. These get no read and no `facilitySelection` field in
-any mode:
+facility on its site. That includes a sign-in a product site issued after
+single sign-on (§54, 0127): it is the same staff sign-in, so it keeps, reads
+and loses its choice exactly as a password sign-in on that site does. Its
+callback answers with a redirect, so in `ask` the website first sees
+`default` on its next `GET /api/v1/auth/session`. A back-channel logout of its
+provider session, or product sign-out everywhere (both end sign-ins with
+`sso_logout`), ends its reads as today's sign-out does, and
+`GET /api/v1/auth/session` on that host then also clears the cookies (§54).
+These get no read and no `facilitySelection` field in any mode:
 
 - patients;
 - account-only outreach sessions (§53, Q88-2);
@@ -6103,17 +6110,19 @@ facility reported, whatever the state.
 
 The stored facility is matched by facility id only, against `actor.facilities`
 as Identity resolved them for this request under the session's own product
-(the access token's product claim; the refresh token's product for a
-refresh), never the request's `Origin`. Those are the memberships §53's gate
-admits on that site: Q88's permission rule and Q97's own-job rule together
-(`facilityAdmittedOnProduct`). So when Q97 narrows what a login holds on a
-site, a stored facility that is no longer admitted there is reported as
-`reselect` at the default and never used; if no facility is left on the site,
-the session ends with `401`, as §53 says, before any read. It takes the first
-match, the rule `SecurityGuard` uses to bind `X-Facility-ID`, so the roles
-reported are the roles every later request at that facility gets. The stored
-membership is used only by the database guard and its foreign key. Every
-answer keeps §53's `actor.products` as Identity resolved it.
+(the access token's product claim; the refresh token's product for a refresh),
+never the request's `Origin`. Those are the memberships §53's gate admits on
+that site: Q88's permission rule, Q97's own-job rule and, for an
+administrator, its organisation's recorded kinds (Q90, Q91; 0126) together
+(`facilityAdmittedOnProduct`). So when Q97 or an organisation's kinds narrow
+what a login holds on a site, a stored facility that is no longer admitted
+there is reported as `reselect` at the default and never used; if no facility
+is left on the site, the session ends with `401`, as §53 says, before any
+read. It takes the first match, the rule `SecurityGuard` uses to bind
+`X-Facility-ID`, so the roles reported are the roles every later request at
+that facility gets. The stored membership is used only by the database guard
+and its foreign key. Every answer keeps §53's `actor.products` as Identity
+resolved it.
 
 ### Routes
 
@@ -6229,6 +6238,13 @@ today: with the setting on they open at the chosen facility, and on
 - The suite `services/ehr-api/test/database/session-facility-selection.integration.sql`
   runs as the Identity runtimes.
 - The jest specs are `services/identity-api/src/auth/facility-selection*.spec.ts`.
+  `facility-selection-sso.spec.ts` runs with single sign-on (0127) on, through
+  the real single sign-on controller, service and session-end filter: a
+  single sign-on staff sign-in answers every step as a password sign-in on
+  the same site does (Q97 and 0126 narrowing included); a back-channel logout
+  or product sign-out ends the reads as sign-out does; service-session
+  answers byte for byte as with the setting off. The suite's section 9 proves
+  the same on the database.
 - Runtime check: `services/identity-api/scripts/verify-facility-selection-runtime.mjs`.
   It runs in the TUF migration rehearsal (`scripts/tuf-staging-migration-rehearsal.mjs`,
   `checks.facility_selection_runtime`, after the prescription-details check,
