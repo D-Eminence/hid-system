@@ -381,3 +381,19 @@ It uses two optional fields the gate gained for it:
 (`EHR_AUDIT_GATE`) and the directories an exception may name
 (`EXCEPTION_GATE_DIRECTORIES`: infra/aws and apps/ehr); the release tests try
 dropping, weakening or redirecting it.
+
+**18 November 2026: entry removed.** npm audit stopped reporting
+GHSA-fc5q-39xc-vjpf while picomatch was still 4.0.7, its latest release, so the
+advisory was withdrawn or changed upstream rather than fixed:
+`npm --prefix apps/ehr audit --json` now reports 0 vulnerabilities. The gate then
+failed the entry as stale on every branch (`stale exception: GHSA-fc5q-39xc-vjpf
+picomatch <=4.0.7 (high) in apps/ehr no longer matches npm audit at
+node_modules/picomatch; correct or remove it`), so the entry was deleted, as
+the stale rule above requires; the infra/aws minimatch entry is the only one
+left. The apps/ehr audit stays on the gate (`EHR_AUDIT_GATE`, with apps/ehr
+still in `EXCEPTION_GATE_DIRECTORIES`), so a future exception needs no workflow
+change.
+With no apps/ehr entry it behaves like the plain audit at moderate: if npm
+reports the advisory again, the job fails until it is reviewed again. The
+release tests keep the removed entry as a fixture, to go on covering
+`dependent_paths`, `ends_when_fix_published` and the registry lookup.
