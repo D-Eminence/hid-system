@@ -6576,6 +6576,26 @@ NIN_CHECK_LIMIT_REACHED`, and `503 NIN_CHECK_LIMIT_UNAVAILABLE` when they
 could not be read) are removed; the desk never answers either code. What
 stops a NIN being paid for twice is the check itself, not a count.
 
+One hold stays, for privacy, not volume: the record HID keeps for a NIN
+(0137's stored answer, 90 days under Q110, or a Health ID's record) is
+compared with the desk's name and date of birth for free, so without any
+bound one staff session could try every date of birth against a stranger's
+NIN until one matched, and so learn their date of birth and registered name.
+After 10 "does not match" answers (`name_mismatch`) for one NIN to one staff
+account within 24 hours, that account's checks of that NIN are refused for
+24 hours, before anything is compared or sent: `409 NIN_CHECK_HELD`, "This
+NIN has been checked too many times today with a name or date of birth that
+does not match. Check the details on the patient's NIN slip, or try again in
+24 hours.", `retryAfterSeconds`: the time left; audited `failure`,
+`providerCalled: false`; the breaker is not touched. No other NIN, account or
+facility is affected, and a match or "could not be verified" never counts.
+The count is a keyed row of `auth.otp_rate_limits` (scope `account`, an HMAC
+keyed by the NIN's lookup HMAC: neither the NIN nor the account). If it
+cannot be read, the desk gets "NIN checks cannot be started right now"
+(`503 NIN_PROVIDER_UNAVAILABLE`) and nothing is compared or sent; if a count
+cannot be written, the answer is still given and a fixed warning is logged
+(`identity.nin.mismatch_count_failed`, no identifier).
+
 ### The breaker with QoreID
 
 As ID-0: a `503` from QoreID trips it at once; three other failures within 5

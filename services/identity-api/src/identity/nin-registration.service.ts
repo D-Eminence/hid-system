@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
-import { ConflictException, Inject, Injectable, Optional } from '@nestjs/common';
+import { createHmac, randomUUID } from 'node:crypto';
+import { ConflictException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
+import { consumeRateLimit } from '../auth/rate-limit';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { requestDigest, requireIdempotencyKey } from '../common/idempotency';
@@ -142,8 +143,23 @@ const CASE_SELECT = `
   left join identity.patients patient on patient.id = registration.resolved_patient_id
 `;
 
+/**
+ * Privacy (Q109 review): with no per-staff limit, the record HID keeps for a
+ * NIN (0137's stored answer, or a Health ID's record) could be compared with
+ * any name and date of birth, free and as often as wanted, so one staff
+ * session could work out a stranger's date of birth and registered name from
+ * their NIN. After this many "does not match" answers for one NIN to one staff
+ * account within DESK_NIN_MISMATCH_WINDOW_SECONDS, that account's checks of
+ * that NIN are held for a day (409 NIN_CHECK_HELD). Not a volume limit (Q109):
+ * no other NIN, account or facility is affected, and a check that matches, or
+ * a NIN QoreID has no record of, never counts.
+ */
+export const DESK_NIN_MISMATCH_LIMIT = 10;
+export const DESK_NIN_MISMATCH_WINDOW_SECONDS = 24 * 60 * 60;
+
 @Injectable()
 export class NinRegistrationService {
+  private readonly logger = new Logger(NinRegistrationService.name);
   private readonly fieldProtector = new CollectedFieldProtector();
 
   constructor(
@@ -230,6 +246,10 @@ export class NinRegistrationService {
     // the record: the NIN service is not asked (QoreID not paid) again, even
     // after 0137's stored answer has ended. Any other request is checked by
     // the NIN service as before.
+    // Before any comparison with a record: an account that has had too many
+    // "does not match" answers for this NIN today is held (privacy, above).
+    const mismatches = this.mismatchBucket(context, ninLookupHmac);
+    await this.assertNotHeldForMismatches(context, mismatches);
     const onHealthId = await this.verifiedNinOnHealthId(context, ninLookupHmac, claimedDemographics);
     let verification: NinVerificationResult;
     if (onHealthId) {
@@ -249,7 +269,7 @@ export class NinRegistrationService {
         details: { provider: verification.provider, ninCheck: 'match', providerCalled: false, healthIdRecord: true },
       });
     } else {
-      verification = await this.verifyWithProvider(input, claimedDemographics, context);
+      verification = await this.verifyWithProvider(input, claimedDemographics, context, mismatches);
     }
 
     const caseId = randomUUID();
@@ -795,7 +815,7 @@ export class NinRegistrationService {
    * behind the breaker. Returns a match; any other answer is thrown.
    */
   private async verifyWithProvider(input: ResolveNinDto, claimedDemographics: NinClaimedDemographics,
-    context: DataAccessContext): Promise<NinVerificationResult> {
+    context: DataAccessContext, mismatches: string): Promise<NinVerificationResult> {
     let verification: NinVerificationResult;
     try {
       // ID-0: while the NIN service breaker is tripped, no check is sent.
@@ -871,6 +891,7 @@ export class NinRegistrationService {
     else this.ninBreaker.recordSuccess();
     if (!verification.verified) {
       const ninCheck = verification.outcome === 'name_mismatch' ? 'name_mismatch' : 'no_match';
+      if (ninCheck === 'name_mismatch') await this.countMismatch(context, mismatches);
       throw await this.ninNotVerified(context, verification.provider, ninCheck, verification.stored === true);
     }
     // Q108: every NIN check is audited on its own, before the case is
@@ -892,6 +913,61 @@ export class NinRegistrationService {
         ...(verification.stored ? { storedAnswer: true } : {}) },
     });
     return verification;
+  }
+
+  /**
+   * The bucket (auth.otp_rate_limits, scope 'account') of one staff account's
+   * mismatches for one NIN: an HMAC keyed by the NIN's lookup HMAC (itself
+   * keyed by NIN_LOOKUP_HMAC_KEY_B64), so it holds neither the NIN nor the
+   * account and cannot be joined to either.
+   */
+  private mismatchBucket(context: DataAccessContext, ninLookupHmac: string): string {
+    return createHmac('sha256', Buffer.from(ninLookupHmac, 'utf8'))
+      .update(['nin-desk-mismatch', context.actor.accountId].join('\u001f'), 'utf8').digest('hex');
+  }
+
+  /**
+   * Refuses, before anything is compared or sent, a NIN this staff account
+   * has had DESK_NIN_MISMATCH_LIMIT "does not match" answers for in the
+   * window: 409 NIN_CHECK_HELD with the time left. When the hold cannot be
+   * read, nothing is compared or sent ("cannot be started right now").
+   */
+  private async assertNotHeldForMismatches(context: DataAccessContext, bucket: string): Promise<void> {
+    let heldUntil: Date | null;
+    try {
+      heldUntil = await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<{ blocked_until: Date | string | null }>(
+          `select blocked_until from auth.otp_rate_limits
+            where scope = 'account' and bucket_hmac = $1 and blocked_until > clock_timestamp()`,
+          [bucket],
+        );
+        const until = result.rows[0]?.blocked_until;
+        return until ? new Date(until) : null;
+      });
+    } catch (error) {
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw ninCheckNotStarted();
+    }
+    if (heldUntil) {
+      const error = ninDetailsHeld(heldUntil);
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw error;
+    }
+  }
+
+  /**
+   * Counts one "does not match" answer; the one that reaches
+   * DESK_NIN_MISMATCH_LIMIT holds the NIN for this account for the window.
+   * A count that cannot be written is logged (no identifier) and the answer
+   * still given.
+   */
+  private async countMismatch(context: DataAccessContext, bucket: string): Promise<void> {
+    try {
+      await this.database.withTransaction(context, (client) => consumeRateLimit(client, 'account', bucket,
+        { windowSeconds: DESK_NIN_MISMATCH_WINDOW_SECONDS, maxRequests: DESK_NIN_MISMATCH_LIMIT - 1 }));
+    } catch {
+      this.logger.warn({ event: 'identity.nin.mismatch_count_failed', correlationId: context.correlationId });
+    }
   }
 
   /**
@@ -1256,4 +1332,17 @@ const CASE_GENDERS = new Set(['female', 'male', 'intersex', 'other', 'unknown'])
 /** A name as the desk's NIN checks compare it: letter case and spacing ignored. */
 function normalizedPersonName(value: string): string {
   return value.trim().replace(/\s+/g, ' ').toLocaleUpperCase('en-NG');
+}
+
+/**
+ * The privacy hold above: the time left, as NIN_CHECK_HELD always gives it,
+ * and what the desk can do now.
+ */
+function ninDetailsHeld(until: Date): DomainProblem {
+  const seconds = Math.max(60, Math.ceil((until.getTime() - Date.now()) / 1000));
+  const hours = Math.ceil(seconds / 3600);
+  return new DomainProblem(409, 'NIN_CHECK_HELD',
+    'This NIN has been checked too many times today with a name or date of birth that does not match. Check the '
+    + `details on the patient's NIN slip, or try again in ${hours} hour${hours === 1 ? '' : 's'}.`, undefined,
+    { extensions: { retryAfterSeconds: seconds } });
 }

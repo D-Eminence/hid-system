@@ -9,11 +9,12 @@ import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { fakeNinCheckStore } from '../testing/nin-check-store.fake';
+import { fakeRateLimitTable } from '../testing/rate-limit-table.fake';
 import { NIN_CHECK_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS, NIN_RECORD_ANSWER_SECONDS,
   NinCheckOnce } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NIN_BREAKER_RETRY_AFTER_MS, NinProviderBreaker } from './nin-provider-breaker';
-import { NinRegistrationService } from './nin-registration.service';
+import { DESK_NIN_MISMATCH_LIMIT, NinRegistrationService } from './nin-registration.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 import { QoreIdNinVerificationProvider } from './qoreid-nin-verification.provider';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
@@ -153,7 +154,10 @@ function system() {
   const cases: unknown[][] = [];
   /** Active patients holding a NIN verified, by NIN lookup HMAC (identity.patient_identifiers). */
   const healthIds = new Map<string, Record<string, unknown>>();
+  const rateLimits = fakeRateLimitTable();
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
+    const limited = rateLimits.query(sql, values);
+    if (limited) return limited;
     if (sql.includes('from identity.patient_identifiers identifier')) {
       const patient = healthIds.get(String(values[0]));
       return { rows: patient ? [patient] : [] };
@@ -183,7 +187,7 @@ function system() {
   const deskChecks = () => deskAudit.record.mock.calls.map(([row]) => row)
     .filter((row) => row.action === 'identity.nin.verify').map((row) => row.details);
   return { qoreId, store, ninCheck, ninOnly, resolve, breaker, cases, checkAudits, deskChecks, deskAudit, lookup,
-    verifyProfile, protector, healthIds };
+    verifyProfile, protector, healthIds, rateLimits };
 }
 
 describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')', () => {
@@ -549,5 +553,23 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       expect(s.qoreId.state.charged).toBe(1);
       expect(s.cases).toHaveLength(0);
     });
+  });
+
+  it('stops a free search of a NIN\'s stored record by date of birth after ten tries (privacy hold)', async () => {
+    const s = system();
+    // One paid check stores the record; every later try is compared with it for free.
+    await expect(s.resolve('desk-once-key-000400', deskContext(), { ...input, dateOfBirth: '1950-01-01' }))
+      .rejects.toMatchObject({ status: 422 });
+    const answers: unknown[] = [];
+    for (let day = 2; day <= 40; day += 1) {
+      const dateOfBirth = `1950-01-${String(Math.min(day, 31)).padStart(2, '0')}`;
+      answers.push(await s.resolve(`desk-once-key-${String(400 + day).padStart(6, '0')}`, deskContext(),
+        { ...input, dateOfBirth }).catch((error: { code?: string }) => error.code));
+    }
+    expect(answers.filter((code) => code === 'NIN_VERIFICATION_FAILED')).toHaveLength(DESK_NIN_MISMATCH_LIMIT - 1);
+    expect(answers.filter((code) => code === 'NIN_CHECK_HELD')).toHaveLength(39 - (DESK_NIN_MISMATCH_LIMIT - 1));
+    expect(s.qoreId.state.charged).toBe(1);
+    // The patient's own desk colleague (another account) is not held.
+    await expect(s.resolve('desk-once-key-000499', deskContext(2))).resolves.toMatchObject({ caseId });
   });
 });

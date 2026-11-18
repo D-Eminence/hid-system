@@ -7,10 +7,12 @@ import * as environment from '../config/environment';
 import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
+import { fakeRateLimitTable } from '../testing/rate-limit-table.fake';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NinRegistrationController } from './nin-registration.controller';
-import { NinRegistrationService } from './nin-registration.service';
+import { DESK_NIN_MISMATCH_LIMIT, DESK_NIN_MISMATCH_WINDOW_SECONDS,
+  NinRegistrationService } from './nin-registration.service';
 import {
   DeferredNinVerificationProvider,
   DeterministicTestNinVerificationProvider,
@@ -294,10 +296,12 @@ describe('Q108 desk NIN resolve through QoreID', () => {
    * none by default.
    */
   function desk(provider: NinVerificationProvider, breaker = new NinProviderBreaker(),
-    holders: Array<Record<string, unknown> | undefined> = []) {
+    holders: Array<Record<string, unknown> | undefined> = [], rateLimits = fakeRateLimitTable()) {
     const statements: Array<{ sql: string; values: unknown[] }> = [];
     const query = jest.fn(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql: sql.replace(/\s+/g, ' '), values });
+      const limited = rateLimits.query(sql, values);
+      if (limited) return limited;
       if (sql.includes('from identity.patient_identifiers identifier')) {
         const holder = holders.shift();
         return { rows: holder ? [holder] : [] };
@@ -322,7 +326,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     };
     const service = new NinRegistrationService(database as never, audit as never, protector as never, {} as never,
       provider, breaker);
-    return { service, audit, statements, breaker };
+    return { service, audit, statements, breaker, rateLimits };
   }
 
   /** Every audit row written, with no NIN, record name or date of birth in any of them. */
@@ -569,6 +573,71 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(JSON.stringify(audit.record.mock.calls)).not.toContain('provider_error');
     // Nothing was sent, so the same request may be sent again.
     await expect(service.resolve(input, 'resolve-key-q108-000046', context)).resolves.toMatchObject({ caseId });
+  });
+
+  describe('the privacy hold: too many "does not match" answers for one NIN to one account', () => {
+    const other = { ...context, actor: { ...context.actor, accountId: 'f0e1d2c3-b4a5-4968-8776-655443322999' } };
+
+    it('holds the account\'s checks of that NIN for a day after ten, before anything is compared or sent', async () => {
+      const qoreId = gate({ verifyNinRecord: jest.fn(async () => found({ lastName: 'OTHER' })) });
+      const rateLimits = fakeRateLimitTable();
+      const { service, audit } = desk(qoreIdProvider(qoreId), undefined, [], rateLimits);
+      for (let attempt = 0; attempt < DESK_NIN_MISMATCH_LIMIT; attempt += 1) {
+        // A brute force over dates of birth: every try is a new body.
+        await expect(service.resolve({ ...input, dateOfBirth: `1991-04-${String(attempt + 1).padStart(2, '0')}` },
+          `resolve-key-hold-${String(attempt).padStart(6, '0')}`, context)).rejects.toMatchObject({
+          status: 422, code: 'NIN_VERIFICATION_FAILED' });
+      }
+      expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(DESK_NIN_MISMATCH_LIMIT);
+      // The right details too: nothing is compared while the hold lasts.
+      const held = await service.resolve(input, 'resolve-key-hold-000099', context).catch((error: unknown) => error);
+      expect(held).toMatchObject({ status: 409, code: 'NIN_CHECK_HELD',
+        message: 'This NIN has been checked too many times today with a name or date of birth that does not match. '
+          + 'Check the details on the patient\'s NIN slip, or try again in 24 hours.' });
+      const retryAfter = (held as DomainProblem).extensions?.retryAfterSeconds as number;
+      expect(retryAfter).toBeGreaterThan(DESK_NIN_MISMATCH_WINDOW_SECONDS - 60);
+      expect(retryAfter).toBeLessThanOrEqual(DESK_NIN_MISMATCH_WINDOW_SECONDS);
+      expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(DESK_NIN_MISMATCH_LIMIT);
+      expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'identity.nin.verify',
+        outcome: 'failure', details: expect.objectContaining({ code: 'NIN_CHECK_HELD', providerCalled: false }) }));
+      // Another account, or another NIN, is not held.
+      qoreId.verifyNinRecord.mockImplementation(async () => found());
+      await expect(service.resolve(input, 'resolve-key-hold-000100', other)).resolves.toMatchObject({ caseId });
+      // The bucket holds neither the NIN, its lookup nor the account.
+      const buckets = JSON.stringify([...rateLimits.rows.keys()]);
+      for (const secret of [NIN, 'a'.repeat(64), context.actor.accountId]) expect(buckets).not.toContain(secret);
+      // A day later the account may check it again.
+      const later = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + DESK_NIN_MISMATCH_WINDOW_SECONDS * 1000 + 1000);
+      await expect(service.resolve(input, 'resolve-key-hold-000101', context)).resolves.toMatchObject({ caseId });
+      later.mockRestore();
+    });
+
+    it('never counts a match or "could not be verified"', async () => {
+      const verifyNinRecord = jest.fn(async () => noRecord());
+      const { service, rateLimits } = desk(qoreIdProvider(gate({ verifyNinRecord })));
+      for (let attempt = 0; attempt < DESK_NIN_MISMATCH_LIMIT + 2; attempt += 1) {
+        await expect(service.resolve(input, `resolve-key-nore-${String(attempt).padStart(6, '0')}`, context))
+          .rejects.toMatchObject({ status: 422, message: 'The NIN could not be verified' });
+      }
+      verifyNinRecord.mockImplementation(async () => found());
+      for (let attempt = 0; attempt < DESK_NIN_MISMATCH_LIMIT + 2; attempt += 1) {
+        await expect(service.resolve(input, `resolve-key-mtch-${String(attempt).padStart(6, '0')}`, context))
+          .resolves.toMatchObject({ caseId });
+      }
+      expect(rateLimits.rows.size).toBe(0);
+    });
+
+    it('answers "cannot be started", comparing and sending nothing, when the hold cannot be read', async () => {
+      const qoreId = gate();
+      const rateLimits = fakeRateLimitTable();
+      rateLimits.fail();
+      const { service, breaker } = desk(qoreIdProvider(qoreId), undefined, [], rateLimits);
+      await expect(service.resolve(input, 'resolve-key-hold-000200', context)).rejects.toMatchObject({
+        status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+        message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+      expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+      expect(breaker.state()).toBe('closed');
+    });
   });
 
   describe('a NIN already on a Health ID (Q110)', () => {
