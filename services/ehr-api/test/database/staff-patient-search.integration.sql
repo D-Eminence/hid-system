@@ -41,6 +41,20 @@
 -- case whose outcome differs.
 begin;
 
+-- As prescription-dispensing-details and provider-self-enrollment do: where
+-- the control table's owner cannot bypass row-level security (a build whose
+-- migrator has neither SUPERUSER nor BYPASSRLS), every staff-context control
+-- read answers PLATFORM_CONTROL_UNAVAILABLE, so the emergency cases lift FORCE
+-- for this rolled-back transaction only.
+do $$
+begin
+  if not (select role_row.rolsuper or role_row.rolbypassrls from pg_proc proc
+            join pg_roles role_row on role_row.oid = proc.proowner
+           where proc.oid = 'platform.control_enabled(text)'::regprocedure) then
+    alter table platform.control_settings no force row level security;
+  end if;
+end $$;
+
 set local session_replication_role = replica;
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct patient care', 'search-test'),
