@@ -15,7 +15,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
 import { GoogleAuthenticationService } from './google-authentication.service';
-import { facilityAdmittedOnProduct, type StaffProduct } from './product-gate';
+import { facilityAdmittedOnProduct, facilityFitsProduct, productsForFacilities, type StaffProduct } from './product-gate';
 import { SecurityGuard } from './security.guard';
 import { TokenService } from './token.service';
 import { TurnstileService } from './turnstile.service';
@@ -115,8 +115,9 @@ class SignInStore {
       ...(sessionId ? { sessionId } : {}), platformRoles: [] as string[], facilityIds: facilities.map((f) => f.id),
       facilities, authenticationMethod: 'local' as const };
     if (bound) {
+      // Q97 (#265): every site the login can open, from all its memberships.
       return { ...base, roles: bound.roles, role: bound.roles[0], permissions: bound.permissions,
-        platformPermissions: [], facility: bound };
+        platformPermissions: [], facility: bound, products: productsForFacilities(all) };
     }
     if (!product && this.platformAdmins.has(accountId)) {
       return { ...base, roles: [], permissions: [], platformRoles: ['platform_super_admin'],
@@ -470,6 +471,76 @@ describe('a staff member\'s chosen facility, kept per sign-in (0129)', () => {
       expect(fromOutreach.body.facilitySelection).toBe('reselect');
       expect(fromOutreach.body.actor.facility.id).toBe(epsilonLaboratory.id);
       expect(fromOutreach.body.actor.facilityIds).not.toContain(laboratory.id);
+    });
+
+    it('reports reselect when Q97 narrows the session\'s own site, and never uses the stored facility', async () => {
+      store.memberships.set(accountId, [secondary, primary, laboratory, epsilonLaboratory]);
+      const signIn = store.signIn(accountId, 'staff', 'lab');
+      expect((await select(signIn.accessToken, laboratory.id, LAB)).status).toBe(200);
+      const before = await session(signIn.accessToken);
+      expect(before.body).toMatchObject({ facilitySelection: 'selected', actor: { facility: { id: laboratory.id } } });
+      // #265's actor.products comes through the chosen facility unchanged.
+      expect(before.body.actor.products).toEqual(['ehr', 'lab', 'migrate']);
+
+      // The laboratory membership loses its lab role and keeps a nurse's: it
+      // still holds lab.'s reading codes for hospital work, so the permission
+      // rule alone fits lab., but Q97's own-job rule no longer admits it there.
+      const narrowed: FacilityAssignment = { ...laboratory, roles: ['nurse'],
+        permissions: ['ehr.encounter.write', 'lab.work-item.read', 'nurse.synthetic'] };
+      expect(facilityFitsProduct(narrowed, 'lab')).toBe(true);
+      expect(facilityAdmittedOnProduct(narrowed, 'lab')).toBe(false);
+      store.memberships.set(accountId, [secondary, primary, narrowed, epsilonLaboratory]);
+
+      const reloaded = await session(signIn.accessToken);
+      expect(reloaded.status).toBe(200);
+      expect(reloaded.body.facilitySelection).toBe('reselect');
+      expect(reloaded.body.actor.facility.id).toBe(epsilonLaboratory.id);
+      expect(reloaded.body.actor.facilityIds).toEqual([epsilonLaboratory.id]);
+      expect(recorded('auth.session.read').at(-1)).toMatchObject({ facilityId: epsilonLaboratory.id });
+      // The row is kept until a new choice replaces it.
+      expect(store.selections.get(familyOf(signIn.sessionId))?.facilityId).toBe(laboratory.id);
+
+      const refreshed = await refresh(signIn, LAB);
+      expect(refreshed.status).toBe(200);
+      expect(refreshed.body.facilitySelection).toBe('reselect');
+      expect(refreshed.body.actor.facility.id).toBe(epsilonLaboratory.id);
+      expect(recorded('auth.refresh').at(-1)).toMatchObject({ facilityId: epsilonLaboratory.id });
+
+      // Choosing it again is refused and stores nothing; the other laboratory is a new choice.
+      tokens.recordFacilitySelection.mockClear();
+      const again = await select(accessFrom(refreshed), laboratory.id, LAB);
+      expect(again.status).toBe(403);
+      expect(again.body.code).toBe('FACILITY_ACCESS_DENIED');
+      expect(tokens.recordFacilitySelection).not.toHaveBeenCalled();
+      expect((await select(accessFrom(refreshed), epsilonLaboratory.id, LAB)).body.facilitySelection).toBe('selected');
+      expect(store.selections.get(familyOf(signIn.sessionId))?.facilityId).toBe(epsilonLaboratory.id);
+    });
+
+    it('keeps #265\'s own-job rule when POST /auth/facility filters a choice by the Origin\'s site', async () => {
+      // A nurse membership that holds lab.'s reading codes for hospital work:
+      // the permission rule alone fits lab., Q97 does not admit it there.
+      const clinicalWithLabCodes = facility('Fictional Theta Clinic', false, 'nurse',
+        ['ehr.encounter.write', 'lab.work-item.read']);
+      expect(facilityFitsProduct(clinicalWithLabCodes, 'lab')).toBe(true);
+      expect(facilityAdmittedOnProduct(clinicalWithLabCodes, 'lab')).toBe(false);
+      store.memberships.set(accountId, [secondary, primary, laboratory, clinicalWithLabCodes]);
+      // No product in the session (issued before the gate), so the handler's
+      // own filter by the Origin's product decides.
+      const signIn = store.signIn(accountId, 'staff');
+      expect(store.actor(signIn.sessionId).facilityIds).toContain(clinicalWithLabCodes.id);
+
+      const refused = await select(signIn.accessToken, clinicalWithLabCodes.id, LAB);
+
+      expect(refused.status).toBe(403);
+      expect(refused.body.code).toBe('FACILITY_ACCESS_DENIED');
+      expect(tokens.recordFacilitySelection).not.toHaveBeenCalled();
+      expect(audit.recordWithClient).not.toHaveBeenCalled();
+      expect(store.selections.size).toBe(0);
+      // The same membership from ehr., and the laboratory from lab., are stored.
+      expect((await select(signIn.accessToken, clinicalWithLabCodes.id, EHR)).body.facilitySelection).toBe('selected');
+      const fromLab = await select(signIn.accessToken, laboratory.id, LAB);
+      expect(fromLab.body).toMatchObject({ facilitySelection: 'selected', actor: { facility: { id: laboratory.id } } });
+      expect(fromLab.body.actor.facilityIds).toEqual([laboratory.id]);
     });
 
     it('ends a refresh from another site with 401 and clears the cookies before any read', async () => {

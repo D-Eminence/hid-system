@@ -5553,7 +5553,8 @@ facility" keeps that choice for the sign-in. A reload, a new tab, a restored
 browser, or a refresh after the 15-minute access token, opens at the chosen
 facility instead of silently moving back to the primary one. If that facility
 is no longer theirs (the membership ended or is held, the facility closed, or
-it no longer fits the site), the website asks "Where are you working?".
+it is no longer admitted on the site, for example a doctor's or nurse's
+membership on lab. since Q97, §53), the website asks "Where are you working?".
 
 ### The setting
 
@@ -5615,15 +5616,22 @@ facility reported, whatever the state.
 The stored facility is matched by facility id only, against `actor.facilities`
 as Identity resolved them for this request under the session's own product
 (the access token's product claim; the refresh token's product for a
-refresh), never the request's `Origin`. It takes the first match, the rule
-`SecurityGuard` uses to bind `X-Facility-ID`, so the roles reported are the
-roles every later request at that facility gets. The stored membership is
-used only by the database guard and its foreign key.
+refresh), never the request's `Origin`. Those are the memberships §53's gate
+admits on that site: Q88's permission rule and Q97's own-job rule together
+(`facilityAdmittedOnProduct`). So when Q97 narrows what a login holds on a
+site, a stored facility that is no longer admitted there is reported as
+`reselect` at the default and never used; if no facility is left on the site,
+the session ends with `401`, as §53 says, before any read. It takes the first
+match, the rule `SecurityGuard` uses to bind `X-Facility-ID`, so the roles
+reported are the roles every later request at that facility gets. The stored
+membership is used only by the database guard and its foreign key. Every
+answer keeps §53's `actor.products` as Identity resolved it.
 
 ### Routes
 
-`POST /api/v1/auth/facility` `{ facilityId }` (no new route). Q88-1's filter
-by the product of the request's `Origin` is unchanged. With `off`, or for an
+`POST /api/v1/auth/facility` `{ facilityId }` (no new route). §53's filter by
+the product of the request's `Origin` (Q88-1 with Q97's own-job rule) is
+unchanged and runs before anything is stored. With `off`, or for an
 OIDC bearer caller, it answers `200 { actor }` and stores nothing, as before.
 With `keep` or `ask`, it stores the choice for the sign-in and writes its
 `auth.facility.select` audit row in the same transaction, and answers
@@ -5746,6 +5754,10 @@ today: with the setting on they open at the chosen facility, and on
   - It fails when a membership ended through the facility's own staff route
     does not give `reselect`, when service-session changes, or when a failed
     read is not `200 unavailable`.
+  - It fails when Q97 narrows the lab. site after a choice (the chosen
+    laboratory membership becomes a nurse's, which fits lab. by the
+    permission rule alone) and the stored facility is still reported, or a
+    new choice of it is stored.
   - It fails when the start-up check misses a grant, or when the server log
     shows an unexpected error.
   - It asserts the `503` of the known gap above and lists each case with

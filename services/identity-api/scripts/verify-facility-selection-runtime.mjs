@@ -29,7 +29,9 @@
 //   5. another sign-in of the account sees it;
 //   6. a sign-in on lab. is not independent of the ehr. one, a choice from a
 //      site that does not admit the facility is stored, or a refresh from
-//      another site is not 401 before any read;
+//      another site is not 401 before any read; or, once Q97's own-job rule
+//      (#265) stops admitting the chosen membership on lab., the stored
+//      facility is still reported, or a new choice of it is stored;
 //   7. a facility that is not the actor's, a sign-in that ended while the
 //      choice waited, or the database guard's refusal, is not refused with
 //      nothing stored (each answer as it is observed today: see
@@ -115,6 +117,7 @@ const { WorkloadAuthService } = load('auth/workload-auth.service.ts');
 const { TurnstileService } = load('auth/turnstile.service.ts');
 const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
 const { FacilitySelectionStartupCheck, FACILITY_SELECTION_UNAVAILABLE_EVENT } = load('auth/facility-selection.ts');
+const { facilityAdmittedOnProduct, facilityFitsProduct } = load('auth/product-gate.ts');
 const { FacilityStaffController } = load('identity/facility-staff.controller.ts');
 const { FacilityStaffService } = load('identity/facility-staff.service.ts');
 const { StaffInvitationsService } = load('identity/staff-invitations.service.ts');
@@ -553,6 +556,62 @@ try {
     assert.deepEqual(cleared, [name, `${name}_csrf`, `${name}_refresh`].sort(), 'the cross-site refresh did not clear the cookies');
     reports(await read(current), beta.id, 'selected', `${mode}: ehr. reload after the refused refresh`);
     steps.push('6. a lab. sign-in of the same account is its own: it answers as a new sign-in, stores its own choice (the laboratory) and reads only that, while the ehr. sign-in keeps its own; a choice of a facility the site does not admit (the laboratory from the ehr. sign-in with lab.\'s Origin, and from the lab. sign-in with ehr.\'s Origin) stores nothing and writes no auth.facility.select row; a refresh of the ehr. sign-in from lab. is 401 with the three cookies cleared and reads nothing');
+
+    // 6d. Q97 narrows a site after a choice: the stored facility is never
+    // used. The doctor's Delta membership also takes the lab role (a doctor
+    // who also works the laboratory, admitted on lab. by that job's own
+    // codes), so the lab. sign-in holds two facilities. Then the laboratory
+    // membership's lab role is replaced by a nurse's, which holds lab.'s
+    // reading codes for hospital work only: the permission rule alone still
+    // fits lab., Q97's own-job rule does not admit it there.
+    const facilityRole = async (membershipId, facilityId, role) => {
+      const id = randomUUID();
+      await owner.query(`insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id,
+          grant_reason) values ($1, $2, $3, 'facility', $4, $5, 'Synthetic facility selection role')`,
+      [id, doctor.id, role, membershipId, facilityId]);
+      return id;
+    };
+    const roleAdministrator = await account(`role-administrator-${mode}`);
+    const revokeRoles = async (where, values) => owner.query(`update auth.account_roles
+        set revoked_at = clock_timestamp(), revoked_by = $1, revocation_reason = 'Synthetic Q97 narrowing for the verifier'
+      where revoked_at is null and ${where}`, [roleAdministrator.id, ...values]);
+    const laboratoryMembership = doctor.memberships[laboratory.id];
+    const deltaLabRole = await facilityRole(doctor.memberships[delta.id], delta.id, 'lab');
+    const widened = await read(lab.held);
+    reports(widened, laboratory.id, 'selected', `${mode}: lab. reload with Delta's lab role`);
+    assert.deepEqual([...widened.body.actor.facilityIds].sort(), [laboratory.id, delta.id].sort(),
+      'the lab. sign-in holds the laboratory and Delta');
+    await revokeRoles('membership_id = $2 and role_code = \'lab\'', [laboratoryMembership]);
+    const laboratoryNurseRole = await facilityRole(laboratoryMembership, laboratory.id, 'nurse');
+    const narrowedCodes = (await owner.query(`select coalesce(array_agg(distinct permission.permission_code), array[]::text[]) as codes
+        from auth.account_roles account_role join auth.role_permissions permission on permission.role_code = account_role.role_code
+       where account_role.membership_id = $1 and account_role.revoked_at is null`, [laboratoryMembership])).rows[0].codes;
+    assert.equal(facilityFitsProduct({ permissions: narrowedCodes }, 'lab'), true,
+      'the narrowed laboratory membership should still fit lab. by the permission rule alone');
+    assert.equal(facilityAdmittedOnProduct({ permissions: narrowedCodes }, 'lab'), false,
+      'Q97 should no longer admit the narrowed laboratory membership on lab.');
+    const narrowed = await reads(1, 'lab. reload after Q97 narrowed it', () => read(lab.held));
+    reports(narrowed, delta.id, 'reselect', `${mode}: lab. reload once the laboratory is a nurse's`);
+    assert.deepEqual(narrowed.body.actor.facilityIds, [delta.id]);
+    assert.equal((await latestSessionRead(lab.held.sessionId)).facility_id, delta.id);
+    await sameRows('Q97 narrowing (the row is kept)');
+    const narrowedRefresh = await reads(1, 'lab. refresh after Q97 narrowed it', () => refresh(lab.held));
+    reports(narrowedRefresh.response, delta.id, 'reselect', `${mode}: lab. refresh once the laboratory is a nurse's`);
+    const labRotated = narrowedRefresh.held;
+    refusedWithoutFacilityHeader(await choose(labRotated, laboratory.id),
+      `${mode}: a choice on lab. of a membership Q97 no longer admits there`, '403 FACILITY_ACCESS_DENIED');
+    problem(await choose(labRotated, laboratory.id, { facility: delta.id }), 403, 'FACILITY_ACCESS_DENIED',
+      `${mode}: the same with X-Facility-ID`);
+    await sameRows('refused choice Q97 no longer admits');
+    assert.equal((await audits('auth.facility.select', labRotated.sessionId)).length, 0);
+    // Restored: the laboratory is a lab's again and Delta a doctor's only.
+    await revokeRoles('id = any($2::uuid[])', [[laboratoryNurseRole, deltaLabRole]]);
+    await facilityRole(laboratoryMembership, laboratory.id, 'lab');
+    const restored = await reads(1, 'lab. reload once restored', () => read(labRotated));
+    reports(restored, laboratory.id, 'selected', `${mode}: lab. reload once the laboratory is a lab's again`);
+    assert.deepEqual(restored.body.actor.facilityIds, [laboratory.id]);
+    await sameRows('Q97 restored');
+    steps.push('6d. once Q97 narrows the lab. site after a choice (the chosen laboratory membership becomes a nurse\'s, which fits lab. by the permission rule alone but is not admitted there by Q97\'s own-job rule, while a Delta membership with the lab role is), GET /auth/session and POST /auth/refresh on the lab. sign-in answer reselect at Delta with one read each and the row kept, a new choice of the laboratory stores nothing, and once the lab role is back the choice is selected again');
 
     // 7. Refusals store nothing. A facility that is not the actor's:
     refusedWithoutFacilityHeader(await choose(current, gamma.id), `${mode}: another organisation's facility`,
