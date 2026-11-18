@@ -1774,3 +1774,9 @@ revoke all on function identity.register_patient_without_nin(uuid, text, text, d
   identity.forget_desk_registration_phone_lookup() from public;
 revoke all on identity.no_nin_case_writes, identity.desk_registration_phone_lookups from public;
 
+-- Opening this facility's own patient without a PIN (0131, ID-4, owner Q101
+-- of 18 November 2026), exactly as 0131 grants it: the command to the
+-- Identity runtime alone. identity.own_facility_basis is the command's (and
+-- a later search's) helper and is granted to no runtime role.
+grant execute on function identity.open_own_facility_patient(text, uuid) to hid_identity_runtime;
+revoke all on function identity.open_own_facility_patient(text, uuid), identity.own_facility_basis(uuid, uuid) from public;
