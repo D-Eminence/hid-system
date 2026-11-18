@@ -93,7 +93,7 @@ describeRehearsal('EHR-C7 the waiting list on PostgreSQL (0135)', () => {
     // A matchRef the desk's search handed out a minute ago (0132's table; only its SHA-256 is stored).
     await client.query(`insert into identity.patient_search_refs (token_sha256, patient_id, account_id, membership_id,
       facility_id, purpose_of_use, search_mode, created_at, expires_at) values (encode(sha256(convert_to($1, 'UTF8')), 'hex'),
-      $2, $3, $4, $5, 'direct-care', 'standard', clock_timestamp(), clock_timestamp() + interval '10 minutes')`,
+      $2, $3, $4, $5, 'direct-care', 'standard', statement_timestamp(), statement_timestamp() + interval '10 minutes')`,
       [matchRef, searchedPatient, id('100', desk.n), id('300', desk.n), facilityId]);
     await client.query('set local session_replication_role = origin');
 

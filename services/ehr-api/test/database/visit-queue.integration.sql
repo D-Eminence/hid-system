@@ -282,8 +282,8 @@ insert into identity.patient_search_refs (token_sha256, patient_id, account_id, 
   purpose_of_use, search_mode, created_at, expires_at)
 values (encode(sha256(convert_to('psr_' || repeat('E', 43), 'UTF8')), 'hex'), 'e1350400-0000-4000-8000-000000000001',
   'e1350100-0000-4000-8000-000000000001', 'e1350300-0000-4000-8000-000000000001',
-  'e1350000-0000-4000-8000-000000000002', 'emergency', 'emergency', clock_timestamp(),
-  clock_timestamp() + interval '10 minutes');
+  'e1350000-0000-4000-8000-000000000002', 'emergency', 'emergency', statement_timestamp(),
+  statement_timestamp() + interval '10 minutes');
 set local role hid_ehr_api_runtime;
 select pg_temp.check_case('1 an expired matchRef', 'refused/-', pg_temp.check_in(1, pg_temp.ref('p1-old'), null));
 select pg_temp.check_case('1 an emergency search''s matchRef', 'refused/-',
