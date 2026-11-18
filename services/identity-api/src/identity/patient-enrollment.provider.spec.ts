@@ -3,6 +3,8 @@ import { resetEnvironmentForTests } from '../config/environment';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
+import type { NinCheckOnce } from './nin-check-once';
+import { passThroughNinCheck } from '../testing/nin-check-store.fake';
 
 const originalEnvironment = { ...process.env };
 const nin = '12345678901';
@@ -32,7 +34,7 @@ describe('QoreID public patient identity provider', () => {
     const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined) };
     return { adapter, integrations, service: new QoreIdPublicPatientIdentityProvider(
       adapter as unknown as QoreIdVerificationAdapter,
-      integrations as unknown as IntegrationRuntimeService) };
+      integrations as unknown as IntegrationRuntimeService, passThroughNinCheck() as unknown as NinCheckOnce) };
   }
 
   it('does not contact the integration when QoreID is disabled', async () => {
@@ -62,7 +64,7 @@ describe('QoreID public patient identity provider', () => {
     const f = provider({ state: 'verified', providerReference: 'transaction-1', ninEnrollmentBinding: binding });
     await expect(f.service.verifyNin(nin)).resolves.toEqual({ ...binding, providerReference: 'transaction-1' });
     expect(f.integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'patient_nin');
-    expect(f.adapter.verifyNinEnrollment).toHaveBeenCalledWith(nin);
+    expect(f.adapter.verifyNinEnrollment).toHaveBeenCalledWith(nin, { timeoutMs: expect.any(Number) });
     f.adapter.verifyNinEnrollment.mockResolvedValue({ state: 'verified', providerReference: 'transaction-2',
       ninEnrollmentBinding: { ...binding, nin: '99999999999' } });
     await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });

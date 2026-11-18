@@ -5,6 +5,8 @@ import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { DomainProblem } from '../common/problem';
 import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
+import type { NinCheckOnce } from './nin-check-once';
+import { passThroughNinCheck } from '../testing/nin-check-store.fake';
 import type { NinIdentifierProtector } from './nin-identifier-protector';
 import { QoreIdVerificationService } from './qoreid-verification.service';
 
@@ -57,7 +59,9 @@ function setup(enabled: boolean, selfBinding = true) {
       sha256: 'b'.repeat(64), keyVersion: 'test-v1' }) } as unknown as NinIdentifierProtector;
   jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: enabled,
     QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: selfBinding } as environment.Environment);
-  return { service: new QoreIdVerificationService(database, provider, integrations, ninProtector), provider, query, database,
+  const ninCheck = passThroughNinCheck();
+  return { service: new QoreIdVerificationService(database, provider, integrations, ninProtector,
+    ninCheck as unknown as NinCheckOnce), provider, query, database, ninCheck,
     integrations, ninProtector,
     setProfileDateOfBirth: (value: string | null) => { profileDateOfBirth = value; },
     setNinEligibility: (value: 'bound_exact' | 'legacy_unbound' | 'denied') => { ninEligibility = value; } };
@@ -117,7 +121,7 @@ describe('QoreID verification service', () => {
     });
     expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', {
       firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04',
-    }, 'exact');
+    }, 'exact', { timeoutMs: expect.any(Number) });
     expect(integrations.consumePatientQuota).toHaveBeenCalledWith(patientRequest.correlationId,
       'patient:subject', patientRequest.actor!.sessionId);
     expect(query.mock.calls.some(([sql]) => sql.includes('record_my_verified_nin_date_of_birth'))).toBe(false);
@@ -168,7 +172,8 @@ describe('QoreID verification service', () => {
     await expect(service.verifyPatientNin(patientRequest, '12345678901', '1990-02-03'))
       .resolves.toMatchObject({ state: 'verified' });
     expect(provider.verifyNin).toHaveBeenCalledWith('12345678901',
-      { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1990-02-03' }, 'either');
+      { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1990-02-03' }, 'either',
+      { timeoutMs: expect.any(Number) });
     const dateCall = query.mock.calls.find(([sql]) => sql.includes('record_my_verified_nin_date_of_birth'));
     expect(dateCall?.[1]).toEqual(['patient:subject', patientRequest.actor!.sessionId, expect.any(String), '1990-02-03']);
     const bindingCall = query.mock.calls.find(([sql]) => sql.includes('bind_my_verified_nin'));
@@ -194,7 +199,8 @@ describe('QoreID verification service', () => {
     expect(integrations.consumePatientQuota).not.toHaveBeenCalled();
     await expect(service.verifyPatientNin(patientRequest, '12345678901', '1991-03-04'))
       .resolves.toMatchObject({ state: 'verified' });
-    expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', expect.anything(), 'exact');
+    expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', expect.anything(), 'exact',
+      { timeoutMs: expect.any(Number) });
   });
 
   it('keeps today\'s answer for a profile with a date of birth whose record does not match (state not_verified)', async () => {

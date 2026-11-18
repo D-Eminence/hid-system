@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0136",
-    "count": 135,
+    "last": "0137",
+    "count": 136,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -637,6 +637,10 @@
       {
         "name": "0136_role_permission_changes.sql",
         "sha256": "8d2f4e08d5108dc5511b4cecd71058eaa74c968bda2b3ba6e9dd963e45c79831"
+      },
+      {
+        "name": "0137_qoreid_nin_check_once.sql",
+        "sha256": "0f6f97b8b78c88dbcdba1b0bfe826e3d49852ec5ab473a84d64c8bb6939256bb"
       }
     ]
   },
