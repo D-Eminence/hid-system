@@ -106,7 +106,8 @@ describe('SX-10 registration-case list', () => {
     expect(answer.nextCursor).toBeNull();
     expect(answer.cases[0]).toEqual({
       caseId: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c01', status: 'pending_new_identity_approval', version: 1,
-      candidateCount: 0, contactRecorded: true, ninStatus: 'verified', fullName: 'Ada Fictional1',
+      candidateCount: 0, contactRecorded: true, ninStatus: 'verified', identityEvidence: 'nin',
+      fullName: 'Ada Fictional1',
       dateOfBirth: '1991-04-05', createdAt: '2026-11-18T10:00:58.000Z', updatedAt: '2026-11-18T10:05:58.000Z',
       createdByMe: true,
     });
@@ -118,7 +119,7 @@ describe('SX-10 registration-case list', () => {
     const [{ sql, values }] = statements as [{ sql: string; values: unknown[] }];
     expect(sql).not.toMatch(/nin_last4|nin_ciphertext|nin_lookup_hmac|verification_reference/);
     expect(sql).toContain('order by registration.created_at desc, registration.id desc');
-    expect(values).toEqual(['mine', deskAccount, null, null, null, 51]);
+    expect(values).toEqual(['mine', deskAccount, null, null, null, 51, null]);
   });
 
   it('shows another facility nothing', async () => {
@@ -170,7 +171,7 @@ describe('SX-10 registration-case list', () => {
       createdAt: '2026-11-18 10:00:57.123456+00', caseId: '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c02' });
     await service.listCases(query({ view: 'facility', limit: '2', cursor: first.nextCursor }), approver);
     expect(statements[1]!.values).toEqual(['facility', deskAccount, null,
-      '2026-11-18 10:00:57.123456+00', '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c02', 3]);
+      '2026-11-18 10:00:57.123456+00', '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c02', 3, null]);
   });
 
   it.each([

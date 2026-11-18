@@ -10,12 +10,16 @@ import { ListRegistrationCasesDto } from './dto/list-registration-cases.dto';
 import { NinRegistrationService } from './nin-registration.service';
 import { getEnvironment } from '../config/environment';
 import { NinProviderBreaker } from './nin-provider-breaker';
+import { RegisterWithoutNinDto, NO_NIN_REASONS } from './dto/register-without-nin.dto';
+import { RegistrationWithoutNinService } from './registration-without-nin.service';
+import { DomainProblem } from '../common/problem';
 
 @Controller('identity')
 export class NinRegistrationController {
   constructor(
     private readonly registrations: NinRegistrationService,
     @Optional() private readonly ninBreaker: NinProviderBreaker = new NinProviderBreaker(),
+    @Optional() private readonly withoutNin?: RegistrationWithoutNinService,
   ) {}
 
   @Get('registration-capabilities')
@@ -28,9 +32,10 @@ export class NinRegistrationController {
       // ID-0: `available` is false while the NIN service breaker is tripped
       // (or NIN checks are off), so the desk knows before it asks.
       nin: { enabled, state: enabled ? 'test-only' : mode, available: enabled && this.ninBreaker.available() },
-      // ID-0: registration without a NIN stays off until ID-2 ships.
-      withoutNin: { enabled: false },
-      newPatientRegistrationRequiresNin: true,
+      // ID-2 (0130, owner Q106): the desk may register a patient without a
+      // NIN; a phone (and address) is required except for a child.
+      withoutNin: { enabled: true, phoneRequiredUnlessChild: true, reasons: [...NO_NIN_REASONS] },
+      newPatientRegistrationRequiresNin: false,
     };
   }
 
@@ -45,6 +50,44 @@ export class NinRegistrationController {
     requireIdempotencyKey(idempotencyKey);
     const context = requireRequestContext(request, input.purpose);
     return this.registrations.resolve(input, idempotencyKey, context);
+  }
+
+  /**
+   * ID-2 (0130, owner Q106 of 18 November 2026): register a patient without a
+   * NIN. With no possible duplicate the same desk person's request creates
+   * the patient at once; otherwise the case waits for an approver. The answer
+   * says which, and never who might be the same person.
+   */
+  @Post('registration-cases/without-nin')
+  @RequirePermissions('identity.registration.write')
+  @AuditAction('identity.registration.without-nin.request')
+  registerWithoutNin(
+    @Body() input: RegisterWithoutNinDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: HidRequest,
+  ) {
+    requireIdempotencyKey(idempotencyKey);
+    const context = requireRequestContext(request, input.purpose);
+    return this.requireWithoutNin().register(input, idempotencyKey, context);
+  }
+
+  /**
+   * ID-2 (0130): an approver rejects a registration without a NIN that was
+   * sent for review (not the same person who started it). A NIN case
+   * answers 409.
+   */
+  @Post('registration-cases/:caseId/reject')
+  @RequirePermissions('identity.registration.approve')
+  @AuditAction('identity.registration-case.reject.request')
+  async reject(
+    @Param('caseId', new ParseUUIDPipe({ version: '4' })) caseId: string,
+    @Body() input: ApproveRegistrationCaseDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: HidRequest,
+  ) {
+    requireIdempotencyKey(idempotencyKey);
+    const context = requireRequestContext(request, input.purpose);
+    return this.requireWithoutNin().review(caseId, 'reject', input, idempotencyKey, context);
   }
 
   /**
@@ -70,7 +113,7 @@ export class NinRegistrationController {
   @Post('registration-cases/:caseId/approve-new')
   @RequirePermissions('identity.registration.approve')
   @AuditAction('identity.registration-case.approve-new.request')
-  approveNew(
+  async approveNew(
     @Param('caseId', new ParseUUIDPipe({ version: '4' })) caseId: string,
     @Body() input: ApproveRegistrationCaseDto,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
@@ -78,6 +121,10 @@ export class NinRegistrationController {
   ) {
     requireIdempotencyKey(idempotencyKey);
     const context = requireRequestContext(request, input.purpose);
+    // ID-2 (0130): a registration without a NIN is decided by its own command.
+    if (this.withoutNin && await this.withoutNin.evidenceOf(caseId, context) === 'none') {
+      return this.withoutNin.review(caseId, 'create_new', input, idempotencyKey, context);
+    }
     return this.registrations.approveNew(caseId, input, idempotencyKey, context);
   }
 
@@ -97,7 +144,7 @@ export class NinRegistrationController {
   @Post('registration-cases/:caseId/link-existing')
   @RequirePermissions('identity.registration.approve')
   @AuditAction('identity.registration-case.link-existing.request')
-  linkExisting(
+  async linkExisting(
     @Param('caseId', new ParseUUIDPipe({ version: '4' })) caseId: string,
     @Body() input: LinkRegistrationCaseDto,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
@@ -105,6 +152,17 @@ export class NinRegistrationController {
   ) {
     requireIdempotencyKey(idempotencyKey);
     const context = requireRequestContext(request, input.purpose);
+    // ID-2 (0130): linking a registration without a NIN is always an approver's decision.
+    if (this.withoutNin && await this.withoutNin.evidenceOf(caseId, context) === 'none') {
+      return this.withoutNin.review(caseId, 'link_existing', input, idempotencyKey, context);
+    }
     return this.registrations.linkExisting(caseId, input, idempotencyKey, context);
+  }
+
+  private requireWithoutNin(): RegistrationWithoutNinService {
+    if (!this.withoutNin) {
+      throw new DomainProblem(503, 'REGISTRATION_WITHOUT_NIN_UNAVAILABLE', 'Registration without a NIN is not available right now.');
+    }
+    return this.withoutNin;
   }
 }

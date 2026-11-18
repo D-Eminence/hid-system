@@ -174,7 +174,8 @@ insert into identity.consent_grants (id, patient_id, staff_id, account_id, membe
 
 -- 3. Labels: each item has exactly 0030's eight keys plus breakGlass and
 -- revocableByPatient (0087), and shareLevel, shareDuration and clinicianName
--- (0095, null here: none of these grants came from a patient share); only the patient-approved and PIN-derived grants are
+-- (0095, null here: none of these grants came from a patient share), and basis
+-- (0131: how the access was given); only the patient-approved and PIN-derived grants are
 -- revocable, never with breakGlass.
 set local role hid_identity_api_runtime;
 select pg_temp.as_patient(1, 'revocation-history-01');
@@ -194,7 +195,7 @@ begin
   if mismatch is not null then raise exception 'Access-history labels differ: %', mismatch; end if;
   if exists (select 1 from jsonb_array_elements(pg_temp.history(1)->'items') item
               where (select array_agg(key order by key) from jsonb_object_keys(item) key)
-                    <> array['breakGlass','clinicianName','consentGrantId','expiresAt','facilityName','purpose','reason',
+                    <> array['basis','breakGlass','clinicianName','consentGrantId','expiresAt','facilityName','purpose','reason',
                              'revocableByPatient','scope','shareDuration','shareLevel','startsAt','status']
                  or ((item->>'breakGlass')::boolean and (item->>'revocableByPatient')::boolean)) then
     raise exception 'An access-history item has other keys, or is both break-glass and revocable';

@@ -36,6 +36,15 @@ export class ListRegistrationCasesDto {
   @Max(100)
   limit = 50;
 
+  /**
+   * 0130: 'none' lists only registrations without a NIN (every one of them
+   * is a possible duplicate to review later, ID-8a); 'nin' only those whose
+   * NIN was checked.
+   */
+  @IsOptionalButNotNull()
+  @IsIn(['none', 'nin'])
+  evidence?: 'none' | 'nin';
+
   /** The `nextCursor` of the previous page, as it was given. */
   @IsOptionalButNotNull()
   @IsString()

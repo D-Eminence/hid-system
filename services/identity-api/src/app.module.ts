@@ -18,11 +18,14 @@ import { OutreachOrganisersModule } from './outreach-organisers/outreach-organis
 import { WebPushModule } from './web-push/web-push.module';
 // SX-5 and SX-9 (lane B): own staff profile and facility staff names.
 import { StaffProfileModule } from './staff-profile/staff-profile.module';
+// 0132 (lane B): staff patient search and emergency search.
+import { PatientSearchModule } from './patient-search/patient-search.module';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule,
     PatientSafetyModule, PatientProfileModule, WebPushModule, OutreachOrganisersModule,
-    StaffProfileModule],
+    StaffProfileModule,
+    PatientSearchModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

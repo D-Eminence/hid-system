@@ -419,6 +419,10 @@ try {
   // 0127: single sign-on hand-off, product gate, back-channel logout and product sign-out, with the in-process fake provider.
   evidence.checks.sso_runtime = JSON.parse(command('exact-role single sign-on hand-off, product gate and sign-out',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-sso-runtime.mjs')], workflowEnvironment));
+  // 0130/0131: registration at the desk without a NIN, and opening this facility's own patient without a PIN.
+  evidence.checks.desk_registration_own_facility_runtime = JSON.parse(command(
+    'exact-role registration without a NIN and own-facility opening', process.execPath,
+    [join(repository, 'services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs')], workflowEnvironment));
   // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
   evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));
