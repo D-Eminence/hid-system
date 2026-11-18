@@ -6214,21 +6214,25 @@ QA open question. ehr-api only; no migration, no new setting.
 A `completed` visit may now move to `entered_in_error` (before, a completed
 visit could not change status). The body is the usual UpdateEncounter body,
 and **a typed `changeReason` is required** (3 to 500 characters; it is
-recorded in `ehr.record_versions` as for every change):
+recorded in `ehr.record_versions` as for every change). Since Q105 the body
+may leave `changeReason` out, but only to start or finish a visit; entering
+a visit in error still needs a typed one:
 
 ```json
 { "expectedRowVersion": 3, "status": "entered_in_error", "changeReason": "Wrong patient chosen" }
 ```
 
-Refusals, checked under the visit's row lock before anything is written:
+Refusals. The two `400`s come first, before the visit is read; the `409`s
+are checked under the visit's row lock, before anything is written:
 
 | Answer | When |
 | --- | --- |
+| `400` (validation) | A `changeReason` shorter than 3 characters after trimming (a blank one included), longer than 500, or `null` |
+| `400 CHANGE_REASON_REQUIRED` "Please say why you are changing this." | No `changeReason` (Q105 lets the body leave it out, but only for a start or finish) |
 | `409 IMPORTED_VISIT_NOT_ENTERED_IN_ERROR` "The imported paper records visit cannot be marked as entered in error." | The visit is the patient's imported paper records visit (0113) |
 | `409 VISIT_HAS_OPEN_ORDERS` "Cancel or stop this visit's prescriptions and lab requests, drafts included, before marking it as entered in error." | The visit still has a `draft`, `active` or `on_hold` prescription or lab request (so no pharmacy or lab keeps acting on a visit that should not exist; a draft counts because it could otherwise be activated later) |
 | `409 VISIT_HAS_SIGNED_NOTES` "Mark this visit's signed notes as entered in error before marking the visit as entered in error." | The visit still has a `signed` or `amended` note (so the patient's own record never lists a note of the visit; see below) |
 | `409 INVALID_ENCOUNTER_TRANSITION` | A completed visit to any status other than `entered_in_error` (unchanged) |
-| `400` (validation) | No `changeReason`, or one shorter than 3 characters |
 
 On success the audit row (`ehr.encounter.update`) carries
 `completedVisitEnteredInError: true`. Entering a planned, in-progress or
@@ -6879,7 +6883,13 @@ any of the changes in the table when the history shows the record was
 signed or active before or cannot be read. For lab requests, a change to
 `on_hold`, `completed`, `cancelled` or `entered_in_error` without a reason
 answers the `400` before the request reaches the database; a draft's
-activation or edit is decided under the request's row lock. The allergy check on a prescription's activation is unchanged (409
+activation or edit is decided under the request's row lock. For visits, a
+change without a reason that can be neither a start (`in_progress`, no other
+field) nor a finish (`completed`, with at most `endedAt`) answers the `400`
+before the visit is read, so before EHR-C8a's `409`s (`VISIT_HAS_OPEN_ORDERS`
+and the others); a move to `in_progress` or `completed` is decided under the
+visit's row lock (a resume after a hold, or a start or finish the history
+shows happened before, then answers the `400`). The allergy check on a prescription's activation is unchanged (409
 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED` until acknowledged). EHR-C8a's 409
 `VISIT_ENTERED_IN_ERROR` is unchanged and comes first.
 

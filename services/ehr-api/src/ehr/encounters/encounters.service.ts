@@ -9,7 +9,7 @@ import {
   UpdateEncounterDto,
 } from '../shared/clinical.dto';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
-import { hasTypedReason, neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
+import { changeReasonRequired, hasTypedReason, neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { lagosCalendarDate, lagosDaySql, VISIT_DAY_TIME_ZONE } from './lagos-day';
 
@@ -67,6 +67,18 @@ const TRANSITIONS: Readonly<Record<EncounterStatus, readonly EncounterStatus[]>>
   [EncounterStatus.Cancelled]: [],
   [EncounterStatus.EnteredInError]: [],
 };
+
+/**
+ * Q105: whether the body could be a visit start (to in progress, nothing
+ * else) or a finish (to completed, with at most its end time), the only
+ * changes that may go without a typed reason. The visit's current status and
+ * history decide the rest, under its row lock.
+ */
+function mayStartOrFinish(input: UpdateEncounterDto): boolean {
+  if (input.chiefComplaint !== undefined) return false;
+  return (input.status === EncounterStatus.InProgress && input.endedAt === undefined)
+    || input.status === EncounterStatus.Completed;
+}
 
 @Injectable()
 export class EncountersService {
@@ -219,6 +231,15 @@ export class EncountersService {
     input: UpdateEncounterDto,
   ): Promise<EncounterRow> {
     this.requireMutation(input, ['status', 'endedAt', 'chiefComplaint']);
+    // Q105: only a start or a finish may go without a typed reason. A change
+    // without one that can be neither (hold, cancel, entered in error, an end
+    // time alone, a chief complaint) answers 400 before the visit is read, as
+    // the body's validation did before Q105, so before EHR-C8a's 409s. Whether
+    // a move to in progress or completed is a first start or finish (and not,
+    // say, a resume) is decided under the visit's row lock.
+    if (!hasTypedReason(input.changeReason) && !mayStartOrFinish(input)) {
+      return Promise.reject(changeReasonRequired());
+    }
     return this.repository.run(
       context,
       patientId,
@@ -422,9 +443,8 @@ export class EncountersService {
    */
   private async fixedVisitReason(client: PoolClient, current: EncounterRow, input: UpdateEncounterDto)
     : Promise<'visit_start' | 'visit_finish' | undefined> {
-    if (input.chiefComplaint !== undefined) return undefined;
-    if (current.status === EncounterStatus.Planned && input.status === EncounterStatus.InProgress
-      && input.endedAt === undefined) {
+    if (!mayStartOrFinish(input)) return undefined;
+    if (current.status === EncounterStatus.Planned && input.status === EncounterStatus.InProgress) {
       return await neverReachedBefore(client, 'encounters', current.id,
         [EncounterStatus.InProgress, EncounterStatus.OnHold, EncounterStatus.Completed]) ? 'visit_start' : undefined;
     }

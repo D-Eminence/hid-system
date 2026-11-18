@@ -556,4 +556,35 @@ describe('Q105 visits: starting and finishing need no typed reason', () => {
     expect(reasons).toEqual([]);
     expect(updated(calls)).toBe(false);
   });
+
+  it.each([
+    ['a hold', { status: EncounterStatus.OnHold }],
+    ['a cancel', { status: EncounterStatus.Cancelled }],
+    ['entering in error', { status: EncounterStatus.EnteredInError }],
+    ['a planned visit back to planned', { status: EncounterStatus.Planned }],
+    ['a chief complaint edit', { chiefComplaint: 'Headache' }],
+    ['an end time alone', { endedAt: '2026-11-18T09:00:00Z' }],
+    ['a start that also sets an end time', { status: EncounterStatus.InProgress, endedAt: '2026-11-18T09:00:00Z' }],
+    ['a start that also changes the chief complaint', { status: EncounterStatus.InProgress, chiefComplaint: 'Headache' }],
+    ['a finish that also changes the chief complaint', { status: EncounterStatus.Completed, chiefComplaint: 'Headache' }],
+  ] as const)('answers %s without a reason before the database, as the visit body did before Q105', async (_label, change) => {
+    const { service, calls } = setup(EncounterStatus.InProgress);
+    await expect(service.update(context, patientId, encounterId, { expectedRowVersion: 1, ...change } as never))
+      .rejects.toMatchObject(REQUIRED);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    ['a start', EncounterStatus.Planned, { status: EncounterStatus.InProgress }],
+    ['a finish', EncounterStatus.InProgress, { status: EncounterStatus.Completed }],
+    ['a finish with its end time', EncounterStatus.InProgress,
+      { status: EncounterStatus.Completed, endedAt: '2026-11-18T09:00:00Z' }],
+  ] as const)('decides %s without a reason under the visit\'s row lock', async (_label, status, change) => {
+    const { service, calls } = setup(status, { createdSeen: 1, reached: 1 });
+    await expect(service.update(context, patientId, encounterId, { expectedRowVersion: 1, ...change } as never))
+      .rejects.toMatchObject(REQUIRED);
+    expect(calls.findIndex((call) => /for update/.test(call.sql))).toBe(0);
+    expect(calls.some((call) => /from ehr\.record_versions/.test(call.sql))).toBe(true);
+    expect(updated(calls)).toBe(false);
+  });
 });

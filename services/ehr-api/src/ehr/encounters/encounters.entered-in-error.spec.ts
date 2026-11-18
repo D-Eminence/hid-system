@@ -135,6 +135,20 @@ describe('EHR-C8a a completed visit entered in error', () => {
     expect(reasons).toEqual([]);
     expect(updated(calls)).toBe(false);
   });
+
+  it.each([
+    ['open orders', 1, 0],
+    ['signed notes', 0, 1],
+  ] as const)('asks for the missing reason before the visit is read, so before the 409 for %s (as before Q105)',
+    async (_label, openOrders, signedNotes) => {
+      const { service, calls, reasons } = setup(visit(EncounterStatus.Completed), openOrders, signedNotes);
+      await expect(service.update(context, patientId, encounterId,
+        { expectedRowVersion: 3, status: EncounterStatus.EnteredInError }))
+        .rejects.toMatchObject({ status: 400, code: 'CHANGE_REASON_REQUIRED' });
+      // No lock, no count, nothing written: the database is never asked.
+      expect(calls).toEqual([]);
+      expect(reasons).toEqual([]);
+    });
 });
 
 describe('EHR-C8a what the patient sees afterwards (patient-self re-run)', () => {
