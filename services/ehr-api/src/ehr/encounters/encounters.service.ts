@@ -10,6 +10,7 @@ import {
 } from '../shared/clinical.dto';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { lagosCalendarDate, lagosDaySql, VISIT_DAY_TIME_ZONE } from './lagos-day';
 
 export interface EncounterRow extends QueryResultRow {
   id: string;
@@ -26,7 +27,25 @@ export interface EncounterRow extends QueryResultRow {
   rowVersion: string;
   createdAt: Date;
   updatedAt: Date;
+  importedPaperRecords?: boolean;
 }
+
+/** EHR-C1: the answer of a create that asked for the open visit today. */
+export type EncounterCreated = EncounterRow & { reusedOpenVisit?: boolean };
+
+/** EHR-C1: what the visit desk reads before starting a visit. */
+export interface OpenVisitToday {
+  /** Today's Lagos calendar date (YYYY-MM-DD). */
+  day: string;
+  timeZone: typeof VISIT_DAY_TIME_ZONE;
+  /** The newest open visit started today at this facility, or null. */
+  encounter: EncounterRow | null;
+}
+
+/** Statuses of a visit still open (not completed, cancelled or entered in error). */
+export const OPEN_VISIT_STATUSES: readonly EncounterStatus[] = [
+  EncounterStatus.Planned, EncounterStatus.InProgress, EncounterStatus.OnHold,
+];
 
 const ENCOUNTER_COLUMNS = `
   id, patient_id as "patientId", facility_id as "facilityId",
@@ -40,14 +59,39 @@ const TRANSITIONS: Readonly<Record<EncounterStatus, readonly EncounterStatus[]>>
   [EncounterStatus.Planned]: [EncounterStatus.InProgress, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
   [EncounterStatus.InProgress]: [EncounterStatus.OnHold, EncounterStatus.Completed, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
   [EncounterStatus.OnHold]: [EncounterStatus.InProgress, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
-  [EncounterStatus.Completed]: [],
+  // EHR-C8a: a completed visit may be entered in error, with a reason
+  // (UpdateEncounterDto requires one); never the imported paper records visit.
+  [EncounterStatus.Completed]: [EncounterStatus.EnteredInError],
   [EncounterStatus.Cancelled]: [],
   [EncounterStatus.EnteredInError]: [],
 };
 
 @Injectable()
 export class EncountersService {
+  /** The clock "today" is read from; tests replace it. */
+  now: () => Date = () => new Date();
+
   constructor(private readonly repository: ClinicalRepository) {}
+
+  /**
+   * EHR-C1: the patient's open visit today (Lagos calendar day) at this
+   * facility, or null. Read under the patient's consent like every visit
+   * read, and audited (`ehr.encounter.open-today`, with `found`).
+   */
+  openToday(context: DataAccessContext, patientId: string): Promise<OpenVisitToday> {
+    const day = lagosCalendarDate(this.now());
+    return this.repository.run(
+      context,
+      patientId,
+      'read_records',
+      { action: 'ehr.encounter.open-today', resourceType: 'encounter', details: { day } },
+      async (client) => {
+        const encounter = (await this.findOpenToday(client, patientId, context.facilityId, day)) ?? null;
+        return { value: { day, timeZone: VISIT_DAY_TIME_ZONE, encounter },
+          ...(encounter ? { resourceId: encounter.id } : {}), details: { found: encounter !== null } };
+      },
+    );
+  }
 
   list(context: DataAccessContext, patientId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.encounters', patientId };
@@ -88,9 +132,26 @@ export class EncountersService {
     patientId: string,
     input: CreateEncounterDto,
     idempotencyKey: string,
-  ): Promise<EncounterRow> {
+  ): Promise<EncounterCreated> {
     const operation = 'encounter.create';
-    const digest = requestDigest(operation, { patientId, input });
+    const reuse = input.reuseOpenVisit === true;
+    if (reuse && input.status !== EncounterStatus.Planned && input.status !== EncounterStatus.InProgress) {
+      throw new DomainProblem(400, 'REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS',
+        'To use the open visit today, start the visit as planned or in progress.');
+    }
+    const day = reuse ? lagosCalendarDate(this.now()) : undefined;
+    // EHR-C1 (review finding 3): the lookup is for today's open visit, so the
+    // visit a reuse request would create must start today too. Otherwise a
+    // device whose clock is behind (just after midnight) would create a visit
+    // dated yesterday that no later lookup finds, and a future booking would
+    // get today's visit back instead of being created.
+    if (day !== undefined && lagosCalendarDate(new Date(input.startedAt)) !== day) {
+      throw new DomainProblem(400, 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY',
+        'To use the open visit today, the visit must start today (Lagos time). Check the date and time on this device.');
+    }
+    // A body without reuseOpenVisit keeps the Idempotency-Key digest it had before EHR-C1.
+    const { reuseOpenVisit: _reuse, ...withoutReuse } = input;
+    const digest = requestDigest(operation, { patientId, input: input.reuseOpenVisit === undefined ? withoutReuse : input });
     return this.repository.run(
       context,
       patientId,
@@ -105,6 +166,19 @@ export class EncountersService {
         digest,
         'encounter',
         async () => {
+          if (day) {
+            // EHR-C1: one open visit per patient per facility per Lagos day.
+            // The lock is taken before the lookup, so two requests at once
+            // cannot both find none and both create one; it is held until
+            // this transaction ends (READ COMMITTED: the lookup after the
+            // wait sees the other request's committed visit).
+            await this.lockOpenVisit(client, context.facilityId, patientId);
+            const open = await this.findOpenToday(client, patientId, context.facilityId, day);
+            if (open) {
+              return { value: { ...open, reusedOpenVisit: true }, id: open.id,
+                details: { reusedOpenVisit: true, day } };
+            }
+          }
           const result = await client.query<EncounterRow>(
             `insert into ehr.encounters (
                patient_id, facility_id, created_by, created_by_membership_id,
@@ -125,9 +199,13 @@ export class EncountersService {
             ],
           );
           const row = this.single(result.rows[0]);
-          return { value: row, id: row.id };
+          return day
+            ? { value: { ...row, reusedOpenVisit: false }, id: row.id, details: { reusedOpenVisit: false, day } }
+            : { value: row, id: row.id };
         },
-        (id) => this.findRow(client, patientId, context.facilityId, id),
+        (id) => day
+          ? this.findReplay(client, context, patientId, idempotencyKey, operation, id)
+          : this.findRow(client, patientId, context.facilityId, id),
       ),
     );
   }
@@ -149,6 +227,9 @@ export class EncountersService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_ENCOUNTER_TRANSITION', 'Encounter status transition is not allowed');
         }
+        const completedInError = current.status === EncounterStatus.Completed
+          && input.status === EncounterStatus.EnteredInError;
+        if (completedInError) await this.assertCompletedVisitCanBeEnteredInError(client, context, patientId, current);
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<EncounterRow>(
           `update ehr.encounters set
@@ -169,10 +250,132 @@ export class EncountersService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Encounter changed since it was loaded');
-        return { value: row, resourceId: encounterId, details: { rowVersion: row.rowVersion } };
+        return { value: row, resourceId: encounterId,
+          details: { rowVersion: row.rowVersion, ...(completedInError ? { completedVisitEnteredInError: true } : {}) } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+  }
+
+  /**
+   * EHR-C8a: the checks before a completed visit is entered in error, run
+   * under the visit's row lock (taken FOR UPDATE). The imported paper records visit (0113)
+   * is refused, and so is a visit that still has:
+   * - a draft, active or on-hold prescription or lab request: those are
+   *   cancelled, stopped or entered in error first, so no pharmacy or lab keeps
+   *   acting on a visit that should not exist (a draft counts, since it could
+   *   otherwise be activated later);
+   * - a signed or amended note: each is entered in error first, so the
+   *   patient's own record (which can see only completed visits, and so cannot
+   *   tell a visit entered in error from one still open) never lists it.
+   * Every order and note change that starts or adds something checks the
+   * visit under FOR SHARE (shared/visit-guard.ts), so none can slip in between
+   * this count and the update.
+   */
+  private async assertCompletedVisitCanBeEnteredInError(
+    client: PoolClient,
+    context: DataAccessContext,
+    patientId: string,
+    current: EncounterRow,
+  ): Promise<void> {
+    if (current.importedPaperRecords) {
+      throw new DomainProblem(409, 'IMPORTED_VISIT_NOT_ENTERED_IN_ERROR',
+        'The imported paper records visit cannot be marked as entered in error.');
+    }
+    const open = await client.query<{ openOrders: number; signedNotes: number }>(
+      `select ((select count(*) from ehr.prescriptions
+                 where encounter_id = $1 and patient_id = $2 and facility_id = $3
+                   and status in ('draft', 'active', 'on_hold'))
+             + (select count(*) from ehr.lab_requests
+                 where encounter_id = $1 and patient_id = $2 and facility_id = $3
+                   and status in ('draft', 'active', 'on_hold')))::int as "openOrders",
+              (select count(*) from ehr.clinical_notes
+                 where encounter_id = $1 and patient_id = $2 and facility_id = $3
+                   and status in ('signed', 'amended'))::int as "signedNotes"`,
+      [current.id, patientId, context.facilityId],
+    );
+    if (Number(open.rows[0]?.openOrders ?? 0) > 0) {
+      throw new DomainProblem(409, 'VISIT_HAS_OPEN_ORDERS',
+        'Cancel or stop this visit\'s prescriptions and lab requests, drafts included, before marking it as entered in error.');
+    }
+    if (Number(open.rows[0]?.signedNotes ?? 0) > 0) {
+      throw new DomainProblem(409, 'VISIT_HAS_SIGNED_NOTES',
+        'Mark this visit\'s signed notes as entered in error before marking the visit as entered in error.');
+    }
+  }
+
+  /** EHR-C1: serialises the open-visit lookup and create for one patient at one facility. */
+  private async lockOpenVisit(client: PoolClient, facilityId: string, patientId: string): Promise<void> {
+    await client.query(
+      `select pg_advisory_xact_lock(hashtextextended('ehr.open-visit:' || $1::text || ':' || $2::text, 0))`,
+      [facilityId, patientId],
+    );
+  }
+
+  /** EHR-C1: the newest open visit started on the given Lagos day at this facility. */
+  private async findOpenToday(
+    client: PoolClient,
+    patientId: string,
+    facilityId: string,
+    day: string,
+  ): Promise<EncounterRow | undefined> {
+    const result = await client.query<EncounterRow>(
+      `select ${ENCOUNTER_COLUMNS} from ehr.encounters
+       where patient_id = $1 and facility_id = $2
+         and status = any($4::text[]) and not imported_paper_records
+         and ${lagosDaySql('started_at', 3)}
+       order by started_at desc, created_at desc, id desc
+       limit 1`,
+      [patientId, facilityId, day, OPEN_VISIT_STATUSES],
+    );
+    return result.rows[0];
+  }
+
+  /**
+   * EHR-C1: an idempotent replay of a create that asked for the open visit:
+   * the same visit, with `reusedOpenVisit` false only when the original
+   * request created it.
+   *
+   * Review finding 5: decided from facts recorded in the original
+   * transaction, not from timestamps (a request's key row is written before
+   * it waits on the advisory lock, so a visit another request created while
+   * it waited is younger than the key). The request created the visit when
+   * the visit's create version (ehr.record_versions, version_no 1) carries
+   * the same correlation id and account as the Idempotency-Key's create
+   * version: both are written by the same request. If either version cannot
+   * be seen, the old comparison of creation times is the fallback.
+   */
+  private async findReplay(
+    client: PoolClient,
+    context: DataAccessContext,
+    patientId: string,
+    idempotencyKey: string,
+    operation: string,
+    id: string,
+  ): Promise<EncounterCreated | undefined> {
+    const row = await this.findRow(client, patientId, context.facilityId, id);
+    if (!row) return undefined;
+    // Compared in the database, at full (microsecond) precision.
+    const key = await client.query<{ reused: boolean }>(
+      `select coalesce(
+                (select encounter_version.correlation_id is distinct from key_version.correlation_id
+                        or encounter_version.changed_by is distinct from key_version.changed_by
+                 from ehr.record_versions encounter_version, ehr.record_versions key_version
+                 where encounter_version.resource_type = 'encounters'
+                   and encounter_version.resource_id = encounter_row.id::text
+                   and encounter_version.version_no = 1
+                   and key_version.resource_type = 'idempotency_keys'
+                   and key_version.resource_id = key_row.id::text
+                   and key_version.version_no = 1),
+                encounter_row.created_at < key_row.created_at) as reused
+       from ehr.idempotency_keys key_row
+       join ehr.encounters encounter_row
+         on encounter_row.id = $1 and encounter_row.patient_id = $2 and encounter_row.facility_id = key_row.facility_id
+       where key_row.facility_id = $3 and key_row.created_by = $4 and key_row.operation = $5
+         and key_row.idempotency_key = $6`,
+      [row.id, patientId, context.facilityId, context.actor.accountId, operation, idempotencyKey],
+    );
+    return { ...row, reusedOpenVisit: key.rows[0]?.reused === true };
   }
 
   private async findRow(client: PoolClient, patientId: string, facilityId: string, id: string): Promise<EncounterRow | undefined> {

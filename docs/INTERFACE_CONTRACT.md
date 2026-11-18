@@ -6022,3 +6022,809 @@ staff or patient sign-in of the client's kind, never changed or deleted:
 INSERT` on the first and `SELECT, INSERT, DELETE` on the second; no other
 runtime holds anything on either. The suite is
 `services/ehr-api/database/tests/sso-relying-party.integration.sql`.
+
+## FR-1. No typed reason for a first signature or a first activation (wave 1, no migration)
+
+Owner decision of 18 November 2026: signing a note or activating a
+prescription for the first time needs no typed reason. A reason is still
+needed to change anything already signed or active. ehr-api only; no
+migration, no new setting. `schema.integration.sql` is unchanged.
+
+### Request bodies
+
+`changeReason` becomes optional in three bodies only: `PATCH
+/ehr/patients/:patientId/encounters/:encounterId/clinical-notes/:noteId`
+(UpdateClinicalNote), `PATCH .../prescriptions/:prescriptionId`
+(UpdatePrescription) and `PATCH .../lab-requests/:requestId`
+(UpdateLabRequest). When it is sent, the rules are unchanged: a string,
+trimmed, 3 to 500 characters, never `null` (`400` from validation
+otherwise). Every other body that carries `changeReason` (visits,
+diagnoses, note revisions, vitals corrections) still requires it.
+
+### When the server records a fixed reason
+
+| Change | Typed reason | What is recorded in `ehr.record_versions.change_reason` |
+| --- | --- | --- |
+| A draft note signed (`status: "signed"`) with no other field (no `title`), and the note's version history shows it was never signed or amended | Not needed | `First signature (no reason needed)` |
+| A draft prescription activated (`status: "active"`) with no other field (no `frequency`, `instructions` or `endsOn`; `allergyAcknowledgement` may be sent), and its version history shows it was never active, on hold or completed | Not needed | `First activation (no reason needed)` |
+| Either of the above with a typed reason | Optional | The typed reason |
+| Anything else: amend, hold, resume after a hold, stop or cancel, entered in error, any edit (drafts included), any lab-request change | **Required** | The typed reason |
+
+"First" is checked against the record's version history, not only its
+current status, and fails closed: if the record's create version cannot be
+read, a reason is required. The `record_versions` row still records who
+changed it and when, as before.
+
+A missing reason where one is required answers:
+
+```
+400 { "code": "CHANGE_REASON_REQUIRED", "detail": "Please say why you are changing this.", ... }
+```
+
+before anything is written. For prescriptions the reason rule is decided
+before the allergy check; the allergy check itself is unchanged, so an
+allergy match on a first activation still answers `409
+ALLERGY_ACKNOWLEDGEMENT_REQUIRED` until the acknowledgement is sent. For lab
+requests the `400` answers before the request reaches the database.
+
+### Audit
+
+When a fixed reason is used, the update's audit row (`ehr.note.update` or
+`ehr.prescription.update`) carries `fixedReason: "first_signature"` or
+`"first_activation"`. With a typed reason the audit details are unchanged
+(the typed text is never in the audit row).
+
+### Not yet covered (owner question 6, pending)
+
+The first activation of a lab request, starting and completing a visit, and
+edits to drafts still need a typed reason.
+
+### Screen change needed (Akos frontend branch)
+
+The note "Sign" and prescription "Activate" actions may send no
+`changeReason`. Every other change keeps asking for a reason and shows the
+server's plain message on `CHANGE_REASON_REQUIRED`.
+
+## EHR-C1. The open visit today, and starting a visit without a duplicate (wave 1, no migration)
+
+Akos P0-2 and N-3. ehr-api only; no migration, no new setting. "Today" is
+the calendar day in Lagos (`Africa/Lagos`, UTC+1) until international
+settings (P2-4). Both routes still need the patient's consent (normal
+`read_records` or `write_records` grant) until the waiting list (EHR-C7)
+lands; a refusal is `403 CONSENT_REQUIRED` and is audited as today.
+
+### `GET /ehr/patients/:patientId/encounters/open-today`
+
+Permission `ehr.encounter.read`. `patientId` is the UUID (never a Health
+ID). Answers `200`:
+
+```json
+{ "day": "2026-11-18", "timeZone": "Africa/Lagos", "encounter": { ...visit... } }
+```
+
+`encounter` is the newest visit of this patient at this facility that is
+open (`planned`, `in_progress` or `on_hold`) and was started on today's Lagos
+day (from 00:00 to before 24:00 Lagos time), or `null` when there is none.
+The imported paper records visit is never returned. The visit has the same
+fields as `GET .../encounters/:encounterId`. Audited as
+`ehr.encounter.open-today` with `day` and `found` (true or false).
+
+### `POST /ehr/patients/:patientId/encounters` with `reuseOpenVisit`
+
+The create body gains `reuseOpenVisit` (optional boolean, never `null`).
+
+- Absent or `false`: exactly as before (the Idempotency-Key digest of a body
+  without it is unchanged, and the answer has no new field).
+- `true`: only with `status` `planned` or `in_progress` (otherwise `400
+  REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS`, "To use the open visit today, start
+  the visit as planned or in progress."), and only with a `startedAt` on
+  today's Lagos day by the server's clock (otherwise `400
+  REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY`, "To use the open visit today, the
+  visit must start today (Lagos time). Check the date and time on this
+  device."). So a device whose clock is behind cannot create a visit dated
+  yesterday that no later lookup finds, and a planned visit for another day
+  is booked without `reuseOpenVisit`. Both checks run before the database
+  is touched. The server takes a transaction
+  lock for this patient at this facility
+  (`pg_advisory_xact_lock(hashtextextended('ehr.open-visit:<facility>:<patient>', 0))`)
+  **before** it looks for today's open visit, and holds it until the
+  transaction ends. If an open visit today exists, it is answered and
+  nothing is created; otherwise the visit is created. Two requests at the
+  same moment therefore give one visit.
+
+The answer is `201` with the visit plus `reusedOpenVisit: true` (an
+existing visit) or `false` (a new one). When `reusedOpenVisit` is `true`,
+the answer is the existing visit as it is: its `encounterType`, `status`,
+`startedAt` and `chiefComplaint` are the existing visit's, not the request's
+(an `emergency` request can get back an `ambulatory` visit that is
+`on_hold`); the screen shows the visit it got back. An idempotent replay of
+the same request answers the same visit, with `reusedOpenVisit: false` only
+when that request created it: the visit's create version in
+`ehr.record_versions` has the same correlation id and account as the
+Idempotency-Key's create version (both are written by the request that
+created them). Only if either version cannot be read does the replay fall
+back to comparing creation times. A client must not send the same
+`X-Correlation-Id` on two different requests. The audit row
+(`ehr.encounter.create`) carries `reusedOpenVisit` and `day`.
+
+### Screen change needed (Akos frontend branch)
+
+Before "Start visit", read `open-today` and offer to continue the open
+visit; when starting, send `reuseOpenVisit: true` so a double tap or two
+staff at once do not make two visits.
+
+## EHR-C3. Latest vitals for a patient (wave 1, no migration)
+
+Akos P1-14. ehr-api only; no migration, no new setting.
+
+### `GET /ehr/patients/:patientId/vitals/latest`
+
+Permission `ehr.vital.read`. `patientId` is the UUID (never a Health ID).
+Read under the patient's consent (`read_records`), like every vitals read.
+A refusal answers `403 CONSENT_REQUIRED` and is audited (`ehr.vital.latest`,
+outcome `denied`); a read is audited as `ehr.vital.latest` with
+`measureCount` (never the values). Answers `200`:
+
+```json
+{
+  "facilityId": "<uuid>",
+  "measures": {
+    "bloodPressure": { "value": { "systolicMmhg": 128, "diastolicMmhg": 84 }, "recordedAt": "...", "vitalId": "<uuid>", "encounterId": "<uuid>", "corrected": false },
+    "pulseBpm": { "value": 76, "recordedAt": "...", "vitalId": "<uuid>", "encounterId": "<uuid>", "corrected": true },
+    "temperatureC": { "value": 37.2, "...": "..." }
+  }
+}
+```
+
+Rules:
+
+- Only this facility's vitals for this patient.
+- For each measure (`heightCm`, `weightKg`, `temperatureC`, `pulseBpm`,
+  `respiratoryRate`, `bloodPressure`, `oxygenSaturationPercent`) the newest
+  reading (by `recordedAt`, then entry time) that has that measure. A measure
+  with no reading is left out of `measures`.
+- The vital's current correction is applied first (the correction's values
+  over the original ones, as the patient record already applies them);
+  `corrected` says whether the reading's current correction set this measure
+  (per measure, not per reading: a correction that changes only the pulse
+  leaves the weight of the same reading `corrected: false`; for
+  `bloodPressure`, true when the correction set either half of the pair).
+- Blood pressure is one measure and is always the systolic and diastolic
+  pair from the same reading; it is never mixed across readings.
+- Vitals of a visit entered in error are left out. (A single vital entered
+  in error waits for EHR-C8b, migration 0142.)
+- Values are JSON numbers (the per-visit vitals list still returns numeric
+  columns as strings, unchanged).
+
+### Screen change needed (Akos frontend branch)
+
+The patient header or chart may show "Latest vitals" from this route, one
+call per patient, and label each value with its date.
+
+## EHR-C8a. A completed visit entered in error (wave 1, no migration)
+
+QA open question. ehr-api only; no migration, no new setting.
+
+### `PATCH /ehr/patients/:patientId/encounters/:encounterId`
+
+A `completed` visit may now move to `entered_in_error` (before, a completed
+visit could not change status). The body is the usual UpdateEncounter body,
+and **a typed `changeReason` is required** (3 to 500 characters; it is
+recorded in `ehr.record_versions` as for every change):
+
+```json
+{ "expectedRowVersion": 3, "status": "entered_in_error", "changeReason": "Wrong patient chosen" }
+```
+
+Refusals, checked under the visit's row lock before anything is written:
+
+| Answer | When |
+| --- | --- |
+| `409 IMPORTED_VISIT_NOT_ENTERED_IN_ERROR` "The imported paper records visit cannot be marked as entered in error." | The visit is the patient's imported paper records visit (0113) |
+| `409 VISIT_HAS_OPEN_ORDERS` "Cancel or stop this visit's prescriptions and lab requests, drafts included, before marking it as entered in error." | The visit still has a `draft`, `active` or `on_hold` prescription or lab request (so no pharmacy or lab keeps acting on a visit that should not exist; a draft counts because it could otherwise be activated later) |
+| `409 VISIT_HAS_SIGNED_NOTES` "Mark this visit's signed notes as entered in error before marking the visit as entered in error." | The visit still has a `signed` or `amended` note (so the patient's own record never lists a note of the visit; see below) |
+| `409 INVALID_ENCOUNTER_TRANSITION` | A completed visit to any status other than `entered_in_error` (unchanged) |
+| `400` (validation) | No `changeReason`, or one shorter than 3 characters |
+
+On success the audit row (`ehr.encounter.update`) carries
+`completedVisitEnteredInError: true`. Entering a planned, in-progress or
+on-hold visit in error is unchanged.
+
+### Nothing new on a visit entered in error (any visit, not only a completed one)
+
+Every path that adds to a visit or starts something on it now reads the
+visit first, under a `FOR SHARE` row lock, and refuses a visit entered in
+error with
+`409 VISIT_ENTERED_IN_ERROR` "This visit was marked as entered in error. Nothing new can be added to it or started on it."
+
+| Route | Refused on a visit entered in error | Still allowed |
+| --- | --- | --- |
+| `POST .../encounters/:encounterId/prescriptions` | always | |
+| `PATCH .../prescriptions/:id` | activate, resume, complete, any edit | `on_hold`, `cancelled`, `entered_in_error` |
+| `POST .../prescriptions/:id/pharmacy-work-item` | always (before the pharmacy is called) | |
+| `POST .../encounters/:encounterId/lab-requests` | always (before the laboratory is called) | |
+| `PATCH .../lab-requests/:id` | activate, resume, complete, any edit | `on_hold`, `cancelled`, `entered_in_error` |
+| `POST .../lab-requests/:id/lab-work-item` | always (a read, no lock: this route writes nothing in the EHR) | |
+| `POST .../encounters/:encounterId/clinical-notes` | always | |
+| `PATCH .../clinical-notes/:id` | sign, title change | `entered_in_error` |
+
+The visit is locked before the order or note row, in every path. Marking a
+completed visit as entered in error locks the visit `FOR UPDATE` before it
+counts orders and signed notes, so a concurrent activation, resume or
+signature either commits first (and the count refuses with 409) or waits and
+then gets `409 VISIT_ENTERED_IN_ERROR`. `FOR SHARE` does not conflict with the
+`FOR KEY SHARE` that foreign keys take, so orders on the same visit do not
+wait for each other. A replay of an Idempotency-Key that was already
+completed is answered as before.
+
+### What the patient sees afterwards
+
+- The patient's own record (`GET` patient self records) lists only completed
+  visits, so the visit disappears from it.
+- The notes in that read are unchanged for the patient: a signed note of a
+  visit that is not completed yet is still listed, as before. The read leaves
+  out a note only when its visit can be seen and is entered in error
+  (`not exists (... status = 'entered_in_error')`). The patient-self policy on
+  `ehr.encounters` hides every visit that is not completed, so for the patient
+  this changes nothing; a completed visit entered in error has no signed note
+  left (`VISIT_HAS_SIGNED_NOTES`), so its notes never reach the patient.
+- The emergency read (staff, who can see every visit at the facility) now
+  leaves out notes of a visit entered in error.
+- Known gap, unchanged from before: a planned, in-progress or on-hold visit
+  can still be entered in error with signed notes in it (that path has no new
+  check), and the patient's record still lists those notes. Closing it needs
+  a database helper the patient's read can call (a migration), or the same
+  `VISIT_HAS_SIGNED_NOTES` rule on that path: an owner decision.
+- The patient chat reads visits, notes, prescriptions, tests, diagnoses and
+  vitals only from completed visits (unchanged; the database's patient-self
+  policies hide diagnoses and vitals of other visits).
+
+### Screen change needed (Akos frontend branch)
+
+Offer "Entered in error" on a completed visit, ask for the reason, and show
+the plain message of each `409` (for open orders, link to the visit's
+prescriptions and lab requests).
+
+## ID-0. NIN status on staff answers, and the NIN service breaker (Akos wave 1, no migration)
+
+Owner decision of 18 November 2026: screens say "NIN Verified" or "NIN Not
+Verified". The service answers one field with two values and the screen
+shows the words.
+
+### `ninStatus`
+
+`ninStatus` is `"verified"` or `"not_verified"`. No other value is ever
+returned, and no stored verification value is passed through as it is.
+
+- `"verified"`: the patient holds a NIN that was checked and has not been
+  revoked (`identity.patient_identifiers`: `identifier_type = 'nin'`,
+  `verified`, `revoked_at is null`).
+- `"not_verified"`: everything else, including a NIN that was revoked.
+
+Added to:
+
+- `POST /api/v1/identity/patient-lookup`: `patient.ninStatus`, beside
+  `patient.version`. The lookup is audited as before
+  (`identity.patient.lookup`).
+- Every registration-case answer (`POST identity/nin/resolve`,
+  `GET identity/registration-cases/:caseId`, `approve-new`,
+  `link-existing`, and their replays): top-level `ninStatus`. A case is
+  `"verified"` when its NIN was checked and, once the case points at a
+  patient, that patient still holds a checked NIN that is not revoked. Every
+  case today has a checked NIN; `"not_verified"` cases arrive with ID-2.
+- Desk search cards (ID-3a, lane B) use the same rule:
+  `services/identity-api/src/identity/nin-status.ts` exports
+  `patientHasVerifiedNinSql()` and `ninStatusOf()`.
+
+### `GET /api/v1/identity/registration-capabilities`
+
+Same permission and headers as before (`identity.registration.write`,
+`X-Facility-Id`). The answer gains `nin.available` and `withoutNin`:
+
+```json
+{
+  "nin": { "enabled": true, "state": "test-only", "available": true },
+  "withoutNin": { "enabled": false },
+  "newPatientRegistrationRequiresNin": true
+}
+```
+
+Staging (deferred) answers
+`{"nin":{"enabled":false,"state":"deferred","available":false},"withoutNin":{"enabled":false},"newPatientRegistrationRequiresNin":true}`.
+
+- `nin.available` is `false` when NIN checks are off (`enabled: false`) or the
+  breaker below is tripped; otherwise `true`.
+- `withoutNin.enabled` is `false` until ID-2 (0130) ships desk registration
+  without a NIN. `newPatientRegistrationRequiresNin` stays `true` until then.
+
+### The breaker
+
+Kept in memory in each Identity process (no table, no secret, no setting).
+
+- A `503` from the NIN service trips it at once.
+- Three other failures (a `5xx`, a bad answer, a network error) within 5
+  minutes trip it.
+- A NIN that does not match (`422 NIN_VERIFICATION_FAILED`) is an answer, not
+  a failure, and does not count. Nor does a `4xx`.
+- While tripped, `POST identity/nin/resolve` answers `503` with code
+  `NIN_PROVIDER_UNAVAILABLE` and detail "The NIN service is not answering
+  right now. Please try again in a minute." without calling the service. The
+  refusal is audited (`identity.nin.verify`, outcome `failure`). A replay of
+  an earlier request is still answered.
+- After 60 seconds one check is let through. While that check waits for its
+  answer, other checks are refused as above (so a busy desk does not send a
+  burst of charged checks to a service that may still be down). Success
+  closes the breaker and clears the count; a failure trips it again; a `4xx`
+  leaves it as it was and lets the next check through. A check with no
+  answer after 60 seconds no longer holds the place.
+- NIN checks switched off (`NIN_PROVIDER_MODE=unavailable`) are a setting,
+  not an outage: the breaker is not touched and no warning is logged. The
+  desk gets `503` `NIN_PROVIDER_UNAVAILABLE`, "NIN verification is not
+  configured", every time (not "try again in a minute"), audited as below.
+  Deferred staging is unchanged (`NIN_PROVIDER_DEFERRED`).
+
+Every failed `identity.nin.verify` audit row says whether the NIN was sent
+to the NIN service. Details are `{ provider, errorType, code, providerCalled }`:
+`providerCalled: true` when the service was asked and the check failed;
+`providerCalled: false` when nothing was sent (deferred, switched off, or the
+breaker refused it, which also adds `breaker: "open"`). `code` is the problem
+code (for example `NIN_PROVIDER_UNAVAILABLE`). No NIN is ever written.
+
+Every counted failure writes one warning log line with
+`event: "identity.nin_provider.unavailable"`, the provider name, the error
+code, the HTTP status, the failures in the last 5 minutes, the breaker state
+and the correlation id. It never holds a NIN, a name or a date of birth.
+
+### Screen change (Akos's frontend branch)
+
+Show `ninStatus` as "NIN Verified" or "NIN Not Verified" on the patient
+lookup and registration-case screens. When `nin.available` is `false`, tell
+the desk the NIN service is not answering and to try again in a minute. Do
+not offer registration without a NIN until `withoutNin.enabled` is `true`.
+
+### Tests
+
+`services/identity-api/src/identity/nin-status.spec.ts` (verified,
+not_verified and revoked on the lookup and the case answer; breaker trip,
+window, retry, recovery, log event; one check at a time while retrying, with
+two desks at once; checks switched off do not trip it; the audit row says
+whether the NIN was sent; capabilities; no answer contains the word the
+owner ruled out). `nin-deferred-staging.spec.ts` exact bodies updated.
+
+## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
+
+Default agreed in the 18 November plan: the desk sees its own cases, approvers
+see every case at the facility.
+
+```text
+GET /api/v1/identity/registration-cases?view=mine|facility[&status=...][&limit=...][&cursor=...]
+```
+
+- Permission `identity.registration.write`, `X-Facility-Id`, and
+  `X-Purpose-Of-Use` (`direct-care`, `emergency` or `healthcare-operations`,
+  as on `GET registration-cases/:caseId`). `Cache-Control: no-store`.
+- `view=mine` (the default): the cases this member's account started at this
+  facility.
+- `view=facility`: every case at this facility. It also needs
+  `identity.registration.approve`; without it the answer is `403`
+  `REGISTRATION_CASE_LIST_DENIED`, "Only staff who approve registrations can
+  see every case at this facility." (audited, outcome `denied`).
+- `status` (optional): one of `pending_new_identity_approval`,
+  `review_required`, `resolved_existing_identity`, `linked_existing`,
+  `approved_new_identity`, `rejected`, `cancelled`.
+- `limit`: 1 to 100, default 50. `cursor`: the `nextCursor` of the previous
+  page, as given. A cursor that is not one we gave answers `400`
+  `REGISTRATION_CASE_CURSOR_INVALID`, "This page link is not valid. Start
+  again from the first page."
+- Any other query parameter (for example a Health ID) answers `400`. Health
+  IDs are never taken in the URL.
+- Only cases of the facility in `X-Facility-Id` are read, whatever else the
+  member may read; another facility sees nothing.
+
+Answer, newest first:
+
+```json
+{
+  "view": "mine",
+  "cases": [
+    {
+      "caseId": "uuid",
+      "status": "approved_new_identity",
+      "version": 2,
+      "candidateCount": 0,
+      "contactRecorded": true,
+      "ninStatus": "verified",
+      "patient": { "patientId": "uuid", "hid": "HID-QX7K2M" },
+      "fullName": "Ada Fictional",
+      "dateOfBirth": "1991-04-05",
+      "createdAt": "2026-11-18T10:00:58.000Z",
+      "updatedAt": "2026-11-18T10:05:58.000Z",
+      "createdByMe": true
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+The item has the same fields as `GET registration-cases/:caseId` (with
+`ninStatus` from ID-0; `patient` only once the case points at a patient), plus
+`fullName`, `dateOfBirth`, `createdAt`, `updatedAt` and `createdByMe`. No NIN
+digits are read or returned (not even the last four), and candidates are not
+listed; open one case for them.
+
+Audit: one `identity.registration-case.list` row per answer, outcome
+`success`, details `{ view, status, page: "first" | "next", count, caseIds,
+patientIds }` (the patients the page shows). No names or dates of birth are
+written to the audit row.
+
+The facility view uses `registration_cases_facility_status_idx`
+(facility, status, created_at desc) when filtered by status; the mine view
+filters on the facility and the creating account.
+
+### Screen change (Akos's frontend branch)
+
+A "My registrations" list for the desk (`view=mine`) and an "All
+registrations" list for approvers (`view=facility`), with "NIN Verified" /
+"NIN Not Verified" from `ninStatus`, and "Load more" while `nextCursor` is
+not null. Opening a row calls `GET registration-cases/:caseId`.
+
+### Tests
+
+`services/identity-api/src/identity/registration-case-list.spec.ts`: mine and
+facility views, another facility sees nothing, the refusal and its audit row,
+the success audit row, no NIN digits in the answer or the query, paging and
+bad cursors, and query parameters (a Health ID is refused). Those run on a
+fake database; one test checks that the Postgres suite below runs the read
+the service sends, word for word.
+
+`services/ehr-api/test/database/registration-case-list.integration.sql`
+(rollback-only, run with the other ported suites by
+`scripts/run-container-database-acceptance.sh`): the exact read, under
+row-level security as `hid_identity_api_runtime` in Identity's transaction
+context. A registration member of facility B reads none of facility A's
+cases (also when naming facility A); a member without
+`identity.registration.write` reads nothing; a platform reviewer, whom
+row-level security lets read every facility, still gets only A's cases in
+A's list; `view=mine` shows only the member's own cases; the status filter;
+paging one case at a time through two cases with the same `created_at`, with
+the cursor's text in Africa/Lagos time; and `ninStatus` for a case with no
+patient yet (verified), a patient with a checked NIN (verified), a patient
+whose NIN was revoked (not verified) and one with none (not verified).
+
+`services/identity-api/src/identity/registration-case-list.http.spec.ts`
+(supertest, the real security guard, audit interceptor and the global
+validation pipe as `main.ts` sets it): `200` with `Cache-Control: no-store`
+and the audit row; `403 PERMISSION_DENIED` without
+`identity.registration.write`; `400 VALIDATION_FAILED` for
+`?hid=HID-QX7K2M`, with nothing read and the Health ID written nowhere;
+`400 PURPOSE_OF_USE_REQUIRED` without `X-Purpose-Of-Use`.
+
+## SX-5. My staff profile, read only (no migration)
+
+Akos P1-8, read part. The account menu's "My profile" for staff. Changing a
+password while signed in (SX-6), preferences and home shortcuts (SX-7) come
+later; until then `canChange` answers `false` for each, and the screen shows
+no edit control.
+
+| Route (under `/api/v1`) | Who | Answer |
+| --- | --- | --- |
+| `GET /identity/me/staff-profile` | Any staff session, by bearer or cookie, including a platform administrator with no facility membership. `X-Facility-ID` is optional; when sent it must be one of the caller's own facilities and only marks that facility as current. No permission is needed: it reads the caller's own account. | `200` below. A patient session: `403 PATIENT_SCOPE_DENIED`. An outreach account-only session (no facility membership): `403 NO_ACTIVE_FACILITY_MEMBERSHIP`. An `X-Facility-ID` that is not one of the caller's own facilities: `403 FACILITY_ACCESS_DENIED`. An account that is no longer active: `401 AUTHENTICATION_REQUIRED`. |
+
+```json
+{
+  "accountId": "uuid",
+  "name": "Ada Fictional",
+  "email": "ada@example.test",
+  "signIn": { "method": "password", "hasPassword": true, "passwordChangedAt": "2026-10-01T09:00:00.000Z" },
+  "licence": { "numberHint": "4567" },
+  "memberSince": "2026-01-05T08:00:00.000Z",
+  "currentFacilityId": "uuid or null",
+  "facilities": [
+    { "id": "uuid", "membershipId": "uuid", "name": "Fictional Clinic", "roles": ["doctor"], "isPrimary": true, "isCurrent": true }
+  ],
+  "products": ["ehr", "migrate"],
+  "canChange": { "name": false, "password": false, "preferences": false }
+}
+```
+
+- `name` is the account's display name, else the staff record's full name.
+- `signIn.method` is `password` or `single_sign_on` (how this session was
+  signed in). `hasPassword` is `false` for a login that has never set one
+  (Google only); `passwordChangedAt` is then `null`.
+- `licence` is `null` when no licence number is recorded, or when the
+  recorded one has no letter or digit (for example `--`), so `numberHint` is
+  never `null`. Only the last four letters or digits are answered (the same
+  rule as `identity.licence_number_hint`), never the full number.
+- `facilities` and `products` are the session's own (every active
+  membership this site admits, section 53), so the profile never shows a
+  facility the session itself cannot use.
+- The read is by the session's account id and subject together, active
+  accounts only. The password hash is never selected.
+- `currentFacilityId` is `null`, and every `isCurrent` is `false`, when no
+  `X-Facility-ID` is sent.
+- Audited on success and on refusal or failure (one row each time) as
+  `auth.staff-profile.read`, resource `session`, at the `X-Facility-ID`
+  facility when one is sent and with no facility otherwise; outcome
+  `success`, `denied` (401 or 403) or `failure`. It is not audited as an
+  `api.` request row: such a staff row needs a facility, and this route must
+  answer without one. No patient is read.
+
+Screen change (Akos frontend branch): the account menu gains "My profile",
+which shows these fields; the licence is shown as "Licence number ending
+4567".
+
+## SX-9. Saved lists: this facility's OCR jobs and staff names (no migration)
+
+Akos P1-10. OCR jobs no longer disappear when the page is left: the Migrate
+desk reads this facility's jobs, newest first, a page at a time, and shows
+who started each one by name. (The registration-case list is SX-10, lane A;
+it uses the same names route.)
+
+| Route (under `/api/v1`) | Who | Answer |
+| --- | --- | --- |
+| `GET /ocr/job-list[?status=<status>][&mine=true][&limit=<1-50>][&cursor=<nextCursor>]` | Staff with `ocr.job.read` at the `X-Facility-ID` facility (doctor, clinician, nurse, lab, admin). Purpose is always `healthcare-operations`, whatever `X-Purpose-Of-Use` says. | `200 { items, nextCursor }` below. No `X-Facility-ID`: `400 FACILITY_REQUIRED`. A facility the caller is not active at: `403 FACILITY_ACCESS_DENIED`. No `ocr.job.read`: `403 PERMISSION_DENIED`. Any other query key, a status that does not exist, `mine` other than `true`, a limit outside 1-50: `400 VALIDATION_FAILED`. A cursor this route did not make: `400 OCR_JOB_LIST_CURSOR_INVALID`, "This page of the list can no longer be opened. Start the list again." |
+| `GET /identity/facility-staff-names[?membershipIds=<id>,<id>,…]` | Any staff member active at the `X-Facility-ID` facility. No permission beyond membership. | `200 { facilityId, staff, complete }` below. No `X-Facility-ID`: `400 FACILITY_REQUIRED`. A facility the caller is not active at: `403 FACILITY_ACCESS_DENIED`. A patient session: `403 PATIENT_SCOPE_DENIED`. More than 100 ids, or anything but comma-separated UUIDs: `400 VALIDATION_FAILED`. |
+
+`status` is one of `queued`, `processing`, `extracted`,
+`awaiting_validation`, `validated`, `rejected`, `failed`, `cancelled` (the
+`ocr.jobs` status check as 0016 left it); an item's `status` is always one of
+these. `mine=true` lists
+only the jobs the caller started at this facility. `limit` defaults to 25.
+
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "documentId": "uuid",
+      "status": "awaiting_validation",
+      "createdAt": "2026-11-18T10:00:00.123Z",
+      "createdByMembershipId": "uuid",
+      "createdByMe": false,
+      "attemptCount": 1,
+      "maxAttempts": 3,
+      "completedAt": null,
+      "failedAt": null,
+      "failureCode": null
+    }
+  ],
+  "nextCursor": "opaque string, or null on the last page"
+}
+```
+
+- Only this facility's jobs are read: the query filters on the request's
+  facility, and row-level security on `ocr.jobs` (0013) allows only that
+  facility as well. Another facility's jobs are never listed.
+- No patient field is answered and no patient or document table is read.
+  A job's patient is shown only when the job is opened with
+  `GET /ocr/jobs/:jobId`, which checks access to that patient as today.
+  No Health ID is ever accepted in this URL.
+- `failureCode` is the stored code only (for example `PROVIDER_TIMEOUT`); the
+  stored free-text summary is not answered.
+- Paging is by `(createdAt, id)`, newest first, kept to the microsecond, so a
+  page never repeats or skips a job. Pass `nextCursor` back as `cursor` with
+  the same filters.
+- Each answer writes one audit row, `ocr.job.list` (resource
+  `ocr-job-list`), in the same transaction as the read (an ordinary
+  READ COMMITTED transaction, not a read-only one: PostgreSQL refuses an
+  insert in a read-only transaction), with the count, the job ids shown, the
+  filters and whether it was the first page; if that row cannot be written
+  nothing is answered. The route changes no job. The request itself is
+  audited as `api.ocr.job.list.request`, on success and failure, with
+  purpose `healthcare-operations` whatever `X-Purpose-Of-Use` or a `purpose`
+  query key says (a `purpose` key is still refused as an unknown key).
+
+```json
+{
+  "facilityId": "uuid",
+  "staff": [
+    { "membershipId": "uuid", "name": "Bola Fictional", "current": true },
+    { "membershipId": "uuid", "name": null, "current": false }
+  ],
+  "complete": true
+}
+```
+
+- The facility is the request's own, never one the caller names.
+- `staff` holds the facility's members past and present, current members
+  first, then by name. `current` is `false` once the membership, the staff
+  record or the login has ended. `name` is `null` for a login that was
+  deleted; the screen shows "Former staff member".
+- Only names are answered: no email, role, licence or account id.
+- Without `membershipIds`, at most 500 names; `complete` is `false` when
+  there are more, and the screen then asks for the ids on its page with
+  `membershipIds`.
+- Audited on success and refusal as `api.identity.facility-staff-names.read`,
+  with purpose `healthcare-operations` (the purpose it always reads under)
+  whatever `X-Purpose-Of-Use` says.
+
+Screen change (Akos frontend branch): the Migrate desk gains a "Documents
+read here" list (status filter, "Only mine", "Load more"), showing "Started
+by <name>" from the names route; a row opens the job as today.
+
+## ORD-3. Own pharmacy and laboratory progress on prescriptions and lab requests (wave 1, no migration)
+
+Akos items N-1b and N-8 (build plan of 18 November 2026, lane D). A
+clinician sees, on each prescription and lab request, where it is in this
+facility's own pharmacy or laboratory, for example "Dispensed 11:05". No
+migration, no new setting and no new secret: the internal calls use the
+ehr-api to pharmacy-api and ehr-api to lab-api workload identity that
+already exists (`PHARMACY_*` and `LAB_*` settings in ehr-api).
+
+### Internal routes (ehr-api only)
+
+`POST /api/v1/pharmacy/work-items/progress` and
+`POST /api/v1/lab/work-items/progress`. Read-only: they change nothing.
+Internal caller `ehr-api` only (`x-hid-internal-caller` plus the service
+token or workload JWT, as `accept-ehr-prescription` and `accept-ehr-order`),
+sent with the clinician's own bearer token or cookie, `X-Facility-Id` and
+`X-Purpose-Of-Use` (`direct-care` or `emergency`). Permission:
+`ehr.prescription.read` (pharmacy) and `ehr.lab-request.read` (lab), the
+clinician's EHR permissions, not a pharmacy or lab one. The read depends on
+the clinician's own consent grant (row-level security and Identity's
+decision), never on a pharmacist's or laboratory member's grant. Because the
+browser request behind them is a read, the guard does not ask Identity for
+the browser-write (Origin and CSRF) check of a forwarded cookie on these two
+routes only (`ReadOnlyPost`), and the patient check
+(`service/authorization/check`, scope `read_records`) reports the browser
+method as `GET` (`X-HID-Original-Method`), not the POST of the internal
+call: the website sends no CSRF token on a read, so a reported POST would be
+refused. Answer `200`, `Cache-Control: no-store`.
+
+Request (ids only, in the body; never a Health ID, never in the URL):
+
+| Field | Pharmacy | Lab |
+| --- | --- | --- |
+| `patientId` | the patient's UUID | the patient's UUID |
+| ids | `sourceEhrPrescriptionIds`: 1-100 distinct UUIDs | `sourceEhrOrderIds`: 1-100 distinct UUIDs |
+
+Any other field is refused (`400 VALIDATION_FAILED`).
+
+Answer: `{ "items": [...] }`, one item per id asked, in the order asked.
+
+Pharmacy item: `sourceEhrPrescriptionId`, `status`, `receivedAt`,
+`dispensedAt`, `reversedAt` (ISO times or `null`).
+
+| `status` | Meaning |
+| --- | --- |
+| `not_received` | no work item here that the clinician may read |
+| `received` | the pharmacy has it and has not dispensed it |
+| `dispensed` | dispensed at `dispensedAt` |
+| `dispensing_reversed` | dispensed, then the dispensing was reversed at `reversedAt` |
+
+Lab item: `sourceEhrOrderId`, `status`, `receivedAt`, `collectedAt`
+(the first sample taken), `lastResultAt` (the latest released result).
+
+| `status` | Meaning |
+| --- | --- |
+| `not_received` | no work item here that the clinician may read |
+| `received` | the laboratory has it; no sample taken yet |
+| `sample_collected` | a sample was taken (collected or received; not rejected, cancelled or entered in error) |
+| `some_results_ready` | some of its tests have a released result |
+| `results_ready` | every test it asks for has a released result |
+
+A result counts only while its current version is released and not marked
+entered in error (the laboratory work list's rule). Only this facility's
+own work is read: work on an order route to another facility is left out
+(its progress is on the EHR item's `orderRoute`).
+
+Refusals: `401` without the internal caller proof; `403 PERMISSION_DENIED`
+without the EHR read permission; `403 PHARMACY_ACCESS_DENIED` or
+`403 LAB_WORK_ITEM_ACCESS_DENIED` when Identity refuses the patient read,
+or Identity's own `403` passed on (both audited with outcome `denied`); `400`
+for a bad body or purpose.
+
+Runtime proof: `services/ehr-api/scripts/verify-order-routes-runtime.mjs`
+step 10b signs a doctor in with the cookie, reads through ehr-api a
+prescription dispensed by the hospital's own pharmacist (`dispensed`, with
+the dispensing's time) and a lab request with results released by its own
+laboratory (`results_ready`), each under the doctor's own grant only; a
+routed prescription and lab request stay `not_received`; a doctor without a
+grant gets `403` from ehr-api, pharmacy-api and lab-api, and the denials are
+audited with the patient.
+
+Audit: every lookup writes one row naming the patient,
+`pharmacy.work-item.progress.read` or `lab.work-item.progress.read`
+(resource `*-work-item-collection`, the facility), with `requestedCount`,
+`foundCount`, the work item ids found and `breakGlass`, in the read's
+transaction. The Lab request row `api.lab.work-item.progress.request` is
+written as for other Lab routes.
+
+### ehr-api answers
+
+`GET .../encounters/:encounterId/prescriptions` and
+`GET .../prescriptions/:prescriptionId`: each prescription gains
+`ownProgress` with the pharmacy fields above (`status`, `receivedAt`,
+`dispensedAt`, `reversedAt`).
+
+`GET .../encounters/:encounterId/lab-requests` and
+`GET .../lab-requests/:requestId`: each lab request gains `ownProgress` with
+the lab fields above (`status`, `receivedAt`, `collectedAt`, `lastResultAt`).
+
+`ownProgress.status` is also:
+- `not_received` for a draft (never sent, so not asked about);
+- `unknown` (all times `null`) when the pharmacy or laboratory could not be
+  asked or answered something unexpected: down, slower than 3 seconds,
+  refused, or a malformed answer. The EHR answer itself never fails because
+  of it.
+
+ehr-api asks once per page (at most 100 ids per call), after its own read
+and audit, with the clinician's own credentials. Nothing else in these
+answers changes.
+
+Screen change (Akos frontend branch): show `ownProgress` on each order row,
+for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
+"Results ready 11:05"; show "Progress not available right now" for
+`unknown`, and nothing for `not_received` on a draft.
+
+## ORD-10 phase 1. Same-medicine warning when prescribing (wave 1, no migration)
+
+Akos items N-9c and P0-5 (build plan of 18 November 2026, lane D). A
+warning, never a block. Phase 2 (with Release B) adds medicines of the same
+class (ATC).
+
+### The check before saving
+
+`POST /api/v1/ehr/patients/:patientId/duplicate-medicine-check`, direct care
+only, permission `ehr.prescription.write` (as the allergy check). Read-only;
+answer `200`, `Cache-Control: no-store`.
+
+Request: `medicationDisplay` (1-500 characters), optional
+`medicationCodeSystem` (up to 255), `medicationCode` (up to 100) and
+`excludePrescriptionId` (a UUID: the prescription being changed or
+activated, left out). Any other field is refused.
+
+Answer:
+
+| Field | Value |
+| --- | --- |
+| `checked` | `true` when the check ran |
+| `matches` | the current prescriptions of the same medicine, newest first |
+| `message` | plain words for the form, or `null` when there are no matches |
+
+Each match: `prescriptionId`, `encounterId`, `medicationDisplay`, `status`
+(`draft`, `active` or `on_hold`), `startsOn`, `endsOn` (`YYYY-MM-DD` or
+`null`), `createdAt`, `matchedBy` (`code` or `name`).
+
+Messages: "This patient already has a current prescription for this
+medicine. Check it before you continue." or "This patient already has N
+current prescriptions for this medicine. Check them before you continue."
+
+What is compared: only this patient's prescriptions at this facility that
+the clinician may read under consent, and only current ones (draft, active
+or on hold, not ended before today in Lagos), at most 500, newest first.
+They match when the codes are the same (and the code systems are the same,
+or one is missing), or when the two name a medicine in common once
+numbers, units, dose form and anything in brackets are set aside
+(`matchedBy: name`). A strength ends the name of its medicine and a
+separator (`/`, `+`, `&`, `,`, "and", "with", "plus") starts the next, so a
+combination product names each of its medicines. A number is set aside on
+its own: the word after it is kept, and a name such as B12 or D3 keeps its
+digits. Examples: "Amoxicillin 500 mg capsules" and "amoxicillin 250mg"
+match; "Codeine 30 paracetamol 500" and "Paracetamol 1 g" match (both hold
+paracetamol); "Amoxicillin" and "Ampicillin" do not; "Vitamin B12 1000 mcg"
+and "Vitamin B6 50mg" do not; "Insulin 70/30 mixtard" and "Insulin" do not
+(words after the last strength with no separator before them belong to the
+medicine before it).
+
+Refusals: `403 CONSENT_REQUIRED` when Identity refuses the read, or when the
+database does not allow this patient's records to be read here (so "no
+match" never stands for "could not read"); `400` for a bad body or purpose.
+
+Audit: `ehr.prescription.duplicate-check` naming the patient, with
+`comparedCount` and `matchCount` only, never the medicine.
+
+### On a new prescription
+
+`POST .../encounters/:encounterId/prescriptions` (unchanged request and
+status) gains `duplicateMedicines` with the same shape, compared with the
+patient's other current prescriptions (the new one left out). It never
+fails the create: when the check cannot run, `duplicateMedicines` is
+`{ "checked": false, "matches": [], "message": null }`. A prescription
+created already cancelled, completed or entered in error gets
+`{ "checked": true, "matches": [], "message": null }` without a check.
+
+Screen change (Akos frontend branch): run the check when a medicine is
+chosen and show `message` with the matches (medicine, status, dates) above
+Save; Save stays enabled. After Save, show `duplicateMedicines.message` if
+present.

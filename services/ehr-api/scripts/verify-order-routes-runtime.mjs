@@ -51,6 +51,9 @@
 // the limits (20 a member, 50 a facility in 24 hours). Owner SQL there only
 // ages routes, writes and then removes synthetic endings for the limits, and
 // reads what the database holds.
+// ORD-3 (step 10b): the doctor, signed in with the cookie, reads through ehr-api where each order is in the
+// hospital's own pharmacy and laboratory (dispensed with its time, results ready) under the doctor's own grant
+// only; routed orders stay not received; a doctor without a grant is refused by all three services, audited.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -1360,6 +1363,93 @@ try {
     pharmacistPull: 201, dispensing: 201, routedPull: 'PRESCRIPTION_ROUTED', routedSendToLab: 'LAB_REQUEST_ROUTED',
     routedUpdate: { labHandoff: 'not_sent ORDER_ROUTED', route: 'withdrawn (order_changed)' } };
   step('same-facility paths: hand-off, Lab chain and release, pharmacist pull and dispensing as before; routed orders refused');
+
+  // ── 10b. ORD-3: where each order is in the hospital's own pharmacy and laboratory ──
+  // The doctor's browser session: the cookie only, a GET, no Origin and no CSRF token, as the website sends a read.
+  // ehr-api asks pharmacy-api and lab-api with that cookie; they ask Identity, reporting the read as a GET. The only
+  // grant in play is the doctor's own: the progress reads pass pharmacy.work_item_allows, lab and pharmacy
+  // context_allows and the row-level security of dispensings, accessions, specimens, results, releases and
+  // invalidations on it, never on the pharmacist's or the laboratory members' grants.
+  // One correlation id for the doctor's reads here and one for the doctor without a grant, so their audit rows are these.
+  const progressRead = { headers: { 'x-correlation-id': `verifier-own-progress-${randomUUID()}` } };
+  const progressRefused = { headers: { 'x-correlation-id': `verifier-own-progress-refused-${randomUUID()}` } };
+  const ownDispensedAt = (await one(`select d.dispensed_at from pharmacy.dispensings d where d.work_item_id=$1`,
+    [ownRxItem.id])).dispensed_at.toISOString();
+  const rx7Progress = expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions/${rx7.id}`, undefined, progressRead),
+    200, 'rx7 with progress')
+    .ownProgress;
+  assert.equal(rx7Progress?.status, 'dispensed', `own pharmacy progress of a dispensed prescription, read with the doctor's `
+    + `cookie: ${JSON.stringify(rx7Progress)}; ${(childLogs.get('ehr-api') ?? []).join('').split('\n')
+      .filter(line => line.includes('progress is unknown')).slice(-2).join(' ')}`);
+  assert.equal(rx7Progress.dispensedAt, ownDispensedAt, 'dispensedAt is the dispensing\'s time');
+  assert.equal(typeof rx7Progress.receivedAt, 'string');
+  assert.equal(rx7Progress.reversedAt, null);
+  // A prescription routed to (and dispensed at) another pharmacy is not this hospital's own work.
+  const rx2Progress = expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions/${rx2.id}`, undefined, progressRead),
+    200, 'rx2 with progress')
+    .ownProgress;
+  assert.deepEqual(rx2Progress, { status: 'not_received', receivedAt: null, dispensedAt: null, reversedAt: null },
+    'a routed prescription in the hospital\'s own pharmacy');
+  const lr7Progress = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests/${lr7.id}`, undefined, progressRead),
+    200, 'lr7 with progress')
+    .ownProgress;
+  assert.equal(lr7Progress?.status, 'results_ready', `own laboratory progress: ${JSON.stringify(lr7Progress)}`);
+  assert.equal(typeof lr7Progress.collectedAt, 'string');
+  assert.equal(typeof lr7Progress.lastResultAt, 'string');
+  const lr1Progress = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests/${lr1.id}`, undefined, progressRead),
+    200, 'lr1 with progress')
+    .ownProgress;
+  assert.equal(lr1Progress?.status, 'not_received', `a routed lab request in the hospital's own laboratory: ${
+    JSON.stringify(lr1Progress)}`);
+  // The lists carry it on every item, and say it for rx7 the same way.
+  const rxListed = expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions`, undefined, progressRead),
+    200, 'prescriptions with progress').items;
+  assert(rxListed.every(item => typeof item.ownProgress?.status === 'string'), 'a listed prescription without ownProgress');
+  assert(!rxListed.some(item => item.ownProgress.status === 'unknown'), 'a listed prescription\'s progress is unknown');
+  const rx7Listed = rxListed.find(item => item.id === rx7.id);
+  if (rx7Listed) assert.deepEqual(rx7Listed.ownProgress, rx7Progress);
+  const lrListed = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests`, undefined, progressRead),
+    200, 'lab requests with progress').items;
+  assert(lrListed.every(item => typeof item.ownProgress?.status === 'string'), 'a listed lab request without ownProgress');
+  assert(!lrListed.some(item => item.ownProgress.status === 'unknown'), 'a listed lab request\'s progress is unknown');
+  // Each lookup is audited with the patient.
+  const progressAudit = await all(`select action, outcome, patient_id from audit.events
+    where action in ('pharmacy.work-item.progress.read', 'lab.work-item.progress.read') and actor_account_id=$1
+      and correlation_id=$2
+    group by action, outcome, patient_id order by action`, [doctor.accountId, progressRead.headers['x-correlation-id']]);
+  assert.deepEqual(progressAudit, [
+    { action: 'lab.work-item.progress.read', outcome: 'success', patient_id: patient.id },
+    { action: 'pharmacy.work-item.progress.read', outcome: 'success', patient_id: patient.id }]);
+  // A doctor at the hospital without a grant: ehr-api refuses the read, and pharmacy-api and lab-api, asked as
+  // ehr-api with that doctor's cookie, refuse it too (403) and audit the denial.
+  expectProblem(await ehrCall(secondDoctor, 'GET', `${enc}/prescriptions/${rx7.id}`, undefined, progressRefused), 403,
+    'CONSENT_REQUIRED');
+  const asEhr = (base, path, token, body) => http(base, 'POST', path, { cookie: secondDoctor.cookie,
+    facility: hospital.facilityId, purpose: 'direct-care', body,
+    headers: { ...progressRefused.headers, 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': token } });
+  const noGrantPharmacy = await asEhr(pharmacy, '/pharmacy/work-items/progress', tokens.pharmacy,
+    { patientId: patient.id, sourceEhrPrescriptionIds: [rx7.id] });
+  assert.equal(noGrantPharmacy.status, 403, `pharmacy progress without a grant: ${answerOf(noGrantPharmacy)}`);
+  assert(!JSON.stringify(noGrantPharmacy.body ?? '').includes('dispensed'), 'progress in the pharmacy refusal');
+  const noGrantLab = await asEhr(lab, '/lab/work-items/progress', tokens.lab,
+    { patientId: patient.id, sourceEhrOrderIds: [lr7.id] });
+  assert.equal(noGrantLab.status, 403, `lab progress without a grant: ${answerOf(noGrantLab)}`);
+  assert(!JSON.stringify(noGrantLab.body ?? '').includes('results_ready'), 'progress in the lab refusal');
+  const deniedAudit = await all(`select action, outcome, patient_id from audit.events
+    where action in ('pharmacy.work-item.progress.read', 'lab.work-item.progress.read') and actor_account_id=$1
+      and correlation_id=$2
+    group by action, outcome, patient_id order by action`,
+  [secondDoctor.accountId, progressRefused.headers['x-correlation-id']]);
+  assert.deepEqual(deniedAudit, [
+    { action: 'lab.work-item.progress.read', outcome: 'denied', patient_id: patient.id },
+    { action: 'pharmacy.work-item.progress.read', outcome: 'denied', patient_id: patient.id }]);
+  evidence.ownProgress = { transport: 'cookie, GET, no CSRF token',
+    prescription: { status: rx7Progress.status, dispensedAt: 'the dispensing\'s time' },
+    routedPrescription: rx2Progress.status, labRequest: lr7Progress.status, routedLabRequest: lr1Progress.status,
+    withoutGrant: { ehr: 'CONSENT_REQUIRED', pharmacy: noGrantPharmacy.status, lab: noGrantLab.status },
+    audit: { reads: 'success, with the patient', withoutGrant: 'denied, with the patient' } };
+  step('ORD-3: the doctor\'s cookie read shows own pharmacy dispensed (with its time) and own lab results ready; '
+    + 'routed orders not received; without a grant 403 and audited');
 
   // ── 11. The switches ──
   const rx4 = await newPrescription('active');

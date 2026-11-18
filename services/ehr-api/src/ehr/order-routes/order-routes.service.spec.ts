@@ -33,8 +33,14 @@ const databaseError = (code: string, message: string) => Object.assign(new Error
  */
 function harness(answers: Record<string, unknown[] | Error> = {}) {
   const statements: Array<{ sql: string; values: unknown[] }> = [];
+  // EHR-C8a: the visit guard's read, kept apart so the other tests see only the order statements.
+  const guards: Array<{ sql: string; values: unknown[]; at: number }> = [];
   const client = {
     query: jest.fn(async (sql: string, values: unknown[] = []) => {
+      if (/^select status from ehr\.encounters\b/.test(sql)) {
+        guards.push({ sql, values, at: statements.length });
+        return { rows: (answers['visit'] as unknown[] | undefined) ?? [{ status: 'in_progress' }] };
+      }
       statements.push({ sql, values });
       const name = /from\s+([a-z_]+\.[a-z_]+)\(/i.exec(sql)?.[1] ?? sql;
       // 0117: the allergy check's read-access question; the facility may read unless a test says otherwise.
@@ -69,12 +75,31 @@ function harness(answers: Record<string, unknown[] | Error> = {}) {
   };
   const identity = { authorizeSelf: jest.fn(), authorize: jest.fn() };
   const service = new OrderRoutesService(repository as never, database as never, audit as never, identity as never);
-  return { service, statements, audits, repository, database, identity, client };
+  return { service, statements, guards, audits, repository, database, identity, client };
 }
 
 const sendRow = { route_id: routeId, reference: '123E4567', state: 'sent', row_version: '1',
   created_at: new Date('2026-10-25T09:00:00.000Z'), respond_by: new Date('2026-11-01T09:00:00.000Z'),
   receiving_facility_name: 'Receiving Laboratory', order_row_version: '2', order_status: 'active', replayed: false };
+
+describe('OrderRoutesService send: a visit entered in error (EHR-C8a)', () => {
+  it.each(['prescription', 'lab_request'] as const)('checks the visit, locked FOR SHARE, before anything else when sending a %s', async (kind) => {
+    const { service, statements, guards } = harness({ 'ehr.send_order_route': [sendRow] });
+    const input = kind === 'prescription' ? { ...sendInput, attestationTextVersion: 'order-route-prescription-attestation-v1' } : sendInput;
+    await service.send(context(), kind, patientId, encounterId, requestId, input, key).catch(() => undefined);
+    expect(guards).toEqual([{ sql: expect.stringMatching(/for share$/), values: [encounterId, patientId, facilityId], at: 0 }]);
+    expect(statements.length).toBeGreaterThan(0);
+  });
+
+  it.each(['prescription', 'lab_request'] as const)('refuses to send a %s from a visit entered in error, and sends nothing', async (kind) => {
+    const { service, statements, guards } = harness({ visit: [{ status: 'entered_in_error' }], 'ehr.send_order_route': [sendRow] });
+    const input = kind === 'prescription' ? { ...sendInput, attestationTextVersion: 'order-route-prescription-attestation-v1' } : sendInput;
+    await expect(service.send(context(), kind, patientId, encounterId, requestId, input, key))
+      .rejects.toMatchObject({ status: 409, code: 'VISIT_ENTERED_IN_ERROR' });
+    expect(guards).toHaveLength(1);
+    expect(statements).toEqual([]);
+  });
+});
 
 describe('OrderRoutesService send (C1)', () => {
   it('sends with the clinician\'s attestation and records it on the send\'s audit row with the patient', async () => {
@@ -176,6 +201,10 @@ describe('OrderRoutesService send of a prescription: the allergy check (0117)', 
     send: Error | null = null, readAllowed = true) {
     const parts = harness();
     parts.client.query.mockImplementation(async (sql: string, values: unknown[] = []) => {
+      if (/^select status from ehr\.encounters\b/.test(sql)) {
+        parts.guards.push({ sql, values, at: parts.statements.length });
+        return { rows: [{ status: 'in_progress' }] };
+      }
       parts.statements.push({ sql, values });
       if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: readAllowed }] };
       if (!readAllowed && /from ehr\.(prescriptions|recorded_allergies|prescription_allergy_acknowledgements)\b|patient_reported_health_profiles/

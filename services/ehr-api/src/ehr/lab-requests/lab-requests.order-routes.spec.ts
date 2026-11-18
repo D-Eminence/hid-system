@@ -105,7 +105,9 @@ describe('LabRequestsService with routes to other facilities (P4c)', () => {
     const { service, log } = fake(row(OrderStatus.Active), row(OrderStatus.Active, '2'), [route('sent'), route('withdrawn')]);
     const updated = await service.update(context, patientId, encounterId, requestId,
       { priority: 'stat', expectedRowVersion: 1, changeReason: 'Urgent' } as never);
-    expect(log).toEqual(['tx: select id, encounter_id', 'tx: C4', 'tx: update ehr.lab_requests set', 'tx: C4']);
+    // EHR-C8a: the visit is locked (FOR SHARE) before the request.
+    expect(log).toEqual(['tx: select status from', 'tx: select id, encounter_id', 'tx: C4', 'tx: update ehr.lab_requests set',
+      'tx: C4']);
     expect(updated).toMatchObject({ labHandoff: { state: 'not_sent', code: 'ORDER_ROUTED' },
       orderRoute: { effectiveState: 'withdrawn' } });
   });

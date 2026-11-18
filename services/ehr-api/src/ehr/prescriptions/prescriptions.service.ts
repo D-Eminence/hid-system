@@ -5,6 +5,8 @@ import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import { AcceptPrescriptionForPharmacyDto, OrderStatus, TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
+import { requireVisitOpenForWork } from '../shared/visit-guard';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
@@ -53,6 +55,9 @@ const TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   [OrderStatus.Cancelled]: [],
   [OrderStatus.EnteredInError]: [],
 };
+
+/** EHR-C8a: the only changes allowed on a visit entered in error: stopping the order. */
+const STOPPING: readonly OrderStatus[] = [OrderStatus.OnHold, OrderStatus.Cancelled, OrderStatus.EnteredInError];
 
 @Injectable()
 export class PrescriptionsService {
@@ -147,6 +152,8 @@ export class PrescriptionsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'prescription',
         async () => {
+          // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
           // 0117: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
           // the warning they were shown (its warningToken); without it nothing is written (the whole
           // transaction, idempotency key included, rolls back).
@@ -201,10 +208,28 @@ export class PrescriptionsService {
       context, patientId, 'write_records',
       { action: 'ehr.prescription.update', resourceType: 'prescription', resourceId: prescriptionId },
       async (client) => {
+        // EHR-C8a: on a visit entered in error a prescription can only be put
+        // on hold, cancelled or entered in error; anything else (activate,
+        // resume, complete, edit) is 409 VISIT_ENTERED_IN_ERROR. The visit is
+        // locked before the prescription, as in every order path.
+        if (!STOPPING.includes(input.status as OrderStatus)) {
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
+        }
         const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
         }
+        // FR-1: the first activation of a draft, with no other change, needs no
+        // typed reason; the fixed one is recorded. "First" is checked against
+        // the version history (a resume after a hold is not first). Decided
+        // before the allergy check, whose 409 is unchanged.
+        const firstActivation = input.changeReason === undefined
+          && current.status === OrderStatus.Draft && input.status === OrderStatus.Active
+          && input.frequency === undefined && input.instructions === undefined && input.endsOn === undefined
+          && await neverReachedBefore(client, 'prescriptions', prescriptionId,
+            [OrderStatus.Active, OrderStatus.OnHold, OrderStatus.Completed]);
+        const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason,
+          firstActivation ? 'first_activation' : undefined);
         // 0117: Activate (draft) and Resume (on hold) check the allergies again: one may have been
         // recorded since the prescription was saved. A match already covered by a stored reason for
         // this prescription needs none.
@@ -213,7 +238,7 @@ export class PrescriptionsService {
           ? await checkPrescriptionAllergies(client, context, patientId,
             { display: current.medicationDisplay, code: current.medicationCode }, input.allergyAcknowledgement, current.id)
           : [];
-        await this.repository.setChangeReason(client, input.changeReason);
+        await this.repository.setChangeReason(client, reason);
         const result = await client.query<PrescriptionRow>(
           `update ehr.prescriptions set
              status = coalesce($1, status), frequency = coalesce($2, frequency),
@@ -231,9 +256,10 @@ export class PrescriptionsService {
           const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
             current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement);
           return { value: this.details.project(row), resourceId: prescriptionId,
-            details: { rowVersion: row.rowVersion, ...override } };
+            details: { rowVersion: row.rowVersion, ...reasonDetails, ...override } };
         }
-        return { value: this.details.project(row), resourceId: prescriptionId, details: { rowVersion: row.rowVersion } };
+        return { value: this.details.project(row), resourceId: prescriptionId,
+          details: { rowVersion: row.rowVersion, ...reasonDetails } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
@@ -258,6 +284,8 @@ export class PrescriptionsService {
         details: { expectedPrescriptionVersion: input.expectedRowVersion },
       },
       async (client) => {
+        // EHR-C8a: never sent to the pharmacy from a visit entered in error.
+        await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
         const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
         if (Number(current.rowVersion) !== input.expectedRowVersion) {
           throw new DomainProblem(

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Optional } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
@@ -9,12 +9,15 @@ import { DatabaseService } from '../database/database.service';
 import { CollectedFieldProtector, registrationCaseContactLabel } from './collected-field-protector';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
-import { assertSafeNinVerificationResult } from './nin-verification.provider';
+import { assertSafeNinVerificationResult, NIN_NOT_CONFIGURED_DETAIL } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
+import { NinProviderBreaker } from './nin-provider-breaker';
+import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
 import type { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto';
 import type { LinkRegistrationCaseDto } from './dto/link-registration-case.dto';
 import type { EnrollPatientDto } from './dto/enroll-patient.dto';
 import type { ResolveNinDto } from './dto/resolve-nin.dto';
+import type { ListRegistrationCasesDto, RegistrationCaseListView } from './dto/list-registration-cases.dto';
 
 type RegistrationStatus =
   | 'pending_new_identity_approval'
@@ -33,6 +36,8 @@ interface RegistrationCaseRow extends QueryResultRow {
   resolved_hid_code: string | null;
   candidate_count: string;
   contact_recorded?: boolean;
+  /** ID-0: see CASE_NIN_VERIFIED. */
+  nin_verified?: boolean;
 }
 
 /**
@@ -76,8 +81,46 @@ export interface RegistrationCaseResult {
   candidateCount: number;
   /** 0114: the desk recorded the patient's phone and address (never returned). */
   contactRecorded: boolean;
+  /** ID-0: "NIN Verified" or "NIN Not Verified" on screen; never the stored verification value. */
+  ninStatus: NinStatus;
   candidates?: Array<{ patientId: string; fullName: string; dateOfBirth: string | null }>;
   patient?: { patientId: string; hid: string };
+}
+
+/**
+ * ID-0: the case's NIN was checked, and, once the case points at a patient,
+ * that patient still holds a checked NIN that has not been revoked.
+ */
+const CASE_NIN_VERIFIED = `case
+      when registration.verified_at is null then false
+      when registration.resolved_patient_id is null then true
+      else ${patientHasVerifiedNinSql('registration.resolved_patient_id')}
+    end as nin_verified`;
+
+/** SX-10: one row of the registration-case list (never NIN digits). */
+interface CaseListRow extends RegistrationCaseRow {
+  full_name: string;
+  dob: string;
+  created_at: Date;
+  updated_at: Date;
+  created_at_cursor: string;
+  created_by_me: boolean;
+}
+
+export interface RegistrationCaseListItem extends RegistrationCaseResult {
+  fullName: string;
+  dateOfBirth: string;
+  createdAt: string;
+  updatedAt: string;
+  /** This member started the case. */
+  createdByMe: boolean;
+}
+
+export interface RegistrationCaseList {
+  view: RegistrationCaseListView;
+  cases: RegistrationCaseListItem[];
+  /** Pass as `cursor` for the next page; null on the last page. */
+  nextCursor: string | null;
 }
 
 const CASE_SELECT = `
@@ -89,7 +132,8 @@ const CASE_SELECT = `
     patient.hid_code as resolved_hid_code,
     (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count,
     exists (select 1 from identity.registration_case_contacts contact
-             where contact.registration_case_id = registration.id and contact.erased_at is null) as contact_recorded
+             where contact.registration_case_id = registration.id and contact.erased_at is null) as contact_recorded,
+    ${CASE_NIN_VERIFIED}
   from identity.registration_cases registration
   left join identity.patients patient on patient.id = registration.resolved_patient_id
 `;
@@ -104,13 +148,14 @@ export class NinRegistrationService {
     private readonly protector: NinIdentifierProtector,
     private readonly hidGenerator: HidCodeGenerator,
     @Inject(NIN_VERIFICATION_PROVIDER) private readonly provider: NinVerificationProvider,
+    @Optional() private readonly ninBreaker: NinProviderBreaker = new NinProviderBreaker(),
   ) {}
 
   async resolve(input: ResolveNinDto, idempotencyHeader: string | undefined, context: DataAccessContext): Promise<RegistrationCaseResult> {
     const idempotencyKey = requireIdempotencyKey(idempotencyHeader);
     if (this.provider.name === 'deferred') {
       const error = new DomainProblem(503, 'NIN_PROVIDER_DEFERRED', 'NIN verification is deferred for this staging environment');
-      await this.auditFailure(context, 'identity.nin.verify', error);
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
       throw error;
     }
     // 0114: the desk's phone and address are stored encrypted; without the
@@ -138,7 +183,25 @@ export class NinRegistrationService {
       ...(input.gender ? { gender: input.gender } : {}),
     };
 
+    if (this.provider.name === 'unavailable') {
+      // ID-0: NIN checks are switched off here (NIN_PROVIDER_MODE=unavailable).
+      // That is a setting, not an outage: the breaker is not touched, nothing
+      // is logged as a failure, and the desk keeps the true message
+      // ("NIN verification is not configured"). Nothing is sent anywhere.
+      const error = new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', NIN_NOT_CONFIGURED_DETAIL);
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw error;
+    }
+
     let verification;
+    try {
+      // ID-0: while the NIN service breaker is tripped, no check is sent.
+      this.ninBreaker.assertAvailable();
+    } catch (error) {
+      // The NIN was not sent to the NIN service; the audit row says so.
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, breaker: 'open' });
+      throw error;
+    }
     try {
       verification = await this.provider.verify({
         nin: input.nin,
@@ -147,9 +210,11 @@ export class NinRegistrationService {
       });
       assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
     } catch (error) {
-      await this.auditFailure(context, 'identity.nin.verify', error);
+      this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true });
       throw error;
     }
+    this.ninBreaker.recordSuccess();
     if (!verification.verified) {
       await this.audit.record({
         correlationId: context.correlationId,
@@ -356,6 +421,89 @@ export class NinRegistrationService {
            join identity.patients patient on patient.id = candidate.patient_id
           where candidate.case_id = $1 order by candidate.match_score desc, patient.id limit 50`, [caseId])).rows : [];
       return { ...this.project(row), candidates };
+    });
+  }
+
+  /**
+   * SX-10: the registration cases of this facility, newest first. 'mine' is
+   * the cases this member started; 'facility' is every case here and needs
+   * identity.registration.approve. No NIN digits are read or returned. The
+   * read is audited with the cases and patients shown.
+   */
+  async listCases(input: ListRegistrationCasesDto, context: DataAccessContext): Promise<RegistrationCaseList> {
+    const view: RegistrationCaseListView = input.view ?? 'mine';
+    const limit = input.limit ?? 50;
+    const auditBase = {
+      correlationId: context.correlationId,
+      actorType: 'staff' as const,
+      actorSubject: context.actor.subject,
+      actorAccountId: context.actor.accountId,
+      actorMembershipId: context.membershipId,
+      organizationId: context.actor.facility?.organizationId,
+      facilityId: context.facilityId,
+      action: 'identity.registration-case.list',
+      resourceType: 'registration-case',
+      purposeOfUse: context.purposeOfUse,
+    };
+    if (view === 'facility' && !context.actor.permissions.includes('identity.registration.approve')) {
+      await this.audit.record({ ...auditBase, outcome: 'denied', details: { view } });
+      throw new DomainProblem(403, 'REGISTRATION_CASE_LIST_DENIED',
+        'Only staff who approve registrations can see every case at this facility.');
+    }
+    const cursor = input.cursor === undefined ? null : decodeCaseCursor(input.cursor);
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query<CaseListRow>(
+        `select
+           registration.id::text,
+           registration.status,
+           registration.row_version::text,
+           registration.resolved_patient_id::text,
+           patient.hid_code as resolved_hid_code,
+           (select count(*)::text from identity.registration_case_candidates candidate
+             where candidate.case_id = registration.id) as candidate_count,
+           exists (select 1 from identity.registration_case_contacts contact
+                    where contact.registration_case_id = registration.id and contact.erased_at is null) as contact_recorded,
+           ${CASE_NIN_VERIFIED},
+           registration.full_name,
+           registration.dob::text as dob,
+           registration.created_at,
+           registration.updated_at,
+           registration.created_at::text as created_at_cursor,
+           (registration.created_by_account_id = $2::uuid) as created_by_me
+         from identity.registration_cases registration
+         left join identity.patients patient on patient.id = registration.resolved_patient_id
+        where registration.facility_id = platform.current_facility_id()
+          and ($1::text = 'facility' or registration.created_by_account_id = $2::uuid)
+          and ($3::text is null or registration.status = $3::text)
+          and ($4::timestamptz is null or (registration.created_at, registration.id) < ($4::timestamptz, $5::uuid))
+        order by registration.created_at desc, registration.id desc
+        limit $6`,
+        [view, context.actor.accountId, input.status ?? null, cursor?.createdAt ?? null, cursor?.caseId ?? null, limit + 1],
+      );
+      const rows = result.rows.slice(0, limit);
+      const last = rows[rows.length - 1];
+      const nextCursor = result.rows.length > limit && last ? encodeCaseCursor(last.created_at_cursor, last.id) : null;
+      const cases = rows.map((row): RegistrationCaseListItem => ({
+        ...this.project(row),
+        fullName: row.full_name,
+        dateOfBirth: row.dob,
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+        createdByMe: row.created_by_me === true,
+      }));
+      await this.audit.recordWithClient(client, {
+        ...auditBase,
+        outcome: 'success',
+        details: {
+          view,
+          status: input.status ?? null,
+          page: cursor ? 'next' : 'first',
+          count: cases.length,
+          caseIds: cases.map((item) => item.caseId),
+          patientIds: [...new Set(cases.flatMap((item) => item.patient ? [item.patient.patientId] : []))],
+        },
+      });
+      return { view, cases, nextCursor };
     });
   }
 
@@ -675,6 +823,7 @@ export class NinRegistrationService {
               exists (select 1 from identity.registration_case_contacts contact
                        where contact.registration_case_id = registration.id
                          and contact.erased_at is null) as has_contact,
+              ${CASE_NIN_VERIFIED},
               (select count(*)::text from identity.registration_case_candidates candidate where candidate.case_id = registration.id) as candidate_count
          from identity.registration_cases registration
          left join identity.patients patient on patient.id = registration.resolved_patient_id
@@ -716,6 +865,7 @@ export class NinRegistrationService {
       version: Number(row.row_version),
       candidateCount: Number(row.candidate_count),
       contactRecorded: row.contact_recorded === true,
+      ninStatus: ninStatusOf(row.nin_verified),
       ...(row.resolved_patient_id && row.resolved_hid_code
         ? { patient: { patientId: row.resolved_patient_id, hid: row.resolved_hid_code } }
         : {}),
@@ -741,7 +891,14 @@ export class NinRegistrationService {
     }).then(() => this.project(row));
   }
 
-  private async auditFailure(context: DataAccessContext, action: string, error: unknown) {
+  /**
+   * `extra.providerCalled` (identity.nin.verify only) answers "was this NIN
+   * sent to the NIN service?": false for a refusal before any check was sent
+   * (deferred, switched off, or the breaker is tripped), true when the
+   * service was asked and the check failed.
+   */
+  private async auditFailure(context: DataAccessContext, action: string, error: unknown,
+    extra: { providerCalled?: boolean; breaker?: 'open' } = {}) {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',
@@ -757,6 +914,8 @@ export class NinRegistrationService {
       details: {
         provider: this.provider.name,
         errorType: error instanceof Error ? error.constructor.name : 'UnknownError',
+        ...(error instanceof DomainProblem ? { code: error.code } : {}),
+        ...extra,
       },
     });
   }
@@ -832,6 +991,30 @@ function isConstraintViolation(error: unknown, constraint: string): boolean {
     && error !== null
     && (error as { code?: unknown }).code === '23505'
     && (error as { constraint?: unknown }).constraint === constraint;
+}
+
+const CURSOR_CREATED_AT = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,6})?[+-]\d{2}(:\d{2})?$/;
+const CURSOR_CASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** SX-10: the list position after a case, opaque to callers. */
+export function encodeCaseCursor(createdAt: string, caseId: string): string {
+  return Buffer.from(JSON.stringify([createdAt, caseId]), 'utf8').toString('base64url');
+}
+
+export function decodeCaseCursor(cursor: string): { createdAt: string; caseId: string } {
+  const invalid = () => new DomainProblem(400, 'REGISTRATION_CASE_CURSOR_INVALID',
+    'This page link is not valid. Start again from the first page.');
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw invalid();
+  }
+  if (!Array.isArray(decoded) || decoded.length !== 2) throw invalid();
+  const [createdAt, caseId] = decoded as unknown[];
+  if (typeof createdAt !== 'string' || !CURSOR_CREATED_AT.test(createdAt)
+    || typeof caseId !== 'string' || !CURSOR_CASE_ID.test(caseId)) throw invalid();
+  return { createdAt, caseId };
 }
 
 /** 0114: the desk fields, all present (the DTO refuses a partial set), or null for an old-shape body. */

@@ -66,3 +66,29 @@ describe('Pharmacy forwards the browser request method to Identity', () => {
       'x-csrf-token': 'csrf' });
   });
 });
+
+describe('ORD-3 progress: the clinician\'s read reaches Identity as a GET', () => {
+  // The internal ehr-api call is a POST with the clinician's cookie and no Origin or CSRF token
+  // (the website sends none on its GET to ehr-api). Reported as POST, Identity would apply the
+  // browser-write check and answer 403 CSRF_VALIDATION_FAILED, so ownProgress would always be unknown.
+  it('reports GET, with the cookie and no Origin or CSRF token, for a cookie-only internal POST', async () => {
+    const { PharmacyWorkItemProgressService } = await import('../pharmacy/work-item-progress.service');
+    const query = jest.fn(async () => ({ rows: [] }));
+    const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown) =>
+      operation({ query })) };
+    const audit = { recordWithClient: jest.fn() };
+    const identity = new IdentityService(workloadIdentity as unknown as PharmacyWorkloadIdentityService);
+    const service = new PharmacyWorkItemProgressService(database as never, identity, audit as never);
+    const request = browserRequest('POST', { 'x-hid-internal-caller': 'ehr-api' });
+    const context = requireRequestContext(request as unknown as HidRequest);
+    expect(context.requestMethod).toBe('POST');
+    const answer = await service.read(context, { patientId,
+      sourceEhrPrescriptionIds: ['60000000-0000-4000-8000-000000000001'] });
+    expect(answer.items[0]?.status).toBe('not_received');
+    const headers = sentHeaders(fetchMock);
+    expect(headers).toMatchObject({ 'x-hid-original-method': 'GET', cookie: 'hid_access=opaque; hid_access_csrf=csrf' });
+    expect(headers).not.toHaveProperty('origin');
+    expect(headers).not.toHaveProperty('x-csrf-token');
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toMatchObject({ patientId, scope: 'read_records' });
+  });
+});

@@ -516,9 +516,11 @@ describe('the allergy check without read access to the patient\'s records (0117,
       await expect(service.create(context, patientId, encounterId, { ...amoxicillin, allergyAcknowledgement: acknowledgement },
         'key-12345678')).resolves.toMatchObject({ id: prescriptionId });
       const at = (pattern: RegExp) => calls.findIndex((call) => pattern.test(call.sql));
-      expect(at(/pg_advisory_xact_lock/)).toBe(0);
-      expect(at(/ehr\.context_allows\(/)).toBe(1);
-      expect(at(/from ehr\.recorded_allergies/)).toBe(2);
+      // EHR-C8a: the visit is locked first (FOR SHARE), in every order path, then the allergy lock.
+      expect(at(/^select status from ehr\.encounters[\s\S]*for share$/)).toBe(0);
+      expect(at(/pg_advisory_xact_lock/)).toBe(1);
+      expect(at(/ehr\.context_allows\(/)).toBe(2);
+      expect(at(/from ehr\.recorded_allergies/)).toBe(3);
       expect(at(/insert into ehr\.prescription_allergy_acknowledgements/)).toBeGreaterThan(at(/insert into ehr\.prescriptions/));
     });
 });
