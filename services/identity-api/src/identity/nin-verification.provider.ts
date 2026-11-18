@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
 import type {
+  NinClaimedDemographics,
   NinVerificationProvider,
   NinVerificationRequest,
   NinVerificationResult,
@@ -56,6 +57,47 @@ export function ninNotConfigured(): DomainProblem {
 export function isNinNotConfigured(error: unknown): boolean {
   return error instanceof DomainProblem && error.code === 'NIN_PROVIDER_UNAVAILABLE'
     && error.message === NIN_NOT_CONFIGURED_DETAIL;
+}
+
+/** What the desk sees when the NIN check's switch cannot be read: nothing was sent. */
+export const NIN_CHECK_NOT_STARTED_DETAIL = 'NIN checks cannot be started right now. Please try again in a minute.';
+
+/**
+ * Q108: the refusal for a check that could not be started because its switch
+ * could not be read (for example, a database hiccup). Nothing was sent: not
+ * an outage of the NIN service, so it must not trip the breaker.
+ */
+export function ninCheckNotStarted(): DomainProblem {
+  return new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', NIN_CHECK_NOT_STARTED_DETAIL);
+}
+
+export function isNinCheckNotStarted(error: unknown): boolean {
+  return error instanceof DomainProblem && error.code === 'NIN_PROVIDER_UNAVAILABLE'
+    && error.message === NIN_CHECK_NOT_STARTED_DETAIL;
+}
+
+/**
+ * Q108: the details the desk typed cannot be anyone's: a date of birth that
+ * is not a real date, is in the future or is before 1900, or a name that is
+ * blank, longer than 100 characters or holds a control character (such as a
+ * tab). The same rules `assertSafeNinVerificationResult` applies, so details
+ * that pass here are never refused there as a bad provider answer.
+ */
+export function implausibleClaimedDemographics(demographics: NinClaimedDemographics): boolean {
+  return !plausibleName(demographics.firstName) || !plausibleName(demographics.lastName)
+    || !plausibleBirthDate(demographics.dateOfBirth);
+}
+
+export function plausibleName(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length >= 1 && value.trim().length <= 100
+    && !/[\x00-\x1f\x7f]/.test(value);
+}
+
+export function plausibleBirthDate(value: unknown, now = Date.now()): boolean {
+  if (typeof value !== 'string' || !ISO_DATE.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+    && date.getUTCFullYear() >= 1900 && date.getTime() <= now;
 }
 
 @Injectable()

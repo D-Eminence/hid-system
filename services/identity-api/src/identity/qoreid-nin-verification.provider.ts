@@ -1,12 +1,16 @@
 import { createHmac } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
-import { consumeRateLimit } from '../auth/rate-limit';
+import type { PoolClient } from 'pg';
+import { consumeRateLimit, lockRateLimitBucket, rateLimitBlocked, releaseRateLimit,
+  type RateLimitWindow } from '../auth/rate-limit';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
-import { ninNotConfigured } from './nin-verification.provider';
+import { ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
 import type {
   NinCheckReservation,
+  NinCheckReservationResult,
+  NinCheckSettlement,
   NinClaimedDemographics,
   NinVerificationProvider,
   NinVerificationRequest,
@@ -39,6 +43,19 @@ export const DESK_NIN_CHECK_LIMITS = {
 const CLOSED_GATE_CODES = new Set(['QOREID_DISABLED', 'QOREID_NIN_ONLY_DISABLED', 'INTEGRATION_PAUSED',
   'QOREID_CONFIGURATION_INVALID']);
 
+/**
+ * Q108: how long a claimed desk request counts as still being checked. A
+ * check takes at most about 20 seconds (token, NIN call and one token
+ * refresh at QOREID_TIMEOUT_MS); a claim older than this was left by a
+ * process that stopped, and the request may be sent again.
+ */
+export const DESK_NIN_CHECK_CLAIM_SECONDS = 2 * 60;
+/** Q108: how long a "could not be verified" or mismatch answer is given again for a resend of the same request. */
+export const DESK_NIN_CHECK_ANSWER_SECONDS = 24 * 60 * 60;
+
+const STORED_OUTCOMES = ['no_match', 'name_mismatch'] as const;
+type StoredOutcome = typeof STORED_OUTCOMES[number];
+
 const HOUR_SECONDS = 60 * 60;
 const DAY_SECONDS = 24 * HOUR_SECONDS;
 const PROVIDER_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
@@ -67,32 +84,98 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
     return this.qoreId.isAvailable();
   }
 
-  async reserve(reservation: NinCheckReservation): Promise<void> {
-    const key = otpHmacKey(getEnvironment());
-    const bucket = (domain: string, id: string) =>
-      createHmac('sha256', key).update(`${domain}\u001f${id}`, 'utf8').digest('hex');
-    let limited: boolean;
+  /**
+   * Before any NIN is sent, in one transaction:
+   *
+   * 1. The desk request (facility, account, Idempotency-Key and body digest)
+   *    is claimed. A resend of a request already answered "could not be
+   *    verified" or "does not match" gets that answer again, with no new
+   *    check; a resend while the first is still being checked is refused
+   *    (409). A match is answered by the case it created (the service finds
+   *    it before calling this).
+   * 2. The three request limits are read first and the check refused (429)
+   *    when any is already reached, counting nothing; otherwise the check is
+   *    counted account-hour, account-day, then facility-day, and if one of
+   *    them now refuses, the counts already taken are given back. A refused
+   *    check therefore never fills another desk's facility limit.
+   *
+   * Keyed rows of `auth.otp_rate_limits` hold the claim and the answer (HMAC
+   * buckets: no NIN, no identifier, no name), as 0049's QoreID counters have
+   * no desk operation without a migration.
+   */
+  async reserve(reservation: NinCheckReservation): Promise<NinCheckReservationResult> {
+    const keys = this.keys(reservation);
+    let found: { kind: 'stored'; outcome: StoredOutcome } | { kind: 'in_progress' } | { kind: 'limited' }
+      | { kind: 'reserved' };
     try {
-      limited = await this.database.withSystemTransaction(reservation.correlationId, async (client) => {
-        const accountHour = await consumeRateLimit(client, 'account',
-          bucket('nin-desk-qoreid-account-hour', reservation.accountId),
-          { windowSeconds: HOUR_SECONDS, maxRequests: DESK_NIN_CHECK_LIMITS.accountPerHour });
-        const accountDay = await consumeRateLimit(client, 'account',
-          bucket('nin-desk-qoreid-account-day', reservation.accountId),
-          { windowSeconds: DAY_SECONDS, maxRequests: DESK_NIN_CHECK_LIMITS.accountPerDay });
-        const facilityDay = await consumeRateLimit(client, 'account',
-          bucket('nin-desk-qoreid-facility-day', reservation.facilityId),
-          { windowSeconds: DAY_SECONDS, maxRequests: DESK_NIN_CHECK_LIMITS.facilityPerDay });
-        return accountHour || accountDay || facilityDay;
+      found = await this.database.withSystemTransaction(reservation.correlationId, async (client) => {
+        await lockRateLimitBucket(client, 'account', keys.claim);
+        const stored = await this.storedAnswer(client, keys);
+        if (stored) return { kind: 'stored' as const, outcome: stored };
+        if (await this.claimHeld(client, keys.claim)) return { kind: 'in_progress' as const };
+        if (await this.limitReached(client, keys.limits)) return { kind: 'limited' as const };
+        await client.query(
+          `insert into auth.otp_rate_limits (
+             scope, bucket_hmac, window_started_at, request_count, blocked_until, updated_at
+           ) values ('account', $1, clock_timestamp(), 1, null, clock_timestamp())
+           on conflict (scope, bucket_hmac) do update set
+             window_started_at = clock_timestamp(), request_count = 1, blocked_until = null,
+             updated_at = clock_timestamp()`,
+          [keys.claim],
+        );
+        return { kind: 'reserved' as const };
       });
     } catch {
       // No SQL diagnostics reach the desk or the logs.
       throw new DomainProblem(503, 'NIN_CHECK_LIMIT_UNAVAILABLE',
         'NIN checks cannot be started right now. Please try again in a minute.');
     }
-    if (limited) {
+    if (found.kind === 'stored') return { stored: found.outcome };
+    if (found.kind === 'in_progress') {
+      throw new DomainProblem(409, 'NIN_CHECK_IN_PROGRESS',
+        'This NIN check is already in progress. Please wait for its answer.');
+    }
+    if (found.kind === 'limited') {
       throw new DomainProblem(429, 'NIN_CHECK_LIMIT_REACHED',
         'The limit of NIN checks has been reached for now. Please try again later.');
+    }
+    return {};
+  }
+
+  /**
+   * Records how the reserved check ended. A "could not be verified" or
+   * "does not match" answer is kept for a resend of the same request; when
+   * nothing usable came back (QoreID failed, or the check was never sent)
+   * the claim is let go so the desk can try again. A match keeps the claim:
+   * the case it creates answers a resend. Never throws: a claim that could
+   * not be updated lapses after DESK_NIN_CHECK_CLAIM_SECONDS.
+   */
+  async settle(reservation: NinCheckReservation, settlement: NinCheckSettlement): Promise<void> {
+    if (settlement === 'match') return;
+    const keys = this.keys(reservation);
+    try {
+      await this.database.withSystemTransaction(reservation.correlationId, async (client) => {
+        await lockRateLimitBucket(client, 'account', keys.claim);
+        if (settlement === 'not_answered') {
+          await client.query(
+            `update auth.otp_rate_limits set request_count = 0, updated_at = clock_timestamp()
+              where scope = 'account' and bucket_hmac = $1`,
+            [keys.claim],
+          );
+          return;
+        }
+        await client.query(
+          `insert into auth.otp_rate_limits (
+             scope, bucket_hmac, window_started_at, request_count, blocked_until, updated_at
+           ) values ('account', $1, clock_timestamp(), 1, null, clock_timestamp())
+           on conflict (scope, bucket_hmac) do update set
+             window_started_at = clock_timestamp(), request_count = 1, blocked_until = null,
+             updated_at = clock_timestamp()`,
+          [keys.answers[settlement]],
+        );
+      });
+    } catch {
+      // Nothing to tell the desk: its answer stands. No SQL diagnostics are logged.
     }
   }
 
@@ -104,6 +187,11 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
       if (error instanceof DomainProblem && CLOSED_GATE_CODES.has(error.code)) {
         // Switched off between the gate and the check: nothing was sent.
         throw ninNotConfigured();
+      }
+      if (error instanceof DomainProblem && error.code === 'INTEGRATION_UNAVAILABLE') {
+        // The gate's admin control could not be read (only the gate, which
+        // runs before anything is sent, raises this code): nothing was sent.
+        throw ninCheckNotStarted();
       }
       if (error instanceof DomainProblem && error.code === 'NIN_NOT_VERIFIED') {
         return this.notVerified(request, 'no_match');
@@ -137,6 +225,72 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
       verifiedAt: new Date().toISOString(),
       demographics,
     };
+  }
+
+  /** The keyed buckets of one desk request (HMAC of the facility, account, key and digest; never the raw values). */
+  private keys(reservation: NinCheckReservation) {
+    const key = otpHmacKey(getEnvironment());
+    const bucket = (domain: string, ...parts: string[]) =>
+      createHmac('sha256', key).update([domain, ...parts].join('\u001f'), 'utf8').digest('hex');
+    const request = [reservation.facilityId, reservation.accountId, reservation.idempotencyKey,
+      reservation.requestSha256];
+    const limits: Array<{ bucket: string; window: RateLimitWindow }> = [
+      { bucket: bucket('nin-desk-qoreid-account-hour', reservation.accountId),
+        window: { windowSeconds: HOUR_SECONDS, maxRequests: DESK_NIN_CHECK_LIMITS.accountPerHour } },
+      { bucket: bucket('nin-desk-qoreid-account-day', reservation.accountId),
+        window: { windowSeconds: DAY_SECONDS, maxRequests: DESK_NIN_CHECK_LIMITS.accountPerDay } },
+      { bucket: bucket('nin-desk-qoreid-facility-day', reservation.facilityId),
+        window: { windowSeconds: DAY_SECONDS, maxRequests: DESK_NIN_CHECK_LIMITS.facilityPerDay } },
+    ];
+    return {
+      claim: bucket('nin-desk-qoreid-claim', ...request),
+      answers: {
+        no_match: bucket('nin-desk-qoreid-answer-no_match', ...request),
+        name_mismatch: bucket('nin-desk-qoreid-answer-name_mismatch', ...request),
+      } satisfies Record<StoredOutcome, string>,
+      limits,
+    };
+  }
+
+  private async storedAnswer(client: PoolClient, keys: ReturnType<QoreIdNinVerificationProvider['keys']>):
+    Promise<StoredOutcome | null> {
+    const result = await client.query<{ bucket_hmac: string }>(
+      `select bucket_hmac from auth.otp_rate_limits
+        where scope = 'account' and bucket_hmac = any($1::text[]) and request_count > 0
+          and window_started_at > clock_timestamp() - ($2 * interval '1 second')`,
+      [STORED_OUTCOMES.map((outcome) => keys.answers[outcome]), DESK_NIN_CHECK_ANSWER_SECONDS],
+    );
+    const held = new Set(result.rows.map((row) => row.bucket_hmac.trim()));
+    return STORED_OUTCOMES.find((outcome) => held.has(keys.answers[outcome])) ?? null;
+  }
+
+  private async claimHeld(client: PoolClient, claim: string): Promise<boolean> {
+    const result = await client.query<{ held: boolean }>(
+      `select (request_count > 0
+                and window_started_at > clock_timestamp() - ($2 * interval '1 second')) as held
+         from auth.otp_rate_limits where scope = 'account' and bucket_hmac = $1`,
+      [claim, DESK_NIN_CHECK_CLAIM_SECONDS],
+    );
+    return result.rows[0]?.held === true;
+  }
+
+  /** True (counting nothing) when a limit is already reached; otherwise counts the check, as reserve() says. */
+  private async limitReached(client: PoolClient, limits: Array<{ bucket: string; window: RateLimitWindow }>):
+    Promise<boolean> {
+    // The same lock order for every caller (account-hour, account-day, facility-day): no deadlock.
+    for (const { bucket } of limits) await lockRateLimitBucket(client, 'account', bucket);
+    for (const { bucket } of limits) {
+      if (await rateLimitBlocked(client, 'account', bucket)) return true;
+    }
+    const counted: string[] = [];
+    for (const { bucket, window } of limits) {
+      if (await consumeRateLimit(client, 'account', bucket, window)) {
+        for (const earlier of counted) await releaseRateLimit(client, 'account', earlier);
+        return true;
+      }
+      counted.push(bucket);
+    }
+    return false;
   }
 
   private notVerified(request: NinVerificationRequest, outcome: 'no_match' | 'name_mismatch',

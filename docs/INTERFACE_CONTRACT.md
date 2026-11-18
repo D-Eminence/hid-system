@@ -6435,16 +6435,50 @@ for letter case and spacing) and the desk's sex, or the record's when the desk
 gave none and the record's is not "unknown". Nothing else from the record is
 kept, returned or logged. The answer never names the record's details.
 
+### Details refused before any check
+
+A date of birth in the future or before 1900, or a first or last name with a
+control character (a tab, a line break), is refused before anything is sent,
+counted or charged. The request body check answers `400 VALIDATION_FAILED`;
+any other caller gets `400 NIN_DETAILS_INVALID`, "Check the name and the date
+of birth. The date of birth cannot be in the future or before 1900.",
+audited with `providerCalled: false`. Neither touches the breaker.
+
+### One check per desk request
+
+Each QoreID check is charged, so one desk request (the same
+`Idempotency-Key` and the same body, from the same staff account at the same
+facility) is checked at most once:
+
+- A resend while the first is still waiting for its answer: `409
+  NIN_CHECK_IN_PROGRESS`, "This NIN check is already in progress. Please wait
+  for its answer.", nothing sent or counted, audited with `providerCalled:
+  false`. After 2 minutes without an answer the request may be sent again.
+- A resend of a request answered "could not be verified" or "does not
+  match" (within 24 hours): the same `422` answer, no new check, audited
+  `denied` with `ninCheck`, `providerCalled: false` and `replay: true`.
+- A resend of a request that matched: the case it created (as before).
+- A resend of a request whose check failed (QoreID error, timeout, switched
+  off, or the switch could not be read): a new check.
+- The same key with a different body (for example a corrected name) is a
+  new request.
+
+The claim and the stored answer are keyed rows of `auth.otp_rate_limits`
+(HMAC buckets; no NIN, name, identifier, key or digest stored).
+
 ### Request limits
 
-Each QoreID check is charged. 0049's QoreID counters have no desk operation
-(adding one needs a migration), so desk checks are counted in the keyed
-request windows (`auth.otp_rate_limits`, HMAC buckets, no identifiers
-stored): 20 per staff account per hour, 100 per staff account per day, 300
-per facility per day. At a limit the desk gets `429 NIN_CHECK_LIMIT_REACHED`,
-"The limit of NIN checks has been reached for now. Please try again later.",
-before anything is sent; audited with `providerCalled: false`. The breaker is
-not touched.
+0049's QoreID counters have no desk operation (adding one needs a migration),
+so desk checks are counted in the keyed request windows
+(`auth.otp_rate_limits`, HMAC buckets, no identifiers stored): 20 per staff
+account per hour, 100 per staff account per day, 300 per facility per day.
+At a limit the desk gets `429 NIN_CHECK_LIMIT_REACHED`, "The limit of NIN
+checks has been reached for now. Please try again later.", before anything
+is sent; audited with `providerCalled: false`. The breaker is not touched.
+A refused check counts toward no limit: the three are read first, and a
+check is counted only when none is reached (if counting it reaches one, the
+counts already taken are given back). So one account's refused clicks never
+use up its facility's limit for the other desks.
 
 ### The breaker with QoreID
 
@@ -6452,8 +6486,10 @@ As ID-0: a `503` from QoreID trips it at once; three other failures within 5
 minutes trip it; QoreID's own `429` and other `4xx` answers do not count.
 QoreID switched off (before or during the check) and a request limit are not
 outages: they free the one retry place without counting. A switch that cannot
-be read answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started
-right now. Please try again in a minute.", without touching the breaker.
+be read, before the check or when it is read again just before sending,
+answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right
+now. Please try again in a minute.", without touching the breaker, audited
+with `providerCalled: false`.
 
 ### `GET /api/v1/identity/registration-capabilities` with QoreID
 
@@ -6469,9 +6505,13 @@ right now. Please try again in a minute.", without touching the breaker.
 `services/identity-api/src/identity/qoreid-nin-desk.spec.ts` (choosing the
 check; match, case and spacing, no match, name and date-of-birth mismatch,
 bad records, QoreID failures; the switch off, unreadable, and switched off
-during the check; request limits; the breaker; the audit rows; capabilities;
-no NIN in an audit row or log line). The QoreID adapter is mocked: no test
-calls QoreID.
+during the check, or unreadable just before sending; request limits,
+including one account's refused clicks not filling the facility's limit;
+one check per desk request (a resend while waiting, at the same moment, after
+"could not be verified" or "does not match", after a failure); details
+refused before any check; the breaker; the audit rows; capabilities; no NIN
+in an audit row or log line). The QoreID adapter is mocked: no test calls
+QoreID.
 
 ## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
 

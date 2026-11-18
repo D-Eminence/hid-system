@@ -1,12 +1,16 @@
 import { Logger } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import * as environment from '../config/environment';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
+import { ResolveNinDto } from './dto/resolve-nin.dto';
 import { NinRegistrationController } from './nin-registration.controller';
 import { NinRegistrationService } from './nin-registration.service';
 import {
   DeferredNinVerificationProvider,
   DeterministicTestNinVerificationProvider,
+  isNinCheckNotStarted,
   isNinNotConfigured,
   NIN_NOT_CONFIGURED_DETAIL,
   UnavailableNinVerificationProvider,
@@ -15,6 +19,8 @@ import { NIN_BREAKER_RETRY_AFTER_MS, NIN_PROVIDER_UNAVAILABLE_EVENT, NinProvider
 import type { NinVerificationProvider, NinVerificationRequest } from './nin.types';
 import type { PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import {
+  DESK_NIN_CHECK_ANSWER_SECONDS,
+  DESK_NIN_CHECK_CLAIM_SECONDS,
   DESK_NIN_CHECK_LIMITS,
   QoreIdNinVerificationProvider,
   selectNinVerificationProvider,
@@ -52,27 +58,81 @@ function gate(overrides: Partial<Record<keyof PublicPatientIdentityProvider, jes
   };
 }
 
-/** A database whose keyed request windows answer `blocked` (in order) for the three buckets. */
-function limitsDatabase(blocked: boolean[] = [false, false, false]) {
+interface WindowRow { request_count: number; window_started_at: Date; blocked_until: Date | null }
+
+/**
+ * A stand-in for `auth.otp_rate_limits` that answers the statements the
+ * request limits, the claim and the stored answers use, as Postgres would.
+ * Transactions run one at a time, as the bucket locks make them in Postgres.
+ */
+function rateLimitTable() {
+  const rows = new Map<string, WindowRow>();
   const statements: Array<{ sql: string; values: unknown[] }> = [];
-  let window = 0;
+  const at = (scope: unknown, bucket: unknown) => `${String(scope)}:${String(bucket)}`;
+  const recent = (row: WindowRow | undefined, seconds: unknown) => row !== undefined
+    && row.request_count > 0 && row.window_started_at.getTime() > Date.now() - Number(seconds) * 1000;
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
-    statements.push({ sql, values });
-    if (/from auth\.otp_rate_limits/.test(sql)) {
-      const isBlocked = blocked[window] ?? false;
-      window += 1;
-      return { rows: isBlocked ? [{ request_count: 1, window_started_at: new Date(),
-        blocked_until: new Date(Date.now() + 60_000) }] : [] };
+    const flat = sql.replace(/\s+/g, ' ').trim();
+    statements.push({ sql: flat, values });
+    if (/pg_advisory_xact_lock/.test(flat)) return { rows: [] };
+    if (/as blocked from auth\.otp_rate_limits/.test(flat)) {
+      const row = rows.get(at(values[0], values[1]));
+      return { rows: row ? [{ blocked: Boolean(row.blocked_until && row.blocked_until.getTime() > Date.now()) }] : [] };
     }
-    return { rows: [] };
+    if (/for update$/.test(flat)) {
+      const row = rows.get(at(values[0], values[1]));
+      return { rows: row ? [{ ...row }] : [] };
+    }
+    if (/bucket_hmac = any\(\$1::text\[\]\)/.test(flat)) {
+      return { rows: (values[0] as string[]).filter((bucket) => recent(rows.get(at('account', bucket)), values[1]))
+        .map((bucket) => ({ bucket_hmac: bucket })) };
+    }
+    if (/as held from auth\.otp_rate_limits/.test(flat)) {
+      const row = rows.get(at('account', values[0]));
+      return { rows: row ? [{ held: recent(row, values[1]) }] : [] };
+    }
+    if (/greatest\(request_count - 1, 0\)/.test(flat)) {
+      const row = rows.get(at(values[0], values[1]));
+      if (row && row.request_count > 0 && (!row.blocked_until || row.blocked_until.getTime() <= Date.now())) {
+        row.request_count -= 1;
+      }
+      return { rows: [] };
+    }
+    if (/set request_count = 0,/.test(flat)) {
+      const row = rows.get(at('account', values[0]));
+      if (row) row.request_count = 0;
+      return { rows: [] };
+    }
+    if (/^insert into auth\.otp_rate_limits .* values \('account', \$1,/.test(flat)) {
+      rows.set(at('account', values[0]), { request_count: 1, window_started_at: new Date(Date.now()), blocked_until: null });
+      return { rows: [] };
+    }
+    if (/^insert into auth\.otp_rate_limits/.test(flat)) {
+      const [scope, bucket, expired, count, blocked, seconds] = values as [string, string, boolean, number, boolean, number];
+      const current = rows.get(at(scope, bucket));
+      rows.set(at(scope, bucket), {
+        request_count: current ? count : 1,
+        window_started_at: !current || expired ? new Date(Date.now()) : current.window_started_at,
+        blocked_until: current && blocked ? new Date(Date.now() + seconds * 1000) : null,
+      });
+      return { rows: [] };
+    }
+    throw new Error(`unexpected statement: ${flat}`);
   });
-  return {
-    database: { withSystemTransaction: jest.fn(async (_c: string, work: (c: unknown) => unknown) => work({ query })) },
-    statements,
+  let queue: Promise<unknown> = Promise.resolve();
+  const database = {
+    withSystemTransaction: jest.fn((_c: string, work: (client: unknown) => Promise<unknown>) => {
+      const run = queue.then(() => work({ query }));
+      queue = run.catch(() => undefined);
+      return run;
+    }),
   };
+  /** The request count a bucket holds now (0 for none). */
+  const counts = () => [...rows.values()].map((row) => row.request_count);
+  return { database, rows, statements, counts };
 }
 
-function qoreIdProvider(qoreId = gate(), database: unknown = limitsDatabase().database) {
+function qoreIdProvider(qoreId = gate(), database: unknown = rateLimitTable().database) {
   return new QoreIdNinVerificationProvider(qoreId as never, database as never);
 }
 
@@ -170,6 +230,16 @@ describe('Q108 QoreID NIN check for the desk', () => {
       await refusal.catch((error) => expect(isNinNotConfigured(error)).toBe(true));
     });
 
+  it('answers "cannot be started" when the gate\'s control cannot be read just before sending', async () => {
+    const qoreId = gate({ verifyNin: jest.fn(async () => {
+      throw new DomainProblem(503, 'INTEGRATION_UNAVAILABLE', 'Delivery provider is temporarily unavailable');
+    }) });
+    const refusal = qoreIdProvider(qoreId).verify(request);
+    await expect(refusal).rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+      message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+    await refusal.catch((error) => expect(isNinCheckNotStarted(error)).toBe(true));
+  });
+
   it.each([
     ['QOREID_PROVIDER_UNAVAILABLE', 503],
     ['QOREID_TIMEOUT', 504],
@@ -200,31 +270,81 @@ describe('Q108 QoreID NIN check for the desk', () => {
 
   describe('request limits', () => {
     const reservation = { correlationId: 'correlation-q108', accountId: context.actor.accountId,
-      facilityId: context.facilityId };
+      facilityId: context.facilityId, idempotencyKey: 'resolve-key-q108-limits', requestSha256: 'b'.repeat(64) };
+    /** A different desk request (its own Idempotency-Key) by `accountId` at the facility. */
+    const check = (index: number, accountId = context.actor.accountId) =>
+      ({ ...reservation, accountId, idempotencyKey: `resolve-key-q108-limit-${index}` });
+    const account = (index: number) => `f0e1d2c3-b4a5-4968-8776-${String(index).padStart(12, '0')}`;
 
-    it('counts each check per account (hour and day) and per facility (day), in keyed buckets', async () => {
-      const { database, statements } = limitsDatabase();
-      await expect(qoreIdProvider(gate(), database).reserve(reservation)).resolves.toBeUndefined();
+    it('claims the request and counts it per account (hour and day) and per facility (day), in keyed buckets', async () => {
+      const { database, statements } = rateLimitTable();
+      await expect(qoreIdProvider(gate(), database).reserve(reservation)).resolves.toEqual({});
       expect(database.withSystemTransaction).toHaveBeenCalledWith('correlation-q108', expect.any(Function));
       const writes = statements.filter(({ sql }) => /insert into auth\.otp_rate_limits/.test(sql));
-      expect(writes).toHaveLength(3);
-      expect(writes.map(({ values }) => values[0])).toEqual(['account', 'account', 'account']);
-      const buckets = writes.map(({ values }) => values[1] as string);
-      expect(new Set(buckets).size).toBe(3);
-      for (const bucket of buckets) expect(bucket).toMatch(/^[0-9a-f]{64}$/);
-      // The bucket is keyed: neither identifier is stored.
-      expect(JSON.stringify(statements)).not.toContain(context.actor.accountId);
-      expect(JSON.stringify(statements)).not.toContain(context.facilityId);
+      expect(writes).toHaveLength(4);
+      const buckets = writes.map(({ values }) => values.find((value) => /^[0-9a-f]{64}$/.test(String(value))));
+      expect(new Set(buckets).size).toBe(4);
+      // The buckets are keyed: no identifier, key or digest is stored.
+      for (const value of [context.actor.accountId, context.facilityId, reservation.idempotencyKey, 'b'.repeat(64)]) {
+        expect(JSON.stringify(statements)).not.toContain(value);
+      }
       expect(DESK_NIN_CHECK_LIMITS).toEqual({ accountPerHour: 20, accountPerDay: 100, facilityPerDay: 300 });
     });
 
-    it.each([0, 1, 2])('refuses with 429 when limit %s is reached', async (index) => {
-      const blocked = [false, false, false];
-      blocked[index] = true;
-      const { database } = limitsDatabase(blocked);
-      await expect(qoreIdProvider(gate(), database).reserve(reservation)).rejects.toMatchObject({
+    it('refuses the 21st check of one account within the hour', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      for (let index = 0; index < 20; index += 1) await expect(provider.reserve(check(index))).resolves.toEqual({});
+      await expect(provider.reserve(check(20))).rejects.toMatchObject({
         status: 429, code: 'NIN_CHECK_LIMIT_REACHED',
         message: 'The limit of NIN checks has been reached for now. Please try again later.' });
+    });
+
+    it('refuses the 101st check of one account within the day', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      const start = Date.parse('2026-11-18T06:00:00Z');
+      const now = jest.spyOn(Date, 'now');
+      for (let index = 0; index < 100; index += 1) {
+        now.mockReturnValue(start + Math.floor(index / 20) * 61 * 60 * 1000);
+        await expect(provider.reserve(check(index))).resolves.toEqual({});
+      }
+      now.mockReturnValue(start + 5 * 61 * 60 * 1000);
+      await expect(provider.reserve(check(100))).rejects.toMatchObject({ status: 429, code: 'NIN_CHECK_LIMIT_REACHED' });
+    });
+
+    it('refuses the 301st check at one facility within the day', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      for (let index = 0; index < 300; index += 1) {
+        await expect(provider.reserve(check(index, account(Math.floor(index / 20))))).resolves.toEqual({});
+      }
+      await expect(provider.reserve(check(300, account(15)))).rejects.toMatchObject({
+        status: 429, code: 'NIN_CHECK_LIMIT_REACHED' });
+    });
+
+    it('does not let one account\'s refused checks fill the facility\'s limit for every other desk', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      for (let index = 0; index < 20; index += 1) await expect(provider.reserve(check(index))).resolves.toEqual({});
+      // A stuck button: 300 more clicks, every one refused.
+      for (let index = 20; index < 320; index += 1) {
+        await expect(provider.reserve(check(index))).rejects.toMatchObject({ status: 429 });
+      }
+      // The facility counted 20, so the other desks still have 280 checks today.
+      for (let index = 0; index < 280; index += 1) {
+        await expect(provider.reserve(check(1000 + index, account(1 + Math.floor(index / 20))))).resolves.toEqual({});
+      }
+      await expect(provider.reserve(check(2000, account(20)))).rejects.toMatchObject({ status: 429 });
+    });
+
+    it('does not count a refused hourly check toward the account\'s day', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      const start = Date.parse('2026-11-18T06:00:00Z');
+      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+      for (let index = 0; index < 20; index += 1) await provider.reserve(check(index));
+      for (let index = 20; index < 120; index += 1) await expect(provider.reserve(check(index))).rejects.toBeDefined();
+      // The next four hours give the account its other 80 checks of the day.
+      for (let index = 0; index < 80; index += 1) {
+        now.mockReturnValue(start + (1 + Math.floor(index / 20)) * 61 * 60 * 1000);
+        await expect(provider.reserve(check(500 + index))).resolves.toEqual({});
+      }
     });
 
     it('refuses with a plain 503 when the limits cannot be read', async () => {
@@ -234,6 +354,70 @@ describe('Q108 QoreID NIN check for the desk', () => {
       const refusal = qoreIdProvider(gate(), database).reserve(reservation);
       await expect(refusal).rejects.toMatchObject({ status: 503, code: 'NIN_CHECK_LIMIT_UNAVAILABLE' });
       await refusal.catch((error: Error) => expect(error.message).not.toMatch(/relation|otp_rate_limits/));
+    });
+  });
+
+  describe('one check per desk request', () => {
+    const reservation = { correlationId: 'correlation-q108', accountId: context.actor.accountId,
+      facilityId: context.facilityId, idempotencyKey: 'resolve-key-q108-once', requestSha256: 'c'.repeat(64) };
+
+    it('refuses a resend while the first check is still waiting for its answer, counting nothing', async () => {
+      const table = rateLimitTable();
+      const provider = qoreIdProvider(gate(), table.database);
+      await expect(provider.reserve(reservation)).resolves.toEqual({});
+      const counted = table.counts();
+      await expect(provider.reserve(reservation)).rejects.toMatchObject({ status: 409, code: 'NIN_CHECK_IN_PROGRESS',
+        message: 'This NIN check is already in progress. Please wait for its answer.' });
+      expect(table.counts()).toEqual(counted);
+    });
+
+    it('lets only one of two requests sent at the same moment through', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      const results = await Promise.allSettled([provider.reserve(reservation), provider.reserve(reservation)]);
+      expect(results.map((result) => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+      expect(results.find((result) => result.status === 'rejected')).toMatchObject({
+        reason: expect.objectContaining({ code: 'NIN_CHECK_IN_PROGRESS' }) });
+    });
+
+    it.each(['no_match', 'name_mismatch'] as const)('gives a resend the stored %s answer, counting nothing', async (outcome) => {
+      const table = rateLimitTable();
+      const provider = qoreIdProvider(gate(), table.database);
+      await provider.reserve(reservation);
+      await provider.settle(reservation, outcome);
+      const counted = table.counts();
+      await expect(provider.reserve(reservation)).resolves.toEqual({ stored: outcome });
+      expect(table.counts()).toEqual(counted);
+    });
+
+    it('lets the desk try again when nothing usable came back', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      await provider.reserve(reservation);
+      await provider.settle(reservation, 'not_answered');
+      await expect(provider.reserve(reservation)).resolves.toEqual({});
+    });
+
+    it('treats the same key with a different body as a different request', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      await provider.reserve(reservation);
+      await provider.settle(reservation, 'no_match');
+      await expect(provider.reserve({ ...reservation, requestSha256: 'd'.repeat(64) })).resolves.toEqual({});
+    });
+
+    it('lets a claim go after two minutes, and a stored answer after a day', async () => {
+      const provider = qoreIdProvider(gate(), rateLimitTable().database);
+      const start = Date.parse('2026-11-18T09:00:00Z');
+      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+      await provider.reserve(reservation);
+      now.mockReturnValue(start + DESK_NIN_CHECK_CLAIM_SECONDS * 1000 + 1000);
+      await expect(provider.reserve(reservation)).resolves.toEqual({});
+      await provider.settle(reservation, 'no_match');
+      now.mockReturnValue(start + (DESK_NIN_CHECK_CLAIM_SECONDS + DESK_NIN_CHECK_ANSWER_SECONDS) * 1000 + 2000);
+      await expect(provider.reserve(reservation)).resolves.toEqual({});
+    });
+
+    it('never throws while recording how a check ended', async () => {
+      const database = { withSystemTransaction: jest.fn(async () => { throw new Error('connection reset'); }) };
+      await expect(qoreIdProvider(gate(), database).settle(reservation, 'no_match')).resolves.toBeUndefined();
     });
   });
 });
@@ -304,7 +488,9 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     jest.spyOn(provider, 'reserve').mockImplementation(async (reservation) => {
       order.push('reserve');
       expect(reservation).toEqual({ correlationId: 'correlation-q108', accountId: context.actor.accountId,
-        facilityId: context.facilityId });
+        facilityId: context.facilityId, idempotencyKey: 'resolve-key-q108-000002',
+        requestSha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      return {};
     });
     const verify = jest.spyOn(provider, 'verify');
     verify.mockImplementation(async (checked) => { order.push('verify'); return { verified: true, outcome: 'match',
@@ -375,15 +561,21 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it('refuses at the request limit without sending the NIN or counting a failure, and frees the retry place', async () => {
-    const { database } = limitsDatabase([true, false, false]);
+    const { database } = rateLimitTable();
     const qoreId = gate();
+    const provider = qoreIdProvider(qoreId, database);
     const breaker = new NinProviderBreaker();
     const start = Date.parse('2026-11-18T10:00:00Z');
     const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+    // This account has made its 20 checks this hour.
+    for (let index = 0; index < 20; index += 1) {
+      await provider.reserve({ correlationId: 'correlation-q108', accountId: context.actor.accountId,
+        facilityId: context.facilityId, idempotencyKey: `resolve-key-q108-earlier-${index}`, requestSha256: 'e'.repeat(64) });
+    }
     breaker.recordFailure(new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'down'));
     warn.mockClear();
     now.mockReturnValue(start + NIN_BREAKER_RETRY_AFTER_MS);
-    const { service, audit } = desk(qoreIdProvider(qoreId, database), breaker);
+    const { service, audit } = desk(provider, breaker);
     await expect(service.resolve(input, 'resolve-key-q108-000010', context)).rejects.toMatchObject({
       status: 429, code: 'NIN_CHECK_LIMIT_REACHED' });
     expect(qoreId.verifyNin).not.toHaveBeenCalled();
@@ -479,6 +671,102 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(breaker.available()).toBe(true);
     expect(warn).not.toHaveBeenCalled();
   });
+
+  it('sends one check, not two, when the same request arrives twice at once', async () => {
+    let answer: (identity: VerifiedPublicPatientIdentity) => void = () => undefined;
+    const qoreId = gate({ verifyNin: jest.fn(() => new Promise<VerifiedPublicPatientIdentity>((resolve) => {
+      answer = resolve;
+    })) });
+    const { service, audit } = desk(qoreIdProvider(qoreId));
+    const first = service.resolve(input, 'resolve-key-q108-000040', context);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(service.resolve(input, 'resolve-key-q108-000040', context)).rejects.toMatchObject({
+      status: 409, code: 'NIN_CHECK_IN_PROGRESS' });
+    answer(record());
+    await expect(first).resolves.toMatchObject({ caseId, ninStatus: 'verified' });
+    expect(qoreId.verifyNin).toHaveBeenCalledTimes(1);
+    expect(auditRows(audit)).toContainEqual(expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
+      details: expect.objectContaining({ code: 'NIN_CHECK_IN_PROGRESS', providerCalled: false }) }));
+  });
+
+  it.each([
+    ['could not be verified', jest.fn(async () => {
+      throw new DomainProblem(422, 'NIN_NOT_VERIFIED', 'The NIN could not be verified');
+    }), 'no_match', 'The NIN could not be verified'],
+    ['does not match', jest.fn(async () => record({ lastName: 'OTHER' })), 'name_mismatch',
+      'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.'],
+  ])('gives a resend of a request answered "%s" the same answer without a new check', async (_label, verifyNin,
+    ninCheck, message) => {
+    verifyNin.mockClear();
+    const qoreId = gate({ verifyNin });
+    const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(service.resolve(input, 'resolve-key-q108-000041', context)).rejects.toMatchObject({
+        status: 422, code: 'NIN_VERIFICATION_FAILED', message });
+    }
+    expect(verifyNin).toHaveBeenCalledTimes(1);
+    expect(breaker.state()).toBe('closed');
+    expect(auditRows(audit)).toEqual([
+      expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied', details: { provider: 'qoreid', ninCheck } }),
+      expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied',
+        details: { provider: 'qoreid', ninCheck, providerCalled: false, replay: true } }),
+    ]);
+    // A corrected request (another body) is a new check.
+    await expect(service.resolve({ ...input, lastName: 'Corrected' }, 'resolve-key-q108-000041', context))
+      .rejects.toMatchObject({ status: 422 });
+    expect(verifyNin).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets the desk resend a request whose check failed', async () => {
+    const qoreId = gate({ verifyNin: jest.fn()
+      .mockRejectedValueOnce(new DomainProblem(504, 'QOREID_TIMEOUT', 'External verification timed out'))
+      .mockResolvedValueOnce(record()) });
+    const { service } = desk(qoreIdProvider(qoreId));
+    await expect(service.resolve(input, 'resolve-key-q108-000042', context)).rejects.toMatchObject({ status: 504 });
+    await expect(service.resolve(input, 'resolve-key-q108-000042', context)).resolves.toMatchObject({ caseId });
+    expect(qoreId.verifyNin).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['a date of birth in the future', { dateOfBirth: '2062-03-01' }],
+    ['a date of birth before 1900', { dateOfBirth: '1899-12-31' }],
+    ['a name with a tab', { firstName: 'Ada\tBola' }],
+    ['a blank name', { lastName: '   ' }],
+  ])('refuses %s before anything is sent, counted or charged', async (_label, overrides) => {
+    const qoreId = gate();
+    const provider = qoreIdProvider(qoreId);
+    const reserve = jest.spyOn(provider, 'reserve');
+    const { service, audit, breaker } = desk(provider);
+    for (const key of ['resolve-key-q108-000043', 'resolve-key-q108-000044', 'resolve-key-q108-000045']) {
+      await expect(service.resolve({ ...input, ...overrides }, key, context)).rejects.toMatchObject({
+        status: 400, code: 'NIN_DETAILS_INVALID',
+        message: 'Check the name and the date of birth. The date of birth cannot be in the future or before 1900.' });
+    }
+    expect(reserve).not.toHaveBeenCalled();
+    expect(qoreId.verifyNin).not.toHaveBeenCalled();
+    expect(breaker.state()).toBe('closed');
+    expect(warn).not.toHaveBeenCalled();
+    expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'identity.nin.verify',
+      outcome: 'failure', details: expect.objectContaining({ code: 'NIN_DETAILS_INVALID', providerCalled: false }) }));
+  });
+
+  it('does not trip the breaker or record a call when the switch cannot be read again just before sending', async () => {
+    const qoreId = gate({ verifyNin: jest.fn()
+      .mockRejectedValueOnce(new DomainProblem(503, 'INTEGRATION_UNAVAILABLE', 'Delivery provider is temporarily unavailable'))
+      .mockResolvedValueOnce(record()) });
+    const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
+    await expect(service.resolve(input, 'resolve-key-q108-000046', context)).rejects.toMatchObject({
+      status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+      message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+    // One 503 from QoreID itself would have tripped it at once.
+    expect(breaker.state()).toBe('closed');
+    expect(warn).not.toHaveBeenCalled();
+    expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
+      details: expect.objectContaining({ provider: 'qoreid', providerCalled: false }) })]);
+    expect(JSON.stringify(audit.record.mock.calls)).not.toContain('provider_error');
+    // Nothing was sent, so the same request may be sent again.
+    await expect(service.resolve(input, 'resolve-key-q108-000046', context)).resolves.toMatchObject({ caseId });
+  });
 });
 
 describe('Q108 registration-capabilities with QoreID', () => {
@@ -514,5 +802,28 @@ describe('Q108 registration-capabilities with QoreID', () => {
   it('reports them on but not available when the switch cannot be read', async () => {
     const qoreId = gate({ isAvailable: jest.fn(async () => { throw new DomainProblem(503, 'INTEGRATION_UNAVAILABLE', 'x'); }) });
     expect((await capabilities(qoreId)).nin).toEqual({ enabled: true, state: 'live', available: false });
+  });
+});
+
+describe('Q108 desk NIN details the request refuses before any check', () => {
+  async function refusedFields(body: Record<string, unknown>) {
+    const errors = await validate(plainToInstance(ResolveNinDto, body), { whitelist: true, forbidNonWhitelisted: true });
+    return errors.map((error) => error.property);
+  }
+
+  it('accepts a real date of birth and plain names', async () => {
+    expect(await refusedFields(input)).toEqual([]);
+    expect(await refusedFields({ ...input, dateOfBirth: '1900-01-01' })).toEqual([]);
+    expect(await refusedFields({ ...input, firstName: '  Ada  Bola ' })).toEqual([]);
+  });
+
+  it.each([
+    ['a date of birth in the future', { dateOfBirth: '2062-03-01' }, 'dateOfBirth'],
+    ['a date of birth before 1900', { dateOfBirth: '1899-12-31' }, 'dateOfBirth'],
+    ['a first name with a tab', { firstName: 'Ada\tBola' }, 'firstName'],
+    ['a last name with a line break', { lastName: 'Fic\ntional' }, 'lastName'],
+    ['a blank name', { firstName: '   ' }, 'firstName'],
+  ])('refuses %s', async (_label, overrides, field) => {
+    expect(await refusedFields({ ...input, ...overrides })).toEqual([field]);
   });
 });
