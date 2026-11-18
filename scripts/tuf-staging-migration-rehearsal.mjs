@@ -253,6 +253,25 @@ try {
   const upgradePurposesBefore = await withClient('hid_upgrade', async client =>
     (await client.query('select to_jsonb(p) as value from identity.purpose_of_use_codes p order by code')).rows);
   assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency', 'healthcare-operations'].includes(row.value.code)));
+  // Owner Q113 A (18 November 2026): 0136 changes the role table only while no
+  // real (non-sealed) staff are active, and stops, changing nothing, otherwise.
+  // This historical baseline keeps one synthetic admin membership at a real
+  // facility, so the release's dry run must stop at 0136 here, and leave every
+  // row as it was. Production has no real staff active (the owner's answer), so
+  // the rehearsal then ends that synthetic membership, as production stands,
+  // and goes on with the upgrade.
+  migration('existing baseline stops at 0136 while real staff are active', 'apply-migrations.mjs', 'hid_upgrade',
+    {}, 'failure', ['--dry-run']);
+  const q113Stop = logs.at(-1);
+  assert.match(`${q113Stop.stdout}\n${q113Stop.stderr}`,
+    /0136 stopped, nothing was changed: real staff would be affected[^\n]*line 19 \(admin loses lab\.work-item\.read\) is now 1 \(1 staff logins\)/);
+  assert.deepEqual((await withClient('hid_upgrade', client => client.query(`select count(*)::integer as count
+    from migration.schema_migrations where version like '0136_%'`))).rows[0], { count: 0 });
+  await withClient('hid_upgrade', client => client.query(`begin;
+    set local session_replication_role = replica;
+    update identity.staff_facility_memberships set active = false
+     where id = 'b6000000-0000-4000-8000-000000000001';
+    commit;`));
   const upgradeBefore = await snapshot('hid_upgrade');
   const upgradeBackup = join(evidenceDirectory, 'pre-schema-upgrade.dump');
   command('backup synthetic schema 0028 before upgrade', join(pgBindir, 'pg_dump'),

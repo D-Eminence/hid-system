@@ -14,9 +14,10 @@
 // The flow: a hospital, a laboratory and a pharmacy sign up (P4) and support
 // reviews them (P4b); the hospital invites a receptionist. The doctor asks the
 // patient for records processing (X-Purpose-Of-Use healthcare-operations,
-// write_records, 1440 minutes); the pharmacist and the receptionist are
-// refused, and so is any request for a patient under 18 or without a date of
-// birth. The patient sees the purpose in the app and approves. With the grant
+// write_records, 1440 minutes); the pharmacist is refused, and so is the
+// receptionist until 0136 gives the front desk ocr.job.write (then its request
+// meets the same rules), and any request for a patient under 18 or without a
+// date of birth. The patient sees the purpose in the app and approves. With the grant
 // OCR creates and reads a job on the patient's document and EHR shows it the
 // document; a direct-care grant does not; the chart (imported records, an
 // imported attachment, the reported health profile, the encounters), Lab and
@@ -393,7 +394,17 @@ try {
     administratorName: 'Bello Musa' });
   const pharmacyFacility = await signUp({ label: 'Pharmacy', organizationType: 'pharmacy', productCode: 'pharmacy',
     administratorName: 'Chioma Eze' });
-  await review(hospital, 'doctor', { body: 'MDCN', number: 'MDCN/71011' });
+  // 0136 (owner Q111 A): a doctor checks readings and confirms their patient,
+  // but no longer starts one (ocr.job.start: the front desk, nurses and
+  // clinicians). This flow starts readings, so once 0136 is applied its
+  // records-processing clinician is a nurse, who holds every permission the
+  // flow uses that a doctor does; before 0136 it is a doctor, as it was.
+  const doctorStartsReadings = (await one(`select not exists (select 1 from auth.permissions where code = 'ocr.job.start')
+      or exists (select 1 from auth.role_permissions where role_code = 'doctor' and permission_code = 'ocr.job.start')
+      as starts`)).starts;
+  await review(hospital, doctorStartsReadings ? 'doctor' : 'nurse',
+    doctorStartsReadings ? { body: 'MDCN', number: 'MDCN/71011' } : { body: 'NMCN', number: 'NMCN/71011' });
+  evidence.recordsProcessingClinician = doctorStartsReadings ? 'doctor' : 'nurse (0136, Q111 A)';
   await review(laboratory, 'lab', { body: 'MLSCN', number: 'MLSCN/71022' });
   await review(pharmacyFacility, 'pharmacist', { body: 'PCN', number: 'PCN/71033' });
   const doctor = await signInStaff(hospital.email, HOSTS.ehr, hospital.facilityId);
@@ -465,7 +476,15 @@ try {
     const denied = stage === 'old-identity' ? [403, 'CONSENT_COMMAND_DENIED'] : [403, 'RECORDS_PROCESSING_NOT_ALLOWED'];
     const minorRefusal = stage === 'old-identity' ? [403, 'CONSENT_COMMAND_DENIED'] : [422, 'RECORDS_PROCESSING_MINOR'];
     refusals.pharmacist = expectProblem(await ask(pharmacist, patient), ...denied, 'pharmacist');
-    refusals.receptionist = expectProblem(await ask(receptionist, patient), ...denied, 'receptionist');
+    // 0136 (owner Q103 A, C1): the front desk holds ocr.job.write and asks the
+    // patient for records processing too, under the same rules. Before 0136 it
+    // is refused; with 0136 it gets past the permission and meets the age rule
+    // (asked for the child, so no live request is left for the later steps).
+    const deskAsks = (await one(`select exists (select 1 from auth.role_permissions
+      where role_code = 'receptionist' and permission_code = 'ocr.job.write') as asks`)).asks;
+    refusals.receptionist = deskAsks
+      ? expectProblem(await ask(receptionist, minor), ...minorRefusal, 'receptionist asking for a minor (0136)')
+      : expectProblem(await ask(receptionist, patient), ...denied, 'receptionist');
     refusals.minor = expectProblem(await ask(doctor, minor), ...minorRefusal, 'minor');
     refusals.undated = expectProblem(await ask(doctor, undated), ...minorRefusal, 'no date of birth');
     refusals.pharmacistForMinor = expectProblem(await ask(pharmacist, minor), ...denied, 'pharmacist asking for a minor');
@@ -670,11 +689,21 @@ try {
       step('the care approval and the Access PIN each covered OCR for the doctor; the patient\'s revocation and turning the PIN off ended it');
     }
 
-    // ── The laboratory may ask (it holds ocr.job.write), and Lab still refuses the purpose ──
-    const labAsked = expectStatus(await ask(labStaff, patient), 201, 'the laboratory asks');
-    expectStatus(await patientCall('POST', `/identity/access-requests/${labAsked.accessRequestId}/approve`), 200, 'lab approval');
-    evidence.laboratory = { asked: 201, labWorkItemsWithGrant: expectProblem(await call(lab, labStaff, 'GET', '/lab/work-items',
-      undefined, { purpose: RECORDS }), 400, 'PURPOSE_OF_USE_REQUIRED', 'lab with a grant') };
+    // ── The laboratory: before 0136 it may ask (it holds ocr.job.write), and Lab still refuses the purpose;
+    //    from 0136 (owner Q103 A, C5) laboratory staff lose paper readings, so the request itself is refused ──
+    const labAsks = (await one(`select exists (select 1 from auth.role_permissions
+      where role_code = 'lab' and permission_code = 'ocr.job.write') as asks`)).asks;
+    if (labAsks) {
+      const labAsked = expectStatus(await ask(labStaff, patient), 201, 'the laboratory asks');
+      expectStatus(await patientCall('POST', `/identity/access-requests/${labAsked.accessRequestId}/approve`), 200, 'lab approval');
+      evidence.laboratory = { asked: 201, labWorkItemsWithGrant: expectProblem(await call(lab, labStaff, 'GET', '/lab/work-items',
+        undefined, { purpose: RECORDS }), 400, 'PURPOSE_OF_USE_REQUIRED', 'lab with a grant') };
+    } else {
+      evidence.laboratory = {
+        asked: expectProblem(await ask(labStaff, patient), 403, 'RECORDS_PROCESSING_NOT_ALLOWED', 'the laboratory asks (0136)'),
+        labWorkItems: expectProblem(await call(lab, labStaff, 'GET', '/lab/work-items', undefined, { purpose: RECORDS }), 400,
+          'PURPOSE_OF_USE_REQUIRED', 'lab with the purpose (0136)') };
+    }
 
     // ── The kill switch: an operator turns the code off, then on again ──
     await owner.query(`update identity.purpose_of_use_codes set active = false where code = $1`, [RECORDS]);
