@@ -1760,3 +1760,14 @@ revoke all on function identity.organization_staff_kinds(uuid) from public;
 grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
 grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
 revoke all on function auth.guard_session_single_sign_on_change() from public;
+
+-- Staff patient search (0132, ID-3a and ID-3b, owner decisions of 18
+-- November 2026), exactly as 0132 grants it: the search and the matchRef
+-- resolver to the Identity runtime alone. No runtime role has any privilege
+-- on identity.patient_search_refs (only the two functions read and write it,
+-- as its owner).
+grant execute on function identity.staff_patient_search(text, text, text, date, text, text[], text, text),
+  identity.resolve_patient_search_ref(text, text) to hid_identity_runtime;
+revoke all on function identity.staff_patient_search(text, text, text, date, text, text[], text, text),
+  identity.resolve_patient_search_ref(text, text) from public;
+revoke all on identity.patient_search_refs from public;
