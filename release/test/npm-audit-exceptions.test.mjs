@@ -47,7 +47,11 @@ test('the reviewed exception covers the real infra/aws minimatch advisory', () =
   assert.equal(result.ok, true, failuresOf(result))
   assert.deepEqual(result.covered.map(({ finding, path }) => [finding.id, finding.package, path]), [['GHSA-g3hv-75wg-m249', 'minimatch', MINIMATCH_PATH]])
   const only = reviewed.exceptions.find(item => item.directory === 'infra/aws')
-  assert.equal(reviewed.exceptions.length, 2)
+  // The infra/aws minimatch entry is the only one: the apps/ehr picomatch entry
+  // was removed on 18 November once npm audit stopped reporting its advisory
+  // (it is kept below as WITHDRAWN_PICOMATCH_ENTRY).
+  assert.equal(reviewed.exceptions.length, 1)
+  assert.deepEqual(reviewed.exceptions.map(item => [item.directory, item.id, item.package]), [['infra/aws', 'GHSA-g3hv-75wg-m249', 'minimatch']])
   assert.deepEqual({ directory: only.directory, id: only.id, package: only.package, vulnerable_range: only.vulnerable_range, severity: only.severity,
     paths: only.paths, approved_by: only.approved_by, approved_at: only.approved_at, expires_at: only.expires_at },
   { directory: 'infra/aws', id: 'GHSA-g3hv-75wg-m249', package: 'minimatch', vulnerable_range: '>=7.0.0 <11.0.1', severity: 'moderate',
@@ -303,16 +307,39 @@ const ehrVulnerabilities = (advisory = picomatchAdvisory()) => ({
 })
 const ehrReport = (vulnerabilities = ehrVulnerabilities()) => report(vulnerabilities)
 const ehrLockfile = { lockfileVersion: 3, packages: { '': { name: '@hid/ehr' }, 'node_modules/picomatch': { version: '4.0.7', dev: true } } }
-const picomatchEntry = (changes = {}) => ({ ...structuredClone(reviewed.exceptions.find(item => item.id === 'GHSA-fc5q-39xc-vjpf')), ...changes })
+// The withdrawn 17 Nov entry, kept as a fixture. It was the apps/ehr entry in
+// security/npm-audit-exceptions.json (PR #263, owner "Q95 A") until 18 November,
+// when npm audit stopped reporting GHSA-fc5q-39xc-vjpf while picomatch was still
+// 4.0.7 and the gate failed it as stale; it was then removed from the file.
+// These tests use it, exactly as it was, to keep covering dependent_paths,
+// ends_when_fix_published and the registry lookup.
+const WITHDRAWN_PICOMATCH_ENTRY = Object.freeze({
+  directory: 'apps/ehr',
+  id: 'GHSA-fc5q-39xc-vjpf',
+  package: 'picomatch',
+  vulnerable_range: '<=4.0.7',
+  severity: 'high',
+  paths: ['node_modules/picomatch'],
+  dependent_paths: ['node_modules/@vitejs/plugin-react', 'node_modules/fdir', 'node_modules/tinyglobby', 'node_modules/vite'],
+  justification: "Regular expression denial of service through single-branch repeated extglobs. picomatch 4.0.7 is installed in apps/ehr only as build tooling: npm ls picomatch --all shows it only under vite 8.2.4 (directly and through tinyglobby 0.2.17 and fdir 6.5.0), all devDependencies, and npm also lists @vitejs/plugin-react 6.1.1 because it peers on vite. It matches glob patterns from vite's own configuration and this repository's files at build time, never input from a user. Evidence, 17 November 2026, from origin/staging-novu-ci-20261005 73eae090: npm --prefix apps/ehr test passed, HID_PUBLIC_BASE=/ npm --prefix apps/ehr run build completed and its release-binding check passed, and none of the 10 files in apps/ehr/dist contains picomatch's source strings (picomatch, POSIX_REGEX_SOURCE, REGEX_NON_SPECIAL_CHARS, 'Expected pattern to be a non-empty string'), which the same search finds in apps/ehr/node_modules/picomatch/lib. npm ls picomatch --omit=dev --all is empty for apps/ehr, and npm ls picomatch --package-lock-only --omit=dev --all is empty for every one of the 27 package-lock.json directories, all 11 services (whose images install with npm ci --omit=dev) included; every picomatch in a lockfile is marked dev.",
+  fix_status: "No fixed version exists: 4.0.7 is picomatch's latest release (dist-tag latest on 17 November 2026) and is in the vulnerable range. The entry has ends_when_fix_published, so the gate fails as soon as a release outside <=4.0.7 is published; then upgrade vite or override picomatch in apps/ehr and remove this entry.",
+  approved_by: 'D-Eminence (owner), in chat 17 Nov 2026: "Q95 A"',
+  approved_at: '2026-11-17',
+  expires_at: '2026-12-01',
+  ends_when_fix_published: true,
+})
+const picomatchEntry = (changes = {}) => ({ ...structuredClone(WITHDRAWN_PICOMATCH_ENTRY), ...changes })
+// The reviewed file as it was from 17 to 18 November: the minimatch entry and the picomatch entry.
+const picomatchFile = () => withEntries(entry(), picomatchEntry())
 const REGISTRY = ['2.3.1', '3.0.1', '4.0.6', '4.0.7']
-function evaluateEhr(auditReport = ehrReport(), { file = reviewed, now = NOW, lockfile = ehrLockfile, versions = REGISTRY } = {}) {
+function evaluateEhr(auditReport = ehrReport(), { file = picomatchFile(), now = NOW, lockfile = ehrLockfile, versions = REGISTRY } = {}) {
   const status = Object.keys(auditReport.vulnerabilities).length > 0 ? 1 : 0
   return evaluateAudit({ report: parseAuditResult({ status, stdout: JSON.stringify(auditReport) }), exceptions: parseExceptions(json(file), now),
     directory: 'apps/ehr', now, lockfile,
     publishedVersions: versions === null ? undefined : () => { if (versions instanceof Error) throw versions; return versions } })
 }
 
-test('the reviewed exception covers the real apps/ehr picomatch advisory while no fix is published', () => {
+test('the withdrawn picomatch entry covers the apps/ehr picomatch advisory as npm reported it on 17 November, while no fix is published', () => {
   const result = evaluateEhr()
   assert.equal(result.ok, true, failuresOf(result))
   assert.deepEqual(result.covered.map(({ finding, path }) => [finding.id, finding.package, path]), [['GHSA-fc5q-39xc-vjpf', 'picomatch', 'node_modules/picomatch']])
@@ -330,7 +357,7 @@ test('the same picomatch advisory fails without the exception, in another direct
   const without = evaluateEhr(ehrReport(), { file: withEntries(entry()) })
   assert.equal(without.ok, false)
   assert.match(failuresOf(without), /no reviewed exception: GHSA-fc5q-39xc-vjpf picomatch <=4\.0\.7 \(high\) at node_modules\/picomatch in apps\/ehr/)
-  const elsewhere = evaluateAudit({ report: ehrReport(), exceptions: reviewed, directory: 'packages/ui', now: NOW })
+  const elsewhere = evaluateAudit({ report: ehrReport(), exceptions: picomatchFile(), directory: 'packages/ui', now: NOW })
   assert.match(failuresOf(elsewhere), /no reviewed exception: GHSA-fc5q-39xc-vjpf .* in packages\/ui/)
   assert.equal(evaluateEhr(ehrReport(), { now: new Date('2026-11-30T23:59:59Z') }).ok, true)
   const expired = evaluateEhr(ehrReport(), { now: new Date('2026-12-01T00:00:00Z') })
@@ -403,12 +430,13 @@ test('malformed optional fields fail closed', () => {
 
 test('main audits apps/ehr, then asks the registry for picomatch versions', () => {
   const lockText = JSON.stringify(ehrLockfile)
+  const picomatchText = json(picomatchFile())
   const run = (viewResult, { lock = lockText, now = NOW } = {}) => {
     const calls = [], out = [], err = []
     const code = main(['apps/ehr'], { now, cwd: REPOSITORY_ROOT, out: text => out.push(text), err: text => err.push(text),
       readText: path => {
         if (path === resolve(REPOSITORY_ROOT, 'apps/ehr/package-lock.json')) { if (lock === null) throw new Error('ENOENT'); return lock }
-        return reviewedText
+        return picomatchText
       },
       spawn: (command, args) => {
         calls.push([command, ...args])
@@ -437,6 +465,58 @@ test('main audits apps/ehr, then asks the registry for picomatch versions', () =
   }
   // A single published version comes back as a JSON string.
   assert.equal(run({ status: 0, stdout: JSON.stringify('4.0.7') }).code, 0)
+})
+
+// `npm --prefix apps/ehr audit --json` on 18 November 2026 (staging-novu-ci-20261005
+// afec3f75), with picomatch still at 4.0.7: GHSA-fc5q-39xc-vjpf is no longer reported.
+const EHR_AUDIT_18_NOV = { auditReportVersion: 2, vulnerabilities: {}, metadata: {
+  vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 },
+  dependencies: { prod: 18, dev: 48, optional: 27, peer: 0, peerOptional: 0, total: 65 } } }
+// What the apps/ehr audit step printed in CI on 18 November, before the entry was removed.
+const CI_STALE_FAILURE = 'stale exception: GHSA-fc5q-39xc-vjpf picomatch <=4.0.7 (high) in apps/ehr no longer matches npm audit at node_modules/picomatch; correct or remove it'
+function runEhrMain(exceptionsText, auditResult) {
+  const calls = [], reads = [], out = [], err = []
+  const code = main(['apps/ehr'], { now: NOW, cwd: REPOSITORY_ROOT, out: text => out.push(text), err: text => err.push(text),
+    readText: path => {
+      reads.push(path)
+      if (path === resolve(REPOSITORY_ROOT, 'security/npm-audit-exceptions.json')) return exceptionsText
+      throw new Error('ENOENT')
+    },
+    spawn: (command, args) => { calls.push([command, ...args]); return args.includes('audit') ? auditResult : { status: 1, stdout: '' } } })
+  return { code, calls, reads, out: out.join(''), err: err.join('') }
+}
+
+test('the real apps/ehr audit of 18 November, with no advisories, passes the gate with the real reviewed file', () => {
+  // apps/ehr stays on the gate with no entry, so a future exception needs no workflow change.
+  assert.ok(EXCEPTION_GATE_DIRECTORIES.includes('apps/ehr'))
+  assert.equal(reviewed.exceptions.some(item => item.directory === 'apps/ehr'), false)
+  const result = evaluateEhr(EHR_AUDIT_18_NOV, { file: reviewed })
+  assert.equal(result.ok, true, failuresOf(result))
+  assert.deepEqual([result.failures, result.covered, result.belowLevel, result.notes], [[], [], [], []])
+  const passed = runEhrMain(reviewedText, { status: 0, stdout: JSON.stringify(EHR_AUDIT_18_NOV) })
+  assert.equal(passed.code, 0, passed.err)
+  // Only the audit runs: with no apps/ehr entry, neither the registry nor the lockfile is read.
+  assert.deepEqual(passed.calls, [['npm', '--prefix', resolve(REPOSITORY_ROOT, 'apps/ehr'), 'audit', '--json']])
+  assert.deepEqual(passed.reads, [resolve(REPOSITORY_ROOT, 'security/npm-audit-exceptions.json')])
+  assert.equal(passed.out, 'npm audit gate passed for apps/ehr: 0 covered, 0 below moderate\n')
+  assert.equal(passed.err, '')
+  // If npm reports the advisory again, the real file fails closed on it.
+  const back = evaluateEhr(ehrReport(), { file: reviewed })
+  assert.equal(back.ok, false)
+  assert.deepEqual(back.failures, ['no reviewed exception: GHSA-fc5q-39xc-vjpf picomatch <=4.0.7 (high) at node_modules/picomatch in apps/ehr'])
+})
+
+test('the withdrawn picomatch entry fails as stale against the empty apps/ehr audit, exactly as CI did on 18 November', () => {
+  // A stale entry matched nothing, so the gate does not ask the registry about it.
+  const result = evaluateEhr(EHR_AUDIT_18_NOV, { versions: new Error('the registry must not be asked') })
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.failures, [CI_STALE_FAILURE])
+  assert.deepEqual([result.covered, result.notes], [[], []])
+  const failed = runEhrMain(json(picomatchFile()), { status: 0, stdout: JSON.stringify(EHR_AUDIT_18_NOV) })
+  assert.equal(failed.code, 1)
+  assert.deepEqual(failed.calls, [['npm', '--prefix', resolve(REPOSITORY_ROOT, 'apps/ehr'), 'audit', '--json']])
+  assert.equal(failed.out, '')
+  assert.equal(failed.err, `${CI_STALE_FAILURE}\nnpm audit gate failed for apps/ehr\n`)
 })
 
 test('ranges', () => {

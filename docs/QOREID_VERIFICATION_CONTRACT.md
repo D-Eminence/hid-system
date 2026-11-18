@@ -76,7 +76,7 @@ The Identity API uses these configuration names for QoreID verification; no cred
 | `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` | Separate patient NIN-only gate; keep disabled until remaining release and security gates are cleared. Entitled sandbox transport and response shape are empirically verified. |
 | `QOREID_BASE_URL` | Approved QoreID API origin. |
 | `QOREID_CLIENT_ID`, `QOREID_CLIENT_SECRET` | Server-only OAuth credentials supplied through the Identity task's secret configuration. |
-| `QOREID_TIMEOUT_MS` | Bounded provider request timeout: 15000 by default, 250 to 20000 (Q109: QoreID charges a check HID stopped waiting for; 20 s keeps a start inside the gateway's 30 s). Production sets its own value in its infrastructure configuration (5000 today), changed only by the owner's apply. |
+| `QOREID_TIMEOUT_MS` | Bounded provider request timeout: 12000 ms by default, 250–20000 allowed (#271; Q109: QoreID charges a check HID stopped waiting for; 20 s keeps a start inside the gateway's 30 s). Production sets none, so it uses the default. |
 | `QOREID_NIN_ANSWER_CEILING_MS` | How long a patient NIN check keeps reading QoreID's answer after the caller stopped waiting (0137): 90000 by default, 1000 to 120000, never less than `QOREID_TIMEOUT_MS`. Not set in production's infrastructure configuration, so the default applies. |
 | `QOREID_MAX_RETRIES` | Must remain `0` for general provider retries; the adapter's single re-authentication retry after an explicit verification `401` is separate. |
 | `NIN_LOOKUP_HMAC_KEY_B64`, `NIN_ENCRYPTION_KEY_B64` | Server-only keys for duplicate lookup and encrypted NIN/profile storage. |
