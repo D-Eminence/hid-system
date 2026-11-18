@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { NinCheckOnceModule } from '../identity/nin-check-once.module';
 import { WebPushModule } from '../web-push/web-push.module';
 import { AccountDeletionNoticeDispatcher } from './account-deletion-notice.dispatcher';
 import { EmergencyContactController } from './emergency-contact.controller';
@@ -11,8 +12,8 @@ import { PatientLifecycleSweeper } from './patient-lifecycle.sweeper';
 import { RecordAccessAlertDispatcher } from './record-access-alert.dispatcher';
 
 @Module({
-  // The sweeper's web push steps (0097, B6).
-  imports: [WebPushModule],
+  // The sweeper's web push steps (0097, B6) and its erasure of stored QoreID NIN answers (0137).
+  imports: [WebPushModule, NinCheckOnceModule],
   controllers: [EmergencyContactController, PatientAccountDeletionController],
   providers: [
     EmergencyContactProtector, EmergencyContactService,

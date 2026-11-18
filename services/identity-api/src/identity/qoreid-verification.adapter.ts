@@ -5,6 +5,7 @@ import {
   QOREID_PROVIDER,
   type QoreIdNinClaims,
   type QoreIdNinEnrollmentBinding,
+  type QoreIdNinRecord,
   type QoreIdVerificationResult,
   type VerificationState,
 } from './qoreid-verification.types';
@@ -108,7 +109,8 @@ export class QoreIdVerificationAdapter {
     const summary = this.record(this.record(response)?.summary);
     if (typeof summary?.nin_check !== 'string') throw this.invalidProviderResponse();
     if (summary.nin_check !== 'verified') return { ...result, state: 'not_verified' };
-    return { ...result, ninEnrollmentBinding: this.ninEnrollmentBinding(response, nin) };
+    const binding = this.ninEnrollmentBinding(response, nin);
+    return { ...result, ninEnrollmentBinding: binding, ninRecord: { complete: true, binding } };
   }
 
   async verifyCac(regNumber: string): Promise<QoreIdVerificationResult> {
@@ -295,10 +297,12 @@ export class QoreIdVerificationAdapter {
     const [claimedFirst, claimedLast] = [this.normalizedName(claims.firstName), this.normalizedName(claims.lastName)];
     const namesMatch = (first === claimedFirst && last === claimedLast)
       || (first === claimedLast && last === claimedFirst);
+    const ninRecord = this.ninRecord(payload, submittedNin);
     if (returnedNin !== submittedNin || !namesMatch || dateOfBirth !== claims.dateOfBirth) {
-      return { ...result, state: 'not_verified' };
+      return { ...result, state: 'not_verified', ...(ninRecord ? { ninRecord } : {}) };
     }
-    return { ...result, ninBinding: { nin: returnedNin, firstName, lastName, dateOfBirth } };
+    return { ...result, ninBinding: { nin: returnedNin, firstName, lastName, dateOfBirth },
+      ...(ninRecord ? { ninRecord } : {}) };
   }
 
   private normalizedNinVerification(payload: unknown, submittedNin: string,
@@ -310,9 +314,12 @@ export class QoreIdVerificationAdapter {
     const fields = this.record(match?.fieldMatches);
     if (typeof match?.status !== 'string' || typeof fields?.firstname !== 'boolean'
       || typeof fields?.lastname !== 'boolean') throw this.invalidProviderResponse();
+    // The record QoreID returned, kept (0137) whatever the comparison gives.
+    const ninRecord = this.ninRecord(payload, submittedNin);
+    const withRecord = ninRecord ? { ninRecord } : {};
     if (match.status !== 'EXACT_MATCH' || !fields.firstname || !fields.lastname
       || (fields.dob !== undefined && fields.dob !== true)) {
-      return { ...result, state: 'not_verified' };
+      return { ...result, state: 'not_verified', ...withRecord };
     }
     const bio = this.record(record?.nin);
     const returnedNin = bio?.nin;
@@ -324,8 +331,26 @@ export class QoreIdVerificationAdapter {
     if (returnedNin !== submittedNin
       || this.normalizedName(firstName) !== this.normalizedName(claims.firstName)
       || this.normalizedName(lastName) !== this.normalizedName(claims.lastName)
-      || dateOfBirth !== claims.dateOfBirth) return { ...result, state: 'not_verified' };
-    return { ...result, ninBinding: { nin: returnedNin, firstName, lastName, dateOfBirth } };
+      || dateOfBirth !== claims.dateOfBirth) return { ...result, state: 'not_verified', ...withRecord };
+    return { ...result, ninBinding: { nin: returnedNin, firstName, lastName, dateOfBirth }, ...withRecord };
+  }
+
+  /**
+   * The record a NIN check returned (0137), for HID to keep instead of asking
+   * again: complete when it parses as a NIN-only enrollment record, else its
+   * name and date of birth, else (another NIN, no usable name) nothing.
+   */
+  private ninRecord(payload: unknown, submittedNin: string): QoreIdNinRecord | undefined {
+    try {
+      return { complete: true, binding: this.ninEnrollmentBinding(payload, submittedNin) };
+    } catch {
+      const bio = this.record(this.record(payload)?.nin);
+      const firstName = this.safeName(bio?.firstname);
+      const lastName = this.safeName(bio?.lastname);
+      const dateOfBirth = this.dateOfBirth(bio?.birthdate);
+      if (bio?.nin !== submittedNin || !firstName || !lastName || !dateOfBirth) return undefined;
+      return { complete: false, binding: { nin: submittedNin, firstName, lastName, dateOfBirth } };
+    }
   }
 
   private normalizedCacVerification(payload: unknown, submitted: string): QoreIdVerificationResult {

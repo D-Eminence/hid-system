@@ -76,6 +76,9 @@ describe('QoreID verification adapter', () => {
     await expect(adapter.verifyNin('12345678901', claims)).resolves.toEqual({
       provider: 'qoreid', state: 'verified', providerReference: '48291', respondedAt: expect.any(String),
       ninBinding: { nin: '12345678901', firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04' },
+      // The record kept so the NIN is not checked again (0137); no gender in this fixture, so not complete.
+      ninRecord: { complete: false, binding: { nin: '12345678901', firstName: 'Samplefirst', lastName: 'Samplelast',
+        dateOfBirth: '1991-03-04' } },
     });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[0]).toEqual([
@@ -95,6 +98,44 @@ describe('QoreID verification adapter', () => {
     const ninHeaders = fetch.mock.calls[1]?.[1]?.headers as Record<string, string>;
     expect(ninHeaders).toEqual({ accept: 'application/json', authorization: 'Bearer server-only-access-token',
       'content-type': 'application/json' });
+  });
+
+  describe('the record kept so a NIN is not checked again (0137)', () => {
+    const withGender = { ...complete, nin: { ...complete.nin, gender: 'M', photo: 'Zml4dHVyZQ==' } };
+    const ask = (body: unknown) => {
+      const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(body));
+      return new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch);
+    };
+
+    it('keeps the complete record when the claims do not match, so a corrected retry is not charged', async () => {
+      const mismatch = { ...withGender, summary: { nin_check: { status: 'NO_MATCH',
+        fieldMatches: { firstname: true, lastname: false } } } };
+      const result = await ask(mismatch).verifyNin('12345678901', claims);
+      expect(result.state).toBe('not_verified');
+      expect(result.ninBinding).toBeUndefined();
+      expect(result.ninRecord).toEqual({ complete: true, binding: expect.objectContaining({ nin: '12345678901',
+        firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04', gender: 'male' }) });
+    });
+
+    it('keeps the record of a sign-up profile check whose stated date of birth differs', async () => {
+      const result = await ask(withGender).verifyNin('12345678901', { ...claims, dateOfBirth: '1991-04-03' }, 'either');
+      expect(result.state).toBe('not_verified');
+      expect(result.ninRecord?.binding.dateOfBirth).toBe('1991-03-04');
+    });
+
+    it('keeps no record for another NIN than the one asked about', async () => {
+      const other = { ...withGender, nin: { ...withGender.nin, nin: '12345678902' } };
+      const result = await ask(other).verifyNin('12345678901', claims, 'either');
+      expect(result.state).toBe('not_verified');
+      expect(result.ninRecord).toBeUndefined();
+    });
+
+    it('keeps the NIN-only enrollment record complete', async () => {
+      const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(sandboxNinOnlySuccess));
+      const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration, fetch as unknown as typeof globalThis.fetch);
+      const result = await adapter.verifyNinEnrollment(fixtureNin);
+      expect(result.ninRecord).toEqual({ complete: true, binding: result.ninEnrollmentBinding });
+    });
   });
 
   it.each(['RC', 'BN', 'IT'] as const)

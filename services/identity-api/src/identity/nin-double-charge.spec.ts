@@ -1,13 +1,18 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
+import { Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
+import { AuditService } from '../audit/audit.service';
 import type { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
 import type { HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
+import { fakeNinCheckStore } from '../testing/nin-check-store.fake';
 import type { HidCodeGenerator } from './hid-code-generator.service';
+import { NIN_CHECK_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS, NIN_RECORD_ANSWER_SECONDS,
+  NinCheckOnce } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
@@ -20,6 +25,8 @@ import { QoreIdVerificationService } from './qoreid-verification.service';
  * two verified checks in the QoreID logs, both charged). Each test drives the
  * real services and the real QoreID adapter against a fake QoreID that counts
  * every NIN request it receives, answered or not, as QoreID bills them.
+ * They were written first as test.failing against the code before the fix
+ * (QoreID asked twice in each); with NinCheckOnce (0137) each asks it once.
  * Fictional values only; nothing leaves the process.
  */
 
@@ -76,11 +83,17 @@ function fakeQoreId() {
 function fakeDatabase() {
   const enrollments: Record<string, unknown>[] = [];
   const bound = new Set<string>();
+  /** NIN lookups whose patient's login was deleted (0096). */
+  const deletedLogins = new Set<string>();
+  const store = fakeNinCheckStore({ erased: (lookup) => deletedLogins.has(lookup) });
+  const audits: unknown[][] = [];
   const evidence: Record<string, unknown>[] = [];
   const profile = { patientId: 'a7000000-0000-4000-8000-000000000001', firstName: 'Adaeze', lastName: 'Fictional',
     dateOfBirth: null as string | null };
   const control = { failNextEnrollmentWrite: false };
   const query = jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+    const stored = store.query(sql, values);
+    if (stored) return stored;
     if (sql.includes('prune_expired_public_patient_enrollments')) {
       for (let index = enrollments.length - 1; index >= 0; index -= 1) {
         const row = enrollments[index]!;
@@ -131,9 +144,12 @@ function fakeDatabase() {
   const database = {
     withSystemTransaction: jest.fn(async (_correlation: string, work: (value: PoolClient) => Promise<unknown>) =>
       work(client)),
-    query: jest.fn(async () => ({ rows: [], rowCount: 1 })),
+    query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+      if (sql.includes('insert into audit.events')) audits.push([...values]);
+      return { rows: [], rowCount: 1 };
+    }),
   } as unknown as DatabaseService;
-  return { database, query, enrollments, bound, evidence, profile, control };
+  return { database, query, enrollments, bound, deletedLogins, store, audits, evidence, profile, control };
 }
 
 function system() {
@@ -145,19 +161,24 @@ function system() {
   const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined),
     consumePatientQuota: jest.fn().mockResolvedValue(undefined) } as unknown as IntegrationRuntimeService;
   const protector = new NinIdentifierProtector();
-  const provider = new QoreIdPublicPatientIdentityProvider(adapter, integrations);
+  const ninCheck = new NinCheckOnce(db.database, protector, new AuditService(db.database));
+  const provider = new QoreIdPublicPatientIdentityProvider(adapter, integrations, ninCheck);
   const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
   const enrollment = new PatientEnrollmentService(db.database, protector, provider,
     notification as unknown as NotificationOtpClient, { generate: jest.fn() } as unknown as HidCodeGenerator,
     { bindPendingInTransaction: jest.fn() } as unknown as GoogleAuthenticationService);
-  const profile = new QoreIdVerificationService(db.database, adapter, integrations, protector);
+  const profile = new QoreIdVerificationService(db.database, adapter, integrations, protector, ninCheck);
   const patientRequest = { correlationId: 'nin-double-charge-profile', actor: { kind: 'patient',
     patientId: db.profile.patientId, accountId: 'a7000000-0000-4000-8000-000000000002', subject: 'patient:fixture',
     sessionId: 'a7000000-0000-4000-8000-000000000003', roles: [], permissions: [], facilityIds: [], facilities: [] },
   header: () => undefined } as unknown as HidRequest;
   const start = (key = KEY_A, correlationId = `start-${key}`) => enrollment.start(NIN, key, IP, correlationId);
   const verifyProfile = (dateOfBirth?: string) => profile.verifyPatientNin(patientRequest, NIN, dateOfBirth);
-  return { qoreId, db, start, verifyProfile, lookup: protector.lookup(NIN) };
+  /** The audit rows of the NIN checks: [path, source, result] each. */
+  const checkAudits = () => db.audits.filter((values) => values[8] === 'identity.qoreid.nin-check')
+    .map((values) => { const details = JSON.parse(String(values[16])) as Record<string, unknown>;
+      return [details.path, details.source, details.result]; });
+  return { qoreId, db, start, verifyProfile, ninCheck, provider, checkAudits, lookup: protector.lookup(NIN) };
 }
 
 describe('the same NIN is sent to QoreID once', () => {
@@ -184,7 +205,7 @@ describe('the same NIN is sent to QoreID once', () => {
   });
 
   describe('Health ID sign-up with a NIN (public enrollment start)', () => {
-    test.failing('E1: two starts at once (a double tap, or two tabs) ask QoreID once', async () => {
+    test('E1: two starts at once (a double tap, or two tabs) ask QoreID once', async () => {
       const s = system();
       s.qoreId.state.delayMs = 30;
       const results = await Promise.allSettled([s.start(KEY_A), s.start(KEY_B)]);
@@ -192,7 +213,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('E2: a start sent again straight after a QoreID timeout does not ask again', async () => {
+    test('E2: a start sent again straight after a QoreID timeout does not ask again', async () => {
       const s = system();
       s.qoreId.state.modes = ['slow'];
       await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_TIMEOUT' });
@@ -200,7 +221,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('E3: a new start after the 24-hour pending enrollment ended reuses the answer', async () => {
+    test('E3: a new start after the 24-hour pending enrollment ended reuses the answer', async () => {
       const s = system();
       await s.start(KEY_A);
       s.db.enrollments[0]!.expires_at = new Date(Date.now() - 1000);
@@ -208,7 +229,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('E4: a retry after the verified answer could not be saved reuses the answer', async () => {
+    test('E4: a retry after the verified answer could not be saved reuses the answer', async () => {
       const s = system();
       s.db.control.failNextEnrollmentWrite = true;
       await expect(s.start(KEY_A)).rejects.toMatchObject({ status: 503 });
@@ -216,7 +237,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('E5: a NIN QoreID found no record for is not asked again on a retry', async () => {
+    test('E5: a NIN QoreID found no record for is not asked again on a retry', async () => {
       const s = system();
       s.qoreId.state.fallback = 'no_record';
       await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'NIN_NOT_VERIFIED' });
@@ -224,7 +245,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('E6: a NIN QoreID refused (not found) is not asked again on a retry', async () => {
+    test('E6: a NIN QoreID refused (not found) is not asked again on a retry', async () => {
       const s = system();
       s.qoreId.state.fallback = 'not_found';
       await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
@@ -249,21 +270,21 @@ describe('the same NIN is sent to QoreID once', () => {
   });
 
   describe('NIN added from the patient profile (POST identity/me/verification/nin)', () => {
-    test.failing('P1: two profile checks at once ask QoreID once', async () => {
+    test('P1: two profile checks at once ask QoreID once', async () => {
       const s = system();
       s.qoreId.state.delayMs = 30;
       await Promise.allSettled([s.verifyProfile('1990-03-02'), s.verifyProfile('1990-03-02')]);
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('P2: a profile check sent again after a details mismatch reuses the answer', async () => {
+    test('P2: a profile check sent again after a details mismatch reuses the answer', async () => {
       const s = system();
       await expect(s.verifyProfile('1990-02-03')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
       await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('P3: a profile check sent again straight after a QoreID timeout does not ask again', async () => {
+    test('P3: a profile check sent again straight after a QoreID timeout does not ask again', async () => {
       const s = system();
       s.qoreId.state.modes = ['slow'];
       await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'QOREID_TIMEOUT' });
@@ -271,26 +292,195 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('P4: a profile check after a NIN sign-up for the same NIN reuses the sign-up answer', async () => {
+    test('P4: a profile check after a NIN sign-up for the same NIN reuses the sign-up answer', async () => {
       const s = system();
       await s.start(KEY_A);
       await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('P5: a NIN sign-up after a profile check that did not bind reuses the answer', async () => {
+    test('P5: a NIN sign-up after a profile check that did not bind reuses the answer', async () => {
       const s = system();
       await expect(s.verifyProfile('1990-02-03')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
       await expect(s.start(KEY_C)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
       expect(s.qoreId.state.charged).toBe(1);
     });
 
-    test.failing('P6: a profile check retried with the same details after "no record" is not asked again', async () => {
+    test('P6: a profile check retried with the same details after "no record" is not asked again', async () => {
       const s = system();
       s.qoreId.state.fallback = 'no_record';
       await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
       await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
       expect(s.qoreId.state.charged).toBe(1);
+    });
+  });
+  describe('the stored answer (NinCheckOnce, 0137)', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+
+    it('the second of two simultaneous starts waits for the first and is told the NIN is taken, with one QoreID call', async () => {
+      const s = system();
+      s.qoreId.state.delayMs = 40;
+      const [first, second] = await Promise.allSettled([s.start(KEY_A), s.start(KEY_B)]);
+      expect(first).toMatchObject({ status: 'fulfilled' });
+      expect(second).toMatchObject({ status: 'rejected', reason: { code: 'NIN_ALREADY_REGISTERED' } });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'record'], ['enrollment', 'stored', 'record']]);
+    });
+
+    it('three checks at once from sign-up, the profile and the desk path ask QoreID once', async () => {
+      const s = system();
+      s.qoreId.state.delayMs = 40;
+      await Promise.allSettled([s.start(KEY_A), s.verifyProfile('1990-03-02'),
+        s.provider.verifyNin(NIN, { correlationId: 'desk-check', path: 'desk' })]);
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits().filter(([, source]) => source === 'qoreid')).toHaveLength(1);
+    });
+
+    it('a record is reused for 30 days, then QoreID is asked again', async () => {
+      const s = system();
+      await s.start(KEY_A);
+      s.db.enrollments.length = 0;
+      s.db.store.clock.offsetMs = NIN_RECORD_ANSWER_SECONDS * 1000 - 60_000;
+      await s.start(KEY_B);
+      expect(s.qoreId.state.charged).toBe(1);
+      s.db.enrollments.length = 0;
+      s.db.store.clock.offsetMs = NIN_RECORD_ANSWER_SECONDS * 1000 + 1000;
+      await s.start(KEY_C);
+      expect(s.qoreId.state.charged).toBe(2);
+    });
+
+    it('"no record" is reused for 24 hours, then QoreID is asked again', async () => {
+      const s = system();
+      s.qoreId.state.fallback = 'no_record';
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'NIN_NOT_VERIFIED' });
+      s.db.store.clock.offsetMs = NIN_NO_RECORD_ANSWER_SECONDS * 1000 - 60_000;
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'NIN_NOT_VERIFIED' });
+      expect(s.qoreId.state.charged).toBe(1);
+      s.db.store.clock.offsetMs = DAY + 1000;
+      s.qoreId.state.fallback = 'verified';
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(2);
+    });
+
+    it('after a timeout the NIN is held for a few minutes, then a new check asks QoreID', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['slow'];
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_TIMEOUT' });
+      const held = await s.start(KEY_A).catch((error: unknown) => error);
+      expect(held).toMatchObject({ status: 409, code: 'NIN_CHECK_IN_PROGRESS',
+        message: 'We are still checking this NIN. Please wait a few minutes, then try again.' });
+      s.db.store.clock.offsetMs = NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(2);
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'timeout'], ['enrollment', 'none', 'held'],
+        ['enrollment', 'qoreid', 'record']]);
+    });
+
+    it('a QoreID outage is not kept: the next check asks again', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['unavailable'];
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_UNAVAILABLE' });
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(2);
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'not_answered'], ['enrollment', 'qoreid', 'record']]);
+    });
+
+    it('a check whose first attempt is still running past the wait gets the plain message, not a second call', async () => {
+      const s = system();
+      // A lease another task holds (as after a crash or a very slow answer).
+      s.db.store.rows.set(s.lookup, { nin_lookup_hmac: s.lookup, state: 'checking',
+        attempt_id: 'a7000000-0000-4000-8000-0000000000ff', question_hmac: null, outcome: null, record_complete: null,
+        answer_ciphertext: null, key_version: null, until: Date.now() + 60_000 });
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ status: 409, code: 'NIN_CHECK_IN_PROGRESS' });
+      expect(s.qoreId.state.charged).toBe(0);
+      expect(s.checkAudits()).toEqual([['enrollment', 'none', 'in_progress']]);
+    });
+
+    it('when the store cannot be reached nothing is sent to QoreID', async () => {
+      const s = system();
+      s.db.store.fail('begin_qoreid_nin_check');
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ status: 503, code: 'NIN_CHECK_UNAVAILABLE' });
+      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ status: 503, code: 'NIN_CHECK_UNAVAILABLE' });
+      expect(s.qoreId.state.charged).toBe(0);
+      // No evidence row: nothing reached QoreID.
+      expect(s.db.evidence).toEqual([]);
+    });
+
+    it('an answer stored under another NIN key version is not reused', async () => {
+      const s = system();
+      await s.start(KEY_A);
+      s.db.enrollments.length = 0;
+      process.env.NIN_KEY_VERSION = 'rotated-v2';
+      resetEnvironmentForTests();
+      await s.start(KEY_B);
+      expect(s.qoreId.state.charged).toBe(2);
+    });
+
+    it('is erased, and never reused, once the patient holding the NIN has deleted their login', async () => {
+      const s = system();
+      await s.start(KEY_A);
+      s.db.enrollments.length = 0;
+      s.db.deletedLogins.add(s.lookup);
+      await expect(s.ninCheck.prune('sweep', 500)).resolves.toBe(1);
+      expect(s.db.store.rows.size).toBe(0);
+      await s.start(KEY_B);
+      expect(s.qoreId.state.charged).toBe(2);
+    });
+
+    it('expired rows are erased by the sweeper\'s prune; live answers stay', async () => {
+      const s = system();
+      await s.start(KEY_A);
+      await expect(s.ninCheck.prune('sweep', 500)).resolves.toBe(0);
+      s.db.store.clock.offsetMs = NIN_RECORD_ANSWER_SECONDS * 1000 + 1000;
+      await expect(s.ninCheck.prune('sweep', 500)).resolves.toBe(1);
+      expect(s.db.store.rows.size).toBe(0);
+    });
+
+    it('keeps the answer encrypted and never puts the NIN in a statement, an audit row or a log line', async () => {
+      const s = system();
+      const logged: string[] = [];
+      for (const level of ['log', 'error', 'warn', 'debug', 'verbose'] as const) {
+        jest.spyOn(Logger.prototype, level).mockImplementation((...args: unknown[]) => {
+          logged.push(JSON.stringify(args));
+        });
+      }
+      s.qoreId.state.modes = ['slow', 'unavailable'];
+      await s.start(KEY_A).catch(() => undefined);
+      s.db.store.clock.offsetMs = NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
+      await s.start(KEY_A).catch(() => undefined);
+      await s.start(KEY_A);
+      s.db.store.fail('finish_qoreid_nin_check');
+      s.db.store.clock.offsetMs = 2 * NIN_RECORD_ANSWER_SECONDS * 1000;
+      s.db.enrollments.length = 0;
+      await s.start(KEY_B);
+      s.db.store.fail(undefined);
+      // The answer could not be recorded, so its lease stands until it ends:
+      // a check right after waits for it and is told so, without a call.
+      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'NIN_CHECK_IN_PROGRESS' });
+      expect(s.qoreId.state.charged).toBe(4);
+      const row = [...s.db.store.rows.values()][0]!;
+      expect(row.nin_lookup_hmac).toBe(s.lookup);
+      const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('latin1') : JSON.stringify(value);
+      for (const value of [...s.db.store.calls.flatMap(({ values }) => values), ...s.db.audits.flat(), ...logged]) {
+        expect(text(value)).not.toContain(NIN);
+        expect(text(value)).not.toContain(s.lookup.slice(0, 16).toUpperCase());
+        expect(text(value)).not.toContain('Adaeze');
+      }
+      for (const audit of s.db.audits.filter((values) => values[8] === 'identity.qoreid.nin-check')) {
+        expect(text(audit)).not.toContain(s.lookup);
+      }
+      expect(logged.some((line) => line.includes('nin-check.finish.failed'))).toBe(true);
+    });
+
+    it('a stored record is compared with the profile exactly as QoreID\'s answer was: a wrong date is still refused', async () => {
+      const s = system();
+      await s.start(KEY_A);
+      await expect(s.verifyProfile('1990-02-03')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
+      s.db.profile.firstName = 'Fictional';
+      s.db.profile.lastName = 'Adaeze';
+      await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.db.evidence.map((row) => row.result)).toEqual(['not_verified', 'verified']);
     });
   });
 });

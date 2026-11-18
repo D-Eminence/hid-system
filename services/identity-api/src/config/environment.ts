@@ -215,7 +215,13 @@ const environmentSchema = z.object({
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
-  QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(10_000).default(5_000),
+  // How long Identity waits for one QoreID request. QoreID charges a check
+  // whether or not HID waits for its answer (owner, 18 November 2026), so a
+  // short wait pays for answers HID throws away: 15 s by default, at most
+  // 20 s so a start (Turnstile, the check, the database) stays inside the
+  // gateway's 30 s read timeout. Production sets its own value in its
+  // infrastructure configuration; changing that needs the owner's apply.
+  QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(20_000).default(15_000),
   // QoreID's POST endpoints do not publish an idempotency contract. Keep
   // retries explicitly disabled rather than risking duplicate verification.
   QOREID_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),

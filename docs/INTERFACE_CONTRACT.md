@@ -659,6 +659,16 @@ of 2026-10-27) and needs QoreID enabled; it does not expose provider
 credentials or tokens. `GET /api/v1/identity/me` answers `ninVerified`
 (a verified, unrevoked NIN identifier is bound).
 
+QoreID is asked once per NIN (0137, Q109; docs/QOREID_VERIFICATION_CONTRACT.md,
+"One QoreID check per NIN"): this route, `POST
+/api/v1/identity/patient-enrollments` and the registration desk reuse a stored
+answer, and a check of a NIN another request is checking, or that timed out in
+the last 5 minutes, answers 409 `NIN_CHECK_IN_PROGRESS` with the plain message
+"We are still checking this NIN. Please wait a few minutes, then try again."
+(no QoreID call, no evidence row). 503 `NIN_CHECK_UNAVAILABLE` means nothing
+was sent. A client shows the message and offers to try again later; it never
+retries on its own.
+
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
 the `read_records` action for the exact facility and patient. With 0117 it also answers `allergies` (recorded and

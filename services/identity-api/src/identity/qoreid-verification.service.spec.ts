@@ -5,6 +5,8 @@ import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { DomainProblem } from '../common/problem';
 import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
+import type { NinCheckOnce } from './nin-check-once';
+import { passThroughNinCheck } from '../testing/nin-check-store.fake';
 import type { NinIdentifierProtector } from './nin-identifier-protector';
 import { QoreIdVerificationService } from './qoreid-verification.service';
 
@@ -57,7 +59,9 @@ function setup(enabled: boolean, selfBinding = true) {
       sha256: 'b'.repeat(64), keyVersion: 'test-v1' }) } as unknown as NinIdentifierProtector;
   jest.spyOn(environment, 'getEnvironment').mockReturnValue({ QOREID_ENABLED: enabled,
     QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: selfBinding } as environment.Environment);
-  return { service: new QoreIdVerificationService(database, provider, integrations, ninProtector), provider, query, database,
+  const ninCheck = passThroughNinCheck();
+  return { service: new QoreIdVerificationService(database, provider, integrations, ninProtector,
+    ninCheck as unknown as NinCheckOnce), provider, query, database, ninCheck,
     integrations, ninProtector,
     setProfileDateOfBirth: (value: string | null) => { profileDateOfBirth = value; },
     setNinEligibility: (value: 'bound_exact' | 'legacy_unbound' | 'denied') => { ninEligibility = value; } };

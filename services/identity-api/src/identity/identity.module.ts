@@ -12,6 +12,7 @@ import { RecordAccessNoticeService } from './record-access-notice.service';
 import { IDENTITY_PROVIDER } from './identity.types';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
+import { NinCheckOnceModule } from './nin-check-once.module';
 import { NinRegistrationService } from './nin-registration.service';
 import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER } from './nin.types';
@@ -53,7 +54,8 @@ import { OutreachHealthIdController } from './outreach-health-id.controller';
 import { OutreachHealthIdService } from './outreach-health-id.service';
 
 @Module({
-  imports: [AuthModule, TurnstileModule, IntegrationModule],
+  // NinCheckOnceModule: every patient NIN check through QoreID, once per NIN (0137).
+  imports: [AuthModule, TurnstileModule, IntegrationModule, NinCheckOnceModule],
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
     AdminOrganizationApplicationsController,
@@ -127,7 +129,7 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
       },
     },
   ],
-  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter,
+  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter, NinCheckOnceModule,
     // The public application quota digest, shared with open sign-up on outreach.
     OrganizationProfileCompletionService],
 })
