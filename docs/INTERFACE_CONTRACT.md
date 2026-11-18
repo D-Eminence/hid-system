@@ -6828,3 +6828,154 @@ Screen change (Akos frontend branch): run the check when a medicine is
 chosen and show `message` with the matches (medicine, status, dates) above
 Save; Save stays enabled. After Save, show `duplicateMedicines.message` if
 present.
+
+## 0132. Staff patient search and emergency search (ID-3a, ID-3b; Akos Release A, migration 0132)
+
+Owner decisions of 18 November 2026: YES to search by name, phone, date of
+birth and Health ID with the strong and weak key rule; YES to emergency
+search by name and date of birth; Q104 YES (an emergency search shows in the
+patient's own access history); Q100 B (a Health ID nobody has answers "No
+such patient" distinctly). Needs 0001-0127, 0130 and 0131 (it uses 0131's
+own-facility basis for "this facility's patients").
+
+Keys go in the body, never in the URL. Answers never carry a Health ID or a
+patient id: each card carries a `matchRef` instead.
+
+### `POST /api/v1/identity/patient-search`
+
+Permission `identity.registration.write` (front desk, approvers, doctors,
+nurses, clinicians), `X-Facility-Id`, `X-Purpose-Of-Use: direct-care`.
+
+```json
+{ "firstName": "Amaka", "lastName": "Okafor", "dateOfBirth": "1990-05-01",
+  "healthId": "HID-QSAA22", "phone": "0803 000 0001" }
+```
+
+Every field is optional; every key given must match. Names match ignoring
+case and extra spaces; the date of birth exactly (`YYYY-MM-DD`); the Health
+ID exactly (any case); the phone in any form it may be stored in (E.164, or a
+Nigerian number starting with 0).
+
+| Keys | Finds |
+|---|---|
+| first name + last name + date of birth | any active patient |
+| Health ID + (last name or date of birth) | any active patient |
+| phone + last name | any active patient |
+| last name + date of birth | only this facility's patients |
+| phone | only this facility's patients |
+| Health ID | only this facility's patients |
+| anything else | 400 `PATIENT_SEARCH_TOO_BROAD` |
+
+"This facility's patients" are 0131's: registered at this desk, or a
+consented visit here in the last 24 months. Inactive, merged and sealed
+(demo or QA tenant) patients are never found; a sealed facility finds only
+its own sealed patients.
+
+Answer `200`:
+
+```json
+{ "mode": "standard", "outcome": "found", "reach": "everywhere", "message": null,
+  "patients": [ { "matchRef": "psr_...", "matchRefExpiresAt": "2026-11-18T10:10:00.000Z",
+    "fullName": "Amaka Okafor", "sex": "female", "dateOfBirth": "1990-05-01",
+    "healthIdLast4": "AA22", "ninStatus": "not_verified" } ] }
+```
+
+- `outcome`: `found` (1-10 cards), `no_match`, `no_such_patient` (a Health ID
+  was given and no patient record of any status has it: "No patient has this
+  Health ID."), `too_many` (more than 10: "Too many matches. Add the date of
+  birth or phone.", no card).
+- `reach`: `everywhere` or `here`. A `no_match` that reached only here says
+  "No patient of this facility matches. To search every facility, add the
+  full name and date of birth."
+- `ninStatus` is ID-0's: `verified` or `not_verified` ("NIN Verified" /
+  "NIN Not Verified" on screen).
+- Registration roles can tell whether a Health ID exists from
+  `no_such_patient`; this is the owner's Q100 B.
+
+Refusals: 400 `PATIENT_SEARCH_TOO_BROAD`, `PATIENT_SEARCH_PHONE_INVALID`,
+`PATIENT_SEARCH_DATE_INVALID`, `VALIDATION_FAILED` (unknown field, malformed
+Health ID, a name over 100 characters), `PURPOSE_OF_USE_REQUIRED`; 403
+(permission); 429 `PATIENT_SEARCH_LIMITED` ("Too many searches. Please wait a
+few minutes and try again."); 503 `PATIENT_SEARCH_UNAVAILABLE`.
+
+### `POST /api/v1/identity/patient-search/emergency`
+
+Permission `identity.break-glass.write` (doctors, nurses, clinicians),
+`X-Purpose-Of-Use: emergency`, the platform's emergency access
+(`break_glass_enabled`) on.
+
+```json
+{ "firstName": "Amaka", "lastName": "Okafor", "dateOfBirth": "1990-05-01",
+  "reason": "Unconscious patient brought in by ambulance" }
+```
+
+Exactly these four fields; the reason (8-500 characters) is required before
+any result. Exact first name, last name and date of birth, any active
+patient, at most 5 cards (`too_many` above 5: "More than 5 people match. Ask
+for a phone number or the Health ID."). The answer has the same shape with
+`mode: "emergency"`. The cards give no access: break-glass still needs its
+own reason. Refusals as above, plus 400 `EMERGENCY_SEARCH_REASON_REQUIRED`
+and 423 `BREAK_GLASS_DISABLED`.
+
+### matchRef
+
+`psr_` and 43 characters, random, made by the database; only its SHA-256 is
+stored (`identity.patient_search_refs`), bound to the patient, the member's
+account, membership and facility and the purpose (`direct-care`, or
+`emergency` for an emergency search), for 10 minutes. No key or setting is
+involved. Identity code resolves it with
+`services/identity-api/src/patient-search/match-ref.ts`
+(`resolvePatientMatchRef`, over `identity.resolve_patient_search_ref`): the
+patient id only for the same member, facility and purpose, unexpired, while
+the patient is active and the seal allows it; null otherwise. Break-glass by
+matchRef (ID-5) and check-in (EHR-C7) use it; they do not change it.
+
+### Limits and alert
+
+Counted before each search (`auth.otp_rate_limits`, HMAC buckets with the
+existing OTP key): 30 searches per member in 10 minutes and 300 per facility
+in an hour; 5 emergency searches per member in an hour. A limit answers 429
+and writes one warning log line `event: "identity.patient_search.limited"`
+with the mode, which limit, the facility id and the correlation id; never
+what was searched for.
+
+### Audit
+
+- Each search that runs: one `identity.patient.search` or
+  `identity.patient.emergency-search` row (success; denied when too broad)
+  with `details.criteria` (the kinds of keys given), `details.criteriaHash`
+  (HMAC-SHA-256 of the values with the OTP key, so a repeated search can be
+  recognised), `reach`, `outcome`, `resultCount` and `patientIds` shown. Never
+  a name, date of birth, Health ID or phone. The emergency reason is kept in
+  the row's `reason`.
+- Each patient shown: one `identity.patient.search.shown` or
+  `identity.patient.emergency-search.shown` row naming the patient.
+- Each refusal (too broad, invalid phone or date, limited, a database
+  refusal, unavailable): one denied (or failure) search row with
+  `details.refusal` and the key kinds. The request interceptor's
+  `api.identity.patient.search.request` rows are written as for every route.
+
+### The patient's access log (owner Q104)
+
+`GET /api/v1/identity/me/access-log` gains the action
+`found_in_emergency_search`, with `facilityName` and `actorName`, for each
+emergency search that showed the patient. The screen says "Found in an
+emergency search at <facility>". A standard search is not listed there (it
+is audited).
+
+### Screen change (Akos's frontend branch)
+
+Desk search form with the five keys; show `message` when there is no card;
+offer "Register new patient" from an empty search (`no_match` or
+`no_such_patient`), not from an error. Emergency search behind the
+break-glass flow, reason first. Keep the `matchRef` (never a Health ID) for
+the next step. Patient's access history: the new action's words above.
+
+### Tests
+
+`services/ehr-api/test/database/staff-patient-search.integration.sql`
+(strong and weak keys, here against everywhere, Health ID outcomes,
+exclusions and seals, the 10 and 5 limits, cards, matchRefs, refusals,
+emergency gate and reason, audit rows without values, the patient's access
+log, structure); `services/identity-api/src/patient-search/patient-search.http.spec.ts`
+and `services/identity-api/src/auth/patient-access-log.spec.ts`.
