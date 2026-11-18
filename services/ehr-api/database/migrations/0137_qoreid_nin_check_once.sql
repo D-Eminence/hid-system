@@ -10,27 +10,36 @@
 -- 1. identity.qoreid_nin_checks: one row per NIN, keyed by the NIN lookup
 --    HMAC the enrollments already use (NIN_LOOKUP_HMAC_KEY); never the NIN.
 --    state 'checking': one attempt holds the check (attempt_id) until
---      `until` (its lease); every other attempt for the NIN waits for it
---      instead of calling QoreID. No database connection or lock is held
---      while QoreID answers: the lease is a row, written and committed in
---      its own short transaction.
---    state 'held': the last check timed out or its answer could not be read;
---      QoreID may still have charged for it, so a new check of the NIN is
---      refused until `until` (a few minutes) instead of being paid again.
+--      `until` (its lease, long enough for QoreID's slowest answer HID still
+--      reads); every other attempt for the NIN waits for it instead of
+--      calling QoreID. No database connection or lock is held while QoreID
+--      answers: the lease is a row, written and committed in its own short
+--      transaction. A lease that ends without an outcome (the attempt was
+--      stopped, or could not record what QoreID said) means QoreID was asked
+--      and probably charged: the next begin turns it into a 6-hour hold.
+--    state 'held': the last check was sent and brought no answer HID could
+--      keep (an error QoreID may have charged: a few minutes; no answer at
+--      all: hours), so a new check of the NIN is refused until `until`
+--      instead of being paid again.
 --    state 'answered': QoreID's answer, AES-256-GCM ciphertext under
 --      Identity's NIN encryption key (key_version), reused by every path until
---      `until`: a record for 30 days, "no record" or a refusal for 24 hours.
---      A record answers every question; a "no record" or a refusal answers
---      the question it was asked (question_hmac, an HMAC of the details a
---      profile check sent) or, asked with the NIN alone (null), every question.
+--      `until`: a record for 30 days (24 hours when a profile check did not
+--      match it), "no record", QoreID's "not found" or an answer HID cannot
+--      use for 24 hours. A record answers every question; another outcome
+--      answers the question it was asked (question_hmac, an HMAC of the
+--      details a profile check sent) or, asked with the NIN alone (null),
+--      every question.
 -- 2. Three SECURITY DEFINER commands for the Identity runtime (system:auth
 --    with a correlation id only): identity.begin_qoreid_nin_check (the stored
 --    answer, "wait", "held", or the lease to call QoreID), identity.
 --    finish_qoreid_nin_check (the holder records the answer, the hold, or
---    lets go) and identity.prune_qoreid_nin_checks (erases rows past `until`
---    and the answers for a NIN bound to a patient whose login was deleted,
---    0096's completion; Identity's patient lifecycle sweeper calls it every
---    tick). begin never returns, and prune erases, an answer for such a NIN.
+--    lets go; never keeps an answer for a NIN whose patient's login was
+--    deleted) and identity.prune_qoreid_nin_checks (erases rows past `until`
+--    through the index on `until`, and the answers for the NINs of patients
+--    whose login deletion (0096) completed in the last day, found from those
+--    deletions, never by testing every row; Identity's patient lifecycle
+--    sweeper calls it every tick). begin never returns an answer for such a
+--    NIN.
 --
 -- No existing table, function, policy or grant changes; the new table has no
 -- foreign key and no trigger on an existing table, so applying it takes no
@@ -58,7 +67,8 @@ begin
      or to_regprocedure('auth.guard_session_single_sign_on_change()') is null
      or to_regclass('identity.patient_identifiers') is null
      or to_regclass('identity.patients') is null
-     or to_regclass('auth.accounts') is null then
+     or to_regclass('auth.accounts') is null
+     or to_regclass('identity.patient_account_deletion_requests') is null then
     raise exception using errcode = '55000', message = '0137: 0001-0127 must be applied first';
   end if;
   -- The columns the erasure test reads, with the types 0002, 0051 and 0096 gave them.
@@ -72,7 +82,10 @@ begin
       ('identity.patients', 'id', 'uuid'),
       ('identity.patients', 'account_id', 'uuid'),
       ('auth.accounts', 'id', 'uuid'),
-      ('auth.accounts', 'status', 'text'))
+      ('auth.accounts', 'status', 'text'),
+      ('identity.patient_account_deletion_requests', 'patient_id', 'uuid'),
+      ('identity.patient_account_deletion_requests', 'state', 'text'),
+      ('identity.patient_account_deletion_requests', 'completed_at', 'timestamp with time zone'))
          expected(relation_name, column_name, type_name)
     left join lateral (
       select format_type(attribute.atttypid, attribute.atttypmod) as type_name
@@ -104,8 +117,16 @@ begin
   end if;
   -- The applying role owns the new objects and reads, as their owner, the
   -- two tables with row-level security the erasure test reads (never a
-  -- superuser's bypass), and may read auth.accounts.
+  -- superuser's bypass), and may read auth.accounts. The prune reads 0096's
+  -- deletion requests as their owner too: that table forces row-level
+  -- security, so its one policy must name the applying role.
   if applier is null
+     or not pg_has_role(applier, (select relowner from pg_class
+                                   where oid = 'identity.patient_account_deletion_requests'::regclass), 'USAGE')
+     or not exists (select 1 from pg_policy policy_row
+                     where policy_row.polrelid = 'identity.patient_account_deletion_requests'::regclass
+                       and pg_get_expr(policy_row.polqual, policy_row.polrelid)
+                           = format('(CURRENT_USER = %L::name)', current_user))
      or not pg_has_role(applier, (select relowner from pg_class where oid = 'identity.patient_identifiers'::regclass), 'USAGE')
      or not pg_has_role(applier, (select relowner from pg_class where oid = 'identity.patients'::regclass), 'USAGE')
      or not has_table_privilege(applier, 'auth.accounts', 'SELECT')
@@ -125,7 +146,7 @@ create table identity.qoreid_nin_checks (
   state text not null check (state in ('checking', 'held', 'answered')),
   attempt_id uuid not null,
   question_hmac char(64) check (question_hmac is null or question_hmac ~ '^[0-9a-f]{64}$'),
-  outcome text check (outcome in ('record', 'no_record', 'rejected')),
+  outcome text check (outcome in ('record', 'no_record', 'rejected', 'unusable')),
   record_complete boolean,
   answer_ciphertext bytea check (answer_ciphertext is null or octet_length(answer_ciphertext) between 30 and 262144),
   key_version text check (key_version is null or length(key_version) between 1 and 64),
@@ -182,7 +203,9 @@ revoke all on function identity.qoreid_nin_check_erased(char) from public;
 --   'stored'  a usable answer (outcome, record_complete, answer_ciphertext);
 --   'call'    this attempt now holds the lease and may ask QoreID once;
 --   'wait'    another attempt holds it until `until`: ask again shortly;
---   'held'    the last check did not finish; no new check until `until`.
+--   'held'    the last check brought no answer HID could keep; no new
+--             check until `until`. A lease that ended without an outcome
+--             becomes such a hold, until 6 hours after the lease's end.
 -- An answer is usable while unexpired, under the caller's key version, for a
 -- NIN not erased, and: a record when complete or the caller does not need a
 -- complete one; another outcome when asked with the NIN alone or for this
@@ -226,6 +249,16 @@ begin
     return query select 'wait'::text, null::text, null::boolean, null::bytea, clock_timestamp();
     return;
   end if;
+  -- QoreID was asked under this lease and nothing was recorded: it probably
+  -- charged, so the NIN is held, not checked again at once.
+  if check_row.state = 'checking' and check_row.until <= clock_timestamp()
+     and check_row.until + interval '6 hours' > clock_timestamp() then
+    update identity.qoreid_nin_checks
+       set state = 'held', until = check_row.until + interval '6 hours', updated_at = clock_timestamp()
+     where nin_lookup_hmac = requested_lookup_hmac;
+    return query select 'held'::text, null::text, null::boolean, null::bytea, check_row.until + interval '6 hours';
+    return;
+  end if;
   if check_row.until > clock_timestamp() then
     if check_row.state = 'checking' then
       return query select 'wait'::text, null::text, null::boolean, null::bytea, check_row.until;
@@ -257,12 +290,15 @@ revoke all on function identity.begin_qoreid_nin_check(char, char, boolean, text
 
 -- The holder of the lease records what came of its check, and only while it
 -- still holds it (another attempt that took over an expired lease wins):
---   'record', 'no_record', 'rejected'  the answer, kept requested_seconds
---     (a record at most 31 days, the others at most 7 days);
---   'held'      a timeout or an unreadable answer: no new check for
---     requested_seconds (at most an hour);
---   'released'  QoreID was not reached or refused for its own reasons (a
---     network failure, an outage, its rate limit): nothing is kept.
+--   'record', 'no_record', 'rejected', 'unusable'  the answer, kept
+--     requested_seconds (a record at most 31 days, the others at most 7
+--     days); never kept for a NIN whose patient's login was deleted (the
+--     holder's row is removed instead);
+--   'held'      sent with no answer HID could keep: no new check for
+--     requested_seconds (at most a day);
+--   'released'  nothing reached QoreID's check (the token request failed,
+--     the connection could not be opened, QoreID's 401 or 429): nothing is
+--     kept.
 -- True when recorded.
 create function identity.finish_qoreid_nin_check(
   requested_lookup_hmac char(64), requested_attempt_id uuid, requested_result text,
@@ -278,15 +314,15 @@ begin
   end if;
   if requested_lookup_hmac is null or requested_lookup_hmac !~ '^[0-9a-f]{64}$' or requested_attempt_id is null
      or requested_result is null
-     or requested_result not in ('record', 'no_record', 'rejected', 'held', 'released')
+     or requested_result not in ('record', 'no_record', 'rejected', 'unusable', 'held', 'released')
      or (requested_question_hmac is not null and requested_question_hmac !~ '^[0-9a-f]{64}$')
-     or (requested_result in ('record', 'no_record', 'rejected') and (
+     or (requested_result in ('record', 'no_record', 'rejected', 'unusable') and (
            requested_ciphertext is null or requested_key_version is null
            or (requested_result = 'record') <> (requested_complete is not null)
            or requested_seconds is null
            or requested_seconds not between 60 and
               case when requested_result = 'record' then 31 * 86400 else 7 * 86400 end))
-     or (requested_result = 'held' and (requested_seconds is null or requested_seconds not between 1 and 3600)) then
+     or (requested_result = 'held' and (requested_seconds is null or requested_seconds not between 1 and 86400)) then
     raise exception using errcode = '22023', message = 'QOREID_NIN_CHECK_INVALID';
   end if;
   if requested_result = 'released' then
@@ -301,6 +337,11 @@ begin
      where nin_lookup_hmac = requested_lookup_hmac and attempt_id = requested_attempt_id and state = 'checking';
     return found;
   end if;
+  if identity.qoreid_nin_check_erased(requested_lookup_hmac) then
+    delete from identity.qoreid_nin_checks
+     where nin_lookup_hmac = requested_lookup_hmac and attempt_id = requested_attempt_id and state = 'checking';
+    return false;
+  end if;
   update identity.qoreid_nin_checks
      set state = 'answered', outcome = requested_result,
          question_hmac = case when requested_result = 'record' then null else requested_question_hmac end,
@@ -313,8 +354,15 @@ end
 $$;
 revoke all on function identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer) from public;
 
--- Erases up to requested_limit rows past `until` (an expired answer, hold or
--- lease) and the answers for a NIN whose patient's login was deleted. The
+-- Erases up to requested_limit rows past `until` (an expired answer or hold,
+-- or a lease that ended more than 6 hours ago), found through the index on
+-- `until`, and up to requested_limit
+-- answers for the NINs of patients whose login deletion (0096) completed in
+-- the last day, found from those deletion requests (few) through the NIN
+-- identifiers and this table's primary key: no row is tested on every tick.
+-- An answer kept before the deletion is erased within a minute of it; begin
+-- never returns, and finish never keeps, an answer for such a NIN, so one
+-- missed while the sweeper was stopped is never used and expires. The
 -- sweeper's; rows another transaction holds are left for the next tick.
 create function identity.prune_qoreid_nin_checks(requested_limit integer)
 returns integer
@@ -323,6 +371,7 @@ set search_path = pg_catalog, pg_temp
 as $$
 declare
   removed integer;
+  erased integer;
 begin
   if platform.current_actor_subject() is distinct from 'system:auth' or platform.current_correlation_id() is null then
     raise exception using errcode = '42501', message = 'QOREID_NIN_CHECK_DENIED';
@@ -335,12 +384,28 @@ begin
      select candidate.nin_lookup_hmac
        from identity.qoreid_nin_checks candidate
       where candidate.until <= clock_timestamp()
-         or (candidate.state = 'answered' and identity.qoreid_nin_check_erased(candidate.nin_lookup_hmac))
+        -- A lease that ended without an outcome stands as a hold (begin's
+        -- 6 hours after its end) until then: never pruned into a free check.
+        and (candidate.state <> 'checking' or candidate.until <= clock_timestamp() - interval '6 hours')
       order by candidate.until
       limit requested_limit
       for update skip locked);
   get diagnostics removed = row_count;
-  return removed;
+  delete from identity.qoreid_nin_checks check_row
+   where check_row.nin_lookup_hmac in (
+     select candidate.nin_lookup_hmac
+       from identity.patient_account_deletion_requests request_row
+       join identity.patient_identifiers identifier
+         on identifier.patient_id = request_row.patient_id and identifier.identifier_type = 'nin'
+       join identity.qoreid_nin_checks candidate
+         on candidate.nin_lookup_hmac = identifier.lookup_hmac and candidate.state = 'answered'
+      where request_row.state = 'completed'
+        and request_row.completed_at > clock_timestamp() - interval '1 day'
+        and identity.qoreid_nin_check_erased(candidate.nin_lookup_hmac)
+      limit requested_limit
+      for update of candidate skip locked);
+  get diagnostics erased = row_count;
+  return removed + erased;
 end
 $$;
 revoke all on function identity.prune_qoreid_nin_checks(integer) from public;

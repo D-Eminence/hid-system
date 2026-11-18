@@ -7,9 +7,13 @@
 -- holder alone records an outcome; a record reused by every question, an
 -- incomplete record taken over by a caller that needs a complete one; "no
 -- record" for the question asked and, asked with the NIN alone, for every
--- question; a hold and its end; letting go; expiry; another key version; the
--- table's checks; erasure for a NIN bound to a patient whose login was deleted
--- (begin never returns it, prune erases it); the prune's limit and what it
+-- question; an answer HID cannot use, kept and reused like "no record"; a
+-- hold (up to a day) and its end; a lease that ended without an outcome held
+-- for 6 hours after its end, and one older than that taken over; letting go;
+-- expiry; another key version; the table's checks; erasure for a NIN bound to
+-- a patient whose login was deleted (begin never returns it, finish never
+-- keeps it, prune erases the answer kept before a deletion completed in the
+-- last day, without testing other rows); the prune's limits and what it
 -- leaves. Two simultaneous begins on separate connections are proved by
 -- services/identity-api/scripts/verify-nin-check-once-runtime.mjs.
 -- Rollback-only. Synthetic values only; uuid prefix 137a.
@@ -84,6 +88,19 @@ insert into identity.patient_identifiers (id, patient_id, identifier_type, value
   ('137a0000-0000-4000-8000-000000000003', '137a0000-0000-4000-8000-000000000002', 'nin',
    decode(repeat('ab', 32), 'hex'), repeat('e', 64), 'k1', '****0001', true, clock_timestamp(), 'qoreid', '7001',
    '137a0000-0000-4000-8000-000000000004');
+-- A second such patient, holding NIN 'k', whose NIN is held (not answered) when the login is deleted.
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('137a0000-0000-4000-8000-000000000011', 'synthetic:nin-check-once:2', 'nin-check-once-2@example.invalid',
+   'NIN Check Twice', 'active');
+insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, status) values
+  ('137a0000-0000-4000-8000-000000000012', '137a0000-0000-4000-8000-000000000011', 'HID-NCK3B2', 'Nin', 'Twice',
+   'Nin Twice', 'active');
+insert into identity.patient_identifiers (id, patient_id, identifier_type, value_ciphertext, lookup_hmac,
+  encryption_key_version, display_hint, verified, verified_at, verification_provider, verification_reference,
+  registration_case_id) values
+  ('137a0000-0000-4000-8000-000000000013', '137a0000-0000-4000-8000-000000000012', 'nin',
+   decode(repeat('ab', 32), 'hex'), repeat('0', 63) || '5', 'k1', '****0002', true, clock_timestamp(), 'qoreid',
+   '7002', '137a0000-0000-4000-8000-000000000014');
 set local session_replication_role = origin;
 
 -- Results of the steps below, read by the checks as the owner.
@@ -138,8 +155,20 @@ begin
   end;
   begin
     perform identity.finish_qoreid_nin_check(repeat('a', 64), '137a0000-0000-4000-8000-0000000000a1', 'held',
-      null, null, null, null, 7200);
-    raise exception 'finish held a NIN for two hours';
+      null, null, null, null, 2 * 86400);
+    raise exception 'finish held a NIN for two days';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    perform identity.finish_qoreid_nin_check(repeat('a', 64), '137a0000-0000-4000-8000-0000000000a1', 'unusable',
+      null, null, decode(repeat('ab', 32), 'hex'), 'k1', 8 * 86400);
+    raise exception 'finish kept an unusable answer past 7 days';
+  exception when invalid_parameter_value then null;
+  end;
+  begin
+    perform identity.finish_qoreid_nin_check(repeat('a', 64), '137a0000-0000-4000-8000-0000000000a1', 'unusable',
+      null, true, decode(repeat('ab', 32), 'hex'), 'k1', 86400);
+    raise exception 'finish kept an unusable answer as a complete record';
   exception when invalid_parameter_value then null;
   end;
   begin
@@ -232,6 +261,42 @@ insert into nin_check_steps
 select 'f released', identity.finish_qoreid_nin_check(repeat('f', 64), '137a0000-0000-4000-8000-0000000000f1',
   'released', null, null, null, null, null)::text;
 
+-- An answer HID cannot use ('g'), asked with the NIN alone, answers every question.
+insert into nin_check_steps
+select 'g first', decision from identity.begin_qoreid_nin_check(repeat('0', 63) || '1', null, true, 'k1',
+  '137a0000-0000-4000-8000-0000000000c5', 30);
+insert into nin_check_steps
+select 'g finish', identity.finish_qoreid_nin_check(repeat('0', 63) || '1', '137a0000-0000-4000-8000-0000000000c5',
+  'unusable', null, null, decode(repeat('ef', 32), 'hex'), 'k1', 86400)::text;
+insert into nin_check_steps
+select 'g any question', format('%s %s', decision, outcome) from identity.begin_qoreid_nin_check(
+  repeat('0', 63) || '1', repeat('4', 64), false, 'k1', '137a0000-0000-4000-8000-0000000000c6', 30);
+insert into nin_check_steps
+select 'g enrollment', format('%s %s', decision, outcome) from identity.begin_qoreid_nin_check(
+  repeat('0', 63) || '1', null, true, 'k1', '137a0000-0000-4000-8000-0000000000c7', 30);
+-- A hold of a day ('h'), the most finish allows.
+insert into nin_check_steps
+select 'h first', decision from identity.begin_qoreid_nin_check(repeat('0', 63) || '2', null, true, 'k1',
+  '137a0000-0000-4000-8000-0000000000d4', 30);
+insert into nin_check_steps
+select 'h held a day', identity.finish_qoreid_nin_check(repeat('0', 63) || '2', '137a0000-0000-4000-8000-0000000000d4',
+  'held', null, null, null, null, 86400)::text;
+-- Two leases that will end without an outcome ('i' just now, 'j' 7 hours ago).
+insert into nin_check_steps
+select 'i first', decision from identity.begin_qoreid_nin_check(repeat('0', 63) || '3', null, true, 'k1',
+  '137a0000-0000-4000-8000-0000000000d5', 30);
+insert into nin_check_steps
+select 'j first', decision from identity.begin_qoreid_nin_check(repeat('0', 63) || '4', null, true, 'k1',
+  '137a0000-0000-4000-8000-0000000000d6', 30);
+
+-- NIN 'k' is held when its patient's login is deleted: the hold stays.
+insert into nin_check_steps
+select 'k first', decision from identity.begin_qoreid_nin_check(repeat('0', 63) || '5', null, true, 'k1',
+  '137a0000-0000-4000-8000-0000000000d0', 30);
+insert into nin_check_steps
+select 'k held', identity.finish_qoreid_nin_check(repeat('0', 63) || '5', '137a0000-0000-4000-8000-0000000000d0',
+  'held', null, null, null, null, 3600)::text;
+
 -- The erased NIN ('e'): answered, then its patient's login is deleted.
 insert into nin_check_steps
 select 'e first', decision from identity.begin_qoreid_nin_check(repeat('e', 64), null, true, 'k1',
@@ -256,6 +321,9 @@ declare
     array['c other question', 'call'], array['c nin only finish', 'true'], array['c any question', 'stored rejected'],
     array['d first', 'call'], array['d held', 'true'], array['d during hold', 'held'],
     array['f first', 'call'], array['f released', 'true'],
+    array['g first', 'call'], array['g finish', 'true'], array['g any question', 'stored unusable'],
+    array['g enrollment', 'stored unusable'], array['h first', 'call'], array['h held a day', 'true'],
+    array['i first', 'call'], array['j first', 'call'], array['k first', 'call'], array['k held', 'true'],
     array['e first', 'call'], array['e finish', 'true'], array['e stored before deletion', 'stored']];
   pair text[];
   actual text;
@@ -310,34 +378,70 @@ begin
 end
 $$;
 
--- Time passes (as the owner): 'a' and the hold on 'd' end, 'b' does not.
+-- Time passes (as the owner): the hold on 'd' ends, 'b' does not; the lease
+-- on 'i' has just ended without an outcome, the ones on 'a' (taken under
+-- another key above) and 'j' 7 hours ago.
 update identity.qoreid_nin_checks set until = clock_timestamp() - interval '1 second'
- where nin_lookup_hmac in (repeat('a', 64), repeat('d', 64));
--- The login of the patient holding NIN 'e' is deleted (0096's completion).
-update auth.accounts set status = 'deleted' where id = '137a0000-0000-4000-8000-000000000001';
+ where nin_lookup_hmac in (repeat('d', 64), repeat('0', 63) || '3');
+update identity.qoreid_nin_checks set until = clock_timestamp() - interval '7 hours'
+ where nin_lookup_hmac in (repeat('a', 64), repeat('0', 63) || '4');
+-- The login of the patient holding NIN 'e' is deleted (0096's completion: the
+-- login's status and its completed deletion request; fixture without triggers).
+set local session_replication_role = replica;
+update auth.accounts set status = 'deleted'
+ where id in ('137a0000-0000-4000-8000-000000000001', '137a0000-0000-4000-8000-000000000011');
+insert into identity.patient_account_deletion_requests (id, account_id, patient_id, requested_session_id, state,
+  confirmation_token_sha256, confirmation_expires_at, confirmation_consumed_at, confirmed_at, waiting_period,
+  scheduled_for, completed_at, correlation_id) values
+  ('137a0000-0000-4000-8000-000000000005', '137a0000-0000-4000-8000-000000000001',
+   '137a0000-0000-4000-8000-000000000002', '137a0000-0000-4000-8000-000000000006', 'completed', repeat('7', 64),
+   clock_timestamp() + interval '1 hour', clock_timestamp(), clock_timestamp(), interval '0', clock_timestamp(),
+   clock_timestamp(), 'nin-check-once-suite'),
+  ('137a0000-0000-4000-8000-000000000015', '137a0000-0000-4000-8000-000000000011',
+   '137a0000-0000-4000-8000-000000000012', '137a0000-0000-4000-8000-000000000016', 'completed', repeat('8', 64),
+   clock_timestamp() + interval '1 hour', clock_timestamp(), clock_timestamp(), interval '0', clock_timestamp(),
+   clock_timestamp(), 'nin-check-once-suite');
+set local session_replication_role = origin;
 
 set local role hid_identity_runtime;
 select set_config('app.actor_subject', 'system:auth', true), set_config('app.correlation_id', 'nin-check-once-suite', true);
-insert into nin_check_steps
-select 'e after deletion', decision from identity.begin_qoreid_nin_check(repeat('e', 64), null, true, 'k1',
-  '137a0000-0000-4000-8000-0000000000e3', 30);
--- Re-answer 'e' so the prune finds an erased answer, then let 'a' and 'd' expire.
-insert into nin_check_steps
-select 'e refinish', identity.finish_qoreid_nin_check(repeat('e', 64), '137a0000-0000-4000-8000-0000000000e3',
-  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
+-- One expired row by `until` and the erased answer for 'e' (each limited to 1).
 insert into nin_check_steps select 'prune one', identity.prune_qoreid_nin_checks(1)::text;
 insert into nin_check_steps select 'prune rest', identity.prune_qoreid_nin_checks(100)::text;
 insert into nin_check_steps select 'prune again', identity.prune_qoreid_nin_checks(100)::text;
+-- 'e' is checked again after the deletion, and its answer is not kept.
+insert into nin_check_steps
+select 'e after deletion', decision from identity.begin_qoreid_nin_check(repeat('e', 64), null, true, 'k1',
+  '137a0000-0000-4000-8000-0000000000e3', 30);
+insert into nin_check_steps
+select 'e refinish', identity.finish_qoreid_nin_check(repeat('e', 64), '137a0000-0000-4000-8000-0000000000e3',
+  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
 insert into nin_check_steps
 select 'd after hold', decision from identity.begin_qoreid_nin_check(repeat('d', 64), null, true, 'k1',
   '137a0000-0000-4000-8000-0000000000d3', 30);
+insert into nin_check_steps
+select 'h during a day hold', decision from identity.begin_qoreid_nin_check(repeat('0', 63) || '2', null, true, 'k1',
+  '137a0000-0000-4000-8000-0000000000d7', 30);
+insert into nin_check_steps
+select 'i after its lease', format('%s %s', decision,
+  until between clock_timestamp() + interval '5 hours 59 minutes' and clock_timestamp() + interval '6 hours')
+  from identity.begin_qoreid_nin_check(repeat('0', 63) || '3', null, true, 'k1',
+    '137a0000-0000-4000-8000-0000000000d8', 30);
+insert into nin_check_steps
+select 'i again', decision from identity.begin_qoreid_nin_check(repeat('0', 63) || '3', null, true, 'k1',
+  '137a0000-0000-4000-8000-0000000000d9', 30);
+insert into nin_check_steps
+select 'i late finish', identity.finish_qoreid_nin_check(repeat('0', 63) || '3', '137a0000-0000-4000-8000-0000000000d5',
+  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
 reset role;
 
 do $$
 declare
   expected text[][] := array[
-    array['e after deletion', 'call'], array['e refinish', 'true'],
-    array['prune one', '1'], array['prune rest', '2'], array['prune again', '0'], array['d after hold', 'call']];
+    array['prune one', '2'], array['prune rest', '2'], array['prune again', '0'],
+    array['e after deletion', 'call'], array['e refinish', 'false'], array['d after hold', 'call'],
+    array['h during a day hold', 'held'], array['i after its lease', 'held t'], array['i again', 'held'],
+    array['i late finish', 'false']];
   pair text[];
   actual text;
 begin
@@ -347,13 +451,20 @@ begin
       raise exception 'Step "%": expected %, got %', pair[1], pair[2], coalesce(actual, 'nothing');
     end if;
   end loop;
-  -- 'a' (expired) and 'e' (erased) are gone; 'b' and 'c' (live answers) stay;
-  -- 'd' was pruned after its hold and is checking again.
-  if exists (select 1 from identity.qoreid_nin_checks where nin_lookup_hmac in (repeat('a', 64), repeat('e', 64)))
+  -- 'a', 'd' and 'j' (expired) and 'e' (erased) were pruned; 'b', 'c' and
+  -- 'g' (live answers) stay; 'd' is checking again; 'e' was not kept again;
+  -- 'i' is held; the hold on 'k' (a deleted login's NIN) stays.
+  if exists (select 1 from identity.qoreid_nin_checks where nin_lookup_hmac in (repeat('a', 64), repeat('e', 64),
+               repeat('0', 63) || '4'))
      or (select count(*) from identity.qoreid_nin_checks
-          where nin_lookup_hmac in (repeat('b', 64), repeat('c', 64)) and state = 'answered') <> 2
+          where nin_lookup_hmac in (repeat('b', 64), repeat('c', 64), repeat('0', 63) || '1')
+            and state = 'answered') <> 3
      or not exists (select 1 from identity.qoreid_nin_checks where nin_lookup_hmac = repeat('d', 64)
-                     and state = 'checking') then
+                     and state = 'checking')
+     or not exists (select 1 from identity.qoreid_nin_checks where nin_lookup_hmac = repeat('0', 63) || '3'
+                     and state = 'held')
+     or not exists (select 1 from identity.qoreid_nin_checks where nin_lookup_hmac = repeat('0', 63) || '5'
+                     and state = 'held') then
     raise exception 'The prune did not erase exactly the expired and erased rows';
   end if;
 end
