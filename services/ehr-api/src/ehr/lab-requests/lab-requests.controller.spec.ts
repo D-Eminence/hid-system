@@ -30,7 +30,7 @@ describe('LabRequestsController send to Lab', () => {
 
   it('requires an Idempotency-Key and passes the expected version to the service', async () => {
     const labRequests = { sendToLab: jest.fn().mockResolvedValue({ id: 'work-item' }) };
-    const controller = new LabRequestsController(labRequests as never);
+    const controller = new LabRequestsController(labRequests as never, {} as never);
     const request = { actor: { id: 'actor', subject: 'staff:test', accountId: 'account', roles: [], permissions: [],
       facilityIds: [facilityId], facilities: [], facility: { membershipId: 'membership' }, authenticationMethod: 'local' },
     facilityId, correlationId: 'correlation-123456', method: 'POST',

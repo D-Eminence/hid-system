@@ -13,6 +13,7 @@ from production_deployment_core import (ACCOUNT, REGION, CLUSTER, COMPONENTS, IN
     task_config_hash, task_payload, validate_candidate, validate_index)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+GATEWAY_VEX = "security/gateway-runtime.vex.json"
 PENDING_LINE = re.compile(r"(\d+) pending migration\(s\)")
 PLAN_LINE = re.compile(r"(\d{4}_[a-z0-9_]+\.sql) ([a-f0-9]{64})")
 ORDER = ("identity-api","notification-api","ehr-api","lab-api","pharmacy-api","ocr-api",
@@ -42,7 +43,12 @@ def candidate():
                           ("raw_scan_sha256","grype.raw.json")):
             require(file_sha(path.with_name(name)) == receipt[key], "PUBLICATION_EVIDENCE_CHANGED")
         for key,name in (("assessment_sha256","runtime-assessment.json"),("vex_sha256","runtime.vex.json")):
-            if receipt.get(key): require(file_sha(path.with_name(name)) == receipt[key], "ASSESSMENT_CHANGED")
+            if not receipt.get(key): continue
+            if key == "vex_sha256" and component == "gateway" and not receipt.get("assessment_sha256"):
+                # The gateway's VEX is the committed, owner-approved file (Q99 A), not a per-build one.
+                require(file_sha(ROOT/GATEWAY_VEX) == receipt[key], "ASSESSMENT_CHANGED")
+            else:
+                require(file_sha(path.with_name(name)) == receipt[key], "ASSESSMENT_CHANGED")
         records[component] = {"image_uri":receipt["image_uri"],"publication_sha256":file_sha(path),
             "sbom_sha256":receipt["sbom_sha256"],"scan_sha256":receipt["scan_sha256"]}
     require(set(records) == set(selected), "COMPLETE_PUBLICATION_SET_REQUIRED")

@@ -5,7 +5,7 @@ import type { NextFunction, Request, Response } from 'express';
 import type { AddressInfo } from 'node:net';
 import { requestDigest } from '../../common/idempotency';
 import { DomainProblem, ProblemDetailsFilter } from '../../common/problem';
-import type { DataAccessContext } from '../../common/request-context';
+import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import { createValidationPipe } from '../../common/validation-pipe';
 import { getEnvironment, resetEnvironmentForTests } from '../../config/environment';
 import { matchAllergies } from '../allergies/allergy-match';
@@ -13,6 +13,8 @@ import { warningToken } from '../allergies/allergy-reader';
 import { CreatePrescriptionDto, CreatePrescriptionWithDetailsDto, OrderStatus } from '../shared/clinical.dto';
 import { CreatePrescriptionBodyPipe, PRESCRIPTION_DISPENSING_DETAILS_OFF,
   PrescriptionDispensingDetails } from './prescription-dispensing-details';
+import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
+import { DuplicateMedicineChecker } from './duplicate-medicines';
 import { PrescriptionsController } from './prescriptions.controller';
 import { PrescriptionsModule } from './prescriptions.module';
 import { PrescriptionsService } from './prescriptions.service';
@@ -346,6 +348,9 @@ describe('the create route over HTTP', () => {
     }) };
     @Module({ controllers: [PrescriptionsController, BeforeController], providers: [
       { provide: PrescriptionsService, useValue: service },
+      // ORD-3 and ORD-10 are not under test here: pass-through doubles.
+      { provide: WorkItemProgressService, useValue: {} },
+      { provide: DuplicateMedicineChecker, useValue: { afterCreate: async (_c: unknown, _p: unknown, created: unknown) => created } },
       { provide: PrescriptionDispensingDetails, useValue: new PrescriptionDispensingDetails(enabled) }] })
     class TestModule {}
     const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
@@ -392,5 +397,38 @@ describe('the create route over HTTP', () => {
     const unknown = await post(route, { ...body, imageUrl: 'https://example.invalid/a.png' });
     expect(unknown.status).toBe(400);
     expect(unknown.body.errors).toEqual([{ field: 'imageUrl', messages: ['property imageUrl should not exist'] }]);
+  });
+});
+
+describe('the controller\'s answers: today\'s keys plus exactly ownProgress or duplicateMedicines (ORD-3, ORD-10)', () => {
+  const request = { actor: { ...context.actor, facility: { membershipId } }, facilityId,
+    correlationId: 'correlation-123456', method: 'GET',
+    header: (name: string) => (name === 'x-purpose-of-use' ? 'direct-care' : undefined) } as unknown as HidRequest;
+  // The real ORD-3 and ORD-10 code: with no clinician credentials the progress is unknown (no call is made).
+  const controller = () => {
+    const { service, repository } = harness(undefined);
+    return { service, controller: new PrescriptionsController(service, new WorkItemProgressService({} as never),
+      new DuplicateMedicineChecker(repository as never)) };
+  };
+
+  it('a listed prescription', async () => {
+    const { service, controller: subject } = controller();
+    const before = await service.list(context, patientId, encounterId, { limit: 50 });
+    const page = await subject.list(request, patientId, encounterId, { limit: 50 } as never);
+    expect(Object.keys(page)).toEqual(Object.keys(before));
+    expect(Object.keys(page.items[0]!)).toEqual([...TODAYS_KEYS, 'orderRoute', 'allergyAcknowledgements', 'ownProgress']);
+    expect(page.items[0]!.ownProgress).toEqual({ status: 'unknown', receivedAt: null, dispensedAt: null, reversedAt: null });
+  });
+
+  it('one prescription', async () => {
+    const answer = await controller().controller.get(request, patientId, encounterId, prescriptionId);
+    expect(Object.keys(answer)).toEqual([...TODAYS_KEYS, 'orderRoute', 'allergyAcknowledgements', 'ownProgress']);
+  });
+
+  it('a new prescription', async () => {
+    const input = await pipe(false).transform({ ...body });
+    const answer = await controller().controller.create(request, patientId, encounterId, 'create-key-0000001', input);
+    expect(Object.keys(answer)).toEqual([...TODAYS_KEYS, 'duplicateMedicines']);
+    expect(answer.duplicateMedicines.checked).toBe(true);
   });
 });

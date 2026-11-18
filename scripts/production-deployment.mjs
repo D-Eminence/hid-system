@@ -3,16 +3,20 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { assertScan, runtimePolicyPath, assertAssessmentBinding } from './production-backend-build.mjs';
+import { assertScan, runtimePolicyPath, assertAssessmentBinding, loadGatewayVex, gatewayVexPath } from './production-backend-build.mjs';
 
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
-export function validatePublication(directory) {
+export function validatePublication(directory, root = process.cwd()) {
   const receipt = JSON.parse(readFileSync(path.join(directory, 'publication.json')));
   const scan = JSON.parse(readFileSync(path.join(directory, 'grype.json')));
   const assessment = receipt.assessment_sha256
     ? JSON.parse(readFileSync(path.join(directory, 'runtime-assessment.json'))) : null;
   const policy = assessment ? JSON.parse(readFileSync(runtimePolicyPath(receipt.component))) : null;
-  assertScan(scan, assessment, policy);
+  // The gateway has no native assessment: its suppressed rows are admitted only by the committed,
+  // owner-approved gateway VEX (Q99 A), bound to the receipt by hash, exactly as the build step did.
+  const gatewayVex = loadGatewayVex(receipt.component, assessment, scan, root);
+  if (gatewayVex && receipt.vex_sha256 !== hash(path.join(root, gatewayVexPath))) throw Error('ASSESSMENT_BINDING_DIFFERS');
+  assertScan(scan, assessment, policy, gatewayVex);
   if (assessment) assertAssessmentBinding(assessment,receipt.component,receipt.source_commit,
     receipt.image_id,hash(path.join(directory,'grype.raw.json')));
   if (assessment && (receipt.assessment_sha256 !== hash(path.join(directory, 'runtime-assessment.json'))
@@ -30,5 +34,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (process.argv[2] === 'candidate') for (const folder of directories('release-evidence')) validatePublication(folder);
     execFileSync(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'),
       ['scripts/production_deployment.py', ...process.argv.slice(2)], { stdio: 'inherit' });
-  } catch { process.exitCode = 1; }
+  } catch (error) { console.error(error?.message ?? error); process.exitCode = 1; }
 }

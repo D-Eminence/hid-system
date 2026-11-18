@@ -405,11 +405,12 @@ describe('the registration desk fields (0114)', () => {
             verification_provider: 'synthetic', verification_reference: 'ref' }] };
         }
         if (/registration_case_candidates\s+where case_id/.test(sql)) return { rows: [{ ok: 1 }], rowCount: 1 };
-        if (sql.includes("identifier_type = 'nin'")) return { rows: [], rowCount: 0 };
+        // The case read (ID-0) also checks the patient's NIN, so it is matched first.
         if (sql.includes('where registration.id = $1 and registration.facility_id')) {
           return { rows: [{ id: caseId, status: 'linked_existing', row_version: '2', resolved_patient_id: patientId,
-            resolved_hid_code: 'HID-ABC234', candidate_count: '1', contact_recorded: true }] };
+            resolved_hid_code: 'HID-ABC234', candidate_count: '1', contact_recorded: true, nin_verified: true }] };
         }
+        if (sql.includes("identifier_type = 'nin'")) return { rows: [], rowCount: 0 };
         return { rows: [], rowCount: 1 };
       }) };
       const database = { withTransaction: jest.fn(async (_c: unknown, work: (c: unknown) => unknown) => work(client)) };
@@ -418,7 +419,7 @@ describe('the registration desk fields (0114)', () => {
         {} as never);
       await expect(registrations.linkExisting(caseId, { patientId, expectedVersion: 1,
         reason: 'Same person on review', purpose: 'healthcare-operations' } as never, 'link-key-0000000000001', context))
-        .resolves.toMatchObject({ status: 'linked_existing', contactRecorded: true });
+        .resolves.toMatchObject({ status: 'linked_existing', contactRecorded: true, ninStatus: 'verified' });
       const update = statements.findIndex(({ sql }) => sql.startsWith('update identity.registration_cases'));
       const copy = statements.findIndex(({ sql }) => sql.startsWith('insert into identity.patient_facility_contacts'));
       expect(update).toBeGreaterThan(-1);

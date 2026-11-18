@@ -21,6 +21,7 @@ import {
   type PatientOrderRoute,
 } from './order-route.mapping';
 import { orderRouteProblem, orderRouteUnavailable, type OrderRouteScope } from './order-route.problems';
+import { requireVisitOpenForWork } from '../shared/visit-guard';
 
 interface SendRow extends QueryResultRow {
   route_id: string;
@@ -121,6 +122,11 @@ export class OrderRoutesService {
         patientAgreement: 'clinician_attested',
       },
     }, async (client) => {
+      // EHR-C8a: nothing is sent from a visit entered in error, the same as
+      // activating an order or handing it to this facility's own pharmacy or
+      // laboratory. The visit is locked FOR SHARE before the order row, the
+      // order every other order path takes.
+      await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
       const allergyMatches = kind === 'prescription'
         ? await this.checkSendablePrescriptionAllergies(client, context, patientId, encounterId, orderId, input)
         : [];

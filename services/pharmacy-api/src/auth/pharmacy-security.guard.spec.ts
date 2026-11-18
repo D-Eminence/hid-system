@@ -2,6 +2,7 @@ jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(() => jest.fn()), jwtVeri
 import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { IdentityApiClient } from '@hid/api-client';
+import { INTERNAL_CALLER, READ_ONLY_POST, REQUIRED_PERMISSIONS } from '../common/decorators';
 import { resetEnvironmentForTests } from '../config/environment';
 import { PharmacySecurityGuard } from './pharmacy-security.guard';
 
@@ -42,7 +43,8 @@ describe('PharmacySecurityGuard', () => {
     const request = { header: jest.fn((name: string) => values[name.toLowerCase()]),
       correlationId: 'test-correlation', method: 'POST' };
     const reflector = { getAllAndOverride: jest.fn()
-      .mockReturnValueOnce(false).mockReturnValueOnce('ehr-api').mockReturnValueOnce(false)
+      // public, internal caller, read-only POST (ORD-3), facility optional, permissions
+      .mockReturnValueOnce(false).mockReturnValueOnce('ehr-api').mockReturnValueOnce(false).mockReturnValueOnce(false)
       .mockReturnValueOnce(['pharmacy.work-item.write']) } as unknown as Reflector;
     const execution = { getHandler: () => null, getClass: () => null,
       switchToHttp: () => ({ getRequest: () => request }) } as unknown as ExecutionContext;
@@ -52,6 +54,37 @@ describe('PharmacySecurityGuard', () => {
     expect(authenticate).toHaveBeenCalledWith(expect.objectContaining({ cookie: values.cookie,
       csrfToken: 'csrf', origin: 'https://ehr.test', validateMutation: true }));
     expect(request).toMatchObject({ facilityId, authTransport: 'cookie' });
+    authenticate.mockRestore();
+  });
+
+  it('does not ask for the browser-write check on an internal read-only POST (ORD-3), and still checks permissions', async () => {
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost:5432/hid',
+      DATABASE_SSL: 'false', CORS_ORIGINS: 'https://ehr.test',
+      PHARMACY_SERVICE_IDENTITY_MODE: 'local-secret', PHARMACY_INTERNAL_SERVICE_TOKEN: 'z'.repeat(32) });
+    resetEnvironmentForTests();
+    const facilityId = '123e4567-e89b-42d3-a456-426614174001';
+    const actor = (permissions: string[]) => ({ id: 'actor-1', subject: 'staff:doctor',
+      accountId: '123e4567-e89b-42d3-a456-426614174002', roles: [], permissions: [],
+      facilityIds: [facilityId], facilities: [{ id: facilityId, membershipId: '123e4567-e89b-42d3-a456-426614174003',
+        organizationId: '123e4567-e89b-42d3-a456-426614174004', name: 'Test', roles: ['doctor'], permissions,
+        isPrimary: true }], authenticationMethod: 'local' as const });
+    const values: Record<string, string> = { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': 'z'.repeat(32),
+      cookie: 'hid_access=session', 'x-facility-id': facilityId };
+    const request = { header: jest.fn((name: string) => values[name.toLowerCase()]),
+      correlationId: 'test-correlation', method: 'POST' };
+    const metadata = new Map<unknown, unknown>([[INTERNAL_CALLER, 'ehr-api'], [READ_ONLY_POST, true],
+      [REQUIRED_PERMISSIONS, ['ehr.prescription.read']]]);
+    const reflector = { getAllAndOverride: jest.fn((key: unknown) => metadata.get(key)) } as unknown as Reflector;
+    const execution = { getHandler: () => null, getClass: () => null,
+      switchToHttp: () => ({ getRequest: () => request }) } as unknown as ExecutionContext;
+    const authenticate = jest.spyOn(IdentityApiClient.prototype, 'authenticateActor')
+      .mockResolvedValue(actor(['ehr.prescription.read']));
+    await expect(new PharmacySecurityGuard(reflector, { authenticate: jest.fn() } as never)
+      .canActivate(execution)).resolves.toBe(true);
+    expect(authenticate).toHaveBeenCalledWith(expect.objectContaining({ validateMutation: false }));
+    authenticate.mockResolvedValue(actor(['pharmacy.work-item.read']));
+    await expect(new PharmacySecurityGuard(reflector, { authenticate: jest.fn() } as never)
+      .canActivate(execution)).rejects.toMatchObject({ status: 403, code: 'PERMISSION_DENIED' });
     authenticate.mockRestore();
   });
 });
