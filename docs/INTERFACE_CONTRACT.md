@@ -6022,3 +6022,51 @@ staff or patient sign-in of the client's kind, never changed or deleted:
 INSERT` on the first and `SELECT, INSERT, DELETE` on the second; no other
 runtime holds anything on either. The suite is
 `services/ehr-api/database/tests/sso-relying-party.integration.sql`.
+
+## SX-5. My staff profile, read only (no migration)
+
+Akos P1-8, read part. The account menu's "My profile" for staff. Changing a
+password while signed in (SX-6), preferences and home shortcuts (SX-7) come
+later; until then `canChange` answers `false` for each, and the screen shows
+no edit control.
+
+| Route (under `/api/v1`) | Who | Answer |
+| --- | --- | --- |
+| `GET /identity/me/staff-profile` | Any staff session, by bearer or cookie. `X-Facility-ID` is optional; when sent it must be one of the caller's own facilities and only marks that facility as current. No permission is needed: it reads the caller's own account. | `200` below. A patient session: `403 PATIENT_SCOPE_DENIED`. An outreach account-only session (no facility membership): `403 NO_ACTIVE_FACILITY_MEMBERSHIP`. An account that is no longer active: `401 AUTHENTICATION_REQUIRED`. |
+
+```json
+{
+  "accountId": "uuid",
+  "name": "Ada Fictional",
+  "email": "ada@example.test",
+  "signIn": { "method": "password", "hasPassword": true, "passwordChangedAt": "2026-10-01T09:00:00.000Z" },
+  "licence": { "numberHint": "4567" },
+  "memberSince": "2026-01-05T08:00:00.000Z",
+  "currentFacilityId": "uuid or null",
+  "facilities": [
+    { "id": "uuid", "membershipId": "uuid", "name": "Fictional Clinic", "roles": ["doctor"], "isPrimary": true, "isCurrent": true }
+  ],
+  "products": ["ehr", "migrate"],
+  "canChange": { "name": false, "password": false, "preferences": false }
+}
+```
+
+- `name` is the account's display name, else the staff record's full name.
+- `signIn.method` is `password` or `single_sign_on` (how this session was
+  signed in). `hasPassword` is `false` for a login that has never set one
+  (Google only); `passwordChangedAt` is then `null`.
+- `licence` is `null` when no licence number is recorded. Only the last four
+  letters or digits are answered (the same rule as
+  `identity.licence_number_hint`), never the full number.
+- `facilities` and `products` are the session's own (every active
+  membership this site admits, section 53), so the profile never shows a
+  facility the session itself cannot use.
+- The read is by the session's account id and subject together, active
+  accounts only. The password hash is never selected.
+- Audited on success and refusal as `api.identity.staff-profile.read`.
+  No patient is read.
+
+Screen change (Akos frontend branch): the account menu gains "My profile",
+which shows these fields; the licence is shown as "Licence number ending
+4567".
+
