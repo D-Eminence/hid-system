@@ -6181,3 +6181,50 @@ Rules:
 
 The patient header or chart may show "Latest vitals" from this route, one
 call per patient, and label each value with its date.
+
+## EHR-C8a. A completed visit entered in error (wave 1, no migration)
+
+QA open question. ehr-api only; no migration, no new setting.
+
+### `PATCH /ehr/patients/:patientId/encounters/:encounterId`
+
+A `completed` visit may now move to `entered_in_error` (before, a completed
+visit could not change status). The body is the usual UpdateEncounter body,
+and **a typed `changeReason` is required** (3 to 500 characters; it is
+recorded in `ehr.record_versions` as for every change):
+
+```json
+{ "expectedRowVersion": 3, "status": "entered_in_error", "changeReason": "Wrong patient chosen" }
+```
+
+Refusals, checked under the visit's row lock before anything is written:
+
+| Answer | When |
+| --- | --- |
+| `409 IMPORTED_VISIT_NOT_ENTERED_IN_ERROR` "The imported paper records visit cannot be marked as entered in error." | The visit is the patient's imported paper records visit (0113) |
+| `409 VISIT_HAS_OPEN_ORDERS` "Stop this visit's active prescriptions and lab requests before marking it as entered in error." | The visit still has an `active` or `on_hold` prescription or lab request (so no pharmacy or lab keeps acting on a visit that should not exist) |
+| `409 INVALID_ENCOUNTER_TRANSITION` | A completed visit to any status other than `entered_in_error` (unchanged) |
+| `400` (validation) | No `changeReason`, or one shorter than 3 characters |
+
+On success the audit row (`ehr.encounter.update`) carries
+`completedVisitEnteredInError: true`. Entering a planned, in-progress or
+on-hold visit in error is unchanged.
+
+### What the patient sees afterwards
+
+- The patient's own record (`GET` patient self records) lists only completed
+  visits, so the visit disappears from it.
+- **Changed:** the notes in that read (and in the emergency read) are now
+  shown only with their visit, and never from a visit entered in error. For
+  the patient this means a signed note appears once its visit is completed,
+  which is how the patient chat already reads notes. Before, a signed note of
+  a visit that was not completed (or was entered in error) was still listed.
+- The patient chat reads visits, notes, prescriptions, tests, diagnoses and
+  vitals only from completed visits (unchanged; the database's patient-self
+  policies hide diagnoses and vitals of other visits).
+
+### Screen change needed (Akos frontend branch)
+
+Offer "Entered in error" on a completed visit, ask for the reason, and show
+the plain message of each `409` (for open orders, link to the visit's
+prescriptions and lab requests).

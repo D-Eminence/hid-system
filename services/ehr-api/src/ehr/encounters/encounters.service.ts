@@ -59,7 +59,9 @@ const TRANSITIONS: Readonly<Record<EncounterStatus, readonly EncounterStatus[]>>
   [EncounterStatus.Planned]: [EncounterStatus.InProgress, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
   [EncounterStatus.InProgress]: [EncounterStatus.OnHold, EncounterStatus.Completed, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
   [EncounterStatus.OnHold]: [EncounterStatus.InProgress, EncounterStatus.Cancelled, EncounterStatus.EnteredInError],
-  [EncounterStatus.Completed]: [],
+  // EHR-C8a: a completed visit may be entered in error, with a reason
+  // (UpdateEncounterDto requires one); never the imported paper records visit.
+  [EncounterStatus.Completed]: [EncounterStatus.EnteredInError],
   [EncounterStatus.Cancelled]: [],
   [EncounterStatus.EnteredInError]: [],
 };
@@ -216,6 +218,9 @@ export class EncountersService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_ENCOUNTER_TRANSITION', 'Encounter status transition is not allowed');
         }
+        const completedInError = current.status === EncounterStatus.Completed
+          && input.status === EncounterStatus.EnteredInError;
+        if (completedInError) await this.assertCompletedVisitCanBeEnteredInError(client, context, patientId, current);
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<EncounterRow>(
           `update ehr.encounters set
@@ -236,10 +241,42 @@ export class EncountersService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Encounter changed since it was loaded');
-        return { value: row, resourceId: encounterId, details: { rowVersion: row.rowVersion } };
+        return { value: row, resourceId: encounterId,
+          details: { rowVersion: row.rowVersion, ...(completedInError ? { completedVisitEnteredInError: true } : {}) } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+  }
+
+  /**
+   * EHR-C8a: the checks before a completed visit is entered in error. The
+   * imported paper records visit (0113) is refused, and so is a visit that
+   * still has an active or on-hold prescription or lab request: those are
+   * stopped or entered in error first, so no pharmacy or lab keeps acting on
+   * a visit that should not exist.
+   */
+  private async assertCompletedVisitCanBeEnteredInError(
+    client: PoolClient,
+    context: DataAccessContext,
+    patientId: string,
+    current: EncounterRow,
+  ): Promise<void> {
+    if (current.importedPaperRecords) {
+      throw new DomainProblem(409, 'IMPORTED_VISIT_NOT_ENTERED_IN_ERROR',
+        'The imported paper records visit cannot be marked as entered in error.');
+    }
+    const open = await client.query<{ openOrders: number }>(
+      `select ((select count(*) from ehr.prescriptions
+                 where encounter_id = $1 and patient_id = $2 and facility_id = $3 and status in ('active', 'on_hold'))
+             + (select count(*) from ehr.lab_requests
+                 where encounter_id = $1 and patient_id = $2 and facility_id = $3 and status in ('active', 'on_hold')))::int
+         as "openOrders"`,
+      [current.id, patientId, context.facilityId],
+    );
+    if (Number(open.rows[0]?.openOrders ?? 0) > 0) {
+      throw new DomainProblem(409, 'VISIT_HAS_OPEN_ORDERS',
+        'Stop this visit\'s active prescriptions and lab requests before marking it as entered in error.');
+    }
   }
 
   /** EHR-C1: serialises the open-visit lookup and create for one patient at one facility. */
