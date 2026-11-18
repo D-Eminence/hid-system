@@ -137,8 +137,8 @@ begin
   end loop;
   begin
     perform identity.finish_qoreid_nin_check(repeat('a', 64), '137a0000-0000-4000-8000-0000000000a1', 'record',
-      null, true, decode(repeat('ab', 32), 'hex'), 'k1', 32 * 86400);
-    raise exception 'finish kept a record past 31 days';
+      null, true, decode(repeat('ab', 32), 'hex'), 'k1', 92 * 86400);
+    raise exception 'finish kept a record past 91 days';
   exception when invalid_parameter_value then null;
   end;
   begin
@@ -188,13 +188,13 @@ select 'a second', decision from identity.begin_qoreid_nin_check(repeat('a', 64)
   '137a0000-0000-4000-8000-0000000000a2', 30);
 insert into nin_check_steps
 select 'a non-holder finish', identity.finish_qoreid_nin_check(repeat('a', 64), '137a0000-0000-4000-8000-0000000000a2',
-  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
+  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 90 * 86400)::text;
 insert into nin_check_steps
 select 'a holder finish', identity.finish_qoreid_nin_check(repeat('a', 64), '137a0000-0000-4000-8000-0000000000a1',
-  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
+  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 90 * 86400)::text;
 insert into nin_check_steps
 select 'a finish twice', identity.finish_qoreid_nin_check(repeat('a', 64), '137a0000-0000-4000-8000-0000000000a1',
-  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
+  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 90 * 86400)::text;
 -- A record answers every question and every caller, complete or not.
 insert into nin_check_steps
 select 'a stored', format('%s %s %s %s', decision, outcome, record_complete, encode(answer_ciphertext, 'hex') = repeat('ab', 32))
@@ -212,7 +212,7 @@ select 'b first', decision from identity.begin_qoreid_nin_check(repeat('b', 64),
   '137a0000-0000-4000-8000-0000000000b1', 30);
 insert into nin_check_steps
 select 'b finish', identity.finish_qoreid_nin_check(repeat('b', 64), '137a0000-0000-4000-8000-0000000000b1',
-  'record', repeat('1', 64), false, decode(repeat('cd', 32), 'hex'), 'k1', 30 * 86400)::text;
+  'record', repeat('1', 64), false, decode(repeat('cd', 32), 'hex'), 'k1', 90 * 86400)::text;
 insert into nin_check_steps
 select 'b partial for profile', decision from identity.begin_qoreid_nin_check(repeat('b', 64), repeat('2', 64), false,
   'k1', '137a0000-0000-4000-8000-0000000000b2', 30);
@@ -221,7 +221,7 @@ select 'b partial for enrollment', decision from identity.begin_qoreid_nin_check
   'k1', '137a0000-0000-4000-8000-0000000000b3', 30);
 insert into nin_check_steps
 select 'b complete finish', identity.finish_qoreid_nin_check(repeat('b', 64), '137a0000-0000-4000-8000-0000000000b3',
-  'record', null, true, decode(repeat('cd', 32), 'hex'), 'k1', 30 * 86400)::text;
+  'record', null, true, decode(repeat('cd', 32), 'hex'), 'k1', 90 * 86400)::text;
 
 -- "No record" for a question answers that question only; asked with the NIN
 -- alone, it answers every question.
@@ -303,7 +303,7 @@ select 'e first', decision from identity.begin_qoreid_nin_check(repeat('e', 64),
   '137a0000-0000-4000-8000-0000000000e1', 30);
 insert into nin_check_steps
 select 'e finish', identity.finish_qoreid_nin_check(repeat('e', 64), '137a0000-0000-4000-8000-0000000000e1',
-  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
+  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 90 * 86400)::text;
 insert into nin_check_steps
 select 'e stored before deletion', decision from identity.begin_qoreid_nin_check(repeat('e', 64), null, true, 'k1',
   '137a0000-0000-4000-8000-0000000000e2', 30);
@@ -365,8 +365,8 @@ begin
   end;
   begin
     insert into identity.qoreid_nin_checks (nin_lookup_hmac, state, attempt_id, until)
-    values (repeat('9', 64), 'held', gen_random_uuid(), clock_timestamp() + interval '40 days');
-    raise exception 'a row was kept past 31 days';
+    values (repeat('9', 64), 'held', gen_random_uuid(), clock_timestamp() + interval '100 days');
+    raise exception 'a row was kept past 91 days';
   exception when check_violation then null;
   end;
   begin
@@ -415,7 +415,7 @@ select 'e after deletion', decision from identity.begin_qoreid_nin_check(repeat(
   '137a0000-0000-4000-8000-0000000000e3', 30);
 insert into nin_check_steps
 select 'e refinish', identity.finish_qoreid_nin_check(repeat('e', 64), '137a0000-0000-4000-8000-0000000000e3',
-  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
+  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 90 * 86400)::text;
 insert into nin_check_steps
 select 'd after hold', decision from identity.begin_qoreid_nin_check(repeat('d', 64), null, true, 'k1',
   '137a0000-0000-4000-8000-0000000000d3', 30);
@@ -432,7 +432,7 @@ select 'i again', decision from identity.begin_qoreid_nin_check(repeat('0', 63) 
   '137a0000-0000-4000-8000-0000000000d9', 30);
 insert into nin_check_steps
 select 'i late finish', identity.finish_qoreid_nin_check(repeat('0', 63) || '3', '137a0000-0000-4000-8000-0000000000d5',
-  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 30 * 86400)::text;
+  'record', null, true, decode(repeat('ab', 32), 'hex'), 'k1', 90 * 86400)::text;
 reset role;
 
 do $$

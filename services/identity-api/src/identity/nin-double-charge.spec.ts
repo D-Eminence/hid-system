@@ -359,7 +359,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.checkAudits().filter(([, source]) => source === 'qoreid')).toHaveLength(1);
     });
 
-    it('a record is reused for 30 days, then QoreID is asked again', async () => {
+    it('a record is reused for 90 days (Q110), then QoreID is asked again', async () => {
       const s = system();
       await s.start(KEY_A);
       s.db.enrollments.length = 0;
@@ -505,7 +505,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect([...s.db.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'unusable' });
     });
 
-    it('a profile check that did not match keeps the record for 24 hours, not 30 days', async () => {
+    it('a profile check that did not match keeps the record for 24 hours, not 90 days', async () => {
       const s = system();
       const before = Date.now();
       await expect(s.verifyProfile('1990-02-03')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
@@ -518,7 +518,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.db.store.rows.size).toBe(0);
     });
 
-    it('a profile check that matched keeps the record for 30 days', async () => {
+    it('a profile check that matched keeps the record for 90 days (Q110)', async () => {
       const s = system();
       const before = Date.now();
       await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
