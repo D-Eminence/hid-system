@@ -150,13 +150,19 @@ declare
   applier oid := (select role_row.oid from pg_roles role_row where role_row.rolname = current_user);
 begin
   -- a. 0001-0127 applied: 0123's sealed QA members table, 0124's and 0125's
-  -- readers, 0126's organisation kinds and 0127's single sign-on table.
+  -- readers, 0126's organisation kinds and 0127's single sign-on table, each
+  -- read from the catalog (to_regprocedure would need USAGE on the schema, so
+  -- a login that may not use lab or pharmacy would stop there with another
+  -- message instead of reaching the ownership check below).
   if not exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
                   where namespace.nspname = 'identity' and relation.relname = 'sealed_qa_members'
                     and relation.relkind = 'r')
-     or to_regprocedure('lab.work_item_patient_cards(uuid[])') is null
-     or to_regprocedure('pharmacy.work_item_prescription_details(uuid[])') is null
-     or to_regprocedure('identity.organization_staff_kinds(uuid)') is null
+     or not exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+                     where (namespace.nspname, proc.proname, pg_catalog.oidvectortypes(proc.proargtypes)) in (
+                       ('lab', 'work_item_patient_cards', 'uuid[]'),
+                       ('pharmacy', 'work_item_prescription_details', 'uuid[]'),
+                       ('identity', 'organization_staff_kinds', 'uuid'))
+                    having count(distinct proc.oid) = 3)
      or not exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
                      where namespace.nspname = 'auth' and relation.relname = 'session_single_sign_on'
                        and relation.relkind = 'r') then
