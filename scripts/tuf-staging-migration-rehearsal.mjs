@@ -416,6 +416,9 @@ try {
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-emergency-contacts-runtime.mjs')], workflowEnvironment));
   evidence.checks.provider_enrollment_runtime = JSON.parse(command('exact-role facility self sign-up workflow, gate, cap and review',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs')], workflowEnvironment));
+  // 0127: single sign-on hand-off, product gate, back-channel logout and product sign-out, with the in-process fake provider.
+  evidence.checks.sso_runtime = JSON.parse(command('exact-role single sign-on hand-off, product gate and sign-out',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-sso-runtime.mjs')], workflowEnvironment));
   // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
   evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));

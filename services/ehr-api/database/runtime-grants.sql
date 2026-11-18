@@ -1740,3 +1740,23 @@ revoke all on function lab.work_item_patient_cards(uuid[]), pharmacy.work_item_p
 -- privileges on that table above are table-wide.
 grant execute on function pharmacy.work_item_prescription_details(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
 revoke all on function pharmacy.work_item_prescription_details(uuid[]) from public;
+
+-- The kinds and active products of an organisation for the staff sign-in gate (0126, owner decisions Q90 and Q91):
+-- the Identity runtime's staff context reads them once per membership, as it reads
+-- identity.organization_self_service_state. To the Identity runtime alone; nothing to any other runtime; no grant on
+-- the application, product or organisation tables.
+grant execute on function identity.organization_staff_kinds(uuid) to hid_identity_runtime;
+revoke all on function identity.organization_staff_kinds(uuid) from public;
+
+-- Single sign-on on auth., the product side (0127, hid-system#142's 0102,
+-- ADR-070), exactly as 0127 grants it. The Identity runtime records a sign-in's single sign-on
+-- provenance with the sign-in, and reads it for back-channel logout and the
+-- patient recent-sign-in check; the 0127 guard admits only the root session
+-- of a staff or patient sign-in of the client's kind and refuses any change,
+-- so neither UPDATE nor DELETE is granted. It records spent sign-in
+-- transactions and logout tokens, by digest, and removes those past their
+-- acceptance. No other service reads either table. The guard runs as the
+-- invoker and reads only auth.sessions, which this runtime already reads.
+grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
+grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
+revoke all on function auth.guard_session_single_sign_on_change() from public;

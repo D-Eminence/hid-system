@@ -128,9 +128,11 @@ describe('CurrentStaffContextService self sign-up state (P4b)', () => {
     const orderBy = '\n        order by membership.is_primary desc, facility.name, membership.facility_id';
     expect(PREVIOUS_STAFF_CONTEXT_SQL.endsWith(orderBy)).toBe(true);
     expect(STAFF_MEMBERSHIPS_SQL).toBe(PREVIOUS_STAFF_CONTEXT_SQL.slice(0, -orderBy.length));
-    expect(STAFF_CONTEXT_SQL).toBe('select grouped.*, state.review_state, state.organization_type\n'
+    expect(STAFF_CONTEXT_SQL).toBe('select grouped.*, state.review_state, state.organization_type, kinds.organization_kinds,\n'
+      + '         kinds.organization_products\n'
       + `         from (${STAFF_MEMBERSHIPS_SQL}) grouped\n`
       + '         left join lateral identity.organization_self_service_state(grouped.organization_id::uuid) state on true\n'
+      + '         left join lateral identity.organization_staff_kinds(grouped.organization_id::uuid) kinds on true\n'
       + '        order by grouped.is_primary desc, grouped.facility_name, grouped.facility_id::uuid');
   });
 
@@ -174,5 +176,75 @@ describe('CurrentStaffContextService self sign-up state (P4b)', () => {
     expect(context.facility?.selfService).toBeUndefined();
     expect(context.facilities.map((facility) => facility.selfService)).toEqual([undefined,
       { review: 'reviewed', organizationType: 'clinic' }]);
+  });
+});
+
+// Owner decisions Q90 and Q91 (17 November 2026): one lateral call per
+// membership row of identity.organization_staff_kinds (0126) adds the
+// organisation's recorded kinds, which the product gate reads for an
+// administrator. A membership with no recorded kind answers exactly as before.
+describe('CurrentStaffContextService organisation kinds (0126, Q90 and Q91)', () => {
+  async function resolved(rows: Record<string, unknown>[]) {
+    const query = jest.fn().mockResolvedValueOnce({ rows, rowCount: rows.length })
+      .mockResolvedValueOnce({ rows: [{ roles: [], permissions: [] }], rowCount: 1 });
+    const context = await new CurrentStaffContextService({ query } as unknown as DatabaseService)
+      .resolve(STAFF_CONTEXT_ROW.subject, 'local');
+    expect(query.mock.calls[0]?.[0]).toBe(STAFF_CONTEXT_SQL);
+    return context;
+  }
+
+  it('reads the kinds with one lateral call per membership, by the membership\'s organisation', () => {
+    expect(STAFF_CONTEXT_SQL.match(/identity\.organization_staff_kinds\(/g)).toHaveLength(1);
+    expect(STAFF_CONTEXT_SQL).toContain('left join lateral identity.organization_staff_kinds(grouped.organization_id::uuid)');
+  });
+
+  it('adds organizationKinds when the organisation has a recorded kind', async () => {
+    const lab = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['laboratory'] }]);
+    expect(lab.facility?.organizationKinds).toEqual(['laboratory']);
+    const both = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['pharmacy', 'laboratory', 'pharmacy'] }]);
+    expect(both.facilities[0]?.organizationKinds).toEqual(['laboratory', 'pharmacy']);
+  });
+
+  it('answers a membership with no recorded kind exactly as before: no organizationKinds key', async () => {
+    const before = await resolved([STAFF_CONTEXT_ROW]);
+    for (const kinds of [[], null, undefined]) {
+      const none = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: kinds }]);
+      expect(JSON.stringify(none)).toBe(JSON.stringify(before));
+      expect(none.facility).not.toHaveProperty('organizationKinds');
+    }
+  });
+
+  it('keeps only the kinds the gate knows', async () => {
+    const context = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['other', 'clinic', 'Hospital'] }]);
+    expect(context.facility?.organizationKinds).toEqual(['clinic']);
+    const unknown = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['other'] }]);
+    expect(unknown.facility).not.toHaveProperty('organizationKinds');
+  });
+
+  it('adds organizationProducts (sorted, once each, known codes only) beside a recorded kind', async () => {
+    const lab = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['laboratory'],
+      organization_products: ['migrate', 'laboratory', 'migrate', 'outreach'] }]);
+    expect(lab.facility?.organizationKinds).toEqual(['laboratory']);
+    expect(lab.facility?.organizationProducts).toEqual(['laboratory', 'migrate']);
+    for (const products of [[], null, undefined, ['outreach']]) {
+      const none = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: ['pharmacy'], organization_products: products }]);
+      expect(none.facility).not.toHaveProperty('organizationProducts');
+    }
+  });
+
+  it('adds no organizationProducts where no kind is recorded (a hospital to the gate answers exactly as before)', async () => {
+    const before = await resolved([STAFF_CONTEXT_ROW]);
+    const held = await resolved([{ ...STAFF_CONTEXT_ROW, organization_kinds: [], organization_products: ['ehr', 'migrate'] }]);
+    expect(JSON.stringify(held)).toBe(JSON.stringify(before));
+  });
+
+  it('keeps each membership\'s own kinds', async () => {
+    const context = await resolved([
+      { ...STAFF_CONTEXT_ROW, is_primary: true, organization_kinds: [] },
+      { ...STAFF_CONTEXT_ROW, facility_id: '10000000-0000-4000-8000-000000000003',
+        membership_id: '40000000-0000-4000-8000-000000000002', facility_name: 'A Laboratory', is_primary: false,
+        organization_kinds: ['laboratory'] },
+    ]);
+    expect(context.facilities.map((facility) => facility.organizationKinds)).toEqual([undefined, ['laboratory']]);
   });
 });
