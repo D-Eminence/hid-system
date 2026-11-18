@@ -51,6 +51,15 @@ export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
   };
 }
 
+/**
+ * The NIN's record as QoreID returned it, kept (encrypted, 0137) so the same
+ * NIN is not checked again: complete when it has everything a NIN-only path
+ * needs (QoreIdNinEnrollmentBinding), else the name and date of birth only.
+ */
+export type QoreIdNinRecord =
+  | { complete: true; binding: QoreIdNinEnrollmentBinding }
+  | { complete: false; binding: QoreIdNinBinding };
+
 export interface QoreIdCacBinding {
   /** Prefixed HID key used in the provider-verified registration lookup. */
   registrationNumber: string;
@@ -106,6 +115,11 @@ export interface QoreIdVerificationResult {
   // into the public verification response or audit details.
   ninBinding?: QoreIdNinBinding;
   ninEnrollmentBinding?: QoreIdNinEnrollmentBinding;
+  /**
+   * The record a NIN check returned, whatever the comparison with the claims
+   * gave (0137): what HID keeps so the NIN is not checked again.
+   */
+  ninRecord?: QoreIdNinRecord;
   cacBinding?: QoreIdCacBinding;
   cacIncompleteProfile?: QoreIdCacIncompleteProfile;
   /** Submitted canonical RC/BN/IT identifier after a successful CAC lookup. */

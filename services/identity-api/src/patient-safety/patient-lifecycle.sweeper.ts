@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
+import { NinCheckOnce } from '../identity/nin-check-once';
 import { AccountDeletionNoticeDispatcher } from './account-deletion-notice.dispatcher';
 import { EmergencyContactNotificationDispatcher } from './emergency-contact-notification.dispatcher';
 import { PatientAccountDeletionService } from './patient-account-deletion.service';
@@ -21,6 +22,8 @@ export const PATIENT_LIFECYCLE_SHUTDOWN_GRACE_MS = 5_000;
 export const SHARE_INVITATION_EXPIRY_BATCH = 100;
 /** Due account deletions completed per tick (0096). */
 export const ACCOUNT_DELETION_FINALIZE_BATCH = 10;
+/** Expired or erased QoreID NIN checks removed per tick (0137). */
+export const NIN_CHECK_PRUNE_BATCH = 500;
 
 /**
  * The patient lifecycle's periodic work, every PATIENT_LIFECYCLE_SWEEP_SECONDS
@@ -37,7 +40,12 @@ export const ACCOUNT_DELETION_FINALIZE_BATCH = 10;
  *   6. identity.prune_web_push_subscriptions(100) (0097), always, even while
  *      push is off: a subscription whose sign-in has ended is erased;
  *   7. the web pushes due (0097), while Identity's push is on
- *      (web-push.config.ts).
+ *      (web-push.config.ts);
+ *   8. identity.prune_qoreid_nin_checks(500) (0137), always: a stored QoreID
+ *      answer past its end (30 days for a record, 24 hours for the others), an
+ *      ended hold, and the answers for the NINs of patients whose login
+ *      deletion completed in the last day are erased, each through an index
+ *      (no row is tested on every tick).
  * The timer no longer depends on the emergency-contact switch. Multiple
  * replicas are safe: claims use row locks with SKIP LOCKED and leases.
  */
@@ -56,6 +64,7 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
     @Optional() private readonly accountDeletion?: PatientAccountDeletionService,
     @Optional() private readonly accountDeletionNotices?: AccountDeletionNoticeDispatcher,
     @Optional() private readonly webPush?: WebPushDispatcher,
+    @Optional() private readonly ninChecks?: NinCheckOnce,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -136,6 +145,10 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
       if (webPushConfiguration().on) {
         await this.step('web_push_dispatch', correlationId, () => webPush.dispatch(correlationId));
       }
+    }
+    if (this.ninChecks) {
+      const ninChecks = this.ninChecks;
+      await this.step('nin_check_prune', correlationId, () => ninChecks.prune(correlationId, NIN_CHECK_PRUNE_BATCH));
     }
   }
 

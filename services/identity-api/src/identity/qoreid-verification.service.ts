@@ -7,6 +7,8 @@ import { requireRequestContext, type HidRequest } from '../common/request-contex
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
+import { NIN_NO_RECORD_ANSWER_SECONDS, NinCheckOnce, type NinCheckAnswer, qoreIdRejected, recordNames,
+  unusableAnswer } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import { matchingCacIncompleteProfile, verifiedCacBinding } from './organization-applications.service';
@@ -45,6 +47,7 @@ export class QoreIdVerificationService {
     private readonly provider: QoreIdVerificationAdapter,
     private readonly integrations: IntegrationRuntimeService,
     private readonly ninProtector: NinIdentifierProtector,
+    private readonly ninCheck: NinCheckOnce,
   ) {}
 
   async verifyPatientNin(request: HidRequest, nin: string, declaredDateOfBirth?: string): Promise<VerificationResponse> {
@@ -79,7 +82,24 @@ export class QoreIdVerificationService {
             'This NIN requires identity review before it can be verified');
         }
         await this.integrations.consumePatientQuota(request.correlationId, actor.subject, actor.sessionId);
-        const result = await this.provider.verifyNin(nin, claims, declaredProfile ? 'either' : 'exact');
+        // QoreID charges every check (Q109): asked once per NIN (NinCheckOnce,
+        // 0137). A record QoreID already returned for this NIN (here, at
+        // sign-up or at a desk) is compared with the profile here instead.
+        const nameOrder = declaredProfile ? 'either' as const : 'exact' as const;
+        const checked = await this.ninCheck.check({
+          nin, correlationId: request.correlationId, path: 'profile', needsCompleteRecord: false,
+          question: JSON.stringify([normalizedClaimName(claims.firstName), normalizedClaimName(claims.lastName),
+            claims.dateOfBirth, nameOrder]),
+          ask: async ({ timeoutMs }) => {
+            const asked = await this.provider.verifyNin(nin, claims, nameOrder, { timeoutMs });
+            // A record that did not match this profile (perhaps someone
+            // else's NIN) is kept no longer than "no record" is.
+            return { answer: profileAnswer(asked), value: asked,
+              ...(asked.state === 'verified' ? {} : { keepSeconds: NIN_NO_RECORD_ANSWER_SECONDS }) };
+          },
+        });
+        const result = checked.source === 'qoreid' ? checked.value
+          : storedProfileResult(checked.answer, nin, claims, nameOrder);
         if (result.state === 'verified') {
           const binding = result.ninBinding;
           const normalizeName = (name: string) => name.trim().replace(/\s+/g, ' ').toLocaleUpperCase('en-NG');
@@ -280,6 +300,9 @@ export class QoreIdVerificationService {
           'INTEGRATION_UNAVAILABLE', 'PATIENT_NIN_BINDING_CONFLICT', 'PATIENT_NIN_BINDING_UNAVAILABLE',
           'NIN_PROTECTION_UNAVAILABLE', 'PATIENT_IDENTITY_PROFILE_INCOMPLETE',
           'VALIDATION_FAILED', 'PATIENT_NIN_DETAILS_MISMATCH',
+          // NinCheckOnce (0137): another check of the NIN is running or held,
+          // or its store is unavailable; nothing was sent to QoreID.
+          'NIN_CHECK_IN_PROGRESS', 'NIN_CHECK_HELD', 'NIN_CHECK_UNAVAILABLE',
         ].includes(error.code))) throw error;
       const failure = this.failureCategory(error);
       await this.persistFailure(persist, failure);
@@ -395,4 +418,57 @@ export class QoreIdVerificationService {
       default: return 'unexpected_response';
     }
   }
+}
+
+function normalizedClaimName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ').toLocaleUpperCase('en-NG');
+}
+
+/**
+ * What a profile check keeps: the record QoreID returned (at least the name
+ * and date of birth it matched), else its "no record". A verified answer
+ * without a record or a usable transaction id is an answer HID cannot use
+ * (thrown, and kept as such), never "no record".
+ */
+function profileAnswer(result: QoreIdVerificationResult): NinCheckAnswer {
+  const record = result.ninRecord ?? (result.ninBinding ? { complete: false as const, binding: result.ninBinding }
+    : undefined);
+  if (result.state === 'verified' && (!record || !result.providerReference)) throw unusableAnswer();
+  if (record && result.providerReference) {
+    return { outcome: 'record', providerReference: result.providerReference, record };
+  }
+  return { outcome: 'no_record', state: result.state === 'incomplete' ? 'incomplete' : 'not_verified',
+    ...(result.providerReference ? { providerReference: result.providerReference } : {}) };
+}
+
+/**
+ * A stored answer, compared with the profile as the adapter compares a fresh
+ * one (qoreid-verification.adapter.ts, normalizedNinVerification and
+ * declaredNinVerification): the record's first and last name equal the
+ * claims' (in either order for a sign-up profile) and its date of birth the
+ * claimed one.
+ */
+function storedProfileResult(answer: NinCheckAnswer, nin: string, claims: QoreIdNinClaims,
+  nameOrder: 'exact' | 'either'): QoreIdVerificationResult {
+  if (answer.outcome === 'rejected') throw qoreIdRejected();
+  // An answer HID could not use for a sign-up still gives the name and date
+  // of birth to compare, when they could be read with QoreID's reference.
+  if (answer.outcome === 'unusable' && (!answer.record || !answer.providerReference)) throw unusableAnswer();
+  const respondedAt = new Date().toISOString();
+  if (answer.outcome === 'no_record') {
+    return { provider: QOREID_PROVIDER, state: answer.state, respondedAt,
+      ...(answer.providerReference ? { providerReference: answer.providerReference } : {}) };
+  }
+  const { record: stored, providerReference } = answer.outcome === 'unusable'
+    ? { record: answer.record!, providerReference: answer.providerReference! } : answer;
+  const record = recordNames(stored);
+  const [first, last] = [normalizedClaimName(record.firstName), normalizedClaimName(record.lastName)];
+  const [claimedFirst, claimedLast] = [normalizedClaimName(claims.firstName), normalizedClaimName(claims.lastName)];
+  const namesMatch = (first === claimedFirst && last === claimedLast)
+    || (nameOrder === 'either' && first === claimedLast && last === claimedFirst);
+  const base = { provider: QOREID_PROVIDER, providerReference, respondedAt };
+  if (record.nin !== nin || !namesMatch || record.dateOfBirth !== claims.dateOfBirth) {
+    return { ...base, state: 'not_verified' };
+  }
+  return { ...base, state: 'verified', ninBinding: record };
 }

@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0127",
-    "count": 128,
+    "last": "0137",
+    "count": 129,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -609,6 +609,10 @@
       {
         "name": "0127_sso_relying_party.sql",
         "sha256": "9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d"
+      },
+      {
+        "name": "0137_qoreid_nin_check_once.sql",
+        "sha256": "8b6278bc0afc438e8b9927f530e4160d8a82b0da2de2d39ca8538d0f744ee6f9"
       }
     ]
   },
