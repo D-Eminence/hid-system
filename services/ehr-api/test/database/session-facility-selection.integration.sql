@@ -52,7 +52,22 @@
 --      nothing on staging does either);
 --   7. the seals (0098 demo, 0123 QA): no membership crosses between real,
 --      demo and QA, so a choice cannot either; a demo or QA staff member's
---      own choice is admitted.
+--      own choice is admitted;
+--   8. the sign-in, as the family's first session (Rahman's review on
+--      hid-system#258): the first session must be a staff session of the
+--      account, so a family whose first session is a patient session, or
+--      another account's, is refused even with a live staff session of the
+--      account in it (forged families: the API never writes one; only that
+--      clause refuses them), and a family whose only live session is a
+--      patient one, or another account's, is refused too; an account-only
+--      outreach session (Q88-2:
+--      a staff session of a verified staff login with no active membership;
+--      staging has no other staff kind) is refused, through the API's write
+--      and directly, with its own ended membership or another account's; and
+--      a rotated sign-in whose first session is revoked, with a later session
+--      live, is admitted on its first choice (an INSERT): the row is keyed to
+--      the revoked first session, which the foreign key pins, while the
+--      liveness check uses the live one.
 -- Synthetic values only; uuid prefix f129; .invalid addresses.
 set plpgsql.variable_conflict = error;
 begin;
@@ -843,5 +858,177 @@ begin
   end if;
 end $$;
 reset role;
+
+-- 8. The sign-in, as the family's first session (Rahman, hid-system#258).
+-- O: a verified staff login whose only membership (o1 at F1) has ended, so
+-- on outreach. it signs in account-only (Q88-2); its session O1 is a staff
+-- session (staging's only staff kind). Forged families (the API never
+-- writes them; rotation copies the kind and the account): K, first session
+-- K1 A's patient session (rotated), with K2 A's live staff session; L, first
+-- session L1 A's staff session (rotated), whose only live session L2 is A's
+-- patient session; M, first session M1 B's staff session (rotated), with M2
+-- A's live staff session; N, first session N1 A's staff session (rotated),
+-- whose only live session N2 is B's. R: A's sign-in rotated twice, first
+-- session R1 and R2 revoked as rotated, R3 live, with no choice yet.
+insert into auth.accounts (id, subject, email, status, password_hash, password_algorithm, token_version, disabled_until) values
+  ('f1292000-0000-4000-8000-0000000000c0', 'synthetic:selection-0129:o', 'o@selection-0129.invalid', 'active', 'synthetic-hash',
+   'argon2id', 1, null);
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role, active) values
+  ('f1294000-0000-4000-8000-0000000000c0', 'f1292000-0000-4000-8000-0000000000c0', 'Staff O Selection',
+   'o@selection-0129.invalid', 'verified', 'nurse', true);
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+    membership_role, app_role, is_primary, active, migration_hold_reason) values
+  ('f1295000-0000-4000-8000-0000000000c0', 'f1294000-0000-4000-8000-0000000000c0', 'f1292000-0000-4000-8000-0000000000c0',
+   'f1290000-0000-4000-8000-0000000000a1', 'f1291000-0000-4000-8000-0000000000f1', 'nurse', 'nurse', true, false, null);
+-- Live sessions first (the revoked ones name them as replaced_by_session_id).
+insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
+    authentication_method, issued_at, expires_at, absolute_expires_at, session_kind, patient_id)
+select fixture.session_id::uuid, fixture.account_id::uuid, fixture.family_id::uuid,
+  md5(fixture.session_id) || md5(fixture.session_id || 'refresh'), gen_random_uuid(), 1, 'password',
+  now(), now() + interval '8 hours', now() + interval '24 hours', fixture.kind, fixture.patient_id::uuid
+from (values
+  ('f1296000-0000-4000-8000-000000000800', 'f1292000-0000-4000-8000-0000000000c0', 'f1296000-0000-4000-8000-000000000800', 'staff', null),
+  ('f1296000-0000-4000-8000-000000000802', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000801', 'staff', null),
+  ('f1296000-0000-4000-8000-000000000804', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000803', 'patient',
+   'f1293000-0000-4000-8000-00000000000a'),
+  ('f1296000-0000-4000-8000-000000000806', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000805', 'staff', null),
+  ('f1296000-0000-4000-8000-000000000811', 'f1292000-0000-4000-8000-00000000000b', 'f1296000-0000-4000-8000-000000000810', 'staff', null),
+  ('f1296000-0000-4000-8000-000000000809', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000807', 'staff', null)
+) as fixture(session_id, account_id, family_id, kind, patient_id);
+-- Then the revoked ones, each family's first session (R2, R's middle one, last).
+insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
+    authentication_method, issued_at, expires_at, absolute_expires_at, revoked_at, revocation_reason,
+    replaced_by_session_id, session_kind, patient_id)
+select fixture.session_id::uuid, fixture.account_id::uuid, fixture.family_id::uuid,
+  md5(fixture.session_id) || md5(fixture.session_id || 'refresh'), gen_random_uuid(), 1, 'password',
+  now() - interval '20 minutes', now() + interval '8 hours', now() + interval '24 hours', now() - interval '5 minutes',
+  'rotated', fixture.replaced_by::uuid, fixture.kind, fixture.patient_id::uuid
+from (values
+  ('f1296000-0000-4000-8000-000000000801', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000801',
+   'f1296000-0000-4000-8000-000000000802', 'patient', 'f1293000-0000-4000-8000-00000000000a'),
+  ('f1296000-0000-4000-8000-000000000803', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000803',
+   'f1296000-0000-4000-8000-000000000804', 'staff', null),
+  ('f1296000-0000-4000-8000-000000000805', 'f1292000-0000-4000-8000-00000000000b', 'f1296000-0000-4000-8000-000000000805',
+   'f1296000-0000-4000-8000-000000000806', 'staff', null),
+  ('f1296000-0000-4000-8000-000000000810', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000810',
+   'f1296000-0000-4000-8000-000000000811', 'staff', null),
+  ('f1296000-0000-4000-8000-000000000808', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000807',
+   'f1296000-0000-4000-8000-000000000809', 'staff', null),
+  ('f1296000-0000-4000-8000-000000000807', 'f1292000-0000-4000-8000-00000000000a', 'f1296000-0000-4000-8000-000000000807',
+   'f1296000-0000-4000-8000-000000000808', 'staff', null)
+) as fixture(session_id, account_id, family_id, replaced_by, kind, patient_id);
+
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'system:auth', true),
+       set_config('app.correlation_id', 'facility-selection-0129-suite-0008', true);
+do $$
+declare
+  rejected record;
+  recorded uuid;
+begin
+  -- (1) The first session must be a staff session of the account. Each row
+  -- below has a live staff session of A at A's current token version and A's
+  -- active membership a1 at F1, so only the first session's kind or account
+  -- is wrong (K, M); in L the only live session is a patient one, and in N
+  -- another account's. O1 is a live staff session of O, an account with no
+  -- active membership.
+  for rejected in select * from (values
+    ('a family whose first session is a patient session (K1, live staff K2)', 'f1296000-0000-4000-8000-000000000801',
+     'f1292000-0000-4000-8000-00000000000a', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1'),
+    ('a family whose first session is another account''s (M1 B''s, live staff M2 A''s)', 'f1296000-0000-4000-8000-000000000805',
+     'f1292000-0000-4000-8000-00000000000a', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1'),
+    ('a family whose only live session is a patient session (L1, live patient L2)', 'f1296000-0000-4000-8000-000000000803',
+     'f1292000-0000-4000-8000-00000000000a', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1'),
+    ('a family whose only live session is another account''s (N1 A''s, live staff N2 B''s)', 'f1296000-0000-4000-8000-000000000810',
+     'f1292000-0000-4000-8000-00000000000a', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1'),
+    ('an account-only outreach session with its own ended membership', 'f1296000-0000-4000-8000-000000000800',
+     'f1292000-0000-4000-8000-0000000000c0', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000c0'),
+    ('an account-only outreach session with another account''s membership', 'f1296000-0000-4000-8000-000000000800',
+     'f1292000-0000-4000-8000-0000000000c0', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1')
+  ) as candidate(label, family_id, account_id, facility_id, membership_id) loop
+    begin
+      insert into auth.session_facility_selection (family_id, account_id, facility_id, membership_id)
+      values (rejected.family_id::uuid, rejected.account_id::uuid, rejected.facility_id::uuid, rejected.membership_id::uuid);
+      raise exception 'the guard admitted a choice with %', rejected.label;
+    exception when check_violation then
+      if sqlerrm <> 'SESSION_FACILITY_SELECTION_INVALID' then raise; end if;
+    end;
+  end loop;
+  -- The same through the API's write: it finds K2, M2 and O1 live staff
+  -- sessions of their accounts and locks them, and the guard refuses.
+  for rejected in select * from (values
+    ('the patient-first family K through its live staff session K2', 'f1296000-0000-4000-8000-000000000802',
+     'f1292000-0000-4000-8000-00000000000a', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1'),
+    ('the other-account-first family M through A''s live staff session M2', 'f1296000-0000-4000-8000-000000000806',
+     'f1292000-0000-4000-8000-00000000000a', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1'),
+    ('the account-only outreach session O1 with its own ended membership', 'f1296000-0000-4000-8000-000000000800',
+     'f1292000-0000-4000-8000-0000000000c0', 'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000c0')
+  ) as candidate(label, presented, account_id, facility_id, membership_id) loop
+    begin
+      recorded := pg_temp.select_facility(rejected.presented::uuid, rejected.account_id::uuid, rejected.facility_id::uuid,
+        rejected.membership_id::uuid);
+      raise exception 'the API''s write recorded a choice for % (answered %)', rejected.label, recorded;
+    exception when check_violation then
+      if sqlerrm <> 'SESSION_FACILITY_SELECTION_INVALID' then raise; end if;
+    end;
+  end loop;
+  -- L2 is a patient session, so the API's write finds no live staff session.
+  if pg_temp.select_facility('f1296000-0000-4000-8000-000000000804', 'f1292000-0000-4000-8000-00000000000a',
+       'f1291000-0000-4000-8000-0000000000f1', 'f1295000-0000-4000-8000-0000000000a1') is not null then
+    raise exception 'the API''s write found a live staff session in a family whose live session is a patient one';
+  end if;
+
+  -- (2) R's first choice, made through its live session R3, is admitted. It
+  -- is an INSERT (no row yet), keyed to the revoked first session R1.
+  if exists (select 1 from auth.session_facility_selection where family_id = 'f1296000-0000-4000-8000-000000000807') then
+    raise exception 'R already has a choice';
+  end if;
+  begin
+    recorded := pg_temp.select_facility('f1296000-0000-4000-8000-000000000809', 'f1292000-0000-4000-8000-00000000000a',
+      'f1291000-0000-4000-8000-0000000000f2', 'f1295000-0000-4000-8000-0000000000a2');
+  exception when check_violation then
+    raise exception 'the guard refused the first choice of a rotated sign-in whose first session R1 is revoked, made through its live session R3: %',
+      sqlerrm;
+  end;
+  if recorded is distinct from 'f1296000-0000-4000-8000-000000000807' then
+    raise exception 'a rotated sign-in whose first session is revoked could not make its first choice (answered %)', recorded;
+  end if;
+end $$;
+reset role;
+do $$
+declare
+  reads text[];
+begin
+  if (select selection.facility_id::text || '/' || selection.membership_id::text || '/' || selection.row_version::text
+        from auth.session_facility_selection selection
+       where selection.family_id = 'f1296000-0000-4000-8000-000000000807'
+         and selection.account_id = 'f1292000-0000-4000-8000-00000000000a')
+     is distinct from 'f1291000-0000-4000-8000-0000000000f2/f1295000-0000-4000-8000-0000000000a2/1' then
+    raise exception 'R''s first choice was not stored as one new row keyed to R1';
+  end if;
+  -- The key pins the revoked first session; the live session is a later one.
+  if (select session_row.revoked_at is not null and session_row.revocation_reason = 'rotated'
+        from auth.sessions session_row where session_row.id = 'f1296000-0000-4000-8000-000000000807') is not true
+     or (select session_row.revoked_at is null and session_row.family_id = 'f1296000-0000-4000-8000-000000000807'
+        from auth.sessions session_row where session_row.id = 'f1296000-0000-4000-8000-000000000809') is not true then
+    raise exception 'R1 must be revoked as rotated and R3 a live session of its family';
+  end if;
+  select array_agg(presented_session.label || '=' || coalesce(pg_temp.selected_facility(presented_session.presented::uuid,
+      'f1292000-0000-4000-8000-00000000000a')::text, 'none') order by presented_session.label)
+    into reads
+    from (values ('R1', 'f1296000-0000-4000-8000-000000000807'), ('R2', 'f1296000-0000-4000-8000-000000000808'),
+                 ('R3', 'f1296000-0000-4000-8000-000000000809')) as presented_session(label, presented);
+  if reads is distinct from array['R1=none', 'R2=none', 'R3=f1291000-0000-4000-8000-0000000000f2'] then
+    raise exception 'R''s choice must be read through its live session only: %', reads;
+  end if;
+  -- Nothing was stored for K, L, M, N or O.
+  if exists (select 1 from auth.session_facility_selection selection
+              where selection.family_id in ('f1296000-0000-4000-8000-000000000800', 'f1296000-0000-4000-8000-000000000801',
+                'f1296000-0000-4000-8000-000000000803', 'f1296000-0000-4000-8000-000000000805',
+                'f1296000-0000-4000-8000-000000000810')
+                 or selection.account_id = 'f1292000-0000-4000-8000-0000000000c0') then
+    raise exception 'a refused sign-in has a stored choice';
+  end if;
+end $$;
 
 rollback;
