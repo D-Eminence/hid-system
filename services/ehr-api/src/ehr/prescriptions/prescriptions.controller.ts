@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Optional, Param, ParseUUIDPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import { RequirePermissions } from '../../common/decorators';
 import type { HidRequest } from '../../common/request-context';
 import { clinicalContext, requireIdempotencyKey } from '../shared/clinical-context';
@@ -9,24 +9,32 @@ import {
 } from '../shared/clinical.dto';
 import { CreatePrescriptionBodyPipe, type CreatePrescriptionInput } from './prescription-dispensing-details';
 import { PrescriptionsService } from './prescriptions.service';
+import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
 
 @Controller('ehr/patients/:patientId/encounters/:encounterId/prescriptions')
 export class PrescriptionsController {
-  constructor(private readonly prescriptions: PrescriptionsService) {}
+  constructor(private readonly prescriptions: PrescriptionsService,
+    @Optional() private readonly progress?: WorkItemProgressService) {}
 
+  /** Each item carries `ownProgress` in this facility's own pharmacy (ORD-3), read after the list. */
   @Get()
   @RequirePermissions('ehr.prescription.read')
-  list(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
+  async list(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string, @Query() query: TimelineQueryDto) {
-    return this.prescriptions.list(clinicalContext(request), patientId, encounterId, query);
+    const context = clinicalContext(request);
+    const page = await this.prescriptions.list(context, patientId, encounterId, query);
+    return this.progress ? this.progress.withPrescriptionProgress(context, patientId, page) : page;
   }
 
+  /** With `ownProgress` (ORD-3), read after the prescription. */
   @Get(':prescriptionId')
   @RequirePermissions('ehr.prescription.read')
-  get(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
+  async get(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
     @Param('prescriptionId', new ParseUUIDPipe()) prescriptionId: string) {
-    return this.prescriptions.get(clinicalContext(request), patientId, encounterId, prescriptionId);
+    const context = clinicalContext(request);
+    const prescription = await this.prescriptions.get(context, patientId, encounterId, prescriptionId);
+    return this.progress ? this.progress.withPrescription(context, patientId, prescription) : prescription;
   }
 
   /**

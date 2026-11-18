@@ -6022,3 +6022,105 @@ staff or patient sign-in of the client's kind, never changed or deleted:
 INSERT` on the first and `SELECT, INSERT, DELETE` on the second; no other
 runtime holds anything on either. The suite is
 `services/ehr-api/database/tests/sso-relying-party.integration.sql`.
+
+## ORD-3. Own pharmacy and laboratory progress on prescriptions and lab requests (wave 1, no migration)
+
+Akos items N-1b and N-8 (build plan of 18 November 2026, lane D). A
+clinician sees, on each prescription and lab request, where it is in this
+facility's own pharmacy or laboratory, for example "Dispensed 11:05". No
+migration, no new setting and no new secret: the internal calls use the
+ehr-api to pharmacy-api and ehr-api to lab-api workload identity that
+already exists (`PHARMACY_*` and `LAB_*` settings in ehr-api).
+
+### Internal routes (ehr-api only)
+
+`POST /api/v1/pharmacy/work-items/progress` and
+`POST /api/v1/lab/work-items/progress`. Read-only: they change nothing.
+Internal caller `ehr-api` only (`x-hid-internal-caller` plus the service
+token or workload JWT, as `accept-ehr-prescription` and `accept-ehr-order`),
+sent with the clinician's own bearer token or cookie, `X-Facility-Id` and
+`X-Purpose-Of-Use` (`direct-care` or `emergency`). Permission:
+`ehr.prescription.read` (pharmacy) and `ehr.lab-request.read` (lab), the
+clinician's EHR permissions, not a pharmacy or lab one. The read depends on
+the clinician's own consent grant (row-level security and Identity's
+decision), never on a pharmacist's or laboratory member's grant. Because the
+browser request behind them is a read, the guard does not ask Identity for
+the browser-write (Origin and CSRF) check of a forwarded cookie on these two
+routes only (`ReadOnlyPost`). Answer `200`, `Cache-Control: no-store`.
+
+Request (ids only, in the body; never a Health ID, never in the URL):
+
+| Field | Pharmacy | Lab |
+| --- | --- | --- |
+| `patientId` | the patient's UUID | the patient's UUID |
+| ids | `sourceEhrPrescriptionIds`: 1-100 distinct UUIDs | `sourceEhrOrderIds`: 1-100 distinct UUIDs |
+
+Any other field is refused (`400 VALIDATION_FAILED`).
+
+Answer: `{ "items": [...] }`, one item per id asked, in the order asked.
+
+Pharmacy item: `sourceEhrPrescriptionId`, `status`, `receivedAt`,
+`dispensedAt`, `reversedAt` (ISO times or `null`).
+
+| `status` | Meaning |
+| --- | --- |
+| `not_received` | no work item here that the clinician may read |
+| `received` | the pharmacy has it and has not dispensed it |
+| `dispensed` | dispensed at `dispensedAt` |
+| `dispensing_reversed` | dispensed, then the dispensing was reversed at `reversedAt` |
+
+Lab item: `sourceEhrOrderId`, `status`, `receivedAt`, `collectedAt`
+(the first sample taken), `lastResultAt` (the latest released result).
+
+| `status` | Meaning |
+| --- | --- |
+| `not_received` | no work item here that the clinician may read |
+| `received` | the laboratory has it; no sample taken yet |
+| `sample_collected` | a sample was taken (collected or received; not rejected, cancelled or entered in error) |
+| `some_results_ready` | some of its tests have a released result |
+| `results_ready` | every test it asks for has a released result |
+
+A result counts only while its current version is released and not marked
+entered in error (the laboratory work list's rule). Only this facility's
+own work is read: work on an order route to another facility is left out
+(its progress is on the EHR item's `orderRoute`).
+
+Refusals: `401` without the internal caller proof; `403 PERMISSION_DENIED`
+without the EHR read permission; `403 PHARMACY_ACCESS_DENIED` or
+`403 LAB_WORK_ITEM_ACCESS_DENIED` when Identity refuses the patient read
+(audited with outcome `denied`); `400` for a bad body or purpose.
+
+Audit: every lookup writes one row naming the patient,
+`pharmacy.work-item.progress.read` or `lab.work-item.progress.read`
+(resource `*-work-item-collection`, the facility), with `requestedCount`,
+`foundCount`, the work item ids found and `breakGlass`, in the read's
+transaction. The Lab request row `api.lab.work-item.progress.request` is
+written as for other Lab routes.
+
+### ehr-api answers
+
+`GET .../encounters/:encounterId/prescriptions` and
+`GET .../prescriptions/:prescriptionId`: each prescription gains
+`ownProgress` with the pharmacy fields above (`status`, `receivedAt`,
+`dispensedAt`, `reversedAt`).
+
+`GET .../encounters/:encounterId/lab-requests` and
+`GET .../lab-requests/:requestId`: each lab request gains `ownProgress` with
+the lab fields above (`status`, `receivedAt`, `collectedAt`, `lastResultAt`).
+
+`ownProgress.status` is also:
+- `not_received` for a draft (never sent, so not asked about);
+- `unknown` (all times `null`) when the pharmacy or laboratory could not be
+  asked or answered something unexpected: down, slower than 3 seconds,
+  refused, or a malformed answer. The EHR answer itself never fails because
+  of it.
+
+ehr-api asks once per page (at most 100 ids per call), after its own read
+and audit, with the clinician's own credentials. Nothing else in these
+answers changes.
+
+Screen change (Akos frontend branch): show `ownProgress` on each order row,
+for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
+"Results ready 11:05"; show "Progress not available right now" for
+`unknown`, and nothing for `not_received` on a draft.
+
