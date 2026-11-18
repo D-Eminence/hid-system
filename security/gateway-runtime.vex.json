@@ -76,5 +76,6 @@
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "The affected code is CMS_encrypt and CMS_encrypt_ex with an EC recipient of group order 1; TLS and QUIC do not use it. nginx, njs, libapk and ssl_client import no CMS_* function. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.6-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols); c_rehash is never run, and the wget health check is plain http://127.0.0.1:3000, so busybox's ssl_client is not started. Assessed 2026-11-18 from the base layers fetched by digest. Alpine 3.24 serves no libssl3/libcrypto3 newer than 3.5.9-r0; OpenSSL 3.5.10 is due 2026-12-01. Expires 2026-12-01: replace with a pinned fixed Alpine 3.24 package, do not renew."
     }
-  ]
+  ],
+  "hid_owner_approval": "D-Eminence, verbatim in chat on 2026-11-18 at about 12:57 UTC: \"Q99 A\""
 }
