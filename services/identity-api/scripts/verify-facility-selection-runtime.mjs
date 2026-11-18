@@ -509,13 +509,15 @@ try {
     assert.equal((await rows(doctor.id)).length, 1);
     steps.push(`5. a second ehr. sign-in of the account answers ${unchosen === 'none' ? 'no facilitySelection' : 'facilitySelection default'} at the primary facility, before and after a reload, and reads none of the first's choice; the first still reads its own`);
 
-    // 6. Each site is its own sign-in (Q88). The laboratory fits lab., not
-    // ehr.; every hospital membership fits both, since lab. also admits
-    // hospital roles, so a site refuses a choice only of a facility it does
+    // 6. Each site is its own sign-in (Q88), and each site is for its own job
+    // (Q97): the laboratory is admitted on lab., not ehr., and the doctor's
+    // and nurse's hospital memberships on ehr., not lab. (they hold lab.'s
+    // reading codes for their hospital work only), so the lab. sign-in holds
+    // the laboratory alone and a site refuses a choice of a facility it does
     // not admit.
     const lab = await signIn(doctor, labOrigin, 'lab-login');
-    reports(lab.response, alpha.id, unchosen, `${mode}: lab. sign-in`);
-    assert(lab.response.body.actor.facilityIds.includes(laboratory.id));
+    reports(lab.response, laboratory.id, unchosen, `${mode}: lab. sign-in`);
+    assert.deepEqual(lab.response.body.actor.facilityIds, [laboratory.id], 'the lab. sign-in holds the laboratory alone (Q97)');
     const labChosen = await choose(lab.held, laboratory.id);
     reports(labChosen, laboratory.id, 'selected', `${mode}: lab. choice`);
     reports(await read(lab.held), laboratory.id, 'selected', `${mode}: lab. reload`);
@@ -538,8 +540,8 @@ try {
     refusedWithoutFacilityHeader(await choose(lab.held, laboratory.id, { origin: ehrOrigin }),
       `${mode}: a choice sent with ehr.'s Origin of a facility ehr. does not admit, on the lab. sign-in`,
       '403 FACILITY_ACCESS_DENIED');
-    problem(await choose(lab.held, laboratory.id, { origin: ehrOrigin, facility: alpha.id }), 403, 'FACILITY_ACCESS_DENIED',
-      `${mode}: the same with X-Facility-ID`);
+    problem(await choose(lab.held, laboratory.id, { origin: ehrOrigin, facility: laboratory.id }), 403,
+      'FACILITY_ACCESS_DENIED', `${mode}: the same with X-Facility-ID`);
     await sameRows('refused cross-site choices');
     assert.equal((await audits('auth.facility.select', current.sessionId)).length, 0);
     assert.equal((await audits('auth.facility.select', lab.held.sessionId)).length, 1);

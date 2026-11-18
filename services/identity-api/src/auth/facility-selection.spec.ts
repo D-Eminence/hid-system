@@ -15,7 +15,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
 import { GoogleAuthenticationService } from './google-authentication.service';
-import { facilityFitsProduct, type StaffProduct } from './product-gate';
+import { facilityAdmittedOnProduct, type StaffProduct } from './product-gate';
 import { SecurityGuard } from './security.guard';
 import { TokenService } from './token.service';
 import { TurnstileService } from './turnstile.service';
@@ -32,8 +32,9 @@ import { WorkloadAuthService } from './workload-auth.service';
 // written for a live staff session of the same account and an active
 // membership, read back only through a live staff session of the family. The
 // actor is resolved as CurrentStaffContextService resolves it: a staff actor
-// has no kind, its facilities are those that fit the session's own product
-// (Q88), the primary facility first and bound.
+// has no kind, its facilities are those admitted on the session's own product
+// (Q88, with Q97's own-job rule: facilityAdmittedOnProduct), the primary
+// facility first and bound.
 //
 // The app runs with main.ts's pipe and filter and SecurityGuard, without the
 // global AuditInterceptor: these are the handler's own answers. Through the
@@ -55,11 +56,14 @@ const facility = (name: string, primary: boolean, role: string, permissions: str
   permissions: [...permissions, `${role}.synthetic`], isPrimary: primary,
 });
 
-// Fictional workforce. Hospital memberships fit every product site; the
-// laboratory one fits lab. only.
+// Fictional workforce. The doctor and nurse memberships are hospital clinical
+// ones, admitted on ehr. (and migrate.) only since Q97; the laboratory ones
+// are admitted on lab. only.
 const primary = facility('Fictional Alpha General', true, 'doctor', ['ehr.encounter.write']);
 const secondary = facility('Fictional Beta Clinic', false, 'nurse', ['ehr.encounter.write']);
 const laboratory = facility('Fictional Gamma Laboratory', false, 'lab', ['lab.work-item.read']);
+// A second laboratory, for the lab. sign-ins that need two facilities there.
+const epsilonLaboratory = facility('Fictional Epsilon Laboratory', false, 'lab', ['lab.work-item.read']);
 const elsewhere = facility('Fictional Delta Hospital', true, 'doctor', ['ehr.encounter.write']);
 
 interface StoredSession { familyId: string; accountId: string; kind: 'staff' | 'patient'; live: boolean; product?: StaffProduct }
@@ -103,7 +107,7 @@ class SignInStore {
   /** As CurrentStaffContextService resolves it under the session's product: no kind, primary first and bound. */
   staffActor(accountId: string, product?: StaffProduct, sessionId?: string): ActorContext {
     const all = this.memberships.get(accountId) ?? [];
-    const fitting = product ? all.filter((candidate) => facilityFitsProduct(candidate, product)) : all;
+    const fitting = product ? all.filter((candidate) => facilityAdmittedOnProduct(candidate, product)) : all;
     const facilities = [...fitting].sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary)
       || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
     const bound = facilities[0];
@@ -445,8 +449,11 @@ describe('a staff member\'s chosen facility, kept per sign-in (0129)', () => {
     });
 
     it('re-checks the choice against the facilities of the session\'s own product, never the request\'s Origin', async () => {
+      // Since Q97 the lab. sign-in holds the two laboratories only, not the
+      // doctor's or the nurse's hospital memberships.
+      store.memberships.set(accountId, [secondary, primary, laboratory, epsilonLaboratory]);
       const signIn = store.signIn(accountId, 'staff', 'lab');
-      expect(store.actor(signIn.sessionId).facilityIds).toEqual(expect.arrayContaining([laboratory.id, primary.id]));
+      expect([...store.actor(signIn.sessionId).facilityIds].sort()).toEqual([laboratory.id, epsilonLaboratory.id].sort());
       expect((await select(signIn.accessToken, laboratory.id, LAB)).status).toBe(200);
 
       // An Origin whose product the laboratory does not fit changes nothing:
@@ -458,10 +465,10 @@ describe('a staff member\'s chosen facility, kept per sign-in (0129)', () => {
       // longer fits the session's product, so the choice is reselect, even
       // with an Origin whose product it would fit.
       store.memberships.set(accountId, [secondary, primary,
-        { ...laboratory, roles: ['outreach_volunteer'], permissions: ['outreach.registration.read'] }]);
+        { ...laboratory, roles: ['outreach_volunteer'], permissions: ['outreach.registration.read'] }, epsilonLaboratory]);
       const fromOutreach = await session(signIn.accessToken).set('Origin', OUTREACH);
       expect(fromOutreach.body.facilitySelection).toBe('reselect');
-      expect(fromOutreach.body.actor.facility.id).toBe(primary.id);
+      expect(fromOutreach.body.actor.facility.id).toBe(epsilonLaboratory.id);
       expect(fromOutreach.body.actor.facilityIds).not.toContain(laboratory.id);
     });
 
@@ -481,15 +488,16 @@ describe('a staff member\'s chosen facility, kept per sign-in (0129)', () => {
 
     it('refuses a choice sent from another site\'s Origin, or of a facility not the actor\'s, with 403 and stores nothing',
       async () => {
+        store.memberships.set(accountId, [secondary, primary, laboratory, epsilonLaboratory]);
         const signIn = store.signIn(accountId, 'staff', 'lab');
-        expect((await select(signIn.accessToken, secondary.id, LAB)).status).toBe(200);
+        expect((await select(signIn.accessToken, laboratory.id, LAB)).status).toBe(200);
         tokens.recordFacilitySelection.mockClear();
         audit.recordWithClient.mockClear();
 
-        // The lab. sign-in holds the laboratory, which ehr.'s product does not
-        // admit: a choice of it sent with ehr.'s Origin is refused.
-        expect(store.actor(signIn.sessionId).facilityIds).toContain(laboratory.id);
-        const fromEhr = await select(signIn.accessToken, laboratory.id, EHR);
+        // The lab. sign-in holds the laboratories, which ehr.'s product does
+        // not admit: a choice of one sent with ehr.'s Origin is refused.
+        expect(store.actor(signIn.sessionId).facilityIds).toContain(epsilonLaboratory.id);
+        const fromEhr = await select(signIn.accessToken, epsilonLaboratory.id, EHR);
         expect(fromEhr.status).toBe(403);
         expect(fromEhr.body.code).toBe('FACILITY_ACCESS_DENIED');
 
@@ -499,8 +507,8 @@ describe('a staff member\'s chosen facility, kept per sign-in (0129)', () => {
 
         expect(tokens.recordFacilitySelection).not.toHaveBeenCalled();
         expect(audit.recordWithClient).not.toHaveBeenCalled();
-        expect(store.selections.get(signIn.sessionId)?.facilityId).toBe(secondary.id);
-        expect((await session(signIn.accessToken)).body.actor.facility.id).toBe(secondary.id);
+        expect(store.selections.get(signIn.sessionId)?.facilityId).toBe(laboratory.id);
+        expect((await session(signIn.accessToken)).body.actor.facility.id).toBe(laboratory.id);
       });
 
     it('stores only a facility that fits the Origin\'s product for a session issued before the gate', async () => {
