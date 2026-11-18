@@ -12,6 +12,7 @@ import {
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { requireChangeReason } from '../shared/change-reason';
+import { requireVisitOpenForWork } from '../shared/visit-guard';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
@@ -74,6 +75,9 @@ export type LabHandoff =
 type HandoffOutcome = { handoff: LabHandoff; workItem: unknown };
 
 const LAB_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/** EHR-C8a: the only changes allowed on a visit entered in error: stopping the request. */
+const STOPPING: readonly OrderStatus[] = [OrderStatus.OnHold, OrderStatus.Cancelled, OrderStatus.EnteredInError];
 
 /**
  * Lab's verdicts on the request or on the caller: invalid (400), not allowed
@@ -166,6 +170,8 @@ export class LabRequestsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'lab-request',
         async () => {
+          // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
           const result = await client.query<CreatedLabRequestRow>(
             `insert into ehr.lab_requests (
                encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
@@ -220,6 +226,9 @@ export class LabRequestsService {
       { action: 'ehr.lab-request.lab-handoff.eligibility-checked', resourceType: 'lab-request', resourceId: requestId,
         details: { expectedRowVersion: input.expectedRowVersion } },
       async (client) => {
+        // EHR-C8a: never sent to the laboratory from a visit entered in error
+        // (a read, no lock: this path writes nothing in the EHR).
+        await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId, { lock: false });
         const current = this.single(await this.findExact(client, context, patientId, encounterId, requestId));
         if (Number(current.rowVersion) !== input.expectedRowVersion) {
           throw new DomainProblem(412, 'LAB_REQUEST_VERSION_CONFLICT',
@@ -322,6 +331,13 @@ export class LabRequestsService {
       context, patientId, 'write_records',
       { action: 'ehr.lab-request.update', resourceType: 'lab-request', resourceId: requestId },
       async (client) => {
+        // EHR-C8a: on a visit entered in error a lab request can only be put
+        // on hold, cancelled or entered in error; anything else (activate,
+        // resume, complete, edit) is 409 VISIT_ENTERED_IN_ERROR. The visit is
+        // locked before the request, as in every order path.
+        if (!STOPPING.includes(input.status as OrderStatus)) {
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
+        }
         const current = await this.lock(client, context, patientId, encounterId, requestId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_LAB_REQUEST_TRANSITION', 'Lab request status transition is not allowed');

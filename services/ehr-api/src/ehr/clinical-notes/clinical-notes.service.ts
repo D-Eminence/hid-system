@@ -12,6 +12,7 @@ import {
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
+import { requireVisitOpenForWork } from '../shared/visit-guard';
 
 export interface ClinicalNoteRow extends QueryResultRow {
   id: string;
@@ -183,6 +184,8 @@ export class ClinicalNotesService {
         digest,
         'clinical-note',
         async () => {
+          // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
           const signed = input.status === NoteStatus.Signed;
           // $4 (the author) is used twice. Without the casts PostgreSQL types the
           // CASE branch `$4 else null` as text before it types the created_by
@@ -326,6 +329,12 @@ export class ClinicalNotesService {
       'write_records',
       { action: 'ehr.note.update', resourceType: 'clinical-note', resourceId: noteId },
       async (client) => {
+        // EHR-C8a: a note on a visit entered in error can only be entered in
+        // error itself; signing it or changing its title is 409
+        // VISIT_ENTERED_IN_ERROR. The visit is locked before the note.
+        if (input.status !== NoteStatus.EnteredInError) {
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
+        }
         const current = await this.lockNote(client, context, patientId, encounterId, noteId);
         this.validateTransition(current, input);
         const signing = input.status === NoteStatus.Signed && current.status === 'draft';

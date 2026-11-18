@@ -249,11 +249,19 @@ export class EncountersService {
   }
 
   /**
-   * EHR-C8a: the checks before a completed visit is entered in error. The
-   * imported paper records visit (0113) is refused, and so is a visit that
-   * still has an active or on-hold prescription or lab request: those are
-   * stopped or entered in error first, so no pharmacy or lab keeps acting on
-   * a visit that should not exist.
+   * EHR-C8a: the checks before a completed visit is entered in error, run
+   * under the visit's FOR UPDATE lock. The imported paper records visit (0113)
+   * is refused, and so is a visit that still has:
+   * - a draft, active or on-hold prescription or lab request: those are
+   *   cancelled, stopped or entered in error first, so no pharmacy or lab keeps
+   *   acting on a visit that should not exist (a draft counts, since it could
+   *   otherwise be activated later);
+   * - a signed or amended note: each is entered in error first, so the
+   *   patient's own record (which can see only completed visits, and so cannot
+   *   tell a visit entered in error from one still open) never lists it.
+   * Every order and note change that starts or adds something checks the
+   * visit under FOR SHARE (shared/visit-guard.ts), so none can slip in between
+   * this count and the update.
    */
   private async assertCompletedVisitCanBeEnteredInError(
     client: PoolClient,
@@ -265,17 +273,25 @@ export class EncountersService {
       throw new DomainProblem(409, 'IMPORTED_VISIT_NOT_ENTERED_IN_ERROR',
         'The imported paper records visit cannot be marked as entered in error.');
     }
-    const open = await client.query<{ openOrders: number }>(
+    const open = await client.query<{ openOrders: number; signedNotes: number }>(
       `select ((select count(*) from ehr.prescriptions
-                 where encounter_id = $1 and patient_id = $2 and facility_id = $3 and status in ('active', 'on_hold'))
+                 where encounter_id = $1 and patient_id = $2 and facility_id = $3
+                   and status in ('draft', 'active', 'on_hold'))
              + (select count(*) from ehr.lab_requests
-                 where encounter_id = $1 and patient_id = $2 and facility_id = $3 and status in ('active', 'on_hold')))::int
-         as "openOrders"`,
+                 where encounter_id = $1 and patient_id = $2 and facility_id = $3
+                   and status in ('draft', 'active', 'on_hold')))::int as "openOrders",
+              (select count(*) from ehr.clinical_notes
+                 where encounter_id = $1 and patient_id = $2 and facility_id = $3
+                   and status in ('signed', 'amended'))::int as "signedNotes"`,
       [current.id, patientId, context.facilityId],
     );
     if (Number(open.rows[0]?.openOrders ?? 0) > 0) {
       throw new DomainProblem(409, 'VISIT_HAS_OPEN_ORDERS',
-        'Stop this visit\'s active prescriptions and lab requests before marking it as entered in error.');
+        'Cancel or stop this visit\'s prescriptions and lab requests, drafts included, before marking it as entered in error.');
+    }
+    if (Number(open.rows[0]?.signedNotes ?? 0) > 0) {
+      throw new DomainProblem(409, 'VISIT_HAS_SIGNED_NOTES',
+        'Mark this visit\'s signed notes as entered in error before marking the visit as entered in error.');
     }
   }
 

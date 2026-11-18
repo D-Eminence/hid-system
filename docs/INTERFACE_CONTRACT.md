@@ -6202,7 +6202,8 @@ Refusals, checked under the visit's row lock before anything is written:
 | Answer | When |
 | --- | --- |
 | `409 IMPORTED_VISIT_NOT_ENTERED_IN_ERROR` "The imported paper records visit cannot be marked as entered in error." | The visit is the patient's imported paper records visit (0113) |
-| `409 VISIT_HAS_OPEN_ORDERS` "Stop this visit's active prescriptions and lab requests before marking it as entered in error." | The visit still has an `active` or `on_hold` prescription or lab request (so no pharmacy or lab keeps acting on a visit that should not exist) |
+| `409 VISIT_HAS_OPEN_ORDERS` "Cancel or stop this visit's prescriptions and lab requests, drafts included, before marking it as entered in error." | The visit still has a `draft`, `active` or `on_hold` prescription or lab request (so no pharmacy or lab keeps acting on a visit that should not exist; a draft counts because it could otherwise be activated later) |
+| `409 VISIT_HAS_SIGNED_NOTES` "Mark this visit's signed notes as entered in error before marking the visit as entered in error." | The visit still has a `signed` or `amended` note (so the patient's own record never lists a note of the visit; see below) |
 | `409 INVALID_ENCOUNTER_TRANSITION` | A completed visit to any status other than `entered_in_error` (unchanged) |
 | `400` (validation) | No `changeReason`, or one shorter than 3 characters |
 
@@ -6210,15 +6211,51 @@ On success the audit row (`ehr.encounter.update`) carries
 `completedVisitEnteredInError: true`. Entering a planned, in-progress or
 on-hold visit in error is unchanged.
 
+### Nothing new on a visit entered in error (any visit, not only a completed one)
+
+Every path that adds to a visit or starts something on it now reads the
+visit first, under a `FOR SHARE` row lock, and refuses a visit entered in
+error with
+`409 VISIT_ENTERED_IN_ERROR` "This visit was marked as entered in error. Nothing new can be added to it or started on it."
+
+| Route | Refused on a visit entered in error | Still allowed |
+| --- | --- | --- |
+| `POST .../encounters/:encounterId/prescriptions` | always | |
+| `PATCH .../prescriptions/:id` | activate, resume, complete, any edit | `on_hold`, `cancelled`, `entered_in_error` |
+| `POST .../prescriptions/:id/pharmacy-work-item` | always (before the pharmacy is called) | |
+| `POST .../encounters/:encounterId/lab-requests` | always (before the laboratory is called) | |
+| `PATCH .../lab-requests/:id` | activate, resume, complete, any edit | `on_hold`, `cancelled`, `entered_in_error` |
+| `POST .../lab-requests/:id/lab-work-item` | always (a read, no lock: this route writes nothing in the EHR) | |
+| `POST .../encounters/:encounterId/clinical-notes` | always | |
+| `PATCH .../clinical-notes/:id` | sign, title change | `entered_in_error` |
+
+The visit is locked before the order or note row, in every path. Marking a
+completed visit as entered in error locks the visit `FOR UPDATE` before it
+counts orders and signed notes, so a concurrent activation, resume or
+signature either commits first (and the count refuses with 409) or waits and
+then gets `409 VISIT_ENTERED_IN_ERROR`. `FOR SHARE` does not conflict with the
+`FOR KEY SHARE` that foreign keys take, so orders on the same visit do not
+wait for each other. A replay of an Idempotency-Key that was already
+completed is answered as before.
+
 ### What the patient sees afterwards
 
 - The patient's own record (`GET` patient self records) lists only completed
   visits, so the visit disappears from it.
-- **Changed:** the notes in that read (and in the emergency read) are now
-  shown only with their visit, and never from a visit entered in error. For
-  the patient this means a signed note appears once its visit is completed,
-  which is how the patient chat already reads notes. Before, a signed note of
-  a visit that was not completed (or was entered in error) was still listed.
+- The notes in that read are unchanged for the patient: a signed note of a
+  visit that is not completed yet is still listed, as before. The read leaves
+  out a note only when its visit can be seen and is entered in error
+  (`not exists (... status = 'entered_in_error')`). The patient-self policy on
+  `ehr.encounters` hides every visit that is not completed, so for the patient
+  this changes nothing; a completed visit entered in error has no signed note
+  left (`VISIT_HAS_SIGNED_NOTES`), so its notes never reach the patient.
+- The emergency read (staff, who can see every visit at the facility) now
+  leaves out notes of a visit entered in error.
+- Known gap, unchanged from before: a planned, in-progress or on-hold visit
+  can still be entered in error with signed notes in it (that path has no new
+  check), and the patient's record still lists those notes. Closing it needs
+  a database helper the patient's read can call (a migration), or the same
+  `VISIT_HAS_SIGNED_NOTES` rule on that path: an owner decision.
 - The patient chat reads visits, notes, prescriptions, tests, diagnoses and
   vitals only from completed visits (unchanged; the database's patient-self
   policies hide diagnoses and vitals of other visits).

@@ -32,12 +32,12 @@ const visit = (status: EncounterStatus, overrides: Partial<EncounterRow> = {}): 
   importedPaperRecords: false, ...overrides,
 });
 
-function setup(current: EncounterRow, openOrders = 0) {
+function setup(current: EncounterRow, openOrders = 0, signedNotes = 0) {
   const calls: { sql: string; values: unknown[] }[] = [];
   const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
     calls.push({ sql, values });
     if (/for update/.test(sql)) return { rows: [current] };
-    if (/as "openOrders"/.test(sql)) return { rows: [{ openOrders }] };
+    if (/as "openOrders"/.test(sql)) return { rows: [{ openOrders, signedNotes }] };
     if (/^\s*update ehr\.encounters/.test(sql)) {
       return { rows: [{ ...current, status: values[0] ?? current.status, rowVersion: '4' }] };
     }
@@ -69,8 +69,15 @@ describe('EHR-C8a a completed visit entered in error', () => {
       details: { rowVersion: '4', completedVisitEnteredInError: true } }]);
     const orders = calls.find((call) => /as "openOrders"/.test(call.sql));
     expect(orders?.values).toEqual([encounterId, patientId, facilityId]);
-    expect(orders?.sql).toMatch(/from ehr\.prescriptions\s+where encounter_id = \$1 and patient_id = \$2 and facility_id = \$3 and status in \('active', 'on_hold'\)/);
-    expect(orders?.sql).toMatch(/from ehr\.lab_requests\s+where encounter_id = \$1 and patient_id = \$2 and facility_id = \$3 and status in \('active', 'on_hold'\)/);
+    // Review finding 1: a draft counts too, since it could otherwise be activated later.
+    expect(orders?.sql).toMatch(/from ehr\.prescriptions\s+where encounter_id = \$1 and patient_id = \$2 and facility_id = \$3\s+and status in \('draft', 'active', 'on_hold'\)/);
+    expect(orders?.sql).toMatch(/from ehr\.lab_requests\s+where encounter_id = \$1 and patient_id = \$2 and facility_id = \$3\s+and status in \('draft', 'active', 'on_hold'\)/);
+    // Review finding 2: signed notes are entered in error first.
+    expect(orders?.sql).toMatch(/from ehr\.clinical_notes\s+where encounter_id = \$1 and patient_id = \$2 and facility_id = \$3\s+and status in \('signed', 'amended'\)/);
+    // The count runs after the visit's FOR UPDATE lock.
+    const lock = calls.findIndex((call) => /for update/.test(call.sql));
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(lock).toBeLessThan(calls.indexOf(orders!));
   });
 
   it('refuses the imported paper records visit', async () => {
@@ -82,11 +89,22 @@ describe('EHR-C8a a completed visit entered in error', () => {
     expect(reasons).toEqual([]);
   });
 
-  it('refuses while the visit still has an active or on-hold prescription or lab request', async () => {
-    const { service, calls } = setup(visit(EncounterStatus.Completed), 2);
+  it('refuses while the visit still has a draft, active or on-hold prescription or lab request', async () => {
+    const { service, calls, reasons } = setup(visit(EncounterStatus.Completed), 1);
     await expect(service.update(context, patientId, encounterId, enterInError))
-      .rejects.toMatchObject({ status: 409, code: 'VISIT_HAS_OPEN_ORDERS' });
+      .rejects.toMatchObject({ status: 409, code: 'VISIT_HAS_OPEN_ORDERS',
+        message: 'Cancel or stop this visit\'s prescriptions and lab requests, drafts included, before marking it as entered in error.' });
     expect(updated(calls)).toBe(false);
+    expect(reasons).toEqual([]);
+  });
+
+  it('refuses while the visit still has a signed or amended note (review finding 2)', async () => {
+    const { service, calls, reasons } = setup(visit(EncounterStatus.Completed), 0, 1);
+    await expect(service.update(context, patientId, encounterId, enterInError))
+      .rejects.toMatchObject({ status: 409, code: 'VISIT_HAS_SIGNED_NOTES',
+        message: 'Mark this visit\'s signed notes as entered in error before marking the visit as entered in error.' });
+    expect(updated(calls)).toBe(false);
+    expect(reasons).toEqual([]);
   });
 
   it.each([EncounterStatus.InProgress, EncounterStatus.Planned, EncounterStatus.Cancelled, EncounterStatus.OnHold])(
@@ -129,10 +147,13 @@ describe('EHR-C8a what the patient sees afterwards (patient-self re-run)', () =>
       { run } as unknown as ClinicalRepository);
     return { service, query };
   }
-  const NOTE_VISIT_FILTER = "and exists(select 1 from ehr.encounters e where e.id=n.encounter_id and e.patient_id=n.patient_id\n"
-    + "          and e.facility_id=n.facility_id and e.status<>'entered_in_error')";
+  const NOTE_VISIT_FILTER = "and not exists(select 1 from ehr.encounters e where e.id=n.encounter_id and e.patient_id=n.patient_id\n"
+    + "          and e.facility_id=n.facility_id and e.status='entered_in_error')";
 
-  it('the patient\'s own record lists only completed visits, and notes only with their visit', async () => {
+  // Review finding 2: the filter is "no visit entered in error can be seen", not "a visit not entered in
+  // error can be seen", so the patient (who sees only completed visits) still gets notes of open visits as
+  // before.
+  it('the patient\'s own record lists only completed visits; notes are filtered only against a visit entered in error', async () => {
     const { service, query } = patientRecords();
     await service.self(request);
     expect(query.mock.calls[0]?.[0]).toContain("status='completed'");

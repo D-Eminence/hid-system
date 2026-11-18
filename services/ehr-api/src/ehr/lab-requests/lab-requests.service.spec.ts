@@ -207,7 +207,11 @@ describe('LabRequestsService sendToLab', () => {
     expect(labApi.acceptEhrOrder.mock.calls[0]?.[1]).toMatchObject({ sourceEhrOrderId: requestId, sourceEhrOrderVersion: 2,
       requestedAt: createdAtExact });
     expect(labApi.acceptEhrOrder.mock.calls[0]?.[2]).toBe(`ehr-order:${requestId}:2`);
-    expect(query.mock.calls.map(([sql]) => String(sql))).toEqual([expect.stringContaining(exactColumn)]);
+    // EHR-C8a: the visit's status is read first (no lock), then the request.
+    expect(query.mock.calls.map(([sql]) => String(sql))).toEqual([
+      expect.stringMatching(/^select status from ehr\.encounters\s+where id = \$1 and patient_id = \$2 and facility_id = \$3$/),
+      expect.stringContaining(exactColumn)]);
+    expect(query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toMatch(/\bfor (share|update|no key update)\b/);
     expect(writes(query)).toEqual([]);
     expect(repository.run).toHaveBeenCalledWith(withLabPermission, patientId, 'write_records', expect.objectContaining({
       action: 'ehr.lab-request.lab-handoff.eligibility-checked', resourceType: 'lab-request', resourceId: requestId }),

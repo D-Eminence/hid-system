@@ -6,6 +6,7 @@ import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } 
 import { AcceptPrescriptionForPharmacyDto, OrderStatus, TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
+import { requireVisitOpenForWork } from '../shared/visit-guard';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
@@ -54,6 +55,9 @@ const TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   [OrderStatus.Cancelled]: [],
   [OrderStatus.EnteredInError]: [],
 };
+
+/** EHR-C8a: the only changes allowed on a visit entered in error: stopping the order. */
+const STOPPING: readonly OrderStatus[] = [OrderStatus.OnHold, OrderStatus.Cancelled, OrderStatus.EnteredInError];
 
 @Injectable()
 export class PrescriptionsService {
@@ -148,6 +152,8 @@ export class PrescriptionsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'prescription',
         async () => {
+          // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
           // 0117: the allergy check. A match needs the prescriber's acknowledgement with a reason, for
           // the warning they were shown (its warningToken); without it nothing is written (the whole
           // transaction, idempotency key included, rolls back).
@@ -202,6 +208,13 @@ export class PrescriptionsService {
       context, patientId, 'write_records',
       { action: 'ehr.prescription.update', resourceType: 'prescription', resourceId: prescriptionId },
       async (client) => {
+        // EHR-C8a: on a visit entered in error a prescription can only be put
+        // on hold, cancelled or entered in error; anything else (activate,
+        // resume, complete, edit) is 409 VISIT_ENTERED_IN_ERROR. The visit is
+        // locked before the prescription, as in every order path.
+        if (!STOPPING.includes(input.status as OrderStatus)) {
+          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
+        }
         const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
@@ -271,6 +284,8 @@ export class PrescriptionsService {
         details: { expectedPrescriptionVersion: input.expectedRowVersion },
       },
       async (client) => {
+        // EHR-C8a: never sent to the pharmacy from a visit entered in error.
+        await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
         const current = await this.lock(client, context, patientId, encounterId, prescriptionId);
         if (Number(current.rowVersion) !== input.expectedRowVersion) {
           throw new DomainProblem(
