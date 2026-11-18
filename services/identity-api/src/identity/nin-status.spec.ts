@@ -6,6 +6,7 @@ import { IdentityService } from './identity.service';
 import type { AuthorizationDecision, IdentityPatient, IdentityProvider } from './identity.types';
 import { NinRegistrationController } from './nin-registration.controller';
 import { NinRegistrationService } from './nin-registration.service';
+import { UnavailableNinVerificationProvider } from './nin-verification.provider';
 import {
   NIN_BREAKER_RETRY_AFTER_MS,
   NIN_BREAKER_WINDOW_MS,
@@ -190,6 +191,43 @@ describe('ID-0 NIN service breaker', () => {
     expect(breaker.available(NIN_BREAKER_RETRY_AFTER_MS + 3)).toBe(true);
   });
 
+  it('lets only one check through while it waits for the answer, then the next once it has one', () => {
+    const breaker = new NinProviderBreaker();
+    breaker.recordFailure(outage(), {}, 0);
+    const at = NIN_BREAKER_RETRY_AFTER_MS;
+    expect(() => breaker.assertAvailable(at)).not.toThrow();
+    // A second desk, while the first check is still waiting: refused, and reported unavailable.
+    expect(() => breaker.assertAvailable(at + 1)).toThrow(expect.objectContaining({ code: 'NIN_PROVIDER_UNAVAILABLE' }));
+    expect(breaker.available(at + 1)).toBe(false);
+    expect(breaker.state(at + 1)).toBe('retrying');
+    // A 4xx answer leaves the breaker as it was, but frees the place for the next check.
+    expect(breaker.recordFailure(new DomainProblem(400, 'BAD_REQUEST', 'Bad request'), {}, at + 2)).toBe(false);
+    expect(breaker.available(at + 2)).toBe(true);
+    expect(() => breaker.assertAvailable(at + 3)).not.toThrow();
+    expect(() => breaker.assertAvailable(at + 4)).toThrow(expect.objectContaining({ code: 'NIN_PROVIDER_UNAVAILABLE' }));
+    breaker.recordSuccess();
+    expect(() => breaker.assertAvailable(at + 5)).not.toThrow();
+    expect(() => breaker.assertAvailable(at + 6)).not.toThrow();
+  });
+
+  it('frees the place when the waiting check fails, and trips again', () => {
+    const breaker = new NinProviderBreaker();
+    breaker.recordFailure(outage(), {}, 0);
+    breaker.assertAvailable(NIN_BREAKER_RETRY_AFTER_MS);
+    breaker.recordFailure(badAnswer(), {}, NIN_BREAKER_RETRY_AFTER_MS + 1);
+    expect(breaker.state(NIN_BREAKER_RETRY_AFTER_MS + 2)).toBe('open');
+    // 60 seconds after the failed retry, one check is let through again.
+    expect(() => breaker.assertAvailable(2 * NIN_BREAKER_RETRY_AFTER_MS + 1)).not.toThrow();
+  });
+
+  it('does not hold the place for ever when the waiting check never answers', () => {
+    const breaker = new NinProviderBreaker();
+    breaker.recordFailure(outage(), {}, 0);
+    breaker.assertAvailable(NIN_BREAKER_RETRY_AFTER_MS);
+    expect(breaker.available(2 * NIN_BREAKER_RETRY_AFTER_MS - 1)).toBe(false);
+    expect(() => breaker.assertAvailable(2 * NIN_BREAKER_RETRY_AFTER_MS)).not.toThrow();
+  });
+
   it('trips again when the retry fails', () => {
     const breaker = new NinProviderBreaker();
     breaker.recordFailure(outage(), {}, 0);
@@ -232,7 +270,8 @@ describe('ID-0 NIN service breaker', () => {
     }
 
     it('stops sending checks once the service answers 503, and audits each refusal', async () => {
-      const verify = jest.fn(async () => { throw new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', 'NIN verification is not configured'); });
+      // The NIN service itself answers 503 (an outage, not a setting).
+      const verify = jest.fn(async () => { throw new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', 'The NIN service is down'); });
       const { service, audit, breaker } = resolver(verify);
       await expect(service.resolve(input, 'resolve-key-00000000001', context)).rejects.toMatchObject({ status: 503 });
       expect(breaker.available()).toBe(false);
@@ -241,9 +280,63 @@ describe('ID-0 NIN service breaker', () => {
       await refused.catch((error: Error) => expect(error.message).not.toMatch(FORBIDDEN_WORD));
       expect(verify).toHaveBeenCalledTimes(1);
       expect(audit.record).toHaveBeenCalledTimes(2);
-      expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({
-        action: 'identity.nin.verify', outcome: 'failure' }));
+      // An auditor can tell the two rows apart: the first NIN was sent to the
+      // NIN service, the second was refused here and never sent.
+      expect(audit.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        action: 'identity.nin.verify', outcome: 'failure',
+        details: { provider: 'deterministic-test', errorType: 'DomainProblem', code: 'NIN_PROVIDER_UNAVAILABLE', providerCalled: true } }));
+      expect(audit.record).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        action: 'identity.nin.verify', outcome: 'failure',
+        details: { provider: 'deterministic-test', errorType: 'DomainProblem', code: 'NIN_PROVIDER_UNAVAILABLE',
+          providerCalled: false, breaker: 'open' } }));
       expect(JSON.stringify(audit.record.mock.calls)).not.toContain('12345678901');
+    });
+
+    it('sends one check when two desks submit at the moment it may retry', async () => {
+      const start = Date.parse('2026-11-18T10:00:00Z');
+      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+      let answer: (value: unknown) => void = () => undefined;
+      const verify = jest.fn(() => new Promise((resolve) => { answer = resolve; }));
+      const { service, breaker } = resolver(verify);
+      breaker.recordFailure(outage());
+      now.mockReturnValue(start + NIN_BREAKER_RETRY_AFTER_MS);
+      const first = service.resolve(input, 'resolve-key-00000000011', context);
+      const second = service.resolve(input, 'resolve-key-00000000012', context);
+      await expect(second).rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE' });
+      expect(verify).toHaveBeenCalledTimes(1);
+      // The one check answers (the NIN does not match): the service is back.
+      answer({ verified: false, provider: 'deterministic-test', reference: 'test-ref',
+        verifiedAt: new Date(start + NIN_BREAKER_RETRY_AFTER_MS).toISOString(),
+        demographics: { firstName: 'Ada', lastName: 'Fictional', dateOfBirth: '1991-04-05' } });
+      await expect(first).rejects.toMatchObject({ code: 'NIN_VERIFICATION_FAILED' });
+      expect(breaker.state()).toBe('closed');
+    });
+
+    it('treats NIN checks switched off as a setting, not an outage', async () => {
+      const query = jest.fn(async () => ({ rows: [] }));
+      const database = { withTransaction: jest.fn(async (_c: unknown, work: (c: unknown) => unknown) => work({ query })) };
+      const audit = { recordWithClient: jest.fn(async () => undefined), record: jest.fn(async () => undefined) };
+      const protector = { lookup: jest.fn(() => 'a'.repeat(64)) };
+      const breaker = new NinProviderBreaker();
+      const provider = new UnavailableNinVerificationProvider();
+      const verify = jest.spyOn(provider, 'verify');
+      const service = new NinRegistrationService(database as never, audit as never, protector as never, {} as never,
+        provider, breaker);
+      for (const key of ['resolve-key-00000000021', 'resolve-key-00000000022']) {
+        await expect(service.resolve(input, key, context)).rejects.toMatchObject({
+          status: 503, code: 'NIN_PROVIDER_UNAVAILABLE', message: 'NIN verification is not configured' });
+        expect(breaker.state()).toBe('closed');
+      }
+      // The same message as the provider's own, not "try again in a minute".
+      await expect(provider.verify({ nin: input.nin, claimedDemographics: input, correlationId: 'c' }))
+        .rejects.toMatchObject({ code: 'NIN_PROVIDER_UNAVAILABLE', message: 'NIN verification is not configured' });
+      expect(verify).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalled();
+      expect(breaker.available()).toBe(true);
+      expect(audit.record).toHaveBeenCalledTimes(2);
+      expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({
+        action: 'identity.nin.verify', outcome: 'failure',
+        details: { provider: 'unavailable', errorType: 'DomainProblem', code: 'NIN_PROVIDER_UNAVAILABLE', providerCalled: false } }));
     });
 
     it('does not count a NIN that does not match as a failure', async () => {

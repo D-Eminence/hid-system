@@ -6089,8 +6089,24 @@ Kept in memory in each Identity process (no table, no secret, no setting).
   right now. Please try again in a minute." without calling the service. The
   refusal is audited (`identity.nin.verify`, outcome `failure`). A replay of
   an earlier request is still answered.
-- After 60 seconds one check is let through. Success closes the breaker and
-  clears the count; a failure trips it again.
+- After 60 seconds one check is let through. While that check waits for its
+  answer, other checks are refused as above (so a busy desk does not send a
+  burst of charged checks to a service that may still be down). Success
+  closes the breaker and clears the count; a failure trips it again; a `4xx`
+  leaves it as it was and lets the next check through. A check with no
+  answer after 60 seconds no longer holds the place.
+- NIN checks switched off (`NIN_PROVIDER_MODE=unavailable`) are a setting,
+  not an outage: the breaker is not touched and no warning is logged. The
+  desk gets `503` `NIN_PROVIDER_UNAVAILABLE`, "NIN verification is not
+  configured", every time (not "try again in a minute"), audited as below.
+  Deferred staging is unchanged (`NIN_PROVIDER_DEFERRED`).
+
+Every failed `identity.nin.verify` audit row says whether the NIN was sent
+to the NIN service. Details are `{ provider, errorType, code, providerCalled }`:
+`providerCalled: true` when the service was asked and the check failed;
+`providerCalled: false` when nothing was sent (deferred, switched off, or the
+breaker refused it, which also adds `breaker: "open"`). `code` is the problem
+code (for example `NIN_PROVIDER_UNAVAILABLE`). No NIN is ever written.
 
 Every counted failure writes one warning log line with
 `event: "identity.nin_provider.unavailable"`, the provider name, the error
@@ -6108,9 +6124,10 @@ not offer registration without a NIN until `withoutNin.enabled` is `true`.
 
 `services/identity-api/src/identity/nin-status.spec.ts` (verified,
 not_verified and revoked on the lookup and the case answer; breaker trip,
-window, retry, recovery, log event; capabilities; no answer contains the
-word the owner ruled out). `nin-deferred-staging.spec.ts` exact bodies
-updated.
+window, retry, recovery, log event; one check at a time while retrying, with
+two desks at once; checks switched off do not trip it; the audit row says
+whether the NIN was sent; capabilities; no answer contains the word the
+owner ruled out). `nin-deferred-staging.spec.ts` exact bodies updated.
 
 ## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
 

@@ -9,7 +9,7 @@ import { DatabaseService } from '../database/database.service';
 import { CollectedFieldProtector, registrationCaseContactLabel } from './collected-field-protector';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
-import { assertSafeNinVerificationResult } from './nin-verification.provider';
+import { assertSafeNinVerificationResult, NIN_NOT_CONFIGURED_DETAIL } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
@@ -155,7 +155,7 @@ export class NinRegistrationService {
     const idempotencyKey = requireIdempotencyKey(idempotencyHeader);
     if (this.provider.name === 'deferred') {
       const error = new DomainProblem(503, 'NIN_PROVIDER_DEFERRED', 'NIN verification is deferred for this staging environment');
-      await this.auditFailure(context, 'identity.nin.verify', error);
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
       throw error;
     }
     // 0114: the desk's phone and address are stored encrypted; without the
@@ -183,12 +183,23 @@ export class NinRegistrationService {
       ...(input.gender ? { gender: input.gender } : {}),
     };
 
+    if (this.provider.name === 'unavailable') {
+      // ID-0: NIN checks are switched off here (NIN_PROVIDER_MODE=unavailable).
+      // That is a setting, not an outage: the breaker is not touched, nothing
+      // is logged as a failure, and the desk keeps the true message
+      // ("NIN verification is not configured"). Nothing is sent anywhere.
+      const error = new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', NIN_NOT_CONFIGURED_DETAIL);
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw error;
+    }
+
     let verification;
     try {
       // ID-0: while the NIN service breaker is tripped, no check is sent.
       this.ninBreaker.assertAvailable();
     } catch (error) {
-      await this.auditFailure(context, 'identity.nin.verify', error);
+      // The NIN was not sent to the NIN service; the audit row says so.
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, breaker: 'open' });
       throw error;
     }
     try {
@@ -200,7 +211,7 @@ export class NinRegistrationService {
       assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
     } catch (error) {
       this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
-      await this.auditFailure(context, 'identity.nin.verify', error);
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true });
       throw error;
     }
     this.ninBreaker.recordSuccess();
@@ -880,7 +891,14 @@ export class NinRegistrationService {
     }).then(() => this.project(row));
   }
 
-  private async auditFailure(context: DataAccessContext, action: string, error: unknown) {
+  /**
+   * `extra.providerCalled` (identity.nin.verify only) answers "was this NIN
+   * sent to the NIN service?": false for a refusal before any check was sent
+   * (deferred, switched off, or the breaker is tripped), true when the
+   * service was asked and the check failed.
+   */
+  private async auditFailure(context: DataAccessContext, action: string, error: unknown,
+    extra: { providerCalled?: boolean; breaker?: 'open' } = {}) {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',
@@ -896,6 +914,8 @@ export class NinRegistrationService {
       details: {
         provider: this.provider.name,
         errorType: error instanceof Error ? error.constructor.name : 'UnknownError',
+        ...(error instanceof DomainProblem ? { code: error.code } : {}),
+        ...extra,
       },
     });
   }

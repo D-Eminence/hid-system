@@ -22,7 +22,11 @@ export type NinBreakerState = 'closed' | 'open' | 'retrying';
  * - Three other failures within 5 minutes trip it.
  * - While tripped, checks are refused without calling the service.
  * - After 60 seconds one check is let through ('retrying'): success closes
- *   the breaker and clears the count; a failure trips it again.
+ *   the breaker and clears the count; a failure trips it again. While that
+ *   one check is waiting for its answer, other checks are still refused, so
+ *   a busy desk does not send a burst of (charged) checks to a service that
+ *   may still be down. A check that has had no answer for 60 seconds no
+ *   longer holds the place.
  *
  * A NIN that does not match ("could not be verified") is an answer, not a
  * failure, and does not count.
@@ -32,20 +36,35 @@ export class NinProviderBreaker {
   private readonly logger = new Logger(NinProviderBreaker.name);
   private failures: number[] = [];
   private openedAt: number | null = null;
+  /** When the one check let through in 'retrying' was sent; null when none is waiting. */
+  private probeStartedAt: number | null = null;
 
   state(now = Date.now()): NinBreakerState {
     if (this.openedAt === null) return 'closed';
     return now - this.openedAt >= NIN_BREAKER_RETRY_AFTER_MS ? 'retrying' : 'open';
   }
 
-  /** True unless the breaker is tripped and the 60 seconds have not passed. */
+  /**
+   * True when a check would be sent now: the breaker is closed, or it is
+   * 'retrying' and no other check is already waiting for its answer.
+   */
   available(now = Date.now()): boolean {
-    return this.state(now) !== 'open';
+    const state = this.state(now);
+    return state === 'closed' || (state === 'retrying' && !this.probeWaiting(now));
   }
 
-  /** Refuses a check while the breaker is tripped. */
+  /**
+   * Refuses a check while the breaker is tripped. In 'retrying' the first
+   * caller takes the one place; the next callers are refused until that
+   * check's answer is recorded (recordSuccess or recordFailure).
+   */
   assertAvailable(now = Date.now()): void {
-    if (this.available(now)) return;
+    const state = this.state(now);
+    if (state === 'closed') return;
+    if (state === 'retrying' && !this.probeWaiting(now)) {
+      this.probeStartedAt = now;
+      return;
+    }
     throw new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE',
       'The NIN service is not answering right now. Please try again in a minute.');
   }
@@ -53,6 +72,7 @@ export class NinProviderBreaker {
   recordSuccess(): void {
     this.failures = [];
     this.openedAt = null;
+    this.probeStartedAt = null;
   }
 
   /**
@@ -62,8 +82,10 @@ export class NinProviderBreaker {
    */
   recordFailure(error: unknown, details: { correlationId?: string; provider?: string } = {}, now = Date.now()): boolean {
     const status = statusOf(error);
-    if (status !== undefined && status < 500) return false;
     const retrying = this.state(now) === 'retrying';
+    // Whatever the answer, the check that held the place has finished.
+    this.probeStartedAt = null;
+    if (status !== undefined && status < 500) return false;
     this.failures = this.failures.filter((at) => now - at < NIN_BREAKER_WINDOW_MS);
     this.failures.push(now);
     if (status === 503 || retrying || this.failures.length >= NIN_BREAKER_FAILURE_LIMIT) this.openedAt = now;
@@ -78,6 +100,10 @@ export class NinProviderBreaker {
       correlationId: details.correlationId,
     });
     return true;
+  }
+
+  private probeWaiting(now: number): boolean {
+    return this.probeStartedAt !== null && now - this.probeStartedAt < NIN_BREAKER_RETRY_AFTER_MS;
   }
 }
 
