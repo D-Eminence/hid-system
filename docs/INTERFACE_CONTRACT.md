@@ -6834,7 +6834,9 @@ present.
 Owner decision, verbatim: "Q103 A" (all five changes; the admin's "approve
 new patient" and the nurse's note writing unchanged). Migration
 `0136_role_permission_changes.sql` changes rows of `auth.role_permissions`
-only: no route, body, error code, function or table changes. Permissions are
+and closes the open records-processing requests that the change makes
+useless (see "Open records-processing requests" below): no route, body, error
+code, function or table changes. Permissions are
 read on every request, so each change applies from a staff member's next
 request; nobody is signed out. Nurses, clinicians, pharmacists and
 `org_admin` are not changed.
@@ -6873,6 +6875,23 @@ and is audited as today, refusals included. The front desk does not get
 `ocr.validation.write`, `ocr.patient.confirm` or `ocr.publication.write`:
 checking a reading and putting it into the chart stay clinical.
 
+**What the front desk can read, beyond scanning (please read before
+signing).** The two read rows give more than the scan steps need.
+`ehr.document.read` lets a desk member who has the patient's access (a
+consent grant, or records processing) list and download every document stored
+for that patient at the facility (`GET /ehr/documents`, `GET
+/ehr/documents/:id/download`), including clinical letters and lab result
+files the desk did not upload. `ocr.job.read` lets them read the full text
+taken from every reading (`GET /ocr/jobs/:jobId/extractions`, `GET
+/ocr/jobs/:jobId/validations`, `GET /ocr/validations/:validationId/publications`).
+The desk still reads no clinical note, diagnosis, prescription or lab request
+(it holds no `ehr.note.read`, `ehr.diagnosis.read`, `ehr.prescription.read`
+or `ehr.lab-request.read`). Every such read is audited. If the owner wants
+the desk to scan without reading clinical documents and their text, that is a
+code change (for example: download and the text reads also need a clinical
+read permission, or only the desk member's own uploads), decided before
+signing; 0136 does not make it.
+
 ### What still works (checked route by route)
 
 - A doctor's own orders' progress (ORD-3): `POST /lab/work-items/progress`
@@ -6905,6 +6924,31 @@ Nurses and clinicians keep checking; the front desk scans. Laboratory staff
 also stop asking for records processing (this reverses the earlier "lab
 included" choice for records processing).
 
+**Facilities left with nobody who can check a reading.** After 0136 only
+nurses and clinicians hold both `ocr.job.write` and `ocr.validation.write`.
+At a facility with doctors and a front desk but no nurse or clinician, the
+desk can still start a reading (`POST /ocr/jobs`), which uses the facility's
+paid OCR pages (0107), but nobody there can check it or confirm its patient,
+so it is never put into the chart and its scan is deleted after 7 days
+(0112). A laboratory is in the same position for readings its staff already
+started. The counts' lines 19 to 23 show how many facilities and readings
+this touches. Before signing, the owner either accepts it, or chooses to keep
+the doctor's `ocr.job.write` row and remove only the doctor's "start a
+reading" in code (a different 0136).
+
+**Open records-processing requests.** 0104's trigger checks `ocr.job.write`
+only when a request is made, and 0104 D8, 0108 and 0113 check it again at
+each use. A request a doctor or laboratory member made before 0136 that the
+patient has not answered would, if approved, show in the patient's access
+history but never work. 0136 closes those requests (status `expired`, as
+0086 and 0096 do), writing one audit row each (`identity.access-request.close`,
+system actor, reason "This staff member can no longer process records", ids
+only). A request whose staff member keeps `ocr.job.write` through another
+role, a direct-care request and an answered request are left as they are.
+The undo does not reopen them. Locks: 0136 takes SHARE ROW EXCLUSIVE on
+`identity.access_requests` as well as on `auth.role_permissions`, so a new
+access request or a patient's answer waits for the few seconds 0136 runs.
+
 ### Staff counts before signing
 
 `docs/rollback/0136_affected_staff_counts.sql` is a read-only query (its
@@ -6913,9 +6957,32 @@ answers: whether the row is there now, how many active staff memberships at
 real facilities hold the role, how many of those actually gain or lose the
 permission (a membership whose other role keeps it is not counted), how many
 distinct staff logins that is, and the same two numbers for the sealed QA and
-demo tenants. Numbers only: no name, email or id. 0136 prints the same
-numbers, from the same query text, as `0136 count n: ...` NOTICE lines in the
-release's dry-run and apply logs.
+demo tenants. Then lines 19 to 23, each for real facilities and for the
+sealed tenants: 19 facilities where someone can check a reading today and
+nobody can after 0136; 20 facilities where after 0136 a reading can be
+started and nobody can check it; 21 the same for confirming its patient; 22
+open records-processing requests 0136 closes; 23 readings not yet checked at
+the facilities of line 19 (a NOTICE line). Numbers only: no name, email or
+id. 0136 prints the same numbers, from the same text, as `0136 count n: ...`
+NOTICE lines in the release's dry-run and apply logs.
+
+How and when the owner sees them: the release cannot show them before
+signing, because its dry run runs only after the declaration is signed and is
+followed at once by the apply. So, before signing, someone with read access
+to the production database (the owner or DevOps) runs the file once, with
+the database owner's login (the one the migrations use) in a read-only
+session:
+
+    psql "<read-only session, database owner's login>" -v ON_ERROR_STOP=1 \
+      -f docs/rollback/0136_affected_staff_counts.sql
+
+Row security hides access requests and the sealed tenant lists from any
+other login, and OCR jobs from every login unless the query names each
+facility (the last block does): with another login the file stops with a
+plain message instead of printing numbers that are too low. It writes
+nothing. The numbers are as of the moment it runs; run it again if the
+signing is days later. The release's own NOTICE lines then show the numbers
+at the moment of the apply.
 
 ### Undo
 
