@@ -91,10 +91,10 @@ insert into identity.organizations (id, name, slug) values
 insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status) values
   ('e8e00000-0000-4000-8000-000000000002', 'e8e00000-0000-4000-8000-000000000001', 'Outreach Guard Clinic',
    'OUTREACH-GUARD', 'Africa/Lagos', true, 'verified');
--- Doctors A (e8e1...01) and B (...02) are active; C's account (...03) is
+-- Front-desk staff A (e8e1...01) and B (...02) are active; C's account (...03) is
 -- disabled and D's (...04) is disabled until tomorrow. Member n has staff
 -- e8e2...0n, one membership e8e3...0n in the clinic, and a facility-scoped
--- doctor role e8e4...0n, which carries the Outreach registration and campaign
+-- receptionist role e8e4...0n (doctors lost Outreach in 0136), which carries the Outreach registration and campaign
 -- permissions that outreach.context_allows requires.
 insert into auth.accounts (id, subject, email, display_name, status, disabled_until)
 select ('e8e10000-0000-4000-8000-00000000000' || n)::uuid, 'synthetic:outreach-guard-' || x,
@@ -104,17 +104,17 @@ select ('e8e10000-0000-4000-8000-00000000000' || n)::uuid, 'synthetic:outreach-g
   from (values (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')) member(n, x);
 insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
 select ('e8e20000-0000-4000-8000-00000000000' || n)::uuid, ('e8e10000-0000-4000-8000-00000000000' || n)::uuid,
-       'Outreach Guard ' || upper(x), 'outreach-guard-' || x || '@example.invalid', 'verified', 'doctor'
+       'Outreach Guard ' || upper(x), 'outreach-guard-' || x || '@example.invalid', 'verified', 'receptionist'
   from (values (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')) member(n, x);
 insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
   membership_role, app_role)
 select ('e8e30000-0000-4000-8000-00000000000' || n)::uuid, ('e8e20000-0000-4000-8000-00000000000' || n)::uuid,
        ('e8e10000-0000-4000-8000-00000000000' || n)::uuid, 'e8e00000-0000-4000-8000-000000000001',
-       'e8e00000-0000-4000-8000-000000000002', 'doctor', 'doctor'
+       'e8e00000-0000-4000-8000-000000000002', 'receptionist', 'receptionist'
   from generate_series(1, 4) n;
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
 select ('e8e40000-0000-4000-8000-00000000000' || n)::uuid, ('e8e10000-0000-4000-8000-00000000000' || n)::uuid,
-       'doctor', 'facility', ('e8e30000-0000-4000-8000-00000000000' || n)::uuid,
+       'receptionist', 'facility', ('e8e30000-0000-4000-8000-00000000000' || n)::uuid,
        'e8e00000-0000-4000-8000-000000000002', 'Synthetic Outreach guard role'
   from generate_series(1, 4) n;
 -- The canonical patient a registration is linked to.
