@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0127",
-    "count": 128,
+    "last": "0131",
+    "count": 130,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -609,6 +609,14 @@
       {
         "name": "0127_sso_relying_party.sql",
         "sha256": "9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d"
+      },
+      {
+        "name": "0130_desk_registration_without_nin.sql",
+        "sha256": "a9f071ee6c1c916c440e8b05f4f64fda359c4b7fff63087f59bcc1904899b9dd"
+      },
+      {
+        "name": "0131_own_facility_patient_access.sql",
+        "sha256": "2e3a83c9ad1188095ecb1342f80ed735a882c969ce43663edae912cfbe22c7fa"
       }
     ]
   },
