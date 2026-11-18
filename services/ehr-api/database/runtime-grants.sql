@@ -1741,7 +1741,7 @@ revoke all on function lab.work_item_patient_cards(uuid[]), pharmacy.work_item_p
 grant execute on function pharmacy.work_item_prescription_details(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
 revoke all on function pharmacy.work_item_prescription_details(uuid[]) from public;
 
--- The kinds and active products of an organisation for the staff sign-in gate (0124, owner decisions Q90 and Q91):
+-- The kinds and active products of an organisation for the staff sign-in gate (0126, owner decisions Q90 and Q91):
 -- the Identity runtime's staff context reads them once per membership, as it reads
 -- identity.organization_self_service_state. To the Identity runtime alone; nothing to any other runtime; no grant on
 -- the application, product or organisation tables.

@@ -1,7 +1,8 @@
--- 0124 The kinds of an organisation, for the staff sign-in gate (owner
--- decisions Q90 and Q91 of 17 November 2026). Written on
+-- 0126 The kinds of an organisation, for the staff sign-in gate (owner
+-- decisions Q90 and Q91 of 17 November 2026). Written as 0124 on
 -- staging-novu-ci-20261005 at 73eae090, where 0001-0123 are applied (as in
--- production). This file requires 0001-0123 applied.
+-- production); renumbered 0126 after hid-system#254's 0124 and #255's 0125
+-- (booked on hid-system#258). This file requires 0001-0125 applied.
 --
 -- Owner, verbatim: Q90 "Q90 A since its the best option that gives each
 -- product seperate environment"; Q91 "Q91 A". identity-api's product gate
@@ -14,7 +15,7 @@
 -- organisation holds); an organisation with no recorded kind (Q91 A), or with
 -- any hospital or clinic kind, is a hospital. The declaration in
 -- config/production-schema-compatibility.json is unsigned: its reviewed_by
--- stays empty until the owner signs it under 0124.
+-- stays empty until the owner signs it under 0126.
 --
 -- WHY A FUNCTION
 --   The kind is recorded only in identity.organization_applications
@@ -72,9 +73,10 @@
 -- out the services).
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied): 0123
---    applied (identity.sealed_qa_facility(uuid) exists), else "0124:
---    0001-0123 must be applied first"; not applied yet (no
---    identity.organization_staff_kinds(uuid)), else "0124: already applied";
+--    and 0125 applied (identity.sealed_qa_facility(uuid) and
+--    pharmacy.work_item_prescription_details(uuid[]) exist), else "0126:
+--    0001-0125 must be applied first"; not applied yet (no
+--    identity.organization_staff_kinds(uuid)), else "0126: already applied";
 --    the columns read exist with the types 0002, 0046 and 0086 gave them; the
 --    organization_type, product_code, application status and product status
 --    checks are 0046's, and 0086's release check (a released self sign-up is
@@ -92,11 +94,12 @@ do $$
 declare
   mismatch text;
 begin
-  if to_regprocedure('identity.sealed_qa_facility(uuid)') is null then
-    raise exception using errcode = '55000', message = '0124: 0001-0123 must be applied first';
+  if to_regprocedure('identity.sealed_qa_facility(uuid)') is null
+     or to_regprocedure('pharmacy.work_item_prescription_details(uuid[])') is null then
+    raise exception using errcode = '55000', message = '0126: 0001-0125 must be applied first';
   end if;
   if to_regprocedure('identity.organization_staff_kinds(uuid)') is not null then
-    raise exception using errcode = '55000', message = '0124: already applied';
+    raise exception using errcode = '55000', message = '0126: already applied';
   end if;
   select string_agg(expected.table_name || '.' || expected.column_name, ', ') into mismatch
     from (values
@@ -114,7 +117,7 @@ begin
                         and attribute.attname = expected.column_name and not attribute.attisdropped
                         and format_type(attribute.atttypid, attribute.atttypmod) = expected.type_name);
   if mismatch is not null then
-    raise exception using errcode = '55000', message = '0124: these columns are not as 0002, 0046 and 0086 made them: ' || mismatch;
+    raise exception using errcode = '55000', message = '0126: these columns are not as 0002, 0046 and 0086 made them: ' || mismatch;
   end if;
   select string_agg(expected.constraint_name, ', ') into mismatch
     from (values
@@ -133,14 +136,14 @@ begin
                         and constraint_row.conname = expected.constraint_name
                         and pg_get_constraintdef(constraint_row.oid) = expected.definition);
   if mismatch is not null then
-    raise exception using errcode = '55000', message = '0124: these checks are not as 0046 made them: ' || mismatch;
+    raise exception using errcode = '55000', message = '0126: these checks are not as 0046 made them: ' || mismatch;
   end if;
   if (select md5(pg_get_constraintdef(constraint_row.oid)) from pg_constraint constraint_row
        where constraint_row.conrelid = to_regclass('identity.organization_applications')
          and constraint_row.conname = 'organization_applications_self_service_release_ck')
      is distinct from '7d5cf043ccf443e618172df8462fb014' then
     raise exception using errcode = '55000',
-      message = '0124: organization_applications_self_service_release_ck is not as 0086 made it';
+      message = '0126: organization_applications_self_service_release_ck is not as 0086 made it';
   end if;
   select string_agg(expected.signature, ', ') into mismatch
     from (values
@@ -149,7 +152,7 @@ begin
    where (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(expected.signature))
          is distinct from expected.body_md5;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = '0124: these bodies are not as 0086 made them: ' || mismatch;
+    raise exception using errcode = '55000', message = '0126: these bodies are not as 0086 made them: ' || mismatch;
   end if;
 end
 $$;
@@ -184,7 +187,7 @@ as $$
 $$;
 
 comment on function identity.organization_staff_kinds(uuid) is
-  '0124 (owner decisions Q90 and Q91, 17 November 2026): one row. organization_kinds: the distinct effective kinds (clinic, hospital, laboratory, pharmacy), sorted, of the organisation''s approved applications (a released self sign-up is rejected), other giving the kind its product makes it as staff_invitable_roles does (ehr or migrate hospital, laboratory laboratory, pharmacy pharmacy), plus hospital for an organisation promoted from the legacy system (Q91 A). organization_products: the distinct product codes, sorted, of its active organization_products rows. Both empty when nothing is recorded. For the Identity runtime''s staff context (product gate): an administrator counts as a hospital role only where the kinds are empty or hold clinic or hospital, and is otherwise admitted on the sites of its kinds and of its products.';
+  '0126 (owner decisions Q90 and Q91, 17 November 2026): one row. organization_kinds: the distinct effective kinds (clinic, hospital, laboratory, pharmacy), sorted, of the organisation''s approved applications (a released self sign-up is rejected), other giving the kind its product makes it as staff_invitable_roles does (ehr or migrate hospital, laboratory laboratory, pharmacy pharmacy), plus hospital for an organisation promoted from the legacy system (Q91 A). organization_products: the distinct product codes, sorted, of its active organization_products rows. Both empty when nothing is recorded. For the Identity runtime''s staff context (product gate): an administrator counts as a hospital role only where the kinds are empty or hold clinic or hospital, and is otherwise admitted on the sites of its kinds and of its products.';
 
 revoke all on function identity.organization_staff_kinds(uuid) from public;
 
@@ -216,13 +219,13 @@ begin
                     and proc.proconfig = array['search_path=pg_catalog, identity, pg_temp']
                     and proc.proowner = (select state.proowner from pg_proc state
                                           where state.oid = 'identity.organization_self_service_state(uuid)'::regprocedure)) then
-    raise exception using errcode = '55000', message = '0124: identity.organization_staff_kinds is not as section 1 made it';
+    raise exception using errcode = '55000', message = '0126: identity.organization_staff_kinds is not as section 1 made it';
   end if;
   if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
               where proc.oid = 'identity.organization_staff_kinds(uuid)'::regprocedure
                 and acl.grantee <> proc.proowner
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) <> 'hid_identity_runtime')) then
-    raise exception using errcode = '55000', message = '0124: identity.organization_staff_kinds is granted to a role other than hid_identity_runtime';
+    raise exception using errcode = '55000', message = '0126: identity.organization_staff_kinds is granted to a role other than hid_identity_runtime';
   end if;
 end
 $$;

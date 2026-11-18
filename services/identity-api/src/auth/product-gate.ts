@@ -131,7 +131,7 @@ export function administratorMembership(facility: FacilityAssignment): boolean {
  * Owner decisions Q90 and Q91 (17 November 2026): an organisation is a
  * hospital when no kind is recorded (Q91 A: the sealed QA and demo hospitals,
  * outreach groups) or any recorded kind is hospital or clinic. The kinds are
- * identity.organization_staff_kinds' (0124), which already reads 'other' as
+ * identity.organization_staff_kinds' (0126), which already reads 'other' as
  * staff_invitable_roles does (ehr or migrate hospital, laboratory laboratory,
  * pharmacy pharmacy) and answers hospital for an organisation promoted from
  * the legacy system, also once a governed approval reused it.

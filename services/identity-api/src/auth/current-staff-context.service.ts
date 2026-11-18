@@ -24,9 +24,9 @@ interface StaffContextRow {
   /** identity.organization_self_service_state's review_state: null for governed and legacy organizations. */
   review_state?: string | null;
   organization_type?: string | null;
-  /** identity.organization_staff_kinds (0124): the organisation's effective kinds, empty when none is recorded. */
+  /** identity.organization_staff_kinds (0126): the organisation's effective kinds, empty when none is recorded. */
   organization_kinds?: string[] | null;
-  /** identity.organization_staff_kinds (0124): the organisation's active product codes, empty when it holds none. */
+  /** identity.organization_staff_kinds (0126): the organisation's active product codes, empty when it holds none. */
   organization_products?: string[] | null;
 }
 
@@ -95,7 +95,7 @@ export const STAFF_MEMBERSHIPS_SQL = `select account.id::text as account_id,
  * identity.organization_self_service_state (0086 §5, stable, definer) adds the
  * organization's self sign-up state, which answers no row for governed and
  * legacy organizations. Owner decisions Q90 and Q91 (17 November 2026) add one
- * lateral call per membership row of identity.organization_staff_kinds (0124,
+ * lateral call per membership row of identity.organization_staff_kinds (0126,
  * stable, definer, one row): the organisation's recorded kinds and the
  * products it holds, which the product gate reads for an administrator. The
  * order is the old one.

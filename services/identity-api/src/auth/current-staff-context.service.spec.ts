@@ -180,10 +180,10 @@ describe('CurrentStaffContextService self sign-up state (P4b)', () => {
 });
 
 // Owner decisions Q90 and Q91 (17 November 2026): one lateral call per
-// membership row of identity.organization_staff_kinds (0124) adds the
+// membership row of identity.organization_staff_kinds (0126) adds the
 // organisation's recorded kinds, which the product gate reads for an
 // administrator. A membership with no recorded kind answers exactly as before.
-describe('CurrentStaffContextService organisation kinds (0124, Q90 and Q91)', () => {
+describe('CurrentStaffContextService organisation kinds (0126, Q90 and Q91)', () => {
   async function resolved(rows: Record<string, unknown>[]) {
     const query = jest.fn().mockResolvedValueOnce({ rows, rowCount: rows.length })
       .mockResolvedValueOnce({ rows: [{ roles: [], permissions: [] }], rowCount: 1 });

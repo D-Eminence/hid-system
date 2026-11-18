@@ -18,7 +18,7 @@ export interface FacilityAssignment {
    */
   selfService?: FacilitySelfService;
   /**
-   * The recorded kinds of the facility's organisation (0124,
+   * The recorded kinds of the facility's organisation (0126,
    * identity.organization_staff_kinds), present only when at least one is
    * recorded. The product gate reads them for an administrator (owner
    * decisions Q90 and Q91): no kind, or a hospital or clinic kind, is a
@@ -27,7 +27,7 @@ export interface FacilityAssignment {
   organizationKinds?: readonly OrganizationKind[];
   /**
    * The products the facility's organisation holds (its active
-   * identity.organization_products rows, 0124), present only with
+   * identity.organization_products rows, 0126), present only with
    * organizationKinds and when at least one is held. The product gate admits
    * the administrator of an organisation that is not a hospital on each held
    * product's site as well as on its kinds' sites.

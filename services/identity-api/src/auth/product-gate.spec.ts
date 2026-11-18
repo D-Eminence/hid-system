@@ -47,7 +47,7 @@ import type { WorkloadAuthService } from './workload-auth.service';
 // sign-in. Owner decisions Q90 and Q91 (17 November 2026): an administrator
 // (organization.manage, or the administrator awaiting review) counts as a
 // hospital role only at an organisation that is not recorded as a laboratory
-// or a pharmacy (identity.organization_staff_kinds, 0124); otherwise it is
+// or a pharmacy (identity.organization_staff_kinds, 0126); otherwise it is
 // admitted on lab. and/or pharmacy. as its organisation's kinds say.
 //
 // Owner decision Q97 ("Q97 A"): each staff site for its own job. Doctors,
@@ -85,7 +85,7 @@ const LOCAL = 'http://localhost:5173';
 const PRODUCTS: StaffProduct[] = ['ehr', 'lab', 'pharmacy', 'migrate', 'outreach'];
 
 // Each place with the kinds and products identity.organization_staff_kinds
-// (0124) answers for it: QA Hospital has no application (no kind, Q91 A: a
+// (0126) answers for it: QA Hospital has no application (no kind, Q91 A: a
 // hospital) and no product, QA Laboratory and QA Pharmacy one governed
 // application and product each (0123).
 const HOSPITAL = { organization: '30000000-0000-4000-8000-000000000001', facility: '10000000-0000-4000-8000-000000000001',
@@ -556,7 +556,7 @@ describe('POST /auth/login on each product site (Q88-1, Q88-2)', () => {
       }
     });
 
-    // 0124 reads 'other' as staff_invitable_roles does, and the gate adds the
+    // 0126 reads 'other' as staff_invitable_roles does, and the gate adds the
     // site of each product the organisation holds.
     it.each([
       ['\'other\' with a laboratory product (the database answers laboratory)', ['laboratory'], ['laboratory'], ['lab']],

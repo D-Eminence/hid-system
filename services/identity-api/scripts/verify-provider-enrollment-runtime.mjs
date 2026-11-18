@@ -3133,7 +3133,7 @@ try {
   const busyRows = (await runtime.query(STAFF_CONTEXT_SQL, [busySubject, ['verified', 'approved', 'active']])).rows.length;
   assert.equal(busyRows, 1000);
   // The wrapped query answers exactly the previous query's rows and order, plus the two state columns and
-  // (0124, owner decisions Q90 and Q91) the organisation's kinds and active products, empty for these organisations
+  // (0126, owner decisions Q90 and Q91) the organisation's kinds and active products, empty for these organisations
   // with no application and no product.
   const previousRows = (await runtime.query(previousSql, [busySubject, ['verified', 'approved', 'active']])).rows;
   const wrappedRows = (await runtime.query(STAFF_CONTEXT_SQL, [busySubject, ['verified', 'approved', 'active']])).rows;

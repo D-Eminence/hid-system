@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- The kinds and products of an organisation for the staff sign-in gate (0124,
+-- The kinds and products of an organisation for the staff sign-in gate (0126,
 -- owner decisions Q90 and Q91 of 17 November 2026). Rollback-only.
 --   1. identity.organization_staff_kinds(uuid): one row (organization_kinds
 --      text[], organization_products text[]), STABLE, SECURITY DEFINER,
@@ -30,8 +30,8 @@
 --      memberships, read as the staff context reads them (one lateral call per
 --      membership), give QA Hospital [], QA Laboratory {laboratory} and QA
 --      Pharmacy {pharmacy}.
--- Synthetic values only: uuid prefix a124, @example.invalid addresses, CAC
--- numbers RC0000000000000124xxx.
+-- Synthetic values only: uuid prefix a126, @example.invalid addresses, CAC
+-- numbers RC0000000000000126xxx.
 set plpgsql.variable_conflict = error;
 begin;
 set constraints all deferred;
@@ -97,13 +97,13 @@ end $$;
 -- 2. Fictional organisations. A reviewer account, then one organisation and
 -- facility per case.
 insert into auth.accounts (id, subject, email, display_name, status) values
-  ('a1240003-0000-4000-8000-000000000001', 'synthetic:staff-kinds:reviewer', 'staff-kinds-reviewer@example.invalid',
+  ('a1260003-0000-4000-8000-000000000001', 'synthetic:staff-kinds:reviewer', 'staff-kinds-reviewer@example.invalid',
    'Staff Kinds Reviewer', 'active');
 
 create temp table kinds_case (key text primary key, organization_id uuid not null, facility_id uuid not null);
 insert into kinds_case (key, organization_id, facility_id)
-select key, ('a1240001-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
-       ('a1240002-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid
+select key, ('a1260001-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
+       ('a1260002-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid
   from unnest(array['none', 'lab', 'pharmacy', 'hospital', 'clinic', 'lab_and_pharmacy', 'lab_and_hospital',
     'suspended', 'no_product', 'other_ehr', 'other_migrate', 'other_lab', 'other_pharmacy_with_lab',
     'self_pending', 'self_reviewed', 'self_released', 'self_pending_suspended', 'self_other_ehr',
@@ -126,30 +126,30 @@ create function pg_temp.application(case_key text, n integer, product text, kind
 returns void language plpgsql as $f$
 declare
   target kinds_case%rowtype;
-  application_id uuid := ('a1240007-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid;
+  application_id uuid := ('a1260007-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid;
 begin
   select * into strict target from kinds_case where key = case_key;
   insert into identity.organization_applications (id, product_code, organization_name, organization_type,
     cac_registration_number, administrator_name, administrator_email, status, verification_result, verified_at,
     organization_id, facility_id, first_admin_account_id, reviewed_by_account_id, review_reason, reviewed_at,
     verified_organization_name, approval_mode)
-  values (application_id, product, 'Staff Kinds ' || case_key, kind, 'RC0000000000000124' || lpad(n::text, 3, '0'),
+  values (application_id, product, 'Staff Kinds ' || case_key, kind, 'RC0000000000000126' || lpad(n::text, 3, '0'),
     'Staff Kinds Admin', 'staff-kinds-admin@example.invalid', 'approved', 'verified', clock_timestamp(),
-    target.organization_id, target.facility_id, 'a1240003-0000-4000-8000-000000000001',
-    case when self_service is null then 'a1240003-0000-4000-8000-000000000001'::uuid end,
+    target.organization_id, target.facility_id, 'a1260003-0000-4000-8000-000000000001',
+    case when self_service is null then 'a1260003-0000-4000-8000-000000000001'::uuid end,
     'Staff kinds suite application', clock_timestamp() - make_interval(secs => 1000 - n), 'Staff Kinds ' || case_key,
     case when self_service is null then 'admin_review' else 'self_service' end);
   if self_service = 'reviewed' then
     update identity.organization_applications
        set self_service_reviewed_at = clock_timestamp(),
-           self_service_reviewed_by_account_id = 'a1240003-0000-4000-8000-000000000001',
+           self_service_reviewed_by_account_id = 'a1260003-0000-4000-8000-000000000001',
            self_service_review_note = 'Staff kinds suite review', self_service_granted_role = 'none',
            self_service_verification_method = 'other'
      where id = application_id;
   elsif self_service = 'released' then
     update identity.organization_applications
        set status = 'rejected', self_service_released_at = clock_timestamp(),
-           self_service_released_by_account_id = 'a1240003-0000-4000-8000-000000000001',
+           self_service_released_by_account_id = 'a1260003-0000-4000-8000-000000000001',
            self_service_release_reason = 'Staff kinds suite release'
      where id = application_id;
   end if;
@@ -235,7 +235,7 @@ begin
     (select (answer.organization_kinds, answer.organization_products) = ('{}'::text[], '{}'::text[])
        from identity.organization_staff_kinds(null) answer)
     and (select (answer.organization_kinds, answer.organization_products) = ('{}'::text[], '{}'::text[])
-           from identity.organization_staff_kinds('a1240001-0000-4000-8000-0000000000ff') answer));
+           from identity.organization_staff_kinds('a1260001-0000-4000-8000-0000000000ff') answer));
   perform pg_temp.assert('an organisation answers only its own applications (a facility id is not an organisation)',
     (select (answer.organization_kinds, answer.organization_products) = ('{}'::text[], '{}'::text[])
        from identity.organization_staff_kinds((select facility_id from kinds_case where key = 'lab')) answer));

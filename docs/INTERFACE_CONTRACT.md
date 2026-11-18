@@ -5296,7 +5296,7 @@ and patients.
 ## 53. Each staff product is its own site; the staff reset email (owner decision of 17 November 2026, Q88, Q89 and Q97)
 
 identity-api (with one new notification-api route) and, for the
-administrator rule decided by the owner as Q90 and Q91, migration 0124
+administrator rule decided by the owner as Q90 and Q91, migration 0126
 (`identity.organization_staff_kinds`, below). The gate reads the permissions
 the seeds already grant and, for an administrator, the recorded kinds of its
 organisation and the products it holds; the session carries its product in the signed access token.
@@ -5410,7 +5410,7 @@ its administrator, and the administrator awaiting review of a pharmacy that
 signed itself up on `migrate.` can sign in there again.
 
 The kinds and products are `identity.organization_staff_kinds(organization_id)`
-(0124, one row of `organization_kinds text[]` and `organization_products
+(0126, one row of `organization_kinds text[]` and `organization_products
 text[]`, STABLE, SECURITY DEFINER, `search_path` pinned, EXECUTE for
 `hid_identity_runtime` only). `organization_kinds` is the distinct
 `organization_type`s, sorted, of every approved application of the
