@@ -1,5 +1,5 @@
-import { RequestMethod } from '@nestjs/common';
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { RequestMethod, type ExecutionContext } from '@nestjs/common';
+import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { REQUIRED_PERMISSIONS } from '../../common/decorators';
 import type { DataAccessContext } from '../../common/request-context';
 import { createValidationPipe } from '../../common/validation-pipe';
@@ -19,7 +19,7 @@ import {
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { VitalsService } from '../vitals/vitals.service';
 import { CreateConsultationDto } from './consultation.dto';
-import { ConsultationsController, consultationPermissions } from './consultations.controller';
+import { ConsultationPartsGuard, ConsultationsController, consultationPermissions } from './consultations.controller';
 import { ConsultationsService } from './consultations.service';
 
 // Fictional identifiers and clinical data only.
@@ -250,6 +250,7 @@ describe('EHR-C5 POST ehr/patients/:patientId/consultations (route)', () => {
     const handler = ConsultationsController.prototype.create;
     expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(RequestMethod.POST);
     expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['ehr.encounter.write']);
+    expect(Reflect.getMetadata(GUARDS_METADATA, handler)).toEqual([ConsultationPartsGuard]);
   });
 
   it('needs each part\'s own write permission, only for the parts sent', () => {
@@ -259,26 +260,51 @@ describe('EHR-C5 POST ehr/patients/:patientId/consultations (route)', () => {
       .toEqual(['ehr.encounter.write']);
   });
 
-  const request = (permissions: string[]) => ({
+  const request = (permissions: string[], requestBody: unknown = body()) => ({
     actor: { ...contextFor('correlation-route-0001').actor, permissions },
-    facilityId, correlationId: 'correlation-route-0001', method: 'POST',
-    header: (name: string) => ({ 'x-purpose-of-use': 'direct-care' } as Record<string, string>)[name.toLowerCase()],
+    facilityId, correlationId: 'correlation-route-0001', method: 'POST', ip: '192.0.2.10', body: requestBody,
+    route: { path: '/ehr/patients/:patientId/consultations' },
+    header: (name: string) => ({ 'x-purpose-of-use': 'direct-care', 'user-agent': 'test-agent' } as
+      Record<string, string>)[name.toLowerCase()],
   }) as never;
+  const http = (value: unknown) => ({ switchToHttp: () => ({ getRequest: () => value }) }) as unknown as ExecutionContext;
 
-  it('refuses the whole call when one part\'s permission is missing: nothing is read or saved', async () => {
-    const service = { create: jest.fn() };
-    const controller = new ConsultationsController(service as never);
+  it('refuses the whole call when one part\'s permission is missing, audited as on the part\'s own route', async () => {
+    const audit = { record: jest.fn(async () => undefined) };
+    const guard = new ConsultationPartsGuard(audit as never);
     const withoutDiagnosis = ['ehr.encounter.write', 'ehr.note.write', 'ehr.vital.write'];
-    expect(() => controller.create(request(withoutDiagnosis), patientId, KEY, body()))
-      .toThrow(expect.objectContaining({ status: 403, code: 'PERMISSION_DENIED' }));
-    expect(service.create).not.toHaveBeenCalled();
+    await expect(guard.canActivate(http(request(withoutDiagnosis))))
+      .rejects.toMatchObject({ status: 403, code: 'PERMISSION_DENIED' });
+    // The row RemoteSecurityGuard writes when POST .../diagnoses lacks ehr.diagnosis.write.
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(audit.record).toHaveBeenCalledWith({
+      correlationId: 'correlation-route-0001', actorType: 'staff', actorSubject: 'staff:test', actorAccountId: accountId,
+      actorMembershipId: membershipId, organizationId: facilityId, facilityId,
+      action: 'security.authorization.denied', resourceType: 'http-request', outcome: 'denied',
+      sourceIp: '192.0.2.10', userAgent: 'test-agent',
+      details: { method: 'POST', route: '/ehr/patients/:patientId/consultations' }, provenance: 'application',
+    });
+  });
+
+  it('lets the call through, writing nothing, when the caller may write every part it sent', async () => {
+    const audit = { record: jest.fn(async () => undefined) };
+    const guard = new ConsultationPartsGuard(audit as never);
+    const withoutDiagnosis = ['ehr.encounter.write', 'ehr.note.write', 'ehr.vital.write'];
+    await expect(guard.canActivate(http(request(consultationPermissions(body()))))).resolves.toBe(true);
+    await expect(guard.canActivate(http(request(withoutDiagnosis, { ...body(), diagnoses: [] })))).resolves.toBe(true);
+    // A body that is not an object asks only for the visit's permission; validation then refuses it.
+    await expect(guard.canActivate(http(request(['ehr.encounter.write'], 'not a body')))).resolves.toBe(true);
+    expect(audit.record).not.toHaveBeenCalled();
   });
 
   it('lets the same caller save a consultation without the part it may not write', async () => {
     const service = { create: jest.fn().mockResolvedValue({}) };
     const controller = new ConsultationsController(service as never);
-    await controller.create(request(['ehr.encounter.write', 'ehr.note.write', 'ehr.vital.write']), patientId, KEY,
+    const withoutDiagnosis = request(['ehr.encounter.write', 'ehr.note.write', 'ehr.vital.write'],
       body({ diagnoses: undefined }));
+    await expect(new ConsultationPartsGuard({ record: jest.fn() } as never).canActivate(http(withoutDiagnosis)))
+      .resolves.toBe(true);
+    await controller.create(withoutDiagnosis, patientId, KEY, body({ diagnoses: undefined }));
     expect(service.create).toHaveBeenCalledWith(expect.objectContaining({ facilityId, purposeOfUse: 'direct-care' }),
       patientId, expect.objectContaining({ diagnoses: undefined }), KEY);
   });
@@ -451,9 +477,6 @@ describe('EHR-C5 one-call consultation (service)', () => {
       body({ visit: { ...body().visit, status: EncounterStatus.Completed } }), KEY))
       .toThrow(expect.objectContaining({ status: 400, code: 'REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS' }));
     expect(() => db.consultations.create(context, patientId,
-      body({ visit: { ...body().visit, startedAt: '2026-11-17T09:30:00.000Z' } }), KEY))
-      .toThrow(expect.objectContaining({ status: 400, code: 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY' }));
-    expect(() => db.consultations.create(context, patientId,
       body({ vitals: { recordedAt: '2026-11-18T09:35:00.000Z', source: VitalSource.Manual } }), KEY))
       .toThrow(expect.objectContaining({ status: 400, code: 'VITAL_MEASUREMENT_REQUIRED' }));
     expect(() => db.consultations.create(context, patientId,
@@ -461,6 +484,44 @@ describe('EHR-C5 one-call consultation (service)', () => {
       .toThrow(expect.objectContaining({ status: 400, code: 'BLOOD_PRESSURE_INCOMPLETE' }));
     expect(db.identity.authorize).not.toHaveBeenCalled();
     expect(db.audits).toEqual([]);
+  });
+
+  it('answers a retry after Lagos midnight from its key, saving nothing new', async () => {
+    const db = fakeDatabase();
+    const first = await db.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY);
+    const before = structuredClone(db.tables());
+    // The next Lagos day (Lagos is UTC+1): 00:30 on 19 November.
+    db.encounters.now = () => new Date('2026-11-18T23:30:00Z');
+    const replay = await db.consultations.create(contextFor('correlation-0002'), patientId, body(), KEY);
+    expect(replay).toEqual(first);
+    expect(db.tables()).toEqual(before);
+    expect(db.audits.slice(5).map((row) => [row.action, (row.details as Row).idempotentReplay])).toEqual([
+      ['ehr.encounter.create', true], ['ehr.note.create', true], ['ehr.vital.create', true],
+      ['ehr.diagnosis.create', true], ['ehr.diagnosis.create', true],
+    ]);
+    // Another body under the same key is still 409.
+    await expect(db.consultations.create(contextFor('correlation-0003'), patientId,
+      body({ diagnoses: [diagnosis({ code: 'A01.0', display: 'Typhoid fever (test)' })] }), KEY))
+      .rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
+    expect(db.tables()).toEqual(before);
+  });
+
+  it('refuses a new consultation whose visit does not start today, saving nothing, not even its key', async () => {
+    const db = fakeDatabase();
+    const yesterday = body({ visit: { ...body().visit, startedAt: '2026-11-17T09:30:00.000Z' } });
+    await expect(db.consultations.create(contextFor('correlation-0001'), patientId, yesterday, KEY))
+      .rejects.toMatchObject({ status: 400, code: 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY' });
+    expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [] });
+    expect(db.audits).toEqual([]);
+    // A saved consultation started yesterday, retried today under a new key, is refused the same way.
+    db.encounters.now = () => new Date('2026-11-17T10:00:00Z');
+    await db.consultations.create(contextFor('correlation-0002'), patientId, yesterday, KEY);
+    db.encounters.now = () => NOW;
+    const before = structuredClone(db.tables());
+    await expect(db.consultations.create(contextFor('correlation-0003'), patientId, yesterday,
+      'consultation-key-0002'))
+      .rejects.toMatchObject({ status: 400, code: 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY' });
+    expect(db.tables()).toEqual(before);
   });
 
   it('saves a visit with only a draft note, leaving out vitals and diagnoses', async () => {

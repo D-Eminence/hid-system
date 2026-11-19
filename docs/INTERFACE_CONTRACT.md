@@ -7049,6 +7049,14 @@ validation; an unknown field is `400 VALIDATION_FAILED`):
   same transaction lock for this patient at this facility, taken before the
   lookup. If the patient has an open visit today it is used and nothing new
   is created; otherwise the visit is created.
+- When the open visit today is used (`encounter.reusedOpenVisit: true`), the
+  `visit` fields sent (`chiefComplaint`, `encounterType`, `startedAt` and the
+  rest) are not saved: the open visit keeps the values it already has, and
+  the answer shows those. The complaint the doctor typed is then not on the
+  visit. Put it in the note, or save it as a visit edit (`PATCH
+  .../encounters/:encounterId`, which needs a typed reason for a complaint
+  change) after this call. This is the EHR-C1 rule;
+  the call does not refuse or warn about it.
 - `note` (optional): the body of `POST .../clinical-notes`, `draft` or
   `signed`. A note signed here needs no reason (FR-1: a first signature never
   does).
@@ -7062,9 +7070,15 @@ validation; an unknown field is `400 VALIDATION_FAILED`):
 Every part is saved in ONE database transaction. If any part is refused (a
 diagnosis the database refuses, the visit entered in error, and so on), no
 part is saved: no visit, note, vitals, diagnosis, Idempotency-Key row or
-audit row. The answer is the refused part's own error (for example `400
-INVALID_CLINICAL_DATA`, `409 VISIT_ENTERED_IN_ERROR`). The same
-Idempotency-Key can then be sent again with the corrected body.
+part's audit row. The request's own failure audit row is still written, as
+for any refused request, and a consent refusal
+writes its `denied` rows (Audit, below). The answer is the refused part's
+own error (for example `400 INVALID_CLINICAL_DATA`, `409
+VISIT_ENTERED_IN_ERROR`). It does not always say which part was refused: a
+database refusal such as `400 INVALID_CLINICAL_DATA` names no part, and a
+validation error inside a part names only that part's top-level field
+(`visit`, `note`, `vitals` or `diagnoses`), not the field within it. The
+same Idempotency-Key can then be sent again with the corrected body.
 
 ### Permissions and consent
 
@@ -7072,10 +7086,16 @@ Permission `ehr.encounter.write` always, plus the write permission of each
 part sent: `ehr.note.write` for `note`, `ehr.vital.write` for `vitals`,
 `ehr.diagnosis.write` for a non-empty `diagnoses`. If one is missing, the
 whole call is `403 PERMISSION_DENIED` ("Required permission is missing")
-before anything is read or saved. Consent is checked once, as for each
+before the body is validated and before anything is read or saved. The
+refusal is audited as a missing permission on the part's own route is: one
+`security.authorization.denied` row (`http-request`, outcome `denied`, the
+method and route), and no other row
+(`services/ehr-api/src/ehr/consultation/consultations.controller.ts`,
+`ConsultationPartsGuard`). Consent is checked once, as for each
 part's own route (`write_records` for this patient; `403 CONSENT_REQUIRED`
 otherwise). The checks each part's own route makes before the database
-(above) also run before the consent check.
+(above) also run before the consent check, except the `startedAt` day
+check, which runs after it (Idempotency-Key, below).
 
 ### Answer
 
@@ -7102,7 +7122,14 @@ again (`201`, the same visit, note, vitals and diagnoses, as they are now;
 differs only by `reuseOpenVisit: true` is the same body. The same key with
 another body is `409 IDEMPOTENCY_KEY_REUSED`; while the first request with
 the key is still running, the second waits for it, as on every clinical
-create. A key is kept for 24 hours, as today. The key is stored once for the
+create. A retry after Lagos midnight, when `startedAt` is no longer today,
+is answered the same way from its key; only a consultation not yet saved
+under its key gets `400 REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY`. That check
+now runs after the consent check, so without consent such a request is
+`403 CONSENT_REQUIRED`. A key, once used, keeps answering this consultation
+(or `409` for another body) for as long as its row exists: the rows are
+never deleted and the check does not look at their expiry time. Use a fresh
+key for each new consultation. The key is stored once for the
 whole call (operation `consultation.create`) and once per part
 (`consultation.encounter`, `consultation.clinical-note`,
 `consultation.vital`, `consultation.diagnosis.1` to `.20`), so a key used on
@@ -7123,4 +7150,8 @@ carries a Health ID, a NIN or clinical text.
 "Start consultation" sends the visit, note, vitals and diagnoses in this one
 call with a fresh Idempotency-Key per consultation (kept for a retry of the
 same save), instead of creating the visit first and asking for "Save the
-rest". Show the error of the part that was refused; nothing was saved.
+rest". On an error, nothing was saved. Show the error's message; when it
+names a part (`visit`, `note`, `vitals` or `diagnoses`), show it with that
+section. After a `201` with `encounter.reusedOpenVisit: true`, the complaint
+typed in "Start consultation" is not on the visit (above): save it as a
+visit edit, or put it in the note before sending.

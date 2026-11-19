@@ -62,6 +62,9 @@ export class ConsultationsService {
    * each part runs its own route's code and is audited as that route audits
    * it. The same Idempotency-Key with the same body answers the saved
    * consultation again; with another body, 409 IDEMPOTENCY_KEY_REUSED.
+   * A retry after Lagos midnight (startedAt no longer today) is answered
+   * from its key the same way; only a request not yet saved under its key
+   * gets 400 REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY, and nothing is saved.
    */
   create(
     context: DataAccessContext,
@@ -74,7 +77,17 @@ export class ConsultationsService {
         'A consultation is saved on the open visit today. Leave out reuseOpenVisit or set it to true.');
     }
     const visit: CreateEncounterDto = { ...input.visit, reuseOpenVisit: true };
-    const plan = this.encounters.planCreate(patientId, visit, CONSULTATION_PART_OPERATIONS.encounter);
+    let plan: EncounterCreatePlan;
+    let notToday: DomainProblem | undefined;
+    try {
+      plan = this.encounters.planCreate(patientId, visit, CONSULTATION_PART_OPERATIONS.encounter);
+    } catch (error) {
+      if (!(error instanceof DomainProblem) || error.code !== 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY') throw error;
+      // Possibly a retry after Lagos midnight of a consultation already
+      // saved: its key replays it below; a new request is refused there.
+      notToday = error;
+      plan = this.encounters.replayPlan(patientId, visit, CONSULTATION_PART_OPERATIONS.encounter);
+    }
     if (input.vitals) this.vitals.checkCreate(input.vitals);
     const body = { ...input, visit };
     const digest = requestDigest(CONSULTATION_OPERATION, { patientId, input: body });
@@ -94,6 +107,9 @@ export class ConsultationsService {
       const created = await this.repository.executeCreate(
         client, context, patientId, idempotencyKey, CONSULTATION_OPERATION, digest, 'consultation',
         async () => {
+          // Nothing is saved under this key yet: a visit that does not start
+          // today is refused, as planCreate refuses it (the key row rolls back).
+          if (notToday) throw notToday;
           const value = await saved();
           return { value, id: value.encounter.id };
         },

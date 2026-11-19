@@ -186,10 +186,24 @@ export class EncountersService {
       throw new DomainProblem(400, 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY',
         'To use the open visit today, the visit must start today (Lagos time). Check the date and time on this device.');
     }
+    return { operation, day, digest: this.createDigest(patientId, input, operation) };
+  }
+
+  /**
+   * EHR-C5: the plan a reuse request had on its own Lagos day (the day of
+   * its startedAt), without planCreate's today check. It is only for
+   * answering a request already saved under its Idempotency-Key again (a
+   * retry after Lagos midnight): the caller must never create with it.
+   */
+  replayPlan(patientId: string, input: CreateEncounterDto, operation: string): EncounterCreatePlan {
+    return { operation, day: lagosCalendarDate(new Date(input.startedAt)),
+      digest: this.createDigest(patientId, input, operation) };
+  }
+
+  private createDigest(patientId: string, input: CreateEncounterDto, operation: string): string {
     // A body without reuseOpenVisit keeps the Idempotency-Key digest it had before EHR-C1.
     const { reuseOpenVisit: _reuse, ...withoutReuse } = input;
-    const digest = requestDigest(operation, { patientId, input: input.reuseOpenVisit === undefined ? withoutReuse : input });
-    return { operation, day, digest };
+    return requestDigest(operation, { patientId, input: input.reuseOpenVisit === undefined ? withoutReuse : input });
   }
 
   /**
