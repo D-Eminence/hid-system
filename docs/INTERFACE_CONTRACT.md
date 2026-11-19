@@ -7744,10 +7744,11 @@ before).
 
 The database keeps an owner-only list of the patients with own work at each
 facility, one list for pharmacy work and one for lab work (owner's Q122 A,
-19 November). A patient is listed with the first own item of that kind there
-and stays listed. The rule answers only for a listed patient, and the lab and
-pharmacy runtimes can each ask only about their own kind, so outside the list
-a runtime's own SQL learns nothing about a patient through the own-work test.
+19 November). A patient is listed with each own item of that kind there (one
+row per item) and stays listed. The rule answers only for a listed patient,
+and the lab and pharmacy runtimes can each ask only about their own kind, so
+outside the list a runtime's own SQL learns nothing about a patient through
+the own-work test.
 
 ### Only the new images (owner's Q120 B, 19 November)
 
@@ -7756,10 +7757,21 @@ The rule above answers only a staff session whose transaction sets
 ehr-api images set it in every staff transaction (always; it is not a
 setting anyone configures). In ehr-api it is used only by the order-route
 send and the route's `resendAllowed`, which then follow the rule for
-sending to an outside pharmacy below (owner's Q121 A). In a pharmacist's
-or lab scientist's ehr-api session it gives nothing beyond what 0133's
-header (D5) already allows any session through its seven readers: ehr-api's
-runtime holds no grant on a pharmacy or lab table. Today's images never set it, so
+sending to an outside pharmacy below (owner's Q121 A). ehr-api's runtime
+holds no grant on a pharmacy or lab table, so in a pharmacist's or lab
+scientist's ehr-api session the value reaches only reads the database
+owner runs: the readers of prescriptions in 0133's header (D5), among them
+`ehr.order_belongs_to`, which the route readers
+`ehr.list_order_routes_for_order` and `ehr.order_route_summaries` call; and
+the reads of the lab and pharmacy work items inside `ehr.send_order_route`
+and `ehr.order_route_resend_allowed`. Nothing new is exposed. Each of those
+reads comes after the session's own consent test (read consent in the route
+readers, write consent and `ehr.order-route.send` in the send) or the own
+pharmacy send's prescription write permission and prescriber test, and the
+session reads what passes them without the value too. A membership that
+holds both a doctor's and a pharmacist's role learns at most that a source
+prescription exists whose own pharmacy item it already reads in
+pharmacy-api (0133 D5). Today's images never set it, so
 on a database with 0133 they list, read, write and record exactly what they
 do without 0133: their pharmacy and lab staff still need a consent grant,
 and the patient cards and audit rows stay as 0124 gives them. Each image can
@@ -7771,17 +7783,22 @@ refusal to dispense an item sent elsewhere.
 
 The automatic send below is the new ehr-api's and does not wait for the new
 pharmacy-api. While today's pharmacy-api serves (a rollback of it alone, or
-a rollout in which the new ehr-api serves first):
-- A prescription sent that way is answered as sent. It reaches the
-  pharmacists only through a consent grant, as any prescription did before
-  0133.
-- If it is then sent to an outside pharmacy (below), today's pharmacy-api
-  keeps its item on the list as open work, unmarked, at the top for good.
-  Dispensing it answers 409 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` ("This
+a rollout in which the new ehr-api serves first), a prescription sent that
+way is answered as sent. It reaches the pharmacists only through a consent
+grant, as any prescription did before 0133.
+
+Sending to an outside pharmacy (below) is the new ehr-api's too. While
+today's pharmacy-api serves, an own item the new ehr-api sent to an outside
+pharmacy, however the pharmacy got it (the automatic send, or a
+pharmacist's acceptance, including items accepted before 0133):
+- stays on today's list as open work, unmarked, at the top for good;
+- is answered by today's `GET /pharmacy/work-items/:id` without `withdrawn`
+  or `withdrawnReason`, so the screen still offers Dispense;
+- answers Dispense with 409 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` ("This
   prescription can no longer be dispensed here"): the database refuses it
-  for every image.
-- Its progress (ORD-3) answers `received` for that item, so the prescriber
-  sees "received" next to the route to the outside pharmacy.
+  for every image;
+- is answered `received` by its progress (ORD-3), so the prescriber sees
+  "received" next to the route to the outside pharmacy.
 
 pharmacy-api therefore goes out with or before ehr-api.
 
@@ -7794,11 +7811,9 @@ withdrawn, can be sent nowhere until the new ehr-api is back. Today's
 ehr-api sends no `X-HID-Own-Progress` header, so the new pharmacy-api
 answers it only the progress statuses it knows (ORD-3).
 
-For every image: the patient list above is written with the first own item
-of a patient at a facility. When two such first items of one patient are
-written at the same moment in SERIALIZABLE transactions, PostgreSQL can now
-cancel one of the two (40001). The services run a cancelled transaction
-again, so both are written.
+For every image: the patient list above holds one row per own item, so two
+own items of one patient written at the same moment never wait for each
+other on it.
 
 ### Pharmacy API and Lab API changes (no new route)
 
@@ -7968,7 +7983,17 @@ hospital's item in the same transaction ("sent elsewhere"):
   and its audit row are unchanged.
 - After a dispensing here, reversed or not, the send answers 409
   `ORDER_ROUTE_ORDER_IN_WORK` ("This order is already being worked on"), as
-  before.
+  before. So does a send after a route an outside pharmacy accepted has
+  ended without being completed; while that route stands, or once it is
+  completed, the send answers 409 `ORDER_ROUTE_ALREADY_SENT`, as before.
+- A "Send to pharmacy" (or a create as active) and a send to an outside
+  pharmacy for the same prescription that race within milliseconds can
+  leave the route sent next to a live item here. "Send to pharmacy" and a
+  create as active run READ COMMITTED, so that the allergy check (0117) reads
+  the allergies after its lock. In that race the database refuses the
+  outside pharmacy's acceptance: the route is withdrawn with
+  `order_in_work`. The prescription is never dispensed twice and stays with
+  this hospital's pharmacy.
 - Only the new ehr-api sends this way (above). Today's ehr-api answers
   `ORDER_ROUTE_ORDER_IN_WORK` for any prescription with a pharmacy work item
   here.
