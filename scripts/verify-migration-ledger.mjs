@@ -141,7 +141,7 @@ const acceptedMigrations = new Map([
   ['0126_organization_staff_kinds.sql', '783f34c54d5289426f47e8c101378209f155ef499ad4e0c1290e17579190fe97'],
   ['0127_sso_relying_party.sql', '9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d'],
   ['0128_patient_access_pin_notice_and_named_requester.sql', 'a6680a546ba38a0df70fb6b3244672875a5d5defe6aad2af5de63f4e803805df'],
-  ['0129_session_facility_selection.sql', '9386e156364330ee76ba0f6483f8b53336e817a6210dd4de2ca137ff3816cb4f'],
+  ['0129_session_facility_selection.sql', '65705c33e1e55fd76bb06f8c19205391534c1b94b43ce890f17b82fec30ef360'],
   ['0130_desk_registration_without_nin.sql', '685a939427b1120d57a61a9c61714cda31cba9998f462253cd17801bb62220c1'],
   ['0131_own_facility_patient_access.sql', 'd57f52528357df4e647a5dc9ba69840f8f2670c46b2a1086d0be1c6dfd031021'],
   ['0132_staff_patient_search.sql', '75a9db1202048df11fe462b5a53bb75bd9b532dd4b91381ff1b615080ec6ae0d'],

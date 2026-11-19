@@ -7075,6 +7075,8 @@ earlier Identity image ignores the two columns.
 
 ## 56. A staff member's chosen facility, kept per sign-in (0129, provisional)
 
+## 55. A staff member's chosen facility, kept per sign-in (0129, provisional)
+
 A port of `main` 0089 (hid-system#73), written on this branch's Identity code
 and tables. The coordinator's tasks of 17 November 2026 on hid-system#258
 booked the number. The design note and the decisions on it are on #258. 0129
@@ -8171,3 +8173,4 @@ gain a second membership, at QA Hospital (pharmacist and lab roles; not
 primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
+
