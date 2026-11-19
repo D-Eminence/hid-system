@@ -25,7 +25,7 @@ COPY --from=build /app/packages/api-client/dist ./packages/api-client/dist
 
 # Controlled deployment job target. APIs never race the central ledger at
 # startup; an orchestrator may run this target once before rolling services.
-FROM gcr.io/distroless/nodejs22-debian13@sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041 AS migration
+FROM gcr.io/distroless/nodejs22-debian13@sha256:af2e7dd3017037b3ba73238b818c7273f3b4349c005f8bd1454b78d580fe7e37 AS migration
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=65532:65532 --from=production-dependencies /app/services/ehr-api/node_modules ./services/ehr-api/node_modules
@@ -36,7 +36,7 @@ WORKDIR /app/services/ehr-api
 USER 65532:65532
 CMD ["scripts/apply-migrations.mjs"]
 
-FROM gcr.io/distroless/nodejs22-debian13@sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041 AS runtime
+FROM gcr.io/distroless/nodejs22-debian13@sha256:af2e7dd3017037b3ba73238b818c7273f3b4349c005f8bd1454b78d580fe7e37 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=65532:65532 --from=production-dependencies /app/services/ehr-api/node_modules ./services/ehr-api/node_modules
