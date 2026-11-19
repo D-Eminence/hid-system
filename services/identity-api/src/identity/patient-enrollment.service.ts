@@ -264,10 +264,18 @@ export class PatientEnrollmentService implements BeforeApplicationShutdown {
       return { cookie: `${existing.id}.${token}`, progress: await this.progress(existing, correlationId, true) };
     }
 
-    // Verification is not retried after transport or result failures. The
-    // adapter may replay once after an explicit 401 with a fresh access token.
-    // Unique HMAC constraints settle concurrent starts.
-    const verified = this.validateIdentity(await this.provider.verifyNin(nin), nin);
+    // QoreID charges every check (Q109): the provider asks it once per NIN
+    // (NinCheckOnce, 0137). A start that finds another start for the same NIN
+    // checking waits for its answer; a stored answer (90 days for a record, Q115,
+    // so also after this enrollment's 24 hours end) is reused; an answer
+    // slower than QOREID_TIMEOUT_MS is still read and kept for the retry, and
+    // a check QoreID may have charged without an answer holds the NIN (5
+    // minutes, or 6 hours with no answer at all). Verification is not retried after
+    // transport or result failures; the adapter may replay once after an
+    // explicit 401 with a fresh access token. Unique HMAC constraints still
+    // settle which concurrent start keeps the enrollment.
+    const verified = this.validateIdentity(await this.provider.verifyNin(nin, { correlationId, path: 'enrollment' }),
+      nin);
     const id = existing?.id ?? randomUUID();
     const profileJson = JSON.stringify(verified);
     const profileCiphertext = this.encrypt(id, 'profile', profileJson);

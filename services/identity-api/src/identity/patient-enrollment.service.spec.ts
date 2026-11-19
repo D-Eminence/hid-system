@@ -16,6 +16,8 @@ import type { IntegrationRuntimeService } from '../integrations/integration-runt
 import { PatientEnrollmentService } from './patient-enrollment.service';
 import { QoreIdPublicPatientIdentityProvider, type PublicPatientIdentityProvider } from './patient-enrollment.provider';
 import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
+import type { NinCheckOnce } from './nin-check-once';
+import { passThroughNinCheck } from '../testing/nin-check-store.fake';
 import type { NinIdentifierProtector } from './nin-identifier-protector';
 import type { HidCodeGenerator } from './hid-code-generator.service';
 import { createContactLookupHmac } from './contact-lookup';
@@ -183,7 +185,9 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
   const database = { withSystemTransaction: jest.fn(async (_correlation: string,
     work: (client: PoolClient) => Promise<unknown>) => work(client)) } as unknown as DatabaseService;
   const provider = { assertAvailable: jest.fn().mockResolvedValue(undefined),
-    isAvailable: jest.fn().mockResolvedValue(true), verifyNin: jest.fn().mockResolvedValue(identity) };
+    isAvailable: jest.fn().mockResolvedValue(true), verifyNin: jest.fn().mockResolvedValue(identity),
+    // The registration desk's check (Q108); sign-up never calls it.
+    verifyNinRecord: jest.fn() };
   const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }),
     deliverPatientWelcome: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }) };
   const protector = { lookup: jest.fn().mockReturnValue('a'.repeat(64)) };
@@ -291,7 +295,7 @@ describe('PatientEnrollmentService', () => {
     const f = fixture();
     const result = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
 
-    expect(f.provider.verifyNin).toHaveBeenCalledWith(nin);
+    expect(f.provider.verifyNin).toHaveBeenCalledWith(nin, { correlationId, path: 'enrollment' });
     expect(result.progress.stage).toBe('verify_contact');
     expect(result.cookie).toMatch(/^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
     const insert = f.queries.find(({ sql }) => sql.includes('insert into identity.public_patient_enrollments'))!;
@@ -948,7 +952,7 @@ describe('PatientEnrollmentService', () => {
         }),
       };
       const provider = new QoreIdPublicPatientIdentityProvider(adapter as unknown as QoreIdVerificationAdapter,
-        integrations as unknown as IntegrationRuntimeService);
+        integrations as unknown as IntegrationRuntimeService, passThroughNinCheck() as unknown as NinCheckOnce);
       const f = fixture(new Map(), provider);
       f.protector.lookup.mockImplementation((value: string) => ninByLookup[value] ?? 'd'.repeat(64));
       return { f, adapter, integrations, pause: () => { paused = true; } };

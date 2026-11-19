@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Headers, Optional, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Header, Headers, Inject, Optional, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { AuditAction, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
@@ -10,28 +10,49 @@ import { ListRegistrationCasesDto } from './dto/list-registration-cases.dto';
 import { NinRegistrationService } from './nin-registration.service';
 import { getEnvironment } from '../config/environment';
 import { NinProviderBreaker } from './nin-provider-breaker';
+import { NIN_VERIFICATION_PROVIDER, type NinVerificationProvider } from './nin.types';
 
 @Controller('identity')
 export class NinRegistrationController {
   constructor(
     private readonly registrations: NinRegistrationService,
     @Optional() private readonly ninBreaker: NinProviderBreaker = new NinProviderBreaker(),
+    @Optional() @Inject(NIN_VERIFICATION_PROVIDER) private readonly provider?: NinVerificationProvider,
   ) {}
 
   @Get('registration-capabilities')
   @RequirePermissions('identity.registration.write')
   @AuditAction('identity.registration-capabilities.read')
-  capabilities() {
-    const mode = getEnvironment().NIN_PROVIDER_MODE;
-    const enabled = mode === 'test';
+  async capabilities(@Req() request: HidRequest) {
     return {
       // ID-0: `available` is false while the NIN service breaker is tripped
       // (or NIN checks are off), so the desk knows before it asks.
-      nin: { enabled, state: enabled ? 'test-only' : mode, available: enabled && this.ninBreaker.available() },
+      nin: await this.ninCapability(request),
       // ID-0: registration without a NIN stays off until ID-2 ships.
       withoutNin: { enabled: false },
       newPatientRegistrationRequiresNin: true,
     };
+  }
+
+  private async ninCapability(request: HidRequest): Promise<{ enabled: boolean; state: string; available: boolean }> {
+    if (this.provider?.name === 'qoreid' && this.provider.isEnabled) {
+      // Q108: NIN checks through QoreID, on while QoreID's switch is on (read
+      // now, never cached). A switch that cannot be read is "try again".
+      // 0098 G6, 0123 G6q: off at a desk of the sealed demo or QA tenant, as
+      // resolve answers there; a seal that cannot be read is "try again".
+      let enabled: boolean;
+      try {
+        enabled = await this.provider.isEnabled()
+          && !(await this.registrations.sealedTenant(request.facilityId, request.actor?.accountId));
+      } catch {
+        return { enabled: true, state: 'live', available: false };
+      }
+      return enabled ? { enabled, state: 'live', available: this.ninBreaker.available() }
+        : { enabled, state: 'unavailable', available: false };
+    }
+    const mode = getEnvironment().NIN_PROVIDER_MODE;
+    const enabled = mode === 'test';
+    return { enabled, state: enabled ? 'test-only' : mode, available: enabled && this.ninBreaker.available() };
   }
 
   @Post('nin/resolve')

@@ -9,10 +9,14 @@ import { DatabaseService } from '../database/database.service';
 import { CollectedFieldProtector, registrationCaseContactLabel } from './collected-field-protector';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
-import { assertSafeNinVerificationResult, NIN_NOT_CONFIGURED_DETAIL } from './nin-verification.provider';
-import { NIN_VERIFICATION_PROVIDER, type NinClaimedDemographics, type NinVerificationProvider } from './nin.types';
+import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinCheckNotStarted,
+  isNinCheckOwnFault, isNinCheckRefusedUnsent, isNinCheckStillRunning, isNinNotConfigured, isStoredNinAnswer,
+  ninCheckNotStarted, ninCouldNotBeVerified, ninNotConfigured } from './nin-verification.provider';
+import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinClaimedDemographics,
+  type NinVerificationProvider, type NinVerificationResult } from './nin.types';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
+import { QOREID_PROVIDER } from './qoreid-verification.types';
 import type { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto';
 import type { LinkRegistrationCaseDto } from './dto/link-registration-case.dto';
 import type { EnrollPatientDto } from './dto/enroll-patient.dto';
@@ -96,6 +100,43 @@ const CASE_NIN_VERIFIED = `case
       when registration.resolved_patient_id is null then true
       else ${patientHasVerifiedNinSql('registration.resolved_patient_id')}
     end as nin_verified`;
+
+/**
+ * Q110: what the record of the active patient holding a NIN verified answers:
+ * that patient, the provider of their check, and the desk's match when the
+ * name and date of birth are the record's.
+ */
+interface NinOnHealthId {
+  patientId: string;
+  provider: string;
+  verification?: NinVerificationResult;
+}
+
+/** Q110: the active patient holding a NIN verified, with that check's evidence (never NIN digits). */
+interface NinHolderRow extends QueryResultRow {
+  patient_id: string;
+  first_name: string | null;
+  last_name: string | null;
+  dob: string | null;
+  gender: string | null;
+  verification_provider: string | null;
+  verification_reference: string | null;
+  verified_at: Date | string | null;
+}
+
+/**
+ * 0098 G6 ("a demo account ... never causes a QoreID call"), 0123 G6q ("a QA
+ * account consumes no QoreID quota") and 0123 D9 ("facility registration
+ * needs a QoreID NIN check, refused for QA"): whether the desk's facility
+ * ($1) or staff account ($2) is a member of the sealed demo or QA tenant,
+ * through the helpers 0098 and 0123 grant Identity's runtime (security
+ * definer; the members themselves are not readable). False for neither, and
+ * for a null id. desk-nin-holder.integration.sql runs it word for word.
+ */
+export const SEALED_TENANT_SQL = `select coalesce(identity.sealed_demo_facility($1::uuid)
+           or identity.sealed_qa_facility($1::uuid)
+           or $2::uuid = any(identity.sealed_demo_ids('account'))
+           or $2::uuid = any(identity.sealed_qa_ids('account')), false) as sealed`;
 
 /** SX-10: one row of the registration-case list (never NIN digits). */
 interface CaseListRow extends RegistrationCaseRow {
@@ -183,39 +224,76 @@ export class NinRegistrationService {
       ...(input.gender ? { gender: input.gender } : {}),
     };
 
-    if (this.provider.name === 'unavailable') {
-      // ID-0: NIN checks are switched off here (NIN_PROVIDER_MODE=unavailable).
-      // That is a setting, not an outage: the breaker is not touched, nothing
-      // is logged as a failure, and the desk keeps the true message
-      // ("NIN verification is not configured"). Nothing is sent anywhere.
-      const error = new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', NIN_NOT_CONFIGURED_DETAIL);
+    // Q108: details that cannot be anyone's (a date of birth in the future
+    // or before 1900, a name with a control character) are refused before
+    // anything is sent, with 400 NIN_DETAILS_INVALID: the request body
+    // checks only their shape, so this answers the website too. Otherwise a
+    // (charged) check would be made, and its answer read as a bad provider
+    // answer that trips the breaker.
+    if (implausibleClaimedDemographics(claimedDemographics)) {
+      const error = new DomainProblem(400, 'NIN_DETAILS_INVALID',
+        'Check the name and the date of birth. The date of birth cannot be in the future or before 1900.');
       await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
       throw error;
     }
 
-    let verification;
-    try {
-      // ID-0: while the NIN service breaker is tripped, no check is sent.
-      this.ninBreaker.assertAvailable();
-    } catch (error) {
-      // The NIN was not sent to the NIN service; the audit row says so.
-      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, breaker: 'open' });
+    // Q108: a live provider (QoreID) asks its switch for every check: the
+    // admin control and its settings, never a cached answer.
+    let switchedOn = this.provider.name !== 'unavailable';
+    if (switchedOn && this.provider.isEnabled) {
+      try {
+        switchedOn = await this.provider.isEnabled();
+      } catch (error) {
+        // The switch could not be read: nothing was sent, the breaker is not
+        // touched (this is not the NIN service failing).
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw ninCheckNotStarted();
+      }
+    }
+    if (!switchedOn) {
+      // ID-0: NIN checks are switched off here (NIN_PROVIDER_MODE=unavailable,
+      // or, Q108, QoreID's switch is off). That is a setting, not an outage:
+      // the breaker is not touched, nothing is logged as a failure, and the
+      // desk keeps the true message ("NIN verification is not configured").
+      // Nothing is sent anywhere.
+      const error = ninNotConfigured();
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
       throw error;
     }
-    try {
-      verification = await this.provider.verify({
-        nin: input.nin,
-        claimedDemographics,
-        correlationId: context.correlationId,
-      });
-      assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
-    } catch (error) {
-      this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
-      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true });
-      throw error;
+
+    // 0098 G6, 0123 G6q and D9: a desk of the sealed demo or QA tenant never
+    // causes a QoreID call. Both seals relied on QoreID's quota refusing
+    // their accounts, and the desk's QoreID check takes no quota (Q109), so
+    // the desk asks the seals itself, before anything else is read or sent:
+    // for a sealed facility or account NIN checks are off, as they were
+    // before Q108 ("not configured"; the holder read, 0137's guard and its
+    // stored answers are never reached, the breaker is not touched). A seal
+    // that cannot be read fails closed: "cannot be started", nothing sent.
+    if (this.provider.name === QOREID_PROVIDER) {
+      let sealed: boolean;
+      try {
+        sealed = await this.sealedTenant(context.facilityId, context.actor.accountId);
+      } catch (error) {
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw ninCheckNotStarted();
+      }
+      if (sealed) {
+        const error = ninNotConfigured();
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, sealedTenant: true });
+        throw error;
+      }
     }
-    this.ninBreaker.recordSuccess();
-    if (!verification.verified) {
+
+    // Q110: a NIN on a Health ID keeps its checked answer with the record,
+    // and the record is the answer. A NIN an active patient holds verified
+    // (not revoked) is never sent to the NIN service from the desk (QoreID is
+    // not paid again, however long ago it was checked): the name and date of
+    // birth on that patient's record match, or the desk is told they do not.
+    // Any other NIN is checked by the NIN service.
+    const onHealthId = await this.ninOnHealthId(context, ninLookupHmac, claimedDemographics);
+    let verification: NinVerificationResult;
+    if (onHealthId?.verification) {
+      verification = onHealthId.verification;
       await this.audit.record({
         correlationId: context.correlationId,
         actorType: 'staff',
@@ -226,11 +304,17 @@ export class NinRegistrationService {
         facilityId: context.facilityId,
         action: 'identity.nin.verify',
         resourceType: 'registration-case',
-        outcome: 'denied',
+        outcome: 'success',
         purposeOfUse: context.purposeOfUse,
-        details: { provider: verification.provider },
+        details: { provider: verification.provider, ninCheck: 'match', providerCalled: false, healthIdRecord: true },
       });
-      throw new DomainProblem(422, 'NIN_VERIFICATION_FAILED', 'The NIN could not be verified');
+    } else if (onHealthId) {
+      // The desk's "does not match" from the record: nothing is sent, kept
+      // or written, and the breaker is not asked.
+      throw await this.ninNotVerified(context, onHealthId.provider, 'name_mismatch',
+        { providerCalled: false, healthIdRecord: true });
+    } else {
+      verification = await this.verifyWithProvider(input, claimedDemographics, context);
     }
 
     const caseId = randomUUID();
@@ -267,6 +351,12 @@ export class NinRegistrationService {
         [protectedNin.lookupHmac],
       );
       const existingPatient = existing.rows[0];
+      if (onHealthId && existingPatient?.patient_id !== onHealthId.patientId) {
+        // The patient or the NIN changed between the read and this write: the
+        // match above no longer stands. Nothing is written; a retry decides
+        // again.
+        throw ninHolderChanged();
+      }
       const candidates = existingPatient ? [] : await this.findCandidates(client, verification.demographics);
       // D13: the stated Health ID is a hint only. It never adds a candidate
       // (that would show staff a patient who gave this facility no consent,
@@ -371,6 +461,7 @@ export class NinRegistrationService {
         purposeOfUse: context.purposeOfUse,
         details: {
           provider: verification.provider,
+          ninCheck: 'match',
           status,
           candidateCount: candidates.length,
           matchedExistingIdentity: Boolean(existingPatient),
@@ -763,6 +854,256 @@ export class NinRegistrationService {
     return rankCandidates(result.rows, demographics);
   }
 
+  /**
+   * Q108: the NIN service's check of a NIN no Health ID holds verified with
+   * the desk's details (QoreID through 0137's guard, or the test provider),
+   * behind the breaker. Returns a match; any other answer is thrown.
+   */
+  private async verifyWithProvider(input: ResolveNinDto, claimedDemographics: NinClaimedDemographics,
+    context: DataAccessContext): Promise<NinVerificationResult> {
+    let verification: NinVerificationResult;
+    try {
+      // ID-0: while the NIN service breaker is tripped, no check is sent.
+      this.ninBreaker.assertAvailable();
+    } catch (error) {
+      // The NIN was not sent to the NIN service; the audit row says so.
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, breaker: 'open' });
+      throw error;
+    }
+    // Q108/Q109: each live check is charged. QoreID's check (the only live
+    // one) is 0137's once-per-NIN guard, so a resend of this request, another
+    // desk's request and any other path's check of the same NIN make one
+    // QoreID call while its answer is kept, but for 0137's exceptions (the
+    // contract's "One QoreID check per NIN": a sign-up after a profile
+    // check's incomplete record; a desk check or a sign-up after a profile
+    // check's "no record" or unusable answer, kept for the profile's question
+    // only; a key version change); a match is answered by the case it created
+    // (resolve finds it first). No limit per staff account, per facility or
+    // across Health ID.
+    //
+    // D4: the breaker counts only what the NIN service did for this request.
+    // onSettled says how this request's own check ended; `late.then` says
+    // what to do with an ending that comes after this request has answered:
+    // nothing yet ('hold' it for the code below), count it ('count'), or
+    // record only an answer, the wait having been counted ('answer_only').
+    const late: { then: 'hold' | 'count' | 'answer_only'; settlement?: NinCheckSettlement } = { then: 'hold' };
+    const onSettled = (settlement: NinCheckSettlement) => {
+      if (late.then === 'count') this.countSettled(settlement, context.correlationId);
+      else if (late.then === 'answer_only') { if (settlement.answered) this.ninBreaker.recordSuccess(); }
+      else late.settlement = settlement;
+    };
+    try {
+      verification = await this.provider.verify({
+        nin: input.nin,
+        claimedDemographics,
+        correlationId: context.correlationId,
+        onSettled,
+      });
+      assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
+    } catch (error) {
+      if (isNinNotConfigured(error) || isNinCheckNotStarted(error) || isNinCheckRefusedUnsent(error)) {
+        // Q108: switched off, or the switch could not be read, between the
+        // switch check and the check; 0137: the once-per-NIN guard refused
+        // it (this NIN is being checked or is held, or the guard's store or
+        // keys are unavailable). Nothing was sent for this request: not an
+        // outage, and the breaker's retry place is freed. The request may be
+        // sent again; the guard decides whether QoreID is asked.
+        this.ninBreaker.release();
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw error;
+      }
+      if (isStoredNinAnswer(error)) {
+        // 0137: the NIN service's earlier answer, kept (an answer HID cannot
+        // use), given again. Nothing was sent for this request: not counted,
+        // and the retry place is freed.
+        this.ninBreaker.release();
+        await this.auditFailure(context, 'identity.nin.verify', error,
+          { providerCalled: true, ninCheck: 'provider_error', storedAnswer: true });
+        throw error;
+      }
+      if (isNinCheckStillRunning(error)) {
+        // 0137: this request's wait ended; the check goes on and its answer
+        // is kept for the retry. D4: the wait running out counts as one
+        // failure (504), as any timeout of the NIN service, so checks it
+        // never answers open the breaker after the usual number of waits.
+        // When the check then answers, that answer is recorded as a success;
+        // when it fails, it is not counted a second time.
+        this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
+        if (late.settlement?.answered) this.ninBreaker.recordSuccess();
+        else if (!late.settlement) late.then = 'answer_only';
+        await this.auditFailure(context, 'identity.nin.verify', error,
+          { providerCalled: true, ninCheck: 'provider_error' });
+        throw error;
+      }
+      if (isNinCheckOwnFault(error)) {
+        // D4: raised by HID's own code or database (the guard's audit write
+        // or store), not by the NIN service: never counted. What the NIN
+        // service did for this request, if it was asked, is counted instead,
+        // now or when it ends; until then the retry place is freed.
+        if (late.settlement) this.countSettled(late.settlement, context.correlationId);
+        else {
+          this.ninBreaker.release();
+          late.then = 'count';
+        }
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true });
+        throw error;
+      }
+      this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true, ninCheck: 'provider_error' });
+      throw error;
+    }
+    // A stored answer is not the NIN service answering now: it neither
+    // clears the failures nor closes a breaker that is letting one check
+    // through; it only frees that place.
+    if (verification.stored) this.ninBreaker.release();
+    else this.ninBreaker.recordSuccess();
+    if (!verification.verified) {
+      const ninCheck = verification.outcome === 'name_mismatch' ? 'name_mismatch' : 'no_match';
+      throw await this.ninNotVerified(context, verification.provider, ninCheck,
+        verification.stored ? { storedAnswer: true } : {});
+    }
+    // Q108: every NIN check is audited on its own, before the case is
+    // written, so a charged check that matched is on record even when the
+    // case then cannot be created (for example, already in a workflow).
+    await this.audit.record({
+      correlationId: context.correlationId,
+      actorType: 'staff',
+      actorSubject: context.actor.subject,
+      actorAccountId: context.actor.accountId,
+      actorMembershipId: context.membershipId,
+      organizationId: context.actor.facility?.organizationId,
+      facilityId: context.facilityId,
+      action: 'identity.nin.verify',
+      resourceType: 'registration-case',
+      outcome: 'success',
+      purposeOfUse: context.purposeOfUse,
+      details: { provider: verification.provider, ninCheck: 'match',
+        ...(verification.stored ? { storedAnswer: true } : {}) },
+    });
+    return verification;
+  }
+
+  /**
+   * 0098 G6, 0123 G6q and D9: true when the facility or the staff account is
+   * a member of the sealed demo or QA tenant, whose desks make no QoreID
+   * call (SEALED_TENANT_SQL). Throws when the seal gives no answer, so a
+   * caller fails closed.
+   */
+  async sealedTenant(facilityId: string | undefined, accountId: string | undefined): Promise<boolean> {
+    const result = await this.database.query<{ sealed: unknown }>(SEALED_TENANT_SQL,
+      [facilityId ?? null, accountId ?? null]);
+    const sealed = result?.rows?.[0]?.sealed;
+    if (typeof sealed !== 'boolean') throw new Error('The sealed tenant read gave no answer');
+    return sealed;
+  }
+
+  /** The active patient who holds this NIN verified and not revoked, with that check's evidence. */
+  private readNinHolder(context: DataAccessContext, ninLookupHmac: string): Promise<NinHolderRow | undefined> {
+    return this.database.withTransaction(context, async (client) => {
+      const result = await client.query<NinHolderRow>(
+        `select patient.id::text as patient_id, patient.first_name, patient.last_name, patient.dob::text as dob,
+                patient.gender, identifier.verification_provider, identifier.verification_reference,
+                identifier.verified_at
+           from identity.patient_identifiers identifier
+           join identity.patients patient on patient.id = identifier.patient_id
+          where identifier.identifier_type = 'nin'
+            and identifier.lookup_hmac = $1
+            and identifier.verified
+            and identifier.revoked_at is null
+            and patient.status = 'active'
+          limit 1`,
+        [ninLookupHmac],
+      );
+      return result.rows[0];
+    });
+  }
+
+  /**
+   * Q110: the active patient who holds this NIN verified (not revoked), and
+   * whether the name and date of birth the desk entered are the ones on that
+   * patient's record (letter case and spacing ignored, first and last name
+   * in that order; a record without a date of birth matches none): when they
+   * are, a match from HID's own checked answer, with that answer's provider,
+   * reference and time. Null when no active patient holds the NIN verified:
+   * only then does the NIN service decide.
+   */
+  private async ninOnHealthId(context: DataAccessContext, ninLookupHmac: string,
+    claimed: NinClaimedDemographics): Promise<NinOnHealthId | null> {
+    let row: NinHolderRow | undefined;
+    try {
+      row = await this.readNinHolder(context, ninLookupHmac);
+    } catch (error) {
+      // Nothing was compared or sent: "cannot be started", the breaker untouched.
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw ninCheckNotStarted();
+    }
+    if (!row) return null;
+    const verifiedAt = row.verified_at ? new Date(row.verified_at) : undefined;
+    if (typeof row.verification_provider !== 'string' || row.verification_provider.length < 1
+      || typeof row.verification_reference !== 'string' || row.verification_reference.length < 1
+      || !verifiedAt || !Number.isFinite(verifiedAt.getTime())) {
+      // 0011 requires a verified NIN's evidence, so a row without it cannot
+      // be read as the record's answer; the NIN is not sent either.
+      const error = ninCheckNotStarted();
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw error;
+    }
+    const provider = row.verification_provider;
+    if (typeof row.first_name !== 'string' || typeof row.last_name !== 'string'
+      || normalizedPersonName(row.first_name) !== normalizedPersonName(claimed.firstName)
+      || normalizedPersonName(row.last_name) !== normalizedPersonName(claimed.lastName)
+      || row.dob !== claimed.dateOfBirth) return { patientId: row.patient_id, provider };
+    const gender = claimed.gender
+      ?? (row.gender && CASE_GENDERS.has(row.gender) && row.gender !== 'unknown' ? row.gender : undefined);
+    return {
+      patientId: row.patient_id,
+      provider,
+      verification: {
+        verified: true,
+        outcome: 'match',
+        provider,
+        reference: row.verification_reference,
+        verifiedAt: verifiedAt.toISOString(),
+        // The desk's spelling, as for a NIN service match.
+        demographics: { firstName: claimed.firstName, lastName: claimed.lastName, dateOfBirth: claimed.dateOfBirth,
+          ...(gender ? { gender } : {}) },
+      },
+    };
+  }
+
+  /** D4: how this request's own check of the NIN service ended, counted: an answer as a success. */
+  private countSettled(settlement: NinCheckSettlement, correlationId: string): void {
+    if (settlement.answered) this.ninBreaker.recordSuccess();
+    else this.ninBreaker.recordFailure(settlement.error, { correlationId, provider: this.provider.name });
+  }
+
+  /**
+   * Audits a NIN that was not verified (denied) and returns the desk's 422:
+   * no record of the NIN (Q117: QoreID's "no record" or its 404, the one
+   * NIN_NOT_VERIFIED answer the desk, sign-up and the profile give), or a
+   * record whose name or date of birth is not the desk's.
+   */
+  private async ninNotVerified(context: DataAccessContext, provider: string, ninCheck: 'no_match' | 'name_mismatch',
+    extra: { storedAnswer?: true; providerCalled?: false; healthIdRecord?: true } = {}): Promise<DomainProblem> {
+    await this.audit.record({
+      correlationId: context.correlationId,
+      actorType: 'staff',
+      actorSubject: context.actor.subject,
+      actorAccountId: context.actor.accountId,
+      actorMembershipId: context.membershipId,
+      organizationId: context.actor.facility?.organizationId,
+      facilityId: context.facilityId,
+      action: 'identity.nin.verify',
+      resourceType: 'registration-case',
+      outcome: 'denied',
+      purposeOfUse: context.purposeOfUse,
+      details: { provider, ninCheck, ...extra },
+    });
+    return ninCheck === 'name_mismatch' ? new DomainProblem(422, 'NIN_VERIFICATION_FAILED',
+      'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.')
+      : ninCouldNotBeVerified();
+  }
+
   private async findByIdempotency(client: PoolClient, context: DataAccessContext, key: string, digest: string) {
     const result = await client.query<RegistrationCaseRow>(
       `${CASE_SELECT}
@@ -898,7 +1239,8 @@ export class NinRegistrationService {
    * service was asked and the check failed.
    */
   private async auditFailure(context: DataAccessContext, action: string, error: unknown,
-    extra: { providerCalled?: boolean; breaker?: 'open' } = {}) {
+    extra: { providerCalled?: boolean; breaker?: 'open'; ninCheck?: 'provider_error'; storedAnswer?: true;
+      sealedTenant?: true } = {}) {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',
@@ -986,6 +1328,20 @@ function isHidCollision(error: unknown): boolean {
     && (error as { constraint?: unknown }).constraint === 'patients_hid_code_ci_uq';
 }
 
+/**
+ * Q110: the NIN's holder changed between the holder read and the case being
+ * written (the NIN was revoked or the patient made inactive), so the answer
+ * from the record no longer stands. No NIN check is running: the code is
+ * 0137's NIN_CHECK_IN_PROGRESS only because the website already does what
+ * this needs with it (wait retryAfterSeconds, then retry with the same
+ * Idempotency-Key, and the retry decides again); the text says what happened.
+ */
+export function ninHolderChanged(): DomainProblem {
+  return new DomainProblem(409, 'NIN_CHECK_IN_PROGRESS',
+    'The record for this NIN changed while it was being checked. Please wait a minute, then try again.', undefined,
+    { extensions: { retryAfterSeconds: 60 } });
+}
+
 function isConstraintViolation(error: unknown, constraint: string): boolean {
   return typeof error === 'object'
     && error !== null
@@ -1032,4 +1388,12 @@ function deskFieldsOf(input: ResolveNinDto): DeskFields | null {
   if (phone == null || addressLine == null || city == null || stateCode == null
     || lga == null || hasExistingHealthId == null) return null;
   return { phone, addressLine, city, stateCode, lga, hasExistingHealthId };
+}
+
+/** The sexes a registration case keeps (0011). */
+const CASE_GENDERS = new Set(['female', 'male', 'intersex', 'other', 'unknown']);
+
+/** A name as the desk's NIN checks compare it: letter case and spacing ignored. */
+function normalizedPersonName(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLocaleUpperCase('en-NG');
 }

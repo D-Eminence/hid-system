@@ -3,6 +3,9 @@ import { resetEnvironmentForTests } from '../config/environment';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
+import type { NinCheckOnce } from './nin-check-once';
+import { passThroughNinCheck } from '../testing/nin-check-store.fake';
+import { markQoreIdDelivery } from './qoreid-delivery';
 
 const originalEnvironment = { ...process.env };
 const nin = '12345678901';
@@ -32,7 +35,7 @@ describe('QoreID public patient identity provider', () => {
     const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined) };
     return { adapter, integrations, service: new QoreIdPublicPatientIdentityProvider(
       adapter as unknown as QoreIdVerificationAdapter,
-      integrations as unknown as IntegrationRuntimeService) };
+      integrations as unknown as IntegrationRuntimeService, passThroughNinCheck() as unknown as NinCheckOnce) };
   }
 
   it('does not contact the integration when QoreID is disabled', async () => {
@@ -62,7 +65,7 @@ describe('QoreID public patient identity provider', () => {
     const f = provider({ state: 'verified', providerReference: 'transaction-1', ninEnrollmentBinding: binding });
     await expect(f.service.verifyNin(nin)).resolves.toEqual({ ...binding, providerReference: 'transaction-1' });
     expect(f.integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'patient_nin');
-    expect(f.adapter.verifyNinEnrollment).toHaveBeenCalledWith(nin);
+    expect(f.adapter.verifyNinEnrollment).toHaveBeenCalledWith(nin, { timeoutMs: expect.any(Number) });
     f.adapter.verifyNinEnrollment.mockResolvedValue({ state: 'verified', providerReference: 'transaction-2',
       ninEnrollmentBinding: { ...binding, nin: '99999999999' } });
     await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
@@ -75,9 +78,29 @@ describe('QoreID public patient identity provider', () => {
     process.env.QOREID_CLIENT_SECRET = 'test-secret';
     resetEnvironmentForTests();
     const f = provider({ state: 'not_verified' });
-    await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'NIN_NOT_VERIFIED' });
+    await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ status: 422, code: 'NIN_NOT_VERIFIED',
+      message: 'This NIN could not be verified. Check the number and try again.' });
     f.adapter.verifyNinEnrollment.mockResolvedValue({ state: 'verified', ninEnrollmentBinding: binding });
     await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+  });
+
+  it('answers QoreID\'s 404 "not found" as the NIN not verified (Q117), and its other refusals as before', async () => {
+    process.env.QOREID_ENABLED = 'true';
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    process.env.QOREID_CLIENT_ID = 'test-client';
+    process.env.QOREID_CLIENT_SECRET = 'test-secret';
+    resetEnvironmentForTests();
+    const refused = (status: number) => markQoreIdDelivery(new DomainProblem(502, 'QOREID_PROVIDER_REJECTED',
+      'External verification could not be completed'), { delivery: status === 404 ? 'answered' : 'sent', status });
+    const f = provider({});
+    f.adapter.verifyNinEnrollment.mockRejectedValueOnce(refused(404));
+    await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ status: 422, code: 'NIN_NOT_VERIFIED',
+      message: 'This NIN could not be verified. Check the number and try again.' });
+    f.adapter.verifyNinEnrollment.mockRejectedValueOnce(refused(404));
+    await expect(f.service.verifyNinRecord(nin)).resolves.toEqual({ source: 'qoreid', outcome: 'no_record' });
+    // An account-level refusal (403) is not about the NIN: unchanged.
+    f.adapter.verifyNinEnrollment.mockRejectedValueOnce(refused(403));
+    await expect(f.service.verifyNin(nin)).rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
   });
 
   it('blocks new verification while QoreID is paused before invoking the adapter', async () => {
