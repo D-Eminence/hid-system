@@ -102,7 +102,8 @@ export class PatientLookupMissService {
   }
 
   /**
-   * Counts one lookup that did not open a patient, for the staff account. True
+   * Counts one lookup answered 404 (no patient found), for the staff account;
+   * a 403 is never counted. True
    * when the account is (now) limited, false when not, undefined when it could
    * not be counted (no account, no membership, or the database failed).
    */

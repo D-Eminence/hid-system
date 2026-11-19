@@ -6095,8 +6095,10 @@ reason too.
 ### Screen change needed (Akos frontend branch)
 
 The note "Sign" and prescription "Activate" actions may send no
-`changeReason`. Every other change keeps asking for a reason and shows the
-server's plain message on `CHANGE_REASON_REQUIRED`.
+`changeReason`. Since Q105, starting or finishing a visit, a lab request's
+first send and draft edits may send none too (see Q105's Website section).
+Every other change keeps asking for a reason and shows the server's plain
+message on `CHANGE_REASON_REQUIRED`.
 
 ## EHR-C1. The open visit today, and starting a visit without a duplicate (wave 1, no migration)
 
@@ -6899,8 +6901,9 @@ before the visit is read, so before EHR-C8a's `409`s (`VISIT_HAS_OPEN_ORDERS`
 and the others); a move to `in_progress` or `completed` is decided under the
 visit's row lock (a resume after a hold, or a start or finish the history
 shows happened before, then answers the `400`). The allergy check on a prescription's activation is unchanged (409
-`ALLERGY_ACKNOWLEDGEMENT_REQUIRED` until acknowledged). EHR-C8a's 409
-`VISIT_ENTERED_IN_ERROR` is unchanged and comes first.
+`ALLERGY_ACKNOWLEDGEMENT_REQUIRED` until acknowledged). For notes and
+prescriptions, EHR-C8a's 409 `VISIT_ENTERED_IN_ERROR` is unchanged and comes
+first; for lab requests and visits, the early `400` above comes before it.
 
 ### Website
 
