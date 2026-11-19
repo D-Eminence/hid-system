@@ -7360,8 +7360,9 @@ candidates, and registration without a NIN is refused at a sealed facility.
 
 Refusals (problem details, plain words): 400 `PHONE_REQUIRED`, `NOT_A_CHILD`, `REGISTRATION_WITHOUT_NIN_INVALID`,
 `VALIDATION_FAILED`; 403 `REGISTRATION_WITHOUT_NIN_DENIED`, `REGISTRATION_WITHOUT_NIN_NOT_AVAILABLE` (sealed facility);
-409 `IDEMPOTENCY_KEY_REUSED`; 429 `REGISTRATION_WITHOUT_NIN_DAILY_LIMIT` (20 a day for a member at a facility). At 50
-in a day at one facility Identity logs `identity.registration.without_nin.facility_daily_high` (facility id and count
+409 `IDEMPOTENCY_KEY_REUSED`. There is no daily limit for a member or a facility (owner Q109), so a busy day, or a day
+QoreID is down, is never refused; every registration is audited and waits as a case until a NIN check or an approver
+decides it. At 50 in a day at one facility Identity logs `identity.registration.without_nin.facility_daily_high` (facility id and count
 only). Each answer and refusal is audited (`identity.registration.without-nin`): criteria kinds, counts and candidate
 patient ids, never a name, date of birth or phone.
 
