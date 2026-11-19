@@ -68,11 +68,11 @@ test('local gates run release tests, release verify and EHR tests in their alway
   for (const label of ['release-tests', 'release-contracts', 'ehr-tests']) assert.ok(!runner.includes(`['${label}', [`), label)
 })
 // GitHub keeps one queued run per concurrency group and drops the older queued
-// run when a newer one joins, so push and dispatch runs use one group per commit
-// and only pull request runs may cancel each other.
+// run when a newer one joins, so push, dispatch and scheduled runs use one group
+// per event and commit, and only pull request runs may cancel each other.
 test('local gates give every pushed commit its own run and cancel only older pull request runs', () => {
   const { concurrency } = parseWorkflow(localGates)
-  assert.equal(concurrency.group, 'tuf-local-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}')
+  assert.equal(concurrency.group, "tuf-local-${{ github.workflow }}-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.sha) }}")
   assert.equal(concurrency['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}")
 })
 test('local gates keep every npm audit and run only infra/aws and apps/ehr through the exception gate', () => {

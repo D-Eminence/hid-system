@@ -67,8 +67,20 @@ Required check names, each bound to GitHub Actions app ID `15368`:
 3. `AWS release-trust source policy`
 4. `Cloudflare TUF Workers`
 5. `EHR release-bound offline cache`
-6. `Complete workspace verification`
-7. `Historical upstream reference oracle`
+6. `Workspace build and verification`
+7. `Workspace tests`
+8. `Synthetic migration rehearsal`
+9. `Historical upstream reference oracle`
+10. `Choose local gates from the changed paths`
+
+Checks 6 to 8 replace the former single `Complete workspace verification`
+job; they run side by side. On a pull request only, the changes job
+(`release/scripts/select-local-gates.mjs`) may skip checks 2, 7, 8 and 9 or
+narrow checks 6 and 7 to fixed lighter gate lists when no changed path needs
+them; a skipped job concludes as skipped. Every push, manual and weekly
+scheduled run, and every pull request whose changed paths cannot be read for
+certain or match no rule, runs every gate. Checks 1, 3, 4 and 5 have no
+condition and always run.
 
 GitHub required checks alone can accept skipped/neutral conclusions. Release
 admission still requires verified successful candidate provenance, source/
@@ -109,7 +121,7 @@ separate unapproved design/ceremony gate; this phase creates no keys.
 
 | Workflow/job | Trigger and untrusted code | Authority and release boundary |
 | --- | --- | --- |
-| `tuf-local-gates.yml`, seven jobs | Push to `staging-novu-ci-20261005`, `main` or `tuf-production-release`, pull request, manual dispatch; PR source is untrusted; no privileged trigger or reusable workflow call | `contents: read`, no environment/OIDC/secrets; SHA-pinned actions and no persisted checkout credentials; builds/tests/local synth and bounded CI evidence upload only; cannot publish TUF or releases |
+| `tuf-local-gates.yml`, ten jobs | Push to `staging-novu-ci-20261005`, `main` or `tuf-production-release`, pull request, manual dispatch, weekly schedule; PR source is untrusted; no privileged trigger or reusable workflow call | `contents: read`, no environment/OIDC/secrets; SHA-pinned actions and no persisted checkout credentials; builds/tests/local synth and bounded CI evidence upload only; cannot publish TUF or releases |
 | `tuf-publish.yml`, tooling | Reusable-only; caller selects data inputs and tooling SHA; tooling remains unprivileged | `contents: read`, no environment/OIDC/secrets; produces immutable-ID tooling artifact; privileged consumer separately requires approved source/archive digest |
 | `tuf-publish.yml`, publish | Reusable-only, no installed caller; rejects PR/tag events, wrong ref/SHA/repository/owner/hosted-runner/workflow claims | Approval-gated `${environment}-publisher`; `contents: read`, `actions: read`, `id-token: write`; IAM preparation binds exact subject/audience/ref/immutable reusable workflow; only after identity/tooling/provenance gates may assume publisher role and run durable TUF publication; no private signing key or direct KMS signing capability |
 | `tuf-protected-readiness.yml`, local preparation | Manual-only; fixed staging environment/ref/repository; owner-approved source SHA before checkout; no reusable publisher call | Only GitHub metadata/approval reads and signature-verified OIDC with `hid-protected-ci-readiness` audience; no AWS STS action, SDK, secrets, credentials, deployment or release output; bounded public evidence only |
