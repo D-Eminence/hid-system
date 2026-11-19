@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, join, resolve } from 'node:path';
@@ -493,8 +493,11 @@ try {
     const linked = [];
     for (const directory of ['.', ...(await readdir(join(live, 'services'))).map((name) => `services/${name}`)]) {
       const own = join(repository, directory, 'node_modules');
-      if (!existsSync(join(live, directory, 'node_modules')) && existsSync(own)) {
-        await symlink(own, join(live, directory, 'node_modules'));
+      const target = join(live, directory, 'node_modules');
+      // A link an earlier rehearsal left to a checkout that is gone is replaced.
+      if (!existsSync(target) && (await lstat(target).catch(() => null))?.isSymbolicLink()) await rm(target);
+      if (!existsSync(target) && existsSync(own)) {
+        await symlink(own, target);
         linked.push(directory);
       }
     }
