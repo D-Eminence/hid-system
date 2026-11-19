@@ -151,6 +151,19 @@ and production refuses a per-finding expiry later than the policy's. Findings
 without one are unchanged. All six libssl3t64 entries should be removed once a
 Debian 3.5.10 package is in the base rather than renewed past 2026-12-01.
 
+On 2026-11-19 Grype began reporting CVE-2026-123864, CVE-2026-123865,
+CVE-2026-123866 and CVE-2026-123872 (High) against node 22.23.4 in every Node
+image (for example the ehr-api job of PR #280), all fixed in the Node 22.23.5
+security release (2026-11-11). The base was repinned to
+`sha256:af2e7dd3017037b3ba73238b818c7273f3b4349c005f8bd1454b78d580fe7e37`
+(`latest`, pushed 2026-11-12), the same image variant carrying Node 22.23.5. Its
+only changed ELF is `/nodejs/bin/node`, byte-identical to the signed nodejs.org
+linux-arm64 release binary, with the same imports; the only other change is the
+file mode of `/usr/lib/os-release`. libc6, the GCC runtime, zlib1g and libssl3t64
+are byte-identical, so the findings above are unchanged and no finding is added.
+Node 22.23.5 still bundles OpenSSL 3.5.9. These checks are recorded in
+`security/node-22.23.5-runtime-evidence.json`.
+
 The gateway (nginx-unprivileged on Alpine 3.24.2) has no ELF inventory
 assessment. Earlier gateway findings were fixed by pinning a fixed package from the
 signed Alpine 3.24 repository (see `gateway/Dockerfile`). On 2026-11-18 Grype
@@ -173,6 +186,19 @@ scan with ignored High/Critical rows (a clean gateway scan needs no file), and
 Replace it with a pinned fixed Alpine 3.24 package when one is served, and do not
 renew it. When Grype starts matching CVE-2026-107493 and CVE-2026-124709 to the
 gateway packages, the gateway scan fails again until they are assessed or fixed.
+
+On 2026-11-19 Grype began reporting CVE-2026-113425, CVE-2026-121810,
+CVE-2026-123007, CVE-2026-123633, CVE-2026-123634 (Critical) and CVE-2026-118899
+(High) against the base's nginx 1.30.6-r1, fixed from 1.30.7-r0. No
+nginx-unprivileged image with 1.30.7 is published yet, so `gateway/Dockerfile`
+pins nginx and its four installed modules at 1.30.7-r1 (njs 1.30.7.1.0.2-r1) from
+the nginx.org Alpine 3.24 repository the base installed nginx from, verified by
+the `nginx_signing.rsa.pub` key already in the base. apk keeps the base's
+unprivileged `nginx.conf` and `default.conf`. Because `gateway/Dockerfile`
+changed, `security/gateway-runtime.vex.json` was re-reviewed: nginx, its modules
+and njs at 1.30.7-r1 have the same OpenSSL imports as 1.30.6-r1, so only its
+`gateway/Dockerfile` hash and the nginx version in its statements changed; its
+CVEs, purls and 2026-12-01 expiry are unchanged.
 
 Every staging image with High scan findings except the gateway (see above) is admitted against the same exact-image not-affected assessment as
 production, `security/production-runtime-assessment.json`, which covers all

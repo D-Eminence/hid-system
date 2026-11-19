@@ -8,5 +8,6 @@ import { VitalsService } from './vitals.service';
   imports: [ClinicalInfrastructureModule],
   controllers: [VitalsController, PatientVitalsController],
   providers: [VitalsService],
+  exports: [VitalsService],
 })
 export class VitalsModule {}

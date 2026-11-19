@@ -7,5 +7,6 @@ import { EncountersService } from './encounters.service';
   imports: [ClinicalInfrastructureModule],
   controllers: [EncountersController],
   providers: [EncountersService],
+  exports: [EncountersService],
 })
 export class EncountersModule {}

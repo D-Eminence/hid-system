@@ -26,6 +26,8 @@ import { PatientEvidenceService } from './patient-records/patient-evidence.servi
 import { PatientAttachmentTextService } from './patient-records/patient-attachment-text.service';
 import { HealthProfileController } from './health-profile/health-profile.controller';
 import { HealthProfileService } from './health-profile/health-profile.service';
+// EHR-C5: one-call consultation.
+import { ConsultationsModule } from './consultation/consultations.module';
 
 @Module({
   imports: [
@@ -40,6 +42,7 @@ import { HealthProfileService } from './health-profile/health-profile.service';
     PrescriptionsModule,
     LabRequestsModule,
     OrderRoutesModule,
+    ConsultationsModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,
