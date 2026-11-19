@@ -138,7 +138,9 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
   const counted = (await admin.query(`select
       'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)'::regprocedure::oid::text consent,
       'auth.membership_has_permission(text,uuid,uuid,text)'::regprocedure::oid::text permission`)).rows[0];
-  const readWorkList = async (subject, membership) => {
+  // switched: the session sets app.own_facility_work to '0133', as the new lab-api image does (0133 D13). Today's
+  // image never sets it, so its fresh connection reads it unset (null).
+  const readWorkList = async (subject, membership, switched = true) => {
     const lab = await connect('lab_work_list_test');
     try {
       await lab.query('begin');
@@ -147,6 +149,9 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
         set_config('app.correlation_id','synthetic-work-list-check',true),set_config('app.patient_id','',true),
         set_config('app.self_authorized_until','',true),set_config('statement_timeout','15000',true)`,
       [FACILITY, subject, membership]);
+      if (switched) await lab.query(`select set_config('app.own_facility_work','0133',true)`);
+      else assert.equal((await lab.query(`select current_setting('app.own_facility_work',true) as switch`)).rows[0].switch,
+        null, "Today's lab-api image leaves app.own_facility_work unset");
       const started = performance.now();
       const rows = (await lab.query(WORK_LIST_QUERY, [FACILITY])).rows;
       const ms = Math.round(performance.now() - started);
@@ -205,9 +210,13 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
     'The lab scientist sees the same 200 rows, in the same order, without a grant');
   assert.ok(labScientist.permissionChecks <= PERMISSION_CHECKS_AT_MOST,
     `Permission checks for the lab scientist: ${labScientist.permissionChecks} (at most ${PERMISSION_CHECKS_AT_MOST})`);
+  // Today's lab-api image does not set app.own_facility_work (0133 D13): the same lab scientist, who holds no grant,
+  // sees none of the laboratory's work, as before 0133.
+  const todaysImage = await readWorkList('staff:synthetic-work-list-scientist', SCIENTIST.membership, false);
+  assert.equal(todaysImage.rows.length, 0, 'Without the switch, the lab scientist without a grant sees no work item');
   return { workItems: visible, ms, consentChecks, consentChecksPerWorkItem: Number((consentChecks / visible).toFixed(2)),
     permissionChecks: clinician.permissionChecks,
     labScientist: { ms: labScientist.ms, consentChecks: labScientist.consentChecks,
-      permissionChecks: labScientist.permissionChecks },
+      permissionChecks: labScientist.permissionChecks, rowsWithoutSwitch: todaysImage.rows.length },
     statementTimeoutMs: 15000 };
 }

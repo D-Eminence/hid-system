@@ -3,6 +3,14 @@ import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryRes
 import type { DataAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 
+/**
+ * 0133 D13 (owner's Q120 B): the own-facility pharmacy and lab work answers
+ * only a staff session that sets app.own_facility_work to this value. This
+ * image always sets it; an older image never does, so it keeps today's view
+ * whichever schema it meets. On a schema without 0133 the setting is unused.
+ */
+export const OWN_FACILITY_WORK = '0133';
+
 export interface TransactionOptions {
   readOnly?: boolean;
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
@@ -101,8 +109,9 @@ export class DatabaseService implements OnApplicationShutdown {
       if (options.readOnly) await client.query('SET TRANSACTION READ ONLY');
       await client.query(`select set_config('app.actor_subject',$1,true),set_config('app.facility_id',$2,true),
         set_config('app.correlation_id',$3,true),set_config('app.membership_id',$4,true),
-        set_config('app.purpose_of_use',$5,true)`, [context.actor.subject, context.facilityId,
-        context.correlationId, context.membershipId, context.purposeOfUse]);
+        set_config('app.purpose_of_use',$5,true),set_config('app.own_facility_work',$6,true)`,
+        [context.actor.subject, context.facilityId, context.correlationId, context.membershipId, context.purposeOfUse,
+          OWN_FACILITY_WORK]);
       const result = await operation(client);
       await client.query('COMMIT');
       return result;

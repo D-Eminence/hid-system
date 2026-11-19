@@ -120,7 +120,9 @@ create function pg_temp.as_qa(account_n integer, membership text, facility_n int
          set_config('app.facility_id', 'c0a00002-0000-4000-8000-00000000000' || facility_n, true),
          set_config('app.correlation_id', 'sealed-qa-0134-' || substr(md5(random()::text), 1, 12), true),
          set_config('app.membership_id', 'c0a00005-0000-4000-8000-0000000000' || membership, true),
-         set_config('app.purpose_of_use', 'direct-care', true);
+         set_config('app.purpose_of_use', 'direct-care', true),
+         -- 0133 D13: the switch the new pharmacy-api and lab-api images set (own work only).
+         set_config('app.own_facility_work', '0133', true);
 $f$;
 grant execute on function pg_temp.as_qa(integer, text, integer) to public;
 -- The owner has set the three logins' passwords (Forgot password): active.

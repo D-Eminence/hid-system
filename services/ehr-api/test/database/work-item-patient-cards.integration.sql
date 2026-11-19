@@ -37,6 +37,9 @@
 --      hides it from them; CR, a member holding the two read permissions but
 --      no receive permission, reads by consent only and keeps showing that a
 --      revoked or an expired grant, and a deny directive, hide the card;
+--      today's images (0133 D13: no app.own_facility_work) get 0124's
+--      answers: LS and PH their granted patients only, LE and PE nothing
+--      under direct care;
 --   4. emergency (D8): a member with an active reasoned break-glass grant and
 --      purpose 'emergency' gets the card of exactly the rows it can read,
 --      and nothing under direct-care;
@@ -243,15 +246,19 @@ select ('e113000b-0000-4000-8000-00000000000' || item.n)::uuid, ('e1130006-0000-
                (5, 1, 2, 2, 5, false), (6, 4, 1, 1, 2, false)) item(n, patient, site, ordering, member, routed);
 set local session_replication_role = origin;
 
--- The session lab-api and pharmacy-api set for a staff request.
-create function pg_temp.as_member(member integer, site integer, purpose text default 'direct-care') returns void
+-- The session lab-api and pharmacy-api set for a staff request; switched =>
+-- false is a session of today's images, which do not set app.own_facility_work.
+create function pg_temp.as_member(member integer, site integer, purpose text default 'direct-care',
+  switched boolean default true) returns void
 language sql as $f$
   select set_config('app.actor_subject', 'synthetic:cards-'
            || (array['ls', 'ph', 'rc', 'l2', 'p2', 'le', 'pe', 'cr'])[member], true),
          set_config('app.facility_id', 'e1130001-0000-4000-8000-00000000000' || site, true),
          set_config('app.correlation_id', 'cards-suite-' || substr(md5(random()::text), 1, 12), true),
          set_config('app.membership_id', 'e1130004-0000-4000-8000-00000000000' || member, true),
-         set_config('app.purpose_of_use', purpose, true);
+         set_config('app.purpose_of_use', purpose, true),
+         -- 0133 D13: the switch the new lab-api and pharmacy-api images set (own work only).
+         set_config('app.own_facility_work', case when switched then '0133' else '' end, true);
 $f$;
 -- The six work items of a kind, and the answers in a comparable form: the
 -- work item's last digit, then name/sex/date of birth/Health ID ending.
@@ -320,7 +327,7 @@ exception when others then
   return sqlstate || ': ' || sqlerrm;
 end
 $f$;
-grant execute on function pg_temp.as_member(integer, integer, text), pg_temp.items(text),
+grant execute on function pg_temp.as_member(integer, integer, text, boolean), pg_temp.items(text),
   pg_temp.cards(text, uuid[]), pg_temp.visible(text, boolean), pg_temp.card_ids(text),
   pg_temp.refusal(text, uuid[]) to public;
 select set_config('cards.audit_before', (select count(*)::text from audit.events), true);
@@ -426,6 +433,30 @@ select pg_temp.expect('CR (consent only) reads its granted patients'' pharmacy c
   '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
 select pg_temp.expect('CR: the pharmacy cards are exactly its own rows', pg_temp.card_ids('pharmacy'),
   pg_temp.visible('pharmacy', true));
+reset role;
+-- 0133 D13 (owner's Q120 B): today's lab-api and pharmacy-api images do not
+-- set app.own_facility_work, so their sessions get 0124's answers: LS and PH
+-- read their granted patients' rows and cards only, never Chidi's (no
+-- grant), and LE and PE nothing under direct care.
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(1, 1, switched => false);
+select pg_temp.expect('LS, today''s image: row-level security as 0124', pg_temp.visible('lab', false), '1 2 4 6');
+select pg_temp.expect('LS, today''s image: its granted patients'' cards', pg_temp.cards('lab', pg_temp.items('lab')),
+  '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
+select pg_temp.expect('LS, today''s image: the cards are exactly its own rows', pg_temp.card_ids('lab'),
+  pg_temp.visible('lab', true));
+select pg_temp.as_member(6, 1, switched => false);
+select pg_temp.expect('LE under direct care, today''s image', pg_temp.cards('lab', pg_temp.items('lab')), '');
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2, 1, switched => false);
+select pg_temp.expect('PH, today''s image: row-level security as 0124', pg_temp.visible('pharmacy', false), '1 2 4 6');
+select pg_temp.expect('PH, today''s image: its granted patients'' cards',
+  pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '1:Amaka Card/female/1991-02-03/AAA2 2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
+select pg_temp.expect('PH, today''s image: the cards are exactly its own rows', pg_temp.card_ids('pharmacy'),
+  pg_temp.visible('pharmacy', true));
+select pg_temp.as_member(7, 1, switched => false);
+select pg_temp.expect('PE under direct care, today''s image', pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '');
 reset role;
 
 -- 3. A revoked or an expired grant, a disabled account (as the owner, then

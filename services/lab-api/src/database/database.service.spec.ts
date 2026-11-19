@@ -1,7 +1,9 @@
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
-import { DatabaseService, isRetryableConflict, retryDelayMs, SERIALIZABLE_ATTEMPTS } from './database.service';
+import {
+  DatabaseService, isRetryableConflict, OWN_FACILITY_WORK, retryDelayMs, SERIALIZABLE_ATTEMPTS,
+} from './database.service';
 
 const context = { actor: { subject: 'synthetic:lab-scientist' }, facilityId: 'facility', correlationId: 'correlation',
   membershipId: 'membership', purposeOfUse: 'direct-care' } as unknown as DataAccessContext;
@@ -113,5 +115,72 @@ describe('Lab DatabaseService transaction retry', () => {
     expect(['40001', '40P01', '23505'].map((code) => isRetryableConflict({ code }))).toEqual([true, true, true]);
     expect([{ code: '42501' }, { code: '0A000' }, { code: 'LAB_IMPORT_ACCESS_DENIED' }, null, 'error']
       .map(isRetryableConflict)).toEqual([false, false, false, false, false]);
+  });
+});
+
+describe('Lab DatabaseService staff session (0133 D13, owner\'s Q120 B)', () => {
+  it('sets app.own_facility_work to 0133 in every staff transaction, beside the staff context', async () => {
+    const calls: { sql: string; values: unknown[] }[] = [];
+    const pool = {
+      connect: async () => ({
+        query: async (sql: string, values: unknown[] = []) => { calls.push({ sql, values }); return { rows: [], rowCount: 0 }; },
+        release: () => undefined,
+      }),
+    };
+    const database = Object.create(DatabaseService.prototype) as DatabaseService;
+    Object.assign(database, { pool });
+    await database.withTransaction(context, async () => 'done');
+    const settings = calls.find((call) => call.sql.includes('set_config'))!;
+    expect(OWN_FACILITY_WORK).toBe('0133');
+    const parameter = /set_config\('app\.own_facility_work',\s*\$(\d+),\s*true\)/.exec(settings.sql);
+    expect(parameter).not.toBeNull();
+    expect(settings.values[Number(parameter![1]) - 1]).toBe('0133');
+    expect(settings.values).toEqual(expect.arrayContaining(['synthetic:lab-scientist', 'facility', 'membership', 'direct-care']));
+  });
+  it('sets it again in every attempt of a retried SERIALIZABLE transaction, and in a read-only one', async () => {
+    const attempts: { sql: string; values: unknown[] }[][] = [];
+    const pool = {
+      connect: async () => {
+        const calls: { sql: string; values: unknown[] }[] = [];
+        attempts.push(calls);
+        return {
+          query: async (sql: string, values: unknown[] = []) => { calls.push({ sql, values }); return { rows: [], rowCount: 0 }; },
+          release: () => undefined,
+        };
+      },
+    };
+    const database = Object.create(DatabaseService.prototype) as DatabaseService;
+    Object.assign(database, { pool, pauseBeforeRetry: async () => undefined });
+    let runs = 0;
+    await database.withTransaction(context, async () => {
+      runs += 1;
+      if (runs < 3) throw sqlError(runs === 1 ? '40001' : '40P01');
+      return 'done';
+    }, { isolationLevel: 'SERIALIZABLE' });
+    await database.withTransaction(context, async () => 'read', { readOnly: true });
+    expect(attempts).toHaveLength(4);
+    for (const calls of attempts) {
+      const settings = calls.find((call) => call.sql.includes('set_config'))!;
+      const parameter = /set_config\('app\.own_facility_work',\s*\$(\d+),\s*true\)/.exec(settings.sql);
+      expect(parameter).not.toBeNull();
+      expect(settings.values[Number(parameter![1]) - 1]).toBe('0133');
+    }
+  });
+
+  it('never sets it in a patient-self transaction', async () => {
+    const calls: { sql: string; values: unknown[] }[] = [];
+    const pool = {
+      connect: async () => ({
+        query: async (sql: string, values: unknown[] = []) => { calls.push({ sql, values }); return { rows: [], rowCount: 0 }; },
+        release: () => undefined,
+      }),
+    };
+    const database = Object.create(DatabaseService.prototype) as DatabaseService;
+    Object.assign(database, { pool });
+    await database.withPatientTransaction({ subject: 'synthetic:patient', accountId: 'account', patientId: 'patient',
+      sessionId: 'session', expiresAt: new Date(Date.now() + 30_000).toISOString() }, 'correlation', async () => 'done');
+    expect(calls.some((call) => call.sql.includes('set_config'))).toBe(true);
+    expect(calls.some((call) => call.sql.includes('own_facility_work') || call.values.includes(OWN_FACILITY_WORK)))
+      .toBe(false);
   });
 });

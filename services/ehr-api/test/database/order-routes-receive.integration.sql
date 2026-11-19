@@ -305,6 +305,8 @@ returns void language sql as $f$
     set_config('app.facility_id', facility::text, true),
     set_config('app.correlation_id', 'p4c-suite-' || member || '-' || substr(md5(random()::text), 1, 8), true),
     set_config('app.purpose_of_use', purpose, true),
+    -- 0133 D13: the switch the new lab-api and pharmacy-api images set (own work only).
+    set_config('app.own_facility_work', '0133', true),
     set_config('app.patient_id', '', true);
 $f$;
 create function pg_temp.as_signup_admin(n integer, purpose text default 'direct-care')

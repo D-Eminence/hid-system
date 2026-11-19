@@ -27,7 +27,8 @@
 -- WHAT IT DOES
 -- D1 identity.facility_work_member_allows(kind, patient, facility, action):
 --    true when the session works for this facility's pharmacy ('pharmacy')
---    or laboratory ('lab'): purpose direct-care; the row's facility is the
+--    or laboratory ('lab'): its transaction set app.own_facility_work to
+--    '0133' (D13); purpose direct-care; the row's facility is the
 --    session's; the member holds, at that facility, <kind>.work-item.read
 --    and <kind>.order-route.receive (the permission that already lets the
 --    pharmacist and the lab scientist work on another facility's orders;
@@ -39,9 +40,9 @@
 --    check's). Emergency sessions keep their own rule (break-glass) and do
 --    not use this one. D1 is two halves, which the policies use apart (see
 --    THE COST): identity.facility_work_session_membership(kind), the
---    session's half (the purpose, the session's facility and the two
---    permissions of an active membership there), which answers that
---    membership or null; and identity.facility_work_patient_allows(kind,
+--    session's half (the switch of D13, the purpose, the session's facility
+--    and the two permissions of an active membership there), which answers
+--    that membership or null; and identity.facility_work_patient_allows(kind,
 --    membership, patient, facility, action), the row's half, given that
 --    answer (STRICT, so never called without one): the membership is still
 --    the session's, at the row's facility, active and not on hold, of an
@@ -238,10 +239,22 @@
 --    trigger function to nobody (the functions and the trigger that call
 --    them run them as their owner). Revoked from
 --    PUBLIC. The replaced functions keep their ACLs.
--- D12 No platform control and no new setting (the owner's rule: no new
---    settings unless unavoidable). ehr-api sends when the function exists
---    and answers the send as `pharmacyHandoff`; an older schema answers no
---    pharmacyHandoff and nothing else changes.
+-- D12 No platform control and no new environment setting (the owner's rule:
+--    no new settings unless unavoidable). ehr-api sends when the function
+--    exists and answers the send as `pharmacyHandoff`; an older schema
+--    answers no pharmacyHandoff and nothing else changes.
+-- D13 The switch (owner's Q120 B, 19 Nov): the own-facility access works only
+--    with the new pharmacy-api and lab-api images. The session's half of D1
+--    answers only a session whose transaction set app.own_facility_work to
+--    '0133', which those images do in every staff transaction (always; it is
+--    not a setting anyone configures). Every own-work path goes through that
+--    half (the 44 policies, D2's two among them; D4's cards; D5 and D9
+--    through D1; D10), so a session of today's images, which never sets it,
+--    gets null from it and sees and does exactly what it does on 0001-0127.
+--    A rollback of either image alone therefore leaves that image as it is
+--    today (what the new ehr-api's automatic send means meanwhile is under
+--    "Old services on this schema"). A session that sets it still needs
+--    everything else D1 asks; the switch only narrows.
 --
 -- THE COST. A policy is asked once for every row a statement reads, and
 -- lab-api's and pharmacy-api's work lists read every work item of the
@@ -409,22 +422,27 @@
 -- Section 0 takes no table lock.
 --
 -- Old services on this schema: today's images call none of the new
--- functions. They gain, through the changed policies, the pharmacist's and
--- lab scientist's view of this facility's own work: today's lab-api and
--- pharmacy-api list it (the list reads under row-level security), while a
--- single item, a dispensing and every chain command still ask Identity's
--- consent in today's images, so they answer as before until the new images
--- (which ask D9 first) are deployed. Today's list records as 0124 did, so
--- for a member without a grant its audit is not 0133's: with
--- OWN_WORK_PATIENT_CARD_ENABLED on (D4 now shows that member the card) it
--- writes the per-patient row with basis 'consent'; off (the default) only
--- the collection row. The release migrates before it rolls the images out,
--- and an image rollback leaves this schema in place, so this holds from the
--- migration until the new lab-api and pharmacy-api images serve, and for as
--- long as a rollback of them stands: deploy them with this migration. The
--- withdrawal (D8) does not depend on the images: its trigger marks a sent
--- prescription changed by any ehr-api image. Applied migrations before 0133
--- are immutable.
+-- functions and never set app.own_facility_work, so the own-work policies,
+-- D2 and D4's own-work branch give them nothing (D13): today's lab-api and
+-- pharmacy-api list, read and write what they do on 0001-0127, and audit as
+-- they do there, at the cost THE COST gives for every session (each
+-- own-work policy asks the session's half once per statement, and the
+-- planner, which cannot know the switch, estimates their lists as it does
+-- the new images', JIT step included). Each of them can therefore be
+-- deployed, or rolled back, on its own after this migration. Two changes
+-- do not depend on those images. The withdrawal (D8): its trigger marks a
+-- sent prescription changed by any ehr-api image. The automatic send (D7):
+-- the new ehr-api image makes it whichever pharmacy-api serves, and tells
+-- the prescriber it was sent. While today's pharmacy-api serves (a rollback
+-- of it alone, or a rollout in which the new ehr-api serves first), a
+-- prescription sent that way reaches its pharmacists only through a
+-- consent grant, as any prescription did before 0133; accepting it again
+-- there is refused (the work items' unique key on the prescription); and it
+-- cannot also be sent to an outside pharmacy (ORDER_ROUTE_ORDER_IN_WORK, as
+-- with the new image until Q119 is built). It waits for the new
+-- pharmacy-api, so pharmacy-api goes out with or before ehr-api, and a
+-- rollback of pharmacy-api alone is safe for access but leaves those
+-- prescriptions waiting. Applied migrations before 0133 are immutable.
 --
 -- Undo (by hand only; no release runs it), in one transaction: drop the
 -- trigger prescriptions_own_pharmacy_send_withdrawn first, then
@@ -789,7 +807,9 @@ $$;
 -- The session's half: what the policies decide once per statement. It
 -- answers the session's membership when that membership may work here as
 -- this facility's pharmacy or lab staff, else null; the row's half then
--- takes that answer, so the two halves are tied to the same membership.
+-- takes that answer, so the two halves are tied to the same membership. It
+-- answers only a session that set app.own_facility_work to '0133' (D13): the
+-- new pharmacy-api and lab-api images set it, today's images do not.
 create function identity.facility_work_session_membership(work_kind text)
 returns uuid
 language sql
@@ -798,7 +818,8 @@ security definer
 set search_path = pg_catalog, pg_temp
 as $$
   select platform.current_membership_id()
-   where coalesce(work_kind in ('pharmacy', 'lab'), false)
+   where coalesce(current_setting('app.own_facility_work', true) = '0133', false)
+     and coalesce(work_kind in ('pharmacy', 'lab'), false)
      and platform.current_facility_id() is not null
      and platform.current_purpose_of_use() = 'direct-care'
      and coalesce(auth.membership_has_permission(platform.current_actor_subject(), platform.current_membership_id(),
@@ -817,8 +838,9 @@ $$;
 -- session's half ran (a cursor, or set_config in the same statement) sees
 -- nothing more. (The membership's own checks below, at the row's facility
 -- and of the session's actor, and the deny test joined on the membership
--- given, would refuse a switched row already; reading the session's
--- membership and facility again keeps the binding explicit.) The rest of
+-- given, would refuse a row of another membership or facility already;
+-- reading the session's membership and facility again keeps the binding
+-- explicit.) The rest of
 -- the member's test (the staff record, the facility and organization, both
 -- permissions) the session's half asked once for the statement; asking it
 -- on every row as well doubled the lab scientist's list (THE COST). Called
@@ -1656,9 +1678,9 @@ end
 $$;
 
 comment on function identity.facility_work_member_allows(text, uuid, uuid, text) is
-  '0133 D1: the session works for this facility''s pharmacy or laboratory (direct care, <kind>.work-item.read and <kind>.order-route.receive here), the patient is active and no deny directive covers the member: identity.facility_work_patient_allows given identity.facility_work_session_membership. Called by D5''s helper and D9, which decide one item; no runtime role executes it.';
+  '0133 D1: the session works for this facility''s pharmacy or laboratory (it set app.own_facility_work to ''0133'' (D13), direct care, <kind>.work-item.read and <kind>.order-route.receive here), the patient is active and no deny directive covers the member: identity.facility_work_patient_allows given identity.facility_work_session_membership. Called by D5''s helper and D9, which decide one item; no runtime role executes it.';
 comment on function identity.facility_work_session_membership(text) is
-  '0133 D1, the session''s half: the session''s membership when the session is in direct care at its facility and that active membership holds <kind>.work-item.read and <kind>.order-route.receive there; else null. The own-work policies ask it once per statement, as (select ...), and pass the answer to the row''s half; the cards and the list''s bases once per call. It allows nothing alone.';
+  '0133 D1, the session''s half: the session''s membership when the session set app.own_facility_work to ''0133'' (D13: the new pharmacy-api and lab-api images do), is in direct care at its facility and that active membership holds <kind>.work-item.read and <kind>.order-route.receive there; else null. The own-work policies ask it once per statement, as (select ...), and pass the answer to the row''s half; the cards and the list''s bases once per call. It allows nothing alone.';
 comment on function identity.facility_work_patient_allows(text, uuid, uuid, uuid, text) is
   '0133 D1, the row''s half, given the session''s half''s answer (STRICT): false unless that membership is still the session''s, at the row''s facility, active and not on hold, of an active account whose subject is the session''s actor; then the patient is active and no deny directive covers that member for the action. Read again on every row, so a statement that changes its settings after the session''s half ran sees nothing more. It does not ask the member''s roles, staff record, facility or organization: the session''s half asks those, once a statement (see 0133 D11 for what a direct call therefore answers).';
 comment on function lab.work_item_patient_cards(uuid[]) is
@@ -1702,7 +1724,7 @@ begin
   with expected(schema_name, proc_name, argument_types, digest, volatility, language_name, config) as (values
          ('identity', 'facility_work_member_allows', 'text, uuid, uuid, text', 'cdf330e36a9fcc347e8e5c06fe0745c2', 's',
            'sql', 'search_path=pg_catalog, pg_temp'),
-         ('identity', 'facility_work_session_membership', 'text', 'd785bffb1c16b4202ee5c5d146bf0b09', 's', 'sql',
+         ('identity', 'facility_work_session_membership', 'text', '36de1f00307dd5602972253b23f22f9f', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),
          ('identity', 'facility_work_patient_allows', 'text, uuid, uuid, uuid, text', 'd195ee7bae41d79fb34eeed590ef6d20', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),

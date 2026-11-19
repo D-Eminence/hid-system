@@ -260,7 +260,10 @@ language sql as $f$
          set_config('app.facility_id', 'e1140001-0000-4000-8000-00000000000' || site, true),
          set_config('app.correlation_id', 'details-suite-' || substr(md5(random()::text), 1, 12), true),
          set_config('app.membership_id', 'e1140004-0000-4000-8000-00000000000' || member, true),
-         set_config('app.purpose_of_use', purpose, true);
+         set_config('app.purpose_of_use', purpose, true),
+         -- 0133 D13: the switch the new pharmacy-api image sets (the EHR API does not; for its
+         -- prescriber it changes nothing, the session's half asking for the pharmacy permissions).
+         set_config('app.own_facility_work', '0133', true);
 $f$;
 -- The EHR API's INSERT with the seven new columns (prescriptions.service.ts
 -- create, PRESCRIPTION_DISPENSING_DETAILS_ENABLED on), for prescriber n at
