@@ -11,6 +11,8 @@ import { HealthController } from './health.controller';
 import { ServiceClientsModule } from './integrations/service-clients.module';
 import { OfflineModule } from './offline/offline.module';
 import { StorageModule } from './storage/storage.module';
+// EHR-C4: the chart summary.
+import { ChartSummaryModule } from './ehr/chart-summary/chart-summary.module';
 
 @Module({
   imports: [
@@ -21,6 +23,8 @@ import { StorageModule } from './storage/storage.module';
     EhrModule,
     ServiceClientsModule,
     OfflineModule,
+    // EHR-C4: the chart summary.
+    ChartSummaryModule,
   ],
   controllers: [HealthController],
   providers: [

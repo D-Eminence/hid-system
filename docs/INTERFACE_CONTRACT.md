@@ -7007,3 +7007,122 @@ Find a patient shows the owner's words, "No patient has this Health ID."
 `PatientsWorkspace.tsx`), only on `PATIENT_NOT_FOUND`. Every other `404` and
 every `403` stays a refused lookup, as today. A limited account gets today's
 `404`, never a `429`.
+
+## EHR-C4: chart summary
+
+Akos P1-1 and N-11 (wave 1, lane C). ehr-api only; no migration, no new
+permission, no new grant, no new setting. One call returns the sections a
+doctor's chart opens with. Each section follows the rules of the route that
+already reads it; nothing here lets anyone read more than those routes allow.
+
+### `GET /ehr/patients/:patientId/chart-summary`
+
+`patientId` is the patient's UUID (never a Health ID). `Cache-Control:
+no-store`. The caller needs at least one of `ehr.encounter.read`,
+`ehr.diagnosis.read`, `ehr.prescription.read`, `ehr.lab-request.read`,
+`ehr.vital.read` or `ehr.note.read`, or the answer is `403
+PERMISSION_DENIED`. `X-Purpose-Of-Use` is `direct-care` or `emergency`; any
+other value is `400 PURPOSE_OF_USE_REQUIRED`.
+
+Each section is included only when the caller holds the permission of the
+route that reads it today:
+
+| Section | Permission | What it holds | At most |
+| --- | --- | --- | --- |
+| `demographics` | `identity.patient.read` | `patientId`, `fullName`, `firstName`, `lastName`, `dateOfBirth`, `gender` (the patient card Identity already gives the EHR; no Health ID, no NIN) | 1 |
+| `problems` | `ehr.diagnosis.read` | diagnoses that are `active`, `recurrence` or `relapse`, not `refuted` or `entered_in_error`, newest first | 50 |
+| `medications` | `ehr.prescription.read` | prescriptions `active` or `on_hold`, not ended before today (Lagos), newest first, each with `ownProgress` (ORD-3) | 50 |
+| `allergies` | `ehr.note.read` | active recorded allergies (any facility, most serious first, `recordedHere`) and the patient's own allergy text, as the emergency read answers them | 200 |
+| `latestVitals` | `ehr.vital.read` | exactly the EHR-C3 answer (`facilityId`, `measures`) | 7 measures |
+| `recentVisits` | `ehr.encounter.read` | this facility's visits, newest first | 10 |
+| `openLabRequests` | `ehr.lab-request.read` | lab requests `active` or `on_hold`, newest first, each with `ownProgress` (ORD-3) | 50 |
+| `recentResults` | `lab.result.released.read` | the newest released results Lab gives the EHR (by release time) | 10 |
+
+Lists answer `{ "items": [...], "more": true | false }`; `more` says there
+were more than the limit. `recentResults` also has `complete` (false when Lab
+had more pages than the summary reads: at most 5 pages of 200).
+
+Each section reads the same records as its own route: this facility's
+visits, diagnoses, prescriptions, lab requests and vitals; the patient's
+allergies from any facility, as the allergy list does; and the results Lab
+gives the EHR, as the staff record does. Anything entered in error is left
+out: a visit entered in error, and every diagnosis,
+prescription, lab request and vital recorded in it; a diagnosis or allergy
+entered in error; a prescription or lab request entered in error, cancelled
+or completed.
+
+Answer `200`:
+
+```json
+{
+  "patientId": "<uuid>",
+  "facilityId": "<uuid>",
+  "purposeOfUse": "direct-care",
+  "limits": { "recentVisits": 10, "problems": 50, "medications": 50, "openLabRequests": 50, "allergies": 200, "recentResults": 10 },
+  "sections": {
+    "demographics": { "patientId": "<uuid>", "fullName": "...", "firstName": "...", "lastName": "...", "dateOfBirth": "1990-01-01", "gender": "female" },
+    "problems": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "codeSystem": "ICD-10", "code": "B50.9", "display": "...", "clinicalStatus": "active", "verificationStatus": "confirmed", "onsetAt": null, "notes": null, "createdAt": "..." }], "more": false },
+    "medications": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "medicationDisplay": "...", "medicationCodeSystem": null, "medicationCode": null, "doseQuantity": "1", "doseUnit": "tablet", "routeCode": "oral", "frequency": "...", "instructions": "...", "startsOn": "2026-11-18", "endsOn": null, "status": "active", "createdAt": "...", "ownProgress": { "status": "dispensed", "receivedAt": "...", "dispensedAt": "...", "reversedAt": null } }], "more": false },
+    "allergies": { "recorded": [{ "source": "recorded", "id": "<uuid>", "substance": "...", "reaction": "...", "severity": "severe", "recordedHere": true, "recordedOn": "..." }], "patientReported": { "source": "patient_reported", "allergies": null, "updatedAt": null } },
+    "latestVitals": { "facilityId": "<uuid>", "measures": { "pulseBpm": { "value": 76, "recordedAt": "...", "vitalId": "<uuid>", "encounterId": "<uuid>", "corrected": false } } },
+    "recentVisits": { "items": [{ "id": "<uuid>", "encounterNumber": "...", "encounterType": "ambulatory", "status": "in_progress", "startedAt": "...", "endedAt": null, "chiefComplaint": "...", "importedPaperRecords": false }], "more": false },
+    "openLabRequests": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "testCodeSystem": "HID-LAB", "testCode": "MP-SMEAR", "testDisplay": "...", "priority": "routine", "status": "active", "specimenTypeCode": null, "clinicalInformation": null, "createdAt": "...", "ownProgress": { "status": "received", "receivedAt": "...", "collectedAt": null, "lastResultAt": null } }], "more": false },
+    "recentResults": { "items": [{ "id": "<uuid>", "version": "...", "title": "...", "recordedAt": "...", "effectiveAt": "...", "fields": {} }], "more": false, "complete": true }
+  },
+  "leftOut": [
+    { "section": "recentResults", "reason": "unavailable", "message": "This part of the chart could not be loaded just now. Try again in a moment." }
+  ]
+}
+```
+
+### Sections left out
+
+A section that is not in `sections` is listed in `leftOut` with a reason and
+a plain sentence to show:
+
+| `reason` | When | `message` |
+| --- | --- | --- |
+| `permission` | the caller does not hold the section's permission, or the other service (Identity or Lab) refused (`403`) | "You do not have permission to see this part of the chart." |
+| `permission` | an emergency read (below), for every section it does not show | "Emergency access shows allergies and past visits only. This part of the chart is not shown." |
+| `unavailable` | Identity or Lab could not be reached, timed out or answered something unexpected | "This part of the chart could not be loaded just now. Try again in a moment." |
+
+When the pharmacy or the laboratory cannot tell the progress of an item, the
+section is still answered, each such item carries `ownProgress: { "status":
+"unknown" }` (as on the per-visit lists), and `leftOut` lists
+`medications.ownProgress` ("Pharmacy progress could not be loaded just now.
+The medicines are shown without it.") or `openLabRequests.ownProgress`
+("Laboratory progress could not be loaded just now. The lab requests are
+shown without it."), reason `unavailable`. A laboratory that is down never
+fails the answer.
+
+### Consent and audit
+
+One consent check for the whole call, the same as every EHR read: Identity
+decides `read_records` for this patient, member, facility and purpose, and
+the database applies its own row checks as well. Without consent the answer
+is `403 CONSENT_REQUIRED`, audited as `ehr.chart-summary.read` with outcome
+`denied`, and nothing is read. A read writes one EHR audit row,
+`ehr.chart-summary.read` (resource `chart-summary`, the patient's UUID), with
+the sections asked for and a count per EHR section; never a value, a name, a
+Health ID or a NIN. The patient card, the results and the progress are read
+after that, from Identity, Lab and the pharmacy, which check access and audit
+their own reads as they do for the per-section routes.
+
+### Emergency (break-glass)
+
+With `X-Purpose-Of-Use: emergency`, the summary shows exactly what the
+emergency read (`GET /ehr/patients/:patientId/emergency-records`) shows
+today, under the same rules: the caller needs both `ehr.encounter.read` and
+`ehr.note.read` (else `403 PERMISSION_DENIED`), and an active break-glass
+grant (else `403 CONSENT_REQUIRED`, audited as denied). It answers
+`allergies` and `recentVisits` (completed visits at this facility, with the
+emergency read's columns: no chief complaint); every other section is in
+`leftOut` with reason `permission`. The audit row is the same action with
+purpose `emergency`.
+
+### Screen change needed (Akos frontend branch)
+
+"Open chart" calls this route once per patient and shows each section in
+`sections`. For each entry in `leftOut`, show its `message` where that
+section would be. Re-read after a drawer closes, as the per-section lists
+are.
