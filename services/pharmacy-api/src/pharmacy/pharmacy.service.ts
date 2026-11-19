@@ -255,7 +255,11 @@ export class PharmacyService {
       if (existing) {
         if (existing.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
           'Prescription acceptance conflicts with existing Pharmacy work');
-        return this.projectWorkItem(existing);
+        // 0133: a replay answers an own item as the single-item read does, withdrawn (changed, or
+        // sent elsewhere: D14) when it was (no flag when it cannot be read).
+        const states = existing.order_route_id ? undefined
+          : await this.ownWork.states(client, [existing.id], context.correlationId, 'flag');
+        return this.projectWorkItem(existing, undefined, undefined, undefined, states?.get(existing.id));
       }
       const inserted = await client.query<WorkItemRow>(`insert into pharmacy.work_items (
         id,patient_id,facility_id,ordering_facility_id,source_ehr_prescription_id,

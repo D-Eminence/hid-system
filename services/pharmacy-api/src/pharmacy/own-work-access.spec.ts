@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import type { DataAccessContext } from '../common/request-context';
+import { requestDigest } from '../common/idempotency';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import { basisDetails, PharmacyOrderRouteAccess } from './order-route-access';
@@ -423,6 +424,43 @@ describe('own pharmacy work (0133)', () => {
     expect(statements.some((sql) => ACCESS.test(sql) || STATES.test(sql))).toBe(false);
     expect(identity.authorize).toHaveBeenCalledTimes(3);
     expect(audited()).toEqual([]);
+  });
+
+  it('a replayed acceptance answers an own item as the single-item read does: withdrawn and why (D14)', async () => {
+    const input = { patientId: ada, orderingFacilityId: facilityId,
+      sourceEhrPrescriptionId: row(3, ada).source_ehr_prescription_id, sourceEhrPrescriptionVersion: 2,
+      sourceEncounterId: '70000000-0000-4000-8000-000000000001', sourceStatus: 'active',
+      medicationDisplay: 'Amoxicillin 500 mg capsule', frequency: 'Every 8 hours', instructions: 'After food',
+      prescribedBy: accountId, prescribedAt: '2026-11-18T09:00:00Z', acceptanceReason: 'Accepted' };
+    const stored = { ...row(3, ada), request_sha256: requestDigest('pharmacy.work-item.accept-ehr-prescription', input) };
+    const replay = async (reasons: Record<string, string | null>, existing: typeof stored) => {
+      const { service, statements } = harness({ reasons });
+      const database = (service as unknown as { database: DatabaseService }).database;
+      const original = database.withTransaction.bind(database);
+      database.withTransaction = (async (c: DataAccessContext, fn: (client: PoolClient) => Promise<unknown>) =>
+        original(c, (pool: PoolClient) => fn({ query: async (sql: string, values?: unknown[]) => {
+          if (/or w\.source_ehr_prescription_id=\$4/.test(sql)) {
+            statements.push(sql);
+            return { rows: [existing] };
+          }
+          return (pool.query as unknown as (s: string, v?: unknown[]) => Promise<unknown>)(sql, values);
+        } } as unknown as PoolClient))) as typeof database.withTransaction;
+      const answer = await service.acceptPrescription(pharmacist, input as never, 'own-key-replay');
+      return { answer: answer as Record<string, unknown>, statements };
+    };
+    const sentElsewhere = await replay({ [id(3)]: 'sent_elsewhere' }, stored);
+    expect(sentElsewhere.answer).toMatchObject({ id: id(3), withdrawn: true, withdrawnReason: 'sent_elsewhere' });
+    expect(sentElsewhere.statements.some((sql) => /insert into pharmacy\.work_items/.test(sql))).toBe(false);
+    expect((await replay({ [id(3)]: 'changed' }, stored)).answer)
+      .toMatchObject({ withdrawn: true, withdrawnReason: 'changed' });
+    const live = (await replay({}, stored)).answer;
+    expect(live).not.toHaveProperty('withdrawn');
+    expect(live).not.toHaveProperty('withdrawnReason');
+    // A route-backed item is never an own item: its states are not asked.
+    const routed = await replay({ [id(3)]: 'sent_elsewhere' },
+      { ...stored, order_route_id: '80000000-0000-4000-8000-000000000001' } as never);
+    expect(routed.answer).not.toHaveProperty('withdrawn');
+    expect(routed.statements.some((sql) => STATES.test(sql))).toBe(false);
   });
 
   it('off, asks nothing new and keeps Identity\'s consent', async () => {
