@@ -387,16 +387,19 @@
 --    route-backed item is inserted only while no other claim of the
 --    prescription is live. A writer of an own item that runs READ
 --    COMMITTED is not seen by a SERIALIZABLE send that took its snapshot
---    first, which then commits its route without releasing that item, and
---    without answering ORDER_ROUTE_ORDER_IN_WORK if that item was dispensed
---    meanwhile (pharmacy-api's dispensing runs READ COMMITTED). ehr-api's
+--    first, which then commits its route without releasing that item.
+--    (pharmacy-api's dispensing runs SERIALIZABLE and writes the claim the
+--    send releases, so a send that took its snapshot first fails on that
+--    claim with 40001 and its retry answers ORDER_ROUTE_ORDER_IN_WORK.) ehr-api's
 --    "Send to pharmacy" and its create as active (D7's callers that lock the
 --    prescription without changing it) are such writers: they run READ
 --    COMMITTED because 0117's allergy check must read the allergies after its
---    lock (SERIALIZABLE would fix the snapshot before the lock and miss an
---    allergy recorded during the wait). So a "Send to pharmacy" and a send to
---    an outside pharmacy racing within milliseconds can leave the route sent
---    next to a live own item. The live claim index then makes the outside
+--    lock (SERIALIZABLE would fix the snapshot at the transaction's first
+--    statement, before the lock, and miss an allergy recorded after it, the
+--    wait included). So a "Send to pharmacy" and a send to an outside
+--    pharmacy that overlap (the outside send waits for the patient's allergy
+--    lock the other holds, then reads from its earlier snapshot) can leave
+--    the route sent next to a live own item. The live claim index then makes the outside
 --    pharmacy's acceptance end in R10 (the route withdrawn, order_in_work):
 --    the prescription is never dispensed twice and stays with this hospital's
 --    pharmacy. Activating a draft writes the prescription row, so a send that
@@ -657,12 +660,11 @@
 -- items and 109 ms per 20,000 measured for the list alone). In the dry run
 -- of several pending files
 -- they last until the dry run ends, while the later files run: a later file
--- that waits for its own locks (up to the runner's 5 s lock_timeout) keeps
--- these, and the earlier files', held meanwhile (in Release A's order,
--- 0136's plain LOCK TABLE of auth.permissions, auth.role_permissions and
--- identity.access_requests waits that way while an access request is being
--- written); the release's combined declaration must state that hold, and
--- the dry run belongs in a quiet window. The replaced functions' catalog
+-- that waited for its own locks (up to the runner's 5 s lock_timeout) would
+-- keep these, and the earlier files', held meanwhile (0136 takes its locks
+-- NOWAIT, with one attempt inside a dry run, as 0133 does, so it does not
+-- wait that way); the release's combined declaration must state any such
+-- hold, and the dry run belongs in a quiet window. The replaced functions' catalog
 -- rows are locked too; the new tables take no lock on existing data.
 -- Section 0 takes no table lock.
 --
