@@ -172,9 +172,11 @@ export class OrderRoutesService {
     // in this image's sessions (app.own_facility_work, DatabaseService) a prescription this
     // hospital's pharmacy holds can still be sent, until that pharmacy dispenses it; the send
     // withdraws its item here in the same transaction ("sent elsewhere"). After a dispensing,
-    // reversed or not, it answers ORDER_ROUTE_ORDER_IN_WORK. "Send to pharmacy" and a replayed
-    // create as active, which ask D7 about the same prescription, run SERIALIZABLE too, so
-    // PostgreSQL pairs them with this send. The database decides; nothing here changes.
+    // reversed or not, it answers ORDER_ROUTE_ORDER_IN_WORK. "Send to pharmacy" and a create as
+    // active stay READ COMMITTED (0117's allergy check reads after its lock), so a send that
+    // overlaps one of them may leave its route next to the item it creates; the outside
+    // pharmacy's acceptance then ends in R10 (order_in_work). The database decides; nothing
+    // here changes.
     }, undefined, { isolationLevel: 'SERIALIZABLE' });
   }
 

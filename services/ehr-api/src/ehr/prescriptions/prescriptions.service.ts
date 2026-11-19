@@ -153,12 +153,8 @@ export class PrescriptionsService {
    * again, which sends once: the hand-off as it stands now (a pending send is
    * tried again), recorded in the replay's audit row as on the first run.
    *
-   * A create as active runs SERIALIZABLE, because its replay asks the send
-   * for a prescription that already exists and may meet an order-route send
-   * of it (0133 D14, see sendToOwnPharmacy). Whether it is a replay is known
-   * only inside the transaction, so every create as active runs so.
-   * DatabaseService runs a transaction PostgreSQL cancels (40001, 40P01)
-   * again, and the retry replays the committed winner. A draft never sends.
+   * It runs READ COMMITTED, as "Send to pharmacy" does (see there): 0117's
+   * allergy check must read after its lock, never from an earlier snapshot.
    */
   create(context: DataAccessContext, patientId: string, encounterId: string, input: CreatePrescriptionInput, key: string) {
     if ((input.doseQuantity === undefined) !== (input.doseUnit === undefined)) {
@@ -172,7 +168,6 @@ export class PrescriptionsService {
       { action: 'ehr.prescription.create', resourceType: 'prescription' },
       (client) => this.createOrReplay(client, context, patientId, encounterId, input, key, operation, digest),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
-      input.status === OrderStatus.Active ? { isolationLevel: 'SERIALIZABLE' } : {},
     );
   }
 
@@ -428,13 +423,18 @@ export class PrescriptionsService {
    * whose item here was sent to another facility's pharmacy (0133 D14) never
    * comes back: once that route ends, the send answers the `routed` row.
    *
-   * SERIALIZABLE (0133 D14): the order-route send runs SERIALIZABLE and
-   * withdraws this pharmacy's undispensed item. This send locks the
-   * prescription but does not change it, so in READ COMMITTED a route send
-   * that overlaps it would not see the item it creates, and would leave a
-   * live route next to a dispensable item here. Run SERIALIZABLE, one of the
-   * two is cancelled (40001) and DatabaseService runs it again; the retry
-   * sees the winner. D7 passes 40001 and 40P01 on (OwnPharmacySend).
+   * READ COMMITTED, on purpose (as a create as active): 0117's allergy
+   * check takes the patient's allergy lock and then reads the allergies, and
+   * only READ COMMITTED reads them after the lock. A SERIALIZABLE transaction
+   * reads from the snapshot of its first statement, taken before the lock,
+   * so an allergy recorded while it waited for the lock would not be seen.
+   * The cost (0133 D14): this send locks the prescription but does not
+   * change it, so a send to an outside pharmacy (SERIALIZABLE) that overlaps
+   * it within milliseconds may not see the item it creates and may leave its
+   * route sent next to that item. The database's live-claim index then ends
+   * the outside pharmacy's acceptance in R10 (the route is withdrawn,
+   * order_in_work): the prescription is never dispensed twice and stays with
+   * this hospital's pharmacy. D7 passes a 40001 or 40P01 on (OwnPharmacySend).
    */
   sendToOwnPharmacy(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string,
     input: SendPrescriptionToOwnPharmacyDto) {
@@ -471,7 +471,6 @@ export class PrescriptionsService {
           details: { prescriptionVersion: Number(current.rowVersion), ...allergyOverride, ...handoffDetails(handoff) } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
-      { isolationLevel: 'SERIALIZABLE' },
     );
   }
 

@@ -102,9 +102,9 @@ export function pharmacyHandoff(outcome: string | undefined): PharmacyHandoff {
  * for the membership) answers `not_allowed`, since trying again cannot help;
  * any other refusal answers "could not be reached".
  * Each refusal is logged with its SQLSTATE only. A serialization failure or
- * deadlock is passed on, so the whole transaction is run again (the callers
- * that may meet an order-route send of the same prescription, "Send to
- * pharmacy" and a replayed create as active, run SERIALIZABLE). The module
+ * deadlock is passed on, never undone by the savepoint alone: the whole
+ * transaction fails (DatabaseService runs a SERIALIZABLE one again; this
+ * file's callers run READ COMMITTED, see "Send to pharmacy"). The module
  * provides it on; the tests' default is off (no statement, no hand-off).
  */
 export class OwnPharmacySend {

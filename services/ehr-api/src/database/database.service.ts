@@ -78,8 +78,8 @@ export class DatabaseService implements OnApplicationShutdown {
    * Runs the operation in one transaction with the request context. A SERIALIZABLE transaction
    * that PostgreSQL cancels to keep concurrent ones serializable (40001, 40P01) is run again from
    * the start, up to SERIALIZABLE_ATTEMPTS in all; any other transaction or error is not retried.
-   * The operation must therefore do nothing outside the database (its SERIALIZABLE callers, the
-   * order route send, "Send to pharmacy" and a prescription created as active, do not).
+   * The operation must therefore do nothing outside the database (the order route send, its one
+   * SERIALIZABLE caller, does not).
    */
   async withTransaction<Result>(
     context: DataAccessContext,
