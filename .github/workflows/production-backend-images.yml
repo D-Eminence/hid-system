@@ -64,6 +64,20 @@ jobs:
         with:
           node-version: '22.23.2'
           package-manager-cache: false
+      - name: Install checksum-verified official Syft and Grype binaries
+        run: node scripts/install-production-scanners.mjs
+      # The vulnerability database download (about two minutes) overlaps the
+      # tests and the image build. Its exit code is written to a file that the
+      # scan waits for, and the scan refuses anything other than 0.
+      - name: Start the Grype vulnerability database download in the background
+        run: |
+          db_job="$RUNNER_TEMP/grype-db-update"
+          mkdir "$db_job"
+          grype_bin="$(command -v grype)"
+          nohup /usr/bin/bash -c 'if "$1" db update; then code=0; else code=$?; fi
+            printf "%s\n" "$code" > "$2/exit-code.partial"
+            mv "$2/exit-code.partial" "$2/exit-code"' \
+            grype-db-update "$grype_bin" "$db_job" < /dev/null > "$db_job/update.log" 2>&1 &
       - name: Verify production workload token agent on Linux
         if: matrix.component == 'identity-api'
         run: |
@@ -103,16 +117,41 @@ jobs:
         run: |
           test "$(docker image inspect "hid-ci/gateway:$GITHUB_SHA" --format '{{.Config.User}}')" = '101'
           docker run --rm --network none "hid-ci/gateway:$GITHUB_SHA" nginx -t
-      - name: Install checksum-verified official Syft and Grype binaries
-        run: node scripts/install-production-scanners.mjs
       - name: Generate final image SPDX SBOM
         run: syft "docker:hid-ci/$COMPONENT:$GITHUB_SHA" --output "spdx-json=$BUILD_EVIDENCE_DIR/sbom.spdx.json"
       - id: distro
         name: Read OS distribution from the exact image
         run: node scripts/production-backend-build.mjs distro "$COMPONENT"
+      - name: Require the Grype database download to have succeeded and record its status
+        env:
+          GRYPE_DB_AUTO_UPDATE: 'false'
+          GRYPE_DB_VALIDATE_AGE: 'true'
+        run: |
+          db_job="$RUNNER_TEMP/grype-db-update"
+          for _ in $(seq 600); do
+            test -f "$db_job/exit-code" && break
+            sleep 1
+          done
+          cat "$db_job/update.log"
+          if ! test -f "$db_job/exit-code"; then
+            echo '::error::The Grype database download did not finish within 10 minutes'
+            exit 1
+          fi
+          code="$(cat "$db_job/exit-code")"
+          if [ "$code" != 0 ]; then
+            echo "::error::The Grype database download failed with exit code $code"
+            exit 1
+          fi
+          # Fails unless the database is present, valid and within grype's default maximum age.
+          grype db status --output json > "$BUILD_EVIDENCE_DIR/grype-db-status.json"
+          cat "$BUILD_EVIDENCE_DIR/grype-db-status.json"
       - name: Scan exact runtime and verify production-specific applicability
         env:
           IMAGE_DISTRO: ${{ steps.distro.outputs.distro }}
+          # Scan with exactly the database recorded above; grype still refuses
+          # one older than its default maximum age.
+          GRYPE_DB_AUTO_UPDATE: 'false'
+          GRYPE_DB_VALIDATE_AGE: 'true'
         run: |
           set +e
           grype "sbom:$BUILD_EVIDENCE_DIR/sbom.spdx.json" --distro "$IMAGE_DISTRO" --output json --fail-on high > "$BUILD_EVIDENCE_DIR/grype.raw.json"
@@ -143,6 +182,7 @@ jobs:
             build-evidence/${{ matrix.component }}/runtime-assessment.json
             build-evidence/${{ matrix.component }}/runtime.vex.json
             build-evidence/${{ matrix.component }}/native-inventory.json
+            build-evidence/${{ matrix.component }}/grype-db-status.json
           retention-days: 7
           if-no-files-found: warn
       - name: Bind image archive to source, scan and SBOM

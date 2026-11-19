@@ -209,3 +209,25 @@ test('the release candidate step admits the gateway scan only with the committed
     assert.equal(validatePublication(dir,repoRoot).component,'gateway');
   } finally { Date.now=realNow; }
 });
+
+// The Grype database downloads in the background while tests and the image
+// build run. The scan must still wait for it, refuse any exit code but 0, keep
+// grype's default database age check and record the database status.
+test('the background Grype database download is waited for, required to succeed and recorded before the scan',()=>{
+  const text=readFileSync(new URL('../.github/workflows/production-backend-images.yml',import.meta.url),'utf8');
+  const at=s=>{const i=text.indexOf(s);assert.ok(i>=0,s);assert.equal(text.indexOf(s,i+1),-1,`${s} appears once`);return i;};
+  const install=at('run: node scripts/install-production-scanners.mjs');
+  const start=at('- name: Start the Grype vulnerability database download in the background');
+  const tests=at('- name: Locked service tests and type checks');
+  const require_=at('- name: Require the Grype database download to have succeeded and record its status');
+  const scan=at('- name: Scan exact runtime and verify production-specific applicability');
+  assert.ok(install<start&&start<tests&&tests<require_&&require_<scan);
+  const startStep=text.slice(start,tests), requireStep=text.slice(require_,scan);
+  assert.ok(startStep.includes('if "$1" db update; then code=0; else code=$?; fi'));
+  assert.ok(startStep.includes('mv "$2/exit-code.partial" "$2/exit-code"'));
+  assert.ok(requireStep.includes('if [ "$code" != 0 ]; then'));
+  assert.ok(requireStep.includes("GRYPE_DB_VALIDATE_AGE: 'true'"));
+  assert.ok(requireStep.includes('grype db status --output json > "$BUILD_EVIDENCE_DIR/grype-db-status.json"'));
+  assert.ok(text.slice(scan).includes("GRYPE_DB_VALIDATE_AGE: 'true'"));
+  assert.ok(!/MAX_ALLOWED_BUILT_AGE|max-allowed-built-age|VALIDATE_AGE: '?false|validate-age/i.test(text));
+});
