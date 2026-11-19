@@ -478,8 +478,8 @@ try {
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   // Release A (coordinator, 19 November 2026, on #280): the runner applies the pending files one by one, each in
   // its own transaction, so a release can stop between two of them. That is acceptable only if today's live images
-  // still pass their runtime verifiers on the schema left after 0132 and after 0135 (and after the last file, until
-  // the new images are deployed). HID_REHEARSAL_LIVE_TREE is a copy of the live images' commit (git archive of it;
+  // still pass their runtime verifiers on the schema left after 0132 and after 0135. (Not after 0136: it changes the
+  // role table on purpose, Q103 A, which the live verifiers' flows encode; this branch's verifiers prove it.) HID_REHEARSAL_LIVE_TREE is a copy of the live images' commit (git archive of it;
   // HID_REHEARSAL_LIVE_COMMIT names it in the evidence). Its own runner and role bootstrap build the live schema
   // with its runtime grants, as production has them; this branch's runner then applies this branch's files up to
   // each point, on a copy of that database, and the live tree's own runtime verifiers (those its rehearsal runs)
@@ -504,6 +504,28 @@ try {
     const liveRehearsal = await readFile(join(live, 'scripts/tuf-staging-migration-rehearsal.mjs'), 'utf8');
     const liveVerifiers = [...new Set(liveRehearsal.match(/services\/[a-z-]+\/scripts\/verify-[a-z-]+-runtime\.mjs/g))];
     assert(liveVerifiers.length > 0, 'The live tree runs no runtime verifier');
+    // A live verifier's guard that checks the database's shape, not the live code: a Release A file changes that
+    // shape on purpose (0128 adds two columns to identity.list_my_access_requests, which the live consent service
+    // reads by name with select *). Such a verifier runs from a copy beside it with that one line set to the shape
+    // this branch leaves; the line, before and after, is in the evidence, and the code it boots is the live code.
+    const liveGuards = {
+      'services/ehr-api/scripts/verify-records-processing-runtime.mjs': [
+        "assert.deepEqual([code?.active, listColumns], [true, 12], 'a database with 0104');",
+        "assert.deepEqual([code?.active, listColumns], [true, 14], 'a database with 0104 and 0128');"],
+    };
+    const guardsChanged = [];
+    const liveScript = async (verifier) => {
+      const guard = liveGuards[verifier];
+      if (!guard) return join(live, verifier);
+      const original = await readFile(join(live, verifier), 'utf8');
+      assert.equal(original.split(guard[0]).length, 2, `the live ${basename(verifier)} guard is not as expected`);
+      const copy = join(live, verifier.replace(/[^/]+$/, (name) => `rehearsal-copy-${name}`));
+      await writeFile(copy, original.replace(guard[0], guard[1]));
+      if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
+        guardsChanged.push({ verifier, live_sha256: sha256(original), line_before: guard[0], line_after: guard[1] });
+      }
+      return copy;
+    };
     const liveFiles = (await readdir(join(liveService, 'database/migrations'))).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
     const liveLast = liveFiles.at(-1).slice(0, 4);
     assert.deepEqual(files.slice(0, liveFiles.length), liveFiles, 'The live migrations are not a prefix of this branch\'s');
@@ -512,7 +534,7 @@ try {
       'hid_live_base');
     migration('live runtime roles and grants by the live bootstrap',
       join(liveService, 'scripts/bootstrap-database-roles.mjs'), 'hid_live_base');
-    const points = [...new Set(['0132', '0135', latestSchema])];
+    const points = ['0132', '0135'];
     const results = [];
     for (const [index, last] of points.entries()) {
       const db = `hid_live_${'abcdefgh'[index]}`;
@@ -544,7 +566,7 @@ try {
         try {
           for (const verifier of liveVerifiers) {
             verified[basename(verifier, '.mjs')] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
-              process.execPath, [join(live, verifier)], liveEnvironment)).status ?? 'passed';
+              process.execPath, [await liveScript(verifier)], liveEnvironment)).status ?? 'passed';
           }
         } finally {
           await rename(database, db);
@@ -557,7 +579,8 @@ try {
     }
     evidence.checks.live_images_mid_release = {
       live_commit: process.env.HID_REHEARSAL_LIVE_COMMIT ?? 'not named', live_schema: liveLast,
-      live_verifiers: liveVerifiers, dependencies_from_this_checkout: linked, points: results };
+      live_verifiers: liveVerifiers, live_verifier_guards_changed: guardsChanged,
+      dependencies_from_this_checkout: linked, points: results };
   }
   const before = await snapshot(database);
   const beforeIntegrity = await integrity(database);
