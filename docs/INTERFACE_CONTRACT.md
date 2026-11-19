@@ -6942,12 +6942,15 @@ hold, cancelling it or entering it in error marks the send withdrawn, and so
 does editing it while it stays active (frequency, instructions, end date) or
 resuming it: the pharmacy item keeps the version that was sent, which 0101 no
 longer dispenses, and "Send to pharmacy" then answers the "earlier version"
-row above, never "already has". Completing a prescription marks nothing.
-Whether the pharmacy item should follow the new version instead is open for
-the owner (review S3 of 18 November). The audit row of the create, the update
-and the send records `pharmacyHandoff` (the status) and
-`pharmacyHandoffReason` (the reason code), never the message, and the update's
-`pharmacySendWithdrawn: true` when it marked the send withdrawn.
+row above, never "already has". Completing a prescription marks nothing. The
+database marks it on the change itself (a trigger on the prescription), so a
+change made by any ehr-api image (an older one during a rolling deploy or
+after a rollback included) marks it too. Whether the pharmacy item should
+follow the new version instead is open for the owner (review S3 of 18
+November). The audit row of the create, the update and the send records
+`pharmacyHandoff` (the status) and `pharmacyHandoffReason` (the reason code),
+never the message, and the update's `pharmacySendWithdrawn: true` when the
+prescription's send stands withdrawn after the change.
 
 ### `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/own-pharmacy-send`
 

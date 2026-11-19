@@ -95,7 +95,8 @@
 --    encounter, who sent it (the prescriber's account and membership), the
 --    state (pending, then sent with the work item), attempts and the last
 --    failure's SQLSTATE (no text), and withdrawn_at once the prescription is
---    put on hold, cancelled or entered in error after the send. Row-level
+--    put on hold, cancelled or entered in error, edited or resumed after the
+--    send (D8). Row-level
 --    security on (not forced), no policy and no grant: only this file's
 --    functions read or write it, with ids taken from the rows they checked.
 --    No foreign key, so creating it locks none of the tables those ids name
@@ -139,15 +140,24 @@
 --    sent prescription answers already_in_pharmacy (superseded once it
 --    changed) and writes nothing. A pending send is tried again by the next
 --    call (the prescriber's "Send to pharmacy").
--- D8 ehr.withdraw_own_pharmacy_send(prescription) (SECURITY
+-- D8 The withdrawal. A trigger on ehr.prescriptions
+--    (prescriptions_own_pharmacy_send_withdrawn, AFTER UPDATE FOR EACH ROW
+--    when the status or row_version changes; its function
+--    ehr.own_pharmacy_send_withdrawn_on_change(), SECURITY DEFINER, the
+--    owner's alone) marks a sent prescription's send withdrawn (once) when
+--    the prescription becomes on hold, cancelled or entered in error, or is
+--    active at another version than the one sent (edited or resumed: the
+--    pharmacy item keeps the version sent), whoever changes it: today's
+--    ehr-api images, which call none of this file's functions, a rolling
+--    deploy or an image rollback included. A completed prescription is not
+--    marked. Dispensing is refused anyway by 0101 (the version or status
+--    changed). ehr.withdraw_own_pharmacy_send(prescription) (SECURITY
 --    DEFINER), for the EHR runtime, in the transaction that changes a
 --    prescription that may have been sent (holds, cancels, enters in error,
---    resumes or edits it): the same session test as D7; marks the send
---    withdrawn (once) when the prescription, as the session reads it, is on
---    hold, cancelled or entered in error, or is active at another version
---    than the one sent (edited or resumed: the pharmacy item keeps the
---    version sent). A completed prescription is not marked. Dispensing is
---    refused anyway by 0101 (the version or status changed).
+--    resumes or edits it): the same session test as D7; marks the send as the
+--    trigger does (a no-op after the trigger) and answers whether the
+--    prescription's send now stands withdrawn, so ehr-api can tell the
+--    prescriber that the pharmacy holds an earlier version.
 -- D9 pharmacy.own_work_access_for(resource, id, action) and
 --    lab.own_work_access_for(resource, id, action) (SECURITY DEFINER,
 --    STABLE), for their runtimes: the own work item (no route) the
@@ -168,8 +178,9 @@
 --    to the runtime that reads its schema's chain tables
 --    (hid_lab_runtime, hid_pharmacy_runtime: a policy's function is executed
 --    with the querying role's privileges, as 0086's context_allows is);
---    all of them to hid_schema_test_runtime; D1 and D5's helper to nobody
---    (the functions that call them run them as their owner). Revoked from
+--    all of them to hid_schema_test_runtime; D1, D5's helper and D8's trigger
+--    function to nobody (the functions and the trigger that call them run
+--    them as their owner). Revoked from
 --    PUBLIC. The replaced functions keep their ACLs.
 -- D12 No platform control and no new setting (the owner's rule: no new
 --    settings unless unavoidable). ehr-api sends when the function exists
@@ -222,7 +233,7 @@
 -- 3. D1 and the replaced bodies (D2, D4).
 -- 4. D3: the two chain functions and the 42 own-work policies.
 -- 5. D6 and D5.
--- 6. D7-D10.
+-- 6. D7-D10 (D8: its trigger and the function).
 -- 7. Grants (D11) and comments.
 -- 8. Post-checks: each new and replaced function's body (md5), owner,
 --    SECURITY DEFINER, volatility, language, not STRICT and search_path;
@@ -234,7 +245,8 @@
 --    security on and not forced, no policy and no grant; the two
 --    ehr.prescriptions policies and the 42 own-work policies, exactly, and
 --    row-level security still enabled and forced on every table that gained
---    one; D5's premise again; then D7 and D8 are fired once without a
+--    one; D8's trigger exactly (enabled, after update, for each row, its
+--    function and its WHEN); D5's premise again; then D7 and D8 are fired once without a
 --    session and must refuse with 42501 OWN_PHARMACY_SEND_DENIED, and D9
 --    once per resource type with random ids and must answer no row (plpgsql
 --    plans a query only when it first runs, so this proves the columns
@@ -242,9 +254,9 @@
 --
 -- Locks (measured with pg_locks before commit on a 0127 copy): section 1
 -- takes, in one attempt, ACCESS EXCLUSIVE on ehr.prescriptions and on the 20
--- Lab and Pharmacy chain tables that gain a policy (CREATE POLICY needs it),
--- and ACCESS SHARE on the tables the new SQL functions read when they are
--- created
+-- Lab and Pharmacy chain tables that gain a policy (CREATE POLICY needs it;
+-- the trigger of D8 needs no more on ehr.prescriptions), and ACCESS SHARE on
+-- the tables the new SQL functions read when they are created
 -- (lab.work_items, pharmacy.work_items, identity.patients, the consent
 -- directives and their versions, the memberships), all NOWAIT: a busy table
 -- fails the attempt at once and its subtransaction releases what it took.
@@ -313,7 +325,12 @@ begin
                          ('pharmacy', 'own_work_source_prescription'), ('ehr', 'send_prescription_to_own_pharmacy'),
                          ('ehr', 'withdraw_own_pharmacy_send'), ('pharmacy', 'own_work_access_for'),
                          ('lab', 'own_work_access_for'), ('pharmacy', 'own_work_item_states'),
-                         ('lab', 'own_work_item_bases')))
+                         ('lab', 'own_work_item_bases'), ('ehr', 'own_pharmacy_send_withdrawn_on_change')))
+     or exists (select 1 from pg_trigger trigger_row
+                  join pg_class relation on relation.oid = trigger_row.tgrelid
+                  join pg_namespace namespace on namespace.oid = relation.relnamespace
+                 where namespace.nspname = 'ehr' and relation.relname = 'prescriptions'
+                   and trigger_row.tgname = 'prescriptions_own_pharmacy_send_withdrawn')
      or exists (select 1 from pg_policy policy_row
                   join pg_class relation on relation.oid = policy_row.polrelid
                   join pg_namespace namespace on namespace.oid = relation.relnamespace
@@ -1126,7 +1143,6 @@ declare
   session_subject text := platform.current_actor_subject();
   source_status text;
   source_version bigint;
-  marked integer;
 begin
   if requested_prescription_id is null then
     raise exception using errcode = '22023', message = 'OWN_PHARMACY_SEND_INVALID';
@@ -1144,7 +1160,8 @@ begin
     return false;
   end if;
   -- Stopped, or still active at another version than the one sent (edited
-  -- or resumed): the pharmacy item keeps the version sent.
+  -- or resumed): the pharmacy item keeps the version sent. The trigger below
+  -- has marked it already on the change itself; this marks it the same way.
   update pharmacy.own_prescription_sends send
      set withdrawn_at = clock_timestamp()
    where send.prescription_id = requested_prescription_id
@@ -1152,10 +1169,42 @@ begin
      and send.state = 'sent'
      and send.withdrawn_at is null
      and (source_status <> 'active' or send.prescription_version is distinct from source_version);
-  get diagnostics marked = row_count;
-  return marked > 0;
+  -- Whether the prescription's send stands withdrawn now (by this change or
+  -- an earlier one).
+  return exists (select 1 from pharmacy.own_prescription_sends send
+                  where send.prescription_id = requested_prescription_id
+                    and send.facility_id = session_facility
+                    and send.withdrawn_at is not null);
 end;
 $$;
+
+-- D8's trigger: every change of a sent prescription's status or version,
+-- whoever makes it, marks its send as above. Runs as the owner (the sends
+-- table's), never refuses the change it follows, and reads only the send.
+create function ehr.own_pharmacy_send_withdrawn_on_change()
+returns trigger
+language plpgsql
+volatile
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  update pharmacy.own_prescription_sends send
+     set withdrawn_at = clock_timestamp()
+   where send.prescription_id = new.id
+     and send.state = 'sent'
+     and send.withdrawn_at is null
+     and (new.status in ('on_hold', 'cancelled', 'entered_in_error')
+       or (new.status = 'active' and send.prescription_version is distinct from new.row_version));
+  return null;
+end;
+$$;
+
+create trigger prescriptions_own_pharmacy_send_withdrawn
+  after update on ehr.prescriptions
+  for each row
+  when (old.status is distinct from new.status or old.row_version is distinct from new.row_version)
+  execute function ehr.own_pharmacy_send_withdrawn_on_change();
 
 -- D9. The own work item a Pharmacy or Lab resource belongs to.
 create function pharmacy.own_work_access_for(requested_resource_type text, requested_resource_id uuid,
@@ -1342,7 +1391,8 @@ revoke all on function identity.facility_work_member_allows(text, uuid, uuid, te
   pharmacy.own_work_access_for(text, uuid, text),
   lab.own_work_access_for(text, uuid, text),
   pharmacy.own_work_item_states(uuid[]),
-  lab.own_work_item_bases(uuid[]) from public;
+  lab.own_work_item_bases(uuid[]),
+  ehr.own_pharmacy_send_withdrawn_on_change() from public;
 
 do $$
 begin
@@ -1389,7 +1439,9 @@ comment on function pharmacy.own_work_source_prescription(uuid, uuid, uuid) is
 comment on function ehr.send_prescription_to_own_pharmacy(uuid, bigint) is
   '0133 D7: sends the prescriber''s active prescription to this facility''s own pharmacy (a work item accepted by the prescriber with the fixed reason), in the caller''s transaction; answers not_found, not_prescriber, not_active, changed, routed, already_in_pharmacy, superseded, no_pharmacy, sent or pending.';
 comment on function ehr.withdraw_own_pharmacy_send(uuid) is
-  '0133 D8: marks a sent prescription withdrawn once it is on hold, cancelled or entered in error, or active at another version than the one sent.';
+  '0133 D8: marks a sent prescription withdrawn once it is on hold, cancelled or entered in error, or active at another version than the one sent (as its trigger does), and answers whether its send stands withdrawn.';
+comment on function ehr.own_pharmacy_send_withdrawn_on_change() is
+  '0133 D8: the trigger function of prescriptions_own_pharmacy_send_withdrawn: marks the send of a prescription that becomes on hold, cancelled or entered in error, or active at another version than the one sent, withdrawn. The owner''s alone.';
 comment on function pharmacy.own_work_access_for(text, uuid, text) is
   '0133 D9: the own work item (no route) a work item or dispensing belongs to, when the session works for this facility''s pharmacy, with the audit basis: consent when the member holds its own consent for the action, else own-work.';
 comment on function lab.own_work_access_for(text, uuid, text) is
@@ -1410,7 +1462,7 @@ declare
   error_state text;
   error_message text;
 begin
-  -- The 14 new and replaced bodies (md5), owner, SECURITY DEFINER,
+  -- The 15 new and replaced bodies (md5), owner, SECURITY DEFINER,
   -- volatility, language, not STRICT, search_path.
   with expected(schema_name, proc_name, argument_types, digest, volatility, language_name, config) as (values
          ('identity', 'facility_work_member_allows', 'text, uuid, uuid, text', '474875a22f8c5e7b46846f1ddb1d5046', 's',
@@ -1431,7 +1483,7 @@ begin
            'search_path=pg_catalog, pg_temp'),
          ('ehr', 'send_prescription_to_own_pharmacy', 'uuid, bigint', 'ea6e547d05979779c9765f7dcc70c377', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
-         ('ehr', 'withdraw_own_pharmacy_send', 'uuid', 'c5762916ddfe74e467e84c6d7ed08fd4', 'v', 'plpgsql',
+         ('ehr', 'withdraw_own_pharmacy_send', 'uuid', '7ff7b714e3f9fe4b93c9393117f6b4bc', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'own_work_access_for', 'text, uuid, text', '5ddb078242919dd978d6312f5cd5aa77', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
@@ -1440,6 +1492,8 @@ begin
          ('pharmacy', 'own_work_item_states', 'uuid[]', '5882cbdcf5dcebb96b3cabb95bba9801', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('lab', 'own_work_item_bases', 'uuid[]', '07e31d7ca86ac31255ad096d56363637', 's', 'plpgsql',
+           'search_path=pg_catalog, pg_temp'),
+         ('ehr', 'own_pharmacy_send_withdrawn_on_change', '', '455c027844f87eebde9dd836f75760cf', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp')),
        differing as (
          select expected.*,
@@ -1495,7 +1549,8 @@ begin
                   ('lab', 'own_work_chain_allows'), ('pharmacy', 'own_work_chain_allows'),
                   ('pharmacy', 'own_work_source_prescription'), ('ehr', 'send_prescription_to_own_pharmacy'),
                   ('ehr', 'withdraw_own_pharmacy_send'), ('pharmacy', 'own_work_access_for'),
-                  ('lab', 'own_work_access_for'), ('pharmacy', 'own_work_item_states'), ('lab', 'own_work_item_bases'))),
+                  ('lab', 'own_work_access_for'), ('pharmacy', 'own_work_item_states'), ('lab', 'own_work_item_bases'),
+                  ('ehr', 'own_pharmacy_send_withdrawn_on_change'))),
        granted as (
          select new_functions.nspname, new_functions.proname, privilege.grantee, privilege.privilege_type,
                 privilege.is_grantable
@@ -1693,6 +1748,21 @@ begin
                        where namespace.nspname in ('lab', 'pharmacy') and policy_row.polname like 'own\_work\_%') <> 42 then
     raise exception using errcode = '55000', message = format('0133: the own-work policies are not section 4''s: %s',
       coalesce(mismatch, 'not 42'));
+  end if;
+  -- D8's trigger, exactly: on ehr.prescriptions, enabled, after update, for
+  -- each row, this file's function and WHEN; the only trigger calling it.
+  if (select count(*) from pg_trigger trigger_row
+       where trigger_row.tgrelid = 'ehr.prescriptions'::regclass
+         and trigger_row.tgname = 'prescriptions_own_pharmacy_send_withdrawn'
+         and not trigger_row.tgisinternal and trigger_row.tgenabled = 'O'
+         and trigger_row.tgfoid = 'ehr.own_pharmacy_send_withdrawn_on_change()'::regprocedure
+         and pg_get_triggerdef(trigger_row.oid)
+           = 'CREATE TRIGGER prescriptions_own_pharmacy_send_withdrawn AFTER UPDATE ON ehr.prescriptions FOR EACH ROW '
+             || 'WHEN (((old.status IS DISTINCT FROM new.status) OR (old.row_version IS DISTINCT FROM new.row_version))) '
+             || 'EXECUTE FUNCTION ehr.own_pharmacy_send_withdrawn_on_change()') <> 1
+     or (select count(*) from pg_trigger trigger_row
+          where trigger_row.tgfoid = 'ehr.own_pharmacy_send_withdrawn_on_change()'::regprocedure) <> 1 then
+    raise exception using errcode = '55000', message = '0133: the withdrawal trigger on ehr.prescriptions is not D8''s';
   end if;
   -- D5's premise again.
   if exists (select 1 from pg_roles role_row

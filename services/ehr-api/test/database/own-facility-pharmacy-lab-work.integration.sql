@@ -35,13 +35,18 @@
 --      read one, a lab scientist (pharmacy items), a pharmacist of another
 --      facility, an emergency session, a patient with a deny directive (her
 --      item and its events), an inactive patient; a pharmacist with a grant
---      keeps the basis 'consent';
---   5. stopping after the send: the withdrawal is marked once, the item
---      reads withdrawn, and dispensing it is refused
---      (PRESCRIPTION_SOURCE_NOT_DISPENSABLE); a sent prescription edited
---      while active, or resumed after the hold, is marked withdrawn too (the
---      pharmacy keeps the version sent) and the send answers superseded,
---      never already_in_pharmacy; completing one marks nothing;
+--      keeps the basis 'consent', on the list and on every command
+--      (own_work_access_for answers 'consent' for the action its grant
+--      covers);
+--   5. stopping after the send: the change itself marks the send withdrawn
+--      (D8's trigger: an UPDATE of the prescription alone, as today's
+--      ehr-api images make it, without calling the withdrawal), once; the
+--      withdrawal answers that it stands withdrawn; the item reads withdrawn,
+--      and dispensing it is refused (PRESCRIPTION_SOURCE_NOT_DISPENSABLE); a
+--      sent prescription edited while active, or resumed after the hold, is
+--      marked withdrawn too (the pharmacy keeps the version sent) and the
+--      send answers superseded, never already_in_pharmacy; completing one
+--      marks nothing;
 --   6. lab: the facility's lab scientist without a grant sees the own lab
 --      work item and its card, may work on it, its basis is 'own-work', and
 --      accessions it; another facility's lab scientist, the nurse and an
@@ -110,7 +115,8 @@ begin
       ('pharmacy.work_item_patient_cards(uuid[])', '0dc38390c3c40a1883b87345ce0d35bd', 's'),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', '41a9afd4ea6f708425b98d1fb6e6eb87', 's'),
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'ea6e547d05979779c9765f7dcc70c377', 'v'),
-      ('ehr.withdraw_own_pharmacy_send(uuid)', 'c5762916ddfe74e467e84c6d7ed08fd4', 'v'),
+      ('ehr.withdraw_own_pharmacy_send(uuid)', '7ff7b714e3f9fe4b93c9393117f6b4bc', 'v'),
+      ('ehr.own_pharmacy_send_withdrawn_on_change()', '455c027844f87eebde9dd836f75760cf', 'v'),
       ('pharmacy.own_work_access_for(text,uuid,text)', '5ddb078242919dd978d6312f5cd5aa77', 's'),
       ('lab.own_work_access_for(text,uuid,text)', '1c834e3ed17d864dadb27f3105cffa04', 's'),
       ('pharmacy.own_work_item_states(uuid[])', '5882cbdcf5dcebb96b3cabb95bba9801', 's'),
@@ -127,6 +133,7 @@ begin
     from (values
       ('identity.facility_work_member_allows(text,uuid,uuid,text)', array[]::text[]),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', array[]::text[]),
+      ('ehr.own_pharmacy_send_withdrawn_on_change()', array[]::text[]),
       ('lab.own_work_chain_allows(text,uuid,uuid,uuid,text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
         'hid_schema_test_runtime']),
       ('pharmacy.own_work_chain_allows(text,uuid,uuid,uuid,text)', array['hid_pharmacy_runtime',
@@ -609,9 +616,22 @@ select pg_temp.as_member(1);
 select pg_temp.expect('an active prescription is not withdrawn', ehr.withdraw_own_pharmacy_send(pg_temp.rx(3))::text,
   'false');
 select pg_temp.set_status(3, 'on_hold', 'Held by the prescriber');
-select pg_temp.expect('the held prescription''s send is withdrawn',
+reset role;
+select set_config('own_work.rx3_withdrawn_at', (select s.withdrawn_at::text from pharmacy.own_prescription_sends s
+  where s.prescription_id = pg_temp.rx(3)), true);
+select pg_temp.expect('the hold alone marks rx3''s send withdrawn (D8''s trigger, no withdrawal call)',
+  (current_setting('own_work.rx3_withdrawn_at') <> '')::text, 'true');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
+select pg_temp.expect('the held prescription''s send stands withdrawn',
   ehr.withdraw_own_pharmacy_send(pg_temp.rx(3))::text, 'true');
-select pg_temp.expect('only once', ehr.withdraw_own_pharmacy_send(pg_temp.rx(3))::text, 'false');
+select pg_temp.expect('and stays so', ehr.withdraw_own_pharmacy_send(pg_temp.rx(3))::text, 'true');
+reset role;
+select pg_temp.expect('marked once (the withdrawal time is the hold''s)', (select s.withdrawn_at::text
+  from pharmacy.own_prescription_sends s where s.prescription_id = pg_temp.rx(3)),
+  current_setting('own_work.rx3_withdrawn_at'));
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
 select pg_temp.as_member(7);
 select pg_temp.expect('a receptionist cannot withdraw', pg_temp.try(format(
   'select ehr.withdraw_own_pharmacy_send(%L)', pg_temp.rx(3))), '42501 OWN_PHARMACY_SEND_DENIED');
@@ -641,21 +661,29 @@ select set_config('app.change_reason', 'Changed the frequency', true);
 update ehr.prescriptions set frequency = 'Every 12 hours' where id = pg_temp.rx(6);
 select pg_temp.expect('the edited rx6 is active at version 3', (select p.status || '/' || p.row_version
   from ehr.prescriptions p where p.id = pg_temp.rx(6)), 'active/3');
-select pg_temp.expect('the edited rx6''s send is withdrawn, once',
+reset role;
+select pg_temp.expect('the edit alone marks rx6''s send withdrawn (D8''s trigger)', (select (s.withdrawn_at is not null)::text
+  from pharmacy.own_prescription_sends s where s.prescription_id = pg_temp.rx(6)), 'true');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
+select pg_temp.expect('the edited rx6''s send stands withdrawn',
   ehr.withdraw_own_pharmacy_send(pg_temp.rx(6))::text || '/' || ehr.withdraw_own_pharmacy_send(pg_temp.rx(6))::text,
-  'true/false');
+  'true/true');
 select pg_temp.expect('Send to pharmacy for the edited rx6 answers superseded', pg_temp.send(pg_temp.rx(6), 3),
   'superseded:item');
 select pg_temp.set_status(3, 'active', 'Resumed after review');
-select pg_temp.expect('the resumed rx3 is active at version 4, its send already withdrawn at the hold',
+select pg_temp.expect('the resumed rx3 is active at version 4, its send withdrawn since the hold',
   (select p.status || '/' || p.row_version from ehr.prescriptions p where p.id = pg_temp.rx(3)) || '/'
-    || ehr.withdraw_own_pharmacy_send(pg_temp.rx(3))::text, 'active/4/false');
+    || ehr.withdraw_own_pharmacy_send(pg_temp.rx(3))::text, 'active/4/true');
 select pg_temp.expect('Send to pharmacy for the resumed rx3 answers superseded', pg_temp.send(pg_temp.rx(3), 4),
   'superseded:item');
 select pg_temp.set_status(4, 'completed', 'Course completed');
 select pg_temp.expect('the completed rx4''s send is not withdrawn', ehr.withdraw_own_pharmacy_send(pg_temp.rx(4))::text,
   'false');
 reset role;
+select pg_temp.expect('rx3''s withdrawal time is still the hold''s', (select s.withdrawn_at::text
+  from pharmacy.own_prescription_sends s where s.prescription_id = pg_temp.rx(3)),
+  current_setting('own_work.rx3_withdrawn_at'));
 select pg_temp.expect('the sends: rx3 and rx6 withdrawn at their sent version 2, rx4 not',
   (select string_agg(right(s.prescription_id::text, 2) || ':' || s.prescription_version || ':' || (s.withdrawn_at is not null),
      ' ' order by s.prescription_id) from pharmacy.own_prescription_sends s

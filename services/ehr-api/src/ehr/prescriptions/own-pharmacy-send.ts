@@ -76,9 +76,11 @@ export function pharmacyHandoff(outcome: string | undefined): PharmacyHandoff {
  * attempt stays pending in the database and is tried again by the next send.
  * A pharmacy item of an earlier version (the prescription was edited or
  * resumed after it was sent) answers `superseded`, never "already there".
- * `withdraw` asks `ehr.withdraw_own_pharmacy_send(prescription)` to mark a
- * sent prescription withdrawn once it is held, cancelled or entered in
- * error, or is still active at another version than the one sent.
+ * `withdraw` asks `ehr.withdraw_own_pharmacy_send(prescription)` whether a
+ * sent prescription's send now stands withdrawn: it is held, cancelled or
+ * entered in error, or is still active at another version than the one sent
+ * (0133's trigger on the prescription marks it on the change itself,
+ * whichever ehr-api image makes it; the function marks it the same way).
  *
  * Each runs in a savepoint, so nothing it does can undo the prescription's own
  * change: a schema without 0133 (42883) answers no hand-off (undefined); the
@@ -107,7 +109,7 @@ export class OwnPharmacySend {
     return outcome === FAILED ? UNAVAILABLE : pharmacyHandoff(outcome);
   }
 
-  /** True when a sent prescription was marked withdrawn now; undefined on a schema without 0133. */
+  /** True when the prescription's send stands withdrawn (now or earlier); undefined on a schema without 0133. */
   async withdraw(client: PoolClient, prescriptionId: string, correlationId: string): Promise<boolean | undefined> {
     if (!this.enabled) return undefined;
     const marked = await this.inSavepoint(client, 'ehr_own_pharmacy_withdraw', correlationId, async () => {
