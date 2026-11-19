@@ -1774,9 +1774,10 @@ revoke all on function auth.guard_session_single_sign_on_change() from public;
 -- runtime. The helpers identity.facility_work_member_allows and
 -- pharmacy.own_work_source_prescription, and the trigger functions
 -- ehr.own_pharmacy_send_withdrawn_on_change (the withdrawal),
--- pharmacy.claim_prescription_work_item and
--- pharmacy.claim_prescription_dispensing (D14's claims) and
--- identity.list_own_work_patient (D15's list), are executed by no role: the
+-- pharmacy.claim_prescription_work_item,
+-- pharmacy.claim_prescription_dispensing and pharmacy.refuse_claim_key_change
+-- (D14's claims and their key) and identity.list_own_work_patient (D15's
+-- list), are executed by no role: the
 -- functions and the triggers that call them run them as their owner. No role
 -- has any privilege on pharmacy.own_prescription_sends,
 -- pharmacy.prescription_item_claims or identity.own_work_patients.
@@ -1807,6 +1808,7 @@ revoke all on function identity.facility_work_member_allows(text, uuid, uuid, te
   ehr.own_pharmacy_staffed(),
   pharmacy.claim_prescription_work_item(),
   pharmacy.claim_prescription_dispensing(),
+  pharmacy.refuse_claim_key_change(),
   identity.list_own_work_patient() from public;
 revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims, identity.own_work_patients from public;
 

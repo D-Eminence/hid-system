@@ -111,10 +111,26 @@
 --    such a prescription only when it is already in the pharmacy, and one
 --    own item per prescription (work_items_prescription_kind_uq, D14) and
 --    the work items' insert policy then refuse;
---    ehr.send_order_route, D7 and D8 refuse a pharmacist before they read;
+--    ehr.send_order_route asks the session's write consent
+--    (ehr.context_allows) and ehr.order-route.send, and D7 and D8
+--    ehr.prescription.write, before they read, so they refuse a pharmacist
+--    (42501); a membership that holds a doctor's and a pharmacist's role
+--    (one membership may hold several, account_roles_active_facility_uq)
+--    passes D7's and D8's gate, and D7 then answers not_prescriber instead
+--    of not_found for another prescriber's prescription that is the source
+--    of an own item it already reads in pharmacy-api: that such a
+--    prescription exists, nothing of it or of the chart (and only through
+--    the EHR runtime's own SQL: ehr-api asks write consent and reads the
+--    prescription as the runtime before it calls D7);
 --    ehr.patient_list_order_routes answers patient sessions only; and
 --    identity.demo_story_install has no runtime grant (the suite lists the
---    seven and shows each).
+--    seven and shows each). An eighth reader is an invoker function the
+--    owner runs: ehr.order_belongs_to, called by the SECURITY DEFINER route
+--    readers ehr.list_order_routes_for_order and ehr.order_route_summaries
+--    (the EHR runtime's). Both ask ehr.order_route_reader first, which asks
+--    ehr.context_allows(patient, facility, 'read_records'), the
+--    prescriptions' own read test, so D5 adds no row there: a pharmacist
+--    without a grant gets ORDER_NOT_FOUND from both.
 -- D6 pharmacy.own_prescription_sends: one row per prescription sent by
 --    itself to this facility's pharmacy: the version, patient, facility and
 --    encounter, who sent it (the prescriber's account and membership), the
@@ -173,7 +189,8 @@
 --    origin is the work item's accepted_by and acceptance_reason). The
 --    attempt runs in a subtransaction, so a failure never undoes the
 --    activation; a serialization failure or deadlock is raised, so the
---    caller's retry runs the whole transaction again. A second call for a
+--    caller's transaction fails whole (a SERIALIZABLE caller is run again;
+--    ehr-api's callers run READ COMMITTED, D14). A second call for a
 --    sent prescription answers already_in_pharmacy (superseded once it
 --    changed, until the item is dispensed) and writes nothing. A pending send is tried again by the next
 --    call (the prescriber's "Send to pharmacy").
@@ -266,11 +283,12 @@
 --    the other kind's own work. D14's reader, called on its own, answers
 --    the ids of the session facility's withdrawn own pharmacy items and why
 --    (sent_elsewhere or changed) to a member holding pharmacy.work-item.read
---    there (the pharmacists, and the roles that read the pharmacy list by
---    consent: doctors, nurses, clinicians, receptionists, administrators),
---    whatever the switch; it answers no patient.
+--    there (on 0001-0127 the admin, clinician, doctor, nurse and pharmacist
+--    roles hold it, the receptionist does not; 0136 may change the role
+--    table), whatever the switch and whatever the purpose of use (none
+--    included); it answers no patient.
 --    All of them to hid_schema_test_runtime; D1 itself, D5's helper, D8's
---    trigger function, D14's two claim trigger functions and D15's list
+--    trigger function, D14's three trigger functions and D15's list
 --    trigger function to nobody (the functions and the triggers that call
 --    them run them as their owner). Revoked from PUBLIC. Neither D14's
 --    claims nor D15's list is granted to any role. The replaced functions
@@ -289,13 +307,25 @@
 --    so a session of today's images, which never sets it, gets null from it
 --    and sees and does exactly what it does on 0001-0127. In ehr-api the
 --    switch also turns ehr.send_order_route and
---    ehr.order_route_resend_allowed to D14's rule; through the session's
---    half it gives a pharmacist's or lab scientist's ehr-api session only
---    what D5's analysis of the seven readers already covers (the EHR runtime
---    holds no grant on a Lab or Pharmacy table). A rollback of any of those
---    images alone therefore leaves that image as it is today (what the new
---    ehr-api's automatic send and its sends elsewhere mean meanwhile is under
---    "Old services on this schema"). A session that sets it still needs
+--    ehr.order_route_resend_allowed to D14's rule. The EHR runtime holds no
+--    grant on a Lab or Pharmacy table, so through the session's half a
+--    pharmacist's or lab scientist's ehr-api session reaches owner-run reads
+--    only: D5's readers of ehr.prescriptions (ehr.order_belongs_to among
+--    them, through ehr.list_order_routes_for_order and
+--    ehr.order_route_summaries), and the reads of lab.work_items and
+--    pharmacy.work_items inside ehr.send_order_route and (its lab arm,
+--    through the same two route readers) ehr.order_route_resend_allowed,
+--    which now pass the own-work read policies (they name no role, so the
+--    owner's reads meet them too). Nothing new is exposed: each of those
+--    reads comes after the session's consent test (ehr.context_allows,
+--    'read_records' in ehr.order_route_reader, 'write_records' with
+--    ehr.order-route.send in the send) or D7's and D8's
+--    ehr.prescription.write and prescriber test, and what passes them the
+--    session reads without the switch too; a membership holding a doctor's
+--    and a pharmacist's role learns only what D5 says. A rollback of any of
+--    those images alone therefore leaves that image as it is today (what the
+--    new ehr-api's automatic send and its sends elsewhere mean meanwhile is
+--    under "Old services on this schema"). A session that sets it still needs
 --    everything else D1 asks; the switch only narrows.
 -- D14 Sending a prescription to an outside pharmacy before this facility's
 --    pharmacy has dispensed it (owner's Q121 A, 19 Nov): the own item is then
@@ -313,8 +343,9 @@
 --    until released, dispensed_at once dispensed; at most one live claim per
 --    prescription (prescription_item_claims_live_uq); a released claim is an
 --    own item's that was never dispensed (its CHECKs). Two ENABLE ALWAYS
---    triggers keep it for every image and every insert path, replica mode
---    included: every new work item claims its prescription
+--    triggers keep it on every insert, by any image, replica mode included,
+--    and two more refuse any UPDATE that would move a claim's key (below):
+--    every new work item claims its prescription
 --    (work_items_claim_prescription: a unique violation while another item
 --    of it is live, which 0086's R10 handler reads as order_in_work,
 --    pharmacy-api's retry answers as today and D7's send keeps pending),
@@ -322,42 +353,72 @@
 --    dispensed or is refused with 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE,
 --    detail sent_elsewhere (released) or not_claimed
 --    (dispensings_claim_prescription, after 0101's validator has taken the
---    prescription FOR SHARE or the route FOR UPDATE). ehr.send_order_route
+--    prescription FOR SHARE or the route FOR UPDATE). A claim's key cannot
+--    move: prescription_claim_key_immutable, an ENABLE ALWAYS BEFORE UPDATE
+--    trigger on pharmacy.work_items (OF id, source_ehr_prescription_id,
+--    order_route_id, facility_id) and on pharmacy.dispensings (OF
+--    work_item_id), each WHEN one of those columns changes, refuses the
+--    change with 55000 PRESCRIPTION_CLAIM_KEY_IMMUTABLE
+--    (pharmacy.refuse_claim_key_change()). 0023's immutability triggers
+--    refuse every UPDATE of both tables, but in origin mode only (and there
+--    they still answer first: the new trigger's name sorts after theirs), so
+--    without it a superuser's replica-mode repair could re-key an item or
+--    re-point a dispensing and leave a claim describing another row (two
+--    dispensings of one prescription, or one of an item sent elsewhere). A
+--    replica-mode repair of an item's patient is not refused (D15 lists the
+--    new pair). A superuser who writes pharmacy.prescription_item_claims
+--    itself is outside what the database enforces. ehr.send_order_route
 --    (0123's text, its sealed clauses with it) and
 --    ehr.order_route_resend_allowed (0086's), replaced in place with hunks
 --    marked "0133 D14", use the new rule only in a session that set the
 --    switch (D13: the new ehr-api): the send locks the own item's claim
 --    after the prescription and its routes (a dispensing takes the
 --    prescription or the route, then the claim, so the two cannot deadlock),
---    answers ORDER_ROUTE_ORDER_IN_WORK once it was dispensed or once an
---    outside pharmacy accepted the prescription, and otherwise releases the
---    live own claim (released_at the route's creation, released_by_route_id
---    the route) in the route's transaction; the resend flag agrees. Without
---    the switch both answer as 0123 and 0086 do. The item stays withdrawn
+--    answers ORDER_ROUTE_ORDER_IN_WORK once it was dispensed (reversed or not)
+--    or once a route an outside pharmacy accepted has ended uncompleted
+--    (while that route stands, or once it completed,
+--    ORDER_ROUTE_ALREADY_SENT, as before), and otherwise releases the live own
+--    claim (released_at the route's creation, released_by_route_id the route)
+--    in the route's transaction; the resend flag agrees. Without the switch
+--    both answer as 0123 and 0086 do. The item stays withdrawn
 --    whatever happens to the route: D7 answers routed, and a second own item
 --    is refused by the key. One prescription is never dispensed twice, for
 --    every image: a dispensing and a release write the same claim row, and a
 --    route-backed item is inserted only while no other claim of the
 --    prescription is live. A writer of an own item that runs READ
 --    COMMITTED is not seen by a SERIALIZABLE send that took its snapshot
---    first, which then commits its route without releasing that item; for
---    it the live claim index and R10 are the database's backstop (the
---    outside acceptance is withdrawn, order_in_work), and the new ehr-api
---    runs both its own-pharmacy send paths SERIALIZABLE, so one of the two
---    gets 40001 and is retried. Readers: D7 (routed), D8 (false once sent
---    elsewhere), D10 (withdrawn_reason) and pharmacy.own_withdrawn_work_items()
---    (SECURITY DEFINER, STABLE): for a member holding pharmacy.work-item.read
---    at the session's facility, the facility's withdrawn own items and why
---    (sent_elsewhere; changed: its send withdrawn (D8) and not dispensed),
---    which the new pharmacy-api's list leaves out (sent_elsewhere) or sorts
---    with the done work (changed) before its LIMIT. Lab requests are
---    unchanged: lab.work_items keeps both its keys, and the send's and
---    resend flag's lab arms are byte for byte. Splitting a prescription
---    across several pharmacies is not built.
--- D15 identity.own_work_patients (owner's Q122 A, 19 Nov): one row per kind
---    ('lab' or 'pharmacy'), facility and patient with own work of that kind
---    there (an own work item, no route), with the first own item that listed
---    it and when; primary key (kind, facility_id, patient_id); row-level
+--    first, which then commits its route without releasing that item, and
+--    without answering ORDER_ROUTE_ORDER_IN_WORK if that item was dispensed
+--    meanwhile (pharmacy-api's dispensing runs READ COMMITTED). ehr-api's
+--    "Send to pharmacy" and its create as active (D7's callers that lock the
+--    prescription without changing it) are such writers: they run READ
+--    COMMITTED because 0117's allergy check must read the allergies after its
+--    lock (SERIALIZABLE would fix the snapshot before the lock and miss an
+--    allergy recorded during the wait). So a "Send to pharmacy" and a send to
+--    an outside pharmacy racing within milliseconds can leave the route sent
+--    next to a live own item. The live claim index then makes the outside
+--    pharmacy's acceptance end in R10 (the route withdrawn, order_in_work):
+--    the prescription is never dispensed twice and stays with this hospital's
+--    pharmacy. Activating a draft writes the prescription row, so a send that
+--    took its snapshot first fails its lock on that row with 40001 and its
+--    retry sees the item; pharmacy-api's acceptance runs SERIALIZABLE, so it
+--    and the send are paired by PostgreSQL. Readers: D7 (routed), D8 (false
+--    once sent elsewhere), D10 (withdrawn_reason) and
+--    pharmacy.own_withdrawn_work_items() (SECURITY DEFINER, STABLE): for a
+--    member holding pharmacy.work-item.read at the session's facility, the
+--    facility's withdrawn own items and why (sent_elsewhere; changed: its send
+--    withdrawn (D8) and not dispensed), which the new pharmacy-api's list
+--    leaves out (sent_elsewhere) or sorts with the done work (changed) before
+--    its LIMIT. Lab requests are unchanged: lab.work_items keeps both its
+--    keys, and the send's and resend flag's lab arms are byte for byte.
+--    Splitting a prescription across several pharmacies is not built.
+-- D15 identity.own_work_patients (owner's Q122 A, 19 Nov): one row per own
+--    work item (no route), lab or pharmacy: its kind ('lab' or 'pharmacy'),
+--    facility, patient and the item, and when it was listed; primary key
+--    (kind, facility_id, patient_id, work_item_id), so own items of one
+--    patient written at the same time never meet on the key, whatever image
+--    writes them and at whatever isolation, and the row's halves ask the
+--    key's prefix (kind, facility, patient); row-level
 --    security on (not forced), no policy, no grant, no foreign key (creating
 --    it locks nothing), the owner's. It is kept by
 --    identity.list_own_work_patient() (SECURITY DEFINER, executable by
@@ -366,13 +427,17 @@
 --    lab.work_items and pharmacy.work_items (AFTER INSERT OR UPDATE OF
 --    patient_id, facility_id, order_route_id, FOR EACH ROW, WHEN
 --    (new.order_route_id IS NULL), ENABLE ALWAYS): lab-api's intake,
---    pharmacy-api's acceptance and D7's send list their patient, today's
---    images and replica-mode loads included; a route-backed item never. Rows
+--    pharmacy-api's acceptance and D7's send list their item's patient,
+--    today's images and replica-mode loads included; a route-backed item
+--    never. A replica-mode repair of an own item's patient lists the new
+--    pair and keeps the old (on pharmacy.work_items a change of its facility
+--    or route is refused first, D14). Rows
 --    are never removed: a withdrawn, sent elsewhere or dispensed own item
 --    keeps its patient listed (the pharmacy still holds it, its chain and
---    its card). Each row's half asks it (one primary-key probe), so it is
+--    its card). Each row's half asks it (one probe of the key's prefix, an
+--    index-only scan), so it is
 --    false for a patient without own work of its kind at the row's
---    facility. Section 3 fills it from the existing own items.
+--    facility. Section 3 fills it from the existing own items, one row each.
 --
 -- THE COST. A policy is asked once for every row a statement reads, and
 -- lab-api's and pharmacy-api's work lists read every work item of the
@@ -431,27 +496,31 @@
 -- scientist to the limit, with a superuser owner, and bounds the
 -- permission checks.
 -- D14 and D15 add these terms. Each row's half also probes D15's primary key
--- once per row asked. Measured with every table and function owned by a
--- NOSUPERUSER NOBYPASSRLS role (4,012 lab and 3,501 pharmacy work items at
--- one facility, runs interleaved): the lab scientist's list (200 rows,
--- 93,314 calls of the lab row's half) took 3.97 s (median of 12) without the
--- probe and 4.09 s with it, about 0.12 s or 1.3 us a call, inside the runs'
--- spread of 3.64 to 4.34 s; the planner's estimate (406,370) and so the JIT
--- step are unchanged. For today's images (no switch, so the row's halves are
+-- (its prefix) once per row asked. Measured with every table and function
+-- owned by a NOSUPERUSER NOBYPASSRLS role (4,012 lab and 3,501 pharmacy work
+-- items at one facility, runs interleaved): the lab scientist's list (200
+-- rows, 93,314 calls of the lab row's half) took 3.97 s (median of 12) without
+-- the probe and 4.09 s with it, about 0.12 s or 1.3 us a call, inside the
+-- runs' spread of 3.64 to 4.34 s; the planner's estimate (406,370) and so the
+-- JIT step are unchanged. Keyed by the own item (one row per own item: 7,513
+-- rows there, where the key by patient held 4), the same list took 3.97 s
+-- (median of 24, spread 3.19 to 4.31 s) against 4.05 s (3.73 to 4.39 s) by
+-- patient, runs interleaved, with the same 93,314 calls and the same
+-- estimate. For today's images (no switch, so the row's halves are
 -- never called) the same list took 5.42 and 5.63 s (median of 6, spread 4.60
 -- to 5.98 s; 0086's consent test on every row, as on 0001-0127). The
 -- pharmacist's list of 3,501 items: 0.46 to 0.53 s before, 0.51 to 0.58 s
 -- after with today's query, 0.49 to 0.62 s with the new pharmacy-api's (one
 -- call of D14's reader, a materialized CTE). Every new pharmacy work item
 -- pays one claim insert (the live claims' index), every own work item one
--- probe of D15's key, every dispensing one claim update, and D10 one more
--- EXISTS per item. Concurrent first own items of one patient, of one kind at
--- one facility, now meet on D15's key: the second waits for the first's
--- commit, and in a SERIALIZABLE transaction (lab-api's and pharmacy-api's
--- acceptances, the new ehr-api's sends; every image) then ends in a 40001
--- (its ON CONFLICT DO NOTHING meets a row committed after its snapshot),
--- which their DatabaseService retries; the retry lists nothing more and
--- commits (measured with two sessions).
+-- row in D15's list, every dispensing one claim update, and D10 one more
+-- EXISTS per item. D15's list grows by one row per own work item and is
+-- never pruned (the owner's alone; the row's half reads only the key's
+-- prefix). Own items of one patient written at the same time meet on no
+-- key of D15's: the list's key holds the item, so neither waits for the
+-- other and neither SERIALIZABLE transaction ends in a 40001 because of it
+-- (two sessions, each inserting a first own lab item of one new patient,
+-- SERIALIZABLE: both commit, no wait).
 --
 -- What it does not do: no new role permission (the plan's 0136 decides the
 -- role table, still open); doctors still cannot accept into Pharmacy through
@@ -518,8 +587,8 @@
 --    replaced functions (the order-route send and its resend flag).
 -- 7. Grants (D11) and comments.
 -- 8. Post-checks: each new and replaced function's body (md5), owner,
---    SECURITY DEFINER, volatility, language, STRICT (the row's half only)
---    and search_path;
+--    SECURITY DEFINER, volatility, language, STRICT (the two row's halves
+--    only) and search_path;
 --    the exact EXECUTE grants of each new function, whether or not each
 --    grantee exists (each existing expected grantee holds EXECUTE, nothing
 --    else is granted, PUBLIC included); the replaced functions' ACLs as
@@ -528,7 +597,7 @@
 --    security on and not forced, no policy and no grant; D14's two replaced
 --    functions' bodies (md5) and attributes, D14's claims and D15's list
 --    exactly as the sends table, pharmacy.work_items' key on the
---    prescription (work_items_prescription_kind_uq alone), the four D14 and
+--    prescription (work_items_prescription_kind_uq alone), the six D14 and
 --    D15 triggers exactly (enabled always); the two
 --    ehr.prescriptions policies and the 44 own-work policies, exactly, and
 --    row-level security still enabled and forced on every table that gained
@@ -555,7 +624,7 @@
 -- their versions, the memberships, auth.accounts, which section 8's probe of
 -- D7 reads too, through platform.current_account_id), all NOWAIT, 28 tables
 -- in all (pg_locks before commit shows no other table of 0001-0127: D14's
--- and D15's DDL, the dropped keys, the new index, the four triggers and
+-- and D15's DDL, the dropped keys, the new index, the six triggers and
 -- lifting and restoring FORCE, needs nothing beyond section 1's ACCESS
 -- EXCLUSIVE on pharmacy.work_items, pharmacy.dispensings and lab.work_items;
 -- the two new tables are created here; ehr.order_routes is not altered, and
@@ -614,20 +683,23 @@
 -- either order; a second own item fails 23505 on
 -- work_items_prescription_kind_uq instead of 0023's key (the same SQLSTATE,
 -- and no code reads the name), an outside acceptance at R10's boundary on
--- the live claim (the same handler); and concurrent first own items of one
--- patient, of one kind at one facility, can now end in a retried 40001 for
--- every image (THE COST). The automatic send (D7) and the sends elsewhere
+-- the live claim (the same handler); D15's list holds each own item, so own
+-- items of one patient written at the same time never wait for each other
+-- on it (THE COST). The automatic send (D7) and the sends elsewhere
 -- (D14): the new ehr-api image makes them whichever pharmacy-api serves, and
 -- tells the prescriber. While today's pharmacy-api serves (a rollback of it
 -- alone, or a rollout in which the new ehr-api serves first), a prescription
 -- sent that way reaches its pharmacists only through a consent grant, as any
 -- prescription did before 0133, and accepting it again there is refused
 -- (the work items' key on the prescription); and an own item the new
--- ehr-api sent elsewhere: (1) stays on today's pharmacy-api's list as open
--- work, at the top of its oldest-first list for good, and dispensing it
--- answers 409 (23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE: D14's claims
--- refuse it); (2) is answered 'received' by today's pharmacy-api's progress
--- reader (ORD-3), next to the route to the outside pharmacy. The automatic
+-- ehr-api sent elsewhere, however the pharmacy got it (the automatic send or
+-- a pharmacist's acceptance, before 0133 included): (1) stays on today's
+-- pharmacy-api's list as open work, at the top of its oldest-first list for
+-- good, its single-item read answers it unmarked (Dispense offered), and
+-- dispensing it answers 409 (23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE:
+-- D14's claims refuse it); (2) is answered 'received' by today's
+-- pharmacy-api's progress reader (ORD-3), next to the route to the outside
+-- pharmacy. The automatic
 -- send waits for the new pharmacy-api, so pharmacy-api goes out with or
 -- before ehr-api, and a rollback of pharmacy-api alone is safe for access
 -- but leaves those prescriptions waiting and those items listed. (3) After a
@@ -636,25 +708,35 @@
 -- any prescription with a work item here, released or not: a prescription
 -- the new ehr-api sent elsewhere whose route was then declined or lapsed can
 -- be sent nowhere until the new ehr-api is back (and this pharmacy cannot
--- dispense its withdrawn item either). Applied migrations before 0133 are
--- immutable.
+-- dispense its withdrawn item either). Its ORD-3 call carries no
+-- X-HID-Own-Progress, so the new pharmacy-api answers it a sent-elsewhere
+-- item as not_received (times null) and a withdrawn one as received.
+-- Applied migrations before 0133 are immutable.
 --
 -- Undo (by hand only; no release runs it), in one transaction. D14's claims
 -- cannot be undone, as its key cannot (0023's
 -- unique(source_ehr_prescription_id) cannot come back once a prescription
--- has an own and a route-backed item):
--- pharmacy.prescription_item_claims, its two trigger functions, both ALWAYS
--- triggers and work_items_prescription_kind_uq stay. Once the send is 0123's
--- again they refuse only what 0001-0127 refused, and they keep one
--- prescription from being dispensed twice: without them a released own item
--- and its outside item could both be dispensed, and an own item and an
--- outside acceptance at R10's boundary would both stand. First restore
--- 0123's ehr.send_order_route and 0086's ehr.order_route_resend_allowed
--- (each body without its hunks marked "0133 D14": md5 0c2def2b and
--- cd18f1a4), so that nothing new is released; then drop
--- pharmacy.own_withdrawn_work_items() (the new pharmacy-api's list takes a
--- missing function, 42883, as a schema without 0133, and lists as today);
--- then drop the trigger prescriptions_own_pharmacy_send_withdrawn, then
+-- has an own and a route-backed item): pharmacy.prescription_item_claims, its
+-- three trigger functions (pharmacy.claim_prescription_work_item,
+-- pharmacy.claim_prescription_dispensing and
+-- pharmacy.refuse_claim_key_change), its four ALWAYS triggers
+-- (work_items_claim_prescription, dispensings_claim_prescription and the two
+-- prescription_claim_key_immutable) and work_items_prescription_kind_uq stay.
+-- Once the send is 0123's again they refuse only what 0001-0127 refused (and,
+-- in replica mode, a change of a claim's key), and they keep one prescription
+-- from being dispensed twice: without them a released own item and its outside
+-- item could both be dispensed, and an own item and an outside acceptance at
+-- R10's boundary would both stand. First restore 0123's ehr.send_order_route
+-- and 0086's ehr.order_route_resend_allowed (each body without its hunks
+-- marked "0133 D14": md5 0c2def2b and cd18f1a4), so that nothing new is
+-- released;
+-- then drop pharmacy.own_withdrawn_work_items() (the new pharmacy-api's list
+-- takes a missing function, 42883, as a schema without 0133, and lists as
+-- today: the items sent elsewhere and the changed ones list again as open
+-- work, at the top of its oldest-first list, and stay undispensable (409;
+-- the claims stay, 0101 refuses a changed one), as with today's
+-- pharmacy-api under "Old services" (1)); then drop the trigger
+-- prescriptions_own_pharmacy_send_withdrawn, then
 -- ehr.own_pharmacy_send_withdrawn_on_change() and the three other functions
 -- that read pharmacy.own_prescription_sends (D7's
 -- ehr.send_prescription_to_own_pharmacy, D8's ehr.withdraw_own_pharmacy_send
@@ -723,7 +805,7 @@ begin
                          ('lab', 'own_work_item_bases'), ('ehr', 'own_pharmacy_send_withdrawn_on_change'),
                          ('ehr', 'own_pharmacy_staffed'), ('pharmacy', 'claim_prescription_work_item'),
                          ('pharmacy', 'claim_prescription_dispensing'), ('identity', 'list_own_work_patient'),
-                         ('pharmacy', 'own_withdrawn_work_items')))
+                         ('pharmacy', 'own_withdrawn_work_items'), ('pharmacy', 'refuse_claim_key_change')))
      or exists (select 1 from pg_trigger trigger_row
                   join pg_class relation on relation.oid = trigger_row.tgrelid
                   join pg_namespace namespace on namespace.oid = relation.relnamespace
@@ -731,7 +813,7 @@ begin
                         and trigger_row.tgname = 'prescriptions_own_pharmacy_send_withdrawn')
                     or (not trigger_row.tgisinternal
                         and trigger_row.tgname in ('work_items_claim_prescription', 'dispensings_claim_prescription',
-                              'work_items_own_work_patient_listed')))
+                              'work_items_own_work_patient_listed', 'prescription_claim_key_immutable')))
      or exists (select 1 from pg_policy policy_row
                   join pg_class relation on relation.oid = policy_row.polrelid
                   join pg_namespace namespace on namespace.oid = relation.relnamespace
@@ -1059,17 +1141,19 @@ begin
 end
 $$;
 
--- 3a. D15. The list of the patients with own work of a kind at a facility.
--- Row-level security on (not forced), no policy, no grant: only the trigger
--- function and the row's halves (both the owner's) read or write it. No
--- foreign key (creating it locks no table).
+-- 3a. D15. The list of the patients with own work of a kind at a facility:
+-- one row per own work item, keyed by the patient first (the row's halves
+-- ask the key's prefix) and then the item (so two own items never meet on
+-- the key). Row-level security on (not forced), no policy, no grant: only
+-- the trigger function and the row's halves (both the owner's) read or
+-- write it. No foreign key (creating it locks no table).
 create table identity.own_work_patients (
   kind text not null check (kind in ('lab', 'pharmacy')),
   facility_id uuid not null,
   patient_id uuid not null,
-  first_work_item_id uuid not null,
+  work_item_id uuid not null,
   listed_at timestamptz not null default clock_timestamp(),
-  primary key (kind, facility_id, patient_id)
+  primary key (kind, facility_id, patient_id, work_item_id)
 );
 alter table identity.own_work_patients enable row level security;
 revoke all on identity.own_work_patients from public;
@@ -1087,9 +1171,9 @@ begin
     raise exception using errcode = '55000', message = 'OWN_WORK_PATIENT_LIST_MISUSED';
   end if;
   if new.order_route_id is null then
-    insert into identity.own_work_patients (kind, facility_id, patient_id, first_work_item_id)
+    insert into identity.own_work_patients (kind, facility_id, patient_id, work_item_id)
     values (tg_table_schema, new.facility_id, new.patient_id, new.id)
-    on conflict (kind, facility_id, patient_id) do nothing;
+    on conflict (kind, facility_id, patient_id, work_item_id) do nothing;
   end if;
   return null;
 end;
@@ -1205,6 +1289,39 @@ create trigger dispensings_claim_prescription
   execute function pharmacy.claim_prescription_dispensing();
 alter table pharmacy.dispensings enable always trigger dispensings_claim_prescription;
 
+-- A claim's key cannot move, in any session, replica mode included: a work
+-- item's id, prescription, route and facility, and a dispensing's work item.
+-- 0023's immutability triggers refuse every UPDATE of both tables, but in
+-- origin mode only (and there they still answer first: this name sorts after
+-- theirs). A replica-mode change of anything else (an item's patient: D15)
+-- is not refused here.
+create function pharmacy.refuse_claim_key_change()
+returns trigger
+language plpgsql
+volatile
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  raise exception using errcode = '55000', message = 'PRESCRIPTION_CLAIM_KEY_IMMUTABLE',
+    detail = tg_table_schema || '.' || tg_table_name;
+end;
+$$;
+
+create trigger prescription_claim_key_immutable
+  before update of id, source_ehr_prescription_id, order_route_id, facility_id on pharmacy.work_items
+  for each row
+  when ((old.id, old.source_ehr_prescription_id, old.order_route_id, old.facility_id)
+        is distinct from (new.id, new.source_ehr_prescription_id, new.order_route_id, new.facility_id))
+  execute function pharmacy.refuse_claim_key_change();
+alter table pharmacy.work_items enable always trigger prescription_claim_key_immutable;
+create trigger prescription_claim_key_immutable
+  before update of work_item_id on pharmacy.dispensings
+  for each row
+  when (old.work_item_id is distinct from new.work_item_id)
+  execute function pharmacy.refuse_claim_key_change();
+alter table pharmacy.dispensings enable always trigger prescription_claim_key_immutable;
+
 -- 3c. The backfill of D15's list and D14's claims, from every work item and
 -- dispensing there is, read by the owner with FORCE lifted for this block
 -- only (section 1 holds ACCESS EXCLUSIVE on the three tables, so no other
@@ -1225,43 +1342,40 @@ begin
   foreach target in array forced loop
     execute format('alter table %s no force row level security', target);
   end loop;
-  insert into identity.own_work_patients (kind, facility_id, patient_id, first_work_item_id)
-  select distinct on (item.facility_id, item.patient_id) 'lab', item.facility_id, item.patient_id, item.id
+  insert into identity.own_work_patients (kind, facility_id, patient_id, work_item_id)
+  select 'lab', item.facility_id, item.patient_id, item.id
     from lab.work_items item
-   where item.order_route_id is null
-   order by item.facility_id, item.patient_id, item.accepted_at, item.id
-  on conflict (kind, facility_id, patient_id) do nothing;
-  insert into identity.own_work_patients (kind, facility_id, patient_id, first_work_item_id)
-  select distinct on (item.facility_id, item.patient_id) 'pharmacy', item.facility_id, item.patient_id, item.id
+   where item.order_route_id is null;
+  insert into identity.own_work_patients (kind, facility_id, patient_id, work_item_id)
+  select 'pharmacy', item.facility_id, item.patient_id, item.id
     from pharmacy.work_items item
-   where item.order_route_id is null
-   order by item.facility_id, item.patient_id, item.accepted_at, item.id
-  on conflict (kind, facility_id, patient_id) do nothing;
+   where item.order_route_id is null;
   insert into pharmacy.prescription_item_claims (work_item_id, prescription_id, order_route_id, facility_id, dispensed_at)
   select item.id, item.source_ehr_prescription_id, item.order_route_id, item.facility_id, dispensing.dispensed_at
     from pharmacy.work_items item
     left join pharmacy.dispensings dispensing on dispensing.work_item_id = item.id;
-  -- Exact both ways: every own item's patient listed for its kind and
-  -- facility, every listed row founded on an own item of that kind, facility
-  -- and patient; every work item claimed as it is (its prescription, route,
-  -- facility and dispensing, live), every claim an item's.
+  -- Exact both ways: every own item listed with its kind, facility and
+  -- patient, every listed row founded on an own item of that kind with that
+  -- id, facility and patient; every work item claimed as it is (its
+  -- prescription, route, facility and dispensing, live), every claim an
+  -- item's.
   select count(*) into unlisted
-    from (select 'lab' as kind, item.facility_id, item.patient_id from lab.work_items item
+    from (select 'lab' as kind, item.id, item.facility_id, item.patient_id from lab.work_items item
            where item.order_route_id is null
           union all
-          select 'pharmacy', item.facility_id, item.patient_id from pharmacy.work_items item
+          select 'pharmacy', item.id, item.facility_id, item.patient_id from pharmacy.work_items item
            where item.order_route_id is null) own
    where not exists (select 1 from identity.own_work_patients listed
                       where listed.kind = own.kind and listed.facility_id = own.facility_id
-                        and listed.patient_id = own.patient_id);
+                        and listed.patient_id = own.patient_id and listed.work_item_id = own.id);
   select count(*) into unfounded
     from identity.own_work_patients listed
    where not exists (select 1 from lab.work_items item
-                      where listed.kind = 'lab' and item.id = listed.first_work_item_id
+                      where listed.kind = 'lab' and item.id = listed.work_item_id
                         and item.order_route_id is null and item.facility_id = listed.facility_id
                         and item.patient_id = listed.patient_id)
      and not exists (select 1 from pharmacy.work_items item
-                      where listed.kind = 'pharmacy' and item.id = listed.first_work_item_id
+                      where listed.kind = 'pharmacy' and item.id = listed.work_item_id
                         and item.order_route_id is null and item.facility_id = listed.facility_id
                         and item.patient_id = listed.patient_id);
   select count(*) into unclaimed
@@ -1293,7 +1407,7 @@ $$;
 -- this facility's pharmacy or lab staff, else null; the row's half then
 -- takes that answer, so the two halves are tied to the same membership. It
 -- answers only a session that set app.own_facility_work to '0133' (D13): the
--- new pharmacy-api and lab-api images set it, today's images do not.
+-- new lab-api, pharmacy-api and ehr-api images set it, today's images do not.
 create function identity.facility_work_session_membership(work_kind text)
 returns uuid
 language sql
@@ -2201,9 +2315,11 @@ $$;
 -- app.own_facility_work to '0133' (the new ehr-api, D13): until this
 -- facility's pharmacy has dispensed a prescription, sending it to an outside
 -- pharmacy withdraws the own item (its claim released by the route) in the
--- same transaction; after an own dispensing, or once an outside pharmacy
--- accepted it, it is in work. Without the switch both answer as 0123 and
--- 0086 do. CREATE OR REPLACE keeps each one's owner and ACL.
+-- same transaction; after an own dispensing, or once a route an outside
+-- pharmacy accepted has ended uncompleted, it is in work (while that route
+-- stands, or once it completed, the send answers ORDER_ROUTE_ALREADY_SENT, as
+-- before). Without the switch both answer as 0123 and 0086 do. CREATE OR
+-- REPLACE keeps each one's owner and ACL.
 create or replace function ehr.send_order_route(
   requested_route_id uuid,
   requested_kind text,
@@ -2598,6 +2714,7 @@ revoke all on function identity.facility_work_member_allows(text, uuid, uuid, te
   identity.list_own_work_patient(),
   pharmacy.claim_prescription_work_item(),
   pharmacy.claim_prescription_dispensing(),
+  pharmacy.refuse_claim_key_change(),
   pharmacy.own_withdrawn_work_items() from public;
 revoke all on pharmacy.prescription_item_claims, identity.own_work_patients from public;
 
@@ -2634,7 +2751,7 @@ $$;
 comment on function identity.facility_work_member_allows(text, uuid, uuid, text) is
   '0133 D1: the session works for this facility''s pharmacy or laboratory (it set app.own_facility_work to ''0133'' (D13), direct care, <kind>.work-item.read and <kind>.order-route.receive here), the patient is active and no deny directive covers the member: the kind''s row''s half (identity.pharmacy_work_patient_allows or identity.lab_work_patient_allows) given identity.facility_work_session_membership. Called by D5''s helper and D9, which decide one item; no runtime role executes it.';
 comment on function identity.facility_work_session_membership(text) is
-  '0133 D1, the session''s half: the session''s membership when the session set app.own_facility_work to ''0133'' (D13: the new pharmacy-api and lab-api images do), is in direct care at its facility and that active membership holds <kind>.work-item.read and <kind>.order-route.receive there; else null. The own-work policies ask it once per statement, as (select ...), and pass the answer to the kind''s row''s half; the cards and the list''s bases once per call. It allows nothing alone.';
+  '0133 D1, the session''s half: the session''s membership when the session set app.own_facility_work to ''0133'' (D13: the new lab-api, pharmacy-api and ehr-api images do), is in direct care at its facility and that active membership holds <kind>.work-item.read and <kind>.order-route.receive there; else null. The own-work policies ask it once per statement, as (select ...), and pass the answer to the kind''s row''s half; the cards and the list''s bases once per call. It allows nothing alone.';
 comment on function identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text) is
   '0133 D1, the row''s half for pharmacy work, given the session''s half''s answer (STRICT): false unless that membership is still the session''s, at the row''s facility, active and not on hold, of an active account whose subject is the session''s actor; then the patient has own pharmacy work at the row''s facility (D15''s list), is active and no deny directive covers that member for the action. Read again on every row, so a statement that changes its settings after the session''s half ran sees nothing more. It does not ask the member''s roles, staff record, facility or organization: the session''s half asks those, once a statement (see 0133 D11 for what a direct call therefore answers). The Pharmacy runtime''s; identity.lab_work_patient_allows is the same text for lab work.';
 comment on function identity.lab_work_patient_allows(uuid, uuid, uuid, text) is
@@ -2662,21 +2779,23 @@ comment on function lab.own_work_access_for(text, uuid, text) is
 comment on function pharmacy.own_work_item_states(uuid[]) is
   '0133 D10: for each own work item here the session may read, consent or own-work, and whether it was withdrawn before it was dispensed and why: sent_elsewhere (D14: the prescription was sent to an outside pharmacy) before changed (D8: its send was withdrawn). At most 200 ids.';
 comment on function pharmacy.own_withdrawn_work_items() is
-  '0133 D14: the session facility''s withdrawn own pharmacy work items and why (sent_elsewhere, or changed while not dispensed), for a member holding pharmacy.work-item.read here; no patient. The new pharmacy-api''s work list leaves out the items sent elsewhere.';
+  '0133 D14: the session facility''s withdrawn own pharmacy work items and why (sent_elsewhere, or changed while not dispensed), for a member holding pharmacy.work-item.read here, whatever the switch and the purpose of use (none included); no patient. The new pharmacy-api''s work list leaves out the items sent elsewhere.';
 comment on table pharmacy.prescription_item_claims is
-  '0133 D14: one claim per pharmacy work item: live until released (the prescription was sent to an outside pharmacy before this facility dispensed it), dispensed_at once dispensed; at most one live claim per prescription. Kept by the ALWAYS triggers work_items_claim_prescription and dispensings_claim_prescription, released by ehr.send_order_route. The owner''s alone.';
+  '0133 D14: one claim per pharmacy work item: live until released (the prescription was sent to an outside pharmacy before this facility dispensed it), dispensed_at once dispensed; at most one live claim per prescription. Kept by the ALWAYS triggers work_items_claim_prescription and dispensings_claim_prescription, its key held by prescription_claim_key_immutable, released by ehr.send_order_route. The owner''s alone.';
 comment on function pharmacy.claim_prescription_work_item() is
   '0133 D14: the trigger function of work_items_claim_prescription: every new pharmacy work item claims its prescription (a unique violation while another item of it is live). The owner''s alone.';
 comment on function pharmacy.claim_prescription_dispensing() is
   '0133 D14: the trigger function of dispensings_claim_prescription: a dispensing turns its item''s live, undispensed claim to dispensed, else 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE (detail sent_elsewhere or not_claimed). The owner''s alone.';
+comment on function pharmacy.refuse_claim_key_change() is
+  '0133 D14: the trigger function of prescription_claim_key_immutable on pharmacy.work_items and pharmacy.dispensings: refuses, in any session, replica mode included, a change of what a claim was made from (a work item''s id, prescription, route or facility; a dispensing''s work item) with 55000 PRESCRIPTION_CLAIM_KEY_IMMUTABLE. The owner''s alone.';
 comment on table identity.own_work_patients is
-  '0133 D15: the patients with own work (an own work item, no route) of a kind at a facility, kept by the ALWAYS trigger work_items_own_work_patient_listed on lab.work_items and pharmacy.work_items; never removed. The row''s halves ask it. The owner''s alone.';
+  '0133 D15: the patients with own work (an own work item, no route) of a kind at a facility, one row per own work item, kept by the ALWAYS trigger work_items_own_work_patient_listed on lab.work_items and pharmacy.work_items; never removed. The row''s halves ask its key''s prefix (kind, facility, patient). The owner''s alone.';
 comment on function identity.list_own_work_patient() is
-  '0133 D15: the trigger function of work_items_own_work_patient_listed: lists the patient of a new own work item for its kind and facility. The owner''s alone.';
+  '0133 D15: the trigger function of work_items_own_work_patient_listed: lists a new own work item with its patient, kind and facility. The owner''s alone.';
 comment on function ehr.send_order_route(uuid, text, uuid, uuid, uuid, bigint, uuid, text, text, character) is
-  'Sends an order to another facility (0086 R4; 0123''s text). 0133 D14: in a session that set app.own_facility_work to ''0133'' (the new ehr-api), a prescription this facility''s pharmacy holds and has not dispensed may be sent, and its own item is withdrawn (sent elsewhere) in the same transaction; after an own dispensing, or once an outside pharmacy accepted it, ORDER_ROUTE_ORDER_IN_WORK. Without the switch, as 0123.';
+  'Sends an order to another facility (0086 R4; 0123''s text). 0133 D14: in a session that set app.own_facility_work to ''0133'' (the new ehr-api), a prescription this facility''s pharmacy holds and has not dispensed may be sent, and its own item is withdrawn (sent elsewhere) in the same transaction; after an own dispensing, or once a route an outside pharmacy accepted has ended uncompleted, ORDER_ROUTE_ORDER_IN_WORK (while that route stands, or once it completed, ORDER_ROUTE_ALREADY_SENT). Without the switch, as 0123.';
 comment on function ehr.order_route_resend_allowed(text, uuid) is
-  'Whether the order may be sent again (0086). 0133 D14: in a session that set app.own_facility_work to ''0133'', for a prescription as its send: not once dispensed here or accepted elsewhere. Without the switch, as 0086.';
+  'Whether the order may be sent again (0086). 0133 D14: in a session that set app.own_facility_work to ''0133'', for a prescription as its send: not once dispensed here or once a route an outside pharmacy accepted exists. Without the switch, as 0086.';
 comment on function lab.own_work_item_bases(uuid[]) is
   '0133 D10: for each own lab work item here the session may read, consent or own-work. At most 200 ids.';
 
@@ -2691,7 +2810,7 @@ declare
   error_state text;
   error_message text;
 begin
-  -- The 19 new and replaced (0124's cards) bodies (md5), owner, SECURITY
+  -- The 20 new and replaced (0124's cards) bodies (md5), owner, SECURITY
   -- DEFINER, volatility, language, STRICT for the two row's halves only,
   -- search_path.
   with expected(schema_name, proc_name, argument_types, digest, volatility, language_name, config) as (values
@@ -2728,8 +2847,10 @@ begin
            'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'claim_prescription_dispensing', '', '2c7f20d7c0df7c582bccc0291f452fdd', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
-         ('identity', 'list_own_work_patient', '', 'd28131a5d3257a7f8a46d4429ec61d87', 'v', 'plpgsql', 'search_path=pg_catalog, pg_temp'),
+         ('identity', 'list_own_work_patient', '', '4a5d85a1c4d6f22c1f289c0dba7ed143', 'v', 'plpgsql', 'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'own_withdrawn_work_items', '', '1d25a10b83c34e91e9104c448b98e8dd', 's', 'plpgsql',
+           'search_path=pg_catalog, pg_temp'),
+         ('pharmacy', 'refuse_claim_key_change', '', '234d53aafb3653ce4732a0292d995432', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp')),
        differing as (
          select expected.*,
@@ -2836,7 +2957,8 @@ begin
                   ('lab', 'own_work_access_for'), ('pharmacy', 'own_work_item_states'), ('lab', 'own_work_item_bases'),
                   ('ehr', 'own_pharmacy_send_withdrawn_on_change'), ('ehr', 'own_pharmacy_staffed'),
                   ('pharmacy', 'claim_prescription_work_item'), ('pharmacy', 'claim_prescription_dispensing'),
-                  ('identity', 'list_own_work_patient'), ('pharmacy', 'own_withdrawn_work_items'))),
+                  ('identity', 'list_own_work_patient'), ('pharmacy', 'own_withdrawn_work_items'),
+                  ('pharmacy', 'refuse_claim_key_change'))),
        granted as (
          select new_functions.nspname, new_functions.proname, privilege.grantee, privilege.privilege_type,
                 privilege.is_grantable
@@ -2948,11 +3070,11 @@ begin
                   || '(work_item_id)']),
          ('identity.own_work_patients'::regclass,
           array['kind:text:true:-', 'facility_id:uuid:true:-', 'patient_id:uuid:true:-',
-                'first_work_item_id:uuid:true:-', 'listed_at:timestamp with time zone:true:clock_timestamp()'],
+                'work_item_id:uuid:true:-', 'listed_at:timestamp with time zone:true:clock_timestamp()'],
           array['c CHECK ((kind = ANY (ARRAY[''lab''::text, ''pharmacy''::text])))',
-                'p PRIMARY KEY (kind, facility_id, patient_id)'],
+                'p PRIMARY KEY (kind, facility_id, patient_id, work_item_id)'],
           array['CREATE UNIQUE INDEX own_work_patients_pkey ON identity.own_work_patients USING btree '
-                  || '(kind, facility_id, patient_id)'])),
+                  || '(kind, facility_id, patient_id, work_item_id)'])),
        wrong as (
          select format('%s: %s', expected.relation_id, what.problem) as what
            from expected
@@ -3018,9 +3140,9 @@ begin
     raise exception using errcode = '55000',
       message = '0133: pharmacy.work_items'' key on the prescription is not work_items_prescription_kind_uq alone';
   end if;
-  -- D14's and D15's four triggers, exactly: enabled always, after the
-  -- statement's rows, their definitions and functions; the claim functions
-  -- used by one trigger each, the list's by two.
+  -- D14's and D15's six triggers, exactly: enabled always, their
+  -- definitions and functions; the claim functions used by one trigger each,
+  -- the claim key's and the list's by two each.
   with expected(relation_id, trigger_name, function_id, definition) as (values
          ('pharmacy.work_items'::regclass, 'work_items_claim_prescription',
           'pharmacy.claim_prescription_work_item()'::regprocedure,
@@ -3039,7 +3161,19 @@ begin
           'identity.list_own_work_patient()'::regprocedure,
           'CREATE TRIGGER work_items_own_work_patient_listed AFTER INSERT OR UPDATE OF patient_id, facility_id, '
             || 'order_route_id ON pharmacy.work_items FOR EACH ROW WHEN ((new.order_route_id IS NULL)) '
-            || 'EXECUTE FUNCTION identity.list_own_work_patient()'))
+            || 'EXECUTE FUNCTION identity.list_own_work_patient()'),
+         ('pharmacy.work_items'::regclass, 'prescription_claim_key_immutable',
+          'pharmacy.refuse_claim_key_change()'::regprocedure,
+          'CREATE TRIGGER prescription_claim_key_immutable BEFORE UPDATE OF id, source_ehr_prescription_id, '
+            || 'order_route_id, facility_id ON pharmacy.work_items FOR EACH ROW WHEN (((((old.id IS DISTINCT FROM '
+            || 'new.id) OR (old.source_ehr_prescription_id IS DISTINCT FROM new.source_ehr_prescription_id)) OR '
+            || '(old.order_route_id IS DISTINCT FROM new.order_route_id)) OR (old.facility_id IS DISTINCT FROM '
+            || 'new.facility_id))) EXECUTE FUNCTION pharmacy.refuse_claim_key_change()'),
+         ('pharmacy.dispensings'::regclass, 'prescription_claim_key_immutable',
+          'pharmacy.refuse_claim_key_change()'::regprocedure,
+          'CREATE TRIGGER prescription_claim_key_immutable BEFORE UPDATE OF work_item_id ON pharmacy.dispensings '
+            || 'FOR EACH ROW WHEN ((old.work_item_id IS DISTINCT FROM new.work_item_id)) '
+            || 'EXECUTE FUNCTION pharmacy.refuse_claim_key_change()'))
   select exists (select 1 from expected
                   where not exists (select 1 from pg_trigger trigger_row
                                      where trigger_row.tgrelid = expected.relation_id
@@ -3047,7 +3181,7 @@ begin
                                        and trigger_row.tgenabled = 'A' and trigger_row.tgfoid = expected.function_id
                                        and pg_get_triggerdef(trigger_row.oid) = expected.definition))
       or (select count(*) from pg_trigger trigger_row
-           where trigger_row.tgfoid in (select expected.function_id from expected)) <> 4
+           where trigger_row.tgfoid in (select expected.function_id from expected)) <> 6
       or exists (select 1 from pg_trigger trigger_row
                   where not trigger_row.tgisinternal
                     and trigger_row.tgname in (select expected.trigger_name from expected)
