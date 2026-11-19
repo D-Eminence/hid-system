@@ -215,11 +215,13 @@ const environmentSchema = z.object({
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
-  // How long Identity waits for one QoreID request (#271): 12 s by default,
-  // at most 20 s so a start (Turnstile, the check, the database) stays inside
-  // the gateway's 30 s read timeout. QoreID charges a check whether or not
-  // HID waits for its answer (owner, 18 November 2026).
-  QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(20_000).default(12_000),
+  // How long Identity waits for one QoreID request: 11 s by default (owner
+  // Q118; #271 had 12 s), at most 20 s so a start (Turnstile, the check, the
+  // database) stays inside the gateway's 30 s read timeout. 11 s keeps a desk
+  // request's worst case inside 30 s too (docs/INTERFACE_CONTRACT.md, Q108).
+  // QoreID charges a check whether or not HID waits for its answer (owner,
+  // 18 November 2026).
+  QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(20_000).default(11_000),
   // How long a patient NIN check keeps reading QoreID's answer after the
   // caller stopped waiting (QOREID_TIMEOUT_MS) (0137, Q109): QoreID charges the
   // check whether or not HID reads the answer, so the answer is read and kept

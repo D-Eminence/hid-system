@@ -4,7 +4,7 @@ import { getEnvironment, resetEnvironmentForTests } from './environment';
 
 /**
  * A local setup copied from .env.example waits for QoreID as long as the code
- * does by default (#271: 12 s; 0137: the answer read for 90 s), so a desk,
+ * does by default (Q118: 11 s; 0137: the answer read for 90 s), so a desk,
  * sign-up or profile check behaves locally as the contract describes.
  * Fictional values only.
  */

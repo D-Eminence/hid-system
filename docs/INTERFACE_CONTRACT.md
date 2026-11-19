@@ -6692,17 +6692,18 @@ fixture, with `QOREID_TIMEOUT_MS` at 1 s and every write failing: 9.2 s).
 | `QOREID_TIMEOUT_MS` | up to, waiting for another check that answers | worst case | worst case, slow database |
 | --- | --- | --- | --- |
 | 5 s (infra/aws/src/hid-regional-stack.ts) | about 8 s | 13 s | about 17 s |
-| 11 s | about 14 s | 25 s | about 29 s |
-| 12 s (the code default, #271) | about 15 s | 27 s | about 31 s |
+| 11 s (the code default, owner Q118) | about 14 s | 25 s | about 29 s |
+| 12 s (#271's default, before Q118) | about 15 s | 27 s | about 31 s |
 | 20 s (the highest the environment allows) | about 23 s | 43 s | about 47 s |
 
 The website's timer for this request must allow 30 s (health#272 does), and
 the gateway's read timeout is 30 s. Only a `QOREID_TIMEOUT_MS` of 11 s or less
 keeps every desk request inside 30 s, with less than a second to spare in its
-worst case; at the 12 s default the worst case with a slow database passes
-30 s, and at 20 s the worst case passes it with any database. So where the
-desk uses QoreID, `QOREID_TIMEOUT_MS` should be 11 s or less (5 s as
-production sets it). A request that runs past 30 s is ended by the gateway
+worst case; at 12 s the worst case with a slow database passes 30 s, and at
+20 s the worst case passes it with any database. So QoreID waits 11 s by
+default (owner Q118, the code's default; no setting needs applying), and
+where `QOREID_TIMEOUT_MS` is set it should be 11 s or less (production's
+infrastructure sets 5 s). A request that runs past 30 s is ended by the gateway
 with its own `504`, not the desk's `504 QOREID_TIMEOUT`: no `code` and no
 `retryAfterSeconds`, so the website shows its general error. Nothing more is
 charged; the server still finishes and, on a match, writes the case. A
