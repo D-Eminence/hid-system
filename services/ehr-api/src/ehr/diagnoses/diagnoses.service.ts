@@ -4,7 +4,7 @@ import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import { CreateDiagnosisDto, TimelineQueryDto, UpdateDiagnosisDto } from '../shared/clinical.dto';
-import { ClinicalRepository } from '../shared/clinical.repository';
+import { ClinicalRepository, type OperationResult } from '../shared/clinical.repository';
 
 export interface DiagnosisRow extends QueryResultRow {
   id: string;
@@ -68,31 +68,47 @@ export class DiagnosesService {
   }
 
   create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateDiagnosisDto, key: string) {
-    const operation = 'diagnosis.create';
-    const digest = requestDigest(operation, { patientId, encounterId, input });
     return this.repository.run(
       context, patientId, 'write_records', { action: 'ehr.diagnosis.create', resourceType: 'diagnosis' },
-      (client) => this.repository.executeCreate(
-        client, context, patientId, key, operation, digest, 'diagnosis',
-        async () => {
-          const result = await client.query<DiagnosisRow>(
-            `insert into ehr.diagnoses (
-               encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
-               code_system, code, display, clinical_status, verification_status, onset_at, abatement_at, notes
-             ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-             returning ${COLUMNS}`,
-            [
-              encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
-              input.codeSystem, input.code, input.display, input.clinicalStatus, input.verificationStatus,
-              input.onsetAt ?? null, input.abatementAt ?? null, input.notes ?? null,
-            ],
-          );
-          const row = this.single(result.rows[0]);
-          return { value: row, id: row.id };
-        },
-        (id) => this.findById(client, context, patientId, id),
-      ),
+      (client) => this.createInTransaction(client, context, patientId, encounterId, input, key),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
+    );
+  }
+
+  /**
+   * The diagnosis create inside a transaction the caller already holds (the
+   * route's own, or EHR-C5's one-call consultation). The caller writes the
+   * `ehr.diagnosis.create` audit row.
+   */
+  createInTransaction(
+    client: PoolClient,
+    context: DataAccessContext,
+    patientId: string,
+    encounterId: string,
+    input: CreateDiagnosisDto,
+    key: string,
+    operation = 'diagnosis.create',
+  ): Promise<OperationResult<DiagnosisRow>> {
+    const digest = requestDigest(operation, { patientId, encounterId, input });
+    return this.repository.executeCreate(
+      client, context, patientId, key, operation, digest, 'diagnosis',
+      async () => {
+        const result = await client.query<DiagnosisRow>(
+          `insert into ehr.diagnoses (
+             encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+             code_system, code, display, clinical_status, verification_status, onset_at, abatement_at, notes
+           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           returning ${COLUMNS}`,
+          [
+            encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
+            input.codeSystem, input.code, input.display, input.clinicalStatus, input.verificationStatus,
+            input.onsetAt ?? null, input.abatementAt ?? null, input.notes ?? null,
+          ],
+        );
+        const row = this.single(result.rows[0]);
+        return { value: row, id: row.id };
+      },
+      (id) => this.findById(client, context, patientId, id),
     );
   }
 

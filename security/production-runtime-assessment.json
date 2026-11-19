@@ -1,9 +1,9 @@
 {
-  "base_digest": "sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041",
+  "base_digest": "sha256:af2e7dd3017037b3ba73238b818c7273f3b4349c005f8bd1454b78d580fe7e37",
   "node_source": {
-    "node_version": "22.23.4",
-    "source_url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4.tar.xz",
-    "sha256": "7b9adc82d612d0a2a863d96c46de2292552e250cee51956ebbe0146c42aacae9",
+    "node_version": "22.23.5",
+    "source_url": "https://nodejs.org/dist/v22.23.5/node-v22.23.5.tar.xz",
+    "sha256": "6cce7c58bf058700c643944903d60a325e8c9ceede1f5c2c088b435f2ada091a",
     "source_files_inspected": 11703,
     "pattern_hits": []
   },
@@ -33,7 +33,7 @@
         "libc6": "2.41-12+deb13u4"
       },
       "justification": "vulnerable_code_not_in_execute_path",
-      "rationale": "No final ELF imports ns_printrrf, ns_printrr or fp_nquery. The checksum-verified Node 22.23.4 source has no calls. All native binaries are bound by exact hashes."
+      "rationale": "No final ELF imports ns_printrrf, ns_printrr or fp_nquery. The checksum-verified Node 22.23.5 source has no calls. All native binaries are bound by exact hashes."
     },
     {
       "id": "CVE-2026-19499",
@@ -44,7 +44,7 @@
         "libc6": "2.41-12+deb13u4"
       },
       "justification": "vulnerable_code_not_in_execute_path",
-      "rationale": "No final ELF imports strfmon or strfmon_l. The checksum-verified Node 22.23.4 source has no calls. All native binaries are bound by exact hashes."
+      "rationale": "No final ELF imports strfmon or strfmon_l. The checksum-verified Node 22.23.5 source has no calls. All native binaries are bound by exact hashes."
     },
     {
       "id": "CVE-2026-95619",
@@ -173,7 +173,7 @@
       "app/services/identity-api/node_modules/argon2/prebuilds/linux-arm64/argon2.armv8.musl.node": "6b40b4db7f48ce350d0e3699805121c5431e37f52cac37238b0f36f96fa86971",
       "app/services/identity-api/node_modules/argon2/prebuilds/linux-x64/argon2.glibc.node": "d573da575d5c8a1ad71edd066d8222a7d99e590bf09daa9204847143b3ba8cd0",
       "app/services/identity-api/node_modules/argon2/prebuilds/linux-x64/argon2.musl.node": "90d12fb13b719fcb8deae23607d093166bc2ba44791a2fd51c966f626e0ec47a",
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -466,7 +466,7 @@
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-arm64/argon2.armv8.musl.node": "6b40b4db7f48ce350d0e3699805121c5431e37f52cac37238b0f36f96fa86971",
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-x64/argon2.glibc.node": "d573da575d5c8a1ad71edd066d8222a7d99e590bf09daa9204847143b3ba8cd0",
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-x64/argon2.musl.node": "90d12fb13b719fcb8deae23607d093166bc2ba44791a2fd51c966f626e0ec47a",
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -751,7 +751,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "lab-api": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -1036,7 +1036,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "pharmacy-api": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -1321,7 +1321,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "ocr-api": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -1606,7 +1606,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "ocr-worker": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -1891,7 +1891,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "outreach-api": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -2176,7 +2176,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "notification-api": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -2461,7 +2461,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "notification-worker": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -2746,7 +2746,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "event-dispatcher": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -3031,7 +3031,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "support-api": {
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -3324,7 +3324,7 @@
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-arm64/argon2.armv8.musl.node": "6b40b4db7f48ce350d0e3699805121c5431e37f52cac37238b0f36f96fa86971",
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-x64/argon2.glibc.node": "d573da575d5c8a1ad71edd066d8222a7d99e590bf09daa9204847143b3ba8cd0",
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-x64/argon2.musl.node": "90d12fb13b719fcb8deae23607d093166bc2ba44791a2fd51c966f626e0ec47a",
-      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+      "nodejs/bin/node": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -3615,8 +3615,9 @@
     "staging-ehr-runtime-assessment.json": "363ae61ae9573b6613205c9d36d299db25362e1e75973053fe52eb78c44d14e0",
     "staging-lab-runtime-assessment.json": "11c50190a2ec3c678adb81d301010cc88769a4924470d9c6d7101e95df751996",
     "node-22.23.4-runtime-evidence.json": "64fd6c7ad36a60fd1597b8bbe1973630473677f5e81a37e630a8ce9ba2fa5fcc",
-    "zlib-deb13u1-runtime-evidence.json": "17232cfccbda5eec2c365bbac2124a72e8d0d73f98fd4fdd48bb4342459643e6"
+    "zlib-deb13u1-runtime-evidence.json": "17232cfccbda5eec2c365bbac2124a72e8d0d73f98fd4fdd48bb4342459643e6",
+    "node-22.23.5-runtime-evidence.json": "f156f952f9ec44e959c3103e8233e600f8a81b29d6472509020e40fa979108a1"
   },
   "admission": "Expected previously reviewed native bytes only. Every current image must independently match this complete inventory; a changed or extra ELF fails closed. Original raw reports retained. No exploitable-risk waiver.",
-  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment the only changed ELF is nodejs/bin/node. Its review (byte-identical to bin/node in the signed Node 22.23.4 linux-arm64 release; no affected glibc import, aligned new or PBDS content) and the base's non-ELF package changes are checksum-bound in node-22.23.4-runtime-evidence.json. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI. Rechecked 2026-10-31: CVE-2026-84243 (glibc gettext accepts LANGUAGE paths; glibc bug 17142, GLIBC-SA-2026-0025) is new and the native bytes are unchanged. The base image has no .mo catalogs or locale data, its config sets only PATH and SSL_CERT_FILE, and Terraform task definitions set no LANG, LANGUAGE or LC_*. libstdc++ and three unloaded glibc helper libraries import gettext functions, so the import list is not the basis; the basis is that node and the Argon2 addon never select a locale (node's only setlocale call is a NULL query), so LC_MESSAGES stays C and LANGUAGE is never read. Rechecked 2026-11-06: CVE-2026-76844 (zlib gz_write stale next_in, reached only through the gzFile write API) is new and the native bytes are unchanged. No newer distroless nodejs22-debian13 digest changes zlib1g, libc6 or the GCC runtime (latest 8ad697a6..., pushed 2026-10-31, differs only in tzdata). node does not link libz.so.1; the only ELF that does is the system libcrypto.so.3, which no inventoried ELF needs and which imports no gz* function; no ELF imports any gz* symbol, and the gate now rejects any ELF that does. Node's bundled zlib also contains gzwrite.c but the checksum-verified Node 22.23.4 source has no gz* call outside deps/zlib. Rechecked 2026-11-12: all seven findings against the Debian security tracker and the trixie, trixie-updates and trixie-security package indexes. libc6 2.41-12+deb13u4 and the GCC runtime 14.2.0-19 are still the newest trixie packages, and all five libc6 and GCC findings remain open for trixie as no-dsa (Minor issue). CVE-2026-84243 is now fixed upstream for glibc 2.45 (commit 03067f3c5e39), which confirms the LANGUAGE mechanism above; no Debian package carries it. The 2026-11-06 statement that no newer digest changes zlib1g no longer holds: DSA-6613-1 (2026-11-07) fixes CVE-2026-85091 and CVE-2026-76844 in zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1, and distroless nodejs22-debian13 digests 74224b87... (2026-11-08, changes only zlib1g and tzdata) and 6f3d5da2... (latest, 2026-11-11, also moves node to 22.23.5) ship it. This assessment stays on the pinned base f643bc05..., whose native bytes are unchanged: production-backend-images run 43127482626 at a710205f matched all twelve inventories exactly. The zlib entries therefore still assess zlib1g 1:1.3.dfsg+really1.3.1-1+b1 and should be retired by repinning the base, not renewed again. base repinned to 74224b87 (pushed 2026-11-08), which carries zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1 from DSA-6613-1. Debian marks both CVE-2026-85091 and CVE-2026-76844 fixed in that version; its gzwrite patch resets next_in when gz_write() fails, so both findings are removed as fixed. Versus f643bc05 the only changed ELF is usr/lib/aarch64-linux-gnu/libz.so.1.3.1, byte-identical to the Debian arm64 package and with the same exported symbols and imports; the other changes are tzdata 2026f data. This is checksum-bound in zlib-deb13u1-runtime-evidence.json; libc6, the GCC runtime and the node layer are unchanged. Rechecked 2026-11-17: CVE-2026-95692 and CVE-2026-88823 (AES-GCM-SIV IV length and empty AAD update), CVE-2026-95691 (QUIC client CRYPTO frame retransmission use-after-free) and CVE-2026-107496 (CMS_encrypt with EC group order 1) are new. All four are Low in OpenSSL advisory 20261110 and fixed in 3.5.10, due 2026-12-01; Debian marks libssl3t64 3.5.7-1~deb13u3 vulnerable for trixie and trixie-security with no fixed version. The native bytes are unchanged: base 74224b87 was rebuilt from its 22 arm64 layers fetched by digest, and all 283 base ELFs plus the 8 Argon2 0.44.0 prebuilds (npm integrity as locked) equal the inventory. DT_NEEDED on libcrypto.so.3 occurs only in libssl.so.3, engines-3/afalg.so and engines-3/loader_attic.so, all from libssl3t64, and no service or locked production dependency calls process.dlopen, crypto.setEngine or an engine option. node (byte-identical to the signed 22.23.4 linux-arm64 release) carries OpenSSL 3.5.9 statically. That copy is also in the affected range, is not reported by the scanner and is not what these entries assess; HID services use only aes-256-gcm and no CMS or QUIC API, and it stays open until a Node 22 release ships OpenSSL 3.5.10. Rechecked 2026-11-18: CVE-2026-107493 (use-after-free in PEM_X509_INFO_read_bio_ex() when a read into a caller-supplied stack fails) and CVE-2026-124709 (QUIC server retains rejected streams that the peer resets) are new. Both are Low in OpenSSL advisory 20261117 and fixed in 3.5.10, due 2026-12-01; Debian marks libssl3t64 3.5.7-1~deb13u3 vulnerable for trixie and trixie-security, and unstable unfixed, with no DSA. Grype matches both in the Debian namespace and rates them High only from the CISA-ADP CVSS 3.1 scores in NVD (7.7 and 7.5). The native bytes are unchanged: staging-backend-images run 44300202434 (PR #267, merge 8c6167c7) wrote native-inventory.json for all twelve components and each equals elf_inventory, and the only unassessed High rows in every raw scan were these two libssl3t64 findings. The base 74224b87 was again rebuilt from its arm64 layers fetched by digest: no ELF other than libssl.so.3 and the two engines-3 modules needs libcrypto.so.3, none needs libssl.so.3, and node and the Argon2 prebuilds import no OpenSSL symbol, so these entries rest on the same basis as the four of 2026-11-17. node's static OpenSSL 3.5.9 is also in the affected range for both: the checksum-verified Node 22.23.4 source has no call to PEM_X509_INFO_read*, OSSL_QUIC_* or SSL_new_listener outside deps/openssl, node:quic in Node 22 uses ngtcp2 rather than OpenSSL QUIC, and HID services call neither. These two entries, like the four of 2026-11-17, should be removed when a Debian openssl 3.5.10 package is in the base, not renewed past 2026-12-01. The policy expires_at stays 2026-12-12; these two entries also carry a per-finding expires_at of 2026-12-01T00:00:00+00:00, which the assessor and the publication gate enforce. Advisory 20261117 also lists CVE-2026-35190 (TLS 1.3 server with the Suite B certificate flag), rated Medium by its CNA; Grype does not report it and it is not assessed here. OWNER APPROVAL: D-Eminence, verbatim in chat on 2026-11-18 at about 12:57 UTC: \"Q99 A\" (Owner Queue Q99: approve the narrow, expiring assessment of the 2026-11-10 and 2026-11-17 OpenSSL advisories for these images, and the gateway-only OpenVEX bound to the gateway files, expiring 2026-12-01). This covers the four libssl3t64 entries of 2026-11-17 that were pending owner approval and the two of 2026-11-18."
+  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment the only changed ELF is nodejs/bin/node. Its review (byte-identical to bin/node in the signed Node 22.23.4 linux-arm64 release; no affected glibc import, aligned new or PBDS content) and the base's non-ELF package changes are checksum-bound in node-22.23.4-runtime-evidence.json. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI. Rechecked 2026-10-31: CVE-2026-84243 (glibc gettext accepts LANGUAGE paths; glibc bug 17142, GLIBC-SA-2026-0025) is new and the native bytes are unchanged. The base image has no .mo catalogs or locale data, its config sets only PATH and SSL_CERT_FILE, and Terraform task definitions set no LANG, LANGUAGE or LC_*. libstdc++ and three unloaded glibc helper libraries import gettext functions, so the import list is not the basis; the basis is that node and the Argon2 addon never select a locale (node's only setlocale call is a NULL query), so LC_MESSAGES stays C and LANGUAGE is never read. Rechecked 2026-11-06: CVE-2026-76844 (zlib gz_write stale next_in, reached only through the gzFile write API) is new and the native bytes are unchanged. No newer distroless nodejs22-debian13 digest changes zlib1g, libc6 or the GCC runtime (latest 8ad697a6..., pushed 2026-10-31, differs only in tzdata). node does not link libz.so.1; the only ELF that does is the system libcrypto.so.3, which no inventoried ELF needs and which imports no gz* function; no ELF imports any gz* symbol, and the gate now rejects any ELF that does. Node's bundled zlib also contains gzwrite.c but the checksum-verified Node 22.23.4 source has no gz* call outside deps/zlib. Rechecked 2026-11-12: all seven findings against the Debian security tracker and the trixie, trixie-updates and trixie-security package indexes. libc6 2.41-12+deb13u4 and the GCC runtime 14.2.0-19 are still the newest trixie packages, and all five libc6 and GCC findings remain open for trixie as no-dsa (Minor issue). CVE-2026-84243 is now fixed upstream for glibc 2.45 (commit 03067f3c5e39), which confirms the LANGUAGE mechanism above; no Debian package carries it. The 2026-11-06 statement that no newer digest changes zlib1g no longer holds: DSA-6613-1 (2026-11-07) fixes CVE-2026-85091 and CVE-2026-76844 in zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1, and distroless nodejs22-debian13 digests 74224b87... (2026-11-08, changes only zlib1g and tzdata) and 6f3d5da2... (latest, 2026-11-11, also moves node to 22.23.5) ship it. This assessment stays on the pinned base f643bc05..., whose native bytes are unchanged: production-backend-images run 43127482626 at a710205f matched all twelve inventories exactly. The zlib entries therefore still assess zlib1g 1:1.3.dfsg+really1.3.1-1+b1 and should be retired by repinning the base, not renewed again. base repinned to 74224b87 (pushed 2026-11-08), which carries zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1 from DSA-6613-1. Debian marks both CVE-2026-85091 and CVE-2026-76844 fixed in that version; its gzwrite patch resets next_in when gz_write() fails, so both findings are removed as fixed. Versus f643bc05 the only changed ELF is usr/lib/aarch64-linux-gnu/libz.so.1.3.1, byte-identical to the Debian arm64 package and with the same exported symbols and imports; the other changes are tzdata 2026f data. This is checksum-bound in zlib-deb13u1-runtime-evidence.json; libc6, the GCC runtime and the node layer are unchanged. Rechecked 2026-11-17: CVE-2026-95692 and CVE-2026-88823 (AES-GCM-SIV IV length and empty AAD update), CVE-2026-95691 (QUIC client CRYPTO frame retransmission use-after-free) and CVE-2026-107496 (CMS_encrypt with EC group order 1) are new. All four are Low in OpenSSL advisory 20261110 and fixed in 3.5.10, due 2026-12-01; Debian marks libssl3t64 3.5.7-1~deb13u3 vulnerable for trixie and trixie-security with no fixed version. The native bytes are unchanged: base 74224b87 was rebuilt from its 22 arm64 layers fetched by digest, and all 283 base ELFs plus the 8 Argon2 0.44.0 prebuilds (npm integrity as locked) equal the inventory. DT_NEEDED on libcrypto.so.3 occurs only in libssl.so.3, engines-3/afalg.so and engines-3/loader_attic.so, all from libssl3t64, and no service or locked production dependency calls process.dlopen, crypto.setEngine or an engine option. node (byte-identical to the signed 22.23.4 linux-arm64 release) carries OpenSSL 3.5.9 statically. That copy is also in the affected range, is not reported by the scanner and is not what these entries assess; HID services use only aes-256-gcm and no CMS or QUIC API, and it stays open until a Node 22 release ships OpenSSL 3.5.10. Rechecked 2026-11-18: CVE-2026-107493 (use-after-free in PEM_X509_INFO_read_bio_ex() when a read into a caller-supplied stack fails) and CVE-2026-124709 (QUIC server retains rejected streams that the peer resets) are new. Both are Low in OpenSSL advisory 20261117 and fixed in 3.5.10, due 2026-12-01; Debian marks libssl3t64 3.5.7-1~deb13u3 vulnerable for trixie and trixie-security, and unstable unfixed, with no DSA. Grype matches both in the Debian namespace and rates them High only from the CISA-ADP CVSS 3.1 scores in NVD (7.7 and 7.5). The native bytes are unchanged: staging-backend-images run 44300202434 (PR #267, merge 8c6167c7) wrote native-inventory.json for all twelve components and each equals elf_inventory, and the only unassessed High rows in every raw scan were these two libssl3t64 findings. The base 74224b87 was again rebuilt from its arm64 layers fetched by digest: no ELF other than libssl.so.3 and the two engines-3 modules needs libcrypto.so.3, none needs libssl.so.3, and node and the Argon2 prebuilds import no OpenSSL symbol, so these entries rest on the same basis as the four of 2026-11-17. node's static OpenSSL 3.5.9 is also in the affected range for both: the checksum-verified Node 22.23.4 source has no call to PEM_X509_INFO_read*, OSSL_QUIC_* or SSL_new_listener outside deps/openssl, node:quic in Node 22 uses ngtcp2 rather than OpenSSL QUIC, and HID services call neither. These two entries, like the four of 2026-11-17, should be removed when a Debian openssl 3.5.10 package is in the base, not renewed past 2026-12-01. The policy expires_at stays 2026-12-12; these two entries also carry a per-finding expires_at of 2026-12-01T00:00:00+00:00, which the assessor and the publication gate enforce. Advisory 20261117 also lists CVE-2026-35190 (TLS 1.3 server with the Suite B certificate flag), rated Medium by its CNA; Grype does not report it and it is not assessed here. OWNER APPROVAL: D-Eminence, verbatim in chat on 2026-11-18 at about 12:57 UTC: \"Q99 A\" (Owner Queue Q99: approve the narrow, expiring assessment of the 2026-11-10 and 2026-11-17 OpenSSL advisories for these images, and the gateway-only OpenVEX bound to the gateway files, expiring 2026-12-01). This covers the four libssl3t64 entries of 2026-11-17 that were pending owner approval and the two of 2026-11-18. Repinned 2026-11-19: Grype began reporting CVE-2026-123864, CVE-2026-123865, CVE-2026-123866 and CVE-2026-123872 (High) against node 22.23.4, all fixed in the Node 22.23.5 security release (2026-11-11). The base is repinned to af2e7dd3... (gcr.io/distroless/nodejs22-debian13:latest, pushed 2026-11-12), the same root variant. Versus 74224b87 the only changed ELF is nodejs/bin/node (7e481833... to bb71f797..., in all twelve inventories), byte-identical to bin/node in the signed Node 22.23.5 linux-arm64 release, with the same 1134 imports, no affected glibc or gzFile write import, and no aligned new or PBDS content; the only other change is the mode of usr/lib/os-release. The checksum-verified node-v22.23.5.tar.xz has no forbidden glibc, PBDS, PEM_X509_INFO_read*, OSSL_QUIC_* or SSL_new_listener use outside deps/openssl. node 22.23.5 still bundles OpenSSL 3.5.9, so the statements above about node's static OpenSSL are unchanged. This is checksum-bound in node-22.23.5-runtime-evidence.json. libc6, the GCC runtime, zlib1g and libssl3t64 are byte-identical, so every finding, package version, per-finding expiry, assessed_at and expires_at is unchanged; no finding is added."
 }
