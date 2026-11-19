@@ -258,6 +258,17 @@ const environmentSchema = z.object({
   ADMIN_OUTREACH_STATUS_URL: optionalUrl,
   ADMIN_EVENT_DISPATCHER_STATUS_URL: optionalUrl,
   ADMIN_OPERATIONS_TIMEOUT_MS: z.coerce.number().int().min(250).max(5000).default(1500),
+  // A staff member's chosen facility, kept per sign-in (0129): 'off' (the
+  // default) is today's behaviour, and reads and stores nothing, so an image
+  // can ship before 0129. 'keep' stores the choice made with POST
+  // /auth/facility and reports it on GET /auth/session and POST /auth/refresh;
+  // 'ask' does the same and also answers 'default' while a staff sign-in has
+  // made no choice, so the website asks where the user is working. Set it in
+  // AWS with HID_STAFF_FACILITY_SELECTION_MODE at synth time, only once 0129
+  // is applied: with it on, Identity refuses to start while the table or one
+  // of its grants is missing (FacilitySelectionStartupCheck). Empty means off;
+  // any other value refuses to boot.
+  STAFF_FACILITY_SELECTION_MODE: z.preprocess(emptyToUndefined, z.enum(['off', 'keep', 'ask']).default('off')),
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {
@@ -382,6 +393,7 @@ function isBase64Key(value: string, requiredBytes: number): boolean {
 }
 
 export type Environment = z.infer<typeof environmentSchema>;
+export type StaffFacilitySelectionMode = Environment['STAFF_FACILITY_SELECTION_MODE'];
 let cachedEnvironment: Environment | undefined;
 
 export function getEnvironment(): Environment {

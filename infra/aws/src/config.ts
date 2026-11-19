@@ -9,6 +9,10 @@ export const stagingModes = ['sleep', 'economy', 'fidelity'] as const;
 export type StagingMode = typeof stagingModes[number];
 export type DeploymentProfile = 'development' | StagingMode | 'production';
 
+/** identity-api's STAFF_FACILITY_SELECTION_MODE (0129): off, keep or ask. */
+export const staffFacilitySelectionModes = ['off', 'keep', 'ask'] as const;
+export type StaffFacilitySelectionMode = typeof staffFacilitySelectionModes[number];
+
 export type InterfaceEndpointName =
   | 'ecr-api'
   | 'ecr-docker'
@@ -59,6 +63,12 @@ export interface HidEnvironmentConfig {
   // ehr-api then takes a prescription's dispensing details and pharmacy-api adds
   // them to own work (0125). Switch it on only after 0125 is applied.
   readonly prescriptionDispensingDetailsEnabled: boolean;
+  // Off unless HID_STAFF_FACILITY_SELECTION_MODE is keep or ask at synth time:
+  // identity-api then keeps a staff member's chosen facility per sign-in
+  // (0129). Synthesize keep or ask only once 0129 is applied: identity-api
+  // refuses to start while its table or grants are missing, and the deploy
+  // rolls back. To roll back the feature, synthesize off again.
+  readonly staffFacilitySelectionMode: StaffFacilitySelectionMode;
 }
 
 interface ProfileValues {
@@ -168,6 +178,7 @@ export function environmentConfig(
   qoreIdEnabledValue?: string,
   ownWorkPatientCardEnabledValue?: string,
   prescriptionDispensingDetailsEnabledValue?: string,
+  staffFacilitySelectionModeValue?: string,
 ): HidEnvironmentConfig {
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -197,12 +208,17 @@ export function environmentConfig(
   if (!['true', 'false'].includes(prescriptionDispensingDetailsEnabledInput)) {
     throw new Error('HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED must be true or false when supplied');
   }
+  const staffFacilitySelectionMode = staffFacilitySelectionModeValue ?? 'off';
+  if (!(staffFacilitySelectionModes as readonly string[]).includes(staffFacilitySelectionMode)) {
+    throw new Error('HID_STAFF_FACILITY_SELECTION_MODE must be off, keep or ask when supplied');
+  }
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
     qoreIdEnabled: qoreIdEnabledInput === 'true',
     ownWorkPatientCardEnabled: ownWorkPatientCardEnabledInput === 'true',
     prescriptionDispensingDetailsEnabled: prescriptionDispensingDetailsEnabledInput === 'true',
+    staffFacilitySelectionMode: staffFacilitySelectionMode as StaffFacilitySelectionMode,
   };
 }
 
