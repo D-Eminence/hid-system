@@ -138,6 +138,22 @@ export const LATEST_VITALS_SQL = `
   where x.value is not null and jsonb_typeof(x.value) <> 'null'
   order by x.measure, effective.recorded_at desc, effective.created_at desc, effective.id desc`;
 
+/**
+ * EHR-C3's reader, inside the caller's transaction (already authorized and
+ * audited by the caller): the newest corrected value of each measure for the
+ * patient at this facility. Also read by the chart summary (EHR-C4).
+ */
+export async function readLatestVitals(client: PoolClient, patientId: string, facilityId: string): Promise<LatestVitals> {
+  const result = await client.query<LatestVitalRow>(LATEST_VITALS_SQL, [patientId, facilityId]);
+  const measures: Partial<Record<LatestVitalMeasure, LatestVitalValue>> = {};
+  for (const row of result.rows) {
+    if (!LATEST_VITAL_MEASURES.includes(row.measure)) continue;
+    measures[row.measure] = { value: latestValue(row.value), recordedAt: row.recordedAt, vitalId: row.vitalId,
+      encounterId: row.encounterId, corrected: row.corrected === true };
+  }
+  return { facilityId, measures };
+}
+
 @Injectable()
 export class VitalsService {
   constructor(private readonly repository: ClinicalRepository) {}
@@ -153,15 +169,8 @@ export class VitalsService {
       context, patientId, 'read_records',
       { action: 'ehr.vital.latest', resourceType: 'vital' },
       async (client) => {
-        const result = await client.query<LatestVitalRow>(LATEST_VITALS_SQL, [patientId, context.facilityId]);
-        const measures: Partial<Record<LatestVitalMeasure, LatestVitalValue>> = {};
-        for (const row of result.rows) {
-          if (!LATEST_VITAL_MEASURES.includes(row.measure)) continue;
-          measures[row.measure] = { value: latestValue(row.value), recordedAt: row.recordedAt, vitalId: row.vitalId,
-            encounterId: row.encounterId, corrected: row.corrected === true };
-        }
-        return { value: { facilityId: context.facilityId, measures },
-          details: { measureCount: Object.keys(measures).length } };
+        const value = await readLatestVitals(client, patientId, context.facilityId);
+        return { value, details: { measureCount: Object.keys(value.measures).length } };
       },
     );
   }
