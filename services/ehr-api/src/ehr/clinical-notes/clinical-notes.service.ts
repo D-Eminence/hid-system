@@ -11,7 +11,7 @@ import {
   UpdateClinicalNoteDto,
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
-import { neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
+import { hasTypedReason, neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
 import { requireVisitOpenForWork } from '../shared/visit-guard';
 
 export interface ClinicalNoteRow extends QueryResultRow {
@@ -338,12 +338,16 @@ export class ClinicalNotesService {
         const current = await this.lockNote(client, context, patientId, encounterId, noteId);
         this.validateTransition(current, input);
         const signing = input.status === NoteStatus.Signed && current.status === 'draft';
-        // FR-1: the first signature of a draft, with no other change, needs no
-        // typed reason; the fixed one is recorded. Anything else needs one.
-        const firstSignature = signing && input.title === undefined && input.changeReason === undefined
+        // FR-1 and Q105: a draft that was never signed may be signed (first
+        // signature) or have its title edited (draft edit), or both, with no
+        // typed reason; the fixed one is recorded. "Never signed" is checked
+        // against the version history and fails closed. Entering in error,
+        // and anything on a signed note, needs a typed reason.
+        const draftWork = current.status === 'draft' && input.status !== NoteStatus.EnteredInError;
+        const free = draftWork && !hasTypedReason(input.changeReason)
           && await neverReachedBefore(client, 'clinical_notes', noteId, ['signed', 'amended']);
         const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason,
-          firstSignature ? 'first_signature' : undefined);
+          free ? (signing ? 'first_signature' : 'draft_edit') : undefined);
         await this.repository.setChangeReason(client, reason);
         const result = await client.query<ClinicalNoteRow>(
           `update ehr.clinical_notes set
@@ -403,6 +407,14 @@ export class ClinicalNotesService {
           if (Number(note.rowVersion) !== input.expectedRowVersion) {
             throw new DomainProblem(412, 'VERSION_CONFLICT', 'Clinical note changed since it was loaded');
           }
+          // Q105: new text for a draft that was never signed needs no typed
+          // reason; the fixed one is recorded on the revision and the version.
+          // Amending a signed note still needs one (checked against the
+          // version history, failing closed).
+          const free = note.status === 'draft' && !hasTypedReason(input.changeReason)
+            && await neverReachedBefore(client, 'clinical_notes', noteId, ['signed', 'amended']);
+          const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason,
+            free ? 'draft_edit' : undefined);
           const nextRevision = note.currentRevisionNo + 1;
           const revisionResult = await client.query<ClinicalNoteRevisionRow>(
             `insert into ehr.clinical_note_revisions (
@@ -416,13 +428,13 @@ export class ClinicalNotesService {
               context.facilityId,
               nextRevision,
               input.content,
-              input.changeReason,
+              reason,
               note.currentRevisionNo,
               context.actor.accountId,
               context.membershipId,
             ],
           );
-          await this.repository.setChangeReason(client, input.changeReason);
+          await this.repository.setChangeReason(client, reason);
           const update = await client.query(
             `update ehr.clinical_notes
              set current_revision_no = $1, status = case when status in ('signed', 'amended') then 'amended' else status end
@@ -431,7 +443,7 @@ export class ClinicalNotesService {
           );
           if (update.rowCount !== 1) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Clinical note changed since it was loaded');
           const revision = this.singleRevision(revisionResult.rows[0]);
-          return { value: revision, id: revision.id };
+          return { value: revision, id: revision.id, ...(reasonDetails.fixedReason ? { details: reasonDetails } : {}) };
         },
         (id) => this.findRevision(client, context, patientId, noteId, id),
       ),
