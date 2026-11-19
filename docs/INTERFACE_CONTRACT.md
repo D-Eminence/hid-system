@@ -6837,8 +6837,9 @@ present.
 Owner decisions of 18 November 2026: activated prescriptions go
 automatically to the hospital's own pharmacy (YES); pharmacy and lab staff
 get their own facility's work items only, never the chart. Needs 0001-0127;
-in Release A, 0128-0132 run before it and none of them replaces, alters or
-relies on anything it replaces or relies on. It fixes finding F2 of the plan:
+in Release A, 0128-0132 run before it and none of them creates, replaces or
+alters a function it replaces or relies on, a table it locks or gives a
+policy, or a column it reads (0133's header). It fixes finding F2 of the plan:
 before 0133 a pharmacist or lab scientist without a personal consent grant
 saw "To dispense 0" and a card with no name for their own facility's work.
 
