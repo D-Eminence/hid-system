@@ -86,6 +86,11 @@
 --      purposes (emergency only, direct care), not yet started or expired;
 --   7d. 0125's prescription details still need the member's consent: none
 --      for PH, the item's details for PG;
+--   7f. another facility's pharmacist and lab member (P2, L2), at their
+--      facility and claiming F1, get nothing of F1's own work from any
+--      reader: no state or basis (D10), no event, dispensing or reversal, no
+--      access through a dispensing or an accession (D9); PH and LS read the
+--      same rows (each probe has rows to find);
 --   8. the owner-run definer functions that read ehr.prescriptions give the
 --      pharmacist nothing more through the EHR runtime: the order-route send,
 --      the own-pharmacy send and the withdrawal refuse the pharmacist first.
@@ -1311,6 +1316,66 @@ select pg_temp.expect('PH: the dispensed and edited rx1 does not read withdrawn'
 select pg_temp.expect('PH: the held rx3 (never dispensed) still reads withdrawn',
   (select string_agg(state.basis || '/' || state.withdrawn, ',')
      from pharmacy.own_work_item_states(array[pg_temp.work_item_of(pg_temp.rx(3))]) state), 'own-work/true');
+reset role;
+
+-- 7f. Another facility's staff, through every reader of the own work: P2
+-- (F2's pharmacist) and L2 (F2's lab member), at F2 and claiming F1, get no
+-- state or basis, no chain row (events, dispensings, reversals; the Lab
+-- chain is case 7b's) and no access through a dispensing or an accession of
+-- F1's own items; PH and LS, at F1, read the same (so each probe has rows to
+-- find). Ada's dispensed items rx1, rx2 (reversed) and rx4, and W1.
+create function pg_temp.dispensing_of(prescription uuid) returns uuid language sql security definer as $f$
+  select d.id from pharmacy.dispensings d where d.work_item_id = pg_temp.work_item_of(prescription)
+$f$;
+create function pg_temp.pharmacy_chain_view(member integer, site integer default null) returns text
+language plpgsql as $f$
+declare
+  items uuid[] := array[pg_temp.work_item_of(pg_temp.rx(1)), pg_temp.work_item_of(pg_temp.rx(2)),
+    pg_temp.work_item_of(pg_temp.rx(4))];
+  answer text;
+begin
+  perform pg_temp.as_member(member, site);
+  select format('states=%s events=%s dispensings=%s reversals=%s access=%s',
+           (select count(*) from pharmacy.own_work_item_states(items)),
+           (select count(*) from pharmacy.work_item_events e where e.work_item_id = any(items)),
+           (select count(*) from pharmacy.dispensings d where d.work_item_id = any(items)),
+           (select count(*) from pharmacy.dispensing_reversals r where r.work_item_id = any(items)),
+           (select count(*) from pharmacy.own_work_access_for('dispensing', pg_temp.dispensing_of(pg_temp.rx(1)),
+              'read_records')) + (select count(*) from pharmacy.own_work_access_for('dispensing',
+              pg_temp.dispensing_of(pg_temp.rx(2)), 'write_records')))
+    into answer;
+  return answer;
+end $f$;
+create function pg_temp.lab_basis_view(member integer, site integer default null) returns text language plpgsql as $f$
+declare answer text;
+begin
+  perform pg_temp.as_member(member, site);
+  select format('bases=%s access=%s',
+           (select coalesce(string_agg(right(basis.work_item_id::text, 1) || ':' || basis.basis, ','
+              order by basis.work_item_id), '-') from lab.own_work_item_bases(array[
+              'e133000a-0000-4000-8000-000000000001'::uuid, 'e133000a-0000-4000-8000-000000000002'::uuid]) basis),
+           (select count(*) from lab.own_work_access_for('work_item', 'e133000a-0000-4000-8000-000000000001',
+              'read_records')) + (select count(*) from lab.own_work_access_for('accession',
+              'e133000b-0000-4000-8000-000000000001', 'write_records')))
+    into answer;
+  return answer;
+end $f$;
+grant execute on function pg_temp.dispensing_of(uuid), pg_temp.pharmacy_chain_view(integer, integer),
+  pg_temp.lab_basis_view(integer, integer) to public;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.expect('PH (F1) reads the three dispensed items'' states and chain',
+  pg_temp.pharmacy_chain_view(2), 'states=3 events=3 dispensings=3 reversals=1 access=2');
+select pg_temp.expect('P2 (pharmacist at F2) reads none of it', pg_temp.pharmacy_chain_view(6),
+  'states=0 events=0 dispensings=0 reversals=0 access=0');
+select pg_temp.expect('P2''s membership in a session at F1 reads none of it', pg_temp.pharmacy_chain_view(6, 1),
+  'states=0 events=0 dispensings=0 reversals=0 access=0');
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.expect('LS (F1) has W1''s basis and access', pg_temp.lab_basis_view(3), 'bases=1:own-work access=2');
+select pg_temp.expect('L2 (lab at F2) has only F2''s own item, nothing of W1', pg_temp.lab_basis_view(11),
+  'bases=2:own-work access=0');
+select pg_temp.expect('L2''s membership in a session at F1 has nothing', pg_temp.lab_basis_view(11, 1),
+  'bases=- access=0');
 reset role;
 
 -- 8. The owner-run definer functions that read ehr.prescriptions (case 1

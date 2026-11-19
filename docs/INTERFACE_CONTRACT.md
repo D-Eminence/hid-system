@@ -7063,8 +7063,11 @@ prescription details verifiers follow 0133's rules where they meet them
 (the automatic send, own work listed on the own-work basis) and add no
 negative case of their own; the database suite
 (`own-facility-pharmacy-lab-work`) holds the full set (another facility's
-staff, other roles, deny directives, emergency sessions, inactive patients,
-route-backed items, the imported evidence).
+staff, at their facility and claiming this one, through every reader: the
+items, cards, events, dispensings, reversals and the Lab chain, the list's
+states and bases and the access checks; other roles, deny directives,
+emergency sessions, inactive patients, route-backed items, the imported
+evidence).
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 
