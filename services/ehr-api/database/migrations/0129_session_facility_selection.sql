@@ -103,8 +103,12 @@
 --    key (id, facility_id, account_id) of identity.staff_facility_memberships;
 --    the applier owns, or inherits from the owner of, those four tables (to
 --    lock them and reference them), and may create in schema auth.
--- 1. SHARE ROW EXCLUSIVE on those four tables, taken NOWAIT and retried
---    every 100 ms for at most 5 seconds, else 55P03 with nothing applied.
+-- 1. SHARE ROW EXCLUSIVE on those four tables, ACCESS SHARE on the two more
+--    tables section 5's firing of the guard reads (identity.staff and
+--    identity.organizations), and the six tables' indexes, in one attempt,
+--    NOWAIT; retried every 100 ms for at most 5 seconds, else 55P03 with
+--    nothing applied; one attempt only, with no sleep, when this transaction
+--    already holds an earlier migration's locks (see Locks).
 -- 2. The table and its comment.
 -- 3. The guard, its comment and the trigger; the guard revoked from PUBLIC.
 -- 4. Grants (D5).
@@ -121,18 +125,40 @@
 --
 -- Locks: the four foreign keys need SHARE ROW EXCLUSIVE on auth.sessions,
 -- auth.accounts, identity.facilities and identity.staff_facility_memberships,
--- held to commit. Section 1 takes them first, NOWAIT, so the migration never
--- waits while holding a lock and no request queues behind a waiting lock;
--- behind an open write on any of the four (a sign-in, a refresh, a sign-out,
--- an account or workforce change) it tries again 100 ms later, and after 50
--- attempts (5 seconds) it stops the release (55P03, nothing applied; the same
--- release can run again, see the declaration's RECOVERY). Reads are never
--- blocked. Once taken, sign-ins, refreshes, sign-outs and account or
--- workforce changes wait until commit: a few milliseconds when 0129 releases
--- alone (the table is new and empty, so nothing is scanned); if it ships with
--- other pending migrations, the runner's dry run of all of them in one
--- transaction holds the locks until that dry run ends. Section 0 takes no
--- table lock.
+-- held to commit; creating them also takes the referenced keys' indexes, and
+-- section 5's firing of the guard plans its query on those four tables and on
+-- identity.staff and identity.organizations (ACCESS SHARE on each table and on
+-- every index of each). Section 1 takes all of them first, in one attempt:
+-- the four tables SHARE ROW EXCLUSIVE and the two ACCESS SHARE, NOWAIT, and
+-- the six tables' indexes by planning a query on the six under a 10 ms
+-- lock_timeout (an ALTER TABLE, VACUUM FULL or REINDEX of identity.staff or
+-- identity.organizations, or an ALTER INDEX ... SET TABLESPACE of an index of
+-- the four, holds what sections 2 and 5 need while it allows section 1's
+-- table locks: measured on the earlier file, 0129 then waited for the
+-- runner's 5 s lock_timeout holding the four tables, and a sign-in queued
+-- behind it). A busy table or index fails the attempt at once and its
+-- subtransaction releases what it took. When 0129 is the first statement of
+-- its transaction (the runner applies each file in its own transaction), the
+-- loop tries again 100 ms later, so the migration never waits while holding a
+-- lock and no request queues behind a waiting lock; behind an open write on
+-- any of the four (a sign-in, a refresh, a sign-out, an account or workforce
+-- change) it tries again, and after 50 attempts (5 seconds) it stops the
+-- release (55P03, nothing applied; the same release can run again, see the
+-- declaration's RECOVERY). When its transaction already holds locks that stop
+-- other sessions' writes or reads of a table (an earlier migration of the
+-- same transaction: the runner's dry run runs every pending file in one
+-- transaction, so with 0128 pending it holds 0128's SHARE ROW EXCLUSIVE on
+-- identity.outbox_events; the runner's own ledger table aside), it makes one
+-- attempt and does not sleep: a busy table or index stops the dry run at
+-- once with 55P03 (nothing applied) instead of keeping those locks held for
+-- up to 5 seconds while it retries. Reads are never blocked (the ACCESS
+-- SHARE locks stop only DDL, VACUUM FULL and REINDEX on identity.staff and
+-- identity.organizations until commit). Once taken, sign-ins, refreshes,
+-- sign-outs and account or workforce changes wait until commit: a few
+-- milliseconds when 0129 releases alone (the table is new and empty, so
+-- nothing is scanned); if it ships with other pending migrations, the
+-- runner's dry run of all of them in one transaction holds the locks until
+-- that dry run ends. Section 0 takes no table lock.
 --
 -- Old services on this schema: nothing reads or writes the new table until
 -- identity-api runs with STAFF_FACILITY_SELECTION_MODE keep or ask; today's
@@ -282,23 +308,57 @@ begin
 end
 $$;
 
--- 1. The four referenced tables, SHARE ROW EXCLUSIVE, NOWAIT, at most 5 s
--- (see Locks). A failed attempt's subtransaction releases what it took.
+-- 1. The four referenced tables, SHARE ROW EXCLUSIVE, the two more tables the
+-- guard reads, ACCESS SHARE, and the six tables' indexes, NOWAIT, at most 5 s
+-- (see Locks). A failed attempt's subtransaction releases what it took. When
+-- this transaction already holds a lock that stops other sessions' writes or
+-- reads of a table (an earlier migration in the same transaction, as in the
+-- runner's dry run of every pending file; the runner's own ledger table
+-- aside), one attempt only and no sleep, so no request queues behind those
+-- locks while this file waits.
 do $$
 declare
   attempt integer := 0;
+  runner_lock_timeout text := current_setting('lock_timeout');
+  holding boolean := exists (
+    select 1 from pg_locks held
+      join pg_class relation on relation.oid = held.relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where held.pid = pg_backend_pid() and held.locktype = 'relation' and held.granted
+       and held.database = (select database_row.oid from pg_database database_row
+                             where database_row.datname = current_database())
+       and held.mode in ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+       and namespace.nspname <> 'migration');
 begin
   loop
     attempt := attempt + 1;
     begin
       lock table auth.sessions, auth.accounts, identity.facilities, identity.staff_facility_memberships
         in share row exclusive mode nowait;
+      lock table identity.staff, identity.organizations in access share mode nowait;
+      -- The six tables' indexes, which creating the foreign keys (section 2)
+      -- and planning the guard's query (section 5) take: a REINDEX or ALTER
+      -- INDEX holds them while it allows the table locks above. A 10 ms
+      -- lock_timeout makes taking them a NOWAIT too (55P03, so this loop tries
+      -- again); the runner's own is restored.
+      perform set_config('lock_timeout', '10ms', true);
+      execute 'select 1 from auth.sessions, auth.accounts, identity.facilities, identity.staff_facility_memberships, '
+        || 'identity.staff, identity.organizations where false';
+      perform set_config('lock_timeout', runner_lock_timeout, true);
       exit;
     exception when lock_not_available then
+      if holding then
+        raise exception using errcode = '55P03',
+          message = '0129: auth.sessions, auth.accounts, identity.facilities, identity.staff_facility_memberships, '
+            || 'identity.staff or identity.organizations (or an index of one) is busy, and this transaction already '
+            || 'holds an earlier migration''s locks, so it does not wait; nothing applied; run the release again at a '
+            || 'quieter time';
+      end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0129: auth.sessions, auth.accounts, identity.facilities or identity.staff_facility_memberships '
-            || 'stayed busy for 5 seconds; nothing applied; run the release again at a quieter time';
+          message = '0129: auth.sessions, auth.accounts, identity.facilities, identity.staff_facility_memberships, '
+            || 'identity.staff or identity.organizations (or an index of one) stayed busy for 5 seconds; nothing '
+            || 'applied; run the release again at a quieter time';
       end if;
       perform pg_sleep(0.1);
     end;
