@@ -628,7 +628,7 @@
       },
       {
         "name": "0132_staff_patient_search.sql",
-        "sha256": "75a9db1202048df11fe462b5a53bb75bd9b532dd4b91381ff1b615080ec6ae0d"
+        "sha256": "31ff0b7bf428125950f8a3830338970b8f2dc8f0b4d23cb95509c0ae2e9fa03b"
       },
       {
         "name": "0133_own_facility_pharmacy_and_lab_work.sql",

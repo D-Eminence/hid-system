@@ -1797,9 +1797,11 @@ revoke all on function identity.open_own_facility_patient(text, uuid), identity.
 -- on identity.patient_search_refs (only the two functions read and write it,
 -- as its owner).
 grant execute on function identity.staff_patient_search(text, text, text, date, text, text[], text, text),
-  identity.resolve_patient_search_ref(text, text) to hid_identity_runtime;
+  identity.resolve_patient_search_ref(text, text),
+  identity.activate_break_glass_by_match_ref(text, text, integer) to hid_identity_runtime;
 revoke all on function identity.staff_patient_search(text, text, text, date, text, text[], text, text),
-  identity.resolve_patient_search_ref(text, text) from public;
+  identity.resolve_patient_search_ref(text, text),
+  identity.activate_break_glass_by_match_ref(text, text, integer) from public;
 revoke all on identity.patient_search_refs from public;
 
 -- The waiting list (0135, EHR-C7, owner decisions of 18 November 2026),

@@ -27,6 +27,10 @@
 --   8. emergency: break-glass permission, emergency purpose, the control
 --      and a reason of 8-500 characters before any result; exactly first
 --      name, last name and date of birth; at most 5 cards;
+--  8b. break-glass by an emergency card's matchRef (ID-5): the member who
+--      searched opens the patient, a replay finds the same grant, and
+--      another member's, a direct-care or a malformed ref is refused as an
+--      unknown Health ID is;
 --   9. audit: one row per search (key kinds and the caller's hash, never a
 --      name, date of birth, Health ID or phone HMAC; the outcome and the
 --      patients shown; denied when too broad; the emergency reason) and one
@@ -449,6 +453,35 @@ select pg_temp.check_case('8 the emergency matchRef resolves for emergency', 'e1
 select pg_temp.as_member(2);
 select pg_temp.check_case('8 and not for direct care', '(null)',
   identity.resolve_patient_search_ref(current_setting('search_test.e1_ref'), 'direct-care')::text);
+-- 8b. Break-glass by the emergency card's matchRef (ID-5): the member who
+-- searched, under the emergency purpose, opens the patient behind the card;
+-- a replay finds the same grant; another member's ref, a direct-care ref and
+-- a malformed ref are refused as an unknown Health ID is. (Correlation ids
+-- outside 'search-suite-' keep section 9's search counts as they are.)
+select pg_temp.as_member(2, 'emergency');
+select set_config('app.correlation_id', 'bg-suite-1', true);
+select pg_temp.check_case('8b break-glass by the emergency matchRef', 'active/e1320400-0000-4000-8000-000000000001/f',
+  (select format('%s/%s/%s', grant_status, subject_patient_id, existing_grant)
+     from identity.activate_break_glass_by_match_ref(current_setting('search_test.e1_ref'),
+       'Unconscious patient brought in by ambulance', 60)));
+select set_config('app.correlation_id', 'bg-suite-2', true);
+select pg_temp.check_case('8b a replay finds the same grant', 'active/t',
+  (select format('%s/%s', grant_status, existing_grant)
+     from identity.activate_break_glass_by_match_ref(current_setting('search_test.e1_ref'),
+       'Unconscious patient brought in by ambulance', 60)));
+select pg_temp.as_member(6, 'emergency');
+select set_config('app.correlation_id', 'bg-suite-3', true);
+select pg_temp.check_case('8b another member''s matchRef is refused', 'P0002 Patient is not available',
+  pg_temp.try($q$select * from identity.activate_break_glass_by_match_ref(current_setting('search_test.e1_ref'),
+    'Unconscious patient brought in by ambulance', 60)$q$));
+select pg_temp.as_member(1, 'emergency');
+select set_config('app.correlation_id', 'bg-suite-4', true);
+select pg_temp.check_case('8b a direct-care matchRef is refused', 'P0002 Patient is not available',
+  pg_temp.try($q$select * from identity.activate_break_glass_by_match_ref(current_setting('search_test.p1_ref'),
+    'Unconscious patient brought in by ambulance', 60)$q$));
+select pg_temp.check_case('8b a malformed matchRef is refused', 'P0002 Patient is not available',
+  pg_temp.try($q$select * from identity.activate_break_glass_by_match_ref('psr_short',
+    'Unconscious patient brought in by ambulance', 60)$q$));
 reset role;
 update platform.control_settings set enabled = false where control_key = 'break_glass_enabled';
 set local role hid_identity_api_runtime;
@@ -505,11 +538,14 @@ select pg_temp.check_case('9 shown rows name the patient and the member', 'true'
 select set_config('app.actor_subject', 'synthetic:search-patient-1', true), set_config('app.membership_id', '', true),
   set_config('app.facility_id', '', true), set_config('app.correlation_id', 'search-suite-patient-1', true),
   set_config('app.purpose_of_use', '', true);
-select pg_temp.check_case('10 only the emergency search is shown', 'found_in_emergency_search|found_in_emergency_search',
+-- (8b's break-glass by matchRef is shown as the emergency access it is.)
+select pg_temp.check_case('10 the emergency searches are shown, a standard search is not',
+  'found_in_emergency_search|found_in_emergency_search|emergency_access',
   (select string_agg(entry ->> 'action', '|' order by entry ->> 'at')
      from jsonb_array_elements(identity.patient_self_access_log('synthetic:search-patient-1',
        'e1320a00-0000-4000-8000-000000000001', 50, null, null) -> 'events') entry));
-select pg_temp.check_case('10 at which facility and by whom', 'Search Clinic A/Bola Doctor/clinician|Search Clinic B/Femi Doctor/clinician',
+select pg_temp.check_case('10 at which facility and by whom',
+  'Search Clinic A/Bola Doctor/clinician|Search Clinic A/Bola Doctor/clinician|Search Clinic B/Femi Doctor/clinician',
   (select string_agg(format('%s/%s/%s', entry ->> 'facilityName', entry ->> 'actorName', entry ->> 'actorKind'), '|'
        order by entry ->> 'facilityName')
      from jsonb_array_elements(identity.patient_self_access_log('synthetic:search-patient-1',

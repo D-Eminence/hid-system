@@ -418,6 +418,10 @@ export class ConsentService {
         // SECURITY DEFINER and granted to PUBLIC, so a staff session reads it
         // without platform.control.read.
         await client.query('select platform.require_control_enabled($1)', ['break_glass_enabled']);
+        // ID-5 (0132): a card from this member's own emergency search names
+        // the patient by its matchRef; the database resolves it and runs the
+        // same activation, refusing an unresolved ref as an unknown Health ID.
+        const byMatchRef = input.matchRef !== undefined;
         const result = await client.query<BreakGlassRow>(
           `select
              access_request_id as "accessRequestId",
@@ -426,8 +430,8 @@ export class ConsentService {
              grant_status as status,
              expires_at as "expiresAt",
              existing_grant as "existingGrant"
-           from identity.activate_break_glass($1, $2, $3)`,
-          [input.hid, input.reason, input.durationMinutes],
+           from ${byMatchRef ? 'identity.activate_break_glass_by_match_ref' : 'identity.activate_break_glass'}($1, $2, $3)`,
+          [byMatchRef ? input.matchRef : input.hid, input.reason, input.durationMinutes],
         );
         return this.requireRow(result.rows[0]);
       });
