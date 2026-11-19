@@ -83,6 +83,15 @@ export interface PharmacyWorkItem {
   duration?: { value: number; unit: string };
   quantityToDispense?: number;
   quantityUnit?: string;
+  /**
+   * Present (always true) only on this facility's own item whose automatic
+   * send was withdrawn before it was dispensed (database 0133): the
+   * prescription was put on hold, cancelled, entered in error, edited or
+   * resumed after it was sent, by the prescriber or a colleague. Dispensing
+   * it answers 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE; show "Changed or
+   * stopped by the prescribing team" with Dispense disabled.
+   */
+  withdrawn?: true;
 }
 
 export interface PharmacyDispensing {
@@ -453,6 +462,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
     } : null,
     ...parseWorkItemPatient(value.patient),
     ...parseWorkItemDetails(value),
+    ...(value.withdrawn === true ? { withdrawn: true as const } : {}),
   };
 }
 

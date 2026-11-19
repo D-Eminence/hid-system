@@ -8,6 +8,7 @@ import { PharmacyOrderRoutesService } from './pharmacy-order-routes.service';
 import { PharmacyOrderRouteAccess } from './order-route-access';
 import { PharmacyOrderRouteCards } from './order-route-cards';
 import { PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
+import { PharmacyOwnWork } from './own-work-access';
 import { PharmacyPrescriptionDetails } from './prescription-dispensing-details';
 import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 // ORD-3: read-only progress of this facility's own work items, for ehr-api.
@@ -21,5 +22,7 @@ import { PharmacyWorkItemProgressService } from './work-item-progress.service';
       useFactory: () => new PharmacyOwnWorkPatientCards(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED) },
     // The prescription details on own work (0125), on only while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is true.
     { provide: PharmacyPrescriptionDetails,
-      useFactory: () => new PharmacyPrescriptionDetails(getEnvironment().PRESCRIPTION_DISPENSING_DETAILS_ENABLED) }] })
+      useFactory: () => new PharmacyPrescriptionDetails(getEnvironment().PRESCRIPTION_DISPENSING_DETAILS_ENABLED) },
+    // This facility's own work for its pharmacy staff (0133): always on; a schema without 0133 answers as before.
+    { provide: PharmacyOwnWork, useFactory: () => new PharmacyOwnWork(true) }] })
 export class PharmacyModule {}

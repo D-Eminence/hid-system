@@ -28,13 +28,16 @@
 // the app, the doctor's access, one pharmacist's (the other holds no consent)
 // and the pharmacy's administrator's at the pharmacy. The doctor writes,
 // through ehr-api, a prescription with all seven details (the EHR echoes them
-// and its list says dispensingDetails: true) and one without any; the
-// hospital's own pharmacist pulls both: own work. Checked: the own work item
-// of the first, on the pharmacist's list and read by id, carries exactly the
-// prescriber's priority, strength, form, duration and quantity; the second
-// carries none of them; the pharmacist without consent sees neither the work
-// nor any detail. Route-backed work (a prescription with all seven details
-// sent to the pharmacy and accepted at its counter) carries no detail, on the
+// and its list says dispensingDetails: true) and one without any, both active,
+// so each goes to the hospital's own pharmacy by itself (0133, ORD-2): own
+// work. Checked: the own work item of the first, on the pharmacist's list and
+// read by id, carries exactly the prescriber's priority, strength, form,
+// duration and quantity; the second carries none of them; the pharmacist
+// without consent, the facility's own pharmacy staff, sees the work since
+// 0133 (ORD-2) but no detail, on the list or by id (0125's details still need
+// the member's consent). Route-backed work (a prescription with all seven details
+// sent to the pharmacy as a draft, which the send activates, and accepted at
+// its counter) carries no detail, on the
 // list and by id, though its reader holds the patient's consent at that
 // facility (its details would come from the sending facility's route: item
 // 4b, later). Owner SQL is used only for what no route does: the platform
@@ -476,14 +479,11 @@ try {
     listSays: { dispensingDetails: true }, stored: 'the seven columns' };
   step('ehr-api took and echoed the seven details on a new prescription, stored them, and says so on its list');
 
-  // ── Own work: both prescriptions pulled by the hospital's own pharmacist ──
-  const pull = async prescription => expectStatus(await call(ehr, ownPharmacist, 'POST',
-    `/ehr/patients/${patient.id}${enc}/prescriptions/${prescription.id}/pharmacy-work-item`,
-    { expectedRowVersion: Number(prescription.rowVersion), reason: 'Synthetic same-facility hand-off' },
-  { key: freshKey('pull') }), 201, 'own pharmacist pull');
-  const pulledWith = await pull(withDetails);
-  const pulledWithout = await pull(withoutDetails);
-  step('own work: both prescriptions pulled by the hospital\'s own pharmacist');
+  // ── Own work: both active prescriptions went to the hospital's own pharmacy by themselves (0133) ──
+  assert.deepEqual([withDetails.pharmacyHandoff, withoutDetails.pharmacyHandoff],
+    [{ status: 'sent', message: 'Sent to this hospital\'s pharmacy.' }, { status: 'sent', message: 'Sent to this hospital\'s pharmacy.' }],
+    `the automatic sends: ${JSON.stringify([withDetails.pharmacyHandoff, withoutDetails.pharmacyHandoff])}`);
+  step('own work: both active prescriptions sent to the hospital\'s own pharmacy by themselves');
 
   // Fails loudly: an own work item the pharmacist may read (it is on their list) without the details its
   // prescription was written with. The service's own warning, if it logged one, names the SQLSTATE
@@ -514,7 +514,7 @@ try {
   const ownList = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'own Pharmacy list');
   const ownWith = ownList.items.find(item => item.sourceEhrPrescriptionId === withDetails.id);
   const ownWithout = ownList.items.find(item => item.sourceEhrPrescriptionId === withoutDetails.id);
-  assert(ownWith && ownWithout, `the pulls did not reach the hospital's Pharmacy: ${JSON.stringify([pulledWith, pulledWithout])}`);
+  assert(ownWith && ownWithout, `the automatic sends did not reach the hospital's Pharmacy: ${JSON.stringify(ownList.items.map(item => item.sourceEhrPrescriptionId))}`);
   assert.deepEqual([ownWith.orderRoute, ownWithout.orderRoute], [undefined, undefined], 'own work has no route');
   assert.deepEqual([ownWith.patientId, ownWithout.patientId], [patient.id, patient.id]);
   requireDetails(ownWith, 'on the list');
@@ -525,25 +525,29 @@ try {
   const ownWithoutRead = expectStatus(await pharmacyCall(ownPharmacist, 'GET', `/work-items/${ownWithout.id}`), 200,
     'own Pharmacy item without details');
   assert.deepEqual(detailsOf(ownWithoutRead), {}, 'own work item without details, read by id');
-  // The pharmacist without consent: the work is not shown, nor any detail.
+  // The pharmacist without consent (0133: the facility's own pharmacy staff) sees the work, never a detail: 0125's
+  // details still need the member's consent.
+  const answerKeys = ['priority', 'strength', 'doseForm', 'duration', 'quantityToDispense', 'quantityUnit'];
+  const keysIn = value => JSON.stringify(value ?? '').match(new RegExp(`"(${answerKeys.join('|')})":`, 'g')) ?? [];
   const noConsent = expectStatus(await pharmacyCall(pharmacistWithoutConsent, 'GET', '/work-items'), 200,
     'Pharmacy list without consent');
-  assert(!noConsent.items.some(item => [ownWith.id, ownWithout.id].includes(item.id)),
-    'own Pharmacy work shown to a pharmacist without consent');
-  assert(!noConsent.items.some(item => Object.keys(detailsOf(item)).length > 0),
-    'prescription details shown to a pharmacist without consent');
-  const noConsentRead = await pharmacyCall(pharmacistWithoutConsent, 'GET', `/work-items/${ownWith.id}`);
-  assert([403, 404].includes(noConsentRead.status), `Pharmacy item read without consent: ${noConsentRead.status}`);
-  assert.equal(JSON.stringify(noConsentRead.body ?? '').includes('500 mg'), false, 'a detail in the refusal');
+  assert.deepEqual(noConsent.items.filter(item => [ownWith.id, ownWithout.id].includes(item.id)).map(item => item.id).sort(),
+    [ownWith.id, ownWithout.id].sort(), 'the facility\'s own Pharmacy work listed to its pharmacist without consent (0133)');
+  assert.deepEqual(keysIn(noConsent.items), [], 'prescription details shown to a pharmacist without consent');
+  const noConsentRead = expectStatus(await pharmacyCall(pharmacistWithoutConsent, 'GET', `/work-items/${ownWith.id}`), 200,
+    'own Pharmacy item read without consent (own-work basis)');
+  assert.deepEqual(keysIn(noConsentRead), [], `a detail in the own-work read: ${JSON.stringify(detailsOf(noConsentRead))}`);
   evidence.own = { listed: 2, withDetails: { onList: expectedDetails, readById: 'the same' },
     withoutDetails: { onList: 'none', readById: 'none' },
-    withoutConsent: { listed: 0, details: 0, read: noConsentRead.status } };
-  step('own work carries the prescriber\'s details on the list and by id; none without them; none for a pharmacist without consent');
+    ownWorkWithoutConsent: { listed: 2, details: 0, read: 200, readDetails: 0 } };
+  step('own work carries the prescriber\'s details on the list and by id; none without them; the facility\'s pharmacist '
+    + 'without consent sees the work and no detail (0133)');
 
   // ── Route-backed work carries none, though its reader holds the patient's consent at that facility ──
   const attestationVersion = async kind => expectStatus(await call(ehr, doctor, 'GET', `/ehr/order-route-attestation?kind=${kind}`),
     200, `attestation ${kind}`).version;
-  const routed = await newPrescription('active', written);
+  // 0133: an active one would have gone to the hospital's own pharmacy by itself; a draft is activated by the send.
+  const routed = await newPrescription('draft', written);
   const route = expectStatus(await ehrCall(doctor, 'POST', `${enc}/prescriptions/${routed.id}/order-routes`,
     { expectedRowVersion: Number(routed.rowVersion), receivingFacilityId: pharmacyFacility.facilityId, patientAgreed: true,
       attestationTextVersion: await attestationVersion('prescription') }, { key: freshKey('send') }), 201,

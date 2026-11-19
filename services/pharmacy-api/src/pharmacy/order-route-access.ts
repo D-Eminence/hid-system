@@ -3,14 +3,20 @@ import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { IdentityService } from '../identity/identity.service';
+import { OWN_WORK_OFF, PharmacyOwnWork } from './own-work-access';
 
 /** The resources a Pharmacy command acts on, as C17 derives their work item (SPEC-FINAL §8.7, PRIV P12). */
 export type PharmacyRouteResource = 'work_item' | 'dispensing';
 
 export type RecordAction = 'read_records' | 'write_records';
 
-/** Why the command may act: the member's consent (Identity, as before P4c) or the work item's order route. */
-export type ResourceBasis = { basis: 'consent' } | { basis: 'order-route'; orderRouteId: string };
+/**
+ * Why the command may act: the member's consent (Identity, as before P4c),
+ * the work item's order route, or (0133) this facility's own work item, on
+ * which the facility's pharmacy staff work without a personal grant.
+ */
+export type ResourceBasis = { basis: 'consent' } | { basis: 'order-route'; orderRouteId: string }
+  | { basis: 'own-work' };
 
 interface AccessRow { outcome: string; route_id: string | null; work_item_id: string | null }
 
@@ -20,9 +26,14 @@ export const orderRouteClosed = () => new DomainProblem(409, 'ORDER_ROUTE_CLOSED
 export const crossFacilityWorkPaused = () => new DomainProblem(423, 'CROSS_FACILITY_ORDERS_UNAVAILABLE',
   'Work on orders from other facilities is paused by Health ID');
 
-/** The audit details a route-backed command adds to its row (SPEC-FINAL §12). */
+/**
+ * The audit details a route-backed command adds to its row (SPEC-FINAL §12),
+ * and (0133) `basis: 'own-work'` for this facility's own work done by its
+ * pharmacy staff without a personal grant. A consent-based row is unchanged.
+ */
 export function basisDetails(basis: ResourceBasis): Record<string, string> {
-  return basis.basis === 'order-route' ? { basis: 'order-route', orderRouteId: basis.orderRouteId } : {};
+  if (basis.basis === 'order-route') return { basis: 'order-route', orderRouteId: basis.orderRouteId };
+  return basis.basis === 'own-work' ? { basis: 'own-work' } : {};
 }
 
 /**
@@ -30,14 +41,19 @@ export function basisDetails(basis: ResourceBasis): Record<string, string> {
  * transaction (SPEC-FINAL §4.3, §9.3, PRIV P12): C17
  * (`pharmacy.order_route_access_for`) derives the work item in the database.
  * `allowed` goes on on the route's basis without Identity; `closed` is 409
- * ORDER_ROUTE_CLOSED; `paused` is 423; `none` is Identity's consent decision
- * as before, refused 403 PHARMACY_ACCESS_DENIED (break-glass never writes).
+ * ORDER_ROUTE_CLOSED; `paused` is 423; `none` is, first (0133), this
+ * facility's own work item for its pharmacy staff (`pharmacy.own_work_access_for`,
+ * no Identity call; basis 'own-work', or 'consent' when the member holds its
+ * own consent for the action, as the work list records it), else Identity's
+ * consent decision as before, refused 403 PHARMACY_ACCESS_DENIED (break-glass
+ * never writes).
  * A database error from C17 is passed on unchanged, so a serialization
  * failure reaches DatabaseService's retry.
  */
 @Injectable()
 export class PharmacyOrderRouteAccess {
-  constructor(private readonly identity: IdentityService) {}
+  constructor(private readonly identity: IdentityService,
+    private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
 
   async authorize(client: PoolClient, context: DataAccessContext, resource: PharmacyRouteResource, resourceId: string,
     patientId: string, action: RecordAction): Promise<ResourceBasis> {
@@ -56,6 +72,10 @@ export class PharmacyOrderRouteAccess {
       case 'paused':
         throw crossFacilityWorkPaused();
       case 'none': {
+        // 0133: this facility's own work item, for its own staff, without asking Identity; the basis is
+        // 'consent' when the member holds its own consent for the action, else 'own-work'.
+        const own = await this.ownWork.basis(client, resource, resourceId, action, context.correlationId);
+        if (own) return { basis: own };
         const decision = await this.identity.authorize(patientId, action, context);
         if (!decision.allowed || (action === 'write_records' && decision.breakGlass)) {
           throw new DomainProblem(403, 'PHARMACY_ACCESS_DENIED',

@@ -6725,6 +6725,7 @@ Pharmacy item: `sourceEhrPrescriptionId`, `status`, `receivedAt`,
 | `received` | the pharmacy has it and has not dispensed it |
 | `dispensed` | dispensed at `dispensedAt` |
 | `dispensing_reversed` | dispensed, then the dispensing was reversed at `reversedAt` |
+| `withdrawn` | (0133) sent to this hospital's pharmacy by itself, then held, cancelled, entered in error, edited or resumed before it was dispensed: the pharmacy holds the version sent, which it can no longer dispense |
 
 Lab item: `sourceEhrOrderId`, `status`, `receivedAt`, `collectedAt`
 (the first sample taken), `lastResultAt` (the latest released result).
@@ -6789,7 +6790,9 @@ answers changes.
 Screen change (Akos frontend branch): show `ownProgress` on each order row,
 for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
 "Results ready 11:05"; show "Progress not available right now" for
-`unknown`, and nothing for `not_received` on a draft.
+`unknown`, and nothing for `not_received` on a draft. For `withdrawn` (0133)
+show "The pharmacy can no longer dispense this prescription" (whatever
+stopped or changed it).
 
 ## ORD-10 phase 1. Same-medicine warning when prescribing (wave 1, no migration)
 
@@ -7913,3 +7916,257 @@ Pharmacy department pages (work list, results, prescriptions) from doctors
 and administrators; hide Outreach from doctors; hide visits and the Migrate
 desk from laboratory staff. Screens already follow the permissions list in the
 session, so most of this happens by itself.
+
+## ORD-2. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (Akos Release A, migration 0133)
+
+Owner decisions of 18 November 2026: activated prescriptions go
+automatically to the hospital's own pharmacy (YES); pharmacy and lab staff
+get their own facility's work items only, never the chart. Needs 0001-0127;
+in Release A, 0128-0132 run before it and none of them creates, replaces or
+alters a function it replaces or relies on, a table it locks or gives a
+policy, or a column it reads (0133's header). It fixes finding F2 of the plan:
+before 0133 a pharmacist or lab scientist without a personal consent grant
+saw "To dispense 0" and a card with no name for their own facility's work.
+
+### Who works on this facility's own work
+
+A member works on this facility's own pharmacy (or lab) work items, those
+with no order route from another facility, when all hold: direct care (an
+emergency session keeps break-glass and does not use this rule); the item is
+at the session's facility; the member holds there `pharmacy.work-item.read`
+and `pharmacy.order-route.receive` (or `lab.work-item.read` and
+`lab.order-route.receive`), which today means the pharmacist and lab roles
+only, so doctors, nurses, clinicians, receptionists and admins gain nothing;
+the patient is active; and no deny directive of the patient covers the
+member. It gives the work item, its patient card (name, sex, date of birth,
+last 4 of the Health ID), its events, accessions, specimens, executions,
+results, dispensings and reversals at that facility, never the chart: no
+EHR table, no version snapshot, none of the patient's imported Lab or
+Pharmacy evidence (OCR-imported outside records, which keep needing the
+member's consent), and the 0125 prescription details still need the
+member's consent. It is decided item by item: a row of the work chain is
+given only when it belongs to an own work item (no order route) of that
+patient at that facility, so the rows of another facility's order (a
+route-backed item) stay as that route allows, even for the same patient.
+It gives reads of the work item and reads and writes of its chain; accepting
+a new item into the pharmacy or the lab still needs the member's consent
+(own prescriptions arrive by the automatic send below). Every read and write
+is audited as before, with `basis: 'own-work'` unless the member holds its
+own consent grant for that action (then the row is a consent row, as
+before).
+
+### Pharmacy API and Lab API changes (no new route)
+
+- `GET /pharmacy/work-items`, `GET /lab/work-items`: the facility's own items
+  appear for its pharmacy or lab staff. Every own item listed is recorded in
+  one audit row per patient (`pharmacy.work-item.list` or
+  `lab.work-item.list`, the work item ids only, as 0124's rows), whether or
+  not 0124's patient card is shown, with `basis: 'consent'` or
+  `basis: 'own-work'` as the database gives it for that member. If the basis
+  cannot be read the list fails (no answer without its audit) rather than
+  record one it could not read. Without 0133 the list records as 0124 did.
+  Today's lab-api and pharmacy-api images on a database with 0133 list the
+  facility's own items to its pharmacy and lab staff (row-level security)
+  and record them as 0124 did: with `OWN_WORK_PATIENT_CARD_ENABLED` on, one
+  row per patient whose card is shown with `basis: 'consent'`, even for a
+  member without a grant; off (the default), the collection row only. The
+  release migrates before it rolls the images out and an image rollback
+  keeps the schema, so the new images go out with 0133, and a rollback of
+  lab-api or pharmacy-api alone after 0133 records this way until they are
+  deployed again.
+- Every command on an own work item or its chain (pharmacy: read, dispense,
+  reverse; lab: read, accession, specimen, execution, result) is allowed on
+  the own-work basis without asking Identity; else Identity's consent decides
+  as before (403 as before). Audit details gain `basis: 'own-work'`, except
+  for a member who holds its own consent grant for that action: the database
+  answers the basis with the access (as the list's reader does), and that
+  member's rows stay consent rows (no `basis`, as before), so the list and
+  the commands record the same basis for the same member and action. A
+  grant for reads only covers the list and the reads: that member's list
+  and read rows are consent rows, and its dispensings, reversals and other
+  writes carry `basis: 'own-work'` (a write grant covers reads too, not the
+  other way round).
+- `GET /lab/executions/:executionId` and
+  `GET /lab/specimens/:specimenId/executions`, which answer result values
+  and every revision, now write one audit row naming the patient in the
+  read's transaction (`lab.execution.read`, resource `lab-execution`, with
+  the accession, specimen, result id and versions returned;
+  `lab.execution.list`, resource `lab-specimen`, with the executions, result
+  ids and versions returned), with the basis as above (`own-work`, or the
+  order route's `order-route` and `orderRouteId`), whatever the basis. Before
+  0133 these reads were recorded only by the request row, which names no
+  patient; the patient's access log already lists both actions as views.
+- An own pharmacy item whose automatic send was withdrawn before it was
+  dispensed (the prescription was put on hold, cancelled, entered in error,
+  edited or resumed after it was sent, by the prescriber or anyone else who
+  may change it) carries `"withdrawn": true`; dispensing it answers 409
+  `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` "This prescription can no longer be
+  dispensed here" (0101, unchanged). An item already dispensed never carries
+  it.
+
+### EHR API: `pharmacyHandoff`
+
+Activating a draft prescription (`PATCH .../prescriptions/:prescriptionId`
+with `status: "active"`), or creating one as active, sends it to this
+hospital's own pharmacy in the same transaction and the answer gains:
+
+```json
+{ "pharmacyHandoff": { "status": "sent", "message": "Sent to this hospital's pharmacy." } }
+```
+
+| status | reason | message |
+|---|---|---|
+| `sent` | | Sent to this hospital's pharmacy. / This hospital's pharmacy already has this prescription. |
+| `pending` | | Not sent to the pharmacy yet. Use Send to pharmacy to try again. |
+| `not_sent` | `no_pharmacy` | Not sent: nobody at this facility works on pharmacy orders on Health ID. |
+| `not_sent` | `routed` | Not sent: this prescription has been sent to another pharmacy. |
+| `not_sent` | `not_prescriber` | Not sent: only the person who wrote this prescription can send it to the pharmacy. |
+| `not_sent` | `changed` | Not sent: this prescription changed. Reload it and try again. (It is not at the version sent, no longer active, or not found.) |
+| `not_sent` | `superseded` | Not sent: this hospital's pharmacy has an earlier version of this prescription, which it can no longer dispense. (It was edited or resumed after it was sent, before it was dispensed; reloading cannot change this.) |
+| `not_sent` | `not_allowed` | Not sent: your role at this facility does not allow sending prescriptions to the pharmacy. |
+| `not_sent` | `unavailable` | Not sent: the pharmacy could not be reached. Use Send to pharmacy to try again. |
+
+Only the prescriber's own activation sends. The pharmacy work item is
+accepted by the prescriber (never recorded as a pharmacist's acceptance) with
+the fixed reason "Sent automatically when the prescription was activated", and
+Pharmacy's `PharmacyWorkItemCreated` event carries the same payload as
+pharmacy-api's own acceptance (`workItemId`, `sourceEhrPrescriptionId`,
+`sourceEhrPrescriptionVersion`, `status: "accepted"`). A
+failed send never undoes the activation. Once sent, the prescription is in
+this hospital's pharmacy and can no longer be routed to another facility's
+pharmacy: the order-route send answers `ORDER_ROUTE_ORDER_IN_WORK`, as for any
+prescription Pharmacy holds. Without 0133 in the database the
+answer has no `pharmacyHandoff`. `not_allowed` is the database refusing the
+session (every prescription route is direct care, so it is the membership:
+it no longer holds `ehr.prescription.write` here); trying again cannot help.
+A replay of a create as active (the same Idempotency-Key) answers the
+prescription as it is now with its `pharmacyHandoff` as the send stands now
+(it asks the send again, which sends once: a pending send is tried again); a
+create as a draft answers none. Resuming after a hold does not send again (the
+pharmacy keeps one item per prescription). Putting a sent prescription on
+hold, cancelling it or entering it in error marks the send withdrawn, and so
+does editing it while it stays active (frequency, instructions, end date) or
+resuming it: the pharmacy item keeps the version that was sent, which 0101 no
+longer dispenses, and "Send to pharmacy" then answers the "earlier version"
+row above (reason `superseded`), never "already has"; the edit's or the
+resume's own answer (the `PATCH`, still active) carries that row as its
+`pharmacyHandoff`, and the prescription's `ownProgress` (ORD-3) answers
+`withdrawn` (what follows is S3 below); a hold, a cancellation or an entry
+in error answers no `pharmacyHandoff`. Completing a prescription marks
+nothing. Once the pharmacy has dispensed the item, a later change is
+recorded on the send but reported nowhere: what was sent was dispensed and
+nothing is left to dispense, so the `PATCH` answers no `pharmacyHandoff` and
+records no `pharmacySendWithdrawn`, "Send to pharmacy" and a replay of the
+create as active answer "already has" (`sent`), never the "earlier version"
+row, `ownProgress` stays `dispensed` (or `dispensing_reversed`), and the
+pharmacy's list does not mark the item withdrawn. The database marks it on
+the change itself (a trigger on the prescription), so a change made by any
+ehr-api image (an older one during a rolling deploy or after a rollback
+included) marks it too; undoing 0133 by hand must drop that trigger, and the
+functions that read the sends table, before the table (the order is in
+0133's header), or every later change of a prescription's status or version
+fails, and so does the pharmacy's list.
+Whether the pharmacy item should follow the new version instead is open for
+the owner (review S3 of 18 November). The audit row of the create, the
+update and the send records `pharmacyHandoff` (the status) and
+`pharmacyHandoffReason` (the reason code), never the message, and the
+update's `pharmacySendWithdrawn: true` when the prescription's send stands
+withdrawn after the change and its item has not been dispensed.
+
+`GET .../encounters/:encounterId/prescriptions` and
+`GET .../prescriptions/:prescriptionId`: each prescription also carries
+`ownPharmacyStaffed` (0133): `true` when somebody at this facility works on
+pharmacy items on Health ID (an active member holding
+`pharmacy.work-item.read` and `pharmacy.order-route.receive` here, the
+send's `no_pharmacy` test), `false` when nobody does. It is absent on a
+database without 0133 and when it cannot be read (the read never fails
+because of it). It names no patient and writes nothing. The test asks the
+full permission check only of the members holding a role here that grants
+those permissions, so its cost follows the facility's pharmacy staff, not
+the number of its members.
+
+### `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/own-pharmacy-send`
+
+"Send to pharmacy" for the prescriber: sends their active prescription, or
+tries a pending send again. Permission `ehr.prescription.write`. No
+Idempotency-Key (sending twice sends once).
+
+```json
+{ "expectedRowVersion": 2, "allergyAcknowledgement": { "warningToken": "...", "reason": "..." } }
+```
+
+`allergyAcknowledgement` only after the allergy warning, as on the pharmacy
+hand-off (0117). Answer `200 { "pharmacyHandoff": { ... } }` as above.
+Errors: 412 `PRESCRIPTION_VERSION_CONFLICT`, 409 `PRESCRIPTION_NOT_ELIGIBLE`
+(not active), 409 `PRESCRIPTION_ROUTED`, 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED`,
+503 `OWN_PHARMACY_SEND_UNAVAILABLE` (no 0133 yet), 403 `CONSENT_REQUIRED`, and
+as every prescription command 404 `CLINICAL_RESOURCE_NOT_FOUND` and 409
+`VISIT_ENTERED_IN_ERROR`. Audit action `ehr.prescription.own-pharmacy-send`
+(details: `expectedPrescriptionVersion`, `prescriptionVersion`, the allergy
+acknowledgement's flags and counts when one was stored for the `handoff`
+stage, `pharmacyHandoff`, `pharmacyHandoffReason`).
+
+Screen change (Akos frontend branch): after Activate, an edit or a resume,
+show `pharmacyHandoff.message`; show "Send to pharmacy" when it is `pending`
+or `not_sent` with reason `unavailable`, never for any other reason
+(`changed`: reload first; `superseded`, `no_pharmacy`, `routed`,
+`not_prescriber`, `not_allowed`: trying again cannot help). The send state is
+not kept on the prescription and nothing retries a pending send by itself,
+so the prescription list and page also show "Send to pharmacy" on a
+prescription when all hold: it is active; the signed-in member wrote it
+(`createdBy` and `createdByMembershipId` are theirs) and holds
+`ehr.prescription.write` here (the session's permissions); no order route is
+in force (`orderRoute`); its `ownProgress.status` is `not_received`; and
+`ownPharmacyStaffed` is `true` (absent or `false`: never, so a facility with
+nobody on pharmacy work is never offered a send that answers `no_pharmacy`).
+That covers a send that failed or is pending, the prescriber's own
+prescription a colleague activated (that colleague's answer was
+`not_prescriber`), and one written before the hospital had pharmacy staff;
+the answer then says which. After any answer but `pending` or `unavailable`
+(`sent`: the pharmacy has it now, and the reloaded prescription's
+`ownProgress` says so; `not_allowed`, when the member's role changed since
+sign-in; and the others above), the page does not offer it again for that
+prescription until it is reloaded, as after Activate. On the pharmacy list,
+show a withdrawn item as "Changed or stopped by the prescribing team" (the
+prescriber or a colleague put it on hold, cancelled, corrected, edited or
+resumed it) with Dispense disabled.
+
+Runtime proof: `services/ehr-api/scripts/verify-own-facility-work-runtime.mjs`
+(run by the TUF staging rehearsal, as `own_facility_work_runtime`) boots
+Identity, EHR, Lab and Pharmacy from their own code as their exact runtime
+roles: a doctor's active prescription and an activated draft are sent by
+themselves; a pharmacist and a lab scientist the patient never approved list,
+read, dispense and accession the hospital's own work, each row naming the
+patient with `basis: own-work` (the execution reads included); a hold marks
+the item withdrawn and Dispense answers 409; an edit answers the "earlier
+version" row (`superseded`) and `ownProgress` reads `withdrawn`; an edit
+after the dispensing answers no `pharmacyHandoff`, "Send to pharmacy" then
+answers "already has", and the item stays unmarked (`ownProgress` stays
+`dispensed`); the list carries `ownPharmacyStaffed: true`; neither member
+reads the chart, each probed with a chart read its role permits (the
+encounter for both, prescriptions for the pharmacist, the lab request for
+the lab scientist), so the answer, 403 `CONSENT_REQUIRED`, is the patient's
+consent and not a missing permission; the patient's access log shows both.
+`verify-own-work-patient-cards-runtime.mjs` checks the other side of "their
+own facility only": the pharmacy's pharmacist and the laboratory's lab
+member, who hold the same two permissions at their own facility, list none
+of the hospital's own work, cannot read it by id, and are refused when they
+name the hospital as their session's facility. The order-route and
+prescription details verifiers follow 0133's rules where they meet them
+(the automatic send, own work listed on the own-work basis) and add no
+negative case of their own; the database suite
+(`own-facility-pharmacy-lab-work`) holds the full set (another facility's
+staff, at their facility and claiming this one, through every reader: the
+items, cards, events, dispensings, reversals and the Lab chain, the list's
+states and bases and the access checks; other roles, deny directives,
+emergency sessions, inactive patients, route-backed items, the imported
+evidence).
+
+## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
+
+Owner decision Q102 of 18 November 2026. No new login, address or password:
+0123's fictional "QA Pharmacist" (pharmacy@) and "QA Lab Scientist" (lab@)
+gain a second membership, at QA Hospital (pharmacist and lab roles; not
+primary). Pick QA Hospital when signing in. Written only where 0123 installed
+the sealed QA tenant (Amazon RDS: production and staging); on every other
+database (CI, acceptance, rehearsals) nothing is written. No API change.

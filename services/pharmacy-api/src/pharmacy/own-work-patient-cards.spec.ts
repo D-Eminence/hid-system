@@ -12,6 +12,7 @@ import { PharmacyOrderRouteAccess } from './order-route-access';
 import { PharmacyOrderRouteCards } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
 import { PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
+import { OWN_WORK_OFF, PharmacyOwnWork } from './own-work-access';
 
 /*
  * The patient on this facility's own work (0124, owner decision 25 of
@@ -249,7 +250,9 @@ describe('OWN_WORK_PATIENT_CARD_ENABLED', () => {
       { provide: AuditService, useValue: {} }, { provide: PharmacyOrderRouteAccess, useValue: {} },
       { provide: PharmacyOrderRouteCards, useValue: {} }, { provide: PharmacyOwnWorkPatientCards, useValue: reader },
       // 0125's reader, which the service takes after this one.
-      { provide: PharmacyPrescriptionDetails, useValue: PRESCRIPTION_DETAILS_OFF }] }).compile();
+      { provide: PharmacyPrescriptionDetails, useValue: PRESCRIPTION_DETAILS_OFF },
+      // 0133's own-work reader, which the service takes after it.
+      { provide: PharmacyOwnWork, useValue: OWN_WORK_OFF }] }).compile();
     expect((moduleRef.get(PharmacyService) as unknown as { ownPatients: unknown }).ownPatients).toBe(reader);
   });
 

@@ -618,8 +618,8 @@ select pg_temp.as_member(2, 1);
 select pg_temp.expect('PH reads its own rows'' details', pg_temp.details(pg_temp.items()),
   '01:urgent/500 mg/capsule/7 day/21.0000 capsule 02:-/-/-/-/- 03:stat/120 mg/5 mL/liquid/2 week/100.5000 mL '
   || '10:-/-/-/-/-');
-select pg_temp.expect('PH: row-level security shows its own rows 01-03 and 07-10', pg_temp.visible_own(),
-  '01 02 03 07 08 09 10');
+select pg_temp.expect('PH: row-level security shows its own rows 01-04 and 07-10 (0133: Kemi''s 04 as the facility''s pharmacy staff; its details still need consent)', pg_temp.visible_own(),
+  '01 02 03 04 07 08 09 10');
 select pg_temp.expect('PH: one routed row alone', pg_temp.details(array['e114000b-0000-4000-8000-000000000006'::uuid]), '');
 select pg_temp.expect('PH: row-level security shows the route-backed row naming e4',
   (select count(*)::text from pharmacy.work_items where id = 'e114000b-0000-4000-8000-000000000012'), '1');
@@ -777,7 +777,7 @@ set local role hid_pharmacy_api_runtime;
 select pg_temp.as_member(2, 1);
 select pg_temp.expect('PH with a deny directive on Ngozi', pg_temp.details(pg_temp.items()),
   '03:stat/120 mg/5 mL/liquid/2 week/100.5000 mL');
-select pg_temp.expect('PH deny: row-level security shows only Femi''s', pg_temp.visible_own(), '03 07');
+select pg_temp.expect('PH deny: row-level security shows Femi''s and (0133) Kemi''s 04', pg_temp.visible_own(), '03 04 07');
 select pg_temp.as_member(5, 1, 'emergency');
 select pg_temp.expect('PE under emergency with a deny directive', pg_temp.details(pg_temp.items()),
   '01:urgent/500 mg/capsule/7 day/21.0000 capsule 02:-/-/-/-/- 10:-/-/-/-/-');

@@ -328,10 +328,11 @@ begin
       and runtime.oid <> (select relation.relowner from pg_class relation where relation.oid = 'identity.sealed_qa_members'::regclass)
       and (has_table_privilege(runtime.oid, 'identity.sealed_qa_members', 'SELECT')
         or has_table_privilege(runtime.oid, 'identity.sealed_qa_members', 'INSERT'))));
+  -- 0134 adds an 18th, identity.sealed_qa_hospital_work_staff_install(), the owner's alone.
   perform pg_temp.assert('helper ACLs: sealed_qa_ids and sealed_qa_facility to the Identity and schema test runtimes only',
     (select count(*) from pg_proc proc
       where proc.pronamespace = 'identity'::regnamespace
-        and (proc.proname like 'sealed\_qa\_%' or proc.proname like '%\_sealed\_qa' or proc.proname = 'demo_members_never_qa')) = 17
+        and (proc.proname like 'sealed\_qa\_%' or proc.proname like '%\_sealed\_qa' or proc.proname = 'demo_members_never_qa')) = 18
     and (select array_agg(proc.oid::regprocedure::text order by proc.oid::regprocedure::text)
            from pg_proc proc
           where proc.pronamespace = 'identity'::regnamespace

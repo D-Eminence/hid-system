@@ -145,6 +145,8 @@ const acceptedMigrations = new Map([
   ['0130_desk_registration_without_nin.sql', 'a9f071ee6c1c916c440e8b05f4f64fda359c4b7fff63087f59bcc1904899b9dd'],
   ['0131_own_facility_patient_access.sql', '2e3a83c9ad1188095ecb1342f80ed735a882c969ce43663edae912cfbe22c7fa'],
   ['0132_staff_patient_search.sql', '4649c518228c80720262e3187462824ba190b2efba73afcec0e7c8804f0eee6b'],
+  ['0133_own_facility_pharmacy_and_lab_work.sql', '588a183081018c2231fdab87c37b3e7bbdaeceaa92ba085d8c1eedbcfdad3244'],
+  ['0134_sealed_qa_hospital_pharmacy_lab_staff.sql', '13a58405e179befac7eb3e1854862b33787e040177a48fa98f55557b2cedb5b7'],
   ['0135_visit_queue.sql', '39460f4fba0714849b156ee5a3be2e12861f819924bc98e5d97b1b9d0cb80095'],
   ['0136_role_permission_changes.sql', '8d2f4e08d5108dc5511b4cecd71058eaa74c968bda2b3ba6e9dd963e45c79831'],
   ['0137_qoreid_nin_check_once.sql', '0f6f97b8b78c88dbcdba1b0bfe826e3d49852ec5ab473a84d64c8bb6939256bb'],
