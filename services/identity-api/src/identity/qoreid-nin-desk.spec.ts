@@ -30,12 +30,14 @@ import { NIN_BREAKER_RETRY_AFTER_MS, NIN_PROVIDER_UNAVAILABLE_EVENT, NinProvider
 import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavailable } from './nin-check-once';
 import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinVerificationProvider,
   type NinVerificationRequest } from './nin.types';
-import type { NinRecordCheck, PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
+import { type NinRecordCheck, type PublicPatientIdentityProvider, QoreIdPublicPatientIdentityProvider,
+  type VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import { markQoreIdDelivery, type QoreIdDelivery } from './qoreid-delivery';
 import {
   QoreIdNinVerificationProvider,
   selectNinVerificationProvider,
 } from './qoreid-nin-verification.provider';
+import { passThroughNinCheck } from '../testing/nin-check-store.fake';
 
 /**
  * Q108 (owner: "Q108 A"): the registration desk's NIN check through QoreID.
@@ -236,7 +238,8 @@ describe('Q108 QoreID NIN check for the desk', () => {
       expect(other.keep.keepRecord).not.toHaveBeenCalled();
       expect(other.result).not.toHaveProperty('recordKept');
     }
-    // No live record to keep (an unusable answer whose name and date of birth matched) leaves the answer as it is.
+    // No live record to keep (it expired between the guard's answer and the keep, a sign-up took over an
+    // incomplete profile record, or the NIN's login was deleted) leaves the answer as it is.
     const notKept = await answered(found({}, 'stored'), recordKeep(false));
     expect(notKept.result).toMatchObject({ verified: true, stored: true });
     expect(notKept.result).not.toHaveProperty('recordKept');
@@ -319,15 +322,6 @@ describe('Q108 QoreID NIN check for the desk', () => {
       // QoreID failing: not HID's own fault, so the breaker counts it.
       expect(isNinCheckOwnFault(error)).toBe(false);
     });
-  });
-
-  it('answers QoreID\'s "no record" (its 404 included, which the guard gives as "no record") as no match (Q117)', async () => {
-    for (const source of ['qoreid', 'stored'] as const) {
-      const answer = await qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => noRecord(source)) }))
-        .verify(request);
-      expect(answer).toMatchObject({ verified: false, outcome: 'no_match', provider: 'qoreid',
-        ...(source === 'stored' ? { stored: true } : {}) });
-    }
   });
 
   it('marks an error no QoreID request raised as HID\'s own', async () => {
@@ -482,6 +476,35 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(breaker.state()).toBe('closed');
     expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied',
       details: { provider: 'qoreid', ninCheck: 'no_match', ...extra } })]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('answers QoreID\'s 404 "not found", fresh or kept by 0137, 422 NIN_NOT_VERIFIED through the real verifyNinRecord (Q117)', async () => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NIN_PROVIDER_MODE: 'unavailable', QOREID_ENABLED: true,
+      QOREID_NIN_ONLY_ENROLLMENT_ENABLED: true } as never);
+    // QoreID's 404, as the adapter raises it: answered, status 404.
+    const adapter = { verifyNinEnrollment: jest.fn(async () => {
+      throw markQoreIdDelivery(new DomainProblem(502, 'QOREID_PROVIDER_REJECTED',
+        'External verification could not be completed'), { delivery: 'answered', status: 404 });
+    }) };
+    const integrations = { assertAvailable: jest.fn(async () => undefined) };
+    const realGate = (ninCheck: unknown) => new QoreIdPublicPatientIdentityProvider(adapter as never,
+      integrations as never, ninCheck as never);
+    // Fresh: the guard asks QoreID for this request and passes its 404 on.
+    const fresh = desk(qoreIdProvider(realGate(passThroughNinCheck()) as never));
+    await expect(fresh.service.resolve(input, 'resolve-key-q117-000001', context)).rejects.toMatchObject(NO_RECORD_ANSWER);
+    expect(adapter.verifyNinEnrollment).toHaveBeenCalledTimes(1);
+    expect(fresh.breaker.state()).toBe('closed');
+    // Kept: 0137 hands back the 404 it kept ('rejected'); nothing is sent.
+    const kept = { check: jest.fn(async () => ({ source: 'stored', answer: { outcome: 'rejected' }, value: undefined })) };
+    const stored = desk(qoreIdProvider(realGate(kept) as never));
+    await expect(stored.service.resolve(input, 'resolve-key-q117-000002', context)).rejects.toMatchObject(NO_RECORD_ANSWER);
+    expect(adapter.verifyNinEnrollment).toHaveBeenCalledTimes(1);
+    expect(auditRows(fresh.audit).concat(auditRows(stored.audit))).toEqual([
+      expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied',
+        details: { provider: 'qoreid', ninCheck: 'no_match' } }),
+      expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied',
+        details: { provider: 'qoreid', ninCheck: 'no_match', storedAnswer: true } })]);
     expect(warn).not.toHaveBeenCalled();
   });
 

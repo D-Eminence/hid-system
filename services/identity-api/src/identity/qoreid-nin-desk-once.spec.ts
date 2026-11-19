@@ -540,6 +540,9 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       s.store.clock.offsetMs = 10 * DAY_MS;
       await expect(s.resolve('desk-once-key-000504', deskContext(2))).resolves.toMatchObject({ caseId });
       expect([...s.store.rows.values()][0]!.until).toBeGreaterThanOrEqual(checked + NIN_RECORD_ANSWER_SECONDS * 1000);
+      // That match is a use: the desk asks 0137 to keep the record, at least 30 days from day 10.
+      expect(keeps(s)).toHaveLength(1);
+      expect([...s.store.rows.values()][0]!.until).toBeGreaterThanOrEqual(checked + 10 * DAY_MS + USE_KEEP_MS);
       // A desk match on day 80 keeps it to at least day 110, so day 109 is still answered from storage.
       s.store.clock.offsetMs = 80 * DAY_MS;
       await expect(s.resolve('desk-once-key-000505', deskContext(3))).resolves.toMatchObject({ caseId });
