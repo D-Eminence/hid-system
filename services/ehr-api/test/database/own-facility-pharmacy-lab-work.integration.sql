@@ -47,6 +47,10 @@
 --      marked withdrawn too (the pharmacy keeps the version sent) and the
 --      send answers superseded, never already_in_pharmacy; completing one
 --      marks nothing;
+--   5b. after a dispensing (case 7e, at the end, so the earlier cases keep
+--      rx1 as it was): an edit of the dispensed rx1 is still recorded on its
+--      send, but the withdrawal answers false and PH's states answer not
+--      withdrawn: what was sent was dispensed;
 --   6. lab: the facility's lab scientist without a grant sees the own lab
 --      work item and its card, may work on it, its basis is 'own-work', and
 --      accessions it; another facility's lab scientist, the nurse and an
@@ -115,11 +119,11 @@ begin
       ('pharmacy.work_item_patient_cards(uuid[])', '0dc38390c3c40a1883b87345ce0d35bd', 's'),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', '41a9afd4ea6f708425b98d1fb6e6eb87', 's'),
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'ea6e547d05979779c9765f7dcc70c377', 'v'),
-      ('ehr.withdraw_own_pharmacy_send(uuid)', '7ff7b714e3f9fe4b93c9393117f6b4bc', 'v'),
+      ('ehr.withdraw_own_pharmacy_send(uuid)', 'bdb411d4f4e7fe6806d246d996e91771', 'v'),
       ('ehr.own_pharmacy_send_withdrawn_on_change()', '455c027844f87eebde9dd836f75760cf', 'v'),
       ('pharmacy.own_work_access_for(text,uuid,text)', '5ddb078242919dd978d6312f5cd5aa77', 's'),
       ('lab.own_work_access_for(text,uuid,text)', '1c834e3ed17d864dadb27f3105cffa04', 's'),
-      ('pharmacy.own_work_item_states(uuid[])', '5882cbdcf5dcebb96b3cabb95bba9801', 's'),
+      ('pharmacy.own_work_item_states(uuid[])', '821f37afc72515b43494f730adf0fef9', 's'),
       ('lab.own_work_item_bases(uuid[])', '07e31d7ca86ac31255ad096d56363637', 's')) expected(proc_name, digest, volatility)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc_name)
    where proc.oid is null or md5(proc.prosrc) <> expected.digest or proc.proowner <> owner_oid
@@ -1247,6 +1251,33 @@ select pg_temp.expect('PH (own work, no grant) reads no prescription details', (
 select pg_temp.as_member(10);
 select pg_temp.expect('PG (a grant for Ada) reads rx1''s details', (select count(*)::text
   from pharmacy.work_item_prescription_details(array[pg_temp.work_item_of(pg_temp.rx(1))])), '1');
+reset role;
+
+-- 7e. (5b) A change after the dispensing: PH dispensed rx1 in case 3; DR now
+-- edits it while it stays active. D8's trigger still records the change on
+-- the send, but neither the withdrawal's answer nor D10's flag reports it:
+-- the pharmacy dispensed what was sent and has nothing left to dispense.
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
+select pg_temp.expect('rx1 is dispensed and sent at version 2, not withdrawn', ehr.withdraw_own_pharmacy_send(pg_temp.rx(1))::text,
+  'false');
+select set_config('app.change_reason', 'Changed the frequency after dispensing', true);
+update ehr.prescriptions set frequency = 'Every 8 hours' where id = pg_temp.rx(1);
+select pg_temp.expect('the edited rx1 is active at version 3', (select p.status || '/' || p.row_version
+  from ehr.prescriptions p where p.id = pg_temp.rx(1)), 'active/3');
+select pg_temp.expect('the withdrawal answers false for the dispensed rx1',
+  ehr.withdraw_own_pharmacy_send(pg_temp.rx(1))::text, 'false');
+reset role;
+select pg_temp.expect('the change is still recorded on rx1''s send', (select (s.withdrawn_at is not null)::text
+  from pharmacy.own_prescription_sends s where s.prescription_id = pg_temp.rx(1)), 'true');
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select pg_temp.expect('PH: the dispensed and edited rx1 does not read withdrawn',
+  (select string_agg(state.basis || '/' || state.withdrawn, ',')
+     from pharmacy.own_work_item_states(array[pg_temp.work_item_of(pg_temp.rx(1))]) state), 'own-work/false');
+select pg_temp.expect('PH: the held rx3 (never dispensed) still reads withdrawn',
+  (select string_agg(state.basis || '/' || state.withdrawn, ',')
+     from pharmacy.own_work_item_states(array[pg_temp.work_item_of(pg_temp.rx(3))]) state), 'own-work/true');
 reset role;
 
 -- 8. The owner-run definer functions that read ehr.prescriptions (case 1

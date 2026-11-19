@@ -156,8 +156,11 @@
 --    prescription that may have been sent (holds, cancels, enters in error,
 --    resumes or edits it): the same session test as D7; marks the send as the
 --    trigger does (a no-op after the trigger) and answers whether the
---    prescription's send now stands withdrawn, so ehr-api can tell the
---    prescriber that the pharmacy holds an earlier version.
+--    prescription's send now stands withdrawn and its work item has not been
+--    dispensed, so ehr-api can tell the prescriber that the pharmacy holds an
+--    earlier version it can no longer dispense. A change after the item was
+--    dispensed is still marked (withdrawn_at records the change), but neither
+--    this answer nor D10's flag reports it: what was sent was dispensed.
 -- D9 pharmacy.own_work_access_for(resource, id, action) and
 --    lab.own_work_access_for(resource, id, action) (SECURITY DEFINER,
 --    STABLE), for their runtimes: the own work item (no route) the
@@ -171,8 +174,9 @@
 --    (SECURITY DEFINER, STABLE), for their runtimes, at most 200 ids: for
 --    each own work item at the session's facility the session may read,
 --    the basis ('consent' when the member's consent test passes, else
---    'own-work'), and for Pharmacy whether its send was withdrawn. The APIs
---    write the audit rows of the work list with that basis.
+--    'own-work'), and for Pharmacy whether its send was withdrawn before the
+--    item was dispensed (D8). The APIs write the audit rows of the work list
+--    with that basis.
 -- D11 Grants, here and in runtime-grants.sql: D7 and D8 to hid_ehr_runtime;
 --    D9 and D10 to hid_pharmacy_runtime or hid_lab_runtime; D3's functions
 --    to the runtime that reads its schema's chain tables
@@ -1179,11 +1183,14 @@ begin
      and send.withdrawn_at is null
      and (source_status <> 'active' or send.prescription_version is distinct from source_version);
   -- Whether the prescription's send stands withdrawn now (by this change or
-  -- an earlier one).
+  -- an earlier one) and its work item was not dispensed: after a dispensing
+  -- the pharmacy has nothing left to dispense, so there is nothing to tell.
   return exists (select 1 from pharmacy.own_prescription_sends send
                   where send.prescription_id = requested_prescription_id
                     and send.facility_id = session_facility
-                    and send.withdrawn_at is not null);
+                    and send.withdrawn_at is not null
+                    and not exists (select 1 from pharmacy.dispensings dispensing
+                                     where dispensing.work_item_id = send.work_item_id));
 end;
 $$;
 
@@ -1336,6 +1343,7 @@ begin
     select decided.id, decided.basis,
            exists (select 1 from pharmacy.own_prescription_sends send
                     where send.work_item_id = decided.id and send.withdrawn_at is not null)
+             and not exists (select 1 from pharmacy.dispensings dispensing where dispensing.work_item_id = decided.id)
       from (
         select item.id,
                case
@@ -1448,7 +1456,7 @@ comment on function pharmacy.own_work_source_prescription(uuid, uuid, uuid) is
 comment on function ehr.send_prescription_to_own_pharmacy(uuid, bigint) is
   '0133 D7: sends the prescriber''s active prescription to this facility''s own pharmacy (a work item accepted by the prescriber with the fixed reason), in the caller''s transaction; answers not_found, not_prescriber, not_active, changed, routed, already_in_pharmacy, superseded, no_pharmacy, sent or pending.';
 comment on function ehr.withdraw_own_pharmacy_send(uuid) is
-  '0133 D8: marks a sent prescription withdrawn once it is on hold, cancelled or entered in error, or active at another version than the one sent (as its trigger does), and answers whether its send stands withdrawn.';
+  '0133 D8: marks a sent prescription withdrawn once it is on hold, cancelled or entered in error, or active at another version than the one sent (as its trigger does), and answers whether its send stands withdrawn while its work item has not been dispensed.';
 comment on function ehr.own_pharmacy_send_withdrawn_on_change() is
   '0133 D8: the trigger function of prescriptions_own_pharmacy_send_withdrawn: marks the send of a prescription that becomes on hold, cancelled or entered in error, or active at another version than the one sent, withdrawn. The owner''s alone.';
 comment on function pharmacy.own_work_access_for(text, uuid, text) is
@@ -1456,7 +1464,7 @@ comment on function pharmacy.own_work_access_for(text, uuid, text) is
 comment on function lab.own_work_access_for(text, uuid, text) is
   '0133 D9: the own work item (no route) a work item, accession, specimen, execution or result belongs to, when the session works for this facility''s laboratory, with the audit basis: consent when the member holds its own consent for the action, else own-work.';
 comment on function pharmacy.own_work_item_states(uuid[]) is
-  '0133 D10: for each own work item here the session may read, consent or own-work, and whether its send was withdrawn. At most 200 ids.';
+  '0133 D10: for each own work item here the session may read, consent or own-work, and whether its send was withdrawn before it was dispensed. At most 200 ids.';
 comment on function lab.own_work_item_bases(uuid[]) is
   '0133 D10: for each own lab work item here the session may read, consent or own-work. At most 200 ids.';
 
@@ -1492,13 +1500,13 @@ begin
            'search_path=pg_catalog, pg_temp'),
          ('ehr', 'send_prescription_to_own_pharmacy', 'uuid, bigint', 'ea6e547d05979779c9765f7dcc70c377', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
-         ('ehr', 'withdraw_own_pharmacy_send', 'uuid', '7ff7b714e3f9fe4b93c9393117f6b4bc', 'v', 'plpgsql',
+         ('ehr', 'withdraw_own_pharmacy_send', 'uuid', 'bdb411d4f4e7fe6806d246d996e91771', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'own_work_access_for', 'text, uuid, text', '5ddb078242919dd978d6312f5cd5aa77', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('lab', 'own_work_access_for', 'text, uuid, text', '1c834e3ed17d864dadb27f3105cffa04', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
-         ('pharmacy', 'own_work_item_states', 'uuid[]', '5882cbdcf5dcebb96b3cabb95bba9801', 's', 'plpgsql',
+         ('pharmacy', 'own_work_item_states', 'uuid[]', '821f37afc72515b43494f730adf0fef9', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('lab', 'own_work_item_bases', 'uuid[]', '07e31d7ca86ac31255ad096d56363637', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),

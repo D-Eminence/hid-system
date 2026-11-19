@@ -6757,7 +6757,8 @@ Screen change (Akos frontend branch): show `ownProgress` on each order row,
 for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
 "Results ready 11:05"; show "Progress not available right now" for
 `unknown`, and nothing for `not_received` on a draft. For `withdrawn` (0133)
-show "The pharmacy cannot dispense this version".
+show "The pharmacy can no longer dispense this prescription" (whatever
+stopped or changed it).
 
 ## ORD-10 phase 1. Same-medicine warning when prescribing (wave 1, no migration)
 
@@ -6903,11 +6904,13 @@ personal grant.
   order route's `order-route` and `orderRouteId`), whatever the basis. Before
   0133 these reads were recorded only by the request row, which names no
   patient; the patient's access log already lists both actions as views.
-- An own pharmacy item whose automatic send was withdrawn (the prescription
-  was put on hold, cancelled, entered in error, edited or resumed after it
-  was sent) carries `"withdrawn": true`; dispensing it answers 409
+- An own pharmacy item whose automatic send was withdrawn before it was
+  dispensed (the prescription was put on hold, cancelled, entered in error,
+  edited or resumed after it was sent, by the prescriber or anyone else who
+  may change it) carries `"withdrawn": true`; dispensing it answers 409
   `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` "This prescription can no longer be
-  dispensed here" (0101, unchanged).
+  dispensed here" (0101, unchanged). An item already dispensed never carries
+  it.
 
 ### EHR API: `pharmacyHandoff`
 
@@ -6927,7 +6930,7 @@ hospital's own pharmacy in the same transaction and the answer gains:
 | `not_sent` | `routed` | Not sent: this prescription has been sent to another pharmacy. |
 | `not_sent` | `not_prescriber` | Not sent: only the person who wrote this prescription can send it to the pharmacy. |
 | `not_sent` | `changed` | Not sent: this prescription changed. Reload it and try again. (It is not at the version sent, no longer active, or not found.) |
-| `not_sent` | `changed` | Not sent: this hospital's pharmacy has an earlier version of this prescription, which it can no longer dispense. (It was edited or resumed after it was sent.) |
+| `not_sent` | `superseded` | Not sent: this hospital's pharmacy has an earlier version of this prescription, which it can no longer dispense. (It was edited or resumed after it was sent, before it was dispensed; reloading cannot change this.) |
 | `not_sent` | `not_allowed` | Not sent: your role at this facility does not allow sending prescriptions to the pharmacy. |
 | `not_sent` | `unavailable` | Not sent: the pharmacy could not be reached. Use Send to pharmacy to try again. |
 
@@ -6953,20 +6956,25 @@ hold, cancelling it or entering it in error marks the send withdrawn, and so
 does editing it while it stays active (frequency, instructions, end date) or
 resuming it: the pharmacy item keeps the version that was sent, which 0101 no
 longer dispenses, and "Send to pharmacy" then answers the "earlier version"
-row above, never "already has"; the edit's or the resume's own answer (the
-`PATCH`, still active) carries that row as its `pharmacyHandoff`, and the
-prescription's `ownProgress` (ORD-3) answers `withdrawn` (what follows is
-S3 below); a hold, a cancellation or an entry in error answers no
-`pharmacyHandoff`. Completing a prescription
-marks nothing. The
-database marks it on the change itself (a trigger on the prescription), so a
-change made by any ehr-api image (an older one during a rolling deploy or
-after a rollback included) marks it too. Whether the pharmacy item should
-follow the new version instead is open for the owner (review S3 of 18
-November). The audit row of the create, the update and the send records
-`pharmacyHandoff` (the status) and `pharmacyHandoffReason` (the reason code),
-never the message, and the update's `pharmacySendWithdrawn: true` when the
-prescription's send stands withdrawn after the change.
+row above (reason `superseded`), never "already has"; the edit's or the
+resume's own answer (the `PATCH`, still active) carries that row as its
+`pharmacyHandoff`, and the prescription's `ownProgress` (ORD-3) answers
+`withdrawn` (what follows is S3 below); a hold, a cancellation or an entry
+in error answers no `pharmacyHandoff`. Completing a prescription marks
+nothing. Once the pharmacy has dispensed the item, a later change is
+recorded on the send but reported nowhere: what was sent was dispensed and
+nothing is left to dispense, so the `PATCH` answers no `pharmacyHandoff` and
+records no `pharmacySendWithdrawn`, `ownProgress` stays `dispensed` (or
+`dispensing_reversed`), and the pharmacy's list does not mark the item
+withdrawn. The database marks it on the change itself (a trigger on the
+prescription), so a change made by any ehr-api image (an older one during a
+rolling deploy or after a rollback included) marks it too. Whether the
+pharmacy item should follow the new version instead is open for the owner
+(review S3 of 18 November). The audit row of the create, the
+update and the send records `pharmacyHandoff` (the status) and
+`pharmacyHandoffReason` (the reason code), never the message, and the
+update's `pharmacySendWithdrawn: true` when the prescription's send stands
+withdrawn after the change and its item has not been dispensed.
 
 ### `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/own-pharmacy-send`
 
@@ -6991,17 +6999,20 @@ stage, `pharmacyHandoff`, `pharmacyHandoffReason`).
 
 Screen change (Akos frontend branch): after Activate, an edit or a resume,
 show `pharmacyHandoff.message`; show "Send to pharmacy" when it is `pending`
-or `not_sent` with reason `unavailable` (never for `changed` or
-`not_allowed`). The send state is not kept on the prescription and nothing
-retries a pending send by itself, so the prescription list and page also
-show "Send to pharmacy" on an active prescription that the signed-in member
-wrote (`createdBy` and `createdByMembershipId` are theirs), with no order
-route in force (`orderRoute`), whose `ownProgress.status` is `not_received`:
-a send that failed or is pending, the prescriber's own prescription a
-colleague activated (that colleague's answer was `not_prescriber`), or one
-written before the hospital had pharmacy staff; the answer then says which.
-On the pharmacy list, show a withdrawn item as "Withdrawn by the prescriber"
-with Dispense disabled.
+or `not_sent` with reason `unavailable`, never for any other reason
+(`changed`: reload first; `superseded`, `no_pharmacy`, `routed`,
+`not_prescriber`, `not_allowed`: trying again cannot help). The send state is
+not kept on the prescription and nothing retries a pending send by itself,
+so the prescription list and page also show "Send to pharmacy" on an active
+prescription that the signed-in member wrote (`createdBy` and
+`createdByMembershipId` are theirs), with no order route in force
+(`orderRoute`), whose `ownProgress.status` is `not_received`: a send that
+failed or is pending, the prescriber's own prescription a colleague
+activated (that colleague's answer was `not_prescriber`), or one written
+before the hospital had pharmacy staff; the answer then says which. On the
+pharmacy list, show a withdrawn item as "Changed or stopped by the
+prescribing team" (the prescriber or a colleague put it on hold, cancelled,
+corrected, edited or resumed it) with Dispense disabled.
 
 Runtime proof: `services/ehr-api/scripts/verify-own-facility-work-runtime.mjs`
 (run by the TUF staging rehearsal, as `own_facility_work_runtime`) boots
@@ -7011,8 +7022,10 @@ themselves; a pharmacist and a lab scientist the patient never approved list,
 read, dispense and accession the hospital's own work, each row naming the
 patient with `basis: own-work` (the execution reads included); a hold marks
 the item withdrawn and Dispense answers 409; an edit answers the "earlier
-version" row and `ownProgress` reads `withdrawn`; neither reads the chart and
-the patient's access log shows both. The order-route, own-work card and
+version" row (`superseded`) and `ownProgress` reads `withdrawn`; an edit
+after the dispensing answers no `pharmacyHandoff` and leaves the item
+unmarked (`ownProgress` stays `dispensed`); neither reads the chart and the
+patient's access log shows both. The order-route, own-work card and
 prescription details verifiers assert the same rules.
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)

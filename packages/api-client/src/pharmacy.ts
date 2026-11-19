@@ -85,10 +85,11 @@ export interface PharmacyWorkItem {
   quantityUnit?: string;
   /**
    * Present (always true) only on this facility's own item whose automatic
-   * send was withdrawn (database 0133): the prescription was put on hold,
-   * cancelled or entered in error after it was sent. Dispensing it answers
-   * 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE; show "Withdrawn by the
-   * prescriber" with Dispense disabled.
+   * send was withdrawn before it was dispensed (database 0133): the
+   * prescription was put on hold, cancelled, entered in error, edited or
+   * resumed after it was sent, by the prescriber or a colleague. Dispensing
+   * it answers 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE; show "Changed or
+   * stopped by the prescribing team" with Dispense disabled.
    */
   withdrawn?: true;
 }

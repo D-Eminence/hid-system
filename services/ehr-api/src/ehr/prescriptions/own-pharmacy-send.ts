@@ -13,7 +13,7 @@ export type OwnPharmacyOutcome = 'not_found' | 'not_prescriber' | 'not_active' |
  */
 export interface PharmacyHandoff {
   status: 'sent' | 'pending' | 'not_sent';
-  reason?: 'no_pharmacy' | 'routed' | 'not_prescriber' | 'changed' | 'not_allowed' | 'unavailable';
+  reason?: 'no_pharmacy' | 'routed' | 'not_prescriber' | 'changed' | 'superseded' | 'not_allowed' | 'unavailable';
   message: string;
 }
 
@@ -41,7 +41,8 @@ const HANDOFFS: Readonly<Record<OwnPharmacyOutcome, PharmacyHandoff>> = {
   changed: CHANGED,
   not_active: CHANGED,
   not_found: CHANGED,
-  superseded: { status: 'not_sent', reason: 'changed',
+  // Its own reason (not `changed`): reloading cannot help, so the screen offers no Reload or Try again for it.
+  superseded: { status: 'not_sent', reason: 'superseded',
     message: 'Not sent: this hospital\'s pharmacy has an earlier version of this prescription, which it can no longer dispense.' },
 };
 
@@ -80,7 +81,9 @@ export function pharmacyHandoff(outcome: string | undefined): PharmacyHandoff {
  * sent prescription's send now stands withdrawn: it is held, cancelled or
  * entered in error, or is still active at another version than the one sent
  * (0133's trigger on the prescription marks it on the change itself,
- * whichever ehr-api image makes it; the function marks it the same way).
+ * whichever ehr-api image makes it; the function marks it the same way), and
+ * its pharmacy item has not been dispensed (after a dispensing there is
+ * nothing left for the pharmacy to dispense, so nothing to tell).
  *
  * Each runs in a savepoint, so nothing it does can undo the prescription's own
  * change: a schema without 0133 (42883) answers no hand-off (undefined); the

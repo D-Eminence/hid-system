@@ -129,7 +129,7 @@ const CONTRACT_TABLE = [
   { status: 'not_sent', reason: 'not_prescriber',
     message: 'Not sent: only the person who wrote this prescription can send it to the pharmacy.' },
   { status: 'not_sent', reason: 'changed', message: 'Not sent: this prescription changed. Reload it and try again.' },
-  { status: 'not_sent', reason: 'changed', message: 'Not sent: this hospital\'s pharmacy has an earlier version of this '
+  { status: 'not_sent', reason: 'superseded', message: 'Not sent: this hospital\'s pharmacy has an earlier version of this '
     + 'prescription, which it can no longer dispense.' },
   { status: 'not_sent', reason: 'not_allowed',
     message: 'Not sent: your role at this facility does not allow sending prescriptions to the pharmacy.' },
@@ -142,7 +142,7 @@ describe('pharmacyHandoff', () => {
     ['sent', 'sent', undefined], ['already_in_pharmacy', 'sent', undefined], ['pending', 'pending', undefined],
     ['no_pharmacy', 'not_sent', 'no_pharmacy'], ['routed', 'not_sent', 'routed'],
     ['not_prescriber', 'not_sent', 'not_prescriber'], ['not_active', 'not_sent', 'changed'],
-    ['changed', 'not_sent', 'changed'], ['not_found', 'not_sent', 'changed'], ['superseded', 'not_sent', 'changed'],
+    ['changed', 'not_sent', 'changed'], ['not_found', 'not_sent', 'changed'], ['superseded', 'not_sent', 'superseded'],
     ['anything else', 'not_sent', 'unavailable'],
   ])('maps %s to %s (%s), in plain words', (outcome, status, reason) => {
     const handoff = pharmacyHandoff(outcome);
@@ -268,12 +268,12 @@ describe('activated prescriptions go to this hospital\'s own pharmacy (0133)', (
       const answer = await service.update(context, patientId, encounterId, prescriptionId,
         { status: OrderStatus.Active, expectedRowVersion: 3, changeReason: 'Resumed after review' } as never) as
         Record<string, unknown>;
-      expect(answer.pharmacyHandoff).toEqual({ status: 'not_sent', reason: 'changed',
+      expect(answer.pharmacyHandoff).toEqual({ status: 'not_sent', reason: 'superseded',
         message: 'Not sent: this hospital\'s pharmacy has an earlier version of this prescription, which it can no longer dispense.' });
       expect(sends()).toEqual([]);
       expect(withdrawals()).toEqual([[prescriptionId]]);
       expect(audits[0]!.details).toMatchObject({ pharmacySendWithdrawn: true, pharmacyHandoff: 'not_sent',
-        pharmacyHandoffReason: 'changed' });
+        pharmacyHandoffReason: 'superseded' });
     });
 
   it('answers no hand-off on a resume of a prescription that was never sent', async () => {
@@ -293,12 +293,25 @@ describe('activated prescriptions go to this hospital\'s own pharmacy (0133)', (
       const answer = await service.update(context, patientId, encounterId, prescriptionId,
         { frequency: 'Twice daily', expectedRowVersion: 2, changeReason: 'Dose interval changed' } as never) as
         Record<string, unknown>;
-      expect(answer.pharmacyHandoff).toEqual({ status: 'not_sent', reason: 'changed',
+      expect(answer.pharmacyHandoff).toEqual({ status: 'not_sent', reason: 'superseded',
         message: 'Not sent: this hospital\'s pharmacy has an earlier version of this prescription, which it can no longer dispense.' });
       expect(sends()).toEqual([]);
       expect(withdrawals()).toEqual([[prescriptionId]]);
       expect(audits[0]!.details).toMatchObject({ rowVersion: '3', pharmacySendWithdrawn: true,
-        pharmacyHandoff: 'not_sent', pharmacyHandoffReason: 'changed' });
+        pharmacyHandoff: 'not_sent', pharmacyHandoffReason: 'superseded' });
+    });
+
+  it('answers no hand-off when the edited prescription\'s item was already dispensed (the database answers false)',
+    async () => {
+      const { service, withdrawals, audits } = harness({ current: prescription(OrderStatus.Active, '2'),
+        updated: { ...prescription(OrderStatus.Active, '3'), endsOn: '2026-12-02' }, withdrawn: false });
+      const answer = await service.update(context, patientId, encounterId, prescriptionId,
+        { endsOn: '2026-12-02', expectedRowVersion: 2, changeReason: 'Course extended after dispensing' } as never) as
+        Record<string, unknown>;
+      expect(withdrawals()).toEqual([[prescriptionId]]);
+      expect('pharmacyHandoff' in answer).toBe(false);
+      expect(audits[0]!.details).not.toHaveProperty('pharmacySendWithdrawn');
+      expect(audits[0]!.details).not.toHaveProperty('pharmacyHandoff');
     });
 
   it('answers no hand-off when a sent prescription is held or cancelled (it is no longer active)', async () => {

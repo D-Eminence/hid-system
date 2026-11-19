@@ -640,9 +640,10 @@ export class PharmacyService {
    * on): its medication gains `strength` and `doseForm`, and the item
    * `priority`, `duration`, `quantityToDispense` and `quantityUnit`, each only
    * when there is a value, after today's fields. An own item whose automatic
-   * send was withdrawn (0133: the prescription was held, cancelled or entered
-   * in error after it was sent) carries `withdrawn: true`; dispensing it is
-   * refused (409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE).
+   * send was withdrawn before it was dispensed (0133: the prescription was
+   * held, cancelled, entered in error, edited or resumed after it was sent, by
+   * whoever changed it) carries `withdrawn: true`; dispensing it is refused
+   * (409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE).
    */
   private projectWorkItem(row: WorkItemRow, card?: OrderRouteCard, ownPatient?: WorkItemRoutePatient,
     details?: WorkItemDispensingDetails, ownState?: OwnWorkState) {

@@ -31,8 +31,10 @@
 // naming the patient, basis own-work, ids only), reads one and dispenses it
 // (rows with basis own-work); a hold withdraws the other (the list marks it
 // withdrawn and dispensing it answers 409); an edit of a third answers the
-// "earlier version" hand-off, its ownProgress reads withdrawn and "Send to
-// pharmacy" answers the same row; the lab scientist without a grant lists,
+// "earlier version" hand-off (reason superseded), its ownProgress reads
+// withdrawn and "Send to pharmacy" answers the same row; an edit of the
+// dispensed one answers no hand-off, its item is not marked withdrawn and
+// its ownProgress stays dispensed; the lab scientist without a grant lists,
 // reads and accessions the doctor's lab request handed to the hospital's
 // Lab, takes and receives the sample, starts the test and reads the execution
 // and the specimen's executions (each read audited with the patient and basis
@@ -430,7 +432,7 @@ try {
       instructions: 'Synthetic instructions: take with food', status }, { key: freshKey('prescription') }), 201,
   `prescription ${display}`);
   const SENT = { status: 'sent', message: 'Sent to this hospital\'s pharmacy.' };
-  const EARLIER = { status: 'not_sent', reason: 'changed',
+  const EARLIER = { status: 'not_sent', reason: 'superseded',
     message: 'Not sent: this hospital\'s pharmacy has an earlier version of this prescription, which it can no longer dispense.' };
   const rx1 = await newPrescription('active', 'Synthetic metformin 500 mg tablet');
   assert.deepEqual(rx1.pharmacyHandoff, SENT, `rx1's hand-off: ${JSON.stringify(rx1.pharmacyHandoff)}`);
@@ -496,7 +498,16 @@ try {
   const sendAgain = expectStatus(await ehrCall(doctor, 'POST', `${enc}/prescriptions/${rx3.id}/own-pharmacy-send`,
     { expectedRowVersion: Number(edited.rowVersion) }), 200, 'Send to pharmacy after the edit');
   assert.deepEqual(sendAgain.pharmacyHandoff, EARLIER, 'Send to pharmacy answers the earlier-version row');
-  // ORD-3 through ehr-api, the doctor's cookie only: dispensed, withdrawn (held and edited).
+  // A change after the dispensing: recorded on the send, reported nowhere (what was sent was dispensed).
+  const editedAfterDispensing = expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx1.id}`,
+    { expectedRowVersion: Number(rx1.rowVersion), frequency: 'three times daily',
+      changeReason: 'Synthetic change after dispensing' }), 200, 'edit rx1 after its dispensing');
+  assert.equal(editedAfterDispensing.pharmacyHandoff, undefined,
+    `an edit after the dispensing answers no hand-off: ${JSON.stringify(editedAfterDispensing.pharmacyHandoff)}`);
+  const afterEdits = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the list after the edits');
+  assert.deepEqual([item1, item2, item3].map(item => afterEdits.items.find(row => row.id === item.id)?.withdrawn),
+    [undefined, true, true], 'withdrawn on the list: the held and the edited items, never the dispensed one');
+  // ORD-3 through ehr-api, the doctor's cookie only: dispensed (also after its edit), withdrawn (held and edited).
   const progressList = expectStatus(await http(ehr, 'GET', `/ehr/patients/${patient.id}${enc}/prescriptions`,
     { cookie: doctor.cookie, facility: hospital.facilityId, purpose: 'direct-care' }), 200, 'the doctor\'s prescriptions');
   const progressOf = rx => progressList.items.find(item => item.id === rx.id)?.ownProgress?.status;
@@ -506,11 +517,13 @@ try {
       withdrawn_at is not null as withdrawn from pharmacy.own_prescription_sends where patient_id = $1
     order by created_at`, [patient.id]);
   assert.deepEqual(sends.map(row => [row.rx, row.state, row.withdrawn]),
-    [[rx1.id, 'sent', false], [rx2.id, 'sent', true], [rx3.id, 'sent', true]], `the sends: ${JSON.stringify(sends)}`);
+    [[rx1.id, 'sent', true], [rx2.id, 'sent', true], [rx3.id, 'sent', true]], `the sends: ${JSON.stringify(sends)}`);
   evidence.afterTheSend = { hold: { handoff: 'none', list: 'withdrawn', dispense: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
-    edit: { handoff: 'earlier version', sendToPharmacy: 'earlier version' },
+    edit: { handoff: 'earlier version (superseded)', sendToPharmacy: 'earlier version (superseded)' },
+    editAfterDispensing: { handoff: 'none', list: 'not withdrawn', ownProgress: 'dispensed', send: 'change recorded' },
     ownProgress: { dispensed: 'dispensed', held: 'withdrawn', edited: 'withdrawn' } };
-  step('a hold withdraws the send (Dispense refused); an edit answers the earlier-version hand-off; ownProgress reads withdrawn');
+  step('a hold withdraws the send (Dispense refused); an edit answers the earlier-version hand-off; ownProgress reads '
+    + 'withdrawn; an edit after the dispensing reports nothing');
 
   // ── The lab scientist without a grant ──
   const labRequest = expectStatus(await ehrCall(doctor, 'POST', `${enc}/lab-requests`,
