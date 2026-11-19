@@ -1,0 +1,69 @@
+{
+  "schema": "hid.native-runtime-evidence/v1",
+  "reviewed_at": "2026-11-19",
+  "scope": "Native evidence for the Node 22.23.5 base pinned by production-runtime-assessment.json. Versus the zlib-patched base recorded in zlib-deb13u1-runtime-evidence.json, nodejs/bin/node is the only changed ELF; every other ELF hash is unchanged and stays covered by that evidence and the evidence it cites.",
+  "base_digest": "sha256:af2e7dd3017037b3ba73238b818c7273f3b4349c005f8bd1454b78d580fe7e37",
+  "platform": "linux/arm64/v8",
+  "platform_manifest": "sha256:ee50dbc7f3f02a0a5793ae8bc4debbc58778dad83c278d08da7670b20f7222f1",
+  "image_config": "sha256:042c0bf1d53ed4946cc1237cd247c91db0b988de10885c5b537ad57954090bb6",
+  "previous_base_digest": "sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041",
+  "previous_platform_manifest": "sha256:a73a187bbfda9cb24a2cb753150ff3d0a0bfffa81b57b1545b9ffd550fefe7ef",
+  "previous_image_config": "sha256:207dab5942055a52958fe555660f80671cea7661622e45d6943fa9706359616f",
+  "registry_tag": "gcr.io/distroless/nodejs22-debian13:latest (pushed 2026-11-12T21:17Z), the same root variant as the previous pin.",
+  "config_unchanged": "User 0, Entrypoint /nodejs/bin/node, Env (PATH, SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt), working directory and 22 layers unchanged; only rootfs diff_ids 12 and 22 differ.",
+  "changed_layers": {
+    "12": "usr/lib/os-release only: identical 344-byte content, file mode 0555 to 0644; no ELF.",
+    "22": "nodejs/bin/node only (nodejs/LICENSE unchanged)."
+  },
+  "unchanged_layers": "The other 20 layers have identical digests, including libc6 2.41-12+deb13u4, the GCC 14.2.0-19 runtime, zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1 and libssl3t64 3.5.7-1~deb13u3, so the glibc, GCC and libssl3t64 findings and their package versions are unchanged.",
+  "elf_diff": {
+    "elf_count": 283,
+    "previous_elf_count": 283,
+    "added": [],
+    "removed": [],
+    "changed": {
+      "nodejs/bin/node": {
+        "previous_sha256": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+        "sha256": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c"
+      }
+    },
+    "inventories_checked": "All 283 base ELF hashes of the rebuilt arm64 root file system equal the corresponding entries of each of the twelve elf_inventory components in production-runtime-assessment.json after this repin; the remaining entries (the 8 Argon2 prebuilds of identity-api, ehr-api and database-migration) come from unchanged lockfiles."
+  },
+  "node_binary": {
+    "path": "nodejs/bin/node",
+    "sha256": "bb71f797d1b3d156d012c59b152c413cf7d4940156cafcde28f1731201ceaf1c",
+    "previous_sha256": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+    "release_tarball": "https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.xz",
+    "release_tarball_sha256": "2babb9eb5264860d540849f4b064a6fbdebcdc323657d9d382ce23d313fd5e09",
+    "release_member": "node-v22.23.5-linux-arm64/bin/node",
+    "byte_identical_to_release_member": true,
+    "release_checksums": "https://nodejs.org/dist/v22.23.5/SHASUMS256.txt",
+    "release_checksums_signer": "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356",
+    "signer_listed_in": "Release keys in README.md of node-v22.23.4.tar.xz (the previously pinned source) and node-v22.23.5.tar.xz.",
+    "bundled_openssl": "3.5.9 (nodejs.org/dist/index.json), unchanged from 22.23.4.",
+    "dt_needed": ["libdl.so.2", "libstdc++.so.6", "libm.so.6", "libgcc_s.so.1", "libpthread.so.0", "libc.so.6", "ld-linux-aarch64.so.1"],
+    "undefined_imports": 1134,
+    "imports_added_vs_previous": [],
+    "imports_removed_vs_previous": [],
+    "forbidden_glibc_imports": 0,
+    "zlib_gz_write_imports": 0,
+    "aligned_new_symbols": 0,
+    "pbds_strings": 0
+  },
+  "node_source": {
+    "source_url": "https://nodejs.org/dist/v22.23.5/node-v22.23.5.tar.xz",
+    "sha256": "6cce7c58bf058700c643944903d60a325e8c9ceede1f5c2c088b435f2ada091a",
+    "listed_in_signed_checksums": true,
+    "source_files_inspected": 11703,
+    "pattern_hits": [],
+    "openssl_api_calls_outside_deps_openssl": []
+  },
+  "methods": {
+    "layers": "Index, arm64 platform manifests and configs of both images, and the two differing layer blobs of each, fetched by digest from gcr.io/distroless/nodejs22-debian13 and checked against those digests. Every entry of each differing layer was compared with the layer at the same position in the previous manifest; the other 20 layers have identical digests. The new image's root file system was also rebuilt by applying all 22 layers in order with whiteouts, and every regular file of 4 or more bytes starting with \\x7fELF was hashed with SHA-256, the rule of scripts/assess-staging-runtime.py.",
+    "release_identity": "SHASUMS256.txt and its detached .sig and clearsigned .asc each verify with the key of that fingerprint; the release tarball and source tarball hashes equal the listed values.",
+    "forbidden_glibc_imports": "Undefined .dynsym and .symtab names read with elf_imports() from scripts/assess-staging-runtime.py (undefined_imports counts them) that are in its forbidden list: strfmon, strfmon_l, __strfmon_l, ns_printrr, ns_printrrf, fp_nquery. zlib_gz_write_imports counts those in its gzFile write list.",
+    "aligned_new_symbols": ".dynsym and .symtab names containing align_val_t (C++17 aligned new and delete).",
+    "pbds_strings": "Occurrences of pb_ds, __gnu_pbds or binary_heap in the binary's bytes; strfmon, ns_printrr and fp_nquery also occur 0 times, and the binary names no libssl.so, libcrypto.so or libz.so.",
+    "source_files_inspected": "Regular files in the source tarball whose extension is .c, .cc, .cpp, .h, .hpp, .gyp or .gypi, the rule of node-22.23.4-runtime-evidence.json. pattern_hits lists those containing a forbidden glibc name, pb_ds, __gnu_pbds or binary_heap; no other file in the tarball contains one either. openssl_api_calls_outside_deps_openssl lists files outside deps/openssl containing PEM_X509_INFO_read, OSSL_QUIC_ or SSL_new_listener."
+  }
+}
