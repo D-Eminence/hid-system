@@ -85,7 +85,7 @@ A patient registered without a NIN (ID-2, 0130), or an unknown patient who has s
 Request:
 
 ```json
-{ "nin": "12345678901", "purpose": "healthcare-operations" }
+{ "nin": "<11-digit-NIN>", "purpose": "healthcare-operations" }
 ```
 
 | Field | Type | Rule |
