@@ -217,10 +217,13 @@
 --    (a policy's functions are executed with the querying role's
 --    privileges, as 0086's context_allows is). Called on their own, the
 --    session's half answers only the session's own membership, and the
---    row's half answers only for a membership that is the session's and
---    holds both permissions at the row's facility: whether that member could
---    see the patient's own work (the patient active, no deny directive
---    covering that member), which that member's own session shows anyway.
+--    row's half answers only for a session that names a valid member of
+--    this kind at the row's facility (an active account of that subject,
+--    staff, membership, facility and organization, and both permissions):
+--    whether a patient id the caller holds is active and whether a deny
+--    directive covers that member. A runtime that names a member's subject
+--    and membership already reads that member's own work through the
+--    policies; this adds only patients without own work there.
 --    All of them to hid_schema_test_runtime; D1 itself, D5's helper and D8's
 --    trigger function to nobody (the functions and the trigger that call
 --    them run them as their owner). Revoked from
@@ -257,8 +260,8 @@
 -- 15-second limit (57014); with the policies named own_work_*, the Pharmacy
 -- tables asked the consent test first, and a pharmacy's list of 3,000 items
 -- took 18 s for its pharmacist. This form, on the same busy laboratory: 7.8
--- to 8.0 s for the clinician, as on 0001-0127 (7.2 s; its 5,631 consent
--- checks are 0086's, and the row's half is never asked for it), 1.8 to 2.1
+-- to 8.4 s for the clinician, as on 0001-0127 (7.2 s; its 5,631 consent
+-- checks are 0086's, and the row's half is never asked for it), 2.3 to 2.7
 -- s for the lab scientist, the same 200 rows; auth.membership_has_permission
 -- runs 16 and 148 times per statement, never per row. With every table and
 -- function owned by a role that is not a superuser, as in production, the
@@ -399,9 +402,12 @@
 -- and pharmacy.own_work_item_states fails pharmacy-api's work list (which
 -- takes only a missing function, 42883, as a schema without 0133). Run step
 -- by step instead, the same order keeps every image working between the
--- steps. Drop the 44 own-work policies and restore 0124's card readers
--- before dropping D1's halves, which they call (0086's work_item_allows is
--- not changed).
+-- steps. D1's halves (identity.facility_work_session_membership and
+-- identity.facility_work_patient_allows) go last: before them, drop the 44
+-- own-work policies, D5's two ehr.prescriptions policies and its helper,
+-- D9 (both), D10 (both) and D1, and restore 0124's card readers; each of
+-- them calls a half, records no dependency on it, and with the half gone
+-- fails with 42883 (0086's work_item_allows is not changed).
 
 -- 0. Preconditions.
 do $$
@@ -754,14 +760,19 @@ as $$
 $$;
 
 -- The row's half, given the session's half's answer. It is false unless
--- that answer is still the session's membership and the row is at that
--- membership's facility, read again on every row: a statement that changes
--- the session's settings after the session's half ran (a cursor, or
--- set_config in the same statement) sees nothing more. The membership must
--- also hold, through unrevoked facility roles, both permissions here, so a
--- caller who names a membership learns only what that member may see. No
--- SQL function inside it but the platform session readers, so a policy that
--- calls it keeps its plan for the whole statement. It answers true or
+-- that answer is still the session's membership, of the session's actor,
+-- and the row is at that membership's facility, all read again on every
+-- row: a statement that changes the session's settings after the session's
+-- half ran (a cursor, or set_config in the same statement) sees nothing
+-- more. The membership must also be an active one, by the conditions of
+-- identity.has_active_membership (the account, the staff record, the
+-- membership, its facility and organization), and hold, through unrevoked
+-- facility roles, both permissions here. Called on its own by a runtime,
+-- it answers only for a session that names a valid member of this kind (its
+-- subject and membership): whether a patient id the caller holds is active
+-- and whether a deny directive covers that member. No SQL function inside
+-- it but the platform session readers, so a policy that calls it keeps its
+-- plan for the whole statement. It answers true or
 -- false, never null (an unset purpose or membership is false).
 create function identity.facility_work_patient_allows(work_kind text, session_membership_id uuid,
   row_patient_id uuid, row_facility_id uuid, requested_action text)
@@ -782,9 +793,22 @@ as $$
     and exists (
       select 1
         from identity.staff_facility_memberships membership
+        join auth.accounts account_row on account_row.id = membership.account_id
+        join identity.staff staff_row on staff_row.id = membership.staff_id
+        join identity.facilities facility on facility.id = membership.facility_id
+        join identity.organizations organization_row on organization_row.id = membership.organization_id
        where membership.id = session_membership_id
          and membership.facility_id = row_facility_id
+         and facility.organization_id = membership.organization_id
+         and account_row.subject = platform.current_actor_subject()
+         and account_row.status = 'active'
+         and (account_row.disabled_until is null or account_row.disabled_until <= current_timestamp)
+         and staff_row.active
+         and lower(staff_row.verification_status) in ('verified', 'approved', 'active')
          and membership.active
+         and membership.migration_hold_reason is null
+         and facility.active
+         and organization_row.active
          and (select count(distinct role_permission.permission_code)
                 from auth.account_roles assignment
                 join auth.roles role_row on role_row.code = assignment.role_code and role_row.active
@@ -1612,7 +1636,7 @@ comment on function identity.facility_work_member_allows(text, uuid, uuid, text)
 comment on function identity.facility_work_session_membership(text) is
   '0133 D1, the session''s half: the session''s membership when the session is in direct care at its facility and that active membership holds <kind>.work-item.read and <kind>.order-route.receive there; else null. The own-work policies ask it once per statement, as (select ...), and pass the answer to the row''s half; the cards and the list''s bases once per call. It allows nothing alone.';
 comment on function identity.facility_work_patient_allows(text, uuid, uuid, uuid, text) is
-  '0133 D1, the row''s half, given the session''s half''s answer: false unless that membership is still the session''s, at the row''s facility, active and holding both permissions there through unrevoked facility roles; then the patient is active and no deny directive covers that member for the action. Read again on every row, so a statement that changes its settings after the session''s half ran sees nothing more.';
+  '0133 D1, the row''s half, given the session''s half''s answer: false unless that membership is still the session''s, of the session''s actor, at the row''s facility, active (as identity.has_active_membership) and holding both permissions there through unrevoked facility roles; then the patient is active and no deny directive covers that member for the action. Read again on every row, so a statement that changes its settings after the session''s half ran sees nothing more.';
 comment on function lab.work_item_patient_cards(uuid[]) is
   'The patient (name, sex, date of birth, last 4 of the Health ID) of each given work item that is this facility''s own work (no order route) and that the session''s member may read: lab.work-item.read here and the read consent test of the work items'' read policy (emergency included), or (0133) the facility''s lab staff. At most 200 ids.';
 comment on function pharmacy.work_item_patient_cards(uuid[]) is
@@ -1656,7 +1680,7 @@ begin
            'sql', 'search_path=pg_catalog, pg_temp'),
          ('identity', 'facility_work_session_membership', 'text', 'd785bffb1c16b4202ee5c5d146bf0b09', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),
-         ('identity', 'facility_work_patient_allows', 'text, uuid, uuid, uuid, text', 'de55c126f77cd3a6c139c23271dacd35', 's', 'sql',
+         ('identity', 'facility_work_patient_allows', 'text, uuid, uuid, uuid, text', '3046099768d1ad26c2e145e4120e8f15', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),
          ('lab', 'work_item_patient_cards', 'uuid[]', '85bffc97b63e3206573c4b3cafcd9bc1', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),

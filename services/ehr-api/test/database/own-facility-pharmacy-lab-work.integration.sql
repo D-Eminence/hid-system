@@ -143,7 +143,7 @@ begin
     from (values
       ('identity.facility_work_member_allows(text,uuid,uuid,text)', 'cdf330e36a9fcc347e8e5c06fe0745c2', 's'),
       ('identity.facility_work_session_membership(text)', 'd785bffb1c16b4202ee5c5d146bf0b09', 's'),
-      ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', 'de55c126f77cd3a6c139c23271dacd35', 's'),
+      ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', '3046099768d1ad26c2e145e4120e8f15', 's'),
       -- 0086's, unchanged: D2 is a policy of its own next to theirs.
       ('lab.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
       ('pharmacy.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
@@ -1610,6 +1610,35 @@ select pg_temp.as_member(4);
 select pg_temp.expect('7g NU''s own session (a nurse): the row''s half for NU says nothing',
   identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000004',
     'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')::text, 'false');
+-- The row's half asks for a valid session of that member: the actor's
+-- subject, an active account and membership (as has_active_membership).
+select pg_temp.as_member(3);
+select set_config('app.actor_subject', '', true);
+select pg_temp.expect('7g LS''s membership with no actor: the row''s half false',
+  identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+    'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')::text, 'false');
+reset role;
+savepoint own_work_invalid_member;
+update auth.accounts set status = 'disabled' where id = 'e1330002-0000-4000-8000-000000000003';
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(3);
+select pg_temp.expect('7g LS with a disabled account: the row''s half false',
+  identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+    'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')::text, 'false');
+reset role;
+rollback to savepoint own_work_invalid_member;
+set local session_replication_role = replica;
+update identity.staff_facility_memberships set migration_hold_reason = 'own-work-suite'
+ where id = 'e1330004-0000-4000-8000-000000000003';
+set local session_replication_role = origin;
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(3);
+select pg_temp.expect('7g LS''s membership on hold: the row''s half false',
+  identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+    'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')::text, 'false');
+reset role;
+rollback to savepoint own_work_invalid_member;
+set local role hid_lab_api_runtime;
 -- No purpose (an empty app.purpose_of_use): the row's half is false, never
 -- null, so D9 refuses too (it returns early only on false).
 select pg_temp.as_member(3, purpose => '');
