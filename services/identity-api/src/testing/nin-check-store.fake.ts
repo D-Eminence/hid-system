@@ -21,6 +21,8 @@ export interface FakeNinCheckRow {
 
 /** 0137's hold for a lease that ended without an outcome. */
 const LOST_LEASE_HOLD_MS = 6 * 60 * 60 * 1000;
+/** Q115: each use of a stored record keeps it at least this long from the use (identity.qoreid_nin_record_used). */
+const RECORD_USE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolean; now?: () => number } = {}) {
   const rows = new Map<string, FakeNinCheckRow>();
@@ -54,6 +56,7 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
       if (row.key_version === keyVersion && !erased(lookup)
         && ((row.outcome === 'record' && (row.record_complete || !complete || row.record_source === 'nin_only'))
           || (row.outcome !== 'record' && (row.question_hmac === null || row.question_hmac === question)))) {
+        if (row.outcome === 'record') used(row);
         return { decision: 'stored', outcome: row.outcome, record_complete: row.record_complete,
           answer_ciphertext: row.answer_ciphertext, until: new Date(row.until) };
       }
@@ -77,13 +80,18 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
     return true;
   }
 
-  /** Q110: a live stored record under this key kept `seconds` from now, never shorter; nothing else changes. */
+  /** Q115's rule: a used record kept at least 30 days from now, never shorter; nothing else changes. */
+  function used(row: FakeNinCheckRow) {
+    row.until = Math.max(row.until, now() + RECORD_USE_KEEP_MS);
+  }
+
+  /** keep_qoreid_nin_record: the rule for a live stored record under this key, of a NIN not erased. */
   function keep(values: readonly unknown[]) {
-    const [lookup, keyVersion, seconds] = values as [string, string, number];
+    const [lookup, keyVersion] = values as [string, string];
     const row = rows.get(lookup);
     if (!row || row.state !== 'answered' || row.outcome !== 'record' || row.key_version !== keyVersion
       || row.until <= now() || erased(lookup)) return false;
-    row.until = Math.max(row.until, now() + Number(seconds) * 1000);
+    used(row);
     return true;
   }
 

@@ -9,9 +9,11 @@
 -- a complete one, an incomplete NIN-only record answered to it from storage;
 -- "no record" for the question asked and, asked with the NIN alone, for every
 -- question; QoreID's "not found" for every question, whichever check got it;
--- an answer HID cannot use, kept and reused like "no record"; the keep of a
--- stored record (Q110: 90 days from the match, never shorter, nothing else
--- changed; only a live record under the caller's key, never an erased one); a
+-- an answer HID cannot use, kept and reused like "no record"; Q115's rule (a
+-- record 90 days from the first check and at least 30 days from each later
+-- use, through begin or the keep; never shorter, nothing else changed; only a
+-- live record under the caller's key, never an erased one; the rule itself to
+-- no role); a
 -- hold (up to a day) and its end; a lease that ended without an outcome held
 -- for 6 hours after its end, and one older than that taken over; letting go;
 -- expiry; another key version; the table's checks; erasure for a NIN bound to
@@ -47,7 +49,7 @@ begin
      and not pg_has_role(role_row.oid, proc.proowner, 'USAGE')
      and proc.oid in ('identity.begin_qoreid_nin_check(char,char,boolean,text,uuid,integer)'::regprocedure,
                       'identity.finish_qoreid_nin_check(char,uuid,text,char,boolean,bytea,text,integer)'::regprocedure,
-                      'identity.keep_qoreid_nin_record(char,text,integer)'::regprocedure,
+                      'identity.keep_qoreid_nin_record(char,text)'::regprocedure,
                       'identity.prune_qoreid_nin_checks(integer)'::regprocedure)
      and has_function_privilege(role_row.oid, proc.oid, 'EXECUTE')
      and role_row.rolname not in ('hid_identity_runtime', 'hid_identity_api_runtime', 'hid_schema_test_runtime');
@@ -58,7 +60,7 @@ begin
          'identity.begin_qoreid_nin_check(char,char,boolean,text,uuid,integer)', 'EXECUTE')
      or not has_function_privilege('hid_identity_runtime',
          'identity.finish_qoreid_nin_check(char,uuid,text,char,boolean,bytea,text,integer)', 'EXECUTE')
-     or not has_function_privilege('hid_identity_runtime', 'identity.keep_qoreid_nin_record(char,text,integer)', 'EXECUTE')
+     or not has_function_privilege('hid_identity_runtime', 'identity.keep_qoreid_nin_record(char,text)', 'EXECUTE')
      or not has_function_privilege('hid_identity_runtime', 'identity.prune_qoreid_nin_checks(integer)', 'EXECUTE')
      or not has_function_privilege('hid_schema_test_runtime', 'identity.prune_qoreid_nin_checks(integer)', 'EXECUTE') then
     raise exception 'The Identity runtime cannot run the NIN check commands';
@@ -71,6 +73,15 @@ begin
      and has_function_privilege(role_row.oid, 'identity.qoreid_nin_check_erased(char)', 'EXECUTE');
   if offender is not null then
     raise exception 'A runtime role may run the erasure test: %', offender;
+  end if;
+  select string_agg(role_row.rolname, ', ') into offender
+    from pg_roles role_row
+   where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+     and not pg_has_role(role_row.oid, (select proowner from pg_proc
+                                         where oid = 'identity.qoreid_nin_record_used(char,text)'::regprocedure), 'USAGE')
+     and has_function_privilege(role_row.oid, 'identity.qoreid_nin_record_used(char,text)', 'EXECUTE');
+  if offender is not null then
+    raise exception 'A runtime role may run the Q115 rule itself: %', offender;
   end if;
   if has_function_privilege('public', 'identity.begin_qoreid_nin_check(char,char,boolean,text,uuid,integer)', 'EXECUTE') then
     raise exception 'PUBLIC may run begin_qoreid_nin_check';
@@ -126,7 +137,7 @@ end
 $$;
 do $$
 begin
-  perform identity.keep_qoreid_nin_record(repeat('a', 64), 'k1', 86400);
+  perform identity.keep_qoreid_nin_record(repeat('a', 64), 'k1');
   raise exception 'keep ran without the system context';
 exception when insufficient_privilege then null;
 end
@@ -184,11 +195,10 @@ begin
     raise exception 'finish kept an unusable answer as a complete record';
   exception when invalid_parameter_value then null;
   end;
-  foreach bad slice 1 in array array[
-    array['short', 'k1', '3600'], array[repeat('a', 64), '', '3600'], array[repeat('a', 64), 'k1', '59'],
-    array[repeat('a', 64), 'k1', (92 * 86400)::text], array[repeat('a', 64), 'k1', null]] loop
+  foreach bad slice 1 in array array[array['short', 'k1'], array[repeat('a', 64), ''], array[repeat('a', 64), null],
+    array[null, 'k1']] loop
     begin
-      perform identity.keep_qoreid_nin_record(bad[1], bad[2], bad[3]::integer);
+      perform identity.keep_qoreid_nin_record(bad[1], bad[2]);
       raise exception 'keep accepted %', bad;
     exception when invalid_parameter_value then null;
     end;
@@ -353,9 +363,10 @@ insert into nin_check_steps
 select 'p other question', format('%s %s', decision, outcome) from identity.begin_qoreid_nin_check(
   repeat('0', 63) || '7', repeat('2', 64), false, 'k1', '137a0000-0000-4000-8000-0000000000e9', 30);
 
--- Q110 ('q', a profile check's incomplete record first kept 24 hours): a
--- later request matched it, so it is kept 90 days from now; a shorter keep
--- never shortens it; only a live record under the caller's key is kept.
+-- Q115 ('q', a profile check's incomplete record first kept 24 hours): each
+-- later use keeps it at least 30 days from that use, through begin (a check
+-- answered from storage) or the keep (the desk's matched record); a use never
+-- shortens a keep; only a live record under the caller's key is kept.
 insert into nin_check_steps
 select 'q first', decision from identity.begin_qoreid_nin_check(repeat('0', 63) || '8', repeat('3', 64), false,
   'k1', '137a0000-0000-4000-8000-0000000000ea', 30);
@@ -363,19 +374,26 @@ insert into nin_check_steps
 select 'q finish', identity.finish_qoreid_nin_check(repeat('0', 63) || '8', '137a0000-0000-4000-8000-0000000000ea',
   'record', repeat('3', 64), false, decode(repeat('cd', 32), 'hex'), 'k1', 86400)::text;
 insert into nin_check_steps
-select 'q keep', identity.keep_qoreid_nin_record(repeat('0', 63) || '8', 'k1', 90 * 86400)::text;
+select 'q used by a check', format('%s %s', decision,
+  until between clock_timestamp() + interval '29 days 23 hours' and clock_timestamp() + interval '30 days')
+  from identity.begin_qoreid_nin_check(repeat('0', 63) || '8', repeat('3', 64), false, 'k1',
+    '137a0000-0000-4000-8000-0000000000eb', 30);
 insert into nin_check_steps
-select 'q keep shorter', identity.keep_qoreid_nin_record(repeat('0', 63) || '8', 'k1', 3600)::text;
+select 'q keep', identity.keep_qoreid_nin_record(repeat('0', 63) || '8', 'k1')::text;
 insert into nin_check_steps
-select 'q keep other key', identity.keep_qoreid_nin_record(repeat('0', 63) || '8', 'k2', 90 * 86400)::text;
+select 'q keep other key', identity.keep_qoreid_nin_record(repeat('0', 63) || '8', 'k2')::text;
 insert into nin_check_steps
-select 'q keep not a record', identity.keep_qoreid_nin_record(repeat('c', 64), 'k1', 90 * 86400)::text;
+select 'q keep not a record', identity.keep_qoreid_nin_record(repeat('c', 64), 'k1')::text;
 insert into nin_check_steps
-select 'q keep a hold', identity.keep_qoreid_nin_record(repeat('d', 64), 'k1', 86400)::text;
+select 'q keep a hold', identity.keep_qoreid_nin_record(repeat('d', 64), 'k1')::text;
 insert into nin_check_steps
-select 'q keep a running check', identity.keep_qoreid_nin_record(repeat('0', 63) || '3', 'k1', 86400)::text;
+select 'q keep a running check', identity.keep_qoreid_nin_record(repeat('0', 63) || '3', 'k1')::text;
 insert into nin_check_steps
-select 'q keep nothing', identity.keep_qoreid_nin_record(repeat('9', 64), 'k1', 86400)::text;
+select 'q keep nothing', identity.keep_qoreid_nin_record(repeat('9', 64), 'k1')::text;
+-- A use of a record kept 90 days from its first check ('m', used twice
+-- above) does not shorten it; nor does a keep.
+insert into nin_check_steps
+select 'm keep', identity.keep_qoreid_nin_record(repeat('0', 63) || '6', 'k1')::text;
 
 -- The erased NIN ('e'): answered, then its patient's login is deleted.
 insert into nin_check_steps
@@ -408,7 +426,8 @@ declare
     array['m for profile', 'stored record f'],
     array['p first', 'call'], array['p finish', 'true'], array['p for enrollment', 'stored rejected'],
     array['p other question', 'stored rejected'],
-    array['q first', 'call'], array['q finish', 'true'], array['q keep', 'true'], array['q keep shorter', 'true'],
+    array['q first', 'call'], array['q finish', 'true'], array['q used by a check', 'stored t'],
+    array['q keep', 'true'], array['m keep', 'true'],
     array['q keep other key', 'false'], array['q keep not a record', 'false'], array['q keep a hold', 'false'],
     array['q keep a running check', 'false'], array['q keep nothing', 'false'],
     array['e first', 'call'], array['e finish', 'true'], array['e stored before deletion', 'stored']];
@@ -440,14 +459,20 @@ begin
   if actual is distinct from '6 nin_only f, 8 profile f, b nin_only t' then
     raise exception 'The records'' sources are %', actual;
   end if;
-  -- The keep: 90 days from now, not shortened by the 1-hour keep after it;
-  -- the answer as it was.
+  -- Q115: 'q' (kept a day at first) is kept 30 days from its last use, the
+  -- answer as it was; 'm' (kept 90 days from its first check) still is,
+  -- after two uses and a keep.
   if not exists (select 1 from identity.qoreid_nin_checks
                   where nin_lookup_hmac = repeat('0', 63) || '8'
-                    and until between clock_timestamp() + interval '89 days 23 hours'
-                                  and clock_timestamp() + interval '90 days'
+                    and until between clock_timestamp() + interval '29 days 23 hours'
+                                  and clock_timestamp() + interval '30 days'
                     and answer_ciphertext = decode(repeat('cd', 32), 'hex') and outcome = 'record') then
-    raise exception 'The keep did not keep the record 90 days, unchanged';
+    raise exception 'A use did not keep the record 30 days, unchanged';
+  end if;
+  if not exists (select 1 from identity.qoreid_nin_checks
+                  where nin_lookup_hmac = repeat('0', 63) || '6'
+                    and until > clock_timestamp() + interval '89 days 23 hours') then
+    raise exception 'A use shortened a record kept 90 days from its first check';
   end if;
 end
 $$;
@@ -513,7 +538,7 @@ set local role hid_identity_runtime;
 select set_config('app.actor_subject', 'system:auth', true), set_config('app.correlation_id', 'nin-check-once-suite', true);
 -- The erased NIN's answer is never kept longer.
 insert into nin_check_steps
-select 'e keep after deletion', identity.keep_qoreid_nin_record(repeat('e', 64), 'k1', 90 * 86400)::text;
+select 'e keep after deletion', identity.keep_qoreid_nin_record(repeat('e', 64), 'k1')::text;
 -- One expired row by `until` and the erased answer for 'e' (each limited to 1).
 insert into nin_check_steps select 'prune one', identity.prune_qoreid_nin_checks(1)::text;
 insert into nin_check_steps select 'prune rest', identity.prune_qoreid_nin_checks(100)::text;
