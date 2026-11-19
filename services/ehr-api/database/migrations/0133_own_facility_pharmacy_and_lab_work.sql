@@ -43,10 +43,11 @@
 --    permissions of an active membership there), which answers that
 --    membership or null; and identity.facility_work_patient_allows(kind,
 --    membership, patient, facility, action), the row's half, given that
---    answer: the membership is still the session's, at the row's facility,
---    active and holding both permissions there through unrevoked facility
---    roles, the purpose is direct care, the patient is active and no deny
---    directive covers that member. The row's half reads the session's
+--    answer (STRICT, so never called without one): the membership is still
+--    the session's, at the row's facility, active and not on hold, of an
+--    active account whose subject is the session's actor; the purpose is
+--    direct care; the patient is active and no deny directive covers that
+--    member. The row's half reads the session's
 --    membership and facility again on every row, so a statement that changes
 --    its settings after the session's half ran (a cursor, or set_config in
 --    the same statement) sees nothing more. Neither half allows anything
@@ -216,14 +217,18 @@
 --    to both, the runtimes that read the work items and their chain tables
 --    (a policy's functions are executed with the querying role's
 --    privileges, as 0086's context_allows is). Called on their own, the
---    session's half answers only the session's own membership, and the
---    row's half answers only for a session that names a valid member of
---    this kind at the row's facility (an active account of that subject,
---    staff, membership, facility and organization, and both permissions):
+--    session's half answers only the session's own membership; the row's
+--    half answers for a session that names an active account's subject and
+--    one of its memberships (active, not on hold) at the row's facility,
+--    whatever its roles (the session's half asks those, once a statement):
 --    whether a patient id the caller holds is active and whether a deny
---    directive covers that member. A runtime that names a member's subject
---    and membership already reads that member's own work through the
---    policies; this adds only patients without own work there.
+--    directive covers that member, for any patient, own work there or not.
+--    So a Lab or Pharmacy runtime that runs SQL of its own learns that much
+--    of a patient id it holds, through its own member or through one of
+--    0123's sealed QA logins (whose ids are public). Closing that (an
+--    owner-only list of the patients with own work at each facility, kept
+--    by a trigger on the work items, which the row's half would also ask)
+--    is an open question for the owner.
 --    All of them to hid_schema_test_runtime; D1 itself, D5's helper and D8's
 --    trigger function to nobody (the functions and the trigger that call
 --    them run them as their owner). Revoked from
@@ -238,11 +243,16 @@
 -- laboratory or pharmacy and every row of its chain. So each own-work
 -- policy asks the session's half,
 -- `(select identity.facility_work_session_membership(<kind>))`, as an
--- InitPlan: once per statement (twice where it answers a membership, once
--- to skip the row's half for every other session and once to pass it on).
--- Only the row's half and the path are asked for each row. The row's half
--- calls no SQL function but the platform session readers, so the statement
--- plans it once; the path is read in the policy, not in a function.
+-- InitPlan: once per statement. The row's half is STRICT and the policy
+-- reads it through coalesce(..., false), so for every other session (no
+-- membership) it is never called and the path is never read. Only the
+-- row's half and the path are asked for each row. The row's half calls no
+-- SQL function but the platform session readers, so the statement plans it
+-- once; the path is read in the policy, not in a function. On each row it
+-- asks again only what a statement could change (the session's membership,
+-- facility, actor and purpose) and that membership's and account's own
+-- state, never the member's roles: counting them on every row as well
+-- doubled the lab scientist's list.
 -- PostgreSQL joins a table's permissive policies with OR in reverse order of
 -- their names and stops at the first that holds, so the own-work policies
 -- are named staff_own_work_*, after every lab_* and pharmacy_* policy of
@@ -259,16 +269,25 @@
 -- the consent-backed clinician and 19 s for a lab scientist, past the
 -- 15-second limit (57014); with the policies named own_work_*, the Pharmacy
 -- tables asked the consent test first, and a pharmacy's list of 3,000 items
--- took 18 s for its pharmacist. This form, on the same busy laboratory: 7.8
--- to 8.4 s for the clinician, as on 0001-0127 (7.2 s; its 5,631 consent
--- checks are 0086's, and the row's half is never asked for it), 2.3 to 2.7
--- s for the lab scientist, the same 200 rows; auth.membership_has_permission
--- runs 16 and 148 times per statement, never per row. With every table and
--- function owned by a role that is not a superuser, as in production, the
--- pharmacist's list of 3,501 items takes 0.9 s and the lab scientist's of
--- 2,000 items 3.5 s. The cards (D4) and the list's bases (D10) ask the
--- session's half once per call. The runtime check holds the clinician and
--- the lab scientist to the limit and bounds the permission checks.
+-- took 18 s for its pharmacist. This form, on the same busy laboratory
+-- (its tables owned by a superuser, as the database-migration job runs
+-- it): 7.7 to 8.4 s for the clinician, as on 0001-0127 (7.2 s; its 5,631
+-- consent checks are 0086's, and the row's half is never asked for it),
+-- 1.3 to 1.5 s for the lab scientist, the same 200 rows;
+-- auth.membership_has_permission runs 16 and 74 times per statement, never
+-- per row. With every table and function owned by a role that is not a
+-- superuser, as in production: the pharmacist's list of 3,501 items 0.5 s;
+-- the lab scientist's 2.1 s at 2,000 lab work items and 3.6 to 3.8 s at
+-- 4,000 (it grows with the laboratory's history, which the list reads
+-- whole: about 15,000 items reach lab-api's 15-second limit); the
+-- consent-backed clinician's 12.7 to 13.7 s at 2,000 items, as on
+-- 0001-0127 (13.3 to 13.6 s: 0086's consent test on every row of that
+-- history, which reaches the limit at about 2,200 items whatever 0133
+-- does); a lab result's verification insert 0.16 s and D9 about 55 ms a
+-- call. The cards (D4) and the list's bases (D10) ask the session's half
+-- once per call. The runtime check holds the clinician and the lab
+-- scientist to the limit, with a superuser owner, and bounds the
+-- permission checks.
 --
 -- What it does not do: no new role permission (the plan's 0136 decides the
 -- role table, still open); doctors still cannot accept into Pharmacy through
@@ -321,7 +340,8 @@
 -- 6. D7-D10 (D8: its trigger and the function).
 -- 7. Grants (D11) and comments.
 -- 8. Post-checks: each new and replaced function's body (md5), owner,
---    SECURITY DEFINER, volatility, language, not STRICT and search_path;
+--    SECURITY DEFINER, volatility, language, STRICT (the row's half only)
+--    and search_path;
 --    the exact EXECUTE grants of each new function, whether or not each
 --    grantee exists (each existing expected grantee holds EXECUTE, nothing
 --    else is granted, PUBLIC included); the replaced functions' ACLs as
@@ -759,34 +779,33 @@ as $$
            platform.current_facility_id(), work_kind || '.order-route.receive'), false)
 $$;
 
--- The row's half, given the session's half's answer. It is false unless
--- that answer is still the session's membership, of the session's actor,
--- and the row is at that membership's facility, all read again on every
--- row: a statement that changes the session's settings after the session's
--- half ran (a cursor, or set_config in the same statement) sees nothing
--- more. The membership must also be an active one, by the conditions of
--- identity.has_active_membership (the account, the staff record, the
--- membership, its facility and organization), and hold, through unrevoked
--- facility roles, both permissions here. Called on its own by a runtime,
--- it answers only for a session that names a valid member of this kind (its
--- subject and membership): whether a patient id the caller holds is active
--- and whether a deny directive covers that member. No SQL function inside
--- it but the platform session readers, so a policy that calls it keeps its
--- plan for the whole statement. It answers true or
--- false, never null (an unset purpose or membership is false).
+-- The row's half, given the session's half's answer. It is STRICT: a
+-- session with no such membership (every session but the facility's own
+-- pharmacy and lab staff) never calls it, and a policy reads that as no.
+-- It is false unless that answer is still the session's membership, active
+-- and not on hold, of an active account whose subject is the session's
+-- actor, and the row is at that membership's facility, all read again on
+-- every row: a statement that changes the session's settings after the
+-- session's half ran (a cursor, or set_config in the same statement) sees
+-- nothing more. The rest of the member's test (the staff record, the
+-- facility and organization, both permissions) the session's half asked
+-- once for the statement; asking it on every row as well doubled the lab
+-- scientist's list (THE COST). Called on its own by a runtime it answers
+-- what D11 says. No SQL function inside it but the platform session
+-- readers, so a policy that calls it keeps its plan for the whole
+-- statement. Given its five arguments it answers true or false, never null
+-- (an unset purpose or membership is false).
 create function identity.facility_work_patient_allows(work_kind text, session_membership_id uuid,
   row_patient_id uuid, row_facility_id uuid, requested_action text)
 returns boolean
 language sql
 stable
+strict
 security definer
 set search_path = pg_catalog, pg_temp
 as $$
-  select coalesce(coalesce(work_kind in ('pharmacy', 'lab'), false)
-    and coalesce(requested_action in ('read_records', 'write_records'), false)
-    and session_membership_id is not null
-    and row_patient_id is not null
-    and row_facility_id is not null
+  select coalesce(work_kind in ('pharmacy', 'lab')
+    and requested_action in ('read_records', 'write_records')
     and session_membership_id = platform.current_membership_id()
     and row_facility_id = platform.current_facility_id()
     and platform.current_purpose_of_use() = 'direct-care'
@@ -794,34 +813,13 @@ as $$
       select 1
         from identity.staff_facility_memberships membership
         join auth.accounts account_row on account_row.id = membership.account_id
-        join identity.staff staff_row on staff_row.id = membership.staff_id
-        join identity.facilities facility on facility.id = membership.facility_id
-        join identity.organizations organization_row on organization_row.id = membership.organization_id
        where membership.id = session_membership_id
          and membership.facility_id = row_facility_id
-         and facility.organization_id = membership.organization_id
-         and account_row.subject = platform.current_actor_subject()
-         and account_row.status = 'active'
-         and (account_row.disabled_until is null or account_row.disabled_until <= current_timestamp)
-         and staff_row.active
-         and lower(staff_row.verification_status) in ('verified', 'approved', 'active')
          and membership.active
          and membership.migration_hold_reason is null
-         and facility.active
-         and organization_row.active
-         and (select count(distinct role_permission.permission_code)
-                from auth.account_roles assignment
-                join auth.roles role_row on role_row.code = assignment.role_code and role_row.active
-                join auth.role_permissions role_permission on role_permission.role_code = role_row.code
-                join auth.permissions permission_row
-                  on permission_row.code = role_permission.permission_code and permission_row.active
-               where assignment.membership_id = membership.id
-                 and assignment.facility_id = membership.facility_id
-                 and assignment.account_id = membership.account_id
-                 and assignment.scope_type = 'facility'
-                 and assignment.revoked_at is null
-                 and role_permission.permission_code in (work_kind || '.work-item.read',
-                       work_kind || '.order-route.receive')) = 2)
+         and account_row.subject = platform.current_actor_subject()
+         and account_row.status = 'active'
+         and (account_row.disabled_until is null or account_row.disabled_until <= current_timestamp))
     and exists (select 1 from identity.patients patient
                  where patient.id = row_patient_id and patient.status = 'active')
     and not exists (
@@ -947,12 +945,12 @@ end;
 $$;
 
 -- 4. D2 and D3: the 44 own-work policies, one statement each:
---      (select identity.facility_work_session_membership(<kind>)) is not null
---      and identity.facility_work_patient_allows(<kind>,
---          (select identity.facility_work_session_membership(<kind>)), patient_id, facility_id, <action>)
+--      coalesce(identity.facility_work_patient_allows(<kind>,
+--          (select identity.facility_work_session_membership(<kind>)), patient_id, facility_id, <action>), false)
 --        the session's half runs once per statement (an InitPlan) and
---        answers the membership it validated, or null: then the row's half
---        is never called (for every session but this facility's lab or
+--        answers the membership it validated, or null: then the STRICT
+--        row's half is never called and the coalesce answers false before
+--        the path is read (for every session but this facility's lab or
 --        pharmacy staff); else the row's half is given that membership;
 --      and exists (<the row's path to its work item>
 --                  and item.order_route_id is null
@@ -1021,33 +1019,28 @@ begin
     if target.anchor_kind is null then
       -- D2: the work item itself, reads only.
       execute format('create policy staff_own_work_read on %1$I.%2$I for select using ('
-        || '(select identity.facility_work_session_membership(%1$L)) is not null '
-        || 'and identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
-        || 'patient_id, facility_id, ''read_records'') '
+        || 'coalesce(identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
+        || 'patient_id, facility_id, ''read_records''), false) '
         || 'and order_route_id is null)', target.schema_name, target.relation_name);
       continue;
     end if;
     if target.read_action is not null then
       execute format('create policy staff_own_work_read on %1$I.%2$I for select using ('
-        || '(select identity.facility_work_session_membership(%1$L)) is not null '
-        || 'and identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
-        || 'patient_id, facility_id, %3$L) and exists (%4$s))',
+        || 'coalesce(identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
+        || 'patient_id, facility_id, %3$L), false) and exists (%4$s))',
         target.schema_name, target.relation_name, target.read_action, own_work);
     end if;
     execute format('create policy staff_own_work_insert on %1$I.%2$I for insert with check ('
-      || '(select identity.facility_work_session_membership(%1$L)) is not null '
-      || 'and identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
-      || 'patient_id, facility_id, ''write_records'') '
+      || 'coalesce(identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
+      || 'patient_id, facility_id, ''write_records''), false) '
       || 'and exists (%3$s))', target.schema_name, target.relation_name, own_work);
     if target.has_update then
       execute format('create policy staff_own_work_update on %1$I.%2$I for update using ('
-        || '(select identity.facility_work_session_membership(%1$L)) is not null '
-        || 'and identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
-        || 'patient_id, facility_id, ''write_records'') '
+        || 'coalesce(identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
+        || 'patient_id, facility_id, ''write_records''), false) '
         || 'and exists (%3$s)) with check ('
-        || '(select identity.facility_work_session_membership(%1$L)) is not null '
-        || 'and identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
-        || 'patient_id, facility_id, ''write_records'') '
+        || 'coalesce(identity.facility_work_patient_allows(%1$L, (select identity.facility_work_session_membership(%1$L)), '
+        || 'patient_id, facility_id, ''write_records''), false) '
         || 'and exists (%3$s))', target.schema_name, target.relation_name, own_work);
     end if;
   end loop;
@@ -1636,7 +1629,7 @@ comment on function identity.facility_work_member_allows(text, uuid, uuid, text)
 comment on function identity.facility_work_session_membership(text) is
   '0133 D1, the session''s half: the session''s membership when the session is in direct care at its facility and that active membership holds <kind>.work-item.read and <kind>.order-route.receive there; else null. The own-work policies ask it once per statement, as (select ...), and pass the answer to the row''s half; the cards and the list''s bases once per call. It allows nothing alone.';
 comment on function identity.facility_work_patient_allows(text, uuid, uuid, uuid, text) is
-  '0133 D1, the row''s half, given the session''s half''s answer: false unless that membership is still the session''s, of the session''s actor, at the row''s facility, active (as identity.has_active_membership) and holding both permissions there through unrevoked facility roles; then the patient is active and no deny directive covers that member for the action. Read again on every row, so a statement that changes its settings after the session''s half ran sees nothing more.';
+  '0133 D1, the row''s half, given the session''s half''s answer (STRICT): false unless that membership is still the session''s, at the row''s facility, active and not on hold, of an active account whose subject is the session''s actor; then the patient is active and no deny directive covers that member for the action. Read again on every row, so a statement that changes its settings after the session''s half ran sees nothing more. The member''s roles are the session''s half''s to ask, once a statement.';
 comment on function lab.work_item_patient_cards(uuid[]) is
   'The patient (name, sex, date of birth, last 4 of the Health ID) of each given work item that is this facility''s own work (no order route) and that the session''s member may read: lab.work-item.read here and the read consent test of the work items'' read policy (emergency included), or (0133) the facility''s lab staff. At most 200 ids.';
 comment on function pharmacy.work_item_patient_cards(uuid[]) is
@@ -1674,13 +1667,13 @@ declare
   error_message text;
 begin
   -- The 14 new and replaced bodies (md5), owner, SECURITY DEFINER,
-  -- volatility, language, not STRICT, search_path.
+  -- volatility, language, STRICT for the row's half only, search_path.
   with expected(schema_name, proc_name, argument_types, digest, volatility, language_name, config) as (values
          ('identity', 'facility_work_member_allows', 'text, uuid, uuid, text', 'cdf330e36a9fcc347e8e5c06fe0745c2', 's',
            'sql', 'search_path=pg_catalog, pg_temp'),
          ('identity', 'facility_work_session_membership', 'text', 'd785bffb1c16b4202ee5c5d146bf0b09', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),
-         ('identity', 'facility_work_patient_allows', 'text, uuid, uuid, uuid, text', '3046099768d1ad26c2e145e4120e8f15', 's', 'sql',
+         ('identity', 'facility_work_patient_allows', 'text, uuid, uuid, uuid, text', 'd195ee7bae41d79fb34eeed590ef6d20', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),
          ('lab', 'work_item_patient_cards', 'uuid[]', '85bffc97b63e3206573c4b3cafcd9bc1', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
@@ -1721,7 +1714,8 @@ begin
                   and pg_catalog.oidvectortypes(proc.proargtypes) = expected.argument_types
                   and md5(proc.prosrc) = expected.digest and proc.proowner = owner_oid and proc.prosecdef
                   and proc.provolatile = expected.volatility::"char" and language_row.lanname = expected.language_name
-                  and not proc.proisstrict and proc.proconfig = array[expected.config]))
+                  and proc.proisstrict = (expected.proc_name = 'facility_work_patient_allows')
+                  and proc.proconfig = array[expected.config]))
   select exists (select 1 from differing),
          (select string_agg(format('%s.%s(%s): %s', differing.schema_name, differing.proc_name, differing.argument_types,
                    coalesce(differing.found, 'missing')), '; ') from differing)
@@ -1928,27 +1922,27 @@ begin
            from anchors),
        expected(schema_name, relation_name, policy_name, command, qual, with_check) as (
          select paths.schema_name, paths.relation_name, 'staff_own_work_read', 'r',
-                format('((%s IS NOT NULL) AND identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, '
-                  || '''read_records''::text) AND (order_route_id IS NULL))', paths.session_half, paths.schema_name, paths.session_half),
+                format('(COALESCE(identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, '
+                  || '''read_records''::text), false) AND (order_route_id IS NULL))', paths.schema_name, paths.session_half),
                 null
            from paths where paths.anchor_kind is null
          union all
          select paths.schema_name, paths.relation_name, 'staff_own_work_read', 'r',
-                format('((%s IS NOT NULL) AND identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, %L::text) '
-                  || 'AND (EXISTS ( %s)))', paths.session_half, paths.schema_name, paths.session_half, paths.read_action, paths.path),
+                format('(COALESCE(identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, %L::text), false) '
+                  || 'AND (EXISTS ( %s)))', paths.schema_name, paths.session_half, paths.read_action, paths.path),
                 null
            from paths where paths.anchor_kind is not null and paths.read_action is not null
          union all
          select paths.schema_name, paths.relation_name, 'staff_own_work_insert', 'a', null,
-                format('((%s IS NOT NULL) AND identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, '
-                  || '''write_records''::text) AND (EXISTS ( %s)))', paths.session_half, paths.schema_name, paths.session_half, paths.path)
+                format('(COALESCE(identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, '
+                  || '''write_records''::text), false) AND (EXISTS ( %s)))', paths.schema_name, paths.session_half, paths.path)
            from paths where paths.has_insert
          union all
          select paths.schema_name, paths.relation_name, 'staff_own_work_update', 'w',
-                format('((%s IS NOT NULL) AND identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, '
-                  || '''write_records''::text) AND (EXISTS ( %s)))', paths.session_half, paths.schema_name, paths.session_half, paths.path),
-                format('((%s IS NOT NULL) AND identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, '
-                  || '''write_records''::text) AND (EXISTS ( %s)))', paths.session_half, paths.schema_name, paths.session_half, paths.path)
+                format('(COALESCE(identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, '
+                  || '''write_records''::text), false) AND (EXISTS ( %s)))', paths.schema_name, paths.session_half, paths.path),
+                format('(COALESCE(identity.facility_work_patient_allows(%L::text, %s, patient_id, facility_id, '
+                  || '''write_records''::text), false) AND (EXISTS ( %s)))', paths.schema_name, paths.session_half, paths.path)
            from paths where paths.has_update),
        actual as (
          select namespace.nspname as schema_name, relation.relname as relation_name, policy_row.polname as policy_name,

@@ -103,10 +103,12 @@
 --      app.facility_id within the same statement (a cursor fetched, then
 --      set_config, then fetched again; set_config in the select list) and
 --      read nothing more: not Bisi's work (her deny directive), not F2's,
---      on the work items and on a chain table (D1's halves are bound); the
---      row's half called on its own answers false for a member without the
---      two permissions, for a membership that is not the session's, and for
---      another facility's row;
+--      on the work items and on a chain table, Lab and Pharmacy (D1's
+--      halves are bound); the row's half called on its own answers false
+--      for a membership that is not the session's, another facility's row,
+--      no actor, a disabled account, a membership on hold and no purpose,
+--      and answers for a receptionist's or nurse's own membership, whose
+--      session's half is null (D11);
 --   8. the owner-run definer functions that read ehr.prescriptions give the
 --      pharmacist nothing more through the EHR runtime: the order-route send,
 --      the own-pharmacy send and the withdrawal refuse the pharmacist first.
@@ -136,14 +138,14 @@ declare
   mismatch text;
   owner_oid oid := (select relowner from pg_class where oid = 'pharmacy.work_items'::regclass);
 begin
-  select string_agg(format('%s md5=%s owner=%s definer=%s volatile=%s config=%s', expected.proc_name,
+  select string_agg(format('%s md5=%s owner=%s definer=%s volatile=%s strict=%s config=%s', expected.proc_name,
            coalesce(md5(proc.prosrc), 'none (missing)'), pg_get_userbyid(proc.proowner), proc.prosecdef,
-           proc.provolatile, proc.proconfig), '; ')
+           proc.provolatile, proc.proisstrict, proc.proconfig), '; ')
     into mismatch
     from (values
       ('identity.facility_work_member_allows(text,uuid,uuid,text)', 'cdf330e36a9fcc347e8e5c06fe0745c2', 's'),
       ('identity.facility_work_session_membership(text)', 'd785bffb1c16b4202ee5c5d146bf0b09', 's'),
-      ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', '3046099768d1ad26c2e145e4120e8f15', 's'),
+      ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', 'd195ee7bae41d79fb34eeed590ef6d20', 's'),
       -- 0086's, unchanged: D2 is a policy of its own next to theirs.
       ('lab.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
       ('pharmacy.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
@@ -160,7 +162,9 @@ begin
       ('lab.own_work_item_bases(uuid[])', 'cc1d6d1bab8fea51d50a6aba82316409', 's')) expected(proc_name, digest, volatility)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc_name)
    where proc.oid is null or md5(proc.prosrc) <> expected.digest or proc.proowner <> owner_oid
-      or not proc.prosecdef or proc.provolatile <> expected.volatility or proc.proisstrict;
+      or not proc.prosecdef or proc.provolatile <> expected.volatility
+      -- STRICT: the row's half only (a session with no own-work membership never calls it).
+      or proc.proisstrict <> (expected.proc_name = 'identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)');
   if mismatch is not null then
     raise exception 'own facility work: the functions are not 0133''s: %', mismatch;
   end if;
@@ -1498,8 +1502,11 @@ reset role;
 
 -- 7g. One statement cannot change its session halfway (D1's halves are
 -- bound). An own lab item and its accession for Bisi at F1 (her deny
--- directive covers everyone at F1), as replica, inside a savepoint undone at
--- the end of the case.
+-- directive covers everyone at F1); and, for Pharmacy, copies of PH's own
+-- item (at F1 and at F2) and of Bisi's, with an event each, under fixed ids
+-- that sort after the row fetched first, so each switch probe below reads
+-- the hidden row after the switch (no sort, no filter pushed below it). As
+-- replica, inside a savepoint undone at the end of the case.
 savepoint own_work_switch;
 set local session_replication_role = replica;
 insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_order_id,
@@ -1516,6 +1523,24 @@ values ('e133000b-0000-4000-8000-0000000000c1', 'e133000a-0000-4000-8000-0000000
   'e1330006-0000-4000-8000-000000000002', 'e1330001-0000-4000-8000-000000000001', 'routine',
   'e1330002-0000-4000-8000-000000000003', 'e1330004-0000-4000-8000-000000000003', 'own-work-switch-accession',
   repeat('c', 64), 'own-work-suite-switch');
+insert into pharmacy.work_items
+select (jsonb_populate_record(null::pharmacy.work_items, to_jsonb(item) || jsonb_build_object('id', copy.id,
+    'source_ehr_prescription_id', gen_random_uuid(), 'idempotency_key', 'own-work-switch-' || copy.tag,
+    'facility_id', coalesce(copy.site, item.facility_id),
+    'ordering_facility_id', coalesce(copy.site, item.ordering_facility_id)))).*
+  from (values ('e133000d-0000-4000-8000-000000000001'::uuid, 'ph-0001', pg_temp.rx(1), null::uuid),
+               ('e133000d-0000-4000-8000-000000000002'::uuid, 'ph-0002', pg_temp.rx(1),
+                'e1330001-0000-4000-8000-000000000002'::uuid),
+               ('e133000d-0000-4000-8000-0000000000c1'::uuid, 'ph-00c1', pg_temp.rx(7), null::uuid))
+         as copy(id, tag, rx, site)
+  join pharmacy.work_items item on item.source_ehr_prescription_id = copy.rx;
+insert into pharmacy.work_item_events (id, work_item_id, patient_id, facility_id, event_version, event_type, actor_id,
+  actor_membership_id, reason, correlation_id, occurred_at)
+select ('e133000e' || substr(item.id::text, 9))::uuid, item.id, item.patient_id, item.facility_id, 1,
+  'prescription_accepted', item.accepted_by, item.accepted_by_membership_id, 'Own work switch probe',
+  'own-work-suite-switch', clock_timestamp()
+  from pharmacy.work_items item
+ where item.id in ('e133000d-0000-4000-8000-000000000001', 'e133000d-0000-4000-8000-0000000000c1');
 set local session_replication_role = origin;
 -- QUERY's rows (ids, last 4 characters, sorted): the first fetched in the
 -- member's own session; then SETTING is changed to VALUE in the same
@@ -1584,8 +1609,12 @@ select pg_temp.expect('7g the chain (accessions), set_config in the select list:
       where a.id in ('e133000b-0000-4000-8000-000000000001', 'e133000b-0000-4000-8000-0000000000c1')) switched),
   '0001');
 -- The row's half on its own (lab and pharmacy runtimes may call it, as the
--- policies do): only for the session's own membership, holding both
--- permissions at the row's facility.
+-- policies do): only for the session's own membership, of the session's
+-- actor's active account, at the row's facility. It does not ask the
+-- member's roles again (the session's half asked them once): for RC's or
+-- NU's own membership it answers whether the patient is active and
+-- uncovered (0133's D11), while the session's half gives them nothing, so
+-- no policy lets them read own work.
 select pg_temp.as_member(3);
 select pg_temp.expect('7g the row''s half for LS: Ada yes, Bisi (deny) no, F2''s row no, another membership no',
   format('%s %s %s %s',
@@ -1599,17 +1628,18 @@ select pg_temp.expect('7g the row''s half for LS: Ada yes, Bisi (deny) no, F2''s
       'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')),
   't f f f');
 select pg_temp.as_member(7);
-select pg_temp.expect('7g RC (receptionist): no session membership, and the row''s half says nothing for RC or as LS',
+select pg_temp.expect('7g RC (receptionist): no session membership; the row''s half answers for RC''s own (D11), never as LS',
   format('%s %s %s', coalesce(identity.facility_work_session_membership('lab')::text, 'null'),
     identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000007',
       'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records'),
     identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
       'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')),
-  'null f f');
+  'null t f');
 select pg_temp.as_member(4);
-select pg_temp.expect('7g NU''s own session (a nurse): the row''s half for NU says nothing',
-  identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000004',
-    'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')::text, 'false');
+select pg_temp.expect('7g NU''s own session (a nurse): no session membership; the row''s half answers for NU''s own (D11)',
+  format('%s %s', coalesce(identity.facility_work_session_membership('lab')::text, 'null'),
+    identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000004',
+      'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')), 'null t');
 -- The row's half asks for a valid session of that member: the actor's
 -- subject, an active account and membership (as has_active_membership).
 select pg_temp.as_member(3);
@@ -1650,18 +1680,53 @@ select pg_temp.expect('7g LS with no purpose: the row''s half false, D9 nothing'
 reset role;
 set local role hid_pharmacy_api_runtime;
 select pg_temp.as_member(2);
-select pg_temp.expect('7g PH, a cursor fetched, then app.membership_id changed: not Bisi''s pharmacy item',
-  (select count(*)::text from regexp_split_to_table(pg_temp.switch_after_first(format(
-     'select id from pharmacy.work_items where id in (%L, %L) order by id = %L desc',
-     pg_temp.work_item_of(pg_temp.rx(1)), pg_temp.work_item_of(pg_temp.rx(7)), pg_temp.work_item_of(pg_temp.rx(1))),
-     'app.membership_id', 'e133ffff-0000-4000-8000-000000000099'), ' ') x where x <> ''), '1');
+select pg_temp.expect('7g PH''s own pharmacy items in its own session (Bisi''s hidden by her deny directive, F2''s not F1''s)',
+  (select string_agg(right(id::text, 4), ' ' order by id) from pharmacy.work_items
+    where id in ('e133000d-0000-4000-8000-000000000001', 'e133000d-0000-4000-8000-000000000002',
+                 'e133000d-0000-4000-8000-0000000000c1')), '0001');
+select pg_temp.expect('7g PH, a cursor fetched, then app.membership_id changed: nothing more (not Bisi''s item)',
+  pg_temp.switch_after_first($q$select id from pharmacy.work_items
+    where id in ('e133000d-0000-4000-8000-000000000001', 'e133000d-0000-4000-8000-0000000000c1') order by id$q$,
+    'app.membership_id', 'e133ffff-0000-4000-8000-000000000099'), '0001');
 select pg_temp.as_member(2);
-select pg_temp.expect('7g PH, set_config in the select list: not Bisi''s pharmacy item',
-  (select count(*)::text from (
+select pg_temp.expect('7g PH, a cursor fetched, then app.facility_id changed to F2: nothing more (not F2''s item)',
+  pg_temp.switch_after_first($q$select id from pharmacy.work_items
+    where id in ('e133000d-0000-4000-8000-000000000001', 'e133000d-0000-4000-8000-000000000002') order by id$q$,
+    'app.facility_id', 'e1330001-0000-4000-8000-000000000002'), '0001');
+select pg_temp.as_member(2);
+-- One index scan, in id order (no sequential or bitmap scan, no sort), so
+-- the visible row's set_config runs before the hidden row is read. (Two
+-- scans, as UNION ALL makes, would each ask the session's half on their
+-- own, after the switch, and so prove nothing.)
+set local enable_seqscan = off;
+set local enable_bitmapscan = off;
+select pg_temp.expect('7g PH, set_config in the select list (membership): not Bisi''s item',
+  (select string_agg(right(switched.id::text, 4), ' ' order by switched.id) from (
      select w.id, set_config('app.membership_id', 'e133ffff-0000-4000-8000-000000000099', true)
        from pharmacy.work_items w
-      where w.id in (pg_temp.work_item_of(pg_temp.rx(1)), pg_temp.work_item_of(pg_temp.rx(7)))) switched
-    where switched.id = pg_temp.work_item_of(pg_temp.rx(7))), '0');
+      where w.id in ('e133000d-0000-4000-8000-000000000001', 'e133000d-0000-4000-8000-0000000000c1')) switched),
+  '0001');
+select pg_temp.as_member(2);
+select pg_temp.expect('7g PH, set_config in the select list (facility F2): not F2''s item',
+  (select string_agg(right(switched.id::text, 4), ' ' order by switched.id) from (
+     select w.id, set_config('app.facility_id', 'e1330001-0000-4000-8000-000000000002', true)
+       from pharmacy.work_items w
+      where w.id in ('e133000d-0000-4000-8000-000000000001', 'e133000d-0000-4000-8000-000000000002')) switched),
+  '0001');
+select pg_temp.as_member(2);
+select pg_temp.expect('7g PH, the chain (work item events), a cursor fetched, then app.membership_id changed: not Bisi''s',
+  pg_temp.switch_after_first($q$select id from pharmacy.work_item_events
+    where id in ('e133000e-0000-4000-8000-000000000001', 'e133000e-0000-4000-8000-0000000000c1') order by id$q$,
+    'app.membership_id', 'e133ffff-0000-4000-8000-000000000099'), '0001');
+select pg_temp.as_member(2);
+select pg_temp.expect('7g PH, the chain (work item events), set_config in the select list: not Bisi''s',
+  (select string_agg(right(switched.id::text, 4), ' ' order by switched.id) from (
+     select e.id, set_config('app.membership_id', 'e133ffff-0000-4000-8000-000000000099', true)
+       from pharmacy.work_item_events e
+      where e.id in ('e133000e-0000-4000-8000-000000000001', 'e133000e-0000-4000-8000-0000000000c1')) switched),
+  '0001');
+set local enable_seqscan = on;
+set local enable_bitmapscan = on;
 select pg_temp.as_member(2, purpose => '');
 select pg_temp.expect('7g PH with no purpose: D9 nothing',
   (select count(*)::text from pharmacy.own_work_access_for('work_item', pg_temp.work_item_of(pg_temp.rx(1)),
