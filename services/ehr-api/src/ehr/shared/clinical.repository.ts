@@ -22,6 +22,13 @@ export interface OperationResult<Value> {
   details?: Readonly<Record<string, unknown>>;
 }
 
+/** EHR-C5: one part of a write made of several, with the audit row its own route would write. */
+export interface AuditedPart {
+  event: SemanticEvent;
+  resourceId?: string;
+  details?: Readonly<Record<string, unknown>>;
+}
+
 interface IdempotencyRow extends QueryResultRow {
   request_sha256: string;
   state: 'processing' | 'completed' | 'failed';
@@ -101,6 +108,60 @@ export class ClinicalRepository {
         throw new DomainProblem(404, 'CLINICAL_RESOURCE_NOT_FOUND', 'Clinical resource was not found');
       }
       return result.result.value;
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
+  /**
+   * EHR-C5 (one-call consultation): several clinical writes for one patient
+   * in ONE transaction, all or nothing, under one consent check. Each part
+   * is audited exactly as its own route audits it (`run`): a refusal writes
+   * one `denied` row per event asked for, and a success writes one `success`
+   * row per part, in the same transaction. A part that fails rolls back every
+   * part and every row.
+   */
+  async runParts<Value>(
+    context: DataAccessContext,
+    patientId: string,
+    access: ClinicalAccess,
+    events: readonly SemanticEvent[],
+    operation: (client: PoolClient) => Promise<{ value: Value; parts: readonly AuditedPart[] }>,
+  ): Promise<Value> {
+    try {
+      const authorization = await this.identity.authorize(patientId, access, context.purposeOfUse, context);
+      if (!authorization.allowed) {
+        for (const event of events) {
+          await this.audit.record({
+            correlationId: context.correlationId,
+            actorType: 'staff',
+            actorSubject: context.actor.subject,
+            actorAccountId: context.actor.accountId,
+            actorMembershipId: context.membershipId,
+            organizationId: context.actor.facility?.organizationId,
+            facilityId: context.facilityId,
+            patientId,
+            action: event.action,
+            resourceType: event.resourceType,
+            resourceId: event.resourceId,
+            outcome: 'denied',
+            purposeOfUse: context.purposeOfUse,
+            details: { ...event.details, reason: 'identity_authorization' },
+          });
+        }
+        throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Active consent and facility membership are required');
+      }
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await operation(client);
+        for (const part of result.parts) {
+          await this.record(client, context, patientId, {
+            ...part.event,
+            resourceId: part.resourceId ?? part.event.resourceId,
+            details: { ...part.event.details, ...part.details },
+          }, 'success');
+        }
+        return result.value;
+      });
     } catch (error) {
       throw this.translate(error);
     }
