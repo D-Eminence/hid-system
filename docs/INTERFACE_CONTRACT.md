@@ -7007,3 +7007,120 @@ Find a patient shows the owner's words, "No patient has this Health ID."
 `PatientsWorkspace.tsx`), only on `PATIENT_NOT_FOUND`. Every other `404` and
 every `403` stays a refused lookup, as today. A limited account gets today's
 `404`, never a `429`.
+
+## EHR-C5: one-call consultation
+
+Akos N-5 ("Start consultation" saves only the complaint; "Save the rest" is
+needed for the diagnosis and the notes). ehr-api only; no migration, no new
+grant, no new setting. It uses only tables, functions and grants that exist
+today (`ehr.encounters`, `ehr.clinical_notes`, `ehr.clinical_note_revisions`,
+`ehr.vitals`, `ehr.diagnoses`, `ehr.idempotency_keys`, `audit.events`).
+Prescriptions and lab requests are not part of this call; they keep their own
+routes. Draft auto-save (EHR-C6, 0141) is separate.
+
+### `POST /ehr/patients/:patientId/consultations`
+
+`patientId` is the UUID (never a Health ID or NIN). Headers as for every
+clinical write: `X-Facility-ID`, `X-Purpose-Of-Use: direct-care` and an
+`Idempotency-Key` (16 to 128 URL-safe characters, otherwise `400
+IDEMPOTENCY_KEY_REQUIRED`).
+
+Body (each part is exactly the body of its own route, with the same
+validation; an unknown field is `400 VALIDATION_FAILED`):
+
+```json
+{
+  "visit": { "encounterType": "ambulatory", "status": "in_progress", "startedAt": "2026-11-18T09:30:00.000Z",
+             "chiefComplaint": "Fever for two days" },
+  "note": { "noteType": "consultation", "title": "Consultation", "status": "signed", "content": "..." },
+  "vitals": { "recordedAt": "2026-11-18T09:35:00.000Z", "temperatureC": 38.4, "systolicMmhg": 120, "diastolicMmhg": 80 },
+  "diagnoses": [ { "codeSystem": "ICD-10", "code": "B50.9", "display": "Malaria", "clinicalStatus": "active",
+                   "verificationStatus": "provisional" } ]
+}
+```
+
+- `visit` (required): the body of `POST .../encounters`. A consultation is
+  always saved on the open visit today (EHR-C1): `reuseOpenVisit` may be
+  left out or be `true`; `false` is `400 CONSULTATION_USES_OPEN_VISIT` ("A
+  consultation is saved on the open visit today. Leave out reuseOpenVisit or
+  set it to true."). The EHR-C1 rules apply unchanged: `status` `planned` or
+  `in_progress` (`400 REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS`), `startedAt` on
+  today's Lagos day (`400 REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY`), and the
+  same transaction lock for this patient at this facility, taken before the
+  lookup. If the patient has an open visit today it is used and nothing new
+  is created; otherwise the visit is created.
+- `note` (optional): the body of `POST .../clinical-notes`, `draft` or
+  `signed`. A note signed here needs no reason (FR-1: a first signature never
+  does).
+- `vitals` (optional): the body of `POST .../vitals`, with the same checks
+  (`400 VITAL_MEASUREMENT_REQUIRED`, `400 BLOOD_PRESSURE_INCOMPLETE`).
+- `diagnoses` (optional): up to 20 bodies of `POST .../diagnoses`. A code is
+  still required (Wave 0 R-1).
+
+### All or nothing
+
+Every part is saved in ONE database transaction. If any part is refused (a
+diagnosis the database refuses, the visit entered in error, and so on), no
+part is saved: no visit, note, vitals, diagnosis, Idempotency-Key row or
+audit row. The answer is the refused part's own error (for example `400
+INVALID_CLINICAL_DATA`, `409 VISIT_ENTERED_IN_ERROR`). The same
+Idempotency-Key can then be sent again with the corrected body.
+
+### Permissions and consent
+
+Permission `ehr.encounter.write` always, plus the write permission of each
+part sent: `ehr.note.write` for `note`, `ehr.vital.write` for `vitals`,
+`ehr.diagnosis.write` for a non-empty `diagnoses`. If one is missing, the
+whole call is `403 PERMISSION_DENIED` ("Required permission is missing")
+before anything is read or saved. Consent is checked once, as for each
+part's own route (`write_records` for this patient; `403 CONSENT_REQUIRED`
+otherwise). The checks each part's own route makes before the database
+(above) also run before the consent check.
+
+### Answer
+
+`201`:
+
+```json
+{
+  "encounter": { "...visit...": "...", "reusedOpenVisit": true },
+  "note": { "...note, as POST .../clinical-notes answers...": "..." },
+  "vitals": { "...vitals, as POST .../vitals answers...": "..." },
+  "diagnoses": [ { "...diagnosis, as POST .../diagnoses answers...": "..." } ]
+}
+```
+
+`note` and `vitals` are `null` and `diagnoses` is `[]` when not sent.
+`encounter.reusedOpenVisit` is `true` when the open visit today was used and
+`false` when this call created the visit (EHR-C1).
+
+### Idempotency-Key
+
+Required. The same key with the same body answers the saved consultation
+again (`201`, the same visit, note, vitals and diagnoses, as they are now;
+`reusedOpenVisit` as first answered) and saves nothing new. A body that
+differs only by `reuseOpenVisit: true` is the same body. The same key with
+another body is `409 IDEMPOTENCY_KEY_REUSED`; while the first request with
+the key is still running, the second waits for it, as on every clinical
+create. A key is kept for 24 hours, as today. The key is stored once for the
+whole call (operation `consultation.create`) and once per part
+(`consultation.encounter`, `consultation.clinical-note`,
+`consultation.vital`, `consultation.diagnosis.1` to `.20`), so a key used on
+a single route never clashes with a consultation.
+
+### Audit
+
+Each part writes the audit row its own route writes, in the same
+transaction: `ehr.encounter.create` (with `reusedOpenVisit`, `day` and
+`idempotentReplay`), `ehr.note.create`, `ehr.vital.create`, and one
+`ehr.diagnosis.create` per diagnosis (each with `idempotentReplay`). A replay
+writes the same rows with `idempotentReplay: true`. A consent refusal writes
+one `denied` row per part sent (reason `identity_authorization`). No row
+carries a Health ID, a NIN or clinical text.
+
+### Screen change needed (Akos frontend branch)
+
+"Start consultation" sends the visit, note, vitals and diagnoses in this one
+call with a fresh Idempotency-Key per consultation (kept for a retry of the
+same save), instead of creating the visit first and asking for "Save the
+rest". Show the error of the part that was refused; nothing was saved.
