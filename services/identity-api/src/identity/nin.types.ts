@@ -46,6 +46,11 @@ export interface NinVerificationResult {
    * kept: nothing was sent for this request.
    */
   stored?: boolean;
+  /**
+   * D2 (Q110): true when a stored record this check matched is now kept 90
+   * days from now (a matched record not yet on a Health ID).
+   */
+  recordKept?: boolean;
 }
 
 export interface NinVerificationProvider {

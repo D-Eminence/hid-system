@@ -6459,6 +6459,37 @@ as long as 0137 keeps a record (90 days, Q110) when it matched the desk's
 details, and 24 hours when it did not (probably someone else's NIN, as a
 profile check keeps a record it did not match); "no record" for 24 hours.
 
+### A matched record is kept 90 days from the match (Q110)
+
+Q110 keeps a matched record that is not yet on a Health ID for 90 days. When
+a desk request's name and date of birth match a record the guard has stored
+(kept by any path: a desk or profile check whose details did not match it, a
+sign-up, an earlier desk match), that record is kept 90 days from this match:
+a record first kept 24 hours after a typo is, once the corrected details have
+matched it, still reused (not paid for again) a month later, by the desk, the
+profile or, when the record is complete, a sign-up (a sign-up asks QoreID
+again for an incomplete one: 0137's sign-up path, not the desk's). A record
+first matched and then matched again is kept
+90 days from the latest match. Only a record is kept so ("no record", QoreID's
+"not found" and an answer HID cannot use keep 0137's own times), and only after
+a match; nothing is kept longer when the details do not match.
+
+The keep uses 0137's own commands, in one transaction that holds the NIN's
+row from the first statement to the last (no other check sees anything in
+between): `identity.begin_qoreid_nin_check` reads the stored record (its
+ciphertext, never decrypted here, and whether it is complete), the same
+command with the key version `desk-keep-matched-record` takes the row over
+for this transaction (0137 takes over a row stored under another key
+version), and `identity.finish_qoreid_nin_check` puts the same ciphertext back
+under the real key version for 90 days (at most 0137's 91). When there is no
+stored record (another outcome, a check running, a hold, another key version,
+a NIN whose login was deleted, no row), the transaction is rolled back and
+nothing changes. Nothing is sent to QoreID. A keep that cannot be written
+leaves the desk's answer as it is and logs `identity.nin.record_keep_failed`
+with the correlation id and a database code only. The desk's `identity.nin.verify`
+row says `recordKept: true` when the record was kept. Proved on PostgreSQL by
+`services/ehr-api/test/database/desk-nin-record-keep.integration.sql`.
+
 ### A NIN already on a Health ID (Q110)
 
 Owner Q110: once a NIN is on a Health ID, its checked answer stays with the
@@ -6513,7 +6544,7 @@ The guard's answers, as the desk gives them:
 
 | The guard | Desk answer | `identity.nin.verify` audit | Breaker |
 | --- | --- | --- | --- |
-| a stored record | compared as a fresh one: the case, or `422` name mismatch | as for a fresh answer, with `storedAnswer: true` | not counted: the retry place is freed, but the breaker is neither closed nor its failures cleared (QoreID was not asked) |
+| a stored record | compared as a fresh one: the case (and the record is kept 90 days from this match), or `422` name mismatch | as for a fresh answer, with `storedAnswer: true` (and `recordKept: true` when kept) | not counted: the retry place is freed, but the breaker is neither closed nor its failures cleared (QoreID was not asked) |
 | a stored "no record" | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `denied`, `ninCheck: "no_match"`, `storedAnswer: true` | not counted; the retry place is freed |
 | another check of this NIN is still running when this request's wait ends | `409 NIN_CHECK_IN_PROGRESS`, "We are still checking this NIN. Please wait a minute, then try again.", `retryAfterSeconds: 60` | `failure`, `providerCalled: false` | not counted; the retry place is freed |
 | the NIN is held after a check QoreID may have charged | `409 NIN_CHECK_HELD`, "We could not finish checking this NIN. Please try again in 5 minutes." (or "... in 6 hours."), `retryAfterSeconds`: the time left | `failure`, `providerCalled: false` | not counted; the retry place is freed |
@@ -6569,9 +6600,10 @@ rows.
   record", the same `422`, for as long as 0137 keeps it.
 - A resend after "does not match", with the same body or a corrected name or
   date of birth (a new body, under the same key or a new one): the stored
-  record, compared again, for as long as 0137 keeps it (Q110 sets how long
-  an unattached record is kept). A corrected request is no longer a new
-  charge.
+  record, compared again, for as long as 0137 keeps it (24 hours after a
+  record that did not match). A corrected request is no longer a new charge,
+  and once its details match, the record is kept 90 days from that match
+  (above), so it is not paid for again later either.
 - A resend of a request that matched: the case it created (as before).
 - A resend after a check that may have been charged without an answer HID
   could keep: `409 NIN_CHECK_HELD` until the hold ends; after a check that
@@ -6646,6 +6678,7 @@ details or no date of birth, never the NIN service, even with the breaker
 tripped; evidence that cannot be read; a patient changed before the write;
 not read while switched off);
 any record will do (no recognised sex), and stored answers said to be stored;
+a matched stored record kept (`recordKept`), and nothing else;
 no claim or stored answer of the desk's own (every resend goes to the guard);
 details
 refused before any check, over HTTP with the same validation pipe and problem
@@ -6662,6 +6695,11 @@ real desk service and providers, 0137's guard, the real profile check
 (`QoreIdVerificationService`) and the real QoreID adapter against a fake
 QoreID that bills every NIN request (two desks at once; the same request
 twice at once; a resend after "could not be verified"; a corrected name; a
+typo, the corrected request two hours later and another desk and the profile
+30 days later, one charge (D2); a record another check kept 24 hours, matched
+by the desk and reused 45 days later; the keep leaving a stored "no record",
+a running check and an empty store as they were, and failing without changing
+the answer; a
 sign-up or the profile and the desk, one after the other and at once; a
 record without a recognised sex or with a line break in its address, kept by
 the profile or met at the desk, one charge; a record the desk did not match

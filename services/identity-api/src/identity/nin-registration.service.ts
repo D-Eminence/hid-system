@@ -947,7 +947,8 @@ export class NinRegistrationService {
       outcome: 'success',
       purposeOfUse: context.purposeOfUse,
       details: { provider: verification.provider, ninCheck: 'match',
-        ...(verification.stored ? { storedAnswer: true } : {}) },
+        ...(verification.stored ? { storedAnswer: true } : {}),
+        ...(verification.recordKept ? { recordKept: true } : {}) },
     });
     return verification;
   }

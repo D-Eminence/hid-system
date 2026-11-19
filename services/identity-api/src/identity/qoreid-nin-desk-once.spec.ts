@@ -9,6 +9,7 @@ import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { fakeNinCheckStore } from '../testing/nin-check-store.fake';
+import { DeskNinRecordKeep, KEEP_TAKE_OVER_KEY_VERSION } from './desk-nin-record-keep';
 import { NIN_CHECK_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS, NIN_RECORD_ANSWER_SECONDS,
   NinCheckOnce } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
@@ -129,9 +130,18 @@ function system() {
   /** While set, the guard's audit write fails (AuditService then refuses with 503). */
   const auditDown = { on: false };
   const checkDatabase = {
-    withSystemTransaction: jest.fn(async (_correlation: string, work: (client: PoolClient) => Promise<unknown>) =>
-      work({ query: jest.fn(async (sql: string, values: readonly unknown[] = []) =>
-        store.query(sql, values) ?? profileTables(sql, values) ?? { rows: [], rowCount: 0 }) } as unknown as PoolClient)),
+    // As a transaction: a failed one leaves the check rows as they were.
+    withSystemTransaction: jest.fn(async (_correlation: string, work: (client: PoolClient) => Promise<unknown>) => {
+      const before = new Map([...store.rows].map(([key, row]) => [key, { ...row }]));
+      try {
+        return await work({ query: jest.fn(async (sql: string, values: readonly unknown[] = []) =>
+          store.query(sql, values) ?? profileTables(sql, values) ?? { rows: [], rowCount: 0 }) } as unknown as PoolClient);
+      } catch (error) {
+        store.rows.clear();
+        for (const [key, row] of before) store.rows.set(key, row);
+        throw error;
+      }
+    }),
     query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
       if (sql.includes('insert into audit.events') && auditDown.on) throw new Error('audit unavailable');
       if (sql.includes('insert into audit.events')) audits.push([...values]);
@@ -146,7 +156,8 @@ function system() {
   const integrations = { assertAvailable: jest.fn().mockResolvedValue(undefined),
     consumePatientQuota: jest.fn().mockResolvedValue(undefined) } as unknown as IntegrationRuntimeService;
   const ninOnly = new QoreIdPublicPatientIdentityProvider(adapter, integrations, ninCheck);
-  const provider = new QoreIdNinVerificationProvider(ninOnly);
+  const keep = new DeskNinRecordKeep(checkDatabase, protector);
+  const provider = new QoreIdNinVerificationProvider(ninOnly, keep);
   // The patient's own "Add NIN" on the profile, as it really asks (its name and date of birth, any record).
   const profile = new QoreIdVerificationService(checkDatabase, adapter, integrations, protector, ninCheck);
   const verifyProfile = () => profile.verifyPatientNin({ correlationId: 'profile-check', actor: { kind: 'patient',
@@ -186,7 +197,7 @@ function system() {
   const deskChecks = () => deskAudit.record.mock.calls.map(([row]) => row)
     .filter((row) => row.action === 'identity.nin.verify').map((row) => row.details);
   return { qoreId, store, ninCheck, ninOnly, resolve, breaker, cases, checkAudits, deskChecks, deskAudit, lookup,
-    verifyProfile, protector, healthIds, auditDown };
+    verifyProfile, protector, healthIds, auditDown, keep };
 }
 
 describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')', () => {
@@ -272,7 +283,8 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     // The second and third are compared with the stored record: nothing was sent for them.
     expect(s.deskChecks()).toEqual([{ provider: 'qoreid', ninCheck: 'name_mismatch' },
       { provider: 'qoreid', ninCheck: 'name_mismatch', storedAnswer: true },
-      { provider: 'qoreid', ninCheck: 'match', storedAnswer: true }]);
+      // D2: the record the corrected details matched is kept 90 days from now.
+      { provider: 'qoreid', ninCheck: 'match', storedAnswer: true, recordKept: true }]);
   });
 
   it('reuses the answer of a sign-up or profile check of the same NIN, and the other paths reuse the desk\'s', async () => {
@@ -308,7 +320,7 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       ['desk', 'qoreid', 'timeout'], ['desk', 'late', 'record'], ['desk', 'stored', 'record']]);
     expect(s.deskChecks()).toEqual([
       expect.objectContaining({ code: 'QOREID_TIMEOUT', providerCalled: true, ninCheck: 'provider_error' }),
-      { provider: 'qoreid', ninCheck: 'match', storedAnswer: true }]);
+      { provider: 'qoreid', ninCheck: 'match', storedAnswer: true, recordKept: true }]);
   });
 
   it('answers 409 NIN_CHECK_HELD with retryAfterSeconds for a NIN held after a check QoreID may have charged', async () => {
@@ -447,6 +459,84 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       await expect(matched.resolve('desk-once-key-000107')).resolves.toMatchObject({ caseId });
       expect([...matched.store.rows.values()][0]!.until)
         .toBeGreaterThanOrEqual(before + NIN_RECORD_ANSWER_SECONDS * 1000);
+    });
+  });
+
+  describe('a matched stored record is kept 90 days from the match (D2, Q110)', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    it('keeps a record first kept 24 hours after a typo once the corrected details match it: no second charge at 30 days', async () => {
+      const s = system();
+      // A typo: QoreID's record does not match, so it is kept 24 hours (perhaps someone else's NIN).
+      await expect(s.resolve('desk-once-key-000500', deskContext(), { ...input, lastName: 'Fixtura' }))
+        .rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED' });
+      const first = { ...[...s.store.rows.values()][0]! };
+      expect(first.until).toBeLessThan(Date.now() + NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 5_000);
+      // The corrected request, two hours later, matches the stored record.
+      s.store.clock.offsetMs = 2 * 60 * 60 * 1000;
+      await expect(s.resolve('desk-once-key-000501')).resolves.toMatchObject({ caseId, ninStatus: 'verified' });
+      const kept = [...s.store.rows.values()][0]!;
+      expect(kept).toMatchObject({ state: 'answered', outcome: 'record', record_complete: true,
+        key_version: first.key_version, answer_ciphertext: first.answer_ciphertext });
+      expect(kept.until).toBeGreaterThanOrEqual(Date.now() + s.store.clock.offsetMs + NIN_RECORD_ANSWER_SECONDS * 1000 - 5_000);
+      expect(s.deskChecks()[1]).toEqual({ provider: 'qoreid', ninCheck: 'match', storedAnswer: true, recordKept: true });
+      // Thirty days later another desk, and the patient's profile, are answered from storage.
+      s.store.clock.offsetMs = 30 * DAY_MS;
+      await expect(s.resolve('desk-once-key-000502', deskContext(2))).resolves.toMatchObject({ caseId });
+      await expect(s.verifyProfile()).resolves.toMatchObject({ state: 'verified' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits().map(([path, source]) => [path, source])).toEqual([['desk', 'qoreid'], ['desk', 'stored'],
+        ['desk', 'stored'], ['profile', 'stored']]);
+      expect(s.qoreId.state.outsideGuard).toBe(0);
+    });
+
+    it('keeps a record another check kept 24 hours (its details did not match) once the desk\'s details match it', async () => {
+      const s = system();
+      // Another check of the NIN whose details were not the record's: QoreID's record, kept 24 hours.
+      await s.ninOnly.verifyNinRecord(NIN, { correlationId: 'other-check', path: 'other', expects: () => false });
+      expect([...s.store.rows.values()][0]!.until).toBeLessThan(Date.now() + NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 5_000);
+      s.store.clock.offsetMs = 60 * 60 * 1000;
+      await expect(s.resolve('desk-once-key-000503')).resolves.toMatchObject({ caseId });
+      s.store.clock.offsetMs = 45 * DAY_MS;
+      await expect(s.resolve('desk-once-key-000504', deskContext(2))).resolves.toMatchObject({ caseId });
+      expect(s.qoreId.state.charged).toBe(1);
+    });
+
+    it('keeps the same answer, unread, and changes nothing when there is no stored record to keep', async () => {
+      const s = system();
+      // Nothing stored: nothing kept, and no row (no lease) is left behind.
+      await expect(s.keep.keepMatchedRecord(NIN, 'keep-1')).resolves.toBe(false);
+      expect(s.store.rows.size).toBe(0);
+      // A stored "no record" is not a record.
+      s.qoreId.state.modes = ['no_record'];
+      await expect(s.resolve('desk-once-key-000505')).rejects.toMatchObject({ status: 422 });
+      const noRecord = { ...[...s.store.rows.values()][0]! };
+      await expect(s.keep.keepMatchedRecord(NIN, 'keep-2')).resolves.toBe(false);
+      expect([...s.store.rows.values()][0]).toEqual(noRecord);
+      // Another attempt holding the NIN's lease: the keep waits for nobody and changes nothing.
+      const lease = { ...noRecord, state: 'checking' as const, outcome: null, answer_ciphertext: null, key_version: null,
+        until: Date.now() + 60_000 };
+      s.store.rows.set(s.lookup, lease);
+      await expect(s.keep.keepMatchedRecord(NIN, 'keep-3')).resolves.toBe(false);
+      expect(s.store.rows.get(s.lookup)).toEqual(lease);
+      // The take-over key version is never one a stored answer carries.
+      expect(KEEP_TAKE_OVER_KEY_VERSION).not.toBe(process.env.NIN_KEY_VERSION ?? 'local-v1');
+    });
+
+    it('never fails the desk\'s answer when the keep cannot be written, and logs no identifier', async () => {
+      const s = system();
+      await expect(s.resolve('desk-once-key-000506', deskContext(), { ...input, lastName: 'Fixtura' }))
+        .rejects.toMatchObject({ status: 422 });
+      s.store.fail('finish_qoreid_nin_check');
+      await expect(s.resolve('desk-once-key-000507')).resolves.toMatchObject({ caseId });
+      s.store.fail(undefined);
+      // Rolled back: still the 24-hour keep, the same answer.
+      expect([...s.store.rows.values()][0]!.until).toBeLessThan(Date.now() + NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 5_000);
+      expect(s.deskChecks()[1]).toEqual({ provider: 'qoreid', ninCheck: 'match', storedAnswer: true });
+      expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: 'identity.nin.record_keep_failed',
+        correlationId: 'desk-once-1' }));
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(NIN);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(s.lookup);
     });
   });
 
