@@ -6971,13 +6971,15 @@ in error answers no `pharmacyHandoff`. Completing a prescription marks
 nothing. Once the pharmacy has dispensed the item, a later change is
 recorded on the send but reported nowhere: what was sent was dispensed and
 nothing is left to dispense, so the `PATCH` answers no `pharmacyHandoff` and
-records no `pharmacySendWithdrawn`, `ownProgress` stays `dispensed` (or
-`dispensing_reversed`), and the pharmacy's list does not mark the item
-withdrawn. The database marks it on the change itself (a trigger on the
-prescription), so a change made by any ehr-api image (an older one during a
-rolling deploy or after a rollback included) marks it too; undoing 0133 by
-hand must drop that trigger before the sends table (the order is in 0133's
-header), or every later change of a prescription's status or version fails.
+records no `pharmacySendWithdrawn`, "Send to pharmacy" and a replay of the
+create as active answer "already has" (`sent`), never the "earlier version"
+row, `ownProgress` stays `dispensed` (or `dispensing_reversed`), and the
+pharmacy's list does not mark the item withdrawn. The database marks it on
+the change itself (a trigger on the prescription), so a change made by any
+ehr-api image (an older one during a rolling deploy or after a rollback
+included) marks it too; undoing 0133 by hand must drop that trigger before
+the sends table (the order is in 0133's header), or every later change of a
+prescription's status or version fails.
 Whether the pharmacy item should follow the new version instead is open for
 the owner (review S3 of 18 November). The audit row of the create, the
 update and the send records `pharmacyHandoff` (the status) and
@@ -7050,13 +7052,13 @@ read, dispense and accession the hospital's own work, each row naming the
 patient with `basis: own-work` (the execution reads included); a hold marks
 the item withdrawn and Dispense answers 409; an edit answers the "earlier
 version" row (`superseded`) and `ownProgress` reads `withdrawn`; an edit
-after the dispensing answers no `pharmacyHandoff` and leaves the item
-unmarked (`ownProgress` stays `dispensed`); the list carries
-`ownPharmacyStaffed: true`; neither member reads the chart, each probed with
-a chart read its role permits (the encounter for both, prescriptions for the
-pharmacist, the lab request for the lab scientist), so the answer, 403
-`CONSENT_REQUIRED`, is the patient's consent and not a missing permission;
-the patient's access log shows both.
+after the dispensing answers no `pharmacyHandoff`, "Send to pharmacy" then
+answers "already has", and the item stays unmarked (`ownProgress` stays
+`dispensed`); the list carries `ownPharmacyStaffed: true`; neither member
+reads the chart, each probed with a chart read its role permits (the
+encounter for both, prescriptions for the pharmacist, the lab request for
+the lab scientist), so the answer, 403 `CONSENT_REQUIRED`, is the patient's
+consent and not a missing permission; the patient's access log shows both.
 `verify-own-work-patient-cards-runtime.mjs` checks the other side of "their
 own facility only": the pharmacy's pharmacist and the laboratory's lab
 member, who hold the same two permissions at their own facility, list none

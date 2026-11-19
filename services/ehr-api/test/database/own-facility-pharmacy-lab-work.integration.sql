@@ -59,8 +59,9 @@
 --      marks nothing;
 --   5b. after a dispensing (case 7e, at the end, so the earlier cases keep
 --      rx1 as it was): an edit of the dispensed rx1 is still recorded on its
---      send, but the withdrawal answers false and PH's states answer not
---      withdrawn: what was sent was dispensed;
+--      send, but the withdrawal answers false, PH's states answer not
+--      withdrawn and the send answers already_in_pharmacy (not superseded):
+--      what was sent was dispensed;
 --   6. lab: the facility's lab scientist without a grant sees the own lab
 --      work item and its card, may work on it, its basis is 'own-work', and
 --      accessions it; another facility's lab scientist, the nurse and an
@@ -136,7 +137,7 @@ begin
       ('lab.work_item_patient_cards(uuid[])', '91e157a7d6f89edd46c14dbb095d1bc6', 's'),
       ('pharmacy.work_item_patient_cards(uuid[])', '0dc38390c3c40a1883b87345ce0d35bd', 's'),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', '41a9afd4ea6f708425b98d1fb6e6eb87', 's'),
-      ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', '50f2e4cf46b7d9cd446f21bd893ea490', 'v'),
+      ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'b95d737694c08ceae4b346412c133e43', 'v'),
       ('ehr.withdraw_own_pharmacy_send(uuid)', 'bdb411d4f4e7fe6806d246d996e91771', 'v'),
       ('ehr.own_pharmacy_send_withdrawn_on_change()', '455c027844f87eebde9dd836f75760cf', 'v'),
       ('ehr.own_pharmacy_staffed()', '9fe0a922c4c121616604e7c9c87ec202', 's'),
@@ -1402,6 +1403,8 @@ select pg_temp.expect('the edited rx1 is active at version 3', (select p.status 
   from ehr.prescriptions p where p.id = pg_temp.rx(1)), 'active/3');
 select pg_temp.expect('the withdrawal answers false for the dispensed rx1',
   ehr.withdraw_own_pharmacy_send(pg_temp.rx(1))::text, 'false');
+select pg_temp.expect('Send to pharmacy for the dispensed and edited rx1 answers already_in_pharmacy, not superseded',
+  pg_temp.send(pg_temp.rx(1), 3), 'already_in_pharmacy:item');
 reset role;
 select pg_temp.expect('the change is still recorded on rx1''s send', (select (s.withdrawn_at is not null)::text
   from pharmacy.own_prescription_sends s where s.prescription_id = pg_temp.rx(1)), 'true');

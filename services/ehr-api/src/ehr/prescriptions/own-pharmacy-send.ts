@@ -76,7 +76,9 @@ export function pharmacyHandoff(outcome: string | undefined): PharmacyHandoff {
  * reason "Sent automatically when the prescription was activated". A failed
  * attempt stays pending in the database and is tried again by the next send.
  * A pharmacy item of an earlier version (the prescription was edited or
- * resumed after it was sent) answers `superseded`, never "already there".
+ * resumed after it was sent) answers `superseded`, never "already there",
+ * until the pharmacy dispenses it: after a dispensing a change is reported
+ * nowhere, so the send answers "already there".
  * `withdraw` asks `ehr.withdraw_own_pharmacy_send(prescription)` whether a
  * sent prescription's send now stands withdrawn: it is held, cancelled or
  * entered in error, or is still active at another version than the one sent

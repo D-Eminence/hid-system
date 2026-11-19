@@ -116,12 +116,15 @@
 --      changed       it is not at the given version;
 --      routed        it has a live route to another facility;
 --      already_in_pharmacy  a work item already exists for it at this
---                    version (a pharmacist accepted it, or an earlier send);
+--                    version (a pharmacist accepted it, or an earlier send),
+--                    or its work item was dispensed (a later change is not
+--                    reported, as in D8);
 --      superseded    a work item already exists for it, but for an earlier
---                    version, or its send was withdrawn: the prescription
---                    was changed or resumed after it was sent, and the
---                    pharmacy (one item per prescription) holds a version
---                    0101 no longer dispenses; nothing is sent;
+--                    version, or its send was withdrawn, and the item was
+--                    not dispensed: the prescription was changed or resumed
+--                    after it was sent, and the pharmacy (one item per
+--                    prescription) holds a version 0101 no longer
+--                    dispenses; nothing is sent;
 --      no_pharmacy   nobody at this facility can work on pharmacy items
 --                    (no active member holds pharmacy.work-item.read and
 --                    pharmacy.order-route.receive here). Only the members
@@ -146,7 +149,7 @@
 --    activation; a serialization failure or deadlock is raised, so the
 --    caller's retry runs the whole transaction again. A second call for a
 --    sent prescription answers already_in_pharmacy (superseded once it
---    changed) and writes nothing. A pending send is tried again by the next
+--    changed, until the item is dispensed) and writes nothing. A pending send is tried again by the next
 --    call (the prescriber's "Send to pharmacy").
 --    ehr.own_pharmacy_staffed() (SECURITY DEFINER, STABLE), for the EHR
 --    runtime: whether somebody at the session's facility works on pharmacy
@@ -174,7 +177,8 @@
 --    dispensed, so ehr-api can tell the prescriber that the pharmacy holds an
 --    earlier version it can no longer dispense. A change after the item was
 --    dispensed is still marked (withdrawn_at records the change), but neither
---    this answer nor D10's flag reports it: what was sent was dispensed.
+--    this answer, D10's flag nor D7's answer (already_in_pharmacy, not
+--    superseded) reports it: what was sent was dispensed.
 -- D9 pharmacy.own_work_access_for(resource, id, action) and
 --    lab.own_work_access_for(resource, id, action) (SECURITY DEFINER,
 --    STABLE), for their runtimes: the own work item (no route) the
@@ -1091,10 +1095,13 @@ begin
   if existing_item is not null then
     -- One item per prescription: an item of an earlier version (the
     -- prescription was edited or resumed after it was sent), or a withdrawn
-    -- send, is not this version in the pharmacy.
-    if existing_version is distinct from source.row_version
-       or exists (select 1 from pharmacy.own_prescription_sends send
-                   where send.prescription_id = source.id and send.withdrawn_at is not null) then
+    -- send, is not this version in the pharmacy, unless the item was
+    -- dispensed: what was sent was dispensed, and a later change is reported
+    -- nowhere (as D8 and D10).
+    if (existing_version is distinct from source.row_version
+        or exists (select 1 from pharmacy.own_prescription_sends send
+                    where send.prescription_id = source.id and send.withdrawn_at is not null))
+       and not exists (select 1 from pharmacy.dispensings dispensing where dispensing.work_item_id = existing_item) then
       return query select 'superseded'::text, existing_item;
       return;
     end if;
@@ -1140,8 +1147,10 @@ begin
   select send.* into send_row from pharmacy.own_prescription_sends send
    where send.prescription_id = source.id for update;
   if send_row.state = 'sent' then
-    return query select case when send_row.withdrawn_at is not null
-                               or send_row.prescription_version is distinct from source.row_version
+    return query select case when (send_row.withdrawn_at is not null
+                                or send_row.prescription_version is distinct from source.row_version)
+                               and not exists (select 1 from pharmacy.dispensings dispensing
+                                                where dispensing.work_item_id = send_row.work_item_id)
                              then 'superseded' else 'already_in_pharmacy' end::text, send_row.work_item_id;
     return;
   end if;
@@ -1599,7 +1608,7 @@ begin
            'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'own_work_source_prescription', 'uuid, uuid, uuid', '41a9afd4ea6f708425b98d1fb6e6eb87', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),
-         ('ehr', 'send_prescription_to_own_pharmacy', 'uuid, bigint', '50f2e4cf46b7d9cd446f21bd893ea490', 'v', 'plpgsql',
+         ('ehr', 'send_prescription_to_own_pharmacy', 'uuid, bigint', 'b95d737694c08ceae4b346412c133e43', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('ehr', 'withdraw_own_pharmacy_send', 'uuid', 'bdb411d4f4e7fe6806d246d996e91771', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
