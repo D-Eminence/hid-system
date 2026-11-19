@@ -101,7 +101,7 @@ function gate(overrides: Partial<Record<keyof PublicPatientIdentityProvider, jes
 /** What the desk hands the guard: the request's correlation id, path 'desk' and its own details to expect. */
 const deskCheck = { correlationId: 'correlation-q108', path: 'desk', expects: expect.any(Function) };
 
-/** D2: the keep of a matched stored record (DeskNinRecordKeep); desk-nin-record-keep.spec.ts tests it. */
+/** D2: the keep of a matched stored record (DeskNinRecordKeep), tested in qoreid-nin-desk-once.spec.ts and on PostgreSQL. */
 function recordKeep(kept = true) {
   return { keepMatchedRecord: jest.fn(async () => kept) };
 }
