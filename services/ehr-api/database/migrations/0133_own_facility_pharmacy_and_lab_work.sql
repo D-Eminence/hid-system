@@ -241,20 +241,31 @@
 -- takes, in one attempt, ACCESS EXCLUSIVE on ehr.prescriptions and on the 20
 -- Lab and Pharmacy chain tables that gain a policy (CREATE POLICY needs it),
 -- and ACCESS SHARE on the tables the new SQL functions read when they are
--- created (lab.work_items, pharmacy.work_items, identity.patients, the
--- consent directives and their versions, the memberships), all NOWAIT: a
--- busy table fails the attempt at once, its subtransaction releases what it
--- took, and the loop tries again 100 ms later, so the migration never waits
--- while holding a lock and no request queues behind a waiting lock; after
--- 50 attempts (5 seconds) it stops the release (55P03, nothing applied; the
--- same release can run again). Once taken, the locks last to commit: EHR
--- prescription reads and writes and every Lab and Pharmacy chain read and
--- write wait until then, a few milliseconds when 0133 releases alone (no row
--- is read or written, the new table is empty); if it ships with other
--- pending migrations, the runner's dry run of all of them in one
--- transaction holds the locks until that dry run ends. The replaced
--- functions' catalog rows are locked too; the new table takes no lock on
--- existing data. Section 0 takes no table lock.
+-- created
+-- (lab.work_items, pharmacy.work_items, identity.patients, the consent
+-- directives and their versions, the memberships), all NOWAIT: a busy table
+-- fails the attempt at once and its subtransaction releases what it took.
+-- When 0133 is the first statement of its transaction (the runner applies
+-- each file in its own transaction), the loop tries again 100 ms later, so it
+-- never waits while holding a lock and no request queues behind a waiting
+-- lock; after 50 attempts (5 seconds) it stops the release (55P03, nothing
+-- applied; the same release can run again). When its transaction already
+-- holds locks that stop other sessions' reads or writes (an earlier
+-- migration of the same transaction: the runner's dry run runs every pending
+-- file in one transaction, so with 0128-0132 pending it holds their locks,
+-- for example ACCESS EXCLUSIVE on identity.consent_grants), it makes one
+-- attempt and does not sleep: a busy table stops the dry run at once with
+-- 55P03 (nothing applied), instead of keeping those tables locked for up to
+-- 5 seconds. Once taken, the locks last to commit: EHR prescription reads
+-- and writes and every Lab and Pharmacy chain read and write wait until
+-- then, a few milliseconds when 0133 is applied alone (no row is read or
+-- written, the new table is empty). In the dry run of several pending files
+-- they last until the dry run ends, while the later files run: a later file
+-- that waits for its own locks (up to the runner's 5 s lock_timeout) keeps
+-- these, and the earlier files', held meanwhile; the release's combined
+-- declaration states that hold. The replaced functions' catalog rows are
+-- locked too; the new table takes no lock on existing data. Section 0 takes
+-- no table lock.
 --
 -- Old services on this schema: today's images call none of the new
 -- functions. They gain, through the changed policies, the pharmacist's and
@@ -520,10 +531,23 @@ end
 $$;
 
 -- 1. Locks (see Locks), NOWAIT, at most 5 s. A failed attempt's
--- subtransaction releases what it took.
+-- subtransaction releases what it took. When this transaction already holds
+-- a lock that stops other sessions' reads or writes of a table (an earlier
+-- migration in the same transaction, as in the runner's dry run of every
+-- pending file; the runner's own ledger table aside), one attempt only and
+-- no sleep, so no request queues behind those locks while this file waits.
 do $$
 declare
   attempt integer := 0;
+  holding boolean := exists (
+    select 1 from pg_locks held
+      join pg_class relation on relation.oid = held.relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where held.pid = pg_backend_pid() and held.locktype = 'relation' and held.granted
+       and held.database = (select database_row.oid from pg_database database_row
+                             where database_row.datname = current_database())
+       and held.mode in ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+       and namespace.nspname <> 'migration');
 begin
   loop
     attempt := attempt + 1;
@@ -540,6 +564,12 @@ begin
         in access share mode nowait;
       exit;
     exception when lock_not_available then
+      if holding then
+        raise exception using errcode = '55P03',
+          message = '0133: ehr.prescriptions or a Lab or Pharmacy work table is busy, and this transaction already '
+            || 'holds an earlier migration''s locks, so it does not wait; nothing applied; run the release again at a '
+            || 'quieter time';
+      end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
           message = '0133: ehr.prescriptions or a Lab or Pharmacy work table stayed busy for 5 seconds; nothing '
