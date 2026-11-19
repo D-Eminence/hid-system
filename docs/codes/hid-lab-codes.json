@@ -1,0 +1,21 @@
+{
+  "codeSystem": "HID-LAB",
+  "version": "2026-11-19",
+  "description": "Health ID local codes for common lab tests that the EHR screen's built-in list offers without a LOINC code. Send codeSystem as testCodeSystem, code as testCode and display as testDisplay. Codes are fixed: a code is never changed or re-used for another test.",
+  "contract": "docs/INTERFACE_CONTRACT.md, section \"Wave 0: answers for the EHR screens (R-1 to R-4, P2-5, P2-6)\"",
+  "codes": [
+    { "code": "MP-SMEAR", "display": "Malaria parasite (blood film)", "specimen": "Blood (EDTA)" },
+    { "code": "MP-RDT", "display": "Malaria rapid diagnostic test", "specimen": "Blood" },
+    { "code": "WIDAL", "display": "Widal test", "specimen": "Serum" },
+    { "code": "URINALYSIS", "display": "Urinalysis", "specimen": "Urine" },
+    { "code": "HB-GENOTYPE", "display": "Haemoglobin genotype", "specimen": "Blood (EDTA)" },
+    { "code": "HIV-SCREEN", "display": "HIV screening", "specimen": "Blood" },
+    { "code": "HBSAG", "display": "Hepatitis B surface antigen", "specimen": "Serum" },
+    { "code": "HCV-AB", "display": "Hepatitis C antibody", "specimen": "Serum" },
+    { "code": "EUCR", "display": "Electrolytes, urea and creatinine", "specimen": "Serum" },
+    { "code": "LFT", "display": "Liver function test", "specimen": "Serum" },
+    { "code": "LIPID-PROFILE", "display": "Lipid profile", "specimen": "Serum" },
+    { "code": "STOOL-MICRO", "display": "Stool microscopy", "specimen": "Stool" },
+    { "code": "SPUTUM-AFB", "display": "Sputum for AFB", "specimen": "Sputum" }
+  ]
+}

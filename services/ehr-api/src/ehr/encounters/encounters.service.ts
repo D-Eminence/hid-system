@@ -10,7 +10,7 @@ import {
 } from '../shared/clinical.dto';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import { changeReasonRequired, hasTypedReason, neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
-import { ClinicalRepository } from '../shared/clinical.repository';
+import { ClinicalRepository, type OperationResult } from '../shared/clinical.repository';
 import { lagosCalendarDate, lagosDaySql, VISIT_DAY_TIME_ZONE } from './lagos-day';
 
 export interface EncounterRow extends QueryResultRow {
@@ -33,6 +33,14 @@ export interface EncounterRow extends QueryResultRow {
 
 /** EHR-C1: the answer of a create that asked for the open visit today. */
 export type EncounterCreated = EncounterRow & { reusedOpenVisit?: boolean };
+
+/** The checked request of a visit create: its operation, EHR-C1 day and Idempotency-Key digest. */
+export interface EncounterCreatePlan {
+  operation: string;
+  /** Today's Lagos date when the request asked for the open visit today. */
+  day: string | undefined;
+  digest: string;
+}
 
 /** EHR-C1: what the visit desk reads before starting a visit. */
 export interface OpenVisitToday {
@@ -147,7 +155,22 @@ export class EncountersService {
     input: CreateEncounterDto,
     idempotencyKey: string,
   ): Promise<EncounterCreated> {
-    const operation = 'encounter.create';
+    const plan = this.planCreate(patientId, input);
+    return this.repository.run(
+      context,
+      patientId,
+      'write_records',
+      { action: 'ehr.encounter.create', resourceType: 'encounter' },
+      (client) => this.createInTransaction(client, context, patientId, input, idempotencyKey, plan),
+    );
+  }
+
+  /**
+   * The checks a visit create runs before the database is touched, and its
+   * Idempotency-Key digest. EHR-C5 (one-call consultation) runs the same
+   * checks under its own operation name.
+   */
+  planCreate(patientId: string, input: CreateEncounterDto, operation = 'encounter.create'): EncounterCreatePlan {
     const reuse = input.reuseOpenVisit === true;
     if (reuse && input.status !== EncounterStatus.Planned && input.status !== EncounterStatus.InProgress) {
       throw new DomainProblem(400, 'REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS',
@@ -163,64 +186,90 @@ export class EncountersService {
       throw new DomainProblem(400, 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY',
         'To use the open visit today, the visit must start today (Lagos time). Check the date and time on this device.');
     }
+    return { operation, day, digest: this.createDigest(patientId, input, operation) };
+  }
+
+  /**
+   * EHR-C5: the plan a reuse request had on its own Lagos day (the day of
+   * its startedAt), without planCreate's today check. It is only for
+   * answering a request already saved under its Idempotency-Key again (a
+   * retry after Lagos midnight): the caller must never create with it.
+   */
+  replayPlan(patientId: string, input: CreateEncounterDto, operation: string): EncounterCreatePlan {
+    return { operation, day: lagosCalendarDate(new Date(input.startedAt)),
+      digest: this.createDigest(patientId, input, operation) };
+  }
+
+  private createDigest(patientId: string, input: CreateEncounterDto, operation: string): string {
     // A body without reuseOpenVisit keeps the Idempotency-Key digest it had before EHR-C1.
     const { reuseOpenVisit: _reuse, ...withoutReuse } = input;
-    const digest = requestDigest(operation, { patientId, input: input.reuseOpenVisit === undefined ? withoutReuse : input });
-    return this.repository.run(
+    return requestDigest(operation, { patientId, input: input.reuseOpenVisit === undefined ? withoutReuse : input });
+  }
+
+  /**
+   * The visit create inside a transaction the caller already holds (the
+   * route's own, or EHR-C5's one-call consultation): the Idempotency-Key row,
+   * the EHR-C1 lock and lookup, and the insert. The caller writes the
+   * `ehr.encounter.create` audit row from the details answered here.
+   */
+  createInTransaction(
+    client: PoolClient,
+    context: DataAccessContext,
+    patientId: string,
+    input: CreateEncounterDto,
+    idempotencyKey: string,
+    plan: EncounterCreatePlan,
+  ): Promise<OperationResult<EncounterCreated>> {
+    const { operation, day, digest } = plan;
+    return this.repository.executeCreate(
+      client,
       context,
       patientId,
-      'write_records',
-      { action: 'ehr.encounter.create', resourceType: 'encounter' },
-      (client) => this.repository.executeCreate(
-        client,
-        context,
-        patientId,
-        idempotencyKey,
-        operation,
-        digest,
-        'encounter',
-        async () => {
-          if (day) {
-            // EHR-C1: one open visit per patient per facility per Lagos day.
-            // The lock is taken before the lookup, so two requests at once
-            // cannot both find none and both create one; it is held until
-            // this transaction ends (READ COMMITTED: the lookup after the
-            // wait sees the other request's committed visit).
-            await this.lockOpenVisit(client, context.facilityId, patientId);
-            const open = await this.findOpenToday(client, patientId, context.facilityId, day);
-            if (open) {
-              return { value: { ...open, reusedOpenVisit: true }, id: open.id,
-                details: { reusedOpenVisit: true, day } };
-            }
+      idempotencyKey,
+      operation,
+      digest,
+      'encounter',
+      async () => {
+        if (day) {
+          // EHR-C1: one open visit per patient per facility per Lagos day.
+          // The lock is taken before the lookup, so two requests at once
+          // cannot both find none and both create one; it is held until
+          // this transaction ends (READ COMMITTED: the lookup after the
+          // wait sees the other request's committed visit).
+          await this.lockOpenVisit(client, context.facilityId, patientId);
+          const open = await this.findOpenToday(client, patientId, context.facilityId, day);
+          if (open) {
+            return { value: { ...open, reusedOpenVisit: true }, id: open.id,
+              details: { reusedOpenVisit: true, day } };
           }
-          const result = await client.query<EncounterRow>(
-            `insert into ehr.encounters (
-               patient_id, facility_id, created_by, created_by_membership_id,
-               encounter_number, encounter_type, status, started_at, ended_at, chief_complaint
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             returning ${ENCOUNTER_COLUMNS}`,
-            [
-              patientId,
-              context.facilityId,
-              context.actor.accountId,
-              context.membershipId,
-              input.encounterNumber ?? null,
-              input.encounterType,
-              input.status,
-              input.startedAt,
-              input.endedAt ?? null,
-              input.chiefComplaint ?? null,
-            ],
-          );
-          const row = this.single(result.rows[0]);
-          return day
-            ? { value: { ...row, reusedOpenVisit: false }, id: row.id, details: { reusedOpenVisit: false, day } }
-            : { value: row, id: row.id };
-        },
-        (id) => day
-          ? this.findReplay(client, context, patientId, idempotencyKey, operation, id)
-          : this.findRow(client, patientId, context.facilityId, id),
-      ),
+        }
+        const result = await client.query<EncounterRow>(
+          `insert into ehr.encounters (
+             patient_id, facility_id, created_by, created_by_membership_id,
+             encounter_number, encounter_type, status, started_at, ended_at, chief_complaint
+           ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           returning ${ENCOUNTER_COLUMNS}`,
+          [
+            patientId,
+            context.facilityId,
+            context.actor.accountId,
+            context.membershipId,
+            input.encounterNumber ?? null,
+            input.encounterType,
+            input.status,
+            input.startedAt,
+            input.endedAt ?? null,
+            input.chiefComplaint ?? null,
+          ],
+        );
+        const row = this.single(result.rows[0]);
+        return day
+          ? { value: { ...row, reusedOpenVisit: false }, id: row.id, details: { reusedOpenVisit: false, day } }
+          : { value: row, id: row.id };
+      },
+      (id) => day
+        ? this.findReplay(client, context, patientId, idempotencyKey, operation, id)
+        : this.findRow(client, patientId, context.facilityId, id),
     );
   }
 
