@@ -58,9 +58,12 @@
 --      desk (identity.registration.write, purpose healthcare-operations):
 --      checks the request (names, date of birth, reason; a phone and address
 --      unless the reason is child, and child only under 18 on the Lagos
---      date; a stated Health ID's shape), replays an idempotent retry, caps
---      a member at 20 registrations without a NIN a day at a facility (the
---      Lagos day; 429), refuses a sealed demo or QA facility, serialises on
+--      date; a stated Health ID's shape), replays an idempotent retry,
+--      counts the facility's registrations without a NIN today (the Lagos
+--      day) for an operations alert, with no daily limit (owner Q109: no
+--      rate limit on a staff member or facility, so a busy day or a day
+--      QoreID is down is never refused), refuses a sealed demo or QA
+--      facility, serialises on
 --      the date of birth, and looks for possible duplicates among active
 --      patients the facility's seal allows: the same date of birth with the
 --      same last name (or first and last swapped), the same phone (a
@@ -90,13 +93,25 @@
 -- unavoidable); identity-api's registration-capabilities answers
 -- withoutNin.enabled true with this file.
 --
--- Locks: ACCESS EXCLUSIVE on identity.registration_cases (ADD COLUMN with a
--- constant default, DROP NOT NULL, ADD CONSTRAINT with one validating scan of
--- a small table, CREATE INDEX on it), SHARE ROW EXCLUSIVE on
+-- Locks, taken first (section 0b), NOWAIT: ACCESS EXCLUSIVE on
+-- identity.registration_cases (ADD COLUMN with a constant default, DROP NOT
+-- NULL, ADD CONSTRAINT with one validating scan of a small table, CREATE
+-- INDEX and CREATE POLICY), SHARE ROW EXCLUSIVE on
 -- identity.registration_case_contacts and identity.patient_facility_contacts
--- (CREATE TRIGGER), each held to commit, behind the runner's 5 s
--- lock_timeout (nothing applied when it expires). New tables and functions
--- take no lock on existing data.
+-- (CREATE TRIGGER) and on identity.patients and identity.facilities (the
+-- foreign keys of a new, empty table), each held to commit. That is every
+-- existing table this file locks (pg_locks before commit), at the strongest
+-- mode it takes. New tables and functions take no lock on existing data.
+-- A busy table fails the attempt at once, and its subtransaction releases
+-- what it took. The attempt is made again every 100 ms for at most 5 seconds,
+-- so the file never waits while holding a lock and no request queues behind
+-- a waiting lock; then 55P03 (nothing applied; the release can run again).
+-- When this transaction already holds an earlier migration's locks that stop
+-- other sessions' reads or writes (the runner's dry run applies every pending
+-- file in one transaction), one attempt and no sleep: 55P03 at once, nothing
+-- applied, instead of keeping those locks while this file waits. Indexes are
+-- locked only by planning (ACCESS SHARE), which only a REINDEX or DROP INDEX
+-- could hold up.
 --
 -- Old services on this schema: today's identity-api never writes the new
 -- columns (their defaults keep every NIN case as it was) and never calls the
@@ -105,6 +120,7 @@
 -- identity/registration-cases/without-nin.
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied).
+-- 0b. Locks, NOWAIT (55P03 and nothing applied).
 -- 1-7. As above.
 -- 8. Post-checks.
 
@@ -167,6 +183,46 @@ begin
   end if;
 end
 $$;
+
+-- 0b. Locks (see Locks), NOWAIT, at most 5 s; one attempt when this
+-- transaction already holds an earlier migration's locks.
+do $locks$
+declare
+  attempt integer := 0;
+  holding boolean := exists (
+    select 1 from pg_locks held
+      join pg_class relation on relation.oid = held.relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where held.pid = pg_backend_pid() and held.locktype = 'relation' and held.granted
+       and held.database = (select database_row.oid from pg_database database_row
+                             where database_row.datname = current_database())
+       and held.mode in ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+       and namespace.nspname <> 'migration');
+begin
+  loop
+    attempt := attempt + 1;
+    begin
+      lock table identity.registration_cases
+        in access exclusive mode nowait;
+      lock table identity.registration_case_contacts, identity.patient_facility_contacts, identity.patients, identity.facilities
+        in share row exclusive mode nowait;
+      exit;
+    exception when lock_not_available then
+      if holding then
+        raise exception using errcode = '55P03',
+          message = '0130: identity.registration_cases, the registration or facility contacts, identity.patients or identity.facilities is busy, and this transaction already holds an earlier migration''s '
+            || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
+      end if;
+      if attempt >= 50 then
+        raise exception using errcode = '55P03',
+          message = '0130: identity.registration_cases, the registration or facility contacts, identity.patients or identity.facilities stayed busy for 5 seconds; nothing applied; run the release again at a '
+            || 'quieter time';
+      end if;
+      perform pg_sleep(0.1);
+    end;
+  end loop;
+end
+$locks$;
 
 -- 1. The case's evidence.
 alter table identity.registration_cases
@@ -429,7 +485,6 @@ declare
   phone_hmacs character(64)[];
   has_contact boolean := requested_phone_ciphertext is not null;
   existing identity.registration_cases%rowtype;
-  member_count integer;
   facility_count integer;
   open_cases integer;
   candidates_found integer;
@@ -499,18 +554,13 @@ begin
     return;
   end if;
 
-  -- 20 a day for a member at a facility; the facility's count for the alert.
-  perform pg_advisory_xact_lock(hashtextextended('no-nin-registration-member:' || actor_account::text
-    || ':' || actor_facility::text, 0));
-  select count(*) filter (where registration.created_by_account_id = actor_account), count(*)
-    into member_count, facility_count
+  -- No daily limit (owner Q109): the facility's count today is only for the
+  -- operations alert, so it is read without a lock.
+  select count(*) into facility_count
     from identity.registration_cases registration
    where registration.facility_id = actor_facility
      and registration.identity_evidence = 'none'
      and registration.created_at >= (lagos_today::timestamp at time zone 'Africa/Lagos');
-  if member_count >= 20 then
-    raise exception using errcode = 'P0001', message = 'NO_NIN_REGISTRATION_DAILY_LIMIT';
-  end if;
 
   -- One registration without a NIN for a date of birth at a time, so two
   -- desks registering the same person see each other.
@@ -678,7 +728,7 @@ end
 $$;
 
 comment on function identity.register_patient_without_nin(uuid, text, text, date, text, text, text, bytea, bytea, text, text, text, text, text) is
-  '0130 (ID-2, owner Q106 of 18 November 2026): the desk registers a patient without a NIN. No possible duplicate: the same desk person creates the patient at once (approved_new_identity, source hid-desk-registration). Any possible duplicate (same date of birth and last name, same phone, the stated Health ID, or an open registration without a NIN): review_required, for an approver. Phone and address required unless the reason is child (under 18). 20 a day per member at a facility. Refused at sealed demo and QA facilities. Audited with criteria kinds only.';
+  '0130 (ID-2, owner Q106 of 18 November 2026): the desk registers a patient without a NIN. No possible duplicate: the same desk person creates the patient at once (approved_new_identity, source hid-desk-registration). Any possible duplicate (same date of birth and last name, same phone, the stated Health ID, or an open registration without a NIN): review_required, for an approver. Phone and address required unless the reason is child (under 18). No daily limit (owner Q109); the count at the facility today is returned for an operations alert. Refused at sealed demo and QA facilities. Audited with criteria kinds only.';
 
 -- 6. The approver command.
 create function identity.review_patient_without_nin(

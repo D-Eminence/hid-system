@@ -612,11 +612,11 @@
       },
       {
         "name": "0130_desk_registration_without_nin.sql",
-        "sha256": "a9f071ee6c1c916c440e8b05f4f64fda359c4b7fff63087f59bcc1904899b9dd"
+        "sha256": "685a939427b1120d57a61a9c61714cda31cba9998f462253cd17801bb62220c1"
       },
       {
         "name": "0131_own_facility_patient_access.sql",
-        "sha256": "2e3a83c9ad1188095ecb1342f80ed735a882c969ce43663edae912cfbe22c7fa"
+        "sha256": "d57f52528357df4e647a5dc9ba69840f8f2670c46b2a1086d0be1c6dfd031021"
       },
       {
         "name": "0132_staff_patient_search.sql",
