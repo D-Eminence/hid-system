@@ -525,16 +525,32 @@ try {
         'apply-migrations.mjs', db, { HID_TEST_MIGRATION_DIRECTORY: subset });
       assert.match(migration(`nothing pending through ${last}`, 'apply-migrations.mjs', db,
         { HID_TEST_MIGRATION_DIRECTORY: subset }), /^0 pending migration\(s\)/);
+      // The live verifiers run only against a database named hid_rehearsal (their own guard), so this copy takes
+      // that name while they run and the rehearsal's own database waits under another; both names are put back.
       const liveEnvironment = {
-        PGDATABASE: db, DATABASE_URL: url(db), CORS_ORIGINS: 'http://127.0.0.1', AUTH_MODE: 'local',
+        PGDATABASE: database, DATABASE_URL: url(database), CORS_ORIGINS: 'http://127.0.0.1', AUTH_MODE: 'local',
         AUTH_SIGNING_SECRET: randomBytes(32).toString('base64url'),
         AUTH_LOGIN_PEPPER: randomBytes(32).toString('base64url'),
         OTP_HMAC_KEY_B64: Buffer.alloc(32, 0x33).toString('base64'),
       };
+      const rename = (from, to) => withClient('postgres', async (client) => {
+        await client.query('select pg_terminate_backend(pid) from pg_stat_activity where datname = $1', [from]);
+        await client.query(`alter database ${quote(from)} rename to ${quote(to)}`);
+      });
       const verified = {};
-      for (const verifier of liveVerifiers) {
-        verified[basename(verifier, '.mjs')] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
-          process.execPath, [join(live, verifier)], liveEnvironment)).status ?? 'passed';
+      await rename(database, 'hid_rehearsal_main');
+      try {
+        await rename(db, database);
+        try {
+          for (const verifier of liveVerifiers) {
+            verified[basename(verifier, '.mjs')] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
+              process.execPath, [join(live, verifier)], liveEnvironment)).status ?? 'passed';
+          }
+        } finally {
+          await rename(database, db);
+        }
+      } finally {
+        await rename('hid_rehearsal_main', database);
       }
       results.push({ through: last, applied: through.length - liveFiles.length,
         runner_output_sha256: sha256(applied), live_verifiers: verified });
