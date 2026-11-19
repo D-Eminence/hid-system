@@ -1686,7 +1686,7 @@ begin
     raise exception using errcode = '55000', message = '0133: the columns of pharmacy.own_prescription_sends are not this file''s';
   end if;
   if ((select array_agg(constraint_row.contype::text || ' ' || pg_get_constraintdef(constraint_row.oid)
-          order by constraint_row.contype, pg_get_constraintdef(constraint_row.oid))
+          order by constraint_row.contype, pg_get_constraintdef(constraint_row.oid) collate "C")
          from pg_constraint constraint_row
         where constraint_row.conrelid = 'pharmacy.own_prescription_sends'::regclass)
       = array['c CHECK (((attempts >= 0) AND (attempts <= 1000)))',
@@ -1698,7 +1698,7 @@ begin
      or exists (select 1 from pg_constraint constraint_row
                  where constraint_row.conrelid = 'pharmacy.own_prescription_sends'::regclass
                    and (not constraint_row.convalidated or constraint_row.condeferrable))
-     or ((select array_agg(pg_get_indexdef(index_row.indexrelid) order by pg_get_indexdef(index_row.indexrelid))
+     or ((select array_agg(pg_get_indexdef(index_row.indexrelid) order by pg_get_indexdef(index_row.indexrelid) collate "C")
             from pg_index index_row where index_row.indrelid = 'pharmacy.own_prescription_sends'::regclass)
          = array['CREATE INDEX own_prescription_sends_facility_idx ON pharmacy.own_prescription_sends USING btree '
                    || '(facility_id, state, created_at)',
