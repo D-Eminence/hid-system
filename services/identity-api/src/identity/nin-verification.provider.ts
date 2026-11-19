@@ -66,11 +66,16 @@ export const NIN_NOT_VERIFIED_DETAIL = 'This NIN could not be verified. Check th
  * Q117: the one answer, on the desk (POST /api/v1/identity/nin/resolve),
  * sign-up with a NIN (POST /api/v1/identity/patient-enrollments) and the
  * profile (POST /api/v1/identity/me/verification/nin), for a NIN QoreID has
- * no record of: its 404 "not found", fresh or kept by 0137, and the NIN-only
- * check's "no record" (fresh or kept). A 422, so its message reaches the
- * website as it is; it replaces the 502 QOREID_PROVIDER_REJECTED those paths
- * answered for QoreID's 404. A name or date of birth that does not match a
- * record QoreID has keeps its own answer on each path.
+ * no record of: its 404 "not found", fresh or kept by 0137, on all three; and
+ * the NIN-only check's "no record" (fresh or kept) on the desk and sign-up,
+ * which ask with the NIN alone. Until #276 says which question a stored "no
+ * record" answered, a profile check that reuses a sign-up's or the desk's
+ * answers it as "not verified" for its details (200 or 409), not with this.
+ * The desk and sign-up give QoreID's "incomplete" this answer too. A 422, so
+ * its message reaches the website as it is; it replaces the 502
+ * QOREID_PROVIDER_REJECTED those paths answered for QoreID's 404. A name or
+ * date of birth that does not match a record QoreID has keeps its own answer
+ * on each path.
  */
 export function ninCouldNotBeVerified(): DomainProblem {
   return new DomainProblem(422, 'NIN_NOT_VERIFIED', NIN_NOT_VERIFIED_DETAIL);

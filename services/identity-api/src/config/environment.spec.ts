@@ -104,8 +104,9 @@ describe('Identity production database transport', () => {
   it('waits 11 s for QoreID by default (Q118), at most 20 s, when QOREID_TIMEOUT_MS is not set', () => {
     // A NIN answer often takes longer than 5 s. QoreID charges for a check it finishes even when HID has
     // stopped waiting, so a short wait made people press again and pay twice (owner, 28 Oct 2026). 11 s (owner
-    // Q118) stays under the website's 15 s request limit, and keeps a desk request's worst case (two waits and
-    // the guard's 3 s) inside the gateway's 30 s read timeout. Production's infrastructure sets its own value.
+    // Q118) keeps a desk request's worst case (two waits and the guard's 3 s) inside the gateway's 30 s read
+    // timeout when the database answers or fails at once. Every AWS environment sets 5 s; this default applies
+    // where it is unset (local, CI).
     production(); resetEnvironmentForTests();
     expect(getEnvironment().QOREID_TIMEOUT_MS).toBe(11_000);
     production(); process.env.QOREID_TIMEOUT_MS = '20000'; resetEnvironmentForTests();

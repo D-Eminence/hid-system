@@ -216,11 +216,16 @@ const environmentSchema = z.object({
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
   // How long Identity waits for one QoreID request: 11 s by default (owner
-  // Q118; #271 had 12 s), at most 20 s so a start (Turnstile, the check, the
-  // database) stays inside the gateway's 30 s read timeout. 11 s keeps a desk
-  // request's worst case inside 30 s too (docs/INTERFACE_CONTRACT.md, Q108).
-  // QoreID charges a check whether or not HID waits for its answer (owner,
-  // 18 November 2026).
+  // Q118; #271 had 12 s), at most 20 s. The 20 s bounds one QoreID request
+  // only: with 0137's wait for another check of the same NIN, a sign-up start
+  // or a desk request can take up to 2 x QOREID_TIMEOUT_MS + 3 s plus database
+  // time, and a sign-up start adds Turnstile (up to 2 x TURNSTILE_TIMEOUT_MS).
+  // 11 s keeps a desk request's worst case inside the gateway's 30 s when the
+  // database answers or fails at once (docs/INTERFACE_CONTRACT.md, Q108).
+  // Every AWS environment (staging and production) sets 5 s
+  // (infra/aws/src/hid-regional-stack.ts); this default applies only where it
+  // is unset (local, CI). QoreID charges a check whether or not HID waits for
+  // its answer (owner, 18 November 2026).
   QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(20_000).default(11_000),
   // How long a patient NIN check keeps reading QoreID's answer after the
   // caller stopped waiting (QOREID_TIMEOUT_MS) (0137, Q109): QoreID charges the

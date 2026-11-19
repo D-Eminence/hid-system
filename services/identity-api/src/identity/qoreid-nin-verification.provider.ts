@@ -55,7 +55,9 @@ const GENDERS = new Set(['female', 'male', 'intersex', 'other', 'unknown']);
  *
  * Q117: QoreID having no record of the NIN (its "no record", or its 404
  * "not found", fresh or kept) is answered `no_match`, which the desk gives as
- * 422 NIN_NOT_VERIFIED, the answer sign-up and the profile give too.
+ * 422 NIN_NOT_VERIFIED, the answer sign-up and the profile give too. QoreID's
+ * "incomplete" (its check not finished) gets the same answer here and on
+ * sign-up (the profile answers it 200 state "incomplete").
  */
 @Injectable()
 export class QoreIdNinVerificationProvider implements NinVerificationProvider {
@@ -163,10 +165,12 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
    * identity.keep_qoreid_nin_record through NinCheckOnce.keepRecord, which
    * never shortens a keep and leaves the answer, its completeness and source
    * as they are); the desk calls it for each stored record its details
-   * match. True when kept; false when there was no live record of the NIN to
-   * keep (an unusable answer whose name and date of birth matched, say). A
-   * keep that cannot be written leaves the desk's answer as it is and is
-   * logged without an identifier.
+   * match. True when kept; false when the stored record the guard returned
+   * was no longer a live record when the keep ran (it expired between the
+   * guard's answer and the keep, a sign-up took over an incomplete profile
+   * record, or the NIN's login was deleted); nothing changes then. A keep
+   * that cannot be written leaves the desk's answer as it is and is logged
+   * without an identifier.
    */
   private async keepMatchedRecord(nin: string, correlationId: string): Promise<boolean> {
     try {

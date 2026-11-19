@@ -51,7 +51,7 @@ export interface PublicPatientIdentityProvider {
    * gender, a photo or an address HID cannot read) by any path, or an answer
    * a sign-up or a desk check kept as unusable that still gives a readable
    * name and date of birth, is used, not paid for again (0137 keeps a profile
-   * check's answer that is not a record for that check's question only, so
+   * check's "no record" or unusable answer for that check's question only, so
    * it is not reused here); such a record QoreID returns here is kept as an
    * incomplete record, as a profile check keeps it.
    *
@@ -169,7 +169,9 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
             // as a profile check keeps one (as long as a record, Q110), not as
             // 'unusable' for 24 hours, so the desk, the profile and a later
             // desk use it without paying again. A sign-up needs a complete
-            // record and asks QoreID itself, as after a profile check.
+            // record: it refuses this NIN-only one from storage (502
+            // QOREID_PROVIDER_RESPONSE_INVALID) without asking QoreID again;
+            // only an incomplete profile record is taken over by a sign-up.
             const named = namedIncompleteRecord(error);
             if (!named) {
               // QoreID's 404 "not found" is its answer (D4); anything else is
