@@ -5,7 +5,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, join, resolve } from 'node:path';
 import { baselineSql, ids, syntheticFixture } from '../release/migration/synthetic-fixture.mjs';
@@ -65,7 +66,8 @@ function url(db) {
 }
 
 function migration(label, script, db = database, extra = {}, expected = 0, flags = []) {
-  return command(label, process.execPath, [join(service, 'scripts', script), ...flags], {
+  // A bare name is this branch's script; an absolute path another tree's (the live images', below).
+  return command(label, process.execPath, [script.startsWith('/') ? script : join(service, 'scripts', script), ...flags], {
     DATABASE_URL: url(db), DATABASE_ADMIN_URL: url(db),
     MIGRATION_RUN_ID: runId, MIGRATION_SNAPSHOT_ID: 'synthetic-fixture-v1',
     MIGRATION_OPERATOR: 'local-synthetic-rehearsal',
@@ -467,6 +469,70 @@ try {
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-facility-selection-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
+  // Release A (coordinator, 19 November 2026, on #280): the runner applies the pending files one by one, each in
+  // its own transaction, so a release can stop between two of them. That is acceptable only if today's live images
+  // still pass their runtime verifiers on the schema left after 0132 and after 0135 (and after the last file, until
+  // the new images are deployed). HID_REHEARSAL_LIVE_TREE is a copy of the live images' commit (git archive of it;
+  // HID_REHEARSAL_LIVE_COMMIT names it in the evidence). Its own runner and role bootstrap build the live schema
+  // with its runtime grants, as production has them; this branch's runner then applies this branch's files up to
+  // each point, on a copy of that database, and the live tree's own runtime verifiers (those its rehearsal runs)
+  // boot the live code as its exact runtime roles. Dependencies the live tree lacks are this checkout's.
+  const liveTree = process.env.HID_REHEARSAL_LIVE_TREE;
+  if (!liveTree) {
+    evidence.checks.live_images_mid_release = { skipped: 'HID_REHEARSAL_LIVE_TREE not set' };
+  } else {
+    const live = resolve(liveTree);
+    const liveService = join(live, 'services/ehr-api');
+    const linked = [];
+    for (const directory of ['.', ...(await readdir(join(live, 'services'))).map((name) => `services/${name}`)]) {
+      const own = join(repository, directory, 'node_modules');
+      if (!existsSync(join(live, directory, 'node_modules')) && existsSync(own)) {
+        await symlink(own, join(live, directory, 'node_modules'));
+        linked.push(directory);
+      }
+    }
+    const liveRehearsal = await readFile(join(live, 'scripts/tuf-staging-migration-rehearsal.mjs'), 'utf8');
+    const liveVerifiers = [...new Set(liveRehearsal.match(/services\/[a-z-]+\/scripts\/verify-[a-z-]+-runtime\.mjs/g))];
+    assert(liveVerifiers.length > 0, 'The live tree runs no runtime verifier');
+    const liveFiles = (await readdir(join(liveService, 'database/migrations'))).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
+    const liveLast = liveFiles.at(-1).slice(0, 4);
+    assert.deepEqual(files.slice(0, liveFiles.length), liveFiles, 'The live migrations are not a prefix of this branch\'s');
+    command('create the live images\' database', join(pgBindir, 'createdb'), ['hid_live_base']);
+    migration(`live schema 0001-${liveLast} by the live runner`, join(liveService, 'scripts/apply-migrations.mjs'),
+      'hid_live_base');
+    migration('live runtime roles and grants by the live bootstrap',
+      join(liveService, 'scripts/bootstrap-database-roles.mjs'), 'hid_live_base');
+    const points = [...new Set(['0132', '0135', latestSchema])];
+    const results = [];
+    for (const [index, last] of points.entries()) {
+      const db = `hid_live_${'abcdefgh'[index]}`;
+      command(`copy the live database for ${last}`, join(pgBindir, 'createdb'), ['-T', 'hid_live_base', db]);
+      const subset = join(temporary, `migrations-through-${last}`);
+      await mkdir(subset);
+      const through = files.filter((name) => name.slice(0, 4) <= last);
+      for (const name of through) await copyFile(join(service, 'database/migrations', name), join(subset, name));
+      const applied = migration(`this branch's files ${files[liveFiles.length].slice(0, 4)}-${last} on the live schema`,
+        'apply-migrations.mjs', db, { HID_TEST_MIGRATION_DIRECTORY: subset });
+      assert.match(migration(`nothing pending through ${last}`, 'apply-migrations.mjs', db,
+        { HID_TEST_MIGRATION_DIRECTORY: subset }), /^0 pending migration\(s\)/);
+      const liveEnvironment = {
+        PGDATABASE: db, DATABASE_URL: url(db), CORS_ORIGINS: 'http://127.0.0.1', AUTH_MODE: 'local',
+        AUTH_SIGNING_SECRET: randomBytes(32).toString('base64url'),
+        AUTH_LOGIN_PEPPER: randomBytes(32).toString('base64url'),
+        OTP_HMAC_KEY_B64: Buffer.alloc(32, 0x33).toString('base64'),
+      };
+      const verified = {};
+      for (const verifier of liveVerifiers) {
+        verified[basename(verifier, '.mjs')] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
+          process.execPath, [join(live, verifier)], liveEnvironment)).status ?? 'passed';
+      }
+      results.push({ through: last, applied: through.length - liveFiles.length,
+        runner_output_sha256: sha256(applied), live_verifiers: verified });
+    }
+    evidence.checks.live_images_mid_release = {
+      live_commit: process.env.HID_REHEARSAL_LIVE_COMMIT ?? 'not named', live_schema: liveLast,
+      live_verifiers: liveVerifiers, dependencies_from_this_checkout: linked, points: results };
+  }
   const before = await snapshot(database);
   const beforeIntegrity = await integrity(database);
   const backupPath = join(evidenceDirectory, 'pre-migration.dump');
