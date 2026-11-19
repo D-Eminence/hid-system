@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { FACILITY_MODULE_RULES, facilityModuleAccess, type FacilityModuleAccess, type FacilityModuleKey }
+import { FACILITY_MODULE_RULES, facilityModuleAccess, type FacilityModuleAccess, type FacilityModuleKey,
+  type FacilityModuleRule }
   from '../src/auth/facility-modules';
 
 /**
@@ -67,7 +68,15 @@ export function seededRolePermissions(): Map<string, string[]> {
   return new Map([...grants].map(([role, set]) => [role, [...set].sort()]));
 }
 
-const TODAY_TEXT: Record<FacilityModuleAccess, string> = { hidden: 'hidden', view: 'view only', full: 'full' };
+/**
+ * Today's level in words. The middle level is not "view only": an area is
+ * shown when its show codes are held, and some show codes are writes (for
+ * example identity.consent.write), so the line names the act codes missing.
+ */
+function todayText(today: FacilityModuleAccess, permissions: readonly string[], area: FacilityModuleRule): string {
+  if (today !== 'view') return today;
+  return `shown, without ${area.act.filter((code) => !permissions.includes(code)).join(' and ')}`;
+}
 
 function akosText(row: RoleMatrixRow, column: RoleMatrixColumn): string {
   const cell = row.cells[column.id];
@@ -106,7 +115,7 @@ export function roleMatrixDifferences(fixture: RoleMatrixFixture, permissionsOf:
           else if (RANK[today] < wanted) kind = 'narrower';
         }
         if (kind) {
-          differences.push(`${role} (${column.label}), ${row.label}: ${kind}. Today ${TODAY_TEXT[today]}; Akos's table ${akosText(row, column)}.`);
+          differences.push(`${role} (${column.label}), ${row.label}: ${kind}. Today ${todayText(today, permissions, area)}; Akos's table ${akosText(row, column)}.`);
         }
       }
     }

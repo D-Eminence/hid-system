@@ -49,7 +49,7 @@ describe('Akos\'s role table against today\'s role rows (SX-1)', () => {
 
   it('says wider or narrower in every recorded difference, and never names a Health ID or NIN', () => {
     for (const difference of FIXTURE.todayDifferences) {
-      expect(difference).toMatch(/: (wider|narrower)\. Today (hidden|view only|full); Akos's table /);
+      expect(difference).toMatch(/: (wider|narrower)\. Today (hidden|full|shown, without [a-z0-9.-]+( and [a-z0-9.-]+)*); Akos's table /);
       expect(difference).not.toMatch(/HID-|\bNIN\b/);
     }
   });

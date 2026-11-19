@@ -7,7 +7,7 @@
     "audit": "View (audit): seen through the facility's audit trail only",
     "hidden": "—: hidden"
   },
-  "comparisonRule": "Each row is compared through one session area (facility-modules.ts). Today's level is hidden, view only (the area's show codes held, not every act code) or full. A level above the table's cell is wider; below it is narrower. A scoped cell counts as view only. An audit cell is met when the area is hidden and the role holds audit.read.",
+  "comparisonRule": "Each row is compared through one session area (facility-modules.ts). Today's level is hidden, shown (the area's show codes held, not every act code; the line names the act codes missing, and some show codes are writes, so this is not always read only) or full. A level above the table's cell is wider; below it is narrower. A scoped cell counts as the table's View. An audit cell is met when the area is hidden and the role holds audit.read.",
   "columns": [
     {
       "id": "frontDesk",
@@ -482,7 +482,7 @@
     ]
   },
   "todayDifferences": [
-    "receptionist (Front desk), Access requests and PIN: narrower. Today view only; Akos's table full.",
+    "receptionist (Front desk), Access requests and PIN: narrower. Today shown, without identity.patient-access-pin.verify; Akos's table full.",
     "receptionist (Front desk), Triage and vitals: narrower. Today hidden; Akos's table view only.",
     "receptionist (Front desk), Scan paper records: narrower. Today hidden; Akos's table full.",
     "receptionist (Front desk), Outreach: wider. Today full; Akos's table hidden.",
@@ -496,11 +496,11 @@
     "clinician (Doctor), Scan paper records: wider. Today full; Akos's table view only.",
     "clinician (Doctor), Outreach: wider. Today full; Akos's table hidden.",
     "lab (Lab), Find patient: wider. Today full; Akos's table with lab orders only.",
-    "lab (Lab), Access requests and PIN: wider. Today view only; Akos's table hidden.",
+    "lab (Lab), Access requests and PIN: wider. Today shown, without identity.patient-access-pin.verify; Akos's table hidden.",
     "pharmacist (Pharmacy), Find patient: wider. Today full; Akos's table with prescriptions only.",
-    "pharmacist (Pharmacy), Access requests and PIN: wider. Today view only; Akos's table hidden.",
+    "pharmacist (Pharmacy), Access requests and PIN: wider. Today shown, without identity.patient-access-pin.verify; Akos's table hidden.",
     "admin (Facility admin), Register and check in: wider. Today full; Akos's table hidden.",
-    "admin (Facility admin), Lab results: wider. Today view only; Akos's table hidden.",
+    "admin (Facility admin), Lab results: wider. Today shown, without lab.result.enter; Akos's table hidden.",
     "org_admin (Facility admin), Register and check in: wider. Today full; Akos's table hidden."
   ]
 }

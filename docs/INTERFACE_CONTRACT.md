@@ -7020,10 +7020,10 @@ hide what a role cannot use. The server still checks every route on its own;
 ### Where it appears
 
 `actor.facilities[*].modules` and, when a facility is selected,
-`actor.facility.modules`, in every `{ actor, ... }` session answer of
+`actor.facility.modules`, in these `{ actor, ... }` session answers of
 identity-api: `POST /api/v1/auth/login`, `POST /api/v1/auth/oidc/exchange`
-(Google sign-in), `POST /api/v1/auth/google/link`, `POST /api/v1/auth/refresh`,
-`GET /api/v1/auth/session`, `POST /api/v1/auth/facility` and the workload
+(Google sign-in), `POST /api/v1/auth/refresh`, `GET /api/v1/auth/session`,
+`POST /api/v1/auth/facility` and the workload
 read of the same answer (`GET` and `POST /api/v1/auth/service-session`).
 
 - `modules` is added after every existing field of the facility. Every
@@ -7033,9 +7033,14 @@ read of the same answer (`GET` and `POST /api/v1/auth/service-session`).
   so their answers are unchanged, byte for byte.
 - It is not an access-token claim and is not stored: it is worked out from
   the facility's `permissions` each time the answer is built.
-- The answer of `POST /api/v1/identity/provider-enrollments/activate`
-  (which signs a new administrator in) is unchanged; the website reads
-  `GET /api/v1/auth/session` afterwards, which carries `modules`.
+- `POST /api/v1/auth/google/link` answers `{ linked: true }` to a patient
+  session, with no actor, so it has no `modules`.
+- Three routes that sign staff in answer an `actor` without `modules`,
+  unchanged: `POST /api/v1/identity/provider-enrollments/activate` (a new
+  administrator), `POST /api/v1/identity/outreach-organisers/activate` and
+  `POST /api/v1/identity/outreach-invitations/accept` (outreach
+  memberships). After them the website reads `GET /api/v1/auth/session`,
+  which carries `modules`.
 
 ### The map
 
@@ -7107,11 +7112,14 @@ seeded permissions (every `insert into auth.role_permissions` in
 `services/ehr-api/database/migrations`, read the same way as the product gate
 tests) with the table, one row at a time through the areas above, and names
 each difference: **wider** (today gives more than the table) or **narrower**
-(today gives less). Today there are 20, recorded in the fixture's
-`todayDifferences`, for example:
+(today gives less). Today's middle level is written "shown, without" the
+area's missing codes, not "view only": an area is shown when its show codes
+are held, and some of those are writes (`identity.consent.write` for access
+requests). Today there are 20, recorded in the fixture's `todayDifferences`,
+for example:
 
-- `receptionist (Front desk), Access requests and PIN: narrower. Today view only; Akos's table full.`
-  (the front desk can ask for access but holds no `identity.patient-access-pin.verify`)
+- `receptionist (Front desk), Access requests and PIN: narrower. Today shown, without identity.patient-access-pin.verify; Akos's table full.`
+  (the front desk can already make access requests, a write, but cannot check a patient's PIN)
 - `doctor (Doctor), Register and check in: wider. Today full; Akos's table hidden.`
 - `lab (Lab), Find patient: wider. Today full; Akos's table with lab orders only.`
 
