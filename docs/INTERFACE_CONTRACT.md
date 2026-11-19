@@ -7036,11 +7036,18 @@ route that reads it today:
 | `latestVitals` | `ehr.vital.read` | exactly the EHR-C3 answer (`facilityId`, `measures`) | 7 measures |
 | `recentVisits` | `ehr.encounter.read` | this facility's visits, newest first | 10 |
 | `openLabRequests` | `ehr.lab-request.read` | lab requests `active` or `on_hold`, newest first, each with `ownProgress` (ORD-3) | 50 |
-| `recentResults` | `lab.result.released.read` | the newest released results Lab gives the EHR (by release time) | 10 |
+| `recentResults` | `lab.result.released.read` | the newest, by release time, of the released results the summary reads from Lab (see `complete` below) | 10 |
 
 Lists answer `{ "items": [...], "more": true | false }`; `more` says there
 were more than the limit. `recentResults` also has `complete` (false when Lab
-had more pages than the summary reads: at most 5 pages of 200).
+had more pages than the summary reads: at most 5 pages of 200). Lab gives its
+pages in record order, not by time. So when `complete` is false (more than
+1,000 released results), the items are the newest of the 1,000 read, and may
+not be the patient's newest results. The pages are read one after another,
+each with the Lab client's own 10-second limit, and the summary sets no
+overall limit on them: a slow Lab can make the whole answer slow, though a
+Lab that fails or times out only leaves `recentResults` out as
+`unavailable`.
 
 Each section reads the same records as its own route: this facility's
 visits, diagnoses, prescriptions, lab requests and vitals; the patient's
@@ -7101,12 +7108,23 @@ One consent check for the whole call, the same as every EHR read: Identity
 decides `read_records` for this patient, member, facility and purpose, and
 the database applies its own row checks as well. Without consent the answer
 is `403 CONSENT_REQUIRED`, audited as `ehr.chart-summary.read` with outcome
-`denied`, and nothing is read. A read writes one EHR audit row,
+`denied`, and nothing is read. A read writes one EHR success audit row,
 `ehr.chart-summary.read` (resource `chart-summary`, the patient's UUID), with
 the sections asked for and a count per EHR section; never a value, a name, a
-Health ID or a NIN. The patient card, the results and the progress are read
-after that, from Identity, Lab and the pharmacy, which check access and audit
-their own reads as they do for the per-section routes.
+Health ID or a NIN. The route is marked to audit failures only, as the
+emergency read and the staff record chat are, so the request's own row is
+written only when the request fails.
+
+The patient card and the results are read after that, from Identity and Lab,
+through the reads the staff record chat already uses. Identity and Lab check
+access themselves, and record these reads under the staff record chat's
+action names: Identity writes `identity.staff.chat.profile.read` once per
+chart open, and Lab writes `lab.staff.chat.released-results.read` once per
+page of results (up to 5 per chart open, each page with its own Identity
+access check). So an auditor sees them as staff record chat reads, not chart
+reads; chart-specific action names in Identity and Lab are a follow-up. The
+pharmacy and laboratory progress is read the same way the per-visit lists
+read it.
 
 ### Emergency (break-glass)
 

@@ -1,7 +1,7 @@
 import { RequestMethod } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import type { PoolClient } from 'pg';
-import { ANY_PERMISSIONS, REQUIRED_PERMISSIONS } from '../../common/decorators';
+import { ANY_PERMISSIONS, AUDIT_FAILURES_ONLY, REQUIRED_PERMISSIONS } from '../../common/decorators';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import { LAB_PROGRESS_UNKNOWN, PHARMACY_PROGRESS_UNKNOWN, type LabOwnProgress,
@@ -134,6 +134,11 @@ describe('EHR-C4 GET ehr/patients/:patientId/chart-summary: the route', () => {
     expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toBeUndefined();
     expect(Reflect.getMetadata(ANY_PERMISSIONS, handler)).toEqual(['ehr.encounter.read', 'ehr.diagnosis.read',
       'ehr.prescription.read', 'ehr.lab-request.read', 'ehr.vital.read', 'ehr.note.read']);
+  });
+
+  it('leaves the success audit row to the service, so a read writes one EHR success row', () => {
+    expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, ChartSummaryController)).toBe(true);
+    expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, PatientRecordsController)).toBe(true);
   });
 
   it('gates each section with the permission its own route already needs (no new permission)', () => {
