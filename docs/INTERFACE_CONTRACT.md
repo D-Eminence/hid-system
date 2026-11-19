@@ -6524,7 +6524,7 @@ filter ("The service could not complete the request."); its `code` and
 `retryAfterSeconds` are always sent. A client shows the plain message, offers
 to try again after `retryAfterSeconds`, sends the same `Idempotency-Key` on
 that retry, and never retries on its own. How long a desk request takes:
-after a few database reads (the replay, QoreID's switch, the hold, a Health
+after a few database reads (the replay, QoreID's switch, a Health
 ID's record, the gate), about `QOREID_TIMEOUT_MS` when it sends its own
 check, and up to `QOREID_TIMEOUT_MS` + 3 s when it waits for another check of
 the same NIN (0137's guard). With the code default (12 s, #271) a waiting
@@ -6584,27 +6584,12 @@ NIN checks (18 November 2026). The review build's limits (20 per staff
 account per hour, 100 per day, 300 per facility per day, `429
 NIN_CHECK_LIMIT_REACHED`, and `503 NIN_CHECK_LIMIT_UNAVAILABLE` when they
 could not be read) are removed; the desk never answers either code. What
-stops a NIN being paid for twice is the check itself, not a count.
-
-One hold stays, for privacy, not volume: the record HID keeps for a NIN
-(0137's stored answer, 90 days under Q110, or a Health ID's record) is
-compared with the desk's name and date of birth for free, so without any
-bound one staff session could try every date of birth against a stranger's
-NIN until one matched, and so learn their date of birth and registered name.
-After 10 "does not match" answers (`name_mismatch`) for one NIN to one staff
-account within 24 hours, that account's checks of that NIN are refused for
-24 hours, before anything is compared or sent: `409 NIN_CHECK_HELD`, "This
-NIN has been checked too many times today with a name or date of birth that
-does not match. Check the details on the patient's NIN slip, or try again in
-24 hours.", `retryAfterSeconds`: the time left; audited `failure`,
-`providerCalled: false`; the breaker is not touched. No other NIN, account or
-facility is affected, and a match or "could not be verified" never counts.
-The count is a keyed row of `auth.otp_rate_limits` (scope `account`, an HMAC
-keyed by the NIN's lookup HMAC: neither the NIN nor the account). If it
-cannot be read, the desk gets "NIN checks cannot be started right now"
-(`503 NIN_PROVIDER_UNAVAILABLE`) and nothing is compared or sent; if a count
-cannot be written, the answer is still given and a fixed warning is logged
-(`identity.nin.mismatch_count_failed`, no identifier).
+stops a NIN being paid for twice is the check itself, not a count. There is no
+limit or hold of any other kind either: no count per staff account, per NIN,
+per facility or across Health ID, and no answer is held because of how often
+a NIN was checked or how often its details did not match. `409
+NIN_CHECK_HELD` means only 0137's hold after a check QoreID may have charged
+(below).
 
 ### The breaker with QoreID
 
@@ -6639,9 +6624,7 @@ check; match, case and spacing, no match, name and date-of-birth mismatch,
 bad records, QoreID failures; the switch off, unreadable, and switched off
 during the check, or unreadable just before sending; no request limits (Q109:
 25 checks by one account, and 400 by 40 accounts at one facility, are never
-refused for volume); the privacy hold (ten mismatches for one NIN to one
-account, then held for that account only, a day; matches and "could not be
-verified" never count; an unreadable hold sends nothing); a NIN already on a
+refused for volume; no hold or count is read or written); a NIN already on a
 Health ID (matched from the record without the NIN service, other details
 left to it, a patient changed before the write, not read while switched off);
 any record will do (no recognised sex), and stored answers said to be stored;
@@ -6664,7 +6647,8 @@ the profile or met at the desk, one charge; a record the desk did not match
 kept 24 hours, a matched one 90 days; a NIN on a Health ID after the stored
 answer ended, no charge; slow answers that do not trip the breaker, answers
 that never come that do; a stored 404 counted once; a stored answer that does
-not close a retrying breaker; a date-of-birth search stopped after ten tries;
+not close a retrying breaker; forty "does not match" answers for one NIN by
+one account, each answered, none held;
 a timeout and the retry with the same `Idempotency-Key`; held, in progress,
 store unreachable; every NIN request sent under the guard's lease; no NIN in
 an audit row or log line). `services/identity-api/src/config/env-example-qoreid.spec.ts`

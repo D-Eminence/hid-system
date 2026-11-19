@@ -1,19 +1,16 @@
 \set ON_ERROR_STOP on
--- Q108 desk NIN check review (no migration): the two reads the registration
--- desk now makes before it asks the NIN service, word for word as
--- NinRegistrationService sends them (qoreid-nin-desk.spec.ts checks that),
+-- Q108 desk NIN check review (no migration): the read the registration desk
+-- makes before it asks the NIN service, word for word as
+-- NinRegistrationService sends it (qoreid-nin-desk.spec.ts checks that),
 -- run under row-level security as Identity's runtime role in the context
 -- Identity's transactions set. Rollback-only. Fictional people, places and
 -- identifiers only; ids start a5180.
 --
---   1. readNinHolder (Q110): the active patient who holds the NIN verified
---      and not revoked, with the name, date of birth (as text), sex and that
---      check's provider, reference and time; nothing for a revoked NIN, an
---      inactive patient or an unknown NIN; nothing for a member without
---      identity.registration.write.
---   2. assertNotHeldForMismatches (privacy hold): a keyed auth.otp_rate_limits
---      row blocked until later is read with its end; one whose block ended,
---      one never blocked and an unknown bucket read nothing.
+--   readNinHolder (Q110): the active patient who holds the NIN verified and
+--   not revoked, with the name, date of birth (as text), sex and that check's
+--   provider, reference and time; nothing for a revoked NIN, an inactive
+--   patient or an unknown NIN; nothing for a member without
+--   identity.registration.write.
 --
 -- Each case records its outcome and the suite fails at the end listing every
 -- case whose outcome differs.
@@ -66,14 +63,6 @@ insert into identity.patient_identifiers (id, patient_id, identifier_type, value
   ('a5180600-0000-4000-8000-000000000003', 'a5180400-0000-4000-8000-000000000003', 'nin',
    decode(repeat('ab', 32), 'hex'), repeat('c3', 32), 'k1', '****8903', true, '2026-10-04 08:00:00+00', 'qoreid',
    '8003', 'a5180500-0000-4000-8000-000000000003', null, null);
--- Hold buckets: d1 blocked for a day; d2 whose block ended; d3 counted, never blocked.
-insert into auth.otp_rate_limits (scope, bucket_hmac, window_started_at, request_count, blocked_until, updated_at)
-values
-  ('account', repeat('d1', 32), clock_timestamp() - interval '1 hour', 10, clock_timestamp() + interval '1 day',
-   clock_timestamp()),
-  ('account', repeat('d2', 32), clock_timestamp() - interval '2 days', 10, clock_timestamp() - interval '1 hour',
-   clock_timestamp()),
-  ('account', repeat('d3', 32), clock_timestamp() - interval '1 hour', 3, null, clock_timestamp());
 set local session_replication_role = origin;
 
 -- The holder read, word for word as NinRegistrationService.readNinHolder sends it: $1 the NIN lookup HMAC.
@@ -92,14 +81,6 @@ language sql stable as $$
             and identifier.revoked_at is null
             and patient.status = 'active'
           limit 1
-$$;
-
--- The hold read, word for word as NinRegistrationService.assertNotHeldForMismatches sends it: $1 the bucket.
-create function pg_temp.desk_nin_hold(char(64))
-returns table (blocked_until timestamptz)
-language sql stable as $$
-  select blocked_until from auth.otp_rate_limits
-            where scope = 'account' and bucket_hmac = $1 and blocked_until > clock_timestamp()
 $$;
 
 create temporary table holder_outcomes (seq serial, name text primary key, expected text not null, actual text)
@@ -130,31 +111,11 @@ begin
   reset role;
   return outcome;
 end $f$;
-create function pg_temp.hold_as(n integer, bucket text) returns text language plpgsql as $f$
-declare outcome text;
-begin
-  set local role hid_identity_api_runtime;
-  perform set_config('app.actor_subject', 'synthetic:holder-member-' || n, true),
-    set_config('app.facility_id', 'a5180000-0000-4000-8000-000000000002', true),
-    set_config('app.correlation_id', 'holder-suite-hold-' || n, true),
-    set_config('app.membership_id', 'a5180300-0000-4000-8000-00000000000' || n, true),
-    set_config('app.purpose_of_use', 'healthcare-operations', true);
-  begin
-    select coalesce(string_agg(case when hold.blocked_until > clock_timestamp() + interval '23 hours'
-        then 'held about a day' else 'held ' || hold.blocked_until::text end, ','), 'none')
-      into outcome
-      from pg_temp.desk_nin_hold(bucket::char(64)) hold;
-  exception when others then
-    outcome := sqlstate || ' ' || sqlerrm;
-  end;
-  reset role;
-  return outcome;
-end $f$;
 create function pg_temp.holder_case(case_name text, expected text, actual text) returns void language sql as $f$
   insert into pg_temp.holder_outcomes (name, expected, actual) values (case_name, expected, actual)
 $f$;
 
--- 1. The holder read.
+-- The holder read.
 select pg_temp.holder_case('1a the desk reads the active patient holding the checked NIN, with its evidence',
   'a5180400-0000-4000-8000-000000000001|Ada|Holder|1991-04-05|female|qoreid|8001|2026-10-01T08:00:00Z',
   pg_temp.holder_as(1, repeat('c1', 32)));
@@ -163,13 +124,6 @@ select pg_temp.holder_case('1c an inactive patient is no holder', 'none', pg_tem
 select pg_temp.holder_case('1d an unknown NIN has no holder', 'none', pg_temp.holder_as(1, repeat('c9', 32)));
 select pg_temp.holder_case('1e a member without identity.registration.write reads no holder', 'none',
   pg_temp.holder_as(2, repeat('c1', 32)));
-
--- 2. The hold read.
-select pg_temp.holder_case('2a a bucket blocked for a day is held, with its end', 'held about a day',
-  pg_temp.hold_as(1, repeat('d1', 32)));
-select pg_temp.holder_case('2b a bucket whose block ended is not held', 'none', pg_temp.hold_as(1, repeat('d2', 32)));
-select pg_temp.holder_case('2c a counted bucket never blocked is not held', 'none', pg_temp.hold_as(1, repeat('d3', 32)));
-select pg_temp.holder_case('2d an unknown bucket is not held', 'none', pg_temp.hold_as(1, repeat('d9', 32)));
 
 -- Result.
 do $$
