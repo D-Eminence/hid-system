@@ -27,7 +27,8 @@
 -- WHAT IT DOES
 -- D1 identity.facility_work_member_allows(kind, patient, facility, action):
 --    true when the session works for this facility's pharmacy ('pharmacy')
---    or laboratory ('lab'): purpose direct-care; the row's facility is the
+--    or laboratory ('lab'): its transaction set app.own_facility_work to
+--    '0133' (D13); purpose direct-care; the row's facility is the
 --    session's; the member holds, at that facility, <kind>.work-item.read
 --    and <kind>.order-route.receive (the permission that already lets the
 --    pharmacist and the lab scientist work on another facility's orders;
@@ -424,18 +425,24 @@
 -- functions and never set app.own_facility_work, so the own-work policies,
 -- D2 and D4's own-work branch give them nothing (D13): today's lab-api and
 -- pharmacy-api list, read and write what they do on 0001-0127, and audit as
--- they do there, at the cost of each own-work policy asking the session's
--- half once per statement (THE COST). Each of them can therefore be
+-- they do there, at the cost THE COST gives for every session (each
+-- own-work policy asks the session's half once per statement, and the
+-- planner, which cannot know the switch, estimates their lists as it does
+-- the new images', JIT step included). Each of them can therefore be
 -- deployed, or rolled back, on its own after this migration. Two changes
 -- do not depend on those images. The withdrawal (D8): its trigger marks a
 -- sent prescription changed by any ehr-api image. The automatic send (D7):
--- the new ehr-api image makes it whichever pharmacy-api serves. While
--- today's pharmacy-api serves (a rollback of it alone), a prescription sent
--- that way reaches its pharmacists only through a consent grant, as any
--- prescription did before 0133, and it cannot also be sent to an outside
--- pharmacy (ORDER_ROUTE_ORDER_IN_WORK, as with the new image until Q119 is
--- built), so it waits for the new image. Applied migrations before 0133 are
--- immutable.
+-- the new ehr-api image makes it whichever pharmacy-api serves, and tells
+-- the prescriber it was sent. While today's pharmacy-api serves (a rollback
+-- of it alone, or a rollout in which the new ehr-api serves first), a
+-- prescription sent that way reaches its pharmacists only through a
+-- consent grant, as any prescription did before 0133; accepting it again
+-- there is refused (the work items' unique key on the prescription); and it
+-- cannot also be sent to an outside pharmacy (ORDER_ROUTE_ORDER_IN_WORK, as
+-- with the new image until Q119 is built). It waits for the new
+-- pharmacy-api, so pharmacy-api goes out with or before ehr-api, and a
+-- rollback of pharmacy-api alone is safe for access but leaves those
+-- prescriptions waiting. Applied migrations before 0133 are immutable.
 --
 -- Undo (by hand only; no release runs it), in one transaction: drop the
 -- trigger prescriptions_own_pharmacy_send_withdrawn first, then

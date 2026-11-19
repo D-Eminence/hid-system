@@ -7055,16 +7055,18 @@ The rule above answers only a staff session whose transaction sets
 `app.own_facility_work` to `'0133'`. The new lab-api and pharmacy-api
 images set it in every staff transaction (always; it is not a setting
 anyone configures). Today's images never set it, so on a database with
-0133 they list, read, write and record exactly what they do without it:
+0133 they list, read, write and record exactly what they do without 0133:
 their pharmacy and lab staff still need a consent grant, and the patient
 cards and audit rows stay as 0124 gives them. Either image can be rolled
 back alone after 0133; it then works as it did before 0133 until it is
 deployed again. The automatic send below is the new ehr-api's and does
-not wait for the new pharmacy-api: while today's pharmacy-api serves, a
-prescription sent that way reaches its pharmacists only through a consent
-grant, as any prescription did before 0133, and it cannot also be sent to
-an outside pharmacy (`ORDER_ROUTE_ORDER_IN_WORK`, as with the new image
-until Q119 is built), so it waits for the new pharmacy-api. A session that sets the value still needs everything the
+not wait for the new pharmacy-api: while today's pharmacy-api serves (a
+rollback of it alone, or a rollout in which the new ehr-api serves first),
+a prescription sent that way is answered as sent, reaches the pharmacists
+only through a consent grant, as any prescription did before 0133, and
+cannot also be sent to an outside pharmacy (`ORDER_ROUTE_ORDER_IN_WORK`, as
+with the new image until Q119 is built), so it waits for the new
+pharmacy-api. pharmacy-api therefore goes out with or before ehr-api. A session that sets the value still needs everything the
 rule asks; the value only narrows. The withdrawal below is the database's
 and does not depend on it.
 
