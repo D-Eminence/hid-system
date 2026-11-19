@@ -71,12 +71,18 @@
 --      purpose (which must be the session's), while the patient is active
 --      and the seal allows it; null otherwise. Other packages (break-glass
 --      by matchRef, check-in) call it; it writes nothing (they audit).
+--   3b. identity.activate_break_glass_by_match_ref(match ref, reason,
+--      minutes) (SECURITY DEFINER), for the Identity runtime (ID-5): the
+--      patient of an emergency search's matchRef of this account,
+--      membership and facility, then 0031's identity.activate_break_glass,
+--      unchanged, with that patient's Health ID; an unresolved ref is
+--      refused as an unknown Health ID ('Patient is not available').
 --   4. identity.patient_self_access_log (0093) replaced: 0093's body with
 --      one more kind, found_in_emergency_search, for
 --      identity.patient.emergency-search.shown rows by staff (owner Q104).
 --      A standard search's rows are not shown there.
 --   5. Owners and EXECUTE: the table and functions are owned by the owner
---      of identity.has_active_consent_grant (as 0131's); EXECUTE on 2 and 3
+--      of identity.has_active_consent_grant (as 0131's); EXECUTE on 2, 3 and 3b
 --      for hid_identity_runtime only (here when the role exists, and in
 --      runtime-grants.sql).
 --
@@ -115,7 +121,8 @@ begin
   end if;
   if to_regclass('identity.patient_search_refs') is not null
      or to_regprocedure('identity.staff_patient_search(text, text, text, date, text, text[], text, text)') is not null
-     or to_regprocedure('identity.resolve_patient_search_ref(text, text)') is not null then
+     or to_regprocedure('identity.resolve_patient_search_ref(text, text)') is not null
+     or to_regprocedure('identity.activate_break_glass_by_match_ref(text, text, integer)') is not null then
     raise exception using errcode = '55000', message = '0132: already applied';
   end if;
   if (select md5(prosrc) from pg_proc
@@ -129,7 +136,8 @@ begin
      or to_regprocedure('identity.sealed_qa_patient(uuid)') is null
      or to_regprocedure('platform.require_control_enabled(text)') is null
      or to_regprocedure('auth.membership_has_permission(text, uuid, uuid, text)') is null
-     or to_regprocedure('auth.account_id_for_subject(text)') is null then
+     or to_regprocedure('auth.account_id_for_subject(text)') is null
+     or to_regprocedure('identity.activate_break_glass(text, text, integer)') is null then
     raise exception using errcode = '55000', message = '0132: a function this file calls is missing';
   end if;
   if not exists (select 1 from pg_extension where extname = 'pgcrypto')
@@ -437,6 +445,45 @@ comment on function identity.resolve_patient_search_ref(text, text) is
   '0132: the patient id of an unexpired matchRef made by a search of this account, membership and facility for this purpose (the session''s), while the patient is active and the seal allows it; null otherwise. Writes nothing; callers audit.';
 revoke all on function identity.resolve_patient_search_ref(text, text) from public;
 
+-- 3b. Break-glass by matchRef (ID-5): the emergency search's card carries no
+-- Health ID, so the next step names the patient by the card's matchRef. The
+-- ref must be this account's, membership's and facility's, from an emergency
+-- search (the session's purpose, which break-glass requires anyway), in the
+-- last 10 minutes, for an active patient the seal allows; anything else is
+-- refused as an unknown Health ID is ('Patient is not available', P0002),
+-- the same for every reason. The activation itself is 0031's
+-- identity.activate_break_glass, unchanged, with the patient's Health ID,
+-- run as this function's owner: its permission, purpose, reason, duration,
+-- seal, hourly limit, replay, grant, event and audit all apply as they do
+-- to a Health ID typed at the desk.
+create function identity.activate_break_glass_by_match_ref(
+  requested_ref text, requested_reason text, requested_duration_minutes integer)
+returns table (access_request_id uuid, consent_grant_id uuid, subject_patient_id uuid, grant_status text,
+  expires_at timestamptz, existing_grant boolean)
+language plpgsql
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  matched_patient uuid := identity.resolve_patient_search_ref(requested_ref, 'emergency');
+  matched_hid text;
+begin
+  if matched_patient is not null then
+    select patient_row.hid_code into matched_hid from identity.patients patient_row where patient_row.id = matched_patient;
+  end if;
+  if matched_hid is null then
+    raise exception using errcode = 'P0002', message = 'Patient is not available';
+  end if;
+  return query select activated.access_request_id, activated.consent_grant_id, activated.subject_patient_id,
+                      activated.grant_status, activated.expires_at, activated.existing_grant
+                 from identity.activate_break_glass(matched_hid, requested_reason, requested_duration_minutes) activated;
+end
+$$;
+
+comment on function identity.activate_break_glass_by_match_ref(text, text, integer) is
+  '0132 (ID-5): break-glass for the patient behind an emergency search''s matchRef of this account, membership and facility (10 minutes); 0031''s activate_break_glass does the rest, unchanged. An unresolved ref is refused as an unknown Health ID.';
+revoke all on function identity.activate_break_glass_by_match_ref(text, text, integer) from public;
+
 -- 4. The patient's access log (0093), with emergency searches (owner Q104).
 create or replace function identity.patient_self_access_log(
   requested_subject text, requested_session uuid, requested_limit integer,
@@ -609,10 +656,12 @@ begin
     execute format('alter table identity.patient_search_refs owner to %I', grant_owner);
     execute format('alter function identity.staff_patient_search(text, text, text, date, text, text[], text, text) owner to %I', grant_owner);
     execute format('alter function identity.resolve_patient_search_ref(text, text) owner to %I', grant_owner);
+    execute format('alter function identity.activate_break_glass_by_match_ref(text, text, integer) owner to %I', grant_owner);
   end if;
   if exists (select 1 from pg_roles where rolname = 'hid_identity_runtime') then
     grant execute on function identity.staff_patient_search(text, text, text, date, text, text[], text, text),
-      identity.resolve_patient_search_ref(text, text) to hid_identity_runtime;
+      identity.resolve_patient_search_ref(text, text),
+      identity.activate_break_glass_by_match_ref(text, text, integer) to hid_identity_runtime;
   end if;
 end
 $$;
@@ -622,7 +671,8 @@ do $$
 begin
   if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
               where proc.oid in ('identity.staff_patient_search(text, text, text, date, text, text[], text, text)'::regprocedure,
-                                 'identity.resolve_patient_search_ref(text, text)'::regprocedure)
+                                 'identity.resolve_patient_search_ref(text, text)'::regprocedure,
+                                 'identity.activate_break_glass_by_match_ref(text, text, integer)'::regprocedure)
                 and acl.grantee <> proc.proowner
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) <> 'hid_identity_runtime')) then
     raise exception using errcode = '55000', message = '0132: a search function is granted to a role other than hid_identity_runtime';

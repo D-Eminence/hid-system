@@ -142,7 +142,7 @@ const acceptedMigrations = new Map([
   ['0127_sso_relying_party.sql', '9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d'],
   ['0130_desk_registration_without_nin.sql', '685a939427b1120d57a61a9c61714cda31cba9998f462253cd17801bb62220c1'],
   ['0131_own_facility_patient_access.sql', 'd57f52528357df4e647a5dc9ba69840f8f2670c46b2a1086d0be1c6dfd031021'],
-  ['0132_staff_patient_search.sql', '75a9db1202048df11fe462b5a53bb75bd9b532dd4b91381ff1b615080ec6ae0d'],
+  ['0132_staff_patient_search.sql', '31ff0b7bf428125950f8a3830338970b8f2dc8f0b4d23cb95509c0ae2e9fa03b'],
   ['0135_visit_queue.sql', '8880d71e8d03ae9dea7614eb88316788d3ad16dca8974218755c8a922a6ce891'],
 ])
 
