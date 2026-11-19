@@ -1762,40 +1762,53 @@ grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
 revoke all on function auth.guard_session_single_sign_on_change() from public;
 
 -- This facility's own pharmacy and lab work (0133, ORD-2, owner decisions of
--- 18 November 2026), exactly as 0133 grants it: the send, its staffed test
--- and the withdrawal to the EHR runtime; the two halves of the own-work test
--- (the own-work policies of the work items and their chain call them, with
--- the querying role's privileges, as 0086's context_allows), the own-work
--- access check and the list's states to the Lab and Pharmacy runtimes; each
--- also to the schema test runtime. The helpers
--- identity.facility_work_member_allows and
--- pharmacy.own_work_source_prescription, and the withdrawal trigger's
--- function ehr.own_pharmacy_send_withdrawn_on_change, are executed by no
--- role: the functions and the trigger that call them run them as their
--- owner. No role has any privilege on pharmacy.own_prescription_sends.
+-- 18 and 19 November 2026), exactly as 0133 grants it: the send, its staffed
+-- test and the withdrawal to the EHR runtime; the session's half of the
+-- own-work test to the Lab and Pharmacy runtimes, and each kind's row's half
+-- to that kind's runtime only (the own-work policies of the work items and
+-- their chain call them, with the querying role's privileges, as 0086's
+-- context_allows): identity.pharmacy_work_patient_allows to the Pharmacy
+-- runtime, identity.lab_work_patient_allows to the Lab runtime; the own-work
+-- access check and the list's states to their runtimes, and the withdrawn
+-- items reader (D14) to the Pharmacy runtime; each also to the schema test
+-- runtime. The helpers identity.facility_work_member_allows and
+-- pharmacy.own_work_source_prescription, and the trigger functions
+-- ehr.own_pharmacy_send_withdrawn_on_change (the withdrawal),
+-- pharmacy.claim_prescription_work_item and
+-- pharmacy.claim_prescription_dispensing (D14's claims) and
+-- identity.list_own_work_patient (D15's list), are executed by no role: the
+-- functions and the triggers that call them run them as their owner. No role
+-- has any privilege on pharmacy.own_prescription_sends,
+-- pharmacy.prescription_item_claims or identity.own_work_patients.
 grant execute on function ehr.send_prescription_to_own_pharmacy(uuid, bigint),
   ehr.withdraw_own_pharmacy_send(uuid), ehr.own_pharmacy_staffed() to hid_ehr_runtime, hid_schema_test_runtime;
 grant execute on function identity.facility_work_session_membership(text),
-  identity.facility_work_patient_allows(text, uuid, uuid, uuid, text),
+  identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text),
   pharmacy.own_work_access_for(text, uuid, text),
-  pharmacy.own_work_item_states(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+  pharmacy.own_work_item_states(uuid[]),
+  pharmacy.own_withdrawn_work_items() to hid_pharmacy_runtime, hid_schema_test_runtime;
 grant execute on function identity.facility_work_session_membership(text),
-  identity.facility_work_patient_allows(text, uuid, uuid, uuid, text),
+  identity.lab_work_patient_allows(uuid, uuid, uuid, text),
   lab.own_work_access_for(text, uuid, text),
   lab.own_work_item_bases(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
 revoke all on function identity.facility_work_member_allows(text, uuid, uuid, text),
   identity.facility_work_session_membership(text),
-  identity.facility_work_patient_allows(text, uuid, uuid, uuid, text),
+  identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text),
+  identity.lab_work_patient_allows(uuid, uuid, uuid, text),
   pharmacy.own_work_source_prescription(uuid, uuid, uuid),
   ehr.send_prescription_to_own_pharmacy(uuid, bigint),
   ehr.withdraw_own_pharmacy_send(uuid),
   pharmacy.own_work_access_for(text, uuid, text),
   pharmacy.own_work_item_states(uuid[]),
+  pharmacy.own_withdrawn_work_items(),
   lab.own_work_access_for(text, uuid, text),
   lab.own_work_item_bases(uuid[]),
   ehr.own_pharmacy_send_withdrawn_on_change(),
-  ehr.own_pharmacy_staffed() from public;
-revoke all on pharmacy.own_prescription_sends from public;
+  ehr.own_pharmacy_staffed(),
+  pharmacy.claim_prescription_work_item(),
+  pharmacy.claim_prescription_dispensing(),
+  identity.list_own_work_patient() from public;
+revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims, identity.own_work_patients from public;
 
 -- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):
 -- its install is the owner's alone.
