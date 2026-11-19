@@ -5,7 +5,7 @@ import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
 import { AcceptPrescriptionForPharmacyDto, OrderStatus, TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
-import { neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
+import { hasTypedReason, neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
 import { requireVisitOpenForWork } from '../shared/visit-guard';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
@@ -249,17 +249,20 @@ export class PrescriptionsService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_PRESCRIPTION_TRANSITION', 'Prescription status transition is not allowed');
         }
-        // FR-1: the first activation of a draft, with no other change, needs no
-        // typed reason; the fixed one is recorded. "First" is checked against
-        // the version history (a resume after a hold is not first). Decided
-        // before the allergy check, whose 409 is unchanged.
-        const firstActivation = input.changeReason === undefined
-          && current.status === OrderStatus.Draft && input.status === OrderStatus.Active
-          && input.frequency === undefined && input.instructions === undefined && input.endsOn === undefined
+        // FR-1 and Q105: a draft that was never active may be activated (first
+        // activation) or edited (draft edit), or both, with no typed reason;
+        // the fixed one is recorded. "Never active" is checked against the
+        // version history (a resume after a hold is not first) and fails
+        // closed. Cancelling or entering a draft in error, and any change to
+        // an active, held or ended prescription, needs a typed reason.
+        // Decided before the allergy check, whose 409 is unchanged.
+        const draftWork = current.status === OrderStatus.Draft
+          && (input.status === undefined || input.status === OrderStatus.Draft || input.status === OrderStatus.Active);
+        const free = draftWork && !hasTypedReason(input.changeReason)
           && await neverReachedBefore(client, 'prescriptions', prescriptionId,
             [OrderStatus.Active, OrderStatus.OnHold, OrderStatus.Completed]);
         const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason,
-          firstActivation ? 'first_activation' : undefined);
+          free ? (input.status === OrderStatus.Active ? 'first_activation' : 'draft_edit') : undefined);
         // 0117: Activate (draft) and Resume (on hold) check the allergies again: one may have been
         // recorded since the prescription was saved. A match already covered by a stored reason for
         // this prescription needs none.
