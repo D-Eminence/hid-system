@@ -44,8 +44,13 @@ const GENDERS = new Set(['female', 'male', 'intersex', 'other', 'unknown']);
  * NIN will do, complete or not (the desk needs no photo, address or
  * recognised gender), so a desk request, a resend of it, another desk's
  * request and a sign-up or profile check of the same NIN together make one
- * QoreID call while the answer is kept or the check is running. No
- * per-request claim and no limit (Q109) is kept beside it.
+ * QoreID call while the answer is kept or the check is running, but for
+ * 0137's own exceptions (docs/INTERFACE_CONTRACT.md, Q108, "One QoreID check
+ * per NIN"), each a second charge: a sign-up after an incomplete record; a
+ * desk check or a sign-up after a profile check's "no record", 404 or
+ * unusable answer, which 0137 keeps for the profile's question only (the desk
+ * asks with none); and a NIN_KEY_VERSION change. No per-request claim and no
+ * limit (Q109) is kept beside it.
  */
 @Injectable()
 export class QoreIdNinVerificationProvider implements NinVerificationProvider {

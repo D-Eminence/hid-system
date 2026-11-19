@@ -47,9 +47,11 @@ export interface PublicPatientIdentityProvider {
    * for the NIN will do, complete or not, because the desk compares only its
    * name and date of birth. A record kept as incomplete (no recognised
    * gender, a photo or an address HID cannot read) by any path, or an answer
-   * kept as unusable that still gives a readable name and date of birth, is
-   * used, not paid for again; such a record QoreID returns here is kept as
-   * an incomplete record, as a profile check keeps it.
+   * a sign-up or a desk check kept as unusable that still gives a readable
+   * name and date of birth, is used, not paid for again (0137 keeps a profile
+   * check's answer that is not a record for that check's question only, so
+   * it is not reused here); such a record QoreID returns here is kept as an
+   * incomplete record, as a profile check keeps it.
    *
    * Says whether the answer came from QoreID for this request or from
    * storage. QoreID's "not found" and an answer without a readable name are

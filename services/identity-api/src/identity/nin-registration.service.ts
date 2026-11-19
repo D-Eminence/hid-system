@@ -872,10 +872,12 @@ export class NinRegistrationService {
     }
     // Q108/Q109: each live check is charged. QoreID's check (the only live
     // one) is 0137's once-per-NIN guard, so a resend of this request, another
-    // desk's request and any other path's check of the same NIN make at most
-    // one QoreID call; a match is answered by the case it created (resolve
-    // finds it first). No limit per staff account, per facility or across
-    // Health ID.
+    // desk's request and any other path's check of the same NIN make one
+    // QoreID call while its answer is kept, but for 0137's exceptions (the
+    // contract's "One QoreID check per NIN": a sign-up after an incomplete
+    // record, a profile check's answer that is not a record, a key version
+    // change); a match is answered by the case it created (resolve finds it
+    // first). No limit per staff account, per facility or across Health ID.
     //
     // D4: the breaker counts only what the NIN service did for this request.
     // onSettled says how this request's own check ended; `late.then` says
