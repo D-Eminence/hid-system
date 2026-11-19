@@ -140,7 +140,7 @@ const acceptedMigrations = new Map([
   ['0125_prescription_dispensing_details.sql', '819afe2de86c400f2ad648ed928eb8318e55fdf0cd17952583b1fd1c52b25bd4'],
   ['0126_organization_staff_kinds.sql', '783f34c54d5289426f47e8c101378209f155ef499ad4e0c1290e17579190fe97'],
   ['0127_sso_relying_party.sql', '9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d'],
-  ['0133_own_facility_pharmacy_and_lab_work.sql', 'a41f5796ba8fe39f8f4ced5250c4b45a4395381f30cc865005e824baf372e20c'],
+  ['0133_own_facility_pharmacy_and_lab_work.sql', 'b3bdc215bf0e897a70763c65b2817bd93cb0fbc1adc2798fd096fc23c85622fb'],
   ['0134_sealed_qa_hospital_pharmacy_lab_staff.sql', '13a58405e179befac7eb3e1854862b33787e040177a48fa98f55557b2cedb5b7'],
 ])
 
