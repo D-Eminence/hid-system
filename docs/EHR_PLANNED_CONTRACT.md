@@ -7,7 +7,8 @@ This file lists the API that Akos's EHR frontend will need but that is not built
 - The live contract is [INTERFACE_CONTRACT.md](INTERFACE_CONTRACT.md). Release A's sections (ID-0, ID-2, ID-4, 0132, EHR-C7, 0136, ORD-2, QA-1 and the rest) land there when they are signed. Sections here cite them by name.
 - A section moves from this file into the live contract when its release is signed. The final text may change in review; any change to a shape here is noted in the PR that makes it live.
 - Migration numbers here are provisional. Numbers are given out in merge order at each release cut-off.
-- **"(assumes Qnnn A — not yet confirmed)"** marks a line that follows our recommended answer to an owner question that is still open. If the owner answers differently, only the marked lines change. Lines without the mark rest on decisions already made (Q100 B, Q105, Q109, Q115, Q117, Q119 and Q121 A, Q123 A).
+- All owner questions for these sections are answered as of 19 Nov 2026. **"(owner decision Qnnn A, 19 Nov 2026)"** marks a line that rests on one of the answers given that day (Q124 A, Q126 A, Q127 A, Q128 A, Q129 A, Q130 A, Q131 A; Q125 B made ORD-4 a planned section). Lines without the mark rest on decisions made earlier (Q100 B, Q105, Q109, Q115, Q117, Q119 and Q121 A, Q123 A).
+- For Q124 A, Health ID's named clinical lead approves changes to the national lists (medicines, lab tests, diagnoses, vitals ranges and same-class rules). The lead is not named in this repository.
 
 Rules that hold in every section:
 
@@ -34,6 +35,7 @@ Rules that hold in every section:
 | [ORD-7: Medicine and lab-test lists, and lab tests by name only](#ord-7-medicine-and-lab-test-lists-and-lab-tests-by-name-only-planned-release-b-needs-a-migration-yes) | P0-5, N-7, N-9, R-2, R-3, P2-5 | B | yes | L |
 | [ORD-9: Diagnosis search on ICD-11, recent diagnoses, and diagnoses by name only](#ord-9-diagnosis-search-on-icd-11-recent-diagnoses-and-diagnoses-by-name-only-planned-release-b-needs-a-migration-yes) | P1-12, R-1, P2-5, P0-5 | B | yes | M |
 | [ORD-10 phase 2: Same-class medicine warning by ATC](#ord-10-phase-2-same-class-medicine-warning-by-atc-planned-release-b-needs-a-migration-no) | N-9, P0-5 | B | no | S |
+| [ORD-4: Pharmacy accepts a prescription before dispensing](#ord-4-pharmacy-accepts-a-prescription-before-dispensing-planned-release-b-needs-a-migration-yes) | N-1, N-8 (pharmacy part) | B | yes | M |
 | [ID-8: Merge an unknown or duplicate record into the real one, with a 30-day undo](#id-8-merge-an-unknown-or-duplicate-record-into-the-real-one-with-a-30-day-undo-planned-release-c-needs-a-migration-yes) | P0-4, P0-1 (duplicates) | C | yes | L |
 | [SX-6: Change password while signed in, and edit own profile](#sx-6-change-password-while-signed-in-and-edit-own-profile-planned-release-c-needs-a-migration-yes) | P1-8 | C | yes | M |
 | [SX-7: Preferences and up to 12 home shortcuts](#sx-7-preferences-and-up-to-12-home-shortcuts-planned-release-c-needs-a-migration-yes) | P1-8, home shortcuts | C | yes | S |
@@ -41,7 +43,6 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
-| [ORD-4: A pharmacy "Accepted" step](#ord-4-a-pharmacy-accepted-step-not-planned-no-release-needs-a-migration-no) | N-1, N-8 | not planned | no | M if reopened |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -49,7 +50,14 @@ Rules that hold in every section:
 | [P2-4: Time zone, date and phone formats](#p2-4-time-zone-date-and-phone-formats-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-4 | after C | yes, when designed | M |
 | [QA-2: Migrate account test pass and one real save of every drawer form](#qa-2-migrate-account-test-pass-and-one-real-save-of-every-drawer-form-planned-before-the-release-a-go-live-needs-a-migration-no) | R-4, QA question | before A go-live | no | S |
 
-Owner questions still open, and the sections that assume answer A: Q124 (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 (ORD-4), Q126 (EHR-C6, ORD-8), Q127 (ID-8, ORD-11), Q128 (ORD-11, SX-7), Q129 (SX-4, CHW-1), Q130 (CHW-1), Q131 (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4).
+Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4). No owner question for these sections is waiting for an answer.
+
+Open points with no decision yet, each to be decided before that section is built:
+
+- ID-7: whether the sealed QA facility may make unknown records for testing (recommended: yes, as sealed QA patients).
+- ORD-8: who keeps a facility's order sets and templates (and so who holds `ehr.order-set.manage`).
+- ORD-7 and ORD-10 phase 2: the WHOCC terms for using ATC codes in a commercial product (until then `atcCode` stays `null`).
+- CHW-1: whether to record a community health worker's registration number.
 
 # Release B
 
@@ -295,7 +303,7 @@ Audit:
 - 0133.
 - ID-6, after identify.
 - ID-8, the merge path from Release C.
-- Owner questions: none pending for this package. The merge path assumes Q127 A (see ID-8). Open point with no question number yet: whether the sealed QA facility may make unknown records for testing. Recommended: yes, as sealed QA patients.
+- Owner questions: none pending for this package. The merge path follows owner decision Q127 A, 19 Nov 2026 (see ID-8). Open point with no decision yet, to be decided before this section is built: whether the sealed QA facility may make unknown records for testing. Recommended: yes, as sealed QA patients.
 
 ### Target
 
@@ -310,7 +318,7 @@ Akos items:
 
 Status: planned, not live.
 
-Owner decision: assumes Q129 A — not yet confirmed. Facility administrators add and remove roles for their own staff. At governed facilities (QA Hospital included), Health ID support does it, with a licence check.
+Owner decision Q129 A, 19 Nov 2026. Facility administrators add and remove roles for their own staff. At governed facilities (QA Hospital included), Health ID support does it, with a licence check.
 
 **What exists today.** The database already lets one membership hold several roles (`auth.account_roles`). Today's screens can only *replace* a member's roles with one role: `POST /identity/facility-staff/:membershipId/role` (`facility-staff.controller.ts`, `identity.change_facility_staff_role` in 0086). That route works only at self-signed-up facilities. Governed and legacy facilities get 403 `STAFF_MANAGEMENT_NOT_AVAILABLE`. The route stays as it is. SX-4 adds two narrower commands beside it.
 
@@ -320,9 +328,9 @@ All routes are under `/api/v1`. Membership ids are UUIDs, and no Health ID or NI
 
 | Method and path | Who may call | Permission |
 |---|---|---|
-| `POST /identity/facility-staff/:membershipId/roles/add` | The facility's administrator, at a self-signed-up facility that support has reviewed, for their own staff. Needs a staff session at the `X-Facility-ID` facility, plus Origin and CSRF checks as today. | `workforce.manage` (assumes Q129 A — not yet confirmed) |
-| `POST /identity/facility-staff/:membershipId/roles/remove` | Same as above. | `workforce.manage` (assumes Q129 A — not yet confirmed) |
-| `POST /admin/facilities/:facilityId/staff/:membershipId/roles/add` | Health ID support, at any facility. This is the only way at governed facilities, QA Hospital included (assumes Q129 A — not yet confirmed). | new `platform.facility-staff.manage`, given to the platform roles that hold `platform.principal.manage` today |
+| `POST /identity/facility-staff/:membershipId/roles/add` | The facility's administrator, at a self-signed-up facility that support has reviewed, for their own staff. Needs a staff session at the `X-Facility-ID` facility, plus Origin and CSRF checks as today. | `workforce.manage` (owner decision Q129 A, 19 Nov 2026) |
+| `POST /identity/facility-staff/:membershipId/roles/remove` | Same as above. | `workforce.manage` (owner decision Q129 A, 19 Nov 2026) |
+| `POST /admin/facilities/:facilityId/staff/:membershipId/roles/add` | Health ID support, at any facility. This is the only way at governed facilities, QA Hospital included (owner decision Q129 A, 19 Nov 2026). | new `platform.facility-staff.manage`, given to the platform roles that hold `platform.principal.manage` today |
 | `POST /admin/facilities/:facilityId/staff/:membershipId/roles/remove` | Same as above. | `platform.facility-staff.manage` |
 
 **Facility administrator: add**
@@ -359,7 +367,7 @@ Body:
 Support sends the same bodies, with these differences:
 - No `currentPassword` and no `expectedVersion`.
 - `If-Match: "<version>"` and `Idempotency-Key` are required, as for every section 19 command.
-- Add also needs `verificationMethod`, which records how support checked the licence. It is one of `regulator_register`, `in_person`, `officer_match`, `cac_registered_contact` or `other` (`VERIFICATION_METHODS`, `staff-licence.ts`), and the licence check is required for every licensed role (assumes Q129 A — not yet confirmed).
+- Add also needs `verificationMethod`, which records how support checked the licence. It is one of `regulator_register`, `in_person`, `officer_match`, `cac_registered_contact` or `other` (`VERIFICATION_METHODS`, `staff-licence.ts`), and the licence check is required for every licensed role (owner decision Q129 A, 19 Nov 2026).
 - QA Hospital's seal (0123) still applies: support may change roles only for the QA tenant's own fictional staff.
 
 **Answers**
@@ -449,7 +457,7 @@ Codes marked "today" already exist. Most are in `staff-invitation-problems.ts`; 
 - SX-1: session `roles` lists every role, `modules` per facility, and the role-matrix fixture.
 - 0136 (role table).
 - Ola's 0129, because SX-4 touches the same Identity staff code.
-- Q129 (pending).
+- Q129 A (owner decision, 19 Nov 2026).
 - CHW-1 adds one more role to the list.
 
 ### Target
@@ -612,13 +620,13 @@ numbers are given out in merge order at the cut-off). Unlike clinical tables,
 this table is **not** versioned in `ehr.record_versions` and rows **can** be
 deleted (clinical tables cannot: `0004:497` and `0004:514`).
 
-Rules (assumes Q126 A — not yet confirmed):
+Rules (owner decision Q126 A, 19 Nov 2026):
 - **Author only.** Only the member who created the draft (same account, same
   membership, same facility) can list, read, save or discard it. Not another
   doctor, not a facility admin, not Health ID support. Enforced by row-level
-  security on the account and membership (assumes Q126 A — not yet confirmed).
+  security on the account and membership (owner decision Q126 A, 19 Nov 2026).
 - **Deleted 7 days after its last save.** A sweeper removes it for good; it
-  is not kept anywhere else in the service (assumes Q126 A — not yet confirmed).
+  is not kept anywhere else in the service (owner decision Q126 A, 19 Nov 2026).
 - One draft per author per visit, and one per author per patient with no
   visit yet.
 - Every call also needs the patient's consent, as for clinical notes:
@@ -667,7 +675,7 @@ Answer `201` (and the same answer on an idempotent replay):
   "sizeBytes": 1834, "createdAt": "...", "savedAt": "...", "expiresAt": "..." }
 ```
 
-`expiresAt` is `savedAt` + 7 days (assumes Q126 A — not yet confirmed).
+`expiresAt` is `savedAt` + 7 days (owner decision Q126 A, 19 Nov 2026).
 
 **Save** (`PATCH`, the auto-save call) replaces the whole content:
 
@@ -744,7 +752,7 @@ audited as every clinical read is today.
   `503` or a network error. On `CONSULTATION_DRAFT_CHANGED`, offer to load the
   newer draft.
 - Show "Drafts are kept for 7 days" near the save status
-  (assumes Q126 A — not yet confirmed).
+  (owner decision Q126 A, 19 Nov 2026).
 - Home or "My work" may show "Unfinished consultations" from
   `my-consultation-drafts`, with "N more for patients you can no longer
   open" from `hiddenCount`.
@@ -756,7 +764,7 @@ audited as every clinical read is today.
 
 ### Depends on
 
-- Owner Q126 (pending; this section assumes A — not yet confirmed).
+- Owner decision Q126 A, 19 Nov 2026.
 - EHR-C5 (one-call consultation). Proposed: EHR-C5's body takes an optional
   `draftId`, and a successful save deletes that draft in the same
   transaction. Until that is agreed, the screen calls discard after the save
@@ -832,7 +840,7 @@ Answer `200`, `Cache-Control: no-store`:
 - `priority`: the lab request's priority; for a prescription, 0125's
   `priority` when set, else `null` (section 46).
 - `ownProgress`: exactly ORD-3's shapes and statuses (pharmacy: `received`,
-  `dispensed`, `dispensing_reversed`, `withdrawn`; lab: `received`,
+  `accepted` once ORD-4 ships, `dispensed`, `dispensing_reversed`, `withdrawn`; lab: `received`,
   `sample_collected`, `some_results_ready`, `results_ready`; plus
   `not_received` and `unknown`). Result values are not in this list; the row
   opens the lab request.
@@ -963,9 +971,9 @@ diastolic 110) follow common severe-hypertension thresholds:
 | Temperature °C | 38.1-39.0 | 35.0 or below, 39.1 or above | below 30 or above 44 |
 | Height, weight | none | none | none |
 
-`approvedBy` stays `null` until a named clinical lead signs the table off
-(we recommend the same lead and review as the medicine and lab-test lists)
-(assumes Q124 A — not yet confirmed). Child ranges are a later version of the
+`approvedBy` stays `null` until Health ID's named clinical lead signs the
+table off, with the same review as the medicine and lab-test lists
+(owner decision Q124 A, 19 Nov 2026). Child ranges are a later version of the
 table.
 
 **Warnings on answers.** The vitals create answer (`201`, and its replay)
@@ -1019,7 +1027,8 @@ Warnings are never errors.
 
 - EHR-C3 (wave 1, on staging) for the `warning` on latest vitals.
 - EHR-C8b: vitals entered in error get no warnings and are not in latest.
-- Q124 (pending; recommended A) for who signs the table off. The screen can
+- Q124 A (owner decision, 19 Nov 2026): Health ID's named clinical lead signs the
+  table off. The screen can
   ship before sign-off with `approvedBy: null`.
 
 ### Target
@@ -1142,7 +1151,7 @@ policy change, tests).
 
 Akos items: N-9 (refills only; strength, form, duration and quantity are live in 0125, section 46; create-as-active already works; formulary search is ORD-7).
 
-Status: planned, not live. Whole package assumes Q131 A (yes to refills) — not yet confirmed.
+Status: planned, not live. Owner decision Q131 A, 19 Nov 2026: yes to refills.
 
 (ORD-12 is a new package id; the build plan lists this under its gaps as "N-9b refills".)
 
@@ -1159,7 +1168,7 @@ No new route. Changed:
 | GET | `/api/v1/pharmacy/work-items`, `/api/v1/pharmacy/work-items/:workItemId` | pharmacy staff | `pharmacy.work-item.read` |
 | POST | `/api/v1/pharmacy/work-items/:workItemId/dispensings` | pharmacist | `pharmacy.dispensing.create` |
 
-Prescription create body: new optional field (assumes Q131 A — not yet confirmed).
+Prescription create body: new optional field (owner decision Q131 A, 19 Nov 2026).
 
 | Field | Value |
 |---|---|
@@ -1174,7 +1183,7 @@ Own pharmacy work items (no order route) gain:
 ```
 
 Dispensing: the body is unchanged (`CreateDispensingDto`: `expectedWorkItemVersion`, `quantityDispensed`, `quantityUnit`, `reason` 8-500), and the `Idempotency-Key` is required as today.
-- A work item now takes up to `1 + refillsAllowed` dispensings (assumes Q131 A — not yet confirmed).
+- A work item now takes up to `1 + refillsAllowed` dispensings (owner decision Q131 A, 19 Nov 2026).
 - The answer gains `fillNumber`: 1 is the first fill, 2 and above are refills.
 - A refill also needs the prescription to be active and not past its `endsOn` (Lagos day). It is checked by 0101's guard, as the first fill is.
 - A reversed fill still counts as used. A reversal never gives a refill back, as today a reversed dispensing counts as done.
@@ -1211,7 +1220,7 @@ Audit: today's `pharmacy.dispensing.create` row, plus `fillNumber`. No new patie
 
 - 0125 (section 46) and 0101 (dispensing guard).
 - ORD-2 (0133, own pharmacy work) and ORD-3.
-- Q123 A and Q119 and Q121 A (decided). Q131 A (pending).
+- Q123 A and Q119 and Q121 A (decided). Q131 A (decided 19 Nov 2026).
 - ORD-11 does not notify for refills, only for the first fill and reversals.
 
 ### Target
@@ -1402,13 +1411,12 @@ together, like section 46's setting.
 - Lab tests: about 150, scoped by the WHO Essential Diagnostics List and
   coded with LOINC (free under its licence, with the attribution above).
   HID-LAB codes cover tests with no good LOINC code.
-- One named Health ID clinical lead owns the national lists (assumes Q124 A
-  — not yet confirmed). The lead has not been named yet.
+- Health ID's named clinical lead owns the national lists and approves every
+  change to them (owner decision Q124 A, 19 Nov 2026).
 - Each change is a reviewed PR to versioned seed files,
   `docs/codes/hid-medicines.json` and `docs/codes/hid-lab-tests.json`
   (HID-LAB codes stay in `hid-lab-codes.json`). It is published only after
-  the lead's sign-off is recorded in the PR (assumes Q124 A — not yet
-  confirmed).
+  the lead's sign-off is recorded in the PR (owner decision Q124 A, 19 Nov 2026).
 - A check like `scripts/tests/hid-lab-codes.test.mjs` proves that codes are
   unique and well formed, and that none is removed or reused.
 - The governed loader (planned, lane D) loads the files. The release
@@ -1471,14 +1479,14 @@ together, like section 46's setting.
 
 - 0125 (section 46): `strength` and `doseForm` on prescriptions.
 - Wave 0 HID-LAB codes.
-- Q124 A (assumes Q124 A — not yet confirmed): the named clinical lead
-  approves list changes. The lead must be named before the first load.
+- Q124 A (owner decision, 19 Nov 2026): Health ID's named clinical lead
+  approves list changes, including the first load.
 - Licence checks before the first load:
   - LOINC attribution text.
   - WHO Model List terms. We copy only generic names, strengths and forms.
-  - WHOCC terms for using ATC codes in a commercial product. This is a new
-    owner question, not yet numbered. Until it is answered, `atcCode` stays
-    `null`.
+  - WHOCC terms for using ATC codes in a commercial product. This is an open
+    point with no decision yet, to be decided before this section is built.
+    Until it is decided, `atcCode` stays `null`.
 - ORD-2 (0133) and order routes for the name-only send paths.
 - SX-1 fixture for the new permission.
 
@@ -1500,13 +1508,13 @@ Akos items: P1-12, R-1, P2-5 (and P0-5's coding ask).
 Status: planned, not live.
 
 Build plan of 18 Nov 2026, migration 0145 (provisional), lane D. This
-section assumes Q124 A (not yet confirmed): ICD-11 is the search list, and
+section follows owner decision Q124 A, 19 Nov 2026: ICD-11 is the search list, and
 ICD-10 codes typed in are still accepted.
 
 Today a diagnosis must have a code (`clinical.dto.ts:304-307`,
 `0004:181`). Any code system text is accepted unchecked (Wave 0 R-1, P2-5).
 The route Akos suggested, `GET /api/v1/ehr/terminology/icd10`, does not
-exist and will not be built (assumes Q124 A — not yet confirmed).
+exist and will not be built (owner decision Q124 A, 19 Nov 2026).
 
 ### Routes
 
@@ -1554,12 +1562,12 @@ Example for `q=falciparum`:
   themselves in the first version; the words of `q` still match coded titles
   as usual. Before release the clinical lead checks that no other name points
   to a narrower title than the words say (for example to "Malaria without
-  parasitological confirmation"). (assumes Q124 A — not yet confirmed)
+  parasitological confirmation"). (owner decision Q124 A, 19 Nov 2026)
 - When `q` looks like an ICD-10 code (a letter, two digits or a digit and a
   letter, then optionally a dot and up to 4 more characters, such as
   `B50.9`), `typedIcd10` is `{ "codeSystem": "ICD-10", "code": "B50.9" }`
   (upper-cased). No ICD-10 title is shipped or looked up: we hold no ICD-10
-  licence (assumes Q124 A — not yet confirmed).
+  licence (owner decision Q124 A, 19 Nov 2026).
 
 **Recent diagnoses.** These are the caller's own last picks at this
 facility, newest first. `limit` is 1-50, default 20.
@@ -1586,8 +1594,8 @@ facility, newest first. `limit` is 1-50, default 20.
   `code` as optional, both or neither. `display` is still required (1-500).
   The EHR-C5 consultation body uses the same DTO
   (`consultation.dto.ts:44-47`), so it follows.
-- ICD-10 typed codes are still accepted exactly as today (assumes Q124 A —
-  not yet confirmed). So is any other code system text.
+- ICD-10 typed codes are still accepted exactly as today (owner decision
+  Q124 A, 19 Nov 2026). So is any other code system text.
 - The create answer gains `codeStatus`:
   - `in_list`: an `ICD-11` code found in the loaded release.
   - `not_in_list`: an `ICD-11` code not found. The diagnosis is still
@@ -1618,7 +1626,7 @@ facility, newest first. `limit` is 1-50, default 20.
 - The ICD-11 extract is checked in as `docs/codes/icd11-mms-2026-01.json`,
   with the WHO release file's hash. The governed loader loads it (ORD-7).
   A new WHO release is a reviewed PR with the clinical lead's sign-off
-  (assumes Q124 A — not yet confirmed).
+  (owner decision Q124 A, 19 Nov 2026).
 
 ### Errors
 
@@ -1662,8 +1670,8 @@ facility, newest first. `limit` is 1-50, default 20.
 
 ### Depends on
 
-- Q124 A (assumes Q124 A — not yet confirmed): ICD-11 search, ICD-10 typed
-  codes kept, and the named clinical lead.
+- Q124 A (owner decision, 19 Nov 2026): ICD-11 search, ICD-10 typed
+  codes kept, and Health ID's named clinical lead.
 - ORD-7 (0144): the loader, the status route, the shared search limit.
 - EHR-C4 and EHR-C5 (built in wave 1): their answers and bodies follow the
   nullable code.
@@ -1692,7 +1700,7 @@ migration of its own: it uses 0144's `ehr.catalog_medicines.atc_code` and
 It adds a warning when a current prescription is a *different* medicine of
 the same class. It is a warning, never a block. It does not check drug
 interactions: interactions would come only from a licensed, maintained
-database, later (assumes Q131 A — not yet confirmed; see ORD-13).
+database, later (owner decision Q131 A, 19 Nov 2026; see ORD-13).
 
 ### Routes
 
@@ -1722,7 +1730,7 @@ check still runs.
 - By default, the same ATC level 4 (the first 5 characters, such as
   `C09AA`) with a different level 5.
 - `ehr.duplicate_class_rules` (seed file `docs/codes/duplicate-class-rules.json`,
-  approved by the clinical lead, assumes Q124 A — not yet confirmed) can
+  approved by Health ID's named clinical lead, owner decision Q124 A, 19 Nov 2026) can
   change that per class:
   - `compare_at_level_3`: for example `M01A`, so two NSAIDs warn even
     though their level-4 classes differ.
@@ -1789,9 +1797,9 @@ to the answer.
 
 - ORD-7 (0144): ATC on formulary items, the rules table and the loader.
 - ORD-10 phase 1 (built in wave 1).
-- Q131 A (assumes Q131 A — not yet confirmed): same-medicine and same-class
+- Q131 A (owner decision, 19 Nov 2026): same-medicine and same-class
   warnings only, no interaction checks now.
-- Q124 A (assumes Q124 A — not yet confirmed): the clinical lead approves
+- Q124 A (owner decision, 19 Nov 2026): Health ID's named clinical lead approves
   the class rules.
 - The ATC licence question in ORD-7. Without ATC codes this package has
   nothing to compare.
@@ -1802,6 +1810,155 @@ Release B, code alongside 0144.
 
 Size: **S** for code. The clinical lead's first class-rule file is the real
 work.
+
+## ORD-4: Pharmacy accepts a prescription before dispensing (planned, Release B, needs a migration: yes)
+
+Akos items:
+- N-1 (the "Accepted" status)
+- N-8 (the pharmacy part of "accepted by"; the laboratory keeps "Sample taken" as its first visible step, see Screen notes)
+
+Status: planned, not live. Owner decision Q125 B, 19 Nov 2026: the pharmacy "Accepted" step is wanted.
+
+Today (Release A, 0133) this hospital's pharmacy has a prescription as soon as the prescriber activates it. The automatic send makes the work item and records the prescriber as the one who accepted it into Pharmacy, with the fixed reason "Sent automatically when the prescription was activated" (0133 D7; never recorded as a pharmacist's acceptance, ORD-2). So the work item's `status: "accepted"` and `acceptedAt` (`pharmacy.service.ts:657` and `:663` on Release A) only mean "the pharmacy has it". No pharmacist has taken it on. ORD-4 adds that step: a pharmacist accepts the prescription, and the prescriber sees "Accepted" between "Sent to pharmacy" and "Dispensed".
+
+### The steps
+
+A work item gains `pharmacyStep`:
+
+| `pharmacyStep` | Meaning | The prescriber's `ownProgress.status` (ORD-3) |
+|---|---|---|
+| `received` | sent to this hospital's pharmacy by itself (0133) and no pharmacist has accepted it yet | `received` |
+| `accepted` | a pharmacist at this pharmacy accepted it; not dispensed yet | `accepted` (new value) |
+| `dispensed` | dispensed | `dispensed` |
+| `dispensing_reversed` | dispensed, then the dispensing was reversed | `dispensing_reversed` |
+
+`withdrawn: true` (0133 D8) stays a separate flag, as today. It can be on a `received` or an `accepted` item.
+
+Which items start at `accepted`:
+- **A prescription from another facility.** The route's Accept (`POST /api/v1/pharmacy/order-routes/:routeId/accept`, `pharmacy.order-route.receive`) is already a member of this pharmacy taking the order on. It makes the work item with that member as `accepted_by` (`0086:8523`). The item is `accepted` from that moment, and needs no second step.
+- **An own item a pharmacist brought in by hand** (`POST /api/v1/pharmacy/work-items/accept-ehr-prescription`, permission `pharmacy.work-item.accept`, which only the pharmacist role holds, `0023:24`). It is `accepted` from that moment, by that member.
+- **An own item sent automatically** (it has a row in `pharmacy.own_prescription_sends` with its `work_item_id`, 0133 D6). It is `received` until a pharmacist accepts it or dispenses it (below).
+
+The migration writes no rows for existing items. Items sent automatically before ORD-4 ships, and not dispensed, show `received` until they are accepted or dispensed.
+
+### Routes
+
+| Method | Path | Who | Permission |
+|---|---|---|---|
+| POST | `/api/v1/pharmacy/work-items/:workItemId/accept` (new) | A pharmacist at the `X-Facility-Id` facility who may write this work item: for this hospital's own work, on 0133's own-work basis (holds `pharmacy.work-item.read` and `pharmacy.order-route.receive` there) or the member's own consent grant to write records; for a prescription from another facility, its order route. Direct care only; an emergency (break-glass) session is refused, as for a dispensing. Origin and CSRF checks as for other browser writes. | `pharmacy.work-item.accept` (pharmacist role only; no role-table change) |
+| GET | `/api/v1/pharmacy/work-items`, `/api/v1/pharmacy/work-items/:workItemId` (changed) | pharmacy staff, as today | `pharmacy.work-item.read` |
+| POST | `/api/v1/pharmacy/work-items/:workItemId/dispensings` (changed) | pharmacist, as today | `pharmacy.dispensing.create` |
+| POST | `/api/v1/pharmacy/work-items/progress` (changed; internal, ehr-api only, ORD-3) | ehr-api with the clinician's own credentials | `ehr.prescription.read` |
+| GET | prescription list and read in ehr-api (changed, ORD-3) | as today | `ehr.prescription.read` |
+
+**Accept.** Headers: `X-Facility-Id`, `X-Purpose-Of-Use: direct-care`, and a required `Idempotency-Key`. UUIDs only in the path; never a Health ID. Body, exactly this field:
+
+```json
+{ "expectedWorkItemVersion": 1 }
+```
+
+No typed reason, as for other first steps (FR-1, Q105). The work item's version does not change (an acceptance is its own row), so dispensing keeps binding to the same version.
+
+Answer `201` the first time, `200` after that:
+
+```json
+{
+  "workItemId": "uuid",
+  "pharmacyStep": "accepted",
+  "pharmacistAcceptance": {
+    "acceptedAt": "2026-11-19T10:52:00.000Z",
+    "acceptedByMembershipId": "uuid",
+    "acceptedWith": "accept"
+  },
+  "alreadyAccepted": false
+}
+```
+
+- `acceptedWith`: `accept` (this route), `dispensing` (recorded by a dispensing, below), `order_route` (the route's Accept) or `hand_off` (brought in by a pharmacist by hand).
+- The screen shows the name through `GET /api/v1/identity/facility-staff-names?membershipIds=<id>` (SX-9, live contract).
+
+Rules:
+- **Once per work item, and safe to repeat.** The database keeps one acceptance per work item. Any later accept, by anyone and with any key, answers `200` with the stored acceptance and `alreadyAccepted: true`, and writes nothing except its audit row. The same `Idempotency-Key` with a different body answers 409 `IDEMPOTENCY_CONFLICT`. Two pharmacists at once: one acceptance is recorded, and the other gets the `200` answer (SERIALIZABLE, as a dispensing).
+- **Only while it can still be dispensed.** If the item is not yet accepted, the accept makes the same check that 0101 makes for a dispensing (`pharmacy.validate_dispensing()`: the prescription is active and at the version the pharmacy holds), and it refuses an item marked `withdrawn`. Either refusal answers 409 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE`, "This prescription can no longer be dispensed here".
+- **Already dispensed.** If an acceptance is stored, the accept answers it (`200`). An item dispensed before ORD-4 shipped has none, and the accept answers 409 `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` (existing code, `pharmacy.service.ts:389`).
+- **It cannot be undone.** There is no "un-accept". A dispensing reversal does not remove the acceptance.
+- **Dispensing a `received` item accepts it first**, in the dispensing's own transaction, by the dispensing pharmacist (`acceptedWith: "dispensing"`, same time). A dispensing is never refused because there is no acceptance. Today's pharmacy screens, and a pharmacy site rolled back alone, keep working.
+- **Refills (ORD-12):** one acceptance per work item, before the first fill. Refills need no new acceptance.
+- **Audit.** Every accept call writes one row naming the patient, `pharmacy.work-item.pharmacist-accept` (resource `pharmacy-work-item`), with `outcome` (`accepted` or `already_accepted`), `acceptedWith`, and the basis as 0133 gives it (`basis: 'own-work'`, a consent row, or the order route). It is written in the same transaction: no answer without its audit row. A refusal is audited as a refused dispensing is today. A dispensing that recorded the acceptance adds `acceptedWithDispensing: true` to its `pharmacy.dispensing.create` row. The work item's history gains one `pharmacist_accepted` event. No outbox event and no notice: ORD-11 notifies only for dispensings and reversals.
+
+**Work item answers** (list, read, and the accept answer) gain:
+
+```json
+{ "pharmacyStep": "received", "pharmacistAcceptance": null }
+```
+
+`status: "accepted"` and `acceptedAt` stay as they are, so no exact-body test of today's fields changes. They mean "the pharmacy has it" and "when it arrived". The screen uses `pharmacyStep` for the steps.
+
+**The prescriber's progress (ORD-3, extended).**
+- The pharmacy progress item may now carry `status: "accepted"`, and gains `acceptedAt` (ISO time, or `null`). The exact new value is `accepted`. It is added to `PharmacyProgressStatus` (`services/pharmacy-api/src/pharmacy/work-item-progress.service.ts:21` on Release A) and to ehr-api's `PharmacyOwnProgressStatus` and `PHARMACY_STATUSES` (`services/ehr-api/src/integrations/work-item-progress.service.ts:25` and `:54`).
+- ORD-3's table gains one row: `accepted` means a pharmacist at this hospital's pharmacy accepted it at `acceptedAt`, and it is not dispensed yet.
+- Which status wins: `dispensing_reversed`, then `dispensed`, then `withdrawn`, then `accepted`, then `received`. So an accepted prescription that is then put on hold reads `withdrawn`.
+- ehr-api's `ownProgress` gains `acceptedAt` next to `receivedAt`, `dispensedAt` and `reversedAt`.
+- **Deploy ehr-api first.** Today's ehr-api treats a whole batch as `unknown` when one status is a value it does not know (`parseItems`, same file, `:189`). So the ehr-api that knows `accepted` goes out with or before the pharmacy-api that sends it.
+- A prescription sent to another facility is unchanged. Its `ownProgress` stays `not_received`, and its progress is on `orderRoute`, whose own state already shows the other pharmacy's Accept (sections 21-24).
+- MY-1's "Ordered by me" list carries the same `ownProgress`, so it shows `accepted` too.
+
+**Sending to an outside pharmacy (Q119 and Q121 A).** The prescriber may send a prescription to an outside pharmacy until this hospital's pharmacy starts dispensing it. **An acceptance does not block that. Only a dispensing does.** When Q119 is built, its send must withdraw this hospital's pharmacy item whether or not it was accepted, as 0133 D8 does for a hold. The acceptance stays on record. ORD-4 adds no check of its own to that send. Until Q119 is built, Release A's rule stands: once sent to this hospital's pharmacy, the prescription cannot be sent elsewhere (`ORDER_ROUTE_ORDER_IN_WORK`, ORD-2), accepted or not.
+
+**Stop and hold.** An acceptance does not stop the prescribing team from putting the prescription on hold, cancelling it, entering it in error, editing it or resuming it. 0133 D8 marks the item `withdrawn` exactly as today. The acceptance is kept, `ownProgress` reads `withdrawn`, and Dispense answers 409 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` (0101, unchanged).
+
+**"We can't complete this order" (D18, section 24).** This is for prescriptions from another facility, and it is unchanged. Such an item is `accepted` when its route is accepted, so the command is offered exactly as today (`POST /api/v1/pharmacy/order-routes/:routeId/cannot-complete`, `pharmacy.order-route.receive`). ORD-4 adds no "can't complete" for this hospital's own prescriptions. A pharmacist who accepted one and then cannot dispense it tells the prescriber, who holds or stops it (the item is then `withdrawn`).
+
+**Database** (number provisional, given in merge order at the Release B cut-off):
+- A new table, `pharmacy.work_item_acceptances`: one row per work item (`work_item_id` unique), with patient, facility, `accepted_by`, `accepted_by_membership_id`, `accepted_at`, `accepted_with` (`accept` or `dispensing`), the idempotency key, the request digest and the correlation id. Rows are never updated or deleted. Row-level security follows the dispensings table: the same own-work (0133), consent and order-route rules.
+- An insert trigger that makes 0101's source check and refuses a withdrawn item (0133's sends table).
+- `pharmacy.work_item_events.event_type` accepts `pharmacist_accepted` as well as `prescription_accepted` (today only the latter, `0023:105`).
+- No change to `pharmacy.work_items`. Its `status` stays `accepted` (`0023:62`) and its `row_version` stays 1 (`0023:82`), so dispensings keep binding to version 1 (`0023:119`). Items from another facility and items brought in by hand need no row: their acceptance is read from the work item itself.
+- The progress read (`WORK_ITEM_PROGRESS_QUERY`) and the work list join the new table.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (an unknown field, a version that is not a whole number of 1 or more) |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | existing |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | existing |
+| 403 | `PERMISSION_DENIED` | existing (no `pharmacy.work-item.accept`) |
+| 403 | `PHARMACY_ACCESS_DENIED` | existing (no basis to write this item, or an emergency session) |
+| 404 | `PHARMACY_WORK_ITEM_NOT_FOUND` | existing, "Pharmacy work item was not found" |
+| 409 | `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` | existing, "This prescription can no longer be dispensed here" (withdrawn, or no longer active at the version held) |
+| 409 | `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` | existing (dispensed before ORD-4, with no acceptance on record) |
+| 409 | `IDEMPOTENCY_CONFLICT` | existing |
+| 412 | `PHARMACY_WORK_ITEM_VERSION_CONFLICT` | existing |
+| 503 | `PHARMACY_ACCEPTANCE_UNAVAILABLE` | Accepting is not available right now. Please try again. (also on a database without the migration) |
+
+### Screen notes
+
+- **Pharmacy list and item:**
+  - On a `received` item that is not withdrawn, show "Accept" as the main button. After it, show "Accepted by <name> 10:52" (the name from SX-9's staff names).
+  - Dispense stays enabled on a `received` item, because a dispensing accepts it too. Lead with Accept, then Dispense.
+  - On `alreadyAccepted: true`, show "Already accepted by <name> 10:52" and treat it as done.
+  - On 409 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE`, show its message and reload. A withdrawn item stays "Changed or stopped by the prescribing team", with Accept and Dispense disabled (ORD-2).
+- **The prescriber's order row:** "Sent to pharmacy 10:40", "Accepted 10:52", "Dispensed 11:05". Use ORD-3's withdrawn text for `withdrawn`. The prescriber's row shows no pharmacist's name: `ownProgress` carries none.
+- **Before this ships:** show "Sent to pharmacy 10:40", then "Dispensed 11:05". Never show "Accepted" or "Accepted by pharmacist" for this hospital's own prescriptions.
+- **A prescription sent to another facility:** show the route's own states (sections 21-24), as today.
+- **A lab request:** "Sample taken 09:30" (`sample_collected`) stays the laboratory's first visible step. There is no laboratory "Accepted" step in this package.
+
+### Depends on
+
+- ORD-2 (0133) and ORD-3 (Release A).
+- 0101 (the dispensing source check) and section 13.
+- Sections 21-24 for prescriptions from another facility; D18 is unchanged.
+- Q125 B (owner decision, 19 Nov 2026). Q119 and Q121 A (decided) for the outside send.
+- ORD-12 (one acceptance per work item, refills included), MY-1 (shows `accepted`), ORD-11 (no notice for an acceptance).
+
+### Target
+
+Release B (lane D). Size **M**:
+- one table with its row-level security and insert trigger, and one widened CHECK;
+- one route, and the dispensing change;
+- the list, read and progress fields in pharmacy-api and ehr-api (ehr-api first);
+- audit and tests, including a step in `services/ehr-api/scripts/verify-own-facility-work-runtime.mjs`: a pharmacist without a consent grant accepts on the own-work basis, the doctor's `ownProgress` reads `accepted` and then `dispensed`, and a hold after an acceptance reads `withdrawn`.
 
 # Release C
 
@@ -1825,11 +1982,11 @@ Both need migrations, numbered at the cut-off. They add:
 - two access-log actions.
 
 Rules:
-- Two different staff members: one asks and another approves. (assumes Q127 A — not yet confirmed)
-- A merge goes only **from** a record that is unknown (ID-7) or "NIN Not Verified", and that nobody signs in to: no login and no enrolment in progress. (assumes Q127 A — not yet confirmed)
+- Two different staff members: one asks and another approves. (owner decision Q127 A, 19 Nov 2026)
+- A merge goes only **from** a record that is unknown (ID-7) or "NIN Not Verified", and that nobody signs in to: no login and no enrolment in progress. (owner decision Q127 A, 19 Nov 2026)
 - The merge goes **into** an active, standard record (NIN Verified or not) on the same side of the seals. A record merged into is never changed: names, date of birth, NIN and Health ID all stay.
 - The source must be this facility's own record: made at this desk (ID-2) or an unknown record made here (ID-7). So only the facility that made a record can merge it.
-- An undo is possible for 30 days after the merge. After that the merge is final. (assumes Q127 A — not yet confirmed)
+- An undo is possible for 30 days after the merge. After that the merge is final. (owner decision Q127 A, 19 Nov 2026)
 
 ### Routes
 
@@ -1873,7 +2030,7 @@ Answer `201`:
 **3. `GET /api/v1/identity/patient-merges/:mergeId`**: one merge, with `undoUntil` once it is merged. Same permissions as the list (the member who asked, or an approver at this facility).
 
 **4. `POST /api/v1/identity/patient-merges/:mergeId/approve`**: carry out the merge (ID-8b).
-- Permission `identity.registration.approve`. The approver must not be the member who asked. (assumes Q127 A — not yet confirmed)
+- Permission `identity.registration.approve`. The approver must not be the member who asked. (owner decision Q127 A, 19 Nov 2026)
 - Body `{ "expectedVersion": 1, "purpose": "healthcare-operations" }`.
 - Every rule is checked again with both records locked (in UUID order). The merge happens in one transaction.
 
@@ -1881,7 +2038,7 @@ Answer `201`:
 
 **6. `POST /api/v1/identity/patient-merges/:mergeId/cancel`**: the member who asked withdraws the request before a decision. Body `{ expectedVersion, purpose }`.
 
-**7. `POST /api/v1/identity/patient-merges/:mergeId/undo`**: an approver at this facility undoes the merge, until `undoUntil` (30 days after `mergedAt`). (assumes Q127 A — not yet confirmed)
+**7. `POST /api/v1/identity/patient-merges/:mergeId/undo`**: an approver at this facility undoes the merge, until `undoUntil` (30 days after `mergedAt`). (owner decision Q127 A, 19 Nov 2026)
 - Body `{ expectedVersion, reason (8-500), purpose }`.
 - Answer: the merge with `status: "undone"` and the counts moved back.
 
@@ -1910,17 +2067,17 @@ What an undo does:
 |---|---|---|
 | 400 | `VALIDATION_FAILED`, `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | as ID-6 |
 | 403 | `PERMISSION_DENIED` | "You do not have permission to do this." |
-| 403 | `MERGE_SECOND_PERSON_REQUIRED` | "Another approver must approve this. You asked for this merge." (assumes Q127 A — not yet confirmed) |
+| 403 | `MERGE_SECOND_PERSON_REQUIRED` | "Another approver must approve this. You asked for this merge." (owner decision Q127 A, 19 Nov 2026) |
 | 403 | `MERGE_SEARCH_FIRST` | "Search for the right record first, then ask to merge. A search result can be used for 10 minutes." (target matchRef not this member's, expired, emergency, or invalid; one answer for all) |
 | 404 | `MERGE_NOT_FOUND` | "No merge request of this facility matches." |
 | 404 | `PATIENT_NOT_FOUND` | "No such patient." (source not this facility's own or not active; Q100 B) |
-| 409 | `MERGE_SOURCE_NOT_ALLOWED` | "Only an unknown or NIN Not Verified record that nobody signs in to can be merged into another." (assumes Q127 A — not yet confirmed) |
+| 409 | `MERGE_SOURCE_NOT_ALLOWED` | "Only an unknown or NIN Not Verified record that nobody signs in to can be merged into another." (owner decision Q127 A, 19 Nov 2026) |
 | 409 | `MERGE_SAME_RECORD` | "These are the same record." |
 | 409 | `MERGE_TARGET_NOT_ALLOWED` | "This record cannot receive a merge." (not active, unknown, or across the seals) |
 | 409 | `MERGE_SOURCE_HAS_OPEN_ROUTED_ORDER` | "This record has an order sent to another facility that is still open. Wait until it is finished or stopped." |
 | 409 | `MERGE_ALREADY_OPEN` | "There is already a merge request for this record." |
 | 409 | `MERGE_ALREADY_DECIDED` | "This merge request has already been decided." |
-| 409 | `MERGE_UNDO_EXPIRED` | "The 30 days to undo this merge have passed." (assumes Q127 A — not yet confirmed) |
+| 409 | `MERGE_UNDO_EXPIRED` | "The 30 days to undo this merge have passed." (owner decision Q127 A, 19 Nov 2026) |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
 | 412 | `VERSION_CONFLICT` | "Someone else changed this merge request. Reload it and try again." |
 | 503 | `MERGE_UNAVAILABLE` | "Merging records is not available right now." (a database without the migration) |
@@ -1958,7 +2115,7 @@ Audit:
 - ID-7.
 - EHR-C7 / 0135, 0133 and every clinical table (the foreign-key coverage check).
 - The order-route sections 21-24.
-- Owner questions: **Q127 A is pending**. Every line marked above depends on it.
+- Owner decision Q127 A, 19 Nov 2026. Every line marked above follows it.
 
 ### Target
 
@@ -2091,7 +2248,7 @@ Akos items:
 
 Status: planned, not live.
 
-The owner's default "Staff language is English only for now" applies. SX-7 stores a `language` field, but its only value is `en` until P2-2 adds translations. Notification choices follow ORD-11 (assumes Q128 A — not yet confirmed).
+The owner's default "Staff language is English only for now" applies. SX-7 stores a `language` field, but its only value is `en` until P2-2 adds translations. Notification choices follow ORD-11 (owner decision Q128 A, 19 Nov 2026).
 
 ### Routes
 
@@ -2128,7 +2285,7 @@ Headers: `Idempotency-Key`.
 
 - The save replaces the whole record.
 - `language` accepts only `en` for now.
-- `criticalResult` cannot be sent: a critical result always notifies and must be marked Seen (assumes Q128 A — not yet confirmed).
+- `criticalResult` cannot be sent: a critical result always notifies and must be marked Seen (owner decision Q128 A, 19 Nov 2026).
 - `expectedVersion` is `0` for the first save.
 
 **Save shortcuts**
@@ -2197,7 +2354,7 @@ Both saves answer `200` with the read answer above. A replay with the same key a
 - SX-1: the `modules` keys.
 - SX-5: `canChange.preferences` turns `true`.
 - SX-4: a removed role marks shortcuts unavailable.
-- ORD-11 for the notice choices (Q128, pending).
+- ORD-11 for the notice choices (owner decision Q128 A, 19 Nov 2026).
 - P2-2 (translations) before any second language.
 
 ### Target
@@ -2212,14 +2369,14 @@ Akos items:
 
 Status: planned, not live.
 
-Owner decision: assumes Q130 A — not yet confirmed. A new Outreach-only role, for field health workers who register and screen people but never open the clinical record.
+Owner decision Q130 A, 19 Nov 2026. A new Outreach-only role, for field health workers who register and screen people but never open the clinical record.
 
 **What exists today**
 - Outreach groups already have `outreach_volunteer` (0115). It holds `outreach.campaign.read`, `outreach.registration.read` and `outreach.registration.write`.
 - 0115's fence lets that role be granted only at an outreach group's facility, and no clinical role there.
 - So a hospital or clinic has no Outreach-only role. Its outreach work is done by roles that also carry clinical permissions. (After 0136, doctors no longer have any Outreach code.)
 
-### The role (assumes Q130 A — not yet confirmed)
+### The role (owner decision Q130 A, 19 Nov 2026)
 
 **Code and name**
 - `community_health_worker`, titled "Community health worker".
@@ -2235,7 +2392,7 @@ Owner decision: assumes Q130 A — not yet confirmed. A new Outreach-only role, 
 
 **Licence**
 - None is asked in this release, as for the front desk.
-- Whether to record a community health practitioner registration number is an open question for the owner.
+- Whether to record a community health practitioner registration number is an open point with no decision yet, to be decided before this section is built.
 
 **Sign-in**
 - Admitted on `outreach.` only, under section 53's gate. The role holds no `ehr.encounter.write`, so it is not a hospital clinical role.
@@ -2264,7 +2421,7 @@ No new route. The role uses existing ones:
 **How it is given**
 - An invitation (`POST /identity/staff-invitations`): the role list gains `community_health_worker`, with no licence fields.
 - SX-4's add and remove.
-- At governed facilities, Health ID support does it (assumes Q129 A — not yet confirmed).
+- At governed facilities, Health ID support does it (owner decision Q129 A, 19 Nov 2026).
 
 **Database (provisional)**
 - One `auth.roles` row and three `auth.role_permissions` rows.
@@ -2302,7 +2459,7 @@ No new codes. These are the answers this role meets:
 
 ### Depends on
 
-- Q130 (pending), and Q129 (pending) for adding it to existing staff.
+- Q130 A (owner decision, 19 Nov 2026), and Q129 A (owner decision, 19 Nov 2026) for adding it to existing staff.
 - SX-1: `modules` and the role-matrix fixture.
 - SX-4.
 - 0136: doctors lose Outreach.
@@ -2406,7 +2563,7 @@ Audit: today's `ehr.lab-request.create` row for each request, plus one `ehr.lab-
 ### Depends on
 
 - ORD-3 (progress) and FR-1 and Q105 (no reason on a first activation): live contract sections.
-- ORD-7 (0144, Release B) for catalogue picks and name-only tests. Its national list is kept by a named clinical lead (assumes Q124 A — not yet confirmed).
+- ORD-7 (0144, Release B) for catalogue picks and name-only tests. Its national list is kept by Health ID's named clinical lead (owner decision Q124 A, 19 Nov 2026).
 - Lab's `lab.validate_work_item` (0077) must also check `requestGroupId` against the EHR order.
 - ORD-8 uses groups when it applies an order set's tests.
 
@@ -2445,7 +2602,7 @@ Order sets and templates belong to one facility. They hold no patient data. Favo
 | GET | `/api/v1/ehr/me/favourites` | the staff member | any of `ehr.lab-request.write`, `ehr.prescription.write`, `ehr.diagnosis.write` |
 | POST | `/api/v1/ehr/me/favourites` (saves the whole list) | the staff member | as above |
 
-- `ehr.order-set.manage` is recommended for doctors and clinicians, not lab staff. Lab staff hold `ehr.lab-request.write` (`0006`), which is why the write permission alone is not enough. This is an open point for the owner (no question number yet). The new rows go into the role-matrix fixture (SX-1).
+- `ehr.order-set.manage` is recommended for doctors and clinicians, not lab staff. Lab staff hold `ehr.lab-request.write` (`0006`), which is why the write permission alone is not enough. This is part of the open point on who keeps a facility's order sets (no decision yet, to be decided before this section is built). The new rows go into the role-matrix fixture (SX-1).
 - Every create and both apply routes take a required `Idempotency-Key`. Updates take `expectedRowVersion`.
 - Patient routes need `X-Purpose-Of-Use: direct-care`.
 
@@ -2529,7 +2686,7 @@ Favourites:
 
 - At most 50 items. A save replaces the whole list.
 - Item fields use the create routes' limits (R-1 for diagnoses).
-- Diagnosis favourites take ICD-11 picks from the search list, and ICD-10 codes typed in are still accepted (assumes Q124 A — not yet confirmed).
+- Diagnosis favourites take ICD-11 picks from the search list, and ICD-10 codes typed in are still accepted (owner decision Q124 A, 19 Nov 2026).
 - A favourite fills the form. It never saves an order by itself.
 
 Audit:
@@ -2562,16 +2719,16 @@ Audit:
 - **After:**
   - Show "Apply" with a tick list of the set's items, all ticked.
   - After applying, show the drafts under "Drafts to check", each with its own Activate button, and the allergy and same-medicine warnings as today. Never present an applied set as "ordered".
-  - A note template fills the note form. Today it creates nothing. Once server-saved consultation drafts (EHR-C6) ship, the template text goes into that draft (assumes Q126 A — not yet confirmed).
+  - A note template fills the note form. Today it creates nothing. Once server-saved consultation drafts (EHR-C6) ship, the template text goes into that draft (owner decision Q126 A, 19 Nov 2026).
   - Warn keepers not to put patient details in a template.
 
 ### Depends on
 
-- ORD-6 (one group for the tests), ORD-7 (0144, catalogue picks; national list approved by a named clinical lead, assumes Q124 A — not yet confirmed), ORD-9 (0145, diagnosis search; ICD-11 list with ICD-10 still accepted, assumes Q124 A — not yet confirmed).
-- EHR-C6 (0141, assumes Q126 A — not yet confirmed).
+- ORD-6 (one group for the tests), ORD-7 (0144, catalogue picks; national list approved by Health ID's named clinical lead, owner decision Q124 A, 19 Nov 2026), ORD-9 (0145, diagnosis search; ICD-11 list with ICD-10 still accepted, owner decision Q124 A, 19 Nov 2026).
+- EHR-C6 (0141, owner decision Q126 A, 19 Nov 2026).
 - FR-1 and Q105, 0117 (allergy check), ORD-10 (duplicate warnings).
 - 0136 and SX-1 for the new permission row.
-- Owner point: who keeps a facility's sets and templates.
+- Open point, to be decided before this section is built: who keeps a facility's sets and templates.
 
 ### Target
 
@@ -2582,7 +2739,7 @@ Release C (lane C). Size **L**: three tables (sets, templates, favourites), ten 
 Akos items:
 - P1-6 (new lab result, critical value, prescription dispensed; a results list with read and unread)
 
-Status: planned, not live. Whole package assumes Q128 A (an in-app notice list first; critical results must be marked Seen) — not yet confirmed.
+Status: planned, not live. Owner decision Q128 A, 19 Nov 2026: an in-app notice list first; critical results must be marked Seen.
 
 Today staff see only access requests as notifications (Akos P1-6). Lab writes a `LabResultReleased` outbox event when a result is released (`lab-executions.service.ts:167`). Pharmacy has no dispensing event (`pharmacy.service.ts` writes only `PharmacyWorkItemCreated` and import events). Lab's README says there is no critical-result acknowledgement today (`services/lab-api/src/lab/README.md:38`).
 
@@ -2597,7 +2754,7 @@ So no notice is lost, and no event bus is needed. This works for the hospital's 
 | `kind` | When | Needs Seen |
 |---|---|---|
 | `lab_result_ready` | a result for the order is released | no |
-| `lab_result_critical` | the released version's `abnormalFlag` is `critical_candidate` (`lab-api/src/lab/dto/execution.dto.ts:31`) | **yes** (assumes Q128 A — not yet confirmed) |
+| `lab_result_critical` | the released version's `abnormalFlag` is `critical_candidate` (`lab-api/src/lab/dto/execution.dto.ts:31`) | **yes** (owner decision Q128 A, 19 Nov 2026) |
 | `lab_result_corrected` | a correction to an already released result is released | no |
 | `prescription_dispensed` | the first fill is dispensed (refills, ORD-12, do not notify) | no |
 | `dispensing_reversed` | a dispensing is reversed | no |
@@ -2647,7 +2804,7 @@ Mark read:
 Mark Seen:
 - Body `{}`. Answer: the notice with `seenAt` set.
 - The recipient must be able to read the patient's records now, because Seen means they saw the result.
-- Allowed on any notice. Required only for critical ones (assumes Q128 A — not yet confirmed).
+- Allowed on any notice. Required only for critical ones (owner decision Q128 A, 19 Nov 2026).
 - Seen is final and is recorded with who and when.
 
 Keeping: a notice is kept 90 days after it is read, and a critical notice 90 days after it is Seen. A critical notice that is not Seen is never removed (proposed).
@@ -2678,13 +2835,13 @@ Audit:
   - The results list puts critical notices first, in red, with "Open result" and then "Mark as Seen". Seen stays disabled until the result has been opened on the page.
   - Unread and read: bold and plain.
   - When `accessEnded` is true, show the message and "Ask for access". Show no name.
-- **Not in this package (open for the owner):** sending to phone or email (the in-app list comes first, assumes Q128 A — not yet confirmed), handing a notice to a colleague, and raising an alarm when a critical result is not Seen. Until then, the laboratory's phone call stays the safety net for critical results.
+- **Not in this package (each would be a later package):** sending to phone or email (the in-app list comes first, owner decision Q128 A, 19 Nov 2026), handing a notice to a colleague, and raising an alarm when a critical result is not Seen. Until then, the laboratory's phone call stays the safety net for critical results.
 
 ### Depends on
 
 - ORD-3, ORD-2 (0133), order routes (sections 21-24), EHR-C7 (card shape), 0131 (own-facility access), MY-1 (0143) and ORD-12 (no refill notices).
-- ID-8b (merge, assumes Q127 A — not yet confirmed) must carry the notices table in its foreign-key coverage, so notices follow the kept record.
-- Q128 A (pending).
+- ID-8b (merge, owner decision Q127 A, 19 Nov 2026) must carry the notices table in its foreign-key coverage, so notices follow the kept record.
+- Q128 A (owner decision, 19 Nov 2026).
 
 ### Target
 
@@ -2697,47 +2854,12 @@ Release C (lane D). Size **L**:
 
 # Not planned yet
 
-## ORD-4: A pharmacy "Accepted" step (not planned, no release, needs a migration: no)
-
-Akos items:
-- N-1 (the "Accepted" status)
-- N-8 (the "accepted by lab" part)
-
-Status: not planned (assumes Q125 A — not yet confirmed).
-
-### Routes
-
-None. What the screen uses instead, all in existing contract sections:
-- `pharmacyHandoff.status: "sent"` after Activate (ORD-2, 0133, Release A).
-- `ownProgress.status` (ORD-3): `received` with `receivedAt`, `dispensed` with `dispensedAt`, `dispensing_reversed`, `withdrawn` (0133), or `unknown`.
-- For a prescription sent to another facility, the order route's own status (sections 21-24).
-
-The pharmacy work item's internal `accepted` state means "the pharmacy has it". With the automatic send, the prescriber's send records it (0133: never recorded as a pharmacist's acceptance).
-
-### Errors
-
-None.
-
-### Screen notes
-
-- Show "Sent to pharmacy 10:40", then "Dispensed 11:05". Never show "Accepted" or "Accepted by pharmacist".
-- For a lab request, "Sample taken 09:30" (`sample_collected`) is the lab's first visible step.
-- If the owner later wants an Accepted step, ORD-4 would add it in Release C. The screen would then add one row between Sent and Dispensed.
-
-### Depends on
-
-Q125 A (pending), ORD-2, ORD-3.
-
-### Target
-
-None. Size if reopened: **M**.
-
 ## ORD-13: No drug-interaction checks (not planned, no release, needs a migration: no)
 
 Akos items:
 - P0-5 and N-9 (the interaction parts)
 
-Status: not planned (assumes Q131 A — not yet confirmed). The build plan (section 6) allows interaction data only from a licensed, maintained commercial database, never a hand-made list.
+Status: not planned (owner decision Q131 A, 19 Nov 2026). The build plan (section 6) allows interaction data only from a licensed, maintained commercial database, never a hand-made list.
 
 ### Routes
 
@@ -2758,7 +2880,7 @@ None.
 
 ### Depends on
 
-Q131 A (pending). A licensed interaction database and its contract would be a separate later package. Other countries come later too (Q131 A).
+Q131 A (owner decision, 19 Nov 2026). A licensed interaction database and its contract would be a separate later package. Other countries come later too (Q131 A).
 
 ### Target
 
@@ -2769,7 +2891,7 @@ None.
 Akos items:
 - P2-1
 
-Status: not planned yet, not live. Nigeria only for now (assumes Q131 A — not yet confirmed: "other countries later"). No route, field or migration is designed. The heading says "after Release C" because no release in A to C includes this work.
+Status: not planned yet, not live. Nigeria only for now (owner decision Q131 A, 19 Nov 2026: "other countries later"). No route, field or migration is designed. The heading says "after Release C" because no release in A to C includes this work.
 
 What to assume and hard-code today:
 - **The only national ID is the NIN.** It is 11 digits (`^\d{11}$`, in `services/identity-api/src/identity/dto/resolve-nin.dto.ts`). It goes only in POST bodies (`POST /api/v1/identity/nin/resolve`, contract section 43.3). It never goes in a URL, a query string or a log line.
@@ -2803,7 +2925,7 @@ Existing; match on the code and not the text.
 
 ### Depends on
 
-Q131 (other countries, pending); the P2-6 data-residency answer; a future owner question on which ID types are allowed in each country.
+Q131 A (other countries later, owner decision of 19 Nov 2026); the P2-6 data-residency answer; a future owner question on which ID types are allowed in each country.
 
 ### Target
 
@@ -2814,7 +2936,7 @@ Not in Releases A to C. Size when designed: M. It needs a country setting on the
 Akos items:
 - P2-2 (and the language part of P1-8)
 
-Status: not planned yet, not live. Everything is English only (assumes Q131 A — not yet confirmed). The build plan's default is "staff language is English only for now". SX-7 preferences (Release C) hold an English-only `language` field: its list (`languagesAvailable`) stays `["en"]`, and the screen keeps it hidden or read-only until P2-2 adds a second language.
+Status: not planned yet, not live. Everything is English only (owner decision Q131 A, 19 Nov 2026). The build plan's default is "staff language is English only for now". SX-7 preferences (Release C) hold an English-only `language` field: its list (`languagesAvailable`) stays `["en"]`, and the screen keeps it hidden or read-only until P2-2 adds a second language.
 
 What to assume and hard-code today:
 - **Every API `detail` and `message` is plain English.** Show it as it arrives.
@@ -2836,7 +2958,7 @@ None new.
 
 ### Depends on
 
-Q131; SX-7 (where the language preference sits).
+Q131 A (19 Nov 2026); SX-7 (where the language preference sits).
 
 ### Target
 
@@ -2847,7 +2969,7 @@ Not in Releases A to C. Size when designed: L (strings across every site, the se
 Akos items:
 - P2-3
 
-Status: not planned yet, not live. Metric only (assumes Q131 A — not yet confirmed).
+Status: not planned yet, not live. Metric only (owner decision Q131 A, 19 Nov 2026).
 
 What to assume and hard-code today:
 - **Units are metric, and each field name carries its unit.** The API takes and returns metric values only:
@@ -2887,7 +3009,7 @@ Existing:
 
 ### Depends on
 
-Q131; P1-11 (VIT-1: physical-limit validation and soft warnings), which may tighten the limits above.
+Q131 A (19 Nov 2026); P1-11 (VIT-1: physical-limit validation and soft warnings), which may tighten the limits above.
 
 ### Target
 
@@ -2898,7 +3020,7 @@ Not in Releases A to C. Size when designed: M (a facility setting and screen con
 Akos items:
 - P2-4
 
-Status: not planned yet, not live. "Today" is the calendar day in Lagos until P2-4 ships (assumes Q131 A — not yet confirmed).
+Status: not planned yet, not live. "Today" is the calendar day in Lagos until P2-4 ships (owner decision Q131 A, 19 Nov 2026).
 
 What to assume and hard-code today:
 - **Timestamps:** the API sends and takes ISO-8601 UTC with `Z` (for example `recordedAt`, `X-HID-Captured-At`). Show them in Lagos time (`Africa/Lagos`, UTC+1, no daylight saving) whatever the device's own time zone is.
@@ -2934,7 +3056,7 @@ Existing:
 
 ### Depends on
 
-Q131; P2-2 (locale display).
+Q131 A (19 Nov 2026); P2-2 (locale display).
 
 ### Target
 
