@@ -129,4 +129,35 @@ describe('PharmacyApiClient transport contract', () => {
       await expect(client.getWorkItem(base.id, context)).rejects.toMatchObject({ status: 502 });
     }
   });
+
+  // 0133: an own item withdrawn before it was dispensed carries `withdrawn: true` and, since D14 (owner's Q121 A),
+  // `withdrawnReason`: 'changed' or 'sent_elsewhere'. The client keeps the reason only for those two values and only
+  // with `withdrawn: true`; anything else is left out, never refused.
+  it('keeps a work item\'s withdrawnReason only for changed or sent_elsewhere, and only with withdrawn', async () => {
+    const base = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-e89b-42d3-a456-426614174004',
+      facilityId: context.facilityId, sourceEhrPrescriptionId: '123e4567-e89b-42d3-a456-426614174005',
+      sourceEncounterId: '123e4567-e89b-42d3-a456-426614174006', sourceEhrPrescriptionVersion: 1, status: 'accepted',
+      medication: { codeSystem: null, code: null, display: 'Amoxicillin 500 mg capsule' }, doseQuantity: 1,
+      doseUnit: 'capsule', routeCode: 'oral', frequency: 'Every 8 hours', instructions: 'After food',
+      acceptedAt: '2026-11-19T09:00:00.000Z', version: 1, dispensing: null };
+    global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({ items: [
+      { ...base, withdrawn: true, withdrawnReason: 'sent_elsewhere' },
+      { ...base, withdrawn: true, withdrawnReason: 'changed' },
+      { ...base, withdrawn: true },
+      { ...base, withdrawn: true, withdrawnReason: 'returned' },
+      { ...base, withdrawnReason: 'sent_elsewhere' },
+      { ...base, withdrawn: false, withdrawnReason: 'changed' },
+      base,
+    ] }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const client = new PharmacyApiClient({ baseUrl: 'https://pharmacy.test' });
+    const items = await client.listWorkItems(context);
+    expect(items.map((item) => [item.withdrawn, item.withdrawnReason])).toEqual([
+      [true, 'sent_elsewhere'], [true, 'changed'], [true, undefined], [true, undefined],
+      [undefined, undefined], [undefined, undefined], [undefined, undefined]]);
+    expect(items.map((item) => 'withdrawnReason' in item)).toEqual([true, true, false, false, false, false, false]);
+    global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({ ...base, withdrawn: true,
+      withdrawnReason: 'sent_elsewhere' }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    await expect(client.getWorkItem(base.id, context)).resolves.toMatchObject({ withdrawn: true,
+      withdrawnReason: 'sent_elsewhere' });
+  });
 });
