@@ -279,7 +279,7 @@ resource "aws_lb_target_group" "production_internal" {
     path                = "/api/v1/health/ready"
     healthy_threshold   = 2
     unhealthy_threshold = 3
-    interval            = 30
+    interval            = 10
     matcher             = "200"
   }
 }
@@ -300,7 +300,7 @@ resource "aws_lb_target_group" "production_gateway" {
     path                = "/gateway-health/ready"
     healthy_threshold   = 2
     unhealthy_threshold = 3
-    interval            = 30
+    interval            = 10
     matcher             = "200"
   }
 }
