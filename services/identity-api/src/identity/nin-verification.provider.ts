@@ -59,6 +59,23 @@ export function isNinNotConfigured(error: unknown): boolean {
     && error.message === NIN_NOT_CONFIGURED_DETAIL;
 }
 
+/** Owner Q117: what the desk, sign-up and the profile say when QoreID has no record of a NIN. */
+export const NIN_NOT_VERIFIED_DETAIL = 'This NIN could not be verified. Check the number and try again.';
+
+/**
+ * Q117: the one answer, on the desk (POST /api/v1/identity/nin/resolve),
+ * sign-up with a NIN (POST /api/v1/identity/patient-enrollments) and the
+ * profile (POST /api/v1/identity/me/verification/nin), for a NIN QoreID has
+ * no record of: its 404 "not found", fresh or kept by 0137, and the NIN-only
+ * check's "no record" (fresh or kept). A 422, so its message reaches the
+ * website as it is; it replaces the 502 QOREID_PROVIDER_REJECTED those paths
+ * answered for QoreID's 404. A name or date of birth that does not match a
+ * record QoreID has keeps its own answer on each path.
+ */
+export function ninCouldNotBeVerified(): DomainProblem {
+  return new DomainProblem(422, 'NIN_NOT_VERIFIED', NIN_NOT_VERIFIED_DETAIL);
+}
+
 /** What the desk sees when the NIN check's switch cannot be read: nothing was sent. */
 export const NIN_CHECK_NOT_STARTED_DETAIL = 'NIN checks cannot be started right now. Please try again in a minute.';
 
@@ -96,9 +113,8 @@ export function isNinCheckRefusedUnsent(error: unknown): boolean {
 
 /**
  * 0137: refusals that repeat an answer the NIN service gave before and HID
- * kept (QoreID's "not found", an answer HID cannot use): nothing was sent for
- * this request, so they are not an outage and do not count toward the
- * breaker.
+ * kept (an answer HID cannot use): nothing was sent for this request, so
+ * they are not an outage and do not count toward the breaker.
  */
 const STORED_ANSWERS = new WeakSet<object>();
 
@@ -125,23 +141,6 @@ export function markNinCheckStillRunning<T extends object>(error: T): T {
 
 export function isNinCheckStillRunning(error: unknown): boolean {
   return typeof error === 'object' && error !== null && STILL_RUNNING.has(error);
-}
-
-/**
- * D4 (the breaker counts only what the NIN service did): a refusal that is
- * the NIN service's own answer, given as an error (QoreID's 404 "not found",
- * answered as 502 QOREID_PROVIDER_REJECTED as on every path). The service
- * answered, so it is never counted as a failure.
- */
-const NIN_SERVICE_ANSWERS = new WeakSet<object>();
-
-export function markNinServiceAnswer<T extends object>(error: T): T {
-  NIN_SERVICE_ANSWERS.add(error);
-  return error;
-}
-
-export function isNinServiceAnswer(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && NIN_SERVICE_ANSWERS.has(error);
 }
 
 /**

@@ -4,8 +4,8 @@ import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
 import { NIN_NO_RECORD_ANSWER_SECONDS, NinCheckOnce, type NinCheckAnswer, type NinCheckPath, type NinCheckResult,
-  qoreIdRejected, recordNames, unusableAnswer } from './nin-check-once';
-import { markNinCheckStillRunning, markStoredNinAnswer } from './nin-verification.provider';
+  recordNames, unusableAnswer } from './nin-check-once';
+import { markNinCheckStillRunning, markStoredNinAnswer, ninCouldNotBeVerified } from './nin-verification.provider';
 import type { NinCheckSettlement } from './nin.types';
 import { qoreIdDelivery } from './qoreid-delivery';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
@@ -38,7 +38,9 @@ export interface PublicPatientIdentityProvider {
    * per NIN, reusing a stored answer and waiting for a check in flight.
    * `context` names the request (its correlation id) and the path for the
    * audit; without it the check is audited under a fresh correlation id as
-   * 'other'.
+   * 'other'. A NIN QoreID has no record of (its 404 "not found" or the
+   * NIN-only check's "no record", fresh or stored) is refused 422
+   * NIN_NOT_VERIFIED (Q117).
    */
   verifyNin(nin: string, context?: NinCheckContext): Promise<VerifiedPublicPatientIdentity>;
   /**
@@ -54,10 +56,12 @@ export interface PublicPatientIdentityProvider {
    * incomplete record, as a profile check keeps it.
    *
    * Says whether the answer came from QoreID for this request or from
-   * storage. QoreID's "not found" and an answer without a readable name are
-   * thrown as by verifyNin, marked isStoredNinAnswer when they come from
-   * storage; the guard's 504 (this request's wait ended, the check goes on)
-   * is marked isNinCheckStillRunning.
+   * storage. QoreID's 404 "not found", fresh or stored, is its "no record"
+   * for the NIN (Q117), answered as outcome 'no_record' like the NIN-only
+   * check's own "no record". An answer without a readable name is thrown as
+   * by verifyNin, marked isStoredNinAnswer when it comes from storage; the
+   * guard's 504 (this request's wait ended, the check goes on) is marked
+   * isNinCheckStillRunning.
    */
   verifyNinRecord(nin: string, context?: NinRecordContext): Promise<NinRecordCheck>;
 }
@@ -129,12 +133,20 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
   async verifyNin(nin: string, context: NinCheckContext = {}): Promise<VerifiedPublicPatientIdentity> {
     await this.assertAvailable();
     if (!/^\d{11}$/.test(nin)) throw new DomainProblem(400, 'NIN_INVALID', 'An 11-digit NIN is required');
-    const checked = await this.ninCheck.check({
-      nin, correlationId: context.correlationId ?? `nin-check-${randomUUID()}`, path: context.path ?? 'other',
-      needsCompleteRecord: true,
-      ask: async ({ timeoutMs }) => ({
-        answer: enrollmentAnswer(await this.adapter.verifyNinEnrollment(nin, { timeoutMs }), nin), value: undefined }),
-    });
+    let checked: NinCheckResult<undefined>;
+    try {
+      checked = await this.ninCheck.check({
+        nin, correlationId: context.correlationId ?? `nin-check-${randomUUID()}`, path: context.path ?? 'other',
+        needsCompleteRecord: true,
+        ask: async ({ timeoutMs }) => ({
+          answer: enrollmentAnswer(await this.adapter.verifyNinEnrollment(nin, { timeoutMs }), nin), value: undefined }),
+      });
+    } catch (error) {
+      // Q117: QoreID's 404 "not found" (kept by the guard as 'rejected') is
+      // its answer that it has no record of the NIN.
+      if (qoreIdNotFound(error)) throw ninCouldNotBeVerified();
+      throw error;
+    }
     return identityFromAnswer(checked.answer, nin);
   }
 
@@ -180,13 +192,18 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
       if (error instanceof DomainProblem && error.code === 'QOREID_TIMEOUT' && !qoreIdDelivery(error)) {
         throw markNinCheckStillRunning(error);
       }
+      // Q117: QoreID's 404 "not found" for this request's own check is its
+      // "no record" for the NIN (the guard keeps it as 'rejected').
+      if (qoreIdNotFound(error)) return { source: 'qoreid', outcome: 'no_record' };
       throw error;
     }
     const stored = checked.source === 'stored';
     const refuse = (problem: DomainProblem) => stored ? markStoredNinAnswer(problem) : problem;
     const answer = checked.answer;
-    if (answer.outcome === 'rejected') throw refuse(qoreIdRejected());
-    if (answer.outcome === 'no_record') return { source: checked.source, outcome: 'no_record' };
+    // Q117: a kept 404 is "no record" too.
+    if (answer.outcome === 'rejected' || answer.outcome === 'no_record') {
+      return { source: checked.source, outcome: 'no_record' };
+    }
     const names = answerNames(answer);
     if (!names || names.record.nin !== nin) throw refuse(invalidResponse());
     return { source: checked.source, outcome: 'record', record: names.record,
@@ -211,7 +228,11 @@ function answerNames(answer: NinCheckAnswer): { record: NinRecordNames; provider
   return undefined;
 }
 
-/** QoreID's 404 "not found": an answer 0137 keeps (as 'rejected'), not a failure of QoreID (D4). */
+/**
+ * QoreID's 404 "not found": its answer that it has no record of the NIN,
+ * which 0137 keeps (as 'rejected') and every path answers as "no record"
+ * (Q117); never a failure of QoreID (D4).
+ */
 export function qoreIdNotFound(error: unknown): boolean {
   const facts = qoreIdDelivery(error);
   return facts?.delivery === 'answered' && facts.status === 404;
@@ -239,13 +260,13 @@ function enrollmentAnswer(result: QoreIdVerificationResult, nin: string): NinChe
     record: { complete: true, binding: result.ninEnrollmentBinding } };
 }
 
-/** The same answer for a fresh and a stored check. */
+/**
+ * The same answer for a fresh and a stored check. QoreID's "no record" and
+ * its kept 404 are the one Q117 answer, 422 NIN_NOT_VERIFIED.
+ */
 function identityFromAnswer(answer: NinCheckAnswer, nin: string): VerifiedPublicPatientIdentity {
-  if (answer.outcome === 'rejected') throw qoreIdRejected();
+  if (answer.outcome === 'rejected' || answer.outcome === 'no_record') throw ninCouldNotBeVerified();
   if (answer.outcome === 'unusable') throw invalidResponse();
-  if (answer.outcome === 'no_record') {
-    throw new DomainProblem(422, 'NIN_NOT_VERIFIED', 'The NIN could not be verified');
-  }
   if (!answer.record.complete || answer.record.binding.nin !== nin) throw invalidResponse();
   return { ...answer.record.binding, providerReference: answer.providerReference };
 }

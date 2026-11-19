@@ -38,6 +38,9 @@ const input = { nin: NIN, firstName: 'Bisola', lastName: 'Fixture', dateOfBirth:
   purpose: 'healthcare-operations' as const };
 const originalEnvironment = { ...process.env };
 const created: NinCheckOnce[] = [];
+/** Q117: the one answer for a NIN QoreID has no record of, on the desk, sign-up and the profile. */
+const NO_RECORD_ANSWER = { status: 422, code: 'NIN_NOT_VERIFIED',
+  message: 'This NIN could not be verified. Check the number and try again.' };
 
 function deskContext(index = 1): DataAccessContext {
   const suffix = String(index).padStart(12, '0');
@@ -135,13 +138,17 @@ function system() {
   const audits: unknown[][] = [];
   /** While set, the guard's audit write fails (AuditService then refuses with 503). */
   const auditDown = { on: false };
+  /** The profile's evidence rows: [result, provider reference, failure category] each. */
+  const evidence: unknown[][] = [];
   const checkDatabase = {
     // As a transaction: a failed one leaves the check rows as they were.
     withSystemTransaction: jest.fn(async (_correlation: string, work: (client: PoolClient) => Promise<unknown>) => {
       const before = new Map([...store.rows].map(([key, row]) => [key, { ...row }]));
       try {
-        return await work({ query: jest.fn(async (sql: string, values: readonly unknown[] = []) =>
-          store.query(sql, values) ?? profileTables(sql, values) ?? { rows: [], rowCount: 0 }) } as unknown as PoolClient);
+        return await work({ query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+          if (sql.includes('record_my_nin_verification_evidence')) evidence.push(values.slice(2, 5));
+          return store.query(sql, values) ?? profileTables(sql, values) ?? { rows: [], rowCount: 0 };
+        }) } as unknown as PoolClient);
       } catch (error) {
         store.rows.clear();
         for (const [key, row] of before) store.rows.set(key, row);
@@ -205,7 +212,7 @@ function system() {
   const deskChecks = () => deskAudit.record.mock.calls.map(([row]) => row)
     .filter((row) => row.action === 'identity.nin.verify').map((row) => row.details);
   return { qoreId, store, ninCheck, ninOnly, resolve, breaker, cases, checkAudits, deskChecks, deskAudit, lookup,
-    verifyProfile, protector, healthIds, auditDown, sealed };
+    verifyProfile, protector, healthIds, auditDown, sealed, evidence };
 }
 
 describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')', () => {
@@ -270,8 +277,7 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     const s = system();
     s.qoreId.state.fallback = 'no_record';
     for (const key of ['desk-once-key-000004', 'desk-once-key-000004', 'desk-once-key-000005']) {
-      await expect(s.resolve(key)).rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED',
-        message: 'The NIN could not be verified' });
+      await expect(s.resolve(key)).rejects.toMatchObject(NO_RECORD_ANSWER);
     }
     expect(s.qoreId.state.charged).toBe(1);
     expect(s.breaker.state()).toBe('closed');
@@ -595,6 +601,66 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     });
   });
 
+  describe('a NIN QoreID has no record of: one 422 on the desk, sign-up and the profile (Q117)', () => {
+    const signUp = (s: ReturnType<typeof system>) => s.ninOnly.verifyNin(NIN, { correlationId: 'signup-check',
+      path: 'enrollment' });
+
+    it('answers QoreID\'s 404 at the desk 422 NIN_NOT_VERIFIED, and a sign-up and the profile the same from storage', async () => {
+      const s = system();
+      s.qoreId.state.fallback = 'not_found';
+      await expect(s.resolve('desk-once-key-000701')).rejects.toMatchObject(NO_RECORD_ANSWER);
+      await expect(signUp(s)).rejects.toMatchObject(NO_RECORD_ANSWER);
+      await expect(s.verifyProfile()).rejects.toMatchObject(NO_RECORD_ANSWER);
+      expect(s.qoreId.state.charged).toBe(1);
+      // The profile's evidence for a 404 is as before: a provider error, nothing verified.
+      expect(s.evidence).toEqual([['provider_error', null, 'unexpected_response']]);
+      expect(s.checkAudits().map(([path, source, result]) => [path, source, result])).toEqual([
+        ['desk', 'qoreid', 'rejected'], ['enrollment', 'stored', 'rejected'], ['profile', 'stored', 'rejected']]);
+      expect(s.deskChecks()).toEqual([{ provider: 'qoreid', ninCheck: 'no_match' }]);
+      expect(s.breaker.state()).toBe('closed');
+    });
+
+    it('answers QoreID\'s 404 at sign-up 422 NIN_NOT_VERIFIED, and the desk the same from storage', async () => {
+      const s = system();
+      s.qoreId.state.fallback = 'not_found';
+      await expect(signUp(s)).rejects.toMatchObject(NO_RECORD_ANSWER);
+      await expect(s.resolve('desk-once-key-000702')).rejects.toMatchObject(NO_RECORD_ANSWER);
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.deskChecks()).toEqual([{ provider: 'qoreid', ninCheck: 'no_match', storedAnswer: true }]);
+    });
+
+    it('answers QoreID\'s 404 on the profile 422 NIN_NOT_VERIFIED, and the desk and a sign-up the same from storage', async () => {
+      const s = system();
+      s.qoreId.state.fallback = 'not_found';
+      await expect(s.verifyProfile()).rejects.toMatchObject(NO_RECORD_ANSWER);
+      expect(s.evidence).toEqual([['provider_error', null, 'unexpected_response']]);
+      await expect(s.resolve('desk-once-key-000703')).rejects.toMatchObject(NO_RECORD_ANSWER);
+      await expect(signUp(s)).rejects.toMatchObject(NO_RECORD_ANSWER);
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits().map(([path, source]) => [path, source])).toEqual([
+        ['profile', 'qoreid'], ['desk', 'stored'], ['enrollment', 'stored']]);
+    });
+
+    it('answers QoreID\'s "no record" at the desk or at sign-up 422 NIN_NOT_VERIFIED, fresh and from storage', async () => {
+      const desk = system();
+      desk.qoreId.state.fallback = 'no_record';
+      await expect(desk.resolve('desk-once-key-000704')).rejects.toMatchObject(NO_RECORD_ANSWER);
+      await expect(signUp(desk)).rejects.toMatchObject(NO_RECORD_ANSWER);
+      const enrollment = system();
+      enrollment.qoreId.state.fallback = 'no_record';
+      await expect(signUp(enrollment)).rejects.toMatchObject(NO_RECORD_ANSWER);
+      await expect(enrollment.resolve('desk-once-key-000705')).rejects.toMatchObject(NO_RECORD_ANSWER);
+      expect([desk.qoreId.state.charged, enrollment.qoreId.state.charged]).toEqual([1, 1]);
+    });
+
+    it('keeps "does not match" (a record whose name or date of birth is not the desk\'s) a different answer', async () => {
+      const s = system();
+      await expect(s.resolve('desk-once-key-000706', deskContext(), { ...input, lastName: 'Fixtura' }))
+        .rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED',
+          message: 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.' });
+    });
+  });
+
   describe('the breaker counts only what QoreID did (D4)', () => {
     const NINS = ['70000000003', '70000000004', '70000000005'];
 
@@ -641,18 +707,18 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       s.qoreId.state.modes = ['not_found', 'not_found', 'not_found'];
       for (const [index, nin] of NINS.entries()) {
         await expect(s.resolve(`desk-once-key-00022${index}`, deskContext(index + 1), { ...input, nin }))
-          .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
+          .rejects.toMatchObject(NO_RECORD_ANSWER);
       }
       for (const key of ['desk-once-key-000220', 'desk-once-key-000223']) {
         await expect(s.resolve(key, deskContext(1), { ...input, nin: NINS[0]! }))
-          .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
+          .rejects.toMatchObject(NO_RECORD_ANSWER);
       }
       expect(s.qoreId.state.charged).toBe(3);
       expect(s.breaker.state()).toBe('closed');
       expect(s.deskChecks()).toEqual([
-        ...NINS.map(() => expect.not.objectContaining({ storedAnswer: true })),
-        expect.objectContaining({ code: 'QOREID_PROVIDER_REJECTED', storedAnswer: true }),
-        expect.objectContaining({ code: 'QOREID_PROVIDER_REJECTED', storedAnswer: true })]);
+        ...NINS.map(() => ({ provider: 'qoreid', ninCheck: 'no_match' })),
+        { provider: 'qoreid', ninCheck: 'no_match', storedAnswer: true },
+        { provider: 'qoreid', ninCheck: 'no_match', storedAnswer: true }]);
       // Another desk's new NIN is still checked.
       await expect(s.resolve('desk-once-key-000224', deskContext(2))).resolves.toMatchObject({ caseId });
     });
@@ -669,9 +735,9 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       await s.ninCheck.settle();
       expect(s.breaker.state()).toBe('closed');
       expect(s.qoreId.state.charged).toBe(3);
-      // The retries are answered from the stored 404, as the first time.
+      // The retries are answered from the stored 404: QoreID has no record of the NIN (Q117).
       await expect(s.resolve('desk-once-key-000260', deskContext(1), { ...input, nin: NINS[0]! }))
-        .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
+        .rejects.toMatchObject(NO_RECORD_ANSWER);
       expect(s.qoreId.state.charged).toBe(3);
     });
 

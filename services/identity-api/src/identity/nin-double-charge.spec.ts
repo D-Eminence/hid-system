@@ -271,8 +271,11 @@ describe('the same NIN is sent to QoreID once', () => {
     test('E6: a NIN QoreID refused (not found) is not asked again on a retry', async () => {
       const s = system();
       s.qoreId.state.fallback = 'not_found';
-      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
-      await expect(s.start(KEY_B)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
+      // Q117: QoreID's 404 is its "no record": 422 NIN_NOT_VERIFIED, fresh and from storage.
+      const noRecord = { status: 422, code: 'NIN_NOT_VERIFIED',
+        message: 'This NIN could not be verified. Check the number and try again.' };
+      await expect(s.start(KEY_A)).rejects.toMatchObject(noRecord);
+      await expect(s.start(KEY_B)).rejects.toMatchObject(noRecord);
       expect(s.qoreId.state.charged).toBe(1);
     });
 
@@ -540,11 +543,12 @@ describe('the same NIN is sent to QoreID once', () => {
     it('For #276 (2): QoreID\'s "not found" for a profile check answers a sign-up and the desk from storage', async () => {
       const s = system();
       s.qoreId.state.fallback = 'not_found';
-      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
+      // Q117: every path answers QoreID's 404 as 422 NIN_NOT_VERIFIED.
+      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ status: 422, code: 'NIN_NOT_VERIFIED' });
       expect([...s.db.store.rows.values()][0]).toMatchObject({ outcome: 'rejected', question_hmac: null });
-      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ status: 422, code: 'NIN_NOT_VERIFIED' });
       await expect(s.provider.verifyNin(NIN, { correlationId: 'desk-check', path: 'desk' }))
-        .rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
+        .rejects.toMatchObject({ status: 422, code: 'NIN_NOT_VERIFIED' });
       expect(s.qoreId.state.charged).toBe(1);
       expect(s.checkAudits()).toEqual([['profile', 'qoreid', 'rejected'], ['enrollment', 'stored', 'rejected'],
         ['desk', 'stored', 'rejected']]);

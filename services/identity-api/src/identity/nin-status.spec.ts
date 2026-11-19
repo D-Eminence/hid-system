@@ -309,7 +309,8 @@ describe('ID-0 NIN service breaker', () => {
       answer({ verified: false, provider: 'deterministic-test', reference: 'test-ref',
         verifiedAt: new Date(start + NIN_BREAKER_RETRY_AFTER_MS).toISOString(),
         demographics: { firstName: 'Ada', lastName: 'Fictional', dateOfBirth: '1991-04-05' } });
-      await expect(first).rejects.toMatchObject({ code: 'NIN_VERIFICATION_FAILED' });
+      // A provider that does not say why is read as "no record" (Q117: 422 NIN_NOT_VERIFIED).
+      await expect(first).rejects.toMatchObject({ code: 'NIN_NOT_VERIFIED' });
       expect(breaker.state()).toBe('closed');
     });
 
@@ -346,7 +347,7 @@ describe('ID-0 NIN service breaker', () => {
       const { service, breaker } = resolver(verify);
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await expect(service.resolve(input, `resolve-key-0000000000${attempt}`, context))
-          .rejects.toMatchObject({ code: 'NIN_VERIFICATION_FAILED' });
+          .rejects.toMatchObject({ status: 422, code: 'NIN_NOT_VERIFIED' });
       }
       expect(breaker.state()).toBe('closed');
       expect(warn).not.toHaveBeenCalled();

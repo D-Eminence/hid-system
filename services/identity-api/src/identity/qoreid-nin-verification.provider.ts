@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
 import { NinCheckOnce } from './nin-check-once';
 import { isNinCheckRefusedUnsent, isNinCheckStillRunning, isStoredNinAnswer, markNinCheckOwnFault,
-  markNinServiceAnswer, markStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
+  markStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
 import type {
   NinClaimedDemographics,
   NinVerificationProvider,
@@ -14,7 +14,6 @@ import {
   type NinRecordNames,
   PUBLIC_PATIENT_IDENTITY_PROVIDER,
   type PublicPatientIdentityProvider,
-  qoreIdNotFound,
 } from './patient-enrollment.provider';
 import { markQoreIdDelivery, qoreIdDelivery } from './qoreid-delivery';
 import { QOREID_PROVIDER, type QoreIdNinBinding } from './qoreid-verification.types';
@@ -48,11 +47,15 @@ const GENDERS = new Set(['female', 'male', 'intersex', 'other', 'unknown']);
  * request and a sign-up or profile check of the same NIN together make one
  * QoreID call while the answer is kept or the check is running, but for
  * 0137's own exceptions (docs/INTERFACE_CONTRACT.md, Q108, "One QoreID check
- * per NIN"), each a second charge: a sign-up after an incomplete record; a
- * desk check or a sign-up after a profile check's "no record", 404 or
- * unusable answer, which 0137 keeps for the profile's question only (the desk
- * asks with none); and a NIN_KEY_VERSION change. No per-request claim and no
- * limit (Q109) is kept beside it.
+ * per NIN"), each a second charge: a sign-up after a profile check's
+ * incomplete record; a desk check or a sign-up after a profile check's "no
+ * record" or unusable answer, which 0137 keeps for the profile's question
+ * only (the desk asks with none); and a NIN_KEY_VERSION change. No
+ * per-request claim and no limit (Q109) is kept beside it.
+ *
+ * Q117: QoreID having no record of the NIN (its "no record", or its 404
+ * "not found", fresh or kept) is answered `no_match`, which the desk gives as
+ * 422 NIN_NOT_VERIFIED, the answer sign-up and the profile give too.
  */
 @Injectable()
 export class QoreIdNinVerificationProvider implements NinVerificationProvider {
@@ -85,9 +88,10 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
    * - 503 NIN_CHECK_UNAVAILABLE (the guard's store could not be read):
    *   "NIN checks cannot be started right now", as the desk answers any check
    *   that could not be started; nothing was sent.
-   * For the breaker (D4), QoreID's 404 "not found" is marked as its answer
-   * (isNinServiceAnswer), and an error no QoreID request raised (the guard's
-   * audit write, a database fault) as HID's own (isNinCheckOwnFault).
+   * For the breaker (D4), an error no QoreID request raised (the guard's
+   * audit write, a database fault) is marked as HID's own
+   * (isNinCheckOwnFault). QoreID's 404 is not an error here: it is its "no
+   * record" (Q117), an answer like any other.
    */
   async verify(request: NinVerificationRequest): Promise<NinVerificationResult> {
     const claimed = request.claimedDemographics;
@@ -215,16 +219,15 @@ export function selectNinVerificationProvider(
  * D4: says what an error from the guard means for the breaker, which counts
  * only what QoreID did. The guard's own answers (stored, still running,
  * refused unsent) are already marked. An error a QoreID request raised is
- * marked with how far it got (qoreid-delivery.ts): its 404 is QoreID's
- * answer; anything else from QoreID (5xx, timeout, network, 401, an answer
- * HID cannot use) is QoreID failing and is left as it is. Any other error
- * was raised by HID's own code or database.
+ * marked with how far it got (qoreid-delivery.ts): QoreID failing (5xx,
+ * timeout, network, 401, an answer HID cannot use) is left as it is (its
+ * 404 never reaches here: verifyNinRecord answers it as "no record", Q117).
+ * Any other error was raised by HID's own code or database.
  */
 function forTheBreaker(error: unknown): unknown {
   if (typeof error !== 'object' || error === null || isStoredNinAnswer(error) || isNinCheckStillRunning(error)
     || isNinCheckRefusedUnsent(error)) return error;
-  if (!qoreIdDelivery(error)) return markNinCheckOwnFault(error);
-  return qoreIdNotFound(error) ? markNinServiceAnswer(error) : error;
+  return qoreIdDelivery(error) ? error : markNinCheckOwnFault(error);
 }
 
 /**

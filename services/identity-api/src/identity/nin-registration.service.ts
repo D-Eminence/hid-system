@@ -10,8 +10,8 @@ import { CollectedFieldProtector, registrationCaseContactLabel } from './collect
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
 import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinCheckNotStarted,
-  isNinCheckOwnFault, isNinCheckRefusedUnsent, isNinCheckStillRunning, isNinNotConfigured, isNinServiceAnswer,
-  isStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
+  isNinCheckOwnFault, isNinCheckRefusedUnsent, isNinCheckStillRunning, isNinNotConfigured, isStoredNinAnswer,
+  ninCheckNotStarted, ninCouldNotBeVerified, ninNotConfigured } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinClaimedDemographics,
   type NinVerificationProvider, type NinVerificationResult } from './nin.types';
 import { NinProviderBreaker } from './nin-provider-breaker';
@@ -911,9 +911,9 @@ export class NinRegistrationService {
         throw error;
       }
       if (isStoredNinAnswer(error)) {
-        // 0137: the NIN service's earlier answer, kept (QoreID's "not found",
-        // an answer HID cannot use), given again. Nothing was sent for this
-        // request: not counted, and the retry place is freed.
+        // 0137: the NIN service's earlier answer, kept (an answer HID cannot
+        // use), given again. Nothing was sent for this request: not counted,
+        // and the retry place is freed.
         this.ninBreaker.release();
         await this.auditFailure(context, 'identity.nin.verify', error,
           { providerCalled: true, ninCheck: 'provider_error', storedAnswer: true });
@@ -929,16 +929,6 @@ export class NinRegistrationService {
         this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
         if (late.settlement?.answered) this.ninBreaker.recordSuccess();
         else if (!late.settlement) late.then = 'answer_only';
-        await this.auditFailure(context, 'identity.nin.verify', error,
-          { providerCalled: true, ninCheck: 'provider_error' });
-        throw error;
-      }
-      if (isNinServiceAnswer(error)) {
-        // D4: QoreID's "not found" (404) is its answer, given as QoreID's own
-        // refusal (502 QOREID_PROVIDER_REJECTED, as on sign-up and the
-        // profile): QoreID answered, so it counts as a success, never as a
-        // failure.
-        this.ninBreaker.recordSuccess();
         await this.auditFailure(context, 'identity.nin.verify', error,
           { providerCalled: true, ninCheck: 'provider_error' });
         throw error;
@@ -1086,7 +1076,12 @@ export class NinRegistrationService {
     else this.ninBreaker.recordFailure(settlement.error, { correlationId, provider: this.provider.name });
   }
 
-  /** Audits a NIN that was not verified (denied) and returns the desk's 422. */
+  /**
+   * Audits a NIN that was not verified (denied) and returns the desk's 422:
+   * no record of the NIN (Q117: QoreID's "no record" or its 404, the one
+   * NIN_NOT_VERIFIED answer the desk, sign-up and the profile give), or a
+   * record whose name or date of birth is not the desk's.
+   */
   private async ninNotVerified(context: DataAccessContext, provider: string, ninCheck: 'no_match' | 'name_mismatch',
     extra: { storedAnswer?: true; providerCalled?: false; healthIdRecord?: true } = {}): Promise<DomainProblem> {
     await this.audit.record({
@@ -1103,9 +1098,9 @@ export class NinRegistrationService {
       purposeOfUse: context.purposeOfUse,
       details: { provider, ninCheck, ...extra },
     });
-    return new DomainProblem(422, 'NIN_VERIFICATION_FAILED', ninCheck === 'name_mismatch'
-      ? 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.'
-      : 'The NIN could not be verified');
+    return ninCheck === 'name_mismatch' ? new DomainProblem(422, 'NIN_VERIFICATION_FAILED',
+      'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.')
+      : ninCouldNotBeVerified();
   }
 
   private async findByIdempotency(client: PoolClient, context: DataAccessContext, key: string, digest: string) {

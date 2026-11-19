@@ -20,7 +20,6 @@ import {
   isNinCheckOwnFault,
   isNinCheckRefusedUnsent,
   isNinNotConfigured,
-  isNinServiceAnswer,
   isStoredNinAnswer,
   markNinCheckStillRunning,
   markStoredNinAnswer,
@@ -28,7 +27,7 @@ import {
   UnavailableNinVerificationProvider,
 } from './nin-verification.provider';
 import { NIN_BREAKER_RETRY_AFTER_MS, NIN_PROVIDER_UNAVAILABLE_EVENT, NinProviderBreaker } from './nin-provider-breaker';
-import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavailable, qoreIdRejected } from './nin-check-once';
+import { ninCheckHeld, ninCheckInProgress, ninCheckStillRunning, ninCheckUnavailable } from './nin-check-once';
 import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinVerificationProvider,
   type NinVerificationRequest } from './nin.types';
 import type { NinRecordCheck, PublicPatientIdentityProvider, VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
@@ -80,10 +79,15 @@ function fromQoreId(status: number, code: string, delivery: QoreIdDelivery = 'se
     { delivery, ...(httpStatus === undefined ? {} : { status: httpStatus }) });
 }
 
-/** QoreID's 404 "not found", as the adapter raises it: an answer (0137 keeps it as 'rejected'). */
-function notFound() {
-  return fromQoreId(502, 'QOREID_PROVIDER_REJECTED', 'answered', 404);
+/** An answer HID cannot use, given again from storage by 0137 (nothing sent for this request). */
+function storedUnusable() {
+  return markStoredNinAnswer(new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
+    'External verification returned an invalid response'));
 }
+
+/** Q117: the one answer for a NIN QoreID has no record of, on the desk, sign-up and the profile. */
+const NO_RECORD_ANSWER = { status: 422, code: 'NIN_NOT_VERIFIED',
+  message: 'This NIN could not be verified. Check the number and try again.' };
 
 function gate(overrides: Partial<Record<keyof PublicPatientIdentityProvider, jest.Mock>> = {}) {
   return {
@@ -312,31 +316,34 @@ describe('Q108 QoreID NIN check for the desk', () => {
     await expect(refusal).rejects.toMatchObject({ status, code });
     await refusal.catch((error) => {
       expect(isNinNotConfigured(error)).toBe(false);
-      // QoreID failing: neither its answer nor HID's own fault, so the breaker counts it.
-      expect(isNinServiceAnswer(error)).toBe(false);
+      // QoreID failing: not HID's own fault, so the breaker counts it.
       expect(isNinCheckOwnFault(error)).toBe(false);
     });
   });
 
-  it('marks QoreID\'s 404 "not found" as its answer, and an error no QoreID request raised as HID\'s own', async () => {
+  it('answers QoreID\'s "no record" (its 404 included, which the guard gives as "no record") as no match (Q117)', async () => {
+    for (const source of ['qoreid', 'stored'] as const) {
+      const answer = await qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => noRecord(source)) }))
+        .verify(request);
+      expect(answer).toMatchObject({ verified: false, outcome: 'no_match', provider: 'qoreid',
+        ...(source === 'stored' ? { stored: true } : {}) });
+    }
+  });
+
+  it('marks an error no QoreID request raised as HID\'s own', async () => {
     const thrown = async (error: unknown) => qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => {
       throw error;
     }) })).verify(request).catch((caught: unknown) => caught);
-    const answer = await thrown(notFound());
-    expect(answer).toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
-    expect(isNinServiceAnswer(answer)).toBe(true);
-    expect(isNinCheckOwnFault(answer)).toBe(false);
     // The guard's audit write failing, and a database fault: HID's own.
     for (const own of [new ServiceUnavailableException('Audit persistence is unavailable; request was denied'),
       Object.assign(new Error('connection reset'), { code: '08006' })]) {
       const caught = await thrown(own);
       expect(caught).toBe(own);
       expect(isNinCheckOwnFault(caught)).toBe(true);
-      expect(isNinServiceAnswer(caught)).toBe(false);
     }
     // The guard's own answers keep their meaning.
-    const stored = await thrown(markStoredNinAnswer(qoreIdRejected()));
-    expect([isStoredNinAnswer(stored), isNinCheckOwnFault(stored), isNinServiceAnswer(stored)]).toEqual([true, false, false]);
+    const stored = await thrown(storedUnusable());
+    expect([isStoredNinAnswer(stored), isNinCheckOwnFault(stored)]).toEqual([true, false]);
     const running = await thrown(markNinCheckStillRunning(ninCheckStillRunning()));
     expect(isNinCheckOwnFault(running)).toBe(false);
     const held = await thrown(ninCheckHeld(new Date(Date.now() + 60_000)));
@@ -466,15 +473,15 @@ describe('Q108 desk NIN resolve through QoreID', () => {
   });
 
   it.each([
-    ['no match', 'no_match', 'The NIN could not be verified'],
-  ])('answers %s as "could not be verified" and audits it', async (_label, ninCheck, message) => {
-    const qoreId = gate({ verifyNinRecord: jest.fn(async () => noRecord()) });
+    ['QoreID\'s "no record"', 'qoreid', {}],
+    ['a "no record" 0137 kept (QoreID\'s 404 included)', 'stored', { storedAnswer: true }],
+  ] as const)('answers %s as 422 NIN_NOT_VERIFIED (Q117) and audits it', async (_label, source, extra) => {
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => noRecord(source)) });
     const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
-    await expect(service.resolve(input, 'resolve-key-q108-000003', context)).rejects.toMatchObject({
-      status: 422, code: 'NIN_VERIFICATION_FAILED', message });
+    await expect(service.resolve(input, 'resolve-key-q108-000003', context)).rejects.toMatchObject(NO_RECORD_ANSWER);
     expect(breaker.state()).toBe('closed');
     expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied',
-      details: { provider: 'qoreid', ninCheck } })]);
+      details: { provider: 'qoreid', ninCheck: 'no_match', ...extra } })]);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -659,8 +666,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     const verifyNinRecord = jest.fn(async () => noRecord());
     const { service, audit, breaker } = desk(qoreIdProvider(gate({ verifyNinRecord })));
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      await expect(service.resolve(input, 'resolve-key-q109-000041', context)).rejects.toMatchObject({
-        status: 422, code: 'NIN_VERIFICATION_FAILED', message: 'The NIN could not be verified' });
+      await expect(service.resolve(input, 'resolve-key-q109-000041', context)).rejects.toMatchObject(NO_RECORD_ANSWER);
     }
     // The guard answers the second from the answer it stored (qoreid-nin-desk-once.spec.ts).
     expect(verifyNinRecord).toHaveBeenCalledTimes(2);
@@ -982,25 +988,23 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       expect(breaker.state()).toBe('closed');
     });
 
-    it('never counts QoreID\'s "not found" (404) as a failure: QoreID answered', async () => {
+    it('never counts QoreID\'s "not found" (404, given by the guard as "no record") as a failure: QoreID answered', async () => {
       const verifyNinRecord = jest.fn(async (_nin: string, check: { onQoreIdSettled: (settlement: NinCheckSettlement) => void }) => {
         check.onQoreIdSettled({ answered: true });
-        throw notFound();
+        return noRecord();
       });
       const { service, audit, breaker } = desk(qoreIdProvider(gate({ verifyNinRecord })));
       for (const key of ['resolve-key-q109-000062', 'resolve-key-q109-000063', 'resolve-key-q109-000064']) {
-        await expect(service.resolve(input, key, context)).rejects.toMatchObject({ status: 502,
-          code: 'QOREID_PROVIDER_REJECTED' });
+        await expect(service.resolve(input, key, context)).rejects.toMatchObject(NO_RECORD_ANSWER);
       }
       expect(breaker.state()).toBe('closed');
       expect(warn).not.toHaveBeenCalled();
       expect(auditRows(audit)).toEqual([0, 1, 2].map(() => expect.objectContaining({ action: 'identity.nin.verify',
-        outcome: 'failure', details: { provider: 'qoreid', errorType: 'DomainProblem', code: 'QOREID_PROVIDER_REJECTED',
-          providerCalled: true, ninCheck: 'provider_error' } })));
+        outcome: 'denied', details: { provider: 'qoreid', ninCheck: 'no_match' } })));
       // QoreID answering closes a breaker that was letting one check through.
       const retrying = retryingBreaker();
       const { service: next } = desk(qoreIdProvider(gate({ verifyNinRecord })), retrying);
-      await expect(next.resolve(input, 'resolve-key-q109-000065', context)).rejects.toMatchObject({ status: 502 });
+      await expect(next.resolve(input, 'resolve-key-q109-000065', context)).rejects.toMatchObject({ status: 422 });
       expect(retrying.state()).toBe('closed');
     });
 
@@ -1046,20 +1050,33 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       expect(later.state()).toBe('open');
     });
 
-    it('answers a stored QoreID refusal again without counting it, freeing the retry place', async () => {
+    it('answers a stored answer HID cannot use again without counting it, freeing the retry place', async () => {
       const breaker = retryingBreaker();
-      const verifyNinRecord = jest.fn(async () => { throw markStoredNinAnswer(qoreIdRejected()); });
+      const verifyNinRecord = jest.fn(async () => { throw storedUnusable(); });
       const { service, audit } = desk(qoreIdProvider(gate({ verifyNinRecord })), breaker);
       for (const key of ['resolve-key-q109-000056', 'resolve-key-q109-000057', 'resolve-key-q109-000058']) {
         await expect(service.resolve(input, key, context)).rejects.toMatchObject({ status: 502,
-          code: 'QOREID_PROVIDER_REJECTED' });
+          code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
       }
       expect(breaker.state()).toBe('retrying');
       expect(breaker.available()).toBe(true);
       expect(warn).not.toHaveBeenCalled();
       expect(auditRows(audit)).toEqual([0, 1, 2].map(() => expect.objectContaining({ action: 'identity.nin.verify',
-        outcome: 'failure', details: expect.objectContaining({ code: 'QOREID_PROVIDER_REJECTED', providerCalled: true,
-          ninCheck: 'provider_error', storedAnswer: true }) })));
+        outcome: 'failure', details: expect.objectContaining({ code: 'QOREID_PROVIDER_RESPONSE_INVALID',
+          providerCalled: true, ninCheck: 'provider_error', storedAnswer: true }) })));
+    });
+
+    it('answers a stored "no record" (QoreID\'s 404 included) 422 NIN_NOT_VERIFIED without counting it (Q117)', async () => {
+      const breaker = retryingBreaker();
+      const { service, audit } = desk(qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => noRecord('stored')) })),
+        breaker);
+      for (const key of ['resolve-key-q109-000076', 'resolve-key-q109-000077']) {
+        await expect(service.resolve(input, key, context)).rejects.toMatchObject(NO_RECORD_ANSWER);
+      }
+      expect(breaker.state()).toBe('retrying');
+      expect(breaker.available()).toBe(true);
+      expect(auditRows(audit)).toEqual([0, 1].map(() => expect.objectContaining({ action: 'identity.nin.verify',
+        outcome: 'denied', details: { provider: 'qoreid', ninCheck: 'no_match', storedAnswer: true } })));
     });
 
     it('frees the retry place for a stored answer but does not close the breaker with it', async () => {
