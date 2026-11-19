@@ -89,6 +89,9 @@
 --   8. the owner-run definer functions that read ehr.prescriptions give the
 --      pharmacist nothing more through the EHR runtime: the order-route send,
 --      the own-pharmacy send and the withdrawal refuse the pharmacist first.
+--   9. the undo order of 0133's header: the sends table dropped while the
+--      withdrawal trigger stands breaks prescription changes (42P01); the
+--      trigger and its function dropped first do not.
 -- Fixtures inserted as the suite runner with session_replication_role =
 -- replica where the services would not write them (identity rows, the lab
 -- work item). Synthetic values only; uuid prefix e133.
@@ -1337,5 +1340,38 @@ select pg_temp.expect('PH: the withdrawal refuses', pg_temp.try(format(
 select pg_temp.expect('PH: the patient''s own route list answers nothing for a staff session',
   pg_temp.rows_of('select * from ehr.patient_list_order_routes()'), '42501 PATIENT_SESSION_REQUIRED');
 reset role;
+
+-- 9. The undo order (0133's header). With the withdrawal trigger left in
+-- place, dropping the sends table succeeds (plpgsql records no dependency)
+-- and every later change of a prescription's status or version fails with
+-- 42P01; dropping the trigger and its function first leaves prescription
+-- changes working. Each in a savepoint, rolled back.
+savepoint undo_table_first;
+drop table pharmacy.own_prescription_sends;
+select pg_temp.expect('the trigger is still there', (select count(*)::text from pg_trigger
+  where tgname = 'prescriptions_own_pharmacy_send_withdrawn'), '1');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
+select set_config('app.change_reason', 'Undo order probe', true);
+select pg_temp.expect('the sends table dropped first: a prescription change fails',
+  pg_temp.try(format($s$update ehr.prescriptions set frequency = 'Every 6 hours' where id = %L$s$, pg_temp.rx(6))),
+  '42P01 relation "pharmacy.own_prescription_sends" does not exist');
+reset role;
+rollback to savepoint undo_table_first;
+savepoint undo_trigger_first;
+drop trigger prescriptions_own_pharmacy_send_withdrawn on ehr.prescriptions;
+drop function ehr.own_pharmacy_send_withdrawn_on_change();
+drop table pharmacy.own_prescription_sends;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
+select set_config('app.change_reason', 'Undo order probe', true);
+select pg_temp.expect('the trigger and its function dropped first: the change goes through',
+  pg_temp.try(format($s$update ehr.prescriptions set frequency = 'Every 6 hours' where id = %L$s$, pg_temp.rx(6))),
+  'ok');
+reset role;
+rollback to savepoint undo_trigger_first;
+select pg_temp.expect('both undone: the sends table and the trigger are back',
+  (select (to_regclass('pharmacy.own_prescription_sends') is not null)::text || '/' || count(*)::text from pg_trigger
+    where tgname = 'prescriptions_own_pharmacy_send_withdrawn'), 'true/1');
 
 rollback;

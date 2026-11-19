@@ -6836,8 +6836,9 @@ present.
 
 Owner decisions of 18 November 2026: activated prescriptions go
 automatically to the hospital's own pharmacy (YES); pharmacy and lab staff
-get their own facility's work items only, never the chart. Needs 0001-0127
-(0128 and 0129 replace nothing it touches). It fixes finding F2 of the plan:
+get their own facility's work items only, never the chart. Needs 0001-0127;
+in Release A, 0128-0132 run before it and none of them replaces, alters or
+relies on anything it replaces or relies on. It fixes finding F2 of the plan:
 before 0133 a pharmacist or lab scientist without a personal consent grant
 saw "To dispense 0" and a card with no name for their own facility's work.
 
@@ -6864,8 +6865,9 @@ route-backed item) stay as that route allows, even for the same patient.
 It gives reads of the work item and reads and writes of its chain; accepting
 a new item into the pharmacy or the lab still needs the member's consent
 (own prescriptions arrive by the automatic send below). Every read and write
-is audited as before, with `basis: 'own-work'` where the member has no
-personal grant.
+is audited as before, with `basis: 'own-work'` unless the member holds its
+own consent grant for that action (then the row is a consent row, as
+before).
 
 ### Pharmacy API and Lab API changes (no new route)
 
@@ -6893,7 +6895,11 @@ personal grant.
   for a member who holds its own consent grant for that action: the database
   answers the basis with the access (as the list's reader does), and that
   member's rows stay consent rows (no `basis`, as before), so the list and
-  the commands record the same basis for the same member.
+  the commands record the same basis for the same member and action. A
+  grant for reads only covers the list and the reads: that member's list
+  and read rows are consent rows, and its dispensings, reversals and other
+  writes carry `basis: 'own-work'` (a write grant covers reads too, not the
+  other way round).
 - `GET /lab/executions/:executionId` and
   `GET /lab/specimens/:specimenId/executions`, which answer result values
   and every revision, now write one audit row naming the patient in the
@@ -6968,9 +6974,11 @@ records no `pharmacySendWithdrawn`, `ownProgress` stays `dispensed` (or
 `dispensing_reversed`), and the pharmacy's list does not mark the item
 withdrawn. The database marks it on the change itself (a trigger on the
 prescription), so a change made by any ehr-api image (an older one during a
-rolling deploy or after a rollback included) marks it too. Whether the
-pharmacy item should follow the new version instead is open for the owner
-(review S3 of 18 November). The audit row of the create, the
+rolling deploy or after a rollback included) marks it too; undoing 0133 by
+hand must drop that trigger before the sends table (the order is in 0133's
+header), or every later change of a prescription's status or version fails.
+Whether the pharmacy item should follow the new version instead is open for
+the owner (review S3 of 18 November). The audit row of the create, the
 update and the send records `pharmacyHandoff` (the status) and
 `pharmacyHandoffReason` (the reason code), never the message, and the
 update's `pharmacySendWithdrawn: true` when the prescription's send stands

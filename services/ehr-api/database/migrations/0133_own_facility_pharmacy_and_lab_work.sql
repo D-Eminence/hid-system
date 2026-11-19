@@ -3,10 +3,13 @@
 -- and lab staff work on their own facility's work items without a personal
 -- consent grant (ORD-2 of the Akos EHR plan of 18 November 2026, Release A,
 -- lane D; it also fixes the plan's finding F2 and Akos item N-4). Written on
--- staging-novu-ci-20261005 at 1f5e2c2a, where 0001-0127 are applied. 0128
--- (hid-system#264) and 0129 (hid-system#266) are booked before this number
--- and replace nothing this file reads or replaces. This file requires
--- 0001-0127 applied. The declaration is signed separately.
+-- staging-novu-ci-20261005 at 1f5e2c2a, where 0001-0127 are applied. In
+-- Release A, 0128-0132 run before this file (0128 hid-system#264, 0129
+-- hid-system#266, and 0130-0132 of the release's other lanes); none of them
+-- creates, replaces or alters a function this file replaces or relies on
+-- (precondition d's list), a table it locks or gives a policy, or a column
+-- precondition c names. This file requires 0001-0127 applied. The
+-- declaration is signed separately.
 --
 -- Owner, 18 November 2026: "activated prescriptions go automatically to the
 -- hospital's own pharmacy: YES", and "pharmacy and lab staff get their own
@@ -289,10 +292,13 @@
 -- written, the new table is empty). In the dry run of several pending files
 -- they last until the dry run ends, while the later files run: a later file
 -- that waits for its own locks (up to the runner's 5 s lock_timeout) keeps
--- these, and the earlier files', held meanwhile; the release's combined
--- declaration states that hold. The replaced functions' catalog rows are
--- locked too; the new table takes no lock on existing data. Section 0 takes
--- no table lock.
+-- these, and the earlier files', held meanwhile (in Release A's order,
+-- 0136's plain LOCK TABLE of auth.permissions, auth.role_permissions and
+-- identity.access_requests waits that way while an access request is being
+-- written); the release's combined declaration must state that hold, and
+-- the dry run belongs in a quiet window. The replaced functions' catalog
+-- rows are locked too; the new table takes no lock on existing data.
+-- Section 0 takes no table lock.
 --
 -- Old services on this schema: today's images call none of the new
 -- functions. They gain, through the changed policies, the pharmacist's and
@@ -311,6 +317,15 @@
 -- withdrawal (D8) does not depend on the images: its trigger marks a sent
 -- prescription changed by any ehr-api image. Applied migrations before 0133
 -- are immutable.
+--
+-- Undo (by hand only; no release runs it): drop the trigger
+-- prescriptions_own_pharmacy_send_withdrawn first, then
+-- ehr.own_pharmacy_send_withdrawn_on_change(), and only then
+-- pharmacy.own_prescription_sends and the other functions. plpgsql records
+-- no dependency on the table, so with the trigger left in place DROP TABLE
+-- succeeds and every later change of a prescription's status or version, by
+-- any ehr-api image, fails with 42P01. Restore 0086's work_item_allows and
+-- 0124's card readers before dropping D1, which they call.
 
 -- 0. Preconditions.
 do $$
