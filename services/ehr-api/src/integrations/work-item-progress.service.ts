@@ -23,7 +23,8 @@ export const OWN_PROGRESS_BATCH = 100;
 /** A slow pharmacy or laboratory must not hold the clinician's list for long. */
 export const OWN_PROGRESS_TIMEOUT_MS = 3_000;
 
-export type PharmacyOwnProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed' | 'unknown';
+export type PharmacyOwnProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed' | 'withdrawn'
+  | 'unknown';
 export interface PharmacyOwnProgress {
   status: PharmacyOwnProgressStatus;
   receivedAt: string | null;
@@ -49,7 +50,8 @@ export const LAB_PROGRESS_UNKNOWN: LabOwnProgress = Object.freeze({ status: 'unk
 export const LAB_PROGRESS_NOT_RECEIVED: LabOwnProgress = Object.freeze({ status: 'not_received', receivedAt: null,
   collectedAt: null, lastResultAt: null });
 
-const PHARMACY_STATUSES = new Set(['not_received', 'received', 'dispensed', 'dispensing_reversed']);
+// 'withdrawn' (0133): sent by itself, then held, cancelled, entered in error, edited or resumed before dispensing.
+const PHARMACY_STATUSES = new Set(['not_received', 'received', 'dispensed', 'dispensing_reversed', 'withdrawn']);
 const LAB_STATUSES = new Set(['not_received', 'received', 'sample_collected', 'some_results_ready', 'results_ready']);
 
 /** A draft was never sent, so it is not asked about; every other status may have been. */

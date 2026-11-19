@@ -5,6 +5,7 @@ import { INTERNAL_CALLER, READ_ONLY_POST, REQUIRED_PERMISSIONS } from '../common
 import type { DataAccessContext } from '../common/request-context';
 import { WORK_ITEM_PROGRESS_MAX_IDS, WorkItemProgressDto } from './dto/work-item-progress.dto';
 import { PharmacyWorkItemProgressController } from './work-item-progress.controller';
+import { PharmacyOwnWork } from './own-work-access';
 import { PharmacyWorkItemProgressService, WORK_ITEM_PROGRESS_QUERY } from './work-item-progress.service';
 
 // Fictional ids only.
@@ -28,13 +29,23 @@ const context: DataAccessContext = {
 const allowed = { allowed: true, patientId: ids.patient, facilityId: ids.facility, membershipId: ids.membership,
   scope: 'read_records', purpose: 'direct-care', breakGlass: false };
 
-function harness(rows: unknown[], decision: unknown = allowed) {
-  const query = jest.fn(async (sql: string) => (sql === WORK_ITEM_PROGRESS_QUERY ? { rows } : { rows: [] }));
+function harness(rows: unknown[], decision: unknown = allowed,
+  own?: { withdrawn?: string[]; error?: Error & { code?: string } }) {
+  const query = jest.fn(async (sql: string, values: unknown[] = []) => {
+    if (sql === WORK_ITEM_PROGRESS_QUERY) return { rows };
+    if (/from pharmacy\.own_work_item_states\(\$1::uuid\[\]\)/.test(sql)) {
+      if (own?.error) throw own.error;
+      return { rows: (values[0] as string[]).map((item) => ({ work_item_id: item, basis: 'consent',
+        withdrawn: own?.withdrawn?.includes(item) ?? false })) };
+    }
+    return { rows: [] };
+  });
   const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown) =>
     operation({ query })) };
   const identity = { authorize: jest.fn().mockResolvedValue(decision) };
   const audit = { recordWithClient: jest.fn() };
-  const service = new PharmacyWorkItemProgressService(database as never, identity as never, audit as never);
+  const service = new PharmacyWorkItemProgressService(database as never, identity as never, audit as never,
+    own ? new PharmacyOwnWork(true) : undefined);
   return { service, query, database, identity, audit };
 }
 
@@ -90,6 +101,35 @@ describe('POST pharmacy/work-items/progress (ORD-3)', () => {
       { patientId: ids.patient, resourceType: 'pharmacy-work-item-collection', resourceId: ids.facility },
       { requestedCount: 4, foundCount: 3, workItemIds: [ids.workA, ids.workB, ids.workC], breakGlass: false });
     expect(JSON.stringify(answer)).not.toMatch(/unverified/i);
+  });
+
+  it('answers withdrawn (0133) for an item whose automatic send was withdrawn before it was dispensed', async () => {
+    const { service } = harness([
+      { work_item_id: ids.workA, source_ehr_prescription_id: ids.rxA, accepted_at: new Date('2026-11-18T10:40:00Z'),
+        dispensed_at: null, reversed_at: null },
+      { work_item_id: ids.workB, source_ehr_prescription_id: ids.rxB, accepted_at: new Date('2026-11-18T10:41:00Z'),
+        dispensed_at: new Date('2026-11-18T11:05:00Z'), reversed_at: null },
+    ], allowed, { withdrawn: [ids.workA, ids.workB] });
+    const answer = await service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA, ids.rxB] });
+    expect(answer.items).toEqual([
+      { sourceEhrPrescriptionId: ids.rxA, status: 'withdrawn', receivedAt: '2026-11-18T10:40:00.000Z',
+        dispensedAt: null, reversedAt: null },
+      { sourceEhrPrescriptionId: ids.rxB, status: 'dispensed', receivedAt: '2026-11-18T10:41:00.000Z',
+        dispensedAt: '2026-11-18T11:05:00.000Z', reversedAt: null },
+    ]);
+  });
+
+  it('gets 0133\'s own-work reader injected by the Pharmacy module', () => {
+    expect((Reflect.getMetadata('design:paramtypes', PharmacyWorkItemProgressService) as unknown[])[3]).toBe(PharmacyOwnWork);
+  });
+
+  it('answers received when the withdrawal cannot be read (the answer never fails because of it)', async () => {
+    const { service } = harness([
+      { work_item_id: ids.workA, source_ehr_prescription_id: ids.rxA, accepted_at: new Date('2026-11-18T10:40:00Z'),
+        dispensed_at: null, reversed_at: null },
+    ], allowed, { error: Object.assign(new Error('function does not exist'), { code: '42883' }) });
+    const answer = await service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA] });
+    expect(answer.items[0]!.status).toBe('received');
   });
 
   it('audits the lookup even when nothing is found', async () => {

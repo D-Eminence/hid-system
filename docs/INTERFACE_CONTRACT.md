@@ -6691,6 +6691,7 @@ Pharmacy item: `sourceEhrPrescriptionId`, `status`, `receivedAt`,
 | `received` | the pharmacy has it and has not dispensed it |
 | `dispensed` | dispensed at `dispensedAt` |
 | `dispensing_reversed` | dispensed, then the dispensing was reversed at `reversedAt` |
+| `withdrawn` | (0133) sent to this hospital's pharmacy by itself, then held, cancelled, entered in error, edited or resumed before it was dispensed: the pharmacy holds the version sent, which it can no longer dispense |
 
 Lab item: `sourceEhrOrderId`, `status`, `receivedAt`, `collectedAt`
 (the first sample taken), `lastResultAt` (the latest released result).
@@ -6755,7 +6756,8 @@ answers changes.
 Screen change (Akos frontend branch): show `ownProgress` on each order row,
 for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
 "Results ready 11:05"; show "Progress not available right now" for
-`unknown`, and nothing for `not_received` on a draft.
+`unknown`, and nothing for `not_received` on a draft. For `withdrawn` (0133)
+show "The pharmacy cannot dispense this version".
 
 ## ORD-10 phase 1. Same-medicine warning when prescribing (wave 1, no migration)
 
@@ -6942,7 +6944,12 @@ hold, cancelling it or entering it in error marks the send withdrawn, and so
 does editing it while it stays active (frequency, instructions, end date) or
 resuming it: the pharmacy item keeps the version that was sent, which 0101 no
 longer dispenses, and "Send to pharmacy" then answers the "earlier version"
-row above, never "already has". Completing a prescription marks nothing. The
+row above, never "already has"; the edit's or the resume's own answer (the
+`PATCH`, still active) carries that row as its `pharmacyHandoff`, and the
+prescription's `ownProgress` (ORD-3) answers `withdrawn` (what follows is
+S3 below); a hold, a cancellation or an entry in error answers no
+`pharmacyHandoff`. Completing a prescription
+marks nothing. The
 database marks it on the change itself (a trigger on the prescription), so a
 change made by any ehr-api image (an older one during a rolling deploy or
 after a rollback included) marks it too. Whether the pharmacy item should
@@ -6973,10 +6980,19 @@ as every prescription command 404 `CLINICAL_RESOURCE_NOT_FOUND` and 409
 acknowledgement's flags and counts when one was stored for the `handoff`
 stage, `pharmacyHandoff`, `pharmacyHandoffReason`).
 
-Screen change (Akos frontend branch): after Activate, show
-`pharmacyHandoff.message`; show "Send to pharmacy" when it is `pending` or
-`not_sent` with reason `unavailable` (never for `changed` or `not_allowed`). On the pharmacy list, show a withdrawn
-item as "Withdrawn by the prescriber" with Dispense disabled.
+Screen change (Akos frontend branch): after Activate, an edit or a resume,
+show `pharmacyHandoff.message`; show "Send to pharmacy" when it is `pending`
+or `not_sent` with reason `unavailable` (never for `changed` or
+`not_allowed`). The send state is not kept on the prescription and nothing
+retries a pending send by itself, so the prescription list and page also
+show "Send to pharmacy" on an active prescription that the signed-in member
+wrote (`createdBy` and `createdByMembershipId` are theirs), with no order
+route in force (`orderRoute`), whose `ownProgress.status` is `not_received`:
+a send that failed or is pending, the prescriber's own prescription a
+colleague activated (that colleague's answer was `not_prescriber`), or one
+written before the hospital had pharmacy staff; the answer then says which.
+On the pharmacy list, show a withdrawn item as "Withdrawn by the prescriber"
+with Dispense disabled.
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 

@@ -261,29 +261,56 @@ describe('activated prescriptions go to this hospital\'s own pharmacy (0133)', (
       { status: OrderStatus.Active, expectedRowVersion: 1 } as never)).rejects.toBe(conflict);
   });
 
-  it('does not send a resume after a hold, and asks whether its send is withdrawn (the pharmacy keeps one item)',
+  it('does not send a resume after a hold, and tells the prescriber the pharmacy holds an earlier version',
     async () => {
       const { service, sends, withdrawals, audits } = harness({ current: prescription(OrderStatus.OnHold, '3'),
-        updated: prescription(OrderStatus.Active, '4'), withdrawn: false });
+        updated: prescription(OrderStatus.Active, '4') });
       const answer = await service.update(context, patientId, encounterId, prescriptionId,
         { status: OrderStatus.Active, expectedRowVersion: 3, changeReason: 'Resumed after review' } as never) as
         Record<string, unknown>;
-      expect('pharmacyHandoff' in answer).toBe(false);
+      expect(answer.pharmacyHandoff).toEqual({ status: 'not_sent', reason: 'changed',
+        message: 'Not sent: this hospital\'s pharmacy has an earlier version of this prescription, which it can no longer dispense.' });
       expect(sends()).toEqual([]);
       expect(withdrawals()).toEqual([[prescriptionId]]);
-      expect(audits[0]!.details).not.toHaveProperty('pharmacySendWithdrawn');
+      expect(audits[0]!.details).toMatchObject({ pharmacySendWithdrawn: true, pharmacyHandoff: 'not_sent',
+        pharmacyHandoffReason: 'changed' });
     });
 
-  it('marks the send withdrawn when a sent prescription is edited while active, and records it', async () => {
-    const { service, sends, withdrawals, audits } = harness({ current: prescription(OrderStatus.Active, '2'),
-      updated: { ...prescription(OrderStatus.Active, '3'), frequency: 'Twice daily' } });
+  it('answers no hand-off on a resume of a prescription that was never sent', async () => {
+    const { service, audits } = harness({ current: prescription(OrderStatus.OnHold, '3'),
+      updated: prescription(OrderStatus.Active, '4'), withdrawn: false });
     const answer = await service.update(context, patientId, encounterId, prescriptionId,
-      { frequency: 'Twice daily', expectedRowVersion: 2, changeReason: 'Dose interval changed' } as never) as
+      { status: OrderStatus.Active, expectedRowVersion: 3, changeReason: 'Resumed after review' } as never) as
       Record<string, unknown>;
     expect('pharmacyHandoff' in answer).toBe(false);
-    expect(sends()).toEqual([]);
-    expect(withdrawals()).toEqual([[prescriptionId]]);
-    expect(audits[0]!.details).toMatchObject({ rowVersion: '3', pharmacySendWithdrawn: true });
+    expect(audits[0]!.details).not.toHaveProperty('pharmacySendWithdrawn');
+  });
+
+  it('tells the prescriber when a sent prescription is edited while active (the pharmacy holds the version sent)',
+    async () => {
+      const { service, sends, withdrawals, audits } = harness({ current: prescription(OrderStatus.Active, '2'),
+        updated: { ...prescription(OrderStatus.Active, '3'), frequency: 'Twice daily' } });
+      const answer = await service.update(context, patientId, encounterId, prescriptionId,
+        { frequency: 'Twice daily', expectedRowVersion: 2, changeReason: 'Dose interval changed' } as never) as
+        Record<string, unknown>;
+      expect(answer.pharmacyHandoff).toEqual({ status: 'not_sent', reason: 'changed',
+        message: 'Not sent: this hospital\'s pharmacy has an earlier version of this prescription, which it can no longer dispense.' });
+      expect(sends()).toEqual([]);
+      expect(withdrawals()).toEqual([[prescriptionId]]);
+      expect(audits[0]!.details).toMatchObject({ rowVersion: '3', pharmacySendWithdrawn: true,
+        pharmacyHandoff: 'not_sent', pharmacyHandoffReason: 'changed' });
+    });
+
+  it('answers no hand-off when a sent prescription is held or cancelled (it is no longer active)', async () => {
+    for (const status of [OrderStatus.OnHold, OrderStatus.Cancelled]) {
+      const { service, audits } = harness({ current: prescription(OrderStatus.Active, '2'),
+        updated: prescription(status, '3') });
+      const answer = await service.update(context, patientId, encounterId, prescriptionId,
+        { status, expectedRowVersion: 2, changeReason: 'Stopped by the prescriber' } as never) as Record<string, unknown>;
+      expect('pharmacyHandoff' in answer).toBe(false);
+      expect(audits[0]!.details).toMatchObject({ pharmacySendWithdrawn: true });
+      expect(audits[0]!.details).not.toHaveProperty('pharmacyHandoff');
+    }
   });
 
   it('asks the database about a completed prescription, which marks nothing', async () => {

@@ -69,6 +69,16 @@ describe('own pharmacy progress on prescriptions (ORD-3)', () => {
       dispensedAt: null, reversedAt: null });
   });
 
+  it('passes withdrawn (0133: the pharmacy holds an earlier version, or the prescription was stopped) on', async () => {
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue(json({ items: [
+      { sourceEhrPrescriptionId: rx(2), status: 'withdrawn', receivedAt: '2026-11-18T10:40:00.000Z',
+        dispensedAt: null, reversedAt: null },
+    ] }));
+    const progress = await service().pharmacy(context, patientId, [{ id: rx(2), status: 'active' }]);
+    expect(progress.get(rx(2))).toEqual({ status: 'withdrawn', receivedAt: '2026-11-18T10:40:00.000Z',
+      dispensedAt: null, reversedAt: null });
+  });
+
   it('does not call at all when every item is a draft', async () => {
     const fetch = jest.spyOn(globalThis, 'fetch');
     const progress = await service().pharmacy(context, patientId, [{ id: rx(1), status: 'draft' }]);

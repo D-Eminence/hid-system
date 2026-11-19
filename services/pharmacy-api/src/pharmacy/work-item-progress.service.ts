@@ -6,15 +6,19 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { WorkItemProgressDto } from './dto/work-item-progress.dto';
+import { OWN_WORK_OFF, PharmacyOwnWork } from './own-work-access';
 
 /**
  * Where a prescription is in this facility's own pharmacy (ORD-3):
  * - not_received: no work item here that the clinician may read;
  * - received: the pharmacy has it and has not dispensed it;
  * - dispensed: it was dispensed (dispensedAt);
- * - dispensing_reversed: it was dispensed and the dispensing was reversed.
+ * - dispensing_reversed: it was dispensed and the dispensing was reversed;
+ * - withdrawn (0133): sent by itself to the pharmacy, then held, cancelled,
+ *   entered in error, edited or resumed before it was dispensed; the pharmacy
+ *   holds the version sent, which it can no longer dispense.
  */
-export type PharmacyProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed';
+export type PharmacyProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed' | 'withdrawn';
 
 export interface PharmacyProgressItem {
   sourceEhrPrescriptionId: string;
@@ -59,7 +63,7 @@ export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
 @Injectable()
 export class PharmacyWorkItemProgressService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
-    private readonly audit: AuditService) {}
+    private readonly audit: AuditService, private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
 
   async read(context: DataAccessContext, input: WorkItemProgressDto): Promise<{ items: PharmacyProgressItem[] }> {
     // The clinician's browser request to ehr-api was a read (GET), and this
@@ -92,17 +96,22 @@ export class PharmacyWorkItemProgressService {
         patientId: input.patientId, resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { requestedCount: input.sourceEhrPrescriptionIds.length, foundCount: rows.length,
         workItemIds: rows.map((row) => row.work_item_id), breakGlass: decision.breakGlass });
+      // 0133: whether each item's automatic send was withdrawn (no flag when it cannot be read).
+      const states = await this.ownWork.states(client, rows.map((row) => row.work_item_id), context.correlationId, 'flag');
       const found = new Map(rows.map((row) => [row.source_ehr_prescription_id.toLowerCase(), row]));
-      return { items: input.sourceEhrPrescriptionIds.map((id) => project(id, found.get(id.toLowerCase()))) };
+      return { items: input.sourceEhrPrescriptionIds.map((id) => {
+        const row = found.get(id.toLowerCase());
+        return project(id, row, row ? states.get(row.work_item_id)?.withdrawn === true : false);
+      }) };
     });
   }
 }
 
-function project(id: string, row: ProgressRow | undefined): PharmacyProgressItem {
+function project(id: string, row: ProgressRow | undefined, withdrawn: boolean): PharmacyProgressItem {
   if (!row) return { sourceEhrPrescriptionId: id, status: 'not_received', receivedAt: null, dispensedAt: null,
     reversedAt: null };
   const status: PharmacyProgressStatus = row.reversed_at ? 'dispensing_reversed'
-    : row.dispensed_at ? 'dispensed' : 'received';
+    : row.dispensed_at ? 'dispensed' : withdrawn ? 'withdrawn' : 'received';
   return { sourceEhrPrescriptionId: id, status, receivedAt: iso(row.accepted_at),
     dispensedAt: iso(row.dispensed_at), reversedAt: iso(row.reversed_at) };
 }

@@ -15,7 +15,7 @@ import { checkPrescriptionAllergies, readAllergyAcknowledgements,
   recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
 import { type CreatePrescriptionInput, PRESCRIPTION_DISPENSING_DETAILS_OFF,
   PrescriptionDispensingDetails } from './prescription-dispensing-details';
-import { OWN_PHARMACY_SEND_OFF, OwnPharmacySend, type PharmacyHandoff } from './own-pharmacy-send';
+import { OWN_PHARMACY_SEND_OFF, OwnPharmacySend, type PharmacyHandoff, pharmacyHandoff } from './own-pharmacy-send';
 import type { SendPrescriptionToOwnPharmacyDto } from './own-pharmacy-send.dto';
 
 export interface PrescriptionRow extends QueryResultRow {
@@ -279,13 +279,16 @@ export class PrescriptionsService {
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Prescription changed since it was loaded');
         // 0133: activating a draft sends it to this hospital's own pharmacy in this transaction
         // (a failure never undoes the activation). Any other change of a prescription that left
-        // draft (it may have been sent) asks the database whether its send is now withdrawn:
+        // draft (it may have been sent) asks the database whether its send now stands withdrawn:
         // holding, cancelling or entering it in error, and editing or resuming it (the pharmacy
-        // item keeps the version sent), and Pharmacy can no longer dispense it (0101).
-        const handoff = current.status === OrderStatus.Draft && row.status === OrderStatus.Active
+        // item keeps the version sent), and Pharmacy can no longer dispense it (0101). An edit or a
+        // resume that leaves it active answers the contract's "earlier version" row, so the
+        // prescriber is told the pharmacy cannot dispense what they now see.
+        const sent = current.status === OrderStatus.Draft && row.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
         const withdrawn = current.status !== OrderStatus.Draft
           ? await this.ownPharmacy.withdraw(client, row.id, context.correlationId) : undefined;
+        const handoff = sent ?? (withdrawn && row.status === OrderStatus.Active ? pharmacyHandoff('superseded') : undefined);
         const sendDetails = { ...handoffDetails(handoff), ...(withdrawn ? { pharmacySendWithdrawn: true } : {}) };
         if (matches.length > 0 && input.allergyAcknowledgement) {
           const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
