@@ -74,7 +74,7 @@ function harness(options: { own?: boolean; executionStatus?: 'in_progress' | 'co
   const statements: { sql: string; values: readonly unknown[] }[] = [];
   const answer = (sql: string): unknown[] => {
     if (sql.includes('lab.order_route_access_for')) return [{ outcome: 'none', route_id: null, work_item_id: workItemId }];
-    if (OWN_ACCESS.test(sql)) return options.own === false ? [] : [{ work_item_id: workItemId }];
+    if (OWN_ACCESS.test(sql)) return options.own === false ? [] : [{ work_item_id: workItemId, basis: 'own-work' }];
     if (/from lab\.work_items/.test(sql)) return [workItem];
     if (/from lab\.accessions\s+where work_item_id=\$1/.test(sql)) return [];
     if (/from lab\.accessions where id=\$1/.test(sql)) return [accession];
@@ -121,8 +121,9 @@ function harness(options: { own?: boolean; executionStatus?: 'in_progress' | 'co
     fn(client as unknown as PoolClient), query: jest.fn().mockRejectedValue(new Error('no pool here')) } as unknown as DatabaseService;
   const identity = { authorize: jest.fn().mockResolvedValue({ allowed: false, breakGlass: false }) } as unknown as
     IdentityService & { authorize: jest.Mock };
-  const audits: { action: string; details?: Record<string, unknown> }[] = [];
-  const audit = { recordWithClient: jest.fn(async (_c: unknown, event: { action: string; details?: Record<string, unknown> }) => {
+  const audits: { action: string; patientId?: string; details?: Record<string, unknown> }[] = [];
+  const audit = { recordWithClient: jest.fn(async (_c: unknown, event: { action: string; patientId?: string;
+    details?: Record<string, unknown> }) => {
     audits.push(event);
   }) } as unknown as AuditService;
   const routeAccess = new LabOrderRouteAccess(identity, new LabOwnWork(true));
@@ -154,9 +155,9 @@ const COMMANDS: [string, 'work_item' | 'accession' | 'specimen' | 'execution' | 
     (h) => h.accessions.reject(scientist, accessionId, specimenId, { expectedVersion: 1, reason: 'Haemolysed sample' }, key)],
   ['start an execution', 'specimen', specimenId, 'write_records', 'lab.execution.start', 'completed',
     (h) => h.executions.start(scientist, specimenId, { expectedSpecimenVersion: 3, startedAt: at, reason: 'Started' }, key)],
-  ['list a specimen\'s executions', 'specimen', specimenId, 'read_records', null, 'completed',
+  ['list a specimen\'s executions', 'specimen', specimenId, 'read_records', 'lab.execution.list', 'completed',
     (h) => h.executions.listForSpecimen(scientist, specimenId)],
-  ['read an execution', 'execution', executionId, 'read_records', null, 'completed',
+  ['read an execution', 'execution', executionId, 'read_records', 'lab.execution.read', 'completed',
     (h) => h.executions.get(scientist, executionId)],
   ['complete an execution', 'execution', executionId, 'write_records', 'lab.execution.complete', 'in_progress',
     (h) => h.executions.complete(scientist, executionId, { expectedVersion: 1, completedAt: at }, key)],
@@ -180,7 +181,7 @@ describe('every Lab command on an own work item goes on the own-work basis (0133
   beforeEach(() => jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined));
   afterEach(() => jest.restoreAllMocks());
 
-  it.each(COMMANDS)('%s: asks D9 about its %s, never Identity, and audits basis own-work',
+  it.each(COMMANDS)('%s: asks D9 about its %s, never Identity, and audits basis own-work naming the patient',
     async (_name, resource, resourceId, action, audited, executionStatus, call) => {
       const h = harness({ executionStatus });
       await expect(call(h)).resolves.toBeDefined();
@@ -188,6 +189,7 @@ describe('every Lab command on an own work item goes on the own-work basis (0133
       expect(h.identity.authorize).not.toHaveBeenCalled();
       if (audited) {
         expect(h.audits.map((event) => event.action)).toEqual([audited]);
+        expect(h.audits[0]?.patientId).toBe(patientId);
         expect(h.audits[0]?.details).toMatchObject({ basis: 'own-work' });
       } else {
         expect(h.audits).toEqual([]);

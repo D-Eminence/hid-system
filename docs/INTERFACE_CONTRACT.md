@@ -6882,6 +6882,16 @@ personal grant.
   answers the basis with the access (as the list's reader does), and that
   member's rows stay consent rows (no `basis`, as before), so the list and
   the commands record the same basis for the same member.
+- `GET /lab/executions/:executionId` and
+  `GET /lab/specimens/:specimenId/executions`, which answer result values
+  and every revision, now write one audit row naming the patient in the
+  read's transaction (`lab.execution.read`, resource `lab-execution`, with
+  the accession, specimen, result id and versions returned;
+  `lab.execution.list`, resource `lab-specimen`, with the executions, result
+  ids and versions returned), with the basis as above (`own-work`, or the
+  order route's `order-route` and `orderRouteId`), whatever the basis. Before
+  0133 these reads were recorded only by the request row, which names no
+  patient; the patient's access log already lists both actions as views.
 - An own pharmacy item whose automatic send was withdrawn (the prescription
   was put on hold, cancelled, entered in error, edited or resumed after it
   was sent) carries `"withdrawn": true`; dispensing it answers 409
