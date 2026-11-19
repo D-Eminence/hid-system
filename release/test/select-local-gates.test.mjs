@@ -288,11 +288,8 @@ test('the workflow narrows only pull request runs, fails closed on missing outpu
     const gates = run.env?.HID_WORKSPACE_GATES
     if (job === 'migration-rehearsal') assert.equal(gates, undefined)
     else assert.match(gates, /^\$\{\{ github\.event_name == 'pull_request' && needs\.changes\.outputs\.[a-z_]+ \|\| '' \}\}$/, job)
-    const cache = steps.filter(s => s.uses?.startsWith('actions/cache@'))
-    assert.equal(cache.length, 1, job)
-    assert.equal(cache[0].uses, 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9')
-    assert.equal(cache[0].with.path, '~/.npm')
-    assert.ok(steps.indexOf(cache[0]) < steps.findIndex(s => /npm.*ci/.test(s.run ?? '')), `${job} restores the cache before installing`)
+    // No actions/cache: the repository's allowed-actions list does not include it.
+    assert.ok(!steps.some(s => s.uses?.startsWith('actions/cache@')), `${job} restores no cache`)
     const upload = steps.find(s => s.uses?.startsWith('actions/upload-artifact@'))
     assert.equal(upload.if, '${{ always() }}')
     assert.equal(upload.with.name, `tuf-workspace-${argument}-\${{ github.run_id }}-\${{ github.run_attempt }}`)
