@@ -1754,8 +1754,9 @@ insert into d18_pins values
   ('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamp with time zone)', '6928763d3b69f0e4b4acf96a6a255736'),
   -- 0133 gave the Lab chain tables a second read policy, staff_own_work_read (the
   -- facility's own lab staff, item by item), which reaches the two halves of
-  -- its member test; 0086's lab.context_allows is kept.
-  ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', 'd195ee7bae41d79fb34eeed590ef6d20'),
+  -- its member test (the row's half for lab work); 0086's lab.context_allows
+  -- is kept.
+  ('identity.lab_work_patient_allows(uuid,uuid,uuid,text)', 'ef568a87ef2d6d35004638e12796f969'),
   ('identity.facility_work_session_membership(text)', '36de1f00307dd5602972253b23f22f9f'),
   ('lab.context_allows(uuid,uuid,text)', '57e689661a6227e34d3bde9562468951'),
   ('lab.patient_self_context(uuid)', '39aeca12d2c59b69877800a9a3a7c50b'),

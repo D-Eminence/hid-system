@@ -777,10 +777,10 @@ select pg_temp.assert('the work lists'' strict policies', (select array_agg(p.po
     'lab.work_items:lab_work_items_insert:a::lab.work_item_allows(patient_id, facility_id, order_route_id, ''write_records''::text)',
     'lab.work_items:lab_work_items_read:r:lab.work_item_allows(patient_id, facility_id, order_route_id, ''read_records''::text):',
     -- 0133 D2: the facility's own lab and pharmacy staff read an own work item (no route).
-    'lab.work_items:staff_own_work_read:r:(COALESCE(identity.facility_work_patient_allows(''lab''::text, ( SELECT identity.facility_work_session_membership(''lab''::text) AS facility_work_session_membership), patient_id, facility_id, ''read_records''::text), false) AND (order_route_id IS NULL)):',
+    'lab.work_items:staff_own_work_read:r:(COALESCE(identity.lab_work_patient_allows(( SELECT identity.facility_work_session_membership(''lab''::text) AS facility_work_session_membership), patient_id, facility_id, ''read_records''::text), false) AND (order_route_id IS NULL)):',
     'pharmacy.work_items:pharmacy_work_items_insert:a::pharmacy.work_item_allows(patient_id, facility_id, order_route_id, ''write_records''::text)',
     'pharmacy.work_items:pharmacy_work_items_read:r:pharmacy.work_item_allows(patient_id, facility_id, order_route_id, ''read_records''::text):',
-    'pharmacy.work_items:staff_own_work_read:r:(COALESCE(identity.facility_work_patient_allows(''pharmacy''::text, ( SELECT identity.facility_work_session_membership(''pharmacy''::text) AS facility_work_session_membership), patient_id, facility_id, ''read_records''::text), false) AND (order_route_id IS NULL)):']);
+    'pharmacy.work_items:staff_own_work_read:r:(COALESCE(identity.pharmacy_work_patient_allows(( SELECT identity.facility_work_session_membership(''pharmacy''::text) AS facility_work_session_membership), patient_id, facility_id, ''read_records''::text), false) AND (order_route_id IS NULL)):']);
 select pg_temp.assert('the deferred first-event check and the triggers on other tables run as the owner',
   (select bool_and(p.prosecdef) from pg_proc p where p.oid in ('ehr.require_order_route_first_event()'::regprocedure,
     'ehr.sync_order_routes_on_order_change()'::regprocedure, 'ehr.close_order_routes_on_release()'::regprocedure,

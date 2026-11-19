@@ -103,9 +103,10 @@ create function pg_temp.untouched_bodies() returns text language sql as $f$
     from (values
       ('pharmacy.validate_work_item()', array['e2411539ee8c95a02dad46c03e24db05']),
       ('pharmacy.validate_dispensing()', array['17f7e8897bd2ab240332e4d2c9f757b7']),
-      -- 0098's body, or 0123's (the sealed QA tenant: 0098's plus one clause).
+      -- 0098's body, or 0123's (the sealed QA tenant: 0098's plus one clause),
+      -- or 0133's (D14: 0123's with the hunks marked "0133 D14").
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)',
-       array['4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b']),
+       array['4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b', 'fef3bfda1239e5cd72a149f8db30ff64']),
       ('ehr.sync_order_routes_on_order_change()', array['8ce6b42450cc06fc02fec8d1cf63af41']),
       -- 0004's body, or 0112's (OCR source deletion replaces the snapshot writer).
       ('ehr.capture_record_version()', array['70daa16f05bb3ec28f05292e6358a702', 'cae99883d00e70ab1d20ed6fbc97ad7b']))
@@ -827,9 +828,14 @@ rollback to savepoint later_column;
 -- passes the version and state checks and is
 -- ORDER_ROUTE_DESTINATION_INELIGIBLE. Both are refusals, so nothing is sent.
 -- A third body (0123's with one more comment line) is refused by the same
--- check. Orders between facilities are switched on for this case as the
--- suite runner (session_replication_role = replica; the route suites use
--- support's command). Undone.
+-- check. 0133 runs after 0125 and replaces the send with 0123's text plus
+-- its D14 hunks, so 0123's body is the live one with those hunks taken out
+-- (the live one itself where 0133 is not applied). Orders between facilities
+-- are switched on for this case as the suite runner (session_replication_role
+-- = replica; the route suites use support's command). Undone: the live body
+-- is back afterwards.
+select set_config('details.live_send_body', (select md5(proc.prosrc) from pg_proc proc
+  where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure), true);
 savepoint send_bodies;
 set local session_replication_role = replica;
 update platform.control_settings set enabled = true where control_key = 'cross_facility_orders_enabled';
@@ -844,9 +850,43 @@ select body.name, body.definition
                E'\n     or identity.sealed_qa_facility(receiving_facility.id) <> '
                  || 'identity.sealed_qa_facility(actor.actor_facility_id) then' as qa_clause,
                E'begin\n  select * into actor' as first_statement) source,
-       lateral (values ('0123', source.live),
-                       ('0098', replace(source.live, source.qa_clause, ' then')),
-                       ('third', replace(source.live, source.first_statement,
+       -- 0123's text: the live body without 0133's D14 hunks.
+       lateral (select replace(replace(replace(replace(source.live, $h$  -- 0133 D14: the new rule only in a session of the new ehr-api (D13's switch).
+  sends_elsewhere boolean := coalesce(current_setting('app.own_facility_work', true) = '0133', false);
+  own_claim pharmacy.prescription_item_claims%rowtype;
+$h$, ''), $h$  -- 0133 D14: this pharmacy's own item's claim, locked after the order and its
+  -- routes (a dispensing locks the order or its route, then the claim).
+  if requested_kind = 'prescription' and sends_elsewhere then
+    select claim.* into own_claim from pharmacy.prescription_item_claims claim
+     where claim.prescription_id = requested_order_id and claim.order_route_id is null
+     for update;
+  end if;
+$h$, ''),
+                 $h$     or (requested_kind = 'prescription' and not sends_elsewhere
+       and exists (select 1 from pharmacy.work_items item where item.source_ehr_prescription_id = requested_order_id))
+     -- 0133 D14: with the switch, in work once dispensed here or accepted elsewhere.
+     or (requested_kind = 'prescription' and sends_elsewhere
+       and (own_claim.dispensed_at is not null
+         or exists (select 1 from pharmacy.prescription_item_claims claim
+                     where claim.prescription_id = requested_order_id and claim.order_route_id is not null))) then
+$h$,
+                 $h$     or (requested_kind = 'prescription'
+       and exists (select 1 from pharmacy.work_items item where item.source_ehr_prescription_id = requested_order_id)) then
+$h$),
+                 $h$  -- 0133 D14: this pharmacy's own item, live and not dispensed, is withdrawn
+  -- (sent elsewhere) in this transaction.
+  if own_claim.work_item_id is not null and own_claim.released_at is null then
+    update pharmacy.prescription_item_claims claim
+       set released_at = sent_at, released_by_route_id = requested_route_id
+     where claim.work_item_id = own_claim.work_item_id and claim.released_at is null and claim.dispensed_at is null;
+    if not found then
+      raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ORDER_IN_WORK';
+    end if;
+  end if;
+$h$, '') as definition) rebuilt,
+       lateral (values ('0123', rebuilt.definition),
+                       ('0098', replace(rebuilt.definition, source.qa_clause, ' then')),
+                       ('third', replace(rebuilt.definition, source.first_statement,
                           E'begin\n  -- a third body\n  select * into actor'))) body(name, definition);
 select pg_temp.expect('the three send_order_route definitions differ', (select count(distinct definition)::text
   from send_bodies), '3');
@@ -889,8 +929,9 @@ select pg_temp.expect('0123''s send_order_route: a1 to DR''s own facility', pg_t
   'P0001 ORDER_ROUTE_DESTINATION_INELIGIBLE');
 reset role;
 select set_config('details.third_body', pg_temp.install_send_body('third'), true);
-select pg_temp.expect('a third send_order_route body is neither accepted one',
-  (current_setting('details.third_body') not in ('4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b'))::text,
+select pg_temp.expect('a third send_order_route body is none of the accepted ones',
+  (current_setting('details.third_body') not in ('4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b',
+    'fef3bfda1239e5cd72a149f8db30ff64'))::text,
   'true');
 select pg_temp.expect('a third send_order_route body refused', pg_temp.untouched_bodies(),
   'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) md5 '
@@ -900,9 +941,11 @@ select pg_temp.expect('a1 unchanged by the refused sends', (select format('%s/%s
     quantity_unit) from ehr.prescriptions where id = 'e1140007-0000-4000-8000-0000000000a1'),
   '1/active/urgent/500 mg/capsule/7/day/21.0000/capsule');
 rollback to savepoint send_bodies;
-select pg_temp.expect('0123''s send_order_route back after case 10', (select md5(proc.prosrc) from pg_proc proc
-   where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure),
-  '0c2def2b530bcb3d68537ade52787b6b');
+select pg_temp.expect('the live send_order_route (0123''s, or 0133''s) back after case 10', (select md5(proc.prosrc)
+   from pg_proc proc where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure),
+  current_setting('details.live_send_body'));
+select pg_temp.expect('the live send_order_route is an accepted one', coalesce(pg_temp.untouched_bodies(), 'accepted'),
+  'accepted');
 
 -- 11. A missing object is a mismatch by itself. 0125's section 0 joins each
 -- pinned body by to_regprocedure, so a function missing at its signature
@@ -955,7 +998,7 @@ begin
 end $$;
 select pg_temp.expect('ehr.send_order_route re-signatured, its body kept',
   (select count(*) from pg_proc proc where proc.proname = 'send_order_route'
-      and proc.pronamespace = 'ehr'::regnamespace and md5(proc.prosrc) = '0c2def2b530bcb3d68537ade52787b6b'
+      and proc.pronamespace = 'ehr'::regnamespace and md5(proc.prosrc) = current_setting('details.live_send_body')
       and proc.pronargs = 11)::text, '1');
 select pg_temp.expect('ehr.send_order_route re-signatured', pg_temp.untouched_bodies(),
   'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) md5 none (missing)');
