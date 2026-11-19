@@ -337,6 +337,20 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
     await expect(ITEM_ROUTES[1]![4](h.service)).rejects.toMatchObject({ status: 409, code: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' });
   });
 
+  // 0133 D14: only this facility's own item can be sent elsewhere; a route-backed item maps any 23514 as before.
+  it('answers any 23514 on a route-backed item with today\'s detail and no withdrawnReason', async () => {
+    for (const error of [databaseError('23514', 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE'),
+      Object.assign(databaseError('23514', 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE'), { detail: 'sent_elsewhere' }),
+      Object.assign(databaseError('23514', 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE'), { detail: 'not_claimed' })]) {
+      const h = pharmacyHarness({ outcome: 'allowed', route_id: routeId }, undefined, true, error);
+      const refusal = await ITEM_ROUTES[1]![4](h.service).catch((caught: unknown) => caught) as
+        { extensions?: unknown; message: string };
+      expect(refusal).toMatchObject({ status: 409, code: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
+        message: 'This prescription can no longer be dispensed here' });
+      expect(refusal.extensions).toBeUndefined();
+    }
+  });
+
   it('leaves the same refusal on a same-facility item unchanged', async () => {
     const h = pharmacyHarness({ outcome: 'none', route_id: null }, { allowed: true, breakGlass: false }, false,
       databaseError('23514', 'Dispensing does not match its eligible Pharmacy work item and actor context'));
