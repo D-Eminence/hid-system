@@ -112,9 +112,11 @@ export class VersionedUpdateDto {
 }
 
 /**
- * FR-1 (18 Nov 2026): the reason may be left out, but only where the service
- * can record a fixed reason instead (the first signature of a draft note, the
- * first activation of a draft prescription; see shared/change-reason.ts).
+ * FR-1 and Q105 (18 Nov 2026): the reason may be left out, but only where the
+ * service can record a fixed reason instead (the first signature of a draft
+ * note, the first activation of a draft prescription or lab request, starting
+ * or finishing a visit, and edits to a draft note, prescription or lab
+ * request that was never signed or active; see shared/change-reason.ts).
  * Every other change without a reason answers 400 CHANGE_REASON_REQUIRED
  * ("Please say why you are changing this."). When given, the same rules as
  * VersionedUpdateDto apply (trimmed, 3 to 500 characters, never null).
@@ -168,7 +170,8 @@ export class CreateEncounterDto {
   reuseOpenVisit?: boolean;
 }
 
-export class UpdateEncounterDto extends VersionedUpdateDto {
+/** Q105: the reason may be left out to start or finish a visit (see shared/change-reason.ts). */
+export class UpdateEncounterDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()
   @IsEnum(EncounterStatus)
   status?: EncounterStatus;
@@ -217,7 +220,8 @@ export class UpdateClinicalNoteDto extends OptionalReasonVersionedUpdateDto {
   status?: NoteStatus;
 }
 
-export class CreateClinicalNoteRevisionDto extends VersionedUpdateDto {
+/** Q105: the reason may be left out for new text on a draft that was never signed (see shared/change-reason.ts). */
+export class CreateClinicalNoteRevisionDto extends OptionalReasonVersionedUpdateDto {
   @IsString()
   @IsNotEmpty()
   @Matches(/\S/)
