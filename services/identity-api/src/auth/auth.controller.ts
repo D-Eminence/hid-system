@@ -554,18 +554,15 @@ export class AuthController {
     return this.sessionResponse(selectedActor, undefined, 'selected');
   }
 
-<<<<<<< HEAD
-  private sessionResponse(actor: ActorContext, expiresAt?: Date, facilitySelection?: FacilitySelectionState) {
-=======
   /**
    * SX-1 (Akos N-2b, N-2e, P1-5): every facility of the answer, and the
    * selected one, also carries `modules`, the product areas its own
    * permissions show (facility-modules.ts, a pure function: no read, no
    * write). Every other field, roles[0] included, is unchanged; a patient or
    * account-only session has no facility, so its answer is unchanged.
+   * `facilitySelection` (0129) is added only when given.
    */
-  private sessionResponse(actor: ActorContext, expiresAt?: Date) {
->>>>>>> origin/staging-novu-ci-20261005
+  private sessionResponse(actor: ActorContext, expiresAt?: Date, facilitySelection?: FacilitySelectionState) {
     return {
       actor: sessionActorWithModules(actor),
       ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
