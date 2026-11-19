@@ -1763,26 +1763,29 @@ revoke all on function auth.guard_session_single_sign_on_change() from public;
 
 -- This facility's own pharmacy and lab work (0133, ORD-2, owner decisions of
 -- 18 November 2026), exactly as 0133 grants it: the send, its staffed test
--- and the withdrawal to the EHR runtime; the work chain's own-work test (its
--- policies call it, with the querying role's privileges, as 0086's
--- context_allows), the own-work access check and the list's states to the
--- Lab and Pharmacy runtimes; each also to the schema test runtime. The
--- helpers identity.facility_work_member_allows and
+-- and the withdrawal to the EHR runtime; the two halves of the own-work test
+-- (the own-work policies of the work items and their chain call them, with
+-- the querying role's privileges, as 0086's context_allows), the own-work
+-- access check and the list's states to the Lab and Pharmacy runtimes; each
+-- also to the schema test runtime. The helpers
+-- identity.facility_work_member_allows and
 -- pharmacy.own_work_source_prescription, and the withdrawal trigger's
 -- function ehr.own_pharmacy_send_withdrawn_on_change, are executed by no
 -- role: the functions and the trigger that call them run them as their
 -- owner. No role has any privilege on pharmacy.own_prescription_sends.
 grant execute on function ehr.send_prescription_to_own_pharmacy(uuid, bigint),
   ehr.withdraw_own_pharmacy_send(uuid), ehr.own_pharmacy_staffed() to hid_ehr_runtime, hid_schema_test_runtime;
-grant execute on function pharmacy.own_work_chain_allows(text, uuid, uuid, uuid, text),
+grant execute on function identity.facility_work_session_allows(text),
+  identity.facility_work_patient_allows(text, uuid, uuid, text),
   pharmacy.own_work_access_for(text, uuid, text),
   pharmacy.own_work_item_states(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
-grant execute on function lab.own_work_chain_allows(text, uuid, uuid, uuid, text),
+grant execute on function identity.facility_work_session_allows(text),
+  identity.facility_work_patient_allows(text, uuid, uuid, text),
   lab.own_work_access_for(text, uuid, text),
   lab.own_work_item_bases(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
 revoke all on function identity.facility_work_member_allows(text, uuid, uuid, text),
-  lab.own_work_chain_allows(text, uuid, uuid, uuid, text),
-  pharmacy.own_work_chain_allows(text, uuid, uuid, uuid, text),
+  identity.facility_work_session_allows(text),
+  identity.facility_work_patient_allows(text, uuid, uuid, text),
   pharmacy.own_work_source_prescription(uuid, uuid, uuid),
   ehr.send_prescription_to_own_pharmacy(uuid, bigint),
   ehr.withdraw_own_pharmacy_send(uuid),

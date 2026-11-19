@@ -2,11 +2,14 @@
 // loaded. All records are synthetic copies of the fixture's Lab chain.
 //
 // The Lab work list (GET /api/v1/lab/work-items, WORK_LIST_QUERY) for a busy laboratory, read exactly as lab-api
-// reads it: a restricted login of hid_lab_api_runtime under row-level security, the staff context of the fixture's
-// consent-backed clinician, and the lab-api pool's 15-second statement timeout (database.service.ts). Every row the
-// query reads from a Lab table pays its own row-level security check, whose cost is mostly the member's consent check
-// (identity.has_active_consent_grant), so the number of consent checks is the machine-independent measure of the
-// query's cost, and the time is the measure against the limit.
+// reads it: a restricted login of hid_lab_api_runtime under row-level security, a member's staff context, and the
+// lab-api pool's 15-second statement timeout (database.service.ts). Two members read it: the fixture's consent-backed
+// clinician, and the laboratory's own lab scientist without any grant (0133, ORD-2: the own-work policies). Every row
+// the query reads from a Lab table pays its own row-level security check. For the clinician its cost is mostly the
+// member's consent check (identity.has_active_consent_grant), so the number of consent checks is the machine-independent
+// measure of the query's cost; for both, the permission checks (auth.membership_has_permission) must not grow with the
+// rows (0133's policies ask the session's half of their member test once per statement); the time is the measure
+// against the limit.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
@@ -15,6 +18,9 @@ const { WORK_LIST_QUERY } = require('../../lab-api/dist/lab/lab-work-items.servi
 const FACILITY = '10000000-0000-4000-8000-000000000002';
 const OTHER_FACILITY = '10000000-0000-4000-8000-000000000003';
 const FIXTURE_WORK_ITEM = 'f1000000-0000-4000-8000-000000000002';
+/** The laboratory's own synthetic lab scientist, with no consent grant (0133). */
+const SCIENTIST = { account: '4c000000-0000-4000-8000-0000000000a1', staff: '4c000000-0000-4000-8000-0000000000a2',
+  membership: '4c000000-0000-4000-8000-0000000000a3', role: '4c000000-0000-4000-8000-0000000000a4' };
 /** Work items with every test released at its current version (done). */
 const DONE_WORK_ITEMS = 1040;
 const OPEN_STATES = ['no_test', 'test_only', 'accession_only', 'specimen_only', 'executed', 'result_entered',
@@ -126,21 +132,35 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
   const visible = Number((await admin.query('select count(*) n from lab.work_items where facility_id=$1', [FACILITY])).rows[0].n);
   const releases = Number((await admin.query('select count(*) n from lab.result_releases where facility_id=$1', [FACILITY])).rows[0].n);
   assert.ok(visible > 1000, 'More than 1,000 work items at the laboratory');
-  const lab = await connect('lab_work_list_test');
-  let rows, ms, consentChecks;
-  try {
-    await lab.query('begin');
-    await lab.query(`select set_config('app.actor_subject','staff:test-clinician',true),set_config('app.facility_id',$1,true),
-      set_config('app.membership_id','40000000-0000-4000-8000-000000000001',true),set_config('app.purpose_of_use','direct-care',true),
-      set_config('app.correlation_id','synthetic-work-list-check',true),set_config('app.patient_id','',true),
-      set_config('app.self_authorized_until','',true),set_config('statement_timeout','15000',true)`, [FACILITY]);
-    const started = performance.now();
-    // As LabWorkItemsService.list runs it; a 57014 here is the busy laboratory's error page.
-    rows = (await lab.query(WORK_LIST_QUERY, [FACILITY])).rows;
-    ms = Math.round(performance.now() - started);
-    consentChecks = Number((await lab.query(`select pg_stat_get_xact_function_calls(
-      'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)'::regprocedure) n`)).rows[0].n);
-  } finally { await lab.query('rollback').catch(() => {}); await lab.end(); }
+  // As LabWorkItemsService.list runs it, in one member's staff context; a 57014 here is the busy laboratory's error
+  // page. The member's consent and permission checks are counted in the same transaction (by oid: the runtime may not
+  // use schema auth).
+  const counted = (await admin.query(`select
+      'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)'::regprocedure::oid::text consent,
+      'auth.membership_has_permission(text,uuid,uuid,text)'::regprocedure::oid::text permission`)).rows[0];
+  const readWorkList = async (subject, membership) => {
+    const lab = await connect('lab_work_list_test');
+    try {
+      await lab.query('begin');
+      await lab.query(`select set_config('app.actor_subject',$2,true),set_config('app.facility_id',$1,true),
+        set_config('app.membership_id',$3,true),set_config('app.purpose_of_use','direct-care',true),
+        set_config('app.correlation_id','synthetic-work-list-check',true),set_config('app.patient_id','',true),
+        set_config('app.self_authorized_until','',true),set_config('statement_timeout','15000',true)`,
+      [FACILITY, subject, membership]);
+      const started = performance.now();
+      const rows = (await lab.query(WORK_LIST_QUERY, [FACILITY])).rows;
+      const ms = Math.round(performance.now() - started);
+      const calls = (await lab.query(`select pg_stat_get_xact_function_calls($1::oid) consent,
+        pg_stat_get_xact_function_calls($2::oid) permission`, [counted.consent, counted.permission])).rows[0];
+      return { rows, ms, consentChecks: Number(calls.consent ?? 0), permissionChecks: Number(calls.permission ?? 0) };
+    } finally { await lab.query('rollback').catch(() => {}); await lab.end(); }
+  };
+  // 0133's own-work policies ask the session's half of their member test (two permission checks) once per statement
+  // for each table they read, never per row: its first form asked it on every row of every Lab table, about 9,000
+  // checks here, and the list timed out at 15 seconds.
+  const PERMISSION_CHECKS_AT_MOST = 200;
+  const clinician = await readWorkList('staff:test-clinician', '40000000-0000-4000-8000-000000000001');
+  const { rows, ms, consentChecks } = clinician;
   assert.equal(rows.length, 200, 'The work list answers 200 rows');
   assert.ok(rows.every((row) => row.facility_id === FACILITY), 'Another facility\'s work is never shown');
   // Each work item and its requested test once, each release and its result and execution once, and the accession
@@ -149,6 +169,8 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
   const bound = 2 * visible + 3 * releases + 2 * rows.length + 100;
   assert.ok(consentChecks > 0 && consentChecks <= bound,
     `Row-level security checks: ${consentChecks} for ${visible} work items (at most ${bound})`);
+  assert.ok(clinician.permissionChecks <= PERMISSION_CHECKS_AT_MOST,
+    `Permission checks for the clinician: ${clinician.permissionChecks} (at most ${PERMISSION_CHECKS_AT_MOST})`);
   // Open work first, oldest first, in every open state; then done work, newest first. The fixture's own work item is
   // left out of the comparison (its state is whatever the checks run before this one left).
   const mine = rows.filter((row) => row.id !== FIXTURE_WORK_ITEM);
@@ -159,6 +181,33 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
     'Every open state comes first, oldest first');
   assert.deepEqual(mine.slice(openPlan.length).map((row) => row.id),
     donePlan.slice(0, mine.length - openPlan.length).map((item) => id('c1', item.n)), 'Done work fills the rest, newest first');
+  // The laboratory's own lab scientist (lab.work-item.read and lab.order-route.receive here), with no consent grant
+  // for anyone: every work item here is this laboratory's own work, so the same 200 rows, through 0133's own-work
+  // policies, within the same limit.
+  await admin.query('begin');
+  try {
+    await admin.query(`insert into auth.accounts(id,subject,email,status)
+      values($1,'staff:synthetic-work-list-scientist','work-list-scientist@example.test','active')`, [SCIENTIST.account]);
+    await admin.query(`insert into identity.staff(id,account_id,full_name,email,verification_status,default_role)
+      values($1,$2,'Synthetic lab scientist','work-list-scientist@example.test','verified','lab')`,
+    [SCIENTIST.staff, SCIENTIST.account]);
+    await admin.query(`insert into identity.staff_facility_memberships(id,staff_id,account_id,organization_id,facility_id,
+        membership_role,app_role,is_primary,active)
+      values($1,$2,$3,'10000000-0000-4000-8000-000000000001',$4,'lab','lab',true,true)`,
+    [SCIENTIST.membership, SCIENTIST.staff, SCIENTIST.account, FACILITY]);
+    await admin.query(`insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason)
+      values($1,$2,'lab','facility',$3,$4,'Synthetic lab scientist for the busy work list')`,
+    [SCIENTIST.role, SCIENTIST.account, SCIENTIST.membership, FACILITY]);
+    await admin.query('commit');
+  } catch (error) { await admin.query('rollback'); throw error; }
+  const labScientist = await readWorkList('staff:synthetic-work-list-scientist', SCIENTIST.membership);
+  assert.deepEqual(labScientist.rows.map((row) => row.id), rows.map((row) => row.id),
+    'The lab scientist sees the same 200 rows, in the same order, without a grant');
+  assert.ok(labScientist.permissionChecks <= PERMISSION_CHECKS_AT_MOST,
+    `Permission checks for the lab scientist: ${labScientist.permissionChecks} (at most ${PERMISSION_CHECKS_AT_MOST})`);
   return { workItems: visible, ms, consentChecks, consentChecksPerWorkItem: Number((consentChecks / visible).toFixed(2)),
+    permissionChecks: clinician.permissionChecks,
+    labScientist: { ms: labScientist.ms, consentChecks: labScientist.consentChecks,
+      permissionChecks: labScientist.permissionChecks },
     statementTimeoutMs: 15000 };
 }

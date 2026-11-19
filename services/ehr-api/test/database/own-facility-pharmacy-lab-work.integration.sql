@@ -9,8 +9,9 @@
 -- Cases:
 --   1. structure: the new and replaced functions' bodies (md5), owner,
 --      SECURITY DEFINER, volatility, search_path; who may execute each; 0086's
---      context_allows bodies unchanged; the 42 own-work policies and none on
---      the imported evidence tables; the sends table has no grant; the two
+--      context_allows and work_item_allows bodies unchanged; the 44 own-work
+--      policies (a read policy on each work item table, 42 on the chain) and
+--      none on the imported evidence tables; the sends table has no grant; the two
 --      ehr.prescriptions policies name only the dispensing validator's owner,
 --      no runtime role is its member, and the owner-run definer functions
 --      that read ehr.prescriptions are the seven known ones;
@@ -131,13 +132,14 @@ begin
            proc.provolatile, proc.proconfig), '; ')
     into mismatch
     from (values
-      ('identity.facility_work_member_allows(text,uuid,uuid,text)', '474875a22f8c5e7b46846f1ddb1d5046', 's'),
-      ('lab.work_item_allows(uuid,uuid,uuid,text)', 'a194e2b4437efd5bb1db5e3bf482aa69', 's'),
-      ('pharmacy.work_item_allows(uuid,uuid,uuid,text)', '2c2236b85397574aefc131ebca4196cc', 's'),
-      ('lab.own_work_chain_allows(text,uuid,uuid,uuid,text)', 'cd166869d06a2c9a9cddbb6a04292c00', 's'),
-      ('pharmacy.own_work_chain_allows(text,uuid,uuid,uuid,text)', 'bef3a9a843481841f315b3af175f86d1', 's'),
-      ('lab.work_item_patient_cards(uuid[])', '91e157a7d6f89edd46c14dbb095d1bc6', 's'),
-      ('pharmacy.work_item_patient_cards(uuid[])', '0dc38390c3c40a1883b87345ce0d35bd', 's'),
+      ('identity.facility_work_member_allows(text,uuid,uuid,text)', '8fe87f3683d8706299e2988f1aa8f183', 's'),
+      ('identity.facility_work_session_allows(text)', '243a6d286d716e1cf061d8f8baaf6ca9', 's'),
+      ('identity.facility_work_patient_allows(text,uuid,uuid,text)', '5b9bfe452478b04dbcf7e18d4cca730e', 's'),
+      -- 0086's, unchanged: D2 is a policy of its own next to theirs.
+      ('lab.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
+      ('pharmacy.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
+      ('lab.work_item_patient_cards(uuid[])', 'c80ae5c7933af400323881709e57777b', 's'),
+      ('pharmacy.work_item_patient_cards(uuid[])', 'f321cac9edce2293a904e6a361657ea4', 's'),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', '41a9afd4ea6f708425b98d1fb6e6eb87', 's'),
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'b95d737694c08ceae4b346412c133e43', 'v'),
       ('ehr.withdraw_own_pharmacy_send(uuid)', 'bdb411d4f4e7fe6806d246d996e91771', 'v'),
@@ -145,8 +147,8 @@ begin
       ('ehr.own_pharmacy_staffed()', '9fe0a922c4c121616604e7c9c87ec202', 's'),
       ('pharmacy.own_work_access_for(text,uuid,text)', '5ddb078242919dd978d6312f5cd5aa77', 's'),
       ('lab.own_work_access_for(text,uuid,text)', '1c834e3ed17d864dadb27f3105cffa04', 's'),
-      ('pharmacy.own_work_item_states(uuid[])', '821f37afc72515b43494f730adf0fef9', 's'),
-      ('lab.own_work_item_bases(uuid[])', '07e31d7ca86ac31255ad096d56363637', 's')) expected(proc_name, digest, volatility)
+      ('pharmacy.own_work_item_states(uuid[])', 'ff7bdad2adf9db32cc349ce6ab4d16c5', 's'),
+      ('lab.own_work_item_bases(uuid[])', 'f8b31a746f89ef2ca35757e87c89ab05', 's')) expected(proc_name, digest, volatility)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc_name)
    where proc.oid is null or md5(proc.prosrc) <> expected.digest or proc.proowner <> owner_oid
       or not proc.prosecdef or proc.provolatile <> expected.volatility or proc.proisstrict;
@@ -160,10 +162,10 @@ begin
       ('identity.facility_work_member_allows(text,uuid,uuid,text)', array[]::text[]),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', array[]::text[]),
       ('ehr.own_pharmacy_send_withdrawn_on_change()', array[]::text[]),
-      ('lab.own_work_chain_allows(text,uuid,uuid,uuid,text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
-        'hid_schema_test_runtime']),
-      ('pharmacy.own_work_chain_allows(text,uuid,uuid,uuid,text)', array['hid_pharmacy_runtime',
-        'hid_pharmacy_api_runtime', 'hid_schema_test_runtime']),
+      ('identity.facility_work_session_allows(text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
+        'hid_pharmacy_runtime', 'hid_pharmacy_api_runtime', 'hid_schema_test_runtime']),
+      ('identity.facility_work_patient_allows(text,uuid,uuid,text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
+        'hid_pharmacy_runtime', 'hid_pharmacy_api_runtime', 'hid_schema_test_runtime']),
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', array['hid_ehr_runtime', 'hid_ehr_api_runtime',
         'hid_schema_test_runtime']),
       ('ehr.withdraw_own_pharmacy_send(uuid)', array['hid_ehr_runtime', 'hid_ehr_api_runtime',
@@ -210,21 +212,26 @@ begin
      is distinct from '57e689661a6227e34d3bde9562468951,958a6e5cd2a534d158c82fe399b8f381' then
     raise exception 'own facility work: 0086''s context_allows bodies changed';
   end if;
-  -- The own-work policies: 42, on the work chain only, never on the imported
-  -- evidence, the Lab outbox or the route reports.
-  if (select count(*) from pg_policy policy_row where policy_row.polname like 'own\_work\_%') <> 42
+  -- The own-work policies: 44, a read policy on each work item table and 42
+  -- on the work chain, never on the imported evidence, the Lab outbox or the
+  -- route reports.
+  if (select count(*) from pg_policy policy_row where policy_row.polname like 'own\_work\_%') <> 44
+     or (select array_agg(policy_row.polname::text || ':' || policy_row.polcmd::text order by policy_row.polrelid)
+           from pg_policy policy_row
+          where policy_row.polname like 'own\_work\_%'
+            and policy_row.polrelid in ('lab.work_items'::regclass, 'pharmacy.work_items'::regclass))
+        is distinct from array['own_work_read:r', 'own_work_read:r']
      or exists (select 1 from pg_policy policy_row
                  where policy_row.polname like 'own\_work\_%'
                    and policy_row.polrelid in ('lab.imported_evidence'::regclass, 'lab.imported_observations'::regclass,
                      'pharmacy.imported_medication_evidence'::regclass, 'lab.outbox_events'::regclass,
-                     'lab.order_route_result_reports'::regclass, 'pharmacy.order_route_dispensing_reports'::regclass,
-                     'lab.work_items'::regclass, 'pharmacy.work_items'::regclass))
+                     'lab.order_route_result_reports'::regclass, 'pharmacy.order_route_dispensing_reports'::regclass))
      or exists (select 1 from pg_policy policy_row
                  where policy_row.polrelid in ('lab.imported_evidence'::regclass, 'lab.imported_observations'::regclass,
                          'pharmacy.imported_medication_evidence'::regclass)
                    and coalesce(pg_get_expr(policy_row.polqual, policy_row.polrelid), '')
                        || coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '') ~ 'own_work') then
-    raise exception 'own facility work: the own-work policies are not 0133''s 42 on the work chain';
+    raise exception 'own facility work: the own-work policies are not 0133''s 44 on the work items and their chain';
   end if;
   -- S7: the owner-run SECURITY DEFINER functions that read ehr.prescriptions
   -- (each sees D5's rows in a pharmacist's session) are exactly these seven;
