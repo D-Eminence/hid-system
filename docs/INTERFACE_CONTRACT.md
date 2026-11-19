@@ -8346,8 +8346,6 @@ facility (from the registration-case list, a just-registered patient, or this fa
 and triage level, marks `chartBlocked` as "Chart cannot be opened", and sends `expectedRowVersion` with every change.
 On 403 `CHECK_IN_NEEDS_SEARCH` show the message and the search box.
 
-
-
 ## 0136. Who can do what: role-table changes (Release A, owner decisions Q103 A, Q111 A, Q112 A, Q113 A)
 
 Owner decisions, verbatim: "Q103 A" (the five changes; the admin's "approve

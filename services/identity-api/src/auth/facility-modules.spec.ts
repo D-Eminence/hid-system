@@ -35,11 +35,13 @@ describe('facility areas for each seeded role (SX-1)', () => {
   });
 
   it.each<[string, FacilityModuleKey[]]>([
-    ['receptionist', ['patients', 'registration', 'accessRequests', 'outreach']],
+    // 0136 (Q103 A, Q112 A): the front desk sees vitals (triage) and scans paper records into the file.
+    ['receptionist', ['patients', 'registration', 'accessRequests', 'triage', 'outreach']],
     ['nurse', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'labResults',
       'prescriptions', 'migrate', 'outreach']],
+    // 0136 (Q103 A): doctors lose the leftover Outreach permissions.
     ['doctor', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
-      'labResults', 'prescriptions', 'migrate', 'outreach']],
+      'labResults', 'prescriptions', 'migrate']],
     ['clinician', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
       'labResults', 'prescriptions', 'migrate', 'outreach']],
     ['lab', ['patients', 'accessRequests', 'lab', 'labResults']],
