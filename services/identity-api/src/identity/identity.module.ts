@@ -48,6 +48,7 @@ import { StaffInvitationsService } from './staff-invitations.service';
 import { StaffReauthenticationService } from './staff-reauthentication.service';
 import { OrderDestinationsController } from './order-destinations.controller';
 import { OrderDestinationsService } from './order-destinations.service';
+import { PatientLookupMissService } from './patient-lookup-miss.service';
 import { SupportHealthIdController } from './support-health-id.controller';
 import { SupportHealthIdService } from './support-health-id.service';
 import { OutreachHealthIdController } from './outreach-health-id.controller';
@@ -128,6 +129,8 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
         return mode === 'deferred' ? deferred : mode === 'test' ? deterministicTest : unavailable;
       },
     },
+    // Q100 B: "No such patient" on the staff Health ID lookup, and its limit.
+    PatientLookupMissService,
   ],
   exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter, NinCheckOnceModule,
     // The public application quota digest, shared with open sign-up on outreach.
