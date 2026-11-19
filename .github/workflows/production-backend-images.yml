@@ -1,10 +1,10 @@
 name: Production backend candidates
 on:
   pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.github/workflows/production-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', '.github/workflows/production-backend-images.yml']
   push:
     branches: [staging-novu-ci-20261005]
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.github/workflows/production-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', '.github/workflows/production-backend-images.yml']
   workflow_dispatch:
     inputs:
       component:

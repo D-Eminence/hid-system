@@ -52,28 +52,88 @@ export function loadGatewayVex(component, assessment, scan, root=repoRoot) {
   return JSON.parse(readFileSync(file));
 }
 const run = (command,args,options={}) => (execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options})??'').trim();
+// Changed-path selection. Every changed path must match one rule below; a path
+// that matches none rebuilds every component, as does any path under scripts/
+// or packages/ that is not listed. A narrower rule can only leave the previously
+// scanned image running: nothing is published unless it is rebuilt, scanned and
+// admitted in this run. production-backend-build.test.mjs checks every
+// production Dockerfile COPY source and every scripts/ path the production
+// workflows run against these rules.
+const nodeServices = components.filter(c=>!['gateway','database-migration'].includes(c));
+const apiClientServices = ['ehr-api','lab-api','pharmacy-api','ocr-api','outreach-api'];
+export const maxChangedPaths = 300;
+// The selector and its test, the build and evidence scripts, the deployment
+// controller (every release redeploys through it) and repository-wide build inputs.
+const rebuildAllPaths = new Set(['package.json','.dockerignore','.gitattributes',runtimePolicyPath(),
+  'scripts/production-backend-build.mjs','scripts/production-backend-build.test.mjs',
+  'scripts/install-production-scanners.mjs','scripts/assess-production-runtime.py',
+  'scripts/assess-staging-runtime.py','scripts/production-deployment.mjs',
+  'scripts/verify-production-approval.py','scripts/production_release_compatibility.py']);
+const migrationOnlyScripts = new Set(['scripts/verify-migration-ledger.mjs','scripts/local-environment.mjs']);
+const ehrMigrationFiles = new Set(['services/ehr-api/package.json','services/ehr-api/package-lock.json','services/ehr-api/Dockerfile']);
+const noImagePackages = ['ui','offline','telemetry','identity-browser-client'];
+// Never copied into a production image and never run by the production build.
+const noImageScripts = [/^scripts\/tests\//,/^scripts\/tuf-[^/]+$/,/^scripts\/staging-[^/]+$/,
+  /^scripts\/verify-[^/]+\.mjs$/,/^scripts\/(test_[^/]+\.py|[^/]+_test\.py|[^/]+\.test\.mjs)$/];
+const noImageSecurity = [/^security\/[^/]+\.md$/,/^security\/staging-[a-z]+-runtime-assessment\.json$/,
+  /^security\/[^/]+-runtime-evidence\.json$/,/^security\/npm-audit-exceptions\.json$/];
+const noImageRoots = ['apps/','docs/','infra/','release/','tools/','.github/'];
+const noImageFiles = new Set(['README.md','CODEX.md','.gitignore','config/production-schema-compatibility.json']);
+export function componentsForPath(p) {
+  if(typeof p!=='string'||!p||p.startsWith('/')||p.split('/').includes('..')) return components;
+  if(rebuildAllPaths.has(p)||p.startsWith('.github/workflows/production-backend-')
+    ||/^scripts\/production_deployment[\w-]*\.py$/.test(p)) return components;
+  if(p===gatewayVexPath) return ['gateway'];
+  if(p==='security/staging-novu-runtime-assessment.json') return ['notification-worker','database-migration'];
+  // The migration ledger and local environment are read only by the migration target.
+  if(migrationOnlyScripts.has(p)) return ['database-migration'];
+  // The migration target copies these and ships the ehr-api dependencies (services/ehr-api/Dockerfile).
+  if(ehrMigrationFiles.has(p)||p.startsWith('services/ehr-api/database/')||p.startsWith('services/ehr-api/scripts/'))
+    return ['ehr-api','database-migration'];
+  if(p.startsWith('packages/server-telemetry/')) return [...nodeServices,'database-migration'];
+  if(p.startsWith('packages/api-client/')) return [...apiClientServices,'database-migration'];
+  if(noImagePackages.some(x=>p.startsWith(`packages/${x}/`))) return [];
+  if(p.startsWith('packages/')) return components;
+  if(noImageScripts.some(r=>r.test(p))) return [];
+  if(p.startsWith('scripts/')) return components;
+  // identity-api copies the workload token agent (services/identity-api/Dockerfile).
+  if(p.startsWith('services/workload-token-agent/')) return ['identity-api'];
+  const service=nodeServices.find(c=>p.startsWith(`services/${c}/`));
+  if(service) return [service];
+  if(p.startsWith('services/')) return components;
+  if(p.startsWith('gateway/')) return ['gateway'];
+  if(noImageSecurity.some(r=>r.test(p))) return [];
+  if(p.startsWith('security/')) return components;
+  if(noImageFiles.has(p)||noImageRoots.some(r=>p.startsWith(r))) return [];
+  return components;
+}
 export function selectComponents(paths, requested='changed') {
   if(requested==='patient-chat-update') return ['identity-api','ehr-api','lab-api','database-migration'];
   if(requested==='admin-update') return ['identity-api','database-migration'];
   if(requested==='novu-update') return ['notification-worker','database-migration'];
   if(requested==='all') return components;
   if(requested!=='changed') { if(!components.includes(requested)) throw Error('Unknown backend component'); return [requested]; }
+  // No paths or too many to review: build everything.
+  if(!Array.isArray(paths)||!paths.length||paths.length>maxChangedPaths) return components;
   const result=new Set();
   for(const p of paths){
-    if(p==='security/production-runtime-assessment.json') return components;
-    if(p===gatewayVexPath){ result.add('gateway'); continue; }
-    if(p==='security/staging-novu-runtime-assessment.json'){
-      result.add('notification-worker');result.add('database-migration');continue;
-    }
-    // The migration ledger is read only by the migration runner's checks; no image contains it.
-    if(p==='scripts/verify-migration-ledger.mjs'){ result.add('database-migration'); continue; }
-    if(p.startsWith('packages/') || p.startsWith('scripts/') || p.startsWith('.github/workflows/production-backend-')) return components;
-    if(p.startsWith('gateway/')) result.add('gateway');
-    for(const c of components.filter(x=>!['gateway','database-migration'].includes(x)))
-      if(p.startsWith(`services/${c}/`)) result.add(c);
-    if(p.startsWith('services/ehr-api/database/') || p.startsWith('services/ehr-api/scripts/')) result.add('database-migration');
+    const selected=componentsForPath(p);
+    if(selected===components) return components;
+    selected.forEach(c=>result.add(c));
   }
   return components.filter(c=>result.has(c));
+}
+const gitDiff = base => execFileSync('git',['diff','--no-renames','--name-only','-z',base,'HEAD'],
+  {encoding:'utf8',stdio:['ignore','pipe','inherit'],maxBuffer:64*1024*1024});
+// Paths changed since base, or null when base is missing, all zeros or unusable,
+// or the diff fails. --no-renames reports both sides of a move.
+export function changedPaths(base, diff=gitDiff) {
+  if(!/^[a-f0-9]{40}$/.test(base??'')||/^0+$/.test(base)) return null;
+  try { return diff(base).split('\0').filter(Boolean); } catch { return null; }
+}
+export function selectChanged(base, diff=gitDiff) {
+  const paths=changedPaths(base,diff);
+  return paths===null?components:selectComponents(paths);
 }
 export function componentConfig(c) {
   if(!components.includes(c)) throw Error('Unknown backend component');
@@ -118,13 +178,8 @@ function main(){
   const [mode,c]=process.argv.slice(2), e=process.env;
   if(mode==='matrix') {
     const requested=e.REQUESTED_COMPONENT||'changed';
-    let paths=[];
-    if(requested==='changed'){
-      const base=e.BASE_SHA;
-      paths=/^[a-f0-9]{40}$/.test(base??'') && !/^0+$/.test(base)
-        ? run('git',['diff','--name-only',base,'HEAD']).split('\n') : ['scripts/'];
-    }
-    const matrix=JSON.stringify({component:selectComponents(paths,requested)});
+    const selected=requested==='changed'?selectChanged(e.BASE_SHA):selectComponents([],requested);
+    const matrix=JSON.stringify({component:selected});
     if(e.GITHUB_OUTPUT) writeFileSync(e.GITHUB_OUTPUT,`matrix=${matrix}\nhas_changes=${JSON.parse(matrix).component.length>0}\n`,{flag:'a'});
     console.log(matrix);return;
   }

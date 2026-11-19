@@ -1,12 +1,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,copyFileSync,rmSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,copyFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {execFileSync} from 'node:child_process';
 import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding,assertGatewayVex,gatewayVexPath,
-  gatewayBoundFiles,gatewayBoundFileHashes,loadGatewayVex} from './production-backend-build.mjs';
+  gatewayBoundFiles,gatewayBoundFileHashes,loadGatewayVex,componentsForPath,changedPaths,selectChanged,maxChangedPaths} from './production-backend-build.mjs';
 
 test('publication accepts only the approved Novu backend branch and exact repository context',()=>{
   const env={GITHUB_REPOSITORY:'D-Eminence/hid-system',GITHUB_REPOSITORY_ID:'1317340803',
@@ -39,9 +40,90 @@ test('production policy edits rebuild every component for fresh native verificat
 test('a migration with its ledger entry rebuilds only the migration runner and the changed services',()=>assert.deepEqual(
   selectComponents(['scripts/verify-migration-ledger.mjs','services/ehr-api/database/migrations/0095_example.sql','services/identity-api/src/app.module.ts',
     'release/config/components.json','config/production-schema-compatibility.json','docs/DATABASE.md']),['identity-api','ehr-api','database-migration']));
-test('any other script still rebuilds every component',()=>assert.deepEqual(selectComponents(['scripts/production_deployment.py']),components));
+test('build, evidence and deployment controller scripts rebuild and redeploy every component',()=>{
+  for(const p of ['scripts/production_deployment.py','scripts/production_deployment_core.py','scripts/production-deployment.mjs',
+    'scripts/verify-production-approval.py','scripts/production_release_compatibility.py','scripts/production-backend-build.mjs',
+    'scripts/production-backend-build.test.mjs','scripts/install-production-scanners.mjs','scripts/assess-production-runtime.py',
+    'scripts/assess-staging-runtime.py','package.json','.dockerignore','.gitattributes'])
+    assert.deepEqual(selectComponents([p]),components,p);
+});
+test('an unknown path under scripts/ or packages/ selects all 13 components',()=>{
+  assert.equal(components.length,13);
+  for(const p of ['scripts/new-helper.mjs','scripts/attestation.mjs','scripts/apply-something.py','scripts/run-container-database-acceptance.sh',
+    'scripts/newdir/tool.mjs','scripts/verify-prebaseline-git.sh','packages/new-shared/src/index.ts','packages/README.md'])
+    assert.deepEqual(selectComponents([p]),components,p);
+});
+test('a pure docs/ or scripts/tests/ change selects no component',()=>{
+  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/codes/hid-lab-codes.json']),[]);
+  assert.deepEqual(selectComponents(['scripts/tests/hid-lab-codes.test.mjs','scripts/tests/fixtures/a.json']),[]);
+  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/codes/hid-lab-codes.json','scripts/tests/hid-lab-codes.test.mjs']),[]);
+});
+test('scripts and packages that no image or production build uses select no component',()=>{
+  for(const p of ['scripts/tuf-staging-migration-rehearsal.mjs','scripts/staging-backend-build.mjs','scripts/verify-container-platform.mjs',
+    'scripts/verify-platform-graph.mjs','scripts/test_production_deployment_core.py','scripts/assess_production_runtime_test.py',
+    'scripts/staging-backend-build.test.mjs','packages/ui/src/Button.tsx','packages/offline/src/index.ts','packages/telemetry/src/index.ts',
+    'packages/identity-browser-client/src/index.ts','security/npm-audit-exceptions.json','security/staging-ehr-runtime-assessment.json',
+    'security/node-22.23.5-runtime-evidence.json','security/STAGING_NOVU_RUNTIME_ASSESSMENT.md','.github/workflows/tuf-local-gates.yml',
+    'release/config/components.json','infra/terraform/main.tf','tools/tuf-release/go.mod','README.md','config/production-schema-compatibility.json'])
+    assert.deepEqual(selectComponents([p]),[],p);
+});
+test('paths that match no rule, and unknown services or security files, select all 13 components',()=>{
+  for(const p of ['Makefile','new-top-level/x.json','config/new.json','services/new-service/src/main.ts','security/new-policy.json',
+    '"quoted/\\303\\251.txt"','','/etc/passwd','services/ehr-api/../../x'])
+    assert.deepEqual(selectComponents([p]),components,JSON.stringify(p));
+});
+test('shared server packages select their consumers and the migration runner',()=>{
+  assert.deepEqual(selectComponents(['packages/server-telemetry/src/index.ts']),components.filter(c=>c!=='gateway'));
+  assert.deepEqual(selectComponents(['packages/api-client/package.json']),
+    ['ehr-api','lab-api','pharmacy-api','ocr-api','outreach-api','database-migration']);
+});
+test('closed fail-open gaps: workload token agent, ehr-api package files and Dockerfile',()=>{
+  assert.deepEqual(selectComponents(['services/workload-token-agent/src/agent.mjs']),['identity-api']);
+  for(const p of ['services/ehr-api/package.json','services/ehr-api/package-lock.json','services/ehr-api/Dockerfile'])
+    assert.deepEqual(selectComponents([p]),['ehr-api','database-migration'],p);
+  assert.deepEqual(selectComponents(['scripts/local-environment.mjs']),['database-migration']);
+  assert.deepEqual(selectComponents(['services/ehr-api/src/main.ts']),['ehr-api']);
+});
+test('a migration PR with its ledger and rehearsal scripts no longer rebuilds all 13',()=>assert.deepEqual(selectComponents([
+  'scripts/verify-migration-ledger.mjs','scripts/tuf-staging-migration-rehearsal.mjs','services/ehr-api/database/migrations/0137_example.sql',
+  'services/ehr-api/database/runtime-grants.sql','services/identity-api/src/app.module.ts','release/migration/manifest.json']),
+  ['identity-api','ehr-api','database-migration']));
+test('an empty change list or more than the review limit selects all 13 components',()=>{
+  assert.deepEqual(selectComponents([]),components);
+  assert.deepEqual(selectComponents(undefined),components);
+  assert.deepEqual(selectComponents(Array.from({length:maxChangedPaths+1},(_,i)=>`docs/${i}.md`)),components);
+  assert.deepEqual(selectComponents(Array.from({length:maxChangedPaths},(_,i)=>`docs/${i}.md`)),[]);
+});
+test('a bad, zero or missing base, a failing diff or an empty diff selects all 13 components',()=>{
+  const base='a'.repeat(40);
+  const fail=()=>{throw Error('fatal: bad object');};
+  for(const b of [undefined,'','0'.repeat(40),'abc','A'.repeat(40),'g'.repeat(40),`${base}\n`])
+    assert.deepEqual(selectChanged(b,()=>'docs/a.md\0'),components,JSON.stringify(b));
+  assert.deepEqual(selectChanged(base,fail),components);
+  assert.equal(changedPaths(base,fail),null);
+  assert.deepEqual(selectChanged(base,()=>''),components);
+  assert.deepEqual(selectChanged(base,()=>'docs/a.md\0scripts/tests/b.test.mjs\0'),[]);
+  assert.deepEqual(selectChanged(base,()=>'services/lab-api/src/a.ts\0services/lab-api/src/b.ts\0'),['lab-api']);
+});
+test('renames report both paths, so moving a file out of a service still rebuilds that service',()=>{
+  const repo=mkdtempSync(join(tmpdir(),'hid-select-'));
+  const git=(...a)=>execFileSync('git',['-C',repo,'-c','user.name=t','-c','user.email=t@example.invalid',...a],{encoding:'utf8'});
+  try{
+    git('init','-q');
+    mkdirSync(join(repo,'services/lab-api/src'),{recursive:true});
+    writeFileSync(join(repo,'services/lab-api/src/helper.ts'),'export const x = 1;\n'.repeat(20));
+    git('add','.');git('commit','-qm','base');
+    const base=git('rev-parse','HEAD').trim();
+    mkdirSync(join(repo,'docs'));
+    git('mv','services/lab-api/src/helper.ts','docs/helper.ts');git('commit','-qm','move');
+    const diff=b=>execFileSync('git',['-C',repo,'diff','--no-renames','--name-only','-z',b,'HEAD'],{encoding:'utf8'});
+    assert.deepEqual(changedPaths(base,diff).sort(),['docs/helper.ts','services/lab-api/src/helper.ts']);
+    assert.deepEqual(selectChanged(base,diff),['lab-api']);
+  }finally{rmSync(repo,{recursive:true,force:true});}
+});
 test('database changes also rebuild the migration runner',()=>assert.deepEqual(selectComponents(['services/ehr-api/database/migrations/0063_example.sql']),['ehr-api','database-migration']));
-test('shared client and CI changes select the complete backend matrix',()=>assert.deepEqual(selectComponents(['packages/api-client/src/index.ts']),components));
+test('shared client changes select its five consumers and the migration runner',()=>assert.deepEqual(selectComponents(['packages/api-client/src/index.ts']),
+  ['ehr-api','lab-api','pharmacy-api','ocr-api','outreach-api','database-migration']));
 test('reject unknown/path-injection components',()=>assert.throws(()=>componentConfig('../production')));
 test('migration uses the existing EHR repository with the migration target',()=>assert.equal(componentConfig('database-migration').target,'migration'));
 test('High/Critical findings and incomplete scan reports block publication',()=>{
@@ -208,4 +290,146 @@ test('the release candidate step admits the gateway scan only with the committed
     write({component:'gateway',assessment_sha256:null,vex_sha256:null},{...scan,ignoredMatches:[]});
     assert.equal(validatePublication(dir,repoRoot).component,'gateway');
   } finally { Date.now=realNow; }
+});
+
+// Coverage guard for the changed-path selector. Each production image's inputs are
+// the non --from COPY sources of the stages its target reaches (FROM <stage> and
+// COPY --from=<stage>). A stage that is reached only through COPY --from of paths
+// under /app/packages/ contributes only its packages/ sources: the migration target
+// takes only the built packages from the ehr-api build stage, never the ehr-api app.
+const trackedFiles=p=>execFileSync('git',['-C',repoRoot,'ls-files','--',p],{encoding:'utf8'}).split('\n').filter(Boolean);
+function dockerStages(file){
+  const text=readFileSync(join(repoRoot,file),'utf8').replace(/\\\r?\n/g,' ');
+  const stages=[];
+  for(const raw of text.split(/\r?\n/)){
+    const line=raw.trim();
+    const from=line.match(/^FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?/i);
+    if(from){stages.push({name:from[2]??String(stages.length),base:from[1],copies:[]});continue;}
+    const copy=line.match(/^(COPY|ADD)\s+(.*)$/i);
+    if(!copy) continue;
+    assert.ok(stages.length,`${file}: COPY before FROM`);
+    let args=copy[2].trim(), flags=[];
+    while(args.startsWith('--')){const [flag,...rest]=args.split(/\s+/);flags.push(flag);args=rest.join(' ');}
+    const parts=args.startsWith('[')?JSON.parse(args):args.split(/\s+/);
+    const fromStage=flags.find(f=>f.startsWith('--from='))?.slice(7)??null;
+    stages.at(-1).copies.push({fromStage,sources:parts.slice(0,-1)});
+  }
+  return stages;
+}
+function imageInputs(file,target){
+  const stages=dockerStages(file), byName=new Map(stages.map(s=>[s.name,s]));
+  assert.ok(byName.has(target),`${file}: missing target ${target}`);
+  const scope=new Map([[target,'all']]), queue=[target];
+  const reach=(name,how)=>{
+    if(!byName.has(name)) return;
+    if(scope.get(name)==='all'||scope.get(name)===how) return;
+    scope.set(name,how==='all'||scope.has(name)?'all':how);queue.push(name);
+  };
+  while(queue.length){
+    const stage=byName.get(queue.shift());
+    reach(stage.base,'all');
+    for(const c of stage.copies) if(c.fromStage!==null)
+      reach(c.fromStage,c.sources.every(s=>s.startsWith('/app/packages/'))?'packages':'all');
+  }
+  const inputs=new Set([file]);
+  for(const [name,how] of scope) for(const c of byName.get(name).copies) if(c.fromStage===null)
+    for(const s of c.sources) if(how==='all'||s.startsWith('packages/')) inputs.add(s);
+  return inputs;
+}
+test('every production Dockerfile COPY source selects the component that copies it',()=>{
+  let checked=0;
+  for(const c of components){
+    const {dockerfile,target}=componentConfig(c);
+    for(const source of imageInputs(dockerfile,target)){
+      const files=trackedFiles(source);
+      assert.ok(files.length,`${c}: ${source} is not tracked`);
+      // A directory source also stands for any file added under it later.
+      const isFile=files.length===1&&files[0]===source;
+      for(const p of [isFile?source:`${source}/new-file`,...files]){
+        assert.ok(selectComponents([p]).includes(c),`${p} is copied into ${c} but does not select it`);checked++;
+      }
+    }
+  }
+  assert.ok(checked>500,`only ${checked} image input files checked`);
+});
+test('the image input parser sees the inputs that the selector map relies on',()=>{
+  const migration=imageInputs('services/ehr-api/Dockerfile','migration');
+  for(const p of ['scripts/local-environment.mjs','services/ehr-api/database','services/ehr-api/scripts','services/ehr-api/package.json',
+    'packages/api-client','packages/server-telemetry/src','services/ehr-api/Dockerfile']) assert.ok(migration.has(p),p);
+  assert.ok(!migration.has('services/ehr-api/src'));
+  assert.ok(imageInputs('services/ehr-api/Dockerfile','runtime').has('services/ehr-api/src'));
+  assert.ok(imageInputs('services/identity-api/Dockerfile','runtime').has('services/workload-token-agent/src'));
+  assert.ok(imageInputs('gateway/Dockerfile','runtime').has('gateway/nginx.conf.template'));
+});
+
+// Every scripts/ path the production workflows run, with the modules those scripts
+// import, must select the components whose job runs it. Steps in the build job that
+// are limited to one component belong to that component; everything else (select,
+// publish, candidate, deploy, rollback) runs for every release and belongs to all.
+// Test files that the select job runs are verified on every run and are exempt, but
+// the modules they import are not.
+const testFile=p=>/^scripts\/(test_[^/]+\.py|[^/]+_test\.py|[^/]+\.test\.mjs)$/.test(p);
+function workflowSteps(file){
+  const steps=[];let job=null,inJobs=false,step=null;
+  for(const line of readFileSync(join(repoRoot,file),'utf8').split('\n')){
+    if(/^jobs:\s*$/.test(line)){inJobs=true;continue;}
+    if(!inJobs) continue;
+    const j=line.match(/^  ([\w-]+):\s*$/);
+    if(j){job=j[1];step=null;continue;}
+    if(/^      - /.test(line)){step={job,condition:null,text:''};steps.push(step);}
+    if(!step) continue;
+    const condition=line.match(/^        if:\s*(.*)$/);
+    if(condition) step.condition=condition[1].trim();
+    step.text+=line.replace(/^\s*(?:- )?name:.*$/,'')+'\n';
+  }
+  return steps;
+}
+function stepOwners(step){
+  if(step.job!=='build'||!step.condition||step.condition==='failure()') return components;
+  const eq=[...step.condition.matchAll(/matrix\.component == '([\w-]+)'/g)].map(m=>m[1]);
+  const ne=[...step.condition.matchAll(/matrix\.component != '([\w-]+)'/g)].map(m=>m[1]);
+  assert.ok(eq.length+ne.length&&!(eq.length&&ne.length)&&!/\|\|/.test(step.condition),`unparsed condition: ${step.condition}`);
+  return eq.length?eq:components.filter(c=>!ne.includes(c));
+}
+function stepScripts(text){
+  const found=new Set();
+  for(const m of text.matchAll(/(?<![\w./-])((?:services\/[\w-]+\/)?scripts\/[\w./-]+)/g)) found.add(m[1]);
+  for(const m of text.matchAll(/unittest discover -s scripts -p '([^']+)'/g)){
+    const pattern=new RegExp('^scripts/'+m[1].replace(/[.]/g,'\\.').replace(/\*/g,'[^/]*')+'$');
+    const matches=trackedFiles('scripts').filter(p=>pattern.test(p));
+    assert.ok(matches.length,`no tests match ${m[1]}`);matches.forEach(p=>found.add(p));
+  }
+  return found;
+}
+function scriptImports(p){
+  if(!existsSync(join(repoRoot,p))) return [];
+  const text=readFileSync(join(repoRoot,p),'utf8'), dir=p.slice(0,p.lastIndexOf('/')), found=[];
+  if(p.endsWith('.mjs')||p.endsWith('.js'))
+    for(const m of text.matchAll(/(?:from\s+|import\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g)) found.push(join(dir,m[1]));
+  if(p.endsWith('.py')){
+    for(const m of text.matchAll(/^\s*(?:from\s+([\w]+)\s+import|import\s+([\w]+))/gm)) found.push(`${dir}/${m[1]??m[2]}.py`);
+    for(const m of text.matchAll(/['"](?:scripts\/)?([\w.-]+\.py)['"]/g)) found.push(`${dir}/${m[1]}`);
+  }
+  return found.filter(f=>existsSync(join(repoRoot,f)));
+}
+test('every scripts/ path the production workflows run selects the components that run it',()=>{
+  const owners=new Map();
+  const add=(p,cs)=>{const prev=owners.get(p)??new Set();const size=prev.size;cs.forEach(c=>prev.add(c));owners.set(p,prev);return prev.size!==size;};
+  const queue=[];
+  for(const file of ['.github/workflows/production-backend-images.yml','.github/workflows/production-backend-rollback.yml'])
+    for(const step of workflowSteps(file)) for(const p of stepScripts(step.text)) if(add(p,stepOwners(step))) queue.push(p);
+  while(queue.length){
+    const p=queue.shift();
+    for(const i of scriptImports(p)) if(add(i,[...owners.get(p)])) queue.push(i);
+  }
+  for(const p of ['scripts/production-backend-build.mjs','scripts/verify-migration-ledger.mjs','scripts/production_deployment_core.py',
+    'scripts/assess-staging-runtime.py','services/ehr-api/scripts/test-patient-evidence-runtime.mjs','scripts/test_production_deployment_ecs.py'])
+    assert.ok(owners.has(p),`workflow parser missed ${p}`);
+  assert.deepEqual([...owners.get('scripts/verify-migration-ledger.mjs')],['database-migration']);
+  for(const [p,cs] of owners){
+    assert.ok(existsSync(join(repoRoot,p)),`workflow runs missing ${p}`);
+    if(testFile(p)) continue;
+    const selected=selectComponents([p]);
+    for(const c of cs) assert.ok(selected.includes(c),`${p} runs for ${c} but does not select it`);
+  }
 });
