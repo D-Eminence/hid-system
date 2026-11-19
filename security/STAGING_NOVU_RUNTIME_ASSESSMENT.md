@@ -21,6 +21,11 @@
 > only changed ELF is `usr/lib/aarch64-linux-gnu/libz.so.1.3.1`. That change is
 > reviewed in `zlib-deb13u1-runtime-evidence.json`, also cited by SHA-256 in
 > `native_evidence_provenance`.
+> Since 2026-11-19 the production assessment pins the Node 22.23.5 base
+> `sha256:af2e7dd3017037b3ba73238b818c7273f3b4349c005f8bd1454b78d580fe7e37`, whose
+> only changed ELF is `nodejs/bin/node`. That binary is reviewed in
+> `node-22.23.5-runtime-evidence.json`, also cited by SHA-256 in
+> `native_evidence_provenance`.
 
 Assessed 2026-10-05; expires 2026-11-04. Covers only the notification worker
 and database migration runner with the exact native file inventories in
