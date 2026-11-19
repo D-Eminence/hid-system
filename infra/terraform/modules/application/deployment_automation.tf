@@ -161,7 +161,12 @@ resource "aws_iam_role_policy" "release_read" {
         Resource = ["${aws_s3_bucket.deployment_releases[0].arn}/${local.release_environment}/current.json",
       "${aws_s3_bucket.deployment_releases[0].arn}/${local.release_environment}/releases/*"] },
       { Effect = "Allow", Action = ["kms:Decrypt"], Resource = aws_kms_key.deployment_releases[0].arn,
-      Condition = { StringEquals = { "kms:ViaService" = "s3.${var.aws_region}.amazonaws.com" } } }
+      Condition = { StringEquals = { "kms:ViaService" = "s3.${var.aws_region}.amazonaws.com" } } },
+      # Read-only look at the deployment lease, so the website's automatic re-pin (health
+      # production-backend-repin.yml) never starts a release while either release holds it. GetItem only:
+      # this role can never take, extend or release the lease.
+      { Effect = "Allow", Action = ["dynamodb:GetItem"], Resource = aws_dynamodb_table.deployment_lease[0].arn,
+      Condition = { "ForAllValues:StringEquals" = { "dynamodb:LeadingKeys" = ["hid-${local.release_environment}"] } } }
     ]
   })
 }
