@@ -858,8 +858,11 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     it('writes nothing when the patient changed between the read and the write', async () => {
       const qoreId = gate();
       const { service, statements } = desk(qoreIdProvider(qoreId), undefined, [holder, undefined]);
+      // The website's NIN_CHECK_IN_PROGRESS handling (wait, then the same Idempotency-Key) is what this needs; the
+      // text says what happened, not that a check is running.
       await expect(service.resolve(input, 'resolve-key-q110-000003', context)).rejects.toMatchObject({
-        status: 409, code: 'NIN_CHECK_IN_PROGRESS' });
+        status: 409, code: 'NIN_CHECK_IN_PROGRESS', extensions: { retryAfterSeconds: 60 },
+        message: 'The record for this NIN changed while it was being checked. Please wait a minute, then try again.' });
       expect(statements.some(({ sql }) => sql.includes('insert into identity.registration_cases ('))).toBe(false);
       expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
     });

@@ -14,7 +14,6 @@ import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinC
   isStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinClaimedDemographics,
   type NinVerificationProvider, type NinVerificationResult } from './nin.types';
-import { ninCheckInProgress } from './nin-check-once';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
 import { QOREID_PROVIDER } from './qoreid-verification.types';
@@ -356,7 +355,7 @@ export class NinRegistrationService {
         // The patient or the NIN changed between the read and this write: the
         // match above no longer stands. Nothing is written; a retry decides
         // again.
-        throw ninCheckInProgress();
+        throw ninHolderChanged();
       }
       const candidates = existingPatient ? [] : await this.findCandidates(client, verification.demographics);
       // D13: the stated Health ID is a hint only. It never adds a candidate
@@ -1329,6 +1328,20 @@ function isHidCollision(error: unknown): boolean {
     && error !== null
     && (error as { code?: unknown }).code === '23505'
     && (error as { constraint?: unknown }).constraint === 'patients_hid_code_ci_uq';
+}
+
+/**
+ * Q110: the NIN's holder changed between the holder read and the case being
+ * written (the NIN was revoked or the patient made inactive), so the answer
+ * from the record no longer stands. No NIN check is running: the code is
+ * 0137's NIN_CHECK_IN_PROGRESS only because the website already does what
+ * this needs with it (wait retryAfterSeconds, then retry with the same
+ * Idempotency-Key, and the retry decides again); the text says what happened.
+ */
+export function ninHolderChanged(): DomainProblem {
+  return new DomainProblem(409, 'NIN_CHECK_IN_PROGRESS',
+    'The record for this NIN changed while it was being checked. Please wait a minute, then try again.', undefined,
+    { extensions: { retryAfterSeconds: 60 } });
 }
 
 function isConstraintViolation(error: unknown, constraint: string): boolean {

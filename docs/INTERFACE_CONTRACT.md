@@ -6552,8 +6552,12 @@ guard is not asked and nothing is kept there, and the breaker is neither asked
 nor touched (the record answers while the breaker is tripped). A "does not
 match" answer writes no case and names nothing from the record. If the patient
 or the NIN changes between this read and the case being written, nothing is
-written: `409 NIN_CHECK_IN_PROGRESS` (with `retryAfterSeconds`), and the retry
-decides again.
+written: `409 NIN_CHECK_IN_PROGRESS`, "The record for this NIN changed while
+it was being checked. Please wait a minute, then try again.", with
+`retryAfterSeconds: 60`, and the retry decides again. No NIN check is running
+then: the code is 0137's only because the website's handling of it (wait
+`retryAfterSeconds`, then retry with the same `Idempotency-Key`) is what this
+needs; the text says what happened.
 
 ### One QoreID check per NIN (0137, Q109)
 
