@@ -6686,6 +6686,13 @@ rows.
   and once its details match, the record is kept 90 days from that match
   (above), so it is not paid for again later either.
 - A resend of a request that matched: the case it created (as before).
+- A NIN already in an active registration case (pending approval or review)
+  at any facility: `409 NIN_REGISTRATION_IN_PROGRESS`, known only when the
+  case is written, after the check (Identity cannot read another facility's
+  cases). Each desk match keeps the record 90 days (above), so within 90 days
+  of the last match the check is answered from storage; a case left pending
+  more than 90 days with no match in between costs one new charge, then 90
+  days from storage again. A pending case is not a Health ID (Q110).
 - A resend after a check that may have been charged without an answer HID
   could keep: `409 NIN_CHECK_HELD` until the hold ends; after a check that
   sent nothing (switched off, the switch or the guard's store unreadable, the
