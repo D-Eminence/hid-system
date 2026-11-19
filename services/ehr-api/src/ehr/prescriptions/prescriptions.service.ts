@@ -427,11 +427,13 @@ export class PrescriptionsService {
    * check takes the patient's allergy lock and then reads the allergies, and
    * only READ COMMITTED reads them after the lock. A SERIALIZABLE transaction
    * reads from the snapshot of its first statement, taken before the lock,
-   * so an allergy recorded while it waited for the lock would not be seen.
-   * The cost (0133 D14): this send locks the prescription but does not
-   * change it, so a send to an outside pharmacy (SERIALIZABLE) that overlaps
-   * it within milliseconds may not see the item it creates and may leave its
-   * route sent next to that item. The database's live-claim index then ends
+   * so an allergy recorded after that first statement (the wait included)
+   * would not be seen. The cost (0133 D14): this send locks the prescription
+   * but does not change it, so a send to an outside pharmacy (SERIALIZABLE)
+   * whose snapshot predates this commit (for example while it waits for the
+   * patient's allergy lock) may not see the item it creates and may leave its
+   * route sent next to that item. The two take the prescription's lock and
+   * the allergy lock in opposite orders, so they can also deadlock (40P01). The database's live-claim index then ends
    * the outside pharmacy's acceptance in R10 (the route is withdrawn,
    * order_in_work): the prescription is never dispensed twice and stays with
    * this hospital's pharmacy. D7 passes a 40001 or 40P01 on (OwnPharmacySend).

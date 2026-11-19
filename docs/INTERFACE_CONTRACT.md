@@ -7986,14 +7986,21 @@ hospital's item in the same transaction ("sent elsewhere"):
   before. So does a send after a route an outside pharmacy accepted has
   ended without being completed; while that route stands, or once it is
   completed, the send answers 409 `ORDER_ROUTE_ALREADY_SENT`, as before.
-- A "Send to pharmacy" (or a create as active) and a send to an outside
-  pharmacy for the same prescription that race within milliseconds can
-  leave the route sent next to a live item here. "Send to pharmacy" and a
-  create as active run READ COMMITTED, so that the allergy check (0117) reads
-  the allergies after its lock. In that race the database refuses the
+- A "Send to pharmacy" and a send to an outside pharmacy for the same
+  prescription that overlap (the outside send's snapshot predates the
+  other's commit, for example while it waits for the patient's allergy lock)
+  can leave the route sent next to a live item here. "Send to pharmacy", a
+  create as active and Activate run READ COMMITTED, so that the allergy
+  check (0117) reads the allergies after its lock: a SERIALIZABLE
+  transaction would read from the snapshot of its first statement and miss
+  an allergy recorded after it. In that race the database refuses the
   outside pharmacy's acceptance: the route is withdrawn with
   `order_in_work`. The prescription is never dispensed twice and stays with
   this hospital's pharmacy.
+- The two take the prescription's lock and the patient's allergy lock in
+  opposite orders, so they can also deadlock. PostgreSQL then cancels one
+  (40P01): a cancelled send to an outside pharmacy is run again, and a
+  cancelled "Send to pharmacy" answers an error and can be sent again.
 - Only the new ehr-api sends this way (above). Today's ehr-api answers
   `ORDER_ROUTE_ORDER_IN_WORK` for any prescription with a pharmacy work item
   here.

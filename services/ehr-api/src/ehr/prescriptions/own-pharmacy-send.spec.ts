@@ -627,8 +627,8 @@ describe('Send to pharmacy (0133)', () => {
  * "Send to pharmacy" and a create as active run READ COMMITTED, never SERIALIZABLE. Both run 0117's allergy check, which
  * takes the patient's allergy lock and then reads the allergies: only READ COMMITTED reads them after the lock. A
  * SERIALIZABLE transaction reads from the snapshot of its first statement, taken before the lock, so an allergy
- * recorded while it waited for the lock would not be seen and the prescription would reach the pharmacy without the
- * acknowledgement. The cost (0133 D14): a send to an outside pharmacy that overlaps one of them may leave its route sent
+ * recorded after that statement (the wait for the lock included) would not be seen and the prescription would reach
+ * the pharmacy without the acknowledgement. The cost (0133 D14): a send to an outside pharmacy that overlaps one of them may leave its route sent
  * next to the item here; the database's live-claim index then ends the outside acceptance in R10 (order_in_work).
  */
 describe('Send to pharmacy and a create as active run READ COMMITTED (0117\'s allergy check, 0133 D14)', () => {
