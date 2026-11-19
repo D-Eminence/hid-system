@@ -10,7 +10,7 @@ import {
   TimelineQueryDto,
   UpdateClinicalNoteDto,
 } from '../shared/clinical.dto';
-import { ClinicalRepository } from '../shared/clinical.repository';
+import { ClinicalRepository, type OperationResult } from '../shared/clinical.repository';
 import { hasTypedReason, neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
 import { requireVisitOpenForWork } from '../shared/visit-guard';
 
@@ -168,63 +168,80 @@ export class ClinicalNotesService {
     input: CreateClinicalNoteDto,
     idempotencyKey: string,
   ): Promise<ClinicalNoteRow> {
-    const operation = 'clinical-note.create';
-    const digest = requestDigest(operation, { patientId, encounterId, input });
     return this.repository.run(
       context,
       patientId,
       'write_records',
       { action: 'ehr.note.create', resourceType: 'clinical-note' },
-      (client) => this.repository.executeCreate(
-        client,
-        context,
-        patientId,
-        idempotencyKey,
-        operation,
-        digest,
-        'clinical-note',
-        async () => {
-          // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
-          await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
-          const signed = input.status === NoteStatus.Signed;
-          // $4 (the author) is used twice. Without the casts PostgreSQL types the
-          // CASE branch `$4 else null` as text before it types the created_by
-          // value as uuid, and refuses the whole statement with 42P08
-          // ("inconsistent types deduced for parameter $4"). That refusal made
-          // every staff visit-note save fail with a 500 (production, 5 Nov 2026).
-          const result = await client.query<ClinicalNoteRow>(
-            `insert into ehr.clinical_notes (
-               encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
-               note_type, title, status, signed_at, signed_by
-             ) values ($1, $2, $3, $4::uuid, $5, $6, $7, $8,
-               case when $9::boolean then clock_timestamp() else null end,
-               case when $9::boolean then $4::uuid else null end)
-             returning ${NOTE_COLUMNS}`,
-            [
-              encounterId,
-              patientId,
-              context.facilityId,
-              context.actor.accountId,
-              context.membershipId,
-              input.noteType,
-              input.title,
-              input.status,
-              signed,
-            ],
-          );
-          const note = this.singleNote(result.rows[0]);
-          await client.query(
-            `insert into ehr.clinical_note_revisions (
-               clinical_note_id, patient_id, facility_id, revision_no, content, change_reason,
-               supersedes_revision_no, created_by, created_by_membership_id
-             ) values ($1, $2, $3, 1, $4, 'initial clinical note', null, $5, $6)`,
-            [note.id, patientId, context.facilityId, input.content, context.actor.accountId, context.membershipId],
-          );
-          return { value: note, id: note.id };
-        },
-        (id) => this.findNoteById(client, context, patientId, id),
-      ),
+      (client) => this.createInTransaction(client, context, patientId, encounterId, input, idempotencyKey),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
+    );
+  }
+
+  /**
+   * The note create inside a transaction the caller already holds (the
+   * route's own, or EHR-C5's one-call consultation): the Idempotency-Key row,
+   * the visit check, the note and its first revision. The caller writes the
+   * `ehr.note.create` audit row.
+   */
+  createInTransaction(
+    client: PoolClient,
+    context: DataAccessContext,
+    patientId: string,
+    encounterId: string,
+    input: CreateClinicalNoteDto,
+    idempotencyKey: string,
+    operation = 'clinical-note.create',
+  ): Promise<OperationResult<ClinicalNoteRow>> {
+    const digest = requestDigest(operation, { patientId, encounterId, input });
+    return this.repository.executeCreate(
+      client,
+      context,
+      patientId,
+      idempotencyKey,
+      operation,
+      digest,
+      'clinical-note',
+      async () => {
+        // EHR-C8a: nothing new on a visit entered in error (409 VISIT_ENTERED_IN_ERROR).
+        await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId);
+        const signed = input.status === NoteStatus.Signed;
+        // $4 (the author) is used twice. Without the casts PostgreSQL types the
+        // CASE branch `$4 else null` as text before it types the created_by
+        // value as uuid, and refuses the whole statement with 42P08
+        // ("inconsistent types deduced for parameter $4"). That refusal made
+        // every staff visit-note save fail with a 500 (production, 5 Nov 2026).
+        const result = await client.query<ClinicalNoteRow>(
+          `insert into ehr.clinical_notes (
+             encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+             note_type, title, status, signed_at, signed_by
+           ) values ($1, $2, $3, $4::uuid, $5, $6, $7, $8,
+             case when $9::boolean then clock_timestamp() else null end,
+             case when $9::boolean then $4::uuid else null end)
+           returning ${NOTE_COLUMNS}`,
+          [
+            encounterId,
+            patientId,
+            context.facilityId,
+            context.actor.accountId,
+            context.membershipId,
+            input.noteType,
+            input.title,
+            input.status,
+            signed,
+          ],
+        );
+        const note = this.singleNote(result.rows[0]);
+        await client.query(
+          `insert into ehr.clinical_note_revisions (
+             clinical_note_id, patient_id, facility_id, revision_no, content, change_reason,
+             supersedes_revision_no, created_by, created_by_membership_id
+           ) values ($1, $2, $3, 1, $4, 'initial clinical note', null, $5, $6)`,
+          [note.id, patientId, context.facilityId, input.content, context.actor.accountId, context.membershipId],
+        );
+        return { value: note, id: note.id };
+      },
+      (id) => this.findNoteById(client, context, patientId, id),
     );
   }
 

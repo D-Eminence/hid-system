@@ -29,6 +29,9 @@ import { EncounterStatus, EncounterType } from './clinical.dto';
 import { EncountersService } from '../encounters/encounters.service';
 import { VitalsService } from '../vitals/vitals.service';
 import { PatientRecordsService } from '../patient-records/patient-records.service';
+import { ClinicalNotesService } from '../clinical-notes/clinical-notes.service';
+import { DiagnosesService } from '../diagnoses/diagnoses.service';
+import { ConsultationsService } from '../consultation/consultations.service';
 
 const url = process.env.EHR_SCRATCH_DATABASE_URL;
 const scratch = url !== undefined && /\/[A-Za-z0-9_]*_scratch(\?|$)/.test(url);
@@ -101,6 +104,21 @@ create table ehr.idempotency_keys (
   locked_until timestamptz not null, expires_at timestamptz not null, row_version bigint not null default 1,
   created_at timestamptz not null default clock_timestamp(), updated_at timestamptz not null default clock_timestamp(),
   unique (facility_id, created_by, operation, idempotency_key));
+-- EHR-C5: the columns the note, vitals and diagnosis creates write (0004), and the diagnoses table.
+alter table ehr.clinical_note_revisions add column change_reason text, add column supersedes_revision_no integer,
+  add column created_by uuid, add column created_by_membership_id uuid;
+alter table ehr.vitals add column created_by uuid, add column created_by_membership_id uuid,
+  add column source text not null default 'manual', add column row_version bigint not null default 1,
+  add column updated_at timestamptz not null default clock_timestamp();
+create table ehr.diagnoses (
+  id uuid primary key default gen_random_uuid(), encounter_id uuid not null, patient_id uuid not null,
+  facility_id uuid not null, created_by uuid not null, created_by_membership_id uuid not null,
+  code_system text not null check (length(code_system) between 1 and 255),
+  code text not null check (length(code) between 1 and 100), display text not null,
+  clinical_status text not null, verification_status text not null, onset_at timestamptz, abatement_at timestamptz,
+  notes text, row_version bigint not null default 1, created_at timestamptz not null default clock_timestamp(),
+  updated_at timestamptz not null default clock_timestamp(),
+  foreign key (encounter_id, patient_id, facility_id) references ehr.encounters(id, patient_id, facility_id));
 create table ehr.record_versions (
   id bigint generated always as identity primary key, resource_type text not null, resource_id text not null,
   version_no bigint not null, operation text not null check (operation in ('create', 'update')),
@@ -129,6 +147,8 @@ create trigger prescriptions_versioned before insert or update on ehr.prescripti
   for each row execute function ehr.capture_record_version();
 create trigger lab_requests_versioned before insert or update on ehr.lab_requests
   for each row execute function ehr.capture_record_version();
+create trigger diagnoses_versioned before insert or update on ehr.diagnoses
+  for each row execute function ehr.capture_record_version();
 create trigger idempotency_keys_versioned before insert or update on ehr.idempotency_keys
   for each row execute function ehr.capture_record_version();
 
@@ -138,7 +158,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['encounters', 'clinical_notes', 'clinical_note_revisions', 'prescriptions', 'lab_requests',
-    'vitals', 'vital_corrections', 'idempotency_keys', 'record_versions'] loop
+    'vitals', 'vital_corrections', 'idempotency_keys', 'record_versions', 'diagnoses'] loop
     execute format('alter table ehr.%I enable row level security', t);
     execute format('alter table ehr.%I force row level security', t);
     execute format('grant select, insert, update on ehr.%I to wave1_runtime', t);
@@ -229,7 +249,7 @@ describeScratch('wave 1 clinical SQL on PostgreSQL (review finding 6)', () => {
   });
 
   beforeEach(async () => {
-    await pool.query(`truncate ehr.record_versions, ehr.idempotency_keys, ehr.vital_corrections, ehr.vitals,
+    await pool.query(`truncate ehr.diagnoses, ehr.record_versions, ehr.idempotency_keys, ehr.vital_corrections, ehr.vitals,
       ehr.clinical_note_revisions, ehr.clinical_notes, ehr.prescriptions, ehr.lab_requests, ehr.encounters`);
   });
 
@@ -508,5 +528,81 @@ describeScratch('wave 1 clinical SQL on PostgreSQL (review finding 6)', () => {
     const emergencyTitles = await inTransaction({ facility: facilityId, correlation: 'emergency-read1' },
       async (client) => (await read(twoReads(client), patientId, facilityId)).notes.map((note) => note.title).sort());
     expect(emergencyTitles).toEqual(['Completed visit note', 'Open visit note']);
+  });
+  /**
+   * EHR-C5: the one-call consultation on PostgreSQL with the real repository
+   * (its runParts transaction, executeCreate and error translation) and the
+   * real services; only consent and the audit writer are stand-ins.
+   */
+  function consultationService() {
+    const database = { withTransaction: (context: DataAccessContext, operation: (client: PoolClient) => Promise<unknown>) =>
+      inTransaction({ facility: context.facilityId, correlation: context.correlationId }, operation) };
+    const audits: { action: string; details: unknown }[] = [];
+    const audit = { record: async () => undefined,
+      recordWithClient: async (_client: PoolClient, event: { action: string; details: unknown }) => {
+        audits.push({ action: event.action, details: event.details });
+      } };
+    const repository = new ClinicalRepository(database as never, audit as never,
+      { authorize: async () => ({ allowed: true }) } as never);
+    const encounters = new EncountersService(repository);
+    encounters.now = () => new Date('2026-11-18T10:00:00Z');
+    const service = new ConsultationsService(repository, encounters, new ClinicalNotesService(repository),
+      new VitalsService(repository), new DiagnosesService(repository));
+    return { service, audits };
+  }
+
+  const consultation = (code = 'B50.9') => ({
+    visit: { encounterType: EncounterType.Ambulatory, status: EncounterStatus.InProgress,
+      startedAt: '2026-11-18T09:30:00.000Z', chiefComplaint: 'Fever (test)' },
+    note: { noteType: 'consultation', title: 'Consultation (test)', status: 'signed', content: 'Fictional note.' },
+    vitals: { recordedAt: '2026-11-18T09:35:00.000Z', temperatureC: 38.4, source: 'manual' },
+    diagnoses: [{ codeSystem: 'ICD-10', code: 'R50.9', display: 'Fever (test)', clinicalStatus: 'active',
+      verificationStatus: 'provisional' }, { codeSystem: 'ICD-10', code, display: 'Malaria (test)',
+      clinicalStatus: 'active', verificationStatus: 'provisional' }],
+  }) as never;
+
+  // Clinical rows and Idempotency-Key rows. (record_versions is left out of the replay comparison: a
+  // BEFORE INSERT trigger runs for a key insert that then meets its conflict, on every route's replay.)
+  const counts = async () => (await pool.query(`select
+      (select count(*) from ehr.encounters)::int as encounters, (select count(*) from ehr.clinical_notes)::int as notes,
+      (select count(*) from ehr.clinical_note_revisions)::int as revisions, (select count(*) from ehr.vitals)::int as vitals,
+      (select count(*) from ehr.diagnoses)::int as diagnoses, (select count(*) from ehr.idempotency_keys)::int as keys,
+      (select count(*) from ehr.record_versions)::int as versions`)).rows[0];
+
+  it('(e) EHR-C5: a diagnosis PostgreSQL refuses rolls back the visit, note and vitals; the key is not used up', async () => {
+    const { service, audits } = consultationService();
+    await expect(service.create(staffContext('consult-fail-001'), patientId, consultation('X'.repeat(101)),
+      'consult-key-000001')).rejects.toMatchObject({ status: 400, code: 'INVALID_CLINICAL_DATA' });
+    expect(await counts()).toEqual({ encounters: 0, notes: 0, revisions: 0, vitals: 0, diagnoses: 0, keys: 0,
+      versions: 0 });
+    expect(audits).toEqual([]);
+    const saved = await service.create(staffContext('consult-ok-00001'), patientId, consultation(), 'consult-key-000001');
+    expect(saved.encounter.reusedOpenVisit).toBe(false);
+    expect(saved.diagnoses.map((row) => row.encounterId)).toEqual([saved.encounter.id, saved.encounter.id]);
+    expect(await counts()).toMatchObject({ encounters: 1, notes: 1, revisions: 1, vitals: 1, diagnoses: 2, keys: 6 });
+  });
+
+  it('(e) EHR-C5: a replay answers the same consultation (reusedOpenVisit read from record_versions); '
+    + 'another body is 409', async () => {
+    const { service } = consultationService();
+    const first = await service.create(staffContext('consult-first-01'), patientId, consultation(), 'consult-key-000002');
+    const { versions: _versions, ...before } = await counts();
+    const replay = await service.create(staffContext('consult-again-01'), patientId, consultation(), 'consult-key-000002');
+    expect(replay).toEqual(first);
+    expect(await counts()).toMatchObject(before);
+    await expect(service.create(staffContext('consult-other-01'), patientId, consultation('A01.0'),
+      'consult-key-000002')).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
+    expect(await counts()).toMatchObject(before);
+  });
+
+  it('(e) EHR-C5: saves onto the open visit today, and its replay still says reused', async () => {
+    const openVisit = await insertVisit('on_hold', '2026-11-18T08:00:00Z');
+    const { service } = consultationService();
+    const saved = await service.create(staffContext('consult-open-001'), patientId, consultation(), 'consult-key-000003');
+    expect(saved.encounter).toMatchObject({ id: openVisit, reusedOpenVisit: true });
+    expect(saved.note?.encounterId).toBe(openVisit);
+    const replay = await service.create(staffContext('consult-open-002'), patientId, consultation(), 'consult-key-000003');
+    expect(replay).toEqual(saved);
+    expect((await counts()).encounters).toBe(1);
   });
 });

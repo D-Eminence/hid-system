@@ -22,6 +22,7 @@ import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-suc
 import { AccountSuspendedProblem } from './account-suspended';
 import { loginPrincipalKey } from './patient-principal';
 import { facilityAdmittedOnProduct, isProductGateRefusal, productForOrigin } from './product-gate';
+import { sessionActorWithModules } from './facility-modules';
 import { SsoRouteGuard } from './sso/sso-route.guard';
 import { SsoSessionEndFilter } from './sso/sso-session-end.filter';
 import { SsoService } from './sso/sso.service';
@@ -553,9 +554,20 @@ export class AuthController {
     return this.sessionResponse(selectedActor, undefined, 'selected');
   }
 
+<<<<<<< HEAD
   private sessionResponse(actor: ActorContext, expiresAt?: Date, facilitySelection?: FacilitySelectionState) {
+=======
+  /**
+   * SX-1 (Akos N-2b, N-2e, P1-5): every facility of the answer, and the
+   * selected one, also carries `modules`, the product areas its own
+   * permissions show (facility-modules.ts, a pure function: no read, no
+   * write). Every other field, roles[0] included, is unchanged; a patient or
+   * account-only session has no facility, so its answer is unchanged.
+   */
+  private sessionResponse(actor: ActorContext, expiresAt?: Date) {
+>>>>>>> origin/staging-novu-ci-20261005
     return {
-      actor,
+      actor: sessionActorWithModules(actor),
       ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
       ...(facilitySelection ? { facilitySelection } : {}),
     };
