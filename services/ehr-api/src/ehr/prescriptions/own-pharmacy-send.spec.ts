@@ -51,6 +51,7 @@ const routed = { ...noRoutes, summary: async () => ({ id: 'route', state: 'accep
 
 const SEND = /from ehr\.send_prescription_to_own_pharmacy\(\$1::uuid, \$2::bigint\)/;
 const WITHDRAW = /ehr\.withdraw_own_pharmacy_send\(\$1::uuid\)/;
+const STAFFED = /select ehr\.own_pharmacy_staffed\(\) as staffed/;
 
 interface Options {
   current: PrescriptionRow;
@@ -59,6 +60,9 @@ interface Options {
   sendError?: Error & { code?: string };
   withdrawn?: boolean;
   withdrawError?: Error & { code?: string };
+  /** ehr.own_pharmacy_staffed()'s answer (default true), or its error. */
+  staffed?: boolean | null;
+  staffedError?: Error & { code?: string };
   ownPharmacy?: OwnPharmacySend;
   routes?: typeof noRoutes;
   /** The patient's recorded allergies, the acknowledgements stored for the prescription, and read access. */
@@ -78,6 +82,7 @@ const harness = (options: Options) => {
     if (/from ehr\.prescription_allergy_acknowledgements/.test(sql)) return { rows: options.stored ?? [] };
     if (/^\s*update ehr\.prescriptions/.test(sql)) return { rows: options.updated ? [options.updated] : [] };
     if (/^\s*insert into ehr\.prescriptions/.test(sql)) return { rows: [options.current] };
+    if (/"cursorAt" from ehr\.prescriptions/.test(sql)) return { rows: [{ ...options.current, cursorAt: '2026-11-18T10:00:00Z' }] };
     if (/from ehr\.prescriptions/.test(sql)) return { rows: [options.current] };
     if (/from ehr\.encounters/.test(sql)) return { rows: [{ status: 'in_progress' }] };
     if (SEND.test(sql)) {
@@ -87,6 +92,10 @@ const harness = (options: Options) => {
     if (WITHDRAW.test(sql)) {
       if (options.withdrawError) throw options.withdrawError;
       return { rows: [{ withdrawn: options.withdrawn ?? true }] };
+    }
+    if (STAFFED.test(sql)) {
+      if (options.staffedError) throw options.staffedError;
+      return { rows: [{ staffed: options.staffed === undefined ? true : options.staffed }] };
     }
     return { rows: [] };
   }) } as unknown as PoolClient;
@@ -441,6 +450,45 @@ describe('activated prescriptions go to this hospital\'s own pharmacy (0133)', (
       { status: OrderStatus.Active, expectedRowVersion: 1 } as never) as Record<string, unknown>;
     expect('pharmacyHandoff' in answer).toBe(false);
     expect(sql().some((statement) => /savepoint/.test(statement))).toBe(false);
+  });
+});
+
+describe('whether a send can reach somebody here: ownPharmacyStaffed on the list and page (0133)', () => {
+  beforeEach(() => jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+  const list = (service: PrescriptionsService) => service.list(context, patientId, encounterId, { limit: 20 } as never) as
+    Promise<{ items: Record<string, unknown>[] }>;
+  const get = (service: PrescriptionsService) => service.get(context, patientId, encounterId, prescriptionId) as
+    Promise<Record<string, unknown>>;
+
+  it('answers the database\'s true or false on each listed prescription and on the page, in a savepoint', async () => {
+    for (const staffed of [true, false]) {
+      const { service, sql } = harness({ current: prescription(OrderStatus.Active, '2'), staffed });
+      expect((await list(service)).items.map((item) => item.ownPharmacyStaffed)).toEqual([staffed]);
+      expect((await get(service)).ownPharmacyStaffed).toBe(staffed);
+      expect(sql().filter((statement) => /ehr_own_pharmacy_staffed/.test(statement))).toEqual([
+        'savepoint ehr_own_pharmacy_staffed', 'release savepoint ehr_own_pharmacy_staffed',
+        'savepoint ehr_own_pharmacy_staffed', 'release savepoint ehr_own_pharmacy_staffed']);
+    }
+  });
+
+  it('answers no field when the database gives no answer, on a schema without 0133, or on a failure', async () => {
+    for (const options of [{ staffed: null }, { staffedError: Object.assign(new Error('no function'), { code: '42883' }) },
+      { staffedError: Object.assign(new Error('permission denied'), { code: '42501' }) }]) {
+      const { service, sql } = harness({ current: prescription(OrderStatus.Active, '2'), ...options });
+      expect((await list(service)).items[0]).not.toHaveProperty('ownPharmacyStaffed');
+      expect(await get(service)).not.toHaveProperty('ownPharmacyStaffed');
+      if ('staffedError' in options) {
+        expect(sql().filter((statement) => /rollback to savepoint ehr_own_pharmacy_staffed/.test(statement))).toHaveLength(2);
+      }
+    }
+  });
+
+  it('off (every direct caller\'s default), asks nothing and answers no field', async () => {
+    const { service, sql } = harness({ current: prescription(OrderStatus.Active, '2'), ownPharmacy: OWN_PHARMACY_SEND_OFF });
+    expect((await list(service)).items[0]).not.toHaveProperty('ownPharmacyStaffed');
+    expect(await get(service)).not.toHaveProperty('ownPharmacyStaffed');
+    expect(sql().some((statement) => STAFFED.test(statement))).toBe(false);
   });
 });
 

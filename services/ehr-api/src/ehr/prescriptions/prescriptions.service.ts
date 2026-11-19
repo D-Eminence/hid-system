@@ -108,8 +108,10 @@ export class PrescriptionsService {
         const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, ids);
         // 0117: each prescription's stored allergy acknowledgements (audited as a count, never the reason).
         const acknowledgements = await readAllergyAcknowledgements(client, context, patientId, ids);
+        // 0133: whether a send to this hospital's own pharmacy can reach somebody here (no field without 0133).
+        const staffed = withStaffed(await this.ownPharmacy.staffed(client, context.correlationId));
         const items = page.items.map((item) => ({ ...withOrderRoute(this.details.project(item), routes),
-          allergyAcknowledgements: acknowledgements.get(item.id) ?? [] }));
+          allergyAcknowledgements: acknowledgements.get(item.id) ?? [], ...staffed }));
         return { value: { ...page, items },
           details: { resultCount: page.items.length, allergyAcknowledgementCount: countValues(acknowledgements) } };
       },
@@ -129,7 +131,10 @@ export class PrescriptionsService {
         // 0117: the allergy acknowledgements stored for it, so whoever activates or resumes a draft
         // sees the earlier reason (audited as a count, never the reason).
         const acknowledgements = (await readAllergyAcknowledgements(client, context, patientId, [row.id])).get(row.id) ?? [];
-        return { value: { ...withOrderRoute(this.details.project(row), routes), allergyAcknowledgements: acknowledgements },
+        // 0133: whether a send to this hospital's own pharmacy can reach somebody here (no field without 0133).
+        const staffed = withStaffed(await this.ownPharmacy.staffed(client, context.correlationId));
+        return { value: { ...withOrderRoute(this.details.project(row), routes), allergyAcknowledgements: acknowledgements,
+          ...staffed },
           details: { allergyAcknowledgementCount: acknowledgements.length } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
@@ -482,6 +487,16 @@ export class PrescriptionsService {
 /** The prescription with its hand-off to this hospital's pharmacy (0133), when there was one. */
 function withHandoff<T extends object>(value: T, handoff: PharmacyHandoff | undefined): T | (T & { pharmacyHandoff: PharmacyHandoff }) {
   return handoff ? { ...value, pharmacyHandoff: handoff } : value;
+}
+
+/**
+ * `ownPharmacyStaffed` (0133): whether somebody at this facility works on
+ * pharmacy items, so the list and page offer "Send to pharmacy" only where a
+ * send can reach somebody (ORD-2's screen rule). Absent when the database
+ * gives no answer (a schema without 0133, or any failure).
+ */
+function withStaffed(staffed: boolean | undefined): { ownPharmacyStaffed?: boolean } {
+  return staffed === undefined ? {} : { ownPharmacyStaffed: staffed };
 }
 
 /** The audit details of a hand-off: its status and reason code, never the message. */

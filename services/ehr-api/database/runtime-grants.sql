@@ -1762,17 +1762,17 @@ grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
 revoke all on function auth.guard_session_single_sign_on_change() from public;
 
 -- This facility's own pharmacy and lab work (0133, ORD-2, owner decisions of
--- 18 November 2026), exactly as 0133 grants it: the send and the withdrawal
--- to the EHR runtime; the work chain's own-work test (its policies call it,
--- with the querying role's privileges, as 0086's context_allows), the
--- own-work access check and the list's states to the Lab and Pharmacy
--- runtimes; each also to the schema test runtime. The helpers
--- identity.facility_work_member_allows and
+-- 18 November 2026), exactly as 0133 grants it: the send, its staffed test
+-- and the withdrawal to the EHR runtime; the work chain's own-work test (its
+-- policies call it, with the querying role's privileges, as 0086's
+-- context_allows), the own-work access check and the list's states to the
+-- Lab and Pharmacy runtimes; each also to the schema test runtime. The
+-- helpers identity.facility_work_member_allows and
 -- pharmacy.own_work_source_prescription are executed by no role: the
 -- functions that call them run them as their owner. No role has any
 -- privilege on pharmacy.own_prescription_sends.
 grant execute on function ehr.send_prescription_to_own_pharmacy(uuid, bigint),
-  ehr.withdraw_own_pharmacy_send(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
+  ehr.withdraw_own_pharmacy_send(uuid), ehr.own_pharmacy_staffed() to hid_ehr_runtime, hid_schema_test_runtime;
 grant execute on function pharmacy.own_work_chain_allows(text, uuid, uuid, uuid, text),
   pharmacy.own_work_access_for(text, uuid, text),
   pharmacy.own_work_item_states(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
@@ -1788,7 +1788,8 @@ revoke all on function identity.facility_work_member_allows(text, uuid, uuid, te
   pharmacy.own_work_access_for(text, uuid, text),
   pharmacy.own_work_item_states(uuid[]),
   lab.own_work_access_for(text, uuid, text),
-  lab.own_work_item_bases(uuid[]) from public;
+  lab.own_work_item_bases(uuid[]),
+  ehr.own_pharmacy_staffed() from public;
 revoke all on pharmacy.own_prescription_sends from public;
 
 -- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):

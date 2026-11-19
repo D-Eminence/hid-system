@@ -83,7 +83,11 @@ export function pharmacyHandoff(outcome: string | undefined): PharmacyHandoff {
  * (0133's trigger on the prescription marks it on the change itself,
  * whichever ehr-api image makes it; the function marks it the same way), and
  * its pharmacy item has not been dispensed (after a dispensing there is
- * nothing left for the pharmacy to dispense, so nothing to tell).
+ * nothing left for the pharmacy to dispense, so nothing to tell). `staffed`
+ * asks `ehr.own_pharmacy_staffed()` whether somebody at this facility works
+ * on pharmacy items (the send's no_pharmacy test), for the prescription list
+ * and page, so the screen offers "Send to pharmacy" only where a send can
+ * reach somebody.
  *
  * Each runs in a savepoint, so nothing it does can undo the prescription's own
  * change: a schema without 0133 (42883) answers no hand-off (undefined); the
@@ -124,8 +128,25 @@ export class OwnPharmacySend {
     return marked === 'true';
   }
 
+  /**
+   * Whether somebody at the session's facility works on pharmacy items
+   * (0133's no_pharmacy test, read only); undefined on a schema without 0133,
+   * when the database gives no answer (the member may not read prescriptions
+   * here) and on any failure, which is logged and never fails the read.
+   */
+  async staffed(client: PoolClient, correlationId: string): Promise<boolean | undefined> {
+    if (!this.enabled) return undefined;
+    const answer = await this.inSavepoint(client, 'ehr_own_pharmacy_staffed', correlationId, async () => {
+      const result = await client.query<{ staffed: boolean | null }>('select ehr.own_pharmacy_staffed() as staffed');
+      const staffed = result.rows[0]?.staffed;
+      return staffed === true ? 'true' : staffed === false ? 'false' : undefined;
+    }, 'Asking whether this hospital has pharmacy staff failed');
+    return answer === 'true' ? true : answer === 'false' ? false : undefined;
+  }
+
   private async inSavepoint(client: PoolClient, name: string, correlationId: string,
-    work: () => Promise<string | undefined>): Promise<string | undefined> {
+    work: () => Promise<string | undefined>,
+    failure = 'Sending to this hospital\'s pharmacy failed'): Promise<string | undefined> {
     await client.query(`savepoint ${name}`);
     try {
       const answer = await work();
@@ -136,7 +157,7 @@ export class OwnPharmacySend {
       if (code === '40001' || code === '40P01') throw error;
       await client.query(`rollback to savepoint ${name}`);
       if (code === '42883') return MISSING;
-      this.logger.warn({ message: 'Sending to this hospital\'s pharmacy failed', sqlState: code, correlationId });
+      this.logger.warn({ message: failure, sqlState: code, correlationId });
       return code === '42501' && errorMessage(error) === 'OWN_PHARMACY_SEND_DENIED' ? DENIED : FAILED;
     }
   }

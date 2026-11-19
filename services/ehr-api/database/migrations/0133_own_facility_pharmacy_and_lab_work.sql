@@ -140,6 +140,12 @@
 --    sent prescription answers already_in_pharmacy (superseded once it
 --    changed) and writes nothing. A pending send is tried again by the next
 --    call (the prescriber's "Send to pharmacy").
+--    ehr.own_pharmacy_staffed() (SECURITY DEFINER, STABLE), for the EHR
+--    runtime: whether somebody at the session's facility works on pharmacy
+--    items (D7's no_pharmacy test, answered true or false), for a session
+--    whose member holds ehr.prescription.read here (else null). It writes
+--    nothing; ehr-api answers it on the prescription list and page, so the
+--    screen offers "Send to pharmacy" only where a send can reach somebody.
 -- D8 The withdrawal. A trigger on ehr.prescriptions
 --    (prescriptions_own_pharmacy_send_withdrawn, AFTER UPDATE FOR EACH ROW
 --    when the status or row_version changes; its function
@@ -177,7 +183,8 @@
 --    'own-work'), and for Pharmacy whether its send was withdrawn before the
 --    item was dispensed (D8). The APIs write the audit rows of the work list
 --    with that basis.
--- D11 Grants, here and in runtime-grants.sql: D7 and D8 to hid_ehr_runtime;
+-- D11 Grants, here and in runtime-grants.sql: D7 (both functions) and D8's
+--    withdrawal to hid_ehr_runtime;
 --    D9 and D10 to hid_pharmacy_runtime or hid_lab_runtime; D3's functions
 --    to the runtime that reads its schema's chain tables
 --    (hid_lab_runtime, hid_pharmacy_runtime: a policy's function is executed
@@ -250,11 +257,12 @@
 --    ehr.prescriptions policies and the 42 own-work policies, exactly, and
 --    row-level security still enabled and forced on every table that gained
 --    one; D8's trigger exactly (enabled, after update, for each row, its
---    function and its WHEN); D5's premise again; then D7 and D8 are fired once without a
---    session and must refuse with 42501 OWN_PHARMACY_SEND_DENIED, and D9
---    once per resource type with random ids and must answer no row (plpgsql
---    plans a query only when it first runs, so this proves the columns
---    those queries read exist).
+--    function and its WHEN); D5's premise again; then D7 and D8 are fired
+--    once without a session and must refuse with 42501
+--    OWN_PHARMACY_SEND_DENIED, ehr.own_pharmacy_staffed() must answer null,
+--    and D9 once per resource type with random ids and must answer no row
+--    (plpgsql plans a query only when it first runs, so this proves the
+--    columns those queries read exist).
 --
 -- Locks (measured with pg_locks before commit on a 0127 copy): section 1
 -- takes, in one attempt, ACCESS EXCLUSIVE on ehr.prescriptions and on the 20
@@ -338,7 +346,8 @@ begin
                          ('pharmacy', 'own_work_source_prescription'), ('ehr', 'send_prescription_to_own_pharmacy'),
                          ('ehr', 'withdraw_own_pharmacy_send'), ('pharmacy', 'own_work_access_for'),
                          ('lab', 'own_work_access_for'), ('pharmacy', 'own_work_item_states'),
-                         ('lab', 'own_work_item_bases'), ('ehr', 'own_pharmacy_send_withdrawn_on_change')))
+                         ('lab', 'own_work_item_bases'), ('ehr', 'own_pharmacy_send_withdrawn_on_change'),
+                         ('ehr', 'own_pharmacy_staffed')))
      or exists (select 1 from pg_trigger trigger_row
                   join pg_class relation on relation.oid = trigger_row.tgrelid
                   join pg_namespace namespace on namespace.oid = relation.relnamespace
@@ -1142,6 +1151,39 @@ begin
 end;
 $$;
 
+-- D7's no_pharmacy test on its own, for the prescription list and page: no
+-- write, no patient; null for a session whose member may not read
+-- prescriptions here.
+create function ehr.own_pharmacy_staffed()
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  session_facility uuid := platform.current_facility_id();
+  session_membership uuid := platform.current_membership_id();
+  session_subject text := platform.current_actor_subject();
+begin
+  if session_facility is null or session_membership is null or session_subject is null
+     or not coalesce(auth.membership_has_permission(session_subject, session_membership, session_facility,
+          'ehr.prescription.read'), false) then
+    return null;
+  end if;
+  return exists (
+    select 1
+      from identity.staff_facility_memberships membership
+      join auth.accounts account on account.id = membership.account_id
+     where membership.facility_id = session_facility
+       and membership.active
+       and coalesce(auth.membership_has_permission(account.subject, membership.id, session_facility,
+             'pharmacy.work-item.read'), false)
+       and coalesce(auth.membership_has_permission(account.subject, membership.id, session_facility,
+             'pharmacy.order-route.receive'), false));
+end;
+$$;
+
 -- D8. The withdrawal.
 create function ehr.withdraw_own_pharmacy_send(requested_prescription_id uuid)
 returns boolean
@@ -1409,13 +1451,14 @@ revoke all on function identity.facility_work_member_allows(text, uuid, uuid, te
   lab.own_work_access_for(text, uuid, text),
   pharmacy.own_work_item_states(uuid[]),
   lab.own_work_item_bases(uuid[]),
-  ehr.own_pharmacy_send_withdrawn_on_change() from public;
+  ehr.own_pharmacy_send_withdrawn_on_change(),
+  ehr.own_pharmacy_staffed() from public;
 
 do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'hid_ehr_runtime') then
     grant execute on function ehr.send_prescription_to_own_pharmacy(uuid, bigint),
-      ehr.withdraw_own_pharmacy_send(uuid) to hid_ehr_runtime;
+      ehr.withdraw_own_pharmacy_send(uuid), ehr.own_pharmacy_staffed() to hid_ehr_runtime;
   end if;
   if exists (select 1 from pg_roles where rolname = 'hid_pharmacy_runtime') then
     grant execute on function pharmacy.own_work_chain_allows(text, uuid, uuid, uuid, text),
@@ -1429,6 +1472,7 @@ begin
     grant execute on function lab.own_work_chain_allows(text, uuid, uuid, uuid, text),
       pharmacy.own_work_chain_allows(text, uuid, uuid, uuid, text),
       ehr.send_prescription_to_own_pharmacy(uuid, bigint), ehr.withdraw_own_pharmacy_send(uuid),
+      ehr.own_pharmacy_staffed(),
       pharmacy.own_work_access_for(text, uuid, text), pharmacy.own_work_item_states(uuid[]),
       lab.own_work_access_for(text, uuid, text), lab.own_work_item_bases(uuid[]) to hid_schema_test_runtime;
   end if;
@@ -1455,6 +1499,8 @@ comment on function pharmacy.own_work_source_prescription(uuid, uuid, uuid) is
   '0133 D5: the prescription is the source of an own pharmacy work item the session works on as this facility''s pharmacy staff. Used by two ehr.prescriptions policies for the owner of pharmacy.validate_dispensing only.';
 comment on function ehr.send_prescription_to_own_pharmacy(uuid, bigint) is
   '0133 D7: sends the prescriber''s active prescription to this facility''s own pharmacy (a work item accepted by the prescriber with the fixed reason), in the caller''s transaction; answers not_found, not_prescriber, not_active, changed, routed, already_in_pharmacy, superseded, no_pharmacy, sent or pending.';
+comment on function ehr.own_pharmacy_staffed() is
+  '0133 D7: whether somebody at the session''s facility works on pharmacy items (the send''s no_pharmacy test); null unless the session''s member may read prescriptions here. Writes nothing.';
 comment on function ehr.withdraw_own_pharmacy_send(uuid) is
   '0133 D8: marks a sent prescription withdrawn once it is on hold, cancelled or entered in error, or active at another version than the one sent (as its trigger does), and answers whether its send stands withdrawn while its work item has not been dispensed.';
 comment on function ehr.own_pharmacy_send_withdrawn_on_change() is
@@ -1479,7 +1525,7 @@ declare
   error_state text;
   error_message text;
 begin
-  -- The 15 new and replaced bodies (md5), owner, SECURITY DEFINER,
+  -- The 16 new and replaced bodies (md5), owner, SECURITY DEFINER,
   -- volatility, language, not STRICT, search_path.
   with expected(schema_name, proc_name, argument_types, digest, volatility, language_name, config) as (values
          ('identity', 'facility_work_member_allows', 'text, uuid, uuid, text', '474875a22f8c5e7b46846f1ddb1d5046', 's',
@@ -1511,7 +1557,8 @@ begin
          ('lab', 'own_work_item_bases', 'uuid[]', '07e31d7ca86ac31255ad096d56363637', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('ehr', 'own_pharmacy_send_withdrawn_on_change', '', '455c027844f87eebde9dd836f75760cf', 'v', 'plpgsql',
-           'search_path=pg_catalog, pg_temp')),
+           'search_path=pg_catalog, pg_temp'),
+         ('ehr', 'own_pharmacy_staffed', '', '4998057d7a17977a8f7e9639bc759c7b', 's', 'plpgsql', 'search_path=pg_catalog, pg_temp')),
        differing as (
          select expected.*,
                 (select string_agg(format('md5=%s owner=%s definer=%s volatile=%s strict=%s config=%s',
@@ -1547,6 +1594,8 @@ begin
          ('ehr', 'send_prescription_to_own_pharmacy', 'hid_schema_test_runtime'),
          ('ehr', 'withdraw_own_pharmacy_send', 'hid_ehr_runtime'),
          ('ehr', 'withdraw_own_pharmacy_send', 'hid_schema_test_runtime'),
+         ('ehr', 'own_pharmacy_staffed', 'hid_ehr_runtime'),
+         ('ehr', 'own_pharmacy_staffed', 'hid_schema_test_runtime'),
          ('lab', 'own_work_chain_allows', 'hid_lab_runtime'),
          ('lab', 'own_work_chain_allows', 'hid_schema_test_runtime'),
          ('lab', 'own_work_access_for', 'hid_lab_runtime'),
@@ -1567,7 +1616,7 @@ begin
                   ('pharmacy', 'own_work_source_prescription'), ('ehr', 'send_prescription_to_own_pharmacy'),
                   ('ehr', 'withdraw_own_pharmacy_send'), ('pharmacy', 'own_work_access_for'),
                   ('lab', 'own_work_access_for'), ('pharmacy', 'own_work_item_states'), ('lab', 'own_work_item_bases'),
-                  ('ehr', 'own_pharmacy_send_withdrawn_on_change'))),
+                  ('ehr', 'own_pharmacy_send_withdrawn_on_change'), ('ehr', 'own_pharmacy_staffed'))),
        granted as (
          select new_functions.nspname, new_functions.proname, privilege.grantee, privilege.privilege_type,
                 privilege.is_grantable
@@ -1814,6 +1863,10 @@ begin
     raise exception using errcode = '55000',
       message = format('0133: the withdrawal must refuse a call without a session with 42501 OWN_PHARMACY_SEND_DENIED; '
         || 'it answered %s %s', error_state, coalesce(error_message, ''));
+  end if;
+  -- D7's staffed test without a session: null, nothing read.
+  if ehr.own_pharmacy_staffed() is not null then
+    raise exception using errcode = '55000', message = '0133: ehr.own_pharmacy_staffed() must answer null without a session';
   end if;
   -- Fire D9 once per resource type with a random id: no such row, no row
   -- answered; each branch's query is planned on its first run.

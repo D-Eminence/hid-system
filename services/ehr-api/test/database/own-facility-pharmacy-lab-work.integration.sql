@@ -23,6 +23,11 @@
 --      changed version, a facility with nobody to work on pharmacy items;
 --      a receptionist, an emergency session and a missing session are
 --      refused 42501;
+--   2b. ehr.own_pharmacy_staffed (D7's no_pharmacy test for the list and
+--      page): true at F1 (for the doctor and the pharmacist), false at F3
+--      (nobody works on pharmacy items there), null for a member who may not
+--      read prescriptions (the receptionist, the lab scientist) and without a
+--      session; it writes nothing;
 --   3. the pharmacist without a grant sees the item, its card and its
 --      event, may work on it (own_work_access_for, basis 'own-work'), its
 --      list basis is 'own-work', and dispenses it; it reads nothing of the chart
@@ -121,6 +126,7 @@ begin
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'ea6e547d05979779c9765f7dcc70c377', 'v'),
       ('ehr.withdraw_own_pharmacy_send(uuid)', 'bdb411d4f4e7fe6806d246d996e91771', 'v'),
       ('ehr.own_pharmacy_send_withdrawn_on_change()', '455c027844f87eebde9dd836f75760cf', 'v'),
+      ('ehr.own_pharmacy_staffed()', '4998057d7a17977a8f7e9639bc759c7b', 's'),
       ('pharmacy.own_work_access_for(text,uuid,text)', '5ddb078242919dd978d6312f5cd5aa77', 's'),
       ('lab.own_work_access_for(text,uuid,text)', '1c834e3ed17d864dadb27f3105cffa04', 's'),
       ('pharmacy.own_work_item_states(uuid[])', '821f37afc72515b43494f730adf0fef9', 's'),
@@ -146,6 +152,7 @@ begin
         'hid_schema_test_runtime']),
       ('ehr.withdraw_own_pharmacy_send(uuid)', array['hid_ehr_runtime', 'hid_ehr_api_runtime',
         'hid_schema_test_runtime']),
+      ('ehr.own_pharmacy_staffed()', array['hid_ehr_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime']),
       ('pharmacy.own_work_access_for(text,uuid,text)', array['hid_pharmacy_runtime', 'hid_pharmacy_api_runtime',
         'hid_schema_test_runtime']),
       ('pharmacy.own_work_item_states(uuid[])', array['hid_pharmacy_runtime', 'hid_pharmacy_api_runtime',
@@ -487,6 +494,29 @@ select pg_temp.as_member(9);
 select pg_temp.expect('F3 has no pharmacy staff', pg_temp.send(pg_temp.rx(9), 2), 'no_pharmacy');
 reset role;
 select pg_temp.expect('no send row for the refused and unsent', (select count(*)::text from pharmacy.own_prescription_sends
+  where prescription_id in (pg_temp.rx(5), pg_temp.rx(9))), '0');
+
+-- 2b. Whether a send can reach somebody here (the list's and page's flag).
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
+select pg_temp.expect('F1 has pharmacy staff, for DR', ehr.own_pharmacy_staffed()::text, 'true');
+select pg_temp.as_member(2);
+select pg_temp.expect('and for PH (who may read prescriptions)', ehr.own_pharmacy_staffed()::text, 'true');
+select pg_temp.as_member(9);
+select pg_temp.expect('F3 has none, for D3', ehr.own_pharmacy_staffed()::text, 'false');
+select pg_temp.as_member(1, site => 3);
+select pg_temp.expect('DR claiming F3 (no membership there) gets no answer', coalesce(ehr.own_pharmacy_staffed()::text, 'null'),
+  'null');
+select pg_temp.as_member(7);
+select pg_temp.expect('the receptionist (no prescription read) gets no answer',
+  coalesce(ehr.own_pharmacy_staffed()::text, 'null'), 'null');
+select pg_temp.as_member(3);
+select pg_temp.expect('the lab scientist (no prescription read) gets no answer',
+  coalesce(ehr.own_pharmacy_staffed()::text, 'null'), 'null');
+select set_config('app.facility_id', '', true);
+select pg_temp.expect('no session, no answer', coalesce(ehr.own_pharmacy_staffed()::text, 'null'), 'null');
+reset role;
+select pg_temp.expect('the staffed test wrote no send row', (select count(*)::text from pharmacy.own_prescription_sends
   where prescription_id in (pg_temp.rx(5), pg_temp.rx(9))), '0');
 
 -- 3. PH, the pharmacist at F1 without any grant, through pharmacy-api's runtime.

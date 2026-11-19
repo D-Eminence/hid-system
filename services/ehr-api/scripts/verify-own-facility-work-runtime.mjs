@@ -34,7 +34,8 @@
 // "earlier version" hand-off (reason superseded), its ownProgress reads
 // withdrawn and "Send to pharmacy" answers the same row; an edit of the
 // dispensed one answers no hand-off, its item is not marked withdrawn and
-// its ownProgress stays dispensed; the lab scientist without a grant lists,
+// its ownProgress stays dispensed; the list carries ownPharmacyStaffed;
+// the lab scientist without a grant lists,
 // reads and accessions the doctor's lab request handed to the hospital's
 // Lab, takes and receives the sample, starts the test and reads the execution
 // and the specimen's executions (each read audited with the patient and basis
@@ -507,12 +508,15 @@ try {
   const afterEdits = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the list after the edits');
   assert.deepEqual([item1, item2, item3].map(item => afterEdits.items.find(row => row.id === item.id)?.withdrawn),
     [undefined, true, true], 'withdrawn on the list: the held and the edited items, never the dispensed one');
-  // ORD-3 through ehr-api, the doctor's cookie only: dispensed (also after its edit), withdrawn (held and edited).
+  // ORD-3 through ehr-api, the doctor's cookie only: dispensed (also after its edit), withdrawn (held and edited);
+  // and the list's ownPharmacyStaffed (the hospital has a pharmacist).
   const progressList = expectStatus(await http(ehr, 'GET', `/ehr/patients/${patient.id}${enc}/prescriptions`,
     { cookie: doctor.cookie, facility: hospital.facilityId, purpose: 'direct-care' }), 200, 'the doctor\'s prescriptions');
   const progressOf = rx => progressList.items.find(item => item.id === rx.id)?.ownProgress?.status;
   assert.deepEqual([progressOf(rx1), progressOf(rx2), progressOf(rx3)], ['dispensed', 'withdrawn', 'withdrawn'],
     `ownProgress: ${JSON.stringify(progressList.items.map(item => [item.id, item.ownProgress]))}`);
+  assert(progressList.items.length > 0 && progressList.items.every(item => item.ownPharmacyStaffed === true),
+    `ownPharmacyStaffed: ${JSON.stringify(progressList.items.map(item => [item.id, item.ownPharmacyStaffed]))}`);
   const sends = await all(`select prescription_id::text as rx, state, prescription_version::text as version,
       withdrawn_at is not null as withdrawn from pharmacy.own_prescription_sends where patient_id = $1
     order by created_at`, [patient.id]);
@@ -521,7 +525,7 @@ try {
   evidence.afterTheSend = { hold: { handoff: 'none', list: 'withdrawn', dispense: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
     edit: { handoff: 'earlier version (superseded)', sendToPharmacy: 'earlier version (superseded)' },
     editAfterDispensing: { handoff: 'none', list: 'not withdrawn', ownProgress: 'dispensed', send: 'change recorded' },
-    ownProgress: { dispensed: 'dispensed', held: 'withdrawn', edited: 'withdrawn' } };
+    ownProgress: { dispensed: 'dispensed', held: 'withdrawn', edited: 'withdrawn' }, ownPharmacyStaffed: true };
   step('a hold withdraws the send (Dispense refused); an edit answers the earlier-version hand-off; ownProgress reads '
     + 'withdrawn; an edit after the dispensing reports nothing');
 

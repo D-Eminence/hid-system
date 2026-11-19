@@ -6976,6 +6976,15 @@ update and the send records `pharmacyHandoff` (the status) and
 update's `pharmacySendWithdrawn: true` when the prescription's send stands
 withdrawn after the change and its item has not been dispensed.
 
+`GET .../encounters/:encounterId/prescriptions` and
+`GET .../prescriptions/:prescriptionId`: each prescription also carries
+`ownPharmacyStaffed` (0133): `true` when somebody at this facility works on
+pharmacy items on Health ID (an active member holding
+`pharmacy.work-item.read` and `pharmacy.order-route.receive` here, the
+send's `no_pharmacy` test), `false` when nobody does. It is absent on a
+database without 0133 and when it cannot be read (the read never fails
+because of it). It names no patient and writes nothing.
+
 ### `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/own-pharmacy-send`
 
 "Send to pharmacy" for the prescriber: sends their active prescription, or
@@ -7003,16 +7012,22 @@ or `not_sent` with reason `unavailable`, never for any other reason
 (`changed`: reload first; `superseded`, `no_pharmacy`, `routed`,
 `not_prescriber`, `not_allowed`: trying again cannot help). The send state is
 not kept on the prescription and nothing retries a pending send by itself,
-so the prescription list and page also show "Send to pharmacy" on an active
-prescription that the signed-in member wrote (`createdBy` and
-`createdByMembershipId` are theirs), with no order route in force
-(`orderRoute`), whose `ownProgress.status` is `not_received`: a send that
-failed or is pending, the prescriber's own prescription a colleague
-activated (that colleague's answer was `not_prescriber`), or one written
-before the hospital had pharmacy staff; the answer then says which. On the
-pharmacy list, show a withdrawn item as "Changed or stopped by the
-prescribing team" (the prescriber or a colleague put it on hold, cancelled,
-corrected, edited or resumed it) with Dispense disabled.
+so the prescription list and page also show "Send to pharmacy" on a
+prescription when all hold: it is active; the signed-in member wrote it
+(`createdBy` and `createdByMembershipId` are theirs) and holds
+`ehr.prescription.write` here (the session's permissions); no order route is
+in force (`orderRoute`); its `ownProgress.status` is `not_received`; and
+`ownPharmacyStaffed` is `true` (absent or `false`: never, so a facility with
+nobody on pharmacy work is never offered a send that answers `no_pharmacy`).
+That covers a send that failed or is pending, the prescriber's own
+prescription a colleague activated (that colleague's answer was
+`not_prescriber`), and one written before the hospital had pharmacy staff;
+the answer then says which. After any answer but `sent`, `pending` or
+`unavailable` (for example `not_allowed`, when the member's role changed
+since sign-in), the page does not offer it again for that prescription until
+it is reloaded. On the pharmacy list, show a withdrawn item as "Changed or
+stopped by the prescribing team" (the prescriber or a colleague put it on
+hold, cancelled, corrected, edited or resumed it) with Dispense disabled.
 
 Runtime proof: `services/ehr-api/scripts/verify-own-facility-work-runtime.mjs`
 (run by the TUF staging rehearsal, as `own_facility_work_runtime`) boots
@@ -7024,9 +7039,10 @@ patient with `basis: own-work` (the execution reads included); a hold marks
 the item withdrawn and Dispense answers 409; an edit answers the "earlier
 version" row (`superseded`) and `ownProgress` reads `withdrawn`; an edit
 after the dispensing answers no `pharmacyHandoff` and leaves the item
-unmarked (`ownProgress` stays `dispensed`); neither reads the chart and the
-patient's access log shows both. The order-route, own-work card and
-prescription details verifiers assert the same rules.
+unmarked (`ownProgress` stays `dispensed`); the list carries
+`ownPharmacyStaffed: true`; neither reads the chart and the patient's access
+log shows both. The order-route, own-work card and prescription details
+verifiers assert the same rules.
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 
