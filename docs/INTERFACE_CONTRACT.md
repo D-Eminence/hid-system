@@ -8867,3 +8867,4 @@ gain a second membership, at QA Hospital (pharmacist and lab roles; not
 primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
+
