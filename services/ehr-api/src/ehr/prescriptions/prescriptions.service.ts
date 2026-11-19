@@ -432,11 +432,15 @@ export class PrescriptionsService {
    * but does not change it, so a send to an outside pharmacy (SERIALIZABLE)
    * whose snapshot predates this commit (for example while it waits for the
    * patient's allergy lock) may not see the item it creates and may leave its
-   * route sent next to that item. The two take the prescription's lock and
-   * the allergy lock in opposite orders, so they can also deadlock (40P01). The database's live-claim index then ends
+   * route sent next to that item. The database's live-claim index then ends
    * the outside pharmacy's acceptance in R10 (the route is withdrawn,
    * order_in_work): the prescription is never dispensed twice and stays with
-   * this hospital's pharmacy. D7 passes a 40001 or 40P01 on (OwnPharmacySend).
+   * this hospital's pharmacy. The two also take the prescription's lock and
+   * the allergy lock in opposite orders, so they can deadlock (40P01):
+   * PostgreSQL cancels one, and the prescription then goes to the outside
+   * pharmacy (a cancelled outside send is run again and releases the item; a
+   * cancelled "Send to pharmacy" leaves no item). D7 passes a 40001 or 40P01
+   * on (OwnPharmacySend).
    */
   sendToOwnPharmacy(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string,
     input: SendPrescriptionToOwnPharmacyDto) {
