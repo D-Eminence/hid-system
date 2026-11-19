@@ -956,7 +956,9 @@ try {
   auditBasis: `order-route on ${basisRows.length} rows` };
   step('B works the order under the route alone, by a member without a consent grant');
 
-  // ── 6c. Never beyond the order: another row of the same patient at B is not opened by the route ──
+  // ── 6c. Never beyond the order: the route opens only its own work item. Since 0133 (ORD-2) B's lab staff work on
+  // B's own work items (no route) of the same patient without a grant, on the own-work basis: every row they write or
+  // read of that item's chain is recorded with basis own-work, never with the route's basis or id ──
   const ownItem = randomUUID();
   await owner.query('set session_replication_role = replica');
   try {
@@ -971,38 +973,45 @@ try {
   } finally {
     await owner.query('set session_replication_role = origin');
   }
+  const ownWorkFrom = (await one('select coalesce(max(sequence_id), 0)::text as at from audit.events')).at;
   const ownList = expectStatus(await labCall(labMember, 'GET', '/work-items'), 200, 'work list');
-  assert(!ownList.items.some(item => item.id === ownItem), 'a same-patient row without a route is listed to a member without consent');
-  const refused = response => [403, 404].includes(response.status);
-  const ownRead = await labCall(labMember, 'GET', `/work-items/${ownItem}`);
-  assert(refused(ownRead), `own item read: ${JSON.stringify(ownRead.body)}`);
-  const ownAccession = await labCall(labMember, 'POST', `/work-items/${ownItem}/accession`,
-    { requirements: [{ specimenType: 'blood' }], reason: 'Synthetic attempt beyond the order' }, { key: freshKey('accession') });
-  assert(refused(ownAccession), `own item accession: ${JSON.stringify(ownAccession.body)}`);
-  // With the patient's consent the administrator works it; the member still cannot reach its chain.
-  await approvedAccess(labAdmin, 'write_records');
-  const ownByAdmin = expectStatus(await labCall(labAdmin, 'POST', `/work-items/${ownItem}/accession`,
-    { requirements: [{ specimenType: 'blood' }], reason: 'Synthetic own accession under consent' }, { key: freshKey('accession') }),
-  201, 'own accession under consent');
-  const ownSpecimen = ownByAdmin.specimens[0];
+  const ownListed = ownList.items.find(item => item.id === ownItem);
+  assert(ownListed, 'B\'s own row of the same patient is not listed to its lab member (0133 own work)');
+  assert.equal(ownListed.orderRoute, undefined, 'the route card on an own row');
   const answer = response => `${response.status} ${response.body?.code ?? ''}`.trim();
-  const beyondResponses = {
-    workItem: ownRead, accession: ownAccession,
-    accessionRead: await labCall(labMember, 'GET', `/accessions/${ownByAdmin.id}`),
-    specimens: await labCall(labMember, 'GET', `/accessions/${ownByAdmin.id}/specimens`),
-    collect: await labCall(labMember, 'POST', `/accessions/${ownByAdmin.id}/specimens/${ownSpecimen.id}/collect`,
-      { expectedVersion: ownSpecimen.version, collectedAt: now() }, { key: freshKey('collect') }),
-    executions: await labCall(labMember, 'GET', `/specimens/${ownSpecimen.id}/executions`),
+  const ownRead = expectStatus(await labCall(labMember, 'GET', `/work-items/${ownItem}`), 200, 'own item read (own work)');
+  const ownAccession = expectStatus(await labCall(labMember, 'POST', `/work-items/${ownItem}/accession`,
+    { requirements: [{ specimenType: 'blood' }], reason: 'Synthetic own accession at B' }, { key: freshKey('accession') }),
+  201, 'own accession (own work)');
+  const ownSpecimen = ownAccession.specimens[0];
+  const ownChain = {
+    workItem: answer({ status: 200, body: ownRead }), accession: '201',
+    accessionRead: answer(await labCall(labMember, 'GET', `/accessions/${ownAccession.id}`)),
+    specimens: answer(await labCall(labMember, 'GET', `/accessions/${ownAccession.id}/specimens`)),
+    collect: answer(await labCall(labMember, 'POST', `/accessions/${ownAccession.id}/specimens/${ownSpecimen.id}/collect`,
+      { expectedVersion: ownSpecimen.version, collectedAt: now() }, { key: freshKey('collect') })),
+    executions: answer(await labCall(labMember, 'GET', `/specimens/${ownSpecimen.id}/executions`)),
   };
-  for (const [name, response] of Object.entries(beyondResponses)) assert(refused(response), `${name}: ${answer(response)}`);
-  const beyond = Object.fromEntries(Object.entries(beyondResponses).map(([name, response]) => [name, answer(response)]));
-  assert.equal((await one('select status from lab.specimens where id=$1', [ownSpecimen.id])).status, 'required',
-    'the refused collect changed the specimen');
+  assert.deepEqual(ownChain, { workItem: '200', accession: '201', accessionRead: '200', specimens: '200', collect: '201',
+    executions: '200' }, 'B\'s lab member works its own row on the own-work basis');
+  assert.equal((await one('select status from lab.specimens where id=$1', [ownSpecimen.id])).status, 'collected');
+  // Every row naming the own item's chain: basis own-work and the patient, never the route's basis or id.
+  const ownRows = await all(`select action, patient_id, details->>'basis' as basis, details ? 'orderRouteId' as route_id,
+      details ? 'orderRouteIds' as route_ids
+    from audit.events where sequence_id > $1::bigint and actor_account_id = $2 and facility_id = $3 and action like 'lab.%'
+      and (resource_id in ($4, $5, $6) or details->'workItemIds' ? $4::text)
+    order by sequence_id`, [ownWorkFrom, labMember.accountId, laboratory.facilityId, ownItem, ownAccession.id, ownSpecimen.id]);
+  assert(ownRows.length >= 6 && ownRows.every(row => row.basis === 'own-work' && row.patient_id === patient.id
+    && !row.route_id && !row.route_ids), `own-work rows: ${JSON.stringify(ownRows)}`);
+  const beyond = { ...ownChain, auditBasis: `own-work on ${ownRows.length} rows, never the route's` };
+  // The administrator (no receive permission, so no own work) gains the patient's consent at B (9b relies on it).
+  await approvedAccess(labAdmin, 'write_records');
   // The laboratory reads nothing of the ordering facility's record.
   const labReadsEhr = await call(ehr, labAdmin, 'GET', `/ehr/patients/${patient.id}${enc}/lab-requests/${lr1.id}`);
   assert([403, 404].includes(labReadsEhr.status), `B read A's lab request: ${labReadsEhr.status}`);
-  evidence.beyondTheOrder = { ...beyond, listedToMember: false, ehrRecordOfA: labReadsEhr.status };
-  step('a receiver never reaches another row of the patient, nor the ordering facility\'s record');
+  evidence.beyondTheOrder = { ...beyond, listedToMember: 'own work (0133)', ehrRecordOfA: labReadsEhr.status };
+  step('the route opens only its own item: B\'s own row of the patient is B\'s own work (0133, never on the route\'s '
+    + 'basis); the ordering facility\'s record stays closed');
 
   // ── 7. The result comes back to the ordering record ──
   const routeViews = expectStatus(await ehrCall(doctor, 'GET', routesPath('lab_request', lr1.id)), 200, 'order routes');
@@ -1322,24 +1331,33 @@ try {
   const ownReleased = expectStatus(await call(lab, doctor, 'GET', `/lab/ehr-orders/${lr7.id}/released-results`), 200,
     'released results');
   assert.equal(JSON.stringify(ownReleased).includes('5.1'), true, `released results: ${JSON.stringify(ownReleased)}`);
-  const ownBasis = await all(`select count(*)::int n, count(*) filter (where details ? 'basis')::int with_basis from audit.events
-    where facility_id=$1 and actor_account_id = any($2::uuid[]) and action like 'lab.%'`,
+  // Same-facility rows never carry a route basis. These members hold the patient's write grant, so since 0133 their
+  // command rows stay consent rows (no basis) and their list rows say 'consent', never 'own-work' (ORD-2).
+  const ownBasis = await all(`select count(*)::int n,
+      count(*) filter (where details->>'basis' is distinct from 'consent' and details ? 'basis')::int other_basis,
+      count(*) filter (where action <> 'lab.work-item.list' and details ? 'basis')::int command_basis
+    from audit.events where facility_id=$1 and actor_account_id = any($2::uuid[]) and action like 'lab.%'`,
   [hospital.facilityId, [hospitalLab1.accountId, hospitalLab2.accountId]]);
-  assert(ownBasis[0].n >= 5 && ownBasis[0].with_basis === 0, `same-facility audit rows carry a route basis: ${JSON.stringify(ownBasis)}`);
+  assert(ownBasis[0].n >= 5 && ownBasis[0].other_basis === 0 && ownBasis[0].command_basis === 0,
+    `same-facility audit rows carry a route or own-work basis: ${JSON.stringify(ownBasis)}`);
   const lr7Row = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests/${lr7.id}`), 200, 'lr7');
   assert.equal(lr7Row.orderRoute, null);
-  // The pharmacist's pull of an unrouted prescription works; of a routed one, it is refused.
+  // 0133: the hospital has a pharmacist now, so the doctor's active prescription goes to its own pharmacy by itself;
+  // it is then in Pharmacy, so neither a pull nor a route to another facility's pharmacy can take it.
   const rx7 = await newPrescription('active');
-  const pulled = expectStatus(await call(ehr, hospitalPharmacist, 'POST',
+  assert.deepEqual(rx7.pharmacyHandoff, { status: 'sent', message: 'Sent to this hospital\'s pharmacy.' },
+    `rx7's automatic send: ${JSON.stringify(rx7.pharmacyHandoff)}`);
+  const pulled = expectProblem(await call(ehr, hospitalPharmacist, 'POST',
     `/ehr/patients/${patient.id}${enc}/prescriptions/${rx7.id}/pharmacy-work-item`,
-    { expectedRowVersion: Number(rx7.rowVersion), reason: 'Synthetic same-facility hand-off' }, { key: freshKey('pull') }), 201,
-  'same-facility pull');
-  const pulledItemId = pulled.workItem?.id ?? pulled.pharmacyWorkItem?.id ?? pulled.id;
+    { expectedRowVersion: Number(rx7.rowVersion), reason: 'Synthetic same-facility hand-off' }, { key: freshKey('pull') }), 409,
+  'IDEMPOTENCY_CONFLICT');
+  const rx7Routed = expectProblem(await send(doctor, 'prescription', rx7, pharmacyFacility.facilityId, prescriptionVersion), 409,
+    'ORDER_ROUTE_ORDER_IN_WORK');
   const ownRxList = expectStatus(await pharmacyCall(hospitalPharmacist, 'GET', '/work-items'), 200, 'hospital pharmacy list');
   assert.deepEqual([ownRxList.receives, ownRxList.routesHere], [false, { waiting: false, held: false }]);
   evidence.contractFields.hospitalsOwnStaff = { lab: { receives: false }, pharmacy: { receives: false } };
   const ownRxItem = ownRxList.items.find(item => item.sourceEhrPrescriptionId === rx7.id);
-  assert(ownRxItem, `pull: ${JSON.stringify(pulled)}`);
+  assert(ownRxItem, `the automatic send: ${JSON.stringify(rx7.pharmacyHandoff)}`);
   assert.equal(ownRxItem.orderRoute, undefined);
   expectStatus(await pharmacyCall(hospitalPharmacist, 'POST', `/work-items/${ownRxItem.id}/dispensings`,
     { expectedWorkItemVersion: Number(ownRxItem.version), quantityDispensed: 30, quantityUnit: 'tablet',
@@ -1360,9 +1378,20 @@ try {
     'a routed request reached this facility\'s Lab');
   evidence.sameFacility = { labHandOff: { ...handedOff, workItem: 'listed at the hospital, no route card, patient masked' },
     chain: 'accession to release under consent, no route basis in audit', releasedResultsAtA: 200, orderRoute: null,
-    pharmacistPull: 201, dispensing: 201, routedPull: 'PRESCRIPTION_ROUTED', routedSendToLab: 'LAB_REQUEST_ROUTED',
+    automaticSend: 'sent', pullOfASentPrescription: pulled.code, routeOfASentPrescription: rx7Routed.code, dispensing: 201,
+    routedPull: 'PRESCRIPTION_ROUTED', routedSendToLab: 'LAB_REQUEST_ROUTED',
     routedUpdate: { labHandoff: 'not_sent ORDER_ROUTED', route: 'withdrawn (order_changed)' } };
-  step('same-facility paths: hand-off, Lab chain and release, pharmacist pull and dispensing as before; routed orders refused');
+  // The hospital's pharmacist leaves (the administrator ends the membership): nobody at the hospital works on
+  // pharmacy items any more, so from here its active prescriptions are not sent there (no_pharmacy) and can be sent
+  // to another facility's pharmacy, as the switches below need.
+  const pharmacistMembership = await one(`select id::text, row_version::text from identity.staff_facility_memberships
+    where account_id=$1 and facility_id=$2`, [hospitalPharmacist.accountId, hospital.facilityId]);
+  expectStatus(await call(identity, doctor, 'POST', `/identity/facility-staff/${pharmacistMembership.id}/end`,
+    { expectedVersion: Number(pharmacistMembership.row_version), reason: 'Synthetic: left the hospital pharmacy',
+      currentPassword: password }), 200, 'end the hospital pharmacist\'s membership');
+  evidence.sameFacility.pharmacistLeft = 'membership ended by the administrator';
+  step('same-facility paths: hand-off, Lab chain and release, the prescription sent to the hospital\'s own pharmacy by '
+    + 'itself (not pulled again, not routed elsewhere) and dispensed; routed orders refused; the pharmacist leaves');
 
   // ── 10b. ORD-3: where each order is in the hospital's own pharmacy and laboratory ──
   // The doctor's browser session: the cookie only, a GET, no Origin and no CSRF token, as the website sends a read.
@@ -1453,6 +1482,9 @@ try {
 
   // ── 11. The switches ──
   const rx4 = await newPrescription('active');
+  assert.deepEqual(rx4.pharmacyHandoff, { status: 'not_sent', reason: 'no_pharmacy',
+    message: 'Not sent: nobody at this facility works on pharmacy orders on Health ID.' },
+  `with no pharmacy staff left: ${JSON.stringify(rx4.pharmacyHandoff)}`);
   const rxRoute4 = await sendPrescription(rx4);
   const rx4Accepted = expectStatus(await acceptPrescription(rxRoute4.id, 1, { kind: 'health_id', value: patient.hid }), 201,
     'accept rx4');

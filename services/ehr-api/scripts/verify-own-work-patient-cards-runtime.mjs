@@ -28,12 +28,15 @@
 // and one laboratory member's and one pharmacist's (the other two hold no
 // consent), and the laboratory's and the pharmacy's administrators' at their
 // own facilities. The doctor's active lab request is handed to the hospital's
-// own Lab, and its pharmacist pulls an active prescription: own work. Checked:
-// every own work item on the consented members' lists, and each one read by
-// id, carries the patient (name, sex, date of birth, Health ID ending), and
-// each list wrote one `basis: consent` audit row naming the patient and the
-// work items (ids only); the members without consent see neither the work
-// nor a patient, and no audit row names the patient for them. Route-backed
+// own Lab, and the doctor's active prescription goes to the hospital's own
+// pharmacy by itself (0133, ORD-2): own work. Checked: every own work item on
+// the consented members' lists, and each one read by id, carries the patient
+// (name, sex, date of birth, Health ID ending), and each list wrote one
+// `basis: consent` audit row naming the patient and the work items (ids only),
+// and their reads by id are consent rows (no basis); since 0133 the members
+// without consent, the facility's own lab and pharmacy staff, see the same
+// work and patient, and their list and read rows carry `basis: own-work`
+// (ORD-2: this facility's own work, never the chart). Route-backed
 // work (a lab request sent to the laboratory, a prescription sent to the
 // pharmacy, each accepted at the counter) keeps its patient from the route
 // card only: while the route allows a read the card's patient and a
@@ -473,12 +476,11 @@ try {
       frequency: 'twice daily', instructions: 'Synthetic instructions: take with food', status },
   { key: freshKey('prescription') }), 201, 'prescription');
   const ownLabRequest = await newLabRequest('active');
+  // 0133: the hospital has pharmacists, so the doctor's active prescription goes to its own pharmacy by itself.
   const ownPrescription = await newPrescription('active');
-  const pulled = expectStatus(await call(ehr, ownPharmacist, 'POST',
-    `/ehr/patients/${patient.id}${enc}/prescriptions/${ownPrescription.id}/pharmacy-work-item`,
-    { expectedRowVersion: Number(ownPrescription.rowVersion), reason: 'Synthetic same-facility hand-off' },
-  { key: freshKey('pull') }), 201, 'own pharmacist pull');
-  step('own work: the active lab request handed to the hospital\'s Lab; the prescription pulled by its pharmacist');
+  assert.deepEqual(ownPrescription.pharmacyHandoff, { status: 'sent', message: 'Sent to this hospital\'s pharmacy.' },
+    `the automatic send: ${JSON.stringify(ownPrescription.pharmacyHandoff)}`);
+  step('own work: the active lab request handed to the hospital\'s Lab; the active prescription sent to its pharmacy by itself');
 
   // Fails loudly: an own work item the member may read (it is on their list) without its patient. The service's
   // own warning, if it logged one, names the SQLSTATE (42501: no EXECUTE; 42883: no 0124).
@@ -498,6 +500,10 @@ try {
   const listAudit = (action, facilityId, who) => all(`select patient_id, resource_id, details from audit.events
     where action = $1 and facility_id = $2 and actor_account_id = $3 and details ? 'basis' order by sequence_id`,
   [action, facilityId, who.accountId]);
+  // A read by id: the basis it was recorded with (none for a consent row).
+  const readBases = (action, facilityId, who, workItemId) => all(`select coalesce(details->>'basis', 'consent (no basis)') as basis,
+      patient_id from audit.events where action = $1 and facility_id = $2 and actor_account_id = $3 and resource_id = $4
+    order by sequence_id`, [action, facilityId, who.accountId, workItemId]);
   const noIdentityIn = (value, label) => {
     const text = JSON.stringify(value);
     for (const item of [patient.fullName, patient.dob, patient.hid, patient.hid.slice(-4)]) {
@@ -523,23 +529,38 @@ try {
     [[patient.id, ownLabItem.id, { basis: 'consent', workItemIds: ownLabRows.map(item => item.id) }]],
     `the Lab list's audit: ${JSON.stringify(labAudit)}`);
   noIdentityIn(labAudit, 'the Lab list audit');
-  // The member without consent: the work is not shown, nor any patient; no audit row names the patient.
+  assert.deepEqual(await readBases('lab.work-item.read', hospital.facilityId, labMember, ownLabItem.id),
+    [{ basis: 'consent (no basis)', patient_id: patient.id }], 'the consented member\'s read is a consent row');
+  // 0133: the facility's own lab member without consent works on this facility's own work: the same items and
+  // patient, every list and read recorded with basis own-work and the patient.
   const labNoConsent = expectStatus(await labCall(labMemberWithoutConsent, 'GET', '/work-items'), 200, 'Lab list without consent');
-  assert(!labNoConsent.items.some(item => item.id === ownLabItem.id), 'own Lab work shown to a member without consent');
-  assert(!labNoConsent.items.some(item => item.patient !== undefined), 'a patient shown to a Lab member without consent');
-  const labNoConsentRead = await labCall(labMemberWithoutConsent, 'GET', `/work-items/${ownLabItem.id}`);
-  assert([403, 404].includes(labNoConsentRead.status), `Lab item read without consent: ${labNoConsentRead.status}`);
-  assert.equal(JSON.stringify(labNoConsentRead.body ?? '').includes(patient.fullName), false);
-  assert.deepEqual(await listAudit('lab.work-item.list', hospital.facilityId, labMemberWithoutConsent), []);
+  const labOwnWorkRows = labNoConsent.items.filter(item => item.orderRoute === undefined);
+  assert.deepEqual(labOwnWorkRows.map(item => item.id), ownLabRows.map(item => item.id),
+    'the facility\'s own Lab work listed to its lab member without consent (0133)');
+  for (const item of labOwnWorkRows) {
+    requirePatient(item, 'lab-api', 'lab.work_item_patient_cards', 'hid_lab_api_runtime', labMemberWithoutConsent);
+  }
+  const labNoConsentRead = expectStatus(await labCall(labMemberWithoutConsent, 'GET', `/work-items/${ownLabItem.id}`), 200,
+    'own Lab item read on the own-work basis');
+  requirePatient(labNoConsentRead, 'lab-api', 'lab.work_item_patient_cards', 'hid_lab_api_runtime', labMemberWithoutConsent);
+  const labOwnWorkAudit = await listAudit('lab.work-item.list', hospital.facilityId, labMemberWithoutConsent);
+  assert.deepEqual(labOwnWorkAudit.map(row => [row.patient_id, row.resource_id, row.details]),
+    [[patient.id, ownLabRows[0].id, { basis: 'own-work', workItemIds: ownLabRows.map(item => item.id) }]],
+    `the own-work Lab list's audit: ${JSON.stringify(labOwnWorkAudit)}`);
+  assert.deepEqual(await readBases('lab.work-item.read', hospital.facilityId, labMemberWithoutConsent, ownLabItem.id),
+    [{ basis: 'own-work', patient_id: patient.id }], 'the own-work read is recorded with its basis and the patient');
+  noIdentityIn(labOwnWorkAudit, 'the own-work Lab list audit');
   evidence.lab = { ownItemsListed: ownLabRows.length, withPatient: ownLabRows.length, readById: 'patient',
-    audit: { rows: labAudit.length, basis: 'consent', idsOnly: true },
-    withoutConsent: { listed: 0, patients: 0, read: labNoConsentRead.status, auditRows: 0 } };
-  step('Lab: own work carries the patient on the list and by id, audited with basis consent; a member without consent sees none');
+    audit: { rows: labAudit.length, basis: 'consent', idsOnly: true, readById: 'consent row (no basis)' },
+    ownWorkWithoutConsent: { listed: labOwnWorkRows.length, patients: labOwnWorkRows.length, read: 200,
+      audit: { list: 'own-work, ids only', read: 'own-work' } } };
+  step('Lab: own work carries the patient on the list and by id, audited with basis consent; the facility\'s lab member '
+    + 'without consent sees the same on the own-work basis (0133)');
 
   // ── Pharmacy: the same through pharmacy.work_item_patient_cards ──
   const ownRxList = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'own Pharmacy list');
   const ownRxItem = ownRxList.items.find(item => item.sourceEhrPrescriptionId === ownPrescription.id);
-  assert(ownRxItem, `the pull did not reach the hospital's Pharmacy: ${JSON.stringify(pulled)}`);
+  assert(ownRxItem, `the automatic send did not reach the hospital's Pharmacy: ${JSON.stringify(ownPrescription.pharmacyHandoff)}`);
   assert.equal(ownRxItem.orderRoute, undefined);
   const ownRxRows = ownRxList.items.filter(item => item.orderRoute === undefined);
   for (const item of ownRxRows) {
@@ -554,18 +575,35 @@ try {
     [[patient.id, ownRxItem.id, { basis: 'consent', workItemIds: ownRxRows.map(item => item.id) }]],
     `the Pharmacy list's audit: ${JSON.stringify(rxAudit)}`);
   noIdentityIn(rxAudit, 'the Pharmacy list audit');
+  assert.deepEqual(await readBases('pharmacy.work-item.read', hospital.facilityId, ownPharmacist, ownRxItem.id),
+    [{ basis: 'consent (no basis)', patient_id: patient.id }], 'the consented pharmacist\'s read is a consent row');
+  // 0133: the facility's own pharmacist without consent: the same items and patient, on the own-work basis.
   const rxNoConsent = expectStatus(await pharmacyCall(pharmacistWithoutConsent, 'GET', '/work-items'), 200,
     'Pharmacy list without consent');
-  assert(!rxNoConsent.items.some(item => item.id === ownRxItem.id), 'own Pharmacy work shown to a member without consent');
-  assert(!rxNoConsent.items.some(item => item.patient !== undefined), 'a patient shown to a pharmacist without consent');
-  const rxNoConsentRead = await pharmacyCall(pharmacistWithoutConsent, 'GET', `/work-items/${ownRxItem.id}`);
-  assert([403, 404].includes(rxNoConsentRead.status), `Pharmacy item read without consent: ${rxNoConsentRead.status}`);
-  assert.equal(JSON.stringify(rxNoConsentRead.body ?? '').includes(patient.fullName), false);
-  assert.deepEqual(await listAudit('pharmacy.work-item.list', hospital.facilityId, pharmacistWithoutConsent), []);
+  const rxOwnWorkRows = rxNoConsent.items.filter(item => item.orderRoute === undefined);
+  assert.deepEqual(rxOwnWorkRows.map(item => item.id), ownRxRows.map(item => item.id),
+    'the facility\'s own Pharmacy work listed to its pharmacist without consent (0133)');
+  for (const item of rxOwnWorkRows) {
+    requirePatient(item, 'pharmacy-api', 'pharmacy.work_item_patient_cards', 'hid_pharmacy_api_runtime',
+      pharmacistWithoutConsent);
+  }
+  const rxNoConsentRead = expectStatus(await pharmacyCall(pharmacistWithoutConsent, 'GET', `/work-items/${ownRxItem.id}`), 200,
+    'own Pharmacy item read on the own-work basis');
+  requirePatient(rxNoConsentRead, 'pharmacy-api', 'pharmacy.work_item_patient_cards', 'hid_pharmacy_api_runtime',
+    pharmacistWithoutConsent);
+  const rxOwnWorkAudit = await listAudit('pharmacy.work-item.list', hospital.facilityId, pharmacistWithoutConsent);
+  assert.deepEqual(rxOwnWorkAudit.map(row => [row.patient_id, row.resource_id, row.details]),
+    [[patient.id, ownRxRows[0].id, { basis: 'own-work', workItemIds: ownRxRows.map(item => item.id) }]],
+    `the own-work Pharmacy list's audit: ${JSON.stringify(rxOwnWorkAudit)}`);
+  assert.deepEqual(await readBases('pharmacy.work-item.read', hospital.facilityId, pharmacistWithoutConsent, ownRxItem.id),
+    [{ basis: 'own-work', patient_id: patient.id }], 'the own-work read is recorded with its basis and the patient');
+  noIdentityIn(rxOwnWorkAudit, 'the own-work Pharmacy list audit');
   evidence.pharmacy = { ownItemsListed: ownRxRows.length, withPatient: ownRxRows.length, readById: 'patient',
-    audit: { rows: rxAudit.length, basis: 'consent', idsOnly: true },
-    withoutConsent: { listed: 0, patients: 0, read: rxNoConsentRead.status, auditRows: 0 } };
-  step('Pharmacy: own work carries the patient on the list and by id, audited with basis consent; a pharmacist without consent sees none');
+    audit: { rows: rxAudit.length, basis: 'consent', idsOnly: true, readById: 'consent row (no basis)' },
+    ownWorkWithoutConsent: { listed: rxOwnWorkRows.length, patients: rxOwnWorkRows.length, read: 200,
+      audit: { list: 'own-work, ids only', read: 'own-work' } } };
+  step('Pharmacy: own work carries the patient on the list and by id, audited with basis consent; the facility\'s '
+    + 'pharmacist without consent sees the same on the own-work basis (0133)');
 
   // ── Route-backed work keeps its patient from the route card only ──
   const attestationVersion = async kind => expectStatus(await call(ehr, doctor, 'GET', `/ehr/order-route-attestation?kind=${kind}`),
@@ -578,7 +616,9 @@ try {
   const labAccepted = expectStatus(await call(lab, labAdmin, 'POST', `/lab/order-routes/${labRoute.id}/accept`,
     { expectedVersion: 1, patientIdentifier: { kind: 'health_id', value: patient.hid } }, { key: freshKey('accept') }), 201,
   'laboratory accepts');
-  const rxRoute = await send('prescription', await newPrescription('active'), pharmacyFacility.facilityId);
+  // 0133: an active prescription went to the hospital's own pharmacy by itself (ORDER_ROUTE_ORDER_IN_WORK if sent
+  // elsewhere), so the doctor sends a draft, which the order-route send activates.
+  const rxRoute = await send('prescription', await newPrescription('draft'), pharmacyFacility.facilityId);
   const rxAccepted = expectStatus(await call(pharmacy, pharmacist, 'POST', `/pharmacy/order-routes/${rxRoute.id}/accept`,
     { expectedVersion: 1, patientIdentifier: { kind: 'date_of_birth', value: patient.dob },
       reason: 'Synthetic acceptance with the patient at the counter' }, { key: freshKey('accept') }), 201, 'pharmacy accepts');
