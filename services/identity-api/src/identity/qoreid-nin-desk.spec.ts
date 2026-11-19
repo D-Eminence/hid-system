@@ -243,6 +243,19 @@ describe('Q108 QoreID NIN check for the desk', () => {
       demographics: claimed });
   });
 
+  it('answers a record born before 1900 (the adapter reads dates from 1800) as not the desk\'s: a mismatch, not 502', async () => {
+    // The desk's own date of birth is from 1900, so such a record never matches; QoreID answered all the same.
+    const answer = await qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => found({ dateOfBirth: '1899-12-31' })) }))
+      .verify(request);
+    expect(answer).toMatchObject({ verified: false, outcome: 'name_mismatch', reference: '700123' });
+    const old = await qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => found({ dateOfBirth: '1800-01-01' })) }))
+      .verify(request);
+    expect(old).toMatchObject({ verified: false, outcome: 'name_mismatch' });
+    // Before 1800, or not a real date, the adapter would not have read it: still an answer HID cannot use.
+    await expect(qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => found({ dateOfBirth: '1799-12-31' })) }))
+      .verify(request)).rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+  });
+
   it('answers no match when QoreID does not confirm the NIN', async () => {
     const qoreId = gate({ verifyNinRecord: jest.fn(async () => noRecord()) });
     const answer = await qoreIdProvider(qoreId).verify(request);

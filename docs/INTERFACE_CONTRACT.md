@@ -6476,6 +6476,12 @@ and spacing ignored, first and last name in that order):
 | QoreID's "not found" (`404`) | `502 QOREID_PROVIDER_REJECTED`, as sign-up and the profile answer it; QoreID's answer, never counted as a failure | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
 | (0137) the guard refuses or reuses an answer | see "One QoreID check per NIN" below | |
 
+A record is any the QoreID adapter can read a name and a date of birth from
+(a real date from 1800, not in the future): a record born before 1900 is
+QoreID's answer like any other and, since the desk's own date of birth is from
+1900, is answered "does not match" (and counts as an answer for the breaker),
+never `502`.
+
 The case keeps the desk's spelling of the name (it equals the record's but
 for letter case and spacing) and the desk's sex, or the record's when the desk
 gave none and the record's is known and not "unknown". The case keeps nothing
@@ -6677,7 +6683,7 @@ did for a request that asked it (D4):
 
 | What happened | Breaker |
 | --- | --- |
-| QoreID answered: a record (complete or not), "no record", "incomplete", or its `404` "not found" | success: closes it and clears the failures |
+| QoreID answered: a record (complete or not, a date of birth before 1900 included), "no record", "incomplete", or its `404` "not found" | success: closes it and clears the failures |
 | QoreID failed: a `5xx`, a timeout at its own deadline, a network failure (before or after sending), its `401`, a `4xx` other than `404` and `429` (such as an account-level `403`, answered `502 QOREID_PROVIDER_REJECTED`), or an answer HID cannot use (no readable name and date of birth) | one failure; a `503` (QoreID's `5xx`, a network failure, its `401`) trips it at once |
 | QoreID's `429` (rate limited) | not counted |
 | the desk's wait ran out while QoreID had not answered (`504 QOREID_TIMEOUT`, the check still running) | one failure, so a QoreID that hangs trips it after three waits within 5 minutes, not at `QOREID_NIN_ANSWER_CEILING_MS`; when that check later answers, the answer is recorded as a success; when it later fails, it is not counted again |

@@ -55,10 +55,11 @@ function deskContext(index = 1): DataAccessContext {
  * answers (HID gives up at QOREID_NIN_ANSWER_CEILING_MS); 'no_gender': a record
  * without a recognised sex, and 'address_break': one whose home address holds
  * a line break (a sign-up cannot enrol from either; the name and date of birth
- * are fine); 'not_found': QoreID's 404; 'unavailable': its 503.
+ * are fine); 'not_found': QoreID's 404; 'unavailable': its 503; 'born_1899': a record whose date of birth is
+ * before 1900 (the adapter reads dates from 1800; the desk's own are from 1900).
  */
 type QoreIdMode = 'verified' | 'no_record' | 'late' | 'slow' | 'reset' | 'forbidden' | 'no_gender' | 'address_break'
-  | 'not_found' | 'unavailable';
+  | 'not_found' | 'unavailable' | 'born_1899';
 
 /** A QoreID that bills every NIN request it receives, answered or not, and answers with the asked NIN's record. */
 function fakeQoreId(leaseHeld: (nin: string) => boolean) {
@@ -99,6 +100,7 @@ function fakeQoreId(leaseHeld: (nin: string) => boolean) {
     }
     const bio = { ...RECORD, nin,
       ...(mode === 'no_gender' ? { gender: '' } : {}),
+      ...(mode === 'born_1899' ? { birthdate: '14-07-1899' } : {}),
       ...(mode === 'address_break' ? { residence: { ...RECORD.residence, address1: '2 Fixture Road\nBack Gate' } } : {}) };
     // The profile's check sends the patient's name and date of birth and gets the record with field matches.
     const claims = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, string> : undefined;
@@ -656,6 +658,23 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       expect(s.breaker.state()).toBe('closed');
       expect(warn.mock.calls.filter(([entry]) => (entry as { event?: string }).event
         === 'identity.nin_provider.unavailable')).toHaveLength(0);
+    });
+
+    it('counts a record born before 1900 as QoreID\'s answer: "does not match", the breaker closed', async () => {
+      const s = system();
+      s.qoreId.state.fallback = 'born_1899';
+      for (const [index, nin] of NINS.entries()) {
+        await expect(s.resolve(`desk-once-key-00028${index}`, deskContext(index + 1), { ...input, nin }))
+          .rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED',
+            message: 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.' });
+      }
+      expect(s.qoreId.state.charged).toBe(3);
+      expect(s.breaker.state()).toBe('closed');
+      expect(warn.mock.calls.filter(([entry]) => (entry as { event?: string }).event
+        === 'identity.nin_provider.unavailable')).toHaveLength(0);
+      // Kept as records that did not match: 24 hours.
+      expect([...s.store.rows.values()].map((row) => [row.outcome, row.until < Date.now()
+        + NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 5_000])).toEqual(NINS.map(() => ['record', true]));
     });
 
     it('never counts the guard\'s own audit write failing, only what QoreID did', async () => {

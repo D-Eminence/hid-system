@@ -223,7 +223,12 @@ function sameDetails(record: QoreIdNinBinding, claimed: NinClaimedDemographics):
     && record.dateOfBirth === claimed.dateOfBirth;
 }
 
-/** The record QoreID returned is for this NIN and well formed (as patient enrollment checks it). */
+/**
+ * The record QoreID returned is for this NIN and well formed (as patient
+ * enrollment checks it). Its date of birth is any the adapter reads (a real
+ * date from 1800, not in the future): a record born before 1900 is QoreID's
+ * answer, and can only not match the desk's details (which are from 1900).
+ */
 function validIdentity(identity: NinRecordNames, providerReference: string, nin: string): boolean {
   const validName = (value: unknown): value is string => typeof value === 'string'
     && value.trim().length >= 1 && value.trim().length <= 100 && !/[\x00-\x1f\x7f]/.test(value);
@@ -232,7 +237,7 @@ function validIdentity(identity: NinRecordNames, providerReference: string, nin:
   return identity !== null && typeof identity === 'object'
     && identity.nin === nin && validName(identity.firstName) && validName(identity.lastName)
     && Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === identity.dateOfBirth
-    && date.getUTCFullYear() >= 1900 && date.getTime() <= Date.now()
+    && date.getUTCFullYear() >= 1800 && date.getTime() <= Date.now()
     // A record without a recognised sex is used for its name and date of birth.
     && (identity.gender === undefined || GENDERS.has(identity.gender))
     && typeof providerReference === 'string' && PROVIDER_REFERENCE.test(providerReference)
