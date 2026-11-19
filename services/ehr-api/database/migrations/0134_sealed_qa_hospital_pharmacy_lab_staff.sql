@@ -29,13 +29,20 @@
 --    0123's install lock: where the QA tenant is not installed (QA Hospital
 --    is not a QA facility: CI, acceptance, rehearsals, throwaway clusters)
 --    it writes nothing and answers 0. Otherwise it refuses (55000, nothing
---    written) when either account or staff record is not 0123's (not a QA
---    account, deleted, another staff record: SEALED_QA_HOSPITAL_STAFF_UNEXPECTED),
---    or a fixed id is held by a row that is not this file's
---    (SEALED_QA_ID_TAKEN). Rows ON CONFLICT DO NOTHING, nothing existing
---    updated; one audit row with counts only when something was written; a
---    second call writes nothing. 0123's seal (G2q: a QA account only at a
---    QA facility; G3q: no platform role) applies to both rows.
+--    written) when a fixed id is held by a row that is not this file's
+--    (SEALED_QA_ID_TAKEN). Each of the two is written only when nothing
+--    already stands for it, and is otherwise left alone, with a notice and
+--    nothing written for it (the release goes on):
+--      the login or its staff record is not 0123's now (deleted, no longer
+--        a sealed QA account, or another staff record);
+--      the QA Facility Admin already gave that staff record that role at QA
+--        Hospital (an invitation the QA login accepted, active or since
+--        deactivated: 0002's staff_memberships_scoped_uq allows one
+--        membership per staff record, organization, facility and role).
+--    Rows ON CONFLICT DO NOTHING, nothing existing updated; one audit row
+--    with counts only when something was written; a second call writes
+--    nothing. 0123's seal (G2q: a QA account only at a QA facility; G3q: no
+--    platform role) applies to both rows.
 -- D3 The migration calls it once (section 2). Where 0123 installed the
 --    sealed QA tenant (0123 section 10 seeds it on Amazon RDS only, where
 --    the rds_superuser role exists: production and staging), the two
@@ -65,8 +72,9 @@
 -- 3. Post-checks: the function's body (md5), owner, SECURITY DEFINER,
 --    volatility, language, not STRICT, search_path and ACL (its owner only,
 --    PUBLIC included, decided by EXISTS); where the QA tenant is installed,
---    both memberships and roles exist exactly as D1 says; where it is not,
---    neither fixed id exists.
+--    each of the two memberships and roles exists exactly as D1 says, or is
+--    left alone for one of D2's two reasons; where it is not, neither fixed
+--    id exists.
 --
 -- Locks: no table lock beyond the rows written (ROW EXCLUSIVE on
 -- identity.staff_facility_memberships, auth.account_roles and audit.events,
@@ -215,6 +223,7 @@ declare
      "staff": "c0a00004-0000-4000-8000-000000000003", "role": "lab"},
     {"membership": "c0a00005-0000-4000-8000-000000000052", "account": "c0a00003-0000-4000-8000-000000000005",
      "staff": "c0a00004-0000-4000-8000-000000000005", "role": "pharmacist"}]';
+  wanted record;
   step bigint;
   inserted integer := 0;
 begin
@@ -224,13 +233,6 @@ begin
                   where facility.id = qa_hospital and facility.organization_id = qa_hospital_organization)
      or not identity.sealed_qa_facility(qa_hospital) then
     return 0;
-  end if;
-  -- Both logins and staff records are 0123's.
-  if (select count(*) from jsonb_to_recordset(staff_rows) qa(account uuid, staff uuid)
-        join auth.accounts account on account.id = qa.account and account.status <> 'deleted'
-        join identity.staff staff_row on staff_row.id = qa.staff and staff_row.account_id = qa.account
-       where identity.sealed_qa_account(account.id)) <> 2 then
-    raise exception using errcode = '55000', message = '0134: SEALED_QA_HOSPITAL_STAFF_UNEXPECTED';
   end if;
   -- A fixed id held by a row that is not this file's.
   if exists (select 1 from identity.staff_facility_memberships membership
@@ -247,19 +249,37 @@ begin
     raise exception using errcode = '55000', message = '0134: SEALED_QA_ID_TAKEN';
   end if;
 
-  insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
-    membership_role, app_role, is_primary, active, source_system)
-  select qa.membership, qa.staff, qa.account, qa_hospital_organization, qa_hospital, qa.role, qa.role, false, true,
-         'hid-sealed-qa'
-    from jsonb_to_recordset(staff_rows) qa(membership uuid, account uuid, staff uuid, role text)
-  on conflict (id) do nothing;
-  get diagnostics step = row_count; inserted := inserted + step;
-
-  insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
-  select qa.membership, qa.account, qa.role, 'facility', qa.membership, qa_hospital, role_reason
-    from jsonb_to_recordset(staff_rows) qa(membership uuid, account uuid, role text)
-  on conflict (id) do nothing;
-  get diagnostics step = row_count; inserted := inserted + step;
+  for wanted in select * from jsonb_to_recordset(staff_rows) qa(membership uuid, account uuid, staff uuid, role text)
+  loop
+    -- The login and its staff record are 0123's now (not deleted, still a
+    -- sealed QA account): else nothing is written for it.
+    if not exists (select 1 from auth.accounts account
+                     join identity.staff staff_row on staff_row.account_id = account.id
+                    where account.id = wanted.account and account.status <> 'deleted'
+                      and staff_row.id = wanted.staff and identity.sealed_qa_account(account.id)) then
+      raise notice '0134: the QA % login is not 0123''s now; nothing written for it', wanted.role;
+      continue;
+    end if;
+    -- The QA Facility Admin already gave this staff record this role at QA
+    -- Hospital (another id, active or not): left as it is.
+    if exists (select 1 from identity.staff_facility_memberships membership
+                where membership.staff_id = wanted.staff and membership.organization_id = qa_hospital_organization
+                  and membership.facility_id = qa_hospital and membership.membership_role = wanted.role
+                  and membership.id <> wanted.membership) then
+      raise notice '0134: the QA % login already has that role at QA Hospital; left as it is', wanted.role;
+      continue;
+    end if;
+    insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+      membership_role, app_role, is_primary, active, source_system)
+    values (wanted.membership, wanted.staff, wanted.account, qa_hospital_organization, qa_hospital, wanted.role,
+      wanted.role, false, true, 'hid-sealed-qa')
+    on conflict (id) do nothing;
+    get diagnostics step = row_count; inserted := inserted + step;
+    insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+    values (wanted.membership, wanted.account, wanted.role, 'facility', wanted.membership, qa_hospital, role_reason)
+    on conflict (id) do nothing;
+    get diagnostics step = row_count; inserted := inserted + step;
+  end loop;
 
   if inserted > 0 then
     insert into audit.events (correlation_id, actor_type, action, outcome, resource_type, provenance,
@@ -294,28 +314,45 @@ begin
         where proc.oid = install and language_row.lanname = 'plpgsql' and proc.prosecdef and proc.provolatile = 'v'
           and not proc.proisstrict and proc.proowner = owner_oid
           and proc.proconfig = array['search_path=pg_catalog, pg_temp']
-          and md5(proc.prosrc) = '3f2a9fe05ae323d6d5fab279e533f8c2')
+          and md5(proc.prosrc) = 'ddce099c7c25ad606a2c3b290bd63b40')
      or (select count(*) from pg_proc proc
           where proc.pronamespace = 'identity'::regnamespace and proc.proname = 'sealed_qa_hospital_work_staff_install') <> 1
      or exists (select 1 from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) privilege
                  where proc.oid = install and privilege.grantee <> proc.proowner) then
     raise exception using errcode = '55000', message = '0134: the function is not as this file makes it';
   end if;
-  -- Where the QA tenant is installed, both rows exactly; elsewhere, neither
-  -- fixed id exists.
+  -- Where the QA tenant is installed, each of the two exactly, or left
+  -- alone for one of D2's reasons; elsewhere, neither fixed id exists.
   if identity.sealed_qa_facility('c0a00002-0000-4000-8000-000000000001') then
-    if (select count(*) from identity.staff_facility_memberships membership
-          join auth.account_roles assignment on assignment.id = membership.id
-           and assignment.membership_id = membership.id and assignment.revoked_at is null
-         where (membership.id, membership.account_id, membership.staff_id, assignment.role_code) in
-               (('c0a00005-0000-4000-8000-000000000032'::uuid, 'c0a00003-0000-4000-8000-000000000003'::uuid,
-                 'c0a00004-0000-4000-8000-000000000003'::uuid, 'lab'),
-                ('c0a00005-0000-4000-8000-000000000052'::uuid, 'c0a00003-0000-4000-8000-000000000005'::uuid,
-                 'c0a00004-0000-4000-8000-000000000005'::uuid, 'pharmacist'))
-           and membership.facility_id = 'c0a00002-0000-4000-8000-000000000001'
-           and membership.organization_id = 'c0a00001-0000-4000-8000-000000000001'
-           and assignment.facility_id = 'c0a00002-0000-4000-8000-000000000001' and assignment.scope_type = 'facility'
-           and membership.active and not membership.is_primary) <> 2 then
+    if exists (
+         select 1
+           from (values ('c0a00005-0000-4000-8000-000000000032'::uuid, 'c0a00003-0000-4000-8000-000000000003'::uuid,
+                         'c0a00004-0000-4000-8000-000000000003'::uuid, 'lab'),
+                        ('c0a00005-0000-4000-8000-000000000052'::uuid, 'c0a00003-0000-4000-8000-000000000005'::uuid,
+                         'c0a00004-0000-4000-8000-000000000005'::uuid, 'pharmacist'))
+                wanted(membership_id, account_id, staff_id, role_code)
+          where not exists (
+                  select 1 from identity.staff_facility_memberships membership
+                    join auth.account_roles assignment on assignment.id = membership.id
+                     and assignment.membership_id = membership.id and assignment.revoked_at is null
+                   where membership.id = wanted.membership_id and membership.account_id = wanted.account_id
+                     and membership.staff_id = wanted.staff_id and assignment.role_code = wanted.role_code
+                     and membership.membership_role = wanted.role_code
+                     and membership.facility_id = 'c0a00002-0000-4000-8000-000000000001'
+                     and membership.organization_id = 'c0a00001-0000-4000-8000-000000000001'
+                     and assignment.facility_id = 'c0a00002-0000-4000-8000-000000000001'
+                     and assignment.scope_type = 'facility' and membership.active and not membership.is_primary)
+            and not exists (
+                  select 1 from identity.staff_facility_memberships membership
+                   where membership.staff_id = wanted.staff_id and membership.membership_role = wanted.role_code
+                     and membership.facility_id = 'c0a00002-0000-4000-8000-000000000001'
+                     and membership.organization_id = 'c0a00001-0000-4000-8000-000000000001'
+                     and membership.id <> wanted.membership_id)
+            and exists (
+                  select 1 from auth.accounts account
+                    join identity.staff staff_row on staff_row.account_id = account.id
+                   where account.id = wanted.account_id and account.status <> 'deleted'
+                     and staff_row.id = wanted.staff_id and identity.sealed_qa_account(account.id))) then
       raise exception using errcode = '55000', message = '0134: the QA Hospital memberships are not written';
     end if;
   elsif exists (select 1 from identity.staff_facility_memberships membership

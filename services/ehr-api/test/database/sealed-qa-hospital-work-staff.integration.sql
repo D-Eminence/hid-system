@@ -18,8 +18,14 @@
 --      at QA Hospital and without any grant, sees it with the patient's name
 --      and dispenses it; at QA Pharmacy it does not see it; the QA Lab
 --      Scientist at QA Hospital sees an own lab work item of QA Hospital;
---   5. refusals: a fixed id held by another row (SEALED_QA_ID_TAKEN), a QA
---      login that was deleted (SEALED_QA_HOSPITAL_STAFF_UNEXPECTED).
+--   5. a fixed id held by another row is refused (SEALED_QA_ID_TAKEN); a QA
+--      login that was deleted gets nothing and the other one is written;
+--   6. the QA Facility Admin already gave the QA Pharmacist the pharmacist
+--      role at QA Hospital (another id, as identity.attach_invited_member
+--      writes it), active or since deactivated: that membership is left as
+--      it is and the QA Lab Scientist's is written (0002's
+--      staff_memberships_scoped_uq would refuse a second one: the install
+--      once failed there with 23505).
 -- No real person, address or password: the logins are 0123's fictional ones.
 set plpgsql.variable_conflict = error;
 begin;
@@ -47,7 +53,7 @@ select pg_temp.expect('the function''s body, attributes and ACL',
      (select count(*) from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
        where acl.grantee <> proc.proowner))
      from pg_proc proc where proc.oid = 'identity.sealed_qa_hospital_work_staff_install()'::regprocedure),
-  '3f2a9fe05ae323d6d5fab279e533f8c2/t/v/{"search_path=pg_catalog, pg_temp"}/0');
+  'ddce099c7c25ad606a2c3b290bd63b40/t/v/{"search_path=pg_catalog, pg_temp"}/0');
 select pg_temp.expect('no runtime role may execute it',
   (select count(*)::text from pg_roles role_row
     where role_row.rolname ~ '^hid_.*(runtime|worker|writer|dispatcher|commands|scanner)$'
@@ -187,7 +193,9 @@ select pg_temp.as_qa(3, '31', 2);
 select pg_temp.expect('at QA Laboratory it does not', (select count(*)::text from lab.work_items), '0');
 reset role;
 
--- 5. Refusals (each undone).
+-- 5. A refusal, and a deleted login (each undone). Cases 5 and 6 first take
+-- back case 3's four rows (session_replication_role replica: no trigger), so
+-- the install runs as it would on a database where an earlier state stood.
 select pg_temp.expect('a fixed id held by another row', pg_temp.try($s$
   do $d$ begin
     perform set_config('session_replication_role', 'replica', true);
@@ -195,12 +203,63 @@ select pg_temp.expect('a fixed id held by another row', pg_temp.try($s$
     perform set_config('session_replication_role', 'origin', true);
     perform identity.sealed_qa_hospital_work_staff_install();
   end $d$$s$), '55000 0134: SEALED_QA_ID_TAKEN');
-select pg_temp.expect('a QA login that was deleted', pg_temp.try($s$
-  do $d$ begin
+create function pg_temp.take_back_case_3() returns void language sql as $f$
+  delete from auth.account_roles
+   where id in ('c0a00005-0000-4000-8000-000000000032', 'c0a00005-0000-4000-8000-000000000052');
+  delete from identity.staff_facility_memberships
+   where id in ('c0a00005-0000-4000-8000-000000000032', 'c0a00005-0000-4000-8000-000000000052');
+$f$;
+create function pg_temp.qa_hospital_memberships() returns text language sql as $f$
+  select coalesce(string_agg(format('%s %s %s %s', case when membership.id::text like 'c0a00005%' then 'fixed'
+           else 'admin' end, account.email, membership.membership_role, membership.active::text), '; '
+           order by account.email, membership.id), 'none')
+    from identity.staff_facility_memberships membership
+    join auth.accounts account on account.id = membership.account_id
+   where membership.facility_id = 'c0a00002-0000-4000-8000-000000000001'
+     and membership.account_id in ('c0a00003-0000-4000-8000-000000000003', 'c0a00003-0000-4000-8000-000000000005');
+$f$;
+select pg_temp.expect('a QA login that was deleted gets nothing; the other one is written', pg_temp.try($s$
+  do $d$ declare written integer; begin
     perform set_config('session_replication_role', 'replica', true);
+    perform pg_temp.take_back_case_3();
     update auth.accounts set status = 'deleted' where id = 'c0a00003-0000-4000-8000-000000000005';
     perform set_config('session_replication_role', 'origin', true);
-    perform identity.sealed_qa_hospital_work_staff_install();
-  end $d$$s$), '55000 0134: SEALED_QA_HOSPITAL_STAFF_UNEXPECTED');
+    written := identity.sealed_qa_hospital_work_staff_install();
+    raise exception 'written % / %', written, pg_temp.qa_hospital_memberships();
+  end $d$$s$), 'P0001 written 2 / fixed lab@healthidentitydirectory.com lab true');
+
+-- 6. The QA Facility Admin's own membership of the QA Pharmacist at QA
+-- Hospital (each undone).
+select pg_temp.expect('an active pharmacist membership the QA Facility Admin made is left as it is', pg_temp.try($s$
+  do $d$ declare written integer; begin
+    perform set_config('session_replication_role', 'replica', true);
+    perform pg_temp.take_back_case_3();
+    insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+      membership_role, app_role, is_primary, active)
+    values ('e1349999-0000-4000-8000-000000000001', 'c0a00004-0000-4000-8000-000000000005',
+      'c0a00003-0000-4000-8000-000000000005', 'c0a00001-0000-4000-8000-000000000001',
+      'c0a00002-0000-4000-8000-000000000001', 'pharmacist', 'pharmacist', false, true);
+    insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+    values ('e1349999-0000-4000-8000-000000000002', 'c0a00003-0000-4000-8000-000000000005', 'pharmacist', 'facility',
+      'e1349999-0000-4000-8000-000000000001', 'c0a00002-0000-4000-8000-000000000001', 'Invited by the QA Facility Admin');
+    perform set_config('session_replication_role', 'origin', true);
+    written := identity.sealed_qa_hospital_work_staff_install();
+    raise exception 'written % / %', written, pg_temp.qa_hospital_memberships();
+  end $d$$s$), 'P0001 written 2 / fixed lab@healthidentitydirectory.com lab true; '
+    || 'admin pharmacy@healthidentitydirectory.com pharmacist true');
+select pg_temp.expect('and a deactivated one too', pg_temp.try($s$
+  do $d$ declare written integer; begin
+    perform set_config('session_replication_role', 'replica', true);
+    perform pg_temp.take_back_case_3();
+    insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+      membership_role, app_role, is_primary, active)
+    values ('e1349999-0000-4000-8000-000000000001', 'c0a00004-0000-4000-8000-000000000005',
+      'c0a00003-0000-4000-8000-000000000005', 'c0a00001-0000-4000-8000-000000000001',
+      'c0a00002-0000-4000-8000-000000000001', 'pharmacist', 'pharmacist', false, false);
+    perform set_config('session_replication_role', 'origin', true);
+    written := identity.sealed_qa_hospital_work_staff_install();
+    raise exception 'written % / %', written, pg_temp.qa_hospital_memberships();
+  end $d$$s$), 'P0001 written 2 / fixed lab@healthidentitydirectory.com lab true; '
+    || 'admin pharmacy@healthidentitydirectory.com pharmacist false');
 
 rollback;
