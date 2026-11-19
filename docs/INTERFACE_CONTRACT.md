@@ -7007,3 +7007,244 @@ Find a patient shows the owner's words, "No patient has this Health ID."
 `PatientsWorkspace.tsx`), only on `PATIENT_NOT_FOUND`. Every other `404` and
 every `403` stays a refused lookup, as today. A limited account gets today's
 `404`, never a `429`.
+
+## Wave 0: answers for the EHR screens (R-1 to R-4, P2-5, P2-6)
+
+**These are answers, not new behaviour.** Nothing in any service, migration,
+grant or setting changes. They answer the questions in Akos's note "Health ID
+EHR QA (Doctor role): backend needs" (17 Nov 2026), items R-1, R-2, R-3, R-4,
+P2-5 and P2-6. The only new files are the HID-LAB code list
+(`docs/codes/hid-lab-codes.json`) and its check
+(`scripts/tests/hid-lab-codes.test.mjs`).
+
+Every statement was checked against `staging-novu-ci-20261005` at `964fabdf`
+(19 Nov 2026). File references are to that branch, and a migration number
+such as `0004:181` means `services/ehr-api/database/migrations/0004_*.sql`,
+line 181. Infrastructure facts come from the Terraform on the `dev` branch at
+`4e64b064`, which is the source of production AWS (`infra/aws/README.md:3-9`
+on this branch); they are marked "dev". Anything marked **Planned** is in the
+18 Nov build plan and is not built.
+
+Rules shared by the three order bodies below: every text field is trimmed of
+outer spaces before it is checked (`clinical.dto.ts:23`), lengths count
+characters after trimming, an optional field may be left out but `null` is
+refused, and a field the body does not declare is refused with `400
+VALIDATION_FAILED` (`services/ehr-api/src/common/validation.ts:3-9`,
+`common/validation-pipe.ts:11-28`). `clinical.dto.ts` is
+`services/ehr-api/src/ehr/shared/clinical.dto.ts`.
+
+### R-1. Diagnoses: "ICD-10" and dotted codes
+
+`POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/diagnoses`
+(`diagnoses.controller.ts:8,27`).
+
+| Field | Required today | What is accepted | Source |
+| --- | --- | --- | --- |
+| `codeSystem` | Yes | Any text, 1 to 255 characters. There is no list and nothing checks it. `ICD-10` is stored exactly as sent. | `clinical.dto.ts:299-302`, `0004:180` |
+| `code` | Yes | Any text, 1 to 100 characters. There is no pattern, so dotted codes such as `B50.9`, `O14.9` and plain ones such as `B54` are accepted. | `clinical.dto.ts:304-307`, `0004:181` |
+| `display` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:309-312`, `0004:182` |
+
+- **Yes:** code system `ICD-10` exactly as written, and WHO codes with a dot,
+  are accepted.
+- **A diagnosis must have a code today.** A body without `code` gets `400
+  VALIDATION_FAILED`, and the column is `NOT NULL` (`0004:181`). Free text is
+  allowed for the name only. Until this changes, the screen should ask for a
+  code, or say the diagnosis cannot be saved without one.
+- Send the code system as `ICD-10`. The patient's own record chat leaves out
+  sensitive diagnoses by their ICD-10 code only when the code system contains
+  "ICD" (`services/ehr-api/src/ehr/patient-records/patient-evidence.policy.ts:135,156`);
+  it also checks the name.
+- The code and code system cannot be changed after saving
+  (`UpdateDiagnosisDto`, `clinical.dto.ts:335-353`, has no code fields). A
+  wrong code is corrected by marking the diagnosis entered in error and
+  saving a new one.
+- **Planned (0145, Release B):** ICD terminology search, and a diagnosis
+  saved with a name and no code. It waits for owner question 8 (ICD-10
+  licence or ICD-11). The route Akos suggested,
+  `GET /api/v1/ehr/terminology/icd10`, does not exist today.
+
+### R-2. Lab tests: "LOINC", and local codes for tests without one
+
+`POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests`
+(`lab-requests.controller.ts:14,41`).
+
+| Field | Required today | What is accepted | Source |
+| --- | --- | --- | --- |
+| `testCodeSystem` | Yes | Any text, 1 to 255 characters. No list; nothing checks it. | `clinical.dto.ts:562-565`, `0004:242` |
+| `testCode` | Yes | Any text, 1 to 100 characters. No pattern. | `clinical.dto.ts:567-570`, `0004:243` |
+| `testDisplay` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:572-575`, `0004:244` |
+| `specimenTypeCode` | No | Any text up to 100 characters. | `clinical.dto.ts:584-588`, `0004:247` |
+
+When the request is sent to the facility's own lab, Lab takes the same
+lengths (`services/lab-api/src/lab/dto/accept-ehr-order.dto.ts:15-17`,
+`0018:27-29`), so every request EHR saves can be sent.
+
+- **Yes:** `LOINC` is accepted as the test code system (as text, like any
+  other).
+- **A test must have a code today.** A request with a name and no code gets
+  `400 VALIDATION_FAILED`, and the column is `NOT NULL` (`0004:243`). So the
+  13 tests the screen fills by name only are refused unless the clinician
+  types a code.
+- **Answer for tests with no LOINC code: use the local code system
+  `HID-LAB`.** Send `testCodeSystem: "HID-LAB"`, the code from the table as
+  `testCode`, and the name from the table as `testDisplay`. The codes are
+  fixed: a code is never changed and never re-used for another test. They
+  use only capital letters A to Z, digits and single hyphens. The same list is
+  in `docs/codes/hid-lab-codes.json`, and `scripts/tests/hid-lab-codes.test.mjs`
+  checks that its codes are unique and well formed and that this table matches
+  it. The specimen is a plain-words suggestion; the screen may send it as
+  `specimenTypeCode` (optional).
+
+The list is every test in the screen's built-in list that has no LOINC code
+(health repo, `main` at `14779584`,
+`apps/patient-web/src/ehr-blue/clinical/parts/vocabulary.ts:77-104`). Akos's
+note names three of them (malaria smear, Widal, genotype).
+
+| HID-LAB code | Test name (`testDisplay`) | Specimen |
+| --- | --- | --- |
+| `MP-SMEAR` | Malaria parasite (blood film) | Blood (EDTA) |
+| `MP-RDT` | Malaria rapid diagnostic test | Blood |
+| `WIDAL` | Widal test | Serum |
+| `URINALYSIS` | Urinalysis | Urine |
+| `HB-GENOTYPE` | Haemoglobin genotype | Blood (EDTA) |
+| `HIV-SCREEN` | HIV screening | Blood |
+| `HBSAG` | Hepatitis B surface antigen | Serum |
+| `HCV-AB` | Hepatitis C antibody | Serum |
+| `EUCR` | Electrolytes, urea and creatinine | Serum |
+| `LFT` | Liver function test | Serum |
+| `LIPID-PROFILE` | Lipid profile | Serum |
+| `STOOL-MICRO` | Stool microscopy | Stool |
+| `SPUTUM-AFB` | Sputum for AFB | Sputum |
+
+- Keep these names as they are. The patient's own record chat leaves out
+  sensitive tests, and for a code that is not LOINC it relies on the name
+  (`patient-evidence.policy.ts:62-75,146-148`; the database filter reads the
+  name only, `patient-evidence.query.ts:120-121`). "HIV screening",
+  "Hepatitis B surface antigen", "Hepatitis C antibody" and "Haemoglobin
+  genotype" all match that list.
+- **Planned (0144, Release B):** a lab test catalogue with LOINC codes, into
+  which the HID-LAB codes move, and a lab request saved with a name and no
+  code.
+
+### R-3. Prescriptions: route words, frequency, medicine code
+
+`POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions`
+(`prescriptions.controller.ts:15,49`).
+
+| Field | Required today | What is accepted | Source |
+| --- | --- | --- | --- |
+| `medicationDisplay` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:368-371`, `0004:211` |
+| `medicationCodeSystem` | No | Any text up to 255 characters. | `clinical.dto.ts:356-360`, `0004:209` |
+| `medicationCode` | No | Any text up to 100 characters. | `clinical.dto.ts:362-366`, `0004:210` |
+| `routeCode` | No | Any text up to 100 characters. There is no code list. | `clinical.dto.ts:384-388`, `0004:214` |
+| `frequency` | Yes | Free text, 1 to 240 characters. | `clinical.dto.ts:390-393`, `0004:215` |
+| `doseUnit` | No | Any text, 1 to 80 characters. | `clinical.dto.ts:378-382` |
+| `instructions` | Yes | Free text, 1 to 4000 characters. | `clinical.dto.ts:395-398` |
+
+- **`routeCode` takes plain words** such as "oral", "intravenous" or
+  "intramuscular", up to 100 characters. No HL7 or SNOMED CT route list is
+  checked, so the screen does not need to switch.
+- **`frequency` is free text**, 1 to 240 characters: "Twice daily" and
+  "Every 8 hours" are accepted as written.
+- **The medicine code and its code system are optional.** A prescription can
+  be saved with the generic name only.
+- Leave an optional field out rather than sending an empty string. EHR
+  accepts `""` for `routeCode`, `medicationCode` and `medicationCodeSystem`
+  (only a maximum is checked), but EHR passes the value on unchanged when the
+  prescription is sent to the facility's pharmacy
+  (`prescriptions.service.ts:347-352`), and Pharmacy needs at least one
+  character in each (`services/pharmacy-api/src/pharmacy/dto/accept-ehr-prescription.dto.ts:13-14,18`,
+  `0023:63-64,68`). Such a prescription could not be sent.
+- The medicine and route cannot be changed after saving. An update changes
+  only status, frequency (1 to 240), instructions and end date
+  (`UpdatePrescriptionDto`, `clinical.dto.ts:499-530`).
+- **Planned (0144, Release B):** formulary search from the catalogue.
+
+### R-4. Rate limits on the pages the drawers re-read
+
+**Answer: yes, one extra read when a drawer closes stays inside every limit.**
+No per-route limit applies to the reads a page makes (visits, vitals,
+diagnoses, notes, lab requests, prescriptions, allergies, access requests,
+registration cases, pharmacy work items). The one limit that counts them is
+the AWS firewall's general limit, which is far above what a drawer adds.
+
+Every limit on the path from the website to the services:
+
+| Where | What is limited | Limit | Counts a drawer re-read? | Source |
+| --- | --- | --- | --- | --- |
+| AWS firewall on the public load balancer (dev) | Every API request | 2,000 requests in 5 minutes per connecting address, then blocked (AWS's default 5-minute window; the rule sets no other) | Yes | `infra/terraform/modules/application/ingress.tf:380-401,403-407` (dev) |
+| Gateway | Patient record chat `POST /api/v1/ehr/me/chat` and support chat `POST /api/v1/support/chat` | 6 a minute per address, 2 extra at once, then `429` | No | `gateway/nginx.conf.template:1,103-120` |
+| Gateway | Staff record chat `POST /api/v1/ehr/patients/:patientId/chat` | 20 a minute per address, 5 extra at once, then `429` | No | `gateway/nginx.conf.template:12,140-148` |
+| Identity | Health ID lookups that find no patient | 30 in 10 minutes per staff account, then `404` for 10 minutes (never `429`). A lookup that opens a patient is not counted. | No | `services/identity-api/src/identity/patient-lookup-miss.service.ts:15-26,53` |
+| Identity | Emergency access activation | Database limit, then `429 EMERGENCY_RATE_LIMITED` | No | `services/identity-api/src/consent/consent.service.ts:425-430` |
+| EHR | Sending orders to another facility | Daily limits, then `429` | No | `services/ehr-api/src/ehr/order-routes/order-route.problems.ts:22-23` |
+| Gateway and services | Every other EHR, Lab, Pharmacy and Identity route, reads included | None | — | No `limit_req` in `gateway/nginx.conf.template:61-101,121-149`; no read route calls `consumeRateLimit` (`services/identity-api/src/auth/rate-limit.ts:18`, whose callers are sign-in codes, enrolment, invitations, searches for share and order destinations, web push and the lookup above) |
+
+The website reaches AWS through the Cloudflare Worker (this contract,
+"Current browser and notification boundary"), and the firewall refuses any
+request without Cloudflare's origin secret (`ingress.tf:299-333`, dev). So the
+address the firewall counts is the one Cloudflare connects from, not the
+clinic's own. Even a re-read of 10 requests would need 200 drawer closes in
+5 minutes from one such address to reach the limit. Re-reading only after a
+drawer saved something keeps the load lower still.
+
+### P2-5. Coding systems and FHIR today
+
+- **No code checking.** Diagnoses, lab tests and medicines accept any code
+  system and any code as text, within the lengths in R-1 to R-3. ICD-10,
+  ICD-11, SNOMED CT, LOINC and HID-LAB are all accepted the same way; none is
+  looked up or checked against a code list.
+- Code systems are read in one place only: the patient's own record chat
+  recognises LOINC (`patient-evidence.policy.ts:78-98`) and ICD
+  (`patient-evidence.policy.ts:134-135,156`) to leave out sensitive tests and
+  diagnoses.
+- **No FHIR API.** No service on this branch has a FHIR route or returns
+  FHIR resources.
+- **Planned:** the lab test catalogue with LOINC and HID-LAB codes (0144) and
+  ICD terminology search (0145, after owner question 8: ICD-10 licence or
+  ICD-11). The 18 Nov build plan has no FHIR item.
+
+### P2-6. Where data is kept, and compliance
+
+Facts, as configured:
+
+| Topic | Fact | Source |
+| --- | --- | --- |
+| Region | Production runs in AWS `eu-west-1` (Ireland), in two zones, `eu-west-1a` and `eu-west-1b`. Releases deploy there. | `infra/terraform/environments/production.tfvars:19,50` (dev); `scripts/production_deployment_core.py:21` |
+| Database | PostgreSQL 16 on RDS, not reachable from the internet, storage encrypted with its own KMS key (key rotation on), a standby copy in a second zone, automated backups kept 30 days. | `infra/terraform/modules/data/main.tf:2-6,368-394` (dev); `infra/terraform/variables.tf:125-128` (dev); `production.tfvars:301` (dev) |
+| Documents | S3, encrypted with a KMS key, versioned, all public access blocked. | `modules/data/main.tf:75-108` (dev) |
+| In transit | The public and internal load balancers listen only on HTTPS, with the TLS 1.2 and 1.3 policy. Encryption ends at the load balancer: it passes requests to the containers inside the private network over plain HTTP. The database refuses connections without TLS (`rds.force_ssl`), and services connect with the RDS certificate. | `modules/application/ingress.tf:29-35,51-56,212-216,231-237` (dev); `modules/data/main.tf:326-333` (dev); `modules/application/workloads.tf:74` (dev) |
+| Audit | Clinical and identity actions are written to `audit.events`, which refuses every update and delete. ehr-api writes an audit row for each request through a global audit interceptor, except on routes marked as not audited. | `0003:210,277-282`; `services/ehr-api/src/app.module.ts:28`, `services/ehr-api/src/audit/audit.interceptor.ts:21-26` |
+| Logs | Application logs are kept 90 days, Identity and security logs 365 days. | `infra/terraform/variables.tf:136-150` (dev); `modules/application/workloads.tf:527` (dev) |
+
+Data that leaves `eu-west-1`, as configured:
+
+| What | Where it goes | Source |
+| --- | --- | --- |
+| Record chat (the patient's "ask about my records" and staff "Ask about this patient"): text from the record | The Claude API, processed in the United States | `production.tfvars:257-261` (dev); `services/ehr-api/src/ehr/patient-records/claude-ai.service.ts:197-202` |
+| Paper records read for Migrate: text read from the page | The Claude API, processed in the United States | `production.tfvars:262-265` (dev); `services/ocr-worker/src/reading/claude.client.ts:12-13`, `services/ocr-worker/src/config.ts:73` |
+| Error reports | Sentry, EU (Germany) host; scrubbed errors only | `production.tfvars:303-307` (dev) |
+| NIN checks | QoreID | `production.tfvars:46` (dev) |
+| Notifications | Novu (`api.novu.co`), with email through Brevo | `production.tfvars:26-27` (dev) |
+| Google sign-in | Google | `production.tfvars:44` (dev) |
+| Every website and API request | Cloudflare, in front of AWS | this contract, "Current browser and notification boundary" |
+
+This repository does not record where QoreID, Novu, Brevo, Google or
+Cloudflare keep data.
+
+Not done, said plainly:
+
+- **No in-country hosting.** All Health ID data is kept in one AWS region,
+  `eu-west-1` (Ireland), not in Nigeria. There is no option today to keep a
+  country's data in that country, and the 18 Nov build plan has no item for
+  it (it lists P2-6 among the gaps no design covers yet).
+- **No certification.** No NDPA (formerly NDPR), GDPR or HIPAA
+  certification, audit or formal assessment is recorded in this repository.
+  Do not tell buyers the product is certified under, or compliant with, any
+  of them.
+- The AWS Backup plan is off (`production.tfvars:58`, dev); RDS's own
+  automated backups above still run.
+- The Terraform defines no CloudTrail trail of its own; whether the AWS
+  account has one is not recorded here.
+- Traffic between the load balancers and the containers is not encrypted
+  (it stays inside the private network; see "In transit" above).
