@@ -563,6 +563,39 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       expect(JSON.stringify(warn.mock.calls)).not.toContain(NIN);
       expect(JSON.stringify(warn.mock.calls)).not.toContain(s.lookup);
     });
+
+    it('logs, without an identifier, a stored record 0137 will not hand over or keep, and changes nothing', async () => {
+      // Today's 0137 never refuses either step for a record step 1 found; a change to its rules must not stop
+      // D2 unseen (the typo record would then end after 24 hours and be paid for again).
+      const s = system();
+      await expect(s.resolve('desk-once-key-000508', deskContext(), { ...input, lastName: 'Fixtura' }))
+        .rejects.toMatchObject({ status: 422 });
+      const before = { ...[...s.store.rows.values()][0]! };
+      const original = s.store.query;
+      for (const [step, refuse] of [
+        ['take_over', (sql: string, values: readonly unknown[]) => sql.includes('begin_qoreid_nin_check')
+          && values[3] === KEEP_TAKE_OVER_KEY_VERSION ? { rows: [{ decision: 'held', outcome: null, record_complete: null,
+            answer_ciphertext: null, until: new Date(Date.now() + 60_000) }] } : undefined],
+        ['finish', (sql: string) => sql.includes('finish_qoreid_nin_check') ? { rows: [{ recorded: false }] } : undefined],
+      ] as const) {
+        warn.mockClear();
+        s.store.query = ((sql: string, values: readonly unknown[] = []) => refuse(sql, values) ?? original(sql, values)) as
+          typeof original;
+        await expect(s.resolve(`desk-once-key-00051${step === 'finish' ? 1 : 0}`)).resolves.toMatchObject({ caseId });
+        s.store.query = original;
+        expect(warn).toHaveBeenCalledWith({ event: 'identity.nin.record_keep_refused', correlationId: 'desk-once-1', step });
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(NIN);
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(s.lookup);
+        // Rolled back: the same row, still kept 24 hours; the desk's answer stands, with no recordKept.
+        expect([...s.store.rows.values()][0]).toEqual(before);
+        expect(s.deskChecks().at(-1)).toEqual({ provider: 'qoreid', ninCheck: 'match', storedAnswer: true });
+      }
+      // Nothing stored at all is not a refusal: nothing is logged.
+      warn.mockClear();
+      await expect(s.keep.keepMatchedRecord('70000000008', 'keep-4')).resolves.toBe(false);
+      expect(warn).not.toHaveBeenCalled();
+      expect(s.qoreId.state.charged).toBe(1);
+    });
   });
 
   describe('the breaker counts only what QoreID did (D4)', () => {

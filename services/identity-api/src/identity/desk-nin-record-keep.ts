@@ -27,8 +27,15 @@ interface BeginRow {
   answer_ciphertext: Buffer | null;
 }
 
-/** Nothing to keep: the transaction is rolled back and nothing has changed. */
-class NothingToKeep extends Error {}
+/**
+ * Nothing to keep: the transaction is rolled back and nothing has changed.
+ * `refusedAt`: the step at which 0137 refused a stored record step 1 found.
+ */
+class NothingToKeep extends Error {
+  constructor(readonly refusedAt?: 'take_over' | 'finish') {
+    super('nothing to keep');
+  }
+}
 
 /**
  * D2 (Q110, the coordinator's "keep a matched, unattached record for 90
@@ -53,7 +60,11 @@ class NothingToKeep extends Error {}
  * another key version, a NIN whose login was deleted) rolls back: nothing
  * changes. The answer is not decrypted, re-encrypted or read here; nothing is
  * sent to QoreID. A keep that cannot be made is logged without an identifier
- * and the desk's answer stands.
+ * and the desk's answer stands: a database error as
+ * `identity.nin.record_keep_failed`, and 0137 refusing step 2 or 3 for a
+ * record step 1 found (which today's 0137 never does: a change to its
+ * take-over or finish rules) as `identity.nin.record_keep_refused`, so the
+ * keep never stops working unseen.
  */
 @Injectable()
 export class DeskNinRecordKeep {
@@ -77,15 +88,18 @@ export class DeskNinRecordKeep {
         const attempt = randomUUID();
         const taken = (await client.query<BeginRow>(KEEP_BEGIN_SQL,
           [lookup, null, false, KEEP_TAKE_OVER_KEY_VERSION, attempt, KEEP_LEASE_SECONDS])).rows[0];
-        if (taken?.decision !== 'call') throw new NothingToKeep();
+        if (taken?.decision !== 'call') throw new NothingToKeep('take_over');
         const finished = (await client.query<{ recorded: boolean }>(KEEP_FINISH_SQL,
           [lookup, attempt, 'record', null, stored.record_complete, stored.answer_ciphertext, keyVersion,
             NIN_RECORD_ANSWER_SECONDS])).rows[0];
-        if (finished?.recorded !== true) throw new NothingToKeep();
+        if (finished?.recorded !== true) throw new NothingToKeep('finish');
       });
       return true;
     } catch (error) {
-      if (!(error instanceof NothingToKeep)) {
+      if (error instanceof NothingToKeep && error.refusedAt) {
+        // No NIN, HMAC or row content.
+        this.logger.warn({ event: 'identity.nin.record_keep_refused', correlationId, step: error.refusedAt });
+      } else if (!(error instanceof NothingToKeep)) {
         // No NIN, HMAC or SQL text.
         this.logger.warn({ event: 'identity.nin.record_keep_failed', correlationId,
           code: typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'

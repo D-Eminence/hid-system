@@ -6521,7 +6521,11 @@ stored record (another outcome, a check running, a hold, another key version,
 a NIN whose login was deleted, no row), the transaction is rolled back and
 nothing changes. Nothing is sent to QoreID. A keep that cannot be written
 leaves the desk's answer as it is and logs `identity.nin.record_keep_failed`
-with the correlation id and a database code only. The desk's `identity.nin.verify`
+with the correlation id and a database code only; when 0137 refuses to hand
+over (`take_over`) or to keep (`finish`) a record the first statement found,
+which today's 0137 never does, so only a change to its rules can cause it,
+the answer stands too and `identity.nin.record_keep_refused` is logged with
+the correlation id and that step only. The desk's `identity.nin.verify`
 row says `recordKept: true` when the record was kept. Proved on PostgreSQL by
 `services/ehr-api/test/database/desk-nin-record-keep.integration.sql`.
 
