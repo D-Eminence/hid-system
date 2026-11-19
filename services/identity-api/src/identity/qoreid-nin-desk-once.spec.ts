@@ -14,7 +14,7 @@ import { NIN_CHECK_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS, NIN_RECORD_ANSWER
   NinCheckOnce } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NIN_BREAKER_RETRY_AFTER_MS, NinProviderBreaker } from './nin-provider-breaker';
-import { NinRegistrationService } from './nin-registration.service';
+import { NinRegistrationService, SEALED_TENANT_SQL } from './nin-registration.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 import { QoreIdNinVerificationProvider } from './qoreid-nin-verification.provider';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
@@ -182,7 +182,10 @@ function system() {
     }
     return { rows: [] };
   });
-  const deskDatabase = { withTransaction: jest.fn(async (_c: unknown, work: (client: unknown) => unknown) => work({ query })) };
+  /** While on, the desk's facility is one of the sealed demo or QA tenant's (0098, 0123). */
+  const sealed = { on: false };
+  const deskDatabase = { withTransaction: jest.fn(async (_c: unknown, work: (client: unknown) => unknown) => work({ query })),
+    query: jest.fn(async (sql: string) => ({ rows: sql === SEALED_TENANT_SQL ? [{ sealed: sealed.on }] : [] })) };
   const deskAudit = { record: jest.fn(async (_row: { action: string; details: unknown }) => undefined),
     recordWithClient: jest.fn(async (_client: unknown, _row: { action: string; details: unknown }) => undefined) };
   const breaker = new NinProviderBreaker();
@@ -197,7 +200,7 @@ function system() {
   const deskChecks = () => deskAudit.record.mock.calls.map(([row]) => row)
     .filter((row) => row.action === 'identity.nin.verify').map((row) => row.details);
   return { qoreId, store, ninCheck, ninOnly, resolve, breaker, cases, checkAudits, deskChecks, deskAudit, lookup,
-    verifyProfile, protector, healthIds, auditDown, keep };
+    verifyProfile, protector, healthIds, auditDown, keep, sealed };
 }
 
 describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')', () => {
@@ -698,6 +701,29 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       expect(s.qoreId.state.charged).toBe(1);
       expect(s.deskChecks()).toEqual([{ provider: 'qoreid', ninCheck: 'name_mismatch' }]);
     });
+  });
+
+  it('makes no QoreID call from a desk of the sealed demo or QA tenant, and never reaches 0137\'s stored answers', async () => {
+    // 0098 G6, 0123 G6q and D9: such a desk causes no QoreID call. A real sign-up of the NIN has paid once.
+    const s = system();
+    await s.ninOnly.verifyNin(NIN, { correlationId: 'signup-check', path: 'enrollment' });
+    s.sealed.on = true;
+    // The record's own details (a free comparison against a real person's stored record) and a new NIN.
+    for (const [key, body] of [['desk-once-key-000601', input], ['desk-once-key-000602', { ...input, lastName: 'Fixtura' }],
+      ['desk-once-key-000603', { ...input, nin: '70000000007' }]] as const) {
+      await expect(s.resolve(key, deskContext(), body)).rejects.toMatchObject({ status: 503,
+        code: 'NIN_PROVIDER_UNAVAILABLE', message: 'NIN verification is not configured' });
+    }
+    expect(s.qoreId.state.charged).toBe(1);
+    expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'record', 'signup-check']]);
+    expect(s.cases).toHaveLength(0);
+    expect(s.breaker.state()).toBe('closed');
+    expect(s.deskChecks()).toEqual([0, 1, 2].map(() => expect.objectContaining({ code: 'NIN_PROVIDER_UNAVAILABLE',
+      providerCalled: false, sealedTenant: true })));
+    // Any other desk checks as before.
+    s.sealed.on = false;
+    await expect(s.resolve('desk-once-key-000604', deskContext(2))).resolves.toMatchObject({ caseId });
+    expect(s.qoreId.state.charged).toBe(1);
   });
 
   it('answers every "does not match" for one NIN by one account, holding nothing (Q109: no limit of any kind)', async () => {

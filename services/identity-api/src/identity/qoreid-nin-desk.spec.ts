@@ -14,7 +14,7 @@ import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NIN_RECORD_ANSWER_SECONDS } from './nin-check-once';
 import { KEEP_BEGIN_SQL, KEEP_FINISH_SQL, KEEP_TAKE_OVER_KEY_VERSION } from './desk-nin-record-keep';
 import { NinRegistrationController } from './nin-registration.controller';
-import { NinRegistrationService } from './nin-registration.service';
+import { NinRegistrationService, SEALED_TENANT_SQL } from './nin-registration.service';
 import {
   DeferredNinVerificationProvider,
   DeterministicTestNinVerificationProvider,
@@ -46,6 +46,8 @@ import {
  * people and identifiers only.
  */
 const FORBIDDEN_WORD = /unverified/i;
+/** SQL text with its whitespace runs made single spaces, as the harnesses record it. */
+const words = (text: string) => text.replace(/\s+/g, ' ').trim();
 const NIN = '12345678901';
 const caseId = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
 const context = {
@@ -363,10 +365,11 @@ describe('Q108 desk NIN resolve through QoreID', () => {
 
   /**
    * `holders`: what each read of the NIN's verified holder (identity.patient_identifiers) finds, in turn;
-   * none by default.
+   * none by default. `sealed`: what the read of the sealed demo and QA tenants answers (SEALED_TENANT_SQL),
+   * or the error it raises; not sealed by default.
    */
   function desk(provider: NinVerificationProvider, breaker = new NinProviderBreaker(),
-    holders: Array<Record<string, unknown> | Error | undefined> = []) {
+    holders: Array<Record<string, unknown> | Error | undefined> = [], sealed: boolean | Error = false) {
     const statements: Array<{ sql: string; values: unknown[] }> = [];
     const query = jest.fn(async (sql: string, values: unknown[] = []) => {
       statements.push({ sql: sql.replace(/\s+/g, ' '), values });
@@ -386,6 +389,12 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     const database = {
       withTransaction: jest.fn(async (_c: unknown, work: (c: unknown) => unknown) => work({ query })),
       withSystemTransaction: jest.fn(async (_c: unknown, work: (c: unknown) => unknown) => work({ query })),
+      // The sealed tenant read, outside any transaction (as the code sends it).
+      query: jest.fn(async (sql: string, values: unknown[] = []) => {
+        statements.push({ sql: sql.replace(/\s+/g, ' '), values });
+        if (sealed instanceof Error) throw sealed;
+        return { rows: sql === SEALED_TENANT_SQL ? [{ sealed }] : [] };
+      }),
     };
     const audit = { recordWithClient: jest.fn(async () => undefined), record: jest.fn(async () => undefined) };
     const protector = {
@@ -669,7 +678,6 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     // must keep testing what the code sends.
     const { service, statements } = desk(qoreIdProvider(gate()));
     await service.resolve(input, 'resolve-key-sql-000001', context);
-    const words = (text: string) => text.replace(/\s+/g, ' ').trim();
     const suite = readFileSync(join(__dirname, '../../../ehr-api/test/database/desk-nin-holder.integration.sql'), 'utf8');
     const body = (name: string) => new RegExp(`create function pg_temp\\.${name}\\([\\s\\S]*?as \\$\\$([\\s\\S]*?)\\$\\$`)
       .exec(suite)?.[1] ?? `pg_temp.${name} is missing`;
@@ -688,6 +696,75 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(suite).toContain(`'${KEEP_TAKE_OVER_KEY_VERSION}'`);
     expect(suite).toContain(`key_version, ${NIN_RECORD_ANSWER_SECONDS})`);
     expect(suite.match(/identity\.begin_qoreid_nin_check\(lookup, null, false, /g)).toHaveLength(2);
+  });
+
+  describe('a desk of the sealed demo or QA tenant (0098 G6, 0123 G6q and D9)', () => {
+    const holder = { patient_id: 'b1000000-0000-4000-8000-000000000001', hid_code: 'HID-FIXTURE-0002',
+      first_name: 'ADA', last_name: 'FICTIONAL', dob: '1991-04-05', gender: 'female',
+      verification_provider: 'qoreid', verification_reference: '700001', verified_at: '2026-10-01T08:00:00.000Z' };
+
+    it('answers "not configured" before anything is read or sent: no QoreID call, no holder read, no guard', async () => {
+      const qoreId = gate();
+      const { service, audit, statements, breaker } = desk(qoreIdProvider(qoreId), undefined, [holder], true);
+      for (const key of ['resolve-key-seal-000001', 'resolve-key-seal-000002']) {
+        await expect(service.resolve(input, key, context)).rejects.toMatchObject({
+          status: 503, code: 'NIN_PROVIDER_UNAVAILABLE', message: NIN_NOT_CONFIGURED_DETAIL });
+      }
+      expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+      expect(qoreId.verifyNin).not.toHaveBeenCalled();
+      // The seal is asked with the desk's facility and staff account, and nothing else is read.
+      expect(statements.filter(({ sql }) => sql === words(SEALED_TENANT_SQL)).map(({ values }) => values))
+        .toEqual([[context.facilityId, context.actor.accountId], [context.facilityId, context.actor.accountId]]);
+      expect(statements.some(({ sql }) => sql.includes('from identity.patient_identifiers identifier'))).toBe(false);
+      expect(statements.some(({ sql }) => /insert into identity\.registration_cases \(/.test(sql))).toBe(false);
+      expect(breaker.state()).toBe('closed');
+      expect(warn).not.toHaveBeenCalled();
+      expect(auditRows(audit)).toEqual([0, 1].map(() => expect.objectContaining({ action: 'identity.nin.verify',
+        outcome: 'failure', details: { provider: 'qoreid', errorType: 'DomainProblem', code: 'NIN_PROVIDER_UNAVAILABLE',
+          providerCalled: false, sealedTenant: true } })));
+    });
+
+    it('fails closed when the seal cannot be read: "cannot be started", nothing sent, the breaker untouched', async () => {
+      const qoreId = gate();
+      const lost = Object.assign(new Error('connection reset'), { code: '08006' });
+      const { service, audit, breaker } = desk(qoreIdProvider(qoreId), undefined, [holder], lost);
+      await expect(service.resolve(input, 'resolve-key-seal-000003', context)).rejects.toMatchObject({
+        status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+        message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+      expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+      expect(breaker.state()).toBe('closed');
+      expect(JSON.stringify(auditRows(audit))).not.toContain('connection reset');
+      expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'identity.nin.verify',
+        outcome: 'failure', details: expect.objectContaining({ providerCalled: false }) }));
+    });
+
+    it('is asked for every check at any other desk, after the switch, and the check goes on', async () => {
+      const qoreId = gate();
+      const { service, statements } = desk(qoreIdProvider(qoreId));
+      await expect(service.resolve(input, 'resolve-key-seal-000004', context)).resolves.toMatchObject({ caseId });
+      expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(1);
+      expect(statements.filter(({ sql }) => sql === words(SEALED_TENANT_SQL))).toHaveLength(1);
+      // Not asked while NIN checks are switched off: that answer is the same.
+      const off = desk(qoreIdProvider(gate({ isAvailable: jest.fn(async () => false) })));
+      await expect(off.service.resolve(input, 'resolve-key-seal-000005', context)).rejects.toMatchObject({
+        status: 503, message: NIN_NOT_CONFIGURED_DETAIL });
+      expect(off.statements.some(({ sql }) => sql === words(SEALED_TENANT_SQL))).toBe(false);
+    });
+
+    it('is not asked for a NIN check that sends nothing to QoreID (the test provider)', async () => {
+      const { service, statements } = desk(new DeterministicTestNinVerificationProvider(), undefined, [], true);
+      await expect(service.resolve(input, 'resolve-key-seal-000006', context)).resolves.toMatchObject({ caseId });
+      expect(statements.some(({ sql }) => sql === words(SEALED_TENANT_SQL))).toBe(false);
+    });
+
+    it('runs, in the database suite, the seal read the desk sends, word for word', () => {
+      // desk-nin-holder.integration.sql runs this read as Identity's runtime role: a demo or QA facility or
+      // account is sealed; a real facility and account, and null ids, are not.
+      const suite = readFileSync(join(__dirname, '../../../ehr-api/test/database/desk-nin-holder.integration.sql'), 'utf8');
+      const body = /create function pg_temp\.desk_sealed_tenant\([\s\S]*?as \$\$([\s\S]*?)\$\$/.exec(suite)?.[1]
+        ?? 'pg_temp.desk_sealed_tenant is missing';
+      expect(words(body)).toBe(words(SEALED_TENANT_SQL));
+    });
   });
 
   describe('a NIN already on a Health ID (Q110)', () => {
@@ -966,10 +1043,19 @@ describe('Q108 desk NIN resolve through QoreID', () => {
 describe('Q108 registration-capabilities with QoreID', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  function capabilities(qoreId: ReturnType<typeof gate>, breaker = new NinProviderBreaker()) {
+  /** The desk's capabilities; `sealed`: what the seal read answers for this desk (or the error it raises). */
+  function capabilities(qoreId: ReturnType<typeof gate>, breaker = new NinProviderBreaker(),
+    sealed: boolean | Error = false) {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NIN_PROVIDER_MODE: 'unavailable' } as never);
-    return new NinRegistrationController({} as never, breaker, qoreIdProvider(qoreId)).capabilities();
+    registrations.sealedTenant.mockImplementation(async () => {
+      if (sealed instanceof Error) throw sealed;
+      return sealed;
+    });
+    return new NinRegistrationController(registrations as never, breaker, qoreIdProvider(qoreId))
+      .capabilities({ facilityId: context.facilityId, actor: context.actor } as HidRequest);
   }
+  const registrations = { sealedTenant: jest.fn() };
+  beforeEach(() => registrations.sealedTenant.mockReset());
 
   it('reports NIN checks on and available while QoreID\'s switch is on', async () => {
     const answer = await capabilities(gate());
@@ -997,6 +1083,17 @@ describe('Q108 registration-capabilities with QoreID', () => {
     const qoreId = gate({ isAvailable: jest.fn(async () => { throw new DomainProblem(503, 'INTEGRATION_UNAVAILABLE', 'x'); }) });
     expect((await capabilities(qoreId)).nin).toEqual({ enabled: true, state: 'live', available: false });
   });
+
+  it('reports them off at a desk of the sealed demo or QA tenant (0098 G6, 0123 G6q), as resolve answers there', async () => {
+    expect((await capabilities(gate(), undefined, true)).nin).toEqual({ enabled: false, state: 'unavailable',
+      available: false });
+    expect(registrations.sealedTenant).toHaveBeenCalledWith(context.facilityId, context.actor.accountId);
+  });
+
+  it('reports them on but not available when the seal cannot be read', async () => {
+    expect((await capabilities(gate(), undefined, new Error('connection reset'))).nin).toEqual({ enabled: true,
+      state: 'live', available: false });
+  });
 });
 
 describe('Q108 desk NIN details refused before any check, over HTTP', () => {
@@ -1008,7 +1105,9 @@ describe('Q108 desk NIN details refused before any check, over HTTP', () => {
     const provider = { name: 'qoreid', isEnabled: jest.fn(async () => true), verify: jest.fn() };
     const audit = { record: jest.fn(async () => undefined), recordWithClient: jest.fn(async () => undefined) };
     const database = { withTransaction: jest.fn(async (_c: unknown, work: (c: unknown) => unknown) =>
-      work({ query: jest.fn(async () => ({ rows: [] })) })) };
+      work({ query: jest.fn(async () => ({ rows: [] })) })),
+    // Not a sealed demo or QA desk.
+    query: jest.fn(async () => ({ rows: [{ sealed: false }] })) };
     const module = await Test.createTestingModule({ controllers: [NinRegistrationController], providers: [
       NinRegistrationService, NinProviderBreaker,
       { provide: DatabaseService, useValue: database },

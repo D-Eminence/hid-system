@@ -23,24 +23,27 @@ export class NinRegistrationController {
   @Get('registration-capabilities')
   @RequirePermissions('identity.registration.write')
   @AuditAction('identity.registration-capabilities.read')
-  async capabilities() {
+  async capabilities(@Req() request: HidRequest) {
     return {
       // ID-0: `available` is false while the NIN service breaker is tripped
       // (or NIN checks are off), so the desk knows before it asks.
-      nin: await this.ninCapability(),
+      nin: await this.ninCapability(request),
       // ID-0: registration without a NIN stays off until ID-2 ships.
       withoutNin: { enabled: false },
       newPatientRegistrationRequiresNin: true,
     };
   }
 
-  private async ninCapability(): Promise<{ enabled: boolean; state: string; available: boolean }> {
+  private async ninCapability(request: HidRequest): Promise<{ enabled: boolean; state: string; available: boolean }> {
     if (this.provider?.name === 'qoreid' && this.provider.isEnabled) {
       // Q108: NIN checks through QoreID, on while QoreID's switch is on (read
       // now, never cached). A switch that cannot be read is "try again".
+      // 0098 G6, 0123 G6q: off at a desk of the sealed demo or QA tenant, as
+      // resolve answers there; a seal that cannot be read is "try again".
       let enabled: boolean;
       try {
-        enabled = await this.provider.isEnabled();
+        enabled = await this.provider.isEnabled()
+          && !(await this.registrations.sealedTenant(request.facilityId, request.actor?.accountId));
       } catch {
         return { enabled: true, state: 'live', available: false };
       }

@@ -17,6 +17,7 @@ import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinClaimedDemo
 import { ninCheckInProgress } from './nin-check-once';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
+import { QOREID_PROVIDER } from './qoreid-verification.types';
 import type { ApproveRegistrationCaseDto } from './dto/approve-registration-case.dto';
 import type { LinkRegistrationCaseDto } from './dto/link-registration-case.dto';
 import type { EnrollPatientDto } from './dto/enroll-patient.dto';
@@ -123,6 +124,20 @@ interface NinHolderRow extends QueryResultRow {
   verification_reference: string | null;
   verified_at: Date | string | null;
 }
+
+/**
+ * 0098 G6 ("a demo account ... never causes a QoreID call"), 0123 G6q ("a QA
+ * account consumes no QoreID quota") and 0123 D9 ("facility registration
+ * needs a QoreID NIN check, refused for QA"): whether the desk's facility
+ * ($1) or staff account ($2) is a member of the sealed demo or QA tenant,
+ * through the helpers 0098 and 0123 grant Identity's runtime (security
+ * definer; the members themselves are not readable). False for neither, and
+ * for a null id. desk-nin-holder.integration.sql runs it word for word.
+ */
+export const SEALED_TENANT_SQL = `select coalesce(identity.sealed_demo_facility($1::uuid)
+           or identity.sealed_qa_facility($1::uuid)
+           or $2::uuid = any(identity.sealed_demo_ids('account'))
+           or $2::uuid = any(identity.sealed_qa_ids('account')), false) as sealed`;
 
 /** SX-10: one row of the registration-case list (never NIN digits). */
 interface CaseListRow extends RegistrationCaseRow {
@@ -245,6 +260,29 @@ export class NinRegistrationService {
       const error = ninNotConfigured();
       await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
       throw error;
+    }
+
+    // 0098 G6, 0123 G6q and D9: a desk of the sealed demo or QA tenant never
+    // causes a QoreID call. Both seals relied on QoreID's quota refusing
+    // their accounts, and the desk's QoreID check takes no quota (Q109), so
+    // the desk asks the seals itself, before anything else is read or sent:
+    // for a sealed facility or account NIN checks are off, as they were
+    // before Q108 ("not configured"; the holder read, 0137's guard and its
+    // stored answers are never reached, the breaker is not touched). A seal
+    // that cannot be read fails closed: "cannot be started", nothing sent.
+    if (this.provider.name === QOREID_PROVIDER) {
+      let sealed: boolean;
+      try {
+        sealed = await this.sealedTenant(context.facilityId, context.actor.accountId);
+      } catch (error) {
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw ninCheckNotStarted();
+      }
+      if (sealed) {
+        const error = ninNotConfigured();
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, sealedTenant: true });
+        throw error;
+      }
     }
 
     // Q110: a NIN on a Health ID keeps its checked answer with the record,
@@ -953,6 +991,20 @@ export class NinRegistrationService {
     return verification;
   }
 
+  /**
+   * 0098 G6, 0123 G6q and D9: true when the facility or the staff account is
+   * a member of the sealed demo or QA tenant, whose desks make no QoreID
+   * call (SEALED_TENANT_SQL). Throws when the seal gives no answer, so a
+   * caller fails closed.
+   */
+  async sealedTenant(facilityId: string | undefined, accountId: string | undefined): Promise<boolean> {
+    const result = await this.database.query<{ sealed: unknown }>(SEALED_TENANT_SQL,
+      [facilityId ?? null, accountId ?? null]);
+    const sealed = result?.rows?.[0]?.sealed;
+    if (typeof sealed !== 'boolean') throw new Error('The sealed tenant read gave no answer');
+    return sealed;
+  }
+
   /** The active patient who holds this NIN verified and not revoked, with that check's evidence. */
   private readNinHolder(context: DataAccessContext, ninLookupHmac: string): Promise<NinHolderRow | undefined> {
     return this.database.withTransaction(context, async (client) => {
@@ -1190,7 +1242,8 @@ export class NinRegistrationService {
    * service was asked and the check failed.
    */
   private async auditFailure(context: DataAccessContext, action: string, error: unknown,
-    extra: { providerCalled?: boolean; breaker?: 'open'; ninCheck?: 'provider_error'; storedAnswer?: true } = {}) {
+    extra: { providerCalled?: boolean; breaker?: 'open'; ninCheck?: 'provider_error'; storedAnswer?: true;
+      sealedTenant?: true } = {}) {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',

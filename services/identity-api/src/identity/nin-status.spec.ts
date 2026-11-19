@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import * as environment from '../config/environment';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { IdentityService } from './identity.service';
 import type { AuthorizationDecision, IdentityPatient, IdentityProvider } from './identity.types';
 import { NinRegistrationController } from './nin-registration.controller';
@@ -356,7 +356,7 @@ describe('ID-0 NIN service breaker', () => {
   describe('registration-capabilities', () => {
     function capabilities(mode: 'test' | 'deferred' | 'unavailable', breaker: NinProviderBreaker) {
       jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NIN_PROVIDER_MODE: mode } as never);
-      return new NinRegistrationController({} as never, breaker).capabilities();
+      return new NinRegistrationController({} as never, breaker).capabilities({} as HidRequest);
     }
 
     it('reports the NIN service available, and registration without a NIN off', async () => {

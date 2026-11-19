@@ -12,6 +12,13 @@
 --   patient or an unknown NIN; nothing for a member without
 --   identity.registration.write.
 --
+--   SEALED_TENANT_SQL (0098 G6, 0123 G6q and D9): whether the desk's
+--   facility or staff account is a member of the sealed demo or QA tenant,
+--   whose desks make no QoreID call, read through the helpers 0098 and 0123
+--   grant Identity's runtime (it cannot read the members themselves): true
+--   for a demo or QA facility and for a demo or QA account, false for a real
+--   facility and account and for null ids.
+--
 -- Each case records its outcome and the suite fails at the end listing every
 -- case whose outcome differs.
 begin;
@@ -124,6 +131,66 @@ select pg_temp.holder_case('1c an inactive patient is no holder', 'none', pg_tem
 select pg_temp.holder_case('1d an unknown NIN has no holder', 'none', pg_temp.holder_as(1, repeat('c9', 32)));
 select pg_temp.holder_case('1e a member without identity.registration.write reads no holder', 'none',
   pg_temp.holder_as(2, repeat('c1', 32)));
+
+-- The seal read, word for word as NinRegistrationService.sealedTenant sends it: $1 the facility, $2 the account.
+-- Members of the sealed demo (98a5180...) and QA (a1a5180...) tenants, fictional ids; the real ones are this
+-- suite's own clinic and receptionist. Rolled back with the rest.
+insert into identity.sealed_demo_members (member_kind, member_id) values
+  ('facility', '98a51800-0000-4000-8000-000000000002'), ('account', '98a51801-0000-4000-8000-000000000001');
+insert into identity.sealed_qa_members (member_kind, member_id) values
+  ('facility', 'a1a51800-0000-4000-8000-000000000002'), ('account', 'a1a51801-0000-4000-8000-000000000001');
+create function pg_temp.desk_sealed_tenant(uuid, uuid)
+returns boolean
+language sql stable as $$
+  select coalesce(identity.sealed_demo_facility($1::uuid)
+           or identity.sealed_qa_facility($1::uuid)
+           or $2::uuid = any(identity.sealed_demo_ids('account'))
+           or $2::uuid = any(identity.sealed_qa_ids('account')), false) as sealed
+$$;
+-- Runs the seal read as Identity's runtime role in the desk's context; its answer as text, or the SQLSTATE.
+create function pg_temp.sealed_as(facility uuid, account uuid) returns text language plpgsql as $f$
+declare outcome text;
+begin
+  set local role hid_identity_api_runtime;
+  perform set_config('app.actor_subject', 'synthetic:holder-member-1', true),
+    set_config('app.facility_id', coalesce(facility::text, ''), true),
+    set_config('app.correlation_id', 'holder-suite-sealed', true),
+    set_config('app.membership_id', 'a5180300-0000-4000-8000-000000000001', true),
+    set_config('app.purpose_of_use', 'healthcare-operations', true);
+  begin
+    outcome := coalesce(pg_temp.desk_sealed_tenant(facility, account)::text, 'null');
+  exception when others then
+    outcome := sqlstate || ' ' || sqlerrm;
+  end;
+  reset role;
+  return outcome;
+end $f$;
+create function pg_temp.sealed_members_as() returns text language plpgsql as $f$
+declare outcome text;
+begin
+  set local role hid_identity_api_runtime;
+  begin
+    perform count(*) from identity.sealed_demo_members;
+    outcome := 'read';
+  exception when others then
+    outcome := sqlstate || ' ' || sqlerrm;
+  end;
+  reset role;
+  return outcome;
+end $f$;
+select pg_temp.holder_case('2a a real facility and a real account are not sealed', 'false',
+  pg_temp.sealed_as('a5180000-0000-4000-8000-000000000002', 'a5180100-0000-4000-8000-000000000001'));
+select pg_temp.holder_case('2b a sealed demo facility is sealed', 'true',
+  pg_temp.sealed_as('98a51800-0000-4000-8000-000000000002', 'a5180100-0000-4000-8000-000000000001'));
+select pg_temp.holder_case('2c a sealed QA facility is sealed', 'true',
+  pg_temp.sealed_as('a1a51800-0000-4000-8000-000000000002', 'a5180100-0000-4000-8000-000000000001'));
+select pg_temp.holder_case('2d a sealed demo account is sealed, whatever the facility', 'true',
+  pg_temp.sealed_as('a5180000-0000-4000-8000-000000000002', '98a51801-0000-4000-8000-000000000001'));
+select pg_temp.holder_case('2e a sealed QA account is sealed, whatever the facility', 'true',
+  pg_temp.sealed_as('a5180000-0000-4000-8000-000000000002', 'a1a51801-0000-4000-8000-000000000001'));
+select pg_temp.holder_case('2f null ids are not sealed', 'false', pg_temp.sealed_as(null, null));
+select pg_temp.holder_case('2g Identity''s runtime still cannot read the members themselves',
+  '42501 permission denied for table sealed_demo_members', pg_temp.sealed_members_as());
 
 -- Result.
 do $$

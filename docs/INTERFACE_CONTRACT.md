@@ -6432,6 +6432,35 @@ Pausing QoreID NIN checks in the admin console pauses the desk check, app.
 patient enrollment and the patient's own NIN check together (they share the
 `patient_nin` control).
 
+### The sealed demo and QA tenants (0098, 0123)
+
+The seals' signed rules say a demo account "never causes a QoreID call" (0098
+G6), a QA account "consumes no QoreID quota" (0123 G6q) and "facility
+registration needs a QoreID NIN check, refused for QA" (0123 D9). Both seals
+relied on QoreID's quota (`platform.consume_qoreid_quota`) refusing their
+accounts, and the desk's QoreID check takes no quota (Q109). So, after the
+switch check and before anything else is read or sent, Identity asks the seals
+whether the desk's facility or its staff account is a member of the sealed
+demo or QA tenant (`identity.sealed_demo_facility`,
+`identity.sealed_qa_facility`, `identity.sealed_demo_ids('account')` and
+`identity.sealed_qa_ids('account')`, which 0098 and 0123 grant Identity's
+runtime). For a sealed desk NIN checks are off, as they were before Q108:
+
+| The seal | Desk answer | `identity.nin.verify` audit |
+| --- | --- | --- |
+| the facility or the account is the demo's or QA's | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN verification is not configured" | `failure`, `providerCalled: false`, `sealedTenant: true` |
+| it cannot be read | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." (it fails closed) | `failure`, `providerCalled: false` |
+| neither | the check goes on as below | |
+
+Nothing is sent to QoreID, the holder read (a NIN on a Health ID, below) and
+0137's guard and its stored answers are never reached, so a sealed desk can
+neither pay for a check nor compare its details with a real person's stored
+record, and the breaker is not touched. `registration-capabilities` says NIN
+checks are off at such a desk (below). The test provider
+(`NIN_PROVIDER_MODE=test`), which sends nothing anywhere, does not ask the
+seals. Proved on PostgreSQL, as Identity's runtime role, by
+`services/ehr-api/test/database/desk-nin-holder.integration.sql` (2a-2g).
+
 ### The check
 
 Only the NIN is sent (QoreID's NIN-only check). Identity compares the record
@@ -6496,7 +6525,8 @@ Owner Q110: once a NIN is on a Health ID, its checked answer stays with the
 record, and the record is the answer: a NIN already verified on a Health ID
 is never sent to QoreID from the desk, however long ago it was checked (0137's
 stored answer may have ended). Before the NIN service is asked (after the
-switch check, so not while NIN checks are off), Identity reads the active
+switch check and the seals, so not while NIN checks are off or at a sealed
+desk), Identity reads the active
 patient who holds this NIN verified and not revoked. A revoked NIN, or a
 patient who is not active, is not a holder: such a NIN goes to the NIN service
 as any other.
@@ -6704,8 +6734,8 @@ still 1 and the store still holds the same row (`record`, incomplete, the same
 ### `GET /api/v1/identity/registration-capabilities` with QoreID
 
 - QoreID's switch on: `"nin": { "enabled": true, "state": "live", "available": <breaker> }`.
-- QoreID's switch off: `"nin": { "enabled": false, "state": "unavailable", "available": false }` (as today).
-- The switch cannot be read: `"nin": { "enabled": true, "state": "live", "available": false }`.
+- QoreID's switch off, or a desk of the sealed demo or QA tenant: `"nin": { "enabled": false, "state": "unavailable", "available": false }` (as today).
+- The switch or the seal cannot be read: `"nin": { "enabled": true, "state": "live", "available": false }`.
 
 `withoutNin` and `newPatientRegistrationRequiresNin` are unchanged here
 (Release A's lane turns `withoutNin` on).
@@ -6717,7 +6747,10 @@ check; match, case and spacing, no match, name and date-of-birth mismatch,
 bad records, QoreID failures; the switch off, unreadable, and switched off
 during the check, or unreadable just before sending; no request limits (Q109:
 25 checks by one account, and 400 by 40 accounts at one facility, are never
-refused for volume; no hold or count is read or written); a NIN already on a
+refused for volume; no hold or count is read or written); a desk of the
+sealed demo or QA tenant ("not configured" before anything is read or sent,
+"cannot be started" when the seal cannot be read, capabilities off; the seal
+read word for word in the database suite); a NIN already on a
 Health ID (the record is the answer: matched, or "does not match" for other
 details or no date of birth, never the NIN service, even with the breaker
 tripped; evidence that cannot be read; a patient changed before the write;
@@ -6741,7 +6774,8 @@ real desk service and providers, 0137's guard, the real profile check
 QoreID that bills every NIN request (two desks at once; the same request
 twice at once; a resend after "could not be verified"; a corrected name; a
 typo, the corrected request two hours later and another desk and the profile
-30 days later, one charge (D2); a record another check kept 24 hours, matched
+30 days later, one charge (D2); a desk of the sealed demo or QA tenant, no
+charge and 0137's stored answers never reached; a record another check kept 24 hours, matched
 by the desk and reused 45 days later; the keep leaving a stored "no record",
 a running check and an empty store as they were, and failing without changing
 the answer; a
