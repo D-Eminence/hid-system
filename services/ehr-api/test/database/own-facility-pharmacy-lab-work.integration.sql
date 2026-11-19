@@ -62,7 +62,9 @@
 --      outbox), an execution started and completed, a result entered and
 --      corrected, checked by L3 and released by LS; each row reads back for
 --      LS and stays hidden from the nurse and from F2's lab scientist; none
---      of these writes reaches R1's chain (routed);
+--      of these writes reaches R1's chain (routed); the inserts the services
+--      make with RETURNING (an accession, a dispensing, a reversal) answer
+--      their row;
 --   7c. the deny directive, scope by scope (D1, as consent's own test): the
 --      facility (this one or another), the organization (this one or
 --      another), the staff member (the pharmacist, not the lab scientist),
@@ -1078,6 +1080,44 @@ select pg_temp.as_member(11, 1);
 select pg_temp.expect('L2 (lab at F2) in a session at F1 reads none of it', pg_temp.lab_chain_written(),
   'requirements=0 specimens= specimen_events=0 commands=0 executions= execution_events=0 results= '
   || 'revisions=0 result_events=0 verifications=0 releases=0');
+reset role;
+-- The services' inserts that answer the new row (RETURNING, so the row must
+-- also pass the read policies): LS's accession of a new own lab item W4,
+-- PH's dispensing of rx2 and its reversal, exactly as lab-api and
+-- pharmacy-api write them.
+set local session_replication_role = replica;
+insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_order_id,
+  source_ehr_order_version, source_encounter_id, status, priority, test_code_system, test_code, test_name,
+  requested_by, requested_at, accepted_by, accepted_by_membership_id, idempotency_key, request_sha256, correlation_id)
+values ('e133000a-0000-4000-8000-000000000004', 'e1330006-0000-4000-8000-000000000001',
+  'e1330001-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', gen_random_uuid(), 1,
+  gen_random_uuid(), 'accepted', 'routine', 'http://loinc.org', '2160-0', 'Creatinine',
+  'e1330002-0000-4000-8000-000000000001', clock_timestamp(), 'e1330002-0000-4000-8000-000000000001',
+  'e1330004-0000-4000-8000-000000000001', 'own-work-lab-item-4-key', repeat('b', 64), 'own-work-suite-lab-4');
+set local session_replication_role = origin;
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(3);
+select pg_temp.expect('LS accessions W4 with lab-api''s statement, answering the row',
+  pg_temp.changed($i$insert into lab.accessions(work_item_id,patient_id,facility_id,priority,created_by,
+    created_by_membership_id,idempotency_key,request_sha256,correlation_id)
+    values('e133000a-0000-4000-8000-000000000004','e1330006-0000-4000-8000-000000000001',
+    'e1330001-0000-4000-8000-000000000001','routine','e1330002-0000-4000-8000-000000000003',
+    'e1330004-0000-4000-8000-000000000003','own-work-accession-0004',repeat('c',64),current_setting('app.correlation_id'))
+    returning id::text,accession_number,work_item_id::text,patient_id::text,facility_id::text,status,priority,
+    row_version::text,created_at,request_sha256$i$), 'rows=1');
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select pg_temp.expect('PH dispenses rx2 with pharmacy-api''s statement, answering the row',
+  pg_temp.changed(pg_temp.dispense_sql(pg_temp.work_item_of(pg_temp.rx(2)), 2) || ' returning *'), 'rows=1');
+select pg_temp.expect('PH reverses it with pharmacy-api''s statement, answering the row',
+  (select pg_temp.changed(format($i$insert into pharmacy.dispensing_reversals (
+        id,dispensing_id,dispensing_version,work_item_id,patient_id,facility_id,reversed_by,
+        reversed_by_membership_id,reason,idempotency_key,request_sha256,correlation_id
+      ) values (%L,%L,1,%L,%L,%L,'e1330002-0000-4000-8000-000000000002','e1330004-0000-4000-8000-000000000002',
+        'Dispensed to the wrong patient','own-work-reverse-0002',repeat('e',64),current_setting('app.correlation_id'))
+      returning *$i$, gen_random_uuid(), d.id, d.work_item_id, d.patient_id, d.facility_id))
+     from pharmacy.dispensings d where d.work_item_id = pg_temp.work_item_of(pg_temp.rx(2))), 'rows=1');
 reset role;
 
 -- 7c. The deny directive, scope by scope. One directive for Ada at a time,
