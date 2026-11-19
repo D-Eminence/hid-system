@@ -6994,6 +6994,18 @@ written before the hospital had pharmacy staff; the answer then says which.
 On the pharmacy list, show a withdrawn item as "Withdrawn by the prescriber"
 with Dispense disabled.
 
+Runtime proof: `services/ehr-api/scripts/verify-own-facility-work-runtime.mjs`
+(run by the TUF staging rehearsal, as `own_facility_work_runtime`) boots
+Identity, EHR, Lab and Pharmacy from their own code as their exact runtime
+roles: a doctor's active prescription and an activated draft are sent by
+themselves; a pharmacist and a lab scientist the patient never approved list,
+read, dispense and accession the hospital's own work, each row naming the
+patient with `basis: own-work` (the execution reads included); a hold marks
+the item withdrawn and Dispense answers 409; an edit answers the "earlier
+version" row and `ownProgress` reads `withdrawn`; neither reads the chart and
+the patient's access log shows both. The order-route, own-work card and
+prescription details verifiers assert the same rules.
+
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 
 Owner decision Q102 of 18 November 2026. No new login, address or password:

@@ -434,6 +434,13 @@ try {
   // whatever its reader does, so only this proves the reader answers).
   evidence.checks.prescription_details_runtime = JSON.parse(command('exact-role prescription details on own pharmacy work',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-prescription-details-runtime.mjs')], workflowEnvironment));
+  // 0133: this facility's own pharmacy and lab work and the automatic send to the hospital's own pharmacy, through
+  // ehr-api, pharmacy-api and lab-api: the doctor's activation sends, the pharmacist and the lab scientist without a
+  // grant work on it (every row, execution reads included, names the patient with basis own-work), a hold or an edit
+  // withdraws the send and the prescriber is told, and neither reads the chart (the services fall back to Identity's
+  // consent whatever 0133's check does, so only this proves the check answers).
+  evidence.checks.own_facility_work_runtime = JSON.parse(command('exact-role own facility pharmacy and lab work',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-own-facility-work-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
