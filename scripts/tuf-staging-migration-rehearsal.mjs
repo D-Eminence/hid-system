@@ -44,6 +44,7 @@ const evidence = {
 };
 let pgBindir;
 let started = false;
+const liveFailures = [];
 
 function command(label, executable, commandArgs, extraEnvironment = {}, expected = 0) {
   const result = spawnSync(executable, commandArgs, {
@@ -485,6 +486,8 @@ try {
   // each point, on a copy of that database, and the live tree's own runtime verifiers (those its rehearsal runs)
   // boot the live code as its exact runtime roles. Dependencies the live tree lacks are this checkout's.
   const liveTree = process.env.HID_REHEARSAL_LIVE_TREE;
+  // Each live verifier's result is recorded and the rehearsal goes on; any live failure fails it at the end.
+  liveFailures.length = 0;
   if (!liveTree) {
     evidence.checks.live_images_mid_release = { skipped: 'HID_REHEARSAL_LIVE_TREE not set' };
   } else {
@@ -565,8 +568,16 @@ try {
         await rename(db, database);
         try {
           for (const verifier of liveVerifiers) {
-            verified[basename(verifier, '.mjs')] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
-              process.execPath, [await liveScript(verifier)], liveEnvironment)).status ?? 'passed';
+            const name = basename(verifier, '.mjs');
+            try {
+              verified[name] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
+                process.execPath, [await liveScript(verifier)], liveEnvironment)).status ?? 'passed';
+            } catch (error) {
+              const message = String(error?.message ?? error).split('\n').find((line) => /Assertion|Error/.test(line))
+                ?? String(error?.message ?? error).slice(0, 300);
+              verified[name] = `failed: ${message.slice(0, 400)}`;
+              liveFailures.push(`${name} after ${last}: ${message.slice(0, 400)}`);
+            }
           }
         } finally {
           await rename(database, db);
@@ -918,6 +929,8 @@ try {
       clinician_exact_facility_doctor_role: true, clinical_grants_and_sessions_absent: true,
       pending_patient_runtime_access_denied: true, live_staging_import: false };
   });
+  assert.equal(liveFailures.length, 0,
+    `Today's live images failed a runtime verifier on the schema left mid-release:\n${liveFailures.join('\n')}`);
   evidence.status = 'passed';
 } catch (error) {
   evidence.failure = error instanceof Error ? error.message : String(error);
