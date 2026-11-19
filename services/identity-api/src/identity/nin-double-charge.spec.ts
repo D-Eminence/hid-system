@@ -474,25 +474,107 @@ describe('the same NIN is sent to QoreID once', () => {
       expect([...s.db.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'record' });
     });
 
-    it('a complete answer HID cannot use is kept for a day: never re-sent, every path refuses it without a call', async () => {
+    it('a NIN-only record without a recognised sex is kept 90 days as an incomplete record: every path reuses it, a sign-up refuses it from storage', async () => {
       const s = system();
       s.qoreId.state.modes = ['no_gender'];
+      const before = Date.now();
       await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
-      s.db.store.clock.offsetMs = NIN_CHECK_HOLD_SECONDS * 1000 + 1000;
+      const row = { ...[...s.db.store.rows.values()][0]! };
+      expect(row).toMatchObject({ state: 'answered', outcome: 'record', record_complete: false,
+        record_source: 'nin_only' });
+      expect(row.until - before).toBeGreaterThanOrEqual(NIN_RECORD_ANSWER_SECONDS * 1000);
+      s.db.store.clock.offsetMs = NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 1000;
       await expect(s.start(KEY_B)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
       await expect(s.provider.verifyNin(NIN, { correlationId: 'desk-check', path: 'desk' }))
         .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
-      // The name and date of birth on it still serve a profile check.
+      // A NIN-only check that takes any record (the desk's) gets it.
+      await expect(s.ninCheck.check({ nin: NIN, correlationId: 'desk-any-record', path: 'desk',
+        needsCompleteRecord: false, ask: async () => { throw new Error('QoreID must not be asked'); } }))
+        .resolves.toMatchObject({ source: 'stored', answer: { outcome: 'record', record: { complete: false } } });
+      // The name and date of birth on it serve a profile check.
       await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
       expect(s.qoreId.state.charged).toBe(1);
-      expect([...s.db.store.rows.values()][0]).toMatchObject({ state: 'answered', outcome: 'unusable' });
-      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'unusable'], ['enrollment', 'stored', 'unusable'],
-        ['desk', 'stored', 'unusable'], ['profile', 'stored', 'unusable']]);
-      s.db.store.clock.offsetMs = NIN_NO_RECORD_ANSWER_SECONDS * 1000 + 1000;
+      expect([...s.db.store.rows.values()][0]).toEqual(row);
+      expect(s.checkAudits()).toEqual([['enrollment', 'qoreid', 'record_incomplete'], ['enrollment', 'stored', 'record'],
+        ['desk', 'stored', 'record'], ['desk', 'stored', 'record'], ['profile', 'stored', 'record']]);
+      s.db.store.clock.offsetMs = NIN_RECORD_ANSWER_SECONDS * 1000 + 1000;
       s.db.enrollments.length = 0;
       s.db.bound.clear();
       await expect(s.start(KEY_C)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
       expect(s.qoreId.state.charged).toBe(2);
+    });
+
+    it('For #276 (1): a sign-up after a NIN-only check kept an incomplete record pays nothing and leaves the row as it was', async () => {
+      const s = system();
+      // The desk's NIN-only check (any record will do, as #279's desk asks it): one charge, the incomplete record
+      // kept 90 days.
+      await expect(s.ninCheck.check({ nin: NIN, correlationId: 'desk-first', path: 'desk', needsCompleteRecord: false,
+        ask: async () => {
+          s.qoreId.state.charged += 1;
+          return { answer: { outcome: 'record' as const, providerReference: '7001', record: { complete: false as const,
+            binding: { nin: NIN, firstName: 'Adaeze', lastName: 'Fictional', dateOfBirth: '1990-03-02' } } },
+          value: undefined };
+        } })).resolves.toMatchObject({ source: 'qoreid' });
+      const row = { ...[...s.db.store.rows.values()][0]! };
+      expect(row).toMatchObject({ outcome: 'record', record_complete: false, record_source: 'nin_only' });
+      await expect(s.provider.verifyNin(NIN, { correlationId: 'signup', path: 'enrollment' }))
+        .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect([...s.db.store.rows.values()][0]).toEqual(row);
+    });
+
+    it('For #276 (1): an incomplete record a profile check kept is taken over by a sign-up, which keeps the NIN-only answer', async () => {
+      const s = system();
+      const before = Date.now();
+      s.db.store.rows.set(s.lookup, { nin_lookup_hmac: s.lookup, state: 'answered',
+        attempt_id: 'a7000000-0000-4000-8000-0000000000fe', question_hmac: null, outcome: 'record',
+        record_complete: false, record_source: 'profile', answer_ciphertext: Buffer.alloc(40, 1),
+        key_version: 'local-v1', until: Date.now() + 86_400_000 });
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(1);
+      const row = [...s.db.store.rows.values()][0]!;
+      expect(row).toMatchObject({ outcome: 'record', record_complete: true, record_source: 'nin_only' });
+      expect(row.until - before).toBeGreaterThanOrEqual(NIN_RECORD_ANSWER_SECONDS * 1000);
+    });
+
+    it('For #276 (2): QoreID\'s "not found" for a profile check answers a sign-up and the desk from storage', async () => {
+      const s = system();
+      s.qoreId.state.fallback = 'not_found';
+      await expect(s.verifyProfile('1990-03-02')).rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
+      expect([...s.db.store.rows.values()][0]).toMatchObject({ outcome: 'rejected', question_hmac: null });
+      await expect(s.start(KEY_A)).rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
+      await expect(s.provider.verifyNin(NIN, { correlationId: 'desk-check', path: 'desk' }))
+        .rejects.toMatchObject({ code: 'QOREID_PROVIDER_REJECTED' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.checkAudits()).toEqual([['profile', 'qoreid', 'rejected'], ['enrollment', 'stored', 'rejected'],
+        ['desk', 'stored', 'rejected']]);
+    });
+
+    it('a profile check\'s "no record" stays bound to the details it sent: a NIN-only check asks again', async () => {
+      const s = system();
+      s.qoreId.state.modes = ['no_record'];
+      await expect(s.verifyProfile('1990-03-02')).rejects.toBeDefined();
+      await expect(s.start(KEY_A)).resolves.toMatchObject({ progress: { stage: 'verify_contact' } });
+      expect(s.qoreId.state.charged).toBe(2);
+    });
+
+    it('Q110: a matched record is kept 90 days from the match, its answer and source unchanged (keep_qoreid_nin_record)', async () => {
+      const s = system();
+      await expect(s.ninCheck.keepRecord(NIN, 'keep-nothing')).resolves.toBe(false);
+      // A profile check that did not match keeps the record 24 hours.
+      await expect(s.verifyProfile('1990-02-03')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
+      const first = { ...[...s.db.store.rows.values()][0]! };
+      expect(first).toMatchObject({ outcome: 'record', record_source: 'profile' });
+      s.db.store.clock.offsetMs = 60 * 60 * 1000;
+      await expect(s.ninCheck.keepRecord(NIN, 'keep-matched')).resolves.toBe(true);
+      const kept = [...s.db.store.rows.values()][0]!;
+      expect(kept.until - first.until).toBeGreaterThan((NIN_RECORD_ANSWER_SECONDS - NIN_NO_RECORD_ANSWER_SECONDS) * 1000);
+      expect(kept).toMatchObject({ outcome: first.outcome, record_complete: first.record_complete,
+        record_source: 'profile', answer_ciphertext: first.answer_ciphertext, key_version: first.key_version });
+      // 45 days later the record still answers, with no charge.
+      s.db.store.clock.offsetMs = 45 * 86_400_000;
+      await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
+      expect(s.qoreId.state.charged).toBe(1);
     });
 
     it('a verified profile answer without a usable QoreID id is kept as unusable, never as a details mismatch', async () => {
@@ -576,7 +658,7 @@ describe('the same NIN is sent to QoreID once', () => {
       // A lease another task holds (as after a crash or a very slow answer).
       s.db.store.rows.set(s.lookup, { nin_lookup_hmac: s.lookup, state: 'checking',
         attempt_id: 'a7000000-0000-4000-8000-0000000000ff', question_hmac: null, outcome: null, record_complete: null,
-        answer_ciphertext: null, key_version: null, until: Date.now() + 60_000 });
+        record_source: null, answer_ciphertext: null, key_version: null, until: Date.now() + 60_000 });
       await expect(s.start(KEY_A)).rejects.toMatchObject({ status: 409, code: 'NIN_CHECK_IN_PROGRESS' });
       expect(s.qoreId.state.charged).toBe(0);
       expect(s.checkAudits()).toEqual([['enrollment', 'none', 'in_progress']]);

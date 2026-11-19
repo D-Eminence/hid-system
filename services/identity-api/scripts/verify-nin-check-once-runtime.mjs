@@ -124,6 +124,21 @@ try {
   assert.equal(rows.filter((row) => row.state === 'answered' && row.outcome === 'record').length, 8);
   results.push('stored: 8 encrypted records and 1 hold, keyed by lookup HMAC only');
 
+  // 5b. Q110: the keep of a matched record, through the runtime role: kept 90 days from now (a record first kept a
+  // day here), its answer and source unchanged; nothing for a held NIN.
+  await admin.query(`update identity.qoreid_nin_checks set until = clock_timestamp() + interval '1 day'
+                      where nin_lookup_hmac = $1`, [lookups[5]]);
+  const before = (await admin.query(`select answer_ciphertext, record_source from identity.qoreid_nin_checks
+                                       where nin_lookup_hmac = $1`, [lookups[5]])).rows[0];
+  assert.equal(before.record_source, 'nin_only');
+  assert.equal(await tasks[1].check.keepRecord(nins[5], `${run}-keep`), true);
+  assert.equal(await tasks[1].check.keepRecord(nins[7], `${run}-keep-held`), false);
+  const after = (await admin.query(`select answer_ciphertext, record_source,
+                                           until > clock_timestamp() + interval '89 days 23 hours' as kept
+                                      from identity.qoreid_nin_checks where nin_lookup_hmac = $1`, [lookups[5]])).rows[0];
+  assert(after.kept && after.record_source === 'nin_only' && after.answer_ciphertext.equals(before.answer_ciphertext));
+  results.push('keep: a matched record kept 90 days from now, unchanged; a held NIN not kept');
+
   // 6. The audit: one row per attempt, QoreID called or not, without NIN or lookup HMAC.
   const audits = (await admin.query(
     `select details from audit.events where action = 'identity.qoreid.nin-check'
