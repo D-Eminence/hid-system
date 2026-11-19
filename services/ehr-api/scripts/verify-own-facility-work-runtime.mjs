@@ -30,13 +30,19 @@
 // reason); the pharmacist without a grant lists them (one list audit row
 // naming the patient, basis own-work, ids only), reads one and dispenses it
 // (rows with basis own-work); a hold withdraws the other (the list marks it
-// withdrawn and dispensing it answers 409); an edit of a third answers the
-// "earlier version" hand-off (reason superseded), its ownProgress reads
-// withdrawn and "Send to pharmacy" answers the same row; an edit of the
-// dispensed one answers no hand-off, "Send to pharmacy" then answers that the
-// pharmacy already has it (not the earlier-version row), its item is not
-// marked withdrawn and its ownProgress stays dispensed; the list carries
-// ownPharmacyStaffed;
+// withdrawn, withdrawnReason changed, and dispensing it answers 409); an edit
+// of a third answers the "earlier version" hand-off (reason superseded), its
+// ownProgress reads withdrawn and "Send to pharmacy" answers the same row; an
+// edit of the dispensed one answers no hand-off, "Send to pharmacy" then
+// answers that the pharmacy already has it (not the earlier-version row), its
+// item is not marked withdrawn and its ownProgress stays dispensed; a fourth,
+// sent and still open, lists first, and the two withdrawn items list with the
+// done work, newest first (0133 D14: they can never be dispensed); the list
+// carries ownPharmacyStaffed;
+// the lab runtime, asking the row's half directly in the lab scientist's
+// session, is told false for the patient, who has own pharmacy work there but
+// no own lab work yet (D15, owner's Q122 A), and true once the lab request is
+// the hospital's Lab's; it may not ask the pharmacy body at all (42501);
 // the lab scientist without a grant lists,
 // reads and accessions the doctor's lab request handed to the hospital's
 // Lab, takes and receives the sample, starts the test and reads the execution
@@ -247,13 +253,17 @@ const evidence = { migration: '0133', setting: { OWN_WORK_PATIENT_CARD_ENABLED }
 const startedAt = Date.now();
 let failure;
 try {
-  // The database holds 0133 (its functions' grants are what this run proves over HTTP, not read here).
+  // The database holds 0133 (its functions' grants are what this run proves over HTTP, not read here), with
+  // D14's reader and D1's row's half split by kind.
   const functions = await all(`select proc.oid::regprocedure::text as name from pg_proc proc
     where (proc.pronamespace, proc.proname) in (('ehr'::regnamespace, 'send_prescription_to_own_pharmacy'),
-      ('pharmacy'::regnamespace, 'own_work_access_for'), ('lab'::regnamespace, 'own_work_access_for'))
-    order by 1`);
-  assert.deepEqual(functions.map(row => row.name), ['ehr.send_prescription_to_own_pharmacy(uuid,bigint)',
-    'lab.own_work_access_for(text,uuid,text)', 'pharmacy.own_work_access_for(text,uuid,text)'], 'a database with 0133');
+      ('pharmacy'::regnamespace, 'own_work_access_for'), ('lab'::regnamespace, 'own_work_access_for'),
+      ('pharmacy'::regnamespace, 'own_withdrawn_work_items'), ('identity'::regnamespace, 'lab_work_patient_allows'),
+      ('identity'::regnamespace, 'pharmacy_work_patient_allows'))`);
+  assert.deepEqual(functions.map(row => row.name).sort(), ['ehr.send_prescription_to_own_pharmacy(uuid,bigint)',
+    'identity.lab_work_patient_allows(uuid,uuid,uuid,text)', 'identity.pharmacy_work_patient_allows(uuid,uuid,uuid,text)',
+    'lab.own_work_access_for(text,uuid,text)', 'pharmacy.own_withdrawn_work_items()',
+    'pharmacy.own_work_access_for(text,uuid,text)'].sort(), 'a database with 0133');
   evidence.database = { functions: functions.map(row => row.name) };
   await new Promise(done => stub.listen(0, '127.0.0.1', done));
   const stubUrl = `http://127.0.0.1:${stub.address().port}`;
@@ -456,19 +466,23 @@ try {
   assert.deepEqual(sentItems.map(row => [row.rx, row.accepted_by, row.acceptance_reason, row.order_route_id]),
     [rx1, rx2, rx3].map(rx => [rx.id, doctor.accountId, 'Sent automatically when the prescription was activated', null]),
     `the work items the sends wrote: ${JSON.stringify(sentItems)}`);
+  // A fourth, sent and left open: it lists before the withdrawn items below, which count as done work.
+  const rx4 = await newPrescription('active', 'Synthetic atorvastatin 20 mg tablet');
+  assert.deepEqual(rx4.pharmacyHandoff, SENT, `rx4's hand-off: ${JSON.stringify(rx4.pharmacyHandoff)}`);
   evidence.send = { createdActive: 'sent', activatedDraft: 'sent', draft: 'no hand-off',
     workItems: { acceptedBy: 'the prescriber', reason: 'fixed', route: 'none' } };
-  step('the doctor\'s active prescription, and a draft when activated, went to the hospital\'s own pharmacy by themselves');
+  step('the doctor\'s active prescriptions, and a draft when activated, went to the hospital\'s own pharmacy by themselves');
 
   // ── The pharmacist without a grant ──
   const auditRows = (who, action) => all(`select patient_id::text, resource_id::text, details from audit.events
     where actor_account_id = $1 and action = $2 order by sequence_id`, [who.accountId, action]);
   const rxList = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the pharmacist\'s list');
   const itemOf = rx => rxList.items.find(item => item.sourceEhrPrescriptionId === rx.id);
-  const [item1, item2, item3] = [rx1, rx2, rx3].map(itemOf);
-  assert(item1 && item2 && item3, `the pharmacist's list: ${JSON.stringify(rxList.items.map(item => item.sourceEhrPrescriptionId))}`);
-  assert.deepEqual([item1, item2, item3].map(item => [item.orderRoute, item.withdrawn, item.patientId]),
-    [[undefined, undefined, patient.id], [undefined, undefined, patient.id], [undefined, undefined, patient.id]]);
+  const [item1, item2, item3, item4] = [rx1, rx2, rx3, rx4].map(itemOf);
+  assert(item1 && item2 && item3 && item4,
+    `the pharmacist's list: ${JSON.stringify(rxList.items.map(item => item.sourceEhrPrescriptionId))}`);
+  assert.deepEqual([item1, item2, item3, item4].map(item => [item.orderRoute, item.withdrawn, item.withdrawnReason,
+    item.patientId]), [item1, item2, item3, item4].map(() => [undefined, undefined, undefined, patient.id]));
   const rxListAudit = await auditRows(ownPharmacist, 'pharmacy.work-item.list');
   const ownRows = rxList.items.filter(item => item.orderRoute === undefined).map(item => item.id);
   assert.deepEqual(rxListAudit.filter(row => row.patient_id).map(row => [row.patient_id, row.details]),
@@ -492,7 +506,9 @@ try {
   'hold rx2');
   assert.equal(held.pharmacyHandoff, undefined, 'a hold answers no hand-off');
   const afterHold = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the list after the hold');
-  assert.equal(afterHold.items.find(item => item.id === item2.id)?.withdrawn, true, 'the held prescription\'s item is withdrawn');
+  const heldItem = afterHold.items.find(item => item.id === item2.id);
+  assert.deepEqual([heldItem?.withdrawn, heldItem?.withdrawnReason], [true, 'changed'],
+    `the held prescription's item is withdrawn as changed: ${JSON.stringify(heldItem)}`);
   const refused = await pharmacyCall(ownPharmacist, 'POST', `/work-items/${item2.id}/dispensings`,
     { expectedWorkItemVersion: Number(item2.version), quantityDispensed: 30, quantityUnit: 'tablet',
       reason: 'Synthetic dispensing after a hold' }, { key: freshKey('dispense') });
@@ -516,14 +532,24 @@ try {
   assert.deepEqual(sendAfterDispensing.pharmacyHandoff, ALREADY,
     `Send to pharmacy after the dispensing: ${JSON.stringify(sendAfterDispensing.pharmacyHandoff)}`);
   const afterEdits = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the list after the edits');
-  assert.deepEqual([item1, item2, item3].map(item => afterEdits.items.find(row => row.id === item.id)?.withdrawn),
-    [undefined, true, true], 'withdrawn on the list: the held and the edited items, never the dispensed one');
+  assert.deepEqual([item1, item2, item3, item4].map(item => {
+    const row = afterEdits.items.find(entry => entry.id === item.id);
+    return [row?.withdrawn, row?.withdrawnReason];
+  }), [[undefined, undefined], [true, 'changed'], [true, 'changed'], [undefined, undefined]],
+  'withdrawn on the list (changed): the held and the edited items, never the dispensed or the open one');
+  // 0133 D14: open work first (rx4's item); a withdrawn item can never be dispensed, so it lists with the done
+  // work, newest first, beside the dispensed one: item3, item2, item1 by acceptance.
+  const ownOrder = afterEdits.items.filter(item => item.orderRoute === undefined).map(item => item.id);
+  assert.deepEqual(ownOrder, [item4.id, item3.id, item2.id, item1.id],
+    `the list's order: ${JSON.stringify(afterEdits.items.map(item => [item.id, item.withdrawnReason ?? null,
+      item.dispensing ? 'dispensed' : 'open']))}`);
   // ORD-3 through ehr-api, the doctor's cookie only: dispensed (also after its edit), withdrawn (held and edited);
   // and the list's ownPharmacyStaffed (the hospital has a pharmacist).
   const progressList = expectStatus(await http(ehr, 'GET', `/ehr/patients/${patient.id}${enc}/prescriptions`,
     { cookie: doctor.cookie, facility: hospital.facilityId, purpose: 'direct-care' }), 200, 'the doctor\'s prescriptions');
   const progressOf = rx => progressList.items.find(item => item.id === rx.id)?.ownProgress?.status;
-  assert.deepEqual([progressOf(rx1), progressOf(rx2), progressOf(rx3)], ['dispensed', 'withdrawn', 'withdrawn'],
+  assert.deepEqual([progressOf(rx1), progressOf(rx2), progressOf(rx3), progressOf(rx4)],
+    ['dispensed', 'withdrawn', 'withdrawn', 'received'],
     `ownProgress: ${JSON.stringify(progressList.items.map(item => [item.id, item.ownProgress]))}`);
   assert(progressList.items.length > 0 && progressList.items.every(item => item.ownPharmacyStaffed === true),
     `ownPharmacyStaffed: ${JSON.stringify(progressList.items.map(item => [item.id, item.ownPharmacyStaffed]))}`);
@@ -531,14 +557,48 @@ try {
       withdrawn_at is not null as withdrawn from pharmacy.own_prescription_sends where patient_id = $1
     order by created_at`, [patient.id]);
   assert.deepEqual(sends.map(row => [row.rx, row.state, row.withdrawn]),
-    [[rx1.id, 'sent', true], [rx2.id, 'sent', true], [rx3.id, 'sent', true]], `the sends: ${JSON.stringify(sends)}`);
-  evidence.afterTheSend = { hold: { handoff: 'none', list: 'withdrawn', dispense: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
+    [[rx1.id, 'sent', true], [rx2.id, 'sent', true], [rx3.id, 'sent', true], [rx4.id, 'sent', false]],
+    `the sends: ${JSON.stringify(sends)}`);
+  evidence.afterTheSend = { hold: { handoff: 'none', list: 'withdrawn (changed)',
+    dispense: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
     edit: { handoff: 'earlier version (superseded)', sendToPharmacy: 'earlier version (superseded)' },
     editAfterDispensing: { handoff: 'none', sendToPharmacy: 'already has it', list: 'not withdrawn', ownProgress: 'dispensed',
       send: 'change recorded' },
-    ownProgress: { dispensed: 'dispensed', held: 'withdrawn', edited: 'withdrawn' }, ownPharmacyStaffed: true };
+    listOrder: 'the open item first, then the withdrawn and dispensed ones, newest first',
+    ownProgress: { dispensed: 'dispensed', held: 'withdrawn', edited: 'withdrawn', open: 'received' },
+    ownPharmacyStaffed: true };
   step('a hold withdraws the send (Dispense refused); an edit answers the earlier-version hand-off; ownProgress reads '
-    + 'withdrawn; an edit after the dispensing reports nothing');
+    + 'withdrawn; withdrawn items list with the done work, after the open one; an edit after the dispensing reports nothing');
+
+  // ── The row's half, asked directly by the lab runtime (0133 D1 with D15, owner's Q122 A) ──
+  // In the lab scientist's own session, as lab-api's role. The patient has own pharmacy work here and no own lab
+  // work yet, so the lab body answers false; the pharmacy body is the pharmacy runtime's alone (42501), so the lab
+  // runtime cannot learn whether the patient has pharmacy work here.
+  const scientistSession = await one(`select membership.id::text as membership_id, account.subject
+      from identity.staff_facility_memberships membership join auth.accounts account on account.id = membership.account_id
+     where membership.account_id = $1 and membership.facility_id = $2`, [ownScientist.accountId, hospital.facilityId]);
+  const askAsLabRuntime = async kind => {
+    const client = new Client({ connectionString: databaseUrl('hid_lab_api_runtime') });
+    await client.connect();
+    try {
+      await client.query('begin');
+      await client.query(`select set_config('app.actor_subject', $1, true), set_config('app.facility_id', $2, true),
+          set_config('app.membership_id', $3, true), set_config('app.purpose_of_use', 'direct-care', true),
+          set_config('app.correlation_id', 'own-facility-work-verifier', true), set_config('app.own_facility_work', '0133', true)`,
+      [scientistSession.subject, hospital.facilityId, scientistSession.membership_id]);
+      const answer = await client.query(`select identity.${kind}_work_patient_allows($1::uuid, $2::uuid, $3::uuid,
+          'read_records') as allowed`, [scientistSession.membership_id, patient.id, hospital.facilityId]);
+      return answer.rows[0].allowed;
+    } catch (error) {
+      return `refused ${error.code}`;
+    } finally {
+      await client.query('rollback').catch(() => {});
+      await client.end();
+    }
+  };
+  const rowHalf = { labBeforeLabWork: await askAsLabRuntime('lab'), pharmacyBody: await askAsLabRuntime('pharmacy') };
+  assert.deepEqual(rowHalf, { labBeforeLabWork: false, pharmacyBody: 'refused 42501' },
+    `the row's half asked by the lab runtime: ${JSON.stringify(rowHalf)}`);
 
   // ── The lab scientist without a grant ──
   const labRequest = expectStatus(await ehrCall(doctor, 'POST', `${enc}/lab-requests`,
@@ -551,6 +611,10 @@ try {
   assert(labItem, `the hand-off to the hospital's Lab: ${JSON.stringify({ labWorkItem: labRequest.labWorkItem,
     labHandoff: labRequest.labHandoff })}`);
   assert.equal(labItem.orderRoute, undefined);
+  // The same direct question, now that the patient has own lab work here: true (the session above was right).
+  rowHalf.labWithLabWork = await askAsLabRuntime('lab');
+  assert.equal(rowHalf.labWithLabWork, true, `the row's half once the patient has own lab work: ${JSON.stringify(rowHalf)}`);
+  evidence.rowHalf = { lab: { noOwnLabWork: false, ownLabWork: true }, pharmacyBodyAsLabRuntime: '42501' };
   expectStatus(await labCall(ownScientist, 'GET', `/work-items/${labItem.id}`), 200, 'read the lab work item');
   const accession = expectStatus(await labCall(ownScientist, 'POST', `/work-items/${labItem.id}/accession`,
     { requirements: [{ specimenType: 'blood' }], reason: 'Synthetic own-work accession' }, { key: freshKey('accession') }),
