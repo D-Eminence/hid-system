@@ -26,6 +26,8 @@ import { PatientEvidenceService } from './patient-records/patient-evidence.servi
 import { PatientAttachmentTextService } from './patient-records/patient-attachment-text.service';
 import { HealthProfileController } from './health-profile/health-profile.controller';
 import { HealthProfileService } from './health-profile/health-profile.service';
+// EHR-C5: one-call consultation.
+import { ConsultationsModule } from './consultation/consultations.module';
 // EHR-C7 (0135): the waiting list.
 import { VisitQueueModule } from './worklist/visit-queue.module';
 
@@ -42,6 +44,7 @@ import { VisitQueueModule } from './worklist/visit-queue.module';
     PrescriptionsModule,
     LabRequestsModule,
     OrderRoutesModule,
+    ConsultationsModule,
     // EHR-C7 (0135): the waiting list.
     VisitQueueModule,
   ],
