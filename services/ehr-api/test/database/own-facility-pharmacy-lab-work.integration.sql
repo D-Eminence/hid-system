@@ -1567,6 +1567,24 @@ begin
   return coalesce(array_to_string(array(select x from unnest(seen) x order by x), ' '), '');
 end $f$;
 grant execute on function pg_temp.switch_after_first(text, text, text) to public;
+-- The fixtures are in place, so no probe below passes for want of its hidden
+-- row.
+select pg_temp.expect('7g fixtures: Bisi''s lab item and accession, the three Pharmacy copies and their two events',
+  format('%s %s %s %s', (select count(*) from lab.work_items where id = 'e133000a-0000-4000-8000-0000000000c1'),
+    (select count(*) from lab.accessions where id = 'e133000b-0000-4000-8000-0000000000c1'),
+    (select count(*) from pharmacy.work_items where id in ('e133000d-0000-4000-8000-000000000001',
+       'e133000d-0000-4000-8000-000000000002', 'e133000d-0000-4000-8000-0000000000c1')),
+    (select count(*) from pharmacy.work_item_events where id in ('e133000e-0000-4000-8000-000000000001',
+       'e133000e-0000-4000-8000-0000000000c1'))), '1 1 3 2');
+-- Every switch probe reads its rows by one index scan, in id order (no
+-- sequential or bitmap scan, so no sort before the first fetch and no
+-- hashed path built before the switch, whatever the statistics or
+-- cursor_tuple_fraction), so the row fetched first is decided before the
+-- switch and the hidden row after it. (A UNION ALL of one scan per row
+-- would prove nothing: each scan asks the session's half on its own, after
+-- the switch.) Undone after the last probe.
+set local enable_seqscan = off;
+set local enable_bitmapscan = off;
 set local role hid_lab_api_runtime;
 select pg_temp.as_member(3);
 select pg_temp.expect('7g LS''s own lab items in its own session (Bisi''s hidden by her deny directive, F2''s not F1''s)',
@@ -1657,6 +1675,15 @@ select pg_temp.expect('7g LS with a disabled account: the row''s half false',
     'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')::text, 'false');
 reset role;
 rollback to savepoint own_work_invalid_member;
+update auth.accounts set disabled_until = clock_timestamp() + interval '1 day'
+ where id = 'e1330002-0000-4000-8000-000000000003';
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(3);
+select pg_temp.expect('7g LS''s account disabled until tomorrow (its status active): the row''s half false',
+  identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+    'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')::text, 'false');
+reset role;
+rollback to savepoint own_work_invalid_member;
 set local session_replication_role = replica;
 update identity.staff_facility_memberships set migration_hold_reason = 'own-work-suite'
  where id = 'e1330004-0000-4000-8000-000000000003';
@@ -1694,12 +1721,6 @@ select pg_temp.expect('7g PH, a cursor fetched, then app.facility_id changed to 
     where id in ('e133000d-0000-4000-8000-000000000001', 'e133000d-0000-4000-8000-000000000002') order by id$q$,
     'app.facility_id', 'e1330001-0000-4000-8000-000000000002'), '0001');
 select pg_temp.as_member(2);
--- One index scan, in id order (no sequential or bitmap scan, no sort), so
--- the visible row's set_config runs before the hidden row is read. (Two
--- scans, as UNION ALL makes, would each ask the session's half on their
--- own, after the switch, and so prove nothing.)
-set local enable_seqscan = off;
-set local enable_bitmapscan = off;
 select pg_temp.expect('7g PH, set_config in the select list (membership): not Bisi''s item',
   (select string_agg(right(switched.id::text, 4), ' ' order by switched.id) from (
      select w.id, set_config('app.membership_id', 'e133ffff-0000-4000-8000-000000000099', true)

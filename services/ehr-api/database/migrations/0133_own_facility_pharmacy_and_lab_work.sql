@@ -219,16 +219,20 @@
 --    privileges, as 0086's context_allows is). Called on their own, the
 --    session's half answers only the session's own membership; the row's
 --    half answers for a session that names an active account's subject and
---    one of its memberships (active, not on hold) at the row's facility,
---    whatever its roles (the session's half asks those, once a statement):
---    whether a patient id the caller holds is active and whether a deny
---    directive covers that member, for any patient, own work there or not.
---    So a Lab or Pharmacy runtime that runs SQL of its own learns that much
---    of a patient id it holds, through its own member or through one of
---    0123's sealed QA logins (whose ids are public). Closing that (an
---    owner-only list of the patients with own work at each facility, kept
---    by a trigger on the work items, which the row's half would also ask)
---    is an open question for the owner.
+--    one of its membership rows that is active and not on hold, at that
+--    membership's facility. It does not ask the member's roles, staff record,
+--    facility or organization (the session's half asks those, once a
+--    statement), so it answers even where identity.has_active_membership
+--    would refuse (a rejected or inactive staff record, a suspended facility,
+--    an inactive organization) and whatever the roles: whether a patient id
+--    the caller holds is active and whether a deny directive covers that
+--    member, for any patient, own work there or not. So a Lab or Pharmacy
+--    runtime that runs SQL of its own learns that much of a patient id it
+--    holds, through its own member or through a sealed login whose ids are
+--    public (0098's demo login, once its owner has reset it; 0123's QA
+--    logins). Closing that (an owner-only list of the patients with own
+--    work at each facility, kept by a trigger on the work items, which the
+--    row's half would also ask) is an open question for the owner.
 --    All of them to hid_schema_test_runtime; D1 itself, D5's helper and D8's
 --    trigger function to nobody (the functions and the trigger that call
 --    them run them as their owner). Revoked from
@@ -278,13 +282,19 @@
 -- per row. With every table and function owned by a role that is not a
 -- superuser, as in production: the pharmacist's list of 3,501 items 0.5 s;
 -- the lab scientist's 2.1 s at 2,000 lab work items and 3.6 to 3.8 s at
--- 4,000 (it grows with the laboratory's history, which the list reads
--- whole: about 15,000 items reach lab-api's 15-second limit); the
--- consent-backed clinician's 12.7 to 13.7 s at 2,000 items, as on
--- 0001-0127 (13.3 to 13.6 s: 0086's consent test on every row of that
--- history, which reaches the limit at about 2,200 items whatever 0133
--- does); a lab result's verification insert 0.16 s and D9 about 55 ms a
--- call. The cards (D4) and the list's bases (D10) ask the session's half
+-- 4,000. It grows with the laboratory's history, which the list reads
+-- whole, and with a step: the own-work policies' paths raise the list's
+-- estimated cost about 40 times (it is costed for every session), so from
+-- about 5,000 items it passes PostgreSQL's jit_inline_above_cost and
+-- jit_optimize_above_cost and JIT adds about 3.4 s to every list, whoever
+-- reads it (7 to 8 s at 5,000, 9 to 10 s at 8,000); with jit on, PostgreSQL's
+-- default, about 15,000 items reach lab-api's 15-second limit, with jit off
+-- about 19,000. The consent-backed clinician's list takes 12.7 to 14.2 s at
+-- 2,000 items (0001-0127: 12.4 to 13.7 s; JIT compiles it now, about 0.3
+-- s): 0086's consent test on every row of that history reaches the limit
+-- at about 2,200 items whatever 0133 does. Pharmacy's lists stay far below
+-- the JIT thresholds. A lab result's verification insert takes 0.16 s and
+-- D9 about 55 ms a call. The cards (D4) and the list's bases (D10) ask the session's half
 -- once per call. The runtime check holds the clinician and the lab
 -- scientist to the limit, with a superuser owner, and bounds the
 -- permission checks.
@@ -365,7 +375,8 @@
 -- 20 chain tables; CREATE POLICY needs it; the trigger of D8 needs no more on
 -- ehr.prescriptions), and ACCESS SHARE on the tables the new SQL functions
 -- read when they are created (identity.patients, the consent directives and
--- their versions, the memberships), all NOWAIT: a busy table
+-- their versions, the memberships, auth.accounts), all NOWAIT, 28 tables in
+-- all (pg_locks before commit shows no other table of 0001-0127): a busy table
 -- fails the attempt at once and its subtransaction releases what it took.
 -- When 0133 is the first statement of its transaction (the runner applies
 -- each file in its own transaction), the loop tries again 100 ms later, so it
@@ -425,9 +436,11 @@
 -- steps. D1's halves (identity.facility_work_session_membership and
 -- identity.facility_work_patient_allows) go last: before them, drop the 44
 -- own-work policies, D5's two ehr.prescriptions policies and its helper,
--- D9 (both), D10 (both) and D1, and restore 0124's card readers; each of
--- them calls a half, records no dependency on it, and with the half gone
--- fails with 42883 (0086's work_item_allows is not changed).
+-- D9 (both), D10 (both) and D1, and restore 0124's card readers. The
+-- policies depend on the functions they call (DROP FUNCTION refuses, 2BP01,
+-- while they stand: the 44 on the halves, D5's two on its helper); the
+-- helper, D9, D10, D1 and the cards record no dependency, so with a half
+-- gone each fails with 42883 (0086's work_item_allows is not changed).
 
 -- 0. Preconditions.
 do $$
@@ -723,7 +736,7 @@ begin
         pharmacy.outbox_events
         in access exclusive mode nowait;
       lock table identity.patients, identity.consent_directives,
-        identity.consent_directive_versions, identity.staff_facility_memberships
+        identity.consent_directive_versions, identity.staff_facility_memberships, auth.accounts
         in access share mode nowait;
       exit;
     exception when lock_not_available then
@@ -787,11 +800,14 @@ $$;
 -- actor, and the row is at that membership's facility, all read again on
 -- every row: a statement that changes the session's settings after the
 -- session's half ran (a cursor, or set_config in the same statement) sees
--- nothing more. The rest of the member's test (the staff record, the
--- facility and organization, both permissions) the session's half asked
--- once for the statement; asking it on every row as well doubled the lab
--- scientist's list (THE COST). Called on its own by a runtime it answers
--- what D11 says. No SQL function inside it but the platform session
+-- nothing more. (The membership's own checks below, at the row's facility
+-- and of the session's actor, and the deny test joined on the membership
+-- given, would refuse a switched row already; reading the session's
+-- membership and facility again keeps the binding explicit.) The rest of
+-- the member's test (the staff record, the facility and organization, both
+-- permissions) the session's half asked once for the statement; asking it
+-- on every row as well doubled the lab scientist's list (THE COST). Called
+-- on its own by a runtime it answers what D11 says, without those. No SQL function inside it but the platform session
 -- readers, so a policy that calls it keeps its plan for the whole
 -- statement. Given its five arguments it answers true or false, never null
 -- (an unset purpose or membership is false).
@@ -1629,7 +1645,7 @@ comment on function identity.facility_work_member_allows(text, uuid, uuid, text)
 comment on function identity.facility_work_session_membership(text) is
   '0133 D1, the session''s half: the session''s membership when the session is in direct care at its facility and that active membership holds <kind>.work-item.read and <kind>.order-route.receive there; else null. The own-work policies ask it once per statement, as (select ...), and pass the answer to the row''s half; the cards and the list''s bases once per call. It allows nothing alone.';
 comment on function identity.facility_work_patient_allows(text, uuid, uuid, uuid, text) is
-  '0133 D1, the row''s half, given the session''s half''s answer (STRICT): false unless that membership is still the session''s, at the row''s facility, active and not on hold, of an active account whose subject is the session''s actor; then the patient is active and no deny directive covers that member for the action. Read again on every row, so a statement that changes its settings after the session''s half ran sees nothing more. The member''s roles are the session''s half''s to ask, once a statement.';
+  '0133 D1, the row''s half, given the session''s half''s answer (STRICT): false unless that membership is still the session''s, at the row''s facility, active and not on hold, of an active account whose subject is the session''s actor; then the patient is active and no deny directive covers that member for the action. Read again on every row, so a statement that changes its settings after the session''s half ran sees nothing more. It does not ask the member''s roles, staff record, facility or organization: the session''s half asks those, once a statement (see 0133 D11 for what a direct call therefore answers).';
 comment on function lab.work_item_patient_cards(uuid[]) is
   'The patient (name, sex, date of birth, last 4 of the Health ID) of each given work item that is this facility''s own work (no order route) and that the session''s member may read: lab.work-item.read here and the read consent test of the work items'' read policy (emergency included), or (0133) the facility''s lab staff. At most 200 ids.';
 comment on function pharmacy.work_item_patient_cards(uuid[]) is
