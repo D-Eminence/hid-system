@@ -7254,3 +7254,426 @@ Not done, said plainly:
   account has one is not recorded here.
 - Traffic between the load balancers and the containers is not encrypted
   (it stays inside the private network; see "In transit" above).
+
+## EHR-C4: chart summary
+
+Akos P1-1 and N-11 (wave 1, lane C). ehr-api only; no migration, no new
+permission, no new grant, no new setting. One call returns the sections a
+doctor's chart opens with. Each section follows the rules of the route that
+already reads it; nothing here lets anyone read more than those routes allow.
+
+### `GET /ehr/patients/:patientId/chart-summary`
+
+`patientId` is the patient's UUID (never a Health ID). `Cache-Control:
+no-store`. The caller needs at least one of `ehr.encounter.read`,
+`ehr.diagnosis.read`, `ehr.prescription.read`, `ehr.lab-request.read`,
+`ehr.vital.read` or `ehr.note.read`, or the answer is `403
+PERMISSION_DENIED`. `X-Purpose-Of-Use` is `direct-care` or `emergency`; any
+other value is `400 PURPOSE_OF_USE_REQUIRED`.
+
+Each section is included only when the caller holds the permission of the
+route that reads it today:
+
+| Section | Permission | What it holds | At most |
+| --- | --- | --- | --- |
+| `demographics` | `identity.patient.read` | `patientId`, `fullName`, `firstName`, `lastName`, `dateOfBirth`, `gender` (the patient card Identity already gives the EHR; no Health ID, no NIN) | 1 |
+| `problems` | `ehr.diagnosis.read` | diagnoses that are `active`, `recurrence` or `relapse`, not `refuted` or `entered_in_error`, newest first | 50 |
+| `medications` | `ehr.prescription.read` | prescriptions `active` or `on_hold`, not ended before today (Lagos), newest first, each with `ownProgress` (ORD-3) | 50 |
+| `allergies` | `ehr.note.read` | active recorded allergies (any facility, most serious first, `recordedHere`) and the patient's own allergy text, as the emergency read answers them | 200 |
+| `latestVitals` | `ehr.vital.read` | exactly the EHR-C3 answer (`facilityId`, `measures`) | 7 measures |
+| `recentVisits` | `ehr.encounter.read` | this facility's visits, newest first | 10 |
+| `openLabRequests` | `ehr.lab-request.read` | lab requests `active` or `on_hold`, newest first, each with `ownProgress` (ORD-3) | 50 |
+| `recentResults` | `lab.result.released.read` | the newest, by release time, of the released results the summary reads from Lab (see `complete` below) | 10 |
+
+Lists answer `{ "items": [...], "more": true | false }`; `more` says there
+were more than the limit. `recentResults` also has `complete` (false when Lab
+had more pages than the summary reads: at most 5 pages of 200). Lab gives its
+pages in record order, not by time. So when `complete` is false (more than
+1,000 released results), the items are the newest of the 1,000 read, and may
+not be the patient's newest results. The pages are read one after another,
+each with the Lab client's own 10-second limit, and the summary sets no
+overall limit on them: a slow Lab can make the whole answer slow, though a
+Lab that fails or times out only leaves `recentResults` out as
+`unavailable`.
+
+Each section reads the same records as its own route: this facility's
+visits, diagnoses, prescriptions, lab requests and vitals; the patient's
+allergies from any facility, as the allergy list does; and the results Lab
+gives the EHR, as the staff record does. Anything entered in error is left
+out: a visit entered in error, and every diagnosis,
+prescription, lab request and vital recorded in it; a diagnosis or allergy
+entered in error; a prescription or lab request entered in error, cancelled
+or completed.
+
+Answer `200`:
+
+```json
+{
+  "patientId": "<uuid>",
+  "facilityId": "<uuid>",
+  "purposeOfUse": "direct-care",
+  "limits": { "recentVisits": 10, "problems": 50, "medications": 50, "openLabRequests": 50, "allergies": 200, "recentResults": 10 },
+  "sections": {
+    "demographics": { "patientId": "<uuid>", "fullName": "...", "firstName": "...", "lastName": "...", "dateOfBirth": "1990-01-01", "gender": "female" },
+    "problems": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "codeSystem": "ICD-10", "code": "B50.9", "display": "...", "clinicalStatus": "active", "verificationStatus": "confirmed", "onsetAt": null, "notes": null, "createdAt": "..." }], "more": false },
+    "medications": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "medicationDisplay": "...", "medicationCodeSystem": null, "medicationCode": null, "doseQuantity": "1", "doseUnit": "tablet", "routeCode": "oral", "frequency": "...", "instructions": "...", "startsOn": "2026-11-18", "endsOn": null, "status": "active", "createdAt": "...", "ownProgress": { "status": "dispensed", "receivedAt": "...", "dispensedAt": "...", "reversedAt": null } }], "more": false },
+    "allergies": { "recorded": [{ "source": "recorded", "id": "<uuid>", "substance": "...", "reaction": "...", "severity": "severe", "recordedHere": true, "recordedOn": "..." }], "patientReported": { "source": "patient_reported", "allergies": null, "updatedAt": null } },
+    "latestVitals": { "facilityId": "<uuid>", "measures": { "pulseBpm": { "value": 76, "recordedAt": "...", "vitalId": "<uuid>", "encounterId": "<uuid>", "corrected": false } } },
+    "recentVisits": { "items": [{ "id": "<uuid>", "encounterNumber": "...", "encounterType": "ambulatory", "status": "in_progress", "startedAt": "...", "endedAt": null, "chiefComplaint": "...", "importedPaperRecords": false }], "more": false },
+    "openLabRequests": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "testCodeSystem": "HID-LAB", "testCode": "MP-SMEAR", "testDisplay": "...", "priority": "routine", "status": "active", "specimenTypeCode": null, "clinicalInformation": null, "createdAt": "...", "ownProgress": { "status": "received", "receivedAt": "...", "collectedAt": null, "lastResultAt": null } }], "more": false },
+    "recentResults": { "items": [{ "id": "<uuid>", "version": "...", "title": "...", "recordedAt": "...", "effectiveAt": "...", "fields": {} }], "more": false, "complete": true }
+  },
+  "leftOut": [
+    { "section": "recentResults", "reason": "unavailable", "message": "This part of the chart could not be loaded just now. Try again in a moment." }
+  ]
+}
+```
+
+### Sections left out
+
+A section that is not in `sections` is listed in `leftOut` with a reason and
+a plain sentence to show:
+
+| `reason` | When | `message` |
+| --- | --- | --- |
+| `permission` | the caller does not hold the section's permission, or the other service (Identity or Lab) refused (`403`) | "You do not have permission to see this part of the chart." |
+| `permission` | an emergency read (below), for every section it does not show | "Emergency access shows allergies and past visits only. This part of the chart is not shown." |
+| `unavailable` | Identity or Lab could not be reached, timed out or answered something unexpected | "This part of the chart could not be loaded just now. Try again in a moment." |
+
+When the pharmacy or the laboratory cannot tell the progress of an item, the
+section is still answered, each such item carries `ownProgress: { "status":
+"unknown" }` (as on the per-visit lists), and `leftOut` lists
+`medications.ownProgress` ("Pharmacy progress could not be loaded just now.
+The medicines are shown without it.") or `openLabRequests.ownProgress`
+("Laboratory progress could not be loaded just now. The lab requests are
+shown without it."), reason `unavailable`. A laboratory that is down never
+fails the answer.
+
+### Consent and audit
+
+One consent check for the whole call, the same as every EHR read: Identity
+decides `read_records` for this patient, member, facility and purpose, and
+the database applies its own row checks as well. Without consent the answer
+is `403 CONSENT_REQUIRED`, audited as `ehr.chart-summary.read` with outcome
+`denied`, and nothing is read. A read writes one EHR success audit row,
+`ehr.chart-summary.read` (resource `chart-summary`, the patient's UUID), with
+the sections asked for and a count per EHR section; never a value, a name, a
+Health ID or a NIN. The route is marked to audit failures only, as the
+emergency read and the staff record chat are, so the request's own row is
+written only when the request fails.
+
+The patient card and the results are read after that, from Identity and Lab,
+through the reads the staff record chat already uses. Identity and Lab check
+access themselves, and record these reads under the staff record chat's
+action names: Identity writes `identity.staff.chat.profile.read` once per
+chart open, and Lab writes `lab.staff.chat.released-results.read` once per
+page of results (up to 5 per chart open, each page with its own Identity
+access check). So an auditor sees them as staff record chat reads, not chart
+reads; chart-specific action names in Identity and Lab are a follow-up. The
+pharmacy and laboratory progress is read the same way the per-visit lists
+read it.
+
+### Emergency (break-glass)
+
+With `X-Purpose-Of-Use: emergency`, the summary shows exactly what the
+emergency read (`GET /ehr/patients/:patientId/emergency-records`) shows
+today, under the same rules: the caller needs both `ehr.encounter.read` and
+`ehr.note.read` (else `403 PERMISSION_DENIED`), and an active break-glass
+grant (else `403 CONSENT_REQUIRED`, audited as denied). It answers
+`allergies` and `recentVisits` (completed visits at this facility, with the
+emergency read's columns: no chief complaint); every other section is in
+`leftOut` with reason `permission`. The audit row is the same action with
+purpose `emergency`.
+
+### Screen change needed (Akos frontend branch)
+
+"Open chart" calls this route once per patient and shows each section in
+`sections`. For each entry in `leftOut`, show its `message` where that
+section would be. Re-read after a drawer closes, as the per-section lists
+are.
+
+## EHR-C5: one-call consultation
+
+Akos N-5 ("Start consultation" saves only the complaint; "Save the rest" is
+needed for the diagnosis and the notes). ehr-api only; no migration, no new
+grant, no new setting. It uses only tables, functions and grants that exist
+today (`ehr.encounters`, `ehr.clinical_notes`, `ehr.clinical_note_revisions`,
+`ehr.vitals`, `ehr.diagnoses`, `ehr.idempotency_keys`, `audit.events`).
+Prescriptions and lab requests are not part of this call; they keep their own
+routes. Draft auto-save (EHR-C6, 0141) is separate.
+
+### `POST /ehr/patients/:patientId/consultations`
+
+`patientId` is the UUID (never a Health ID or NIN). Headers as for every
+clinical write: `X-Facility-ID`, `X-Purpose-Of-Use: direct-care` and an
+`Idempotency-Key` (16 to 128 URL-safe characters, otherwise `400
+IDEMPOTENCY_KEY_REQUIRED`).
+
+Body (each part is exactly the body of its own route, with the same
+validation; an unknown field is `400 VALIDATION_FAILED`):
+
+```json
+{
+  "visit": { "encounterType": "ambulatory", "status": "in_progress", "startedAt": "2026-11-18T09:30:00.000Z",
+             "chiefComplaint": "Fever for two days" },
+  "note": { "noteType": "consultation", "title": "Consultation", "status": "signed", "content": "..." },
+  "vitals": { "recordedAt": "2026-11-18T09:35:00.000Z", "temperatureC": 38.4, "systolicMmhg": 120, "diastolicMmhg": 80 },
+  "diagnoses": [ { "codeSystem": "ICD-10", "code": "B50.9", "display": "Malaria", "clinicalStatus": "active",
+                   "verificationStatus": "provisional" } ]
+}
+```
+
+- `visit` (required): the body of `POST .../encounters`. A consultation is
+  always saved on the open visit today (EHR-C1): `reuseOpenVisit` may be
+  left out or be `true`; `false` is `400 CONSULTATION_USES_OPEN_VISIT` ("A
+  consultation is saved on the open visit today. Leave out reuseOpenVisit or
+  set it to true."). The EHR-C1 rules apply unchanged: `status` `planned` or
+  `in_progress` (`400 REUSE_OPEN_VISIT_NEEDS_OPEN_STATUS`), `startedAt` on
+  today's Lagos day (`400 REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY`), and the
+  same transaction lock for this patient at this facility, taken before the
+  lookup. If the patient has an open visit today it is used and nothing new
+  is created; otherwise the visit is created.
+- When the open visit today is used (`encounter.reusedOpenVisit: true`), the
+  `visit` fields sent (`chiefComplaint`, `encounterType`, `startedAt` and the
+  rest) are not saved: the open visit keeps the values it already has, and
+  the answer shows those. The complaint the doctor typed is then not on the
+  visit. Put it in the note, or save it as a visit edit (`PATCH
+  .../encounters/:encounterId`, which needs a typed reason for a complaint
+  change) after this call. This is the EHR-C1 rule;
+  the call does not refuse or warn about it.
+- `note` (optional): the body of `POST .../clinical-notes`, `draft` or
+  `signed`. A note signed here needs no reason (FR-1: a first signature never
+  does).
+- `vitals` (optional): the body of `POST .../vitals`, with the same checks
+  (`400 VITAL_MEASUREMENT_REQUIRED`, `400 BLOOD_PRESSURE_INCOMPLETE`).
+- `diagnoses` (optional): up to 20 bodies of `POST .../diagnoses`. A code is
+  still required (Wave 0 R-1).
+
+### All or nothing
+
+Every part is saved in ONE database transaction. If any part is refused (a
+diagnosis the database refuses, the visit entered in error, and so on), no
+part is saved: no visit, note, vitals, diagnosis, Idempotency-Key row or
+part's audit row. The request's own failure audit row is still written, as
+for any refused request, and a consent refusal
+writes its `denied` rows (Audit, below). The answer is the refused part's
+own error (for example `400 INVALID_CLINICAL_DATA`, `409
+VISIT_ENTERED_IN_ERROR`). It does not always say which part was refused: a
+database refusal such as `400 INVALID_CLINICAL_DATA` names no part, and a
+validation error inside a part names only that part's top-level field
+(`visit`, `note`, `vitals` or `diagnoses`), not the field within it. The
+same Idempotency-Key can then be sent again with the corrected body.
+
+### Permissions and consent
+
+Permission `ehr.encounter.write` always, plus the write permission of each
+part sent: `ehr.note.write` for `note`, `ehr.vital.write` for `vitals`,
+`ehr.diagnosis.write` for a non-empty `diagnoses`. If one is missing, the
+whole call is `403 PERMISSION_DENIED` ("Required permission is missing")
+before the body is validated and before anything is read or saved. The
+refusal is audited as a missing permission on the part's own route is: one
+`security.authorization.denied` row (`http-request`, outcome `denied`, the
+method and route), and no other row
+(`services/ehr-api/src/ehr/consultation/consultations.controller.ts`,
+`ConsultationPartsGuard`). Consent is checked once, as for each
+part's own route (`write_records` for this patient; `403 CONSENT_REQUIRED`
+otherwise). The checks each part's own route makes before the database
+(above) also run before the consent check, except the `startedAt` day
+check, which runs after it (Idempotency-Key, below).
+
+### Answer
+
+`201`:
+
+```json
+{
+  "encounter": { "...visit...": "...", "reusedOpenVisit": true },
+  "note": { "...note, as POST .../clinical-notes answers...": "..." },
+  "vitals": { "...vitals, as POST .../vitals answers...": "..." },
+  "diagnoses": [ { "...diagnosis, as POST .../diagnoses answers...": "..." } ]
+}
+```
+
+`note` and `vitals` are `null` and `diagnoses` is `[]` when not sent.
+`encounter.reusedOpenVisit` is `true` when the open visit today was used and
+`false` when this call created the visit (EHR-C1).
+
+### Idempotency-Key
+
+Required. The same key with the same body answers the saved consultation
+again (`201`, the same visit, note, vitals and diagnoses, as they are now;
+`reusedOpenVisit` as first answered) and saves nothing new. A body that
+differs only by `reuseOpenVisit: true` is the same body. The same key with
+another body is `409 IDEMPOTENCY_KEY_REUSED`; while the first request with
+the key is still running, the second waits for it, as on every clinical
+create. A retry after Lagos midnight, when `startedAt` is no longer today,
+is answered the same way from its key; only a consultation not yet saved
+under its key gets `400 REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY`. That check
+now runs after the consent check, so without consent such a request is
+`403 CONSENT_REQUIRED`. A key, once used, keeps answering this consultation
+(or `409` for another body) for as long as its row exists: the rows are
+never deleted and the check does not look at their expiry time. Use a fresh
+key for each new consultation. The key is stored once for the
+whole call (operation `consultation.create`) and once per part
+(`consultation.encounter`, `consultation.clinical-note`,
+`consultation.vital`, `consultation.diagnosis.1` to `.20`), so a key used on
+a single route never clashes with a consultation.
+
+### Audit
+
+Each part writes the audit row its own route writes, in the same
+transaction: `ehr.encounter.create` (with `reusedOpenVisit`, `day` and
+`idempotentReplay`), `ehr.note.create`, `ehr.vital.create`, and one
+`ehr.diagnosis.create` per diagnosis (each with `idempotentReplay`). A replay
+writes the same rows with `idempotentReplay: true`. A consent refusal writes
+one `denied` row per part sent (reason `identity_authorization`). No row
+carries a Health ID, a NIN or clinical text.
+
+### Screen change needed (Akos frontend branch)
+
+"Start consultation" sends the visit, note, vitals and diagnoses in this one
+call with a fresh Idempotency-Key per consultation (kept for a retry of the
+same save), instead of creating the visit first and asking for "Save the
+rest". On an error, nothing was saved. Show the error's message; when it
+names a part (`visit`, `note`, `vitals` or `diagnoses`), show it with that
+section. After a `201` with `encounter.reusedOpenVisit: true`, the complaint
+typed in "Start consultation" is not on the visit (above): save it as a
+visit edit, or put it in the note before sending.
+
+## SX-1: modules map per facility
+
+Akos N-2b, N-2e and P1-5 (wave 1, no migration, no new setting). The session
+answer already lists each facility's `roles` (every active role of the
+membership) and `permissions`. Each facility now also carries `modules`: the
+product areas the screens should show at that facility, so the website can
+hide what a role cannot use. The server still checks every route on its own;
+`modules` changes no permission and refuses nothing.
+
+### Where it appears
+
+`actor.facilities[*].modules` and, when a facility is selected,
+`actor.facility.modules`, in these `{ actor, ... }` session answers of
+identity-api: `POST /api/v1/auth/login`, `POST /api/v1/auth/oidc/exchange`
+(Google sign-in), `POST /api/v1/auth/refresh`, `GET /api/v1/auth/session`,
+`POST /api/v1/auth/facility` and the workload
+read of the same answer (`GET` and `POST /api/v1/auth/service-session`).
+
+- `modules` is added after every existing field of the facility. Every
+  other field is unchanged, `roles[0]` (and so `actor.role`) included, and
+  so is the order of the actor's fields.
+- A patient session and an account-only outreach session have no facility,
+  so their answers are unchanged, byte for byte.
+- It is not an access-token claim and is not stored: it is worked out from
+  the facility's `permissions` each time the answer is built.
+- `POST /api/v1/auth/google/link` answers `{ linked: true }` to a patient
+  session, with no actor, so it has no `modules`.
+- Three routes that sign staff in answer an `actor` without `modules`,
+  unchanged: `POST /api/v1/identity/provider-enrollments/activate` (a new
+  administrator), `POST /api/v1/identity/outreach-organisers/activate` and
+  `POST /api/v1/identity/outreach-invitations/accept` (outreach
+  memberships). After them the website reads `GET /api/v1/auth/session`,
+  which carries `modules`.
+
+### The map
+
+Every key is always present, `true` (show the area) or `false` (hide it), in
+this order. Each area is shown when the facility's `permissions` hold every
+code in the "Shown when the facility holds" column. These are the codes the
+area's routes already require.
+
+```json
+{
+  "patients": true, "registration": false, "accessRequests": true, "emergencyAccess": true,
+  "triage": true, "consultation": true, "orders": true, "lab": false, "labResults": true,
+  "pharmacy": false, "prescriptions": true, "migrate": true, "outreach": true,
+  "admin": false, "audit": false
+}
+```
+
+| Key | Akos's row | Shown when the facility holds |
+| --- | --- | --- |
+| `patients` | Find patient | `identity.patient.read` |
+| `registration` | Register and check in | `identity.registration.write` |
+| `accessRequests` | Access requests and PIN | `identity.consent.write` |
+| `emergencyAccess` | Emergency access | `identity.consent.write` and `identity.break-glass.write` |
+| `triage` | Triage and vitals (and Nursing observations) | `ehr.vital.read` |
+| `consultation` | Consultation and diagnosis | `ehr.diagnosis.read` |
+| `orders` | Order labs and prescribe | `ehr.lab-request.write` and `ehr.prescription.write` |
+| `lab` | Lab queue and results entry | `lab.result.enter` |
+| `labResults` | Lab results | `lab.result.released.read` |
+| `pharmacy` | Dispense medicines | `pharmacy.dispensing.create` |
+| `prescriptions` | Prescriptions | `ehr.prescription.read` |
+| `migrate` | Scan paper records | `ocr.job.read` and `ocr.publication.write` |
+| `outreach` | Outreach | `outreach.campaign.read` |
+| `admin` | Facility profile and staff | `workforce.manage` |
+| `audit` | The "View (audit)" cells | `audit.read` |
+
+- The map is a pure function of the facility's own `permissions`
+  (`services/identity-api/src/auth/facility-modules.ts`): the same codes
+  always give the same map, whatever their order. A membership with two
+  roles shows what either role shows.
+- Akos's row "Nursing observations" has no key: no permission tells it apart
+  from "Triage and vitals" today, so the screens use `triage` for both.
+- P1-5: doctor, clinician, nurse, receptionist, lab and pharmacist never hold
+  `workforce.manage` or `audit.read`, so `admin` and `audit` are `false` for
+  them. A facility administrator (admin, org_admin, and the administrator
+  awaiting review) sees both.
+- The map shows what today's role rows allow, not Akos's proposed table. For
+  example a doctor's `registration` is `true`, because the doctor role holds
+  `identity.registration.write` today. The role rows change only in a later
+  migration that the owner picks from the matrix below (0136).
+
+Example answers for today's seeded roles (fictional facility):
+
+| Role | Areas shown (`true`) |
+| --- | --- |
+| receptionist | patients, registration, accessRequests, outreach |
+| nurse | patients, registration, accessRequests, emergencyAccess, triage, consultation, labResults, prescriptions, migrate, outreach |
+| doctor, clinician | the nurse's areas and orders |
+| lab | patients, accessRequests, lab, labResults |
+| pharmacist | patients, accessRequests, pharmacy, prescriptions |
+| admin | registration, labResults, outreach, admin, audit |
+| org_admin | registration, outreach, admin, audit |
+| outreach organiser or volunteer | outreach |
+
+### The role matrix (Akos's table against today's role rows)
+
+`services/identity-api/test/role-matrix.json` is Akos's proposed table,
+checked in. The jest test `src/auth/role-matrix.spec.ts` compares each role's
+seeded permissions (every `insert into auth.role_permissions` in
+`services/ehr-api/database/migrations`, read the same way as the product gate
+tests) with the table, one row at a time through the areas above, and names
+each difference: **wider** (today gives more than the table) or **narrower**
+(today gives less). Today's middle level is written "shown, without" the
+area's missing codes, not "view only": an area is shown when its show codes
+are held, and some of those are writes (`identity.consent.write` for access
+requests). Today there are 20, recorded in the fixture's `todayDifferences`,
+for example:
+
+- `receptionist (Front desk), Access requests and PIN: narrower. Today shown, without identity.patient-access-pin.verify; Akos's table full.`
+  (the front desk can already make access requests, a write, but cannot check a patient's PIN)
+- `doctor (Doctor), Register and check in: wider. Today full; Akos's table hidden.`
+- `lab (Lab), Find patient: wider. Today full; Akos's table with lab orders only.`
+
+The test passes today. It fails when a migration adds or removes a
+`role_permissions` row for a role of the table (`todayRolePermissions` pins
+every seeded code of receptionist, nurse, doctor, clinician, lab, pharmacist,
+admin and org_admin) or when the differences change, until the same pull
+request updates the fixture. Packages that add role rows (0131, 0133, 0134,
+0136) update it.
+
+Clinician is compared with Akos's Doctor column (it holds the same codes
+today); admin and org_admin with the Facility admin column.
+
+### Audit
+
+No new audit row. The session reads are audited as before
+(`auth.session.read`, `auth.facility.select`, `auth.login`, `auth.refresh`),
+with nothing added. No patient is read.
+
+### Website (Akos frontend branch, not changed here)
+
+Read `actor.facility.modules` (or the chosen facility's entry in
+`actor.facilities`) and hide each menu item and home tile whose key is
+`false`; P1-5 hides Facility settings when `admin` is `false`. Treat a
+missing `modules` (an older backend) as today: show what is shown now.
