@@ -1,0 +1,506 @@
+{
+  "about": "SX-1 (Akos N-2b, N-2e). Akos's proposed role table (\"Proposed role access (for N-2)\", Health ID EHR QA, Doctor role, 17 November 2026), checked in so a jest test (services/identity-api/src/auth/role-matrix.spec.ts) can compare it with the role rows the migrations seed today. todayRolePermissions pins every seeded permission of each role named here, and todayDifferences records every difference between today's grants and the table. Both must change in the same pull request as any migration that adds or removes a role_permissions row for these roles; the test fails otherwise. The table is a starting point for the owner to confirm; nothing here changes what any role can do.",
+  "cellMeaning": {
+    "full": "Full: view and act",
+    "view": "View: read only",
+    "scoped": "Find patient limited to the role's own work (\"With lab orders\", \"With prescriptions\")",
+    "audit": "View (audit): seen through the facility's audit trail only",
+    "hidden": "—: hidden"
+  },
+  "comparisonRule": "Each row is compared through one session area (facility-modules.ts). Today's level is hidden, view only (the area's show codes held, not every act code) or full. A level above the table's cell is wider; below it is narrower. A scoped cell counts as view only. An audit cell is met when the area is hidden and the role holds audit.read.",
+  "columns": [
+    {
+      "id": "frontDesk",
+      "label": "Front desk",
+      "roles": [
+        "receptionist"
+      ]
+    },
+    {
+      "id": "nurse",
+      "label": "Nurse",
+      "roles": [
+        "nurse"
+      ]
+    },
+    {
+      "id": "doctor",
+      "label": "Doctor",
+      "roles": [
+        "doctor",
+        "clinician"
+      ]
+    },
+    {
+      "id": "lab",
+      "label": "Lab",
+      "roles": [
+        "lab"
+      ]
+    },
+    {
+      "id": "pharmacy",
+      "label": "Pharmacy",
+      "roles": [
+        "pharmacist"
+      ]
+    },
+    {
+      "id": "facilityAdmin",
+      "label": "Facility admin",
+      "roles": [
+        "admin",
+        "org_admin"
+      ]
+    }
+  ],
+  "columnNotes": "Akos's table has one Doctor column; clinician holds the same seeded permissions as doctor today, so it is compared with that column. Facility admin stands for both admin and org_admin. The administrator awaiting review (org_admin_awaiting_review) is a short-lived state and is not compared.",
+  "homeOpensOn": {
+    "frontDesk": "Arrivals and check-in",
+    "nurse": "Triage queue",
+    "doctor": "My patients waiting",
+    "lab": "Lab work queue",
+    "pharmacy": "Dispensing queue",
+    "facilityAdmin": "Staff and settings"
+  },
+  "rows": [
+    {
+      "label": "Find patient",
+      "module": "patients",
+      "cells": {
+        "frontDesk": "full",
+        "nurse": "full",
+        "doctor": "full",
+        "lab": "scoped",
+        "pharmacy": "scoped",
+        "facilityAdmin": "hidden"
+      },
+      "scopedText": {
+        "lab": "with lab orders only",
+        "pharmacy": "with prescriptions only"
+      }
+    },
+    {
+      "label": "Register and check in",
+      "module": "registration",
+      "cells": {
+        "frontDesk": "full",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Access requests and PIN",
+      "module": "accessRequests",
+      "cells": {
+        "frontDesk": "full",
+        "nurse": "full",
+        "doctor": "full",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "audit"
+      }
+    },
+    {
+      "label": "Emergency access",
+      "module": "emergencyAccess",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "full",
+        "doctor": "full",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "audit"
+      }
+    },
+    {
+      "label": "Triage and vitals",
+      "module": "triage",
+      "cells": {
+        "frontDesk": "view",
+        "nurse": "full",
+        "doctor": "full",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Nursing observations",
+      "module": null,
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "full",
+        "doctor": "view",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      },
+      "notCompared": "No permission tells nursing observations apart from triage and vitals today; the screens use the triage area for both."
+    },
+    {
+      "label": "Consultation and diagnosis",
+      "module": "consultation",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "view",
+        "doctor": "full",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Order labs and prescribe",
+      "module": "orders",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "hidden",
+        "doctor": "full",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Lab queue and results entry",
+      "module": "lab",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "full",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Lab results",
+      "module": "labResults",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "view",
+        "doctor": "view",
+        "lab": "full",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Dispense medicines",
+      "module": "pharmacy",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "hidden",
+        "pharmacy": "full",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Prescriptions",
+      "module": "prescriptions",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "view",
+        "doctor": "full",
+        "lab": "hidden",
+        "pharmacy": "view",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Scan paper records",
+      "module": "migrate",
+      "cells": {
+        "frontDesk": "full",
+        "nurse": "hidden",
+        "doctor": "view",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      }
+    },
+    {
+      "label": "Outreach",
+      "module": "outreach",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "full"
+      }
+    },
+    {
+      "label": "Facility profile and staff",
+      "module": "admin",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "full"
+      }
+    },
+    {
+      "label": "Audit trail",
+      "module": "audit",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "full"
+      },
+      "derived": "Not a row of Akos's table: taken from its \"View (audit)\" cells, which give the facility admin the audit trail. The audit trail is read only, so holding audit.read is its full use."
+    }
+  ],
+  "todayRolePermissions": {
+    "receptionist": [
+      "ehr.encounter.read",
+      "ehr.encounter.write",
+      "identity.authorization.check",
+      "identity.consent.read",
+      "identity.consent.write",
+      "identity.patient.read",
+      "identity.registration.write",
+      "outreach.campaign.read",
+      "outreach.campaign.write",
+      "outreach.registration.read",
+      "outreach.registration.write"
+    ],
+    "nurse": [
+      "ehr.diagnosis.read",
+      "ehr.document.read",
+      "ehr.document.write",
+      "ehr.encounter.read",
+      "ehr.encounter.write",
+      "ehr.lab-request.read",
+      "ehr.note.read",
+      "ehr.note.write",
+      "ehr.prescription.read",
+      "ehr.vital.read",
+      "ehr.vital.write",
+      "identity.authorization.check",
+      "identity.break-glass.write",
+      "identity.consent.read",
+      "identity.consent.write",
+      "identity.patient-access-pin.verify",
+      "identity.patient.read",
+      "identity.registration.write",
+      "lab.import.read",
+      "lab.import.write",
+      "lab.result.released.read",
+      "lab.work-item.accept",
+      "lab.work-item.read",
+      "ocr.job.read",
+      "ocr.job.write",
+      "ocr.patient.confirm",
+      "ocr.publication.write",
+      "ocr.validation.write",
+      "outreach.campaign.read",
+      "outreach.campaign.write",
+      "outreach.registration.read",
+      "outreach.registration.write",
+      "pharmacy.dispensing.read",
+      "pharmacy.import.read",
+      "pharmacy.import.write",
+      "pharmacy.work-item.read"
+    ],
+    "doctor": [
+      "ehr.diagnosis.read",
+      "ehr.diagnosis.write",
+      "ehr.document.read",
+      "ehr.document.write",
+      "ehr.encounter.read",
+      "ehr.encounter.write",
+      "ehr.lab-request.read",
+      "ehr.lab-request.write",
+      "ehr.note.read",
+      "ehr.note.write",
+      "ehr.order-route.send",
+      "ehr.prescription.read",
+      "ehr.prescription.write",
+      "ehr.vital.read",
+      "ehr.vital.write",
+      "identity.authorization.check",
+      "identity.break-glass.write",
+      "identity.consent.read",
+      "identity.consent.write",
+      "identity.patient-access-pin.verify",
+      "identity.patient.read",
+      "identity.registration.write",
+      "lab.import.read",
+      "lab.import.write",
+      "lab.result.released.read",
+      "lab.work-item.accept",
+      "lab.work-item.read",
+      "ocr.job.read",
+      "ocr.job.write",
+      "ocr.patient.confirm",
+      "ocr.publication.write",
+      "ocr.validation.write",
+      "outreach.campaign.read",
+      "outreach.campaign.write",
+      "outreach.registration.read",
+      "outreach.registration.write",
+      "pharmacy.dispensing.read",
+      "pharmacy.import.read",
+      "pharmacy.import.write",
+      "pharmacy.work-item.read"
+    ],
+    "clinician": [
+      "ehr.diagnosis.read",
+      "ehr.diagnosis.write",
+      "ehr.document.read",
+      "ehr.document.write",
+      "ehr.encounter.read",
+      "ehr.encounter.write",
+      "ehr.lab-request.read",
+      "ehr.lab-request.write",
+      "ehr.note.read",
+      "ehr.note.write",
+      "ehr.order-route.send",
+      "ehr.prescription.read",
+      "ehr.prescription.write",
+      "ehr.vital.read",
+      "ehr.vital.write",
+      "identity.authorization.check",
+      "identity.break-glass.write",
+      "identity.consent.read",
+      "identity.consent.write",
+      "identity.patient-access-pin.verify",
+      "identity.patient.read",
+      "identity.registration.write",
+      "lab.import.read",
+      "lab.import.write",
+      "lab.result.released.read",
+      "lab.work-item.accept",
+      "lab.work-item.read",
+      "ocr.job.read",
+      "ocr.job.write",
+      "ocr.patient.confirm",
+      "ocr.publication.write",
+      "ocr.validation.write",
+      "outreach.campaign.read",
+      "outreach.campaign.write",
+      "outreach.registration.read",
+      "outreach.registration.write",
+      "pharmacy.dispensing.read",
+      "pharmacy.import.read",
+      "pharmacy.import.write",
+      "pharmacy.work-item.read"
+    ],
+    "lab": [
+      "ehr.document.read",
+      "ehr.document.write",
+      "ehr.encounter.read",
+      "ehr.lab-request.read",
+      "ehr.lab-request.write",
+      "identity.authorization.check",
+      "identity.consent.read",
+      "identity.consent.write",
+      "identity.patient.read",
+      "lab.accession.create",
+      "lab.accession.read",
+      "lab.execution.complete",
+      "lab.execution.read",
+      "lab.execution.start",
+      "lab.import.read",
+      "lab.import.write",
+      "lab.order-route.receive",
+      "lab.result.correct",
+      "lab.result.enter",
+      "lab.result.entered-in-error",
+      "lab.result.release",
+      "lab.result.released.read",
+      "lab.result.revise-released",
+      "lab.result.verify",
+      "lab.specimen.collect",
+      "lab.specimen.receive",
+      "lab.specimen.reject",
+      "lab.work-item.accept",
+      "lab.work-item.read",
+      "ocr.job.read",
+      "ocr.job.write",
+      "ocr.validation.write"
+    ],
+    "pharmacist": [
+      "ehr.encounter.read",
+      "ehr.prescription.read",
+      "identity.authorization.check",
+      "identity.consent.read",
+      "identity.consent.write",
+      "identity.patient.read",
+      "pharmacy.dispensing.create",
+      "pharmacy.dispensing.read",
+      "pharmacy.dispensing.reverse",
+      "pharmacy.import.read",
+      "pharmacy.import.write",
+      "pharmacy.order-route.receive",
+      "pharmacy.work-item.accept",
+      "pharmacy.work-item.read"
+    ],
+    "admin": [
+      "audit.read",
+      "identity.registration.approve",
+      "identity.registration.write",
+      "lab.accession.read",
+      "lab.execution.read",
+      "lab.import.read",
+      "lab.result.released.read",
+      "lab.work-item.read",
+      "ocr.job.read",
+      "organization.manage",
+      "outreach.campaign.read",
+      "outreach.campaign.write",
+      "outreach.registration.read",
+      "outreach.registration.write",
+      "pharmacy.dispensing.read",
+      "pharmacy.import.read",
+      "pharmacy.work-item.read",
+      "workforce.manage"
+    ],
+    "org_admin": [
+      "audit.read",
+      "identity.registration.approve",
+      "identity.registration.write",
+      "organization.manage",
+      "outreach.campaign.read",
+      "outreach.campaign.write",
+      "outreach.registration.read",
+      "outreach.registration.write",
+      "workforce.manage"
+    ]
+  },
+  "todayDifferences": [
+    "receptionist (Front desk), Access requests and PIN: narrower. Today view only; Akos's table full.",
+    "receptionist (Front desk), Triage and vitals: narrower. Today hidden; Akos's table view only.",
+    "receptionist (Front desk), Scan paper records: narrower. Today hidden; Akos's table full.",
+    "receptionist (Front desk), Outreach: wider. Today full; Akos's table hidden.",
+    "nurse (Nurse), Register and check in: wider. Today full; Akos's table hidden.",
+    "nurse (Nurse), Scan paper records: wider. Today full; Akos's table hidden.",
+    "nurse (Nurse), Outreach: wider. Today full; Akos's table hidden.",
+    "doctor (Doctor), Register and check in: wider. Today full; Akos's table hidden.",
+    "doctor (Doctor), Scan paper records: wider. Today full; Akos's table view only.",
+    "doctor (Doctor), Outreach: wider. Today full; Akos's table hidden.",
+    "clinician (Doctor), Register and check in: wider. Today full; Akos's table hidden.",
+    "clinician (Doctor), Scan paper records: wider. Today full; Akos's table view only.",
+    "clinician (Doctor), Outreach: wider. Today full; Akos's table hidden.",
+    "lab (Lab), Find patient: wider. Today full; Akos's table with lab orders only.",
+    "lab (Lab), Access requests and PIN: wider. Today view only; Akos's table hidden.",
+    "pharmacist (Pharmacy), Find patient: wider. Today full; Akos's table with prescriptions only.",
+    "pharmacist (Pharmacy), Access requests and PIN: wider. Today view only; Akos's table hidden.",
+    "admin (Facility admin), Register and check in: wider. Today full; Akos's table hidden.",
+    "admin (Facility admin), Lab results: wider. Today view only; Akos's table hidden.",
+    "org_admin (Facility admin), Register and check in: wider. Today full; Akos's table hidden."
+  ]
+}
