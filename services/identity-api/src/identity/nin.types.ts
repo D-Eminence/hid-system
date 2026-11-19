@@ -46,12 +46,6 @@ export interface NinVerificationResult {
    * kept: nothing was sent for this request.
    */
   stored?: boolean;
-  /**
-   * Q115: true when a stored record this check matched was kept by 0137's
-   * shared rule (NinCheckOnce.keepRecord: at least 30 days from this use, 90
-   * days from its first check, whichever ends later).
-   */
-  recordKept?: boolean;
 }
 
 export interface NinVerificationProvider {

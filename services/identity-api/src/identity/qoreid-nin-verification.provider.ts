@@ -1,6 +1,5 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
-import { NinCheckOnce } from './nin-check-once';
 import { isNinCheckRefusedUnsent, isNinCheckStillRunning, isStoredNinAnswer, markNinCheckOwnFault,
   markStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
 import type {
@@ -36,9 +35,11 @@ const GENDERS = new Set(['female', 'male', 'intersex', 'other', 'unknown']);
  * from it. 0137's guard keeps QoreID's answer (encrypted, as for every path):
  * a record that matched for as long as 0137 keeps a record from its first
  * check (90 days, Q110), one that did not match (probably someone else's NIN)
- * for 24 hours. Each later desk request whose details match a stored record
- * is a use of it, and keeps it through 0137's one shared rule
- * (NinCheckOnce.keepRecord, Q115).
+ * for 24 hours. Each later desk request the guard answers from a stored
+ * record, its details matching or not, is a use of it, and 0137's begin keeps
+ * the record at least 30 days from that use as it answers (Q115,
+ * identity.qoreid_nin_record_used), so the desk makes no keep call of its own
+ * (NinCheckOnce.keepRecord would only repeat it).
  *
  * Its only way to QoreID is PUBLIC_PATIENT_IDENTITY_PROVIDER.verifyNinRecord,
  * 0137's once-per-NIN guard as path 'desk'. Any record the guard holds for the
@@ -62,10 +63,8 @@ const GENDERS = new Set(['female', 'male', 'intersex', 'other', 'unknown']);
 @Injectable()
 export class QoreIdNinVerificationProvider implements NinVerificationProvider {
   readonly name = QOREID_PROVIDER;
-  private readonly logger = new Logger(QoreIdNinVerificationProvider.name);
 
-  constructor(@Inject(PUBLIC_PATIENT_IDENTITY_PROVIDER) private readonly qoreId: PublicPatientIdentityProvider,
-    private readonly ninCheck: NinCheckOnce) {}
+  constructor(@Inject(PUBLIC_PATIENT_IDENTITY_PROVIDER) private readonly qoreId: PublicPatientIdentityProvider) {}
 
   isEnabled(): Promise<boolean> {
     return this.qoreId.isAvailable();
@@ -78,8 +77,8 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
    * become the desk's:
    * - a stored answer: compared as a fresh one, and said to be stored
    *   (`stored`, or isStoredNinAnswer on a refusal): nothing was sent. A
-   *   stored record the desk's details match is a use of it, kept by 0137's
-   *   shared rule (Q115, NinCheckOnce.keepRecord), said by `recordKept`;
+   *   stored record is a use of it: the guard's begin kept it by 0137's Q115
+   *   rule before the desk compares it, matched or not;
    * - 409 NIN_CHECK_IN_PROGRESS (this NIN is being checked) and 409
    *   NIN_CHECK_HELD (held after a check QoreID may have charged), with
    *   `retryAfterSeconds`: passed on; nothing was sent for this request.
@@ -132,11 +131,6 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
     if (!sameDetails(identity, claimed)) {
       return this.notVerified(request, 'name_mismatch', stored, checked.providerReference);
     }
-    // Q115: a stored record these details match is a later use of it, kept
-    // by 0137's shared rule (NinCheckOnce.keepRecord), even one first kept 24
-    // hours because an earlier request's details did not match it. A fresh
-    // match is the record's first check, which the guard keeps 90 days.
-    const kept = stored && await this.keepMatchedRecord(request.nin, request.correlationId);
     // The desk's spelling is kept: it equals the record's but for letter case
     // and spacing. The record's sex is used only when the desk gave none.
     const demographics: NinClaimedDemographics = {
@@ -154,34 +148,7 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
       verifiedAt: new Date().toISOString(),
       demographics,
       ...(stored ? { stored: true } : {}),
-      ...(kept ? { recordKept: true } : {}),
     };
-  }
-
-  /**
-   * Q115 (owner): a stored NIN record for someone not on a Health ID is kept
-   * 90 days from its first check, and each later use keeps it at least 30
-   * days from that use. 0137 owns that one rule (#276:
-   * identity.keep_qoreid_nin_record through NinCheckOnce.keepRecord, which
-   * never shortens a keep and leaves the answer, its completeness and source
-   * as they are); the desk calls it for each stored record its details
-   * match. True when kept; false when the stored record the guard returned
-   * was no longer a live record when the keep ran (it expired between the
-   * guard's answer and the keep, a sign-up took over an incomplete profile
-   * record, or the NIN's login was deleted); nothing changes then. A keep
-   * that cannot be written leaves the desk's answer as it is and is logged
-   * without an identifier.
-   */
-  private async keepMatchedRecord(nin: string, correlationId: string): Promise<boolean> {
-    try {
-      return await this.ninCheck.keepRecord(nin, correlationId);
-    } catch (error) {
-      // No NIN, HMAC or SQL text.
-      this.logger.warn({ event: 'identity.nin.record_keep_failed', correlationId,
-        code: typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
-          ? error.code : 'unknown' });
-      return false;
-    }
   }
 
   private notVerified(request: NinVerificationRequest, outcome: 'no_match' | 'name_mismatch', stored: boolean,

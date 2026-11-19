@@ -118,7 +118,7 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
       provide: IDENTITY_PROVIDER,
       useExisting: PostgresIdentityProvider,
     },
-    // Q108: the desk's NIN check through QoreID (a matched stored record kept by 0137's rule, Q115).
+    // Q108: the desk's NIN check through QoreID (each stored record it uses kept by 0137's begin, Q115).
     QoreIdNinVerificationProvider,
     {
       provide: NIN_VERIFICATION_PROVIDER,
