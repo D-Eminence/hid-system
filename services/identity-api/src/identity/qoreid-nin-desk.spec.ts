@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { type INestApplication, Logger, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { NextFunction, Response } from 'express';
@@ -591,6 +593,24 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(JSON.stringify(audit.record.mock.calls)).not.toContain('provider_error');
     // Nothing was sent, so the same request may be sent again.
     await expect(service.resolve(input, 'resolve-key-q108-000046', context)).resolves.toMatchObject({ caseId });
+  });
+
+  it('runs, in the database suite, the holder read and the hold read the desk sends, word for word', async () => {
+    // The fakes here answer both reads themselves. The Postgres suite
+    // (desk-nin-holder.integration.sql) runs these exact reads under row-level
+    // security as Identity's runtime role in the desk's context: a revoked NIN,
+    // an inactive patient, a member without registration permission, and
+    // held, ended and never-blocked buckets. It must keep testing what the code sends.
+    const { service, statements } = desk(qoreIdProvider(gate()));
+    await service.resolve(input, 'resolve-key-sql-000001', context);
+    const words = (text: string) => text.replace(/\s+/g, ' ').trim();
+    const suite = readFileSync(join(__dirname, '../../../ehr-api/test/database/desk-nin-holder.integration.sql'), 'utf8');
+    const body = (name: string) => new RegExp(`create function pg_temp\\.${name}\\([\\s\\S]*?as \\$\\$([\\s\\S]*?)\\$\\$`)
+      .exec(suite)?.[1] ?? `pg_temp.${name} is missing`;
+    const holder = statements.find(({ sql }) => sql.includes('from identity.patient_identifiers identifier'));
+    const hold = statements.find(({ sql }) => sql.includes('from auth.otp_rate_limits') && sql.includes('blocked_until >'));
+    expect(words(body('desk_nin_holder'))).toBe(words(holder?.sql ?? 'no holder read was sent'));
+    expect(words(body('desk_nin_hold'))).toBe(words(hold?.sql ?? 'no hold read was sent'));
   });
 
   describe('the privacy hold: too many "does not match" answers for one NIN to one account', () => {
