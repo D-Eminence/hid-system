@@ -152,6 +152,9 @@ export class PrescriptionsService {
    * Idempotency-Key) answers the prescription as it is now and asks the send
    * again, which sends once: the hand-off as it stands now (a pending send is
    * tried again), recorded in the replay's audit row as on the first run.
+   *
+   * It runs READ COMMITTED, as "Send to pharmacy" does (see there): 0117's
+   * allergy check must read after its lock, never from an earlier snapshot.
    */
   create(context: DataAccessContext, patientId: string, encounterId: string, input: CreatePrescriptionInput, key: string) {
     if ((input.doseQuantity === undefined) !== (input.doseUnit === undefined)) {
@@ -290,8 +293,9 @@ export class PrescriptionsService {
         // draft (it may have been sent) asks the database whether its send now stands withdrawn:
         // holding, cancelling or entering it in error, and editing or resuming it (the pharmacy
         // item keeps the version sent), and Pharmacy can no longer dispense it (0101); the database
-        // answers false once the item was dispensed (nothing is left to dispense). An edit or a
-        // resume that leaves it active answers the contract's "earlier version" row (reason
+        // answers false once the item was dispensed (nothing is left to dispense), and once it was
+        // sent to another facility's pharmacy (0133 D14: this pharmacy no longer holds it). An edit or
+        // a resume that leaves it active answers the contract's "earlier version" row (reason
         // `superseded`), so the prescriber is told the pharmacy cannot dispense what they now see.
         const sent = current.status === OrderStatus.Draft && row.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
@@ -415,7 +419,28 @@ export class PrescriptionsService {
    * the pharmacy hand-off checks it (0117), its acknowledgement stored for the
    * hand-off stage. The database decides the rest and the answer is the
    * prescription's `pharmacyHandoff`. On a schema without 0133 it is 503
-   * OWN_PHARMACY_SEND_UNAVAILABLE. Sending twice sends once.
+   * OWN_PHARMACY_SEND_UNAVAILABLE. Sending twice sends once. A prescription
+   * whose item here was sent to another facility's pharmacy (0133 D14) never
+   * comes back: once that route ends, the send answers the `routed` row.
+   *
+   * READ COMMITTED, on purpose (as a create as active): 0117's allergy
+   * check takes the patient's allergy lock and then reads the allergies, and
+   * only READ COMMITTED reads them after the lock. A SERIALIZABLE transaction
+   * reads from the snapshot of its first statement, taken before the lock,
+   * so an allergy recorded after that first statement (the wait included)
+   * would not be seen. The cost (0133 D14): this send locks the prescription
+   * but does not change it, so a send to an outside pharmacy (SERIALIZABLE)
+   * whose snapshot predates this commit (for example while it waits for the
+   * patient's allergy lock) may not see the item it creates and may leave its
+   * route sent next to that item. The database's live-claim index then ends
+   * the outside pharmacy's acceptance in R10 (the route is withdrawn,
+   * order_in_work): the prescription is never dispensed twice and stays with
+   * this hospital's pharmacy. The two also take the prescription's lock and
+   * the allergy lock in opposite orders, so they can deadlock (40P01):
+   * PostgreSQL cancels one, and the prescription then goes to the outside
+   * pharmacy (a cancelled outside send is run again and releases the item; a
+   * cancelled "Send to pharmacy" leaves no item). D7 passes a 40001 or 40P01
+   * on (OwnPharmacySend).
    */
   sendToOwnPharmacy(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string,
     input: SendPrescriptionToOwnPharmacyDto) {

@@ -5,6 +5,7 @@ import { validate } from 'class-validator';
 import type { PoolClient } from 'pg';
 import { REQUIRED_PERMISSIONS } from '../../common/decorators';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
+import { DatabaseService } from '../../database/database.service';
 import { matchAllergies } from '../allergies/allergy-match';
 import { warningToken } from '../allergies/allergy-reader';
 import { OrderStatus } from '../shared/clinical.dto';
@@ -619,6 +620,83 @@ describe('Send to pharmacy (0133)', () => {
     expect(provider.useFactory().enabled).toBe(true);
     expect(OWN_PHARMACY_SEND_OFF.enabled).toBe(false);
     expect((Reflect.getMetadata('design:paramtypes', PrescriptionsService) as unknown[])[4]).toBe(OwnPharmacySend);
+  });
+});
+
+/*
+ * "Send to pharmacy" and a create as active run READ COMMITTED, never SERIALIZABLE. Both run 0117's allergy check, which
+ * takes the patient's allergy lock and then reads the allergies: only READ COMMITTED reads them after the lock. A
+ * SERIALIZABLE transaction reads from the snapshot of its first statement, taken before the lock, so an allergy
+ * recorded after that statement (the wait for the lock included) would not be seen and the prescription would reach
+ * the pharmacy without the acknowledgement. The cost (0133 D14): a send to an outside pharmacy that overlaps a "Send to
+ * pharmacy" (its snapshot predates that commit) may leave its route sent next to the item here (a create as active
+ * cannot race this way: its prescription is new); the database's live-claim index then ends the outside acceptance in
+ * R10 (order_in_work).
+ */
+describe('Send to pharmacy and a create as active run READ COMMITTED (0117\'s allergy check, 0133 D14)', () => {
+  beforeEach(() => jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+  /** The transaction options the last repository.run was given (its seventh argument), if any. */
+  const transactionOf = (service: PrescriptionsService) =>
+    (service as unknown as { repository: { run: jest.Mock } }).repository.run.mock.calls.at(-1)?.[6];
+  const newPrescription = (status: OrderStatus) => ({ medicationDisplay: 'Amoxicillin 500 mg',
+    frequency: 'Three times daily', instructions: 'Take with food', status }) as never;
+
+  it('"Send to pharmacy" does not ask for SERIALIZABLE', async () => {
+    const { service, sends } = harness({ current: prescription(OrderStatus.Active, '2') });
+    await expect(service.sendToOwnPharmacy(context, patientId, encounterId, prescriptionId, { expectedRowVersion: 2 }))
+      .resolves.toEqual({ pharmacyHandoff: CONTRACT_TABLE[0] });
+    expect(sends()).toEqual([[prescriptionId, 2]]);
+    expect(transactionOf(service)?.isolationLevel).toBeUndefined();
+  });
+
+  it('a create as active (first run and replay) and a draft do not ask for SERIALIZABLE', async () => {
+    for (const [status, replay, sent] of [[OrderStatus.Active, false, 1], [OrderStatus.Active, true, 1],
+      [OrderStatus.Draft, true, 0]] as const) {
+      const { service, sends, createAs } = harness({ current: prescription(status, '2'), outcome: 'already_in_pharmacy' });
+      createAs(replay);
+      await service.create(context, patientId, encounterId, newPrescription(status), 'own-pharmacy-create-key');
+      expect(sends()).toHaveLength(sent);
+      expect(transactionOf(service)?.isolationLevel).toBeUndefined();
+    }
+  });
+
+  it.each(['40001', '40P01'])('through the real DatabaseService "Send to pharmacy" runs READ COMMITTED, once; '
+    + 'a %s from the send fails the whole transaction', async (code) => {
+    const transactions: string[][] = [];
+    const pool = { connect: async () => {
+      const statements: string[] = [];
+      transactions.push(statements);
+      return { release: () => undefined, query: async (sql: string) => {
+        statements.push(sql.trim());
+        if (SEND.test(sql)) throw Object.assign(new Error('could not serialize access'), { code });
+        if (/^select 1 from ehr\.prescriptions/.test(sql.trim())) return { rows: [{}], rowCount: 1 };
+        if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: true }], rowCount: 1 };
+        if (/from ehr\.encounters/.test(sql)) return { rows: [{ status: 'in_progress' }], rowCount: 1 };
+        if (/from ehr\.prescriptions/.test(sql)) return { rows: [prescription(OrderStatus.Active, '2')], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      } };
+    } };
+    const database = Object.create(DatabaseService.prototype) as DatabaseService;
+    Object.assign(database, { pool, pauseBeforeRetry: async () => undefined });
+    const audit = { record: jest.fn(async () => undefined), recordWithClient: jest.fn(async () => undefined) };
+    const identity = { authorize: jest.fn(async () => ({ allowed: true, breakGlass: false })) };
+    const service = new PrescriptionsService(new ClinicalRepository(database, audit as never, identity as never),
+      { acceptEhrPrescription: jest.fn() } as never, noRoutes as never, undefined, new OwnPharmacySend(true));
+    await expect(service.sendToOwnPharmacy(context, patientId, encounterId, prescriptionId, { expectedRowVersion: 2 }))
+      .rejects.toMatchObject({ code });
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0]).toContain('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+    expect(transactions[0]).not.toContain('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
+    // The allergy lock comes before the allergy reads, in the same READ COMMITTED transaction.
+    const lock = transactions[0]!.findIndex((sql) => /pg_advisory_xact_lock\(hashtext\('ehr\.allergy:'/.test(sql));
+    const reads = transactions[0]!.findIndex((sql) => /from ehr\.recorded_allergies/.test(sql));
+    expect(lock).toBeGreaterThan(-1);
+    expect(reads).toBeGreaterThan(lock);
+    // The send passed the failure on: its savepoint was not rolled back to, the whole transaction was.
+    expect(transactions[0]).not.toContain('rollback to savepoint ehr_own_pharmacy_send');
+    expect(transactions[0]!.at(-1)).toBe('ROLLBACK');
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
 });
 

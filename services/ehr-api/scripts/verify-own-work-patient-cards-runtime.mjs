@@ -46,7 +46,12 @@
 // `basis: order-route` row, never a `basis: consent` row; after the route's
 // windows close (owner SQL ages them) the administrators, who hold the
 // patient's consent at their facility and still read the work on it, get
-// the card's `access: none` and no patient. Owner SQL is used only for what
+// the card's `access: none` and no patient. Last, the doctor sends the
+// hospital's own prescription, still undispensed, to the pharmacy (0133 D14,
+// owner's Q121 A): the hospital's pharmacists no longer list its item there,
+// the pharmacist without consent still reads it by id on the own-work basis
+// (`withdrawnReason: sent_elsewhere`, audited with the patient), and Dispense
+// answers 409. Owner SQL is used only for what
 // no route does: the platform administrator's and the patient's accounts (as
 // the other runtime verifiers seed them), QoreID switched on, ageing routes
 // past their windows (the services' clock cannot be moved) and reading what
@@ -642,8 +647,9 @@ try {
   const labAccepted = expectStatus(await call(lab, labAdmin, 'POST', `/lab/order-routes/${labRoute.id}/accept`,
     { expectedVersion: 1, patientIdentifier: { kind: 'health_id', value: patient.hid } }, { key: freshKey('accept') }), 201,
   'laboratory accepts');
-  // 0133: an active prescription went to the hospital's own pharmacy by itself (ORDER_ROUTE_ORDER_IN_WORK if sent
-  // elsewhere), so the doctor sends a draft, which the order-route send activates.
+  // 0133: an active prescription goes to the hospital's own pharmacy by itself, and sending it elsewhere withdraws
+  // that own item (D14, checked last below), so for a route-backed item alone the doctor sends a draft, which the
+  // order-route send activates and which never reaches the hospital's pharmacy.
   const rxRoute = await send('prescription', await newPrescription('draft'), pharmacyFacility.facilityId);
   const rxAccepted = expectStatus(await call(pharmacy, pharmacist, 'POST', `/pharmacy/order-routes/${rxRoute.id}/accept`,
     { expectedVersion: 1, patientIdentifier: { kind: 'date_of_birth', value: patient.dob },
@@ -693,6 +699,37 @@ try {
     consentBasisRows: 0 };
   step('route-backed work: the card\'s patient while the route is open, none after it closes, though its reader holds consent');
 
+  // ── Sent elsewhere before dispensing (0133 D14, owner's Q121 A) ──
+  // The hospital's own prescription is still undispensed, so the doctor can send it to the pharmacy. The send
+  // withdraws the hospital's item ("sent elsewhere"): neither of the hospital's pharmacists lists it any more; the
+  // one without consent still reads it by id on the own-work basis, marked, audited with the patient; and the
+  // database refuses its dispensing.
+  const elsewhereRoute = await send('prescription', ownPrescription, pharmacyFacility.facilityId);
+  for (const who of [pharmacistWithoutConsent, ownPharmacist]) {
+    const listed = expectStatus(await pharmacyCall(who, 'GET', '/work-items'), 200, `${who.name}'s list after the send elsewhere`);
+    assert(!listed.items.some(item => item.id === ownRxItem.id),
+      `${who.name} still lists the item sent elsewhere: ${JSON.stringify(listed.items.map(item => item.id))}`);
+  }
+  const elsewhereRead = expectStatus(await pharmacyCall(pharmacistWithoutConsent, 'GET', `/work-items/${ownRxItem.id}`), 200,
+    'the item sent elsewhere, by id, on the own-work basis');
+  assert.deepEqual([elsewhereRead.id, elsewhereRead.withdrawn, elsewhereRead.withdrawnReason],
+    [ownRxItem.id, true, 'sent_elsewhere'], JSON.stringify(elsewhereRead));
+  assert.deepEqual(await readBases('pharmacy.work-item.read', hospital.facilityId, pharmacistWithoutConsent, ownRxItem.id),
+    [{ basis: 'own-work', patient_id: patient.id }, { basis: 'own-work', patient_id: patient.id }],
+    'the read of the item sent elsewhere is recorded with basis own-work and the patient');
+  const elsewhereDispense = await pharmacyCall(pharmacistWithoutConsent, 'POST', `/work-items/${ownRxItem.id}/dispensings`,
+    { expectedWorkItemVersion: Number(ownRxItem.version), quantityDispensed: 60, quantityUnit: 'tablet',
+      reason: 'Synthetic dispensing after the send elsewhere' }, { key: freshKey('dispense') });
+  assert.deepEqual([elsewhereDispense.status, elsewhereDispense.body?.code, elsewhereDispense.body?.withdrawnReason],
+    [409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE', 'sent_elsewhere'], JSON.stringify(elsewhereDispense.body));
+  assert.equal((await one('select count(*)::int as n from pharmacy.dispensings where work_item_id = $1', [ownRxItem.id])).n, 0,
+    'the item sent elsewhere has no dispensing');
+  evidence.sentElsewhere = { route: elsewhereRoute.effectiveState, hospitalLists: 'left out (both pharmacists)',
+    readById: { status: 200, withdrawnReason: 'sent_elsewhere', audit: 'own-work, with the patient' },
+    dispense: `409 ${elsewhereDispense.body?.code}` };
+  step('sent elsewhere before dispensing: off the hospital\'s lists, read by id as sent_elsewhere on the own-work basis, '
+    + 'not dispensable');
+
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   evidence.status = 'passed';
   console.log(JSON.stringify(evidence));
@@ -703,6 +740,11 @@ try {
   await new Promise(done => setTimeout(done, 300));
   for (const child of children) if (child.exitCode === null) child.kill('SIGKILL');
   stub.close();
+  // pg-pool's end() resolves before its connections finish closing, so the
+  // forced drop below can terminate one of them (57P01) once the checks are
+  // over (as identity-api's verify-provider-enrollment-runtime.mjs notes).
+  // Only that is expected here; any other pool error still fails the run.
+  owner.on('error', (error) => { if (error.code !== '57P01') throw error; });
   await owner.end().catch(() => {});
   if (failure && loopback && process.env.HID_VERIFIER_KEEP_DATABASE === '1') console.error(`kept ${isolated}`);
   else await maintenance.query(`drop database if exists ${isolated} with (force)`).catch(() => {});

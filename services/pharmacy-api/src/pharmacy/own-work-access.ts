@@ -4,16 +4,27 @@ import type { PoolClient } from 'pg';
 /** The resources 0133's `pharmacy.own_work_access_for` derives an own work item from. */
 export type PharmacyOwnWorkResource = 'work_item' | 'dispensing';
 
-/** Why the session sees an own work item (0133 D10), and whether its automatic send was withdrawn. */
+/**
+ * Why the session sees an own work item (0133 D10), whether it was withdrawn
+ * before it was dispensed, and why: 'changed' when its automatic send was
+ * withdrawn (the prescription was held, cancelled, entered in error, edited
+ * or resumed after it was sent), 'sent_elsewhere' when the prescription was
+ * sent to another facility's pharmacy (D14, owner's Q121 A). Set only with
+ * `withdrawn: true`.
+ */
 export interface OwnWorkState {
   basis: 'consent' | 'own-work';
   withdrawn: boolean;
+  withdrawnReason?: OwnWorkWithdrawnReason;
 }
+
+export type OwnWorkWithdrawnReason = 'changed' | 'sent_elsewhere';
 
 interface StateRow {
   work_item_id: string;
   basis: string;
   withdrawn: boolean;
+  withdrawn_reason: string | null;
 }
 
 /** At most this many ids per statement (0133's reader takes 200). */
@@ -31,9 +42,12 @@ const STATE_BATCH = 200;
  * dispensing belongs to, and with which audit basis: 'consent' when the
  * member holds its own consent for the action (as the work list's reader
  * records it), else 'own-work'. `states` asks `pharmacy.own_work_item_states` why
- * the session sees each own row ('consent' or 'own-work') and whether its
- * automatic send was withdrawn (the prescription was held, cancelled,
- * entered in error, edited or resumed after it was sent).
+ * the session sees each own row ('consent' or 'own-work') and whether it was
+ * withdrawn before it was dispensed, with the reason: 'changed' (its
+ * automatic send was withdrawn: the prescription was held, cancelled,
+ * entered in error, edited or resumed after it was sent) or 'sent_elsewhere'
+ * (the prescription was sent to another facility's pharmacy, D14). A
+ * withdrawn row with no reason or another one counts as 'changed'.
  *
  * Each runs in the caller's transaction, in a savepoint. `basis`: a schema
  * without 0133 (42883) or any other refusal answers "no own-work basis", so
@@ -91,13 +105,15 @@ export class PharmacyOwnWork {
     try {
       for (let start = 0; start < workItemIds.length; start += STATE_BATCH) {
         const result = await client.query<StateRow>(
-          `select work_item_id::text as work_item_id, basis, withdrawn
+          `select work_item_id::text as work_item_id, basis, withdrawn, withdrawn_reason
              from pharmacy.own_work_item_states($1::uuid[])`,
           [workItemIds.slice(start, start + STATE_BATCH)],
         );
         for (const row of result.rows) {
           if (row.basis === 'consent' || row.basis === 'own-work') {
-            found.set(row.work_item_id, { basis: row.basis, withdrawn: row.withdrawn === true });
+            found.set(row.work_item_id, row.withdrawn === true
+              ? { basis: row.basis, withdrawn: true, withdrawnReason: withdrawnReason(row.withdrawn_reason) }
+              : { basis: row.basis, withdrawn: false });
           }
         }
       }
@@ -117,6 +133,11 @@ export class PharmacyOwnWork {
 
 /** Off: no statement, no own-work basis (the tests' and every direct caller's default). */
 export const OWN_WORK_OFF = new PharmacyOwnWork(false);
+
+/** 'sent_elsewhere' only for exactly that text; any other reason, or none, is 'changed'. */
+function withdrawnReason(value: string | null | undefined): OwnWorkWithdrawnReason {
+  return value === 'sent_elsewhere' ? 'sent_elsewhere' : 'changed';
+}
 
 function sqlState(error: unknown): string {
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;

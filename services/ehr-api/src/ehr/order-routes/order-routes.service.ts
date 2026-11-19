@@ -168,7 +168,15 @@ export class OrderRoutesService {
     // reads the Lab or Pharmacy work items, so a same-facility acceptance of the same order
     // that overlaps it fails with 40001 (its retry then sees the route) instead of leaving a
     // live route and a dispensable work item. DatabaseService runs a send PostgreSQL cancels
-    // again; ehr.send_order_route replays its own idempotency key.
+    // again; ehr.send_order_route replays its own idempotency key. 0133 D14 (owner's Q121 A):
+    // in this image's sessions (app.own_facility_work, DatabaseService) a prescription this
+    // hospital's pharmacy holds can still be sent, until that pharmacy dispenses it; the send
+    // withdraws its item here in the same transaction ("sent elsewhere"). After a dispensing,
+    // reversed or not, it answers ORDER_ROUTE_ORDER_IN_WORK. "Send to pharmacy" and a create as
+    // active stay READ COMMITTED (0117's allergy check reads after its lock), so a send that
+    // overlaps one of them may leave its route next to the item it creates; the outside
+    // pharmacy's acceptance then ends in R10 (order_in_work). The database decides; nothing
+    // here changes.
     }, undefined, { isolationLevel: 'SERIALIZABLE' });
   }
 
