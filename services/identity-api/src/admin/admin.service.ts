@@ -417,8 +417,10 @@ export class AdminService {
       const [items, total] = await Promise.all([
         client.query<ReviewRow>(`select registration.id::text, registration.facility_id::text as "facilityId",
           facility.name as "facilityName", registration.status,
-          concat('NIN-****', registration.nin_last4) as "maskedNin",
-          registration.verification_provider as provider,
+          -- 0130: a case registered without a NIN has no NIN to mask.
+          case when registration.identity_evidence = 'none' then 'NIN Not Verified'
+               else concat('NIN-****', registration.nin_last4) end as "maskedNin",
+          coalesce(registration.verification_provider, '') as provider,
           (select count(*) from identity.registration_case_candidates candidate
             where candidate.case_id = registration.id)::text as "candidateCount",
           registration.row_version::text as version, registration.created_at as "createdAt",

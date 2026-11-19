@@ -358,11 +358,12 @@ describe('ID-0 NIN service breaker', () => {
       return new NinRegistrationController({} as never, breaker).capabilities();
     }
 
-    it('reports the NIN service available, and registration without a NIN off', () => {
+    it('reports the NIN service available, and registration without a NIN on (ID-2, 0130)', () => {
       expect(capabilities('test', new NinProviderBreaker())).toEqual({
         nin: { enabled: true, state: 'test-only', available: true },
-        withoutNin: { enabled: false },
-        newPatientRegistrationRequiresNin: true,
+        withoutNin: { enabled: true, phoneRequiredUnlessChild: true,
+          reasons: ['nin_service_unavailable', 'no_nin', 'not_carried', 'child', 'foreign_national'] },
+        newPatientRegistrationRequiresNin: false,
       });
     });
 

@@ -173,7 +173,9 @@ describe('explicitly deferred staging NIN', () => {
     const response = await request(app!.getHttpServer()).get('/api/v1/identity/registration-capabilities');
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ nin: { enabled: false, state: 'deferred', available: false },
-      withoutNin: { enabled: false }, newPatientRegistrationRequiresNin: true });
+      withoutNin: { enabled: true, phoneRequiredUnlessChild: true,
+        reasons: ['nin_service_unavailable', 'no_nin', 'not_carried', 'child', 'foreign_national'] },
+      newPatientRegistrationRequiresNin: false });
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
@@ -274,7 +276,9 @@ describe('explicitly deferred staging NIN', () => {
       .set('authorization', 'Bearer synthetic-token').set('x-facility-id', facilityId);
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ nin: { enabled: false, state: 'deferred', available: false },
-      withoutNin: { enabled: false }, newPatientRegistrationRequiresNin: true });
+      withoutNin: { enabled: true, phoneRequiredUnlessChild: true,
+        reasons: ['nin_service_unavailable', 'no_nin', 'not_carried', 'child', 'foreign_national'] },
+      newPatientRegistrationRequiresNin: false });
     expect(tokens.verify).toHaveBeenCalledWith('synthetic-token');
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
@@ -288,8 +292,9 @@ describe('explicitly deferred staging NIN', () => {
       .set('idempotency-key', `deferred:${randomUUID()}`)
       .send({ expectedVersion: 1, reason: 'Synthetic unverified registration', purpose: 'healthcare-operations' });
     expect(response.status).toBe(404);
-    expect(query).toHaveBeenCalledTimes(1);
-    expect(query.mock.calls[0][0]).toMatch(/^\s*select/i);
+    // 0130: the route first asks whether the case was registered without a NIN; nothing is written.
+    expect(query).toHaveBeenCalledTimes(2);
+    for (const [sql] of query.mock.calls) expect(sql).toMatch(/^\s*select/i);
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });

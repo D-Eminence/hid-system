@@ -318,6 +318,17 @@ describe('AdminService sealed demo facilities (0098)', () => {
     expect(String(client.query.mock.calls[1]?.[0])).not.toContain('sealed_demo');
   });
 
+  it('labels an identity review registered without a NIN "NIN Not Verified", never a masked NIN (0130)', async () => {
+    const { service, client } = harness({ id: 'review', facilityId: '10000000-0000-4000-8000-000000000002',
+      facilityName: 'Clinic', status: 'review_required', maskedNin: 'NIN Not Verified', provider: '',
+      candidateCount: '1', version: '1', createdAt: new Date(), updatedAt: new Date(), demo: false, count: '1' });
+    const listed = await service.listIdentityReviews(platformAdmin, { page: 1, pageSize: 20 } as never);
+    expect(listed.items.map((item) => item.maskedNin)).toEqual(['NIN Not Verified']);
+    const sql = String(client.query.mock.calls[0]?.[0]);
+    expect(sql).toContain("when registration.identity_evidence = 'none' then 'NIN Not Verified'");
+    expect(sql).not.toMatch(/unverified/i);
+  });
+
   it('marks platform audit events at a demo facility or by a demo login, from one read per page', async () => {
     const events = [
       { sequenceId: '3', facilityId: '98d00002-0000-4000-8000-000000000002', actorSubject: 'staff:real' },

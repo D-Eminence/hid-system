@@ -105,6 +105,8 @@ function quote(identifier) {
 const addedColumns = {
   'ehr.encounters': ['imported_paper_records'], // 0113, default false
   'ocr.publications': ['publication_basis'], // 0113, default NULL (read as direct care)
+  // 0130, default 'nin_verified' and NULL: every historical case was registered with a checked NIN.
+  'identity.registration_cases': ['identity_evidence', 'no_nin_reason'],
 };
 
 async function snapshot(db) {
@@ -372,6 +374,7 @@ try {
     const historicalDefaults = [
       ['ehr.encounters', 'imported_paper_records is distinct from false'],
       ['ocr.publications', 'publication_basis is not null'],
+      ['identity.registration_cases', "identity_evidence is distinct from 'nin_verified' or no_nin_reason is not null"],
     ];
     for (const [table, offending] of historicalDefaults) {
       const { rows } = await client.query(`select count(*)::int as n from ${table} where ${offending}`);
@@ -419,6 +422,10 @@ try {
   // 0127: single sign-on hand-off, product gate, back-channel logout and product sign-out, with the in-process fake provider.
   evidence.checks.sso_runtime = JSON.parse(command('exact-role single sign-on hand-off, product gate and sign-out',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-sso-runtime.mjs')], workflowEnvironment));
+  // 0130/0131: registration at the desk without a NIN, and opening this facility's own patient without a PIN.
+  evidence.checks.desk_registration_own_facility_runtime = JSON.parse(command(
+    'exact-role registration without a NIN and own-facility opening', process.execPath,
+    [join(repository, 'services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs')], workflowEnvironment));
   // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
   evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));

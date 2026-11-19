@@ -7677,3 +7677,123 @@ Read `actor.facility.modules` (or the chosen facility's entry in
 `actor.facilities`) and hide each menu item and home tile whose key is
 `false`; P1-5 hides Facility settings when `admin` is `false`. Treat a
 missing `modules` (an older backend) as today: show what is shown now.
+
+## ID-2. Registration at the front desk without a NIN (0130, owner Q106 of 18 November 2026)
+
+Owner, 18 November 2026 (Q106, recommended answer accepted): "Phone required except for children. The same desk
+person creates the record when there are no possible duplicates. An approver decides when there are possible
+duplicates, and always for link-existing." Screens say "NIN Verified" or "NIN Not Verified"; no answer uses the word
+the owner ruled out. The NIN route and outreach and patient self sign-up are unchanged.
+
+`GET identity/registration-capabilities` now answers
+`withoutNin: { enabled: true, phoneRequiredUnlessChild: true, reasons: [...] }` and
+`newPatientRegistrationRequiresNin: false`. No new setting or platform control.
+
+`POST identity/registration-cases/without-nin` (permission `identity.registration.write`, `Idempotency-Key` required)
+
+| Field | Rule |
+|---|---|
+| `firstName`, `lastName` | 1-100 characters |
+| `dateOfBirth` | `YYYY-MM-DD`, not after today (Lagos) |
+| `gender` | optional: female, male, intersex, other, unknown |
+| `noNinReason` | `nin_service_unavailable`, `no_nin`, `not_carried`, `child`, `foreign_national` |
+| `phone`, `addressLine`, `city`, `stateCode`, `lga` | required together, unless `noNinReason` is `child` (then all or none); `child` needs a date of birth under 18 |
+| `hasExistingHealthId`, `existingHealthId` | the Health ID the patient says they have, only when `hasExistingHealthId` is true |
+| `purpose` | `healthcare-operations` |
+
+Answer 201, the outcome only, never who might be the same person:
+
+```json
+{ "caseId": "...", "status": "approved_new_identity", "version": 1, "outcome": "registered",
+  "message": "Patient registered. Their NIN is not verified yet.", "identityEvidence": "none",
+  "ninStatus": "not_verified", "replayed": false, "patient": { "patientId": "...", "hid": "HID-..." } }
+```
+
+or `"status": "review_required", "outcome": "sent_for_review"` with the message "This may be someone who is already
+registered. An approver will review it before a record is made." and no `patient`.
+
+Possible duplicates (any one sends the case for review): an active patient with the same date of birth and the same
+last name (or the first and last names swapped); the same phone (a patient's sign-in phone, or a phone a desk recorded
+for a registration without a NIN, compared by the contact lookup HMAC); the stated Health ID; an open registration
+without a NIN with the same date of birth and last name or the same phone. Sealed demo and QA patients are never
+candidates, and registration without a NIN is refused at a sealed facility.
+
+Refusals (problem details, plain words): 400 `PHONE_REQUIRED`, `NOT_A_CHILD`, `REGISTRATION_WITHOUT_NIN_INVALID`,
+`VALIDATION_FAILED`; 403 `REGISTRATION_WITHOUT_NIN_DENIED`, `REGISTRATION_WITHOUT_NIN_NOT_AVAILABLE` (sealed facility);
+409 `IDEMPOTENCY_KEY_REUSED`. There is no daily limit for a member or a facility (owner Q109), so a busy day, or a day
+QoreID is down, is never refused; every registration is audited and waits as a case until a NIN check or an approver
+decides it. At 50 in a day at one facility Identity logs `identity.registration.without_nin.facility_daily_high` (facility id and count
+only). Each answer and refusal is audited (`identity.registration.without-nin`): criteria kinds, counts and candidate
+patient ids, never a name, date of birth or phone.
+
+The approver's decision, for a case sent for review, by an approver (`identity.registration.approve`) who did not start
+it:
+
+- `POST identity/registration-cases/:caseId/approve-new` creates a new patient (no NIN identifier);
+- `POST identity/registration-cases/:caseId/link-existing` `{ patientId, expectedVersion, reason, purpose }` links to
+  one of the case's candidates;
+- `POST identity/registration-cases/:caseId/reject` `{ expectedVersion, reason, purpose }` (cases without a NIN only;
+  a NIN case answers 409 `REGISTRATION_CASE_HAS_NIN`).
+
+Refusals: 403 `REGISTRATION_REVIEW_SECOND_PERSON_REQUIRED` (the approver started the case), 403
+`REGISTRATION_REVIEW_DENIED`, 404 `REGISTRATION_CASE_NOT_FOUND`, 409 `PATIENT_NOT_A_REVIEW_CANDIDATE`,
+`REGISTRATION_CASE_ALREADY_DECIDED`, 412 `VERSION_CONFLICT`.
+
+`GET identity/registration-cases/:caseId` and the list answer `identityEvidence` (`nin` or `none`); for a case without a
+NIN, `candidates` is empty unless the reader is an approver who did not start it (minimal cards: patient id, full name,
+date of birth). `GET identity/registration-cases?evidence=none` lists only registrations without a NIN: every one of
+them is a possible duplicate for the later merge review (ID-8a).
+
+Screen change (Akos's frontend branch): "Register without a NIN" from an empty search, with the reason list; show
+"NIN Not Verified"; show "Sent for review" without any other person's details; approvers' review screen gains Reject.
+
+Suites: `services/ehr-api/test/database/desk-registration-without-nin.integration.sql`;
+`collect-signup-fields.integration.sql` (a resolved case's patient holds its NIN) and
+`registration-case-list.integration.sql` (the evidence filter) changed. Runtime:
+`services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs`.
+
+## ID-4. Opening this facility's own patient without a PIN (0131, owner Q101 of 18 November 2026)
+
+Owner, 18 November 2026 (Q101, recommended answer accepted): a patient is this facility's when registered at its desk,
+or after a consented visit there in the last 24 months; doctors, nurses and clinicians only; 24 hours; every opening in
+the patient's access history; check-in-only and emergency-only visits do not count. Lab and pharmacy staff and the front
+desk never get it.
+
+`POST identity/own-facility-access` (permission `identity.patient.open-own-facility`, held by doctor, clinician and
+nurse only; `X-Purpose-Of-Use: direct-care`). Body: exactly one of `{ "hid": "HID-..." }` or `{ "patientId": "<uuid>" }`.
+No Health ID in a URL.
+
+Answer 200:
+
+```json
+{ "consentGrantId": "...", "patientId": "...", "status": "active", "expiresAt": "...", "existingGrant": false,
+  "authorization": { "basis": "own-facility", "scope": "write_records", "purpose": "direct-care" } }
+```
+
+The grant is 24 hours of read and write for direct care (`authorization_method` `own_facility`, no access request, so
+it never gives OCR or Migrate records-processing cover); a second opening by the same member while it lasts answers
+the same grant with `existingGrant: true`. After it the usual record reads (`identity/authorization/check`) allow the
+member and write the "Your records were opened" notice (access kind `own_facility`).
+
+"Registered here": a registration case at this facility that created the patient (with its checked NIN, or without a
+NIN), that resolved to the patient's own checked NIN, or that attached its checked NIN to the patient; or a
+registration without a NIN linked to the patient and then confirmed by the patient (their approval or Access PIN to
+this facility after the link). "Visit here": a visit at this facility started in the last 24 months, not cancelled,
+entered in error or imported paper records, started under a grant the patient gave (approval or Access PIN) to the
+member who started it. A visit started under an own-facility grant, records processing or nothing the patient gave (a
+check-in, EHR-C7) does not count.
+
+Refusals: 404 `PATIENT_NOT_FOUND` "No such patient. Check the Health ID and try again." for a Health ID or id with no
+active patient this facility may see (owner Q100 B); 403 `OWN_FACILITY_ACCESS_REFUSED` "You cannot open this
+patient's records without their consent. Ask for their Access PIN or send an access request." for no basis, a deny
+directive, or a patient's revocation of an own-facility opening here in the last 24 hours (one answer for all three);
+403 `PERMISSION_DENIED` (no permission); 400 `PURPOSE_OF_USE_REQUIRED`, `PATIENT_IDENTIFIER_REQUIRED`. Every answer
+and refusal writes an audit row (`identity.patient.open-own-facility`, with the basis or the refusal kind).
+
+The patient's side: `GET identity/me/access-history` items gain `basis` (`own-facility`, `pin`, `share`, `approval`,
+`emergency`, `other`); an own-facility opening has `patientRevocable: true` and the patient may revoke it
+(`POST identity/me/consent-grants/:grantId/revoke`). Screen change: label `basis: 'own-facility'` "Opened as this
+facility's patient"; the staff frontend handles `basis: 'own-facility'` and offers the PIN or an access request on 403.
+
+Suites: `services/ehr-api/test/database/own-facility-access.integration.sql`;
+`patient-grant-revocation.integration.sql` (the history's keys) changed.

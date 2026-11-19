@@ -6,6 +6,7 @@ import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { IntegrationModule } from '../integrations/integration.module';
 import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
+import { RegistrationWithoutNinService } from './registration-without-nin.service';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
 import { IdentityService } from './identity.service';
 import { RecordAccessNoticeService } from './record-access-notice.service';
@@ -80,6 +81,8 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
     OutreachHealthIdService,
     RecordAccessNoticeService,
     NinRegistrationService,
+    // ID-2 (0130): registration at the desk without a NIN.
+    RegistrationWithoutNinService,
     // ID-0: one NIN service breaker per process, shared by resolve and registration-capabilities.
     NinProviderBreaker,
     FacilityProfileService,
