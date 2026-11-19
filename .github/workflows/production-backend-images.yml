@@ -1,10 +1,10 @@
 name: Production backend candidates
 on:
   pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', '.github/workflows/production-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', 'infra/aws/runtime/workload-issuer/**', '.github/workflows/production-backend-images.yml']
   push:
     branches: [staging-novu-ci-20261005]
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', '.github/workflows/production-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', 'infra/aws/runtime/workload-issuer/**', '.github/workflows/production-backend-images.yml']
   workflow_dispatch:
     inputs:
       component:
@@ -22,6 +22,9 @@ concurrency:
 jobs:
   select:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_changes: ${{ steps.matrix.outputs.has_changes }}
@@ -39,7 +42,10 @@ jobs:
           python3 scripts/production_release_compatibility.py --repository . --baseline e078bd53a1601c1d2e533108169a96ec2e7dbd0f --candidate "$GITHUB_SHA" --output production-source-admission.json
       - id: matrix
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # A push is compared with the commit of the last run that deployed (read from the
+          # Actions API), not with the previous push; see releasedBase in the script.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
           REQUESTED_COMPONENT: ${{ inputs.component || 'changed' }}
         run: node scripts/production-backend-build.mjs matrix
   build:

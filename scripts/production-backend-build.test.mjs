@@ -1,13 +1,14 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,copyFileSync,rmSync,existsSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,copyFileSync,rmSync,existsSync,statSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join,posix} from 'node:path';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding,assertGatewayVex,gatewayVexPath,
-  gatewayBoundFiles,gatewayBoundFileHashes,loadGatewayVex,componentsForPath,changedPaths,selectChanged,maxChangedPaths} from './production-backend-build.mjs';
+  gatewayBoundFiles,gatewayBoundFileHashes,loadGatewayVex,componentsForPath,changedPaths,selectChanged,maxChangedPaths,
+  outsideTestInputs,releasedBase,releaseBranch,workflowPath} from './production-backend-build.mjs';
 
 test('publication accepts only the approved Novu backend branch and exact repository context',()=>{
   const env={GITHUB_REPOSITORY:'D-Eminence/hid-system',GITHUB_REPOSITORY_ID:'1317340803',
@@ -39,7 +40,9 @@ test('patient chat release builds exactly its three APIs and compatible migratio
 test('production policy edits rebuild every component for fresh native verification',()=>assert.deepEqual(selectComponents(['security/production-runtime-assessment.json']),components));
 test('a migration with its ledger entry rebuilds only the migration runner and the changed services',()=>assert.deepEqual(
   selectComponents(['scripts/verify-migration-ledger.mjs','services/ehr-api/database/migrations/0095_example.sql','services/identity-api/src/app.module.ts',
-    'release/config/components.json','config/production-schema-compatibility.json','docs/DATABASE.md']),['identity-api','ehr-api','database-migration']));
+    'release/config/components.json','config/production-schema-compatibility.json','docs/DATABASE.md']),
+  // identity-api, ocr-api, ocr-worker and outreach-api specs read every migration (see outsideTestInputs).
+  ['identity-api','ehr-api','ocr-api','ocr-worker','outreach-api','database-migration']));
 test('build, evidence and deployment controller scripts rebuild and redeploy every component',()=>{
   for(const p of ['scripts/production_deployment.py','scripts/production_deployment_core.py','scripts/production-deployment.mjs',
     'scripts/verify-production-approval.py','scripts/production_release_compatibility.py','scripts/production-backend-build.mjs',
@@ -82,12 +85,52 @@ test('closed fail-open gaps: workload token agent, ehr-api package files and Doc
   for(const p of ['services/ehr-api/package.json','services/ehr-api/package-lock.json','services/ehr-api/Dockerfile'])
     assert.deepEqual(selectComponents([p]),['ehr-api','database-migration'],p);
   assert.deepEqual(selectComponents(['scripts/local-environment.mjs']),['database-migration']);
-  assert.deepEqual(selectComponents(['services/ehr-api/src/main.ts']),['ehr-api']);
+});
+test('ehr-api and lab-api build inputs select the migration rehearsal that runs their built output',()=>{
+  for(const p of ['services/ehr-api/src/main.ts','services/ehr-api/src/ehr/patient-records/patient-evidence.service.ts',
+    'services/ehr-api/tsconfig.build.json','services/ehr-api/nest-cli.json'])
+    assert.deepEqual(selectComponents([p]),['ehr-api','database-migration'],p);
+  for(const p of ['services/lab-api/src/lab/patient-results.service.ts','services/lab-api/src/new-file.ts',
+    'services/lab-api/package.json','services/lab-api/package-lock.json','services/lab-api/tsconfig.json','services/lab-api/Dockerfile'])
+    assert.deepEqual(selectComponents([p]),['lab-api','database-migration'],p);
+  // Jest specs and the test/ directory are not compiled into dist or copied into the migration image.
+  assert.deepEqual(selectComponents(['services/ehr-api/src/main.spec.ts']),['ehr-api']);
+  assert.deepEqual(selectComponents(['services/lab-api/src/lab/lab.service.spec.ts']),['lab-api']);
+  assert.deepEqual(selectComponents(['services/ehr-api/test/fixtures/legacy-identity.sample.json']),['ehr-api']);
+  // Other services are not built by the rehearsal.
+  assert.deepEqual(selectComponents(['services/pharmacy-api/src/main.ts']),['pharmacy-api']);
+});
+test('every .dockerignore, including a per-Dockerfile one, rebuilds every component',()=>{
+  for(const c of components){
+    const {dockerfile}=componentConfig(c);
+    assert.deepEqual(selectComponents([`${dockerfile}.dockerignore`]),components,`${dockerfile}.dockerignore`);
+  }
+  for(const p of ['.dockerignore','services/ehr-api/Dockerfile.dockerignore','gateway/Dockerfile.dockerignore','apps/web/.dockerignore'])
+    assert.deepEqual(selectComponents([p]),components,p);
+});
+test('files that service tests read from outside the service select the reading service',()=>{
+  const cases=[
+    ['services/ehr-api/database/migrations/0120_x.sql',['identity-api','ehr-api','ocr-api','ocr-worker','outreach-api','database-migration']],
+    ['services/ehr-api/database/runtime-grants.sql',['ehr-api','ocr-worker','outreach-api','database-migration']],
+    ['services/ehr-api/database/tests/schema.integration.sql',['ehr-api','ocr-worker','outreach-api','database-migration']],
+    ['services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql',['ehr-api','lab-api','pharmacy-api']],
+    ['services/ehr-api/test/database/registration-case-list.integration.sql',['identity-api','ehr-api']],
+    ['services/ocr-worker/src/reading/contract.ts',['ocr-api','ocr-worker']],
+    ['services/ocr-worker/package.json',['ocr-worker']],
+    ['services/identity-api/src/identity/dto/authorize-outreach.dto.ts',['identity-api','outreach-api']],
+    ['gateway/nginx.conf.template',['outreach-api','gateway']],
+    ['gateway/proxy-headers.conf',['gateway']],
+    ['infra/aws/runtime/workload-issuer/issuer.mjs',['identity-api']],
+    ['infra/aws/runtime/other/x.mjs',[]],
+  ];
+  for(const [p,expected] of cases) assert.deepEqual(selectComponents([p]),components.filter(c=>expected.includes(c)),p);
+  // A reader never narrows a rule that already selects all 13.
+  assert.deepEqual(selectComponents(['services/ehr-api/database/migrations/../../x']),components);
 });
 test('a migration PR with its ledger and rehearsal scripts no longer rebuilds all 13',()=>assert.deepEqual(selectComponents([
   'scripts/verify-migration-ledger.mjs','scripts/tuf-staging-migration-rehearsal.mjs','services/ehr-api/database/migrations/0137_example.sql',
   'services/ehr-api/database/runtime-grants.sql','services/identity-api/src/app.module.ts','release/migration/manifest.json']),
-  ['identity-api','ehr-api','database-migration']));
+  ['identity-api','ehr-api','ocr-api','ocr-worker','outreach-api','database-migration']));
 test('an empty change list or more than the review limit selects all 13 components',()=>{
   assert.deepEqual(selectComponents([]),components);
   assert.deepEqual(selectComponents(undefined),components);
@@ -103,25 +146,25 @@ test('a bad, zero or missing base, a failing diff or an empty diff selects all 1
   assert.equal(changedPaths(base,fail),null);
   assert.deepEqual(selectChanged(base,()=>''),components);
   assert.deepEqual(selectChanged(base,()=>'docs/a.md\0scripts/tests/b.test.mjs\0'),[]);
-  assert.deepEqual(selectChanged(base,()=>'services/lab-api/src/a.ts\0services/lab-api/src/b.ts\0'),['lab-api']);
+  assert.deepEqual(selectChanged(base,()=>'services/pharmacy-api/src/a.ts\0services/pharmacy-api/src/b.ts\0'),['pharmacy-api']);
 });
 test('renames report both paths, so moving a file out of a service still rebuilds that service',()=>{
   const repo=mkdtempSync(join(tmpdir(),'hid-select-'));
   const git=(...a)=>execFileSync('git',['-C',repo,'-c','user.name=t','-c','user.email=t@example.invalid',...a],{encoding:'utf8'});
   try{
     git('init','-q');
-    mkdirSync(join(repo,'services/lab-api/src'),{recursive:true});
-    writeFileSync(join(repo,'services/lab-api/src/helper.ts'),'export const x = 1;\n'.repeat(20));
+    mkdirSync(join(repo,'services/pharmacy-api/src'),{recursive:true});
+    writeFileSync(join(repo,'services/pharmacy-api/src/helper.ts'),'export const x = 1;\n'.repeat(20));
     git('add','.');git('commit','-qm','base');
     const base=git('rev-parse','HEAD').trim();
     mkdirSync(join(repo,'docs'));
-    git('mv','services/lab-api/src/helper.ts','docs/helper.ts');git('commit','-qm','move');
+    git('mv','services/pharmacy-api/src/helper.ts','docs/helper.ts');git('commit','-qm','move');
     const diff=b=>execFileSync('git',['-C',repo,'diff','--no-renames','--name-only','-z',b,'HEAD'],{encoding:'utf8'});
-    assert.deepEqual(changedPaths(base,diff).sort(),['docs/helper.ts','services/lab-api/src/helper.ts']);
-    assert.deepEqual(selectChanged(base,diff),['lab-api']);
+    assert.deepEqual(changedPaths(base,diff).sort(),['docs/helper.ts','services/pharmacy-api/src/helper.ts']);
+    assert.deepEqual(selectChanged(base,diff),['pharmacy-api']);
   }finally{rmSync(repo,{recursive:true,force:true});}
 });
-test('database changes also rebuild the migration runner',()=>assert.deepEqual(selectComponents(['services/ehr-api/database/migrations/0063_example.sql']),['ehr-api','database-migration']));
+test('database changes also rebuild the migration runner',()=>assert.deepEqual(selectComponents(['services/ehr-api/database/migrations/0063_example.sql']),['identity-api','ehr-api','ocr-api','ocr-worker','outreach-api','database-migration']));
 test('shared client changes select its five consumers and the migration runner',()=>assert.deepEqual(selectComponents(['packages/api-client/src/index.ts']),
   ['ehr-api','lab-api','pharmacy-api','ocr-api','outreach-api','database-migration']));
 test('reject unknown/path-injection components',()=>assert.throws(()=>componentConfig('../production')));
@@ -401,17 +444,37 @@ function stepScripts(text){
   }
   return found;
 }
+// A require of a service's built output (services/<c>/dist/...) is a read of the
+// whole service build: every src file that tsconfig.build.json compiles and the
+// files that configure the build. It is followed to services/<c>/src and those
+// files, never dropped. Relative JavaScript imports must exist; Python import
+// guesses that are not repository files are standard library modules.
+const buildConfig=['package.json','package-lock.json','tsconfig.json','tsconfig.build.json','nest-cli.json'];
+function builtSource(f){
+  const m=f.match(/^(services\/[\w-]+)\/dist\//);
+  if(!m) return [f];
+  return [`${m[1]}/src`,...buildConfig.map(n=>`${m[1]}/${n}`).filter(x=>existsSync(join(repoRoot,x)))];
+}
 function scriptImports(p){
-  if(!existsSync(join(repoRoot,p))) return [];
+  if(!existsSync(join(repoRoot,p))||statSync(join(repoRoot,p)).isDirectory()) return [];
   const text=readFileSync(join(repoRoot,p),'utf8'), dir=p.slice(0,p.lastIndexOf('/')), found=[];
   if(p.endsWith('.mjs')||p.endsWith('.js'))
-    for(const m of text.matchAll(/(?:from\s+|import\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g)) found.push(join(dir,m[1]));
+    for(const m of text.matchAll(/(?:from\s+|import\s*\(\s*|require\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g)){
+      for(const f of builtSource(join(dir,m[1]))){
+        assert.ok(existsSync(join(repoRoot,f)),`${p} imports ${m[1]}, which is not in the repository`);found.push(f);
+      }
+    }
   if(p.endsWith('.py')){
-    for(const m of text.matchAll(/^\s*(?:from\s+([\w]+)\s+import|import\s+([\w]+))/gm)) found.push(`${dir}/${m[1]??m[2]}.py`);
-    for(const m of text.matchAll(/['"](?:scripts\/)?([\w.-]+\.py)['"]/g)) found.push(`${dir}/${m[1]}`);
+    const guesses=[];
+    for(const m of text.matchAll(/^\s*(?:from\s+([\w]+)\s+import|import\s+([\w]+))/gm)) guesses.push(`${dir}/${m[1]??m[2]}.py`);
+    for(const m of text.matchAll(/['"](?:scripts\/)?([\w.-]+\.py)['"]/g)) guesses.push(`${dir}/${m[1]}`);
+    found.push(...guesses.filter(f=>existsSync(join(repoRoot,f))));
   }
-  return found.filter(f=>existsSync(join(repoRoot,f)));
+  return found;
 }
+// A directory owner stands for every compiled file in it now and any file added later.
+const ownedFiles=p=>statSync(join(repoRoot,p)).isDirectory()
+  ?[...trackedFiles(p).filter(f=>!f.endsWith('.spec.ts')),`${p}/new-file.ts`]:[p];
 test('every scripts/ path the production workflows run selects the components that run it',()=>{
   const owners=new Map();
   const add=(p,cs)=>{const prev=owners.get(p)??new Set();const size=prev.size;cs.forEach(c=>prev.add(c));owners.set(p,prev);return prev.size!==size;};
@@ -423,13 +486,144 @@ test('every scripts/ path the production workflows run selects the components th
     for(const i of scriptImports(p)) if(add(i,[...owners.get(p)])) queue.push(i);
   }
   for(const p of ['scripts/production-backend-build.mjs','scripts/verify-migration-ledger.mjs','scripts/production_deployment_core.py',
-    'scripts/assess-staging-runtime.py','services/ehr-api/scripts/test-patient-evidence-runtime.mjs','scripts/test_production_deployment_ecs.py'])
+    'scripts/assess-staging-runtime.py','services/ehr-api/scripts/test-patient-evidence-runtime.mjs','scripts/test_production_deployment_ecs.py',
+    'services/ehr-api/scripts/lab-work-list-runtime-checks.mjs','services/ehr-api/src','services/lab-api/src','services/lab-api/tsconfig.build.json'])
     assert.ok(owners.has(p),`workflow parser missed ${p}`);
   assert.deepEqual([...owners.get('scripts/verify-migration-ledger.mjs')],['database-migration']);
+  assert.deepEqual([...owners.get('services/ehr-api/src')],['database-migration']);
+  assert.deepEqual([...owners.get('services/lab-api/src')],['database-migration']);
   for(const [p,cs] of owners){
     assert.ok(existsSync(join(repoRoot,p)),`workflow runs missing ${p}`);
     if(testFile(p)) continue;
-    const selected=selectComponents([p]);
-    for(const c of cs) assert.ok(selected.includes(c),`${p} runs for ${c} but does not select it`);
+    for(const f of ownedFiles(p)){
+      const selected=selectComponents([f]);
+      for(const c of cs) assert.ok(selected.includes(c),`${f} runs for ${c} but does not select it`);
+    }
   }
+});
+
+// Every file that a service's tests read or import from outside the service must
+// select that service, so that a change to the file runs those tests. The
+// identity-api job also runs the workload token agent tests. Reads are found from
+// relative path literals and from join/resolve calls built from __dirname and
+// string literals (also through a const that holds such a call). Files under
+// services/<c>/scripts/ are runtime verifiers that the service jobs do not run:
+// the ones the migration step runs are covered by the workflow test above, and
+// the rest run in the TUF staging rehearsal.
+const testReader=p=>{
+  const dir=p.split('/')[1];
+  if(dir==='workload-token-agent') return 'identity-api';
+  return components.includes(dir)&&!['gateway','database-migration'].includes(dir)?dir:null;
+};
+// Literals that look like paths but are never read as files.
+const notReadLiterals=new Set(['services/workload-token-agent/test/agent.test.mjs ../../outside']);
+function outsideReads(file){
+  const text=readFileSync(join(repoRoot,file),'utf8'), dir=posix.dirname(file), service=file.split('/').slice(0,2).join('/');
+  const names=new Map([['__dirname',dir],['import.meta.dirname',dir]]), found=new Set();
+  const literal=a=>/^(['"])([^'"$`]*)\1$/.exec(a)?.[2];
+  const evaluate=args=>{
+    const parts=args.split(',').map(a=>a.trim());
+    let value=names.get(parts[0]);
+    if(value===undefined) return null;
+    for(const a of parts.slice(1)){const l=literal(a); if(l===undefined) break; value=posix.join(value,l);}
+    return posix.normalize(value);
+  };
+  for(const m of text.matchAll(/const\s+(\w+)\s*=\s*(?:path\.)?(?:join|resolve)\(([^()]*)\)/g)){
+    const v=evaluate(m[2]); if(v) names.set(m[1],v);
+  }
+  for(const m of text.matchAll(/(?:path\.)?(?:join|resolve)\(([^()]*)\)/g)){const v=evaluate(m[1]); if(v) found.add(v);}
+  for(const m of text.matchAll(/['"`]((?:\.\.\/)+[^'"`$]*)['"`]/g))
+    if(!notReadLiterals.has(`${file} ${m[1]}`)) found.add(posix.normalize(posix.join(dir,m[1])));
+  return [...found].map(p=>p.replace(/\/$/,'')).filter(p=>p!==service&&!p.startsWith(`${service}/`));
+}
+test('every file a service test reads from outside the service selects that service',()=>{
+  const reads=new Map();
+  for(const file of trackedFiles('services')){
+    const reader=testReader(file);
+    if(!reader||!/\.(?:ts|mts|js|mjs|cjs)$/.test(file)||/^services\/[\w-]+\/scripts\//.test(file)) continue;
+    for(const target of outsideReads(file)) reads.set(`${file} -> ${target}`,{reader,target});
+  }
+  for(const known of ['services/identity-api/src/auth/product-gate.spec.ts -> services/ehr-api/database/migrations',
+    'services/outreach-api/src/database/runtime-function-grants.spec.ts -> services/ehr-api/database/migrations',
+    'services/outreach-api/src/database/runtime-function-grants.spec.ts -> services/ehr-api/database/runtime-grants.sql',
+    'services/ocr-api/src/ocr/reading/reading-versions.spec.ts -> services/ocr-worker/src',
+    'services/ocr-worker/src/database-privileges.spec.ts -> services/ehr-api/database/runtime-grants.sql',
+    'services/outreach-api/src/outreach/health-id-unclaimed.spec.ts -> gateway/nginx.conf.template',
+    'services/workload-token-agent/test/issuer.test.mjs -> infra/aws/runtime/workload-issuer/issuer.mjs',
+    'services/lab-api/src/lab/lab-order-route-cannot-complete.spec.ts -> services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql'])
+    assert.ok(reads.has(known),`test read scanner missed ${known}`);
+  for(const [key,{reader,target}] of reads){
+    assert.ok(existsSync(join(repoRoot,target)),`${key}: not in the repository`);
+    for(const f of statSync(join(repoRoot,target)).isDirectory()?[...trackedFiles(target),`${target}/new-file`]:[target])
+      assert.ok(selectComponents([f]).includes(reader),`${key}: ${f} does not select ${reader}`);
+  }
+});
+test('the workflow starts for every outside file a service test reads',()=>{
+  const text=readFileSync(join(repoRoot,'.github/workflows/production-backend-images.yml'),'utf8');
+  for(const [p] of outsideTestInputs){
+    const root=p.split('/')[0];
+    assert.ok(['services','gateway'].includes(root)||text.split(`'${p}**'`).length===3,`${p} is missing from the workflow paths`);
+  }
+});
+
+
+// Push selection base: the commit of the last run that deployed (or built nothing).
+const pushEnv={GITHUB_EVENT_NAME:'push',GITHUB_REF:`refs/heads/${releaseBranch}`,GITHUB_RUN_ID:'900'};
+const sha=n=>String(n).repeat(40).slice(0,40);
+const run=(id,head,extra={})=>({id,run_attempt:1,head_sha:head,head_branch:releaseBranch,event:'push',conclusion:'success',path:workflowPath,...extra});
+const deployedJobs=[{name:'select',conclusion:'success'},{name:'build (lab-api)',conclusion:'success'},
+  {name:'publish (lab-api)',conclusion:'success'},{name:'candidate',conclusion:'success'},{name:'deploy',conclusion:'success'}];
+const publishedOnlyJobs=deployedJobs.map(j=>j.name==='deploy'?{...j,conclusion:'skipped'}:j);
+const emptyJobs=[{name:'select',conclusion:'success'},{name:'build',conclusion:'skipped'},{name:'verify-publisher',conclusion:'skipped'},
+  {name:'publish',conclusion:'skipped'},{name:'candidate',conclusion:'skipped'},{name:'deploy',conclusion:'skipped'}];
+const fakeApi=(runs,jobs)=>async suffix=>{
+  if(suffix.startsWith('actions/workflows/')){
+    assert.equal(suffix,`actions/workflows/production-backend-images.yml/runs?branch=${releaseBranch}&event=push&status=success&per_page=30`);
+    return {workflow_runs:runs};
+  }
+  const m=suffix.match(/^actions\/runs\/(\d+)\/attempts\/1\/jobs\?per_page=100$/);
+  assert.ok(m,suffix);
+  return {jobs:jobs[m[1]]};
+};
+const always=()=>true;
+test('a push compares with the last run that deployed, so cancelled and failed runs are not lost',async()=>{
+  // The API lists only successful runs: a cancelled or failed run in between never appears,
+  // so its changes stay inside the diff from the last deployed commit.
+  assert.equal(await releasedBase(pushEnv,fakeApi([run(800,sha(1)),run(700,sha(2))],{800:deployedJobs,700:deployedJobs}),always),sha(1));
+  // A run that published without deploying is passed over; one that built nothing is a valid base.
+  assert.equal(await releasedBase(pushEnv,fakeApi([run(800,sha(1)),run(700,sha(2))],{800:publishedOnlyJobs,700:deployedJobs}),always),sha(2));
+  assert.equal(await releasedBase(pushEnv,fakeApi([run(800,sha(1))],{800:emptyJobs}),always),sha(1));
+  // The current run is never its own base.
+  assert.equal(await releasedBase(pushEnv,fakeApi([run(900,sha(3)),run(800,sha(1))],{800:deployedJobs}),always),sha(1));
+});
+test('the push base fails closed to every component on any doubt',async()=>{
+  const ok=fakeApi([run(800,sha(1))],{800:deployedJobs});
+  const cases=[
+    ['pull request event',{...pushEnv,GITHUB_EVENT_NAME:'pull_request'},ok,always],
+    ['workflow_dispatch',{...pushEnv,GITHUB_EVENT_NAME:'workflow_dispatch'},ok,always],
+    ['other branch',{...pushEnv,GITHUB_REF:'refs/heads/main'},ok,always],
+    ['API error',pushEnv,async()=>{throw Error('500');},always],
+    ['no runs',pushEnv,fakeApi([],{}),always],
+    ['unexpected answer',pushEnv,async()=>({}),always],
+    ['jobs missing',pushEnv,fakeApi([run(800,sha(1))],{}),always],
+    ['select did not succeed',pushEnv,fakeApi([run(800,sha(1))],{800:deployedJobs.filter(j=>j.name!=='select')}),always],
+    ['only published runs',pushEnv,fakeApi([run(800,sha(1))],{800:publishedOnlyJobs}),always],
+    ['not an ancestor of HEAD',pushEnv,ok,()=>false],
+    ['malformed sha',pushEnv,fakeApi([run(800,'abc')],{800:deployedJobs}),always],
+    ['other workflow',pushEnv,fakeApi([run(800,sha(1),{path:'.github/workflows/other.yml'})],{800:deployedJobs}),always],
+    ['other branch run',pushEnv,fakeApi([run(800,sha(1),{head_branch:'main'})],{800:deployedJobs}),always],
+    ['failed run listed',pushEnv,fakeApi([run(800,sha(1),{conclusion:'failure'})],{800:deployedJobs}),always],
+  ];
+  for(const [name,env,api,ancestor] of cases){
+    const base=await releasedBase(env,api,ancestor);
+    assert.equal(base,null,name);
+    assert.deepEqual(selectChanged(base,()=>'docs/a.md\0'),components,name);
+  }
+});
+test('the select job reads the push base from the Actions API, not from the previous push',()=>{
+  const text=readFileSync(join(repoRoot,'.github/workflows/production-backend-images.yml'),'utf8');
+  const select=text.slice(text.indexOf('\n  select:\n'),text.indexOf('\n  build:\n'));
+  assert.ok(/permissions:\n\s+contents: read\n\s+actions: read\n/.test(select));
+  assert.ok(select.includes('BASE_SHA: ${{ github.event.pull_request.base.sha }}\n'));
+  assert.ok(!select.includes('github.event.before'));
 });
