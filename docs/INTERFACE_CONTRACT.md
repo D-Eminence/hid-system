@@ -7306,6 +7306,93 @@ prescription, lab request and vital recorded in it; a diagnosis or allergy
 entered in error; a prescription or lab request entered in error, cancelled
 or completed.
 
+Answer `200`:
+
+```json
+{
+  "patientId": "<uuid>",
+  "facilityId": "<uuid>",
+  "purposeOfUse": "direct-care",
+  "limits": { "recentVisits": 10, "problems": 50, "medications": 50, "openLabRequests": 50, "allergies": 200, "recentResults": 10 },
+  "sections": {
+    "demographics": { "patientId": "<uuid>", "fullName": "...", "firstName": "...", "lastName": "...", "dateOfBirth": "1990-01-01", "gender": "female" },
+    "problems": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "codeSystem": "ICD-10", "code": "B50.9", "display": "...", "clinicalStatus": "active", "verificationStatus": "confirmed", "onsetAt": null, "notes": null, "createdAt": "..." }], "more": false },
+    "medications": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "medicationDisplay": "...", "medicationCodeSystem": null, "medicationCode": null, "doseQuantity": "1", "doseUnit": "tablet", "routeCode": "oral", "frequency": "...", "instructions": "...", "startsOn": "2026-11-18", "endsOn": null, "status": "active", "createdAt": "...", "ownProgress": { "status": "dispensed", "receivedAt": "...", "dispensedAt": "...", "reversedAt": null } }], "more": false },
+    "allergies": { "recorded": [{ "source": "recorded", "id": "<uuid>", "substance": "...", "reaction": "...", "severity": "severe", "recordedHere": true, "recordedOn": "..." }], "patientReported": { "source": "patient_reported", "allergies": null, "updatedAt": null } },
+    "latestVitals": { "facilityId": "<uuid>", "measures": { "pulseBpm": { "value": 76, "recordedAt": "...", "vitalId": "<uuid>", "encounterId": "<uuid>", "corrected": false } } },
+    "recentVisits": { "items": [{ "id": "<uuid>", "encounterNumber": "...", "encounterType": "ambulatory", "status": "in_progress", "startedAt": "...", "endedAt": null, "chiefComplaint": "...", "importedPaperRecords": false }], "more": false },
+    "openLabRequests": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "testCodeSystem": "HID-LAB", "testCode": "MP-SMEAR", "testDisplay": "...", "priority": "routine", "status": "active", "specimenTypeCode": null, "clinicalInformation": null, "createdAt": "...", "ownProgress": { "status": "received", "receivedAt": "...", "collectedAt": null, "lastResultAt": null } }], "more": false },
+    "recentResults": { "items": [{ "id": "<uuid>", "version": "...", "title": "...", "recordedAt": "...", "effectiveAt": "...", "fields": {} }], "more": false, "complete": true }
+  },
+  "leftOut": [
+    { "section": "recentResults", "reason": "unavailable", "message": "This part of the chart could not be loaded just now. Try again in a moment." }
+  ]
+}
+```
+
+### Sections left out
+
+A section that is not in `sections` is listed in `leftOut` with a reason and
+a plain sentence to show:
+
+| `reason` | When | `message` |
+| --- | --- | --- |
+| `permission` | the caller does not hold the section's permission, or the other service (Identity or Lab) refused (`403`) | "You do not have permission to see this part of the chart." |
+| `permission` | an emergency read (below), for every section it does not show | "Emergency access shows allergies and past visits only. This part of the chart is not shown." |
+| `unavailable` | Identity or Lab could not be reached, timed out or answered something unexpected | "This part of the chart could not be loaded just now. Try again in a moment." |
+
+When the pharmacy or the laboratory cannot tell the progress of an item, the
+section is still answered, each such item carries `ownProgress: { "status":
+"unknown" }` (as on the per-visit lists), and `leftOut` lists
+`medications.ownProgress` ("Pharmacy progress could not be loaded just now.
+The medicines are shown without it.") or `openLabRequests.ownProgress`
+("Laboratory progress could not be loaded just now. The lab requests are
+shown without it."), reason `unavailable`. A laboratory that is down never
+fails the answer.
+
+### Consent and audit
+
+One consent check for the whole call, the same as every EHR read: Identity
+decides `read_records` for this patient, member, facility and purpose, and
+the database applies its own row checks as well. Without consent the answer
+is `403 CONSENT_REQUIRED`, audited as `ehr.chart-summary.read` with outcome
+`denied`, and nothing is read. A read writes one EHR success audit row,
+`ehr.chart-summary.read` (resource `chart-summary`, the patient's UUID), with
+the sections asked for and a count per EHR section; never a value, a name, a
+Health ID or a NIN. The route is marked to audit failures only, as the
+emergency read and the staff record chat are, so the request's own row is
+written only when the request fails.
+
+The patient card and the results are read after that, from Identity and Lab,
+through the reads the staff record chat already uses. Identity and Lab check
+access themselves, and record these reads under the staff record chat's
+action names: Identity writes `identity.staff.chat.profile.read` once per
+chart open, and Lab writes `lab.staff.chat.released-results.read` once per
+page of results (up to 5 per chart open, each page with its own Identity
+access check). So an auditor sees them as staff record chat reads, not chart
+reads; chart-specific action names in Identity and Lab are a follow-up. The
+pharmacy and laboratory progress is read the same way the per-visit lists
+read it.
+
+### Emergency (break-glass)
+
+With `X-Purpose-Of-Use: emergency`, the summary shows exactly what the
+emergency read (`GET /ehr/patients/:patientId/emergency-records`) shows
+today, under the same rules: the caller needs both `ehr.encounter.read` and
+`ehr.note.read` (else `403 PERMISSION_DENIED`), and an active break-glass
+grant (else `403 CONSENT_REQUIRED`, audited as denied). It answers
+`allergies` and `recentVisits` (completed visits at this facility, with the
+emergency read's columns: no chief complaint); every other section is in
+`leftOut` with reason `permission`. The audit row is the same action with
+purpose `emergency`.
+
+### Screen change needed (Akos frontend branch)
+
+"Open chart" calls this route once per patient and shows each section in
+`sections`. For each entry in `leftOut`, show its `message` where that
+section would be. Re-read after a drawer closes, as the per-section lists
+are.
+
 ## ID-2. Registration at the front desk without a NIN (0130, owner Q106 of 18 November 2026)
 
 Owner, 18 November 2026 (Q106, recommended answer accepted): "Phone required except for children. The same desk
@@ -7471,89 +7558,127 @@ its own sealed patients.
 Answer `200`:
 
 ```json
-{
-  "patientId": "<uuid>",
-  "facilityId": "<uuid>",
-  "purposeOfUse": "direct-care",
-  "limits": { "recentVisits": 10, "problems": 50, "medications": 50, "openLabRequests": 50, "allergies": 200, "recentResults": 10 },
-  "sections": {
-    "demographics": { "patientId": "<uuid>", "fullName": "...", "firstName": "...", "lastName": "...", "dateOfBirth": "1990-01-01", "gender": "female" },
-    "problems": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "codeSystem": "ICD-10", "code": "B50.9", "display": "...", "clinicalStatus": "active", "verificationStatus": "confirmed", "onsetAt": null, "notes": null, "createdAt": "..." }], "more": false },
-    "medications": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "medicationDisplay": "...", "medicationCodeSystem": null, "medicationCode": null, "doseQuantity": "1", "doseUnit": "tablet", "routeCode": "oral", "frequency": "...", "instructions": "...", "startsOn": "2026-11-18", "endsOn": null, "status": "active", "createdAt": "...", "ownProgress": { "status": "dispensed", "receivedAt": "...", "dispensedAt": "...", "reversedAt": null } }], "more": false },
-    "allergies": { "recorded": [{ "source": "recorded", "id": "<uuid>", "substance": "...", "reaction": "...", "severity": "severe", "recordedHere": true, "recordedOn": "..." }], "patientReported": { "source": "patient_reported", "allergies": null, "updatedAt": null } },
-    "latestVitals": { "facilityId": "<uuid>", "measures": { "pulseBpm": { "value": 76, "recordedAt": "...", "vitalId": "<uuid>", "encounterId": "<uuid>", "corrected": false } } },
-    "recentVisits": { "items": [{ "id": "<uuid>", "encounterNumber": "...", "encounterType": "ambulatory", "status": "in_progress", "startedAt": "...", "endedAt": null, "chiefComplaint": "...", "importedPaperRecords": false }], "more": false },
-    "openLabRequests": { "items": [{ "id": "<uuid>", "encounterId": "<uuid>", "testCodeSystem": "HID-LAB", "testCode": "MP-SMEAR", "testDisplay": "...", "priority": "routine", "status": "active", "specimenTypeCode": null, "clinicalInformation": null, "createdAt": "...", "ownProgress": { "status": "received", "receivedAt": "...", "collectedAt": null, "lastResultAt": null } }], "more": false },
-    "recentResults": { "items": [{ "id": "<uuid>", "version": "...", "title": "...", "recordedAt": "...", "effectiveAt": "...", "fields": {} }], "more": false, "complete": true }
-  },
-  "leftOut": [
-    { "section": "recentResults", "reason": "unavailable", "message": "This part of the chart could not be loaded just now. Try again in a moment." }
-  ]
-}
+{ "mode": "standard", "outcome": "found", "reach": "everywhere", "message": null,
+  "patients": [ { "matchRef": "psr_...", "matchRefExpiresAt": "2026-11-18T10:10:00.000Z",
+    "fullName": "Amaka Okafor", "sex": "female", "dateOfBirth": "1990-05-01",
+    "healthIdLast4": "AA22", "ninStatus": "not_verified" } ] }
 ```
 
-### Sections left out
+- `outcome`: `found` (1-10 cards), `no_match`, `no_such_patient` (a Health ID
+  was given and no patient record of any status has it: "No patient has this
+  Health ID."), `too_many` (more than 10: "Too many matches. Add the date of
+  birth or phone.", no card).
+- `reach`: `everywhere` or `here`. A `no_match` that reached only here says
+  "No patient of this facility matches. To search every facility, add the
+  full name and date of birth."
+- `ninStatus` is ID-0's: `verified` or `not_verified` ("NIN Verified" /
+  "NIN Not Verified" on screen).
+- Registration roles can tell whether a Health ID exists from
+  `no_such_patient`; this is the owner's Q100 B.
 
-A section that is not in `sections` is listed in `leftOut` with a reason and
-a plain sentence to show:
+Refusals: 400 `PATIENT_SEARCH_TOO_BROAD`, `PATIENT_SEARCH_PHONE_INVALID`,
+`PATIENT_SEARCH_DATE_INVALID`, `VALIDATION_FAILED` (unknown field, malformed
+Health ID, a name over 100 characters), `PURPOSE_OF_USE_REQUIRED`; 403
+(permission); 429 `PATIENT_SEARCH_LIMITED` ("Too many searches. Please wait a
+few minutes and try again."); 503 `PATIENT_SEARCH_UNAVAILABLE`.
 
-| `reason` | When | `message` |
-| --- | --- | --- |
-| `permission` | the caller does not hold the section's permission, or the other service (Identity or Lab) refused (`403`) | "You do not have permission to see this part of the chart." |
-| `permission` | an emergency read (below), for every section it does not show | "Emergency access shows allergies and past visits only. This part of the chart is not shown." |
-| `unavailable` | Identity or Lab could not be reached, timed out or answered something unexpected | "This part of the chart could not be loaded just now. Try again in a moment." |
+### `POST /api/v1/identity/patient-search/emergency`
 
-When the pharmacy or the laboratory cannot tell the progress of an item, the
-section is still answered, each such item carries `ownProgress: { "status":
-"unknown" }` (as on the per-visit lists), and `leftOut` lists
-`medications.ownProgress` ("Pharmacy progress could not be loaded just now.
-The medicines are shown without it.") or `openLabRequests.ownProgress`
-("Laboratory progress could not be loaded just now. The lab requests are
-shown without it."), reason `unavailable`. A laboratory that is down never
-fails the answer.
+Permission `identity.break-glass.write` (doctors, nurses, clinicians),
+`X-Purpose-Of-Use: emergency`, the platform's emergency access
+(`break_glass_enabled`) on.
 
-### Consent and audit
+```json
+{ "firstName": "Amaka", "lastName": "Okafor", "dateOfBirth": "1990-05-01",
+  "reason": "Unconscious patient brought in by ambulance" }
+```
 
-One consent check for the whole call, the same as every EHR read: Identity
-decides `read_records` for this patient, member, facility and purpose, and
-the database applies its own row checks as well. Without consent the answer
-is `403 CONSENT_REQUIRED`, audited as `ehr.chart-summary.read` with outcome
-`denied`, and nothing is read. A read writes one EHR success audit row,
-`ehr.chart-summary.read` (resource `chart-summary`, the patient's UUID), with
-the sections asked for and a count per EHR section; never a value, a name, a
-Health ID or a NIN. The route is marked to audit failures only, as the
-emergency read and the staff record chat are, so the request's own row is
-written only when the request fails.
+Exactly these four fields; the reason (8-500 characters) is required before
+any result. Exact first name, last name and date of birth, any active
+patient, at most 5 cards (`too_many` above 5: "More than 5 people match. Ask
+for a phone number or the Health ID."). The answer has the same shape with
+`mode: "emergency"`. The cards give no access: break-glass still needs its
+own reason. Refusals as above, plus 400 `EMERGENCY_SEARCH_REASON_REQUIRED`
+and 423 `BREAK_GLASS_DISABLED`.
 
-The patient card and the results are read after that, from Identity and Lab,
-through the reads the staff record chat already uses. Identity and Lab check
-access themselves, and record these reads under the staff record chat's
-action names: Identity writes `identity.staff.chat.profile.read` once per
-chart open, and Lab writes `lab.staff.chat.released-results.read` once per
-page of results (up to 5 per chart open, each page with its own Identity
-access check). So an auditor sees them as staff record chat reads, not chart
-reads; chart-specific action names in Identity and Lab are a follow-up. The
-pharmacy and laboratory progress is read the same way the per-visit lists
-read it.
+### matchRef
 
-### Emergency (break-glass)
+`psr_` and 43 characters, random, made by the database; only its SHA-256 is
+stored (`identity.patient_search_refs`), bound to the patient, the member's
+account, membership and facility and the purpose (`direct-care`, or
+`emergency` for an emergency search), for 10 minutes. No key or setting is
+involved. Identity code resolves it with
+`services/identity-api/src/patient-search/match-ref.ts`
+(`resolvePatientMatchRef`, over `identity.resolve_patient_search_ref`): the
+patient id only for the same member, facility and purpose, unexpired, while
+the patient is active and the seal allows it; null otherwise. Break-glass by
+matchRef (ID-5) and check-in (EHR-C7) use it; they do not change it.
 
-With `X-Purpose-Of-Use: emergency`, the summary shows exactly what the
-emergency read (`GET /ehr/patients/:patientId/emergency-records`) shows
-today, under the same rules: the caller needs both `ehr.encounter.read` and
-`ehr.note.read` (else `403 PERMISSION_DENIED`), and an active break-glass
-grant (else `403 CONSENT_REQUIRED`, audited as denied). It answers
-`allergies` and `recentVisits` (completed visits at this facility, with the
-emergency read's columns: no chief complaint); every other section is in
-`leftOut` with reason `permission`. The audit row is the same action with
-purpose `emergency`.
+### Break-glass by matchRef (ID-5)
 
-### Screen change needed (Akos frontend branch)
+`POST /api/v1/identity/break-glass` takes the patient as exactly one of
+`hid` (a Health ID) or `matchRef` (a card's matchRef from this member's own
+emergency search in the last 10 minutes):
+`{ "matchRef": "psr_...", "reason": "...", "durationMinutes": 60 }`. Both at
+once, or neither, is `400 VALIDATION_FAILED`. The database resolves the ref
+(`identity.activate_break_glass_by_match_ref`, 0132) and runs the same
+activation as for a Health ID: every check, the hourly limit, the replay, the
+grant, the event and the audit are unchanged, and so is the answer. A ref that
+does not resolve (another member's, another facility's, a direct-care
+search's, expired, malformed, or a patient no longer active) answers as an
+unknown Health ID does: `404 CONSENT_RESOURCE_NOT_FOUND`, the same for every
+reason. The emergency card never carries a Health ID, so the screen sends the
+card's `matchRef`.
 
-"Open chart" calls this route once per patient and shows each section in
-`sections`. For each entry in `leftOut`, show its `message` where that
-section would be. Re-read after a drawer closes, as the per-section lists
-are.
+### Limits and alert
+
+Counted before each search (`auth.otp_rate_limits`, HMAC buckets with the
+existing OTP key): 30 searches per member in 10 minutes and 300 per facility
+in an hour; 5 emergency searches per member in an hour. A limit answers 429
+and writes one warning log line `event: "identity.patient_search.limited"`
+with the mode, which limit, the facility id and the correlation id; never
+what was searched for.
+
+### Audit
+
+- Each search that runs: one `identity.patient.search` or
+  `identity.patient.emergency-search` row (success; denied when too broad)
+  with `details.criteria` (the kinds of keys given), `details.criteriaHash`
+  (HMAC-SHA-256 of the values with the OTP key, so a repeated search can be
+  recognised), `reach`, `outcome`, `resultCount` and `patientIds` shown. Never
+  a name, date of birth, Health ID or phone. The emergency reason is kept in
+  the row's `reason`.
+- Each patient shown: one `identity.patient.search.shown` or
+  `identity.patient.emergency-search.shown` row naming the patient.
+- Each refusal (too broad, invalid phone or date, limited, a database
+  refusal, unavailable): one denied (or failure) search row with
+  `details.refusal` and the key kinds. The request interceptor's
+  `api.identity.patient.search.request` rows are written as for every route.
+
+### The patient's access log (owner Q104)
+
+`GET /api/v1/identity/me/access-log` gains the action
+`found_in_emergency_search`, with `facilityName` and `actorName`, for each
+emergency search that showed the patient. The screen says "Found in an
+emergency search at <facility>". A standard search is not listed there (it
+is audited).
+
+### Screen change (Akos's frontend branch)
+
+Desk search form with the five keys; show `message` when there is no card;
+offer "Register new patient" from an empty search (`no_match` or
+`no_such_patient`), not from an error. Emergency search behind the
+break-glass flow, reason first. Keep the `matchRef` (never a Health ID) for
+the next step: break-glass sends it as `matchRef` (ID-5, above). Patient's access history: the new action's words above.
+
+### Tests
+
+`services/ehr-api/test/database/staff-patient-search.integration.sql`
+(strong and weak keys, here against everywhere, Health ID outcomes,
+exclusions and seals, the 10 and 5 limits, cards, matchRefs, refusals,
+emergency gate and reason, audit rows without values, the patient's access
+log, structure); `services/identity-api/src/patient-search/patient-search.http.spec.ts`
+and `services/identity-api/src/auth/patient-access-log.spec.ts`.
 
 ## EHR-C5: one-call consultation
 
@@ -7840,125 +7965,3 @@ Read `actor.facility.modules` (or the chosen facility's entry in
 `actor.facilities`) and hide each menu item and home tile whose key is
 `false`; P1-5 hides Facility settings when `admin` is `false`. Treat a
 missing `modules` (an older backend) as today: show what is shown now.
-
-{ "mode": "standard", "outcome": "found", "reach": "everywhere", "message": null,
-  "patients": [ { "matchRef": "psr_...", "matchRefExpiresAt": "2026-11-18T10:10:00.000Z",
-    "fullName": "Amaka Okafor", "sex": "female", "dateOfBirth": "1990-05-01",
-    "healthIdLast4": "AA22", "ninStatus": "not_verified" } ] }
-```
-
-- `outcome`: `found` (1-10 cards), `no_match`, `no_such_patient` (a Health ID
-  was given and no patient record of any status has it: "No patient has this
-  Health ID."), `too_many` (more than 10: "Too many matches. Add the date of
-  birth or phone.", no card).
-- `reach`: `everywhere` or `here`. A `no_match` that reached only here says
-  "No patient of this facility matches. To search every facility, add the
-  full name and date of birth."
-- `ninStatus` is ID-0's: `verified` or `not_verified` ("NIN Verified" /
-  "NIN Not Verified" on screen).
-- Registration roles can tell whether a Health ID exists from
-  `no_such_patient`; this is the owner's Q100 B.
-
-Refusals: 400 `PATIENT_SEARCH_TOO_BROAD`, `PATIENT_SEARCH_PHONE_INVALID`,
-`PATIENT_SEARCH_DATE_INVALID`, `VALIDATION_FAILED` (unknown field, malformed
-Health ID, a name over 100 characters), `PURPOSE_OF_USE_REQUIRED`; 403
-(permission); 429 `PATIENT_SEARCH_LIMITED` ("Too many searches. Please wait a
-few minutes and try again."); 503 `PATIENT_SEARCH_UNAVAILABLE`.
-
-### `POST /api/v1/identity/patient-search/emergency`
-
-Permission `identity.break-glass.write` (doctors, nurses, clinicians),
-`X-Purpose-Of-Use: emergency`, the platform's emergency access
-(`break_glass_enabled`) on.
-
-```json
-{ "firstName": "Amaka", "lastName": "Okafor", "dateOfBirth": "1990-05-01",
-  "reason": "Unconscious patient brought in by ambulance" }
-```
-
-Exactly these four fields; the reason (8-500 characters) is required before
-any result. Exact first name, last name and date of birth, any active
-patient, at most 5 cards (`too_many` above 5: "More than 5 people match. Ask
-for a phone number or the Health ID."). The answer has the same shape with
-`mode: "emergency"`. The cards give no access: break-glass still needs its
-own reason. Refusals as above, plus 400 `EMERGENCY_SEARCH_REASON_REQUIRED`
-and 423 `BREAK_GLASS_DISABLED`.
-
-### matchRef
-
-`psr_` and 43 characters, random, made by the database; only its SHA-256 is
-stored (`identity.patient_search_refs`), bound to the patient, the member's
-account, membership and facility and the purpose (`direct-care`, or
-`emergency` for an emergency search), for 10 minutes. No key or setting is
-involved. Identity code resolves it with
-`services/identity-api/src/patient-search/match-ref.ts`
-(`resolvePatientMatchRef`, over `identity.resolve_patient_search_ref`): the
-patient id only for the same member, facility and purpose, unexpired, while
-the patient is active and the seal allows it; null otherwise. Break-glass by
-matchRef (ID-5) and check-in (EHR-C7) use it; they do not change it.
-
-### Break-glass by matchRef (ID-5)
-
-`POST /api/v1/identity/break-glass` takes the patient as exactly one of
-`hid` (a Health ID) or `matchRef` (a card's matchRef from this member's own
-emergency search in the last 10 minutes):
-`{ "matchRef": "psr_...", "reason": "...", "durationMinutes": 60 }`. Both at
-once, or neither, is `400 VALIDATION_FAILED`. The database resolves the ref
-(`identity.activate_break_glass_by_match_ref`, 0132) and runs the same
-activation as for a Health ID: every check, the hourly limit, the replay, the
-grant, the event and the audit are unchanged, and so is the answer. A ref that
-does not resolve (another member's, another facility's, a direct-care
-search's, expired, malformed, or a patient no longer active) answers as an
-unknown Health ID does: `404 CONSENT_RESOURCE_NOT_FOUND`, the same for every
-reason. The emergency card never carries a Health ID, so the screen sends the
-card's `matchRef`.
-
-### Limits and alert
-
-Counted before each search (`auth.otp_rate_limits`, HMAC buckets with the
-existing OTP key): 30 searches per member in 10 minutes and 300 per facility
-in an hour; 5 emergency searches per member in an hour. A limit answers 429
-and writes one warning log line `event: "identity.patient_search.limited"`
-with the mode, which limit, the facility id and the correlation id; never
-what was searched for.
-
-### Audit
-
-- Each search that runs: one `identity.patient.search` or
-  `identity.patient.emergency-search` row (success; denied when too broad)
-  with `details.criteria` (the kinds of keys given), `details.criteriaHash`
-  (HMAC-SHA-256 of the values with the OTP key, so a repeated search can be
-  recognised), `reach`, `outcome`, `resultCount` and `patientIds` shown. Never
-  a name, date of birth, Health ID or phone. The emergency reason is kept in
-  the row's `reason`.
-- Each patient shown: one `identity.patient.search.shown` or
-  `identity.patient.emergency-search.shown` row naming the patient.
-- Each refusal (too broad, invalid phone or date, limited, a database
-  refusal, unavailable): one denied (or failure) search row with
-  `details.refusal` and the key kinds. The request interceptor's
-  `api.identity.patient.search.request` rows are written as for every route.
-
-### The patient's access log (owner Q104)
-
-`GET /api/v1/identity/me/access-log` gains the action
-`found_in_emergency_search`, with `facilityName` and `actorName`, for each
-emergency search that showed the patient. The screen says "Found in an
-emergency search at <facility>". A standard search is not listed there (it
-is audited).
-
-### Screen change (Akos's frontend branch)
-
-Desk search form with the five keys; show `message` when there is no card;
-offer "Register new patient" from an empty search (`no_match` or
-`no_such_patient`), not from an error. Emergency search behind the
-break-glass flow, reason first. Keep the `matchRef` (never a Health ID) for
-the next step: break-glass sends it as `matchRef` (ID-5, above). Patient's access history: the new action's words above.
-
-### Tests
-
-`services/ehr-api/test/database/staff-patient-search.integration.sql`
-(strong and weak keys, here against everywhere, Health ID outcomes,
-exclusions and seals, the 10 and 5 limits, cards, matchRefs, refusals,
-emergency gate and reason, audit rows without values, the patient's access
-log, structure); `services/identity-api/src/patient-search/patient-search.http.spec.ts`
-and `services/identity-api/src/auth/patient-access-log.spec.ts`.
