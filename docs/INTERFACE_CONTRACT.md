@@ -674,6 +674,38 @@ check goes on and its answer is kept for the retry. 503 `NIN_CHECK_UNAVAILABLE`
 means nothing was sent. A client shows the message and offers to try again
 after `retryAfterSeconds`; it never retries on its own.
 
+A NIN QoreID has no record of (owner Q117) gets one answer on this route,
+`POST /api/v1/identity/patient-enrollments` and the registration desk (`POST
+/api/v1/identity/nin/resolve`, section Q108): 422 `NIN_NOT_VERIFIED`, "This
+NIN could not be verified. Check the number and try again." It is QoreID's
+`404` ("not found") on any of the three, fresh or reused from 0137's store
+(which keeps it 24 hours for every path), and, on sign-up and the desk,
+which ask with the NIN alone, QoreID's "no record" (fresh or reused). It
+replaces the 502 `QOREID_PROVIDER_REJECTED` the three answered for QoreID's
+`404`; sign-up already answered its "no record" 422 `NIN_NOT_VERIFIED`,
+now with this text, and the desk answered it 422 `NIN_VERIFICATION_FAILED`.
+A 4xx `detail` reaches the client as written, so a client shows this sentence.
+This route's answer to QoreID's "not verified" for the profile's name and date
+of birth is unchanged (200 `state: "not_verified"`, or 409
+`PATIENT_NIN_DETAILS_MISMATCH` for a profile without a date of birth), as is
+the desk's "does not match" (422 `NIN_VERIFICATION_FAILED`, its own text);
+this route records the same evidence for a `404` as before (`provider_error`,
+`unexpected_response`). Other QoreID refusals keep their answers (an
+account-level 4xx: 502 `QOREID_PROVIDER_REJECTED`; an answer HID cannot use:
+502 `QOREID_PROVIDER_RESPONSE_INVALID`).
+
+How long 0137 keeps a NIN's record (owner Q115, for someone not on a Health
+ID): 90 days from the first check, and each later use (the desk, sign-up or
+this route) keeps it at least 30 days from that use; it ends at whichever is
+later. 0137 (#276) owns that one rule (`identity.keep_qoreid_nin_record`
+through `NinCheckOnce.keepRecord`, which never shortens a keep). The desk
+calls it for each stored record its name and date of birth match (Q108).
+As built at #276's c780b095, `keepRecord` keeps the record 90 days from the
+use, and sign-up and this route do not call it yet: until #276 makes it 30
+days from the use and calls it for their uses too, a desk match keeps a
+record 90 days from that match and a sign-up or profile use leaves its keep
+as it was.
+
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
 the `read_records` action for the exact facility and patient. With 0117 it also answers `allergies` (recorded and
@@ -6378,8 +6410,9 @@ Kept in memory in each Identity process (no table, no secret, no setting).
 - A `503` from the NIN service trips it at once.
 - Three other failures (a `5xx`, a bad answer, a network error) within 5
   minutes trip it.
-- A NIN that does not match (`422 NIN_VERIFICATION_FAILED`) is an answer, not
-  a failure, and does not count. Nor does a `4xx`.
+- A NIN that does not match (`422 NIN_VERIFICATION_FAILED`), or that the NIN
+  service has no record of (`422 NIN_NOT_VERIFIED` since Q117, section Q108),
+  is an answer, not a failure, and does not count. Nor does a `4xx`.
 - While tripped, `POST identity/nin/resolve` answers `503` with code
   `NIN_PROVIDER_UNAVAILABLE` and detail "The NIN service is not answering
   right now. Please try again in a minute." without calling the service. The
@@ -6489,11 +6522,16 @@ and spacing ignored, first and last name in that order):
 | QoreID's answer | Desk answer | Audit `ninCheck` |
 | --- | --- | --- |
 | the record matches | the case is recorded with `verification_provider = 'qoreid'`, QoreID's reference and the time; `ninStatus: "verified"` ("NIN Verified") | `match` (`identity.nin.verify`, `success`, written before the case; and on `identity.nin.resolve`) |
-| the NIN is not confirmed | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `no_match` (`identity.nin.verify`, `denied`) |
+| QoreID has no record of the NIN: its "no record", or its "not found" (`404`) | `422 NIN_NOT_VERIFIED`, "This NIN could not be verified. Check the number and try again." (owner Q117: the same code and text as sign-up and the profile); QoreID's answer, never counted as a failure | `no_match` (`identity.nin.verify`, `denied`) |
 | the name or date of birth differs | `422 NIN_VERIFICATION_FAILED`, "The name or date of birth does not match the NIN record. Check the spelling and the date of birth." | `name_mismatch` (`identity.nin.verify`, `denied`) |
 | QoreID fails (5xx, timeout, network, bad answer) | QoreID's own `5xx` problem (its timeout, `504 QOREID_TIMEOUT`, with `retryAfterSeconds: 60`, as the guard's 504); counts toward the breaker | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
-| QoreID's "not found" (`404`) | `502 QOREID_PROVIDER_REJECTED`, as sign-up and the profile answer it; QoreID's answer, never counted as a failure | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
 | (0137) the guard refuses or reuses an answer | see "One QoreID check per NIN" below | |
+
+QoreID's `404` was `502 QOREID_PROVIDER_REJECTED` here, and its "no record"
+`422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified", before Q117.
+The desk's `no_match` from any NIN provider (the test provider's included) is
+now `422 NIN_NOT_VERIFIED` with the owner's text; only a record whose name or
+date of birth is not the desk's is `422 NIN_VERIFICATION_FAILED`.
 
 A record is any the QoreID adapter can read a name and a date of birth from
 (a real date from 1800, not in the future): a record born before 1900 is
@@ -6509,61 +6547,65 @@ and logs never name the record's details. QoreID's answer itself is kept by
 0137's guard, encrypted, as on every path (docs/QOREID_VERIFICATION_CONTRACT.md,
 "One QoreID check per NIN"): the NIN-only record (name, date of birth, sex,
 and the middle name, phone, home address and photo when QoreID sends them) for
-as long as 0137 keeps a record (90 days, Q110) when it matched the desk's
-details, and 24 hours when it did not (probably someone else's NIN, as a
-profile check keeps a record it did not match); "no record" for 24 hours.
+as long as 0137 keeps a record (90 days from this first check, Q110 and Q115)
+when it matched the desk's details, and 24 hours when it did not (probably
+someone else's NIN, as a profile check keeps a record it did not match); "no
+record" and QoreID's `404` for 24 hours.
 
-### A matched record is kept 90 days from the match (Q110)
+### A matched stored record is kept by 0137's shared rule (Q115)
 
-Q110 keeps a matched record that is not yet on a Health ID for 90 days. When
-a desk request's name and date of birth match a record the guard has stored
-as a record (0137's outcome `record`, complete or not, whichever path stored
-it: a desk or profile check whose details did not match it, a sign-up, an
-earlier desk match), that record is kept 90 days from this match: a record
-first kept 24 hours after a typo is, once the corrected details have matched
-it, still reused (not paid for again) a month later, by the desk, the profile
-or, when the record is complete, a sign-up (a sign-up asks QoreID again for an
-incomplete one: 0137's sign-up path, not the desk's; see "For #276: a sign-up
-after the desk kept an incomplete record" below). A record first matched and
-then matched again is kept 90 days from the latest match. Only a desk
-request's match extends a keep: a sign-up or a profile check that uses a
-stored record leaves its keep as 0137 set it (those are 0137's paths). Only a
-record is kept so, and only after a match; nothing is kept longer when the
-details do not match.
+Owner Q115 (it changes Q110's 90 days from each match): a stored NIN record
+for someone not on a Health ID is kept 90 days from the first check, and each
+later use (the desk, sign-up or the profile) keeps it at least 30 days from
+that use; it ends at whichever is later, the first check plus 90 days or the
+last use plus 30 days. 0137 (#276, Rahman's) owns that one rule:
+`identity.keep_qoreid_nin_record(lookup, key version, seconds)` sets the
+record's end to the later of its current end and now plus `seconds` (it never
+shortens a keep, changes nothing but the end, and keeps only a live record,
+complete or not, under the caller's key version, for a NIN whose login was
+not deleted), called through `NinCheckOnce.keepRecord(nin, correlationId)`.
+The first check's 90 days are 0137's own (`finish_qoreid_nin_check`).
+
+The desk's part: when a desk request's name and date of birth match a record
+the guard answered from storage (0137's outcome `record`, complete or not,
+whichever path stored it: a desk or profile check whose details did not
+match it, a sign-up, an earlier desk match), that match is a use of it, and
+the desk calls `NinCheckOnce.keepRecord` for it, once per request. So a
+record first kept 24 hours after a typo is kept at least 30 days from the
+corrected request that matched it. A fresh match is the record's first check,
+which the guard already keeps 90 days, so the desk asks for no keep then; a
+"does not match" answer, a stored "no record" and anything that is not a
+stored record are not uses and keep nothing. Nothing is sent to QoreID. The desk's
+`identity.nin.verify` row says `recordKept: true` when `keepRecord` kept the
+record. A keep that cannot be written (a database error) leaves the desk's
+answer as it is and logs `identity.nin.record_keep_failed` with the
+correlation id and a database code only; `keepRecord` answering that there
+was no live record to keep (an unusable answer whose readable name and date
+of birth matched, say) is not logged.
+
+As built at #276's c780b095, `keepRecord` asks for 90 days from the use
+(`NIN_RECORD_ANSWER_SECONDS`), so today a desk match keeps a record 90 days
+from that match, and a sign-up or profile use of a stored record leaves its
+keep as it was. For Q115, #276 changes `keepRecord` to ask for 30 days from
+the use (`keep_qoreid_nin_record`'s "later of the two" then gives the owner's
+rule with no change to the desk) and calls it for a sign-up's and a profile
+check's use of a stored record. The desk's tests
+(`qoreid-nin-desk-once.spec.ts`) hold under both: a record is never ended
+before 90 days from its first check, and each desk match keeps it at least
+30 days from that match.
 
 Any other stored answer keeps 0137's own time, which for anything but a record
 is at most 7 days (`finish_qoreid_nin_check` refuses longer): "no record",
-QoreID's "not found", and an answer HID cannot use. That includes a sign-up's
-own answer for a NIN whose record lacks something a sign-up needs (no
-recognised sex, a photo or home address HID cannot read): 0137's `verifyNin`
-keeps it as `unusable` for 24 hours, with the name and date of birth when they
-could be read. The desk compares those from storage and answers a match
-without paying, but cannot keep that answer 90 days, so a NIN that a sign-up
-checked first, matched at a desk and never put on a Health ID is paid for
-again by the next desk or profile check after those 24 hours. Only the #276
-change below closes this (a sign-up's such answer kept as an incomplete
-NIN-only record, for as long as a record), and once it is made the keep
-extends that record like any other.
-
-The keep uses 0137's own commands, in one transaction that holds the NIN's
-row from the first statement to the last (no other check sees anything in
-between): `identity.begin_qoreid_nin_check` reads the stored record (its
-ciphertext, never decrypted here, and whether it is complete), the same
-command with the key version `desk-keep-matched-record` takes the row over
-for this transaction (0137 takes over a row stored under another key
-version), and `identity.finish_qoreid_nin_check` puts the same ciphertext back
-under the real key version for 90 days (at most 0137's 91). When there is no
-stored record (another outcome, a check running, a hold, another key version,
-a NIN whose login was deleted, no row), the transaction is rolled back and
-nothing changes. Nothing is sent to QoreID. A keep that cannot be written
-leaves the desk's answer as it is and logs `identity.nin.record_keep_failed`
-with the correlation id and a database code only; when 0137 refuses to hand
-over (`take_over`) or to keep (`finish`) a record the first statement found,
-which today's 0137 never does, so only a change to its rules can cause it,
-the answer stands too and `identity.nin.record_keep_refused` is logged with
-the correlation id and that step only. The desk's `identity.nin.verify`
-row says `recordKept: true` when the record was kept. Proved on PostgreSQL by
-`services/ehr-api/test/database/desk-nin-record-keep.integration.sql`.
+QoreID's "not found", and an answer HID cannot use. A record that lacks
+something a sign-up needs (no recognised sex, a photo or home address HID
+cannot read) but whose name, date of birth and QoreID reference can be read
+is kept as an incomplete record, as long as a record, whichever path got it
+(#276 at c780b095: a sign-up's own such answer included), so the desk's keep
+extends it like any other. 0137's own suite
+(`services/ehr-api/test/database/qoreid-nin-check-once.integration.sql`)
+proves `keep_qoreid_nin_record` on PostgreSQL; the desk's earlier take-over of
+the row (`DeskNinRecordKeep`, the key version `desk-keep-matched-record`, and
+`desk-nin-record-keep.integration.sql`) is removed.
 
 ### A NIN already on a Health ID (Q110)
 
@@ -6604,17 +6646,18 @@ the same gate and guard as sign-up's `verifyNin`, but any record QoreID
 returned for the NIN will do, complete or not, because the desk compares only
 the name and date of birth. A record kept as incomplete (no recognised sex, a
 photo or a home address HID cannot read; a sign-up cannot enrol from it) by
-any path, or kept as unusable with a readable name and date of birth by a
-sign-up or a desk check (which ask with the NIN alone; a profile check's is
-not reused here, see below), is compared, not paid for again, and such a
-record checked at the desk is answered, not refused with `502`. The desk
-keeps one it gets from QoreID as an incomplete record, as a profile check does
-(as long as a record, Q110; 24 hours when it is not the desk's patient), so
-later desk and profile checks of that NIN reuse it; a sign-up, which needs a
-complete record, asks QoreID itself for that NIN, as after a profile check. A
-stored record is compared with the desk's name and date of birth as a fresh
-one is, so correcting a name or a date of birth after "does not match" is not
-charged again. The guard writes its own audit row
+any path, or an older answer kept as unusable with a readable name and date of
+birth by a sign-up or a desk check (which ask with the NIN alone; a profile
+check's is not reused here, see below), is compared, not paid for again, and
+such a record checked at the desk is answered, not refused with `502`. The
+desk keeps one it gets from QoreID as an incomplete record, as every path does
+(as long as a record; 24 hours when it is not the desk's patient), so later
+desk and profile checks of that NIN reuse it, and a sign-up refuses it from
+storage (`502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time) without
+QoreID being paid again (0137's `record_source` `nin_only`, #276 at
+c780b095). A stored record is compared with the desk's name and date of
+birth as a fresh one is, so correcting a name or a date of birth after "does
+not match" is not charged again. The guard writes its own audit row
 (`identity.qoreid.nin-check`, `path: "desk"`, the same `correlationId` as the
 desk's `identity.nin.verify` row) saying whether QoreID was called or a stored
 answer reused; never the NIN or its HMAC.
@@ -6624,41 +6667,44 @@ for it whichever path asks (sign-up, the profile, the desk) and the stored
 answer is reused, except in these cases today. Each is a second charge for
 the same NIN, and each is 0137's rule (#276, Rahman's), not changed here:
 
-- A sign-up of a NIN whose kept record is incomplete asks QoreID again and is
-  charged again (0137's sign-up path; see "For #276: a sign-up after the desk
-  kept an incomplete record" below).
-- 0137 keeps an answer that is not a record ("no record", QoreID's `404` "not
-  found", an answer HID cannot use) for the question it was asked with, and
-  reuses it only for a check that asks the same question
-  (`begin_qoreid_nin_check`: the row's `question_hmac` null or equal to the
-  caller's). A profile check asks with the patient's name and date of birth;
-  the desk and a sign-up ask with the NIN alone. So within the 24 hours 0137
-  keeps a profile check's "no record" or `404`, a desk check or a sign-up of
-  the same NIN asks QoreID again and is charged again, and so does a profile
-  check with other details. On the desk-once fixture: the profile's `404`,
-  then the desk, 2 charges; the profile's "no record", then the desk, 2; the
-  profile's `404`, then a sign-up, 2. The other way round is reused: an answer
-  a desk check or a sign-up got answers every question, a profile check's
-  included (the desk's `404`, then the profile: 1 charge). See "For #276: a
-  profile check's answer that is not a record" below.
+- A sign-up of a NIN whose kept record is an incomplete one a profile check
+  got (asked with the name and date of birth, which may come back without
+  what the NIN-only check returns) takes the NIN over, asks QoreID again and
+  keeps the NIN-only answer. An incomplete record from a desk check or a
+  sign-up (`nin_only`) is answered to a sign-up from storage.
+- 0137 keeps a profile check's "no record" and an answer HID cannot use for
+  the question it was asked with, and reuses them only for a check that asks
+  the same question (`begin_qoreid_nin_check`: the row's `question_hmac` null
+  or equal to the caller's). A profile check asks with the patient's name and
+  date of birth; the desk and a sign-up ask with the NIN alone. So within the
+  24 hours 0137 keeps a profile check's "no record", a desk check or a sign-up
+  of the same NIN asks QoreID again and is charged again, and so does a
+  profile check with other details (`nin-double-charge.spec.ts`: the
+  profile's "no record", then a sign-up, 2 charges). QoreID's `404` is about
+  the NIN, so 0137 keeps it for every question whichever path got it (#276 at
+  c780b095): the profile's `404`, then the desk and a sign-up, 1 charge,
+  each answered `422 NIN_NOT_VERIFIED` (`qoreid-nin-desk-once.spec.ts`). An
+  answer a desk check or a sign-up got answers every question, a profile
+  check's included.
 - When `NIN_KEY_VERSION` changes, no answer kept under the old version is
   reused (0137 reuses only a row kept under the caller's key version): the
   next check of each such NIN, by any path, asks QoreID again, a record
-  included, and keeps the new answer under the new version (on the fixture: a
-  desk match, the key version changed, the desk again: 2 charges).
+  included, and keeps the new answer under the new version
+  (`nin-double-charge.spec.ts`: "an answer stored under another NIN key
+  version is not reused").
 
 The guard's answers, as the desk gives them:
 
 | The guard | Desk answer | `identity.nin.verify` audit | Breaker |
 | --- | --- | --- | --- |
-| a stored record | compared as a fresh one: the case (and the record is kept 90 days from this match), or `422` name mismatch | as for a fresh answer, with `storedAnswer: true` (and `recordKept: true` when kept) | not counted: the retry place is freed, but the breaker is neither closed nor its failures cleared (QoreID was not asked) |
-| a stored "no record" | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `denied`, `ninCheck: "no_match"`, `storedAnswer: true` | not counted; the retry place is freed |
+| a stored record | compared as a fresh one: the case (and the record is kept by 0137's shared rule, Q115, above), or `422` name mismatch | as for a fresh answer, with `storedAnswer: true` (and `recordKept: true` when kept) | not counted: the retry place is freed, but the breaker is neither closed nor its failures cleared (QoreID was not asked) |
+| a stored "no record", or a stored QoreID "not found" (`404`) from any path | `422 NIN_NOT_VERIFIED`, "This NIN could not be verified. Check the number and try again." (Q117) | `denied`, `ninCheck: "no_match"`, `storedAnswer: true` | not counted; the retry place is freed |
 | another check of this NIN is still running when this request's wait ends | `409 NIN_CHECK_IN_PROGRESS`, "We are still checking this NIN. Please wait a minute, then try again.", `retryAfterSeconds: 60` | `failure`, `providerCalled: false` | not counted; the retry place is freed |
 | the NIN is held after a check QoreID may have charged | `409 NIN_CHECK_HELD`, "We could not finish checking this NIN. Please try again in 5 minutes." (or "... in 6 hours."), `retryAfterSeconds`: the time left | `failure`, `providerCalled: false` | not counted; the retry place is freed |
 | this request's wait (`QOREID_TIMEOUT_MS`) ended before QoreID answered | `504 QOREID_TIMEOUT`, `retryAfterSeconds: 60`; the check goes on and its answer is kept for the retry | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | the wait counts as one failure, as a timeout; when the check later answers, that answer is recorded as a success; when it later fails, it is not counted again |
 | its store could not be read (`NIN_CHECK_UNAVAILABLE`) | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." | `failure`, `providerCalled: false` | not counted |
 | its NIN keys are missing | `503 NIN_PROTECTION_UNAVAILABLE` | `failure`, `providerCalled: false` | not counted |
-| a stored QoreID "not found" (404) or an answer HID cannot use (one without a readable name and date of birth) | `502 QOREID_PROVIDER_REJECTED` or `502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time | `failure`, `providerCalled: true`, `ninCheck: "provider_error"`, `storedAnswer: true` | not counted; the retry place is freed |
+| a stored answer HID cannot use (one without a readable name and date of birth) | `502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time | `failure`, `providerCalled: true`, `ninCheck: "provider_error"`, `storedAnswer: true` | not counted; the retry place is freed |
 | the guard's own audit write or another part of HID failed (not QoreID) | the error as raised (the audit's `503`, or `500`) | `failure`, `providerCalled: true` (no `ninCheck`) | not counted; if this request's own QoreID check ended, how it ended is counted (an answer as a success); if it is still running, it is counted when it ends |
 
 `providerCalled` says whether the desk's check was handed to the NIN service
@@ -6736,22 +6782,25 @@ rows.
 - The same request twice at once (a double click), or two desks with the
   same NIN: the second waits for the first's answer and reuses it, or gets
   `409 NIN_CHECK_IN_PROGRESS` when that answer does not come within its wait.
-- A resend of a request answered "could not be verified": the stored "no
-  record", the same `422`, for as long as 0137 keeps it.
+- A resend of a request answered "could not be verified" (`422
+  NIN_NOT_VERIFIED`): the stored "no record" or `404`, the same `422`, for as
+  long as 0137 keeps it.
 - A resend after "does not match", with the same body or a corrected name or
   date of birth (a new body, under the same key or a new one): the stored
   record, compared again, for as long as 0137 keeps it (24 hours after a
   record that did not match). A corrected request is no longer a new charge,
-  and once its details match, the record is kept 90 days from that match
-  (above), so it is not paid for again later either.
+  and once its details match, that use keeps the record by 0137's shared rule
+  (Q115, above), so it is not paid for again soon after either.
 - A resend of a request that matched: the case it created (as before).
 - A NIN already in an active registration case (pending approval or review)
   at any facility: `409 NIN_REGISTRATION_IN_PROGRESS`, known only when the
   case is written, after the check (Identity cannot read another facility's
-  cases). Each desk match keeps the record 90 days (above), so within 90 days
-  of the last match the check is answered from storage; a case left pending
-  more than 90 days with no match in between costs one new charge, then 90
-  days from storage again. A pending case is not a Health ID (Q110).
+  cases). Each desk match of the stored record is a use that keeps it (Q115,
+  above: at least 30 days from that match, never less than 90 days from the
+  first check), so while the next check comes within that time it is answered
+  from storage; after a longer gap with no use in between, one new charge
+  starts a new record (90 days from that check). A pending case is not a
+  Health ID (Q110).
 - A resend after a check that may have been charged without an answer HID
   could keep: `409 NIN_CHECK_HELD` until the hold ends; after a check that
   sent nothing (switched off, the switch or the guard's store unreadable, the
@@ -6803,121 +6852,39 @@ before sending, answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be
 started right now. Please try again in a minute.", audited with
 `providerCalled: false`.
 
-### For #276: a sign-up after the desk kept an incomplete record (0137's sign-up path)
+### What #276 settled at c780b095, and what is left for it
 
-Not changed here: this is 0137's sign-up path (#276, Rahman's), and this
-branch keeps 0137's files as #276 has them. What happens today: a desk check
-of a NIN whose NIN-only record lacks something a sign-up needs (no recognised
-sex, or a photo or home address HID cannot read) keeps that record as an
-incomplete record for 90 days, so later desk and profile checks reuse it. A
-sign-up of the same NIN (`verifyNin`, which needs a complete record) is then
-handed the NIN by `identity.begin_qoreid_nin_check` ("an incomplete record
-taken over by a caller needing a complete one"), asks QoreID again on the
-same NIN-only endpoint, is charged again for the same answer, refuses it
-(`502 QOREID_PROVIDER_RESPONSE_INVALID`), and `finishFailure` stores it as
-`unusable` for 24 hours in place of the 90-day record, so the desk and the
-profile pay again the day after.
+This branch keeps 0137's files as #276 has them (merged at c780b095). There
+#276 made these changes the desk asked for; each is proved in
+`nin-double-charge.spec.ts`:
 
-What #276 should change: a stored record that came from QoreID's NIN-only
-check (a sign-up's or the desk's; not a profile check's, which asks with the
-name and date of birth and may come back without what a sign-up needs even
-when the NIN-only record has it) and lacks a field a sign-up needs is
-answered to a sign-up from storage as the same unusable answer (`502
-QOREID_PROVIDER_RESPONSE_INVALID`, as the first time), is never sent to
-QoreID again while it is kept, and is never replaced by an answer kept for a
-shorter time. In 0137's terms: the row needs to say which check its record
-came from (for example a column `record_source` of `nin_only` or `profile`,
-set by `finish_qoreid_nin_check`); `begin_qoreid_nin_check` returns `stored`
-for an incomplete `nin_only` record to a caller that needs a complete one
-(and takes over only an incomplete `profile` record); no finish shortens a
-stored record's keep; and a sign-up's own such answer, when its name and date
-of birth can be read, is kept the same way (an incomplete `nin_only` record
-for as long as a record) rather than as `unusable` for 24 hours, so a desk or
-profile check after a sign-up does not pay again the next day either.
-`verifyNin` already refuses an incomplete stored record as `502
-QOREID_PROVIDER_RESPONSE_INVALID` without asking.
+- Each stored record says which check it came from (`record_source`
+  `nin_only` or `profile`). A sign-up after the desk kept an incomplete
+  NIN-only record is answered `502 QOREID_PROVIDER_RESPONSE_INVALID` from
+  storage, with no second charge and the row left as it was ("For #276
+  (1)"); only an incomplete profile record is taken over.
+- QoreID's `404` is kept with no question, so a profile check's `404`
+  answers a sign-up and the desk from storage ("For #276 (2)"), each now
+  `422 NIN_NOT_VERIFIED` (Q117).
+- `identity.keep_qoreid_nin_record` and `NinCheckOnce.keepRecord`: the desk
+  calls it (Q115, above) in place of its own take-over of the row, so the
+  take-over's need to carry `record_source` through a re-store is gone.
 
-The source must also survive this branch's keep of a matched record (above):
-`DeskNinRecordKeep` (`desk-nin-record-keep.ts`) re-stores a stored row with
-0137's own commands (begin, begin with the take-over key version
-`desk-keep-matched-record`, then `finish_qoreid_nin_check` with the same
-ciphertext, eight arguments, `KEEP_FINISH_SQL`). So `begin_qoreid_nin_check`
-should return the stored record's source with its ciphertext, and either
-`finish_qoreid_nin_check` takes the source as an argument, which the keep then
-passes back unchanged, or finish keeps the row's own source when it stores the
-same ciphertext again for the same NIN. The source must never be defaulted
-when the keep re-stores a row: defaulted to `nin_only`, a profile check's
-incomplete record a desk matched would answer a sign-up `502` from storage for
-90 days although the NIN-only record may be complete; defaulted to `profile`,
-a desk's incomplete NIN-only record would be taken over by a sign-up, paid for
-again and replaced by the 24-hour `unusable` row, the double charge this note
-is about. A new finish argument without a default also breaks the keep's
-eight-argument call (`42883`: every keep logged as `record_keep_failed` and
-none made, so a record kept 24 hours after a typo is paid for again), so
-`KEEP_FINISH_SQL` and `desk-nin-record-keep.integration.sql` change in the
-same release as #276's change, and that suite gets a case: an incomplete
-record of each source, matched and kept by the keep, keeps its source. If the
-new rules refuse the keep's take-over or finish, the keep says so
-(`identity.nin.record_keep_refused`).
+Left for #276 (Rahman's), not changed here:
 
-The test that fails today (the desk-once fixture of
-`qoreid-nin-desk-once.spec.ts`: the real desk service and providers, 0137's
-guard on the in-memory store and the real adapter against a fake QoreID that
-bills every NIN request): QoreID's NIN-only record for the NIN has no
-recognised sex; the desk resolves the NIN (one charge; the store holds
-`outcome 'record'`, `record_complete false`, kept 90 days); then
-`verifyNin(NIN, { path: 'enrollment' })` for the same NIN answers `502
-QOREID_PROVIDER_RESPONSE_INVALID`, and afterwards QoreID's charge count is
-still 1 and the store still holds the same row (`record`, incomplete, the same
-`until`). Today the count is 2 and the row is `unusable`, kept 24 hours.
-
-### For #276: a profile check's answer that is not a record (0137's reuse rule)
-
-Not changed here either: this is 0137's `begin_qoreid_nin_check` and
-`NinCheckOnce` (#276, Rahman's). What happens today: a profile check ("Add
-NIN") asks QoreID with the patient's name and date of birth, and 0137 keeps an
-answer that is not a record ("no record", QoreID's `404` "not found", an
-answer HID cannot use) with that question's HMAC (`question_hmac`) for 24
-hours; `begin_qoreid_nin_check` reuses such a row only for a caller whose
-question is the same (`question_hmac` null or equal). The desk and a sign-up
-ask with no question, so within those 24 hours a desk check or a sign-up of the
-same NIN takes the row over, asks QoreID again and is charged again for the
-same answer (a NIN QoreID does not know: the profile's `502
-QOREID_PROVIDER_REJECTED`, then the desk's, 2 charges). A row kept with no
-question (a desk's or a sign-up's) already answers every question.
-
-What #276 should change, or the owner decide:
-
-- QoreID's `404` "not found" (outcome `rejected`) is about the NIN: both
-  checks use the same path (`/v1/ng/identities/nin/<nin>`, the profile's with
-  the details in the body), and HID takes a `404` as QoreID's "not found"
-  whatever the request's body held (`requestJson` in
-  qoreid-verification.adapter.ts). It should be kept with no question
-  (`question_hmac` null) whichever path got it, so it answers every path, as
-  a desk's or a sign-up's `404` does: in 0137's terms,
-  `NinCheckOnce.finishFailure` passes a null question for the `404`, or
-  `finish_qoreid_nin_check` stores `question_hmac` null for `rejected` as it
-  does for `record`. Otherwise this stays a second charge. (Should QoreID's
-  documentation say a `404` can depend on the details sent, it stays as it
-  is, and the owner knows the cost.)
-- A profile check's "no record" may depend on the name and date of birth it
-  sent (whether QoreID answers "not verified" with no record when the details
-  differ is QoreID's behaviour, which this repository does not settle): the
-  owner or Rahman decides whether it, too, answers every question. Until then
-  a desk check or a sign-up after it is a second charge.
-- A profile check's answer HID cannot use stays bound to its question: a
-  check with details may come back without what the NIN-only check returns
-  (as in the note above).
-
-The test that fails today (the same desk-once fixture): QoreID answers `404`
-for the NIN; the patient's profile check answers `502
-QOREID_PROVIDER_REJECTED` (one charge; the store holds `outcome 'rejected'`
-with the profile's `question_hmac`, kept 24 hours); then the desk resolves the
-same NIN and answers `502 QOREID_PROVIDER_REJECTED` from storage (the guard's
-row `source: "stored"`), and afterwards QoreID's charge count is still 1. Today
-the count is 2 and the guard's row is `source: "qoreid"`. The same with
-`verifyNin(NIN, { path: 'enrollment' })` in place of the desk: today 2
-charges.
+- Q115: `keepRecord` asks for 90 days from the use; the owner's rule needs 30
+  days from the use, and a sign-up's and a profile check's use of a stored
+  record to call it too (above, "A matched stored record is kept by 0137's
+  shared rule").
+- A profile check's "no record" stays bound to its question (it may depend
+  on the details sent): a desk check or a sign-up after it is a second
+  charge until the owner or Rahman decides otherwise.
+- Q117 on the profile: a profile check that reuses a NIN-only "no record"
+  (a sign-up's or the desk's, which answers every question) is answered as
+  QoreID's "not verified" for the profile's details (`200 state:
+  "not_verified"`, or `409 PATIENT_NIN_DETAILS_MISMATCH`), not `422
+  NIN_NOT_VERIFIED`: 0137's begin does not say whether a stored "no record"
+  was asked with the NIN alone, so the profile cannot tell it from its own.
 
 ### `GET /api/v1/identity/registration-capabilities` with QoreID
 
@@ -6945,13 +6912,16 @@ match" for other details or no date of birth, never the NIN service, even with
 the breaker tripped; evidence that cannot be read; a patient changed before
 the write, with its own text; not read while switched off); any record will
 do (no recognised sex), and stored answers said to be stored; a matched
-stored record kept (`recordKept`), and nothing else; no claim or stored answer
+stored record kept through 0137's `keepRecord` (`recordKept`), and nothing
+else, and a keep that cannot be written logged without changing the answer;
+QoreID's "no record" (its `404` included), fresh or stored, answered `422
+NIN_NOT_VERIFIED` (Q117) and audited `no_match`; no claim or stored answer
 of the desk's own (every resend goes to the guard); details refused before any
 check, over HTTP with the same validation pipe and problem filter as `main.ts`
 (`400 NIN_DETAILS_INVALID`, and `VALIDATION_FAILED` only for a malformed
 body); the breaker (D4: a stored answer neither counts nor closes it; each 504
 wait counts once and a late answer closes it, a late failure is not counted
-again; QoreID's 404 is an answer; the guard's audit write failing is HID's own
+again; QoreID's "no record" and `404` are answers; the guard's audit write failing is HID's own
 and only what QoreID did counts); the audit rows; capabilities; no NIN in an
 audit row or log line; 0137's answers as the desk's). The QoreID adapter is
 mocked: no test calls QoreID.
@@ -6961,10 +6931,17 @@ real desk service and providers, 0137's guard, the real profile check
 QoreID that bills every NIN request (two desks at once; the same request
 twice at once; a resend after "could not be verified"; a corrected name; a
 typo, the corrected request two hours later and another desk and the profile
-30 days later, one charge (D2); a record another check kept 24 hours, matched
-by the desk and reused 45 days later; the keep leaving a stored "no record", a
-running check and an empty store as they were, failing without changing the
-answer, and logging 0137's refusal of its take-over or finish; a desk of the
+29 days after that, one charge, the record kept at least 30 days from the
+corrected match (Q115); a record matched at the desk on days 10, 80 and 109,
+never ended before day 90 and kept at least 30 days from each match, one
+charge; a record another check kept 24 hours, matched by the desk and reused
+29 days later; no keep after "does not match" or a stored "no record"; a keep
+that cannot be written, the answer and the row unchanged, logged without an
+identifier; QoreID's `404` at the desk, at sign-up and on the profile, each
+`422 NIN_NOT_VERIFIED` with the other two answered the same from storage,
+one charge, and the profile's evidence as before; QoreID's "no record" at the
+desk and at sign-up, fresh and from storage; "does not match" still its own
+answer (Q117); a desk of the
 sealed demo or QA tenant, no charge and 0137's stored answers never reached; a
 sign-up or the profile and the desk, one after the other and at once; a
 record without a recognised sex or with a line break in its address, kept by
