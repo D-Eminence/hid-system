@@ -12,7 +12,7 @@ import type { IntegrationRuntimeService } from '../integrations/integration-runt
 import { fakeNinCheckStore } from '../testing/nin-check-store.fake';
 import type { HidCodeGenerator } from './hid-code-generator.service';
 import { NIN_CHECK_HOLD_SECONDS, NIN_CHECK_NO_ANSWER_HOLD_SECONDS, NIN_NO_RECORD_ANSWER_SECONDS,
-  NIN_RECORD_ANSWER_SECONDS, NinCheckOnce } from './nin-check-once';
+  NIN_RECORD_ANSWER_SECONDS, NIN_RECORD_USE_KEEP_SECONDS, NinCheckOnce } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 import { QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
@@ -359,16 +359,26 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.checkAudits().filter(([, source]) => source === 'qoreid')).toHaveLength(1);
     });
 
-    it('a record is reused for 90 days (Q110), then QoreID is asked again', async () => {
+    it('Q115: a record is kept 90 days from the first check, a use extends it 30 days from that use, then QoreID is asked again', async () => {
       const s = system();
       await s.start(KEY_A);
       s.db.enrollments.length = 0;
-      s.db.store.clock.offsetMs = NIN_RECORD_ANSWER_SECONDS * 1000 - 60_000;
+      // A use 10 days in keeps the 90 days (the later of the two).
+      s.db.store.clock.offsetMs = 10 * 86_400_000;
       await s.start(KEY_B);
+      s.db.enrollments.length = 0;
+      // A use a minute before the 90 days end keeps it 30 days from that use.
+      s.db.store.clock.offsetMs = NIN_RECORD_ANSWER_SECONDS * 1000 - 60_000;
+      await s.start(KEY_C);
       expect(s.qoreId.state.charged).toBe(1);
       s.db.enrollments.length = 0;
       s.db.store.clock.offsetMs = NIN_RECORD_ANSWER_SECONDS * 1000 + 1000;
-      await s.start(KEY_C);
+      await s.start('6b2a3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d');
+      expect(s.qoreId.state.charged).toBe(1);
+      s.db.enrollments.length = 0;
+      // That use, too, kept it 30 days from itself; past them, QoreID is asked again.
+      s.db.store.clock.offsetMs = (NIN_RECORD_ANSWER_SECONDS + NIN_RECORD_USE_KEEP_SECONDS) * 1000 + 5_000;
+      await s.start('7c3b4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e');
       expect(s.qoreId.state.charged).toBe(2);
     });
 
@@ -558,23 +568,26 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.qoreId.state.charged).toBe(2);
     });
 
-    it('Q110: a matched record is kept 90 days from the match, its answer and source unchanged (keep_qoreid_nin_record)', async () => {
+    it('Q115: keepRecord keeps a matched record 30 days from now, never shorter, its answer and source unchanged', async () => {
       const s = system();
       await expect(s.ninCheck.keepRecord(NIN, 'keep-nothing')).resolves.toBe(false);
       // A profile check that did not match keeps the record 24 hours.
       await expect(s.verifyProfile('1990-02-03')).rejects.toMatchObject({ code: 'PATIENT_NIN_DETAILS_MISMATCH' });
       const first = { ...[...s.db.store.rows.values()][0]! };
       expect(first).toMatchObject({ outcome: 'record', record_source: 'profile' });
+      expect(first.until - Date.now()).toBeLessThanOrEqual(NIN_NO_RECORD_ANSWER_SECONDS * 1000);
       s.db.store.clock.offsetMs = 60 * 60 * 1000;
       await expect(s.ninCheck.keepRecord(NIN, 'keep-matched')).resolves.toBe(true);
-      const kept = [...s.db.store.rows.values()][0]!;
-      expect(kept.until - first.until).toBeGreaterThan((NIN_RECORD_ANSWER_SECONDS - NIN_NO_RECORD_ANSWER_SECONDS) * 1000);
+      const kept = { ...[...s.db.store.rows.values()][0]! };
+      expect(kept.until - (Date.now() + 60 * 60 * 1000)).toBeGreaterThanOrEqual(NIN_RECORD_USE_KEEP_SECONDS * 1000 - 5_000);
       expect(kept).toMatchObject({ outcome: first.outcome, record_complete: first.record_complete,
         record_source: 'profile', answer_ciphertext: first.answer_ciphertext, key_version: first.key_version });
-      // 45 days later the record still answers, with no charge.
-      s.db.store.clock.offsetMs = 45 * 86_400_000;
+      // 25 days later the record still answers, with no charge, and that use keeps it 30 days from then.
+      s.db.store.clock.offsetMs = 25 * 86_400_000;
       await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });
       expect(s.qoreId.state.charged).toBe(1);
+      expect([...s.db.store.rows.values()][0]!.until - (Date.now() + 25 * 86_400_000))
+        .toBeGreaterThanOrEqual(NIN_RECORD_USE_KEEP_SECONDS * 1000 - 5_000);
     });
 
     it('a verified profile answer without a usable QoreID id is kept as unusable, never as a details mismatch', async () => {
@@ -600,7 +613,7 @@ describe('the same NIN is sent to QoreID once', () => {
       expect(s.db.store.rows.size).toBe(0);
     });
 
-    it('a profile check that matched keeps the record for 90 days (Q110)', async () => {
+    it('a profile check that matched keeps the record for 90 days from the first check (Q110, Q115)', async () => {
       const s = system();
       const before = Date.now();
       await expect(s.verifyProfile('1990-03-02')).resolves.toMatchObject({ state: 'verified' });

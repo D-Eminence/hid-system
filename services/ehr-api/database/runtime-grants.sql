@@ -1819,19 +1819,20 @@ revoke all on ehr.visit_queue from public;
 -- QoreID NIN checks asked once per NIN (0137, Q109), exactly as 0137 grants
 -- them: the Identity runtime begins a check (the stored answer, a wait, a hold
 -- or the lease to ask QoreID), records its outcome as the lease holder, keeps a
--- stored record a later request matched for 90 days (Q110), and its
+-- stored record it used at least 30 days from that use (Q115), and its
 -- patient lifecycle sweeper erases expired rows and the answers for a NIN whose
 -- patient's login was deleted; also the schema test runtime. Nothing to any
 -- other runtime; no grant on identity.qoreid_nin_checks or on the erasure test,
 -- which the commands call as their owner.
 grant execute on function identity.begin_qoreid_nin_check(char, char, boolean, text, uuid, integer),
   identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer),
-  identity.keep_qoreid_nin_record(char, text, integer),
+  identity.keep_qoreid_nin_record(char, text),
   identity.prune_qoreid_nin_checks(integer) to hid_identity_runtime, hid_schema_test_runtime;
 revoke all on function identity.begin_qoreid_nin_check(char, char, boolean, text, uuid, integer),
   identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer),
-  identity.keep_qoreid_nin_record(char, text, integer),
-  identity.prune_qoreid_nin_checks(integer), identity.qoreid_nin_check_erased(char) from public;
+  identity.keep_qoreid_nin_record(char, text),
+  identity.prune_qoreid_nin_checks(integer), identity.qoreid_nin_check_erased(char),
+  identity.qoreid_nin_record_used(char, text) from public;
 revoke all on identity.qoreid_nin_checks from public;
 
 -- This facility's own pharmacy and lab work (0133, ORD-2, owner decisions of

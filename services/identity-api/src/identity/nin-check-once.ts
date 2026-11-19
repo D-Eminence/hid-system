@@ -14,15 +14,25 @@ import type { QoreIdNinBinding, QoreIdNinEnrollmentBinding, QoreIdNinRecord } fr
  * not, so the same NIN is never sent to QoreID twice while HID has, or is
  * getting, its answer. No limit on staff, facilities or Health ID is added.
  *
- * A QoreID answer is reused for 90 days when QoreID returned the NIN's
- * record (owner Q110, 18 November 2026: an answer for a NIN not yet on a
- * Health ID is kept 90 days; once the NIN is on a Health ID its checked
- * answer stays with the record): a record does not change from one day to
- * the next, and a person who starts again after the 24-hour enrollment ends,
- * adds the NIN on the profile after a sign-up, or is checked at a desk, is
- * the same NIN. 0137 refuses to keep one longer than 91 days.
+ * A QoreID answer is reused for 90 days from the first check when QoreID
+ * returned the NIN's record, and each later use keeps it at least
+ * NIN_RECORD_USE_KEEP_SECONDS from that use (owner Q115 A as changed, 19
+ * November 2026: it expires at the later of the first check + 90 days and the
+ * last use + 30 days; once the NIN is on a Health ID its checked answer stays
+ * with the record): a record does not change from one day to the next, and a
+ * person who starts again after the 24-hour enrollment ends, adds the NIN on
+ * the profile after a sign-up, or is checked at a desk, is the same NIN. 0137
+ * refuses to keep one longer than 91 days.
  */
 export const NIN_RECORD_ANSWER_SECONDS = 90 * 24 * 60 * 60;
+/**
+ * Q115: each later use of a stored record (the desk, a sign-up or the profile)
+ * keeps it at least this long from that use. 0137 applies it as one rule,
+ * identity.qoreid_nin_record_used: begin, to every stored record it answers,
+ * and keep_qoreid_nin_record (keepRecord here), for a use made without begin.
+ * This constant is the rule's, for tests and the contract; the database owns it.
+ */
+export const NIN_RECORD_USE_KEEP_SECONDS = 30 * 24 * 60 * 60;
 /**
  * "No record", QoreID's "not found" (404) and an answer HID could not use are
  * charged too, so they are reused for 24 hours: long enough that a person
@@ -242,19 +252,20 @@ export class NinCheckOnce implements BeforeApplicationShutdown {
   }
 
   /**
-   * Owner Q110: a stored record that a later request matched (the desk's name
-   * and date of birth equal the record's) is kept NIN_RECORD_ANSWER_SECONDS
-   * from now, or longer when it already was (0137's
-   * keep_qoreid_nin_record never shortens a keep); its answer, completeness
-   * and source stay as they are, and nothing is sent to QoreID. True when
-   * kept; false when there is no live record of this NIN under the current
-   * key (nothing changes). A database error is the caller's to log.
+   * Q115's rule for a use made without check() (the desk keeping a record it
+   * matched, #279): the stored record of this NIN is kept at least
+   * NIN_RECORD_USE_KEEP_SECONDS from now, never shorter (0137's
+   * keep_qoreid_nin_record, the same rule begin applies to every stored
+   * record it answers); its answer, completeness and source stay as they are,
+   * and nothing is sent to QoreID. True when kept; false when there is no live
+   * record of this NIN under the current key (nothing changes). A database
+   * error is the caller's to log.
    */
   async keepRecord(nin: string, correlationId: string): Promise<boolean> {
     const lookup = this.ninProtector.lookup(nin);
     const result = await this.database.withSystemTransaction(correlationId, (client) =>
-      client.query<{ kept: boolean }>('select identity.keep_qoreid_nin_record($1,$2,$3) as kept',
-        [lookup, getEnvironment().NIN_KEY_VERSION, NIN_RECORD_ANSWER_SECONDS]));
+      client.query<{ kept: boolean }>('select identity.keep_qoreid_nin_record($1,$2) as kept',
+        [lookup, getEnvironment().NIN_KEY_VERSION]));
     return result.rows[0]?.kept === true;
   }
 
