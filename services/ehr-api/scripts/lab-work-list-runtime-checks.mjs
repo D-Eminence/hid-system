@@ -155,10 +155,10 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
       return { rows, ms, consentChecks: Number(calls.consent ?? 0), permissionChecks: Number(calls.permission ?? 0) };
     } finally { await lab.query('rollback').catch(() => {}); await lab.end(); }
   };
-  // 0133's own-work policies ask the session's half of their member test (two permission checks) once per statement
-  // for each table they read, never per row: its first form asked it on every row of every Lab table, about 9,000
-  // checks here, and the list timed out at 15 seconds.
-  const PERMISSION_CHECKS_AT_MOST = 200;
+  // 0133's own-work policies ask the session's half of their member test (two permission checks) at most twice per
+  // statement for each table they read, never per row: its first form asked it on every row of every Lab table, about
+  // 9,000 checks here, and the list timed out at 15 seconds.
+  const PERMISSION_CHECKS_AT_MOST = 400;
   const clinician = await readWorkList('staff:test-clinician', '40000000-0000-4000-8000-000000000001');
   const { rows, ms, consentChecks } = clinician;
   assert.equal(rows.length, 200, 'The work list answers 200 rows');

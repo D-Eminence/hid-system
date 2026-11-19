@@ -1775,17 +1775,17 @@ revoke all on function auth.guard_session_single_sign_on_change() from public;
 -- owner. No role has any privilege on pharmacy.own_prescription_sends.
 grant execute on function ehr.send_prescription_to_own_pharmacy(uuid, bigint),
   ehr.withdraw_own_pharmacy_send(uuid), ehr.own_pharmacy_staffed() to hid_ehr_runtime, hid_schema_test_runtime;
-grant execute on function identity.facility_work_session_allows(text),
-  identity.facility_work_patient_allows(text, uuid, uuid, text),
+grant execute on function identity.facility_work_session_membership(text),
+  identity.facility_work_patient_allows(text, uuid, uuid, uuid, text),
   pharmacy.own_work_access_for(text, uuid, text),
   pharmacy.own_work_item_states(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
-grant execute on function identity.facility_work_session_allows(text),
-  identity.facility_work_patient_allows(text, uuid, uuid, text),
+grant execute on function identity.facility_work_session_membership(text),
+  identity.facility_work_patient_allows(text, uuid, uuid, uuid, text),
   lab.own_work_access_for(text, uuid, text),
   lab.own_work_item_bases(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
 revoke all on function identity.facility_work_member_allows(text, uuid, uuid, text),
-  identity.facility_work_session_allows(text),
-  identity.facility_work_patient_allows(text, uuid, uuid, text),
+  identity.facility_work_session_membership(text),
+  identity.facility_work_patient_allows(text, uuid, uuid, uuid, text),
   pharmacy.own_work_source_prescription(uuid, uuid, uuid),
   ehr.send_prescription_to_own_pharmacy(uuid, bigint),
   ehr.withdraw_own_pharmacy_send(uuid),

@@ -98,6 +98,15 @@
 --      reader: no state or basis (D10), no event, dispensing or reversal, no
 --      access through a dispensing or an accession (D9); PH and LS read the
 --      same rows (each probe has rows to find);
+--   7g. one statement cannot change its session halfway: LS and PH, after
+--      the session's half has run, change app.membership_id or
+--      app.facility_id within the same statement (a cursor fetched, then
+--      set_config, then fetched again; set_config in the select list) and
+--      read nothing more: not Bisi's work (her deny directive), not F2's,
+--      on the work items and on a chain table (D1's halves are bound); the
+--      row's half called on its own answers false for a member without the
+--      two permissions, for a membership that is not the session's, and for
+--      another facility's row;
 --   8. the owner-run definer functions that read ehr.prescriptions give the
 --      pharmacist nothing more through the EHR runtime: the order-route send,
 --      the own-pharmacy send and the withdrawal refuse the pharmacist first.
@@ -132,14 +141,14 @@ begin
            proc.provolatile, proc.proconfig), '; ')
     into mismatch
     from (values
-      ('identity.facility_work_member_allows(text,uuid,uuid,text)', '8fe87f3683d8706299e2988f1aa8f183', 's'),
-      ('identity.facility_work_session_allows(text)', '243a6d286d716e1cf061d8f8baaf6ca9', 's'),
-      ('identity.facility_work_patient_allows(text,uuid,uuid,text)', '5b9bfe452478b04dbcf7e18d4cca730e', 's'),
+      ('identity.facility_work_member_allows(text,uuid,uuid,text)', 'cdf330e36a9fcc347e8e5c06fe0745c2', 's'),
+      ('identity.facility_work_session_membership(text)', 'd785bffb1c16b4202ee5c5d146bf0b09', 's'),
+      ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', 'de55c126f77cd3a6c139c23271dacd35', 's'),
       -- 0086's, unchanged: D2 is a policy of its own next to theirs.
       ('lab.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
       ('pharmacy.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
-      ('lab.work_item_patient_cards(uuid[])', 'c80ae5c7933af400323881709e57777b', 's'),
-      ('pharmacy.work_item_patient_cards(uuid[])', 'f321cac9edce2293a904e6a361657ea4', 's'),
+      ('lab.work_item_patient_cards(uuid[])', '85bffc97b63e3206573c4b3cafcd9bc1', 's'),
+      ('pharmacy.work_item_patient_cards(uuid[])', 'acef52973ff912360540f50a144c1466', 's'),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', '41a9afd4ea6f708425b98d1fb6e6eb87', 's'),
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'b95d737694c08ceae4b346412c133e43', 'v'),
       ('ehr.withdraw_own_pharmacy_send(uuid)', 'bdb411d4f4e7fe6806d246d996e91771', 'v'),
@@ -147,8 +156,8 @@ begin
       ('ehr.own_pharmacy_staffed()', '9fe0a922c4c121616604e7c9c87ec202', 's'),
       ('pharmacy.own_work_access_for(text,uuid,text)', '5ddb078242919dd978d6312f5cd5aa77', 's'),
       ('lab.own_work_access_for(text,uuid,text)', '1c834e3ed17d864dadb27f3105cffa04', 's'),
-      ('pharmacy.own_work_item_states(uuid[])', 'ff7bdad2adf9db32cc349ce6ab4d16c5', 's'),
-      ('lab.own_work_item_bases(uuid[])', 'f8b31a746f89ef2ca35757e87c89ab05', 's')) expected(proc_name, digest, volatility)
+      ('pharmacy.own_work_item_states(uuid[])', 'e95c7e04a1f68b27ffbf7f2a3fa902ed', 's'),
+      ('lab.own_work_item_bases(uuid[])', 'cc1d6d1bab8fea51d50a6aba82316409', 's')) expected(proc_name, digest, volatility)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc_name)
    where proc.oid is null or md5(proc.prosrc) <> expected.digest or proc.proowner <> owner_oid
       or not proc.prosecdef or proc.provolatile <> expected.volatility or proc.proisstrict;
@@ -162,9 +171,9 @@ begin
       ('identity.facility_work_member_allows(text,uuid,uuid,text)', array[]::text[]),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', array[]::text[]),
       ('ehr.own_pharmacy_send_withdrawn_on_change()', array[]::text[]),
-      ('identity.facility_work_session_allows(text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
+      ('identity.facility_work_session_membership(text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
         'hid_pharmacy_runtime', 'hid_pharmacy_api_runtime', 'hid_schema_test_runtime']),
-      ('identity.facility_work_patient_allows(text,uuid,uuid,text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
+      ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', array['hid_lab_runtime', 'hid_lab_api_runtime',
         'hid_pharmacy_runtime', 'hid_pharmacy_api_runtime', 'hid_schema_test_runtime']),
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', array['hid_ehr_runtime', 'hid_ehr_api_runtime',
         'hid_schema_test_runtime']),
@@ -215,14 +224,14 @@ begin
   -- The own-work policies: 44, a read policy on each work item table and 42
   -- on the work chain, never on the imported evidence, the Lab outbox or the
   -- route reports.
-  if (select count(*) from pg_policy policy_row where policy_row.polname like 'own\_work\_%') <> 44
+  if (select count(*) from pg_policy policy_row where policy_row.polname like 'staff\_own\_work\_%') <> 44
      or (select array_agg(policy_row.polname::text || ':' || policy_row.polcmd::text order by policy_row.polrelid)
            from pg_policy policy_row
-          where policy_row.polname like 'own\_work\_%'
+          where policy_row.polname like 'staff\_own\_work\_%'
             and policy_row.polrelid in ('lab.work_items'::regclass, 'pharmacy.work_items'::regclass))
-        is distinct from array['own_work_read:r', 'own_work_read:r']
+        is distinct from array['staff_own_work_read:r', 'staff_own_work_read:r']
      or exists (select 1 from pg_policy policy_row
-                 where policy_row.polname like 'own\_work\_%'
+                 where policy_row.polname like 'staff\_own\_work\_%'
                    and policy_row.polrelid in ('lab.imported_evidence'::regclass, 'lab.imported_observations'::regclass,
                      'pharmacy.imported_medication_evidence'::regclass, 'lab.outbox_events'::regclass,
                      'lab.order_route_result_reports'::regclass, 'pharmacy.order_route_dispensing_reports'::regclass))
@@ -1486,6 +1495,189 @@ select pg_temp.expect('L2 (lab at F2) has only F2''s own item, nothing of W1', p
 select pg_temp.expect('L2''s membership in a session at F1 has nothing', pg_temp.lab_basis_view(11, 1),
   'bases=- access=0');
 reset role;
+
+-- 7g. One statement cannot change its session halfway (D1's halves are
+-- bound). An own lab item and its accession for Bisi at F1 (her deny
+-- directive covers everyone at F1), as replica, inside a savepoint undone at
+-- the end of the case.
+savepoint own_work_switch;
+set local session_replication_role = replica;
+insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_order_id,
+  source_ehr_order_version, source_encounter_id, status, priority, test_code_system, test_code, test_name,
+  requested_by, requested_at, accepted_by, accepted_by_membership_id, idempotency_key, request_sha256, correlation_id)
+values ('e133000a-0000-4000-8000-0000000000c1', 'e1330006-0000-4000-8000-000000000002',
+  'e1330001-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', gen_random_uuid(), 1,
+  gen_random_uuid(), 'accepted', 'routine', 'http://loinc.org', '718-7', 'Haemoglobin',
+  'e1330002-0000-4000-8000-000000000001', clock_timestamp(), 'e1330002-0000-4000-8000-000000000001',
+  'e1330004-0000-4000-8000-000000000001', 'own-work-switch-key', repeat('b', 64), 'own-work-suite-switch');
+insert into lab.accessions (id, work_item_id, patient_id, facility_id, priority, created_by, created_by_membership_id,
+  idempotency_key, request_sha256, correlation_id)
+values ('e133000b-0000-4000-8000-0000000000c1', 'e133000a-0000-4000-8000-0000000000c1',
+  'e1330006-0000-4000-8000-000000000002', 'e1330001-0000-4000-8000-000000000001', 'routine',
+  'e1330002-0000-4000-8000-000000000003', 'e1330004-0000-4000-8000-000000000003', 'own-work-switch-accession',
+  repeat('c', 64), 'own-work-suite-switch');
+set local session_replication_role = origin;
+-- QUERY's rows (ids, last 4 characters, sorted): the first fetched in the
+-- member's own session; then SETTING is changed to VALUE in the same
+-- statement and the rest are fetched.
+create function pg_temp.switch_after_first(query text, setting text, switched text) returns text
+language plpgsql as $f$
+declare
+  rows_cursor refcursor;
+  fetched record;
+  seen text[] := '{}';
+begin
+  open rows_cursor for execute query;
+  fetch rows_cursor into fetched;
+  if found then
+    seen := seen || right(fetched.id::text, 4);
+  end if;
+  perform set_config(setting, switched, true);
+  loop
+    fetch rows_cursor into fetched;
+    exit when not found;
+    seen := seen || right(fetched.id::text, 4);
+  end loop;
+  close rows_cursor;
+  return coalesce(array_to_string(array(select x from unnest(seen) x order by x), ' '), '');
+end $f$;
+grant execute on function pg_temp.switch_after_first(text, text, text) to public;
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(3);
+select pg_temp.expect('7g LS''s own lab items in its own session (Bisi''s hidden by her deny directive, F2''s not F1''s)',
+  (select string_agg(right(id::text, 4), ' ' order by id) from lab.work_items
+    where id in ('e133000a-0000-4000-8000-000000000001', 'e133000a-0000-4000-8000-000000000002',
+                 'e133000a-0000-4000-8000-0000000000c1')), '0001');
+select pg_temp.expect('7g a cursor fetched, then app.membership_id changed: nothing more (not Bisi''s item)',
+  pg_temp.switch_after_first($q$select id from lab.work_items
+    where id in ('e133000a-0000-4000-8000-000000000001', 'e133000a-0000-4000-8000-0000000000c1') order by id$q$,
+    'app.membership_id', 'e133ffff-0000-4000-8000-000000000099'), '0001');
+select pg_temp.as_member(3);
+select pg_temp.expect('7g a cursor fetched, then app.facility_id changed to F2: nothing more (not F2''s item)',
+  pg_temp.switch_after_first($q$select id from lab.work_items
+    where id in ('e133000a-0000-4000-8000-000000000001', 'e133000a-0000-4000-8000-000000000002') order by id$q$,
+    'app.facility_id', 'e1330001-0000-4000-8000-000000000002'), '0001');
+select pg_temp.as_member(3);
+select pg_temp.expect('7g set_config in the select list (membership): not Bisi''s item',
+  (select string_agg(right(switched.id::text, 4), ' ' order by switched.id) from (
+     select w.id, set_config('app.membership_id', 'e133ffff-0000-4000-8000-000000000099', true)
+       from lab.work_items w
+      where w.id in ('e133000a-0000-4000-8000-000000000001', 'e133000a-0000-4000-8000-0000000000c1')) switched),
+  '0001');
+select pg_temp.as_member(3);
+select pg_temp.expect('7g set_config in the select list (facility F2): not F2''s item',
+  (select string_agg(right(switched.id::text, 4), ' ' order by switched.id) from (
+     select w.id, set_config('app.facility_id', 'e1330001-0000-4000-8000-000000000002', true)
+       from lab.work_items w
+      where w.id in ('e133000a-0000-4000-8000-000000000001', 'e133000a-0000-4000-8000-000000000002')) switched),
+  '0001');
+select pg_temp.as_member(3);
+select pg_temp.expect('7g the chain (accessions), a cursor fetched, then app.membership_id changed: not Bisi''s',
+  pg_temp.switch_after_first($q$select id from lab.accessions
+    where id in ('e133000b-0000-4000-8000-000000000001', 'e133000b-0000-4000-8000-0000000000c1') order by id$q$,
+    'app.membership_id', 'e133ffff-0000-4000-8000-000000000099'), '0001');
+select pg_temp.as_member(3);
+select pg_temp.expect('7g the chain (accessions), set_config in the select list: not Bisi''s',
+  (select string_agg(right(switched.id::text, 4), ' ' order by switched.id) from (
+     select a.id, set_config('app.membership_id', 'e133ffff-0000-4000-8000-000000000099', true)
+       from lab.accessions a
+      where a.id in ('e133000b-0000-4000-8000-000000000001', 'e133000b-0000-4000-8000-0000000000c1')) switched),
+  '0001');
+-- The row's half on its own (lab and pharmacy runtimes may call it, as the
+-- policies do): only for the session's own membership, holding both
+-- permissions at the row's facility.
+select pg_temp.as_member(3);
+select pg_temp.expect('7g the row''s half for LS: Ada yes, Bisi (deny) no, F2''s row no, another membership no',
+  format('%s %s %s %s',
+    identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+      'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records'),
+    identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+      'e1330006-0000-4000-8000-000000000002', 'e1330001-0000-4000-8000-000000000001', 'read_records'),
+    identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+      'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000002', 'read_records'),
+    identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000015',
+      'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')),
+  't f f f');
+select pg_temp.as_member(7);
+select pg_temp.expect('7g RC (receptionist): no session membership, and the row''s half says nothing for RC or as LS',
+  format('%s %s %s', coalesce(identity.facility_work_session_membership('lab')::text, 'null'),
+    identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000007',
+      'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records'),
+    identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+      'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')),
+  'null f f');
+select pg_temp.as_member(4);
+select pg_temp.expect('7g NU''s own session (a nurse): the row''s half for NU says nothing',
+  identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000004',
+    'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records')::text, 'false');
+-- No purpose (an empty app.purpose_of_use): the row's half is false, never
+-- null, so D9 refuses too (it returns early only on false).
+select pg_temp.as_member(3, purpose => '');
+select pg_temp.expect('7g LS with no purpose: the row''s half false, D9 nothing',
+  format('%s %s', identity.facility_work_patient_allows('lab', 'e1330004-0000-4000-8000-000000000003',
+      'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001', 'read_records'),
+    (select count(*) from lab.own_work_access_for('work_item', 'e133000a-0000-4000-8000-000000000001',
+       'write_records'))), 'f 0');
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select pg_temp.expect('7g PH, a cursor fetched, then app.membership_id changed: not Bisi''s pharmacy item',
+  (select count(*)::text from regexp_split_to_table(pg_temp.switch_after_first(format(
+     'select id from pharmacy.work_items where id in (%L, %L) order by id = %L desc',
+     pg_temp.work_item_of(pg_temp.rx(1)), pg_temp.work_item_of(pg_temp.rx(7)), pg_temp.work_item_of(pg_temp.rx(1))),
+     'app.membership_id', 'e133ffff-0000-4000-8000-000000000099'), ' ') x where x <> ''), '1');
+select pg_temp.as_member(2);
+select pg_temp.expect('7g PH, set_config in the select list: not Bisi''s pharmacy item',
+  (select count(*)::text from (
+     select w.id, set_config('app.membership_id', 'e133ffff-0000-4000-8000-000000000099', true)
+       from pharmacy.work_items w
+      where w.id in (pg_temp.work_item_of(pg_temp.rx(1)), pg_temp.work_item_of(pg_temp.rx(7)))) switched
+    where switched.id = pg_temp.work_item_of(pg_temp.rx(7))), '0');
+select pg_temp.as_member(2, purpose => '');
+select pg_temp.expect('7g PH with no purpose: D9 nothing',
+  (select count(*)::text from pharmacy.own_work_access_for('work_item', pg_temp.work_item_of(pg_temp.rx(1)),
+     'write_records')), '0');
+reset role;
+-- The own-work read policy is asked first on each of its tables (0133's
+-- THE COST: PostgreSQL ORs permissive policies in reverse name order). PH
+-- reads its four Pharmacy tables, the consent checks counted; then the same
+-- reads with the own-work read policies renamed to sort first, so asked
+-- last: the same rows, and more consent checks.
+set local track_functions = 'all';
+select set_config('hid.test.consent_oid', 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)'
+  ::regprocedure::oid::text, true);
+create function pg_temp.consent_calls() returns bigint language sql as $f$
+  select coalesce(pg_stat_get_xact_function_calls(current_setting('hid.test.consent_oid')::oid), 0)
+$f$;
+create function pg_temp.pharmacy_reads() returns text language sql as $f$
+  select format('%s/%s/%s/%s', (select count(*) from pharmacy.work_items), (select count(*) from pharmacy.work_item_events),
+    (select count(*) from pharmacy.dispensings), (select count(*) from pharmacy.dispensing_reversals))
+$f$;
+grant execute on function pg_temp.consent_calls(), pg_temp.pharmacy_reads() to public;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select set_config('hid.test.consent_before', pg_temp.consent_calls()::text, true);
+select set_config('hid.test.rows_first', pg_temp.pharmacy_reads(), true);
+select set_config('hid.test.consent_first', (pg_temp.consent_calls()
+  - current_setting('hid.test.consent_before')::bigint)::text, true);
+reset role;
+savepoint own_work_order;
+alter policy staff_own_work_read on pharmacy.work_items rename to aaa_own_work_read;
+alter policy staff_own_work_read on pharmacy.work_item_events rename to aaa_own_work_read;
+alter policy staff_own_work_read on pharmacy.dispensings rename to aaa_own_work_read;
+alter policy staff_own_work_read on pharmacy.dispensing_reversals rename to aaa_own_work_read;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select set_config('hid.test.consent_before', pg_temp.consent_calls()::text, true);
+select set_config('hid.test.rows_last', pg_temp.pharmacy_reads(), true);
+select pg_temp.expect('7g PH: the same rows, and fewer consent checks with the own-work policies asked first',
+  format('%s %s', current_setting('hid.test.rows_last') = current_setting('hid.test.rows_first'),
+    current_setting('hid.test.consent_first')::bigint
+      < pg_temp.consent_calls() - current_setting('hid.test.consent_before')::bigint),
+  't t');
+reset role;
+rollback to savepoint own_work_order;
+rollback to savepoint own_work_switch;
 
 -- 8. The owner-run definer functions that read ehr.prescriptions (case 1
 -- lists them) give PH nothing more through the EHR runtime: each refuses

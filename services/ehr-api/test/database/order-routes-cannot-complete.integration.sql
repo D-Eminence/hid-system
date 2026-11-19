@@ -1752,11 +1752,11 @@ insert into d18_pins values
   -- 0108 (owner decisions D-a and D-b) replaced the cover's body: no 24-hour
   -- bound, and an active patient share covers too.
   ('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamp with time zone)', '6928763d3b69f0e4b4acf96a6a255736'),
-  -- 0133 gave the Lab chain tables a second read policy, own_work_read (the
+  -- 0133 gave the Lab chain tables a second read policy, staff_own_work_read (the
   -- facility's own lab staff, item by item), which reaches the two halves of
   -- its member test; 0086's lab.context_allows is kept.
-  ('identity.facility_work_patient_allows(text,uuid,uuid,text)', '5b9bfe452478b04dbcf7e18d4cca730e'),
-  ('identity.facility_work_session_allows(text)', '243a6d286d716e1cf061d8f8baaf6ca9'),
+  ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', 'de55c126f77cd3a6c139c23271dacd35'),
+  ('identity.facility_work_session_membership(text)', 'd785bffb1c16b4202ee5c5d146bf0b09'),
   ('lab.context_allows(uuid,uuid,text)', '57e689661a6227e34d3bde9562468951'),
   ('lab.patient_self_context(uuid)', '39aeca12d2c59b69877800a9a3a7c50b'),
   ('notification.enqueue_patient_inbox_item(uuid,text,text,uuid,jsonb)', '0b5689f31a3ce00f9313fe1e55244fad'),
