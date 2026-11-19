@@ -581,17 +581,23 @@ try {
     + 'names the patient with basis own-work');
 
   // ── Never the chart ──
-  // Each probe is a chart read the member's role permits (0006: both hold ehr.encounter.read; the pharmacist
-  // ehr.prescription.read, the lab scientist ehr.lab-request.read), so the refusal is the patient's consent
-  // (403 CONSENT_REQUIRED), never a missing permission (403 PERMISSION_DENIED).
-  const chartProbes = [[ownPharmacist, `/ehr/patients/${patient.id}${enc}`],
-    [ownPharmacist, `/ehr/patients/${patient.id}${enc}/prescriptions`],
-    [ownPharmacist, `/ehr/patients/${patient.id}${enc}/prescriptions/${rx1.id}`],
-    [ownScientist, `/ehr/patients/${patient.id}${enc}`],
-    [ownScientist, `/ehr/patients/${patient.id}${enc}/lab-requests/${labRequest.id}`]];
-  for (const [who, path] of chartProbes) {
+  // Each probe is a chart read. Where the member's role permits it (0006: both held ehr.encounter.read; the
+  // pharmacist holds ehr.prescription.read, the lab scientist ehr.lab-request.read), the refusal is the patient's
+  // consent (403 CONSENT_REQUIRED), never a missing permission. Where the role no longer permits it (Release A's
+  // 0136, Q103 A: laboratory staff lose visits, ehr.encounter.read), the refusal is the missing permission (403
+  // PERMISSION_DENIED), read from the role table, so this verifier holds with 0133 alone and with 0136 after it.
+  const chartProbes = [[ownPharmacist, 'pharmacist', 'ehr.encounter.read', `/ehr/patients/${patient.id}${enc}`],
+    [ownPharmacist, 'pharmacist', 'ehr.prescription.read', `/ehr/patients/${patient.id}${enc}/prescriptions`],
+    [ownPharmacist, 'pharmacist', 'ehr.prescription.read', `/ehr/patients/${patient.id}${enc}/prescriptions/${rx1.id}`],
+    [ownScientist, 'lab', 'ehr.encounter.read', `/ehr/patients/${patient.id}${enc}`],
+    [ownScientist, 'lab', 'ehr.lab-request.read', `/ehr/patients/${patient.id}${enc}/lab-requests/${labRequest.id}`]];
+  for (const [who, role, permission, path] of chartProbes) {
+    const permitted = (await one(`select exists (select 1 from auth.role_permissions
+                                    where role_code = $1 and permission_code = $2) as permitted`,
+      [role, permission])).permitted;
     const chart = await call(ehr, who, 'GET', path);
-    assert.deepEqual([chart.status, chart.body?.code], [403, 'CONSENT_REQUIRED'], `${who.name} GET ${path}: ${chart.status} `
+    assert.deepEqual([chart.status, chart.body?.code], [403, permitted ? 'CONSENT_REQUIRED' : 'PERMISSION_DENIED'],
+      `${who.name} GET ${path} (${role} ${permitted ? 'holds' : 'lacks'} ${permission}): ${chart.status} `
       + JSON.stringify(chart.body));
     assert.equal(JSON.stringify(chart.body ?? '').includes(patient.fullName), false);
   }
