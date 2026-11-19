@@ -5,6 +5,7 @@ import { validate } from 'class-validator';
 import type { PoolClient } from 'pg';
 import { REQUIRED_PERMISSIONS } from '../../common/decorators';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
+import { DatabaseService } from '../../database/database.service';
 import { matchAllergies } from '../allergies/allergy-match';
 import { warningToken } from '../allergies/allergy-reader';
 import { OrderStatus } from '../shared/clinical.dto';
@@ -619,6 +620,88 @@ describe('Send to pharmacy (0133)', () => {
     expect(provider.useFactory().enabled).toBe(true);
     expect(OWN_PHARMACY_SEND_OFF.enabled).toBe(false);
     expect((Reflect.getMetadata('design:paramtypes', PrescriptionsService) as unknown[])[4]).toBe(OwnPharmacySend);
+  });
+});
+
+/*
+ * 0133 D14 (owner's Q121 A): the order-route send runs SERIALIZABLE and withdraws this hospital's undispensed item. A
+ * "Send to pharmacy", or a replayed create as active, that overlaps it locks the prescription without changing it, so
+ * in READ COMMITTED the route send would not see the item it creates. Both run SERIALIZABLE, so PostgreSQL cancels one
+ * of the pair (40001); D7 passes that on and DatabaseService runs the whole transaction again.
+ */
+describe('the sends that may meet an order-route send run SERIALIZABLE (0133 D14)', () => {
+  beforeEach(() => jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+  /** The transaction options the last repository.run was given (its seventh argument). */
+  const transactionOf = (service: PrescriptionsService) =>
+    (service as unknown as { repository: { run: jest.Mock } }).repository.run.mock.calls.at(-1)?.[6];
+  const newPrescription = (status: OrderStatus) => ({ medicationDisplay: 'Amoxicillin 500 mg',
+    frequency: 'Three times daily', instructions: 'Take with food', status }) as never;
+
+  it('"Send to pharmacy" asks for a SERIALIZABLE transaction', async () => {
+    const { service, sends } = harness({ current: prescription(OrderStatus.Active, '2') });
+    await expect(service.sendToOwnPharmacy(context, patientId, encounterId, prescriptionId, { expectedRowVersion: 2 }))
+      .resolves.toEqual({ pharmacyHandoff: CONTRACT_TABLE[0] });
+    expect(sends()).toEqual([[prescriptionId, 2]]);
+    expect(transactionOf(service)).toEqual({ isolationLevel: 'SERIALIZABLE' });
+  });
+
+  it('a create as active asks for one too: its replay asks the send about a prescription that already exists',
+    async () => {
+      for (const replay of [true, false]) {
+        const { service, sends, createAs } = harness({ current: prescription(OrderStatus.Active, '2'),
+          outcome: 'already_in_pharmacy' });
+        createAs(replay);
+        await service.create(context, patientId, encounterId, newPrescription(OrderStatus.Active), 'own-pharmacy-create-key');
+        expect(sends()).toEqual([[prescriptionId, 2]]);
+        expect(transactionOf(service)).toEqual({ isolationLevel: 'SERIALIZABLE' });
+      }
+    });
+
+  it('a create as a draft keeps the default transaction (it never sends)', async () => {
+    const { service, sends, createAs } = harness({ current: prescription(OrderStatus.Draft) });
+    createAs(true);
+    await service.create(context, patientId, encounterId, newPrescription(OrderStatus.Draft), 'own-pharmacy-create-key');
+    expect(sends()).toEqual([]);
+    expect(transactionOf(service)).toEqual({});
+  });
+
+  it.each(['40001', '40P01'])('runs "Send to pharmacy" again from the start when D7 is cancelled with %s', async (code) => {
+    const transactions: string[][] = [];
+    let asked = 0;
+    const pool = { connect: async () => {
+      const statements: string[] = [];
+      transactions.push(statements);
+      return { release: () => undefined, query: async (sql: string) => {
+        statements.push(sql.trim());
+        if (SEND.test(sql)) {
+          asked += 1;
+          if (asked === 1) throw Object.assign(new Error('could not serialize access'), { code });
+          return { rows: [{ outcome: 'sent' }], rowCount: 1 };
+        }
+        if (/^select 1 from ehr\.prescriptions/.test(sql.trim())) return { rows: [{}], rowCount: 1 };
+        if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: true }], rowCount: 1 };
+        if (/from ehr\.encounters/.test(sql)) return { rows: [{ status: 'in_progress' }], rowCount: 1 };
+        if (/from ehr\.prescriptions/.test(sql)) return { rows: [prescription(OrderStatus.Active, '2')], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      } };
+    } };
+    const database = Object.create(DatabaseService.prototype) as DatabaseService;
+    Object.assign(database, { pool, pauseBeforeRetry: async () => undefined });
+    const audit = { record: jest.fn(async () => undefined), recordWithClient: jest.fn(async () => undefined) };
+    const identity = { authorize: jest.fn(async () => ({ allowed: true, breakGlass: false })) };
+    const service = new PrescriptionsService(new ClinicalRepository(database, audit as never, identity as never),
+      { acceptEhrPrescription: jest.fn() } as never, noRoutes as never, undefined, new OwnPharmacySend(true));
+    await expect(service.sendToOwnPharmacy(context, patientId, encounterId, prescriptionId, { expectedRowVersion: 2 }))
+      .resolves.toEqual({ pharmacyHandoff: CONTRACT_TABLE[0] });
+    expect(transactions).toHaveLength(2);
+    for (const statements of transactions) expect(statements).toContain('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
+    // D7 passed the cancellation on: its savepoint was not rolled back to, the whole transaction was.
+    expect(transactions[0]).not.toContain('rollback to savepoint ehr_own_pharmacy_send');
+    expect(transactions[0]!.at(-1)).toBe('ROLLBACK');
+    expect(transactions[1]!.at(-1)).toBe('COMMIT');
+    expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
+    expect(identity.authorize).toHaveBeenCalledTimes(1);
   });
 });
 

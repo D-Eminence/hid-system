@@ -78,14 +78,19 @@ export function pharmacyHandoff(outcome: string | undefined): PharmacyHandoff {
  * A pharmacy item of an earlier version (the prescription was edited or
  * resumed after it was sent) answers `superseded`, never "already there",
  * until the pharmacy dispenses it: after a dispensing a change is reported
- * nowhere, so the send answers "already there".
+ * nowhere, so the send answers "already there". A prescription sent to
+ * another facility's pharmacy answers `routed`, also after that route ended
+ * and also when this pharmacy's item was withdrawn by that send ("sent
+ * elsewhere", 0133 D14, owner's Q121 A): it never comes back here.
  * `withdraw` asks `ehr.withdraw_own_pharmacy_send(prescription)` whether a
  * sent prescription's send now stands withdrawn: it is held, cancelled or
  * entered in error, or is still active at another version than the one sent
  * (0133's trigger on the prescription marks it on the change itself,
  * whichever ehr-api image makes it; the function marks it the same way), and
  * its pharmacy item has not been dispensed (after a dispensing there is
- * nothing left for the pharmacy to dispense, so nothing to tell). `staffed`
+ * nothing left for the pharmacy to dispense, so nothing to tell) and was not
+ * sent elsewhere (this pharmacy no longer holds it, so nothing to tell either:
+ * the prescriber sees `ownProgress` `sent_elsewhere` and the route). `staffed`
  * asks `ehr.own_pharmacy_staffed()` whether somebody at this facility works
  * on pharmacy items (the send's no_pharmacy test), for the prescription list
  * and page, so the screen offers "Send to pharmacy" only where a send can
@@ -97,7 +102,9 @@ export function pharmacyHandoff(outcome: string | undefined): PharmacyHandoff {
  * for the membership) answers `not_allowed`, since trying again cannot help;
  * any other refusal answers "could not be reached".
  * Each refusal is logged with its SQLSTATE only. A serialization failure or
- * deadlock is passed on, so the whole transaction is run again. The module
+ * deadlock is passed on, so the whole transaction is run again (the callers
+ * that may meet an order-route send of the same prescription, "Send to
+ * pharmacy" and a replayed create as active, run SERIALIZABLE). The module
  * provides it on; the tests' default is off (no statement, no hand-off).
  */
 export class OwnPharmacySend {
