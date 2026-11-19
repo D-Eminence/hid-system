@@ -102,6 +102,18 @@ const CASE_NIN_VERIFIED = `case
       else ${patientHasVerifiedNinSql('registration.resolved_patient_id')}
     end as nin_verified`;
 
+/** Q110: the active patient holding a NIN verified, with that check's evidence (never NIN digits). */
+interface NinHolderRow extends QueryResultRow {
+  patient_id: string;
+  first_name: string | null;
+  last_name: string | null;
+  dob: string | null;
+  gender: string | null;
+  verification_provider: string | null;
+  verification_reference: string | null;
+  verified_at: Date | string | null;
+}
+
 /** SX-10: one row of the registration-case list (never NIN digits). */
 interface CaseListRow extends RegistrationCaseRow {
   full_name: string;
@@ -240,16 +252,16 @@ export class NinRegistrationService {
       throw error;
     }
 
+    // Before any comparison with a record: an account that has had too many
+    // "does not match" answers for this NIN today is held (privacy, above).
+    const mismatches = this.mismatchBucket(context, ninLookupHmac);
+    await this.assertNotHeldForMismatches(context, mismatches);
     // Q110: a NIN on a Health ID keeps its checked answer with the record.
     // A returning patient whose NIN HID already holds verified, typed with
     // the name and date of birth on that patient's record, is matched from
     // the record: the NIN service is not asked (QoreID not paid) again, even
     // after 0137's stored answer has ended. Any other request is checked by
     // the NIN service as before.
-    // Before any comparison with a record: an account that has had too many
-    // "does not match" answers for this NIN today is held (privacy, above).
-    const mismatches = this.mismatchBucket(context, ninLookupHmac);
-    await this.assertNotHeldForMismatches(context, mismatches);
     const onHealthId = await this.verifiedNinOnHealthId(context, ninLookupHmac, claimedDemographics);
     let verification: NinVerificationResult;
     if (onHealthId) {
@@ -971,13 +983,9 @@ export class NinRegistrationService {
   }
 
   /** The active patient who holds this NIN verified and not revoked, with that check's evidence. */
-  private readNinHolder(context: DataAccessContext, ninLookupHmac: string) {
+  private readNinHolder(context: DataAccessContext, ninLookupHmac: string): Promise<NinHolderRow | undefined> {
     return this.database.withTransaction(context, async (client) => {
-      const result = await client.query<{
-        patient_id: string; first_name: string | null; last_name: string | null; dob: string | null;
-        gender: string | null; verification_provider: string | null; verification_reference: string | null;
-        verified_at: Date | string | null;
-      }>(
+      const result = await client.query<NinHolderRow>(
         `select patient.id::text as patient_id, patient.first_name, patient.last_name, patient.dob::text as dob,
                 patient.gender, identifier.verification_provider, identifier.verification_reference,
                 identifier.verified_at
@@ -1006,12 +1014,7 @@ export class NinRegistrationService {
    */
   private async verifiedNinOnHealthId(context: DataAccessContext, ninLookupHmac: string,
     claimed: NinClaimedDemographics): Promise<{ patientId: string; verification: NinVerificationResult } | null> {
-    type HolderRow = {
-      patient_id: string; first_name: string | null; last_name: string | null; dob: string | null;
-      gender: string | null; verification_provider: string | null; verification_reference: string | null;
-      verified_at: Date | string | null;
-    };
-    let row: HolderRow | undefined;
+    let row: NinHolderRow | undefined;
     try {
       row = await this.readNinHolder(context, ninLookupHmac);
     } catch (error) {
