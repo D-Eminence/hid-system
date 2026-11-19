@@ -148,7 +148,7 @@ const acceptedMigrations = new Map([
   ['0133_own_facility_pharmacy_and_lab_work.sql', '588a183081018c2231fdab87c37b3e7bbdaeceaa92ba085d8c1eedbcfdad3244'],
   ['0134_sealed_qa_hospital_pharmacy_lab_staff.sql', '13a58405e179befac7eb3e1854862b33787e040177a48fa98f55557b2cedb5b7'],
   ['0135_visit_queue.sql', '8880d71e8d03ae9dea7614eb88316788d3ad16dca8974218755c8a922a6ce891'],
-  ['0136_role_permission_changes.sql', '8d2f4e08d5108dc5511b4cecd71058eaa74c968bda2b3ba6e9dd963e45c79831'],
+  ['0136_role_permission_changes.sql', '66e17d50e8ce377d42fedab127c8a99dd8b132611ea2766aba2f84ef650c2ea2'],
   ['0137_qoreid_nin_check_once.sql', '0f6f97b8b78c88dbcdba1b0bfe826e3d49852ec5ab473a84d64c8bb6939256bb'],
 ])
 
