@@ -10,7 +10,7 @@ import {
   TimelineQueryDto,
   VitalMeasurementsDto,
 } from '../shared/clinical.dto';
-import { ClinicalRepository } from '../shared/clinical.repository';
+import { ClinicalRepository, type OperationResult } from '../shared/clinical.repository';
 
 export interface VitalRow extends QueryResultRow {
   id: string;
@@ -138,6 +138,22 @@ export const LATEST_VITALS_SQL = `
   where x.value is not null and jsonb_typeof(x.value) <> 'null'
   order by x.measure, effective.recorded_at desc, effective.created_at desc, effective.id desc`;
 
+/**
+ * EHR-C3's reader, inside the caller's transaction (already authorized and
+ * audited by the caller): the newest corrected value of each measure for the
+ * patient at this facility. Also read by the chart summary (EHR-C4).
+ */
+export async function readLatestVitals(client: PoolClient, patientId: string, facilityId: string): Promise<LatestVitals> {
+  const result = await client.query<LatestVitalRow>(LATEST_VITALS_SQL, [patientId, facilityId]);
+  const measures: Partial<Record<LatestVitalMeasure, LatestVitalValue>> = {};
+  for (const row of result.rows) {
+    if (!LATEST_VITAL_MEASURES.includes(row.measure)) continue;
+    measures[row.measure] = { value: latestValue(row.value), recordedAt: row.recordedAt, vitalId: row.vitalId,
+      encounterId: row.encounterId, corrected: row.corrected === true };
+  }
+  return { facilityId, measures };
+}
+
 @Injectable()
 export class VitalsService {
   constructor(private readonly repository: ClinicalRepository) {}
@@ -153,15 +169,8 @@ export class VitalsService {
       context, patientId, 'read_records',
       { action: 'ehr.vital.latest', resourceType: 'vital' },
       async (client) => {
-        const result = await client.query<LatestVitalRow>(LATEST_VITALS_SQL, [patientId, context.facilityId]);
-        const measures: Partial<Record<LatestVitalMeasure, LatestVitalValue>> = {};
-        for (const row of result.rows) {
-          if (!LATEST_VITAL_MEASURES.includes(row.measure)) continue;
-          measures[row.measure] = { value: latestValue(row.value), recordedAt: row.recordedAt, vitalId: row.vitalId,
-            encounterId: row.encounterId, corrected: row.corrected === true };
-        }
-        return { value: { facilityId: context.facilityId, measures },
-          details: { measureCount: Object.keys(measures).length } };
+        const value = await readLatestVitals(client, patientId, context.facilityId);
+        return { value, details: { measureCount: Object.keys(value.measures).length } };
       },
     );
   }
@@ -218,33 +227,54 @@ export class VitalsService {
 
   create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateVitalDto, key: string) {
     this.assertMeasurements(input);
-    const operation = 'vital.create';
-    const digest = requestDigest(operation, { patientId, encounterId, input });
     return this.repository.run(
       context, patientId, 'write_records', { action: 'ehr.vital.create', resourceType: 'vital' },
-      (client) => this.repository.executeCreate(
-        client, context, patientId, key, operation, digest, 'vital',
-        async () => {
-          const result = await client.query<VitalRow>(
-            `insert into ehr.vitals (
-               encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
-               recorded_at, height_cm, weight_kg, temperature_c, pulse_bpm, respiratory_rate,
-               systolic_mmhg, diastolic_mmhg, oxygen_saturation_percent, source
-             ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-             returning ${VITAL_COLUMNS}`,
-            [
-              encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
-              input.recordedAt, input.heightCm ?? null, input.weightKg ?? null, input.temperatureC ?? null,
-              input.pulseBpm ?? null, input.respiratoryRate ?? null, input.systolicMmhg ?? null,
-              input.diastolicMmhg ?? null, input.oxygenSaturationPercent ?? null, input.source,
-            ],
-          );
-          const row = this.single(result.rows[0]);
-          return { value: row, id: row.id };
-        },
-        (id) => this.findVitalById(client, context, patientId, id),
-      ),
+      (client) => this.createInTransaction(client, context, patientId, encounterId, input, key),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
+    );
+  }
+
+  /** The checks a vitals create runs before the database is touched (also EHR-C5's one-call consultation). */
+  checkCreate(input: CreateVitalDto): void {
+    this.assertMeasurements(input);
+  }
+
+  /**
+   * The vitals create inside a transaction the caller already holds (the
+   * route's own, or EHR-C5's one-call consultation). The caller runs
+   * checkCreate first and writes the `ehr.vital.create` audit row.
+   */
+  createInTransaction(
+    client: PoolClient,
+    context: DataAccessContext,
+    patientId: string,
+    encounterId: string,
+    input: CreateVitalDto,
+    key: string,
+    operation = 'vital.create',
+  ): Promise<OperationResult<VitalRow>> {
+    const digest = requestDigest(operation, { patientId, encounterId, input });
+    return this.repository.executeCreate(
+      client, context, patientId, key, operation, digest, 'vital',
+      async () => {
+        const result = await client.query<VitalRow>(
+          `insert into ehr.vitals (
+             encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+             recorded_at, height_cm, weight_kg, temperature_c, pulse_bpm, respiratory_rate,
+             systolic_mmhg, diastolic_mmhg, oxygen_saturation_percent, source
+           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+           returning ${VITAL_COLUMNS}`,
+          [
+            encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
+            input.recordedAt, input.heightCm ?? null, input.weightKg ?? null, input.temperatureC ?? null,
+            input.pulseBpm ?? null, input.respiratoryRate ?? null, input.systolicMmhg ?? null,
+            input.diastolicMmhg ?? null, input.oxygenSaturationPercent ?? null, input.source,
+          ],
+        );
+        const row = this.single(result.rows[0]);
+        return { value: row, id: row.id };
+      },
+      (id) => this.findVitalById(client, context, patientId, id),
     );
   }
 

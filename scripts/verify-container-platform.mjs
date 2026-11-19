@@ -21,7 +21,7 @@ const backends = [
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
 const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/',
   ocr: '/migrate/', outreach: '/outreach/', admin: '/admin/' }
-const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:74224b87e0ca49c53adcc9b475d13f4080a10eea5ab2fdd4684e5094accd4041'
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:af2e7dd3017037b3ba73238b818c7273f3b4349c005f8bd1454b78d580fe7e37'
 const unprivilegedNginxRuntime = 'nginxinc/nginx-unprivileged@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01'
 
 const textExtensions = new Set([
@@ -180,8 +180,8 @@ for (const app of apps) {
     `API-only gateway must not package the Cloudflare-hosted ${app} frontend`)
 }
 assert.match(gatewayDockerfile, /USER 101/, 'gateway must run as the unprivileged Nginx user')
-assert.match(gatewayDockerfile, /USER 0[\s\S]*RUN apk del --no-cache curl\s+\\\s+&& apk add --no-cache 'pcre2=10\.49-r0' 'libexpat=2\.10\.0-r0' 'zlib=1\.4-r0' 'libx11=1\.8\.14-r0' 'brotli-libs=1\.2\.1-r0'\s+\\\s+'musl=1\.2\.6-r3' 'musl-utils=1\.2\.6-r3' 'libxslt=1\.1\.43-r4'/,
-  'gateway must install the exact security patch from its signed Alpine repository')
+assert.match(gatewayDockerfile, /USER 0[\s\S]*RUN apk del --no-cache curl\s+\\\s+&& apk add --no-cache 'pcre2=10\.49-r0' 'libexpat=2\.10\.0-r0' 'zlib=1\.4-r0' 'libx11=1\.8\.14-r0' 'brotli-libs=1\.2\.1-r0'\s+\\\s+'musl=1\.2\.6-r3' 'musl-utils=1\.2\.6-r3' 'libxslt=1\.1\.43-r4'\s+\\\s+&& apk add --no-cache -X https:\/\/nginx\.org\/packages\/alpine\/v3\.24\/main\s+\\\s+'nginx=1\.30\.7-r1' 'nginx-module-njs=1\.30\.7\.1\.0\.2-r1' 'nginx-module-xslt=1\.30\.7-r1'\s+\\\s+'nginx-module-geoip=1\.30\.7-r1' 'nginx-module-image-filter=1\.30\.7-r1'/,
+  'gateway must install the exact security patches from its signed Alpine and nginx.org repositories')
 assert.doesNotMatch(gatewayDockerfile, /apk upgrade|--allow-untrusted|--no-check-certificate/,
   'gateway must not broadly upgrade packages or bypass package trust')
 assert.equal([...gatewayDockerfile.matchAll(/^USER (.+)$/gm)].at(-1)?.[1], '101',
