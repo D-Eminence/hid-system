@@ -47,7 +47,8 @@
 --    the session's, at the row's facility, active and not on hold, of an
 --    active account whose subject is the session's actor; the purpose is
 --    direct care; the patient is active and no deny directive covers that
---    member. The row's half reads the session's
+--    member. The row's half checks the membership given, at the row's
+--    facility and of the session's actor, and reads the session's
 --    membership and facility again on every row, so a statement that changes
 --    its settings after the session's half ran (a cursor, or set_config in
 --    the same statement) sees nothing more. Neither half allows anything
@@ -375,8 +376,12 @@
 -- 20 chain tables; CREATE POLICY needs it; the trigger of D8 needs no more on
 -- ehr.prescriptions), and ACCESS SHARE on the tables the new SQL functions
 -- read when they are created (identity.patients, the consent directives and
--- their versions, the memberships, auth.accounts), all NOWAIT, 28 tables in
--- all (pg_locks before commit shows no other table of 0001-0127): a busy table
+-- their versions, the memberships, auth.accounts, which section 8's probe of
+-- D7 reads too, through platform.current_account_id), all NOWAIT, 28 tables
+-- in all (pg_locks before commit shows no other table of 0001-0127), and the
+-- indexes of auth.accounts, by planning a query on it under a 10 ms
+-- lock_timeout (a REINDEX of it holds them while it allows the table's
+-- ACCESS SHARE; the other four are not planned on before commit): a busy table
 -- fails the attempt at once and its subtransaction releases what it took.
 -- When 0133 is the first statement of its transaction (the runner applies
 -- each file in its own transaction), the loop tries again 100 ms later, so it
@@ -714,6 +719,7 @@ $$;
 do $$
 declare
   attempt integer := 0;
+  runner_lock_timeout text := current_setting('lock_timeout');
   holding boolean := exists (
     select 1 from pg_locks held
       join pg_class relation on relation.oid = held.relation
@@ -738,18 +744,27 @@ begin
       lock table identity.patients, identity.consent_directives,
         identity.consent_directive_versions, identity.staff_facility_memberships, auth.accounts
         in access share mode nowait;
+      -- auth.accounts' indexes, which planning a query on it takes (section
+      -- 8's probe of D7 plans one): a REINDEX holds them while it allows the
+      -- ACCESS SHARE above. A 10 ms lock_timeout makes taking them a NOWAIT
+      -- too (55P03, so this loop tries again); the runner's own is restored.
+      perform set_config('lock_timeout', '10ms', true);
+      execute 'select 1 from auth.accounts where false';
+      perform set_config('lock_timeout', runner_lock_timeout, true);
       exit;
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
-          message = '0133: ehr.prescriptions or a Lab or Pharmacy work table is busy, and this transaction already '
-            || 'holds an earlier migration''s locks, so it does not wait; nothing applied; run the release again at a '
-            || 'quieter time';
+          message = '0133: ehr.prescriptions, a Lab or Pharmacy work table or a table 0133 reads (identity.patients, '
+            || 'the consent directives, the memberships, auth.accounts and its indexes) is busy, and this transaction '
+            || 'already holds an earlier migration''s locks, so it does not wait; nothing applied; run the release '
+            || 'again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0133: ehr.prescriptions or a Lab or Pharmacy work table stayed busy for 5 seconds; nothing '
-            || 'applied; run the release again at a quieter time';
+          message = '0133: ehr.prescriptions, a Lab or Pharmacy work table or a table 0133 reads (identity.patients, '
+            || 'the consent directives, the memberships, auth.accounts and its indexes) stayed busy for 5 seconds; '
+            || 'nothing applied; run the release again at a quieter time';
       end if;
       perform pg_sleep(0.1);
     end;
