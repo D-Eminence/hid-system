@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import production_deployment_core as c
 import production_deployment as b
 from test_production_deployment_core import ctx, image, index
@@ -354,6 +354,23 @@ class ParallelReadTests(unittest.TestCase):
             with self.assertRaisesRegex(c.ReleaseError,'ECS_HEALTH_TIMEOUT'): ecs.current('identity-api')
         self.assertEqual(sleep.call_count,3)
 
+    def test_snapshot_describes_an_unsettled_service_again_on_each_retry(self):
+        # The first describe of identity-api is mid-rollout; the retry must ask ECS again, not reuse that answer.
+        class Settling(LiveAWS):
+            def answer(self, operation, body):
+                result=super().answer(operation,body)
+                if operation=='describe-services' and body['services'][0]=='hid-production-identity-api':
+                    self.described=getattr(self,'described',0)+1
+                    if self.described==1: result['services'][0]['deployments']=[{'rolloutState':'IN_PROGRESS'}]
+                return result
+        aws=Settling(delay=0); ecs=b.ECS(aws,FakeLease())
+        clock=iter(range(0,1000,5))
+        with patch.object(b.time,'sleep') as sleep,patch.object(b.time,'monotonic',side_effect=lambda:next(clock)):
+            row=ecs.current('identity-api')
+        self.assertEqual(aws.described,2); self.assertEqual(sleep.call_count,1)
+        self.assertEqual(row['task_definition'],aws.task('identity-api'))
+        self.assertEqual(row['image_uri'],image('identity-api'))
+
     def test_parallel_returns_in_order_and_waits_for_started_work_before_raising(self):
         finished=[]
         def work(n):
@@ -466,15 +483,36 @@ class DeployPhaseTests(unittest.TestCase):
             else: self.assertEqual(names,['approval','lease','snapshot-before','receipt-started','migration','register-services',
                 'rollout-services','register-gateway','rollout-gateway','snapshot-after','index-and-receipt','notify'])
 
-    def test_phase_marks_refuse_free_text(self):
+    def test_phase_marks_drop_free_text_and_never_raise(self):
         written=[]; phases=b.Phases(out=lambda line,flush:written.append(line))
-        for bad in ({'phase':'patient Ada'},{'phase':'lease','note':'text'},{'phase':'lease','count':1.5},{'phase':'lease','Bad':1}):
+        for bad in ({'phase':'patient Ada'},{'phase':'lease','note':'text'},{'phase':'lease','count':1.5},{'phase':'lease','Bad':1},
+                    {'phase':'migration','plan_after_skipped':True}):
             phase=bad.pop('phase')
-            with self.assertRaisesRegex(c.ReleaseError,'UNKNOWN_PHASE|PHASE_COUNTS_ONLY'): phases.mark(phase,**bad)
+            self.assertFalse(phases.mark(phase,**bad))
         self.assertEqual(written,[])
-        phases.mark('lease',services=12); self.assertRegex(written[0],r' phase=lease .* services=12$')
-        # A failed write never fails the release.
-        b.Phases(out=lambda line,flush:(_ for _ in ()).throw(OSError('closed'))).mark('lease')
+        self.assertTrue(phases.mark('lease',services=12)); self.assertRegex(written[0],r' phase=lease .* services=12$')
+        # A failed write, a broken clock or a malformed migration record never fails the release.
+        self.assertFalse(b.Phases(out=lambda line,flush:(_ for _ in ()).throw(OSError('closed'))).mark('lease'))
+        broken=b.Phases(clock=iter([0]).__next__,out=lambda line,flush:written.append(line))
+        self.assertFalse(broken.mark('lease'))
+        for checks in (None,{},{'plan_after':'skipped'},{'plan_after':'ran','pending_before':'x','tasks':1}):
+            phases.migration('backend-1-1-'+'a'*16,checks)
+        self.assertEqual(len(written),1)
+        phases.migration('backend-1-1-'+'a'*16,{'pending_before':0,'plan_after':'skipped','reason':b.SKIPPED_PLAN_AFTER,'tasks':1})
+        self.assertEqual(len(written),3); self.assertIn('"migration_plan_after": "skipped"',written[1])
+        self.assertRegex(written[2],r' phase=migration .* pending_before=0 plan_after_skipped=1 tasks=1$')
+
+    def test_a_dropped_phase_line_never_rolls_back_a_healthy_release(self):
+        # Every phase name unknown, or every line failing to build: the release still succeeds and is not rolled back.
+        broken_clock=Mock(); broken_clock.datetime.now.side_effect=RuntimeError('clock')
+        for patches in ({'PHASES':frozenset()},{'datetime':broken_clock}):
+            with self.subTest(patches=list(patches)),patch.multiple(b,**patches):
+                baseline,state,objects,calls,lease=self.execute(components=('identity-api','database-migration'))
+                self.assertTrue(any(k.endswith('/complete.json') for k in objects))
+                self.assertFalse(any(k.endswith('/failed.json') for k in objects))
+                self.assertEqual(objects[c.INDEX_KEY]['backend_release'],next(iter(v for k,v in objects.items()
+                    if k.endswith('/complete.json')))['candidate']['release_id'])
+                self.assertEqual(len(calls),1); self.assertTrue(lease.released)
 
 
 if __name__=='__main__': unittest.main()

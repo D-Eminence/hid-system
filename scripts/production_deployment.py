@@ -46,21 +46,39 @@ def parallel(work, items, workers):
             raise
 
 class Phases:
-    """Timestamped progress lines: a fixed phase name, elapsed seconds and integer counts only."""
+    """Timestamped progress lines: a fixed phase name, elapsed seconds and integer counts only.
+
+    Progress output never decides a release, so nothing here raises into deploy(): a line that fails
+    its checks (unknown phase, a count that is not a plain integer) or fails to print is dropped."""
     def __init__(self, clock=time.monotonic, out=print):
         self.clock, self.out = clock, out
         self.start = self.last = clock()
 
     def mark(self, phase, **counts):
-        require(phase in PHASES, "UNKNOWN_PHASE")
-        require(all(re.fullmatch(r"[a-z_]+",k) and type(v) is int for k,v in counts.items()), "PHASE_COUNTS_ONLY")
-        now = self.clock()
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        line = "deploy-phase %s phase=%s phase_s=%.1f elapsed_s=%.1f" % (stamp,phase,now-self.last,now-self.start)
-        self.last = now
-        # Progress output never decides a release: a failed write is ignored.
-        try: self.out(line+"".join(" %s=%d" % item for item in sorted(counts.items())), flush=True)
-        except Exception: pass
+        """Prints one phase line; returns whether it was printed. Never raises."""
+        try:
+            if phase not in PHASES: return False
+            if not all(re.fullmatch(r"[a-z_]+",k) and type(v) is int for k,v in counts.items()): return False
+            now = self.clock()
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            line = "deploy-phase %s phase=%s phase_s=%.1f elapsed_s=%.1f" % (stamp,phase,now-self.last,now-self.start)
+            self.last = now
+            self.out(line+"".join(" %s=%d" % item for item in sorted(counts.items())), flush=True)
+            return True
+        except Exception:
+            return False
+
+    def migration(self, release_id, checks):
+        """Logs the migration outcome. Never raises: the durable record is migration_checks in the receipt."""
+        try:
+            skipped = checks.get("plan_after") == "skipped"
+            if skipped:
+                self.out(json.dumps({"release_id":release_id,"migration_plan_after":"skipped",
+                    "reason":checks["reason"]}), flush=True)
+            self.mark("migration",pending_before=int(checks["pending_before"]),tasks=int(checks["tasks"]),
+                plan_after_skipped=int(skipped))
+        except Exception:
+            pass
 
 def candidate():
     ctx = context("backend")
@@ -450,12 +468,7 @@ def deploy(mode="deploy", rollback_id=None):
             require(settings["migration_network"] == index["migration_network"], "MIGRATION_NETWORK_DIFFERS_FROM_INDEX")
             settings["migration_task_definition"] = index["migration_task_definition"]
             migration_arn = ecs.migrate(desired["database-migration"],candidate["schema_change"],settings,candidate["release_id"])
-            checks = ecs.migration_checks
-            if checks["plan_after"] == "skipped":
-                print(json.dumps({"release_id":candidate["release_id"],"migration_plan_after":"skipped",
-                    "reason":checks["reason"]}),flush=True)
-            phases.mark("migration",pending_before=checks["pending_before"],tasks=checks["tasks"],
-                plan_after_skipped=int(checks["plan_after"] == "skipped"))
+            phases.migration(candidate["release_id"],ecs.migration_checks)
         # The services roll out side by side; the gateway, which routes to them, follows once they are healthy.
         rollout = [name for name in ORDER if name in desired]
         for label, wave in (("services",[n for n in rollout if n != "gateway"]), ("gateway",[n for n in rollout if n == "gateway"])):
