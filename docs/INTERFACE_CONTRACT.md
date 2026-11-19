@@ -6468,7 +6468,8 @@ sign-up, an earlier desk match), that record is kept 90 days from this match:
 a record first kept 24 hours after a typo is, once the corrected details have
 matched it, still reused (not paid for again) a month later, by the desk, the
 profile or, when the record is complete, a sign-up (a sign-up asks QoreID
-again for an incomplete one: 0137's sign-up path, not the desk's). A record
+again for an incomplete one: 0137's sign-up path, not the desk's; see "For
+#276" below). A record
 first matched and then matched again is kept
 90 days from the latest match. Only a record is kept so ("no record", QoreID's
 "not found" and an answer HID cannot use keep 0137's own times), and only after
@@ -6655,6 +6656,51 @@ A switch that cannot be read, before the check or when it is read again just
 before sending, answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be
 started right now. Please try again in a minute.", audited with
 `providerCalled: false`.
+
+### For #276: a sign-up after the desk kept an incomplete record (0137's sign-up path)
+
+Not changed here: this is 0137's sign-up path (#276, Rahman's), and this
+branch keeps 0137's files as #276 has them. What happens today: a desk check
+of a NIN whose NIN-only record lacks something a sign-up needs (no recognised
+sex, or a photo or home address HID cannot read) keeps that record as an
+incomplete record for 90 days, so later desk and profile checks reuse it. A
+sign-up of the same NIN (`verifyNin`, which needs a complete record) is then
+handed the NIN by `identity.begin_qoreid_nin_check` ("an incomplete record
+taken over by a caller needing a complete one"), asks QoreID again on the
+same NIN-only endpoint, is charged again for the same answer, refuses it
+(`502 QOREID_PROVIDER_RESPONSE_INVALID`), and `finishFailure` stores it as
+`unusable` for 24 hours in place of the 90-day record, so the desk and the
+profile pay again the day after.
+
+What #276 should change: a stored record that came from QoreID's NIN-only
+check (a sign-up's or the desk's; not a profile check's, which asks with the
+name and date of birth and may come back without what a sign-up needs even
+when the NIN-only record has it) and lacks a field a sign-up needs is
+answered to a sign-up from storage as the same unusable answer (`502
+QOREID_PROVIDER_RESPONSE_INVALID`, as the first time), is never sent to
+QoreID again while it is kept, and is never replaced by an answer kept for a
+shorter time. In 0137's terms: the row needs to say which check its record
+came from (for example a column `record_source` of `nin_only` or `profile`,
+set by `finish_qoreid_nin_check`); `begin_qoreid_nin_check` returns `stored`
+for an incomplete `nin_only` record to a caller that needs a complete one
+(and takes over only an incomplete `profile` record); no finish shortens a
+stored record's keep; and a sign-up's own such answer, when its name and date
+of birth can be read, is kept the same way (an incomplete `nin_only` record
+for as long as a record) rather than as `unusable` for 24 hours, so a desk or
+profile check after a sign-up does not pay again the next day either.
+`verifyNin` already refuses an incomplete stored record as `502
+QOREID_PROVIDER_RESPONSE_INVALID` without asking.
+
+The test that fails today (the desk-once fixture of
+`qoreid-nin-desk-once.spec.ts`: the real desk service and providers, 0137's
+guard on the in-memory store and the real adapter against a fake QoreID that
+bills every NIN request): QoreID's NIN-only record for the NIN has no
+recognised sex; the desk resolves the NIN (one charge; the store holds
+`outcome 'record'`, `record_complete false`, kept 90 days); then
+`verifyNin(NIN, { path: 'enrollment' })` for the same NIN answers `502
+QOREID_PROVIDER_RESPONSE_INVALID`, and afterwards QoreID's charge count is
+still 1 and the store still holds the same row (`record`, incomplete, the same
+`until`). Today the count is 2 and the row is `unusable`, kept 24 hours.
 
 ### `GET /api/v1/identity/registration-capabilities` with QoreID
 
