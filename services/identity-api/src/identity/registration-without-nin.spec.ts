@@ -169,7 +169,6 @@ describe('registration without a NIN (0130, ID-2)', () => {
       ['22023', 'NO_NIN_REGISTRATION_PHONE_REQUIRED', 400, 'PHONE_REQUIRED'],
       ['22023', 'NO_NIN_REGISTRATION_NOT_A_CHILD', 400, 'NOT_A_CHILD'],
       ['22023', 'NO_NIN_REGISTRATION_INVALID', 400, 'REGISTRATION_WITHOUT_NIN_INVALID'],
-      ['P0001', 'NO_NIN_REGISTRATION_DAILY_LIMIT', 429, 'REGISTRATION_WITHOUT_NIN_DAILY_LIMIT'],
       ['22023', 'IDEMPOTENCY_KEY_REUSED', 409, 'IDEMPOTENCY_KEY_REUSED'],
     ])('answers %s %s as %s %s, in plain words, and audits the refusal', async (sqlstate, message, status, code) => {
       const { service, audit } = setup([databaseError(sqlstate, message)]);

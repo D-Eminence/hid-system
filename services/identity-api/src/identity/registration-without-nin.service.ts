@@ -27,9 +27,10 @@ import type { NinStatus } from './nin-status';
  * person.
  */
 
-/** A member may register 20 patients without a NIN a day at a facility (the database's limit). */
-export const NO_NIN_DAILY_LIMIT_PER_MEMBER = 20;
-/** At this many registrations without a NIN in a day at one facility, an alert is logged (no identifiers). */
+/**
+ * There is no daily limit (owner Q109: no rate limit on a staff member or facility). At this many registrations without
+ * a NIN in a day at one facility, an alert is logged (no identifiers).
+ */
 export const NO_NIN_FACILITY_DAILY_ALERT = 50;
 
 export type WithoutNinDecision = 'create_new' | 'link_existing' | 'reject';
@@ -88,7 +89,6 @@ export const WITHOUT_NIN_MESSAGES = {
   statedHealthId: 'Give the Health ID only when the patient says they already have one.',
   denied: 'You cannot register patients at this facility.',
   sealed: 'Registration without a NIN is not available at a demonstration or test facility.',
-  dailyLimit: 'You have registered 20 patients without a NIN today. Another member of staff can continue, or try again tomorrow.',
   keyReused: 'This request was already sent with different details. Start a new registration.',
   reviewDenied: 'Only an approver at this facility can decide this registration.',
   secondPerson: 'Another approver must decide this registration, because you started it.',
@@ -256,8 +256,6 @@ export class RegistrationWithoutNinService {
         return new DomainProblem(400, 'NOT_A_CHILD', WITHOUT_NIN_MESSAGES.notAChild);
       case 'NO_NIN_REGISTRATION_INVALID':
         return new DomainProblem(400, 'REGISTRATION_WITHOUT_NIN_INVALID', WITHOUT_NIN_MESSAGES.invalid);
-      case 'NO_NIN_REGISTRATION_DAILY_LIMIT':
-        return new DomainProblem(429, 'REGISTRATION_WITHOUT_NIN_DAILY_LIMIT', WITHOUT_NIN_MESSAGES.dailyLimit);
       case 'IDEMPOTENCY_KEY_REUSED':
         return new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED', WITHOUT_NIN_MESSAGES.keyReused);
       default:
