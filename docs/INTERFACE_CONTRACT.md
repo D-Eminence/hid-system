@@ -6667,16 +6667,30 @@ out, QoreID's `401` after the one replay, its `429`) just before that wait
 ends; this request then sends its own check and waits for it too: up to
 2 × `QOREID_TIMEOUT_MS` + 3 s. Recording the answer adds milliseconds, and up
 to about 4 s more when the database is slow (0137 tries the write again after
-0.2, 1 and 3 s). With the 5 s `QOREID_TIMEOUT_MS` that
-infra/aws/src/hid-regional-stack.ts sets, a request answers within about 8 s,
-and 13 s (about 17 s with a slow database) in the worst case. With the code
-default (12 s, #271) it is about 15 s, and 27 s (about 31 s) in the worst
-case, which can pass the website's 30 s and the gateway's 30 s; at the
-environment's highest allowed value (20 s) the worst case is about 43 s. So
-the website's timer for this request must allow 30 s (health#272 does), and
-where the desk uses QoreID `QOREID_TIMEOUT_MS` should stay at 12 s or less (5 s
-as production sets it). A request the website stopped waiting for is answered
-from storage on its retry with the same `Idempotency-Key`.
+0.2, 1 and 3 s): 2 × `QOREID_TIMEOUT_MS` + about 7 s in all (on the desk-once
+fixture, with `QOREID_TIMEOUT_MS` at 1 s and every write failing: 9.2 s).
+
+| `QOREID_TIMEOUT_MS` | up to, waiting for another check that answers | worst case | worst case, slow database |
+| --- | --- | --- | --- |
+| 5 s (infra/aws/src/hid-regional-stack.ts) | about 8 s | 13 s | about 17 s |
+| 11 s | about 14 s | 25 s | about 29 s |
+| 12 s (the code default, #271) | about 15 s | 27 s | about 31 s |
+| 20 s (the highest the environment allows) | about 23 s | 43 s | about 47 s |
+
+The website's timer for this request must allow 30 s (health#272 does), and
+the gateway's read timeout is 30 s. Only a `QOREID_TIMEOUT_MS` of 11 s or less
+keeps every desk request inside 30 s, with less than a second to spare in its
+worst case; at the 12 s default the worst case with a slow database passes
+30 s, and at 20 s the worst case passes it with any database. So where the
+desk uses QoreID, `QOREID_TIMEOUT_MS` should be 11 s or less (5 s as
+production sets it). A request that runs past 30 s is ended by the gateway
+with its own `504`, not the desk's `504 QOREID_TIMEOUT`: no `code` and no
+`retryAfterSeconds`, so the website shows its general error. Nothing more is
+charged; the server still finishes and, on a match, writes the case. A
+request the website stopped waiting for is answered from storage on its retry
+with the same `Idempotency-Key` (the case, or the stored answer); a new
+submission with a new key after a match is `409
+NIN_REGISTRATION_IN_PROGRESS`, the receptionist's own case.
 
 ### Details refused before any check
 
