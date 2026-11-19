@@ -72,8 +72,8 @@ begin
            expected.proc_name, coalesce(md5(proc.prosrc), 'none (missing)'), pg_get_userbyid(proc.proowner), proc.prosecdef, proc.provolatile,
            language_row.lanname, proc.proisstrict, proc.proconfig), '; ')
     into mismatch
-    from (values ('lab.work_item_patient_cards(uuid[])', '91e157a7d6f89edd46c14dbb095d1bc6'),
-                 ('pharmacy.work_item_patient_cards(uuid[])', '0dc38390c3c40a1883b87345ce0d35bd')) expected(proc_name, digest)
+    from (values ('lab.work_item_patient_cards(uuid[])', 'c80ae5c7933af400323881709e57777b'),
+                 ('pharmacy.work_item_patient_cards(uuid[])', 'f321cac9edce2293a904e6a361657ea4')) expected(proc_name, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc_name)
     left join pg_language language_row on language_row.oid = proc.prolang
    where proc.oid is null or md5(proc.prosrc) <> expected.digest

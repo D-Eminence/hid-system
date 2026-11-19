@@ -1071,11 +1071,12 @@ select pg_temp.assert('the review gate keeps a receiving role out of the pending
 -- resource-based.
 set local role hid_lab_api_runtime;
 select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
--- 0133: an own (non-route) work item is now allowed to L1's lab staff too.
-select pg_temp.assert('residual: the chain branch is per patient (and, since 0133, L1''s own work is its lab staff''s)',
-  lab.context_allows(
+-- 0133 (D2) lets L1's lab staff read L1's own work item through a policy of
+-- its own, lab.work_items' own_work_read (the read above); 0086's
+-- lab.work_item_allows stays strict.
+select pg_temp.assert('residual: the chain branch is per patient', lab.context_allows(
   'e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid, 'read_records')
-  and lab.work_item_allows('e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid,
+  and not lab.work_item_allows('e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid,
     null, 'read_records'));
 reset role;
 
