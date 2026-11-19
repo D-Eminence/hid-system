@@ -7023,6 +7023,8 @@ Find a patient shows the owner's words, "No patient has this Health ID."
 every `403` stays a refused lookup, as today. A limited account gets today's
 `404`, never a `429`.
 
+
+
 ## 55. The PIN-use notice and the named requester (0128, provisional)
 
 Port of `main` 0091 sections 4 and 5 (NOTIF-PIN-NOTICE, CONSENT-GRANTEE),
@@ -7653,6 +7655,8 @@ facility (from the registration-case list, a just-registered patient, or this fa
 `patientId`. The waiting list polls `GET ehr/visit-queue`, shows name, sex, date of birth, `•••• healthIdLast4`, stage
 and triage level, marks `chartBlocked` as "Chart cannot be opened", and sends `expectedRowVersion` with every change.
 On 403 `CHECK_IN_NEEDS_SEARCH` show the message and the search box.
+
+
 
 ## 0136. Who can do what: role-table changes (Release A, owner decisions Q103 A, Q111 A, Q112 A, Q113 A)
 
