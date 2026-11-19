@@ -3,6 +3,20 @@ import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryRes
 import { getEnvironment } from '../config/environment';
 import type { DataAccessContext } from '../common/request-context';
 
+/**
+ * 0133 D13 and D14 (owner's Q120 B and Q121 A): a staff session that sets
+ * app.own_facility_work to this value gets 0133's rules. In ehr-api it
+ * switches the order-route send and its resend flag to D14's rule: until
+ * this hospital's own pharmacy has dispensed a prescription it holds, the
+ * prescription can still be sent to an outside pharmacy, and the send
+ * withdraws the own item ("sent elsewhere"). This image always sets it, in
+ * staff transactions only (never a patient, system or workload one). An
+ * older image never sets it, so it keeps ORDER_ROUTE_ORDER_IN_WORK for any
+ * prescription with a work item here, whichever schema it meets. On a
+ * schema without 0133 the setting is unused.
+ */
+export const OWN_FACILITY_WORK = '0133';
+
 export interface TransactionOptions {
   readOnly?: boolean;
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
@@ -64,8 +78,8 @@ export class DatabaseService implements OnApplicationShutdown {
    * Runs the operation in one transaction with the request context. A SERIALIZABLE transaction
    * that PostgreSQL cancels to keep concurrent ones serializable (40001, 40P01) is run again from
    * the start, up to SERIALIZABLE_ATTEMPTS in all; any other transaction or error is not retried.
-   * The operation must therefore do nothing outside the database (the order route send, its one
-   * SERIALIZABLE caller, does not).
+   * The operation must therefore do nothing outside the database (its SERIALIZABLE callers, the
+   * order route send, "Send to pharmacy" and a prescription created as active, do not).
    */
   async withTransaction<Result>(
     context: DataAccessContext,
@@ -105,13 +119,15 @@ export class DatabaseService implements OnApplicationShutdown {
            set_config('app.facility_id', $2, true),
            set_config('app.correlation_id', $3, true),
            set_config('app.membership_id', $4, true),
-           set_config('app.purpose_of_use', $5, true)`,
+           set_config('app.purpose_of_use', $5, true),
+           set_config('app.own_facility_work', $6, true)`,
         [
           context.actor.subject,
           context.facilityId,
           context.correlationId,
           context.membershipId,
           context.purposeOfUse,
+          OWN_FACILITY_WORK,
         ],
       );
       const result = await operation(client);

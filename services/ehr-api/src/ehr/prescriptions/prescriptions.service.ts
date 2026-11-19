@@ -152,6 +152,13 @@ export class PrescriptionsService {
    * Idempotency-Key) answers the prescription as it is now and asks the send
    * again, which sends once: the hand-off as it stands now (a pending send is
    * tried again), recorded in the replay's audit row as on the first run.
+   *
+   * A create as active runs SERIALIZABLE, because its replay asks the send
+   * for a prescription that already exists and may meet an order-route send
+   * of it (0133 D14, see sendToOwnPharmacy). Whether it is a replay is known
+   * only inside the transaction, so every create as active runs so.
+   * DatabaseService runs a transaction PostgreSQL cancels (40001, 40P01)
+   * again, and the retry replays the committed winner. A draft never sends.
    */
   create(context: DataAccessContext, patientId: string, encounterId: string, input: CreatePrescriptionInput, key: string) {
     if ((input.doseQuantity === undefined) !== (input.doseUnit === undefined)) {
@@ -165,6 +172,7 @@ export class PrescriptionsService {
       { action: 'ehr.prescription.create', resourceType: 'prescription' },
       (client) => this.createOrReplay(client, context, patientId, encounterId, input, key, operation, digest),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
+      input.status === OrderStatus.Active ? { isolationLevel: 'SERIALIZABLE' } : {},
     );
   }
 
@@ -290,8 +298,9 @@ export class PrescriptionsService {
         // draft (it may have been sent) asks the database whether its send now stands withdrawn:
         // holding, cancelling or entering it in error, and editing or resuming it (the pharmacy
         // item keeps the version sent), and Pharmacy can no longer dispense it (0101); the database
-        // answers false once the item was dispensed (nothing is left to dispense). An edit or a
-        // resume that leaves it active answers the contract's "earlier version" row (reason
+        // answers false once the item was dispensed (nothing is left to dispense), and once it was
+        // sent to another facility's pharmacy (0133 D14: this pharmacy no longer holds it). An edit or
+        // a resume that leaves it active answers the contract's "earlier version" row (reason
         // `superseded`), so the prescriber is told the pharmacy cannot dispense what they now see.
         const sent = current.status === OrderStatus.Draft && row.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
@@ -415,7 +424,17 @@ export class PrescriptionsService {
    * the pharmacy hand-off checks it (0117), its acknowledgement stored for the
    * hand-off stage. The database decides the rest and the answer is the
    * prescription's `pharmacyHandoff`. On a schema without 0133 it is 503
-   * OWN_PHARMACY_SEND_UNAVAILABLE. Sending twice sends once.
+   * OWN_PHARMACY_SEND_UNAVAILABLE. Sending twice sends once. A prescription
+   * whose item here was sent to another facility's pharmacy (0133 D14) never
+   * comes back: once that route ends, the send answers the `routed` row.
+   *
+   * SERIALIZABLE (0133 D14): the order-route send runs SERIALIZABLE and
+   * withdraws this pharmacy's undispensed item. This send locks the
+   * prescription but does not change it, so in READ COMMITTED a route send
+   * that overlaps it would not see the item it creates, and would leave a
+   * live route next to a dispensable item here. Run SERIALIZABLE, one of the
+   * two is cancelled (40001) and DatabaseService runs it again; the retry
+   * sees the winner. D7 passes 40001 and 40P01 on (OwnPharmacySend).
    */
   sendToOwnPharmacy(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string,
     input: SendPrescriptionToOwnPharmacyDto) {
@@ -452,6 +471,7 @@ export class PrescriptionsService {
           details: { prescriptionVersion: Number(current.rowVersion), ...allergyOverride, ...handoffDetails(handoff) } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
+      { isolationLevel: 'SERIALIZABLE' },
     );
   }
 
