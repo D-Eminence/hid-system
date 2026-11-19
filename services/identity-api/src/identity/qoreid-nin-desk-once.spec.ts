@@ -605,6 +605,39 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       await expect(s.resolve('desk-once-key-000224', deskContext(2))).resolves.toMatchObject({ caseId });
     });
 
+    it('records QoreID\'s late 404 behind a desk wait as its answer: three such waits open it, the answers close it', async () => {
+      // D4(a) inside verifyNinRecord: a 404 QoreID gives after the desk stopped waiting settles as answered.
+      const s = system();
+      s.qoreId.state.delayMs = 500;
+      s.qoreId.state.modes = ['not_found', 'not_found', 'not_found'];
+      const first = await Promise.all(NINS.map((nin, index) => s.resolve(`desk-once-key-00026${index}`,
+        deskContext(index + 1), { ...input, nin }).catch((error: unknown) => error)));
+      expect(first).toEqual(NINS.map(() => expect.objectContaining({ status: 504, code: 'QOREID_TIMEOUT' })));
+      expect(s.breaker.state()).toBe('open');
+      await s.ninCheck.settle();
+      expect(s.breaker.state()).toBe('closed');
+      expect(s.qoreId.state.charged).toBe(3);
+      // The retries are answered from the stored 404, as the first time.
+      await expect(s.resolve('desk-once-key-000260', deskContext(1), { ...input, nin: NINS[0]! }))
+        .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
+      expect(s.qoreId.state.charged).toBe(3);
+    });
+
+    it('never counts a fresh 404 when the guard\'s audit write fails after it: QoreID answered', async () => {
+      // D4(a) and (c): the error the desk gets is HID's own (503); what QoreID did, a 404, is an answer.
+      const s = system();
+      s.auditDown.on = true;
+      s.qoreId.state.modes = ['not_found', 'not_found', 'not_found'];
+      for (const [index, nin] of NINS.entries()) {
+        await expect(s.resolve(`desk-once-key-00027${index}`, deskContext(index + 1), { ...input, nin }))
+          .rejects.toMatchObject({ status: 503 });
+      }
+      expect(s.qoreId.state.charged).toBe(3);
+      expect(s.breaker.state()).toBe('closed');
+      expect(warn.mock.calls.filter(([entry]) => (entry as { event?: string }).event
+        === 'identity.nin_provider.unavailable')).toHaveLength(0);
+    });
+
     it('never counts the guard\'s own audit write failing, only what QoreID did', async () => {
       const s = system();
       s.auditDown.on = true;

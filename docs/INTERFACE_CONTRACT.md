@@ -6786,7 +6786,7 @@ kept 24 hours, a matched one 90 days; a NIN on a Health ID after the stored
 answer ended, no charge, and other details "does not match" from the record
 with no charge and nothing kept; slow answers whose three waits open the
 breaker and whose answers close it; a hang that opens it after three waits;
-QoreID's 404, fresh or stored, never counted; the guard's audit write failing,
+QoreID's 404, fresh or stored, late behind a desk wait (its answer closes the breaker the waits opened) or followed by the guard's audit write failing, never counted; the guard's audit write failing,
 never counted; a stored answer that does not close a retrying breaker; forty "does not match" answers for one NIN by
 one account, each answered, none held;
 a timeout and the retry with the same `Idempotency-Key`; held, in progress,
