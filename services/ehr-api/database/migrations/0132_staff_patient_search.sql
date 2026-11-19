@@ -80,16 +80,28 @@
 --      for hid_identity_runtime only (here when the role exists, and in
 --      runtime-grants.sql).
 --
--- Locks: SHARE ROW EXCLUSIVE on identity.patients and
--- identity.staff_facility_memberships for the two foreign keys of a new,
--- empty table (no scan), held to commit behind the runner's 5 s
--- lock_timeout; nothing else.
+-- Locks, taken first (section 0b), NOWAIT: SHARE ROW EXCLUSIVE on
+-- identity.patients and identity.staff_facility_memberships for the two
+-- foreign keys of a new, empty table (no scan), held to commit; nothing else
+-- (pg_locks before commit). Writes to the two tables wait until the file
+-- commits; reads do not.
+-- A busy table fails the attempt at once, and its subtransaction releases
+-- what it took. The attempt is made again every 100 ms for at most 5 seconds,
+-- so the file never waits while holding a lock and no request queues behind
+-- a waiting lock; then 55P03 (nothing applied; the release can run again).
+-- When this transaction already holds an earlier migration's locks that stop
+-- other sessions' reads or writes (the runner's dry run applies every pending
+-- file in one transaction), one attempt and no sleep: 55P03 at once, nothing
+-- applied, instead of keeping those locks while this file waits. Indexes are
+-- locked only by planning (ACCESS SHARE), which only a REINDEX or DROP INDEX
+-- could hold up.
 --
 -- Old services on this schema: today's identity-api never calls the new
 -- functions; its access-log reader drops an action it does not know, so the
 -- new kind is not shown until this branch's identity-api runs.
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied).
+-- 0b. Locks, NOWAIT (55P03 and nothing applied).
 -- 1-5. As above.
 -- 6. Post-checks.
 
@@ -126,6 +138,44 @@ begin
   end if;
 end
 $$;
+
+-- 0b. Locks (see Locks), NOWAIT, at most 5 s; one attempt when this
+-- transaction already holds an earlier migration's locks.
+do $locks$
+declare
+  attempt integer := 0;
+  holding boolean := exists (
+    select 1 from pg_locks held
+      join pg_class relation on relation.oid = held.relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where held.pid = pg_backend_pid() and held.locktype = 'relation' and held.granted
+       and held.database = (select database_row.oid from pg_database database_row
+                             where database_row.datname = current_database())
+       and held.mode in ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+       and namespace.nspname <> 'migration');
+begin
+  loop
+    attempt := attempt + 1;
+    begin
+      lock table identity.patients, identity.staff_facility_memberships
+        in share row exclusive mode nowait;
+      exit;
+    exception when lock_not_available then
+      if holding then
+        raise exception using errcode = '55P03',
+          message = '0132: identity.patients or identity.staff_facility_memberships is busy, and this transaction already holds an earlier migration''s '
+            || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
+      end if;
+      if attempt >= 50 then
+        raise exception using errcode = '55P03',
+          message = '0132: identity.patients or identity.staff_facility_memberships stayed busy for 5 seconds; nothing applied; run the release again at a '
+            || 'quieter time';
+      end if;
+      perform pg_sleep(0.1);
+    end;
+  end loop;
+end
+$locks$;
 
 -- 1. The match references.
 create table identity.patient_search_refs (
