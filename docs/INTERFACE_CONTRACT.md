@@ -7117,9 +7117,10 @@ note names three of them (malaria smear, Widal, genotype).
 | `SPUTUM-AFB` | Sputum for AFB | Sputum |
 
 - Keep these names as they are. The patient's own record chat leaves out
-  sensitive tests, and for a code that is not LOINC it relies on the name
-  (`patient-evidence.policy.ts:62-75,146-148`; the database filter reads the
-  name only, `patient-evidence.query.ts:120-121`). "HIV screening",
+  sensitive tests. For a code that is not LOINC it checks both the name and
+  the code text against its word list (`patient-evidence.policy.ts:62-75,146-148`),
+  and the database filter checks the name only
+  (`patient-evidence.query.ts:120-121`). "HIV screening",
   "Hepatitis B surface antigen", "Hepatitis C antibody" and "Haemoglobin
   genotype" all match that list.
 - **Planned (0144, Release B):** a lab test catalogue with LOINC codes, into
@@ -7166,7 +7167,8 @@ note names three of them (malaria smear, Widal, genotype).
 No per-route limit applies to the reads a page makes (visits, vitals,
 diagnoses, notes, lab requests, prescriptions, allergies, access requests,
 registration cases, pharmacy work items). The one limit that counts them is
-the AWS firewall's general limit, which is far above what a drawer adds.
+the AWS firewall's general limit, and one re-read per drawer close adds very
+little to it.
 
 Every limit on the path from the website to the services:
 
@@ -7175,18 +7177,22 @@ Every limit on the path from the website to the services:
 | AWS firewall on the public load balancer (dev) | Every API request | 2,000 requests in 5 minutes per connecting address, then blocked (AWS's default 5-minute window; the rule sets no other) | Yes | `infra/terraform/modules/application/ingress.tf:380-401,403-407` (dev) |
 | Gateway | Patient record chat `POST /api/v1/ehr/me/chat` and support chat `POST /api/v1/support/chat` | 6 a minute per address, 2 extra at once, then `429` | No | `gateway/nginx.conf.template:1,103-120` |
 | Gateway | Staff record chat `POST /api/v1/ehr/patients/:patientId/chat` | 20 a minute per address, 5 extra at once, then `429` | No | `gateway/nginx.conf.template:12,140-148` |
-| Identity | Health ID lookups that find no patient | 30 in 10 minutes per staff account, then `404` for 10 minutes (never `429`). A lookup that opens a patient is not counted. | No | `services/identity-api/src/identity/patient-lookup-miss.service.ts:15-26,53` |
+| Identity | Health ID lookups answered `404` (no such patient, or a patient this facility may not see) | 30 in 10 minutes per staff account, then `404` for 10 minutes (never `429`). A lookup that opens a patient, or is refused with `403`, is not counted. | No | `services/identity-api/src/identity/patient-lookup-miss.service.ts:15-26,53` |
+| Identity | Order destination search `GET /api/v1/identity/order-destinations` | 60 an hour per staff membership, then `429` | No: it is a typed search, not re-read when a drawer closes | `services/identity-api/src/identity/order-destinations.controller.ts:17`; `order-destinations.service.ts:44-46,78` |
 | Identity | Emergency access activation | Database limit, then `429 EMERGENCY_RATE_LIMITED` | No | `services/identity-api/src/consent/consent.service.ts:425-430` |
 | EHR | Sending orders to another facility | Daily limits, then `429` | No | `services/ehr-api/src/ehr/order-routes/order-route.problems.ts:22-23` |
-| Gateway and services | Every other EHR, Lab, Pharmacy and Identity route, reads included | None | — | No `limit_req` in `gateway/nginx.conf.template:61-101,121-149`; no read route calls `consumeRateLimit` (`services/identity-api/src/auth/rate-limit.ts:18`, whose callers are sign-in codes, enrolment, invitations, searches for share and order destinations, web push and the lookup above) |
+| Services | Other actions: sign-in and sign-up codes, enrolment, invitations, outreach sign-up and Health IDs, contact changes, share searches, shares and share invitations, web push, offline key escrow, the patient record chat, and accepting, correcting or ending orders at Lab and Pharmacy | Each its own limit, then `429` (or `404` as above) | No: none of these is a page read | For example `services/identity-api/src/auth/rate-limit.ts:18` and its callers; `services/ehr-api/src/offline/offline.service.ts:298`; `services/ehr-api/src/ehr/patient-records/patient-chat.service.ts:162`; `services/lab-api/src/lab/lab-order-route.mapping.ts:134,175,190`; `services/pharmacy-api/src/pharmacy/pharmacy-order-route.mapping.ts:143,181` |
+| Gateway and services | The page reads listed above | None | — | No `limit_req` in `gateway/nginx.conf.template:61-101,121-149`; none of these reads has a limit in its service |
 
 The website reaches AWS through the Cloudflare Worker (this contract,
 "Current browser and notification boundary"), and the firewall refuses any
 request without Cloudflare's origin secret (`ingress.tf:299-333`, dev). So the
 address the firewall counts is the one Cloudflare connects from, not the
-clinic's own. Even a re-read of 10 requests would need 200 drawer closes in
-5 minutes from one such address to reach the limit. Re-reading only after a
-drawer saved something keeps the load lower still.
+clinic's own. The 2,000 in 5 minutes is not set aside per clinic: it is
+shared by all traffic Cloudflare sends from that same address, from every
+clinic, patient and page. One re-read per drawer close still adds very little
+to it. Re-reading only after a drawer saved something keeps the load lower
+still.
 
 ### P2-5. Coding systems and FHIR today
 
@@ -7214,7 +7220,7 @@ Facts, as configured:
 | Database | PostgreSQL 16 on RDS, not reachable from the internet, storage encrypted with its own KMS key (key rotation on), a standby copy in a second zone, automated backups kept 30 days. | `infra/terraform/modules/data/main.tf:2-6,368-394` (dev); `infra/terraform/variables.tf:125-128` (dev); `production.tfvars:301` (dev) |
 | Documents | S3, encrypted with a KMS key, versioned, all public access blocked. | `modules/data/main.tf:75-108` (dev) |
 | In transit | The public and internal load balancers listen only on HTTPS, with the TLS 1.2 and 1.3 policy. Encryption ends at the load balancer: it passes requests to the containers inside the private network over plain HTTP. The database refuses connections without TLS (`rds.force_ssl`), and services connect with the RDS certificate. | `modules/application/ingress.tf:29-35,51-56,212-216,231-237` (dev); `modules/data/main.tf:326-333` (dev); `modules/application/workloads.tf:74` (dev) |
-| Audit | Clinical and identity actions are written to `audit.events`, which refuses every update and delete. ehr-api writes an audit row for each request through a global audit interceptor, except on routes marked as not audited. | `0003:210,277-282`; `services/ehr-api/src/app.module.ts:28`, `services/ehr-api/src/audit/audit.interceptor.ts:21-26` |
+| Audit | Clinical and identity actions are written to `audit.events`, which refuses every update and delete. ehr-api writes an audit row for each request through a global audit interceptor, except on routes marked as not audited; routes marked to audit failures only write a row only when they fail. | `0003:210,277-282`; `services/ehr-api/src/app.module.ts:28`, `services/ehr-api/src/audit/audit.interceptor.ts:21-41` |
 | Logs | Application logs are kept 90 days, Identity and security logs 365 days. | `infra/terraform/variables.tf:136-150` (dev); `modules/application/workloads.tf:527` (dev) |
 
 Data that leaves `eu-west-1`, as configured:
