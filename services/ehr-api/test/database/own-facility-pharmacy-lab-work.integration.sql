@@ -109,6 +109,12 @@
 --      no actor, a disabled account, a membership on hold and no purpose,
 --      and answers for a receptionist's or nurse's own membership, whose
 --      session's half is null (D11);
+--   7h. today's images (no app.own_facility_work, 0133 D13): before any
+--      session of this suite sets it, PH's session reads it unset and gets
+--      no session membership; PH and LS without the switch read none of
+--      the own items, cards, chain rows, states, bases or D9 access; another
+--      value does not switch it on; PG, a pharmacist with grants, reads the
+--      same items, cards and chain rows with or without it;
 --   8. the owner-run definer functions that read ehr.prescriptions give the
 --      pharmacist nothing more through the EHR runtime: the order-route send,
 --      the own-pharmacy send and the withdrawal refuse the pharmacist first.
@@ -144,7 +150,7 @@ begin
     into mismatch
     from (values
       ('identity.facility_work_member_allows(text,uuid,uuid,text)', 'cdf330e36a9fcc347e8e5c06fe0745c2', 's'),
-      ('identity.facility_work_session_membership(text)', 'd785bffb1c16b4202ee5c5d146bf0b09', 's'),
+      ('identity.facility_work_session_membership(text)', '36de1f00307dd5602972253b23f22f9f', 's'),
       ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', 'd195ee7bae41d79fb34eeed590ef6d20', 's'),
       -- 0086's, unchanged: D2 is a policy of its own next to theirs.
       ('lab.work_item_allows(uuid,uuid,uuid,text)', 'b710e0c6b66ce87c8c4a059ad435b774', 's'),
@@ -340,10 +346,13 @@ select gen_random_uuid(), ('e1330006-0000-4000-8000-00000000000' || patient)::uu
        consent(member, patient, site);
 set local session_replication_role = origin;
 
--- The session the services set (DatabaseService.withTransaction).
+-- The session the services set (DatabaseService.withTransaction). The new
+-- pharmacy-api and lab-api images also set app.own_facility_work to '0133'
+-- (0133 D13); switched => false is a session of today's images, which do not.
 create function pg_temp.as_member(member integer, site integer default null, purpose text default 'direct-care',
-  correlation text default null) returns void language sql as $f$
-  select set_config('app.actor_subject', 'synthetic:own-work-' || (select code from own_members where n = member), true),
+  correlation text default null, switched boolean default true) returns void language sql as $f$
+  select set_config('app.own_facility_work', case when switched then '0133' else '' end, true),
+         set_config('app.actor_subject', 'synthetic:own-work-' || (select code from own_members where n = member), true),
          set_config('app.facility_id', 'e1330001-0000-4000-8000-00000000000'
            || coalesce(site, (select own_members.site from own_members where n = member)), true),
          set_config('app.correlation_id', coalesce(correlation, 'own-work-' || substr(md5(random()::text), 1, 12)), true),
@@ -417,6 +426,25 @@ begin
     execute format('grant execute on function %s to public', proc.signature);
   end loop;
 end $$;
+
+-- 7h, first part (the rest is case 7h below). Today's images never set
+-- app.own_facility_work, so their sessions read it unset (null), not empty:
+-- nothing in this session has set it yet. PH's session, as today's
+-- pharmacy-api sets it, then with the switch the new image adds.
+set local role hid_pharmacy_api_runtime;
+select set_config('app.actor_subject', 'synthetic:own-work-ph', true),
+       set_config('app.facility_id', 'e1330001-0000-4000-8000-000000000001', true),
+       set_config('app.correlation_id', 'own-work-unset-switch', true),
+       set_config('app.membership_id', 'e1330004-0000-4000-8000-000000000002', true),
+       set_config('app.purpose_of_use', 'direct-care', true);
+select pg_temp.expect('7h PH, today''s image: the switch is unset in its session (null, not empty)',
+  coalesce(current_setting('app.own_facility_work', true), 'null'), 'null');
+select pg_temp.expect('7h PH, today''s image (the switch unset): no session membership',
+  coalesce(identity.facility_work_session_membership('pharmacy')::text, 'null'), 'null');
+select set_config('app.own_facility_work', '0133', true);
+select pg_temp.expect('7h PH, the new image (the switch set): its session membership',
+  coalesce(identity.facility_work_session_membership('pharmacy')::text, 'null'), 'e1330004-0000-4000-8000-000000000002');
+reset role;
 
 -- The EHR rows, through the EHR runtime with the EHR API's statements, as
 -- DR at F1: encounter E1 for Ada, E2 for Bisi, E3 for Chike; prescriptions
@@ -1449,14 +1477,14 @@ reset role;
 create function pg_temp.dispensing_of(prescription uuid) returns uuid language sql security definer as $f$
   select d.id from pharmacy.dispensings d where d.work_item_id = pg_temp.work_item_of(prescription)
 $f$;
-create function pg_temp.pharmacy_chain_view(member integer, site integer default null) returns text
-language plpgsql as $f$
+create function pg_temp.pharmacy_chain_view(member integer, site integer default null, switched boolean default true)
+returns text language plpgsql as $f$
 declare
   items uuid[] := array[pg_temp.work_item_of(pg_temp.rx(1)), pg_temp.work_item_of(pg_temp.rx(2)),
     pg_temp.work_item_of(pg_temp.rx(4))];
   answer text;
 begin
-  perform pg_temp.as_member(member, site);
+  perform pg_temp.as_member(member, site, switched => switched);
   select format('states=%s events=%s dispensings=%s reversals=%s access=%s',
            (select count(*) from pharmacy.own_work_item_states(items)),
            (select count(*) from pharmacy.work_item_events e where e.work_item_id = any(items)),
@@ -1468,10 +1496,11 @@ begin
     into answer;
   return answer;
 end $f$;
-create function pg_temp.lab_basis_view(member integer, site integer default null) returns text language plpgsql as $f$
+create function pg_temp.lab_basis_view(member integer, site integer default null, switched boolean default true)
+returns text language plpgsql as $f$
 declare answer text;
 begin
-  perform pg_temp.as_member(member, site);
+  perform pg_temp.as_member(member, site, switched => switched);
   select format('bases=%s access=%s',
            (select coalesce(string_agg(right(basis.work_item_id::text, 1) || ':' || basis.basis, ','
               order by basis.work_item_id), '-') from lab.own_work_item_bases(array[
@@ -1482,8 +1511,8 @@ begin
     into answer;
   return answer;
 end $f$;
-grant execute on function pg_temp.dispensing_of(uuid), pg_temp.pharmacy_chain_view(integer, integer),
-  pg_temp.lab_basis_view(integer, integer) to public;
+grant execute on function pg_temp.dispensing_of(uuid), pg_temp.pharmacy_chain_view(integer, integer, boolean),
+  pg_temp.lab_basis_view(integer, integer, boolean) to public;
 set local role hid_pharmacy_api_runtime;
 select pg_temp.expect('PH (F1) reads the three dispensed items'' states and chain',
   pg_temp.pharmacy_chain_view(2), 'states=3 events=3 dispensings=3 reversals=1 access=2');
@@ -1793,6 +1822,72 @@ select pg_temp.expect('7g PH: the same rows, and fewer consent checks with the o
 reset role;
 rollback to savepoint own_work_order;
 rollback to savepoint own_work_switch;
+
+-- 7h. Today's images (0133 D13, owner's Q120 B): a session that does not set
+-- app.own_facility_work to '0133' (today's pharmacy-api and lab-api never
+-- do) gets nothing of the own work: no own item, card, chain row, state,
+-- basis or D9 access for PH and LS, who hold no grant, as on 0001-0127;
+-- another value does not switch it on; PG, who holds grants, reads the same
+-- items, cards and chain rows with the switch or without it (0086's consent
+-- policies, 0124's cards). The unset case (null) is checked before the
+-- fixtures' first session, where nothing has set it yet.
+create function pg_temp.own_items_view(member integer, kind text, switched boolean) returns text
+language plpgsql as $f$
+declare answer text;
+begin
+  perform pg_temp.as_member(member, switched => switched);
+  if kind = 'pharmacy' then
+    select format('session=%s items=%s cards=%s', coalesce(identity.facility_work_session_membership('pharmacy')::text, 'null'),
+             (select count(*) from pharmacy.work_items where facility_id = 'e1330001-0000-4000-8000-000000000001'),
+             (select count(*) from pharmacy.work_item_patient_cards(array(select pg_temp.work_item_of(pg_temp.rx(n))
+                from generate_series(1, 4) n))))
+      into answer;
+  else
+    select format('session=%s items=%s cards=%s', coalesce(identity.facility_work_session_membership('lab')::text, 'null'),
+             (select count(*) from lab.work_items where facility_id = 'e1330001-0000-4000-8000-000000000001'),
+             (select count(*) from lab.work_item_patient_cards(array['e133000a-0000-4000-8000-000000000001'::uuid])))
+      into answer;
+  end if;
+  return answer;
+end $f$;
+grant execute on function pg_temp.own_items_view(integer, text, boolean) to public;
+-- The rows a pharmacy member reads through today's readers: items and cards
+-- (own_items_view without its session part), events, dispensings and
+-- reversals (pharmacy_chain_view without D10's states and D9's access).
+create function pg_temp.granted_view(member integer, switched boolean) returns text language sql as $f$
+  select regexp_replace(pg_temp.own_items_view(member, 'pharmacy', switched), '^session=\S+ ', '') || ' '
+    || regexp_replace(pg_temp.pharmacy_chain_view(member, null, switched), '^states=\d+ (.*) access=\d+$', '\1')
+$f$;
+grant execute on function pg_temp.granted_view(integer, boolean) to public;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.expect('7h PH, the new image (the switch set): its own items and cards',
+  (pg_temp.own_items_view(2, 'pharmacy', true) ~ '^session=e1330004-0000-4000-8000-000000000002 items=[1-9][0-9]* cards=[1-9]')::text,
+  'true');
+select pg_temp.expect('7h PH, today''s image (no switch): nothing of the own work', pg_temp.own_items_view(2, 'pharmacy', false),
+  'session=null items=0 cards=0');
+select pg_temp.expect('7h PH, today''s image: no state, chain row or access', pg_temp.pharmacy_chain_view(2, null, false),
+  'states=0 events=0 dispensings=0 reversals=0 access=0');
+select pg_temp.as_member(2);
+select set_config('app.own_facility_work', 'on', true);
+select pg_temp.expect('7h PH with another value than 0133: no session membership',
+  coalesce(identity.facility_work_session_membership('pharmacy')::text, 'null'), 'null');
+-- PG, a pharmacist at F1 holding grants: what its grants give (0086's
+-- consent policies, 0124's cards) does not depend on the switch. Only the
+-- rows of the tables and cards today's images read are compared; the
+-- states and the access check (D10, D9) are the new images' own readers.
+select pg_temp.expect('7h PG (a pharmacist with grants), today''s image: what its grants give',
+  pg_temp.granted_view(10, false), 'items=7 cards=4 events=3 dispensings=3 reversals=1');
+select pg_temp.expect('7h PG: the same with the switch',
+  (pg_temp.granted_view(10, false) = pg_temp.granted_view(10, true))::text, 'true');
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.expect('7h LS, the new image: its own items and card',
+  (pg_temp.own_items_view(3, 'lab', true) ~ '^session=e1330004-0000-4000-8000-000000000003 items=[1-9][0-9]* cards=1$')::text,
+  'true');
+select pg_temp.expect('7h LS, today''s image (no switch): nothing of the own work', pg_temp.own_items_view(3, 'lab', false),
+  'session=null items=0 cards=0');
+select pg_temp.expect('7h LS, today''s image: no basis or access', pg_temp.lab_basis_view(3, null, false), 'bases=- access=0');
+reset role;
 
 -- 8. The owner-run definer functions that read ehr.prescriptions (case 1
 -- lists them) give PH nothing more through the EHR runtime: each refuses

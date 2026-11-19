@@ -251,7 +251,9 @@ language sql as $f$
          set_config('app.facility_id', 'e1130001-0000-4000-8000-00000000000' || site, true),
          set_config('app.correlation_id', 'cards-suite-' || substr(md5(random()::text), 1, 12), true),
          set_config('app.membership_id', 'e1130004-0000-4000-8000-00000000000' || member, true),
-         set_config('app.purpose_of_use', purpose, true);
+         set_config('app.purpose_of_use', purpose, true),
+         -- 0133 D13: the switch the new lab-api and pharmacy-api images set (own work only).
+         set_config('app.own_facility_work', '0133', true);
 $f$;
 -- The six work items of a kind, and the answers in a comparable form: the
 -- work item's last digit, then name/sex/date of birth/Health ID ending.

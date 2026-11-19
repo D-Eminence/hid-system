@@ -7049,6 +7049,25 @@ is audited as before, with `basis: 'own-work'` unless the member holds its
 own consent grant for that action (then the row is a consent row, as
 before).
 
+### Only the new images (owner's Q120 B, 19 November)
+
+The rule above answers only a staff session whose transaction sets
+`app.own_facility_work` to `'0133'`. The new lab-api and pharmacy-api
+images set it in every staff transaction (always; it is not a setting
+anyone configures). Today's images never set it, so on a database with
+0133 they list, read, write and record exactly what they do without it:
+their pharmacy and lab staff still need a consent grant, and the patient
+cards and audit rows stay as 0124 gives them. Either image can be rolled
+back alone after 0133; it then works as it did before 0133 until it is
+deployed again. The automatic send below is the new ehr-api's and does
+not wait for the new pharmacy-api: while today's pharmacy-api serves, a
+prescription sent that way reaches its pharmacists only through a consent
+grant, as any prescription did before 0133, and it cannot also be sent to
+an outside pharmacy (`ORDER_ROUTE_ORDER_IN_WORK`, as with the new image
+until Q119 is built), so it waits for the new pharmacy-api. A session that sets the value still needs everything the
+rule asks; the value only narrows. The withdrawal below is the database's
+and does not depend on it.
+
 ### Pharmacy API and Lab API changes (no new route)
 
 - `GET /pharmacy/work-items`, `GET /lab/work-items`: the facility's own items
@@ -7059,15 +7078,6 @@ before).
   `basis: 'own-work'` as the database gives it for that member. If the basis
   cannot be read the list fails (no answer without its audit) rather than
   record one it could not read. Without 0133 the list records as 0124 did.
-  Today's lab-api and pharmacy-api images on a database with 0133 list the
-  facility's own items to its pharmacy and lab staff (row-level security)
-  and record them as 0124 did: with `OWN_WORK_PATIENT_CARD_ENABLED` on, one
-  row per patient whose card is shown with `basis: 'consent'`, even for a
-  member without a grant; off (the default), the collection row only. The
-  release migrates before it rolls the images out and an image rollback
-  keeps the schema, so the new images go out with 0133, and a rollback of
-  lab-api or pharmacy-api alone after 0133 records this way until they are
-  deployed again.
 - Every command on an own work item or its chain (pharmacy: read, dispense,
   reverse; lab: read, accession, specimen, execution, result) is allowed on
   the own-work basis without asking Identity; else Identity's consent decides

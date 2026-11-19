@@ -1756,7 +1756,7 @@ insert into d18_pins values
   -- facility's own lab staff, item by item), which reaches the two halves of
   -- its member test; 0086's lab.context_allows is kept.
   ('identity.facility_work_patient_allows(text,uuid,uuid,uuid,text)', 'd195ee7bae41d79fb34eeed590ef6d20'),
-  ('identity.facility_work_session_membership(text)', 'd785bffb1c16b4202ee5c5d146bf0b09'),
+  ('identity.facility_work_session_membership(text)', '36de1f00307dd5602972253b23f22f9f'),
   ('lab.context_allows(uuid,uuid,text)', '57e689661a6227e34d3bde9562468951'),
   ('lab.patient_self_context(uuid)', '39aeca12d2c59b69877800a9a3a7c50b'),
   ('notification.enqueue_patient_inbox_item(uuid,text,text,uuid,jsonb)', '0b5689f31a3ce00f9313fe1e55244fad'),
