@@ -42,7 +42,7 @@ export const NIN_CHECK_PRUNE_BATCH = 500;
  *   7. the web pushes due (0097), while Identity's push is on
  *      (web-push.config.ts);
  *   8. identity.prune_qoreid_nin_checks(500) (0137), always: a stored QoreID
- *      answer past its end (30 days for a record, 24 hours for the others), an
+ *      answer past its end (90 days for a record, 24 hours for the others), an
  *      ended hold, and the answers for the NINs of patients whose login
  *      deletion completed in the last day are erased, each through an index
  *      (no row is tested on every tick).

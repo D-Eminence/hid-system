@@ -1,5 +1,5 @@
 /**
- * An in-memory identity.qoreid_nin_checks with the three 0137 commands, as
+ * An in-memory identity.qoreid_nin_checks with the four 0137 commands, as
  * the migration defines them, for unit tests only (no database). Each command
  * runs without an await, so concurrent callers see it as one transaction, as
  * the row lock makes them in PostgreSQL. The SQL itself is proved by
@@ -13,6 +13,7 @@ export interface FakeNinCheckRow {
   question_hmac: string | null;
   outcome: 'record' | 'no_record' | 'rejected' | 'unusable' | null;
   record_complete: boolean | null;
+  record_source: 'nin_only' | 'profile' | null;
   answer_ciphertext: Buffer | null;
   key_version: string | null;
   until: number;
@@ -36,7 +37,8 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
     const row = rows.get(lookup);
     const take = () => {
       rows.set(lookup, { nin_lookup_hmac: lookup, state: 'checking', attempt_id: attempt, question_hmac: question,
-        outcome: null, record_complete: null, answer_ciphertext: null, key_version: null, until: leaseEnd });
+        outcome: null, record_complete: null, record_source: null, answer_ciphertext: null, key_version: null,
+        until: leaseEnd });
       return { decision: 'call', outcome: null, record_complete: null, answer_ciphertext: null, until: new Date(leaseEnd) };
     };
     if (!row) return take();
@@ -50,7 +52,7 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
       if (row.state === 'held') return { decision: 'held', outcome: null, record_complete: null,
         answer_ciphertext: null, until: new Date(row.until) };
       if (row.key_version === keyVersion && !erased(lookup)
-        && ((row.outcome === 'record' && (row.record_complete || !complete))
+        && ((row.outcome === 'record' && (row.record_complete || !complete || row.record_source === 'nin_only'))
           || (row.outcome !== 'record' && (row.question_hmac === null || row.question_hmac === question)))) {
         return { decision: 'stored', outcome: row.outcome, record_complete: row.record_complete,
           answer_ciphertext: row.answer_ciphertext, until: new Date(row.until) };
@@ -67,9 +69,21 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
     if (result === 'released') { rows.delete(lookup); return true; }
     if (result === 'held') { Object.assign(row, { state: 'held', until: now() + Number(seconds) * 1000 }); return true; }
     if (erased(lookup)) { rows.delete(lookup); return false; }
-    Object.assign(row, { state: 'answered', outcome: result, question_hmac: result === 'record' ? null : question,
-      record_complete: result === 'record' ? complete : null, answer_ciphertext: ciphertext, key_version: keyVersion,
-      until: now() + Number(seconds) * 1000 });
+    Object.assign(row, { state: 'answered', outcome: result,
+      question_hmac: result === 'record' || result === 'rejected' ? null : question,
+      record_complete: result === 'record' ? complete : null,
+      record_source: result !== 'record' ? null : question === null ? 'nin_only' : 'profile',
+      answer_ciphertext: ciphertext, key_version: keyVersion, until: now() + Number(seconds) * 1000 });
+    return true;
+  }
+
+  /** Q110: a live stored record under this key kept `seconds` from now, never shorter; nothing else changes. */
+  function keep(values: readonly unknown[]) {
+    const [lookup, keyVersion, seconds] = values as [string, string, number];
+    const row = rows.get(lookup);
+    if (!row || row.state !== 'answered' || row.outcome !== 'record' || row.key_version !== keyVersion
+      || row.until <= now() || erased(lookup)) return false;
+    row.until = Math.max(row.until, now() + Number(seconds) * 1000);
     return true;
   }
 
@@ -93,11 +107,12 @@ export function fakeNinCheckStore(options: { erased?: (lookup: string) => boolea
 
   /** Answers the 0137 statements; undefined for any other statement. */
   function query(sql: string, values: readonly unknown[] = []) {
-    if (!sql.includes('qoreid_nin_check')) return undefined;
+    if (!sql.includes('qoreid_nin_check') && !sql.includes('identity.keep_qoreid_nin_record')) return undefined;
     calls.push({ sql, values });
     if (failing && sql.includes(failing)) throw Object.assign(new Error('database unavailable'), { code: '57P01' });
     if (sql.includes('identity.begin_qoreid_nin_check')) return { rows: [begin(values)] };
     if (sql.includes('identity.finish_qoreid_nin_check')) return { rows: [{ recorded: finish(values) }] };
+    if (sql.includes('identity.keep_qoreid_nin_record')) return { rows: [{ kept: keep(values) }] };
     if (sql.includes('identity.prune_qoreid_nin_checks')) return { rows: [{ removed: prune(values) }] };
     return undefined;
   }
