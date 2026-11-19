@@ -1,7 +1,7 @@
 name: Staging backend images
+# Pull requests are built and scanned by production-backend-images.yml, under
+# the stricter production policy, so this workflow no longer repeats them.
 on:
-  pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.github/workflows/staging-backend-images.yml']
   push:
     branches: [staging]
     paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.github/workflows/staging-backend-images.yml']
@@ -16,7 +16,7 @@ permissions:
   contents: read
 concurrency:
   group: staging-backend-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   select:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/staging'

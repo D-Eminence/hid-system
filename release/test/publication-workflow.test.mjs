@@ -51,6 +51,22 @@ test('publisher audits release and Cloudflare as before and only infra/aws throu
     'npm --prefix infra/cloudflare audit --audit-level=moderate',
     'node release/scripts/npm-audit-with-exceptions.mjs infra/aws', ''].join('\n'))
 })
+// run-workspace-gates.mjs no longer repeats these three commands, so the
+// always-on jobs of the same run must keep running them, unconditionally.
+test('local gates run release tests, release verify and EHR tests in their always-on jobs only', async () => {
+  const workflow = parseWorkflow(localGates)
+  const runs = (job, command) => workflow.jobs[job].steps.filter(s => s.run === command)
+  for (const [job, command] of [['release-contracts', 'npm --prefix release test'], ['release-contracts', 'npm --prefix release run verify'],
+    ['ehr-release-cache', 'npm --prefix apps/ehr test']]) {
+    const steps = runs(job, command)
+    assert.equal(steps.length, 1, `${job}: ${command}`)
+    for (const key of ['if', 'continue-on-error', 'working-directory', 'shell']) assert.equal(steps[0][key], undefined, `${job}: ${command} ${key}`)
+    for (const key of ['if', 'needs', 'continue-on-error', 'strategy']) assert.equal(workflow.jobs[job][key], undefined, `${job} ${key}`)
+  }
+  const runner = await readFile(new URL('../scripts/run-workspace-gates.mjs', import.meta.url), 'utf8')
+  for (const label of ['build', 'test', 'verify', 'migration-rehearsal', 'diff-check']) assert.ok(runner.includes(`['${label}', [`), label)
+  for (const label of ['release-tests', 'release-contracts', 'ehr-tests']) assert.ok(!runner.includes(`['${label}', [`), label)
+})
 test('local gates keep every npm audit and run only infra/aws and apps/ehr through the exception gate', () => {
   assert.equal(verifyLocalGateWorkflow(localGates), true)
   const step = (w, job) => w.jobs[job].steps.find(s => s.run === LOCAL_GATE_AUDITS[job])

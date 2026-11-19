@@ -12,9 +12,11 @@ assert.equal(source, process.env.GITHUB_SHA)
 const output = join(process.env.RUNNER_TEMP, 'workspace-gates')
 mkdirSync(output, { mode: 0o700 })
 const results = []
+// `npm --prefix release test`, `npm --prefix release run verify` and
+// `npm --prefix apps/ehr test` are not repeated here: the release-contracts and
+// ehr-release-cache jobs run them in the same workflow run on the same commit,
+// and verify-publication-workflow.mjs refuses any condition on those jobs.
 const commands = [['build', ['npm', 'run', 'build']], ['test', ['npm', 'test']], ['verify', ['npm', 'run', 'verify']],
-  ['release-tests', ['npm', '--prefix', 'release', 'test']], ['release-contracts', ['npm', '--prefix', 'release', 'run', 'verify']],
-  ['ehr-tests', ['npm', '--prefix', 'apps/ehr', 'test']],
   ['migration-rehearsal', ['node', 'scripts/tuf-staging-migration-rehearsal.mjs', '--evidence-dir', join(process.env.RUNNER_TEMP, 'synthetic-migration')]],
   ['diff-check', ['git', 'diff', '--check']]]
 for (const [label, [executable, ...args]] of commands) {

@@ -18,7 +18,9 @@ env:
   PRODUCTION_APPROVAL_MODE: ${{ vars.PRODUCTION_APPROVAL_MODE || 'protected' }}
 concurrency:
   group: production-backend-${{ github.ref }}
-  cancel-in-progress: false
+  # A newer commit on the same pull request cancels the older check run.
+  # Push and dispatch runs publish and are never cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   select:
     runs-on: ubuntu-24.04
