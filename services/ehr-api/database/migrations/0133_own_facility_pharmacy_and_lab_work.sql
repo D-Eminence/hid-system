@@ -327,14 +327,20 @@
 -- prescription changed by any ehr-api image. Applied migrations before 0133
 -- are immutable.
 --
--- Undo (by hand only; no release runs it): drop the trigger
--- prescriptions_own_pharmacy_send_withdrawn first, then
--- ehr.own_pharmacy_send_withdrawn_on_change(), and only then
--- pharmacy.own_prescription_sends and the other functions. plpgsql records
--- no dependency on the table, so with the trigger left in place DROP TABLE
--- succeeds and every later change of a prescription's status or version, by
--- any ehr-api image, fails with 42P01. Restore 0086's work_item_allows and
--- 0124's card readers before dropping D1, which they call.
+-- Undo (by hand only; no release runs it), in one transaction: drop the
+-- trigger prescriptions_own_pharmacy_send_withdrawn first, then
+-- ehr.own_pharmacy_send_withdrawn_on_change() and the three other functions
+-- that read pharmacy.own_prescription_sends (D7's
+-- ehr.send_prescription_to_own_pharmacy, D8's ehr.withdraw_own_pharmacy_send
+-- and D10's pharmacy.own_work_item_states), and only then the table and the
+-- rest. plpgsql records no dependency on the table, so DROP TABLE succeeds
+-- while they stand, and each then fails with 42P01: the trigger fails every
+-- later change of a prescription's status or version, by any ehr-api image,
+-- and pharmacy.own_work_item_states fails pharmacy-api's work list (which
+-- takes only a missing function, 42883, as a schema without 0133). Run step
+-- by step instead, the same order keeps every image working between the
+-- steps. Restore 0086's work_item_allows and 0124's card readers before
+-- dropping D1, which they call.
 
 -- 0. Preconditions.
 do $$

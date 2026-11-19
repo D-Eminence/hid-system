@@ -6977,9 +6977,10 @@ row, `ownProgress` stays `dispensed` (or `dispensing_reversed`), and the
 pharmacy's list does not mark the item withdrawn. The database marks it on
 the change itself (a trigger on the prescription), so a change made by any
 ehr-api image (an older one during a rolling deploy or after a rollback
-included) marks it too; undoing 0133 by hand must drop that trigger before
-the sends table (the order is in 0133's header), or every later change of a
-prescription's status or version fails.
+included) marks it too; undoing 0133 by hand must drop that trigger, and the
+functions that read the sends table, before the table (the order is in
+0133's header), or every later change of a prescription's status or version
+fails, and so does the pharmacy's list.
 Whether the pharmacy item should follow the new version instead is open for
 the owner (review S3 of 18 November). The audit row of the create, the
 update and the send records `pharmacyHandoff` (the status) and
