@@ -6469,11 +6469,10 @@ a record first kept 24 hours after a typo is, once the corrected details have
 matched it, still reused (not paid for again) a month later, by the desk, the
 profile or, when the record is complete, a sign-up (a sign-up asks QoreID
 again for an incomplete one: 0137's sign-up path, not the desk's; see "For
-#276" below). A record
-first matched and then matched again is kept
-90 days from the latest match. Only a record is kept so ("no record", QoreID's
-"not found" and an answer HID cannot use keep 0137's own times), and only after
-a match; nothing is kept longer when the details do not match.
+#276" below). A record first matched and then matched again is kept 90 days
+from the latest match. Only a record is kept so ("no record", QoreID's "not
+found" and an answer HID cannot use keep 0137's own times), and only after a
+match; nothing is kept longer when the details do not match.
 
 The keep uses 0137's own commands, in one transaction that holds the NIN's
 row from the first statement to the last (no other check sees anything in
