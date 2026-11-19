@@ -36,7 +36,10 @@
 // and their reads by id are consent rows (no basis); since 0133 the members
 // without consent, the facility's own lab and pharmacy staff, see the same
 // work and patient, and their list and read rows carry `basis: own-work`
-// (ORD-2: this facility's own work, never the chart). Route-backed
+// (ORD-2: this facility's own work, never the chart), while the pharmacy's
+// pharmacist and the laboratory's lab member, who hold the same permissions
+// at their own facility, list none of it, cannot read it by id and cannot
+// claim the hospital as their session's facility. Route-backed
 // work (a lab request sent to the laboratory, a prescription sent to the
 // pharmacy, each accepted at the counter) keeps its patient from the route
 // card only: while the route allows a read the card's patient and a
@@ -604,6 +607,29 @@ try {
       audit: { list: 'own-work, ids only', read: 'own-work' } } };
   step('Pharmacy: own work carries the patient on the list and by id, audited with basis consent; the facility\'s '
     + 'pharmacist without consent sees the same on the own-work basis (0133)');
+
+  // ── Another facility's pharmacist and lab member: never the hospital's own work ──
+  // 0133 gives own work to the facility's own pharmacy and lab staff only (the row's facility must be the session's).
+  // The pharmacy's pharmacist and the laboratory's lab member hold the same two permissions at their own facility,
+  // so only that rule keeps the hospital's items from them: none listed, none read by id, no list row naming a
+  // patient, and the hospital refused as their session's facility (no membership there).
+  const outsiders = [['the pharmacy\'s pharmacist', pharmacist, pharmacyCall, ownRxItem, 'pharmacy.work-item.list'],
+    ['the laboratory\'s lab member', labAdmin, labCall, ownLabItem, 'lab.work-item.list']];
+  for (const [label, who, callAs, ownItem, listAction] of outsiders) {
+    const listed = expectStatus(await callAs(who, 'GET', '/work-items'), 200, `${label}'s list`);
+    assert(!listed.items.some(item => item.id === ownItem.id || item.patientId === patient.id),
+      `the hospital's own work listed to ${label}: ${JSON.stringify(listed.items.map(item => item.id))}`);
+    const byId = await callAs(who, 'GET', `/work-items/${ownItem.id}`);
+    assert([403, 404].includes(byId.status), `${label} read the hospital's own item: ${byId.status}`);
+    assert.equal(JSON.stringify(byId.body ?? '').includes(patient.fullName), false);
+    assert.deepEqual(await listAudit(listAction, who.facilityId, who), [], `${label}: a list row names a patient`);
+    const claimed = await callAs({ ...who, facilityId: hospital.facilityId }, 'GET', '/work-items');
+    assert([401, 403].includes(claimed.status), `${label} with the hospital as the session's facility: ${claimed.status}`);
+    assert.equal(JSON.stringify(claimed.body ?? '').includes(patient.fullName), false);
+  }
+  evidence.otherFacilities = { pharmacist: { listed: 0, readById: 'refused', claimHospital: 'refused' },
+    labMember: { listed: 0, readById: 'refused', claimHospital: 'refused' } };
+  step('another facility\'s pharmacist and lab member see none of the hospital\'s own work, by list or by id (0133)');
 
   // ── Route-backed work keeps its patient from the route card only ──
   const attestationVersion = async kind => expectStatus(await call(ehr, doctor, 'GET', `/ehr/order-route-attestation?kind=${kind}`),

@@ -7048,9 +7048,22 @@ the item withdrawn and Dispense answers 409; an edit answers the "earlier
 version" row (`superseded`) and `ownProgress` reads `withdrawn`; an edit
 after the dispensing answers no `pharmacyHandoff` and leaves the item
 unmarked (`ownProgress` stays `dispensed`); the list carries
-`ownPharmacyStaffed: true`; neither reads the chart and the patient's access
-log shows both. The order-route, own-work card and prescription details
-verifiers assert the same rules.
+`ownPharmacyStaffed: true`; neither member reads the chart, each probed with
+a chart read its role permits (the encounter for both, prescriptions for the
+pharmacist, the lab request for the lab scientist), so the answer, 403
+`CONSENT_REQUIRED`, is the patient's consent and not a missing permission;
+the patient's access log shows both.
+`verify-own-work-patient-cards-runtime.mjs` checks the other side of "their
+own facility only": the pharmacy's pharmacist and the laboratory's lab
+member, who hold the same two permissions at their own facility, list none
+of the hospital's own work, cannot read it by id, and are refused when they
+name the hospital as their session's facility. The order-route and
+prescription details verifiers follow 0133's rules where they meet them
+(the automatic send, own work listed on the own-work basis) and add no
+negative case of their own; the database suite
+(`own-facility-pharmacy-lab-work`) holds the full set (another facility's
+staff, other roles, deny directives, emergency sessions, inactive patients,
+route-backed items, the imported evidence).
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 

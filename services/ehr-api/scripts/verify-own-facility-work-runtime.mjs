@@ -39,8 +39,11 @@
 // reads and accessions the doctor's lab request handed to the hospital's
 // Lab, takes and receives the sample, starts the test and reads the execution
 // and the specimen's executions (each read audited with the patient and basis
-// own-work); neither reads anything of the chart; the patient's access log
-// shows both as views. Owner SQL is used only for what no route does: the
+// own-work); neither reads anything of the chart, each probed with a chart
+// read its role does permit (encounters for both, prescriptions for the
+// pharmacist, the lab request for the lab scientist), so the patient's
+// consent, not a missing permission, refuses it (403 CONSENT_REQUIRED); the
+// patient's access log shows both as views. Owner SQL is used only for what no route does: the
 // platform administrator's and the patient's accounts (as the other runtime
 // verifiers seed them), QoreID switched on, and reading what the database
 // holds.
@@ -570,15 +573,26 @@ try {
     + 'names the patient with basis own-work');
 
   // ── Never the chart ──
-  for (const who of [ownPharmacist, ownScientist]) {
-    const chart = await call(ehr, who, 'GET', `/ehr/patients/${patient.id}${enc}/prescriptions`);
-    assert([403, 404].includes(chart.status), `${who.name} read the chart: ${chart.status}`);
+  // Each probe is a chart read the member's role permits (0006: both hold ehr.encounter.read; the pharmacist
+  // ehr.prescription.read, the lab scientist ehr.lab-request.read), so the refusal is the patient's consent
+  // (403 CONSENT_REQUIRED), never a missing permission (403 PERMISSION_DENIED).
+  const chartProbes = [[ownPharmacist, `/ehr/patients/${patient.id}${enc}`],
+    [ownPharmacist, `/ehr/patients/${patient.id}${enc}/prescriptions`],
+    [ownPharmacist, `/ehr/patients/${patient.id}${enc}/prescriptions/${rx1.id}`],
+    [ownScientist, `/ehr/patients/${patient.id}${enc}`],
+    [ownScientist, `/ehr/patients/${patient.id}${enc}/lab-requests/${labRequest.id}`]];
+  for (const [who, path] of chartProbes) {
+    const chart = await call(ehr, who, 'GET', path);
+    assert.deepEqual([chart.status, chart.body?.code], [403, 'CONSENT_REQUIRED'], `${who.name} GET ${path}: ${chart.status} `
+      + JSON.stringify(chart.body));
+    assert.equal(JSON.stringify(chart.body ?? '').includes(patient.fullName), false);
   }
   const log = expectStatus(await patientCall('GET', '/identity/me/access-log?limit=100'), 200, 'the patient\'s access log');
   const viewers = new Set(log.events.filter(event => event.action === 'viewed').map(event => event.actorName));
   assert(viewers.has(ownPharmacist.name) && viewers.has(ownScientist.name),
     `the patient's access log: ${JSON.stringify(log.events.map(event => [event.action, event.actorName]))}`);
-  evidence.chart = { pharmacist: 'refused', labScientist: 'refused', patientAccessLog: 'both shown as views' };
+  evidence.chart = { pharmacist: 'CONSENT_REQUIRED (encounter, prescriptions, a prescription)',
+    labScientist: 'CONSENT_REQUIRED (encounter, the lab request)', patientAccessLog: 'both shown as views' };
   step('neither reads the chart; the patient\'s access log shows both as views');
 
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
