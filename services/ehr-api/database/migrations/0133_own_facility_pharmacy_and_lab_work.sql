@@ -288,8 +288,17 @@
 -- pharmacy-api list it (the list reads under row-level security), while a
 -- single item, a dispensing and every chain command still ask Identity's
 -- consent in today's images, so they answer as before until the new images
--- (which ask D9 first) are deployed. Applied migrations before 0133 are
--- immutable.
+-- (which ask D9 first) are deployed. Today's list records as 0124 did, so
+-- for a member without a grant its audit is not 0133's: with
+-- OWN_WORK_PATIENT_CARD_ENABLED on (D4 now shows that member the card) it
+-- writes the per-patient row with basis 'consent'; off (the default) only
+-- the collection row. The release migrates before it rolls the images out,
+-- and an image rollback leaves this schema in place, so this holds from the
+-- migration until the new lab-api and pharmacy-api images serve, and for as
+-- long as a rollback of them stands: deploy them with this migration. The
+-- withdrawal (D8) does not depend on the images: its trigger marks a sent
+-- prescription changed by any ehr-api image. Applied migrations before 0133
+-- are immutable.
 
 -- 0. Preconditions.
 do $$

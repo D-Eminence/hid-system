@@ -6876,6 +6876,15 @@ personal grant.
   `basis: 'own-work'` as the database gives it for that member. If the basis
   cannot be read the list fails (no answer without its audit) rather than
   record one it could not read. Without 0133 the list records as 0124 did.
+  Today's lab-api and pharmacy-api images on a database with 0133 list the
+  facility's own items to its pharmacy and lab staff (row-level security)
+  and record them as 0124 did: with `OWN_WORK_PATIENT_CARD_ENABLED` on, one
+  row per patient whose card is shown with `basis: 'consent'`, even for a
+  member without a grant; off (the default), the collection row only. The
+  release migrates before it rolls the images out and an image rollback
+  keeps the schema, so the new images go out with 0133, and a rollback of
+  lab-api or pharmacy-api alone after 0133 records this way until they are
+  deployed again.
 - Every command on an own work item or its chain (pharmacy: read, dispense,
   reverse; lab: read, accession, specimen, execution, result) is allowed on
   the own-work basis without asking Identity; else Identity's consent decides
