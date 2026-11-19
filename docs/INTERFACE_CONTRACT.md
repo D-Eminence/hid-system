@@ -6877,7 +6877,11 @@ personal grant.
 - Every command on an own work item or its chain (pharmacy: read, dispense,
   reverse; lab: read, accession, specimen, execution, result) is allowed on
   the own-work basis without asking Identity; else Identity's consent decides
-  as before (403 as before). Audit details gain `basis: 'own-work'`.
+  as before (403 as before). Audit details gain `basis: 'own-work'`, except
+  for a member who holds its own consent grant for that action: the database
+  answers the basis with the access (as the list's reader does), and that
+  member's rows stay consent rows (no `basis`, as before), so the list and
+  the commands record the same basis for the same member.
 - An own pharmacy item whose automatic send was withdrawn (the prescription
   was put on hold, cancelled, entered in error, edited or resumed after it
   was sent) carries `"withdrawn": true`; dispensing it answers 409

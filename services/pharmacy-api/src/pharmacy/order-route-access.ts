@@ -43,8 +43,10 @@ export function basisDetails(basis: ResourceBasis): Record<string, string> {
  * `allowed` goes on on the route's basis without Identity; `closed` is 409
  * ORDER_ROUTE_CLOSED; `paused` is 423; `none` is, first (0133), this
  * facility's own work item for its pharmacy staff (`pharmacy.own_work_access_for`,
- * basis 'own-work', no Identity call), else Identity's consent decision as
- * before, refused 403 PHARMACY_ACCESS_DENIED (break-glass never writes).
+ * no Identity call; basis 'own-work', or 'consent' when the member holds its
+ * own consent for the action, as the work list records it), else Identity's
+ * consent decision as before, refused 403 PHARMACY_ACCESS_DENIED (break-glass
+ * never writes).
  * A database error from C17 is passed on unchanged, so a serialization
  * failure reaches DatabaseService's retry.
  */
@@ -70,9 +72,10 @@ export class PharmacyOrderRouteAccess {
       case 'paused':
         throw crossFacilityWorkPaused();
       case 'none': {
-        if (await this.ownWork.allows(client, resource, resourceId, action, context.correlationId)) {
-          return { basis: 'own-work' };
-        }
+        // 0133: this facility's own work item, for its own staff, without asking Identity; the basis is
+        // 'consent' when the member holds its own consent for the action, else 'own-work'.
+        const own = await this.ownWork.basis(client, resource, resourceId, action, context.correlationId);
+        if (own) return { basis: own };
         const decision = await this.identity.authorize(patientId, action, context);
         if (!decision.allowed || (action === 'write_records' && decision.breakGlass)) {
           throw new DomainProblem(403, 'PHARMACY_ACCESS_DENIED',

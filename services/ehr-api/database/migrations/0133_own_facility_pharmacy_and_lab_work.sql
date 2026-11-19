@@ -151,9 +151,12 @@
 -- D9 pharmacy.own_work_access_for(resource, id, action) and
 --    lab.own_work_access_for(resource, id, action) (SECURITY DEFINER,
 --    STABLE), for their runtimes: the own work item (no route) the
---    resource belongs to, when D1 allows the session on it; else no row.
---    Pharmacy resources: work_item, dispensing; Lab: work_item, accession,
---    specimen, execution, result (as 0086's C16 and C17).
+--    resource belongs to, when D1 allows the session on it, with the basis
+--    the command's audit row records: 'consent' when the member holds its
+--    own consent for that action (as D10 reads it for the list), else
+--    'own-work'; else no row. Pharmacy resources: work_item, dispensing;
+--    Lab: work_item, accession, specimen, execution, result (as 0086's C16
+--    and C17).
 -- D10 pharmacy.own_work_item_states(ids) and lab.own_work_item_bases(ids)
 --    (SECURITY DEFINER, STABLE), for their runtimes, at most 200 ids: for
 --    each own work item at the session's facility the session may read,
@@ -1157,7 +1160,7 @@ $$;
 -- D9. The own work item a Pharmacy or Lab resource belongs to.
 create function pharmacy.own_work_access_for(requested_resource_type text, requested_resource_id uuid,
   requested_action text)
-returns table (work_item_id uuid)
+returns table (work_item_id uuid, basis text)
 language plpgsql
 stable
 security definer
@@ -1184,13 +1187,20 @@ begin
      or not identity.facility_work_member_allows('pharmacy', item.patient_id, item.facility_id, requested_action) then
     return;
   end if;
-  return query select item.id;
+  -- The basis the audit row records: the member's own consent for this
+  -- action when it holds one (as the work list's D10 reads it), else own-work.
+  return query
+    select item.id,
+           case when identity.has_active_consent_grant(item.patient_id, platform.current_actor_subject(),
+                       platform.current_membership_id(), item.facility_id, requested_action,
+                       platform.current_purpose_of_use())
+                then 'consent' else 'own-work' end;
 end;
 $$;
 
 create function lab.own_work_access_for(requested_resource_type text, requested_resource_id uuid,
   requested_action text)
-returns table (work_item_id uuid)
+returns table (work_item_id uuid, basis text)
 language plpgsql
 stable
 security definer
@@ -1236,7 +1246,14 @@ begin
      or not identity.facility_work_member_allows('lab', item.patient_id, item.facility_id, requested_action) then
     return;
   end if;
-  return query select item.id;
+  -- The basis the audit row records: the member's own consent for this
+  -- action when it holds one (as the work list's D10 reads it), else own-work.
+  return query
+    select item.id,
+           case when identity.has_active_consent_grant(item.patient_id, platform.current_actor_subject(),
+                       platform.current_membership_id(), item.facility_id, requested_action,
+                       platform.current_purpose_of_use())
+                then 'consent' else 'own-work' end;
 end;
 $$;
 
@@ -1374,9 +1391,9 @@ comment on function ehr.send_prescription_to_own_pharmacy(uuid, bigint) is
 comment on function ehr.withdraw_own_pharmacy_send(uuid) is
   '0133 D8: marks a sent prescription withdrawn once it is on hold, cancelled or entered in error, or active at another version than the one sent.';
 comment on function pharmacy.own_work_access_for(text, uuid, text) is
-  '0133 D9: the own work item (no route) a work item or dispensing belongs to, when the session works for this facility''s pharmacy.';
+  '0133 D9: the own work item (no route) a work item or dispensing belongs to, when the session works for this facility''s pharmacy, with the audit basis: consent when the member holds its own consent for the action, else own-work.';
 comment on function lab.own_work_access_for(text, uuid, text) is
-  '0133 D9: the own work item (no route) a work item, accession, specimen, execution or result belongs to, when the session works for this facility''s laboratory.';
+  '0133 D9: the own work item (no route) a work item, accession, specimen, execution or result belongs to, when the session works for this facility''s laboratory, with the audit basis: consent when the member holds its own consent for the action, else own-work.';
 comment on function pharmacy.own_work_item_states(uuid[]) is
   '0133 D10: for each own work item here the session may read, consent or own-work, and whether its send was withdrawn. At most 200 ids.';
 comment on function lab.own_work_item_bases(uuid[]) is
@@ -1416,9 +1433,9 @@ begin
            'search_path=pg_catalog, pg_temp'),
          ('ehr', 'withdraw_own_pharmacy_send', 'uuid', 'c5762916ddfe74e467e84c6d7ed08fd4', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
-         ('pharmacy', 'own_work_access_for', 'text, uuid, text', 'bb03e692d187fe85783fed28cc40413c', 's', 'plpgsql',
+         ('pharmacy', 'own_work_access_for', 'text, uuid, text', '5ddb078242919dd978d6312f5cd5aa77', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
-         ('lab', 'own_work_access_for', 'text, uuid, text', '89336895a7a4878211fc44c45197e454', 's', 'plpgsql',
+         ('lab', 'own_work_access_for', 'text, uuid, text', '1c834e3ed17d864dadb27f3105cffa04', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'own_work_item_states', 'uuid[]', '5882cbdcf5dcebb96b3cabb95bba9801', 's', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),

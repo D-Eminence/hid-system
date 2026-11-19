@@ -46,7 +46,7 @@ const CARDS = /from lab\.work_item_patient_cards\(\$1::uuid\[\]\)/;
 const RECEIVES = 'select lab.order_route_receives_here() as receives, lab.order_routes_here() as routes_here';
 
 interface Options {
-  ownWork?: boolean; accessRows?: { work_item_id: string }[]; accessError?: Error;
+  ownWork?: boolean; accessRows?: { work_item_id: string; basis: string }[]; accessError?: Error;
   /** 0133's bases: a failure, or the ids answered (default: every one asked). */
   basesError?: Error & { code?: string }; basesFor?: (ids: string[]) => string[];
   /** 0124's OWN_WORK_PATIENT_CARD_ENABLED (default on). */
@@ -63,7 +63,7 @@ const harness = (options: Options = {}) => {
     if (/from lab\.order_route_access_for/.test(sql)) return { rows: [{ outcome: 'none', route_id: null, work_item_id: null }] };
     if (ACCESS.test(sql)) {
       if (options.accessError) throw options.accessError;
-      return { rows: options.accessRows ?? [{ work_item_id: values[1] }] };
+      return { rows: options.accessRows ?? [{ work_item_id: values[1], basis: 'own-work' }] };
     }
     if (BASES.test(sql)) {
       if (options.basesError) throw options.basesError;
@@ -112,6 +112,18 @@ describe('own lab work (0133)', () => {
       await expect(routeAccess.authorize(client, scientist, resource, id(9), ada, 'write_records', denied as never))
         .resolves.toEqual({ basis: 'own-work' });
       expect(identity.authorize).not.toHaveBeenCalled();
+    });
+
+  it('keeps the basis consent, without asking Identity, for a member holding its own consent (as the list does)',
+    async () => {
+      const { service, routeAccess, client, identity, audited } = harness({ accessRows: [{ work_item_id: id(1),
+        basis: 'consent' }] });
+      await service.get(scientist, id(1));
+      const denied = () => new Error('denied');
+      await expect(routeAccess.authorize(client, scientist, 'result', id(9), ada, 'write_records', denied as never))
+        .resolves.toEqual({ basis: 'consent' });
+      expect(identity.authorize).not.toHaveBeenCalled();
+      expect(audited()).toEqual([{ action: 'lab.work-item.read', patientId: ada, details: {} }]);
     });
 
   it('falls back to Identity\'s consent when the database answers no own-work basis', async () => {

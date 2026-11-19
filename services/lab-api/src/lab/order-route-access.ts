@@ -56,9 +56,10 @@ export function basisDetails(basis: ResourceBasis): Record<string, string> {
  *   423 CROSS_FACILITY_ORDERS_UNAVAILABLE.
  * - `none`: no route applies (a same-facility row, a read the route does not
  *   allow, or a resource not visible): first (0133) this facility's own work
- *   item for its lab staff (`lab.own_work_access_for`, basis 'own-work', no
- *   Identity call), else Identity's consent decision as before, refused with
- *   the command's own problem.
+ *   item for its lab staff (`lab.own_work_access_for`, no Identity call;
+ *   basis 'own-work', or 'consent' when the member holds its own consent for
+ *   the action, as the work list records it), else Identity's consent
+ *   decision as before, refused with the command's own problem.
  *
  * A database error from C11 is not mapped: a serialization failure must reach
  * DatabaseService's retry, and any other one answers 500 as every other Lab
@@ -81,9 +82,10 @@ export class LabOrderRouteAccess {
       case 'paused':
         throw crossFacilityWorkPaused();
       case 'none': {
-        if (await this.ownWork.allows(client, resource, resourceId, action, context.correlationId)) {
-          return { basis: 'own-work' };
-        }
+        // 0133: this facility's own work item, for its own staff, without asking Identity; the basis is
+        // 'consent' when the member holds its own consent for the action, else 'own-work'.
+        const own = await this.ownWork.basis(client, resource, resourceId, action, context.correlationId);
+        if (own) return { basis: own };
         const decision = await this.identity.authorize(patientId, action, context.purposeOfUse, context);
         if (!decision.allowed || (action === 'write_records' && decision.breakGlass)) throw denied();
         return { basis: 'consent' };

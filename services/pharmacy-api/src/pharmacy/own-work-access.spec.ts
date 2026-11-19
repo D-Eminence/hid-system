@@ -50,7 +50,7 @@ const CARDS = /from pharmacy\.work_item_patient_cards\(\$1::uuid\[\]\)/;
 
 interface Options {
   ownWork?: boolean;
-  accessRows?: { work_item_id: string }[];
+  accessRows?: { work_item_id: string; basis: string }[];
   accessError?: Error & { code?: string };
   statesError?: Error & { code?: string };
   /** The ids 0133's states answer (default: every one asked). */
@@ -80,7 +80,7 @@ const harness = (options: Options = {}) => {
     }
     if (ACCESS.test(sql)) {
       if (options.accessError) throw options.accessError;
-      return { rows: options.accessRows ?? [{ work_item_id: values[1] }] };
+      return { rows: options.accessRows ?? [{ work_item_id: values[1], basis: 'own-work' }] };
     }
     if (STATES.test(sql)) {
       if (options.statesError) throw options.statesError;
@@ -155,6 +155,18 @@ describe('own pharmacy work (0133)', () => {
       resourceType: 'medication-dispensing', details: { workItemId: id(1), workItemVersion: 1, status: 'dispensed',
         basis: 'own-work' } }]);
   });
+
+  it('keeps the basis consent, without asking Identity, for a pharmacist holding its own consent (as the list does)',
+    async () => {
+      const { service, identity, audited } = harness({ accessRows: [{ work_item_id: id(1), basis: 'consent' }] });
+      await service.getWorkItem(pharmacist, id(1));
+      await service.dispense(pharmacist, id(1), { expectedWorkItemVersion: 1, quantityDispensed: 21,
+        quantityUnit: 'capsule', reason: 'Dispensed to the patient' }, 'own-work-dispense-key-0002');
+      expect(identity.authorize).not.toHaveBeenCalled();
+      expect(audited().map((entry) => [entry.action, entry.details])).toEqual([
+        ['pharmacy.work-item.read', {}],
+        ['pharmacy.dispensing.create', { workItemId: id(1), workItemVersion: 1, status: 'dispensed' }]]);
+    });
 
   it('falls back to Identity\'s consent when the database answers no own-work basis', async () => {
     const { service, identity, audited } = harness({ accessRows: [] });

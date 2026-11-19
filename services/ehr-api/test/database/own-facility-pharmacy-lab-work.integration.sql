@@ -24,8 +24,8 @@
 --      a receptionist, an emergency session and a missing session are
 --      refused 42501;
 --   3. the pharmacist without a grant sees the item, its card and its
---      event, may work on it (own_work_access_for), its basis is
---      'own-work', and dispenses it; it reads nothing of the chart
+--      event, may work on it (own_work_access_for, basis 'own-work'), its
+--      list basis is 'own-work', and dispenses it; it reads nothing of the chart
 --      (ehr.context_allows is false, ehr.prescriptions is not readable);
 --      a second work item for a sent prescription is refused (one item per
 --      prescription), and so is accepting a prescription nobody sent;
@@ -111,8 +111,8 @@ begin
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', '41a9afd4ea6f708425b98d1fb6e6eb87', 's'),
       ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'ea6e547d05979779c9765f7dcc70c377', 'v'),
       ('ehr.withdraw_own_pharmacy_send(uuid)', 'c5762916ddfe74e467e84c6d7ed08fd4', 'v'),
-      ('pharmacy.own_work_access_for(text,uuid,text)', 'bb03e692d187fe85783fed28cc40413c', 's'),
-      ('lab.own_work_access_for(text,uuid,text)', '89336895a7a4878211fc44c45197e454', 's'),
+      ('pharmacy.own_work_access_for(text,uuid,text)', '5ddb078242919dd978d6312f5cd5aa77', 's'),
+      ('lab.own_work_access_for(text,uuid,text)', '1c834e3ed17d864dadb27f3105cffa04', 's'),
       ('pharmacy.own_work_item_states(uuid[])', '5882cbdcf5dcebb96b3cabb95bba9801', 's'),
       ('lab.own_work_item_bases(uuid[])', '07e31d7ca86ac31255ad096d56363637', 's')) expected(proc_name, digest, volatility)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc_name)
@@ -486,9 +486,9 @@ select pg_temp.expect('PH sees the seven items sent (rx1-rx4, rx6, rx7, rx8)',
 select pg_temp.expect('PH sees rx1''s card with the name',
   (select string_agg(card.patient_full_name || '/' || card.patient_health_id_last4, ',')
      from pharmacy.work_item_patient_cards(array[pg_temp.work_item_of(pg_temp.rx(1))]) card), 'Ada Own/AAA2');
-select pg_temp.expect('PH may work on rx1''s item',
-  (select count(*)::text from pharmacy.own_work_access_for('work_item', pg_temp.work_item_of(pg_temp.rx(1)),
-     'write_records')), '1');
+select pg_temp.expect('PH may work on rx1''s item, on the own-work basis',
+  (select string_agg(access.basis, ',') from pharmacy.own_work_access_for('work_item',
+     pg_temp.work_item_of(pg_temp.rx(1)), 'write_records') access), 'own-work');
 select pg_temp.expect('rx1''s basis for PH is own-work, not withdrawn',
   (select string_agg(state.basis || '/' || state.withdrawn, ',')
      from pharmacy.own_work_item_states(array[pg_temp.work_item_of(pg_temp.rx(1))]) state), 'own-work/false');
@@ -569,6 +569,12 @@ select pg_temp.as_member(10);
 select pg_temp.expect('PG (pharmacist with grants) keeps the basis consent',
   (select string_agg(state.basis, ',') from pharmacy.own_work_item_states(array[pg_temp.work_item_of(pg_temp.rx(1))]) state),
   'consent');
+select pg_temp.expect('PG keeps the basis consent on the commands too (read, and the write its grant covers)',
+  (select string_agg(access.basis, ',') from (
+     select * from pharmacy.own_work_access_for('work_item', pg_temp.work_item_of(pg_temp.rx(1)), 'read_records')
+     union all
+     select * from pharmacy.own_work_access_for('work_item', pg_temp.work_item_of(pg_temp.rx(1)), 'write_records')) access),
+  'consent,consent');
 reset role;
 -- Bisi's deny directive (facility F1, everyone) and Chike made inactive.
 set local session_replication_role = replica;

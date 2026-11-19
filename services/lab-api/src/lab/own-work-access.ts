@@ -22,15 +22,17 @@ const STATE_BATCH = 200;
  * 2026: "pharmacy and lab staff get their own facility's work items only,
  * never the chart"; finding F2 of the Akos EHR plan).
  *
- * `allows` asks `lab.own_work_access_for` whether the session works for this
+ * `basis` asks `lab.own_work_access_for` whether the session works for this
  * facility's laboratory (direct care, lab.work-item.read and
  * lab.order-route.receive here, the patient active and no deny directive) on
  * the own work item (no order route) a work item, accession, specimen,
- * execution or result belongs to. `bases` asks `lab.own_work_item_bases`
+ * execution or result belongs to, and with which audit basis: 'consent' when
+ * the member holds its own consent for the action (as the work list's reader
+ * records it), else 'own-work'. `bases` asks `lab.own_work_item_bases`
  * why the session sees each own row ('consent' or 'own-work'), for the work
  * list's per-patient audit rows.
  *
- * Each runs in the caller's transaction, in a savepoint. `allows`: a schema
+ * Each runs in the caller's transaction, in a savepoint. `basis`: a schema
  * without 0133 (42883) or any other refusal answers "no own-work basis", so
  * the command falls back to Identity's consent as before. `bases`: undefined
  * on a schema without 0133 (the list then records as 0124 did); any other
@@ -45,23 +47,26 @@ export class LabOwnWork {
 
   constructor(readonly enabled: boolean) {}
 
-  async allows(client: PoolClient, resource: LabOwnWorkResource, resourceId: string,
-    action: 'read_records' | 'write_records', correlationId: string): Promise<boolean> {
-    if (!this.enabled) return false;
+  /** The own-work access and its audit basis; undefined when there is none (or it cannot be read). */
+  async basis(client: PoolClient, resource: LabOwnWorkResource, resourceId: string,
+    action: 'read_records' | 'write_records', correlationId: string): Promise<OwnWorkState['basis'] | undefined> {
+    if (!this.enabled) return undefined;
     await client.query('savepoint lab_own_work_access');
     try {
-      const result = await client.query<{ work_item_id: string }>(
-        'select work_item_id::text as work_item_id from lab.own_work_access_for($1, $2::uuid, $3)',
+      const result = await client.query<{ work_item_id: string; basis: string }>(
+        'select work_item_id::text as work_item_id, basis from lab.own_work_access_for($1, $2::uuid, $3)',
         [resource, resourceId, action],
       );
       await client.query('release savepoint lab_own_work_access');
-      return result.rows.length > 0;
+      const found = result.rows[0];
+      if (!found) return undefined;
+      return found.basis === 'consent' ? 'consent' : 'own-work';
     } catch (error) {
       if (mustRetry(error)) throw error;
       await client.query('rollback to savepoint lab_own_work_access');
       this.logger.warn({ message: 'Own lab work access could not be checked', sqlState: sqlState(error),
         correlationId });
-      return false;
+      return undefined;
     }
   }
 
