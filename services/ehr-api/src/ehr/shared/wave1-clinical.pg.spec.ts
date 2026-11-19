@@ -1,5 +1,5 @@
 /**
- * Review finding 6 (FR-1, EHR-C1, EHR-C3, EHR-C8a): the new SQL run on
+ * Review finding 6 (FR-1, EHR-C1, EHR-C3, EHR-C8a; Q105 since): the new SQL run on
  * PostgreSQL, not on a fake client.
  *
  * Runs only when EHR_SCRATCH_DATABASE_URL names an empty scratch database
@@ -126,6 +126,8 @@ create trigger encounters_versioned before insert or update on ehr.encounters
 create trigger clinical_notes_versioned before insert or update on ehr.clinical_notes
   for each row execute function ehr.capture_record_version();
 create trigger prescriptions_versioned before insert or update on ehr.prescriptions
+  for each row execute function ehr.capture_record_version();
+create trigger lab_requests_versioned before insert or update on ehr.lab_requests
   for each row execute function ehr.capture_record_version();
 create trigger idempotency_keys_versioned before insert or update on ehr.idempotency_keys
   for each row execute function ehr.capture_record_version();
@@ -268,6 +270,52 @@ describeScratch('wave 1 clinical SQL on PostgreSQL (review finding 6)', () => {
     await inTransaction({ facility: facilityId, correlation: 'rx-hold-0000001' }, async (client) => {
       await client.query(`update ehr.prescriptions set status = 'on_hold' where id = $1`, [id]);
       await client.query(`update ehr.prescriptions set status = 'draft' where id = $1`, [id]);
+    });
+    await expect(first()).resolves.toBe(false);
+  });
+
+  it('(a) Q105: a visit starts and finishes with no typed reason; the fixed reasons are in record_versions', async () => {
+    const visitId = await insertVisit('planned', '2026-11-18T08:00:00Z');
+    const service = new EncountersService(scratchRepository());
+    const started = await service.update(staffContext('visit-start-0001'), patientId, visitId,
+      { expectedRowVersion: 1, status: EncounterStatus.InProgress } as never);
+    expect(started.status).toBe('in_progress');
+    const finished = await service.update(staffContext('visit-finish-001'), patientId, visitId,
+      { expectedRowVersion: 2, status: EncounterStatus.Completed, endedAt: '2026-11-18T09:00:00Z' } as never);
+    expect(finished.status).toBe('completed');
+    const reasons = await pool.query<{ change_reason: string }>(`select change_reason from ehr.record_versions
+      where resource_type = 'encounters' and resource_id = $1 order by version_no`, [visitId]);
+    expect(reasons.rows.map((row) => row.change_reason))
+      .toEqual(['create', 'Visit started (no reason needed)', 'Visit finished (no reason needed)']);
+  });
+
+  it('(a) Q105: a resume after a hold, and a visit started before, still need a typed reason', async () => {
+    const visitId = await insertVisit('in_progress', '2026-11-18T08:00:00Z');
+    const service = new EncountersService(scratchRepository());
+    await service.update(staffContext('visit-hold-00001'), patientId, visitId,
+      { expectedRowVersion: 1, status: EncounterStatus.OnHold, changeReason: 'Patient sent for X-ray' } as never);
+    await expect(service.update(staffContext('visit-resume-001'), patientId, visitId,
+      { expectedRowVersion: 2, status: EncounterStatus.InProgress } as never))
+      .rejects.toMatchObject({ status: 400, code: 'CHANGE_REASON_REQUIRED' });
+    const versions = await pool.query(`select count(*)::int as n from ehr.record_versions
+      where resource_type = 'encounters' and resource_id = $1`, [visitId]);
+    expect(versions.rows[0].n).toBe(2);
+  });
+
+  it('(a) Q105: a lab request\'s history is read as lab_requests; a request held once is not "first"', async () => {
+    const visitId = await insertVisit('in_progress', '2026-11-18T08:00:00Z');
+    const id = await inTransaction({ facility: facilityId, correlation: 'lab-create-0001' }, async (client) =>
+      (await client.query<{ id: string }>(`insert into ehr.lab_requests (encounter_id, patient_id, facility_id,
+        created_by, created_by_membership_id, medication_display, status) values ($1, $2, $3, $4, $5, 'Widal test', 'draft')
+        returning id`, [visitId, patientId, facilityId, accountId, membershipId])).rows[0]!.id);
+    const first = (facility = facilityId) => inTransaction({ facility, correlation: 'lab-check-00001' },
+      (client) => neverReachedBefore(client, 'lab_requests', id, ['active', 'on_hold', 'completed']));
+    await expect(first()).resolves.toBe(true);
+    await expect(first(otherFacilityId)).resolves.toBe(false);
+    await inTransaction({ facility: facilityId, correlation: 'lab-hold-000001' }, async (client) => {
+      await client.query(`select set_config('app.change_reason', 'Waiting for the sample', true)`);
+      await client.query(`update ehr.lab_requests set status = 'on_hold' where id = $1`, [id]);
+      await client.query(`update ehr.lab_requests set status = 'draft' where id = $1`, [id]);
     });
     await expect(first()).resolves.toBe(false);
   });

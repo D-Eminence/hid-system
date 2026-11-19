@@ -12,6 +12,17 @@ import type {
 import { IDENTITY_PROVIDER } from './identity.types';
 import { RecordAccessNoticeService } from './record-access-notice.service';
 import { ninStatusOf } from './nin-status';
+import { PatientLookupMissService, patientNotFound } from './patient-lookup-miss.service';
+
+/**
+ * How a staff Health ID lookup that opened no patient ended, as its audit row
+ * says it (never the Health ID): no patient record has the Health ID (Q100 B),
+ * the patient is not available here, the lookup was not authorized (today's
+ * 403, never counted), or the account was limited (then the answer is today's
+ * 404, never "No such patient" and never a 429: every client closes a record
+ * on 403 or 404).
+ */
+type LookupMissResult = 'no_such_patient' | 'not_available' | 'not_authorized' | 'limited';
 
 @Injectable()
 export class IdentityService {
@@ -19,6 +30,7 @@ export class IdentityService {
     @Inject(IDENTITY_PROVIDER) private readonly provider: IdentityProvider,
     private readonly audit: AuditService,
     @Optional() private readonly notices?: RecordAccessNoticeService,
+    @Optional() private readonly misses?: PatientLookupMissService,
   ) {}
 
   async staffPatientProfile(patientId:string,context:DataAccessContext) {
@@ -50,7 +62,16 @@ export class IdentityService {
       throw error;
     }
     if (!patient) {
-      await this.record(context, 'identity.patient.lookup', 'denied', undefined, purpose);
+      // Q100 B: counted first, so a limited member learns nothing about the
+      // Health ID; then "No such patient" only when no record has it at all.
+      // A limited member gets today's 404, never a 429: the website closes an
+      // open record on 403 or 404 (its verify() before every save), so a new
+      // status would leave a record open after access has ended.
+      const limited = await this.misses?.countMiss(context);
+      const issued = limited === false ? await this.misses?.issued(hid, context) : undefined;
+      const result: LookupMissResult = limited === true ? 'limited' : issued === false ? 'no_such_patient' : 'not_available';
+      await this.record(context, 'identity.patient.lookup', 'denied', undefined, purpose, { lookupResult: result });
+      if (result === 'no_such_patient') throw patientNotFound();
       throw new NotFoundException('Patient was not found or is not available');
     }
     const decision = await this.provider.authorize({
@@ -60,7 +81,13 @@ export class IdentityService {
       context,
     });
     if (!decision.allowed) {
-      await this.record(context, 'identity.patient.lookup', 'denied', patient.id, purpose);
+      // The patient exists and this lookup may see them but not open them:
+      // today's 403, not counted. The 403 says nothing Q100 B added (the
+      // issued check is never asked here, and a limited account would get the
+      // same 403), so counting it would only limit a desk working through
+      // patients who have not yet given consent.
+      const result: LookupMissResult = 'not_authorized';
+      await this.record(context, 'identity.patient.lookup', 'denied', patient.id, purpose, { lookupResult: result });
       throw new ForbiddenException('Patient access is not authorized');
     }
     await this.record(context, 'identity.patient.lookup', 'success', patient.id, purpose, {

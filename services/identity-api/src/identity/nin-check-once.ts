@@ -242,6 +242,23 @@ export class NinCheckOnce implements BeforeApplicationShutdown {
   }
 
   /**
+   * Owner Q110: a stored record that a later request matched (the desk's name
+   * and date of birth equal the record's) is kept NIN_RECORD_ANSWER_SECONDS
+   * from now, or longer when it already was (0137's
+   * keep_qoreid_nin_record never shortens a keep); its answer, completeness
+   * and source stay as they are, and nothing is sent to QoreID. True when
+   * kept; false when there is no live record of this NIN under the current
+   * key (nothing changes). A database error is the caller's to log.
+   */
+  async keepRecord(nin: string, correlationId: string): Promise<boolean> {
+    const lookup = this.ninProtector.lookup(nin);
+    const result = await this.database.withSystemTransaction(correlationId, (client) =>
+      client.query<{ kept: boolean }>('select identity.keep_qoreid_nin_record($1,$2,$3) as kept',
+        [lookup, getEnvironment().NIN_KEY_VERSION, NIN_RECORD_ANSWER_SECONDS]));
+    return result.rows[0]?.kept === true;
+  }
+
+  /**
    * The sweeper's: erases rows past their end, and the answers for NINs whose
    * patient's login deletion completed in the last day (0096), each bounded
    * by `limit`.
@@ -314,6 +331,18 @@ export class NinCheckOnce implements BeforeApplicationShutdown {
     if (facts?.delivery === 'answered' && code === 'QOREID_PROVIDER_REJECTED' && facts.status === 404) {
       await this.finishAnswer(request, lookup, question, attempt, { outcome: 'rejected' });
       return 'rejected';
+    }
+    if (facts?.delivery === 'answered' && code === 'QOREID_PROVIDER_RESPONSE_INVALID' && facts.record
+      && facts.providerReference) {
+      // A record without something a sign-up needs (no recognised sex, a photo
+      // or address HID cannot read) whose name and date of birth could be
+      // read with QoreID's reference: the record itself, incomplete, kept as
+      // long as a record. 0137 answers a NIN-only one from storage to every
+      // later check, so a sign-up refuses it again without QoreID being paid
+      // again, and the desk and the profile compare it.
+      await this.finishAnswer(request, lookup, question, attempt, { outcome: 'record',
+        providerReference: facts.providerReference, record: facts.record });
+      return 'record_incomplete';
     }
     if (facts?.delivery === 'answered' && code === 'QOREID_PROVIDER_RESPONSE_INVALID') {
       await this.finishAnswer(request, lookup, question, attempt, { outcome: 'unusable',

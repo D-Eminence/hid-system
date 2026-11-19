@@ -27,16 +27,27 @@
 --      on a Health ID is kept 90 days; once on a Health ID the NIN's checked
 --      answer stays with the record) (24 hours when a profile check did not
 --      match it), "no record", QoreID's "not found" or an answer HID cannot
---      use for 24 hours. A record answers every question; another outcome
---      answers the question it was asked (question_hmac, an HMAC of the
---      details a profile check sent) or, asked with the NIN alone (null),
---      every question.
--- 2. Three SECURITY DEFINER commands for the Identity runtime (system:auth
+--      use for 24 hours. A record answers every question, and says which
+--      check it came from (record_source): 'nin_only' (a sign-up's or the
+--      desk's check of the NIN alone) or 'profile' (a profile check, sent
+--      with the patient's name and date of birth). A record without
+--      everything a sign-up needs is answered from storage to every caller
+--      when it came from the NIN-only check (QoreID would answer that check
+--      the same again, and charge again); only an incomplete profile record
+--      is taken over by a caller that needs a complete one. QoreID's "not
+--      found" (404) is about the NIN, whatever was sent with it, so it too
+--      answers every question. Another outcome answers the question it was
+--      asked (question_hmac, an HMAC of the details a profile check sent)
+--      or, asked with the NIN alone (null), every question.
+-- 2. Four SECURITY DEFINER commands for the Identity runtime (system:auth
 --    with a correlation id only): identity.begin_qoreid_nin_check (the stored
 --    answer, "wait", "held", or the lease to call QoreID), identity.
 --    finish_qoreid_nin_check (the holder records the answer, the hold, or
 --    lets go; never keeps an answer for a NIN whose patient's login was
---    deleted) and identity.prune_qoreid_nin_checks (erases rows past `until`
+--    deleted), identity.keep_qoreid_nin_record (owner Q110: a stored record a
+--    later request matches is kept 90 days from the match; never shortens a
+--    keep, never changes the answer or its source) and
+--    identity.prune_qoreid_nin_checks (erases rows past `until`
 --    through the index on `until`, and the answers for the NINs of patients
 --    whose login deletion (0096) completed in the last day, found from those
 --    deletions, never by testing every row; Identity's patient lifecycle
@@ -60,7 +71,8 @@ begin
      or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
                  where namespace.nspname = 'identity'
                    and proc.proname in ('begin_qoreid_nin_check', 'finish_qoreid_nin_check',
-                                        'prune_qoreid_nin_checks', 'qoreid_nin_check_erased')) then
+                                        'keep_qoreid_nin_record', 'prune_qoreid_nin_checks',
+                                        'qoreid_nin_check_erased')) then
     raise exception using errcode = '55000', message = '0137: already applied';
   end if;
   -- 0127 (single sign-on, the last migration this file follows) and the
@@ -150,19 +162,22 @@ create table identity.qoreid_nin_checks (
   question_hmac char(64) check (question_hmac is null or question_hmac ~ '^[0-9a-f]{64}$'),
   outcome text check (outcome in ('record', 'no_record', 'rejected', 'unusable')),
   record_complete boolean,
+  record_source text check (record_source in ('nin_only', 'profile')),
   answer_ciphertext bytea check (answer_ciphertext is null or octet_length(answer_ciphertext) between 30 and 262144),
   key_version text check (key_version is null or length(key_version) between 1 and 64),
   until timestamptz not null,
   created_at timestamptz not null default clock_timestamp(),
   updated_at timestamptz not null default clock_timestamp(),
   -- An answer, and only an answer, has its outcome, ciphertext and key; a
-  -- record says whether it is complete and answers every question.
+  -- record says whether it is complete and which check it came from; a
+  -- record and QoreID's "not found" answer every question.
   constraint qoreid_nin_checks_answer_ck check (
     (state = 'answered') = (outcome is not null)
     and (state = 'answered') = (answer_ciphertext is not null)
     and (state = 'answered') = (key_version is not null)
     and (outcome is not distinct from 'record') = (record_complete is not null)
-    and (outcome is distinct from 'record' or question_hmac is null)),
+    and (outcome is not distinct from 'record') = (record_source is not null)
+    and (outcome is null or outcome not in ('record', 'rejected') or question_hmac is null)),
   -- Never kept longer than a record's 90 days (Q110) and a day's margin.
   constraint qoreid_nin_checks_until_ck check (until <= updated_at + interval '91 days')
 );
@@ -209,10 +224,14 @@ revoke all on function identity.qoreid_nin_check_erased(char) from public;
 --             check until `until`. A lease that ended without an outcome
 --             becomes such a hold, until 6 hours after the lease's end.
 -- An answer is usable while unexpired, under the caller's key version, for a
--- NIN not erased, and: a record when complete or the caller does not need a
--- complete one; another outcome when asked with the NIN alone or for this
--- question. Anything else (expired, another question, an incomplete record
--- for a caller that needs a complete one, another key) is taken over.
+-- NIN not erased, and: a record when complete, when the caller does not need
+-- a complete one, or when it came from the NIN-only check (a caller that
+-- needs a complete record is given it and refuses it as the first caller
+-- did, without paying QoreID for the same answer again); another outcome
+-- when kept for every question (null: asked with the NIN alone, or QoreID's
+-- "not found") or for this question. Anything else (expired, another
+-- question, an incomplete profile record for a caller that needs a complete
+-- one, another key) is taken over.
 create function identity.begin_qoreid_nin_check(
   requested_lookup_hmac char(64), requested_question_hmac char(64), requested_complete boolean,
   requested_key_version text, requested_attempt_id uuid, requested_lease_seconds integer)
@@ -272,7 +291,8 @@ begin
     end if;
     if check_row.key_version = requested_key_version
        and not identity.qoreid_nin_check_erased(requested_lookup_hmac)
-       and ((check_row.outcome = 'record' and (check_row.record_complete or not requested_complete))
+       and ((check_row.outcome = 'record'
+             and (check_row.record_complete or not requested_complete or check_row.record_source = 'nin_only'))
             or (check_row.outcome <> 'record'
                 and (check_row.question_hmac is null or check_row.question_hmac = requested_question_hmac))) then
       return query select 'stored'::text, check_row.outcome, check_row.record_complete,
@@ -282,7 +302,7 @@ begin
   end if;
   update identity.qoreid_nin_checks
      set state = 'checking', attempt_id = requested_attempt_id, question_hmac = requested_question_hmac,
-         outcome = null, record_complete = null, answer_ciphertext = null, key_version = null,
+         outcome = null, record_complete = null, record_source = null, answer_ciphertext = null, key_version = null,
          until = lease_end, updated_at = clock_timestamp()
    where nin_lookup_hmac = requested_lookup_hmac;
   return query select 'call'::text, null::text, null::boolean, null::bytea, lease_end;
@@ -295,7 +315,9 @@ revoke all on function identity.begin_qoreid_nin_check(char, char, boolean, text
 --   'record', 'no_record', 'rejected', 'unusable'  the answer, kept
 --     requested_seconds (a record at most 91 days, the others at most 7
 --     days); never kept for a NIN whose patient's login was deleted (the
---     holder's row is removed instead);
+--     holder's row is removed instead). A record's source is the check's:
+--     'profile' when it was asked with a question, else 'nin_only'. A record
+--     and QoreID's "not found" are kept for every question;
 --   'held'      sent with no answer HID could keep: no new check for
 --     requested_seconds (at most a day);
 --   'released'  nothing reached QoreID's check (the token request failed,
@@ -346,8 +368,11 @@ begin
   end if;
   update identity.qoreid_nin_checks
      set state = 'answered', outcome = requested_result,
-         question_hmac = case when requested_result = 'record' then null else requested_question_hmac end,
+         question_hmac = case when requested_result in ('record', 'rejected') then null
+                              else requested_question_hmac end,
          record_complete = case when requested_result = 'record' then requested_complete end,
+         record_source = case when requested_result <> 'record' then null
+                              when requested_question_hmac is null then 'nin_only' else 'profile' end,
          answer_ciphertext = requested_ciphertext, key_version = requested_key_version,
          until = clock_timestamp() + make_interval(secs => requested_seconds), updated_at = clock_timestamp()
    where nin_lookup_hmac = requested_lookup_hmac and attempt_id = requested_attempt_id and state = 'checking';
@@ -355,6 +380,40 @@ begin
 end
 $$;
 revoke all on function identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer) from public;
+
+-- Owner Q110: a stored record that a later request matched (the desk's
+-- name and date of birth equal the record's) is kept requested_seconds from
+-- now (at most 91 days), or as long as it was already kept when that is
+-- longer: a keep is never shortened. Only an answered record under the
+-- caller's key version, unexpired, for a NIN not erased; its answer, source
+-- and completeness are left as they are, and nothing is sent to QoreID. True
+-- when kept; false when there is no such record (nothing changes).
+create function identity.keep_qoreid_nin_record(
+  requested_lookup_hmac char(64), requested_key_version text, requested_seconds integer)
+returns boolean
+language plpgsql security definer
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if platform.current_actor_subject() is distinct from 'system:auth' or platform.current_correlation_id() is null then
+    raise exception using errcode = '42501', message = 'QOREID_NIN_CHECK_DENIED';
+  end if;
+  if requested_lookup_hmac is null or requested_lookup_hmac !~ '^[0-9a-f]{64}$'
+     or requested_key_version is null or length(requested_key_version) not between 1 and 64
+     or requested_seconds is null or requested_seconds not between 60 and 91 * 86400 then
+    raise exception using errcode = '22023', message = 'QOREID_NIN_CHECK_INVALID';
+  end if;
+  update identity.qoreid_nin_checks check_row
+     set until = greatest(check_row.until, clock_timestamp() + make_interval(secs => requested_seconds)),
+         updated_at = clock_timestamp()
+   where check_row.nin_lookup_hmac = requested_lookup_hmac and check_row.state = 'answered'
+     and check_row.outcome = 'record' and check_row.key_version = requested_key_version
+     and check_row.until > clock_timestamp()
+     and not identity.qoreid_nin_check_erased(requested_lookup_hmac);
+  return found;
+end
+$$;
+revoke all on function identity.keep_qoreid_nin_record(char, text, integer) from public;
 
 -- Erases up to requested_limit rows past `until` (an expired answer or hold,
 -- or a lease that ended more than 6 hours ago), found through the index on
@@ -421,7 +480,7 @@ end
 $$;
 revoke all on function identity.prune_qoreid_nin_checks(integer) from public;
 
--- 3. Grants (here and in runtime-grants.sql): the three commands to the
+-- 3. Grants (here and in runtime-grants.sql): the four commands to the
 -- Identity runtime and the schema test runtime; nothing to any other runtime;
 -- no grant on the table or the erasure test.
 do $$
@@ -431,6 +490,7 @@ begin
     if exists (select 1 from pg_roles where rolname = runtime_role) then
       execute format('grant execute on function identity.begin_qoreid_nin_check(char, char, boolean, text, uuid, integer), '
         || 'identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer), '
+        || 'identity.keep_qoreid_nin_record(char, text, integer), '
         || 'identity.prune_qoreid_nin_checks(integer) to %I', runtime_role);
     end if;
   end loop;
@@ -440,7 +500,7 @@ $$;
 -- 4. Post-checks: the applying role owns everything new; row-level security
 -- is forced with the one owner policy; the table's ACL holds only its owner;
 -- every function is SECURITY DEFINER with this search_path; and only the two
--- runtimes above may execute the three commands (nobody the erasure test).
+-- runtimes above may execute the four commands (nobody the erasure test).
 do $$
 declare offender text;
 begin
@@ -462,8 +522,8 @@ begin
   select string_agg(proc.oid::regprocedure::text, ', ') into offender
     from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
    where namespace.nspname = 'identity'
-     and proc.proname in ('begin_qoreid_nin_check', 'finish_qoreid_nin_check', 'prune_qoreid_nin_checks',
-                          'qoreid_nin_check_erased')
+     and proc.proname in ('begin_qoreid_nin_check', 'finish_qoreid_nin_check', 'keep_qoreid_nin_record',
+                          'prune_qoreid_nin_checks', 'qoreid_nin_check_erased')
      and (not proc.prosecdef or proc.proowner <> (select oid from pg_roles where rolname = current_user)
           or proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp']);
   if offender is not null then
@@ -475,8 +535,8 @@ begin
    cross join aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) privilege
     left join pg_roles grantee on grantee.oid = privilege.grantee
    where namespace.nspname = 'identity'
-     and proc.proname in ('begin_qoreid_nin_check', 'finish_qoreid_nin_check', 'prune_qoreid_nin_checks',
-                          'qoreid_nin_check_erased')
+     and proc.proname in ('begin_qoreid_nin_check', 'finish_qoreid_nin_check', 'keep_qoreid_nin_record',
+                          'prune_qoreid_nin_checks', 'qoreid_nin_check_erased')
      and privilege.grantee <> proc.proowner
      and not (grantee.rolname in ('hid_identity_runtime', 'hid_schema_test_runtime')
               and proc.proname <> 'qoreid_nin_check_erased');

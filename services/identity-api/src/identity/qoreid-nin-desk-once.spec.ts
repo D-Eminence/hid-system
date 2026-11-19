@@ -384,7 +384,7 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     // A lease another task holds (a very slow answer, or a stopped process).
     s.store.rows.set(s.lookup, { nin_lookup_hmac: s.lookup, state: 'checking',
       attempt_id: 'b8000000-0000-4000-8000-0000000000ff', question_hmac: null, outcome: null, record_complete: null,
-      answer_ciphertext: null, key_version: null, until: Date.now() + 60_000 });
+      record_source: null, answer_ciphertext: null, key_version: null, until: Date.now() + 60_000 });
     const answer = await s.resolve('desk-once-key-000014').catch((error: unknown) => error);
     expect(answer).toMatchObject({ status: 409, code: 'NIN_CHECK_IN_PROGRESS',
       message: 'We are still checking this NIN. Please wait a minute, then try again.',
