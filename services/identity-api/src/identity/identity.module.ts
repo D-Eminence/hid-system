@@ -17,7 +17,6 @@ import { NinRegistrationService } from './nin-registration.service';
 import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER } from './nin.types';
 import { QoreIdNinVerificationProvider, selectNinVerificationProvider } from './qoreid-nin-verification.provider';
-import { DeskNinRecordKeep } from './desk-nin-record-keep';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import {
   QOREID_ADAPTER_CONFIGURATION,
@@ -119,9 +118,8 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
       provide: IDENTITY_PROVIDER,
       useExisting: PostgresIdentityProvider,
     },
-    // Q108: the desk's NIN check through QoreID; D2: a matched stored record kept 90 days.
+    // Q108: the desk's NIN check through QoreID (a matched stored record kept by 0137's rule, Q115).
     QoreIdNinVerificationProvider,
-    DeskNinRecordKeep,
     {
       provide: NIN_VERIFICATION_PROVIDER,
       inject: [DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider, DeferredNinVerificationProvider,

@@ -11,8 +11,6 @@ import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
-import { NIN_RECORD_ANSWER_SECONDS } from './nin-check-once';
-import { KEEP_BEGIN_SQL, KEEP_FINISH_SQL, KEEP_TAKE_OVER_KEY_VERSION } from './desk-nin-record-keep';
 import { NinRegistrationController } from './nin-registration.controller';
 import { NinRegistrationService, SEALED_TENANT_SQL } from './nin-registration.service';
 import {
@@ -101,9 +99,15 @@ function gate(overrides: Partial<Record<keyof PublicPatientIdentityProvider, jes
 /** What the desk hands the guard: the request's correlation id, path 'desk' and its own details to expect. */
 const deskCheck = { correlationId: 'correlation-q108', path: 'desk', expects: expect.any(Function) };
 
-/** D2: the keep of a matched stored record (DeskNinRecordKeep), tested in qoreid-nin-desk-once.spec.ts and on PostgreSQL. */
-function recordKeep(kept = true) {
-  return { keepMatchedRecord: jest.fn(async () => kept) };
+/**
+ * Q115: 0137's shared keep of a stored record (NinCheckOnce.keepRecord), which the desk calls for a stored record
+ * its details match. Its rule is 0137's, tested with the guard in qoreid-nin-desk-once.spec.ts.
+ */
+function recordKeep(kept: boolean | Error = true) {
+  return { keepRecord: jest.fn(async () => {
+    if (kept instanceof Error) throw kept;
+    return kept;
+  }) };
 }
 
 function qoreIdProvider(qoreId = gate(), keep = recordKeep()) {
@@ -213,23 +217,36 @@ describe('Q108 QoreID NIN check for the desk', () => {
     expect(isStoredNinAnswer(await stored(found({ firstName: ' ' })).catch((error: unknown) => error))).toBe(false);
   });
 
-  it('keeps a stored record the desk\'s details match 90 days from now (D2), and says so; nothing else', async () => {
+  it('keeps a stored record the desk\'s details match through 0137\'s shared rule (Q115), and says so; nothing else', async () => {
     const answered = async (answer: NinRecordCheck, keep = recordKeep()) => ({ keep,
       result: await qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => answer) }), keep).verify(request) });
     const matched = await answered(found({}, 'stored'));
-    expect(matched.keep.keepMatchedRecord).toHaveBeenCalledTimes(1);
-    expect(matched.keep.keepMatchedRecord).toHaveBeenCalledWith(NIN, 'correlation-q108');
+    // 0137's one rule decides how long (#276): the desk only says which NIN was used, under its request.
+    expect(matched.keep.keepRecord).toHaveBeenCalledTimes(1);
+    expect(matched.keep.keepRecord).toHaveBeenCalledWith(NIN, 'correlation-q108');
     expect(matched.result).toMatchObject({ verified: true, stored: true, recordKept: true });
-    // A fresh match is already kept 90 days by the guard; a mismatch or "no record" is not the desk's patient.
+    // A fresh match is the record's first check (the guard keeps it 90 days); a mismatch or "no record" is not
+    // the desk's patient.
     for (const answer of [found(), found({ lastName: 'OTHER' }, 'stored'), noRecord('stored')]) {
       const other = await answered(answer);
-      expect(other.keep.keepMatchedRecord).not.toHaveBeenCalled();
+      expect(other.keep.keepRecord).not.toHaveBeenCalled();
       expect(other.result).not.toHaveProperty('recordKept');
     }
-    // A keep that could not be made leaves the answer as it is.
+    // No live record to keep (an unusable answer whose name and date of birth matched) leaves the answer as it is.
     const notKept = await answered(found({}, 'stored'), recordKeep(false));
     expect(notKept.result).toMatchObject({ verified: true, stored: true });
     expect(notKept.result).not.toHaveProperty('recordKept');
+  });
+
+  it('answers a match whose keep could not be written, logging only the correlation id and a database code', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const keep = recordKeep(Object.assign(new Error(`connection reset for ${NIN}`), { code: '08006' }));
+    const result = await qoreIdProvider(gate({ verifyNinRecord: jest.fn(async () => found({}, 'stored')) }), keep)
+      .verify(request);
+    expect(result).toMatchObject({ verified: true, outcome: 'match', stored: true });
+    expect(result).not.toHaveProperty('recordKept');
+    expect(warn.mock.calls).toEqual([[{ event: 'identity.nin.record_keep_failed', correlationId: 'correlation-q108',
+      code: '08006' }]]);
   });
 
   it.each([
@@ -367,7 +384,7 @@ describe('Q108 QoreID NIN check for the desk', () => {
   it('has no claim, stored answer or limit of its own: only the NIN check (Q109, 0137)', () => {
     const provider = qoreIdProvider();
     expect(Object.getOwnPropertyNames(Object.getPrototypeOf(provider)).sort())
-      .toEqual(['constructor', 'isEnabled', 'notVerified', 'verify']);
+      .toEqual(['constructor', 'isEnabled', 'keepMatchedRecord', 'notVerified', 'verify']);
   });
 });
 
@@ -718,17 +735,6 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(statements.some(({ sql }) => sql.includes('otp_rate_limits'))).toBe(false);
   });
 
-  it('runs, in the database suite, the keep of a matched record as DeskNinRecordKeep makes it (D2)', () => {
-    // desk-nin-record-keep.integration.sql makes the keep's three calls of 0137's commands on PostgreSQL, as
-    // Identity's runtime: the same commands, the same take-over key version, the same 90 days.
-    const suite = readFileSync(join(__dirname, '../../../ehr-api/test/database/desk-nin-record-keep.integration.sql'), 'utf8');
-    expect(KEEP_BEGIN_SQL).toBe('select * from identity.begin_qoreid_nin_check($1,$2,$3,$4,$5,$6)');
-    expect(KEEP_FINISH_SQL).toBe('select identity.finish_qoreid_nin_check($1,$2,$3,$4,$5,$6,$7,$8) as recorded');
-    expect(suite).toContain(`'${KEEP_TAKE_OVER_KEY_VERSION}'`);
-    expect(suite).toContain(`key_version, ${NIN_RECORD_ANSWER_SECONDS})`);
-    expect(suite.match(/identity\.begin_qoreid_nin_check\(lookup, null, false, /g)).toHaveLength(2);
-  });
-
   describe('a desk of the sealed demo or QA tenant (0098 G6, 0123 G6q and D9)', () => {
     const holder = { patient_id: 'b1000000-0000-4000-8000-000000000001', hid_code: 'HID-FIXTURE-0002',
       first_name: 'ADA', last_name: 'FICTIONAL', dob: '1991-04-05', gender: 'female',
@@ -1063,7 +1069,7 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       await expect(service.resolve(input, 'resolve-key-q109-000059', context)).resolves.toMatchObject({ caseId });
       expect(breaker.state()).toBe('retrying');
       expect(breaker.available()).toBe(true);
-      // D2: the matched stored record is kept 90 days from now, and the audit row says so.
+      // Q115: the matched stored record is kept by 0137's shared rule, and the audit row says so.
       expect(auditRows(audit)[0]).toEqual(expect.objectContaining({ action: 'identity.nin.verify', outcome: 'success',
         details: { provider: 'qoreid', ninCheck: 'match', storedAnswer: true, recordKept: true } }));
       // A check QoreID answers now does close it.

@@ -47,8 +47,9 @@ export interface NinVerificationResult {
    */
   stored?: boolean;
   /**
-   * D2 (Q110): true when a stored record this check matched is now kept 90
-   * days from now (a matched record not yet on a Health ID).
+   * Q115: true when a stored record this check matched was kept by 0137's
+   * shared rule (NinCheckOnce.keepRecord: at least 30 days from this use, 90
+   * days from its first check, whichever ends later).
    */
   recordKept?: boolean;
 }
