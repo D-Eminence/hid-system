@@ -289,6 +289,17 @@ describe('ConsentService', () => {
     await expect(service.listMyAccessRequests(context)).resolves.toStrictEqual([{ ...listedAnswer, purpose }]);
   });
 
+  it('names the requesting clinician and their role once 0128 lists them, and null when unknown', async () => {
+    query.mockResolvedValueOnce({ rows: [
+      { ...listedRequest, purpose_of_use: 'direct-care', requester_name: 'Dr Ada Example', requester_role: 'doctor' },
+      { ...listedRequest, purpose_of_use: 'direct-care', requester_name: 'Dr Ada Example', requester_role: null },
+    ] });
+    await expect(service.listMyAccessRequests(context)).resolves.toStrictEqual([
+      { ...listedAnswer, purpose: 'direct-care', requesterName: 'Dr Ada Example', requesterRole: 'doctor' },
+      { ...listedAnswer, purpose: 'direct-care', requesterName: 'Dr Ada Example', requesterRole: null },
+    ]);
+  });
+
   // Records processing (0104): the trigger on identity.access_requests refuses
   // a healthcare-operations request as 42501 with exact messages (the code).
   // These are the strings 0104_records_processing_purpose.sql raises.

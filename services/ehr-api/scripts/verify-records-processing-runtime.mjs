@@ -251,8 +251,11 @@ try {
   const code = await one(`select active from identity.purpose_of_use_codes where code = 'healthcare-operations'`);
   const listColumns = (await one(`select count(*)::int as n from pg_proc proc, unnest(proc.proargmodes) mode
     where proc.oid = 'identity.list_my_access_requests()'::regprocedure and mode = 't'`)).n;
+  // 0128 adds the requester's name and role as columns 13 and 14 (its notice
+  // function is the marker); everything this verifier checks is 0104's.
+  const has0128 = (await one(`select to_regprocedure('notification.on_identity_pin_outbox_created()') is not null as present`)).present;
   if (stage === 'before-0104') assert.deepEqual([code, listColumns], [undefined, 11], 'a database without 0104');
-  else assert.deepEqual([code?.active, listColumns], [true, 12], 'a database with 0104');
+  else assert.deepEqual([code?.active, listColumns], [true, has0128 ? 14 : 12], 'a database with 0104');
   evidence.database = { recordsProcessingCode: code ? (code.active ? 'active' : 'inactive') : 'absent', listColumns };
   await new Promise(done => stub.listen(0, '127.0.0.1', done));
   const stubUrl = `http://127.0.0.1:${stub.address().port}`;
