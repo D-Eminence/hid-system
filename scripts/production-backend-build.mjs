@@ -94,6 +94,8 @@ export const outsideTestInputs = [
   ['services/identity-api/src/identity/dto/authorize-outreach.dto.ts',['outreach-api']],
   ['gateway/nginx.conf.template',['outreach-api']],
   ['infra/aws/runtime/workload-issuer/',['identity-api']],
+  // ehr-api's zero136-count-block.spec.ts checks 0136 carries this file's count block (Q113 A).
+  ['docs/rollback/0136_affected_staff_counts.sql',['ehr-api']],
 ];
 const noImagePackages = ['ui','offline','telemetry','identity-browser-client'];
 // Never copied into a production image and never run by the production build.

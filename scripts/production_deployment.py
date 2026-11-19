@@ -1,6 +1,8 @@
 """Guarded ECS release controller. Uses only GitHub runner inputs and the shared wire contract."""
 import argparse
+import concurrent.futures
 import copy
+import datetime
 import json
 import os
 import pathlib
@@ -18,6 +20,65 @@ PENDING_LINE = re.compile(r"(\d+) pending migration\(s\)")
 PLAN_LINE = re.compile(r"(\d{4}_[a-z0-9_]+\.sql) ([a-f0-9]{64})")
 ORDER = ("identity-api","notification-api","ehr-api","lab-api","pharmacy-api","ocr-api",
          "outreach-api","notification-worker","event-dispatcher","ocr-worker","support-api","gateway")
+# Read-only AWS calls run side by side in a small pool; ECR retention writes use a smaller one.
+# Each call is still one serial `aws` subprocess with the wrapper's own retry and error rules.
+READ_POOL = 6
+PROTECT_POOL = 4
+ROLLOUT_POLL_SECONDS = 5
+SKIPPED_PLAN_AFTER = "PLAN_BEFORE_FOUND_ZERO_PENDING"
+PHASES = frozenset({"approval","lease","snapshot-before","receipt-started","migration","register-services",
+    "rollout-services","register-gateway","rollout-gateway","snapshot-after","index-and-receipt","notify",
+    "rollback-rollout","rollback-snapshot","rollback-index"})
+
+def parallel(work, items, workers):
+    """Runs work(item) for every item and returns results in item order.
+
+    Raises the error of the first item, in order, that failed. Every started call has finished
+    before this returns or raises, so nothing keeps running behind the caller's back."""
+    items = list(items)
+    if len(items) <= 1: return [work(item) for item in items]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers,len(items))) as pool:
+        futures = [pool.submit(work,item) for item in items]
+        try:
+            return [future.result() for future in futures]
+        except BaseException:
+            for future in futures: future.cancel()
+            raise
+
+class Phases:
+    """Timestamped progress lines: a fixed phase name, elapsed seconds and integer counts only.
+
+    Progress output never decides a release, so nothing here raises into deploy(): a line that fails
+    its checks (unknown phase, a count that is not a plain integer) or fails to print is dropped."""
+    def __init__(self, clock=time.monotonic, out=print):
+        self.clock, self.out = clock, out
+        self.start = self.last = clock()
+
+    def mark(self, phase, **counts):
+        """Prints one phase line; returns whether it was printed. Never raises."""
+        try:
+            if phase not in PHASES: return False
+            if not all(re.fullmatch(r"[a-z_]+",k) and type(v) is int for k,v in counts.items()): return False
+            now = self.clock()
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            line = "deploy-phase %s phase=%s phase_s=%.1f elapsed_s=%.1f" % (stamp,phase,now-self.last,now-self.start)
+            self.last = now
+            self.out(line+"".join(" %s=%d" % item for item in sorted(counts.items())), flush=True)
+            return True
+        except Exception:
+            return False
+
+    def migration(self, release_id, checks):
+        """Logs the migration outcome. Never raises: the durable record is migration_checks in the receipt."""
+        try:
+            skipped = checks.get("plan_after") == "skipped"
+            if skipped:
+                self.out(json.dumps({"release_id":release_id,"migration_plan_after":"skipped",
+                    "reason":checks["reason"]}), flush=True)
+            self.mark("migration",pending_before=int(checks["pending_before"]),tasks=int(checks["tasks"]),
+                plan_after_skipped=int(skipped))
+        except Exception:
+            pass
 
 def candidate():
     ctx = context("backend")
@@ -102,6 +163,7 @@ def rollback_candidate(release_id):
 class ECS:
     def __init__(self, aws, lease):
         self.aws, self.lease = aws, lease
+        self.migration_checks = None
 
     def service(self, component):
         body = self.aws.call("ecs","describe-services",{"cluster":CLUSTER,"services":["hid-production-"+component]})
@@ -146,7 +208,11 @@ class ECS:
     def check(self, component, expected, seen_expected):
         """One look at a rollout: (service and definition once it is healthy, else None; whether the target was seen)."""
         self.lease.assert_owned()
-        service = self.service(component)
+        return self.look(component, expected, seen_expected)
+
+    def look(self, component, expected, seen_expected, service=None):
+        """check() without the lease read: the caller checks the lease once for a batch of read-only looks."""
+        service = service or self.service(component)
         seen_expected = seen_expected or service["taskDefinition"] == expected
         complete = (service["taskDefinition"] == expected and service["desiredCount"] > 0
             and service["runningCount"] == service["desiredCount"] and service["pendingCount"] == 0
@@ -179,15 +245,32 @@ class ECS:
         return None, seen_expected
 
     def snapshot(self):
-        result = {}
-        for component in COMPONENTS:
-            service = self.service(component)
-            service, definition = self.healthy(component,service["taskDefinition"],deadline=30)
-            container = next(c for c in definition["containerDefinitions"] if c["name"] == component)
-            image(component, container["image"])
-            result[component] = {"image_uri":container["image"],"task_definition":service["taskDefinition"],
-                "config_sha256":task_config_hash(definition,component)}
-        return result
+        """Verifies all 12 services (revision, image, container health, Cloud Map, targets), side by side.
+
+        Every call here is a read, so the lease is read once for the whole snapshot; any one service
+        failing fails the snapshot, as before."""
+        self.lease.assert_owned()
+        rows = parallel(self.current, COMPONENTS, READ_POOL)
+        return dict(zip(COMPONENTS, rows))
+
+    def current(self, component, deadline=30):
+        """The live, settled revision of one service: the same looks as healthy(), reusing the first describe."""
+        service = self.service(component)
+        expected = service["taskDefinition"]
+        end = time.monotonic()+deadline
+        seen_expected = False
+        while time.monotonic() < end:
+            result, seen_expected = self.look(component, expected, seen_expected, service)
+            if result: break
+            service = None
+            time.sleep(10)
+        else:
+            raise ReleaseError("ECS_HEALTH_TIMEOUT")
+        service, definition = result
+        container = next(c for c in definition["containerDefinitions"] if c["name"] == component)
+        image(component, container["image"])
+        return {"image_uri":container["image"],"task_definition":service["taskDefinition"],
+            "config_sha256":task_config_hash(definition,component)}
 
     def protect_image(self, component, uri):
         image(component,uri)
@@ -210,16 +293,32 @@ class ECS:
         require(any(tag in r.get("imageTags",[]) for r in self.aws.call("ecr","describe-images",{
             "repositoryName":repository,"imageIds":[{"imageDigest":digest}]}).get("imageDetails",[])), "IMAGE_RETENTION_READBACK_FAILED")
 
+    def prepare(self, targets):
+        """Builds each service's new task definition and protects every image it touches, before any registration.
+
+        Reads run side by side; each distinct image is protected once (ECR reads, then put-image after a
+        lease check) in a pool of PROTECT_POOL. Returns ({component: payload}, number of images protected)."""
+        names = list(targets)
+        def read(component):
+            service = self.service(component)
+            definition = self.definition(service["taskDefinition"])
+            payload = task_payload(definition,component,targets[component])
+            # Protect application and any unchanged token-agent image before replacing tasks.
+            images = [(component,targets[component]),
+                      (component,next(c["image"] for c in definition["containerDefinitions"] if c["name"] == component))]
+            images += [("identity-api",c["image"]) for c in definition["containerDefinitions"] if c["name"] == "workload-token-agent"]
+            return payload, images
+        rows = parallel(read, names, READ_POOL)
+        images = list(dict.fromkeys(item for _,found in rows for item in found))
+        parallel(lambda item: self.protect_image(*item), images, PROTECT_POOL)
+        return {name:row[0] for name,row in zip(names,rows)}, len(images)
+
     def register(self, component, uri):
-        service = self.service(component)
-        definition = self.definition(service["taskDefinition"])
-        payload = task_payload(definition,component,uri)
-        # Protect application and any unchanged token-agent image before replacing tasks.
-        self.protect_image(component,uri)
-        self.protect_image(component,next(c["image"] for c in definition["containerDefinitions"] if c["name"] == component))
-        for container in definition["containerDefinitions"]:
-            if container["name"] == "workload-token-agent":
-                self.protect_image("identity-api",container["image"])
+        payloads,_ = self.prepare({component:uri})
+        return self.register_prepared(component,payloads[component])
+
+    def register_prepared(self, component, payload):
+        """Registers one prepared definition (serial; a mutation, after a lease check)."""
         self.lease.assert_owned()
         result = self.aws.call("ecs","register-task-definition",payload,mutation=True)["taskDefinition"]
         require({k:result[k] for k in REGISTER_FIELDS if k in result} == payload, "REGISTERED_CONFIGURATION_DIFFERS")
@@ -233,6 +332,7 @@ class ECS:
 
     def update_all(self, targets, deadline=900):
         """Starts every rollout, then waits for all of them together: services roll out side by side."""
+        if not targets: return
         for component, arn in targets.items():
             self.lease.assert_owned()
             self.aws.call("ecs","update-service",{"cluster":CLUSTER,"service":"hid-production-"+component,
@@ -241,12 +341,14 @@ class ECS:
         seen = dict.fromkeys(targets, False)
         pending = list(targets)
         while True:
-            for component in list(pending):
-                result, seen[component] = self.check(component, targets[component], seen[component])
+            # One lease read per sweep; the sweep itself only reads, every pending service side by side.
+            self.lease.assert_owned()
+            looks = parallel(lambda component: self.look(component, targets[component], seen[component]), pending, READ_POOL)
+            for component, (result, seen[component]) in zip(list(pending), looks):
                 if result: pending.remove(component)
             if not pending: return
             if time.monotonic() >= end: raise ReleaseError("ECS_HEALTH_TIMEOUT")
-            time.sleep(10)
+            time.sleep(ROLLOUT_POLL_SECONDS)
 
     def migrate(self, uri, contract, settings, release_id):
         template = settings["migration_task_definition"]
@@ -259,8 +361,10 @@ class ECS:
         network = settings["migration_network"]
         require(network["assignPublicIp"] == "DISABLED" and len(network["subnets"]) == 2
                 and len(network["securityGroups"]) == 1, "PRIVATE_MIGRATION_NETWORK_REQUIRED")
+        tasks = []
         def run(mode,phase=None):
             self.lease.assert_owned()
+            tasks.append(phase or mode)
             task = self.aws.call("ecs","run-task",{"cluster":CLUSTER,"taskDefinition":definition["taskDefinitionArn"],
                 "launchType":"FARGATE","clientToken":sha((release_id+(phase or mode)).encode()),
                 "networkConfiguration":{"awsvpcConfiguration":network},"enableExecuteCommand":False,
@@ -290,7 +394,12 @@ class ECS:
             require(contract.get("changed") and set(plan) == declared, "UNREVIEWED_PENDING_MIGRATIONS")
             run("dry-run")
             run("apply")
-        require(run("plan","after")[0] == 0, "PENDING_MIGRATIONS_REMAIN")
+            require(run("plan","after")[0] == 0, "PENDING_MIGRATIONS_REMAIN")
+            self.migration_checks = {"pending_before":pending,"plan_after":"ran","tasks":len(tasks)}
+        else:
+            # Plan-before saw nothing pending and this release started no task since, under the same
+            # lease: a second plan task could only repeat that answer. Record that it was skipped and why.
+            self.migration_checks = {"pending_before":0,"plan_after":"skipped","reason":SKIPPED_PLAN_AFTER,"tasks":len(tasks)}
         return definition["taskDefinitionArn"]
 
     def migration_logs(self, arn):
@@ -316,12 +425,15 @@ def deploy(mode="deploy", rollback_id=None):
     require(file_sha(path) == os.environ.get("EXPECTED_CANDIDATE_SHA256"), "APPROVED_ARTIFACT_CHANGED")
     validate_candidate(candidate,ctx)
     github = GitHub(ctx["repository"])
+    phases = Phases()
     # The approval step before cloud credentials already waited for GitHub's job records to settle.
     approval = github.assert_approval(candidate, settle=120)
+    phases.mark("approval")
     aws = AWS()
     aws.account()
     store = Store(aws)
     lease = Lease(aws,candidate["release_id"]).acquire()
+    phases.mark("lease")
     reconciled, started, previous, updated = False, False, None, []
     alert_failed = False
     receipt_key = "production/releases/"+candidate["release_id"]+"/"
@@ -330,6 +442,7 @@ def deploy(mode="deploy", rollback_id=None):
         validate_index(index)
         ecs = ECS(aws,lease)
         previous = ecs.snapshot()
+        phases.mark("snapshot-before",services=len(previous))
         require(previous == {n:{k:r[k] for k in ("image_uri","task_definition","config_sha256")}
                              for n,r in index["backend"].items()}, "LIVE_BASELINE_DIFFERS_FROM_INDEX")
         validate_candidate(candidate,ctx)
@@ -347,6 +460,7 @@ def deploy(mode="deploy", rollback_id=None):
         store.put(receipt_key+"started.json",{"schema":"hid.release-receipt/v1","kind":"backend",
             "candidate":candidate,"approval":approval,"before":previous,"status":"started"})
         started = True
+        phases.mark("receipt-started")
         migration_arn = index.get("migration_task_definition")
         if "database-migration" in desired:
             settings = json.loads(os.environ["RELEASE_CONFIG_JSON"])
@@ -354,19 +468,26 @@ def deploy(mode="deploy", rollback_id=None):
             require(settings["migration_network"] == index["migration_network"], "MIGRATION_NETWORK_DIFFERS_FROM_INDEX")
             settings["migration_task_definition"] = index["migration_task_definition"]
             migration_arn = ecs.migrate(desired["database-migration"],candidate["schema_change"],settings,candidate["release_id"])
+            phases.migration(candidate["release_id"],ecs.migration_checks)
         # The services roll out side by side; the gateway, which routes to them, follows once they are healthy.
         rollout = [name for name in ORDER if name in desired]
-        for wave in ([n for n in rollout if n != "gateway"], [n for n in rollout if n == "gateway"]):
+        for label, wave in (("services",[n for n in rollout if n != "gateway"]), ("gateway",[n for n in rollout if n == "gateway"])):
+            if not wave: continue
+            # Reads and image protection for the whole wave first; nothing is registered or updated yet.
+            payloads, protected = ecs.prepare({name:desired[name] for name in wave})
             targets = {}
             for name in wave:
-                arn = ecs.register(name,desired[name])
+                arn = ecs.register_prepared(name,payloads[name])
                 # Record mutation intent durably before sending update-service (including uncertain responses).
                 store.put(receipt_key+"intent-"+name+".json",{"component":name,"prior":previous[name],
                     "target_task_definition":arn})
                 updated.append(name)
                 targets[name] = arn
-            if targets: ecs.update_all(targets)
+            phases.mark("register-"+label,services=len(targets),images=protected)
+            ecs.update_all(targets)
+            phases.mark("rollout-"+label,services=len(targets))
         after = ecs.snapshot()
+        phases.mark("snapshot-after",services=len(after))
         lease.assert_owned()
         current,_ = store.read(INDEX_KEY,index_meta["VersionId"])
         require(current == index, "INDEX_BASELINE_VERSION_DIFFERS")
@@ -385,12 +506,15 @@ def deploy(mode="deploy", rollback_id=None):
         require(all(after[n]["image_uri"] == desired[n] for n in desired if n in COMPONENTS), "DEPLOYED_DIGEST_DIFFERS")
         index_meta = store.put(INDEX_KEY,new_index,etag=index_meta["ETag"])
         store.put(receipt_key+"complete.json",{"schema":"hid.release-receipt/v1","kind":"backend","status":"success",
-            "candidate":candidate,"before":index["backend"],"after":new_backend,"migration_task_definition":migration_arn})
+            "candidate":candidate,"before":index["backend"],"after":new_backend,"migration_task_definition":migration_arn,
+            **({"migration_checks":ecs.migration_checks} if ecs.migration_checks else {})})
         reconciled = True
+        phases.mark("index-and-receipt")
         try: notify(aws,candidate,"success" if mode == "deploy" else "rollback-success")
         except ReleaseError:
             alert_failed = True
             print(json.dumps({"release_id":candidate["release_id"],"alert_status":"failed"}))
+        phases.mark("notify")
         print(json.dumps({"release_id":candidate["release_id"],"status":"success","components":updated}))
     except Exception as error:
         # Never retry an uncertain update blindly. Describe live state, then restore only this release's intent targets.
@@ -398,7 +522,9 @@ def deploy(mode="deploy", rollback_id=None):
             try:
                 lease.assert_owned()
                 ecs.update_all({name:previous[name]["task_definition"] for name in reversed(updated)})
+                phases.mark("rollback-rollout",services=len(updated))
                 after = ecs.snapshot()
+                phases.mark("rollback-snapshot",services=len(after))
                 require(after == previous, "ROLLBACK_BASELINE_NOT_RESTORED")
                 # Schema may already be committed; preserve the admitted compatible migration pin.
                 restored = copy.deepcopy(index)
@@ -417,6 +543,7 @@ def deploy(mode="deploy", rollback_id=None):
                     "status":"failed-rolled-back","error_code":str(error) if isinstance(error,ReleaseError) else "CONTROLLER_FAILED",
                     "before":previous,"after":after})
                 reconciled = True
+                phases.mark("rollback-index")
             except Exception:
                 # Lease loss/uncertain rollback blocks takeover until explicit reconciliation.
                 reconciled = False

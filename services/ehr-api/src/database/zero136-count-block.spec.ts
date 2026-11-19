@@ -7,10 +7,12 @@ import { join } from 'node:path';
 // be affected than the owner approved. The numbers can be compared only if
 // both come from the same text, so 0136 carries the counts file's block
 // do $count_0136$ ... $count_0136$; character for character.
-const repository = join(__dirname, '../../../..');
+// Both paths are built from __dirname and literals only, so the production
+// selector's test scan (scripts/production-backend-build.test.mjs) sees the
+// one file read from outside ehr-api; outsideTestInputs maps it to ehr-api.
 const migration = readFileSync(
-  join(repository, 'services/ehr-api/database/migrations/0136_role_permission_changes.sql'), 'utf8');
-const countsFile = readFileSync(join(repository, 'docs/rollback/0136_affected_staff_counts.sql'), 'utf8');
+  join(__dirname, '../../database/migrations/0136_role_permission_changes.sql'), 'utf8');
+const countsFile = readFileSync(join(__dirname, '../../../../docs/rollback/0136_affected_staff_counts.sql'), 'utf8');
 
 function countBlock(text: string): string[] {
   return [...text.matchAll(/^do \$count_0136\$\n[\s\S]*?^\$count_0136\$;$/gm)].map((match) => match[0]);
