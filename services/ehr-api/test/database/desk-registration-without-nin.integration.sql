@@ -24,7 +24,8 @@
 --      case can no longer be inserted already decided, or resolved to a
 --      patient who does not hold its NIN (the NIN path is otherwise
 --      unchanged);
---   7. 20 a day per member at a facility;
+--   7. no daily limit (owner Q109): a member's 21st today is created, and
+--      the facility's count today is answered for the operations alert;
 --   8. refusals: no registration permission, another purpose, a sealed
 --      facility; the evidence shape check;
 --   9. erasing the case contact deletes the phone lookup.
@@ -345,8 +346,9 @@ select pg_temp.check_case('6 the runtime cannot write the marker', '42501 permis
 select pg_temp.check_case('6 the runtime cannot read the phone lookups', '42501 permission denied for table desk_registration_phone_lookups',
   pg_temp.attempt(1, $s$select 1 from identity.desk_registration_phone_lookups$s$));
 
--- 7. 20 a day per member at a facility (member 1 has 5 today: cases 1, 4, 6, 7
--- and 8; 15 more children, then the 21st).
+-- 7. No daily limit (owner Q109). Member 1 has 5 today (cases 1, 4, 6, 7 and
+-- 8); 15 more children, then the 21st and the 22nd are created too, and the
+-- answer counts the facility's registrations without a NIN today.
 do $$
 declare
   outcome text;
@@ -361,11 +363,27 @@ begin
     end if;
   end loop;
 end $$;
-select pg_temp.check_case('7 the 21st today', 'P0001 NO_NIN_REGISTRATION_DAILY_LIMIT',
-  pg_temp.register(1, 'e1300600-0000-4000-8000-000000000099', 'Batch', 'Toomany',
-    ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '20 days')::date, 'child',
-    null, null, 'nonin-batch-key-0099', repeat('9', 64), 'HID-NSA2B3'));
-select pg_temp.check_case('7 another member is not limited', 'approved_new_identity/0/f/t',
+do $$
+declare
+  first_answer record;
+  second_answer record;
+begin
+  perform pg_temp.as_member(1);
+  select * into first_answer from identity.register_patient_without_nin('e1300600-0000-4000-8000-000000000099',
+    'Batch', 'Toomany', ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '20 days')::date,
+    'female', 'child', null, null, null, null, null, 'nonin-batch-key-0099', repeat('9', 64), 'HID-NSA2B3');
+  perform pg_temp.check_case('7 the 21st today is created', 'approved_new_identity/0/f/t',
+    format('%s/%s/%s/%s', first_answer.case_status, first_answer.candidate_count, first_answer.replayed,
+      first_answer.subject_patient_id is not null));
+  select * into second_answer from identity.register_patient_without_nin('e1300600-0000-4000-8000-000000000097',
+    'Batch', 'Twentysecond', ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '22 days')::date,
+    'female', 'child', null, null, null, null, null, 'nonin-batch-key-0097', repeat('7', 64), 'HID-NSE6F7');
+  perform pg_temp.check_case('7 the 22nd today is created; the facility count goes on',
+    format('approved_new_identity/t/%s', first_answer.facility_daily_count + 1),
+    format('%s/%s/%s', second_answer.case_status, first_answer.facility_daily_count >= 21,
+      second_answer.facility_daily_count));
+end $$;
+select pg_temp.check_case('7 another member registers too', 'approved_new_identity/0/f/t',
   pg_temp.register(2, 'e1300600-0000-4000-8000-000000000098', 'Batch', 'Another',
     ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '21 days')::date, 'child',
     null, null, 'nonin-batch-key-0098', repeat('8', 64), 'HID-NSC4D5'));

@@ -74,11 +74,27 @@
 --   7. EXECUTE on 5 for hid_identity_runtime only (here when the role
 --      exists, and in runtime-grants.sql).
 --
--- Locks: ACCESS EXCLUSIVE on identity.consent_grants (replace a CHECK and add
--- one; one validating scan each) and identity.record_access_notices (replace
--- its CHECK), and on ehr.encounters (CREATE POLICY), held to commit, behind
--- the runner's 5 s lock_timeout (nothing applied when it expires). Writes to
--- these tables wait for that time; reads of ehr.encounters too.
+-- Locks, taken first (section 0b), NOWAIT: ACCESS EXCLUSIVE on
+-- identity.consent_grants (replace a CHECK and add one; one validating scan
+-- each), identity.record_access_notices (replace its CHECK) and
+-- ehr.encounters (CREATE POLICY); ROW EXCLUSIVE on auth.permissions and
+-- auth.role_permissions (the new permission and its roles), ROW SHARE on
+-- auth.roles, and ACCESS SHARE on identity.patients,
+-- identity.patient_identifiers and identity.registration_cases (read by the
+-- new functions' bodies), each held to commit. That is every existing table
+-- this file locks (pg_locks before commit), at the strongest mode it takes.
+-- Writes to the first three wait until the file commits, and reads of
+-- ehr.encounters too.
+-- A busy table fails the attempt at once, and its subtransaction releases
+-- what it took. The attempt is made again every 100 ms for at most 5 seconds,
+-- so the file never waits while holding a lock and no request queues behind
+-- a waiting lock; then 55P03 (nothing applied; the release can run again).
+-- When this transaction already holds an earlier migration's locks that stop
+-- other sessions' reads or writes (the runner's dry run applies every pending
+-- file in one transaction), one attempt and no sleep: 55P03 at once, nothing
+-- applied, instead of keeping those locks while this file waits. Indexes are
+-- locked only by planning (ACCESS SHARE), which only a REINDEX or DROP INDEX
+-- could hold up.
 --
 -- Old services on this schema: today's identity-api never writes
 -- 'own_facility' and never calls the new functions; the patient's history
@@ -86,6 +102,7 @@
 -- file before it serves POST identity/own-facility-access.
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied).
+-- 0b. Locks, NOWAIT (55P03 and nothing applied).
 -- 1-7. As above.
 -- 8. Post-checks.
 
@@ -135,6 +152,50 @@ begin
   end if;
 end
 $$;
+
+-- 0b. Locks (see Locks), NOWAIT, at most 5 s; one attempt when this
+-- transaction already holds an earlier migration's locks.
+do $locks$
+declare
+  attempt integer := 0;
+  holding boolean := exists (
+    select 1 from pg_locks held
+      join pg_class relation on relation.oid = held.relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where held.pid = pg_backend_pid() and held.locktype = 'relation' and held.granted
+       and held.database = (select database_row.oid from pg_database database_row
+                             where database_row.datname = current_database())
+       and held.mode in ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+       and namespace.nspname <> 'migration');
+begin
+  loop
+    attempt := attempt + 1;
+    begin
+      lock table identity.consent_grants, identity.record_access_notices, ehr.encounters
+        in access exclusive mode nowait;
+      lock table auth.permissions, auth.role_permissions
+        in row exclusive mode nowait;
+      lock table auth.roles
+        in row share mode nowait;
+      lock table identity.patients, identity.patient_identifiers, identity.registration_cases
+        in access share mode nowait;
+      exit;
+    exception when lock_not_available then
+      if holding then
+        raise exception using errcode = '55P03',
+          message = '0131: identity.consent_grants, identity.record_access_notices, ehr.encounters, the permission tables or a table 0131 reads (identity.patients, its identifiers, identity.registration_cases) is busy, and this transaction already holds an earlier migration''s '
+            || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
+      end if;
+      if attempt >= 50 then
+        raise exception using errcode = '55P03',
+          message = '0131: identity.consent_grants, identity.record_access_notices, ehr.encounters, the permission tables or a table 0131 reads (identity.patients, its identifiers, identity.registration_cases) stayed busy for 5 seconds; nothing applied; run the release again at a '
+            || 'quieter time';
+      end if;
+      perform pg_sleep(0.1);
+    end;
+  end loop;
+end
+$locks$;
 
 -- 1. The permission.
 insert into auth.permissions (code, description) values
