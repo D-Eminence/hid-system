@@ -561,6 +561,24 @@ describe('Q108 desk NIN resolve through QoreID', () => {
     expect(breaker.state()).toBe('open');
   });
 
+  it.each([
+    ['its token request timed out (nothing sent)', 'not_sent'],
+    ['the check timed out at its deadline', 'sent'],
+  ] as const)('answers QoreID\'s own 504 QOREID_TIMEOUT when %s with retryAfterSeconds, as the guard\'s', async (_label,
+    delivery) => {
+    const timeout = fromQoreId(504, 'QOREID_TIMEOUT', delivery);
+    const qoreId = gate({ verifyNinRecord: jest.fn(async () => { throw timeout; }) });
+    const { service, audit, breaker } = desk(qoreIdProvider(qoreId));
+    const answer = await service.resolve(input, 'resolve-key-q108-000070', context).catch((error: unknown) => error);
+    expect(answer).toMatchObject({ status: 504, code: 'QOREID_TIMEOUT', extensions: { retryAfterSeconds: 60 } });
+    // Still QoreID failing: one failure for the breaker, audited as a provider error.
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: NIN_PROVIDER_UNAVAILABLE_EVENT,
+      code: 'QOREID_TIMEOUT', status: 504 }));
+    expect(breaker.state()).toBe('closed');
+    expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'failure',
+      details: expect.objectContaining({ code: 'QOREID_TIMEOUT', providerCalled: true, ninCheck: 'provider_error' }) })]);
+  });
+
   it('does not count QoreID\'s own rate limit (429) as an outage', async () => {
     const qoreId = gate({ verifyNinRecord: jest.fn(async () => {
       throw fromQoreId(429, 'QOREID_RATE_LIMITED', 'not_sent', 429);

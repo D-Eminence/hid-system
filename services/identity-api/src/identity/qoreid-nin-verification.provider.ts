@@ -16,7 +16,7 @@ import {
   type PublicPatientIdentityProvider,
   qoreIdNotFound,
 } from './patient-enrollment.provider';
-import { qoreIdDelivery } from './qoreid-delivery';
+import { markQoreIdDelivery, qoreIdDelivery } from './qoreid-delivery';
 import { QOREID_PROVIDER, type QoreIdNinBinding } from './qoreid-verification.types';
 
 /** The gate's refusals while it is closed. Anything else is a fault, not a setting. */
@@ -72,7 +72,8 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
    *   `retryAfterSeconds`: passed on; nothing was sent for this request.
    * - 504 QOREID_TIMEOUT with `retryAfterSeconds` (isNinCheckStillRunning):
    *   passed on; the check was sent and goes on, its answer is kept for the
-   *   retry and `request.onSettled` hears how it ended.
+   *   retry and `request.onSettled` hears how it ended. QoreID's own 504
+   *   QOREID_TIMEOUT is given the same `retryAfterSeconds` (withRetryAfter).
    * - 503 NIN_CHECK_UNAVAILABLE (the guard's store could not be read):
    *   "NIN checks cannot be started right now", as the desk answers any check
    *   that could not be started; nothing was sent.
@@ -104,7 +105,7 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
         // check: nothing was sent.
         throw ninCheckNotStarted();
       }
-      throw forTheBreaker(error);
+      throw withRetryAfter(forTheBreaker(error));
     }
     const stored = checked.source === 'stored';
     if (checked.outcome === 'no_record') return this.notVerified(request, 'no_match', stored);
@@ -192,6 +193,23 @@ function forTheBreaker(error: unknown): unknown {
     || isNinCheckRefusedUnsent(error)) return error;
   if (!qoreIdDelivery(error)) return markNinCheckOwnFault(error);
   return qoreIdNotFound(error) ? markNinServiceAnswer(error) : error;
+}
+
+/**
+ * Every 504 QOREID_TIMEOUT the desk answers carries `retryAfterSeconds: 60`,
+ * as the guard's own does (the website waits that long, then retries with
+ * the same Idempotency-Key). QoreID's own timeout reaches the desk without
+ * it: its token request timing out at QOREID_TIMEOUT_MS (which starts before
+ * the guard's wait, so it ends first), or the check at its deadline. The same
+ * problem is given with the extension, keeping how far its request got; the
+ * breaker counts it as before.
+ */
+function withRetryAfter(error: unknown): unknown {
+  const facts = qoreIdDelivery(error);
+  if (!(error instanceof DomainProblem) || error.code !== 'QOREID_TIMEOUT' || !facts
+    || typeof error.extensions?.retryAfterSeconds === 'number') return error;
+  return markQoreIdDelivery(new DomainProblem(error.getStatus(), error.code, error.message, error.errors,
+    { extensions: { ...error.extensions, retryAfterSeconds: 60 } }), facts);
 }
 
 function normalizedName(value: string): string {

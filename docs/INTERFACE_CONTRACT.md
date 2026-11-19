@@ -6472,7 +6472,7 @@ and spacing ignored, first and last name in that order):
 | the record matches | the case is recorded with `verification_provider = 'qoreid'`, QoreID's reference and the time; `ninStatus: "verified"` ("NIN Verified") | `match` (`identity.nin.verify`, `success`, written before the case; and on `identity.nin.resolve`) |
 | the NIN is not confirmed | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `no_match` (`identity.nin.verify`, `denied`) |
 | the name or date of birth differs | `422 NIN_VERIFICATION_FAILED`, "The name or date of birth does not match the NIN record. Check the spelling and the date of birth." | `name_mismatch` (`identity.nin.verify`, `denied`) |
-| QoreID fails (5xx, timeout, network, bad answer) | QoreID's own `5xx` problem; counts toward the breaker | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
+| QoreID fails (5xx, timeout, network, bad answer) | QoreID's own `5xx` problem (its timeout, `504 QOREID_TIMEOUT`, with `retryAfterSeconds: 60`, as the guard's 504); counts toward the breaker | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
 | QoreID's "not found" (`404`) | `502 QOREID_PROVIDER_REJECTED`, as sign-up and the profile answer it; QoreID's answer, never counted as a failure | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
 | (0137) the guard refuses or reuses an answer | see "One QoreID check per NIN" below | |
 
@@ -6589,7 +6589,13 @@ The guard's answers, as the desk gives them:
 an answer it kept, so nothing was sent for this request; whether QoreID itself
 was called is the guard's row's `qoreidCalled`. A `5xx` problem's `detail` is replaced by the problem
 filter ("The service could not complete the request."); its `code` and
-`retryAfterSeconds` are always sent. A client shows the plain message, offers
+`retryAfterSeconds` are always sent. Every `504 QOREID_TIMEOUT` the desk
+answers carries `retryAfterSeconds: 60`: the guard's (this request's wait
+ended, the check goes on) and QoreID's own (its token request timed out at
+`QOREID_TIMEOUT_MS`, which starts before the guard's wait and so ends first;
+or the check at its deadline). After QoreID's own timeout nothing is kept for
+the retry when the NIN was not sent (the retry checks it again) and 0137's
+hold answers it when it was. A client shows the plain message, offers
 to try again after `retryAfterSeconds`, sends the same `Idempotency-Key` on
 that retry, and never retries on its own. How long a desk request takes:
 after a few database reads (the replay, QoreID's switch, a Health

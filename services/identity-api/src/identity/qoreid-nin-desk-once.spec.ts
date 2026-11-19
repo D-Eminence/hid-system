@@ -63,10 +63,15 @@ type QoreIdMode = 'verified' | 'no_record' | 'late' | 'slow' | 'reset' | 'forbid
 /** A QoreID that bills every NIN request it receives, answered or not, and answers with the asked NIN's record. */
 function fakeQoreId(leaseHeld: (nin: string) => boolean) {
   const state = { charged: 0, outsideGuard: 0, modes: [] as QoreIdMode[], fallback: 'verified' as QoreIdMode,
-    delayMs: 0 };
+    delayMs: 0, tokenHangs: false };
   let transaction = 8000;
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
   const fetch = jest.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/token') && state.tokenHangs) {
+      // QoreID's token endpoint never answers: the adapter gives up at its own timeout (nothing is billed).
+      await new Promise((_resolve, reject) => init?.signal?.addEventListener('abort',
+        () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+    }
     if (url.endsWith('/token')) return json({ accessToken: 'fixture-access-token', expiresIn: 7200, tokenType: 'Bearer' });
     if (!url.includes('/v1/ng/identities/nin/')) throw new Error('unexpected QoreID path');
     const nin = decodeURIComponent(url.slice(url.lastIndexOf('/') + 1));
@@ -324,6 +329,21 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     expect(s.deskChecks()).toEqual([
       expect.objectContaining({ code: 'QOREID_TIMEOUT', providerCalled: true, ninCheck: 'provider_error' }),
       { provider: 'qoreid', ninCheck: 'match', storedAnswer: true, recordKept: true }]);
+  });
+
+  it('answers QoreID\'s own 504 QOREID_TIMEOUT (its token request hung) with retryAfterSeconds, sending nothing', async () => {
+    const s = system();
+    s.qoreId.state.tokenHangs = true;
+    const answer = await s.resolve('desk-once-key-000018').catch((error: unknown) => error);
+    expect(answer).toMatchObject({ status: 504, code: 'QOREID_TIMEOUT', extensions: { retryAfterSeconds: 60 } });
+    // The NIN never reached QoreID: nothing charged or kept, the NIN free for the retry; QoreID failing counts once.
+    expect(s.qoreId.state.charged).toBe(0);
+    expect(s.store.rows.size).toBe(0);
+    expect(warn.mock.calls.filter(([entry]) => (entry as { event?: string }).event
+      === 'identity.nin_provider.unavailable')).toHaveLength(1);
+    s.qoreId.state.tokenHangs = false;
+    await expect(s.resolve('desk-once-key-000018')).resolves.toMatchObject({ caseId });
+    expect(s.qoreId.state.charged).toBe(1);
   });
 
   it('answers 409 NIN_CHECK_HELD with retryAfterSeconds for a NIN held after a check QoreID may have charged', async () => {
