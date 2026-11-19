@@ -6461,22 +6461,27 @@ profile check keeps a record it did not match); "no record" for 24 hours.
 ### A NIN already on a Health ID (Q110)
 
 Owner Q110: once a NIN is on a Health ID, its checked answer stays with the
-record. Before the NIN service is asked (after the switch check, so not while
-NIN checks are off), Identity reads the active patient who holds this NIN
-verified and not revoked. When the name and date of birth the desk entered are
-the ones on that patient's record (letter case and spacing ignored, first and
-last name in that order), the desk is answered from the record: the case is
-`resolved_existing_identity` for that patient, with the identifier's own
-`verification_provider`, `verification_reference` and time; nothing is sent
-to the NIN service and QoreID is not paid again, however long ago the NIN was
-checked (0137's stored answer may have ended), and the breaker is neither
-asked nor touched. Audit: `identity.nin.verify`, `success`, `ninCheck:
-"match"`, `providerCalled: false`, `healthIdRecord: true`. Any other request
-(no such patient, other details, a record without a date of birth or without
-its check's reference) goes to the NIN service as below, and learns nothing
-from this read. If the patient or the NIN changes between this read and the
-case being written, nothing is written: `409 NIN_CHECK_IN_PROGRESS` (with
-`retryAfterSeconds`), and the retry decides again.
+record, and the record is the answer: a NIN already verified on a Health ID
+is never sent to QoreID from the desk, however long ago it was checked (0137's
+stored answer may have ended). Before the NIN service is asked (after the
+switch check, so not while NIN checks are off), Identity reads the active
+patient who holds this NIN verified and not revoked. A revoked NIN, or a
+patient who is not active, is not a holder: such a NIN goes to the NIN service
+as any other.
+
+| The holder's record | Desk answer | `identity.nin.verify` audit |
+| --- | --- | --- |
+| the name and date of birth the desk entered are the record's (letter case and spacing ignored, first and last name in that order) | the case is `resolved_existing_identity` for that patient, with the identifier's own `verification_provider`, `verification_reference` and time | `success`, `ninCheck: "match"`, `providerCalled: false`, `healthIdRecord: true` |
+| any other name or date of birth (the names the other way round, or a record without a date of birth, included) | `422 NIN_VERIFICATION_FAILED`, "The name or date of birth does not match the NIN record. Check the spelling and the date of birth.": the same code and text as a QoreID record that does not match | `denied`, `ninCheck: "name_mismatch"`, `providerCalled: false`, `healthIdRecord: true` |
+| its check's evidence cannot be read (0011 requires it, so this should not happen) | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." | `failure`, `providerCalled: false` |
+
+In every row nothing is sent to the NIN service, QoreID is not paid, 0137's
+guard is not asked and nothing is kept there, and the breaker is neither asked
+nor touched (the record answers while the breaker is tripped). A "does not
+match" answer writes no case and names nothing from the record. If the patient
+or the NIN changes between this read and the case being written, nothing is
+written: `409 NIN_CHECK_IN_PROGRESS` (with `retryAfterSeconds`), and the retry
+decides again.
 
 ### One QoreID check per NIN (0137, Q109)
 
@@ -6625,8 +6630,10 @@ bad records, QoreID failures; the switch off, unreadable, and switched off
 during the check, or unreadable just before sending; no request limits (Q109:
 25 checks by one account, and 400 by 40 accounts at one facility, are never
 refused for volume; no hold or count is read or written); a NIN already on a
-Health ID (matched from the record without the NIN service, other details
-left to it, a patient changed before the write, not read while switched off);
+Health ID (the record is the answer: matched, or "does not match" for other
+details or no date of birth, never the NIN service, even with the breaker
+tripped; evidence that cannot be read; a patient changed before the write;
+not read while switched off);
 any record will do (no recognised sex), and stored answers said to be stored;
 no claim or stored answer of the desk's own (every resend goes to the guard);
 details
@@ -6645,7 +6652,8 @@ sign-up or the profile and the desk, one after the other and at once; a
 record without a recognised sex or with a line break in its address, kept by
 the profile or met at the desk, one charge; a record the desk did not match
 kept 24 hours, a matched one 90 days; a NIN on a Health ID after the stored
-answer ended, no charge; slow answers that do not trip the breaker, answers
+answer ended, no charge, and other details "does not match" from the record
+with no charge and nothing kept; slow answers that do not trip the breaker, answers
 that never come that do; a stored 404 counted once; a stored answer that does
 not close a retrying breaker; forty "does not match" answers for one NIN by
 one account, each answered, none held;

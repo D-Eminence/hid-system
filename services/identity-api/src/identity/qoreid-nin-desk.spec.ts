@@ -636,12 +636,34 @@ describe('Q108 desk NIN resolve through QoreID', () => {
       ['the names the other way round', { first_name: 'FICTIONAL', last_name: 'ADA' }],
       ['another date of birth', { dob: '1991-04-06' }],
       ['no date of birth', { dob: null }],
-      ['no recorded check', { verification_reference: null }],
-    ])('leaves a record with %s to the NIN service', async (_label, overrides) => {
+    ])('answers "does not match" from a record with %s, never asking the NIN service', async (_label, overrides) => {
       const qoreId = gate();
-      const { service } = desk(qoreIdProvider(qoreId), undefined, [{ ...holder, ...overrides }, { ...holder, ...overrides }]);
-      await expect(service.resolve(input, 'resolve-key-q110-000002', context)).resolves.toMatchObject({ caseId });
-      expect(qoreId.verifyNinRecord).toHaveBeenCalledTimes(1);
+      const breaker = new NinProviderBreaker();
+      breaker.recordFailure(new DomainProblem(503, 'QOREID_PROVIDER_UNAVAILABLE', 'down'));
+      warn.mockClear();
+      const { service, audit, statements } = desk(qoreIdProvider(qoreId), breaker, [{ ...holder, ...overrides }]);
+      const refusal = await service.resolve(input, 'resolve-key-q110-000002', context).catch((error: unknown) => error);
+      // The same answer, code and text as a record from the NIN service that does not match.
+      expect(refusal).toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED',
+        message: 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.' });
+      expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+      expect(statements.some(({ sql }) => /insert into identity\.registration_cases \(/.test(sql))).toBe(false);
+      expect(auditRows(audit)).toEqual([expect.objectContaining({ action: 'identity.nin.verify', outcome: 'denied',
+        details: { provider: 'qoreid', ninCheck: 'name_mismatch', providerCalled: false, healthIdRecord: true } })]);
+      // Neither the record's name nor its date of birth reaches the desk or the audit row.
+      expect(JSON.stringify([(refusal as Error).message, audit.record.mock.calls])).not.toMatch(/BOLA|1991-04-06/);
+      expect(breaker.state()).toBe('open');
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('answers "cannot be started", sending nothing, for a holder whose check cannot be read', async () => {
+      const qoreId = gate();
+      const { service, breaker } = desk(qoreIdProvider(qoreId), undefined, [{ ...holder, verification_reference: null }]);
+      await expect(service.resolve(input, 'resolve-key-q110-000006', context)).rejects.toMatchObject({
+        status: 503, code: 'NIN_PROVIDER_UNAVAILABLE',
+        message: 'NIN checks cannot be started right now. Please try again in a minute.' });
+      expect(qoreId.verifyNinRecord).not.toHaveBeenCalled();
+      expect(breaker.state()).toBe('closed');
     });
 
     it('writes nothing when the patient changed between the read and the write', async () => {

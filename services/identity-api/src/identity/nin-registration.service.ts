@@ -101,6 +101,17 @@ const CASE_NIN_VERIFIED = `case
       else ${patientHasVerifiedNinSql('registration.resolved_patient_id')}
     end as nin_verified`;
 
+/**
+ * Q110: what the record of the active patient holding a NIN verified answers:
+ * that patient, the provider of their check, and the desk's match when the
+ * name and date of birth are the record's.
+ */
+interface NinOnHealthId {
+  patientId: string;
+  provider: string;
+  verification?: NinVerificationResult;
+}
+
 /** Q110: the active patient holding a NIN verified, with that check's evidence (never NIN digits). */
 interface NinHolderRow extends QueryResultRow {
   patient_id: string;
@@ -236,15 +247,15 @@ export class NinRegistrationService {
       throw error;
     }
 
-    // Q110: a NIN on a Health ID keeps its checked answer with the record.
-    // A returning patient whose NIN HID already holds verified, typed with
-    // the name and date of birth on that patient's record, is matched from
-    // the record: the NIN service is not asked (QoreID not paid) again, even
-    // after 0137's stored answer has ended. Any other request is checked by
-    // the NIN service as before.
-    const onHealthId = await this.verifiedNinOnHealthId(context, ninLookupHmac, claimedDemographics);
+    // Q110: a NIN on a Health ID keeps its checked answer with the record,
+    // and the record is the answer. A NIN an active patient holds verified
+    // (not revoked) is never sent to the NIN service from the desk (QoreID is
+    // not paid again, however long ago it was checked): the name and date of
+    // birth on that patient's record match, or the desk is told they do not.
+    // Any other NIN is checked by the NIN service.
+    const onHealthId = await this.ninOnHealthId(context, ninLookupHmac, claimedDemographics);
     let verification: NinVerificationResult;
-    if (onHealthId) {
+    if (onHealthId?.verification) {
       verification = onHealthId.verification;
       await this.audit.record({
         correlationId: context.correlationId,
@@ -260,6 +271,11 @@ export class NinRegistrationService {
         purposeOfUse: context.purposeOfUse,
         details: { provider: verification.provider, ninCheck: 'match', providerCalled: false, healthIdRecord: true },
       });
+    } else if (onHealthId) {
+      // The desk's "does not match" from the record: nothing is sent, kept
+      // or written, and the breaker is not asked.
+      throw await this.ninNotVerified(context, onHealthId.provider, 'name_mismatch',
+        { providerCalled: false, healthIdRecord: true });
     } else {
       verification = await this.verifyWithProvider(input, claimedDemographics, context);
     }
@@ -883,7 +899,8 @@ export class NinRegistrationService {
     else this.ninBreaker.recordSuccess();
     if (!verification.verified) {
       const ninCheck = verification.outcome === 'name_mismatch' ? 'name_mismatch' : 'no_match';
-      throw await this.ninNotVerified(context, verification.provider, ninCheck, verification.stored === true);
+      throw await this.ninNotVerified(context, verification.provider, ninCheck,
+        verification.stored ? { storedAnswer: true } : {});
     }
     // Q108: every NIN check is audited on its own, before the case is
     // written, so a charged check that matched is on record even when the
@@ -928,16 +945,16 @@ export class NinRegistrationService {
   }
 
   /**
-   * Q110: the active patient who holds this NIN verified (not revoked), when
-   * the name and date of birth the desk entered are the ones on that
+   * Q110: the active patient who holds this NIN verified (not revoked), and
+   * whether the name and date of birth the desk entered are the ones on that
    * patient's record (letter case and spacing ignored, first and last name
-   * in that order): a match from HID's own checked answer, with that
-   * answer's provider, reference and time. Null otherwise, and then the NIN
-   * service decides, as before; a desk that typed other details learns
-   * nothing here.
+   * in that order; a record without a date of birth matches none): when they
+   * are, a match from HID's own checked answer, with that answer's provider,
+   * reference and time. Null when no active patient holds the NIN verified:
+   * only then does the NIN service decide.
    */
-  private async verifiedNinOnHealthId(context: DataAccessContext, ninLookupHmac: string,
-    claimed: NinClaimedDemographics): Promise<{ patientId: string; verification: NinVerificationResult } | null> {
+  private async ninOnHealthId(context: DataAccessContext, ninLookupHmac: string,
+    claimed: NinClaimedDemographics): Promise<NinOnHealthId | null> {
     let row: NinHolderRow | undefined;
     try {
       row = await this.readNinHolder(context, ninLookupHmac);
@@ -946,22 +963,31 @@ export class NinRegistrationService {
       await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
       throw ninCheckNotStarted();
     }
-    const verifiedAt = row?.verified_at ? new Date(row.verified_at) : undefined;
-    if (!row || typeof row.first_name !== 'string' || typeof row.last_name !== 'string'
+    if (!row) return null;
+    const verifiedAt = row.verified_at ? new Date(row.verified_at) : undefined;
+    if (typeof row.verification_provider !== 'string' || row.verification_provider.length < 1
+      || typeof row.verification_reference !== 'string' || row.verification_reference.length < 1
+      || !verifiedAt || !Number.isFinite(verifiedAt.getTime())) {
+      // 0011 requires a verified NIN's evidence, so a row without it cannot
+      // be read as the record's answer; the NIN is not sent either.
+      const error = ninCheckNotStarted();
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw error;
+    }
+    const provider = row.verification_provider;
+    if (typeof row.first_name !== 'string' || typeof row.last_name !== 'string'
       || normalizedPersonName(row.first_name) !== normalizedPersonName(claimed.firstName)
       || normalizedPersonName(row.last_name) !== normalizedPersonName(claimed.lastName)
-      || row.dob !== claimed.dateOfBirth
-      || typeof row.verification_provider !== 'string' || row.verification_provider.length < 1
-      || typeof row.verification_reference !== 'string' || row.verification_reference.length < 1
-      || !verifiedAt || !Number.isFinite(verifiedAt.getTime())) return null;
+      || row.dob !== claimed.dateOfBirth) return { patientId: row.patient_id, provider };
     const gender = claimed.gender
       ?? (row.gender && CASE_GENDERS.has(row.gender) && row.gender !== 'unknown' ? row.gender : undefined);
     return {
       patientId: row.patient_id,
+      provider,
       verification: {
         verified: true,
         outcome: 'match',
-        provider: row.verification_provider,
+        provider,
         reference: row.verification_reference,
         verifiedAt: verifiedAt.toISOString(),
         // The desk's spelling, as for a NIN service match.
@@ -979,7 +1005,7 @@ export class NinRegistrationService {
 
   /** Audits a NIN that was not verified (denied) and returns the desk's 422. */
   private async ninNotVerified(context: DataAccessContext, provider: string, ninCheck: 'no_match' | 'name_mismatch',
-    storedAnswer = false): Promise<DomainProblem> {
+    extra: { storedAnswer?: true; providerCalled?: false; healthIdRecord?: true } = {}): Promise<DomainProblem> {
     await this.audit.record({
       correlationId: context.correlationId,
       actorType: 'staff',
@@ -992,7 +1018,7 @@ export class NinRegistrationService {
       resourceType: 'registration-case',
       outcome: 'denied',
       purposeOfUse: context.purposeOfUse,
-      details: { provider, ninCheck, ...(storedAnswer ? { storedAnswer: true } : {}) },
+      details: { provider, ninCheck, ...extra },
     });
     return new DomainProblem(422, 'NIN_VERIFICATION_FAILED', ninCheck === 'name_mismatch'
       ? 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.'

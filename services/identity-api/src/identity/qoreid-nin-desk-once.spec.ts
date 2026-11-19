@@ -543,14 +543,33 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
         healthIdRecord: true }]);
     });
 
-    it('leaves a desk that typed other details to the NIN check, as before, telling it nothing', async () => {
+    it('answers other details "does not match" from the record: no QoreID call, nothing kept or written', async () => {
       const s = system();
       onHealthId(s);
-      await expect(s.resolve('desk-once-key-000302', deskContext(), { ...input, dateOfBirth: '1988-07-15' }))
-        .rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED',
+      for (const [key, body] of [['desk-once-key-000302', { ...input, dateOfBirth: '1988-07-15' }],
+        ['desk-once-key-000303', { ...input, firstName: 'Bisi' }]] as const) {
+        await expect(s.resolve(key, deskContext(), body)).rejects.toMatchObject({ status: 422,
+          code: 'NIN_VERIFICATION_FAILED',
           message: 'The name or date of birth does not match the NIN record. Check the spelling and the date of birth.' });
-      expect(s.qoreId.state.charged).toBe(1);
+      }
+      expect(s.qoreId.state.charged).toBe(0);
+      expect(s.store.rows.size).toBe(0);
+      expect(s.checkAudits()).toEqual([]);
       expect(s.cases).toHaveLength(0);
+      expect(s.deskChecks()).toEqual([0, 1].map(() => ({ provider: 'qoreid', ninCheck: 'name_mismatch',
+        providerCalled: false, healthIdRecord: true })));
+      // The right details are matched from the same record, still without QoreID.
+      await expect(s.resolve('desk-once-key-000304')).resolves.toMatchObject({ caseId });
+      expect(s.qoreId.state.charged).toBe(0);
+    });
+
+    it('treats a revoked NIN or an inactive patient as no holder: QoreID checks it, as before', async () => {
+      // identity.patient_identifiers finds no holder for either (desk-nin-holder.integration.sql 1b, 1c).
+      const s = system();
+      await expect(s.resolve('desk-once-key-000305', deskContext(), { ...input, dateOfBirth: '1988-07-15' }))
+        .rejects.toMatchObject({ status: 422, code: 'NIN_VERIFICATION_FAILED' });
+      expect(s.qoreId.state.charged).toBe(1);
+      expect(s.deskChecks()).toEqual([{ provider: 'qoreid', ninCheck: 'name_mismatch' }]);
     });
   });
 
