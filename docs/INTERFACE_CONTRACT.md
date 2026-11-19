@@ -6032,14 +6032,16 @@ migration, no new setting. `schema.integration.sql` is unchanged.
 
 ### Request bodies
 
-`changeReason` becomes optional in three bodies only: `PATCH
+`changeReason` becomes optional in three bodies: `PATCH
 /ehr/patients/:patientId/encounters/:encounterId/clinical-notes/:noteId`
 (UpdateClinicalNote), `PATCH .../prescriptions/:prescriptionId`
 (UpdatePrescription) and `PATCH .../lab-requests/:requestId`
-(UpdateLabRequest). When it is sent, the rules are unchanged: a string,
-trimmed, 3 to 500 characters, never `null` (`400` from validation
-otherwise). Every other body that carries `changeReason` (visits,
-diagnoses, note revisions, vitals corrections) still requires it.
+(UpdateLabRequest). Q105 adds two more: `PATCH
+/ehr/patients/:patientId/encounters/:encounterId` (UpdateEncounter) and
+`POST .../clinical-notes/:noteId/revisions` (new note text). When it is
+sent, the rules are unchanged: a string, trimmed, 3 to 500 characters,
+never `null` (`400` from validation otherwise). Diagnosis updates and
+vitals corrections still require it in the body.
 
 ### When the server records a fixed reason
 
@@ -6048,7 +6050,8 @@ diagnoses, note revisions, vitals corrections) still requires it.
 | A draft note signed (`status: "signed"`) with no other field (no `title`), and the note's version history shows it was never signed or amended | Not needed | `First signature (no reason needed)` |
 | A draft prescription activated (`status: "active"`) with no other field (no `frequency`, `instructions` or `endsOn`; `allergyAcknowledgement` may be sent), and its version history shows it was never active, on hold or completed | Not needed | `First activation (no reason needed)` |
 | Either of the above with a typed reason | Optional | The typed reason |
-| Anything else: amend, hold, resume after a hold, stop or cancel, entered in error, any edit (drafts included), any lab-request change | **Required** | The typed reason |
+| Q105 adds: a lab request's first activation, starting and finishing a visit, and edits to a draft note, prescription or lab request that was never signed or active (see the Q105 section for the conditions and the recorded reasons) | Not needed | The Q105 fixed reason |
+| Anything else: amend, hold, resume after a hold, stop or cancel (drafts included), entered in error (drafts and visits included), completing an order, any change to something already signed or active, a visit's chief complaint | **Required** | The typed reason |
 
 "First" is checked against the record's version history, not only its
 current status, and fails closed: if the record's create version cannot be
@@ -6065,25 +6068,37 @@ before anything is written. For prescriptions the reason rule is decided
 before the allergy check; the allergy check itself is unchanged, so an
 allergy match on a first activation still answers `409
 ALLERGY_ACKNOWLEDGEMENT_REQUIRED` until the acknowledgement is sent. For lab
-requests the `400` answers before the request reaches the database.
+requests and visits, a change that can never go without a typed reason
+answers the `400` before the request reaches the database; one that might
+(a lab request's first activation or draft edit, a visit's start or finish)
+is decided under the row lock (Q105).
 
 ### Audit
 
 When a fixed reason is used, the update's audit row (`ehr.note.update` or
 `ehr.prescription.update`) carries `fixedReason: "first_signature"` or
-`"first_activation"`. With a typed reason the audit details are unchanged
-(the typed text is never in the audit row).
+`"first_activation"`. Q105 adds `"draft_edit"`, `"visit_start"` and
+`"visit_finish"`, and the same field on `ehr.lab-request.update`,
+`ehr.encounter.update` and `ehr.note-revision.create`. With a typed reason
+the audit details are unchanged (the typed text is never in the audit row).
 
-### Not yet covered (owner question 6, pending)
+### Extended by Q105
 
-The first activation of a lab request, starting and completing a visit, and
-edits to drafts still need a typed reason.
+Owner question 6 was answered yes on 18 November 2026: the first activation
+of a lab request, starting and finishing a visit, and edits to drafts no
+longer need a typed reason. The request bodies, the table, the `400` and
+the audit above include it; the Q105 section has the conditions and the
+recorded reasons. For notes and prescriptions, a draft edit (and an edit
+sent with the first signature or first activation) now records a fixed
+reason too.
 
 ### Screen change needed (Akos frontend branch)
 
 The note "Sign" and prescription "Activate" actions may send no
-`changeReason`. Every other change keeps asking for a reason and shows the
-server's plain message on `CHANGE_REASON_REQUIRED`.
+`changeReason`. Since Q105, starting or finishing a visit, a lab request's
+first send and draft edits may send none too (see Q105's Website section).
+Every other change keeps asking for a reason and shows the server's plain
+message on `CHANGE_REASON_REQUIRED`.
 
 ## EHR-C1. The open visit today, and starting a visit without a duplicate (wave 1, no migration)
 
@@ -6210,21 +6225,25 @@ QA open question. ehr-api only; no migration, no new setting.
 A `completed` visit may now move to `entered_in_error` (before, a completed
 visit could not change status). The body is the usual UpdateEncounter body,
 and **a typed `changeReason` is required** (3 to 500 characters; it is
-recorded in `ehr.record_versions` as for every change):
+recorded in `ehr.record_versions` as for every change). Since Q105 the body
+may leave `changeReason` out, but only to start or finish a visit; entering
+a visit in error still needs a typed one:
 
 ```json
 { "expectedRowVersion": 3, "status": "entered_in_error", "changeReason": "Wrong patient chosen" }
 ```
 
-Refusals, checked under the visit's row lock before anything is written:
+Refusals. The two `400`s come first, before the visit is read; the `409`s
+are checked under the visit's row lock, before anything is written:
 
 | Answer | When |
 | --- | --- |
+| `400` (validation) | A `changeReason` shorter than 3 characters after trimming (a blank one included), longer than 500, or `null` |
+| `400 CHANGE_REASON_REQUIRED` "Please say why you are changing this." | No `changeReason` (Q105 lets the body leave it out, but only for a start or finish) |
 | `409 IMPORTED_VISIT_NOT_ENTERED_IN_ERROR` "The imported paper records visit cannot be marked as entered in error." | The visit is the patient's imported paper records visit (0113) |
 | `409 VISIT_HAS_OPEN_ORDERS` "Cancel or stop this visit's prescriptions and lab requests, drafts included, before marking it as entered in error." | The visit still has a `draft`, `active` or `on_hold` prescription or lab request (so no pharmacy or lab keeps acting on a visit that should not exist; a draft counts because it could otherwise be activated later) |
 | `409 VISIT_HAS_SIGNED_NOTES` "Mark this visit's signed notes as entered in error before marking the visit as entered in error." | The visit still has a `signed` or `amended` note (so the patient's own record never lists a note of the visit; see below) |
 | `409 INVALID_ENCOUNTER_TRANSITION` | A completed visit to any status other than `entered_in_error` (unchanged) |
-| `400` (validation) | No `changeReason`, or one shorter than 3 characters |
 
 On success the audit row (`ehr.encounter.update`) carries
 `completedVisitEnteredInError: true`. Entering a planned, in-progress or
@@ -6828,6 +6847,166 @@ Screen change (Akos frontend branch): run the check when a medicine is
 chosen and show `message` with the matches (medicine, status, dates) above
 Save; Save stays enabled. After Save, show `duplicateMedicines.message` if
 present.
+
+## Q105. No typed reason for a lab request's first activation, starting and finishing a visit, and draft edits (no migration)
+
+Owner decision of 18 November 2026 (owner question 6, answered yes; Akos
+N-12: reasons only for things already signed or active). It extends FR-1 in
+ehr-api only: no migration, no new setting, `schema.integration.sql`
+unchanged. The rule and the fail-closed "first" check are FR-1's: "never
+signed or active" is read from the record's version history
+(`ehr.record_versions`), and if its create version cannot be read, a typed
+reason is required.
+
+### Request bodies
+
+`changeReason` may now also be left out of `PATCH
+/ehr/patients/:patientId/encounters/:encounterId` (UpdateEncounter) and `POST
+.../clinical-notes/:noteId/revisions` (new note text). When sent, the rules
+are unchanged (trimmed, 3 to 500 characters, never `null`). Diagnosis
+updates and vital corrections still require it in the body.
+
+### When the server records a fixed reason
+
+| Change (no typed reason sent) | Condition | Recorded reason (`change_reason`) | Audit `fixedReason` |
+| --- | --- | --- | --- |
+| Lab request `status: "active"` from `draft` (may also change `priority` or `clinicalInformation`); it is then sent to Lab as before | never active, on hold or completed | `First activation (no reason needed)` | `first_activation` |
+| Lab request `priority` or `clinicalInformation` while it stays `draft` | never active, on hold or completed | `Draft edit (no reason needed)` | `draft_edit` |
+| Prescription `frequency`, `instructions` or `endsOn` while it stays `draft` | never active, on hold or completed | `Draft edit (no reason needed)` | `draft_edit` |
+| Prescription `status: "active"` from `draft` together with those edits | as FR-1 | `First activation (no reason needed)` | `first_activation` |
+| Note `title` while it stays `draft` | never signed or amended | `Draft edit (no reason needed)` | `draft_edit` |
+| Note signed together with a `title` change | never signed or amended | `First signature (no reason needed)` | `first_signature` |
+| New note text (`revisions`) on a `draft` note; the revision row's `change_reason` holds the same text | never signed or amended | `Draft edit (no reason needed)` | `draft_edit` (on `ehr.note-revision.create`) |
+| Visit `status: "in_progress"` from `planned`, no other field | never in progress, on hold or completed | `Visit started (no reason needed)` | `visit_start` |
+| Visit `status: "completed"` from `in_progress`, with or without `endedAt`, no `chiefComplaint` | never completed | `Visit finished (no reason needed)` | `visit_finish` |
+
+A typed reason, when sent, is always recorded instead, and the audit details
+are then unchanged (the typed text is never in the audit row).
+
+### Still needs a typed reason
+
+`400 CHANGE_REASON_REQUIRED`, "Please say why you are changing this.",
+before anything is written, for: putting on hold, resuming after a hold,
+cancelling (drafts included), entering in error (drafts and visits
+included), completing a lab request or prescription, amending a signed note,
+any change to an active, held or ended order, a visit's chief complaint, and
+any of the changes in the table when the history shows the record was
+signed or active before or cannot be read. For lab requests, a change to
+`on_hold`, `completed`, `cancelled` or `entered_in_error` without a reason
+answers the `400` before the request reaches the database; a draft's
+activation or edit is decided under the request's row lock. For visits, a
+change without a reason that can be neither a start (`in_progress`, no other
+field) nor a finish (`completed`, with at most `endedAt`) answers the `400`
+before the visit is read, so before EHR-C8a's `409`s (`VISIT_HAS_OPEN_ORDERS`
+and the others); a move to `in_progress` or `completed` is decided under the
+visit's row lock (a resume after a hold, or a start or finish the history
+shows happened before, then answers the `400`). The allergy check on a prescription's activation is unchanged (409
+`ALLERGY_ACKNOWLEDGEMENT_REQUIRED` until acknowledged). For notes and
+prescriptions, EHR-C8a's 409 `VISIT_ENTERED_IN_ERROR` is unchanged and comes
+first; for lab requests and visits, the early `400` above comes before it.
+
+### Website
+
+Akos's frontend may leave the reason box out for these changes. Every
+other change keeps it.
+
+## Q100 B. "No such patient" on the staff Health ID lookup (no migration)
+
+Owner decision of 18 November 2026 (Q100, option B): a Health ID that no
+patient has answers "No such patient" distinctly. identity-api only: no
+migration and no new setting.
+
+### `POST /api/v1/identity/patient-lookup`
+
+Body unchanged (`hid` in the body, never in a URL; `purpose`). Answers:
+
+| Case | Status | Body |
+| --- | --- | --- |
+| The patient opens (unchanged) | `200` | as before |
+| No patient record of any status has this Health ID, and the Health ID is on the member's facility's side of the seals (below) | `404` | `{ "code": "PATIENT_NOT_FOUND", "detail": "No patient has this Health ID." }` |
+| The patient exists but is not available here (another facility's patient without consent, not active, sealed tenant) | `404` | today's answer, unchanged (`code` `NOT_FOUND`, "Patient was not found or is not available") |
+| The Health ID is on another side of the seals than the member's facility, or starts `ZDEM` or `ZQA` without being a sealed one, or the facility's side cannot be told (below) | `404` | today's answer, whether or not any record has the Health ID, never `PATIENT_NOT_FOUND` |
+| The patient can be seen here but this lookup is not authorized | `403` | today's answer, unchanged; never counted toward the limit below |
+| The staff account has had 30 lookups answered `404` in 10 minutes, at any of its facilities | `404` | today's answer (`404` `NOT_FOUND`) for 10 minutes to every lookup that finds no patient, never `PATIENT_NOT_FOUND` and never a `429`; a `403` stays today's `403` |
+
+"No record has this Health ID" is read with
+`identity.support_health_id_matches` (0109), which identity-api's runtime
+may already execute: it answers only whether the one Health ID asked is
+issued (any status), nothing else about any patient. Note: 0109's comment
+names the support route as its caller; this is a second caller of the same
+function, with no database change.
+
+Every lookup that finds no patient (every `404`) is counted for the person
+before anything is said about the Health ID (`auth.otp_rate_limits`,
+`account` bucket keyed by an HMAC of the staff account with the existing
+`OTP_HMAC_KEY_B64`). It is one limit per account, not per membership: a
+member of several facilities gets no fresh 30 by changing `X-Facility-ID`.
+A lookup that opens a patient is not counted, and neither is today's `403`:
+the issued check is never asked for it and a limited account gets the same
+`403`, so counting it would only limit a desk working through patients who
+have not yet given consent. A limited account keeps getting today's `404`,
+never a new status: the website ends access and closes an open record on any
+`403` or `404` from this lookup (its check before every save), so a `429`
+there would leave a record open after access has ended. If the member cannot be counted, the side of
+the member's facility cannot be told, or the issued check cannot be read
+(or answers anything but the one Health ID or nothing), the answer is
+today's `404`, never `PATIENT_NOT_FOUND`.
+
+### The seals (demo 0098, QA 0123)
+
+Nothing in a sealed tenant ever finds a real patient, and nothing real finds
+a sealed one (0098 D2, 0123). The issued check reads past row-level
+security, so it is asked only when the Health ID and the member's facility
+are on the same side:
+
+| Health ID | Its side |
+| --- | --- |
+| `HID-ZDEM` and 4 more Health ID characters (8 in all, 0098 D7) | demo |
+| `HID-ZQA` and 5 more Health ID characters (8 in all, 0123 D7) | QA |
+| Any other Health ID starting `ZDEM` or `ZQA` (any length) | none: always today's `404` |
+| Every other Health ID | real |
+
+Identity's generator has never issued an 8-character Health ID and, since
+Q60, never starts one with `ZDEM` or `ZQA`; a real Health ID issued earlier
+that starts so is never answered `PATIENT_NOT_FOUND` (it gets today's `404`
+when it does not open).
+
+The member's facility's side is read with `identity.sealed_demo_facility`
+(0098) and `identity.sealed_qa_facility` (0123), which identity-api's runtime
+may already execute: demo when only the first says yes, QA when only the
+second does, real when neither does. When both say yes, when either cannot
+be read, or when the request has no facility, the side cannot be told and
+the answer is today's `404`. So a demo or QA member learns nothing about
+real Health IDs, a real member nothing about demo or QA ones, and the demo
+and QA tenants nothing about each other; each learns only whether a Health
+ID of its own side is issued. Nothing is asked about the Health ID (no side
+query and no issued check) when it is malformed or starts `ZDEM` or `ZQA`
+without being a sealed one.
+
+### Audit
+
+Every answer writes `identity.patient.lookup` as before (`success`, or
+`denied`), never with the Health ID. A `denied` row now carries
+`details.lookupResult`: `no_such_patient`, `not_available`,
+`not_authorized` (with the patient id, as before; a `403`, never counted)
+or `limited` (a `404` while the account is limited).
+`not_available` is every `404` that is not `PATIENT_NOT_FOUND` and not
+limited: a record has the Health ID, the Health ID is of another side of the
+seals, or it could not be told.
+
+### Not changed
+
+Access requests, the Access PIN and emergency access by Health ID keep
+their answers (`404 CONSENT_RESOURCE_NOT_FOUND` and so on). They are lane A's
+(`src/consent/*`) and are being changed by hid-system#264 (0128).
+
+### Website
+
+Find a patient shows the owner's words, "No patient has this Health ID."
+(the answer's `detail`), with Register for roles that register (health repo,
+`PatientsWorkspace.tsx`), only on `PATIENT_NOT_FOUND`. Every other `404` and
+every `403` stays a refused lookup, as today. A limited account gets today's
+`404`, never a `429`.
 
 ## 55. A staff member's chosen facility, kept per sign-in (0129, provisional)
 

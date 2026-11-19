@@ -11,7 +11,7 @@ import {
   UpdateLabRequestDto,
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
-import { requireChangeReason } from '../shared/change-reason';
+import { changeReasonRequired, hasTypedReason, neverReachedBefore, resolveChangeReason } from '../shared/change-reason';
 import { requireVisitOpenForWork } from '../shared/visit-guard';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
@@ -324,9 +324,17 @@ export class LabRequestsService {
     if (input.priority === undefined && input.status === undefined && input.clinicalInformation === undefined) {
       throw new DomainProblem(400, 'EMPTY_UPDATE', 'At least one clinical field must be supplied');
     }
-    // FR-1: every lab-request change still needs a typed reason. The first
-    // activation of a lab request waits for owner question 6.
-    const changeReason = requireChangeReason(input.changeReason);
+    // Q105: a draft that was never active may be activated (its first
+    // activation, which sends it to Lab) or edited, or both, with no typed
+    // reason; the fixed one is recorded. Any other change without a typed
+    // reason (hold, resume, complete, cancel, entered in error) answers 400
+    // before the request reaches the database; whether the request is a
+    // draft that was never active is checked under its row lock, against the
+    // version history, failing closed.
+    const typed = hasTypedReason(input.changeReason);
+    if (!typed && input.status !== undefined && input.status !== OrderStatus.Draft && input.status !== OrderStatus.Active) {
+      throw changeReasonRequired();
+    }
     const { row, routedBefore, orderRoute } = await this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.lab-request.update', resourceType: 'lab-request', resourceId: requestId },
@@ -345,7 +353,12 @@ export class LabRequestsService {
         // Read under the row lock, which C1 takes first, so no route can be
         // sent between this read and the update (SPEC-FINAL §8.9).
         const before = await this.orderRoutes.summary(client, context, 'lab_request', patientId, requestId);
-        await this.repository.setChangeReason(client, changeReason);
+        const free = !typed && current.status === OrderStatus.Draft
+          && await neverReachedBefore(client, 'lab_requests', requestId,
+            [OrderStatus.Active, OrderStatus.OnHold, OrderStatus.Completed]);
+        const { reason, details: reasonDetails } = resolveChangeReason(input.changeReason,
+          free ? (input.status === OrderStatus.Active ? 'first_activation' : 'draft_edit') : undefined);
+        await this.repository.setChangeReason(client, reason);
         const result = await client.query<CreatedLabRequestRow>(
           `update ehr.lab_requests set
              priority = coalesce($1, priority), status = coalesce($2, status),
@@ -364,7 +377,7 @@ export class LabRequestsService {
         const after = before ? await this.orderRoutes.summary(client, context, 'lab_request', patientId, requestId)
           : before;
         return { value: { row, routedBefore: routeInForce(before), orderRoute: after },
-          resourceId: requestId, details: { rowVersion: row.rowVersion } };
+          resourceId: requestId, details: { rowVersion: row.rowVersion, ...reasonDetails } };
       },
       (client) => this.repository.exists(client, 'lab_requests', requestId, patientId, context.facilityId, encounterId),
     );
