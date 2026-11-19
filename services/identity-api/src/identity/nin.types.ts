@@ -18,7 +18,10 @@ export interface NinVerificationRequest {
   onSettled?: (settlement: NinCheckSettlement) => void;
 }
 
-/** How a check sent to the NIN service ended: an answer, or the failure. */
+/**
+ * How a check sent to the NIN service ended: an answer (QoreID's 404 "not
+ * found" included), or the failure.
+ */
 export type NinCheckSettlement = { answered: true } | { answered: false; error: unknown };
 
 /**

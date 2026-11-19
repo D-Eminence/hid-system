@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DomainProblem } from '../common/problem';
-import { markStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
+import { isNinCheckRefusedUnsent, isNinCheckStillRunning, isStoredNinAnswer, markNinCheckOwnFault,
+  markNinServiceAnswer, markStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
 import type {
   NinClaimedDemographics,
   NinVerificationProvider,
@@ -12,7 +13,9 @@ import {
   type NinRecordNames,
   PUBLIC_PATIENT_IDENTITY_PROVIDER,
   type PublicPatientIdentityProvider,
+  qoreIdNotFound,
 } from './patient-enrollment.provider';
+import { qoreIdDelivery } from './qoreid-delivery';
 import { QOREID_PROVIDER, type QoreIdNinBinding } from './qoreid-verification.types';
 
 /** The gate's refusals while it is closed. Anything else is a fault, not a setting. */
@@ -68,6 +71,9 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
    * - 503 NIN_CHECK_UNAVAILABLE (the guard's store could not be read):
    *   "NIN checks cannot be started right now", as the desk answers any check
    *   that could not be started; nothing was sent.
+   * For the breaker (D4), QoreID's 404 "not found" is marked as its answer
+   * (isNinServiceAnswer), and an error no QoreID request raised (the guard's
+   * audit write, a database fault) as HID's own (isNinCheckOwnFault).
    */
   async verify(request: NinVerificationRequest): Promise<NinVerificationResult> {
     const claimed = request.claimedDemographics;
@@ -93,7 +99,7 @@ export class QoreIdNinVerificationProvider implements NinVerificationProvider {
         // check: nothing was sent.
         throw ninCheckNotStarted();
       }
-      throw error;
+      throw forTheBreaker(error);
     }
     const stored = checked.source === 'stored';
     if (checked.outcome === 'no_record') return this.notVerified(request, 'no_match', stored);
@@ -159,6 +165,22 @@ export function selectNinVerificationProvider(
   if (environment.NIN_PROVIDER_MODE === 'deferred') return providers.deferred;
   if (environment.NIN_PROVIDER_MODE === 'test') return providers.deterministicTest;
   return environment.QOREID_ENABLED ? providers.qoreId : providers.unavailable;
+}
+
+/**
+ * D4: says what an error from the guard means for the breaker, which counts
+ * only what QoreID did. The guard's own answers (stored, still running,
+ * refused unsent) are already marked. An error a QoreID request raised is
+ * marked with how far it got (qoreid-delivery.ts): its 404 is QoreID's
+ * answer; anything else from QoreID (5xx, timeout, network, 401, an answer
+ * HID cannot use) is QoreID failing and is left as it is. Any other error
+ * was raised by HID's own code or database.
+ */
+function forTheBreaker(error: unknown): unknown {
+  if (typeof error !== 'object' || error === null || isStoredNinAnswer(error) || isNinCheckStillRunning(error)
+    || isNinCheckRefusedUnsent(error)) return error;
+  if (!qoreIdDelivery(error)) return markNinCheckOwnFault(error);
+  return qoreIdNotFound(error) ? markNinServiceAnswer(error) : error;
 }
 
 function normalizedName(value: string): string {

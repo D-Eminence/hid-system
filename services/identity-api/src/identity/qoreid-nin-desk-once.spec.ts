@@ -126,11 +126,14 @@ function system() {
   const store = fakeNinCheckStore();
   const qoreId = fakeQoreId((nin) => store.rows.get(protector.lookup(nin))?.state === 'checking');
   const audits: unknown[][] = [];
+  /** While set, the guard's audit write fails (AuditService then refuses with 503). */
+  const auditDown = { on: false };
   const checkDatabase = {
     withSystemTransaction: jest.fn(async (_correlation: string, work: (client: PoolClient) => Promise<unknown>) =>
       work({ query: jest.fn(async (sql: string, values: readonly unknown[] = []) =>
         store.query(sql, values) ?? profileTables(sql, values) ?? { rows: [], rowCount: 0 }) } as unknown as PoolClient)),
     query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+      if (sql.includes('insert into audit.events') && auditDown.on) throw new Error('audit unavailable');
       if (sql.includes('insert into audit.events')) audits.push([...values]);
       return { rows: [], rowCount: 1 };
     }),
@@ -183,7 +186,7 @@ function system() {
   const deskChecks = () => deskAudit.record.mock.calls.map(([row]) => row)
     .filter((row) => row.action === 'identity.nin.verify').map((row) => row.details);
   return { qoreId, store, ninCheck, ninOnly, resolve, breaker, cases, checkAudits, deskChecks, deskAudit, lookup,
-    verifyProfile, protector, healthIds };
+    verifyProfile, protector, healthIds, auditDown };
 }
 
 describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')', () => {
@@ -447,16 +450,19 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
     });
   });
 
-  describe('the breaker counts what QoreID did, never a stored answer or the desk\'s wait', () => {
+  describe('the breaker counts only what QoreID did (D4)', () => {
     const NINS = ['70000000003', '70000000004', '70000000005'];
 
-    it('is not tripped by slow answers QoreID does give; the retries are answered from storage', async () => {
+    it('counts each desk wait that runs out, and closes again when QoreID\'s slow answers come; retries reuse them', async () => {
       const s = system();
       s.qoreId.state.fallback = 'late';
       const first = await Promise.all(NINS.map((nin, index) => s.resolve(`desk-once-key-00020${index}`,
         deskContext(index + 1), { ...input, nin }).catch((error: unknown) => error)));
       expect(first).toEqual(NINS.map(() => expect.objectContaining({ status: 504, code: 'QOREID_TIMEOUT' })));
+      // Three waits ran out: as three timeouts, they open it.
+      expect(s.breaker.state()).toBe('open');
       await s.ninCheck.settle();
+      // QoreID answered all three late: those answers are recorded as successes.
       expect(s.breaker.state()).toBe('closed');
       // The website resends with the same Idempotency-Key after retryAfterSeconds.
       const retries = await Promise.all(NINS.map((nin, index) => s.resolve(`desk-once-key-00020${index}`,
@@ -466,36 +472,67 @@ describe('Q108 desk NIN check through 0137\'s once-per-NIN guard (path \'desk\')
       expect(s.qoreId.state.outsideGuard).toBe(0);
     });
 
-    it('is still tripped by checks QoreID never answers, when the ceiling ends them', async () => {
+    it('is tripped by a QoreID that hangs after the usual three waits, not at its 90-second ceiling', async () => {
       const s = system();
       s.qoreId.state.fallback = 'slow';
       for (const [index, nin] of NINS.entries()) {
         await expect(s.resolve(`desk-once-key-00021${index}`, deskContext(index + 1), { ...input, nin }))
           .rejects.toMatchObject({ status: 504, code: 'QOREID_TIMEOUT' });
       }
-      expect(s.breaker.state()).toBe('closed');
-      await s.ninCheck.settle();
+      // Open as soon as the third wait ran out, while the three checks are still waiting on QoreID.
       expect(s.breaker.state()).toBe('open');
       await expect(s.resolve('desk-once-key-000219', deskContext(4), { ...input, nin: '70000000006' }))
         .rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE' });
       expect(s.qoreId.state.charged).toBe(3);
+      // QoreID never answers them: each was counted once, at its wait.
+      await s.ninCheck.settle();
+      expect(s.breaker.state()).toBe('open');
+      expect(warn.mock.calls.filter(([entry]) => (entry as { event?: string }).event
+        === 'identity.nin_provider.unavailable')).toHaveLength(3);
     });
 
-    it('counts QoreID\'s "not found" once, not each time it is given again from storage', async () => {
+    it('never counts QoreID\'s "not found": it is QoreID\'s answer, fresh or given again from storage', async () => {
       const s = system();
-      s.qoreId.state.modes = ['not_found'];
-      for (const key of ['desk-once-key-000220', 'desk-once-key-000220', 'desk-once-key-000221']) {
-        await expect(s.resolve(key)).rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
+      s.qoreId.state.modes = ['not_found', 'not_found', 'not_found'];
+      for (const [index, nin] of NINS.entries()) {
+        await expect(s.resolve(`desk-once-key-00022${index}`, deskContext(index + 1), { ...input, nin }))
+          .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
       }
-      expect(s.qoreId.state.charged).toBe(1);
+      for (const key of ['desk-once-key-000220', 'desk-once-key-000223']) {
+        await expect(s.resolve(key, deskContext(1), { ...input, nin: NINS[0]! }))
+          .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_REJECTED' });
+      }
+      expect(s.qoreId.state.charged).toBe(3);
       expect(s.breaker.state()).toBe('closed');
       expect(s.deskChecks()).toEqual([
-        expect.not.objectContaining({ storedAnswer: true }),
+        ...NINS.map(() => expect.not.objectContaining({ storedAnswer: true })),
         expect.objectContaining({ code: 'QOREID_PROVIDER_REJECTED', storedAnswer: true }),
         expect.objectContaining({ code: 'QOREID_PROVIDER_REJECTED', storedAnswer: true })]);
       // Another desk's new NIN is still checked.
-      await expect(s.resolve('desk-once-key-000222', deskContext(2), { ...input, nin: NINS[0]! }))
+      await expect(s.resolve('desk-once-key-000224', deskContext(2))).resolves.toMatchObject({ caseId });
+    });
+
+    it('never counts the guard\'s own audit write failing, only what QoreID did', async () => {
+      const s = system();
+      s.auditDown.on = true;
+      // QoreID answers each NIN, and the guard keeps the answer, but cannot audit it: 503 to the desk.
+      for (const [index, nin] of NINS.entries()) {
+        await expect(s.resolve(`desk-once-key-00025${index}`, deskContext(index + 1), { ...input, nin }))
+          .rejects.toMatchObject({ status: 503 });
+      }
+      // The resends are answered from storage, whose audit row cannot be written either.
+      for (const [index, nin] of NINS.entries()) {
+        await expect(s.resolve(`desk-once-key-00025${index}`, deskContext(index + 1), { ...input, nin }))
+          .rejects.toMatchObject({ status: 503 });
+      }
+      expect(s.qoreId.state.charged).toBe(3);
+      expect(s.breaker.state()).toBe('closed');
+      expect(s.deskChecks()).toEqual(NINS.concat(NINS).map(() =>
+        expect.objectContaining({ errorType: 'ServiceUnavailableException', providerCalled: true })));
+      s.auditDown.on = false;
+      await expect(s.resolve('desk-once-key-000250', deskContext(1), { ...input, nin: NINS[0]! }))
         .resolves.toMatchObject({ caseId });
+      expect(s.qoreId.state.charged).toBe(3);
     });
 
     it('does not let a stored answer close a breaker letting one check through', async () => {

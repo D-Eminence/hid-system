@@ -158,7 +158,9 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
             // record and asks QoreID itself, as after a profile check.
             const named = namedIncompleteRecord(error);
             if (!named) {
-              context.onQoreIdSettled?.({ answered: false, error });
+              // QoreID's 404 "not found" is its answer (D4); anything else is
+              // QoreID failing, or answering with nothing HID can use.
+              context.onQoreIdSettled?.(qoreIdNotFound(error) ? { answered: true } : { answered: false, error });
               throw error;
             }
             answer = named;
@@ -205,6 +207,12 @@ function answerNames(answer: NinCheckAnswer): { record: NinRecordNames; provider
     return { record: recordNames(answer.record), providerReference: answer.providerReference };
   }
   return undefined;
+}
+
+/** QoreID's 404 "not found": an answer 0137 keeps (as 'rejected'), not a failure of QoreID (D4). */
+export function qoreIdNotFound(error: unknown): boolean {
+  const facts = qoreIdDelivery(error);
+  return facts?.delivery === 'answered' && facts.status === 404;
 }
 
 /** QoreID's full answer that a sign-up cannot enrol from but whose name and date of birth could be read. */

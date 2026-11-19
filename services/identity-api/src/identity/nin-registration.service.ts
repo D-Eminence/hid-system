@@ -10,8 +10,8 @@ import { CollectedFieldProtector, registrationCaseContactLabel } from './collect
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-protector';
 import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinCheckNotStarted,
-  isNinCheckRefusedUnsent, isNinCheckStillRunning, isNinNotConfigured, isStoredNinAnswer, ninCheckNotStarted,
-  ninNotConfigured } from './nin-verification.provider';
+  isNinCheckOwnFault, isNinCheckRefusedUnsent, isNinCheckStillRunning, isNinNotConfigured, isNinServiceAnswer,
+  isStoredNinAnswer, ninCheckNotStarted, ninNotConfigured } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinClaimedDemographics,
   type NinVerificationProvider, type NinVerificationResult } from './nin.types';
 import { ninCheckInProgress } from './nin-check-once';
@@ -840,12 +840,15 @@ export class NinRegistrationService {
     // finds it first). No limit per staff account, per facility or across
     // Health ID.
     //
-    // 0137: the breaker counts what the NIN service did, never a stored
-    // answer or this request's wait. A check still running when the wait
-    // ends (504) is counted when it ends (onSettled), answered or not.
-    const late: { waiting: boolean; settlement?: NinCheckSettlement } = { waiting: false };
+    // D4: the breaker counts only what the NIN service did for this request.
+    // onSettled says how this request's own check ended; `late.then` says
+    // what to do with an ending that comes after this request has answered:
+    // nothing yet ('hold' it for the code below), count it ('count'), or
+    // record only an answer, the wait having been counted ('answer_only').
+    const late: { then: 'hold' | 'count' | 'answer_only'; settlement?: NinCheckSettlement } = { then: 'hold' };
     const onSettled = (settlement: NinCheckSettlement) => {
-      if (late.waiting) this.countSettled(settlement, context.correlationId);
+      if (late.then === 'count') this.countSettled(settlement, context.correlationId);
+      else if (late.then === 'answer_only') { if (settlement.answered) this.ninBreaker.recordSuccess(); }
       else late.settlement = settlement;
     };
     try {
@@ -879,13 +882,39 @@ export class NinRegistrationService {
       }
       if (isNinCheckStillRunning(error)) {
         // 0137: this request's wait ended; the check goes on and its answer
-        // is kept for the retry. A slow answer is not an outage: the breaker
-        // counts how the check ends, and the retry place stays taken until
-        // then (or until it lapses).
-        if (late.settlement) this.countSettled(late.settlement, context.correlationId);
-        else late.waiting = true;
+        // is kept for the retry. D4: the wait running out counts as one
+        // failure (504), as any timeout of the NIN service, so checks it
+        // never answers open the breaker after the usual number of waits.
+        // When the check then answers, that answer is recorded as a success;
+        // when it fails, it is not counted a second time.
+        this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
+        if (late.settlement?.answered) this.ninBreaker.recordSuccess();
+        else if (!late.settlement) late.then = 'answer_only';
         await this.auditFailure(context, 'identity.nin.verify', error,
           { providerCalled: true, ninCheck: 'provider_error' });
+        throw error;
+      }
+      if (isNinServiceAnswer(error)) {
+        // D4: QoreID's "not found" (404) is its answer, given as QoreID's own
+        // refusal (502 QOREID_PROVIDER_REJECTED, as on sign-up and the
+        // profile): QoreID answered, so it counts as a success, never as a
+        // failure.
+        this.ninBreaker.recordSuccess();
+        await this.auditFailure(context, 'identity.nin.verify', error,
+          { providerCalled: true, ninCheck: 'provider_error' });
+        throw error;
+      }
+      if (isNinCheckOwnFault(error)) {
+        // D4: raised by HID's own code or database (the guard's audit write
+        // or store), not by the NIN service: never counted. What the NIN
+        // service did for this request, if it was asked, is counted instead,
+        // now or when it ends; until then the retry place is freed.
+        if (late.settlement) this.countSettled(late.settlement, context.correlationId);
+        else {
+          this.ninBreaker.release();
+          late.then = 'count';
+        }
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: true });
         throw error;
       }
       this.ninBreaker.recordFailure(error, { correlationId: context.correlationId, provider: this.provider.name });
@@ -997,7 +1026,7 @@ export class NinRegistrationService {
     };
   }
 
-  /** 0137: how a check that outlived its request's wait ended, counted as if it had answered in time. */
+  /** D4: how this request's own check of the NIN service ended, counted: an answer as a success. */
   private countSettled(settlement: NinCheckSettlement, correlationId: string): void {
     if (settlement.answered) this.ninBreaker.recordSuccess();
     else this.ninBreaker.recordFailure(settlement.error, { correlationId, provider: this.provider.name });

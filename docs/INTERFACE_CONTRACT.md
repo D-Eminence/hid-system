@@ -6444,6 +6444,7 @@ and spacing ignored, first and last name in that order):
 | the NIN is not confirmed | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `no_match` (`identity.nin.verify`, `denied`) |
 | the name or date of birth differs | `422 NIN_VERIFICATION_FAILED`, "The name or date of birth does not match the NIN record. Check the spelling and the date of birth." | `name_mismatch` (`identity.nin.verify`, `denied`) |
 | QoreID fails (5xx, timeout, network, bad answer) | QoreID's own `5xx` problem; counts toward the breaker | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
+| QoreID's "not found" (`404`) | `502 QOREID_PROVIDER_REJECTED`, as sign-up and the profile answer it; QoreID's answer, never counted as a failure | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
 | (0137) the guard refuses or reuses an answer | see "One QoreID check per NIN" below | |
 
 The case keeps the desk's spelling of the name (it equals the record's but
@@ -6516,10 +6517,11 @@ The guard's answers, as the desk gives them:
 | a stored "no record" | `422 NIN_VERIFICATION_FAILED`, "The NIN could not be verified" | `denied`, `ninCheck: "no_match"`, `storedAnswer: true` | not counted; the retry place is freed |
 | another check of this NIN is still running when this request's wait ends | `409 NIN_CHECK_IN_PROGRESS`, "We are still checking this NIN. Please wait a minute, then try again.", `retryAfterSeconds: 60` | `failure`, `providerCalled: false` | not counted; the retry place is freed |
 | the NIN is held after a check QoreID may have charged | `409 NIN_CHECK_HELD`, "We could not finish checking this NIN. Please try again in 5 minutes." (or "... in 6 hours."), `retryAfterSeconds`: the time left | `failure`, `providerCalled: false` | not counted; the retry place is freed |
-| this request's wait (`QOREID_TIMEOUT_MS`) ended before QoreID answered | `504 QOREID_TIMEOUT`, `retryAfterSeconds: 60`; the check goes on and its answer is kept for the retry | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | the wait is not counted; the check is counted when it ends: QoreID's answer as a success, no answer by `QOREID_NIN_ANSWER_CEILING_MS` or a failure as a failure (a `503` trips it at once). A retry-place check keeps the place until then |
+| this request's wait (`QOREID_TIMEOUT_MS`) ended before QoreID answered | `504 QOREID_TIMEOUT`, `retryAfterSeconds: 60`; the check goes on and its answer is kept for the retry | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | the wait counts as one failure, as a timeout; when the check later answers, that answer is recorded as a success; when it later fails, it is not counted again |
 | its store could not be read (`NIN_CHECK_UNAVAILABLE`) | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." | `failure`, `providerCalled: false` | not counted |
 | its NIN keys are missing | `503 NIN_PROTECTION_UNAVAILABLE` | `failure`, `providerCalled: false` | not counted |
-| a stored QoreID "not found" (404) or an answer HID cannot use (one without a readable name and date of birth) | `502 QOREID_PROVIDER_REJECTED` or `502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time | `failure`, `providerCalled: true`, `ninCheck: "provider_error"`, `storedAnswer: true` | not counted (the first time counted once); the retry place is freed |
+| a stored QoreID "not found" (404) or an answer HID cannot use (one without a readable name and date of birth) | `502 QOREID_PROVIDER_REJECTED` or `502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time | `failure`, `providerCalled: true`, `ninCheck: "provider_error"`, `storedAnswer: true` | not counted; the retry place is freed |
+| the guard's own audit write or another part of HID failed (not QoreID) | the error as raised (the audit's `503`, or `500`) | `failure`, `providerCalled: true` (no `ninCheck`) | not counted; if this request's own QoreID check ended, how it ended is counted (an answer as a success); if it is still running, it is counted when it ends |
 
 `providerCalled` says whether the desk's check was handed to the NIN service
 (for QoreID, to the guard); `storedAnswer: true` says the guard answered from
@@ -6599,19 +6601,28 @@ NIN_CHECK_HELD` means only 0137's hold after a check QoreID may have charged
 ### The breaker with QoreID
 
 As ID-0: a `503` from QoreID trips it at once; three other failures within 5
-minutes trip it; QoreID's own `429` and other `4xx` answers do not count.
-With 0137 it counts only what QoreID did for a request that asked it: an
-answer the guard kept (any outcome) neither counts nor closes the breaker
-(it frees the one retry place), and a check still running when the desk's
-wait ends is counted when it ends, not as a timeout at the wait, so slow
-answers that QoreID does give (and that the retries reuse) never lock the
-desks out, while checks that QoreID never answers still trip it.
-QoreID switched off (before or during the check) is not an outage: it frees
-the one retry place without counting. A switch that cannot
-be read, before the check or when it is read again just before sending,
-answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right
-now. Please try again in a minute.", without touching the breaker, audited
-with `providerCalled: false`.
+minutes trip it; while tripped no check is sent (`503
+NIN_PROVIDER_UNAVAILABLE`, "The NIN service is not answering right now.
+Please try again in a minute."); after 60 seconds one check is let through:
+its success closes it, its failure trips it again. It counts only what QoreID
+did for a request that asked it (D4):
+
+| What happened | Breaker |
+| --- | --- |
+| QoreID answered: a record (complete or not), "no record", "incomplete", or its `404` "not found" | success: closes it and clears the failures |
+| QoreID failed: a `5xx`, a timeout at its own deadline, a network failure (before or after sending), its `401`, a `4xx` other than `404` and `429` (such as an account-level `403`, answered `502 QOREID_PROVIDER_REJECTED`), or an answer HID cannot use (no readable name and date of birth) | one failure; a `503` (QoreID's `5xx`, a network failure, its `401`) trips it at once |
+| QoreID's `429` (rate limited) | not counted |
+| the desk's wait ran out while QoreID had not answered (`504 QOREID_TIMEOUT`, the check still running) | one failure, so a QoreID that hangs trips it after three waits within 5 minutes, not at `QOREID_NIN_ANSWER_CEILING_MS`; when that check later answers, the answer is recorded as a success; when it later fails, it is not counted again |
+| an answer the guard kept (any outcome, `404` included) | not counted, and the breaker is neither closed nor its failures cleared; the retry place is freed |
+| the guard refused before sending (`409 NIN_CHECK_IN_PROGRESS`, `409 NIN_CHECK_HELD`), or its store or keys were unavailable | not counted; the retry place is freed |
+| an error of HID's own code or database (the guard's audit write, its store), not QoreID's | not counted; how this request's own QoreID check ended, if it was sent, is counted as above (now, or when it ends); the retry place is freed meanwhile |
+| QoreID switched off, or its switch unreadable | not counted (found during the check, the retry place is freed) |
+| a NIN on a Health ID, answered from the record; details refused before any check | the breaker is not asked |
+
+A switch that cannot be read, before the check or when it is read again just
+before sending, answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be
+started right now. Please try again in a minute.", audited with
+`providerCalled: false`.
 
 ### `GET /api/v1/identity/registration-capabilities` with QoreID
 
@@ -6639,8 +6650,11 @@ no claim or stored answer of the desk's own (every resend goes to the guard);
 details
 refused before any check, over HTTP with the same validation pipe and problem
 filter as `main.ts` (`400 NIN_DETAILS_INVALID`, and `VALIDATION_FAILED` only
-for a malformed body); the breaker (a stored answer neither counts nor closes
-it; a 504 is counted when its check ends); the audit rows; capabilities; no
+for a malformed body); the breaker (D4: a stored answer neither counts nor
+closes it; each 504 wait counts once and a late answer closes it, a late
+failure is not counted again; QoreID's 404 is an answer; the guard's audit
+write failing is HID's own and only what QoreID did counts); the audit rows;
+capabilities; no
 NIN in an audit row or log line; 0137's answers as the desk's). The QoreID
 adapter is mocked: no test calls QoreID.
 `services/identity-api/src/identity/qoreid-nin-desk-once.spec.ts` drives the
@@ -6653,9 +6667,10 @@ record without a recognised sex or with a line break in its address, kept by
 the profile or met at the desk, one charge; a record the desk did not match
 kept 24 hours, a matched one 90 days; a NIN on a Health ID after the stored
 answer ended, no charge, and other details "does not match" from the record
-with no charge and nothing kept; slow answers that do not trip the breaker, answers
-that never come that do; a stored 404 counted once; a stored answer that does
-not close a retrying breaker; forty "does not match" answers for one NIN by
+with no charge and nothing kept; slow answers whose three waits open the
+breaker and whose answers close it; a hang that opens it after three waits;
+QoreID's 404, fresh or stored, never counted; the guard's audit write failing,
+never counted; a stored answer that does not close a retrying breaker; forty "does not match" answers for one NIN by
 one account, each answered, none held;
 a timeout and the retry with the same `Idempotency-Key`; held, in progress,
 store unreachable; every NIN request sent under the guard's lease; no NIN in

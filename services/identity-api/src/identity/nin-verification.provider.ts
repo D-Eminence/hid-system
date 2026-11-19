@@ -128,6 +128,40 @@ export function isNinCheckStillRunning(error: unknown): boolean {
 }
 
 /**
+ * D4 (the breaker counts only what the NIN service did): a refusal that is
+ * the NIN service's own answer, given as an error (QoreID's 404 "not found",
+ * answered as 502 QOREID_PROVIDER_REJECTED as on every path). The service
+ * answered, so it is never counted as a failure.
+ */
+const NIN_SERVICE_ANSWERS = new WeakSet<object>();
+
+export function markNinServiceAnswer<T extends object>(error: T): T {
+  NIN_SERVICE_ANSWERS.add(error);
+  return error;
+}
+
+export function isNinServiceAnswer(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && NIN_SERVICE_ANSWERS.has(error);
+}
+
+/**
+ * D4: an error raised by HID's own code or database during the check (the
+ * once-per-NIN guard's audit write or store, a fault of ours), not by the NIN
+ * service. Never counted as a failure; what the NIN service itself did for
+ * the request, when it was asked, is counted from onSettled instead.
+ */
+const OWN_FAULTS = new WeakSet<object>();
+
+export function markNinCheckOwnFault<T extends object>(error: T): T {
+  OWN_FAULTS.add(error);
+  return error;
+}
+
+export function isNinCheckOwnFault(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && OWN_FAULTS.has(error);
+}
+
+/**
  * Q108: the details the desk typed cannot be anyone's: a date of birth that
  * is not a real date, is in the future or is before 1900, or a name that is
  * blank, longer than 100 characters or holds a control character (such as a
