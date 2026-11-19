@@ -6,6 +6,14 @@ import { basename, join, relative, resolve } from 'node:path'
 import { isFrontendSourcePath, isTestFixturePath } from './verification-paths.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
+// --sources-only skips only the scan of the built frontend artifacts
+// (apps/*/dist), for a pull request that changes no application, package or
+// build input and therefore runs no build; every source, document and ignore
+// file is still scanned. `npm run verify` runs the full scan.
+const args = process.argv.slice(2)
+assert.ok(args.length === 0 || (args.length === 1 && args[0] === '--sources-only'),
+  'Usage: node scripts/verify-secret-readiness.mjs [--sources-only]')
+const sourcesOnly = args.length === 1
 const canonicalRoots = ['apps', 'services', 'packages', 'gateway', 'infra', 'scripts', 'docs']
 const explicitFiles = ['CODEX.md', 'README.md', 'package.json', '.gitignore', '.dockerignore']
 const ignoredDirectories = new Set([
@@ -196,7 +204,7 @@ for (const app of ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin'])
 const artifactFindings = new Set()
 const artifactRoots = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
   .map((app) => join(repository, 'apps', app, 'dist'))
-const artifactFiles = (await Promise.all(artifactRoots.map((root) => walk(root)))).flat()
+const artifactFiles = sourcesOnly ? [] : (await Promise.all(artifactRoots.map((root) => walk(root)))).flat()
 let artifactTextFiles = 0
 for (const path of artifactFiles) {
   const source = await text(path)
@@ -213,6 +221,7 @@ process.stdout.write(JSON.stringify({
   canonicalTextFiles,
   frontendSourceFiles: frontendFiles.length,
   frontendArtifactTextFiles: artifactTextFiles,
+  frontendArtifactsScanned: !sourcesOnly,
   canonicalSecretFindings: 0,
   frontendArtifactSecretFindings: 0,
   publicFrontendPrefix: 'VITE_',

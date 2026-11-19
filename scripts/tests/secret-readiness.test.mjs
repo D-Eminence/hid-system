@@ -14,7 +14,7 @@ const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
 // A synthetic value shaped like a VAPID private key (43 base64url characters); never key material.
 const vapidShaped = createHash('sha256').update('synthetic web push probe').digest('base64url')
 
-function runGate(files) {
+function runGate(files, args = []) {
   const root = mkdtempSync(join(tmpdir(), 'secret-readiness-'))
   try {
     for (const script of ['verify-secret-readiness.mjs', 'verification-paths.mjs']) {
@@ -34,7 +34,7 @@ function runGate(files) {
       mkdirSync(dirname(join(root, path)), { recursive: true })
       writeFileSync(join(root, path), source)
     }
-    const result = spawnSync(process.execPath, [join(root, 'scripts', 'verify-secret-readiness.mjs')], { encoding: 'utf8' })
+    const result = spawnSync(process.execPath, [join(root, 'scripts', 'verify-secret-readiness.mjs'), ...args], { encoding: 'utf8' })
     return { status: result.status, output: `${result.stdout}${result.stderr}` }
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -66,4 +66,19 @@ test('a frontend source naming the web push VAPID private key fails the gate', (
   const result = runGate({ 'apps/web/src/push.ts': 'export const name = import.meta.env.WEB_PUSH_VAPID_PRIVATE_KEY\n' })
   assert.notEqual(result.status, 0)
   assert.match(result.output, /apps\/web\/src\/push\.ts references a server-only secret contract/)
+})
+
+// Light pull request runs (no application, package or build input changed, so
+// no build) scan every source and document but not apps/*/dist.
+test('--sources-only still scans sources and documents and skips only the built frontend artifacts', () => {
+  const leaked = `WEB_PUSH_VAPID_PRIVATE_KEY=${vapidShaped}\n`
+  const leak = runGate({ 'services/probe/.env.example': leaked }, ['--sources-only'])
+  assert.notEqual(leak.status, 0)
+  assert.match(leak.output, /services\/probe\/\.env\.example:configured-secret-in-env-example/)
+  const passed = runGate({}, ['--sources-only'])
+  assert.equal(passed.status, 0, passed.output)
+  assert.match(passed.output, /"frontendArtifactsScanned":false/)
+  assert.match(runGate({}).output, /"frontendArtifactsScanned":true/)
+  assert.notEqual(runGate({}, ['--skip-everything']).status, 0)
+  assert.notEqual(runGate({}, ['--sources-only', '--sources-only']).status, 0)
 })
