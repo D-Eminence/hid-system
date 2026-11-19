@@ -1,7 +1,7 @@
 name: Production backend candidates
 on:
   pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.github/workflows/production-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.github/workflows/production-backend-images.yml', '.github/workflows/staging-backend-images.yml']
   push:
     branches: [staging-novu-ci-20261005]
     paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.github/workflows/production-backend-images.yml']
@@ -19,7 +19,12 @@ env:
 concurrency:
   group: production-backend-${{ github.ref }}
   # A newer commit on the same pull request cancels the older check run.
-  # Push and dispatch runs publish and are never cancelled.
+  # A running push or dispatch run publishes and is never cancelled. GitHub
+  # still keeps at most one queued run per group: a newer push replaces a
+  # queued one, so that commit gets no run of its own (behaviour unchanged).
+  # The newer run diffs from its own push's before SHA, so a component
+  # changed only in the replaced commit is not rebuilt until it changes again
+  # or someone dispatches it.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   select:
@@ -36,6 +41,7 @@ jobs:
       - name: Verify retained database and workload source compatibility
         run: |
           node --test scripts/production-backend-build.test.mjs
+          node --test scripts/staging-backend-build.test.mjs
           python3 -m unittest discover -s scripts -p 'test_production*.py'
           python3 -m unittest discover -s scripts -p 'assess*runtime_test.py'
           python3 scripts/production_release_compatibility.py --repository . --baseline e078bd53a1601c1d2e533108169a96ec2e7dbd0f --candidate "$GITHUB_SHA" --output production-source-admission.json

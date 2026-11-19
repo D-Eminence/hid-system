@@ -1,6 +1,8 @@
 name: Staging backend images
 # Pull requests are built and scanned by production-backend-images.yml, under
-# the stricter production policy, so this workflow no longer repeats them.
+# the stricter production policy, so this workflow no longer repeats them. That
+# workflow's pull request check also runs scripts/staging-backend-build.test.mjs
+# and assess_staging_runtime_test.py and triggers on changes to this file.
 on:
   push:
     branches: [staging]
@@ -16,10 +18,10 @@ permissions:
   contents: read
 concurrency:
   group: staging-backend-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 jobs:
   select:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging'
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -36,7 +38,7 @@ jobs:
           python3 -m unittest discover -s scripts -p 'assess_staging_runtime_test.py'
       - id: matrix
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.before }}
           REQUESTED_COMPONENT: ${{ inputs.component || 'changed' }}
         run: node scripts/staging-backend-build.mjs matrix
   build:

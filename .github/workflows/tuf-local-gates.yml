@@ -12,9 +12,13 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: tuf-local-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Only a newer commit on the same pull request cancels a run; branch pushes
-  # always finish so every staging commit keeps its own full record.
+  # Pull request runs share one group per pull request, and a newer commit
+  # cancels the older run. Push and dispatch runs get one group per commit, so
+  # a newer commit never cancels or replaces another commit's run, and every
+  # protected-branch commit keeps its own full record. (GitHub keeps one queued
+  # run per group and replaces it when a newer run joins, so a per-branch group
+  # could drop a commit's run without a trace.)
+  group: tuf-local-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CI: "true"

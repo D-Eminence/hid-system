@@ -231,3 +231,17 @@ test('the background Grype database download is waited for, required to succeed 
   assert.ok(text.slice(scan).includes("GRYPE_DB_VALIDATE_AGE: 'true'"));
   assert.ok(!/MAX_ALLOWED_BUILT_AGE|max-allowed-built-age|VALIDATE_AGE: '?false|validate-age/i.test(text));
 });
+
+// The staging workflow no longer runs on pull requests, so the production PR
+// check runs the staging selection and scan guard tests and also starts when
+// the staging workflow file changes.
+test('the production PR check runs the staging script tests and watches the staging workflow',()=>{
+  const text=readFileSync(new URL('../.github/workflows/production-backend-images.yml',import.meta.url),'utf8');
+  const staging=readFileSync(new URL('../.github/workflows/staging-backend-images.yml',import.meta.url),'utf8');
+  const pr=text.slice(text.indexOf('  pull_request:'),text.indexOf('  push:'));
+  assert.ok(pr.includes("'.github/workflows/staging-backend-images.yml'"));
+  const select=text.slice(text.indexOf('- name: Verify retained database and workload source compatibility'),text.indexOf('- id: matrix'));
+  for(const command of ['node --test scripts/production-backend-build.test.mjs','node --test scripts/staging-backend-build.test.mjs',
+    "python3 -m unittest discover -s scripts -p 'assess*runtime_test.py'"]) assert.ok(select.includes(command),command);
+  assert.ok(!/^\s*pull_request:/m.test(staging));
+});
