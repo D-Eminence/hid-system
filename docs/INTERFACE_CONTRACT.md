@@ -7037,12 +7037,14 @@ nobody on pharmacy work is never offered a send that answers `no_pharmacy`).
 That covers a send that failed or is pending, the prescriber's own
 prescription a colleague activated (that colleague's answer was
 `not_prescriber`), and one written before the hospital had pharmacy staff;
-the answer then says which. After any answer but `sent`, `pending` or
-`unavailable` (for example `not_allowed`, when the member's role changed
-since sign-in), the page does not offer it again for that prescription until
-it is reloaded. On the pharmacy list, show a withdrawn item as "Changed or
-stopped by the prescribing team" (the prescriber or a colleague put it on
-hold, cancelled, corrected, edited or resumed it) with Dispense disabled.
+the answer then says which. After any answer but `pending` or `unavailable`
+(`sent`: the pharmacy has it now, and the reloaded prescription's
+`ownProgress` says so; `not_allowed`, when the member's role changed since
+sign-in; and the others above), the page does not offer it again for that
+prescription until it is reloaded, as after Activate. On the pharmacy list,
+show a withdrawn item as "Changed or stopped by the prescribing team" (the
+prescriber or a colleague put it on hold, cancelled, corrected, edited or
+resumed it) with Dispense disabled.
 
 Runtime proof: `services/ehr-api/scripts/verify-own-facility-work-runtime.mjs`
 (run by the TUF staging rehearsal, as `own_facility_work_runtime`) boots
