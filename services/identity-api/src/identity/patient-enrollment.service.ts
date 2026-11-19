@@ -266,7 +266,7 @@ export class PatientEnrollmentService implements BeforeApplicationShutdown {
 
     // QoreID charges every check (Q109): the provider asks it once per NIN
     // (NinCheckOnce, 0137). A start that finds another start for the same NIN
-    // checking waits for its answer; a stored answer (90 days for a record, Q110,
+    // checking waits for its answer; a stored answer (90 days for a record, Q115,
     // so also after this enrollment's 24 hours end) is reused; an answer
     // slower than QOREID_TIMEOUT_MS is still read and kept for the retry, and
     // a check QoreID may have charged without an answer holds the NIN (5

@@ -124,8 +124,8 @@ try {
   assert.equal(rows.filter((row) => row.state === 'answered' && row.outcome === 'record').length, 8);
   results.push('stored: 8 encrypted records and 1 hold, keyed by lookup HMAC only');
 
-  // 5b. Q110: the keep of a matched record, through the runtime role: kept 90 days from now (a record first kept a
-  // day here), its answer and source unchanged; nothing for a held NIN.
+  // 5b. Q115: the keep of a matched record, through the runtime role: kept 30 days from now (a record left with a
+  // day here), never shorter, its answer and source unchanged; nothing for a held NIN.
   await admin.query(`update identity.qoreid_nin_checks set until = clock_timestamp() + interval '1 day'
                       where nin_lookup_hmac = $1`, [lookups[5]]);
   const before = (await admin.query(`select answer_ciphertext, record_source from identity.qoreid_nin_checks
@@ -134,10 +134,11 @@ try {
   assert.equal(await tasks[1].check.keepRecord(nins[5], `${run}-keep`), true);
   assert.equal(await tasks[1].check.keepRecord(nins[7], `${run}-keep-held`), false);
   const after = (await admin.query(`select answer_ciphertext, record_source,
-                                           until > clock_timestamp() + interval '89 days 23 hours' as kept
+                                           until between clock_timestamp() + interval '29 days 23 hours'
+                                                     and clock_timestamp() + interval '30 days' as kept
                                       from identity.qoreid_nin_checks where nin_lookup_hmac = $1`, [lookups[5]])).rows[0];
   assert(after.kept && after.record_source === 'nin_only' && after.answer_ciphertext.equals(before.answer_ciphertext));
-  results.push('keep: a matched record kept 90 days from now, unchanged; a held NIN not kept');
+  results.push('keep: a matched record kept 30 days from now (Q115), unchanged; a held NIN not kept');
 
   // 6. The audit: one row per attempt, QoreID called or not, without NIN or lookup HMAC.
   const audits = (await admin.query(
@@ -162,7 +163,7 @@ try {
     [lookups])).rows[0].n;
   assert.equal(left, 5);
   results.push(`prune: ${removed} expired rows erased, live answers kept`);
-  assert(NIN_RECORD_ANSWER_SECONDS === 90 * 24 * 3600); // Q110: a matched answer not yet on a Health ID is kept 90 days
+  assert(NIN_RECORD_ANSWER_SECONDS === 90 * 24 * 3600); // Q115: a record not yet on a Health ID, 90 days from the first check
 } finally {
   await admin.query('delete from identity.qoreid_nin_checks where nin_lookup_hmac = any($1)', [lookups]);
   await admin.end();
