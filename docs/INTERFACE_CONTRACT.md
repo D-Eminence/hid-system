@@ -667,7 +667,8 @@ within the configured 5–240 minute bounds, permits at most ten new activations
 per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
 notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
-Identity's activation (`POST /api/v1/identity/break-glass`) also requires the
+Identity's activation (`POST /api/v1/identity/break-glass`, the patient named by
+`hid` or, since 0132, by an emergency search card's `matchRef`) also requires the
 platform `break_glass_enabled` control, checked inside the activation
 transaction before the command: while it is off, activation answers
 `423 BREAK_GLASS_DISABLED` ("Emergency access is currently disabled by the
@@ -7229,6 +7230,22 @@ patient id only for the same member, facility and purpose, unexpired, while
 the patient is active and the seal allows it; null otherwise. Break-glass by
 matchRef (ID-5) and check-in (EHR-C7) use it; they do not change it.
 
+### Break-glass by matchRef (ID-5)
+
+`POST /api/v1/identity/break-glass` takes the patient as exactly one of
+`hid` (a Health ID) or `matchRef` (a card's matchRef from this member's own
+emergency search in the last 10 minutes):
+`{ "matchRef": "psr_...", "reason": "...", "durationMinutes": 60 }`. Both at
+once, or neither, is `400 VALIDATION_FAILED`. The database resolves the ref
+(`identity.activate_break_glass_by_match_ref`, 0132) and runs the same
+activation as for a Health ID: every check, the hourly limit, the replay, the
+grant, the event and the audit are unchanged, and so is the answer. A ref that
+does not resolve (another member's, another facility's, a direct-care
+search's, expired, malformed, or a patient no longer active) answers as an
+unknown Health ID does: `404 CONSENT_RESOURCE_NOT_FOUND`, the same for every
+reason. The emergency card never carries a Health ID, so the screen sends the
+card's `matchRef`.
+
 ### Limits and alert
 
 Counted before each search (`auth.otp_rate_limits`, HMAC buckets with the
@@ -7268,7 +7285,7 @@ Desk search form with the five keys; show `message` when there is no card;
 offer "Register new patient" from an empty search (`no_match` or
 `no_such_patient`), not from an error. Emergency search behind the
 break-glass flow, reason first. Keep the `matchRef` (never a Health ID) for
-the next step. Patient's access history: the new action's words above.
+the next step: break-glass sends it as `matchRef` (ID-5, above). Patient's access history: the new action's words above.
 
 ### Tests
 
