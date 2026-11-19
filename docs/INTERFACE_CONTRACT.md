@@ -7244,10 +7244,12 @@ Not done, said plainly:
   `eu-west-1` (Ireland), not in Nigeria. There is no option today to keep a
   country's data in that country, and the 18 Nov build plan has no item for
   it (it lists P2-6 among the gaps no design covers yet).
-- **No certification.** No NDPA (formerly NDPR), GDPR or HIPAA
-  certification, audit or formal assessment is recorded in this repository.
-  Do not tell buyers the product is certified under, or compliant with, any
-  of them.
+- **Certification is held outside this repository.** Health ID told us on
+  19 Nov 2026 that it holds NDPA (formerly NDPR) certification, and that the
+  service is aligned with GDPR and HIPAA. The certificate and any assessment
+  papers are kept by Health ID, not here; ask Health ID for them. When you
+  describe this to buyers, use exactly those words: "NDPA certified" and
+  "GDPR- and HIPAA-aligned". Do not say "GDPR certified" or "HIPAA certified".
 - The AWS Backup plan is off (`production.tfvars:58`, dev); RDS's own
   automated backups above still run.
 - The Terraform defines no CloudTrail trail of its own; whether the AWS

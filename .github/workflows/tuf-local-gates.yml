@@ -1,13 +1,30 @@
 name: TUF local security gates
 on:
   pull_request: null
-  push: null
+  # Feature branches are checked once, by their pull request run; start a
+  # manual run for a branch without a pull request.
+  push:
+    branches:
+      - staging-novu-ci-20261005
+      - main
+      - tuf-production-release
   workflow_dispatch: null
+  # Weekly, so govulncheck in the TUF client job sees new Go advisories even
+  # when no change touches the TUF tooling. A scheduled run runs every gate.
+  schedule:
+    - cron: '41 3 * * 1'
 permissions:
   contents: read
 concurrency:
-  group: tuf-local-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Pull request runs share one group per pull request, and a newer commit
+  # cancels the older run. Push and dispatch runs get one group per commit, so
+  # a newer commit never cancels or replaces another commit's run, and every
+  # protected-branch commit keeps its own full record. (GitHub keeps one queued
+  # run per group and replaces it when a newer run joins, so a per-branch group
+  # could drop a commit's run without a trace.) The event name keeps a
+  # scheduled or manual run of a commit from replacing its queued push run.
+  group: tuf-local-${{ github.workflow }}-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CI: "true"
   NODE_VERSION: 22.23.2
@@ -15,6 +32,44 @@ env:
   BROKER_GO_BUILD_IMAGE: docker.io/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
   BROKER_LAMBDA_RUNTIME_IMAGE: public.ecr.aws/lambda/provided:al2023@sha256:7dea43facdd67ffd71aa540527b6af413dfdae0133a0423ee9c329bf1e5adb6c
 jobs:
+  changes:
+    name: Choose local gates from the changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      skip_go_jobs: ${{ steps.select.outputs.skip_go_jobs }}
+      workspace_gates: ${{ steps.select.outputs.workspace_gates }}
+      workspace_install: ${{ steps.select.outputs.workspace_install }}
+      skip_workspace_test: ${{ steps.select.outputs.skip_workspace_test }}
+      test_gates: ${{ steps.select.outputs.test_gates }}
+      test_install: ${{ steps.select.outputs.test_install }}
+      skip_migration_rehearsal: ${{ steps.select.outputs.skip_migration_rehearsal }}
+      reason: ${{ steps.select.outputs.reason }}
+    steps:
+      # A pull request run checks out the merge commit; its first parent is the
+      # base branch tip, so depth 2 is enough to diff the pull request.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      # Only pull request runs are narrowed; any other event, and any doubt
+      # about the changed paths, selects every gate. The rules are in the script.
+      - name: Choose gates from the pull request's changed paths
+        id: select
+        run: node release/scripts/select-local-gates.mjs
+      - name: Retain the gate selection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-local-changes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/local-gate-selection
+          if-no-files-found: error
+          retention-days: 90
   release-contracts:
     name: Release contracts and admission
     runs-on: ubuntu-24.04
@@ -60,6 +115,11 @@ jobs:
           retention-days: 90
   tuf-client:
     name: Pinned TUF client and reproducibility
+    needs: changes
+    # Runs on every push, manual and scheduled run; a pull request skips it only
+    # when the changes job says no changed path reaches the TUF tooling. A
+    # failed changes job leaves the output empty, so the job runs.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.skip_go_jobs != 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -392,8 +452,63 @@ jobs:
           path: ${{ runner.temp }}/local-gate-evidence.json
           if-no-files-found: error
           retention-days: 90
+  # The former single workspace job, split into three jobs that run side by
+  # side. Each job's gate list is fixed in run-workspace-gates.mjs; a pull
+  # request run may narrow it to another fixed list chosen by the changes job,
+  # and any other value runs the job's full list. Every push, manual and
+  # scheduled run runs all three jobs with every gate. No other job uses their
+  # artifacts, and a job skipped by its condition concludes as skipped, which
+  # leaves the run green.
   workspace:
-    name: Complete workspace verification
+    name: Workspace build and verification
+    needs: changes
+    # Always runs; on a pull request that changes no code it runs only the
+    # secret scan and the whitespace check, without installing dependencies.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.workspace_install != 'none' }}
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install all tracked lockfiles without cloud authority
+        if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.workspace_install != 'none' }}
+        run: |-
+          node --input-type=module <<'NODE'
+          import {execFileSync} from 'node:child_process';
+          import {dirname} from 'node:path';
+          const paths=execFileSync('git',['ls-files','-z','**/package-lock.json'],{encoding:'utf8'}).split('\0').filter(Boolean);
+          for(const path of paths) execFileSync('npm',['--prefix',dirname(path),'ci'],{stdio:'inherit'});
+          NODE
+      - name: Run and record workspace build and verification gates
+        env:
+          HID_WORKSPACE_GATES: ${{ github.event_name == 'pull_request' && needs.changes.outputs.workspace_gates || '' }}
+          HID_WORKSPACE_SKIP_REASON: ${{ needs.changes.outputs.reason }}
+        run: node release/scripts/run-workspace-gates.mjs build-verify
+      - name: Retain workspace evidence even after failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-workspace-build-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workspace-gates
+          if-no-files-found: warn
+          retention-days: 90
+  workspace-test:
+    name: Workspace tests
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.skip_workspace_test != 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -411,14 +526,56 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
           cache: false
-      - name: Install all tracked lockfiles without cloud authority
+      - name: Install the lockfiles the selected tests need, without cloud authority
+        env:
+          HID_TEST_INSTALL: ${{ github.event_name == 'pull_request' && needs.changes.outputs.test_install || 'all' }}
         run: |-
           node --input-type=module <<'NODE'
           import {execFileSync} from 'node:child_process';
           import {dirname} from 'node:path';
-          const paths=execFileSync('git',['ls-files','-z','**/package-lock.json'],{encoding:'utf8'}).split('\0').filter(Boolean);
+          const all=execFileSync('git',['ls-files','-z','**/package-lock.json'],{encoding:'utf8'}).split('\0').filter(Boolean);
+          // The staging preparation tests load only release and ehr-api dependencies.
+          const light=['release/package-lock.json','services/ehr-api/package-lock.json'];
+          const paths=process.env.HID_TEST_INSTALL==='staging-preparation'?light:all;
           for(const path of paths) execFileSync('npm',['--prefix',dirname(path),'ci'],{stdio:'inherit'});
           NODE
+      - name: Run and record workspace test gates
+        env:
+          HID_WORKSPACE_GATES: ${{ github.event_name == 'pull_request' && needs.changes.outputs.test_gates || '' }}
+          HID_WORKSPACE_SKIP_REASON: ${{ needs.changes.outputs.reason }}
+        run: node release/scripts/run-workspace-gates.mjs test
+      - name: Retain workspace evidence even after failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tuf-workspace-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workspace-gates
+          if-no-files-found: warn
+          retention-days: 90
+  migration-rehearsal:
+    name: Synthetic migration rehearsal
+    needs: changes
+    # Runs on every push, manual and scheduled run, and on every pull request
+    # that changes database, migration, grant or runtime-verifier code or the
+    # services and packages those verifiers boot (see select-local-gates.mjs).
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.skip_migration_rehearsal != 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - name: Install the lockfiles the rehearsal loads, without cloud authority
+        run: |
+          for package in release packages/api-client packages/server-telemetry services/identity-api services/ehr-api services/lab-api services/pharmacy-api services/ocr-api services/notification-api; do
+            npm --prefix "${package}" ci
+          done
       - name: Prepare PostgreSQL 16 and pgvector for the disposable rehearsal
         run: |
           # The runner image already ships postgresql-16 from PGDG, and its
@@ -436,20 +593,70 @@ jobs:
           sudo dpkg --install "$RUNNER_TEMP/$deb"
           test -x /usr/lib/postgresql/16/bin/pg_config
           test -f "$(/usr/lib/postgresql/16/bin/pg_config --sharedir)/extension/vector.control"
-      - name: Run and record complete workspace gates
+      - name: Run and record the synthetic migration rehearsal
         env:
           PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
-        run: node release/scripts/run-workspace-gates.mjs
+        run: node release/scripts/run-workspace-gates.mjs migration-rehearsal
       - name: Retain workspace evidence even after failure
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tuf-workspace-${{ github.run_id }}-${{ github.run_attempt }}
+          name: tuf-workspace-migration-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/workspace-gates
           if-no-files-found: warn
           retention-days: 90
+  # Branch protection on main and tuf-production-release requires a check
+  # named "Complete workspace verification", the name of the former single
+  # workspace job. This job keeps that check and its meaning: it always runs
+  # (it has no condition that can skip it) and passes only when the build and
+  # verification job succeeded and the test and rehearsal jobs each succeeded,
+  # or were skipped on a pull request because the changes job chose to skip
+  # them. Any other event needs all three to succeed.
+  workspace-complete:
+    name: Complete workspace verification
+    needs:
+      - changes
+      - workspace
+      - workspace-test
+      - migration-rehearsal
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require every workspace job to pass or to be skipped by the pull request selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKSPACE_RESULT: ${{ needs.workspace.result }}
+          WORKSPACE_TEST_RESULT: ${{ needs.workspace-test.result }}
+          MIGRATION_REHEARSAL_RESULT: ${{ needs.migration-rehearsal.result }}
+          SKIP_WORKSPACE_TEST: ${{ needs.changes.outputs.skip_workspace_test }}
+          SKIP_MIGRATION_REHEARSAL: ${{ needs.changes.outputs.skip_migration_rehearsal }}
+        run: |
+          set -euo pipefail
+          status=0
+          check() {
+            if [ "$2" = success ]; then
+              echo "$1: success"
+            elif [ "$EVENT_NAME" = pull_request ] && [ "$3" = true ] && [ "$2" = skipped ]; then
+              echo "$1: skipped by the pull request gate selection"
+            else
+              echo "::error::$1 concluded '$2'; it must succeed"
+              status=1
+            fi
+          }
+          check 'Workspace build and verification' "$WORKSPACE_RESULT" never
+          check 'Workspace tests' "$WORKSPACE_TEST_RESULT" "$SKIP_WORKSPACE_TEST"
+          check 'Synthetic migration rehearsal' "$MIGRATION_REHEARSAL_RESULT" "$SKIP_MIGRATION_REHEARSAL"
+          exit "$status"
   upstream-reference:
     name: Historical upstream reference oracle
+    needs: changes
+    # Runs on every push, manual and scheduled run; a pull request skips it only
+    # when the changes job says no changed path reaches the TUF tooling. A
+    # failed changes job leaves the output empty, so the job runs.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.skip_go_jobs != 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
