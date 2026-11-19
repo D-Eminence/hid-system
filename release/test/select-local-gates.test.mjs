@@ -107,6 +107,11 @@ test('database, migration, grant and runtime-verifier changes always run the reh
     'services/notification-api/scripts/verify-delivery-runtime.mjs', 'services/identity-api/src/auth/auth.service.ts',
     'services/lab-api/src/lab/lab.service.ts', 'services/pharmacy-api/Dockerfile', 'services/ocr-api/src/ocr/ocr.service.ts',
     'packages/api-client/src/index.ts', 'packages/server-telemetry/src/index.ts', 'release/migration/synthetic-fixture.mjs',
+    // verify-provider-enrollment-runtime.mjs checks Identity's staff invitations
+    // against notification-api's own DTO, recipient check and templates.
+    'services/notification-api/src/notification/dto/deliver-staff-invitation.dto.ts',
+    'services/notification-api/src/notification/dto/deliver-otp.dto.ts', 'services/notification-api/src/providers/provider.types.ts',
+    'services/notification-api/package-lock.json',
     'services/outreach-api/package-lock.json', 'apps/web/package.json', 'release/package-lock.json', ...REHEARSAL_SCRIPTS]
   for (const path of rehearsal) {
     const plan = pr([path])
@@ -161,7 +166,9 @@ test('the rehearsal selection and install cover every service, package and scrip
   const services = new Set([...rehearsal.matchAll(/services\/([a-z-]+)/g)].map(m => m[1]))
   for (const verifier of verifiers) {
     const source = readFileSync(new URL(`../../${verifier}`, import.meta.url), 'utf8')
-    for (const m of source.matchAll(/services\/([a-z-]+)|'([a-z]+-(?:api|worker))'/g)) services.add(m[1] ?? m[2])
+    // services/<name>, '<name>', '<name>/...' and '../<name>': every way a
+    // verifier reaches another service's source or dependencies.
+    for (const m of source.matchAll(/services\/([a-z-]+)|['"/](?:\.\.\/)*([a-z]+(?:-[a-z]+)*-(?:api|worker))['"/]/g)) services.add(m[1] ?? m[2])
     for (const m of source.matchAll(/from\s+'(\.\.?\/[^']+)'/g)) {
       const target = posix.normalize(posix.join(posix.dirname(verifier), m[1]))
       assert.ok(REHEARSAL_SERVICES.some(s => target.startsWith(`services/${s}/`)), `${verifier} imports ${target}`)
@@ -190,7 +197,9 @@ test('the rehearsal selection and install cover every service, package and scrip
 
 test('every file that names a mapped config file is a production release reader that no local gate runs', () => {
   const allowed = [/^config\//, /^docs\//, /^\.github\/workflows\/production-backend-/, /^scripts\/(?:production|test_production)/,
-    /^services\/ehr-api\/database\/migrations\//, /^services\/ehr-api\/scripts\/test-staging-schema-upgrade\.mjs$/]
+    /^services\/ehr-api\/database\/migrations\//, /^services\/ehr-api\/scripts\/test-staging-schema-upgrade\.mjs$/,
+    // The selector's own map and this test name the file but do not read it.
+    /^release\/scripts\/select-local-gates\.mjs$/, /^release\/test\/select-local-gates\.test\.mjs$/]
   for (const [path, gates] of Object.entries(CONFIG_READERS)) {
     assert.deepEqual(gates, [])
     const readers = execFileSync('git', ['grep', '-l', '-F', posix.basename(path)], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean)
@@ -261,13 +270,16 @@ test('the workflow narrows only pull request runs, fails closed on missing outpu
     'workspace-test': "${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.skip_workspace_test != 'true') }}",
     'migration-rehearsal': "${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.skip_migration_rehearsal != 'true') }}",
   }
-  assert.deepEqual(Object.keys(workflow.jobs).sort(), [...Object.keys(LOCAL_GATE_AUDITS), 'changes', ...Object.keys(conditions)].sort())
+  assert.deepEqual(Object.keys(workflow.jobs).sort(), [...Object.keys(LOCAL_GATE_AUDITS), 'changes', 'workspace-complete', ...Object.keys(conditions)].sort())
   for (const [job, condition] of Object.entries(conditions)) {
     assert.equal(workflow.jobs[job].needs, 'changes', job)
     assert.equal(workflow.jobs[job].if, condition, job)
   }
-  // Nothing waits on a job that a pull request may skip, so no job needs its artifacts.
-  for (const [name, job] of Object.entries(workflow.jobs)) assert.ok(job.needs === undefined || job.needs === 'changes', name)
+  // Nothing waits on a job that a pull request may skip, so no job needs its
+  // artifacts; only the required-check job below reads their results.
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    if (name !== 'workspace-complete') assert.ok(job.needs === undefined || job.needs === 'changes', name)
+  }
   const runner = { workspace: 'build-verify', 'workspace-test': 'test', 'migration-rehearsal': 'migration-rehearsal' }
   for (const [job, argument] of Object.entries(runner)) {
     const steps = workflow.jobs[job].steps
@@ -293,4 +305,74 @@ test('the workflow narrows only pull request runs, fails closed on missing outpu
     "${{ github.event_name == 'pull_request' && needs.changes.outputs.test_install || 'all' }}")
   // Every action in the workflow is pinned to a full commit.
   for (const job of Object.values(workflow.jobs)) for (const step of job.steps) if (step.uses) assert.match(step.uses, /^[a-z-]+\/[a-z-]+@[0-9a-f]{40}$/, step.uses)
+})
+
+// Branch protection on main and tuf-production-release requires a check named
+// "Complete workspace verification" (the former single workspace job). The
+// job that keeps that name must never be skipped, and must pass only when the
+// three workspace jobs pass or the pull request selection skipped them.
+test('the "Complete workspace verification" check runs on every event and fails closed', () => {
+  const workflow = parseWorkflow(localGates)
+  const job = workflow.jobs['workspace-complete']
+  assert.equal(job.name, 'Complete workspace verification')
+  assert.equal(Object.values(workflow.jobs).filter(j => j.name === 'Complete workspace verification').length, 1)
+  // Every required check listed in the protection record is still reported by exactly one job.
+  const protection = readFileSync(new URL('../../docs/TUF-CI-PROTECTION.md', import.meta.url), 'utf8')
+  const listed = protection.slice(protection.indexOf('Required check names'))
+  const required = [...listed.slice(0, listed.indexOf('\n\n', listed.indexOf('\n1. '))).matchAll(/^\d+\. `([^`]+)`$/gm)].map(m => m[1])
+  assert.equal(required.length, 7)
+  for (const name of required) assert.equal(Object.values(workflow.jobs).filter(j => j.name === name).length, 1, name)
+  assert.deepEqual(job.needs, ['changes', 'workspace', 'workspace-test', 'migration-rehearsal'])
+  // always(): a required check that is skipped counts as passed, so no
+  // failure or skip upstream may skip this job.
+  assert.equal(job.if, '${{ always() }}')
+  assert.equal(job.container, undefined)
+  assert.equal(job.services, undefined)
+  assert.equal(job.steps.length, 1)
+  const [step] = job.steps
+  assert.equal(step.uses, undefined)
+  assert.deepEqual(step.env, {
+    EVENT_NAME: '${{ github.event_name }}',
+    WORKSPACE_RESULT: '${{ needs.workspace.result }}',
+    WORKSPACE_TEST_RESULT: '${{ needs.workspace-test.result }}',
+    MIGRATION_REHEARSAL_RESULT: '${{ needs.migration-rehearsal.result }}',
+    SKIP_WORKSPACE_TEST: '${{ needs.changes.outputs.skip_workspace_test }}',
+    SKIP_MIGRATION_REHEARSAL: '${{ needs.changes.outputs.skip_migration_rehearsal }}',
+  })
+  assert.ok(!step.run.includes('${{'), 'no expression is interpolated into the shell script')
+  const passes = env => {
+    try {
+      execFileSync('bash', ['-c', step.run], { env: { PATH: process.env.PATH, ...env }, stdio: 'pipe' })
+      return true
+    } catch (error) {
+      if (typeof error.status !== 'number') throw error
+      return false
+    }
+  }
+  const ok = { EVENT_NAME: 'push', WORKSPACE_RESULT: 'success', WORKSPACE_TEST_RESULT: 'success', MIGRATION_REHEARSAL_RESULT: 'success',
+    SKIP_WORKSPACE_TEST: 'false', SKIP_MIGRATION_REHEARSAL: 'false' }
+  for (const event of ['push', 'workflow_dispatch', 'schedule', 'pull_request']) assert.equal(passes({ ...ok, EVENT_NAME: event }), true, event)
+  // A pull request may skip the test and rehearsal jobs only when the changes job said so.
+  const skippedPr = { ...ok, EVENT_NAME: 'pull_request', WORKSPACE_TEST_RESULT: 'skipped', MIGRATION_REHEARSAL_RESULT: 'skipped',
+    SKIP_WORKSPACE_TEST: 'true', SKIP_MIGRATION_REHEARSAL: 'true' }
+  assert.equal(passes(skippedPr), true)
+  assert.equal(passes({ ...skippedPr, WORKSPACE_TEST_RESULT: 'success' }), true)
+  // Fail closed: any failure, cancellation or unexplained skip fails the check.
+  const failing = [
+    ['workspace failed', { ...ok, WORKSPACE_RESULT: 'failure' }],
+    ['workspace skipped', { ...skippedPr, WORKSPACE_RESULT: 'skipped' }],
+    ['workspace cancelled', { ...ok, WORKSPACE_RESULT: 'cancelled' }],
+    ['tests failed', { ...ok, WORKSPACE_TEST_RESULT: 'failure' }],
+    ['rehearsal failed', { ...ok, MIGRATION_REHEARSAL_RESULT: 'failure' }],
+    ['rehearsal failed on a pull request that selected it', { ...skippedPr, MIGRATION_REHEARSAL_RESULT: 'failure', SKIP_MIGRATION_REHEARSAL: 'false' }],
+    ['tests skipped on a push', { ...skippedPr, EVENT_NAME: 'push' }],
+    ['rehearsal skipped on a manual run', { ...skippedPr, EVENT_NAME: 'workflow_dispatch' }],
+    ['rehearsal skipped on a scheduled run', { ...skippedPr, EVENT_NAME: 'schedule' }],
+    ['rehearsal skipped without a selection (changes job failed)', { ...skippedPr, SKIP_WORKSPACE_TEST: '', SKIP_MIGRATION_REHEARSAL: '' }],
+    ['tests skipped though the selection kept them', { ...skippedPr, SKIP_WORKSPACE_TEST: 'false' }],
+    ['rehearsal skipped though the selection kept it', { ...skippedPr, SKIP_MIGRATION_REHEARSAL: 'false' }],
+    ['missing results', { EVENT_NAME: 'pull_request' }],
+    ['unexpected result', { ...ok, WORKSPACE_TEST_RESULT: 'neutral' }],
+  ]
+  for (const [label, env] of failing) assert.equal(passes(env), false, label)
 })

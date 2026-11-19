@@ -43,10 +43,12 @@ export const SELECT_EVERYTHING = Object.freeze([
   'scripts/local-environment.mjs',
 ])
 
-// Services whose SQL only the migration rehearsal runs under the exact
-// database roles: the rehearsal and the runtime verifiers it runs boot each of
-// them from source (verify-records-processing-runtime.mjs boots ocr-api).
-export const REHEARSAL_SERVICES = Object.freeze(['identity-api', 'ehr-api', 'lab-api', 'pharmacy-api', 'ocr-api'])
+// Services the migration rehearsal loads from source: the rehearsal and the
+// runtime verifiers it runs boot each of them under the exact database roles
+// (verify-records-processing-runtime.mjs boots ocr-api), and
+// verify-provider-enrollment-runtime.mjs checks Identity's staff invitations
+// against notification-api's own route DTO, recipient check and templates.
+export const REHEARSAL_SERVICES = Object.freeze(['identity-api', 'ehr-api', 'lab-api', 'pharmacy-api', 'ocr-api', 'notification-api'])
 // Shared packages those services load at run time.
 export const REHEARSAL_PACKAGES = Object.freeze(['api-client', 'server-telemetry'])
 // The rehearsal script and the repository scripts it imports or runs.

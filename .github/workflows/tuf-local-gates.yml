@@ -598,7 +598,7 @@ jobs:
           restore-keys: tuf-local-npm-migration-rehearsal-${{ runner.os }}-${{ env.NODE_VERSION }}-
       - name: Install the lockfiles the rehearsal loads, without cloud authority
         run: |
-          for package in release packages/api-client packages/server-telemetry services/identity-api services/ehr-api services/lab-api services/pharmacy-api services/ocr-api; do
+          for package in release packages/api-client packages/server-telemetry services/identity-api services/ehr-api services/lab-api services/pharmacy-api services/ocr-api services/notification-api; do
             npm --prefix "${package}" ci
           done
       - name: Prepare PostgreSQL 16 and pgvector for the disposable rehearsal
@@ -630,6 +630,51 @@ jobs:
           path: ${{ runner.temp }}/workspace-gates
           if-no-files-found: warn
           retention-days: 90
+  # Branch protection on main and tuf-production-release requires a check
+  # named "Complete workspace verification", the name of the former single
+  # workspace job. This job keeps that check and its meaning: it always runs
+  # (it has no condition that can skip it) and passes only when the build and
+  # verification job succeeded and the test and rehearsal jobs each succeeded,
+  # or were skipped on a pull request because the changes job chose to skip
+  # them. Any other event needs all three to succeed.
+  workspace-complete:
+    name: Complete workspace verification
+    needs:
+      - changes
+      - workspace
+      - workspace-test
+      - migration-rehearsal
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require every workspace job to pass or to be skipped by the pull request selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKSPACE_RESULT: ${{ needs.workspace.result }}
+          WORKSPACE_TEST_RESULT: ${{ needs.workspace-test.result }}
+          MIGRATION_REHEARSAL_RESULT: ${{ needs.migration-rehearsal.result }}
+          SKIP_WORKSPACE_TEST: ${{ needs.changes.outputs.skip_workspace_test }}
+          SKIP_MIGRATION_REHEARSAL: ${{ needs.changes.outputs.skip_migration_rehearsal }}
+        run: |
+          set -euo pipefail
+          status=0
+          check() {
+            if [ "$2" = success ]; then
+              echo "$1: success"
+            elif [ "$EVENT_NAME" = pull_request ] && [ "$3" = true ] && [ "$2" = skipped ]; then
+              echo "$1: skipped by the pull request gate selection"
+            else
+              echo "::error::$1 concluded '$2'; it must succeed"
+              status=1
+            fi
+          }
+          check 'Workspace build and verification' "$WORKSPACE_RESULT" never
+          check 'Workspace tests' "$WORKSPACE_TEST_RESULT" "$SKIP_WORKSPACE_TEST"
+          check 'Synthetic migration rehearsal' "$MIGRATION_REHEARSAL_RESULT" "$SKIP_MIGRATION_REHEARSAL"
+          exit "$status"
   upstream-reference:
     name: Historical upstream reference oracle
     needs: changes
