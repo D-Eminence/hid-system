@@ -1,8 +1,13 @@
 # Automated staging backend builds
 
-`Staging backend images` checks PRs and builds affected backend components.
-Pushes to `staging-novu-ci-20261005` or `staging` also publish passing images to
-existing staging ECR repositories using short-lived GitHub OIDC credentials.
+`Staging backend images` runs only on pushes to `staging` and on manual runs
+against `staging`. It builds affected backend components and publishes passing
+images to existing staging ECR repositories using short-lived GitHub OIDC
+credentials. Pull requests no longer start it: `Production backend candidates`
+(`production-backend-images.yml`) builds and scans PR images under the stricter
+production policy, and its PR check also runs the staging selection and scan
+guard tests (`scripts/staging-backend-build.test.mjs`,
+`scripts/assess_staging_runtime_test.py`).
 Frontend-only changes do not run this pipeline. The current frontend release is
 retained while the developer finishes its changes.
 
