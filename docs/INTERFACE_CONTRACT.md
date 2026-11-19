@@ -6992,7 +6992,10 @@ pharmacy items on Health ID (an active member holding
 `pharmacy.work-item.read` and `pharmacy.order-route.receive` here, the
 send's `no_pharmacy` test), `false` when nobody does. It is absent on a
 database without 0133 and when it cannot be read (the read never fails
-because of it). It names no patient and writes nothing.
+because of it). It names no patient and writes nothing. The test asks the
+full permission check only of the members holding a role here that grants
+those permissions, so its cost follows the facility's pharmacy staff, not
+the number of its members.
 
 ### `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/own-pharmacy-send`
 

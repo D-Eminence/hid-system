@@ -124,7 +124,12 @@
 --                    0101 no longer dispenses; nothing is sent;
 --      no_pharmacy   nobody at this facility can work on pharmacy items
 --                    (no active member holds pharmacy.work-item.read and
---                    pharmacy.order-route.receive here);
+--                    pharmacy.order-route.receive here). Only the members
+--                    holding here an unrevoked role that grants each of the
+--                    two (read through the role assignments' index) are
+--                    asked the full permission check, so the test costs
+--                    with the facility's pharmacy staff, not with all its
+--                    members;
 --      sent          the work item was created now;
 --      pending       the attempt failed: the send row stays pending with the
 --                    failure's SQLSTATE, and nothing else is written.
@@ -145,9 +150,9 @@
 --    call (the prescriber's "Send to pharmacy").
 --    ehr.own_pharmacy_staffed() (SECURITY DEFINER, STABLE), for the EHR
 --    runtime: whether somebody at the session's facility works on pharmacy
---    items (D7's no_pharmacy test, answered true or false), for a session
---    whose member holds ehr.prescription.read here (else null). It writes
---    nothing; ehr-api answers it on the prescription list and page, so the
+--    items (D7's no_pharmacy test, the same statement, answered true or
+--    false), for a session whose member holds ehr.prescription.read here
+--    (else null). It writes nothing; ehr-api answers it on the prescription list and page, so the
 --    screen offers "Send to pharmacy" only where a send can reach somebody.
 -- D8 The withdrawal. A trigger on ehr.prescriptions
 --    (prescriptions_own_pharmacy_send_withdrawn, AFTER UPDATE FOR EACH ROW
@@ -381,6 +386,9 @@ begin
   -- the list only names them.
   with expected(schema_name, relation_name, column_names) as (values
          ('auth', 'accounts', array['id uuid', 'subject text']),
+         ('auth', 'account_roles', array['membership_id uuid', 'role_code text', 'scope_type text',
+           'revoked_at timestamp with time zone']),
+         ('auth', 'role_permissions', array['role_code text', 'permission_code text']),
          ('ehr', 'order_routes', array['source_prescription_id uuid', 'state text',
            'respond_by timestamp with time zone']),
          ('ehr', 'prescriptions', array['id uuid', 'encounter_id uuid', 'patient_id uuid', 'facility_id uuid',
@@ -500,7 +508,8 @@ begin
                   join pg_namespace namespace on namespace.oid = relation.relnamespace
                  where namespace.nspname = 'pharmacy' and relation.relname = 'work_items' and relation.relkind = 'r');
   with expected_tables(schema_name, relation_name) as (values
-         ('ehr', 'prescriptions'), ('ehr', 'order_routes'), ('auth', 'accounts'), ('identity', 'patients'),
+         ('ehr', 'prescriptions'), ('ehr', 'order_routes'), ('auth', 'accounts'), ('auth', 'account_roles'),
+         ('auth', 'role_permissions'), ('identity', 'patients'),
          ('identity', 'consent_directives'), ('identity', 'consent_directive_versions'),
          ('identity', 'staff_facility_memberships'), ('lab', 'work_items'), ('lab', 'work_item_events'),
          ('lab', 'work_item_requested_tests'), ('lab', 'accessions'), ('lab', 'accession_events'),
@@ -1092,15 +1101,33 @@ begin
     return query select 'already_in_pharmacy'::text, existing_item;
     return;
   end if;
+  -- Nobody here works on pharmacy items. The candidates are the active
+  -- members holding here an unrevoked role that grants each permission (the
+  -- permission check implies it; the role assignments' index answers it);
+  -- only they are asked the full check, so the cost follows the facility's
+  -- pharmacy staff, not all its members.
   if not exists (
+    with candidate as materialized (
+      select membership.id, account.subject
+        from identity.staff_facility_memberships membership
+        join auth.accounts account on account.id = membership.account_id
+       where membership.facility_id = session_facility
+         and membership.active
+         and exists (select 1 from auth.account_roles assignment
+                       join auth.role_permissions role_permission on role_permission.role_code = assignment.role_code
+                      where assignment.membership_id = membership.id and assignment.scope_type = 'facility'
+                        and assignment.revoked_at is null
+                        and role_permission.permission_code = 'pharmacy.work-item.read')
+         and exists (select 1 from auth.account_roles assignment
+                       join auth.role_permissions role_permission on role_permission.role_code = assignment.role_code
+                      where assignment.membership_id = membership.id and assignment.scope_type = 'facility'
+                        and assignment.revoked_at is null
+                        and role_permission.permission_code = 'pharmacy.order-route.receive'))
     select 1
-      from identity.staff_facility_memberships membership
-      join auth.accounts account on account.id = membership.account_id
-     where membership.facility_id = session_facility
-       and membership.active
-       and coalesce(auth.membership_has_permission(account.subject, membership.id, session_facility,
+      from candidate
+     where coalesce(auth.membership_has_permission(candidate.subject, candidate.id, session_facility,
              'pharmacy.work-item.read'), false)
-       and coalesce(auth.membership_has_permission(account.subject, membership.id, session_facility,
+       and coalesce(auth.membership_has_permission(candidate.subject, candidate.id, session_facility,
              'pharmacy.order-route.receive'), false)) then
     return query select 'no_pharmacy'::text, null::uuid;
     return;
@@ -1166,9 +1193,9 @@ begin
 end;
 $$;
 
--- D7's no_pharmacy test on its own, for the prescription list and page: no
--- write, no patient; null for a session whose member may not read
--- prescriptions here.
+-- D7's no_pharmacy test on its own (the same statement), for the
+-- prescription list and page: no write, no patient; null for a session whose
+-- member may not read prescriptions here.
 create function ehr.own_pharmacy_staffed()
 returns boolean
 language plpgsql
@@ -1187,14 +1214,27 @@ begin
     return null;
   end if;
   return exists (
+    with candidate as materialized (
+      select membership.id, account.subject
+        from identity.staff_facility_memberships membership
+        join auth.accounts account on account.id = membership.account_id
+       where membership.facility_id = session_facility
+         and membership.active
+         and exists (select 1 from auth.account_roles assignment
+                       join auth.role_permissions role_permission on role_permission.role_code = assignment.role_code
+                      where assignment.membership_id = membership.id and assignment.scope_type = 'facility'
+                        and assignment.revoked_at is null
+                        and role_permission.permission_code = 'pharmacy.work-item.read')
+         and exists (select 1 from auth.account_roles assignment
+                       join auth.role_permissions role_permission on role_permission.role_code = assignment.role_code
+                      where assignment.membership_id = membership.id and assignment.scope_type = 'facility'
+                        and assignment.revoked_at is null
+                        and role_permission.permission_code = 'pharmacy.order-route.receive'))
     select 1
-      from identity.staff_facility_memberships membership
-      join auth.accounts account on account.id = membership.account_id
-     where membership.facility_id = session_facility
-       and membership.active
-       and coalesce(auth.membership_has_permission(account.subject, membership.id, session_facility,
+      from candidate
+     where coalesce(auth.membership_has_permission(candidate.subject, candidate.id, session_facility,
              'pharmacy.work-item.read'), false)
-       and coalesce(auth.membership_has_permission(account.subject, membership.id, session_facility,
+       and coalesce(auth.membership_has_permission(candidate.subject, candidate.id, session_facility,
              'pharmacy.order-route.receive'), false));
 end;
 $$;
@@ -1559,7 +1599,7 @@ begin
            'search_path=pg_catalog, pg_temp'),
          ('pharmacy', 'own_work_source_prescription', 'uuid, uuid, uuid', '41a9afd4ea6f708425b98d1fb6e6eb87', 's', 'sql',
            'search_path=pg_catalog, pg_temp'),
-         ('ehr', 'send_prescription_to_own_pharmacy', 'uuid, bigint', 'ea6e547d05979779c9765f7dcc70c377', 'v', 'plpgsql',
+         ('ehr', 'send_prescription_to_own_pharmacy', 'uuid, bigint', '50f2e4cf46b7d9cd446f21bd893ea490', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
          ('ehr', 'withdraw_own_pharmacy_send', 'uuid', 'bdb411d4f4e7fe6806d246d996e91771', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
@@ -1573,7 +1613,7 @@ begin
            'search_path=pg_catalog, pg_temp'),
          ('ehr', 'own_pharmacy_send_withdrawn_on_change', '', '455c027844f87eebde9dd836f75760cf', 'v', 'plpgsql',
            'search_path=pg_catalog, pg_temp'),
-         ('ehr', 'own_pharmacy_staffed', '', '4998057d7a17977a8f7e9639bc759c7b', 's', 'plpgsql', 'search_path=pg_catalog, pg_temp')),
+         ('ehr', 'own_pharmacy_staffed', '', '9fe0a922c4c121616604e7c9c87ec202', 's', 'plpgsql', 'search_path=pg_catalog, pg_temp')),
        differing as (
          select expected.*,
                 (select string_agg(format('md5=%s owner=%s definer=%s volatile=%s strict=%s config=%s',

@@ -28,6 +28,11 @@
 --      (nobody works on pharmacy items there), null for a member who may not
 --      read prescriptions (the receptionist, the lab scientist) and without a
 --      session; it writes nothing;
+--   2c. that test (the staffed answer and D7's no_pharmacy) asks the full
+--      permission check of the members holding a pharmacy role only: 200
+--      more members at F3 add no check (counted with track_functions), and
+--      the full check still decides (a disabled account, a revoked role: not
+--      staffed; the two permissions through two roles: staffed, and D7 sends);
 --   3. the pharmacist without a grant sees the item, its card and its
 --      event, may work on it (own_work_access_for, basis 'own-work'), its
 --      list basis is 'own-work', and dispenses it; it reads nothing of the chart
@@ -131,10 +136,10 @@ begin
       ('lab.work_item_patient_cards(uuid[])', '91e157a7d6f89edd46c14dbb095d1bc6', 's'),
       ('pharmacy.work_item_patient_cards(uuid[])', '0dc38390c3c40a1883b87345ce0d35bd', 's'),
       ('pharmacy.own_work_source_prescription(uuid,uuid,uuid)', '41a9afd4ea6f708425b98d1fb6e6eb87', 's'),
-      ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', 'ea6e547d05979779c9765f7dcc70c377', 'v'),
+      ('ehr.send_prescription_to_own_pharmacy(uuid,bigint)', '50f2e4cf46b7d9cd446f21bd893ea490', 'v'),
       ('ehr.withdraw_own_pharmacy_send(uuid)', 'bdb411d4f4e7fe6806d246d996e91771', 'v'),
       ('ehr.own_pharmacy_send_withdrawn_on_change()', '455c027844f87eebde9dd836f75760cf', 'v'),
-      ('ehr.own_pharmacy_staffed()', '4998057d7a17977a8f7e9639bc759c7b', 's'),
+      ('ehr.own_pharmacy_staffed()', '9fe0a922c4c121616604e7c9c87ec202', 's'),
       ('pharmacy.own_work_access_for(text,uuid,text)', '5ddb078242919dd978d6312f5cd5aa77', 's'),
       ('lab.own_work_access_for(text,uuid,text)', '1c834e3ed17d864dadb27f3105cffa04', 's'),
       ('pharmacy.own_work_item_states(uuid[])', '821f37afc72515b43494f730adf0fef9', 's'),
@@ -526,6 +531,98 @@ select pg_temp.expect('no session, no answer', coalesce(ehr.own_pharmacy_staffed
 reset role;
 select pg_temp.expect('the staffed test wrote no send row', (select count(*)::text from pharmacy.own_prescription_sends
   where prescription_id in (pg_temp.rx(5), pg_temp.rx(9))), '0');
+
+-- 2c. The no_pharmacy test (the staffed answer and D7's) asks the full
+-- permission check (auth.membership_has_permission, counted by
+-- track_functions) of the members holding a pharmacy role here only, not of
+-- every member: at F3, 200 more members (nurses) add no check to either,
+-- and the staffed answer makes one (the session's own). The full check still
+-- decides: a pharmacist whose account is disabled, or whose role was
+-- revoked, does not staff F3; a member holding the two permissions through
+-- two roles does, and D7 then sends. In a savepoint, rolled back.
+savepoint staffed_scale;
+set local track_functions = 'all';
+create function pg_temp.permission_checks() returns bigint language sql as $f$
+  select coalesce(pg_stat_get_xact_function_calls('auth.membership_has_permission(text,uuid,uuid,text)'::regprocedure), 0)
+$f$;
+grant execute on function pg_temp.permission_checks() to public;
+-- Adds members at F3 numbered from first to last with one or more roles (as replica, as the suite's own).
+create function pg_temp.add_f3_members(first integer, last integer, roles text[], account_status text default 'active')
+returns void language plpgsql as $f$
+begin
+  insert into auth.accounts (id, subject, email, display_name, status)
+  select ('e1339002-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'synthetic:own-work-f3-' || n,
+         'own-work-f3-' || n || '@example.invalid', 'Own Work F3 ' || n, account_status
+    from generate_series(first, last) n;
+  insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
+  select ('e1339003-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
+         ('e1339002-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'Own Work F3 ' || n,
+         'own-work-f3-' || n || '@example.invalid', 'verified', roles[1]
+    from generate_series(first, last) n;
+  insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+    membership_role, app_role, is_primary, active)
+  select ('e1339004-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
+         ('e1339003-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
+         ('e1339002-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'e1330000-0000-4000-8000-000000000001',
+         'e1330001-0000-4000-8000-000000000003', roles[1], roles[1], true, true
+    from generate_series(first, last) n;
+  insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+  select gen_random_uuid(), ('e1339002-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, role_code, 'facility',
+         ('e1339004-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'e1330001-0000-4000-8000-000000000003',
+         'Own work suite role'
+    from generate_series(first, last) n cross join unnest(roles) role_code;
+end $f$;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(9);
+select set_config('own_work.checks', pg_temp.permission_checks()::text, true);
+select pg_temp.expect('F3 is not staffed', ehr.own_pharmacy_staffed()::text, 'false');
+select set_config('own_work.staffed_checks', (pg_temp.permission_checks()
+  - current_setting('own_work.checks')::bigint)::text, true);
+select set_config('own_work.checks', pg_temp.permission_checks()::text, true);
+select pg_temp.expect('D7 at F3: no_pharmacy', pg_temp.send(pg_temp.rx(9), 2), 'no_pharmacy');
+select set_config('own_work.send_checks', (pg_temp.permission_checks()
+  - current_setting('own_work.checks')::bigint)::text, true);
+reset role;
+set local session_replication_role = replica;
+select pg_temp.add_f3_members(1, 200, array['nurse']);
+set local session_replication_role = origin;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(9);
+select set_config('own_work.checks', pg_temp.permission_checks()::text, true);
+select pg_temp.expect('F3 with 200 more members (nurses): still not staffed', ehr.own_pharmacy_staffed()::text, 'false');
+select pg_temp.expect('the staffed answer asks the permission check once (the session''s), with or without them',
+  current_setting('own_work.staffed_checks') || '/' || (pg_temp.permission_checks()
+    - current_setting('own_work.checks')::bigint)::text, '1/1');
+select set_config('own_work.checks', pg_temp.permission_checks()::text, true);
+select pg_temp.expect('D7 at F3 with them: no_pharmacy', pg_temp.send(pg_temp.rx(9), 2), 'no_pharmacy');
+select pg_temp.expect('D7''s no_pharmacy test asks no more permission checks with them',
+  (pg_temp.permission_checks() - current_setting('own_work.checks')::bigint)::text,
+  current_setting('own_work.send_checks'));
+reset role;
+set local session_replication_role = replica;
+select pg_temp.add_f3_members(201, 201, array['pharmacist'], 'disabled');
+select pg_temp.add_f3_members(202, 202, array['pharmacist']);
+update auth.account_roles set granted_at = clock_timestamp() - interval '1 hour', revoked_at = clock_timestamp(),
+       revoked_by = 'e1330002-0000-4000-8000-000000000009', revocation_reason = 'Own work suite: role revoked'
+ where membership_id = 'e1339004-0000-4000-8000-000000000202';
+set local session_replication_role = origin;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(9);
+select pg_temp.expect('a pharmacist with a disabled account, or a revoked role, does not staff F3',
+  ehr.own_pharmacy_staffed()::text || '/' || pg_temp.send(pg_temp.rx(9), 2), 'false/no_pharmacy');
+reset role;
+set local session_replication_role = replica;
+select pg_temp.add_f3_members(203, 203, array['nurse', 'own_work_receive_only']);
+set local session_replication_role = origin;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(9);
+select pg_temp.expect('a member holding the read and the receive permission through two roles staffs F3, and D7 sends',
+  ehr.own_pharmacy_staffed()::text || '/' || pg_temp.send(pg_temp.rx(9), 2), 'true/sent:item');
+reset role;
+rollback to savepoint staffed_scale;
+select pg_temp.expect('2c is undone: F3 has no new member and rx9 no send', (select count(*)::text
+  from identity.staff_facility_memberships where facility_id = 'e1330001-0000-4000-8000-000000000003')
+  || '/' || (select count(*)::text from pharmacy.own_prescription_sends where prescription_id = pg_temp.rx(9)), '1/0');
 
 -- 3. PH, the pharmacist at F1 without any grant, through pharmacy-api's runtime.
 set local role hid_pharmacy_api_runtime;
