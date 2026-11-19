@@ -3,5 +3,10 @@ import { ClinicalInfrastructureModule } from '../shared/clinical-infrastructure.
 import { DiagnosesController } from './diagnoses.controller';
 import { DiagnosesService } from './diagnoses.service';
 
-@Module({ imports: [ClinicalInfrastructureModule], controllers: [DiagnosesController], providers: [DiagnosesService] })
+@Module({
+  imports: [ClinicalInfrastructureModule],
+  controllers: [DiagnosesController],
+  providers: [DiagnosesService],
+  exports: [DiagnosesService],
+})
 export class DiagnosesModule {}
