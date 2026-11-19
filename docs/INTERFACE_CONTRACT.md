@@ -7539,3 +7539,141 @@ names a part (`visit`, `note`, `vitals` or `diagnoses`), show it with that
 section. After a `201` with `encounter.reusedOpenVisit: true`, the complaint
 typed in "Start consultation" is not on the visit (above): save it as a
 visit edit, or put it in the note before sending.
+
+## SX-1: modules map per facility
+
+Akos N-2b, N-2e and P1-5 (wave 1, no migration, no new setting). The session
+answer already lists each facility's `roles` (every active role of the
+membership) and `permissions`. Each facility now also carries `modules`: the
+product areas the screens should show at that facility, so the website can
+hide what a role cannot use. The server still checks every route on its own;
+`modules` changes no permission and refuses nothing.
+
+### Where it appears
+
+`actor.facilities[*].modules` and, when a facility is selected,
+`actor.facility.modules`, in these `{ actor, ... }` session answers of
+identity-api: `POST /api/v1/auth/login`, `POST /api/v1/auth/oidc/exchange`
+(Google sign-in), `POST /api/v1/auth/refresh`, `GET /api/v1/auth/session`,
+`POST /api/v1/auth/facility` and the workload
+read of the same answer (`GET` and `POST /api/v1/auth/service-session`).
+
+- `modules` is added after every existing field of the facility. Every
+  other field is unchanged, `roles[0]` (and so `actor.role`) included, and
+  so is the order of the actor's fields.
+- A patient session and an account-only outreach session have no facility,
+  so their answers are unchanged, byte for byte.
+- It is not an access-token claim and is not stored: it is worked out from
+  the facility's `permissions` each time the answer is built.
+- `POST /api/v1/auth/google/link` answers `{ linked: true }` to a patient
+  session, with no actor, so it has no `modules`.
+- Three routes that sign staff in answer an `actor` without `modules`,
+  unchanged: `POST /api/v1/identity/provider-enrollments/activate` (a new
+  administrator), `POST /api/v1/identity/outreach-organisers/activate` and
+  `POST /api/v1/identity/outreach-invitations/accept` (outreach
+  memberships). After them the website reads `GET /api/v1/auth/session`,
+  which carries `modules`.
+
+### The map
+
+Every key is always present, `true` (show the area) or `false` (hide it), in
+this order. Each area is shown when the facility's `permissions` hold every
+code in the "Shown when the facility holds" column. These are the codes the
+area's routes already require.
+
+```json
+{
+  "patients": true, "registration": false, "accessRequests": true, "emergencyAccess": true,
+  "triage": true, "consultation": true, "orders": true, "lab": false, "labResults": true,
+  "pharmacy": false, "prescriptions": true, "migrate": true, "outreach": true,
+  "admin": false, "audit": false
+}
+```
+
+| Key | Akos's row | Shown when the facility holds |
+| --- | --- | --- |
+| `patients` | Find patient | `identity.patient.read` |
+| `registration` | Register and check in | `identity.registration.write` |
+| `accessRequests` | Access requests and PIN | `identity.consent.write` |
+| `emergencyAccess` | Emergency access | `identity.consent.write` and `identity.break-glass.write` |
+| `triage` | Triage and vitals (and Nursing observations) | `ehr.vital.read` |
+| `consultation` | Consultation and diagnosis | `ehr.diagnosis.read` |
+| `orders` | Order labs and prescribe | `ehr.lab-request.write` and `ehr.prescription.write` |
+| `lab` | Lab queue and results entry | `lab.result.enter` |
+| `labResults` | Lab results | `lab.result.released.read` |
+| `pharmacy` | Dispense medicines | `pharmacy.dispensing.create` |
+| `prescriptions` | Prescriptions | `ehr.prescription.read` |
+| `migrate` | Scan paper records | `ocr.job.read` and `ocr.publication.write` |
+| `outreach` | Outreach | `outreach.campaign.read` |
+| `admin` | Facility profile and staff | `workforce.manage` |
+| `audit` | The "View (audit)" cells | `audit.read` |
+
+- The map is a pure function of the facility's own `permissions`
+  (`services/identity-api/src/auth/facility-modules.ts`): the same codes
+  always give the same map, whatever their order. A membership with two
+  roles shows what either role shows.
+- Akos's row "Nursing observations" has no key: no permission tells it apart
+  from "Triage and vitals" today, so the screens use `triage` for both.
+- P1-5: doctor, clinician, nurse, receptionist, lab and pharmacist never hold
+  `workforce.manage` or `audit.read`, so `admin` and `audit` are `false` for
+  them. A facility administrator (admin, org_admin, and the administrator
+  awaiting review) sees both.
+- The map shows what today's role rows allow, not Akos's proposed table. For
+  example a doctor's `registration` is `true`, because the doctor role holds
+  `identity.registration.write` today. The role rows change only in a later
+  migration that the owner picks from the matrix below (0136).
+
+Example answers for today's seeded roles (fictional facility):
+
+| Role | Areas shown (`true`) |
+| --- | --- |
+| receptionist | patients, registration, accessRequests, outreach |
+| nurse | patients, registration, accessRequests, emergencyAccess, triage, consultation, labResults, prescriptions, migrate, outreach |
+| doctor, clinician | the nurse's areas and orders |
+| lab | patients, accessRequests, lab, labResults |
+| pharmacist | patients, accessRequests, pharmacy, prescriptions |
+| admin | registration, labResults, outreach, admin, audit |
+| org_admin | registration, outreach, admin, audit |
+| outreach organiser or volunteer | outreach |
+
+### The role matrix (Akos's table against today's role rows)
+
+`services/identity-api/test/role-matrix.json` is Akos's proposed table,
+checked in. The jest test `src/auth/role-matrix.spec.ts` compares each role's
+seeded permissions (every `insert into auth.role_permissions` in
+`services/ehr-api/database/migrations`, read the same way as the product gate
+tests) with the table, one row at a time through the areas above, and names
+each difference: **wider** (today gives more than the table) or **narrower**
+(today gives less). Today's middle level is written "shown, without" the
+area's missing codes, not "view only": an area is shown when its show codes
+are held, and some of those are writes (`identity.consent.write` for access
+requests). Today there are 20, recorded in the fixture's `todayDifferences`,
+for example:
+
+- `receptionist (Front desk), Access requests and PIN: narrower. Today shown, without identity.patient-access-pin.verify; Akos's table full.`
+  (the front desk can already make access requests, a write, but cannot check a patient's PIN)
+- `doctor (Doctor), Register and check in: wider. Today full; Akos's table hidden.`
+- `lab (Lab), Find patient: wider. Today full; Akos's table with lab orders only.`
+
+The test passes today. It fails when a migration adds or removes a
+`role_permissions` row for a role of the table (`todayRolePermissions` pins
+every seeded code of receptionist, nurse, doctor, clinician, lab, pharmacist,
+admin and org_admin) or when the differences change, until the same pull
+request updates the fixture. Packages that add role rows (0131, 0133, 0134,
+0136) update it.
+
+Clinician is compared with Akos's Doctor column (it holds the same codes
+today); admin and org_admin with the Facility admin column.
+
+### Audit
+
+No new audit row. The session reads are audited as before
+(`auth.session.read`, `auth.facility.select`, `auth.login`, `auth.refresh`),
+with nothing added. No patient is read.
+
+### Website (Akos frontend branch, not changed here)
+
+Read `actor.facility.modules` (or the chosen facility's entry in
+`actor.facilities`) and hide each menu item and home tile whose key is
+`false`; P1-5 hides Facility settings when `admin` is `false`. Treat a
+missing `modules` (an older backend) as today: show what is shown now.
