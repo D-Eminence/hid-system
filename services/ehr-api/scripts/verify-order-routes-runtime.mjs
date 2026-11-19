@@ -3223,6 +3223,11 @@ try {
   await new Promise(done => setTimeout(done, 300));
   for (const child of children) if (child.exitCode === null) child.kill('SIGKILL');
   stub.close();
+  // pg-pool's end() resolves before its connections finish closing, so the
+  // forced drop below can terminate one of them (57P01) once the checks are
+  // over (as identity-api's verify-provider-enrollment-runtime.mjs notes).
+  // Only that is expected here; any other pool error still fails the run.
+  owner.on('error', (error) => { if (error.code !== '57P01') throw error; });
   await owner.end().catch(() => {});
   if (failure && loopback && process.env.HID_VERIFIER_KEEP_DATABASE === '1') console.error(`kept ${isolated}`);
   else await maintenance.query(`drop database if exists ${isolated} with (force)`).catch(() => {});
