@@ -12,9 +12,19 @@
 --    row, or 'entered_in_error') and status_changed_at (null exactly while
 --    recorded). Adding a column with a constant default rewrites nothing;
 --    the two CHECKs read the existing rows once, under the lock below.
--- D2 vitals_latest_recorded_idx: (patient_id, facility_id, recorded_at desc,
---    created_at desc, id desc) where status = 'recorded', for the latest
---    reading per patient and facility (EHR-C3), leaving out withdrawn rows.
+-- D2 vitals_entered_in_error_hidden: a RESTRICTIVE select policy on
+--    ehr.vitals that hides a reading entered in error from every session
+--    that has not set app.vitals_status to '0142', which only this release's
+--    ehr-api sets, in its staff transactions (0133 D13's pattern). So an
+--    older ehr-api image on this schema (during the rolling deploy, or after
+--    a rollback) never shows a withdrawn reading as current: it drops out of
+--    that image's latest vitals, chart summary, visit lists, reads, staff
+--    chat and evidence, and that image's correction of it finds nothing
+--    instead of reaching the guard. A restrictive policy only narrows what
+--    the other policies allow. (An index of the latest recorded reading was
+--    planned here; every reader tests the status through to_jsonb so that it
+--    also runs on a schema without this file, so the index could never be
+--    used, and it is not built.)
 -- D3 ehr.guard_vital_status() and the trigger vitals_status_guard, BEFORE
 --    INSERT OR UPDATE (it fires before vitals_versioned, by name):
 --    - a new reading is 'recorded' with no status time (else 23514
@@ -37,9 +47,11 @@
 --    INSERT and UPDATE on ehr.vitals (table level), and nothing is granted
 --    on the guard.
 --
--- Locks: ACCESS EXCLUSIVE on ehr.vitals (the column adds, the index, the
--- trigger and the policy), held to commit; nothing else is locked beyond
--- planning. Taken first, NOWAIT: a busy table fails the attempt at once and
+-- Locks: ACCESS EXCLUSIVE on ehr.vitals (the column adds, the trigger and the
+-- policies) and ACCESS SHARE on ehr.encounters (vitals_patient_self_read's
+-- subquery, parsed when the policy is altered), held to commit; nothing else
+-- is locked beyond planning. Taken first, together, NOWAIT: a busy table
+-- fails the attempt at once and
 -- its subtransaction releases what it took; the attempt is made again every
 -- 100 ms for at most 5 seconds, then 55P03 (nothing applied). When this
 -- transaction already holds an earlier migration's locks that stop other
@@ -48,15 +60,19 @@
 --
 -- Old services on this schema: today's ehr-api never names the columns and
 -- inserts and corrects only recorded readings, which the guard admits
--- unchanged. A reading marked entered in error by the new ehr-api still
--- appears in an old ehr-api's staff lists, and its correction is refused
--- (55000) instead of being written.
+-- unchanged, and D2 hides every withdrawn reading from it. Its staff record
+-- evidence hashes each row's to_jsonb, which gains the two columns here, so
+-- if today's image refreshes vitals evidence on this schema it embeds those
+-- chunks again; this release's image leaves both columns out of its hashes,
+-- so its hashes are those of before this file (and such chunks are embedded
+-- once more). Roll this release's ehr-api out before this file (it runs on a
+-- schema without it) or right after it.
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied).
 -- 0b. Locks, NOWAIT (55P03 and nothing applied).
--- 1. The columns (D1) and the index (D2).
+-- 1. The columns (D1).
 -- 2. The guard and its trigger (D3, D5).
--- 3. The patient's own read (D4).
+-- 3. The patient's own read (D4) and the older images' read (D2).
 -- 4. Post-checks.
 
 -- 0. Preconditions.
@@ -72,7 +88,9 @@ begin
               where attribute.attrelid = 'ehr.vitals'::regclass and attribute.attname in ('status', 'status_changed_at')
                 and not attribute.attisdropped)
      or to_regprocedure('ehr.guard_vital_status()') is not null
-     or to_regclass('ehr.vitals_latest_recorded_idx') is not null then
+     or exists (select 1 from pg_policy policy_row
+                 where policy_row.polrelid = 'ehr.vitals'::regclass
+                   and policy_row.polname = 'vitals_entered_in_error_hidden') then
     raise exception using errcode = '55000', message = '0142: already applied';
   end if;
   select string_agg(expected.column_name, ', ') into mismatch
@@ -122,16 +140,17 @@ begin
     attempt := attempt + 1;
     begin
       lock table ehr.vitals in access exclusive mode nowait;
+      lock table ehr.encounters in access share mode nowait;
       exit;
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
-          message = '0142: ehr.vitals is busy, and this transaction already holds an earlier migration''s '
+          message = '0142: ehr.vitals or ehr.encounters is busy, and this transaction already holds an earlier migration''s '
             || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0142: ehr.vitals stayed busy for 5 seconds; nothing applied; run the release again at a '
+          message = '0142: ehr.vitals or ehr.encounters stayed busy for 5 seconds; nothing applied; run the release again at a '
             || 'quieter time';
       end if;
       perform pg_sleep(0.1);
@@ -140,7 +159,7 @@ begin
 end
 $locks$;
 
--- 1. The columns (D1) and the index (D2).
+-- 1. The columns (D1).
 alter table ehr.vitals
   add column status text not null default 'recorded',
   add column status_changed_at timestamptz,
@@ -149,10 +168,6 @@ alter table ehr.vitals
 comment on column ehr.vitals.status is
   'recorded, or entered_in_error (0142, EHR-C8b): a reading withdrawn for good; the reason is in ehr.record_versions.';
 comment on column ehr.vitals.status_changed_at is 'When the reading was marked entered in error (0142); null while recorded.';
-
-create index vitals_latest_recorded_idx on ehr.vitals
-  (patient_id, facility_id, recorded_at desc, created_at desc, id desc)
-  where status = 'recorded';
 
 -- 2. The guard (D3, D5) and its trigger.
 create function ehr.guard_vital_status()
@@ -196,10 +211,12 @@ create trigger vitals_status_guard
   before insert or update on ehr.vitals
   for each row execute function ehr.guard_vital_status();
 
--- 3. The patient's own read (D4).
+-- 3. The patient's own read (D4) and the older images' read (D2).
 alter policy vitals_patient_self_read on ehr.vitals using
   (ehr.patient_self_context(patient_id) and status = 'recorded'
    and exists(select 1 from ehr.encounters e where e.id=encounter_id and e.patient_id=vitals.patient_id and e.status='completed'));
+create policy vitals_entered_in_error_hidden on ehr.vitals as restrictive for select
+  using (status = 'recorded' or current_setting('app.vitals_status', true) = '0142');
 
 -- 4. Post-checks.
 do $$
@@ -217,8 +234,15 @@ begin
                     and pg_get_expr(policy_row.polqual, policy_row.polrelid) like '%status = ''recorded''::text%') then
     raise exception using errcode = '55000', message = '0142: vitals_patient_self_read does not leave out entered-in-error readings';
   end if;
-  if (select count(*) from pg_policy policy_row where policy_row.polrelid = 'ehr.vitals'::regclass) <> 4 then
-    raise exception using errcode = '55000', message = '0142: ehr.vitals does not have its four policies';
+  if (select count(*) from pg_policy policy_row where policy_row.polrelid = 'ehr.vitals'::regclass) <> 5
+     or not exists (select 1 from pg_policy policy_row
+                     where policy_row.polrelid = 'ehr.vitals'::regclass
+                       and policy_row.polname = 'vitals_entered_in_error_hidden'
+                       and not policy_row.polpermissive and policy_row.polcmd = 'r'
+                       and policy_row.polroles = array[0::oid]
+                       and pg_get_expr(policy_row.polqual, policy_row.polrelid) =
+                         '((status = ''recorded''::text) OR (current_setting(''app.vitals_status''::text, true) = ''0142''::text))') then
+    raise exception using errcode = '55000', message = '0142: ehr.vitals does not have its four policies and the restrictive read';
   end if;
   if exists (select 1 from pg_proc proc where proc.oid = 'ehr.guard_vital_status()'::regprocedure
               and (proc.prosecdef or proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp'])) then

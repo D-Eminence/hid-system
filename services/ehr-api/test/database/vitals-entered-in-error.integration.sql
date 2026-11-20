@@ -1,10 +1,11 @@
 \set ON_ERROR_STOP on
 -- 0142 (EHR-C8b): one vitals reading marked entered in error, for good.
 -- Rollback-only. Synthetic values only; uuid prefix f142; .invalid addresses.
---   1. structure: the two columns and their CHECKs, the partial index for the
---      latest recorded reading, the guard (plpgsql, SECURITY INVOKER,
---      search_path pg_catalog, pg_temp; before insert and update; before
---      vitals_versioned), the patient's own read, four policies;
+--   1. structure: the two columns and their CHECKs, no latest-reading index,
+--      the guard (plpgsql, SECURITY INVOKER, search_path pg_catalog,
+--      pg_temp; before insert and update; before vitals_versioned), the
+--      patient's own read, the restrictive read for older images, five
+--      policies;
 --   2. the guard, under a staff context: a new reading is recorded; a new
 --      reading entered in error or with a status time is refused (23514); a
 --      correction of a recorded reading still works; the mark needs a change
@@ -15,7 +16,12 @@
 --      (55000) and a delete still is;
 --   3. as the EHR runtime in the patient's own context: the recorded reading
 --      of a completed visit is read, the entered-in-error one and its
---      corrections are not.
+--      corrections are not;
+--   4. as the EHR runtime in the nurse's staff context: with
+--      app.vitals_status '0142' (this release's ehr-api) both readings are
+--      read; without it, or with another value (an older image), only the
+--      recorded one, and that image's update of the withdrawn one finds no
+--      row.
 set plpgsql.variable_conflict = error;
 begin;
 
@@ -86,6 +92,19 @@ exception when others then
 end
 $f$;
 
+-- One statement: how many rows it changed, or its SQLSTATE and message.
+create function pg_temp.rows_changed(statement text) returns text language plpgsql as $f$
+declare
+  changed bigint;
+begin
+  execute statement;
+  get diagnostics changed = row_count;
+  return changed::text;
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+
 -- 1. Structure.
 select pg_temp.check_case('1 the two columns', 'status text! default recorded,status_changed_at timestamp with time zone',
   (select string_agg(attname || ' ' || format_type(atttypid, atttypmod) || case when attnotnull then '!' else '' end
@@ -96,9 +115,8 @@ select pg_temp.check_case('1 the two columns', 'status text! default recorded,st
 select pg_temp.check_case('1 the CHECKs', 'vitals_status_ck,vitals_status_shape_ck',
   (select string_agg(conname, ',' order by conname) from pg_constraint
     where conrelid = 'ehr.vitals'::regclass and conname like 'vitals_status%'));
-select pg_temp.check_case('1 the latest-reading index leaves out withdrawn readings',
-  'CREATE INDEX vitals_latest_recorded_idx ON ehr.vitals USING btree (patient_id, facility_id, recorded_at DESC, created_at DESC, id DESC) WHERE (status = ''recorded''::text)',
-  pg_get_indexdef('ehr.vitals_latest_recorded_idx'::regclass));
+select pg_temp.check_case('1 no latest-reading index (no reader could use it)', '(null)',
+  (select to_regclass('ehr.vitals_latest_recorded_idx')::text));
 select pg_temp.check_case('1 the guard', 'plpgsql/f/{"search_path=pg_catalog, pg_temp"}/insert,update',
   (select format('%s/%s/%s/%s', language.lanname, proc.prosecdef, proc.proconfig,
        (select string_agg(event, ',' order by event) from (values
@@ -114,10 +132,14 @@ select pg_temp.check_case('1 the guard fires before the version trigger', 'vital
 select pg_temp.check_case('1 nobody may run the guard directly', '(null)',
   (select string_agg(grantee::regrole::text, ',') from pg_proc, aclexplode(proacl)
     where oid = 'ehr.guard_vital_status()'::regprocedure and privilege_type = 'EXECUTE' and grantee <> proowner));
-select pg_temp.check_case('1 four policies; the patient''s own read needs recorded', '4/t',
+select pg_temp.check_case('1 five policies; the patient''s own read needs recorded', '5/t',
   (select format('%s/%s', count(*), bool_or(polname = 'vitals_patient_self_read'
        and pg_get_expr(polqual, polrelid) like '%(status = ''recorded''::text)%'))
      from pg_policy where polrelid = 'ehr.vitals'::regclass));
+select pg_temp.check_case('1 the restrictive read for older images, on every role',
+  'f/r/{0}/((status = ''recorded''::text) OR (current_setting(''app.vitals_status''::text, true) = ''0142''::text))',
+  (select format('%s/%s/%s/%s', polpermissive, polcmd, polroles, pg_get_expr(polqual, polrelid))
+     from pg_policy where polrelid = 'ehr.vitals'::regclass and polname = 'vitals_entered_in_error_hidden'));
 
 -- 2. The guard.
 select pg_temp.check_case('2 a new reading is recorded', 'recorded/(null)',
@@ -187,6 +209,31 @@ select pg_temp.check_case('3 the patient reads the recorded reading only', 'f142
   (select string_agg(id::text, ',' order by id) from ehr.vitals where patient_id = 'f1427000-0000-4000-8000-000000000001'));
 select pg_temp.check_case('3 and none of the withdrawn reading''s corrections', '0',
   (select count(*)::text from ehr.vital_corrections where vital_id = 'f1429000-0000-4000-8000-000000000002'));
+reset role;
+
+-- 4. Staff reads: this release's ehr-api against an older image.
+select set_config('app.actor_subject', 'synthetic:vitals-0142:nurse', true),
+  set_config('app.membership_id', 'f1425000-0000-4000-8000-0000000000a1', true),
+  set_config('app.facility_id', 'f1421000-0000-4000-8000-0000000000f1', true),
+  set_config('app.purpose_of_use', 'direct-care', true),
+  set_config('app.account_id', '', true), set_config('app.session_id', '', true),
+  set_config('app.patient_id', '', true), set_config('app.self_authorized_until', '', true),
+  set_config('app.change_reason', 'Synthetic older image correction', true);
+set local role hid_ehr_api_runtime;
+select set_config('app.vitals_status', '0142', true);
+select pg_temp.check_case('4 this release''s session reads both readings, with their status',
+  'f1429000-0000-4000-8000-000000000001/recorded,f1429000-0000-4000-8000-000000000002/entered_in_error',
+  (select string_agg(id || '/' || status, ',' order by id) from ehr.vitals
+    where patient_id = 'f1427000-0000-4000-8000-000000000001'));
+select set_config('app.vitals_status', '', true);
+select pg_temp.check_case('4 an older image''s session reads the recorded reading only', 'f1429000-0000-4000-8000-000000000001',
+  (select string_agg(id::text, ',' order by id) from ehr.vitals where patient_id = 'f1427000-0000-4000-8000-000000000001'));
+select set_config('app.vitals_status', '0141', true);
+select pg_temp.check_case('4 any other value is an older image', 'f1429000-0000-4000-8000-000000000001',
+  (select string_agg(id::text, ',' order by id) from ehr.vitals where patient_id = 'f1427000-0000-4000-8000-000000000001'));
+select pg_temp.check_case('4 an older image''s update of the withdrawn reading finds no row', '0',
+  pg_temp.rows_changed($s$update ehr.vitals set current_correction_no = current_correction_no + 1
+    where id = 'f1429000-0000-4000-8000-000000000002'$s$));
 reset role;
 
 do $$
