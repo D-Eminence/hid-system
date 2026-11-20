@@ -9034,3 +9034,107 @@ primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
 
+
+## EHR-C6. Consultation drafts saved on the server (Release B, migration 0141; not live until signed)
+
+Akos N-5 and the auto-save part of P1-13. Owner decision Q126 A (19 November
+2026): author only; deleted 7 days after the last save. The planned
+contract's "EHR-C6" is the spec; this section is what is built.
+
+A draft is the unfinished consultation form, saved while the clinician types.
+It is not part of the patient's record: no version history, no clinical
+check, never in the chart, the patient's own record, chat, the record
+evidence, Migrate or OCR. Drafts can be deleted.
+
+All routes: `X-Facility-Id`, `X-Purpose-Of-Use: direct-care`, permission
+`ehr.note.write`. UUIDs only; no Health ID. GET, POST and PATCH only.
+
+| Method and path | Consent |
+|---|---|
+| `POST /api/v1/ehr/patients/:patientId/consultation-drafts` (`Idempotency-Key`) | `write_records` |
+| `GET /api/v1/ehr/patients/:patientId/consultation-drafts` | `read_records` |
+| `GET /api/v1/ehr/patients/:patientId/consultation-drafts/:draftId` | `read_records` |
+| `PATCH /api/v1/ehr/patients/:patientId/consultation-drafts/:draftId` | `write_records` |
+| `POST /api/v1/ehr/patients/:patientId/consultation-drafts/:draftId/discard` | none (authorship only) |
+| `GET /api/v1/ehr/my-consultation-drafts` | per patient (below) |
+
+**Create** body: `{ "encounterId"?: uuid, "formVersion": 1-1000, "content": { … } }`.
+`encounterId` is optional (an open or completed visit of this patient here;
+another is 404 `CLINICAL_RESOURCE_NOT_FOUND`, one entered in error 409
+`VISIT_ENTERED_IN_ERROR`). `content` is a JSON object of at most 262,144 bytes
+and 20 levels, stored as given and never read. Any other field, or `null`, is
+400. `201` (and the same on a replay):
+
+```json
+{ "draftId": "uuid", "encounterId": "uuid", "formVersion": 1, "rowVersion": 1,
+  "sizeBytes": 1834, "createdAt": "…", "savedAt": "…", "expiresAt": "…" }
+```
+
+`expiresAt` is `savedAt` + 7 days. One draft per author per visit, and one per
+author per patient with no visit: a second is 409
+`CONSULTATION_DRAFT_EXISTS`, and the problem carries the existing `draftId`.
+
+**Save** (`PATCH`): `{ "expectedRowVersion", "formVersion", "content" }`,
+replacing the whole content; `200` with the create answer's shape and the new
+`rowVersion`, `savedAt` and `expiresAt`. No reason is asked. Another version
+is 409 `CONSULTATION_DRAFT_CHANGED`; a retry of a save that already went
+through (same content and form version, stored `rowVersion` one higher)
+answers the stored draft. At most 60 saves per member per minute (429,
+counted per ehr-api task).
+
+**List for this patient**: `{ "items": [draft without content] }`, newest
+save first, at most 20. **Read one**: the draft with `content`. **Discard**:
+`204`, safe to repeat.
+
+**My drafts** (all patients, this facility):
+
+```json
+{ "items": [ { "draftId": "uuid", "encounterId": null, "savedAt": "…", "expiresAt": "…",
+    "patient": { "patientId": "uuid", "fullName": "…", "sex": "female", "dateOfBirth": "1990-05-01",
+                 "healthIdLast4": "AA22" } } ],
+  "hiddenCount": 1 }
+```
+
+A draft for a patient the author can no longer read for direct care is not
+listed; it is counted in `hiddenCount` (and still deleted on time). At most
+50, newest save first.
+
+Another member's draft, an expired one and a discarded one all answer 404
+`CONSULTATION_DRAFT_NOT_FOUND`: the database shows the author only their own
+unexpired drafts.
+
+Audit (never the content): `ehr.consultation-draft.create`, `.update`,
+`.read`, `.list` and `.discard`, naming the patient, with `sizeBytes` as
+stored; `my-consultation-drafts` writes one `.list` row and one `.list.shown`
+row per patient shown (the database); the sweeper writes `.expire` per draft.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. |
+| 400 | `CONSULTATION_DRAFT_TOO_LARGE` | This draft is too large to save (limit 256 KB). Remove pasted text or split the note. |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED`, `PURPOSE_OF_USE_REQUIRED` | as today |
+| 403 | `CONSENT_REQUIRED`, `PERMISSION_DENIED` | as today |
+| 404 | `CONSULTATION_DRAFT_NOT_FOUND` | This draft was not found. It may have been finished, discarded or kept for more than 7 days. |
+| 404 | `CLINICAL_RESOURCE_NOT_FOUND` | as today (the visit) |
+| 409 | `CONSULTATION_DRAFT_EXISTS` | You already have a saved draft for this visit. Open it to carry on. (with `draftId`) |
+| 409 | `CONSULTATION_DRAFT_CHANGED` | This draft was saved from another tab or device. Reload it before you carry on. |
+| 409 | `VISIT_ENTERED_IN_ERROR`, `IDEMPOTENCY_KEY_REUSED` | as today |
+| 429 | `CONSULTATION_DRAFT_SAVE_LIMITED` | Saving too often. Your draft will save again in a few seconds. |
+| 503 | `CONSULTATION_DRAFTS_UNAVAILABLE` | Drafts cannot be saved right now. Keep this page open and try again. (also on a database without 0141) |
+
+### Database (0141)
+
+- `ehr.consultation_drafts`, under forced row-level security. The author's
+  policies call `ehr.is_consultation_draft_author` (SECURITY DEFINER): the
+  session's own account, membership and facility, an active membership with
+  `ehr.note.write`; reads and saves also need an unexpired draft. The owner
+  may read and delete, for the two functions below.
+- A guard sets the times, the size and the version, and refuses a move to
+  another patient, author or visit.
+- Content is stored as given, as note bodies are: protected by row-level
+  security and the database's encryption at rest (no application-level
+  encryption in ehr-api).
+- `ehr.list_my_consultation_drafts()` and `ehr.sweep_consultation_drafts(batch)`
+  (SECURITY DEFINER, EHR runtime). ehr-api runs the sweeper every 10 minutes.
