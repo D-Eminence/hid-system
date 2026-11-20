@@ -148,6 +148,8 @@ const { StaffInvitationsSignedInController } = load('identity/staff-invitations-
 const { AdminFacilityStaffController } = load('identity/admin-facility-staff.controller.ts');
 const { StaffInvitationsService } = load('identity/staff-invitations.service.ts');
 const { FacilityStaffService } = load('identity/facility-staff.service.ts');
+// SX-4 (0139): FacilityStaffController's add and remove one role.
+const { FacilityStaffRolesService } = load('identity/facility-staff-roles.service.ts');
 const { StaffReauthenticationService } = load('identity/staff-reauthentication.service.ts');
 const { ConsentController } = load('consent/consent.controller.ts');
 const { ConsentService } = load('consent/consent.service.ts');
@@ -336,7 +338,8 @@ try {
       ProviderEnrollmentService, OrganizationProfileCompletionService, OrganizationApplicationsService,
       SelfServiceFacilitiesService, AdminService, AdminOperationsService, PricingService, EmergencyContactProtector,
       QoreIdVerificationAdapter,
-      StaffInvitationsService, FacilityStaffService, StaffReauthenticationService, ConsentService,
+      StaffInvitationsService, FacilityStaffService, FacilityStaffRolesService, StaffReauthenticationService,
+      ConsentService,
       { provide: IdentityService, useValue: patientLookupStub },
       { provide: NinRegistrationService, useValue: {} },
       { provide: QOREID_ADAPTER_CONFIGURATION, useValue: { baseUrl: 'https://api.qoreid.com',
@@ -2858,6 +2861,48 @@ try {
   p4b.roleChange = { wrongPassword: 'STAFF_REAUTHENTICATION_FAILED', noLicence: 400, status: 200,
     permissionsAtNextRequest: 'doctor', unchanged: 'FACILITY_STAFF_ROLE_UNCHANGED', licenceOnly: 200,
     attestations: 3, staleVersion: 409, administratorRow: 'FACILITY_STAFF_SELF' };
+
+  // ── 11b. SX-4 (0139): add one role, then remove it ──
+  const bisiVersion = Number((await membershipOf(bisiAccount, hospital.facilityId)).row_version);
+  const addRolePath = `/identity/facility-staff/${bisiMembership.id}/roles/add`;
+  const removeRolePath = `/identity/facility-staff/${bisiMembership.id}/roles/remove`;
+  const addRoleBody = { expectedVersion: bisiVersion, role: 'lab', licenceBody: 'MLSCN', licenceNumber: 'ML/88888',
+    attested: true, reason: 'Also runs the bench at night', currentPassword: password };
+  sensitive.add('ML/88888');
+  const addRoleKey = `verifier-add-role-${randomUUID()}`;
+  expectProblem(await staffCall(hospitalAdmin, 'post', addRolePath, addRoleBody), 400, 'IDEMPOTENCY_KEY_REQUIRED');
+  const addedRole = await staffCall(hospitalAdmin, 'post', addRolePath, addRoleBody,
+    { headers: { 'Idempotency-Key': addRoleKey } });
+  assert.equal(addedRole.status, 201, `add role: ${JSON.stringify(addedRole.body)}`);
+  assert.deepEqual(addedRole.body, { membershipId: bisiMembership.id, version: bisiVersion + 1, roles: ['doctor', 'lab'],
+    replayed: false });
+  const bisiWithLab = await sessionRead(bisiSession);
+  assert.deepEqual([...bisiWithLab.body.actor.permissions].sort(), await permissionsOf('doctor', 'lab'),
+    'The added role did not apply at the next request');
+  const replayedRole = await staffCall(hospitalAdmin, 'post', addRolePath, addRoleBody,
+    { headers: { 'Idempotency-Key': addRoleKey } });
+  assert.deepEqual([replayedRole.status, replayedRole.body.replayed, replayedRole.body.version], [200, true, bisiVersion + 1]);
+  expectProblem(await staffCall(hospitalAdmin, 'post', addRolePath, { ...addRoleBody, expectedVersion: bisiVersion + 1 },
+    { headers: { 'Idempotency-Key': `verifier-add-role-${randomUUID()}` } }), 409, 'FACILITY_STAFF_ROLE_ALREADY_HELD');
+  assert.equal(await count(`select count(*)::int n from identity.staff_licence_attestations
+    where account_id=$1 and role_code='lab' and verification_method='facility_attestation'`, [bisiAccount]), 1);
+  const removeRoleBody = { expectedVersion: bisiVersion + 1, role: 'lab', reason: 'Back on the wards only',
+    currentPassword: password };
+  const removedRole = await staffCall(hospitalAdmin, 'post', removeRolePath, removeRoleBody);
+  assert.equal(removedRole.status, 200, `remove role: ${JSON.stringify(removedRole.body)}`);
+  assert.deepEqual(removedRole.body, { membershipId: bisiMembership.id, version: bisiVersion + 2, roles: ['doctor'],
+    replayed: false });
+  assert.deepEqual([...(await sessionRead(bisiSession)).body.actor.permissions].sort(), await permissionsOf('doctor'),
+    'The removed role still applied at the next request');
+  expectProblem(await staffCall(hospitalAdmin, 'post', removeRolePath, removeRoleBody), 409, 'FACILITY_STAFF_ROLE_NOT_HELD');
+  expectProblem(await staffCall(hospitalAdmin, 'post', removeRolePath, { ...removeRoleBody, role: 'doctor',
+    expectedVersion: bisiVersion + 2 }), 409, 'FACILITY_STAFF_LAST_ROLE');
+  assert.equal(await count(`select count(*)::int n from audit.events where resource_id=$1
+    and action in ('identity.facility-staff.role-add', 'identity.facility-staff.role-remove') and outcome='success'`,
+  [bisiMembership.id]), 2);
+  p4b.roleAddRemove = { missingKey: 'IDEMPOTENCY_KEY_REQUIRED', added: 201, roles: ['doctor', 'lab'],
+    permissionsAtNextRequest: 'doctor+lab', replay: 200, alreadyHeld: 'FACILITY_STAFF_ROLE_ALREADY_HELD', removed: 200,
+    retry: 'FACILITY_STAFF_ROLE_NOT_HELD', lastRole: 'FACILITY_STAFF_LAST_ROLE', successRows: 2 };
 
   // ── 12. Expiry and revocation ──
   const expiringEmail = email('invitee-expiring');
