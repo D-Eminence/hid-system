@@ -26,13 +26,18 @@ export class IdentityService {
       workloadHeaders: () => workloadIdentity.identityHeaders() });
   }
 
+  /**
+   * `options.signal` (ORD-3's batch form, decision 4) aborts the check when
+   * the batch's time is up; the aborted fetch is answered as Identity being
+   * unavailable (503), and the batch tells it apart by its own signal.
+   */
   async authorize(patientId: string, scope: 'read_records' | 'write_records',
-    context: DataAccessContext): Promise<AuthorizationDecision> {
+    context: DataAccessContext, options: { signal?: AbortSignal } = {}): Promise<AuthorizationDecision> {
     const decision = await this.client.authorizePatient(patientId, scope, context.purposeOfUse,
       { authorization: context.authorization, cookie: context.userCookie,
         csrfToken: context.csrfToken, origin: context.origin, requestMethod: context.requestMethod,
         correlationId: context.correlationId, facilityId: context.facilityId,
-        purposeOfUse: context.purposeOfUse })
+        purposeOfUse: context.purposeOfUse, ...(options.signal ? { signal: options.signal } : {}) })
       .catch((error) => { if (error instanceof IdentityApiProblem) throw new DomainProblem(error.status,
         error.code ?? 'IDENTITY_AUTHORIZATION_DENIED', error.message); throw new DomainProblem(503,
         'IDENTITY_SERVICE_UNAVAILABLE', 'Identity authorization service is unavailable'); });
