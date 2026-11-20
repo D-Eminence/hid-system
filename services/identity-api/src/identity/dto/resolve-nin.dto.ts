@@ -41,6 +41,13 @@ export function hasAnyDeskField(body: object): boolean {
   return DESK_FIELDS.some((field) => values[field] !== undefined && values[field] !== null);
 }
 
+/**
+ * Q108: the body check refuses a malformed name or date. A well-formed one
+ * that cannot be anyone's (a date of birth in the future or before 1900, a
+ * name with a control character) passes here and is refused by
+ * NinRegistrationService before any (charged) NIN check is sent, with the
+ * desk's own answer, 400 NIN_DETAILS_INVALID, which the website shows as is.
+ */
 export class ResolveNinDto {
   @Transform(normalizeNin)
   @IsString()

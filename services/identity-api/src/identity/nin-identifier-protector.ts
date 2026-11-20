@@ -45,6 +45,15 @@ export function protectPatientSelfNin(
   return protectNinWithContext(nin, `identity:patient-self-nin:${evidenceId}:nin`, config);
 }
 
+/** ID-6 (0138): a NIN linked at a desk, bound to its link (identity.patient_nin_links). */
+export function protectPatientNinLink(
+  nin: string,
+  linkId: string,
+  config: NinProtectionConfig,
+): ProtectedNin {
+  return protectNinWithContext(nin, `identity:patient-nin-link:${linkId}:nin`, config);
+}
+
 export function protectPatientSelfNinProfile(
   profile: { firstName: string; lastName: string; dateOfBirth: string },
   evidenceId: string,
@@ -108,6 +117,19 @@ export class NinIdentifierProtector {
       throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection keys are unavailable');
     }
     return protectPatientSelfNin(nin, evidenceId, {
+      lookupKey: Buffer.from(environment.NIN_LOOKUP_HMAC_KEY_B64, 'base64'),
+      encryptionKey: Buffer.from(environment.NIN_ENCRYPTION_KEY_B64, 'base64'),
+      keyVersion: environment.NIN_KEY_VERSION,
+    });
+  }
+
+  /** ID-6 (0138): the NIN of a desk link, bound to the link's id. */
+  protectLink(nin: string, linkId: string): ProtectedNin {
+    const environment = getEnvironment();
+    if (!environment.NIN_LOOKUP_HMAC_KEY_B64 || !environment.NIN_ENCRYPTION_KEY_B64) {
+      throw new DomainProblem(503, 'NIN_PROTECTION_UNAVAILABLE', 'NIN protection keys are unavailable');
+    }
+    return protectPatientNinLink(nin, linkId, {
       lookupKey: Buffer.from(environment.NIN_LOOKUP_HMAC_KEY_B64, 'base64'),
       encryptionKey: Buffer.from(environment.NIN_ENCRYPTION_KEY_B64, 'base64'),
       keyVersion: environment.NIN_KEY_VERSION,

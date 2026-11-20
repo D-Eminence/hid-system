@@ -7,9 +7,11 @@ import { requireRequestContext, type HidRequest } from '../common/request-contex
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
-import { NIN_NO_RECORD_ANSWER_SECONDS, NinCheckOnce, type NinCheckAnswer, qoreIdRejected, recordNames,
+import { NIN_NO_RECORD_ANSWER_SECONDS, NinCheckOnce, type NinCheckAnswer, type NinCheckResult, recordNames,
   unusableAnswer } from './nin-check-once';
 import { NinIdentifierProtector } from './nin-identifier-protector';
+import { ninCouldNotBeVerified } from './nin-verification.provider';
+import { qoreIdNotFound } from './patient-enrollment.provider';
 import { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import { matchingCacIncompleteProfile, verifiedCacBinding } from './organization-applications.service';
 import {
@@ -86,18 +88,27 @@ export class QoreIdVerificationService {
         // 0137). A record QoreID already returned for this NIN (here, at
         // sign-up or at a desk) is compared with the profile here instead.
         const nameOrder = declaredProfile ? 'either' as const : 'exact' as const;
-        const checked = await this.ninCheck.check({
-          nin, correlationId: request.correlationId, path: 'profile', needsCompleteRecord: false,
-          question: JSON.stringify([normalizedClaimName(claims.firstName), normalizedClaimName(claims.lastName),
-            claims.dateOfBirth, nameOrder]),
-          ask: async ({ timeoutMs }) => {
-            const asked = await this.provider.verifyNin(nin, claims, nameOrder, { timeoutMs });
-            // A record that did not match this profile (perhaps someone
-            // else's NIN) is kept no longer than "no record" is.
-            return { answer: profileAnswer(asked), value: asked,
-              ...(asked.state === 'verified' ? {} : { keepSeconds: NIN_NO_RECORD_ANSWER_SECONDS }) };
-          },
-        });
+        let checked: NinCheckResult<QoreIdVerificationResult>;
+        try {
+          checked = await this.ninCheck.check({
+            nin, correlationId: request.correlationId, path: 'profile', needsCompleteRecord: false,
+            question: JSON.stringify([normalizedClaimName(claims.firstName), normalizedClaimName(claims.lastName),
+              claims.dateOfBirth, nameOrder]),
+            ask: async ({ timeoutMs }) => {
+              const asked = await this.provider.verifyNin(nin, claims, nameOrder, { timeoutMs });
+              // A record that did not match this profile (perhaps someone
+              // else's NIN) is kept no longer than "no record" is.
+              return { answer: profileAnswer(asked), value: asked,
+                ...(asked.state === 'verified' ? {} : { keepSeconds: NIN_NO_RECORD_ANSWER_SECONDS }) };
+            },
+          });
+        } catch (error) {
+          // Q117: QoreID's 404 "not found" (kept by the guard for every path)
+          // is its answer that it has no record of the NIN. Its evidence is
+          // recorded as before (a provider error).
+          if (qoreIdNotFound(error)) throw ninCouldNotBeVerified();
+          throw error;
+        }
         const result = checked.source === 'qoreid' ? checked.value
           : storedProfileResult(checked.answer, nin, claims, nameOrder);
         if (result.state === 'verified') {
@@ -450,7 +461,8 @@ function profileAnswer(result: QoreIdVerificationResult): NinCheckAnswer {
  */
 function storedProfileResult(answer: NinCheckAnswer, nin: string, claims: QoreIdNinClaims,
   nameOrder: 'exact' | 'either'): QoreIdVerificationResult {
-  if (answer.outcome === 'rejected') throw qoreIdRejected();
+  // Q117: a kept 404 "not found" (from any path) is QoreID having no record of the NIN.
+  if (answer.outcome === 'rejected') throw ninCouldNotBeVerified();
   // An answer HID could not use for a sign-up still gives the name and date
   // of birth to compare, when they could be read with QoreID's reference.
   if (answer.outcome === 'unusable' && (!answer.record || !answer.providerReference)) throw unusableAnswer();

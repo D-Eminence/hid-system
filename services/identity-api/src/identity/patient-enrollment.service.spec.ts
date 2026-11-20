@@ -185,7 +185,9 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
   const database = { withSystemTransaction: jest.fn(async (_correlation: string,
     work: (client: PoolClient) => Promise<unknown>) => work(client)) } as unknown as DatabaseService;
   const provider = { assertAvailable: jest.fn().mockResolvedValue(undefined),
-    isAvailable: jest.fn().mockResolvedValue(true), verifyNin: jest.fn().mockResolvedValue(identity) };
+    isAvailable: jest.fn().mockResolvedValue(true), verifyNin: jest.fn().mockResolvedValue(identity),
+    // The registration desk's check (Q108); sign-up never calls it.
+    verifyNinRecord: jest.fn() };
   const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }),
     deliverPatientWelcome: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }) };
   const protector = { lookup: jest.fn().mockReturnValue('a'.repeat(64)) };
