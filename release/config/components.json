@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0138",
-    "count": 139,
+    "last": "0146",
+    "count": 140,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -653,6 +653,10 @@
       {
         "name": "0138_patient_nin_link.sql",
         "sha256": "f96255b4e783c3182ca56106d4e64fcd3440d348aed487d76cb4babee79469e3"
+      },
+      {
+        "name": "0146_unknown_patient_record.sql",
+        "sha256": "8a2a4cb84acc3f1c7a62b6cd1723882d6d82891a5d86208a1e11264df0a136c9"
       }
     ]
   },

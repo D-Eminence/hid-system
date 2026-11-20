@@ -34,6 +34,10 @@ export interface VisitQueueCard {
   rowVersion: number;
   /** A deny directive covers this facility: the patient stays listed, the chart cannot be opened. */
   chartBlocked: boolean;
+  /** 0146 (ID-7): an unknown patient record shows its fullName ("Unknown patient U-0007") and label. */
+  recordKind: 'standard' | 'unknown';
+  /** 0146 (ID-7): the date of birth is estimated (an unknown record's age). */
+  dateOfBirthEstimated: boolean;
 }
 
 export interface VisitQueueCheckIn {
@@ -65,6 +69,8 @@ interface CardRow extends QueryResultRow {
   closed_at: Date | null;
   row_version: string;
   chart_blocked: boolean;
+  record_kind?: string | null;
+  dob_estimated?: boolean | null;
 }
 
 interface OutcomeRow extends CardRow {
@@ -77,6 +83,11 @@ const CARD_COLUMNS = `entry_id, patient_id, full_name, sex, date_of_birth::text 
   stage_changed_at, closed_at, row_version::text as row_version, chart_blocked`;
 
 export const CHECK_IN_SQL = `select outcome, ${CARD_COLUMNS} from ehr.visit_queue_check_in($1, $2)`;
+/** 0146 (ID-7): the record kinds of the cards' entries, read only where 0146 is applied. */
+export const RECORD_KINDS_PRESENT_SQL =
+  `select to_regprocedure('ehr.visit_queue_record_kinds(uuid[])') is not null as present`;
+export const RECORD_KINDS_SQL =
+  'select entry_id::text as entry_id, record_kind, dob_estimated from ehr.visit_queue_record_kinds($1::uuid[])';
 export const LIST_SQL = `select ${CARD_COLUMNS}, has_more from ehr.visit_queue_list($1) order by ord`;
 export const UPDATE_SQL = `select outcome, ${CARD_COLUMNS}
   from ehr.visit_queue_update($1, $2, $3, $4::smallint, $5, $6, $7)`;
@@ -150,8 +161,21 @@ export class VisitQueueService {
   private async query<Row extends QueryResultRow>(context: DataAccessContext, sql: string,
     values: readonly unknown[]): Promise<Row[]> {
     try {
-      return await this.database.withTransaction(context, async (client: PoolClient) =>
-        (await client.query<Row>(sql, [...values])).rows);
+      return await this.database.withTransaction(context, async (client: PoolClient) => {
+        const rows = (await client.query<Row>(sql, [...values])).rows;
+        const entryIds = rows.map((row) => (row as { entry_id?: unknown }).entry_id).filter(
+          (id): id is string => typeof id === 'string');
+        if (entryIds.length === 0
+            || (await client.query<{ present: boolean }>(RECORD_KINDS_PRESENT_SQL)).rows[0]?.present !== true) {
+          return rows;
+        }
+        const kinds = new Map((await client.query<{ entry_id: string; record_kind: string; dob_estimated: boolean }>(
+          RECORD_KINDS_SQL, [entryIds])).rows.map((kind) => [kind.entry_id, kind]));
+        return rows.map((row) => {
+          const kind = kinds.get(String((row as { entry_id?: unknown }).entry_id));
+          return kind ? { ...row, record_kind: kind.record_kind, dob_estimated: kind.dob_estimated } : row;
+        });
+      });
     } catch (error) {
       throw translate(error);
     }
@@ -176,6 +200,8 @@ function toCard(row: CardRow): VisitQueueCard {
     closedAt: row.closed_at === null ? null : new Date(row.closed_at).toISOString(),
     rowVersion: Number(row.row_version),
     chartBlocked: row.chart_blocked === true,
+    recordKind: row.record_kind === 'unknown' ? 'unknown' : 'standard',
+    dateOfBirthEstimated: row.dob_estimated === true,
   };
 }
 

@@ -435,7 +435,9 @@ begin
     raise exception 'own facility work: the own-work policies are not 0133''s 44 on the work items and their chain';
   end if;
   -- S7: the owner-run SECURITY DEFINER functions that read ehr.prescriptions
-  -- (each sees D5's rows in a pharmacist's session) are exactly these seven;
+  -- (each sees D5's rows in a pharmacist's session) are exactly these eight
+  -- (0146's identity.decide_unknown_patient only tests that a record has
+  -- none, and only the Identity runtime may run it);
   -- case 8 shows each gives the pharmacist nothing more. A new one must be
   -- added here, and to case 8, by whoever writes it. The check matches a
   -- definer's own text only: an invoker helper that such a definer calls
@@ -448,6 +450,7 @@ begin
          and proc.proowner = (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure))
      is distinct from 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
        || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
+       || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
        || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item()' then
     raise exception 'own facility work: the owner-run definer functions that read ehr.prescriptions changed: %',
       (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
@@ -2167,6 +2170,11 @@ select pg_temp.expect('PH: the withdrawal refuses', pg_temp.try(format(
 -- (The list is the patient's own: a staff session is refused.)
 select pg_temp.expect('PH: the patient''s own route list answers nothing for a staff session',
   pg_temp.rows_of('select * from ehr.patient_list_order_routes()'), '42501 PATIENT_SESSION_REQUIRED');
+-- 0146: the unknown record's decision is the Identity runtime's alone.
+select pg_temp.expect('PH: the unknown record''s decision is not the EHR runtime''s', pg_temp.try(format(
+  'select * from identity.decide_unknown_patient(%L, %L, 1, %L, %L, %L)', pg_temp.rx(4), 'cancel',
+  'Own work probe reason', 'own-work-unknown-probe', repeat('a', 64))),
+  '42501 permission denied for function decide_unknown_patient');
 reset role;
 
 -- Fixtures of cases 10 and 11 (0133 D14 and D15), as replica: patient 4 Dayo
