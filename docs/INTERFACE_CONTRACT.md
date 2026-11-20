@@ -9034,3 +9034,234 @@ primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
 
+
+## SX-4. Add or remove one role for a staff member (Release B, migration 0139; not live until signed)
+
+Akos N-2a and N-2c. Owner decision Q129 A (19 November 2026): facility
+administrators add and remove roles for their own staff; at governed
+facilities (QA Hospital included) Health ID support does it, with a licence
+check. The planned contract's "SX-4" is the spec; this section is what is
+built.
+
+One membership may hold several roles (`auth.account_roles`). Today's
+`POST /identity/facility-staff/:membershipId/role` replaces them with one
+role and is unchanged. SX-4 adds two narrower commands beside it, for the
+facility administrator and for support. Membership ids are UUIDs; no Health
+ID or NIN appears in these routes.
+
+### The facility administrator
+
+Both routes need a staff session at the `X-Facility-ID` facility with
+`workforce.manage`, at a self-signed-up facility that support has reviewed
+(403 `STAFF_MANAGEMENT_NOT_AVAILABLE` at governed and legacy facilities, 409
+`FACILITY_REVIEW_PENDING` before review), the Origin and CSRF checks of every
+cookie POST, and the password re-entered.
+
+**`POST /api/v1/identity/facility-staff/:membershipId/roles/add`**
+
+Headers: `Idempotency-Key` (required, 16-128 URL-safe characters). Body,
+exactly these fields:
+
+```json
+{ "role": "nurse", "licenceBody": "NMCN", "licenceNumber": "NMCN-12345",
+  "attested": true, "reason": "Also covers night triage", "currentPassword": "…", "expectedVersion": 4 }
+```
+
+| Field | Rule |
+|---|---|
+| `role` | `doctor`, `nurse`, `lab`, `pharmacist` or `receptionist`, and one of the facility's invitable roles (`inviteOptions.roles` of `GET /identity/facility-staff`). |
+| `licenceBody`, `licenceNumber` | The role's own licence: MDCN (doctor), NMCN (nurse), MLSCN (lab), PCN (pharmacist), with a number of 3-100 characters. The front desk sends neither. Today's invitation rule. |
+| `attested` | `true`: the administrator vouches for the licence. |
+| `reason` | 8-500 characters. |
+| `currentPassword` | 1-256 characters. |
+| `expectedVersion` | The member's `version` from `GET /identity/facility-staff`. |
+
+- Closed while staff invitations are closed (423 `STAFF_INVITATIONS_UNAVAILABLE`),
+  as today's role change is.
+- Refused 403 `STAFF_RECENT_RECOVERY_HOLD` if the administrator's account was
+  recovered with a verification code in the last 24 hours.
+- `201` for a new grant. The same `Idempotency-Key` with the same request
+  answers `200` with `replayed: true` and changes nothing; with another
+  request, 409 `IDEMPOTENCY_KEY_REUSED`. The password is not part of the
+  request compared.
+
+**`POST /api/v1/identity/facility-staff/:membershipId/roles/remove`**
+
+```json
+{ "role": "lab", "reason": "Moved to the ward full time", "currentPassword": "…", "expectedVersion": 5 }
+```
+
+- No licence fields and no `Idempotency-Key`. Not closed with staff
+  invitations, and allowed during the recovery hold (as removing a member).
+- `200`. A retry after success answers 409 `FACILITY_STAFF_ROLE_NOT_HELD`
+  (before any version check); the screen reloads the list.
+
+### Health ID support
+
+**`POST /api/v1/admin/facilities/:facilityId/staff/:membershipId/roles/add`**
+and **`.../roles/remove`**: `platform.facility-staff.manage` (new; given to
+every platform role that holds `platform.principal.manage`: today
+`platform_admin` and `platform_super_admin`), facility optional (a standalone
+platform administrator works).
+
+- Headers: `If-Match: "<version>"` (the member's version; a weak tag or no
+  quotes are accepted too) and `Idempotency-Key`, both required: 428
+  `IF_MATCH_REQUIRED` and 400 `IDEMPOTENCY_KEY_REQUIRED`.
+- Bodies as the administrator's, with no `currentPassword` and no
+  `expectedVersion`. Add also needs `verificationMethod` for a licensed role:
+  `regulator_register`, `in_person`, `officer_match`, `cac_registered_contact`
+  or `other`. The front desk sends none.
+- Any facility. The roles allowed are those of the organisation's recorded
+  kinds (a hospital or clinic: all five; a laboratory: `lab` and
+  `receptionist`; a pharmacy: `pharmacist` and `receptionist`; none
+  recorded: a hospital). None at an outreach group's facility.
+- Support may change a governed facility's administrator's membership (never
+  the administrator roles themselves). At a self-signed-up facility the
+  administrator's role is changed with
+  `POST /api/v1/admin/self-service-facilities/:applicationId/administrator-role`
+  (which keeps the facility's record of it and signs the administrator out),
+  so these routes answer 409 `FACILITY_STAFF_ADMINISTRATOR` for that
+  membership. Before review that route answers 404 (support's review sets the
+  administrator's role), so the detail says which applies. A self-signed-up
+  facility still under review has no other member. Its own account and
+  platform accounts are refused.
+- QA Hospital's seal (0123) holds: a membership of the QA facility belongs
+  to one of the QA tenant's fictional accounts.
+- Add answers `201`, or `200` with `replayed: true`; remove answers `200`,
+  and a replay `200` with `replayed: true`.
+
+### Answers
+
+```json
+{ "membershipId": "uuid", "version": 6, "roles": ["doctor", "nurse"], "replayed": false }
+```
+
+`roles` is every active role of the membership, sorted. A remove (and its
+replay) also carries `grantsRevoked`: how many of the member's own-facility
+and break-glass grants it revoked (see below), usually `0`.
+
+### What happens
+
+- **Add** grants the one role. For a licensed role it records one licence
+  attestation tied to that grant: the administrator's (`facility_attestation`)
+  or support's, whose method is how support checked the licence.
+- **Remove** revokes the one role ("Role removed by the facility
+  administrator" or "Role removed by Health ID support"). Other roles are
+  untouched. A member always keeps one role: 409 `FACILITY_STAFF_LAST_ROLE`.
+  To end someone's access, use `POST /identity/facility-staff/:membershipId/end`.
+- The membership's version goes up by one.
+- **Grants the roles left no longer allow are revoked now.** A remove revokes
+  the member's unexpired, active grants here that no role still held allows:
+  own-facility openings (ID-4, 0131) when no role left has
+  `identity.patient.open-own-facility` (doctor, nurse, clinician), and
+  break-glass grants when none has `identity.break-glass.write`. So a doctor
+  who is also a pharmacist and loses doctor cannot keep reading a chart they
+  opened as a doctor. Status `revoked`, by the caller, with the remove's
+  reason, and one `identity.consent-grant.close` audit row each with the
+  patient (the patient's access log shows "access ended" for the
+  administrator's). Grants the patient approved, or gave with the PIN, stay.
+  Such a revocation is not the patient's, so it does not set off ID-4's
+  24-hour refusal: the facility's other clinicians still open the patient as
+  before (0139 replaces 0131's opener so that only the patient's own
+  revocation refuses; this also covers 0086's end of a membership).
+- An open or a break-glass activation by the member waits for a remove in
+  flight on their membership and is then answered under the roles left, so no
+  grant is made after the remove has read the member's grants.
+- Other permissions are read on every request, so the rest of the change
+  applies from the member's next request; nobody is signed out. Sign-in sites
+  follow section 53's gate (adding `lab` to a hospital doctor also admits
+  them on `lab.`).
+- A remove closes the member's open records-processing requests that can no
+  longer be used (pending, `healthcare-operations`, and the member no longer
+  holds `ocr.job.write` here): status `expired`, one
+  `identity.access-request.close` audit row each, as 0136 did.
+- **The session's `roles`.** The staff session lists the membership's two role
+  columns as `roles`, not every grant, and the first is the role a patient
+  sees on an access request and a PIN-use notice. An add leaves them as they
+  are. A remove of the role either column names moves that column to the
+  first role still held, alphabetically. In the rare case that the first
+  column names the role removed and every role left would collide with an
+  ended membership of the same person here, the remove is refused: 409
+  `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` (remove the person from the facility
+  and invite them again). Access, `modules` and the sign-in gate all read the
+  grants. Listing every role in the session is a follow-up.
+
+### Audit
+
+- The administrator: one `identity.facility-staff.role-add` or
+  `identity.facility-staff.role-remove` row at the facility for each success
+  (written by the database: the membership, role, licence body, roles before
+  and after, closed requests, revoked grants, and the reason) and each refusal (outcome
+  `denied`: the membership, role, reason and code), besides the request row
+  every route writes.
+- Support: `admin.facility-staff.role-add.request` or
+  `admin.facility-staff.role-remove.request` for every request, and one
+  `admin.facility-staff.role-add` or `.role-remove` row for each success, in
+  the command's transaction (the facility, membership, role, licence body,
+  method, roles before and after, closed requests, revoked grants, and the
+  reason).
+- Each grant a remove revokes: one `identity.consent-grant.close` row with the
+  patient and facility, written by the database. The administrator's is a
+  staff row; support's is a system row (a platform row may not name a
+  patient), and support's own row above names the change.
+- No row ever holds a licence number or the password.
+
+### Reads
+
+In `GET /identity/facility-staff` and support's `GET /admin/facilities/:facilityId/staff`,
+each member gains `licences`, one per active licensed role:
+
+```json
+"licences": [{ "role": "nurse", "body": "NMCN", "numberHint": "2345", "vouchedBy": "Ada Obi",
+  "vouchedAt": "2026-11-20T09:00:00.000Z", "method": "facility_attestation" }]
+```
+
+- `numberHint` is the last 4 letters or digits, for support too.
+- A licensed role with no attestation (a role granted before attestations)
+  has `numberHint`, `vouchedBy`, `vouchedAt` and `method` null.
+- `licence` stays as it was for older screens.
+- On a database without 0139, `licences` is absent.
+
+### Errors
+
+| HTTP | Code | Detail |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. |
+| 400 | `STAFF_INVITATION_INVALID` | The licence does not match the role |
+| 400 | `STAFF_INVITATION_ROLE_NOT_ALLOWED` | This facility cannot invite that role |
+| 400 | `FACILITY_STAFF_REASON_INVALID` | Enter a reason of 8 to 500 characters |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | (header missing) Idempotency-Key must contain 16 to 128 URL-safe characters |
+| 403 | `PERMISSION_DENIED` | Staff management is not permitted |
+| 403 | `STAFF_MANAGEMENT_NOT_AVAILABLE` | Staff management is not available at this facility |
+| 403 | `STAFF_REAUTHENTICATION_FAILED` | (today's) |
+| 403 | `STAFF_RECENT_RECOVERY_HOLD` | (today's; add only) |
+| 404 | `FACILITY_STAFF_NOT_FOUND` | Staff member was not found |
+| 404 | `ADMIN_FACILITY_NOT_FOUND` | Facility was not found (support) |
+| 409 | `FACILITY_REVIEW_PENDING` | (today's) |
+| 409 | `FACILITY_STAFF_SELF` | You cannot change your own membership |
+| 409 | `FACILITY_STAFF_ADMINISTRATOR` | (today's) on the administrator's routes; on support's, a self-signed-up facility's administrator: This is a self-signed-up facility's administrator. Before review, set their role in the facility's review; after review, change it with the facility's administrator role |
+| 409 | `FACILITY_STAFF_ALREADY_ENDED` | This person no longer works at the facility |
+| 409 | `FACILITY_STAFF_PLATFORM_ACCOUNT` | This account's access is managed by Health ID |
+| 409 | `FACILITY_STAFF_ROLE_ALREADY_HELD` | This person already has that role |
+| 409 | `FACILITY_STAFF_ROLE_NOT_HELD` | This person does not have that role |
+| 409 | `FACILITY_STAFF_LAST_ROLE` | This is the person's only role. To stop their access, remove them from the facility |
+| 409 | `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` | This role cannot be removed here. To change this person's roles, remove them from the facility and invite them again |
+| 409 | `VERSION_CONFLICT` | This changed meanwhile; reload before retrying |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | This request was already used for a different change. Please reload and try again |
+| 423 | `STAFF_INVITATIONS_UNAVAILABLE` | Staff invitations are not open (the administrator's add) |
+| 428 | `IF_MATCH_REQUIRED` | Reload the staff list and try again (support) |
+| 503 | `STAFF_MANAGEMENT_UNAVAILABLE` | Staff management is temporarily unavailable |
+
+### Database (0139)
+
+`identity.add_facility_staff_role`, `identity.remove_facility_staff_role`,
+`identity.admin_add_facility_staff_role`,
+`identity.admin_remove_facility_staff_role`,
+`identity.list_facility_staff_licences()` and
+`identity.admin_list_facility_staff_licences(uuid)`: SECURITY DEFINER,
+EXECUTE to the Identity runtime only. The idempotency keys are kept in
+`auth.admin_command_idempotency` under the operations
+`identity.facility-staff.role-add`, `admin.facility-staff.role-add` and
+`admin.facility-staff.role-remove`. `identity.staff_licence_attestations`
+accepts support's methods (with no attesting membership, review or
+invitation) and a new attestation text, `platform-staff-role-v1`.

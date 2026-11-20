@@ -25,7 +25,7 @@ function IsStaffPersonName(): PropertyDecorator {
  * fields absent); every other role has the body its regulator issues and a
  * number. Placed on `role`, it reads the licence fields of the same object.
  */
-function LicenceMatchesRole(): PropertyDecorator {
+export function LicenceMatchesRole(): PropertyDecorator {
   return (target: object, propertyName: string | symbol) => registerDecorator({
     name: 'licenceMatchesRole', target: target.constructor, propertyName: String(propertyName),
     options: { message: 'licenceBody and licenceNumber must be the role\'s licence (none for a receptionist)' },
