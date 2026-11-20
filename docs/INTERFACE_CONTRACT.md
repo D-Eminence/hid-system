@@ -9034,3 +9034,96 @@ primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
 
+
+## MY-1. "Ordered by me" (Release B, migration 0143; not live until signed)
+
+Akos P1-4. The planned contract's "MY-1" is the spec; this section is what is
+built. One list of the lab requests and prescriptions this member ordered at
+this facility (`created_by_membership_id` is the session's membership), so
+doctors stop using the lab and pharmacy work queues.
+
+### `GET /api/v1/ehr/my-orders`
+
+`X-Facility-Id`, `X-Purpose-Of-Use: direct-care`. No single permission: lab
+rows need `ehr.lab-request.read` and prescription rows
+`ehr.prescription.read`; `kind=all` lists what the member may read; neither,
+or a kind asked without its permission, is 403 `PERMISSION_DENIED`. No patient
+in the path or query. `Cache-Control: no-store`.
+
+| Parameter | Values | Default |
+|---|---|---|
+| `kind` | `all`, `lab`, `prescription` | `all` |
+| `state` | `open` (draft, active, on hold) or `all` | `all` |
+| `since` | `YYYY-MM-DD` (a Lagos day), today or earlier, at most 2 years back | 90 days ago |
+| `limit` | 1-50 | 25 |
+| `cursor` | from the last answer | none |
+
+The reach: open orders of any age, plus ended ones (completed or cancelled)
+created on or after `since` (Q123 A). Orders entered in error are never
+listed. Newest first. A cursor is valid only for the member, facility and
+filters it was issued with.
+
+```json
+{ "items": [
+    { "kind": "lab_request", "orderId": "uuid", "encounterId": "uuid",
+      "patient": { "patientId": "uuid", "fullName": "Amaka Okafor", "sex": "female",
+                   "dateOfBirth": "1990-05-01", "healthIdLast4": "AA22" },
+      "display": "Full blood count", "status": "active", "priority": "urgent",
+      "createdAt": "…", "updatedAt": "…",
+      "ownProgress": { "status": "results_ready", "receivedAt": "…", "collectedAt": "…", "lastResultAt": "…" },
+      "orderRoute": null } ],
+  "hiddenCount": 2, "since": "2026-08-22", "nextCursor": null }
+```
+
+- `display`: the stored test or medicine name. `priority`: the lab request's;
+  a prescription's 0125 priority when set, else `null`.
+- `ownProgress`: ORD-3's shapes and statuses, asked once per patient and kind
+  on the page (audited by ORD-3 as today).
+- `orderRoute`: the order's route summary (sections 21-24), or `null`.
+- `patient`: the waiting-list card (EHR-C7); never a full Health ID.
+- **Access ended:** a row is listed only while the member may read that
+  patient's records now for direct care (a consent grant, 0131's own-facility
+  opening included; never break-glass). Other matching orders are counted in
+  `hiddenCount` and never shown. An empty page still carries `hiddenCount`.
+
+Audit (by the database): one `ehr.my-orders.list` row (kinds, open only,
+since, count, `hiddenCount`, patient ids shown) and one
+`ehr.my-orders.list.shown` row per patient shown, on every read.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (bad `kind`, `state`, `since`, `limit`, or a day after today) |
+| 400 | `MY_ORDERS_SINCE_TOO_OLD` | You can look back up to 2 years. Choose a later date. |
+| 400 | `INVALID_CURSOR` | Pagination cursor is invalid |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | as today |
+| 403 | `PERMISSION_DENIED` | as today |
+| 503 | `MY_ORDERS_UNAVAILABLE` | Your orders cannot be listed right now. Please try again. (also on a database without 0143) |
+
+### Database (0143)
+
+- `ehr.list_my_orders(kinds, open_only, since, cursor…, limit)`, SECURITY
+  DEFINER, EXECUTE for the EHR runtime only. It checks the session (an
+  active, unheld membership here, direct care, the per-kind read permission),
+  applies the session's own rule per patient (`ehr.context_allows(patient,
+  facility, 'read_records')`), counts the rest, pages, returns the cards and
+  writes the audit rows.
+- Indexes on `(facility_id, created_by_membership_id, created_at desc, id
+  desc)` for `ehr.prescriptions` and `ehr.lab_requests`.
+- `prescriptions_owner_read` and `lab_requests_owner_read` (as 0131's
+  `encounters_owner_read`): the tables' owner may read them, so the function
+  can count orders of patients the member can no longer read. No runtime role
+  is a member of the owner; the runtime's own reads are unchanged.
+
+### Screen notes
+
+- Tabs All, Lab, Prescriptions, and "Open only" (`state=open`). Show the
+  name, sex, date of birth, `•••• healthIdLast4`, the test or medicine,
+  status, priority and ORD-3's progress words.
+- "Showing the last 90 days and everything still open", with "Look further
+  back" (sets `since`).
+- When `hiddenCount` is above 0: "N more orders are for patients whose records
+  you can no longer open."
+- A row opens the visit's order by `patientId`, `encounterId` and `orderId`,
+  through the usual consent check.
