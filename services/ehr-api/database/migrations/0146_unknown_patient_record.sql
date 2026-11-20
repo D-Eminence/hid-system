@@ -93,7 +93,9 @@
 --    (<table>_unknown_cancel_read) open only while
 --    ehr.unknown_patient_cancel_scans holds this backend transaction's
 --    marker, which identity.decide_unknown_patient writes just before the
---    check and deletes just after (0130's marker pattern). So every other
+--    check and deletes just after (0130's marker pattern). Each policy's test
+--    is one scalar subquery, evaluated once per statement (an InitPlan), so
+--    no reader of these tables pays it per row. So every other
 --    owner-run function and trigger that reads these tables sees exactly what
 --    it saw before, and the owner without a session still sees nothing. Each
 --    policy tests the owner's membership first. The marker table is the
@@ -1594,9 +1596,13 @@ declare
 begin
   foreach table_name in array array['clinical_notes', 'diagnoses', 'documents', 'lab_requests', 'prescriptions',
                                     'recorded_allergies', 'vitals'] loop
-    execute format('create policy %I on ehr.%I for select using (case when pg_has_role((select relation.relowner '
+    -- One scalar subquery with no outer reference: an InitPlan, so the test
+    -- runs once per statement, never per row, for every role that reads the
+    -- table (these names sort after the tables' other policies, so they are
+    -- asked first).
+    execute format('create policy %I on ehr.%I for select using ((select case when pg_has_role((select relation.relowner '
       || 'from pg_class relation where relation.oid = %L::regclass), %L) '
-      || 'then ehr.unknown_patient_cancel_scan_open() else false end)',
+      || 'then ehr.unknown_patient_cancel_scan_open() else false end))',
       table_name || '_unknown_cancel_read', table_name, 'ehr.' || table_name, 'USAGE');
   end loop;
 end
@@ -2115,6 +2121,8 @@ begin
   if (select count(*) from pg_policy policy join pg_class relation on relation.oid = policy.polrelid
        join pg_namespace namespace on namespace.oid = relation.relnamespace
       where namespace.nspname = 'ehr' and policy.polname = relation.relname || '_unknown_cancel_read'
+        -- one scalar subquery (an InitPlan), never a per-row test
+        and regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '\s+', ' ', 'g') like '( SELECT CASE WHEN pg_has_role(%'
         and relation.relname in ('clinical_notes', 'diagnoses', 'documents', 'lab_requests', 'prescriptions',
                                  'recorded_allergies', 'vitals')) <> 7 then
     raise exception using errcode = '55000', message = '0146 post-check: a cancel-check policy is missing';
