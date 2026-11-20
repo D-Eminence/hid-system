@@ -2891,7 +2891,7 @@ try {
   const removedRole = await staffCall(hospitalAdmin, 'post', removeRolePath, removeRoleBody);
   assert.equal(removedRole.status, 200, `remove role: ${JSON.stringify(removedRole.body)}`);
   assert.deepEqual(removedRole.body, { membershipId: bisiMembership.id, version: bisiVersion + 2, roles: ['doctor'],
-    replayed: false });
+    replayed: false, grantsRevoked: 0 });
   assert.deepEqual([...(await sessionRead(bisiSession)).body.actor.permissions].sort(), await permissionsOf('doctor'),
     'The removed role still applied at the next request');
   expectProblem(await staffCall(hospitalAdmin, 'post', removeRolePath, removeRoleBody), 409, 'FACILITY_STAFF_ROLE_NOT_HELD');
