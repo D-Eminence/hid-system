@@ -155,10 +155,6 @@ begin
   if mismatch is not null then
     raise exception using errcode = '55000', message = '0138: these bodies are not as 0001-0137 left them: ' || mismatch;
   end if;
-  if not exists (select 1 from pg_roles where rolname = 'hid_identity_runtime')
-     or not exists (select 1 from pg_roles where rolname = 'hid_schema_test_runtime') then
-    raise exception using errcode = '55000', message = '0138: hid_identity_runtime or hid_schema_test_runtime is missing';
-  end if;
 end
 $$;
 
@@ -333,8 +329,6 @@ begin
 end;
 $$;
 revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char) from public;
-grant execute on function identity.patient_nin_link_precheck(uuid, char, text, char)
-  to hid_identity_runtime, hid_schema_test_runtime;
 comment on function identity.patient_nin_link_precheck(uuid, char, text, char) is
   '0138 (ID-6): what POST identity/patients/:id/nin may do before QoreID is asked: not_found, not_permitted, already_linked, has_nin, replay, key_reused, or eligible with the record''s name and date of birth (compared with the NIN record by identity-api).';
 
@@ -471,8 +465,23 @@ end;
 $$;
 revoke all on function identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char)
   from public;
-grant execute on function identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char)
-  to hid_identity_runtime, hid_schema_test_runtime;
+
+-- Grants (here and in runtime-grants.sql): the precheck and the link to the
+-- Identity runtime and the schema test runtime, where they exist (the
+-- runtime roles' bootstrap may come after the migrations); nothing to any
+-- other runtime; no grant on identity.patient_nin_links.
+do $$
+declare runtime_role text;
+begin
+  foreach runtime_role in array array['hid_identity_runtime', 'hid_schema_test_runtime'] loop
+    if exists (select 1 from pg_roles where rolname = runtime_role) then
+      execute format('grant execute on function identity.patient_nin_link_precheck(uuid, char, text, char), '
+        || 'identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char) to %I',
+        runtime_role);
+    end if;
+  end loop;
+end
+$$;
 comment on function identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char) is
   '0138 (ID-6): link a QoreID-checked NIN to this facility''s own patient: nin_linked, or not_found, not_permitted, already_linked, has_nin, on_another_record (with the other record, for the audit row only), replay or key_reused.';
 
