@@ -19,7 +19,7 @@ export class VitalsListQueryDto extends TimelineQueryDto {
  * EHR-C8b: PATCH .../vitals/:vitalId, exactly these fields. `status` is only
  * `entered_in_error`. The reason is required: a missing one answers 400
  * CHANGE_REASON_REQUIRED (the service), one under 3 or over 500 characters
- * 400 VALIDATION_FAILED.
+ * (only spaces included, trimmed to nothing) 400 VALIDATION_FAILED.
  */
 export class MarkVitalEnteredInErrorDto {
   @IsInt()

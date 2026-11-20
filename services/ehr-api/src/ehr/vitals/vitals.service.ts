@@ -413,6 +413,8 @@ export class VitalsService {
   markEnteredInError(context: DataAccessContext, patientId: string, encounterId: string, vitalId: string,
     input: MarkVitalEnteredInErrorDto) {
     const reason = requireChangeReason(input.changeReason);
+    // The scoped lookup (as a correction's) audits a reading of another visit,
+    // patient or facility as not_found; its 404 keeps this route's code.
     return this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.vital.update', resourceType: 'vital', resourceId: vitalId, details: { enteredInError: true } },
@@ -439,7 +441,13 @@ export class VitalsService {
         if (!updated) throw new DomainProblem(412, 'VERSION_CONFLICT', VITAL_MESSAGES.versionConflict);
         return { value: updated, resourceId: vitalId };
       },
-    );
+      (client) => this.repository.exists(client, 'vitals', vitalId, patientId, context.facilityId, encounterId),
+    ).catch((error: unknown) => {
+      if (error instanceof DomainProblem && error.code === 'CLINICAL_RESOURCE_NOT_FOUND') {
+        throw new DomainProblem(404, 'VITAL_NOT_FOUND', VITAL_MESSAGES.notFound);
+      }
+      throw error;
+    });
   }
 
   private async findVital(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {

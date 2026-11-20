@@ -4,6 +4,8 @@ import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { PoolClient } from 'pg';
 import { REQUIRED_PERMISSIONS } from '../../common/decorators';
+import { DomainProblem } from '../../common/problem';
+import { createValidationPipe } from '../../common/validation-pipe';
 import type { DataAccessContext } from '../../common/request-context';
 import type { ClinicalRepository } from '../shared/clinical.repository';
 import { VitalsController } from './vitals.controller';
@@ -27,7 +29,8 @@ const context = { correlationId: 'correlation-123456', facilityId, membershipId,
 const squash = (sql: string) => sql.replace(/\s+/g, ' ').trim();
 const databaseError = (code: string, message: string) => Object.assign(new Error(message), { code });
 
-function harness(options: { locked?: Record<string, unknown> | null; updated?: Record<string, unknown>[] | Error } = {}) {
+function harness(options: { locked?: Record<string, unknown> | null; updated?: Record<string, unknown>[] | Error;
+  exists?: boolean } = {}) {
   const statements: { sql: string; values: unknown[] }[] = [];
   const locked = options.locked === undefined
     ? { id: vitalId, status: 'recorded', rowVersion: '2', currentCorrectionNo: 0 } : options.locked;
@@ -46,11 +49,18 @@ function harness(options: { locked?: Record<string, unknown> | null; updated?: R
   };
   const events: unknown[] = [];
   const repository = {
+    // As ClinicalRepository.run: the scoped lookup first (a miss is audited not_found and answered 404).
     run: jest.fn(async (_context: unknown, _patient: string, access: string, event: unknown,
-      operation: (client: PoolClient) => Promise<{ value: unknown }>, scopedLookup?: unknown) => {
+      operation: (client: PoolClient) => Promise<{ value: unknown }>,
+      scopedLookup?: (client: PoolClient) => Promise<boolean>) => {
       events.push({ access, event, scopedLookup });
+      if (scopedLookup && !(await scopedLookup(client as unknown as PoolClient))) {
+        throw new DomainProblem(404, 'CLINICAL_RESOURCE_NOT_FOUND', 'Clinical resource was not found');
+      }
       return (await operation(client as unknown as PoolClient)).value;
     }),
+    exists: jest.fn(async () => options.exists ?? true),
+    encounterExists: jest.fn(async () => true),
     setChangeReason: jest.fn(async () => undefined),
     executeCreate: jest.fn(async (_client: unknown, _context: unknown, _patient: unknown, _key: unknown, _operation: unknown,
       _digest: unknown, _type: unknown, create: () => Promise<{ value: unknown }>) => (await create()).value)
@@ -93,8 +103,9 @@ describe('EHR-C8b: PATCH .../vitals/:vitalId marks a reading entered in error', 
       const answer = await service.markEnteredInError(context, patientId, encounterId, vitalId,
         body() as MarkVitalEnteredInErrorDto);
       expect(answer).toMatchObject({ id: vitalId, status: 'entered_in_error', rowVersion: '3' });
-      expect(events).toEqual([{ access: 'write_records', scopedLookup: undefined, event: { action: 'ehr.vital.update',
+      expect(events).toEqual([{ access: 'write_records', scopedLookup: expect.any(Function), event: { action: 'ehr.vital.update',
         resourceType: 'vital', resourceId: vitalId, details: { enteredInError: true } } }]);
+      expect(repository.exists).toHaveBeenCalledWith(expect.anything(), 'vitals', vitalId, patientId, facilityId, encounterId);
       expect(statements).toHaveLength(2);
       expect(statements[0]!.sql).toMatch(/^select .* from ehr\.vitals where id = \$1 and encounter_id = \$2 and patient_id = \$3 and facility_id = \$4 for update$/);
       expect(statements[0]!.values).toEqual([vitalId, encounterId, patientId, facilityId]);
@@ -104,13 +115,26 @@ describe('EHR-C8b: PATCH .../vitals/:vitalId marks a reading entered in error', 
       expect(JSON.stringify(events)).not.toContain('wrong patient');
     });
 
-  it.each([['missing', undefined], ['blank', '   ']])('a %s reason is 400 CHANGE_REASON_REQUIRED before anything is read',
-    async (_label, changeReason) => {
-      const { service, repository } = harness();
-      await expect(Promise.resolve().then(() => service.markEnteredInError(context, patientId, encounterId, vitalId,
-        body({ changeReason }) as MarkVitalEnteredInErrorDto))).rejects.toMatchObject({ status: 400,
-        code: 'CHANGE_REASON_REQUIRED', message: 'Please say why you are changing this.' });
-      expect(repository.run).not.toHaveBeenCalled();
+  it('a missing reason is 400 CHANGE_REASON_REQUIRED before anything is read', async () => {
+    const { service, repository } = harness();
+    await expect(Promise.resolve().then(() => service.markEnteredInError(context, patientId, encounterId, vitalId,
+      body({ changeReason: undefined }) as MarkVitalEnteredInErrorDto))).rejects.toMatchObject({ status: 400,
+      code: 'CHANGE_REASON_REQUIRED', message: 'Please say why you are changing this.' });
+    expect(repository.run).not.toHaveBeenCalled();
+  });
+
+  it('a reason of only spaces is 400 VALIDATION_FAILED from the route\'s validation (trimmed to nothing)', async () => {
+    await expect(createValidationPipe().transform(body({ changeReason: '   ' }),
+      { type: 'body', metatype: MarkVitalEnteredInErrorDto })).rejects.toMatchObject({ status: 400,
+      code: 'VALIDATION_FAILED', errors: [expect.objectContaining({ field: 'changeReason' })] });
+  });
+
+  it('a reading of another visit, patient or facility is 404 VITAL_NOT_FOUND after the audited lookup, with nothing read',
+    async () => {
+      const { service, statements } = harness({ exists: false });
+      await expect(service.markEnteredInError(context, patientId, encounterId, vitalId, body() as MarkVitalEnteredInErrorDto))
+        .rejects.toMatchObject({ status: 404, code: 'VITAL_NOT_FOUND', message: 'These vitals were not found.' });
+      expect(statements).toHaveLength(0);
     });
 
   it('an unknown reading is 404 VITAL_NOT_FOUND', async () => {
