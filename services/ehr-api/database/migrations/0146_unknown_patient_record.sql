@@ -61,7 +61,9 @@
 --    records: another facility's or a missing one answers not_found, with
 --    the reason in the audit row. Writes are idempotent (the caller's key
 --    and the request's digest), and a replay writes its own audit row
---    (replayed: true), since it answers the card again. Every call writes
+--    (replayed: true), since it answers the card again; an identify
+--    replayed after the record was cancelled is refused as a fresh one is
+--    (UNKNOWN_PATIENT_CANCELLED). Every call writes
 --    its audit row (identity.unknown-patient.create, .list and one
 --    .list.shown per card, .read, .identify, .review and one .review.shown
 --    per candidate, .confirm-separate, .cancel): patient ids, outcome or
@@ -90,7 +92,7 @@
 --    diagnoses, documents, lab_requests, prescriptions, recorded_allergies,
 --    vitals) only during D9's check: row-level security on each is forced,
 --    and the check must see a record whoever wrote it. The policies
---    (<table>_unknown_cancel_read) open only while
+--    (<table>_cancel_check_read) open only while
 --    ehr.unknown_patient_cancel_scans holds this backend transaction's
 --    marker, which identity.decide_unknown_patient writes just before the
 --    check and deletes just after (0130's marker pattern). Each policy's test
@@ -112,8 +114,12 @@
 -- D13 0130's identity.register_patient_without_nin, replaced (md5-pinned):
 --    a record that is still unknown is never a candidate; a Health ID the
 --    patient states that is this facility's unknown record is refused
---    (P0001 PATIENT_RECORD_UNKNOWN: identify that record instead), and at
---    another facility it is not a candidate; an identified record's held
+--    (P0001 PATIENT_RECORD_UNKNOWN: identify that record instead); at
+--    another facility it is not a candidate, since that facility can neither
+--    identify nor link it, but it sends the case to an approver
+--    (review_required, kind stated_health_id, no candidate row), and the
+--    audit row names the record (statedUnknownRecordPatientId), for ID-8;
+--    an identified record's held
 --    phone counts as a phone match; a record in review whose held details
 --    look like the same person counts as an open registration; a replay
 --    writes its audit row. The trigger registration_cases_unknown_patient
@@ -132,8 +138,12 @@
 -- identity.staff_facility_memberships (the foreign keys of the new table);
 -- ACCESS SHARE on ehr.encounters and identity.consent_grants (named by the
 -- SQL functions' bodies, which are parsed when created). SHARE ROW EXCLUSIVE
--- does not block reads, so no identity table is closed to its readers, and
--- only the clinical tables are closed to the EHR, Pharmacy and Lab runtimes.
+-- does not block reads, so no identity table is closed to its readers, but
+-- a write to one of those tables in flight stops the attempt. Only the
+-- clinical tables are closed to their readers: the EHR, Pharmacy and Lab
+-- runtimes, and, for ehr.documents, also the OCR worker's job poll (0107's
+-- ocr.claim_worker_job_fair joins it, every second by default) and ocr-api's
+-- job writes (0112's ocr.validate_job_write reads it FOR SHARE).
 -- That is every existing table this file locks (pg_locks before commit), at
 -- the strongest mode it takes, besides ROW EXCLUSIVE on audit.events, which
 -- validating the audit helper's INSERT takes and which blocks only SHARE and
@@ -142,7 +152,9 @@
 -- 5 seconds, then 55P03 (nothing applied). When this transaction already
 -- holds an earlier migration's locks that stop other sessions' reads or
 -- writes (the runner's dry run), one attempt and no sleep: 55P03 at once,
--- nothing applied.
+-- nothing applied. Either refusal is this file's own busy refusal, which
+-- the runner's dry run rolls back and runs again from the start, within its
+-- bound (services/ehr-api/scripts/dry-run-attempts.mjs).
 --
 -- Old services on this schema: identity.patients is unchanged, so today's
 -- identity-api reads patients as before; it reads search answers by column
@@ -1152,6 +1164,11 @@ begin
     if record_row.identify_request_sha256 <> requested_request_sha256 then
       raise exception using errcode = '22023', message = 'IDEMPOTENCY_KEY_REUSED';
     end if;
+    -- A record cancelled since (from sent_for_review) is refused as a fresh
+    -- identify is, never answered "identified" again.
+    if record_row.status = 'cancelled' then
+      raise exception using errcode = 'P0001', message = 'UNKNOWN_PATIENT_CANCELLED';
+    end if;
     perform identity.unknown_patient_audit(actor.actor_subject, actor.actor_account, actor.actor_membership,
       actor.actor_facility, actor.actor_organization, actor.actor_correlation, 'identity.unknown-patient.identify',
       'success', record_row.patient_id, null, jsonb_build_object('replayed', true, 'status', record_row.status));
@@ -1598,12 +1615,14 @@ begin
                                     'recorded_allergies', 'vitals'] loop
     -- One scalar subquery with no outer reference: an InitPlan, so the test
     -- runs once per statement, never per row, for every role that reads the
-    -- table (these names sort after the tables' other policies, so they are
-    -- asked first).
+    -- table, wherever it stands among the table's policies. The names sort
+    -- before 0143's prescriptions_scan_my_orders and
+    -- lab_requests_scan_my_orders, which 0143 requires to be asked first
+    -- (its D1), whichever of the two files is applied first.
     execute format('create policy %I on ehr.%I for select using ((select case when pg_has_role((select relation.relowner '
       || 'from pg_class relation where relation.oid = %L::regclass), %L) '
       || 'then ehr.unknown_patient_cancel_scan_open() else false end))',
-      table_name || '_unknown_cancel_read', table_name, 'ehr.' || table_name, 'USAGE');
+      table_name || '_cancel_check_read', table_name, 'ehr.' || table_name, 'USAGE');
   end loop;
 end
 $$;
@@ -1652,6 +1671,7 @@ declare
   new_patient uuid;
   desk_reason constant text := 'No possible duplicates: created at the desk without a NIN';
   kinds text[];
+  stated_unknown_record uuid; -- 0146: another facility's unknown record, by the stated Health ID
 begin
   if actor_account is null or actor_membership is null or actor_facility is null or actor_correlation is null
      or platform.current_purpose_of_use() is distinct from 'healthcare-operations'
@@ -1741,6 +1761,19 @@ begin
         where upper(patient.hid_code) = stated_value and patient.status = 'active'
           and unknown_record.status <> 'identified' and unknown_record.facility_id = actor_facility) then
     raise exception using errcode = 'P0001', message = 'PATIENT_RECORD_UNKNOWN';
+  end if;
+  -- 0146 (ID-7, D13): a stated Health ID that is another facility's record
+  -- that is still unknown is no candidate (this facility can neither
+  -- identify nor link it before ID-8), but it sends the case to an approver,
+  -- and the audit row names the record. A sealed record never counts (this
+  -- facility is not sealed).
+  if stated_value is not null then
+    select patient.id into stated_unknown_record
+      from identity.patients patient
+      join identity.unknown_patients unknown_record on unknown_record.patient_id = patient.id
+     where upper(patient.hid_code) = stated_value and patient.status = 'active'
+       and unknown_record.status <> 'identified'
+       and not identity.sealed_demo_patient(patient.id) and not identity.sealed_qa_patient(patient.id);
   end if;
 
   -- One registration without a NIN for a date of birth at a time, so two
@@ -1837,12 +1870,13 @@ begin
     case when exists (select 1 from jsonb_array_elements(candidate_json) item where item -> 'reasons' ? 'phone')
       then 'phone' end,
     case when exists (select 1 from jsonb_array_elements(candidate_json) item where item -> 'reasons' ? 'stated_hid')
+           or stated_unknown_record is not null -- 0146
       then 'stated_health_id' end,
     case when open_cases > 0 then 'open_registration' end], null);
 
   insert into identity.no_nin_case_writes (case_id) values (requested_case_id);
 
-  if candidates_found = 0 and open_cases = 0 then
+  if candidates_found = 0 and open_cases = 0 and stated_unknown_record is null then -- 0146: and no such record
     -- Owner Q106: no possible duplicates, so the same desk person creates the record.
     new_patient := pg_catalog.gen_random_uuid();
     insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, gender, status, source_system)
@@ -1905,6 +1939,9 @@ begin
       'candidateCount', candidates_found, 'openRegistrationCount', open_cases,
       'duplicateKinds', to_jsonb(kinds), 'contactRecorded', has_contact,
       'statedHealthId', stated_value is not null)
+      -- 0146: only when the stated Health ID is another facility's unknown record.
+      || case when stated_unknown_record is not null then jsonb_build_object('statedUnknownRecord', true)
+              else '{}'::jsonb end
   );
   if new_patient is not null then
     insert into identity.outbox_events (
@@ -1926,6 +1963,9 @@ begin
                                 from jsonb_array_elements(candidate_json) item),
       'openRegistrationCount', open_cases, 'duplicateKinds', to_jsonb(kinds),
       'contactRecorded', has_contact, 'facilityDailyCount', facility_count + 1)
+      -- 0146: the link to another facility's unknown record, kept for ID-8.
+      || case when stated_unknown_record is not null
+              then jsonb_build_object('statedUnknownRecordPatientId', stated_unknown_record) else '{}'::jsonb end
   );
   return query select requested_case_id,
     case when new_patient is null then 'review_required' else 'approved_new_identity' end,
@@ -1938,7 +1978,7 @@ comment on function identity.register_patient_without_nin(uuid, text, text, date
   '0130 (ID-2, owner Q106 of 18 November 2026): the desk registers a patient without a NIN. No possible duplicate: the same desk person creates the patient at once (approved_new_identity, source hid-desk-registration). Any possible duplicate (same date of birth and last name, same phone, the stated Health ID, or an open registration without a NIN): review_required, for an approver. Phone and address required unless the reason is child (under 18). No daily limit (owner Q109); the count at the facility today is returned for an operations alert. Refused at sealed demo and QA facilities. Audited with criteria kinds only.';
 
 comment on function identity.register_patient_without_nin(uuid, text, text, date, text, text, text, bytea, bytea, text, text, text, text, text) is
-  '0130 (ID-2, owner Q106 of 18 November 2026), with 0146 (ID-7): the desk registers a patient without a NIN. No possible duplicate: the same desk person creates the patient at once (approved_new_identity, source hid-desk-registration). Any possible duplicate (same date of birth and last name, same phone, including an identified unknown record''s held phone, the stated Health ID, an open registration without a NIN, or an unknown record in review whose held details match): review_required, for an approver. A record that is still unknown is never a candidate; a stated Health ID of this facility''s unknown record is refused (PATIENT_RECORD_UNKNOWN: identify it). Phone and address required unless the reason is child (under 18). No daily limit (owner Q109); the count at the facility today is returned for an operations alert. Refused at sealed demo and QA facilities. Audited with criteria kinds only, a replay too.';
+  '0130 (ID-2, owner Q106 of 18 November 2026), with 0146 (ID-7): the desk registers a patient without a NIN. No possible duplicate: the same desk person creates the patient at once (approved_new_identity, source hid-desk-registration). Any possible duplicate (same date of birth and last name, same phone, including an identified unknown record''s held phone, the stated Health ID, an open registration without a NIN, or an unknown record in review whose held details match): review_required, for an approver. A record that is still unknown is never a candidate; a stated Health ID of this facility''s unknown record is refused (PATIENT_RECORD_UNKNOWN: identify it), and of another facility''s sends the case for review with no candidate. Phone and address required unless the reason is child (under 18). No daily limit (owner Q109); the count at the facility today is returned for an operations alert. Refused at sealed demo and QA facilities. Audited with criteria kinds only, a replay too.';
 
 create function identity.refuse_registration_for_unknown_patient()
 returns trigger
@@ -2120,7 +2160,7 @@ begin
   end if;
   if (select count(*) from pg_policy policy join pg_class relation on relation.oid = policy.polrelid
        join pg_namespace namespace on namespace.oid = relation.relnamespace
-      where namespace.nspname = 'ehr' and policy.polname = relation.relname || '_unknown_cancel_read'
+      where namespace.nspname = 'ehr' and policy.polname = relation.relname || '_cancel_check_read'
         -- one scalar subquery (an InitPlan), never a per-row test
         and regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '\s+', ' ', 'g') like '( SELECT CASE WHEN pg_has_role(%'
         and relation.relname in ('clinical_notes', 'diagnoses', 'documents', 'lab_requests', 'prescriptions',

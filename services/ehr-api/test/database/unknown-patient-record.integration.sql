@@ -787,7 +787,8 @@ end $$;
 -- 9e (items 2 and 7, and 8 for 0130). ID-2's rule reads an identified
 -- record's held phone and a record in review's held details, never a QA
 -- record's; a stated Health ID of this facility's unknown record is refused,
--- and at another facility it is not a candidate; a replay is audited.
+-- and at another facility it is not a candidate but sends the case to an
+-- approver (a QA facility's record never counts); a replay is audited.
 do $$
 declare answer record;
 begin
@@ -828,14 +829,40 @@ select pg_temp.as_member(5, 'unknown-ola-9e-other');
 do $$
 declare answer record;
 begin
+  -- Record 8 is still unknown at H: here at O it is no candidate (O can
+  -- neither identify nor link it), but the case goes to an approver (Ola's
+  -- round 3, item 3).
   select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000006', 'Sade', 'Lawal',
     date '1977-07-07', 'female', 'not_carried', pg_temp.hmac('b4'), pg_temp.note(), pg_temp.note(), 'v1', 'HID-UNKAAB2',
     pg_temp.key('register-sade'), pg_temp.sha('register-sade'), 'HID-UNKADE');
-  if answer.case_status <> 'approved_new_identity' or answer.candidate_count <> 0 then
+  if answer.case_status <> 'review_required' or answer.candidate_count <> 0 or answer.subject_patient_id is not null then
     raise exception '9e: another facility''s stated Health ID of an unknown record answered %', row_to_json(answer);
+  end if;
+  -- The QA facility's unknown record (record 7) never counts at a real facility.
+  select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000017', 'Tobi', 'Ade',
+    date '1978-08-08', 'male', 'not_carried', pg_temp.hmac('b5'), pg_temp.note(), pg_temp.note(), 'v1', 'HID-UNKAAA8',
+    pg_temp.key('register-tobi'), pg_temp.sha('register-tobi'), 'HID-UNKAEZ');
+  if answer.case_status <> 'approved_new_identity' or answer.candidate_count <> 0 then
+    raise exception '9e: the QA facility''s unknown record counted at a real facility: %', row_to_json(answer);
   end if;
 end $$;
 reset role;
+do $$
+begin
+  if exists (select 1 from identity.registration_case_candidates where case_id = 'f146c000-0000-4000-8000-000000000006')
+     or not exists (select 1 from audit.events where action = 'identity.registration.without-nin'
+                     and resource_id = 'f146c000-0000-4000-8000-000000000006' and patient_id is null
+                     and details -> 'duplicateKinds' = '["stated_health_id"]'::jsonb
+                     and details ->> 'statedUnknownRecordPatientId' = pg_temp.patient(8)::text
+                     and (details -> 'candidatePatientIds') = '[]'::jsonb)
+     or not exists (select 1 from identity.registration_case_events
+                     where case_id = 'f146c000-0000-4000-8000-000000000006' and event_type = 'review_required'
+                       and details @> '{"statedUnknownRecord": true, "duplicateKinds": ["stated_health_id"]}')
+     or exists (select 1 from audit.events where action = 'identity.registration.without-nin'
+                 and resource_id = 'f146c000-0000-4000-8000-000000000017' and details ? 'statedUnknownRecordPatientId') then
+    raise exception '9e: the review of another facility''s stated unknown record is not recorded as intended';
+  end if;
+end $$;
 do $$
 begin
   if not exists (select 1 from identity.registration_case_candidates
@@ -924,6 +951,20 @@ begin
     raise exception '9g: the erasure left the held contact';
   end if;
 end $$;
+-- The desk's identify of record 17, retried with its key and body after
+-- the cancel, is refused as a fresh identify is (Ola's round 3, item 4).
+set local role hid_identity_api_runtime;
+select pg_temp.as_member(1, 'unknown-ola-9g-replay');
+do $$
+begin
+  if pg_temp.refusal(format('select identity.identify_unknown_patient(%L, %s, %L, %L, %L, %L, %L, %L::bytea, %L::bytea, %L, %L, %L)',
+       pg_temp.patient(17), pg_temp.version(17), 'Ada', 'Obi', '1990-05-01', 'female', pg_temp.hmac('b3'),
+       pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-17'), pg_temp.sha('identify-17')))
+     <> 'P0001 UNKNOWN_PATIENT_CANCELLED' then
+    raise exception '9g: an identify replayed after the cancel was answered';
+  end if;
+end $$;
+reset role;
 -- After the erasure, the same phone is no longer a candidate.
 set local role hid_identity_api_runtime;
 select pg_temp.as_member(1, 'unknown-ola-9g-after');

@@ -9930,7 +9930,9 @@ Audit: the database writes one row per success and per not-found
 `.read`, `.identify` with candidate counts and ids, `.review` plus one
 `.review.shown` per candidate, `.confirm-separate`, `.cancel`), and one per
 replay of create, identify and the decisions (`replayed: true`, since a
-replay answers the card again); Identity writes a `denied` row with the
+replay answers the card again). An identify replayed after the record was
+cancelled answers 409 `UNKNOWN_PATIENT_CANCELLED`, as a fresh identify does.
+Identity writes a `denied` row with the
 refusal's code for every other refusal. No row holds a name, date of birth,
 phone, Health ID or the arrival note.
 
@@ -9951,7 +9953,12 @@ phone, Health ID or the arrival note.
   unknown is never a candidate. A stated Health ID that is this facility's
   unknown record answers 409 `PATIENT_RECORD_UNKNOWN` ("This Health ID belongs
   to an unknown patient record at this facility. Identify that record
-  instead."); at another facility it is simply not a candidate. No
+  instead."). At another facility it is not a candidate, since that facility
+  can neither identify nor link it before ID-8, but it sends the case to an
+  approver (`review_required`, duplicate kind `stated_health_id`, no
+  candidate), and the audit row keeps the record's patient id
+  (`statedUnknownRecordPatientId`) for ID-8. A sealed QA or demo record never
+  counts. No
   registration case can resolve to a record that is still unknown (a trigger);
   the approver's link answers 409 `PATIENT_RECORD_UNKNOWN` ("This record is not
   identified yet, so it cannot be linked. Identify it first."). A replay of a
