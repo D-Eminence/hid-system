@@ -17,6 +17,7 @@ import { NinCheckOnceModule } from './nin-check-once.module';
 import { NinRegistrationService } from './nin-registration.service';
 import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER } from './nin.types';
+import { QoreIdNinVerificationProvider, selectNinVerificationProvider } from './qoreid-nin-verification.provider';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import {
   QOREID_ADAPTER_CONFIGURATION,
@@ -120,17 +121,18 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
       provide: IDENTITY_PROVIDER,
       useExisting: PostgresIdentityProvider,
     },
+    // Q108: the desk's NIN check through QoreID (each stored record it uses kept by 0137's begin, Q115).
+    QoreIdNinVerificationProvider,
     {
       provide: NIN_VERIFICATION_PROVIDER,
-      inject: [DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider, DeferredNinVerificationProvider],
+      inject: [DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider, DeferredNinVerificationProvider,
+        QoreIdNinVerificationProvider],
       useFactory: (
         deterministicTest: DeterministicTestNinVerificationProvider,
         unavailable: UnavailableNinVerificationProvider,
         deferred: DeferredNinVerificationProvider,
-      ) => {
-        const mode = getEnvironment().NIN_PROVIDER_MODE;
-        return mode === 'deferred' ? deferred : mode === 'test' ? deterministicTest : unavailable;
-      },
+        qoreId: QoreIdNinVerificationProvider,
+      ) => selectNinVerificationProvider(getEnvironment(), { deterministicTest, unavailable, deferred, qoreId }),
     },
     // Q100 B: "No such patient" on the staff Health ID lookup, and its limit.
     PatientLookupMissService,
