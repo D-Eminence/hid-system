@@ -140,6 +140,47 @@ describe('FacilityStaffService', () => {
       });
     });
 
+    it('adds each member\'s licences, one per licensed role, where 0139 is applied (SX-4)', async () => {
+      const { service, sqlCalls } = harness({
+        'facility_staff_management_state': () => ({ rows: [stateRow] }),
+        'identity.list_facility_staff()': () => ({ rows: memberRows }),
+        'list_facility_staff_invitations': () => ({ rows: [] }),
+        'to_regprocedure': () => ({ rows: [{ present: true }] }),
+        'from identity.list_facility_staff_licences()': () => ({ rows: [
+          { membership_id: '40000000-0000-4000-8000-000000000001', role_code: 'doctor', licence_body: 'MDCN',
+            licence_number_hint: '2345', vouched_by_name: 'Health ID support', vouched_at: '2026-10-25T08:00:00Z',
+            verification_method: 'platform_review' },
+          { membership_id: '40000000-0000-4000-8000-000000000001', role_code: 'nurse', licence_body: 'NMCN',
+            licence_number_hint: null, vouched_by_name: null, vouched_at: null, verification_method: null },
+        ] }),
+      });
+      const answer = await service.list(staffContext('reviewed'));
+      expect(sqlCalls('to_regprocedure')[0]?.transaction).toBe('staff');
+      expect(sqlCalls('from identity.list_facility_staff_licences()')[0]?.sql)
+        .toBe('select * from identity.list_facility_staff_licences()');
+      expect(answer.members.map((member) => (member as { licences?: unknown }).licences)).toEqual([
+        [{ role: 'doctor', body: 'MDCN', numberHint: '2345', vouchedBy: 'Health ID support',
+          vouchedAt: '2026-10-25T08:00:00.000Z', method: 'platform_review' },
+        { role: 'nurse', body: 'NMCN', numberHint: null, vouchedBy: null, vouchedAt: null, method: null }],
+        [],
+      ]);
+      // `licence` stays as it was for older screens.
+      expect(answer.members[0]?.licence).toEqual({ body: 'MDCN', numberHint: '2345', vouchedBy: 'Health ID support',
+        vouchedAt: '2026-10-25T08:00:00.000Z', method: 'platform_review' });
+    });
+
+    it('leaves `licences` out where 0139 is not applied', async () => {
+      const { service, sqlCalls } = harness({
+        'facility_staff_management_state': () => ({ rows: [stateRow] }),
+        'identity.list_facility_staff()': () => ({ rows: memberRows }),
+        'list_facility_staff_invitations': () => ({ rows: [] }),
+        'to_regprocedure': () => ({ rows: [{ present: false }] }),
+      });
+      const answer = await service.list(staffContext('reviewed'));
+      expect(answer.members.every((member) => !('licences' in member))).toBe(true);
+      expect(sqlCalls('from identity.list_facility_staff_licences()')).toEqual([]);
+    });
+
     it.each([
       ['pending', { review_state: 'pending' }], ['invitations closed', { invitations_open: false }],
       ['delivery paused', { delivery_paused: true }], ['at the pending limit', { pending_count: 100 }],
@@ -330,6 +371,31 @@ describe('FacilityStaffService', () => {
       expect(answer.invitations).toEqual([expect.objectContaining({ invitationId: 'inv', reference: '3F2A9C1B',
         licenceNumber: 'ML/77', sameLicenceElsewhere: 0, nameMismatch: false })]);
       expect(answer.invitations[0]).not.toHaveProperty('membershipId');
+    });
+
+    it('adds each member\'s licences where 0139 is applied (SX-4)', async () => {
+      const { service, sqlCalls } = harness({
+        'from identity.facilities facility': () => ({ rows: [{ id: facilityId, name: 'Governed',
+          review_state: null, organization_type: null, product_code: null }] }),
+        'identity.admin_list_facility_staff($1)': () => ({ rows: [
+          { kind: 'membership', membership_id: membershipId, invitation_id: null, reference: null, account_id: 'acc',
+            name: 'Chidi Eze', email: 'chidi@example.test', roles: ['doctor', 'nurse'], status: 'active',
+            licence_body: 'MDCN', licence_number: 'MDCN/1', licence_key: 'MDCN:1', same_licence_elsewhere: 0,
+            name_mismatch: false, attested_by_account_id: 'support', attested_by_name: 'Support',
+            verification_method: 'regulator_register', attested_at: '2026-11-20T09:00:00Z', created_at: '2026-10-26T10:00:00Z' },
+        ] }),
+        'to_regprocedure': () => ({ rows: [{ present: true }] }),
+        'admin_list_facility_staff_licences': () => ({ rows: [
+          { membership_id: membershipId, role_code: 'nurse', licence_body: 'NMCN', licence_number_hint: '7007',
+            vouched_by_name: 'Support', vouched_at: '2026-11-20T09:00:00Z', verification_method: 'regulator_register' },
+        ] }),
+      });
+      const answer = await service.adminStaff(admin, facilityId);
+      expect(sqlCalls('admin_list_facility_staff_licences')[0]).toMatchObject({ transaction: 'platform',
+        sql: 'select * from identity.admin_list_facility_staff_licences($1)', values: [facilityId] });
+      expect(answer.members[0]).toMatchObject({ membershipId, licenceNumber: 'MDCN/1', licences: [{ role: 'nurse',
+        body: 'NMCN', numberHint: '7007', vouchedBy: 'Support', vouchedAt: '2026-11-20T09:00:00.000Z',
+        method: 'regulator_register' }] });
     });
 
     it('answers a governed facility with selfService null, and an unknown one 404', async () => {

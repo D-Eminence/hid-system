@@ -40,6 +40,7 @@ import { AdminSelfServiceApplicationsController,
 import { SelfServiceFacilitiesService } from './self-service-facilities.service';
 import { AdminFacilityStaffController } from './admin-facility-staff.controller';
 import { FacilityStaffController } from './facility-staff.controller';
+import { FacilityStaffRolesService } from './facility-staff-roles.service';
 import { FacilityStaffService } from './facility-staff.service';
 import { FacilityProfileController } from './facility-profile.controller';
 import { FacilityProfileService } from './facility-profile.service';
@@ -111,6 +112,7 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
     SelfServiceFacilitiesService,
     StaffInvitationsService,
     FacilityStaffService,
+    FacilityStaffRolesService,
     StaffReauthenticationService,
     OrderDestinationsService,
     QoreIdPublicPatientIdentityProvider,
