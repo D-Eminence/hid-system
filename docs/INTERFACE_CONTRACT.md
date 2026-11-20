@@ -9638,3 +9638,105 @@ primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
 
+
+## ID-6. Verify a NIN later and link it (Release B, migration 0138; not live until signed)
+
+Akos P0-1. Owner decisions applied: Q109 (no limit per staff member or
+facility), Q115 (the keep rule, through 0137's guard), Q117 (the words when a
+NIN cannot be verified), Q110 (a NIN a Health ID holds is never sent again)
+and Q100 B (404 `PATIENT_NOT_FOUND`). The planned contract's "ID-6" is the
+spec; this section is what is built.
+
+A patient registered without a NIN (ID-2, 0130) gets a NIN checked with QoreID
+at this facility's desk and attached to their record. On success ID-0's rule
+reads `ninStatus: "verified"` (a verified, unrevoked `nin` row). Names, date of
+birth, Health ID, the assurance state and who has access do not change.
+
+### `POST /api/v1/identity/patients/:patientId/nin`
+
+- `:patientId` is the patient's UUID. The NIN goes only in the body.
+- Permission `identity.registration.write` (front desk, approvers, doctors,
+  nurses, clinicians), `X-Facility-Id`, `Idempotency-Key` required.
+- Only this facility's own patients (0131's `identity.own_facility_basis`). A
+  consent grant does not allow it. Linking a NIN never creates or extends an
+  own-facility basis.
+
+Body, exactly these fields:
+
+```json
+{ "nin": "<11-digit-NIN>", "purpose": "healthcare-operations" }
+```
+
+`nin` is 11 digits once spaces (and hyphens) are removed.
+
+The order of checks. A NIN that is not this patient's never says whether anyone
+else holds it, and nothing is charged for a refusal the database gives first:
+
+1. The patient: active, this side of the seals, this facility's own patient
+   (else 404 or 403).
+2. The patient's own verified NIN: the same NIN answers `already_linked` (no
+   QoreID call); another answers 409 `PATIENT_ALREADY_HAS_NIN`.
+3. The NIN check, with the name and date of birth on the patient's record:
+   the desk's check (deferred or switched off, the sealed tenants, Q110's
+   record, the NIN service behind ID-0's breaker, 0137's guard as path
+   `desk`). The record's names are compared in the record's order and then the
+   other way round; the second comparison is answered from what the first
+   kept, never charged again. "No record" and "does not match" give one
+   answer, 422 `NIN_VERIFICATION_FAILED`.
+4. Only after a match: a NIN another record holds answers 409
+   `NIN_ON_ANOTHER_RECORD`. Nothing changes and the other record is never
+   named. Under Q110 this is a NIN a Health ID holds whose record matched.
+5. The link, in one transaction (`identity.link_patient_nin`): the checks
+   again under the NIN's and the patient's locks, the evidence
+   (`identity.patient_nin_links`), the verified `nin` identifier (source
+   `hid-desk-nin-link`) and the patient's `row_version` + 1.
+
+Answer `200`:
+
+```json
+{ "patientId": "uuid", "outcome": "nin_linked", "ninStatus": "verified",
+  "message": "NIN Verified. It is now on this patient's record.", "replayed": false }
+```
+
+- `outcome` is `nin_linked` or `already_linked` ("NIN Verified. It is already
+  on this patient's record.").
+- The same key with the same body replays a link with `replayed: true`. The
+  same key with another body is 409 `IDEMPOTENCY_KEY_REUSED`.
+- The answer never carries the NIN, its last 4 digits or anything from the NIN
+  record.
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Enter the 11-digit NIN." (also another purpose or an extra field) |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | existing |
+| 403 | `PERMISSION_DENIED` | existing |
+| 403 | `NIN_LINK_NOT_PERMITTED` | "You can add a NIN only for this facility's own patients." |
+| 404 | `PATIENT_NOT_FOUND` | "No such patient." (unknown, inactive, merged, or across the seals) |
+| 409 | `PATIENT_ALREADY_HAS_NIN` | "This patient already has a verified NIN." |
+| 409 | `NIN_ON_ANOTHER_RECORD` | "This NIN is already on another patient record. Ask an approver to review the two records." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | "This request key was already used for a different request." |
+| 409 | `NIN_CHECK_IN_PROGRESS`, `NIN_CHECK_HELD` | as 0137, with `retryAfterSeconds` |
+| 422 | `NIN_VERIFICATION_FAILED` | "This NIN could not be verified. Check the number and try again." (Q117; an answer, not a breaker failure) |
+| 502 | `QOREID_PROVIDER_RESPONSE_INVALID` | as 0137 |
+| 503 | `NIN_PROVIDER_UNAVAILABLE` | NIN checks off here, a sealed tenant's desk, or the breaker open (nothing sent) |
+| 503 | `NIN_PROVIDER_DEFERRED` | staging with NIN checks deferred |
+| 504 | `QOREID_TIMEOUT` | as 0137 |
+
+Audit: one `identity.patient.nin-link` row for each answer and each refusal:
+the patient (none for `PATIENT_NOT_FOUND`), `outcome` (`nin_linked`,
+`already_linked`) or `refusal` (`not_found`, `not_permitted`,
+`already_has_nin`, `no_record`, `details_mismatch`, `on_another_record` with
+`otherPatientId`, `key_reused`), and `qoreidCalled`. Never the NIN or its
+HMAC. The desk's NIN check writes its own `identity.nin.verify` and
+`identity.qoreid.nin-check` rows as for registration.
+
+The patient's access log (`GET /api/v1/identity/me/access-log`) gains the
+action `nin_added` with `facilityName` ("NIN added at <facility>") for each
+link; an `already_linked` answer adds nothing.
+
+Screen notes: show "Verify NIN" on a patient whose `ninStatus` is
+`not_verified`, to staff with `identity.registration.write`, for this
+facility's own patients, while `registration-capabilities` answers
+`nin.available: true`. Show the Q117 words exactly on 422; on 409
+`NIN_CHECK_*` or 504 offer to try again after `retryAfterSeconds`, never
+automatically. Never echo the NIN after sending it.
