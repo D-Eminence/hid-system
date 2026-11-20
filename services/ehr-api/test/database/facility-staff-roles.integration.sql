@@ -11,14 +11,20 @@
 --      review;
 --   2. the administrator's remove: one role revoked, the others untouched,
 --      a retry answers not held, the last role, the role columns moved to a
---      held role (kept on a collision), the open records-processing request
---      closed with its audit row while a direct-care request and a member who
---      keeps ocr.job.write keep theirs;
+--      held role, a remove refused when no role left can take
+--      membership_role, the open records-processing request closed with its
+--      audit row while a direct-care request and a member who keeps
+--      ocr.job.write keep theirs, the own-facility and break-glass grants
+--      revoked with their audit rows when no role left allows them (an
+--      expired one and the patient's own grant untouched), and kept when a
+--      role left still allows them;
 --   3. the reads: one licence per licensed active role, hints only, the
 --      facility's own members only;
 --   4. support: permission, a governed facility (no recorded kind is a
 --      hospital), a laboratory's roles, the licence check and its method,
---      the administrator's membership, a facility under review, replay and
+--      the administrator's membership (refused at a self-signed-up facility,
+--      allowed at a governed one, where a remove revokes its own-facility
+--      grant as the system actor), a facility under review, replay and
 --      reuse, remove with replay, its read;
 --   5. the staff-invitations control closes add, not remove; the helpers
 --      are not the runtime's.
@@ -131,19 +137,20 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
 -- request and a pending direct-care request), m2 doctor, m3 receptionist
 -- holding a platform role, m4 pharmacist with an ended lab membership at the
 -- same facility (m14), m6 doctor and nurse (a pending healthcare-operations
--- request). Facility 2: m5 lab. Governed hospital: m7 doctor.
+-- request), m8 doctor and pharmacist. Facility 2: m5 lab. Governed hospital:
+-- m7 doctor, m9 the administrator (org_admin and doctor).
 insert into auth.accounts (id, subject, email, display_name, status)
 select ('e1390000-0000-4000-8000-00000000001' || n)::uuid, 'synthetic:roles:member-' || n,
   'member' || n || '@roles-people.invalid', 'Roles Member ' || n, 'active'
-  from generate_series(1, 7) n;
+  from generate_series(1, 9) n;
 insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason) values
   ('e1391000-0000-4000-8000-000000000013', 'e1390000-0000-4000-8000-000000000013', 'support_admin', 'platform',
    'Staff roles suite platform member');
 insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
 select ('e1394000-0000-4000-8000-00000000001' || n)::uuid, ('e1390000-0000-4000-8000-00000000001' || n)::uuid,
   'Roles Member ' || n, 'member' || n || '@roles-people.invalid', 'verified',
-  (array['nurse', 'doctor', 'receptionist', 'pharmacist', 'lab', 'doctor', 'doctor'])[n]
-  from generate_series(1, 7) n;
+  (array['nurse', 'doctor', 'receptionist', 'pharmacist', 'lab', 'doctor', 'doctor', 'doctor', 'doctor'])[n]
+  from generate_series(1, 9) n;
 insert into identity.staff_facility_memberships
   (id, staff_id, account_id, organization_id, facility_id, membership_role, app_role, is_primary, active)
 select ('e1395000-0000-4000-8000-0000000000' || lpad(member.n::text, 2, '0'))::uuid,
@@ -156,12 +163,14 @@ select ('e1395000-0000-4000-8000-0000000000' || lpad(member.n::text, 2, '0'))::u
   member.role_code, member.role_code, member.n < 10, member.n < 10
   from (values (1, 1, 'f1', 'nurse'), (2, 2, 'f1', 'doctor'), (3, 3, 'f1', 'receptionist'),
                (4, 4, 'f1', 'pharmacist'), (14, 4, 'f1', 'lab'), (5, 5, 'f2', 'lab'),
-               (6, 6, 'f1', 'doctor'), (7, 7, 'g', 'doctor')) as member(n, staff_n, facility, role_code);
+               (6, 6, 'f1', 'doctor'), (7, 7, 'g', 'doctor'), (8, 8, 'f1', 'doctor'),
+               (9, 9, 'g', 'org_admin')) as member(n, staff_n, facility, role_code);
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
 select ('e1392000-0000-4000-8000-0000000000' || lpad(grant_row.n::text, 2, '0'))::uuid, membership.account_id,
   grant_row.role_code, 'facility', membership.id, membership.facility_id, 'Staff roles suite member'
   from (values (1, 1, 'nurse'), (2, 2, 'doctor'), (3, 3, 'receptionist'), (4, 4, 'pharmacist'), (5, 5, 'lab'),
-               (6, 6, 'doctor'), (16, 6, 'nurse'), (7, 7, 'doctor')) as grant_row(n, member_n, role_code)
+               (6, 6, 'doctor'), (16, 6, 'nurse'), (7, 7, 'doctor'), (8, 8, 'doctor'), (18, 8, 'pharmacist'),
+               (9, 9, 'org_admin'), (19, 9, 'doctor')) as grant_row(n, member_n, role_code)
   join identity.staff_facility_memberships membership
     on membership.id = ('e1395000-0000-4000-8000-0000000000' || lpad(grant_row.member_n::text, 2, '0'))::uuid;
 -- 0104's trigger admits a records-processing request only from its own
@@ -183,6 +192,50 @@ select pg_temp.request('e1397000-0000-4000-8000-000000000002', 'e1396000-0000-40
   'direct-care');
 select pg_temp.request('e1397000-0000-4000-8000-000000000003', 'e1396000-0000-4000-8000-000000000003', 6,
   'healthcare-operations');
+-- Consent grants (owner SQL). m8: g1 own-facility (patient 1), g2
+-- break-glass (patient 2), g3 an own-facility grant already past its expiry
+-- (patient 3), g4 the patient's own approval (patient 3). m6: g5
+-- own-facility (patient 1), g6 break-glass (patient 3). m9: g7 own-facility
+-- (patient 1).
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope, status,
+  reason, starts_at, expires_at, break_glass, purpose_of_use, authorization_method, granted_by_patient_id)
+select ('e1398000-0000-4000-8000-00000000000' || grant_row.n)::uuid,
+  ('e1396000-0000-4000-8000-00000000000' || grant_row.patient_n)::uuid, membership.staff_id, membership.account_id,
+  membership.id, membership.facility_id, grant_row.scope, 'active', grant_row.reason,
+  clock_timestamp() - make_interval(hours => grant_row.started_hours_ago),
+  clock_timestamp() + make_interval(hours => grant_row.expires_in_hours), grant_row.scope = 'break_glass',
+  grant_row.purpose, grant_row.method,
+  case when grant_row.method is null and grant_row.scope <> 'break_glass'
+    then ('e1396000-0000-4000-8000-00000000000' || grant_row.patient_n)::uuid end
+  from (values
+    (1, 8, 1, 'write_records', 'direct-care', 'own_facility', 'Opened as this facility''s patient', 1, 23),
+    (2, 8, 2, 'break_glass', 'emergency', null, 'Unconscious on arrival, staff roles suite', 1, 1),
+    (3, 8, 3, 'write_records', 'direct-care', 'own_facility', 'Opened as this facility''s patient', 48, -24),
+    (4, 8, 3, 'read_records', 'direct-care', null, 'Approved by the patient', 1, 23),
+    (5, 6, 1, 'write_records', 'direct-care', 'own_facility', 'Opened as this facility''s patient', 1, 23),
+    (6, 6, 3, 'break_glass', 'emergency', null, 'Unconscious on arrival, staff roles suite', 1, 1),
+    (7, 9, 1, 'write_records', 'direct-care', 'own_facility', 'Opened as this facility''s patient', 1, 23)
+  ) as grant_row(n, member_n, patient_n, scope, purpose, method, reason, started_hours_ago, expires_in_hours)
+  join identity.staff_facility_memberships membership
+    on membership.id = ('e1395000-0000-4000-8000-0000000000' || lpad(grant_row.member_n::text, 2, '0'))::uuid;
+create function pg_temp.grant_id(n integer) returns uuid language sql as $f$
+  select ('e1398000-0000-4000-8000-00000000000' || n)::uuid;
+$f$;
+-- 0005's check, as the member's own session would make it (owner only).
+create function pg_temp.allowed(patient_n integer, member_n integer, purpose text) returns boolean language sql as $f$
+  select identity.has_active_consent_grant(('e1396000-0000-4000-8000-00000000000' || patient_n)::uuid,
+    'synthetic:roles:member-' || member_n, membership.id, membership.facility_id, 'read_records', purpose)
+    from identity.staff_facility_memberships membership
+   where membership.id = ('e1395000-0000-4000-8000-0000000000' || lpad(member_n::text, 2, '0'))::uuid;
+$f$;
+do $$
+begin
+  if not (pg_temp.allowed(1, 8, 'direct-care') and pg_temp.allowed(2, 8, 'emergency')
+          and pg_temp.allowed(3, 8, 'direct-care') and pg_temp.allowed(1, 6, 'direct-care')
+          and pg_temp.allowed(3, 6, 'emergency') and pg_temp.allowed(1, 9, 'direct-care')) then
+    raise exception '0a: a grant fixture does not admit its member';
+  end if;
+end $$;
 
 create function pg_temp.as_staff(target_subject text, target_membership text, target_facility text, correlation text)
 returns void language sql as $f$
@@ -218,7 +271,7 @@ end
 $f$;
 grant execute on function pg_temp.as_staff(text,text,text,text), pg_temp.as_admin(integer,text),
   pg_temp.as_platform(text,text), pg_temp.member(integer), pg_temp.version(integer), pg_temp.key(text),
-  pg_temp.sha(text), pg_temp.refusal(text) to hid_identity_api_runtime;
+  pg_temp.sha(text), pg_temp.refusal(text), pg_temp.grant_id(integer) to hid_identity_api_runtime;
 
 -- 1. The administrator's add.
 set local role hid_identity_api_runtime;
@@ -383,7 +436,8 @@ declare
 begin
   select * into removed from identity.remove_facility_staff_role(pg_temp.member(2), before_version, 'nurse',
     'Back on days only');
-  if removed.roles <> array['doctor'] or removed.row_version <> before_version + 1 or removed.requests_closed <> 0 then
+  if removed.roles <> array['doctor'] or removed.row_version <> before_version + 1 or removed.requests_closed <> 0
+     or removed.grants_revoked <> 0 then
     raise exception '2a: the remove answered %', row_to_json(removed);
   end if;
   outcome := pg_temp.refusal(format('select identity.remove_facility_staff_role(%L, %s, %L, %L)',
@@ -409,12 +463,15 @@ begin
 end $$;
 -- m1: add lab, then remove nurse: the columns move to lab and the
 -- healthcare-operations request is closed (lab does not hold ocr.job.write).
--- m6: remove nurse, keeps doctor (ocr.job.write): its request stays.
--- m4: add lab, then remove pharmacist: app_role moves; membership_role
--- collides with the ended lab membership m14 and stays.
+-- m6: remove nurse, keeps doctor (ocr.job.write, own-facility, break-glass):
+-- its request and its grants stay.
+-- m4: add lab, then remove pharmacist: refused, as membership_role names
+-- pharmacist and lab collides with the ended lab membership m14.
+-- m8: remove doctor, keeps pharmacist: the own-facility and break-glass
+-- grants are revoked, the expired one and the patient's own are not.
 select pg_temp.as_admin(1, 'roles-remove-0002');
 do $$
-declare removed record;
+declare removed record; outcome text;
 begin
   perform identity.add_facility_staff_role(pg_temp.member(1), pg_temp.version(1), 'lab', 'MLSCN', 'ML 1001',
     'facility-staff-attestation-v1', 'Also runs the bench', pg_temp.key('m1-lab'), pg_temp.sha('m1-lab'));
@@ -425,15 +482,31 @@ begin
   end if;
   select * into removed from identity.remove_facility_staff_role(pg_temp.member(6), pg_temp.version(6), 'nurse',
     'Doctor work only');
-  if removed.roles <> array['doctor'] or removed.requests_closed <> 0 then
+  if removed.roles <> array['doctor'] or removed.requests_closed <> 0 or removed.grants_revoked <> 0 then
     raise exception '2g: the m6 remove answered %', row_to_json(removed);
   end if;
   perform identity.add_facility_staff_role(pg_temp.member(4), pg_temp.version(4), 'lab', 'MLSCN', 'ML 4004',
     'facility-staff-attestation-v1', 'Also runs the bench', pg_temp.key('m4-lab'), pg_temp.sha('m4-lab'));
-  select * into removed from identity.remove_facility_staff_role(pg_temp.member(4), pg_temp.version(4), 'pharmacist',
-    'Bench work only from now');
-  if removed.roles <> array['lab'] then
-    raise exception '2h: the m4 remove answered %', row_to_json(removed);
+  outcome := pg_temp.refusal(format('select identity.remove_facility_staff_role(%L, %s, %L, %L)',
+    pg_temp.member(4), pg_temp.version(4), 'pharmacist', 'Bench work only from now'));
+  if outcome <> 'P0001 FACILITY_STAFF_ROLE_COLUMN_CONFLICT' then
+    raise exception '2h: the m4 remove answered %', outcome;
+  end if;
+  -- Refused before the version check, as the last role is.
+  outcome := pg_temp.refusal(format('select identity.remove_facility_staff_role(%L, %s, %L, %L)',
+    pg_temp.member(4), pg_temp.version(4) + 1, 'pharmacist', 'Bench work only from now'));
+  if outcome <> 'P0001 FACILITY_STAFF_ROLE_COLUMN_CONFLICT' then
+    raise exception '2h: a stale m4 remove answered %', outcome;
+  end if;
+end $$;
+select pg_temp.as_admin(1, 'roles-remove-0003');
+do $$
+declare removed record;
+begin
+  select * into removed from identity.remove_facility_staff_role(pg_temp.member(8), pg_temp.version(8), 'doctor',
+    'Pharmacy work only from now');
+  if removed.roles <> array['pharmacist'] or removed.requests_closed <> 0 or removed.grants_revoked <> 2 then
+    raise exception '2n: the m8 remove answered %', row_to_json(removed);
   end if;
 end $$;
 reset role;
@@ -444,10 +517,16 @@ begin
      or (select array[membership_role, app_role] from identity.staff_facility_memberships where id = pg_temp.member(6))
        <> array['doctor', 'doctor']
      or (select array[membership_role, app_role] from identity.staff_facility_memberships where id = pg_temp.member(4))
-       <> array['pharmacist', 'lab']
+       <> array['pharmacist', 'pharmacist']
+     or (select array[membership_role, app_role] from identity.staff_facility_memberships where id = pg_temp.member(8))
+       <> array['pharmacist', 'pharmacist']
      or (select array[membership_role, app_role] from identity.staff_facility_memberships where id = pg_temp.member(2))
        <> array['doctor', 'doctor'] then
     raise exception '2i: the role columns are wrong';
+  end if;
+  if (select array_agg(role_code order by role_code) from auth.account_roles
+       where membership_id = pg_temp.member(4) and revoked_at is null) <> array['lab', 'pharmacist'] then
+    raise exception '2i: the refused m4 remove changed its roles';
   end if;
   if not exists (select 1 from auth.account_roles
                   where membership_id = pg_temp.member(2) and role_code = 'nurse' and revoked_at is not null
@@ -477,8 +556,52 @@ begin
                     and resource_id = pg_temp.member(1)::text and reason = 'Bench work only from now'
                     and details = jsonb_build_object('membershipId', pg_temp.member(1), 'roleCode', 'nurse',
                       'previousRoles', jsonb_build_array('lab', 'nurse'), 'roles', jsonb_build_array('lab'),
-                      'requestsClosed', 1)) then
+                      'requestsClosed', 1, 'grantsRevoked', 0)) then
     raise exception '2m: the remove audit row is wrong';
+  end if;
+  -- m8's grants: the two the roles left no longer allow are revoked.
+  if (select array_agg(id order by id) from identity.consent_grants
+       where membership_id = pg_temp.member(8) and status = 'revoked'
+         and revoked_by = current_setting('hid.test.r_account_1')::uuid and revoked_at is not null
+         and revoked_reason = 'Role removed by the facility administrator')
+       is distinct from array[pg_temp.grant_id(1), pg_temp.grant_id(2)]
+     or (select array_agg(status order by id) from identity.consent_grants
+          where id in (pg_temp.grant_id(3), pg_temp.grant_id(4), pg_temp.grant_id(5), pg_temp.grant_id(6)))
+       <> array['active', 'active', 'active', 'active'] then
+    raise exception '2o: the wrong grants were revoked';
+  end if;
+  if pg_temp.allowed(1, 8, 'direct-care') or pg_temp.allowed(2, 8, 'emergency')
+     or not pg_temp.allowed(3, 8, 'direct-care')
+     or not pg_temp.allowed(1, 6, 'direct-care') or not pg_temp.allowed(3, 6, 'emergency') then
+    raise exception '2p: a revoked grant still admits, or a kept one does not';
+  end if;
+  if (select count(*) from audit.events where action = 'identity.consent-grant.close'
+       and correlation_id = 'roles-remove-0003') <> 2
+     or (select count(*) from audit.events
+          where action = 'identity.consent-grant.close' and correlation_id = 'roles-remove-0003'
+            and actor_type = 'staff' and actor_subject = 'org-onboarding:' || current_setting('hid.test.r_account_1')
+            and actor_account_id = current_setting('hid.test.r_account_1')::uuid
+            and actor_membership_id = current_setting('hid.test.r_membership_1')::uuid
+            and organization_id = current_setting('hid.test.r_org_1')::uuid
+            and facility_id = current_setting('hid.test.r_facility_1')::uuid
+            and outcome = 'success' and resource_type = 'consent-grant'
+            and reason = 'Role removed by the facility administrator'
+            and ((resource_id = pg_temp.grant_id(1)::text and patient_id = 'e1396000-0000-4000-8000-000000000001'
+                  and details = jsonb_build_object('existing_closure', false, 'membershipId', pg_temp.member(8),
+                    'cause', 'role-removed', 'access', 'own_facility'))
+              or (resource_id = pg_temp.grant_id(2)::text and patient_id = 'e1396000-0000-4000-8000-000000000002'
+                  and details = jsonb_build_object('existing_closure', false, 'membershipId', pg_temp.member(8),
+                    'cause', 'role-removed', 'access', 'break_glass')))) <> 2
+     or exists (select 1 from audit.events where action = 'identity.consent-grant.close'
+                 and correlation_id = 'roles-remove-0002') then
+    raise exception '2q: the grant closing audit rows are wrong';
+  end if;
+  if not exists (select 1 from audit.events
+                  where action = 'identity.facility-staff.role-remove' and correlation_id = 'roles-remove-0003'
+                    and details = jsonb_build_object('membershipId', pg_temp.member(8), 'roleCode', 'doctor',
+                      'previousRoles', jsonb_build_array('doctor', 'pharmacist'), 'roles', jsonb_build_array('pharmacist'),
+                      'requestsClosed', 0, 'grantsRevoked', 2)) then
+    raise exception '2r: the m8 remove audit row is wrong';
   end if;
 end $$;
 
@@ -486,11 +609,14 @@ end $$;
 set local role hid_identity_api_runtime;
 select pg_temp.as_admin(1, 'roles-read-0001');
 do $$
-declare listed jsonb;
+declare listed jsonb; expected jsonb;
 begin
   select jsonb_agg(to_jsonb(licence) - 'vouched_at' order by licence.membership_id, licence.role_code) into listed
     from identity.list_facility_staff_licences() licence;
-  if listed <> jsonb_build_array(
+  -- The administrator's membership id is random, so the expected rows are
+  -- put in the read's order (membership, role) before comparing.
+  select jsonb_agg(item order by (item->>'membership_id')::uuid, item->>'role_code') into expected
+    from jsonb_array_elements(jsonb_build_array(
        jsonb_build_object('membership_id', current_setting('hid.test.r_membership_1'), 'role_code', 'doctor',
          'licence_body', 'MDCN', 'licence_number_hint', '1390', 'vouched_by_name', 'Roles Super Admin',
          'verification_method', 'platform_review'),
@@ -500,8 +626,13 @@ begin
          'licence_number_hint', null, 'vouched_by_name', null, 'verification_method', null),
        jsonb_build_object('membership_id', pg_temp.member(4), 'role_code', 'lab', 'licence_body', 'MLSCN',
          'licence_number_hint', '4004', 'vouched_by_name', 'Ada Roles Admin', 'verification_method', 'facility_attestation'),
+       jsonb_build_object('membership_id', pg_temp.member(4), 'role_code', 'pharmacist', 'licence_body', 'PCN',
+         'licence_number_hint', null, 'vouched_by_name', null, 'verification_method', null),
        jsonb_build_object('membership_id', pg_temp.member(6), 'role_code', 'doctor', 'licence_body', 'MDCN',
-         'licence_number_hint', null, 'vouched_by_name', null, 'verification_method', null)) then
+         'licence_number_hint', null, 'vouched_by_name', null, 'verification_method', null),
+       jsonb_build_object('membership_id', pg_temp.member(8), 'role_code', 'pharmacist', 'licence_body', 'PCN',
+         'licence_number_hint', null, 'vouched_by_name', null, 'verification_method', null))) item;
+  if listed is distinct from expected then
     raise exception '3a: the licences read %', listed;
   end if;
 end $$;
@@ -579,11 +710,11 @@ begin
       current_setting('hid.test.r_facility_2'), pg_temp.member(5), pg_temp.version(5), 'doctor', 'MDCN', 'MDCN/5',
       'in_person', 'Also sees patients', pg_temp.key('lab-doctor'), pg_temp.sha('lab-doctor')),
       '22023 STAFF_INVITATION_ROLE_NOT_ALLOWED'),
-    ('4k a facility under review', format(
+    ('4k the administrator of a facility under review (its only member)', format(
       'select identity.admin_add_facility_staff_role(%L, %L, %s, %L, %L, %L, %L, %L, %L, %L)',
       current_setting('hid.test.r_facility_3'), current_setting('hid.test.r_membership_3'), 1, 'doctor', 'MDCN',
       'MDCN/3', 'in_person', 'Also sees patients', pg_temp.key('pending-doctor'), pg_temp.sha('pending-doctor')),
-      'P0001 FACILITY_REVIEW_PENDING'),
+      'P0001 FACILITY_STAFF_ADMINISTRATOR'),
     ('4l a platform account', format(
       'select identity.admin_add_facility_staff_role(%L, %L, %s, %L, %L, %L, %L, %L, %L, %L)',
       current_setting('hid.test.r_facility_1'), pg_temp.member(3), pg_temp.version(3), 'nurse', 'NMCN', 'RN 3',
@@ -595,15 +726,33 @@ begin
       raise exception '%: expected %, got %', attempt.label, attempt.expected, outcome;
     end if;
   end loop;
-  -- The facility administrator's own membership (org_admin and doctor).
-  select * into added from identity.admin_add_facility_staff_role(current_setting('hid.test.r_facility_1')::uuid,
-    current_setting('hid.test.r_membership_1')::uuid,
+  -- A self-signed-up facility's administrator (org_admin and doctor): 0086
+  -- S12's administrator-role command, not these.
+  outcome := pg_temp.refusal(format(
+    'select identity.admin_add_facility_staff_role(%L, %L, %s, %L, %L, %L, %L, %L, %L, %L)',
+    current_setting('hid.test.r_facility_1'), current_setting('hid.test.r_membership_1'),
     (select row_version from identity.staff_facility_memberships
       where id = current_setting('hid.test.r_membership_1')::uuid),
     'nurse', 'NMCN', 'RN 1390', 'officer_match', 'Also covers night triage', pg_temp.key('admin-nurse'),
-    pg_temp.sha('admin-nurse'));
-  if not ('nurse' = any(added.roles)) or not ('org_admin' = any(added.roles)) then
-    raise exception '4m: support''s add to the administrator answered %', row_to_json(added);
+    pg_temp.sha('admin-nurse')));
+  if outcome <> 'P0001 FACILITY_STAFF_ADMINISTRATOR' then
+    raise exception '4m: support''s add to a self-signed-up administrator answered %', outcome;
+  end if;
+  outcome := pg_temp.refusal(format(
+    'select identity.admin_remove_facility_staff_role(%L, %L, %s, %L, %L, %L, %L)',
+    current_setting('hid.test.r_facility_1'), current_setting('hid.test.r_membership_1'),
+    (select row_version from identity.staff_facility_memberships
+      where id = current_setting('hid.test.r_membership_1')::uuid),
+    'doctor', 'Administration only from now', pg_temp.key('admin-remove'), pg_temp.sha('admin-remove')));
+  if outcome <> 'P0001 FACILITY_STAFF_ADMINISTRATOR' then
+    raise exception '4m: support''s remove from a self-signed-up administrator answered %', outcome;
+  end if;
+  -- A governed facility's administrator (m9, org_admin and doctor).
+  select * into added from identity.admin_add_facility_staff_role('e1393000-0000-4000-8000-000000000010',
+    pg_temp.member(9), pg_temp.version(9), 'pharmacist', 'PCN', 'PCN 9009', 'in_person',
+    'Also runs the governed pharmacy', pg_temp.key('g-admin-pharmacist'), pg_temp.sha('g-admin-pharmacist'));
+  if added.roles <> array['doctor', 'org_admin', 'pharmacist'] or added.replayed then
+    raise exception '4m: support''s add to a governed administrator answered %', row_to_json(added);
   end if;
 end $$;
 -- Support removes, and replays the remove.
@@ -614,25 +763,49 @@ begin
   select * into removed from identity.admin_remove_facility_staff_role('e1393000-0000-4000-8000-000000000010',
     pg_temp.member(7), before_version, 'doctor', 'Nursing only from now', pg_temp.key('g-remove'), pg_temp.sha('g-remove'));
   if removed.roles <> array['nurse'] or removed.previous_roles <> array['doctor', 'nurse']
-     or removed.row_version <> before_version + 1 or removed.requests_closed <> 0 or removed.replayed then
+     or removed.row_version <> before_version + 1 or removed.requests_closed <> 0 or removed.grants_revoked <> 0
+     or removed.replayed then
     raise exception '4n: the support remove answered %', row_to_json(removed);
   end if;
   select * into replay from identity.admin_remove_facility_staff_role('e1393000-0000-4000-8000-000000000010',
     pg_temp.member(7), before_version, 'doctor', 'Nursing only from now', pg_temp.key('g-remove'), pg_temp.sha('g-remove'));
   if replay.roles <> array['nurse'] or replay.row_version <> before_version + 1 or not replay.replayed
-     or replay.requests_closed <> 0 then
+     or replay.requests_closed <> 0 or replay.grants_revoked <> 0 then
     raise exception '4o: the support remove replay answered %', row_to_json(replay);
+  end if;
+end $$;
+-- Support removes doctor from the governed administrator: its own-facility
+-- grant is revoked (the system actor's row, as a platform row names no
+-- patient), and the replay answers the same count.
+select pg_temp.as_platform('synthetic:roles:super', 'roles-support-0004');
+do $$
+declare before_version bigint := pg_temp.version(9); removed record; replay record;
+begin
+  select * into removed from identity.admin_remove_facility_staff_role('e1393000-0000-4000-8000-000000000010',
+    pg_temp.member(9), before_version, 'doctor', 'Pharmacy and administration only', pg_temp.key('g-admin-remove'),
+    pg_temp.sha('g-admin-remove'));
+  if removed.roles <> array['org_admin', 'pharmacist'] or removed.grants_revoked <> 1 or removed.replayed then
+    raise exception '4x: support''s remove from a governed administrator answered %', row_to_json(removed);
+  end if;
+  select * into replay from identity.admin_remove_facility_staff_role('e1393000-0000-4000-8000-000000000010',
+    pg_temp.member(9), before_version, 'doctor', 'Pharmacy and administration only', pg_temp.key('g-admin-remove'),
+    pg_temp.sha('g-admin-remove'));
+  if replay.grants_revoked <> 1 or not replay.replayed then
+    raise exception '4x: its replay answered %', row_to_json(replay);
   end if;
 end $$;
 select pg_temp.as_platform('synthetic:roles:super', 'roles-support-read');
 do $$
 declare listed jsonb;
 begin
-  select jsonb_agg(to_jsonb(licence) - 'vouched_at') into listed
+  select jsonb_agg(to_jsonb(licence) - 'vouched_at' order by licence.membership_id, licence.role_code) into listed
     from identity.admin_list_facility_staff_licences('e1393000-0000-4000-8000-000000000010') licence;
   if listed <> jsonb_build_array(jsonb_build_object('membership_id', pg_temp.member(7), 'role_code', 'nurse',
        'licence_body', 'NMCN', 'licence_number_hint', '7007', 'vouched_by_name', 'Roles Super Admin',
-       'verification_method', 'regulator_register')) then
+       'verification_method', 'regulator_register'),
+       jsonb_build_object('membership_id', pg_temp.member(9), 'role_code', 'pharmacist',
+       'licence_body', 'PCN', 'licence_number_hint', '9009', 'vouched_by_name', 'Roles Super Admin',
+       'verification_method', 'in_person')) then
     raise exception '4p: support''s licences read %', listed;
   end if;
 end $$;
@@ -675,8 +848,26 @@ begin
   end if;
   if (select count(*) from auth.admin_command_idempotency
        where actor_account_id = 'e1390000-0000-4000-8000-000000000001'
-         and operation in ('admin.facility-staff.role-add', 'admin.facility-staff.role-remove')) <> 3 then
+         and operation in ('admin.facility-staff.role-add', 'admin.facility-staff.role-remove')) <> 4 then
     raise exception '4u: support''s stored answers are wrong';
+  end if;
+  if (select status || ' ' || revoked_by || ' ' || revoked_reason from identity.consent_grants
+       where id = pg_temp.grant_id(7))
+       is distinct from 'revoked e1390000-0000-4000-8000-000000000001 Role removed by Health ID support'
+     or pg_temp.allowed(1, 9, 'direct-care')
+     or (select count(*) from audit.events
+          where action = 'identity.consent-grant.close' and correlation_id = 'roles-support-0004') <> 1
+     or not exists (select 1 from audit.events
+                     where action = 'identity.consent-grant.close' and correlation_id = 'roles-support-0004'
+                       and actor_type = 'system' and actor_subject is null and actor_account_id is null
+                       and actor_membership_id is null
+                       and organization_id = 'e1393000-0000-4000-8000-000000000009'
+                       and facility_id = 'e1393000-0000-4000-8000-000000000010'
+                       and patient_id = 'e1396000-0000-4000-8000-000000000001'
+                       and resource_id = pg_temp.grant_id(7)::text and reason = 'Role removed by Health ID support'
+                       and details = jsonb_build_object('existing_closure', false, 'membershipId', pg_temp.member(9),
+                         'cause', 'role-removed', 'access', 'own_facility')) then
+    raise exception '4y: support''s grant revocation or its audit row is wrong';
   end if;
   -- The constraint refuses a support method with a membership, and an unknown method.
   begin
@@ -724,13 +915,13 @@ begin
   if outcome <> '55000 PLATFORM_CONTROL_DISABLED:staff_invitations_enabled' then
     raise exception '5a: an add with the control closed answered %', outcome;
   end if;
-  -- A remove still works: m4 holds lab only now, so its last role is
+  -- A remove still works: m2 holds doctor only, so its last role is
   -- refused; m1 gets nurse back first through support (support's commands
   -- are not behind the control) and then loses it.
   outcome := pg_temp.refusal(format('select identity.remove_facility_staff_role(%L, %s, %L, %L)',
-    pg_temp.member(4), pg_temp.version(4), 'lab', 'Pharmacy work only again'));
+    pg_temp.member(2), pg_temp.version(2), 'doctor', 'Leaving the wards again'));
   if outcome <> 'P0001 FACILITY_STAFF_LAST_ROLE' then
-    raise exception '5b: removing m4''s last role answered %', outcome;
+    raise exception '5b: removing m2''s last role answered %', outcome;
   end if;
   perform pg_temp.as_platform('synthetic:roles:super', 'roles-closed-support');
   perform identity.admin_add_facility_staff_role(current_setting('hid.test.r_facility_1')::uuid, pg_temp.member(1),

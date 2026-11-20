@@ -9115,10 +9115,14 @@ platform administrator works).
   kinds (a hospital or clinic: all five; a laboratory: `lab` and
   `receptionist`; a pharmacy: `pharmacist` and `receptionist`; none
   recorded: a hospital). None at an outreach group's facility.
-- Support may change the facility administrator's membership (never the
-  administrator roles themselves). Its own account and platform accounts are
-  refused. A facility still under review answers 409
-  `FACILITY_REVIEW_PENDING`.
+- Support may change a governed facility's administrator's membership (never
+  the administrator roles themselves). At a self-signed-up facility the
+  administrator's role is changed with
+  `POST /api/v1/admin/self-service-facilities/:applicationId/administrator-role`
+  (which keeps the facility's record of it and signs the administrator out),
+  so these routes answer 409 `FACILITY_STAFF_ADMINISTRATOR` for that
+  membership; a self-signed-up facility still under review has no other
+  member. Its own account and platform accounts are refused.
 - QA Hospital's seal (0123) holds: a membership of the QA facility belongs
   to one of the QA tenant's fictional accounts.
 - Add answers `201`, or `200` with `replayed: true`; remove answers `200`,
@@ -9130,7 +9134,9 @@ platform administrator works).
 { "membershipId": "uuid", "version": 6, "roles": ["doctor", "nurse"], "replayed": false }
 ```
 
-`roles` is every active role of the membership, sorted.
+`roles` is every active role of the membership, sorted. A remove (and its
+replay) also carries `grantsRevoked`: how many of the member's own-facility
+and break-glass grants it revoked (see below), usually `0`.
 
 ### What happens
 
@@ -9142,35 +9148,53 @@ platform administrator works).
   untouched. A member always keeps one role: 409 `FACILITY_STAFF_LAST_ROLE`.
   To end someone's access, use `POST /identity/facility-staff/:membershipId/end`.
 - The membership's version goes up by one.
-- Permissions are read on every request, so the change applies from the
-  member's next request; nobody is signed out. Sign-in sites follow section
-  53's gate (adding `lab` to a hospital doctor also admits them on `lab.`).
+- **Grants the roles left no longer allow are revoked now.** A remove revokes
+  the member's unexpired, active grants here that no role still held allows:
+  own-facility openings (ID-4, 0131) when no role left has
+  `identity.patient.open-own-facility` (doctor, nurse, clinician), and
+  break-glass grants when none has `identity.break-glass.write`. So a doctor
+  who is also a pharmacist and loses doctor cannot keep reading a chart they
+  opened as a doctor. Status `revoked`, by the caller, with the remove's
+  reason, and one `identity.consent-grant.close` audit row each with the
+  patient (the patient's access log shows "access ended" for the
+  administrator's). Grants the patient approved, or gave with the PIN, stay.
+- Other permissions are read on every request, so the rest of the change
+  applies from the member's next request; nobody is signed out. Sign-in sites
+  follow section 53's gate (adding `lab` to a hospital doctor also admits
+  them on `lab.`).
 - A remove closes the member's open records-processing requests that can no
   longer be used (pending, `healthcare-operations`, and the member no longer
   holds `ocr.job.write` here): status `expired`, one
   `identity.access-request.close` audit row each, as 0136 did.
 - **The session's `roles`.** The staff session lists the membership's two role
-  columns as `roles`, not every grant. An add leaves them as they are. A
-  remove of the role either column names moves that column to the first role
-  still held, alphabetically (the first column keeps its old value only in
-  the rare case that every role left would collide with an ended membership
-  of the same person here, as today's role change does). Access, `modules`
-  and the sign-in gate all read the grants. Listing every role in the
-  session is a follow-up.
+  columns as `roles`, not every grant, and the first is the role a patient
+  sees on an access request and a PIN-use notice. An add leaves them as they
+  are. A remove of the role either column names moves that column to the
+  first role still held, alphabetically. In the rare case that the first
+  column names the role removed and every role left would collide with an
+  ended membership of the same person here, the remove is refused: 409
+  `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` (remove the person from the facility
+  and invite them again). Access, `modules` and the sign-in gate all read the
+  grants. Listing every role in the session is a follow-up.
 
 ### Audit
 
 - The administrator: one `identity.facility-staff.role-add` or
   `identity.facility-staff.role-remove` row at the facility for each success
   (written by the database: the membership, role, licence body, roles before
-  and after, closed requests, and the reason) and each refusal (outcome
+  and after, closed requests, revoked grants, and the reason) and each refusal (outcome
   `denied`: the membership, role, reason and code), besides the request row
   every route writes.
 - Support: `admin.facility-staff.role-add.request` or
   `admin.facility-staff.role-remove.request` for every request, and one
   `admin.facility-staff.role-add` or `.role-remove` row for each success, in
   the command's transaction (the facility, membership, role, licence body,
-  method, roles before and after, closed requests, and the reason).
+  method, roles before and after, closed requests, revoked grants, and the
+  reason).
+- Each grant a remove revokes: one `identity.consent-grant.close` row with the
+  patient and facility, written by the database. The administrator's is a
+  staff row; support's is a system row (a platform row may not name a
+  patient), and support's own row above names the change.
 - No row ever holds a licence number or the password.
 
 ### Reads
@@ -9206,12 +9230,13 @@ each member gains `licences`, one per active licensed role:
 | 404 | `ADMIN_FACILITY_NOT_FOUND` | Facility was not found (support) |
 | 409 | `FACILITY_REVIEW_PENDING` | (today's) |
 | 409 | `FACILITY_STAFF_SELF` | You cannot change your own membership |
-| 409 | `FACILITY_STAFF_ADMINISTRATOR` | (today's; the administrator's routes only) |
+| 409 | `FACILITY_STAFF_ADMINISTRATOR` | (today's) on the administrator's routes; on support's, a self-signed-up facility's administrator: This is a self-signed-up facility's administrator. Change their role with the facility's administrator role |
 | 409 | `FACILITY_STAFF_ALREADY_ENDED` | This person no longer works at the facility |
 | 409 | `FACILITY_STAFF_PLATFORM_ACCOUNT` | This account's access is managed by Health ID |
 | 409 | `FACILITY_STAFF_ROLE_ALREADY_HELD` | This person already has that role |
 | 409 | `FACILITY_STAFF_ROLE_NOT_HELD` | This person does not have that role |
 | 409 | `FACILITY_STAFF_LAST_ROLE` | This is the person's only role. To stop their access, remove them from the facility |
+| 409 | `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` | This role cannot be removed here. To change this person's roles, remove them from the facility and invite them again |
 | 409 | `VERSION_CONFLICT` | This changed meanwhile; reload before retrying |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | This request was already used for a different change. Please reload and try again |
 | 423 | `STAFF_INVITATIONS_UNAVAILABLE` | Staff invitations are not open (the administrator's add) |

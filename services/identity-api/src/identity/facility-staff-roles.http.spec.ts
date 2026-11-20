@@ -325,12 +325,13 @@ describe('SX-4 routes over HTTP', () => {
   });
 
   describe('the administrator: remove', () => {
-    it('answers 200 with the roles left; not behind the staff-invitations gate', async () => {
+    it('answers 200 with the roles left and the grants revoked; not behind the staff-invitations gate', async () => {
       handlers['identity.remove_facility_staff_role'] = changed({ roles: ['nurse'], previous_roles: undefined,
-        replayed: undefined, requests_closed: 1 });
+        replayed: undefined, requests_closed: 1, grants_revoked: '2' });
       handlers['as invitations'] = () => ({ rows: [{ invitations: false, provider_portal: true, maintenance: false }] });
       const answer = await asStaff(`${staffPath}/remove`).send(removeBody);
-      expect([answer.status, answer.body]).toEqual([200, { membershipId, version: 5, roles: ['nurse'], replayed: false }]);
+      expect([answer.status, answer.body]).toEqual([200,
+        { membershipId, version: 5, roles: ['nurse'], replayed: false, grantsRevoked: 2 }]);
       const [call] = sqlCalls('identity.remove_facility_staff_role');
       expect([call?.sql, call?.values]).toEqual([REMOVE_FACILITY_STAFF_ROLE_SQL,
         [membershipId, 5, 'lab', 'Moved to the ward full time']]);
@@ -346,9 +347,17 @@ describe('SX-4 routes over HTTP', () => {
       const last = await asStaff(`${staffPath}/remove`).send(removeBody);
       expect([last.status, last.body.code, last.body.detail]).toEqual([409, 'FACILITY_STAFF_LAST_ROLE',
         'This is the person\'s only role. To stop their access, remove them from the facility']);
+      handlers['identity.remove_facility_staff_role'] = () => {
+        throw databaseError('P0001', 'FACILITY_STAFF_ROLE_COLUMN_CONFLICT');
+      };
+      const column = await asStaff(`${staffPath}/remove`).send(removeBody);
+      expect([column.status, column.body.code, column.body.detail]).toEqual([409, 'FACILITY_STAFF_ROLE_COLUMN_CONFLICT',
+        'This role cannot be removed here. To change this person\'s roles, remove them from the facility and invite them again']);
       expect(domainRows('identity.facility-staff.role-remove')).toEqual([
         expect.objectContaining({ outcome: 'denied', details: { membershipId, roleCode: 'lab', code: 'FACILITY_STAFF_ROLE_NOT_HELD' } }),
         expect.objectContaining({ outcome: 'denied', details: { membershipId, roleCode: 'lab', code: 'FACILITY_STAFF_LAST_ROLE' } }),
+        expect.objectContaining({ outcome: 'denied',
+          details: { membershipId, roleCode: 'lab', code: 'FACILITY_STAFF_ROLE_COLUMN_CONFLICT' } }),
       ]);
     });
 
@@ -429,32 +438,40 @@ describe('SX-4 routes over HTTP', () => {
         [databaseError('P0002', 'ADMIN_FACILITY_NOT_FOUND'), 404, 'ADMIN_FACILITY_NOT_FOUND'],
         [databaseError('P0001', 'FACILITY_REVIEW_PENDING'), 409, 'FACILITY_REVIEW_PENDING'],
         [databaseError('42501', 'ADMIN_PERMISSION_DENIED'), 403, 'PERMISSION_DENIED'],
+        [databaseError('P0001', 'FACILITY_STAFF_ADMINISTRATOR'), 409, 'FACILITY_STAFF_ADMINISTRATOR'],
       ] as [unknown, number, string][]) {
         handlers['identity.admin_add_facility_staff_role'] = () => { throw error; };
         const answer = await asSupport(`${supportPath}/add`).set('If-Match', '"4"')
           .set('Idempotency-Key', 'support-add-role-0005').send(supportAddBody);
         expect([answer.status, answer.body.code]).toEqual([status, code]);
+        if (code === 'FACILITY_STAFF_ADMINISTRATOR') {
+          // Support is pointed to 0086 S12's command, not told that support changes it.
+          expect(answer.body.detail).toBe('This is a self-signed-up facility\'s administrator. Change their role with the '
+            + 'facility\'s administrator role');
+        }
       }
       expect(audit.recordWithClient).not.toHaveBeenCalled();
     });
 
     it('removes 200, writes its success row once, and a replay none', async () => {
       handlers['identity.admin_remove_facility_staff_role'] = changed({ roles: ['nurse'], previous_roles: ['doctor', 'nurse'],
-        requests_closed: '2' });
+        requests_closed: '2', grants_revoked: 1 });
       const removed = await asSupport(`${supportPath}/remove`).set('If-Match', '"5"')
         .set('Idempotency-Key', 'support-remove-role-0001').send({ role: 'doctor', reason: 'Nursing only from now' });
-      expect([removed.status, removed.body]).toEqual([200, { membershipId, version: 5, roles: ['nurse'], replayed: false }]);
+      expect([removed.status, removed.body]).toEqual([200,
+        { membershipId, version: 5, roles: ['nurse'], replayed: false, grantsRevoked: 1 }]);
       const [call] = sqlCalls('identity.admin_remove_facility_staff_role');
       expect([call?.sql, call?.values]).toEqual([ADMIN_REMOVE_FACILITY_STAFF_ROLE_SQL, [facilityId, membershipId, 5,
         'doctor', 'Nursing only from now', 'support-remove-role-0001', requestDigest('admin.facility-staff.role-remove',
           { facilityId, membershipId, expectedVersion: 5, role: 'doctor', reason: 'Nursing only from now' })]]);
       expect(domainRows('admin.facility-staff.role-remove')).toEqual([expect.objectContaining({ outcome: 'success',
         details: { facilityId, membershipId, roleCode: 'doctor', previousRoles: ['doctor', 'nurse'], roles: ['nurse'],
-          requestsClosed: 2 } })]);
-      handlers['identity.admin_remove_facility_staff_role'] = changed({ roles: ['nurse'], replayed: true });
+          requestsClosed: 2, grantsRevoked: 1 } })]);
+      handlers['identity.admin_remove_facility_staff_role'] = changed({ roles: ['nurse'], replayed: true,
+        grants_revoked: 1 });
       const replay = await asSupport(`${supportPath}/remove`).set('If-Match', '"5"')
         .set('Idempotency-Key', 'support-remove-role-0001').send({ role: 'doctor', reason: 'Nursing only from now' });
-      expect([replay.status, replay.body.replayed]).toEqual([200, true]);
+      expect([replay.status, replay.body.replayed, replay.body.grantsRevoked]).toEqual([200, true, 1]);
       expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
     });
   });

@@ -14,6 +14,8 @@ const ROLE_REFUSALS: Readonly<Record<string, Refusal>> = Object.freeze({
   FACILITY_STAFF_ROLE_ALREADY_HELD: [409, 'This person already has that role'],
   FACILITY_STAFF_ROLE_NOT_HELD: [409, 'This person does not have that role'],
   FACILITY_STAFF_LAST_ROLE: [409, 'This is the person\'s only role. To stop their access, remove them from the facility'],
+  FACILITY_STAFF_ROLE_COLUMN_CONFLICT: [409,
+    'This role cannot be removed here. To change this person\'s roles, remove them from the facility and invite them again'],
   IDEMPOTENCY_KEY_REUSED: [409, 'This request was already used for a different change. Please reload and try again'],
   IDEMPOTENCY_KEY_REQUIRED: [400, 'Please try again'],
   // This route's own wording for today's codes (the contract's "SX-4" errors).
@@ -44,6 +46,11 @@ export function staffRoleProblem(error: unknown, caller: StaffRoleCaller): Domai
   }
   if (caller === 'support') {
     if (code === '42501') return new DomainProblem(403, 'PERMISSION_DENIED', 'Staff management is not permitted');
+    // A self-signed-up facility's administrator: 0086 S12's administrator-role command (0139).
+    if (code === 'P0001' && message === 'FACILITY_STAFF_ADMINISTRATOR') {
+      return new DomainProblem(409, 'FACILITY_STAFF_ADMINISTRATOR',
+        'This is a self-signed-up facility\'s administrator. Change their role with the facility\'s administrator role');
+    }
     if (code === 'P0002' && message === 'ADMIN_FACILITY_NOT_FOUND') {
       return new DomainProblem(404, 'ADMIN_FACILITY_NOT_FOUND', 'Facility was not found');
     }

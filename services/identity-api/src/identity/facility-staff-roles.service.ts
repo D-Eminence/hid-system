@@ -22,13 +22,18 @@ interface RoleChangeRow extends QueryResultRow {
   roles: string[] | null;
   previous_roles?: string[] | null;
   requests_closed?: Count;
+  grants_revoked?: Count;
   replayed?: boolean | null;
 }
 
-/** The answer of every SX-4 command; `status` is 201 for a new grant, else 200. */
+/**
+ * The answer of every SX-4 command; `status` is 201 for a new grant, else 200.
+ * A remove also says how many of the member's own-facility and break-glass
+ * grants it revoked (0139).
+ */
 export interface StaffRoleAnswer {
   status: 200 | 201;
-  body: { membershipId: string; version: number; roles: string[]; replayed: boolean };
+  body: { membershipId: string; version: number; roles: string[]; replayed: boolean; grantsRevoked?: number };
 }
 
 /** The four statements, exactly as identity-api sends them (0139). */
@@ -103,7 +108,7 @@ export class FacilityStaffRolesService {
       await this.reauthentication.confirm(context.actor, input.currentPassword, request);
       const row = await this.database.withTransaction(context, async (client) => (await client.query<RoleChangeRow>(
         REMOVE_FACILITY_STAFF_ROLE_SQL, [membershipId, input.expectedVersion, input.role, input.reason])).rows[0]);
-      return this.answer(row, 200);
+      return this.answer(row, 200, true);
     } catch (error) {
       throw await this.facilityRefusal(context, 'identity.facility-staff.role-remove', membershipId, input.role,
         input.reason, error);
@@ -154,9 +159,9 @@ export class FacilityStaffRolesService {
       if (row && row.replayed !== true) {
         await this.supportAudit(client, context, 'admin.facility-staff.role-remove', facilityId, membershipId,
           input.reason, { roleCode: input.role, previousRoles: row.previous_roles ?? [], roles: row.roles ?? [],
-            requestsClosed: count(row.requests_closed) });
+            requestsClosed: count(row.requests_closed), grantsRevoked: count(row.grants_revoked) });
       }
-      return this.answer(row, 200);
+      return this.answer(row, 200, true);
     });
   }
 
@@ -166,10 +171,12 @@ export class FacilityStaffRolesService {
     return { body: body ?? null, number: typeof number === 'string' ? normalizeLicenceNumber(number) : null };
   }
 
-  private answer(row: RoleChangeRow | undefined, status: 200 | 201): StaffRoleAnswer {
+  private answer(row: RoleChangeRow | undefined, status: 200 | 201, removed = false): StaffRoleAnswer {
     if (!row) throw unavailableFor('staff');
-    return { status, body: { membershipId: row.membership_id, version: count(row.row_version), roles: row.roles ?? [],
-      replayed: row.replayed === true } };
+    const body: StaffRoleAnswer['body'] = { membershipId: row.membership_id, version: count(row.row_version),
+      roles: row.roles ?? [], replayed: row.replayed === true };
+    if (removed) body.grantsRevoked = count(row.grants_revoked);
+    return { status, body };
   }
 
   /**

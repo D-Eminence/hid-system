@@ -54,24 +54,41 @@
 --   removed by Health ID support"). Other roles are untouched. The
 --   membership's version goes up by one either way.
 --   Refused, in this order, after the caller's own checks: not held (remove)
---   or already held (add), the member's last role (remove), then a version
---   that is not the membership's (40001). So a retried remove answers
+--   or already held (add), the member's last role (remove), no role left for
+--   membership_role (remove; see below), then a version that is not the
+--   membership's (40001). So a retried remove answers
 --   FACILITY_STAFF_ROLE_NOT_HELD, not a version conflict.
 --   The two role columns of the membership (membership_role, app_role) are
 --   what the staff session lists as roles today (identity-api's staff
---   context query). An add leaves them as they are. A remove of the role one
---   of them names moves that column to the first role still held, in
---   alphabetical order (membership_role keeps its old value only when every
---   role still held would collide with another membership of the same
---   person here, as 0086's role change does), so the session never names a
---   role that was removed.
+--   context query), and membership_role is the requester's role a patient
+--   sees on an access request and a PIN-use notice (0128). An add leaves
+--   them as they are. A remove of the role one of them names moves that
+--   column to the first role still held, in alphabetical order, so the
+--   session and the patient never see a role that was removed. When
+--   membership_role names the role removed and every role still held would
+--   collide with another membership of the same person here
+--   (staff_memberships_scoped_uq, which covers ended memberships), the
+--   remove is refused (FACILITY_STAFF_ROLE_COLUMN_CONFLICT, before the
+--   version check): end the membership and invite the person again.
 --   A remove then closes the member's open records-processing requests that
 --   can no longer be used, exactly as 0136 step 4 does: pending,
 --   healthcare-operations, not break-glass, not held for migration, and the
 --   membership no longer holds ocr.job.write here. Status 'expired' and one
 --   identity.access-request.close audit row each (system actor, ids only).
---   Permissions are read on every request, so a change applies from the
---   member's next request; nobody is signed out.
+--   It also revokes the member's unexpired active consent grants that the
+--   roles left no longer allow: 0131's own-facility grants
+--   (authorization_method own_facility) when no role still held here has
+--   identity.patient.open-own-facility, and break-glass grants when none has
+--   identity.break-glass.write. The roles are read directly (auth.roles,
+--   auth.role_permissions, auth.permissions, all active), not through the
+--   account's state, so a disabled account keeps what its roles allow.
+--   Status 'revoked', revoked_by the caller, the remove's own reason, and one
+--   identity.consent-grant.close audit row each with the patient (as 0086's
+--   end_facility_staff_membership writes it: the administrator as a staff
+--   actor; support as the system actor, since a platform row may not name a
+--   patient). Patient-approved and PIN grants are the patient's and stay.
+--   Other permissions are read on every request, so the rest of a change
+--   applies from the member's next request; nobody is signed out.
 --
 -- The administrator's commands
 --   Admission is 0086's identity.staff_management_actor(true): a staff
@@ -96,10 +113,17 @@
 --   none recorded counts as a hospital, Q91 A), and none at an outreach
 --   group's facility. A licensed role needs the licence and how support
 --   checked it; the front desk needs neither. Support may change an
---   administrator's membership (never the administrator roles themselves,
---   which are not staff roles); its own account and platform accounts are
---   refused. The QA seal holds through 0123's triggers: a membership of the
---   QA facility belongs to a QA account. identity-api writes support's
+--   administrator's membership at a governed facility (never the
+--   administrator roles themselves, which are not staff roles). At a
+--   self-signed-up facility (an organisation with a self-service
+--   application, as 0086's identity.staff_management_actor finds it) the
+--   administrator's clinical role is 0086 S12's (support's
+--   administrator-role command, which keeps self_service_granted_role and
+--   signs the administrator out), so the administrator's membership is
+--   refused there (FACILITY_STAFF_ADMINISTRATOR). Its own account and
+--   platform accounts are refused. The QA seal holds through 0123's
+--   triggers: a membership of the QA facility belongs to a QA account.
+--   identity-api writes support's
 --   admin.facility-staff.role-add or .role-remove audit row in the same
 --   transaction, as for every support command.
 -- Idempotency
@@ -117,12 +141,15 @@
 -- (rows inserted); ROW SHARE on auth.roles (the foreign key check of the new
 -- auth.role_permissions rows); and ACCESS SHARE on auth.account_roles,
 -- auth.accounts and identity.staff_facility_memberships (named by the SQL
--- functions' bodies, which are parsed when created); held to commit. That is
--- every existing table this file locks (pg_locks before commit), at the
--- strongest mode it takes. Taken first, together, NOWAIT: a busy table fails
--- the attempt at once and its subtransaction releases what it took; the
--- attempt is made again every 100 ms for at most 5 seconds, then 55P03
--- (nothing applied). When this
+-- functions' bodies, which are parsed when created) and on
+-- auth.admin_command_idempotency (three functions declare its %rowtype:
+-- plpgsql's validator builds that type at CREATE, and the type cache opens
+-- the table with a lock it releases at once, so pg_locks before commit does
+-- not show it); held to commit. That is every existing table this file locks
+-- (pg_locks before commit, plus that one), at the strongest mode it takes.
+-- Taken first, together, NOWAIT: a busy table fails the attempt at once and
+-- its subtransaction releases what it took; the attempt is made again every
+-- 100 ms for at most 5 seconds, then 55P03 (nothing applied). When this
 -- transaction already holds an earlier migration's locks that stop other
 -- sessions' reads or writes (the runner's dry run), one attempt and no
 -- sleep: 55P03 at once, nothing applied.
@@ -209,7 +236,14 @@ begin
       ('identity.staff_licence_attestations', 'verification_method', 'text'),
       ('identity.staff_licence_attestations', 'role_grant_id', 'uuid'),
       ('identity.outreach_organisations', 'facility_id', 'uuid'),
-      ('auth.admin_command_idempotency', 'response', 'jsonb')) expected(table_name, column_name, type_name)
+      ('auth.admin_command_idempotency', 'response', 'jsonb'),
+      ('identity.consent_grants', 'membership_id', 'uuid'), ('identity.consent_grants', 'status', 'text'),
+      ('identity.consent_grants', 'expires_at', 'timestamp with time zone'),
+      ('identity.consent_grants', 'authorization_method', 'text'), ('identity.consent_grants', 'break_glass', 'boolean'),
+      ('identity.consent_grants', 'scope', 'text'), ('identity.consent_grants', 'revoked_reason', 'text'),
+      ('identity.organization_applications', 'approval_mode', 'text'),
+      ('identity.organization_applications', 'self_service_released_at', 'timestamp with time zone'))
+      expected(table_name, column_name, type_name)
    where not exists (select 1 from pg_attribute attribute
                       where attribute.attrelid = to_regclass(expected.table_name)
                         and attribute.attname = expected.column_name and not attribute.attisdropped
@@ -221,6 +255,8 @@ begin
      or not exists (select 1 from auth.permissions where code = 'platform.admin.access')
      or not exists (select 1 from auth.permissions where code = 'workforce.manage')
      or not exists (select 1 from auth.permissions where code = 'ocr.job.write')
+     or not exists (select 1 from auth.permissions where code = 'identity.patient.open-own-facility')
+     or not exists (select 1 from auth.permissions where code = 'identity.break-glass.write')
      or not exists (select 1 from identity.staff_attestation_texts where version = 'facility-staff-attestation-v1') then
     raise exception using errcode = '55000', message = '0139: a permission or attestation text this file reads is missing';
   end if;
@@ -248,7 +284,8 @@ begin
       lock table identity.staff_licence_attestations in access exclusive mode nowait;
       lock table auth.permissions, auth.role_permissions, identity.staff_attestation_texts in row exclusive mode nowait;
       lock table auth.roles in row share mode nowait;
-      lock table auth.account_roles, auth.accounts, identity.staff_facility_memberships in access share mode nowait;
+      lock table auth.account_roles, auth.accounts, identity.staff_facility_memberships, auth.admin_command_idempotency
+        in access share mode nowait;
       exit;
     exception when lock_not_available then
       if holding then
@@ -393,7 +430,8 @@ create function identity.staff_role_change_apply(
   out row_version bigint,
   out roles text[],
   out previous_roles text[],
-  out requests_closed integer
+  out requests_closed integer,
+  out grants_revoked integer
 ) returns record
 language plpgsql volatile
 set search_path = pg_catalog, pg_temp
@@ -405,6 +443,9 @@ declare
   member_subject text;
   next_app_role text;
   next_membership_role text;
+  own_facility_lost boolean;
+  break_glass_lost boolean;
+  closed record;
 begin
   if requested_action not in ('add', 'remove') then
     raise exception using errcode = '22023', message = 'STAFF_INVITATION_INVALID';
@@ -426,6 +467,17 @@ begin
   end if;
   if requested_action = 'remove' and cardinality(previous_roles) = 1 then
     raise exception using errcode = 'P0001', message = 'FACILITY_STAFF_LAST_ROLE';
+  end if;
+  -- No role left can take membership_role (staff_memberships_scoped_uq).
+  if requested_action = 'remove' and member.membership_role = requested_role
+     and not exists (select 1 from unnest(previous_roles) held(role_code)
+                      where held.role_code <> requested_role
+                        and not exists (select 1 from identity.staff_facility_memberships other
+                                         where other.staff_id = member.staff_id
+                                           and other.organization_id = member.organization_id
+                                           and other.facility_id = member.facility_id and other.id <> member.id
+                                           and other.membership_role = held.role_code)) then
+    raise exception using errcode = 'P0001', message = 'FACILITY_STAFF_ROLE_COLUMN_CONFLICT';
   end if;
   if expected_version is null or member.row_version <> expected_version then
     raise exception using errcode = '40001', message = 'Facility staff membership version conflict';
@@ -477,7 +529,6 @@ begin
                           and other.membership_role = held.role_code)
      order by held.role_code
      limit 1;
-    next_membership_role := coalesce(next_membership_role, member.membership_role);
   end if;
   update identity.staff_facility_memberships membership
      set membership_role = next_membership_role, app_role = next_app_role,
@@ -511,6 +562,58 @@ begin
       returning 1
     )
     select count(*)::integer into requests_closed from audited;
+  end if;
+
+  -- The grants the roles left no longer allow (see "What a command does").
+  grants_revoked := 0;
+  if requested_action = 'remove' then
+    select
+      not exists (select 1 from auth.account_roles assignment
+                    join auth.roles role_row on role_row.code = assignment.role_code and role_row.active
+                    join auth.role_permissions holder on holder.role_code = assignment.role_code
+                    join auth.permissions permission_row
+                      on permission_row.code = holder.permission_code and permission_row.active
+                   where assignment.membership_id = member.id and assignment.facility_id = member.facility_id
+                     and assignment.scope_type = 'facility' and assignment.revoked_at is null
+                     and holder.permission_code = 'identity.patient.open-own-facility'),
+      not exists (select 1 from auth.account_roles assignment
+                    join auth.roles role_row on role_row.code = assignment.role_code and role_row.active
+                    join auth.role_permissions holder on holder.role_code = assignment.role_code
+                    join auth.permissions permission_row
+                      on permission_row.code = holder.permission_code and permission_row.active
+                   where assignment.membership_id = member.id and assignment.facility_id = member.facility_id
+                     and assignment.scope_type = 'facility' and assignment.revoked_at is null
+                     and holder.permission_code = 'identity.break-glass.write')
+      into own_facility_lost, break_glass_lost;
+    if own_facility_lost or break_glass_lost then
+      for closed in
+        update identity.consent_grants grant_row
+           set status = 'revoked', revoked_at = observed, revoked_by = attester_account,
+               revoked_reason = change_reason, updated_at = observed, row_version = grant_row.row_version + 1
+         where grant_row.membership_id = member.id and grant_row.status = 'active'
+           and grant_row.expires_at > observed
+           and ((own_facility_lost and grant_row.authorization_method = 'own_facility')
+             or (break_glass_lost and (grant_row.break_glass or grant_row.scope = 'break_glass')))
+        returning grant_row.id, grant_row.patient_id, grant_row.facility_id, grant_row.break_glass
+      loop
+        grants_revoked := grants_revoked + 1;
+        insert into audit.events (
+          correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
+          organization_id, facility_id, patient_id, action, outcome, resource_type, resource_id,
+          purpose_of_use, reason, provenance, source_system, details
+        ) values (
+          platform.current_correlation_id(),
+          case when attester_membership is null then 'system' else 'staff' end,
+          case when attester_membership is null then null else platform.current_actor_subject() end,
+          case when attester_membership is null then null else attester_account end,
+          attester_membership, member.organization_id, closed.facility_id, closed.patient_id,
+          'identity.consent-grant.close', 'success', 'consent-grant', closed.id::text,
+          'healthcare-operations', change_reason, 'application', 'identity-api',
+          jsonb_build_object('existing_closure', false, 'membershipId', member.id, 'cause', 'role-removed',
+            'access', case when closed.break_glass then 'break_glass' else 'own_facility' end)
+        );
+      end loop;
+    end if;
   end if;
 end
 $$;
@@ -669,7 +772,8 @@ create function identity.remove_facility_staff_role(
   expected_version bigint,
   requested_role text,
   requested_reason text
-) returns table (membership_id uuid, row_version bigint, roles text[], requests_closed integer)
+) returns table (membership_id uuid, row_version bigint, roles text[], requests_closed integer,
+  grants_revoked integer)
 language plpgsql security definer
 set search_path = pg_catalog, pg_temp
 as $$
@@ -706,9 +810,10 @@ begin
     'healthcare-operations', reason, 'application', 'identity-api',
     jsonb_build_object('membershipId', member.id, 'roleCode', requested_role,
       'previousRoles', to_jsonb(changed.previous_roles), 'roles', to_jsonb(changed.roles),
-      'requestsClosed', changed.requests_closed)
+      'requestsClosed', changed.requests_closed, 'grantsRevoked', changed.grants_revoked)
   );
-  return query select member.id, changed.row_version, changed.roles, changed.requests_closed;
+  return query select member.id, changed.row_version, changed.roles, changed.requests_closed,
+    changed.grants_revoked;
 end
 $$;
 
@@ -785,7 +890,14 @@ begin
   if not (requested_role = any(identity.staff_role_change_roles(requested_facility_id))) then
     raise exception using errcode = '22023', message = 'STAFF_INVITATION_ROLE_NOT_ALLOWED';
   end if;
-  member := identity.staff_role_change_member(requested_membership_id, requested_facility_id, actor_account, true);
+  -- A self-signed-up facility's administrator: 0086 S12's command, not this one.
+  member := identity.staff_role_change_member(requested_membership_id, requested_facility_id, actor_account,
+    not exists (select 1 from identity.facilities facility
+                  join identity.organization_applications application
+                    on application.organization_id = facility.organization_id
+                 where facility.id = requested_facility_id and application.approval_mode = 'self_service'
+                   and application.reviewed_by_account_id is null
+                   and (application.status = 'approved' or application.self_service_released_at is not null)));
   changed := identity.staff_role_change_apply(member, expected_version, 'add', requested_role,
     case when requested_role = 'receptionist' then null else requested_licence_body end,
     case when requested_role = 'receptionist' then null else normalized_number end,
@@ -816,7 +928,7 @@ create function identity.admin_remove_facility_staff_role(
   requested_idempotency_key text,
   requested_request_sha256 char(64)
 ) returns table (membership_id uuid, row_version bigint, roles text[], previous_roles text[],
-  requests_closed integer, replayed boolean)
+  requests_closed integer, grants_revoked integer, replayed boolean)
 language plpgsql security definer
 set search_path = pg_catalog, pg_temp
 as $$
@@ -858,7 +970,7 @@ begin
     return query select (prior.response->>'membershipId')::uuid, (prior.response->>'version')::bigint,
       array(select jsonb_array_elements_text(prior.response->'roles')),
       array(select jsonb_array_elements_text(prior.response->'previousRoles')),
-      (prior.response->>'requestsClosed')::integer, true;
+      (prior.response->>'requestsClosed')::integer, (prior.response->>'grantsRevoked')::integer, true;
     return;
   end if;
 
@@ -868,7 +980,14 @@ begin
   if not (requested_role = any(identity.staff_role_change_roles(requested_facility_id))) then
     raise exception using errcode = '22023', message = 'STAFF_INVITATION_ROLE_NOT_ALLOWED';
   end if;
-  member := identity.staff_role_change_member(requested_membership_id, requested_facility_id, actor_account, true);
+  -- A self-signed-up facility's administrator: 0086 S12's command, not this one.
+  member := identity.staff_role_change_member(requested_membership_id, requested_facility_id, actor_account,
+    not exists (select 1 from identity.facilities facility
+                  join identity.organization_applications application
+                    on application.organization_id = facility.organization_id
+                 where facility.id = requested_facility_id and application.approval_mode = 'self_service'
+                   and application.reviewed_by_account_id is null
+                   and (application.status = 'approved' or application.self_service_released_at is not null)));
   changed := identity.staff_role_change_apply(member, expected_version, 'remove', requested_role,
     null, null, null, null, actor_account, null, 'Role removed by Health ID support');
   insert into auth.admin_command_idempotency (
@@ -877,10 +996,11 @@ begin
     actor_account, 'admin.facility-staff.role-remove', requested_idempotency_key, requested_request_sha256,
     jsonb_build_object('membershipId', member.id, 'facilityId', requested_facility_id,
       'version', changed.row_version, 'roles', to_jsonb(changed.roles),
-      'previousRoles', to_jsonb(changed.previous_roles), 'requestsClosed', changed.requests_closed)
+      'previousRoles', to_jsonb(changed.previous_roles), 'requestsClosed', changed.requests_closed,
+      'grantsRevoked', changed.grants_revoked)
   );
   return query select member.id, changed.row_version, changed.roles, changed.previous_roles,
-    changed.requests_closed, false;
+    changed.requests_closed, changed.grants_revoked, false;
 end
 $$;
 
