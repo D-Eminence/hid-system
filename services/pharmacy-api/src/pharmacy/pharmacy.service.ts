@@ -15,6 +15,7 @@ import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
 import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState, type OwnWorkWithdrawnReason } from './own-work-access';
+import { workListSince } from './work-list-window';
 import { PRESCRIPTION_DETAILS_OFF, PharmacyPrescriptionDetails,
   type WorkItemDispensingDetails } from './prescription-dispensing-details';
 
@@ -61,13 +62,22 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
   left join pharmacy.dispensings d on d.work_item_id=w.id
   left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
 
+/**
+ * Which rows the list reaches (owner decision Q123 A): open work of any age,
+ * and done work received (`accepted_at`) on or after the Lagos midnight that
+ * starts the day in `$1` (YYYY-MM-DD, workListSince()). The same for both list
+ * queries, after every other filter and before the order and the limit.
+ */
+const WORK_LIST_WINDOW = `(o.open_work or w.accepted_at >= ($1::date::timestamp at time zone 'Africa/Lagos'))`;
+
 /** Open work first, oldest first, then done work, newest first; 200 rows. The same for both list queries. */
 const WORK_LIST_ORDER = `order by o.open_work desc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
   case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
 
 /**
- * The work list (200 rows, as before). A work item is open while it has no
- * dispensing. A reversed dispensing counts as done: a work item takes one
+ * The work list (200 rows, as before): open work of any age, and done work
+ * received on or after the day in `$1` (WORK_LIST_WINDOW, Q123 A). A work
+ * item is open while it has no dispensing. A reversed dispensing counts as done: a work item takes one
  * dispensing only (0023), so a reversed item cannot be dispensed again and
  * would otherwise stay at the top for good (owner, 2026-11-02, until
  * dispensing again exists). Open work comes first, oldest
@@ -94,6 +104,7 @@ const WORK_LIST_ORDER = `order by o.open_work desc,case when o.open_work then w.
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null as open_work) o
+  where ${WORK_LIST_WINDOW}
   ${WORK_LIST_ORDER}`;
 
 /**
@@ -108,8 +119,9 @@ export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
  * work, newest first, never as open work at the top: it can never be
  * dispensed, and would otherwise fill the oldest open slots for good. A
  * route-backed item is never matched (the reader names own items only, and
- * the join asks for no order route). The projection, the order and the limit
- * are WORK_LIST_QUERY's. Exported for the tests.
+ * the join asks for no order route). The projection, the window (so a
+ * withdrawn item received before `$1` is left out like other done work), the
+ * order and the limit are WORK_LIST_QUERY's. Exported for the tests.
  */
 export const WORK_LIST_QUERY_0133 = `with withdrawn as materialized (select x.work_item_id, x.withdrawn_reason
     from pharmacy.own_withdrawn_work_items() x)
@@ -117,6 +129,7 @@ export const WORK_LIST_QUERY_0133 = `with withdrawn as materialized (select x.wo
   left join withdrawn x on x.work_item_id=w.id and w.order_route_id is null
   cross join lateral (select d.id is null and x.work_item_id is null as open_work) o
   where x.withdrawn_reason is distinct from 'sent_elsewhere'
+    and ${WORK_LIST_WINDOW}
   ${WORK_LIST_ORDER}`;
 
 /**
@@ -299,8 +312,9 @@ export class PharmacyService {
    * The work list. Row-level security shows this facility's rows the member
    * may read: under consent, or bound to an order route that allows a read
    * now (P4c, strict policy). Open work comes first, oldest first, then done
-   * work, newest first, 200 rows in all (WORK_LIST_QUERY); the answer's shape
-   * is unchanged. With 0133 (WORK_LIST_QUERY_0133, in a savepoint) an own
+   * work, newest first, 200 rows in all (WORK_LIST_QUERY). Open work of any
+   * age is listed; done work only if received on or after `since`, the Lagos
+   * day 90 days before today (Q123 A), which the answer carries. With 0133 (WORK_LIST_QUERY_0133, in a savepoint) an own
    * item sent to another facility's pharmacy is left out and an own item
    * withdrawn on a change counts as done work; on a schema without 0133's
    * reader (42883) the savepoint is rolled back and WORK_LIST_QUERY answers.
@@ -320,8 +334,9 @@ export class PharmacyService {
    * between facilities and work on them are on (FEAS R4, V11).
    */
   async listWorkItems(context: DataAccessContext) {
+    const since = workListSince();
     const page = await this.database.withTransaction(context, async (client) => {
-      const result = await this.workList(client);
+      const result = await this.workList(client, since);
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
         resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { returnedCount: result.rows.length });
@@ -336,31 +351,31 @@ export class PharmacyService {
       const details = await this.prescriptionDetails.details(client, ownIds, context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
-        this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id))), ...receiving,
+        this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id))), since, ...receiving,
         ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
   }
 
   /**
-   * The list's rows. With the own-work reader on, 0133's query, in a
+   * The list's rows (`since`: workListSince()). With the own-work reader on, 0133's query, in a
    * savepoint: a schema without 0133's reader (42883) rolls back to it and
    * answers today's query. Any other failure, a serialization failure or
    * deadlock among them, is passed on (DatabaseService runs a cancelled
    * SERIALIZABLE transaction again): the list never answers an item that can
    * no longer be dispensed here as open work because the reader failed.
    */
-  private async workList(client: PoolClient) {
-    if (!this.ownWork.enabled) return client.query<WorkItemRow>(WORK_LIST_QUERY);
+  private async workList(client: PoolClient, since: string) {
+    if (!this.ownWork.enabled) return client.query<WorkItemRow>(WORK_LIST_QUERY, [since]);
     await client.query('savepoint pharmacy_work_list');
     try {
-      const result = await client.query<WorkItemRow>(WORK_LIST_QUERY_0133);
+      const result = await client.query<WorkItemRow>(WORK_LIST_QUERY_0133, [since]);
       await client.query('release savepoint pharmacy_work_list');
       return result;
     } catch (error) {
       if (sqlState(error) !== '42883') throw error;
       await client.query('rollback to savepoint pharmacy_work_list');
-      return client.query<WorkItemRow>(WORK_LIST_QUERY);
+      return client.query<WorkItemRow>(WORK_LIST_QUERY, [since]);
     }
   }
 
