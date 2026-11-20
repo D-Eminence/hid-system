@@ -280,6 +280,13 @@ const environmentSchema = z.object({
   // of its grants is missing (FacilitySelectionStartupCheck). Empty means off;
   // any other value refuses to boot.
   STAFF_FACILITY_SELECTION_MODE: z.preprocess(emptyToUndefined, z.enum(['off', 'keep', 'ask']).default('off')),
+  // SX-8 (0140): keep the patient a staff sign-in has open across a reload,
+  // for at most 8 hours, at one facility. Off (the default): the two
+  // open-patient routes answer 404 and GET /auth/session never carries
+  // openPatient. Set it in AWS with HID_STAFF_OPEN_PATIENT_ENABLED at synth
+  // time, only once 0140 is applied: with it on, Identity refuses to start
+  // while the table or one of its grants is missing (OpenPatientStartupCheck).
+  STAFF_OPEN_PATIENT_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {

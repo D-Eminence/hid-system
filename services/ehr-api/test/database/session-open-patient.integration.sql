@@ -21,7 +21,17 @@
 --      ended membership or another facility's membership is refused (23514
 --      or 23503); a set longer than 8 hours, with another purpose, or for no
 --      such patient is refused (23514, 23503); an update cannot move a row
---      to another sign-in (55000).
+--      to another sign-in (55000);
+--   4. Identity's own statements, verbatim (open-patient.service.ts and
+--      auth/open-patient.ts; open-patient-sql.spec.ts holds this file to
+--      their text), as the Identity API runtime: the presented session; the
+--      store (8 hours, never past the sign-in's end, nothing for a sign-in
+--      ending now, version by version); the read through any live session
+--      of the sign-in only; a stale version is not cleared; a move clears
+--      only another facility's row; the user's clear and its repeat; an
+--      expired row reads expired; a refreshed sign-in stores and reads
+--      through its new session; and the card, which row-level security
+--      gives only under the grant the access check allows.
 set plpgsql.variable_conflict = error;
 begin;
 
@@ -49,6 +59,14 @@ insert into identity.staff_facility_memberships (id, staff_id, account_id, organ
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, status, account_id) values
   ('f1407000-0000-4000-8000-000000000001', 'HID-QPA2B3', 'Amaka', 'Open', 'Amaka Open', '1990-05-01', 'active', 'f1402000-0000-4000-8000-0000000000e0'),
   ('f1407000-0000-4000-8000-000000000002', 'HID-QPC4D5', 'Bayo', 'Open', 'Bayo Open', '1985-02-02', 'active', null);
+-- A may read Bayo's records at F1 for direct care (section 4's card); nobody may read Amaka's.
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id,
+  scope, purpose_of_use, status, reason, starts_at, expires_at, break_glass, correlation_id) values
+  ('f140b000-0000-4000-8000-000000000001', 'f1407000-0000-4000-8000-000000000002',
+   'f1404000-0000-4000-8000-00000000000a', 'f1402000-0000-4000-8000-00000000000a',
+   'f1405000-0000-4000-8000-0000000000a1', 'f1401000-0000-4000-8000-0000000000f1',
+   'read_records', 'direct-care', 'active', 'Synthetic open patient grant', now() - interval '1 minute',
+   now() + interval '1 hour', false, 'open-patient-0140-grant');
 -- Sessions: a1 A's live staff sign-in (and a1b, a later session of it); a9 A's signed-out sign-in;
 -- b1 B's live staff sign-in; p1 P's patient sign-in.
 insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
@@ -75,15 +93,18 @@ grant usage on sequence pg_temp.open_outcomes_seq_seq to hid_identity_api_runtim
 create function pg_temp.check_case(case_name text, expected text, actual text) returns void language sql as $f$
   insert into pg_temp.open_outcomes (name, expected, actual) values (case_name, expected, coalesce(actual, '(null)'))
 $f$;
--- The API's set: the upsert keyed by the family, as TokenService writes it.
+-- A set keyed by the family, with its set time taken once (section 4 runs the API's own statement).
 create function pg_temp.set_open(family uuid, account uuid, facility uuid, membership uuid, patient uuid,
   purpose text default 'direct-care', hours interval default interval '8 hours') returns text language plpgsql as $f$
+declare
+  moment timestamptz := clock_timestamp();
 begin
-  insert into auth.session_open_patient (family_id, account_id, facility_id, membership_id, patient_id, purpose, expires_at)
-  values (family, account, facility, membership, patient, purpose, clock_timestamp() + hours)
+  insert into auth.session_open_patient (family_id, account_id, facility_id, membership_id, patient_id, purpose,
+    set_at, expires_at)
+  values (family, account, facility, membership, patient, purpose, moment, moment + hours)
   on conflict (family_id) do update
      set facility_id = excluded.facility_id, membership_id = excluded.membership_id,
-         patient_id = excluded.patient_id, purpose = excluded.purpose, set_at = clock_timestamp(),
+         patient_id = excluded.patient_id, purpose = excluded.purpose, set_at = excluded.set_at,
          expires_at = excluded.expires_at, row_version = auth.session_open_patient.row_version + 1;
   return 'kept';
 exception when others then
@@ -179,6 +200,248 @@ end $$;
 delete from auth.session_open_patient where family_id = 'f1406000-0000-4000-8000-0000000000a1';
 select pg_temp.check_case('3 a clear deletes it', '0',
   (select count(*)::text from auth.session_open_patient where family_id = 'f1406000-0000-4000-8000-0000000000a1'));
+reset role;
+
+-- 4. Identity's own statements, verbatim. Each helper runs one statement with
+-- EXECUTE ... USING, so its $n are the API's parameters.
+create function pg_temp.op_presented(session_id uuid, account uuid) returns text language plpgsql as $f$
+declare
+  family text;
+  ends timestamptz;
+begin
+  execute $sql$select session.family_id::text, session.absolute_expires_at
+  from auth.sessions session
+ where session.id = $1
+   and session.account_id = $2
+   and session.session_kind = 'staff'
+   and session.revoked_at is null
+   and session.expires_at > clock_timestamp()
+   and session.absolute_expires_at > clock_timestamp()
+   for share$sql$ into family, ends using session_id, account;
+  return family;
+end
+$f$;
+create function pg_temp.op_store(family uuid, account uuid, facility uuid, membership uuid, patient uuid,
+  purpose text, ends timestamptz) returns text language plpgsql as $f$
+declare
+  kept timestamptz;
+  stored bigint;
+begin
+  execute $sql$insert into auth.session_open_patient
+       (family_id, account_id, facility_id, membership_id, patient_id, purpose, set_at, expires_at)
+select $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, moment.at,
+       least(moment.at + make_interval(hours => 8), $7::timestamptz)
+  from (select clock_timestamp() as at) moment
+ where $7::timestamptz > moment.at
+on conflict (family_id) do update
+   set facility_id = excluded.facility_id, membership_id = excluded.membership_id,
+       patient_id = excluded.patient_id, purpose = excluded.purpose,
+       set_at = excluded.set_at, expires_at = excluded.expires_at,
+       row_version = auth.session_open_patient.row_version + 1
+returning expires_at$sql$ into kept using family, account, facility, membership, patient, purpose, ends;
+  get diagnostics stored = row_count;
+  return case when stored = 0 then 'none' else 'kept' end;
+exception when others then
+  return sqlstate;
+end
+$f$;
+create function pg_temp.op_read(session_id uuid, account uuid) returns text language plpgsql as $f$
+declare
+  found_row record;
+  rows_read bigint;
+begin
+  execute $sql$select open_patient.patient_id::text, open_patient.purpose,
+       open_patient.facility_id::text, open_patient.expires_at, open_patient.row_version::text,
+       open_patient.expires_at <= clock_timestamp() as expired
+  from auth.sessions session
+  join auth.session_open_patient open_patient
+    on open_patient.family_id = session.family_id and open_patient.account_id = session.account_id
+ where session.id = $1
+   and session.account_id = $2
+   and session.session_kind = 'staff'
+   and session.revoked_at is null
+   and session.expires_at > clock_timestamp()
+   and session.absolute_expires_at > clock_timestamp()$sql$ into found_row using session_id, account;
+  get diagnostics rows_read = row_count;
+  if rows_read = 0 then return 'none'; end if;
+  return format('%s/%s/%s/%s/%s', found_row.patient_id, found_row.purpose, found_row.facility_id,
+    found_row.row_version, found_row.expired);
+end
+$f$;
+create function pg_temp.op_clear(session_id uuid, account uuid) returns text language plpgsql as $f$
+declare
+  patient text;
+  cleared bigint;
+begin
+  execute $sql$delete from auth.session_open_patient open_patient
+  using auth.sessions session
+ where session.id = $1
+   and session.account_id = $2
+   and open_patient.family_id = session.family_id
+   and open_patient.account_id = session.account_id
+returning open_patient.patient_id::text$sql$ into patient using session_id, account;
+  get diagnostics cleared = row_count;
+  return format('%s/%s', cleared, patient);
+end
+$f$;
+create function pg_temp.op_clear_read(session_id uuid, account uuid, version text) returns text language plpgsql as $f$
+declare
+  cleared bigint;
+begin
+  execute $sql$delete from auth.session_open_patient open_patient
+  using auth.sessions session
+ where session.id = $1
+   and session.account_id = $2
+   and open_patient.family_id = session.family_id
+   and open_patient.account_id = session.account_id
+   and open_patient.row_version = $3::bigint$sql$ using session_id, account, version;
+  get diagnostics cleared = row_count;
+  return cleared::text;
+end
+$f$;
+create function pg_temp.op_clear_elsewhere(session_id uuid, account uuid, facility uuid) returns text language plpgsql as $f$
+declare
+  cleared bigint;
+begin
+  execute $sql$delete from auth.session_open_patient open_patient
+  using auth.sessions session
+ where session.id = $1
+   and session.account_id = $2
+   and open_patient.family_id = session.family_id
+   and open_patient.account_id = session.account_id
+   and open_patient.facility_id <> $3$sql$ using session_id, account, facility;
+  get diagnostics cleared = row_count;
+  return cleared::text;
+end
+$f$;
+create function pg_temp.op_card(patient uuid) returns text language plpgsql as $f$
+declare
+  card record;
+  rows_read bigint;
+begin
+  execute $sql$select patient_row.full_name, patient_row.gender as sex,
+       patient_row.dob::text as date_of_birth, right(patient_row.hid_code, 4) as health_id_last4,
+       exists (select 1 from identity.patient_identifiers nin_identifier
+     where nin_identifier.patient_id = patient_row.id
+       and nin_identifier.identifier_type = 'nin'
+       and nin_identifier.verified
+       and nin_identifier.revoked_at is null) as nin_verified
+  from identity.patients patient_row
+ where patient_row.id = $1
+   and patient_row.status = 'active'$sql$ into card using patient;
+  get diagnostics rows_read = row_count;
+  if rows_read = 0 then return 'none'; end if;
+  return format('%s/%s/%s/%s/%s', card.full_name, coalesce(card.sex, '-'), card.date_of_birth, card.health_id_last4,
+    card.nin_verified);
+end
+$f$;
+create function pg_temp.op_span() returns text language sql as $f$
+  select (expires_at - set_at)::text from auth.session_open_patient where family_id = 'f1406000-0000-4000-8000-0000000000a1'
+$f$;
+
+set local role hid_identity_api_runtime;
+select pg_temp.check_case('4 the presented session, locked for share', 'f1406000-0000-4000-8000-0000000000a1',
+  pg_temp.op_presented('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 a later session of the sign-in presents its family', 'f1406000-0000-4000-8000-0000000000a1',
+  pg_temp.op_presented('f1406000-0000-4000-8000-0000000000a2', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 a signed-out session is not presented', '(null)',
+  pg_temp.op_presented('f1406000-0000-4000-8000-0000000000a9', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 another account''s session is not presented', '(null)',
+  pg_temp.op_presented('f1406000-0000-4000-8000-0000000000b1', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 the store', 'kept',
+  pg_temp.op_store('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f1', 'f1405000-0000-4000-8000-0000000000a1', 'f1407000-0000-4000-8000-000000000002',
+    'direct-care', clock_timestamp() + interval '24 hours'));
+select pg_temp.check_case('4 kept 8 hours', '08:00:00', pg_temp.op_span());
+select pg_temp.check_case('4 a second store replaces it', 'kept',
+  pg_temp.op_store('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f1', 'f1405000-0000-4000-8000-0000000000a1', 'f1407000-0000-4000-8000-000000000001',
+    'emergency', clock_timestamp() + interval '24 hours'));
+select pg_temp.check_case('4 a sign-in ending sooner ends it sooner', 'kept',
+  pg_temp.op_store('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f1', 'f1405000-0000-4000-8000-0000000000a1', 'f1407000-0000-4000-8000-000000000001',
+    'emergency', clock_timestamp() + interval '1 hour'));
+select pg_temp.check_case('4 under an hour', 'true',
+  (select (pg_temp.op_span()::interval <= interval '1 hour' and pg_temp.op_span()::interval > interval '59 minutes')::text));
+select pg_temp.check_case('4 a sign-in ending now stores nothing', 'none',
+  pg_temp.op_store('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f1', 'f1405000-0000-4000-8000-0000000000a1', 'f1407000-0000-4000-8000-000000000002',
+    'direct-care', clock_timestamp() - interval '1 second'));
+select pg_temp.check_case('4 the read through the sign-in',
+  'f1407000-0000-4000-8000-000000000001/emergency/f1401000-0000-4000-8000-0000000000f1/3/f',
+  pg_temp.op_read('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 the read through a later session of the sign-in',
+  'f1407000-0000-4000-8000-000000000001/emergency/f1401000-0000-4000-8000-0000000000f1/3/f',
+  pg_temp.op_read('f1406000-0000-4000-8000-0000000000a2', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 no read under another account', 'none',
+  pg_temp.op_read('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000b'));
+select pg_temp.check_case('4 no read through a signed-out sign-in', 'none',
+  pg_temp.op_read('f1406000-0000-4000-8000-0000000000a9', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 a stale version is not cleared', '0',
+  pg_temp.op_clear_read('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a', '2'));
+select pg_temp.check_case('4 a move to the same facility clears nothing', '0',
+  pg_temp.op_clear_elsewhere('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f1'));
+select pg_temp.check_case('4 a move to another facility clears it', '1',
+  pg_temp.op_clear_elsewhere('f1406000-0000-4000-8000-0000000000a2', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f2'));
+select pg_temp.check_case('4 stored again', 'kept',
+  pg_temp.op_store('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f1', 'f1405000-0000-4000-8000-0000000000a1', 'f1407000-0000-4000-8000-000000000002',
+    'direct-care', clock_timestamp() + interval '24 hours'));
+select pg_temp.check_case('4 the version read is cleared', '1',
+  pg_temp.op_clear_read('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a', '1'));
+select pg_temp.check_case('4 and stored again', 'kept',
+  pg_temp.op_store('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f1', 'f1405000-0000-4000-8000-0000000000a1', 'f1407000-0000-4000-8000-000000000002',
+    'direct-care', clock_timestamp() + interval '24 hours'));
+select pg_temp.check_case('4 the user''s clear names the patient', '1/f1407000-0000-4000-8000-000000000002',
+  pg_temp.op_clear('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 a repeated clear clears nothing', '0/',
+  pg_temp.op_clear('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 B''s row is untouched by A''s clears', '1',
+  (select count(*)::text from auth.session_open_patient where family_id = 'f1406000-0000-4000-8000-0000000000b1'));
+update auth.session_open_patient set set_at = now() - interval '9 hours',
+       expires_at = now() - interval '2 hours', row_version = row_version + 1
+ where family_id = 'f1406000-0000-4000-8000-0000000000b1';
+select pg_temp.check_case('4 an expired row reads expired', 't',
+  (select split_part(pg_temp.op_read('f1406000-0000-4000-8000-0000000000b1', 'f1402000-0000-4000-8000-00000000000b'), '/', 5)));
+reset role;
+-- A refresh: the sign-in's first session is replaced by a later one.
+update auth.sessions set revoked_at = clock_timestamp(), revocation_reason = 'rotated', row_version = row_version + 1
+ where id = 'f1406000-0000-4000-8000-0000000000a1';
+set local role hid_identity_api_runtime;
+select pg_temp.check_case('4 after a refresh, presented through the new session', 'f1406000-0000-4000-8000-0000000000a1',
+  pg_temp.op_presented('f1406000-0000-4000-8000-0000000000a2', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 after a refresh, the first session is not presented', '(null)',
+  pg_temp.op_presented('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a'));
+select pg_temp.check_case('4 after a refresh, the store', 'kept',
+  pg_temp.op_store('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a',
+    'f1401000-0000-4000-8000-0000000000f1', 'f1405000-0000-4000-8000-0000000000a1', 'f1407000-0000-4000-8000-000000000002',
+    'direct-care', clock_timestamp() + interval '24 hours'));
+select pg_temp.check_case('4 after a refresh, read through the new session', 'f1407000-0000-4000-8000-000000000002',
+  split_part(pg_temp.op_read('f1406000-0000-4000-8000-0000000000a2', 'f1402000-0000-4000-8000-00000000000a'), '/', 1));
+select pg_temp.check_case('4 after a refresh, no read through the first session', 'none',
+  pg_temp.op_read('f1406000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a'));
+-- The card, as Identity reads it: as A at F1 for direct care.
+select set_config('app.actor_subject', 'synthetic:open-patient-0140:a', true),
+  set_config('app.facility_id', 'f1401000-0000-4000-8000-0000000000f1', true),
+  set_config('app.membership_id', 'f1405000-0000-4000-8000-0000000000a1', true),
+  set_config('app.purpose_of_use', 'direct-care', true),
+  set_config('app.correlation_id', 'open-patient-0140-card', true);
+select pg_temp.check_case('4 the access check allows Bayo, not Amaka', 't/f',
+  (select format('%s/%s',
+     identity.has_active_consent_grant('f1407000-0000-4000-8000-000000000002', 'synthetic:open-patient-0140:a',
+       'f1405000-0000-4000-8000-0000000000a1', 'f1401000-0000-4000-8000-0000000000f1', 'read_records', 'direct-care',
+       clock_timestamp()),
+     identity.has_active_consent_grant('f1407000-0000-4000-8000-000000000001', 'synthetic:open-patient-0140:a',
+       'f1405000-0000-4000-8000-0000000000a1', 'f1401000-0000-4000-8000-0000000000f1', 'read_records', 'direct-care',
+       clock_timestamp()))));
+select pg_temp.check_case('4 the card under the grant (last 4 only)', 'Bayo Open/-/1985-02-02/C4D5/f',
+  pg_temp.op_card('f1407000-0000-4000-8000-000000000002'));
+select pg_temp.check_case('4 no card without one', 'none', pg_temp.op_card('f1407000-0000-4000-8000-000000000001'));
+select set_config('app.purpose_of_use', 'emergency', true);
+select pg_temp.check_case('4 no card under another purpose', 'none', pg_temp.op_card('f1407000-0000-4000-8000-000000000002'));
 reset role;
 
 do $$
