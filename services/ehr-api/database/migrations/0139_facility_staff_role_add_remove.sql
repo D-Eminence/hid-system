@@ -112,16 +112,17 @@
 --   lock on the caller and key makes a concurrent retry wait and replay.
 --
 -- Locks: ACCESS EXCLUSIVE on identity.staff_licence_attestations (its
--- constraints are replaced; a small table), and ROW EXCLUSIVE on
+-- constraints are replaced; a small table); ROW EXCLUSIVE on
 -- auth.permissions, auth.role_permissions and identity.staff_attestation_texts
--- (rows inserted), held to commit. That is every existing table this file
--- locks (pg_locks before commit), at the strongest mode it takes, besides
--- ROW SHARE on auth.roles, which the foreign key check of the new
--- auth.role_permissions rows takes and which blocks only ACCESS EXCLUSIVE
--- and EXCLUSIVE. Taken
--- first, NOWAIT: a busy table fails the attempt at once and its
--- subtransaction releases what it took; the attempt is made again every
--- 100 ms for at most 5 seconds, then 55P03 (nothing applied). When this
+-- (rows inserted); ROW SHARE on auth.roles (the foreign key check of the new
+-- auth.role_permissions rows); and ACCESS SHARE on auth.account_roles,
+-- auth.accounts and identity.staff_facility_memberships (named by the SQL
+-- functions' bodies, which are parsed when created); held to commit. That is
+-- every existing table this file locks (pg_locks before commit), at the
+-- strongest mode it takes. Taken first, together, NOWAIT: a busy table fails
+-- the attempt at once and its subtransaction releases what it took; the
+-- attempt is made again every 100 ms for at most 5 seconds, then 55P03
+-- (nothing applied). When this
 -- transaction already holds an earlier migration's locks that stop other
 -- sessions' reads or writes (the runner's dry run), one attempt and no
 -- sleep: 55P03 at once, nothing applied.
@@ -246,16 +247,18 @@ begin
     begin
       lock table identity.staff_licence_attestations in access exclusive mode nowait;
       lock table auth.permissions, auth.role_permissions, identity.staff_attestation_texts in row exclusive mode nowait;
+      lock table auth.roles in row share mode nowait;
+      lock table auth.account_roles, auth.accounts, identity.staff_facility_memberships in access share mode nowait;
       exit;
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
-          message = '0139: the licence attestations, auth.permissions, auth.role_permissions or the attestation texts are busy, and this transaction already holds an earlier migration''s '
+          message = '0139: the licence attestations or a table it reads is busy, and this transaction already holds an earlier migration''s '
             || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0139: the licence attestations, auth.permissions, auth.role_permissions or the attestation texts stayed busy for 5 seconds; nothing applied; run the release again at a '
+          message = '0139: the licence attestations or a table it reads stayed busy for 5 seconds; nothing applied; run the release again at a '
             || 'quieter time';
       end if;
       perform pg_sleep(0.1);
