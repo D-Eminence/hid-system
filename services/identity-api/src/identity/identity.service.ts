@@ -108,6 +108,8 @@ export class IdentityService {
         version: patient.rowVersion,
         // ID-0: "NIN Verified" or "NIN Not Verified" on screen.
         ninStatus: ninStatusOf(patient.ninVerified),
+        // ID-7 (0146): an unknown record's first and last names are placeholders.
+        recordKind: patient.recordKind ?? 'standard',
       },
       authorization: {
         decision: 'allow' as const,

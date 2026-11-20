@@ -44,7 +44,8 @@ export interface LinkedPatientNin {
   replayed: boolean;
 }
 
-type Decision = 'not_found' | 'not_permitted' | 'already_linked' | 'has_nin' | 'replay' | 'key_reused' | 'eligible';
+type Decision = 'not_found' | 'not_permitted' | 'already_linked' | 'has_nin' | 'replay' | 'key_reused' | 'eligible'
+  | 'unknown_record';
 
 interface PrecheckRow extends QueryResultRow {
   decision: Decision;
@@ -61,7 +62,7 @@ interface LinkRow extends QueryResultRow {
 
 /** The refusal kinds an audit row may name (never the NIN). */
 type RefusalKind = 'not_found' | 'not_permitted' | 'already_has_nin' | 'no_record' | 'details_mismatch'
-  | 'on_another_record' | 'key_reused';
+  | 'on_another_record' | 'key_reused' | 'not_identified';
 
 const MESSAGES = {
   nin_linked: 'NIN Verified. It is now on this patient\'s record.',
@@ -113,6 +114,10 @@ export class PatientNinLinkService {
       case 'has_nin':
         await this.refuse(context, patientId, 'already_has_nin', false);
         throw alreadyHasNin();
+      case 'unknown_record':
+        // 0146 (ID-7): an unknown patient record is identified first; QoreID is not asked.
+        await this.refuse(context, patientId, 'not_identified', false);
+        throw notIdentified();
       case 'already_linked':
         await this.auditRow(context, patientId, 'success', { outcome: 'already_linked', qoreidCalled: false });
         return this.answer(patientId, 'already_linked', false);
@@ -242,6 +247,10 @@ function patientNotFound(): DomainProblem {
 
 function notPermitted(): DomainProblem {
   return new DomainProblem(403, 'NIN_LINK_NOT_PERMITTED', 'You can add a NIN only for this facility\'s own patients.');
+}
+
+function notIdentified(): DomainProblem {
+  return new DomainProblem(409, 'PATIENT_NOT_IDENTIFIED', 'Identify this patient before adding a NIN.');
 }
 
 function alreadyHasNin(): DomainProblem {

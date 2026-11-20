@@ -8,7 +8,8 @@ import { createValidationPipe } from '../../common/validation-pipe';
 import type { DatabaseService } from '../../database/database.service';
 import { VisitQueueController } from './visit-queue.controller';
 import { CheckInToVisitQueueDto, ListVisitQueueQueryDto, UpdateVisitQueueEntryDto } from './visit-queue.dto';
-import { CHECK_IN_SQL, LIST_SQL, UPDATE_SQL, VisitQueueService, translate } from './visit-queue.service';
+import { CHECK_IN_SQL, LIST_SQL, RECORD_KINDS_PRESENT_SQL, RECORD_KINDS_SQL, UPDATE_SQL, VisitQueueService,
+  translate } from './visit-queue.service';
 
 // Fictional identifiers only.
 const facilityId = '123e4567-e89b-42d3-a456-426614174002';
@@ -33,7 +34,9 @@ const cardRow = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-function fakeDatabase(rows: readonly Record<string, unknown>[] | Error) {
+/** The cards' rows, and (0146) whether the record-kind function exists and what it answers. */
+function fakeDatabase(rows: readonly Record<string, unknown>[] | Error,
+  kinds: readonly Record<string, unknown>[] | null = null) {
   const calls: { sql: string; values: unknown[] }[] = [];
   const contexts: DataAccessContext[] = [];
   const database = {
@@ -43,6 +46,8 @@ function fakeDatabase(rows: readonly Record<string, unknown>[] | Error) {
         query: async (sql: string, values: unknown[]) => {
           calls.push({ sql, values });
           if (rows instanceof Error) throw rows;
+          if (sql === RECORD_KINDS_PRESENT_SQL) return { rows: [{ present: kinds !== null }] };
+          if (sql === RECORD_KINDS_SQL) return { rows: kinds ?? [] };
           return { rows };
         },
       });
@@ -125,7 +130,7 @@ describe('EHR-C7 the waiting list (0135)', () => {
     it('sends the matchRef to the database function and answers the card', async () => {
       const { database, calls, contexts } = fakeDatabase([{ outcome: 'checked_in', ...cardRow() }]);
       const answer = await new VisitQueueService(database).checkIn(context, { matchRef });
-      expect(calls).toEqual([{ sql: CHECK_IN_SQL, values: [matchRef, null] }]);
+      expect(calls).toEqual([{ sql: CHECK_IN_SQL, values: [matchRef, null] }, { sql: RECORD_KINDS_PRESENT_SQL, values: undefined }]);
       expect(contexts).toEqual([context]);
       expect(answer).toEqual({
         outcome: 'checked_in',
@@ -133,7 +138,7 @@ describe('EHR-C7 the waiting list (0135)', () => {
           entryId, patientId, fullName: 'Amaka Queueone', sex: 'female', dateOfBirth: '1990-01-02', healthIdLast4: 'AA22',
           stage: 'waiting', triageLevel: null, assignedMembershipId: null, checkInBasis: 'search',
           checkedInAt: '2026-11-18T09:00:00.000Z', checkInDay: '2026-11-18', stageChangedAt: '2026-11-18T09:00:00.000Z',
-          closedAt: null, rowVersion: 1, chartBlocked: false,
+          closedAt: null, rowVersion: 1, chartBlocked: false, recordKind: 'standard', dateOfBirthEstimated: false,
         },
       });
     });
@@ -178,11 +183,21 @@ describe('EHR-C7 the waiting list (0135)', () => {
       const rows = [cardRow({ has_more: true }), cardRow({ entry_id: 'second', full_name: 'Bayo Queuetwo', has_more: true })];
       const { database, calls } = fakeDatabase(rows);
       const answer = await new VisitQueueService(database).list(context, true);
-      expect(calls).toEqual([{ sql: LIST_SQL, values: [true] }]);
+      expect(calls).toEqual([{ sql: LIST_SQL, values: [true] }, { sql: RECORD_KINDS_PRESENT_SQL, values: undefined }]);
       expect(LIST_SQL).toContain('order by ord');
       expect(answer.limit).toBe(200);
       expect(answer.hasMore).toBe(true);
       expect(answer.items.map((item) => item.fullName)).toEqual(['Amaka Queueone', 'Bayo Queuetwo']);
+    });
+
+    it('adds each card\'s record kind and estimated date of birth where 0146 is applied (ID-7)', async () => {
+      const rows = [cardRow(), cardRow({ entry_id: 'second', full_name: 'Unknown patient U-0007' })];
+      const { database, calls } = fakeDatabase(rows, [{ entry_id: 'second', record_kind: 'unknown', dob_estimated: true }]);
+      const answer = await new VisitQueueService(database).list(context, false);
+      expect(calls.map((call) => call.sql)).toEqual([LIST_SQL, RECORD_KINDS_PRESENT_SQL, RECORD_KINDS_SQL]);
+      expect(calls[2]?.values).toEqual([[entryId, 'second']]);
+      expect(answer.items.map((item) => [item.fullName, item.recordKind, item.dateOfBirthEstimated])).toEqual([
+        ['Amaka Queueone', 'standard', false], ['Unknown patient U-0007', 'unknown', true]]);
     });
 
     it('answers an empty list', async () => {
@@ -202,7 +217,8 @@ describe('EHR-C7 the waiting list (0135)', () => {
         ...cardRow({ stage: 'ready', triage_level: 2, assigned_membership_id: doctorMembershipId, row_version: '3' }) }]);
       const card = await new VisitQueueService(database).update(context, entryId,
         { expectedRowVersion: 2, stage: 'ready', triageLevel: 2, assignedMembershipId: doctorMembershipId });
-      expect(calls).toEqual([{ sql: UPDATE_SQL, values: [entryId, 2, 'ready', 2, false, doctorMembershipId, false] }]);
+      expect(calls).toEqual([{ sql: UPDATE_SQL, values: [entryId, 2, 'ready', 2, false, doctorMembershipId, false] },
+        { sql: RECORD_KINDS_PRESENT_SQL, values: undefined }]);
       expect(card).toMatchObject({ stage: 'ready', triageLevel: 2, assignedMembershipId: doctorMembershipId, rowVersion: 3 });
     });
 

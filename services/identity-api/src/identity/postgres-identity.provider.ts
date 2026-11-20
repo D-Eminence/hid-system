@@ -20,6 +20,7 @@ interface PatientRow {
   gender: string | null;
   row_version: string;
   nin_verified?: boolean;
+  record_kind?: string | null;
 }
 
 interface GrantRow {
@@ -38,7 +39,8 @@ export class PostgresIdentityProvider implements IdentityProvider {
       const result = await client.query<PatientRow>(
         `select patient_row.id::text, patient_row.hid_code, patient_row.first_name, patient_row.last_name,
                 patient_row.full_name, patient_row.dob::text, patient_row.gender, patient_row.row_version::text,
-                ${patientHasVerifiedNinSql('patient_row.id')} as nin_verified
+                ${patientHasVerifiedNinSql('patient_row.id')} as nin_verified,
+                to_jsonb(patient_row) ->> 'record_kind' as record_kind
            from identity.patients patient_row
           where upper(patient_row.hid_code) = upper($1)
             and patient_row.status = 'active'
@@ -163,6 +165,7 @@ export class PostgresIdentityProvider implements IdentityProvider {
       gender: row.gender,
       rowVersion: Number(row.row_version),
       ...(row.nin_verified === undefined ? {} : { ninVerified: row.nin_verified === true }),
+      ...(row.record_kind === undefined ? {} : { recordKind: row.record_kind === 'unknown' ? 'unknown' as const : 'standard' as const }),
     };
   }
 }
