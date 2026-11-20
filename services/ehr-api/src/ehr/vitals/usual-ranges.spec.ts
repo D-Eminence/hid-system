@@ -89,10 +89,12 @@ describe('VIT-1: the usual-ranges table', () => {
   });
 });
 
-function harness(rows: { vital?: Record<string, unknown>; correction?: Record<string, unknown>; latest?: Record<string, unknown>[] }) {
+function harness(rows: { vital?: Record<string, unknown>; correction?: Record<string, unknown>; latest?: Record<string, unknown>[];
+  replay?: boolean }) {
   const client = {
     query: jest.fn(async (sql: string) => {
       if (/insert into ehr\.vital_corrections/.test(sql)) return { rows: [rows.correction], rowCount: 1 };
+      if (/from ehr\.vital_corrections/.test(sql)) return { rows: rows.correction ? [rows.correction] : [], rowCount: 1 };
       if (/update ehr\.vitals set current_correction_no/.test(sql)) return { rows: [], rowCount: 1 };
       if (/select distinct on \(x\.measure\)/.test(sql)) return { rows: rows.latest ?? [], rowCount: 0 };
       if (/insert into ehr\.vitals|from ehr\.vitals/.test(sql)) return { rows: [rows.vital], rowCount: 1 };
@@ -102,8 +104,10 @@ function harness(rows: { vital?: Record<string, unknown>; correction?: Record<st
   const repository = {
     run: jest.fn(async (_c: unknown, _p: unknown, _a: unknown, _e: unknown,
       operation: (client: PoolClient) => Promise<{ value: unknown }>) => (await operation(client as unknown as PoolClient)).value),
+    // As ClinicalRepository.executeCreate: a key already used replays the saved result, never running create.
     executeCreate: jest.fn(async (_client: unknown, _context: unknown, _patient: unknown, _key: unknown, _operation: unknown,
-      _digest: unknown, _type: unknown, create: () => Promise<{ value: unknown }>) => create()),
+      _digest: unknown, _type: unknown, create: () => Promise<{ value: unknown }>,
+      replay: (id: string) => Promise<unknown>) => (rows.replay ? { value: await replay('saved-id') } : create())),
     setChangeReason: jest.fn(),
     encounterExists: jest.fn(async () => true),
     exists: jest.fn(async () => true),
@@ -151,15 +155,43 @@ describe('VIT-1: warnings on the answers, and the one new hard rule', () => {
     expect(answer.measures.bloodPressure?.warning).toMatchObject({ measure: 'systolicMmhg', level: 'outside_usual' });
   });
 
-  it.each([['equal', 80, 80], ['higher', 80, 90]])('a diastolic %s to the systolic is 400 BLOOD_PRESSURE_ORDER_INVALID',
-    (_label, systolicMmhg, diastolicMmhg) => {
-      const service = harness({});
+  it.each([['equal', 80, 80], ['higher', 80, 90]])('a diastolic %s to the systolic is 400 BLOOD_PRESSURE_ORDER_INVALID for a new write',
+    async (_label, systolicMmhg, diastolicMmhg) => {
+      const service = harness({ vital: recorded });
       const refusal = { status: 400, code: 'BLOOD_PRESSURE_ORDER_INVALID', message: 'The lower blood pressure number '
         + '(diastolic) must be less than the upper one (systolic). Check the reading.' };
-      expect(() => service.checkCreate({ systolicMmhg, diastolicMmhg } as never)).toThrow(
+      expect(() => service.checkBloodPressureOrder({ systolicMmhg, diastolicMmhg } as never)).toThrow(
         expect.objectContaining(refusal) as unknown as Error);
-      expect(() => service.correct(context, patientId, encounterId, vitalId,
+      // Not among the pre-checks: it runs after the key lookup.
+      expect(() => service.checkCreate({ systolicMmhg, diastolicMmhg } as never)).not.toThrow();
+      await expect(service.create(context, patientId, encounterId, { recordedAt: '2026-11-20T00:00:00.000Z', source: 'manual',
+        systolicMmhg, diastolicMmhg } as never, 'key-123456789')).rejects.toMatchObject(refusal);
+      await expect(service.correct(context, patientId, encounterId, vitalId,
         { expectedRowVersion: 1, changeReason: 'Typo', replacementValues: { systolicMmhg, diastolicMmhg } }, 'key-123456789'))
-        .toThrow(expect.objectContaining(refusal) as unknown as Error);
+        .rejects.toMatchObject(refusal);
     });
+
+  it('a retry of a reading an older image saved with diastolic equal to systolic replays it, never 400', async () => {
+    const saved = { ...recorded, systolicMmhg: 120, diastolicMmhg: 120 };
+    const service = harness({ vital: saved, replay: true,
+      correction: { id: 'c1', vitalId, correctionNo: 1, replacementValues: { systolic_mmhg: 120, diastolic_mmhg: 120 } } });
+    await expect(service.create(context, patientId, encounterId, { recordedAt: '2026-11-20T00:00:00.000Z', source: 'manual',
+      systolicMmhg: 120, diastolicMmhg: 120 } as never, 'key-123456789')).resolves.toMatchObject({ id: vitalId,
+      systolicMmhg: 120, diastolicMmhg: 120 });
+    await expect(service.correct(context, patientId, encounterId, vitalId,
+      { expectedRowVersion: 1, changeReason: 'Typo', replacementValues: { systolicMmhg: 120, diastolicMmhg: 120 } },
+      'key-123456789')).resolves.toBeDefined();
+  });
+
+  it('a replay of a create or a correction of a reading since entered in error carries no warnings', async () => {
+    const withdrawn = { ...recorded, status: 'entered_in_error' };
+    const service = harness({ vital: withdrawn, replay: true,
+      correction: { id: 'c1', vitalId, correctionNo: 1, replacementValues: { pulse_bpm: 140 } } });
+    await expect(service.create(context, patientId, encounterId, { recordedAt: '2026-11-20T00:00:00.000Z', source: 'manual',
+      pulseBpm: 135 } as never, 'key-123456789')).resolves.toMatchObject({ status: 'entered_in_error', warnings: [],
+      usualRangesVersion: '2026-11-adult-1' });
+    await expect(service.correct(context, patientId, encounterId, vitalId,
+      { expectedRowVersion: 1, changeReason: 'Typo', replacementValues: { pulseBpm: 140 } }, 'key-123456789'))
+      .resolves.toMatchObject({ warnings: [], usualRangesVersion: '2026-11-adult-1' });
+  });
 });

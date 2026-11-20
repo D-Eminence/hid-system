@@ -269,20 +269,38 @@ export class VitalsService {
     );
   }
 
-  /** VIT-1: the answer (and its replay) carries the reading's warnings; they never block the save. */
+  /**
+   * VIT-1: the answer (and its replay) carries the reading's warnings; they
+   * never block the save. A replay of a reading since marked entered in error
+   * carries none.
+   */
   async create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateVitalDto, key: string) {
-    this.assertMeasurements(input);
+    this.assertMeasurementsGiven(input);
     const row = await this.repository.run(
       context, patientId, 'write_records', { action: 'ehr.vital.create', resourceType: 'vital' },
       (client) => this.createInTransaction(client, context, patientId, encounterId, input, key),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
-    return { ...row, ...warningsOf(vitalValues(row)) };
+    return { ...row, ...(row.status === 'entered_in_error' ? noWarnings() : warningsOf(vitalValues(row))) };
   }
 
-  /** The checks a vitals create runs before the database is touched (also EHR-C5's one-call consultation). */
+  /**
+   * The checks a vitals create runs before the database is touched (also
+   * EHR-C5's one-call consultation). VIT-1's blood-pressure order rule is not
+   * among them: it runs only for a new write, after the key lookup
+   * (checkBloodPressureOrder), so a retry of a reading an older image saved
+   * still replays.
+   */
   checkCreate(input: CreateVitalDto): void {
-    this.assertMeasurements(input);
+    this.assertMeasurementsGiven(input);
+  }
+
+  /** VIT-1's one hard rule, for a new write only (never a replay of a saved one). */
+  checkBloodPressureOrder(value: VitalMeasurementsDto): void {
+    if (value.systolicMmhg !== undefined && value.diastolicMmhg !== undefined && value.diastolicMmhg >= value.systolicMmhg) {
+      throw new DomainProblem(400, 'BLOOD_PRESSURE_ORDER_INVALID', 'The lower blood pressure number (diastolic) must be '
+        + 'less than the upper one (systolic). Check the reading.');
+    }
   }
 
   /**
@@ -303,6 +321,7 @@ export class VitalsService {
     return this.repository.executeCreate(
       client, context, patientId, key, operation, digest, 'vital',
       async () => {
+        this.checkBloodPressureOrder(input);
         const result = await client.query<VitalRow>(
           `insert into ehr.vitals (
              encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
@@ -332,7 +351,7 @@ export class VitalsService {
     input: CreateVitalCorrectionDto,
     key: string,
   ) {
-    this.assertMeasurements(input.replacementValues);
+    this.assertMeasurementsGiven(input.replacementValues);
     const operation = 'vital-correction.create';
     const digest = requestDigest(operation, { patientId, encounterId, vitalId, input });
     return this.repository.run(
@@ -341,6 +360,7 @@ export class VitalsService {
       (client) => this.repository.executeCreate(
         client, context, patientId, key, operation, digest, 'vital-correction',
         async () => {
+          this.checkBloodPressureOrder(input.replacementValues);
           const vital = await this.lockVital(client, context, patientId, encounterId, vitalId);
           if (vital.status === 'entered_in_error') {
             throw new DomainProblem(409, 'VITAL_ENTERED_IN_ERROR', VITAL_MESSAGES.enteredInError);
@@ -463,15 +483,10 @@ export class VitalsService {
     return row;
   }
 
-  private assertMeasurements(value: VitalMeasurementsDto): void {
+  private assertMeasurementsGiven(value: VitalMeasurementsDto): void {
     if (!hasMeasurements(value)) throw new DomainProblem(400, 'VITAL_MEASUREMENT_REQUIRED', 'At least one vital measurement is required');
     if ((value.systolicMmhg === undefined) !== (value.diastolicMmhg === undefined)) {
       throw new DomainProblem(400, 'BLOOD_PRESSURE_INCOMPLETE', 'Systolic and diastolic pressure must be supplied together');
-    }
-    // VIT-1's one hard rule (code only; rows already stored are not touched).
-    if (value.systolicMmhg !== undefined && value.diastolicMmhg !== undefined && value.diastolicMmhg >= value.systolicMmhg) {
-      throw new DomainProblem(400, 'BLOOD_PRESSURE_ORDER_INVALID', 'The lower blood pressure number (diastolic) must be '
-        + 'less than the upper one (systolic). Check the reading.');
     }
   }
 }
@@ -513,8 +528,17 @@ function warningsOf(values: Partial<Record<WarnedMeasure, number | null>>) {
   return { warnings: vitalWarnings(values), usualRangesVersion: USUAL_RANGES_VERSION };
 }
 
-/** A correction's warnings are for the values after it: its values over the reading's own. */
+/** A reading entered in error gets no warnings (EHR-C8b), even on a replay of its create or correction. */
+function noWarnings() {
+  return { warnings: [] as ReturnType<typeof vitalWarnings>, usualRangesVersion: USUAL_RANGES_VERSION };
+}
+
+/**
+ * A correction's warnings are for the values after it: its values over the
+ * reading's own; none once the reading is entered in error.
+ */
 function correctionWithWarnings(vital: VitalRow, correction: VitalCorrectionRow) {
+  if (vital.status === 'entered_in_error') return { ...correction, ...noWarnings() };
   const after = { ...vitalValues(vital) };
   for (const [key, value] of Object.entries(correction.replacementValues)) {
     if (key in after) after[key as WarnedMeasure] = value === null ? null : Number(value);

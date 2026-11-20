@@ -9140,7 +9140,12 @@ the diastolic must be lower than the systolic, else 400
 `BLOOD_PRESSURE_ORDER_INVALID` "The lower blood pressure number (diastolic)
 must be less than the upper one (systolic). Check the reading." Rows already
 stored are not touched. The hard limits of today (`VALIDATION_FAILED`,
-`BLOOD_PRESSURE_INCOMPLETE`) are unchanged.
+`BLOOD_PRESSURE_INCOMPLETE`) are unchanged and checked first.
+
+The rule is checked only for a new write, after the `Idempotency-Key` is
+looked up: a retry of a create, a correction or a consultation that an older
+image saved (when a diastolic equal to the systolic was allowed) replays the
+saved answer instead of answering 400.
 
 ### `GET /api/v1/ehr/vitals/usual-ranges`
 
@@ -9167,11 +9172,19 @@ serious level applies (`check_entry`, then `far_outside_usual`, then
 | Temperature °C | 38.1-39.0 | 35.0 or below, 39.1 or above | below 30, above 44 |
 | Height, weight | none | none | none |
 
+For the clinical lead's sign-off (Ola's review of #297): NEWS2 also scores
+35.1-36.0 °C, which this draft table leaves without an `outside_usual` band
+(35.4 °C gives no warning, and the low-temperature message says "Usual for
+adults: 35.1 to 38"). Either add that band (and make 36.1 the usual low), or
+keep the table and record why (for example, axillary or infrared readings run
+low). The table is the agreed draft until then.
+
 ### Warnings on answers
 
 The vitals create answer (`201`, and its replay) and the correction answer
 gain `warnings` and `usualRangesVersion`. A correction's warnings are for the
-values after it (its values over the reading's own):
+values after it (its values over the reading's own). A replay of either, once
+the reading is marked entered in error, carries `warnings: []`:
 
 ```json
 { "warnings": [
