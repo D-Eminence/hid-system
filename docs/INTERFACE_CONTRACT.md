@@ -9111,10 +9111,15 @@ since, count, `hiddenCount`, patient ids shown) and one
   writes the audit rows.
 - Indexes on `(facility_id, created_by_membership_id, created_at desc, id
   desc)` for `ehr.prescriptions` and `ehr.lab_requests`.
-- `prescriptions_owner_read` and `lab_requests_owner_read` (as 0131's
-  `encounters_owner_read`): the tables' owner may read them, so the function
-  can count orders of patients the member can no longer read. No runtime role
-  is a member of the owner; the runtime's own reads are unchanged.
+- `prescriptions_my_orders_read` and `lab_requests_my_orders_read`: the
+  tables' owner may read them only during the function's one counting
+  statement, so it can count orders of patients the member can no longer
+  read. The function writes an owner-only marker for its own transaction
+  (`ehr.my_orders_scans`) just before that statement and deletes it just
+  after (0130's marker pattern). Every other owner-run function and trigger
+  that reads these tables sees exactly what it saw before, and the owner
+  without a session sees nothing. No runtime role is a member of the owner;
+  the runtime's own reads are unchanged.
 
 ### Screen notes
 

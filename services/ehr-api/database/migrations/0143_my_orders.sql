@@ -9,12 +9,22 @@
 --
 -- D1 Two indexes, prescriptions_my_orders_idx and lab_requests_my_orders_idx,
 --    on (facility_id, created_by_membership_id, created_at desc, id desc);
---    and prescriptions_owner_read and lab_requests_owner_read: row-level
---    security on both tables is forced, and the function below must see
---    this member's orders for patients the member can no longer read, to
---    count them (never to show them), so the tables' owner may read them,
---    as 0131's encounters_owner_read. No runtime role is a member of the
---    owner.
+--    and prescriptions_my_orders_read and lab_requests_my_orders_read:
+--    row-level security on both tables is forced, and the function below
+--    must see this member's orders for patients the member can no longer
+--    read, to count them (never to show them). The tables' owner may read
+--    them only while ehr.my_orders_scans holds this transaction's marker,
+--    which ehr.list_my_orders writes just before its one counting statement
+--    and deletes just after (0130's marker pattern). So every other
+--    owner-run definer and trigger that reads these tables sees exactly what
+--    it saw before, and the owner without a session still sees nothing
+--    (pharmacy-session-guards' fail-closed cases). Each policy tests the
+--    owner's membership first (CASE), so a runtime role's read never depends
+--    on the marker. ehr.my_orders_scans is the owner's only;
+--    ehr.my_orders_scan_open() may be executed by PUBLIC (PostgreSQL checks
+--    EXECUTE on every function of a plan) and answers only whether this
+--    backend's own transaction holds a marker. No runtime role is a member
+--    of the owner.
 -- D2 ehr.list_my_orders(requested_kinds text[], requested_open_only boolean,
 --    requested_since date, cursor_created_at timestamptz, cursor_kind text,
 --    cursor_id uuid, requested_limit integer), SECURITY DEFINER, for the EHR
@@ -77,7 +87,8 @@ begin
   end if;
   if to_regprocedure('ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer)') is not null
      or exists (select 1 from pg_policy policy_row
-                 where policy_row.polname in ('prescriptions_owner_read', 'lab_requests_owner_read'))
+                 where policy_row.polname in ('prescriptions_my_orders_read', 'lab_requests_my_orders_read'))
+     or to_regclass('ehr.my_orders_scans') is not null
      or to_regclass('ehr.prescriptions_my_orders_idx') is not null
      or to_regclass('ehr.lab_requests_my_orders_idx') is not null then
     raise exception using errcode = '55000', message = '0143: already applied';
@@ -159,14 +170,42 @@ create index prescriptions_my_orders_idx on ehr.prescriptions
   (facility_id, created_by_membership_id, created_at desc, id desc);
 create index lab_requests_my_orders_idx on ehr.lab_requests
   (facility_id, created_by_membership_id, created_at desc, id desc);
-create policy prescriptions_owner_read on ehr.prescriptions
+-- The marker: one row while ehr.list_my_orders counts, for this backend's
+-- transaction only.
+create table ehr.my_orders_scans (
+  backend_pid integer not null,
+  transaction_started_at timestamptz not null,
+  primary key (backend_pid, transaction_started_at)
+);
+revoke all on ehr.my_orders_scans from public;
+create function ehr.my_orders_scan_open()
+returns boolean
+language sql
+stable
+security definer
+cost 1
+set search_path = pg_catalog, pg_temp
+as $$
+  select exists (select 1 from ehr.my_orders_scans scan
+                  where scan.backend_pid = pg_backend_pid()
+                    and scan.transaction_started_at = transaction_timestamp())
+$$;
+-- Every role that reads these tables evaluates the policies, and PostgreSQL
+-- checks EXECUTE on each function of a query's plan when it starts it, so
+-- PUBLIC may execute this one. It answers only whether this backend's own
+-- transaction holds a marker, which only ehr.list_my_orders can write.
+revoke all on function ehr.my_orders_scan_open() from public;
+grant execute on function ehr.my_orders_scan_open() to public;
+create policy prescriptions_my_orders_read on ehr.prescriptions
   for select
-  using (pg_has_role((select relation.relowner from pg_class relation
-                       where relation.oid = 'ehr.prescriptions'::regclass), 'USAGE'));
-create policy lab_requests_owner_read on ehr.lab_requests
+  using (case when pg_has_role((select relation.relowner from pg_class relation
+                                 where relation.oid = 'ehr.prescriptions'::regclass), 'USAGE')
+              then ehr.my_orders_scan_open() else false end);
+create policy lab_requests_my_orders_read on ehr.lab_requests
   for select
-  using (pg_has_role((select relation.relowner from pg_class relation
-                       where relation.oid = 'ehr.lab_requests'::regclass), 'USAGE'));
+  using (case when pg_has_role((select relation.relowner from pg_class relation
+                                 where relation.oid = 'ehr.lab_requests'::regclass), 'USAGE')
+              then ehr.my_orders_scan_open() else false end);
 
 -- 2. The function (D2).
 create function ehr.list_my_orders(requested_kinds text[], requested_open_only boolean, requested_since date,
@@ -231,6 +270,9 @@ begin
 
   -- The reach, then the session's own rule once per patient (may it read this
   -- patient's records now, for direct care?), then one page of the rest.
+  -- Only this statement runs with the marker (D1).
+  insert into ehr.my_orders_scans (backend_pid, transaction_started_at)
+  values (pg_backend_pid(), transaction_timestamp()) on conflict do nothing;
   with found as (
     select 'prescription'::text as kind, prescription.id as order_id, prescription.patient_id,
            prescription.created_at
@@ -267,6 +309,8 @@ begin
          coalesce(array_agg(page.patient_id order by page.created_at desc, page.kind desc, page.order_id desc), array[]::uuid[])
     into hidden, page_kinds, page_ids, page_patients
     from page;
+  delete from ehr.my_orders_scans scan
+   where scan.backend_pid = pg_backend_pid() and scan.transaction_started_at = transaction_timestamp();
   more := cardinality(page_ids) > page_limit;
   page_kinds := page_kinds[1:page_limit];
   page_ids := page_ids[1:page_limit];
@@ -367,6 +411,17 @@ begin
                 and pg_has_role(role_row.oid, (select relation.relowner from pg_class relation
                                                 where relation.oid = 'ehr.prescriptions'::regclass), 'USAGE')) then
     raise exception using errcode = '55000', message = '0143: a runtime role is a member of the order tables'' owner';
+  end if;
+  if (select count(*) from pg_policy policy_row
+       where (policy_row.polrelid, policy_row.polname) in (('ehr.prescriptions'::regclass, 'prescriptions_my_orders_read'),
+                                                           ('ehr.lab_requests'::regclass, 'lab_requests_my_orders_read'))
+         and policy_row.polcmd = 'r') <> 2
+     or exists (select 1 from pg_class relation, aclexplode(relation.relacl) acl
+                 where relation.oid = 'ehr.my_orders_scans'::regclass and acl.grantee <> relation.relowner)
+     or exists (select 1 from pg_proc proc, aclexplode(proc.proacl) acl
+                 where proc.oid = 'ehr.my_orders_scan_open()'::regprocedure and acl.grantee <> proc.proowner
+                   and acl.grantee <> 0) then
+    raise exception using errcode = '55000', message = '0143: the counting marker or its policies are not as created';
   end if;
 end
 $$;
