@@ -1,7 +1,6 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { PoolClient } from 'pg';
-import { AuditService } from '../../audit/audit.service';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { requestDigest } from '../../common/idempotency';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
@@ -10,7 +9,14 @@ import { ClinicalRepository } from '../shared/clinical.repository';
 import { requireVisitOpenForWork } from '../shared/visit-guard';
 import type { CreateConsultationDraftDto, SaveConsultationDraftDto } from './consultation-drafts.dto';
 
-/** Owner decision Q126 A: a draft's content, at most 256 KB as UTF-8 JSON, 20 levels deep. */
+/**
+ * Owner decision Q126 A: a draft's content, at most 256 KB and 20 levels
+ * deep. The database measures the size as stored (the JSON text PostgreSQL
+ * keeps for jsonb, which adds a space after each colon and comma), and its
+ * guard refuses anything over the limit; the check here refuses early what
+ * the database would certainly refuse, since that text is never shorter than
+ * JSON.stringify's.
+ */
 export const DRAFT_MAX_BYTES = 262_144;
 export const DRAFT_MAX_DEPTH = 20;
 /** 60 saves per member per minute (per ehr-api task, as the other in-memory limits). */
@@ -80,8 +86,30 @@ function draftAnswer(row: DraftRow): ConsultationDraft {
   };
 }
 
-/** The content's size as the database stores it, and its depth; refuses what is over the limits. */
+/** A NUL, which jsonb cannot store, or a UTF-16 surrogate without its pair. */
+const UNSTORABLE_TEXT = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+function invalidContent(message: string): DomainProblem {
+  return new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.',
+    [{ field: 'content', messages: [message] }]);
+}
+
+/**
+ * Refuses content the database cannot store (a NUL or a lone surrogate, in
+ * any key or string), content deeper than 20 levels, and content whose
+ * JSON.stringify size is already over the limit (the database's own measure
+ * is never smaller). Answers that early size.
+ */
 export function checkDraftContent(content: Record<string, unknown>): number {
+  const unstorable = (value: unknown, level: number): boolean => {
+    if (level > DRAFT_MAX_DEPTH + 1) return false;
+    if (typeof value === 'string') return UNSTORABLE_TEXT.test(value);
+    if (Array.isArray(value)) return value.some((item) => unstorable(item, level + 1));
+    if (value && typeof value === 'object') {
+      return Object.entries(value).some(([key, item]) => UNSTORABLE_TEXT.test(key) || unstorable(item, level + 1));
+    }
+    return false;
+  };
   const depth = (value: unknown, level: number): number => {
     if (level > DRAFT_MAX_DEPTH + 1) return level;
     if (Array.isArray(value)) return value.reduce<number>((max, item) => Math.max(max, depth(item, level + 1)), level);
@@ -90,10 +118,8 @@ export function checkDraftContent(content: Record<string, unknown>): number {
     }
     return level - 1;
   };
-  if (depth(content, 1) > DRAFT_MAX_DEPTH) {
-    throw new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.',
-      [{ field: 'content', messages: [`content must be at most ${DRAFT_MAX_DEPTH} levels deep`] }]);
-  }
+  if (depth(content, 1) > DRAFT_MAX_DEPTH) throw invalidContent(`content must be at most ${DRAFT_MAX_DEPTH} levels deep`);
+  if (unstorable(content, 1)) throw invalidContent('content must not contain a NUL character or an unpaired surrogate');
   const bytes = Buffer.byteLength(JSON.stringify(content), 'utf8');
   if (bytes > DRAFT_MAX_BYTES) throw new DomainProblem(400, 'CONSULTATION_DRAFT_TOO_LARGE', DRAFT_MESSAGES.tooLarge);
   return bytes;
@@ -101,6 +127,17 @@ export function checkDraftContent(content: Record<string, unknown>): number {
 
 function notFound(): DomainProblem {
   return new DomainProblem(404, 'CONSULTATION_DRAFT_NOT_FOUND', DRAFT_MESSAGES.notFound);
+}
+
+/** A draft query's text the database cannot take as jsonb (22P05, 22P02): 400 on content. */
+async function draftQuery<Row extends object>(client: PoolClient, sql: string, values: unknown[]) {
+  try {
+    return await client.query<Row & QueryResultRow>(sql, values);
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === '22P05' || code === '22P02') throw invalidContent('content could not be stored as JSON');
+    throw error;
+  }
 }
 
 /** The table's or function's absence (a database without 0141) or any other failure: 503. */
@@ -125,7 +162,9 @@ function unavailable(error: unknown): DomainProblem {
  * server. Author only (row-level security), deleted 7 days after the last
  * save (ConsultationDraftSweeper). Not part of the record. Every call needs
  * ehr.note.write; create and save need the patient's write_records consent,
- * list and read read_records; discard needs only authorship. The content is
+ * list and read read_records (checked here, and again by 0141's row-level
+ * security, so a grant that ends hides the draft at once); discard needs
+ * only authorship (0141's ehr.discard_consultation_draft). The content is
  * never audited, logged or read.
  */
 @Injectable()
@@ -135,7 +174,6 @@ export class ConsultationDraftsService {
   constructor(
     private readonly repository: ClinicalRepository,
     private readonly database: DatabaseService,
-    private readonly audit: AuditService,
   ) {}
 
   async create(context: DataAccessContext, patientId: string, input: CreateConsultationDraftDto, key: string) {
@@ -149,29 +187,7 @@ export class ConsultationDraftsService {
         (client) => this.repository.executeCreate(client, context, patientId, key, operation, digest, 'consultation-draft',
           async () => {
             if (input.encounterId !== undefined) await this.requireVisit(client, context, patientId, input.encounterId);
-            await client.query('savepoint consultation_draft_create');
-            let row: DraftRow | undefined;
-            try {
-              row = (await client.query<DraftRow>(
-                `insert into ehr.consultation_drafts (patient_id, facility_id, account_id, membership_id, encounter_id,
-                   form_version, content, size_bytes, expires_at)
-                 values ($1, $2, $3, $4, $5, $6, $7::jsonb, 2, clock_timestamp())
-                 returning ${DRAFT_COLUMNS}`,
-                [patientId, context.facilityId, context.actor.accountId, context.membershipId, input.encounterId ?? null,
-                  input.formVersion, JSON.stringify(input.content)],
-              )).rows[0];
-            } catch (error) {
-              if ((error as { code?: unknown }).code !== '23505') throw error;
-              await client.query('rollback to savepoint consultation_draft_create');
-              const existing = (await client.query<{ id: string }>(
-                `select id::text from ehr.consultation_drafts
-                  where patient_id = $1 and facility_id = $2 and membership_id = $3
-                    and encounter_id is not distinct from $4::uuid`,
-                [patientId, context.facilityId, context.membershipId, input.encounterId ?? null],
-              )).rows[0];
-              throw new DomainProblem(409, 'CONSULTATION_DRAFT_EXISTS', DRAFT_MESSAGES.exists,
-                undefined, existing ? { draftId: existing.id } : undefined);
-            }
+            const row = await this.insertDraft(client, context, patientId, input);
             if (!row) throw new Error('The draft was not stored');
             return { value: row, id: row.draftId, details: { sizeBytes: Number(row.sizeBytes) } };
           },
@@ -193,7 +209,7 @@ export class ConsultationDraftsService {
         context, patientId, 'write_records',
         { action: 'ehr.consultation-draft.update', resourceType: 'consultation-draft', resourceId: draftId },
         async (client) => {
-          const current = (await client.query<DraftRow & { same: boolean }>(
+          const current = (await draftQuery<DraftRow & { same: boolean }>(client,
             `select ${DRAFT_COLUMNS}, (content = $4::jsonb and form_version = $5) as same
                from ehr.consultation_drafts
               where id = $1 and patient_id = $2 and facility_id = $3
@@ -209,7 +225,7 @@ export class ConsultationDraftsService {
           if (Number(current.rowVersion) !== input.expectedRowVersion) {
             throw new DomainProblem(409, 'CONSULTATION_DRAFT_CHANGED', DRAFT_MESSAGES.changed);
           }
-          const saved = (await client.query<DraftRow>(
+          const saved = (await draftQuery<DraftRow>(client,
             `update ehr.consultation_drafts set content = $4::jsonb, form_version = $5
               where id = $1 and patient_id = $2 and facility_id = $3 and row_version = $6
               returning ${DRAFT_COLUMNS}`,
@@ -219,9 +235,10 @@ export class ConsultationDraftsService {
           if (!saved) throw new DomainProblem(409, 'CONSULTATION_DRAFT_CHANGED', DRAFT_MESSAGES.changed);
           return { value: saved, details: { sizeBytes: Number(saved.sizeBytes) } };
         },
+        (client) => this.draftVisible(client, context, patientId, draftId),
       ));
     } catch (error) {
-      throw this.translate(error);
+      throw this.translate(error, 'draft');
     }
   }
 
@@ -235,9 +252,10 @@ export class ConsultationDraftsService {
           if (!row) throw notFound();
           return { value: row, details: { sizeBytes: Number(row.sizeBytes) } };
         },
+        (client) => this.draftVisible(client, context, patientId, draftId),
       ));
     } catch (error) {
-      throw this.translate(error);
+      throw this.translate(error, 'draft');
     }
   }
 
@@ -261,23 +279,15 @@ export class ConsultationDraftsService {
     }
   }
 
-  /** Discard: authorship only (no consent check), safe to repeat. */
+  /**
+   * Discard: authorship only (no consent check), safe to repeat. 0141's
+   * ehr.discard_consultation_draft deletes the author's own draft and writes
+   * the audit row (success, or failure with reason not_found).
+   */
   async discard(context: DataAccessContext, patientId: string, draftId: string): Promise<void> {
     try {
       await this.database.withTransaction(context, async (client: PoolClient) => {
-        const removed = (await client.query<{ size_bytes: number }>(
-          `delete from ehr.consultation_drafts where id = $1 and patient_id = $2 and facility_id = $3
-           returning size_bytes`,
-          [draftId, patientId, context.facilityId],
-        )).rows[0];
-        await this.audit.recordWithClient(client, {
-          correlationId: context.correlationId, actorType: 'staff', actorSubject: context.actor.subject,
-          actorAccountId: context.actor.accountId, actorMembershipId: context.membershipId,
-          organizationId: context.actor.facility?.organizationId, facilityId: context.facilityId, patientId,
-          action: 'ehr.consultation-draft.discard', resourceType: 'consultation-draft', resourceId: draftId,
-          outcome: 'success', purposeOfUse: context.purposeOfUse,
-          details: removed ? { sizeBytes: Number(removed.size_bytes), discarded: true } : { discarded: false },
-        });
+        await client.query('select ehr.discard_consultation_draft($1::uuid, $2::uuid) as discarded', [draftId, patientId]);
       });
     } catch (error) {
       throw unavailable(error);
@@ -327,6 +337,56 @@ export class ConsultationDraftsService {
     await requireVisitOpenForWork(client, patientId, context.facilityId, encounterId, { lock: false });
   }
 
+  /**
+   * Inserts the draft. On a conflict the author cannot see (their own draft
+   * for this visit, expired but not yet swept), 0141's
+   * ehr.expire_my_consultation_draft clears it (never under a legal hold),
+   * and the insert is tried once more. A visible conflict, or a second one,
+   * is 409 CONSULTATION_DRAFT_EXISTS, naming the draft when it is visible.
+   */
+  private async insertDraft(client: PoolClient, context: DataAccessContext, patientId: string,
+    input: CreateConsultationDraftDto): Promise<DraftRow | undefined> {
+    for (let attempt = 1; ; attempt += 1) {
+      await client.query('savepoint consultation_draft_create');
+      try {
+        return (await draftQuery<DraftRow>(client,
+          `insert into ehr.consultation_drafts (patient_id, facility_id, account_id, membership_id, encounter_id,
+             form_version, content, size_bytes, expires_at)
+           values ($1, $2, $3, $4, $5, $6, $7::jsonb, 2, clock_timestamp())
+           returning ${DRAFT_COLUMNS}`,
+          [patientId, context.facilityId, context.actor.accountId, context.membershipId, input.encounterId ?? null,
+            input.formVersion, JSON.stringify(input.content)],
+        )).rows[0];
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== '23505') throw error;
+        await client.query('rollback to savepoint consultation_draft_create');
+      }
+      const existing = (await client.query<{ id: string }>(
+        `select id::text from ehr.consultation_drafts
+          where patient_id = $1 and facility_id = $2 and membership_id = $3
+            and encounter_id is not distinct from $4::uuid`,
+        [patientId, context.facilityId, context.membershipId, input.encounterId ?? null],
+      )).rows[0];
+      if (!existing && attempt === 1) {
+        const cleared = (await client.query<{ expired: boolean }>(
+          'select ehr.expire_my_consultation_draft($1::uuid, $2::uuid) as expired',
+          [patientId, input.encounterId ?? null],
+        )).rows[0]?.expired === true;
+        if (cleared) continue;
+      }
+      throw new DomainProblem(409, 'CONSULTATION_DRAFT_EXISTS', DRAFT_MESSAGES.exists,
+        undefined, existing ? { draftId: existing.id } : undefined);
+    }
+  }
+
+  /** run()'s scoped lookup: the author's own live draft, as row-level security shows it (else a not_found audit row). */
+  private async draftVisible(client: PoolClient, context: DataAccessContext, patientId: string, draftId: string) {
+    return ((await client.query(
+      'select 1 from ehr.consultation_drafts where id = $1 and patient_id = $2 and facility_id = $3',
+      [draftId, patientId, context.facilityId],
+    )).rowCount ?? 0) > 0;
+  }
+
   private async find(client: PoolClient, context: DataAccessContext, patientId: string, draftId: string,
     withContent = false): Promise<DraftRow | undefined> {
     return (await client.query<DraftRow>(
@@ -336,7 +396,9 @@ export class ConsultationDraftsService {
     )).rows[0];
   }
 
-  private translate(error: unknown): unknown {
+  private translate(error: unknown, lookup?: 'draft'): unknown {
+    // run()'s scoped lookup found no draft (and recorded it): the draft's own 404.
+    if (lookup === 'draft' && error instanceof DomainProblem && error.code === 'CLINICAL_RESOURCE_NOT_FOUND') return notFound();
     if (error instanceof DomainProblem) return error;
     const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
     if (code === '42P01' || code === '42883' || code === '22023') return unavailable(error);

@@ -3,7 +3,6 @@ import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { PoolClient } from 'pg';
-import type { AuditService } from '../../audit/audit.service';
 import { REQUIRED_PERMISSIONS } from '../../common/decorators';
 import { DomainProblem, ProblemDetailsFilter } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
@@ -60,10 +59,9 @@ function harness(answers: { [pattern: string]: unknown[] | Error } = {}) {
     withSystemTransaction: jest.fn(async (_correlation: string, operation: (client: PoolClient) => Promise<unknown>) =>
       operation(client as unknown as PoolClient)),
   };
-  const audit = { recordWithClient: jest.fn(async () => undefined) };
   const service = new ConsultationDraftsService(repository as unknown as ClinicalRepository,
-    database as unknown as DatabaseService, audit as unknown as AuditService);
-  return { service, statements, repository, database, audit, events };
+    database as unknown as DatabaseService);
+  return { service, statements, repository, database, events };
 }
 
 describe('EHR-C6: consultation drafts', () => {
@@ -90,6 +88,30 @@ describe('EHR-C6: consultation drafts', () => {
 
   it('a save needs its version', () => {
     expect(validateSync(plainToInstance(SaveConsultationDraftDto, { formVersion: 1, content: {} })).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['a NUL in a value', { text: 'Synthetic\u0000note' }],
+    ['a NUL in a key', { 'key\u0000': 'Synthetic' }],
+    ['a lone high surrogate', { text: 'Synthetic \uD83D' }],
+    ['a lone low surrogate, deep in an array', { items: [{ text: '\uDE00 Synthetic' }] }],
+  ])('content the database cannot store is 400 VALIDATION_FAILED on content: %s', (_label, content) => {
+    expect(() => checkDraftContent(content)).toThrow(expect.objectContaining({ status: 400, code: 'VALIDATION_FAILED',
+      errors: [{ field: 'content', messages: ['content must not contain a NUL character or an unpaired surrogate'] }] }) as unknown as Error);
+  });
+
+  it('content with a paired surrogate (an emoji) is fine', () => {
+    expect(() => checkDraftContent({ text: 'Synthetic \uD83D\uDE00' })).not.toThrow();
+  });
+
+  it.each(['22P05', '22P02'])('a %s from a draft query is 400 VALIDATION_FAILED on content', async (code) => {
+    const failure = Object.assign(new Error('unsupported Unicode escape sequence'), { code });
+    const created = harness({ 'insert into ehr.consultation_drafts': failure });
+    await expect(created.service.create(context, patientId, { formVersion: 1, content: {} }, 'key-123456789-abcdef'))
+      .rejects.toMatchObject({ status: 400, code: 'VALIDATION_FAILED', errors: [{ field: 'content' }] });
+    const saved = harness({ '^select 1 from': [{ found: 1 }], 'for update': failure });
+    await expect(saved.service.save(context, patientId, draftId, { expectedRowVersion: 1, formVersion: 1, content: {} }))
+      .rejects.toMatchObject({ status: 400, code: 'VALIDATION_FAILED' });
   });
 
   it('content: at most 256 KB as UTF-8 JSON and 20 levels deep', () => {
@@ -134,37 +156,94 @@ describe('EHR-C6: consultation drafts', () => {
       'key-123456789-abcdef').then(() => undefined, (error: unknown) => error);
     expect(failure).toMatchObject({ status: 409, code: 'CONSULTATION_DRAFT_EXISTS', extensions: { draftId } });
     expect(statements.map(({ sql }) => sql)).toContain('rollback to savepoint consultation_draft_create');
+    expect(statements.some(({ sql }) => sql.includes('expire_my_consultation_draft'))).toBe(false);
   });
 
+  it('the author\'s own expired draft for the visit, not yet swept: cleared through 0141, then the insert again', async () => {
+    let inserts = 0;
+    const statements: string[] = [];
+    const { service, repository } = harness();
+    const client = { query: jest.fn(async (sql: string) => {
+      statements.push(sql.replace(/\s+/g, ' ').trim());
+      if (sql.includes('insert into ehr.consultation_drafts')) {
+        inserts += 1;
+        if (inserts === 1) throw Object.assign(new Error('duplicate key'), { code: '23505' });
+        return { rows: [stored], rowCount: 1 };
+      }
+      if (sql.includes('expire_my_consultation_draft')) return { rows: [{ expired: true }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    }) };
+    repository.run.mockImplementationOnce(async (_c: unknown, _p: string, _a: string, _e: unknown,
+      operation: (c: PoolClient) => Promise<{ value: unknown }>) => (await operation(client as unknown as PoolClient)).value);
+    await expect(service.create(context, patientId, { encounterId, formVersion: 1, content: {} }, 'key-123456789-abcdef'))
+      .resolves.toMatchObject({ draftId });
+    expect(inserts).toBe(2);
+    expect(client.query).toHaveBeenCalledWith('select ehr.expire_my_consultation_draft($1::uuid, $2::uuid) as expired',
+      [patientId, encounterId]);
+  });
+
+  it('a conflict nobody can clear is 409 CONSULTATION_DRAFT_EXISTS with no draftId, after one try', async () => {
+    const { service, statements } = harness({
+      'insert into ehr.consultation_drafts': Object.assign(new Error('duplicate key'), { code: '23505' }),
+      'expire_my_consultation_draft': [{ expired: false }],
+    });
+    const failure = await service.create(context, patientId, { formVersion: 1, content: {} }, 'key-123456789-abcdef')
+      .then(() => undefined, (error: unknown) => error);
+    expect(failure).toMatchObject({ status: 409, code: 'CONSULTATION_DRAFT_EXISTS' });
+    expect((failure as { extensions?: unknown }).extensions).toBeUndefined();
+    expect(statements.filter(({ sql }) => sql.startsWith('insert into ehr.consultation_drafts'))).toHaveLength(1);
+  });
+
+  const visible = { '^select 1 from ehr.consultation_drafts': [{ found: 1 }] };
+
   it('save: write_records; a new version', async () => {
-    const { service, statements, events } = harness({
+    const { service, statements, events } = harness({ ...visible,
       'for update': [{ ...stored, same: false }],
       'update ehr.consultation_drafts': [{ ...stored, rowVersion: '2' }],
     });
     await expect(service.save(context, patientId, draftId, { expectedRowVersion: 1, formVersion: 1, content: { a: 1 } }))
       .resolves.toMatchObject({ rowVersion: 2 });
     expect(events[0]).toMatchObject({ access: 'write_records', action: 'ehr.consultation-draft.update', resourceId: draftId });
-    expect(statements[1]!.values).toEqual([draftId, patientId, facilityId, JSON.stringify({ a: 1 }), 1, 1]);
+    expect(statements[2]!.values).toEqual([draftId, patientId, facilityId, JSON.stringify({ a: 1 }), 1, 1]);
   });
 
   it('save: a retry of a save that went through answers the stored draft', async () => {
-    const { service, statements } = harness({ 'for update': [{ ...stored, rowVersion: '2', same: true }] });
+    const { service, statements } = harness({ ...visible, 'for update': [{ ...stored, rowVersion: '2', same: true }] });
     await expect(service.save(context, patientId, draftId, { expectedRowVersion: 1, formVersion: 1, content: { a: 1 } }))
       .resolves.toMatchObject({ rowVersion: 2 });
-    expect(statements).toHaveLength(1);
+    expect(statements).toHaveLength(2);
   });
 
   it.each([
-    ['another version', { 'for update': [{ ...stored, rowVersion: '3', same: false }] }, 409, 'CONSULTATION_DRAFT_CHANGED'],
-    ['no such draft (or another member\'s, or expired)', {}, 404, 'CONSULTATION_DRAFT_NOT_FOUND'],
+    ['another version', { ...visible, 'for update': [{ ...stored, rowVersion: '3', same: false }] }, 409, 'CONSULTATION_DRAFT_CHANGED'],
+    ['no such draft (or another member\'s, or expired, or its grant ended)', {}, 404, 'CONSULTATION_DRAFT_NOT_FOUND'],
   ] as const)('save: %s', async (_label, answers, status, code) => {
     const { service } = harness(answers as never);
     await expect(service.save(context, patientId, draftId, { expectedRowVersion: 1, formVersion: 1, content: {} }))
       .rejects.toMatchObject({ status, code });
   });
 
+  it('read and save of a draft the author cannot see go through run()\'s scoped lookup (a not_found audit row), as 404 CONSULTATION_DRAFT_NOT_FOUND', async () => {
+    const { service, repository, statements } = harness();
+    await expect(service.read(context, patientId, draftId)).rejects.toMatchObject({ status: 404, code: 'CONSULTATION_DRAFT_NOT_FOUND' });
+    await expect(service.save(context, patientId, draftId, { expectedRowVersion: 1, formVersion: 1, content: {} }))
+      .rejects.toMatchObject({ status: 404, code: 'CONSULTATION_DRAFT_NOT_FOUND' });
+    expect(repository.run.mock.calls.map((call) => typeof call[5])).toEqual(['function', 'function']);
+    expect(statements.map(({ sql }) => sql)).toEqual([
+      'select 1 from ehr.consultation_drafts where id = $1 and patient_id = $2 and facility_id = $3',
+      'select 1 from ehr.consultation_drafts where id = $1 and patient_id = $2 and facility_id = $3']);
+    expect(statements[0]!.values).toEqual([draftId, patientId, facilityId]);
+  });
+
+  it('a missing visit on create stays 404 CLINICAL_RESOURCE_NOT_FOUND', async () => {
+    const { service, repository } = harness();
+    repository.encounterExists.mockResolvedValueOnce(false);
+    await expect(service.create(context, patientId, { encounterId, formVersion: 1, content: {} }, 'key-123456789-abcdef'))
+      .rejects.toMatchObject({ status: 404, code: 'CLINICAL_RESOURCE_NOT_FOUND' });
+  });
+
   it(`save: at most ${DRAFT_SAVES_PER_MINUTE} a minute per member (429)`, async () => {
-    const { service } = harness({ 'for update': [{ ...stored, same: true, rowVersion: '2' }] });
+    const { service } = harness({ ...visible, 'for update': [{ ...stored, same: true, rowVersion: '2' }] });
     for (let save = 0; save < DRAFT_SAVES_PER_MINUTE; save += 1) {
       await service.save(context, patientId, draftId, { expectedRowVersion: 1, formVersion: 1, content: {} });
     }
@@ -173,25 +252,23 @@ describe('EHR-C6: consultation drafts', () => {
   });
 
   it('read and list: read_records; list newest save first, at most 20, without content', async () => {
-    const { service, statements, events } = harness({ ', content from': [{ ...stored, content: { a: 1 } }],
+    const { service, statements, events } = harness({ ...visible, ', content from': [{ ...stored, content: { a: 1 } }],
       'order by saved_at desc': [stored] });
     await expect(service.read(context, patientId, draftId)).resolves.toMatchObject({ draftId, content: { a: 1 } });
     await expect(service.list(context, patientId)).resolves.toEqual({ items: [expect.not.objectContaining({ content: expect.anything() })] });
     expect(events.map((event) => [event.access, event.action])).toEqual([['read_records', 'ehr.consultation-draft.read'],
       ['read_records', 'ehr.consultation-draft.list']]);
-    expect(statements[1]!.sql).toContain('order by saved_at desc, id desc limit 20');
+    expect(statements[2]!.sql).toContain('order by saved_at desc, id desc limit 20');
   });
 
-  it('discard: no consent check, audited, safe to repeat', async () => {
-    const { service, repository, audit } = harness({ 'delete from ehr.consultation_drafts': [{ size_bytes: 34 }] });
-    await service.discard(context, patientId, draftId);
+  it('discard: no consent check; 0141\'s function deletes and audits; safe to repeat', async () => {
+    const { service, repository, statements } = harness({ 'discard_consultation_draft': [{ discarded: true }] });
+    await expect(service.discard(context, patientId, draftId)).resolves.toBeUndefined();
     expect(repository.run).not.toHaveBeenCalled();
-    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      action: 'ehr.consultation-draft.discard', patientId, resourceId: draftId, details: { sizeBytes: 34, discarded: true } }));
-    const again = harness();
+    expect(statements).toEqual([{ sql: 'select ehr.discard_consultation_draft($1::uuid, $2::uuid) as discarded',
+      values: [draftId, patientId] }]);
+    const again = harness({ 'discard_consultation_draft': [{ discarded: false }] });
     await expect(again.service.discard(context, patientId, draftId)).resolves.toBeUndefined();
-    expect(again.audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      details: { discarded: false } }));
   });
 
   it('my drafts: cards, hiddenCount (also on an empty list), never a full Health ID', async () => {
@@ -209,7 +286,7 @@ describe('EHR-C6: consultation drafts', () => {
     ['a database without 0141', Object.assign(new Error('relation does not exist'), { code: '42P01' })],
     ['any other failure', new Error('Connection terminated unexpectedly')],
   ])('%s answers 503 CONSULTATION_DRAFTS_UNAVAILABLE', async (_label, error) => {
-    const { service } = harness({ 'list_my_consultation_drafts': error, 'delete from': error });
+    const { service } = harness({ 'list_my_consultation_drafts': error, 'discard_consultation_draft': error });
     await expect(service.mine(context)).rejects.toMatchObject({ status: 503, code: 'CONSULTATION_DRAFTS_UNAVAILABLE' });
     await expect(service.discard(context, patientId, draftId)).rejects.toMatchObject({ status: 503 });
   });
