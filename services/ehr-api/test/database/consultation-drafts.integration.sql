@@ -1,15 +1,22 @@
 \set ON_ERROR_STOP on
 -- 0141 (EHR-C6): consultation drafts saved on the server. Rollback-only.
 -- Synthetic values only; uuid prefix f141; .invalid addresses.
---   1. structure: forced row-level security and its six policies, the two
---      one-per uniqueness rules, the guard, the two functions (SECURITY
---      DEFINER, search_path pg_catalog, pg_temp), the grants;
+--   1. structure: forced row-level security and its five policies, the two
+--      one-per uniqueness rules, the guard, the functions (SECURITY DEFINER,
+--      search_path pg_catalog, pg_temp), the grants (no DELETE for the
+--      runtime; the hold check and the session helper are the owner's);
 --   2. as the EHR API runtime: the author writes, saves and discards; the
 --      server sets the times, the size and the version; the one-per rules;
 --      no move to another patient or visit; the size limit; another member,
 --      the same doctor at another facility and an expired draft see
---      nothing; the author's list across patients (an ended grant is
---      counted, not shown) and its audit rows; the sweeper.
+--      nothing; an ended grant hides the draft from read and save at once,
+--      while discard still works; the author's list across patients (an
+--      ended grant is counted, not shown) and its audit rows; discard's
+--      audit rows (success, then failure; a patient id that is no patient);
+--      the sweeper (a draft under a legal hold on its author is kept until
+--      the hold is released; the run's correlation id); a create that meets
+--      the author's own expired draft clears it (not under a hold on the
+--      patient) and tries again.
 set plpgsql.variable_conflict = error;
 begin;
 
@@ -103,20 +110,36 @@ end
 $f$;
 
 -- 1. Structure.
-select pg_temp.check_case('1 forced row-level security, six policies', 't/t/6',
+select pg_temp.check_case('1 forced row-level security, five policies',
+  't/t/consultation_drafts_author_insert,consultation_drafts_author_read,consultation_drafts_author_update,consultation_drafts_owner_delete,consultation_drafts_owner_read',
   (select format('%s/%s/%s', relrowsecurity, relforcerowsecurity,
-     (select count(*) from pg_policy where polrelid = 'ehr.consultation_drafts'::regclass))
+     (select string_agg(polname::text, ',' order by polname) from pg_policy where polrelid = 'ehr.consultation_drafts'::regclass))
      from pg_class where oid = 'ehr.consultation_drafts'::regclass));
+select pg_temp.check_case('1 the author policies check consent', 'write_records/read_records/write_records',
+  (select string_agg(substring(pg_get_expr(coalesce(polqual, polwithcheck), polrelid) from '(read_records|write_records)'), '/'
+       order by polname)
+     from pg_policy where polrelid = 'ehr.consultation_drafts'::regclass and polname like '%author%'));
 select pg_temp.check_case('1 one per visit, one per patient without a visit',
   'consultation_drafts_one_per_visit (membership_id, encounter_id) WHERE (encounter_id IS NOT NULL)|consultation_drafts_one_without_visit (membership_id, patient_id) WHERE (encounter_id IS NULL)',
   (select string_agg(regexp_replace(pg_get_indexdef(indexrelid), '^CREATE UNIQUE INDEX (\w+) ON ehr.consultation_drafts USING btree ', '\1 '), '|'
        order by indexrelid::regclass::text)
      from pg_index where indrelid = 'ehr.consultation_drafts'::regclass and indisunique and not indisprimary));
-select pg_temp.check_case('1 the functions', 'true/true/true',
+select pg_temp.check_case('1 the functions', 'true/true/true/true/true/true/true',
   (select string_agg((prosecdef and proconfig = array['search_path=pg_catalog, pg_temp'])::text, '/' order by proname)
      from pg_proc where oid in ('ehr.list_my_consultation_drafts()'::regprocedure, 'ehr.sweep_consultation_drafts(integer)'::regprocedure,
-       'ehr.is_consultation_draft_author(uuid,uuid,uuid)'::regprocedure)));
-select pg_temp.check_case('1 the EHR runtime only', 'DELETE,INSERT,SELECT,UPDATE/(null)',
+       'ehr.is_consultation_draft_author(uuid,uuid,uuid)'::regprocedure, 'ehr.consultation_draft_held(uuid,uuid)'::regprocedure,
+       'ehr.consultation_draft_session()'::regprocedure, 'ehr.discard_consultation_draft(uuid,uuid)'::regprocedure,
+       'ehr.expire_my_consultation_draft(uuid,uuid)'::regprocedure)));
+select pg_temp.check_case('1 the runtime runs discard and expiry, never the hold check or the session helper', 't/t/f/f',
+  (select format('%s/%s/%s/%s',
+     has_function_privilege('hid_ehr_runtime', 'ehr.discard_consultation_draft(uuid,uuid)', 'EXECUTE'),
+     has_function_privilege('hid_ehr_runtime', 'ehr.expire_my_consultation_draft(uuid,uuid)', 'EXECUTE'),
+     has_function_privilege('hid_ehr_runtime', 'ehr.consultation_draft_held(uuid,uuid)', 'EXECUTE'),
+     has_function_privilege('hid_ehr_runtime', 'ehr.consultation_draft_session()', 'EXECUTE'))));
+select pg_temp.check_case('1 the hold check is platform.legal_holds'' owner''s', 'true',
+  (select (proowner = (select relowner from pg_class where oid = 'platform.legal_holds'::regclass))::text
+     from pg_proc where oid = 'ehr.consultation_draft_held(uuid,uuid)'::regprocedure));
+select pg_temp.check_case('1 the EHR runtime only', 'INSERT,SELECT,UPDATE/(null)',
   (select format('%s/%s',
      (select string_agg(privilege, ',' order by privilege) from unnest(array['SELECT','INSERT','UPDATE','DELETE']) privilege
        where has_table_privilege('hid_ehr_runtime', 'ehr.consultation_drafts', privilege)),
@@ -179,8 +202,11 @@ update ehr.consultation_drafts set created_at = now() - interval '9 days', saved
        expires_at = now() - interval '1 day' where id = 'f141d000-0000-4000-8000-000000000002';
 set local session_replication_role = origin;
 set local role hid_ehr_api_runtime;
-select pg_temp.check_case('2 D sees D''s live drafts only', 'f141d000-0000-4000-8000-000000000001,f141d000-0000-4000-8000-000000000003',
+select pg_temp.check_case('2 D sees D''s live drafts only, and none whose grant ended', 'f141d000-0000-4000-8000-000000000001',
   (select string_agg(id::text, ',' order by id) from ehr.consultation_drafts));
+select pg_temp.check_case('2 an ended grant: the draft cannot be saved', 'ok 0', pg_temp.try($s$
+  update ehr.consultation_drafts set content = '{"examination": "Synthetic, later"}'
+   where id = 'f141d000-0000-4000-8000-000000000003'$s$));
 select pg_temp.check_case('2 an expired draft cannot be saved', 'ok 0', pg_temp.try($s$
   update ehr.consultation_drafts set content = '{}' where id = 'f141d000-0000-4000-8000-000000000002'$s$));
 select pg_temp.check_case('2 the list across patients: P2''s draft counted, not shown', 'f141d000-0000-4000-8000-000000000001/Ada Orders/female/1984-04-04/A2B3/hidden 1',
@@ -192,14 +218,27 @@ select pg_temp.check_case('2 the list is audited, with one shown row per patient
        count(*) filter (where action = 'ehr.consultation-draft.list.shown'),
        max((details->>'hiddenCount')) filter (where action = 'ehr.consultation-draft.list'))
      from audit.events where correlation_id = 'drafts-0141-suite'));
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('2 an ended grant: the author still discards', 'true',
+  (select ehr.discard_consultation_draft('f141d000-0000-4000-8000-000000000003', 'f1417000-0000-4000-8000-000000000002')::text));
+reset role;
+select pg_temp.check_case('2 the discard is audited, naming the patient', 'success/f1417000-0000-4000-8000-000000000002/t/f',
+  (select format('%s/%s/%s/%s', outcome, patient_id, (details->>'discarded')::boolean, details ? 'content') from audit.events
+    where action = 'ehr.consultation-draft.discard' and resource_id = 'f141d000-0000-4000-8000-000000000003'));
 select pg_temp.as_member('synthetic:drafts-0141:e', 'f1415000-0000-4000-8000-0000000000e1', 'f1411000-0000-4000-8000-0000000000f1');
 set local role hid_ehr_api_runtime;
-select pg_temp.check_case('2 another member sees, saves and discards nothing', '0/ok 0/ok 0',
-  (select format('%s/%s/%s', (select count(*) from ehr.consultation_drafts),
+select pg_temp.check_case('2 another member sees, saves and discards nothing; the runtime cannot delete', '0/ok 0/f/42501',
+  (select format('%s/%s/%s/%s', (select count(*) from ehr.consultation_drafts),
      pg_temp.try($s$update ehr.consultation_drafts set content = '{}' where id = 'f141d000-0000-4000-8000-000000000001'$s$),
-     pg_temp.try($s$delete from ehr.consultation_drafts where id = 'f141d000-0000-4000-8000-000000000001'$s$))));
+     ehr.discard_consultation_draft('f141d000-0000-4000-8000-000000000001', 'f1417000-0000-4000-8000-000000000001'),
+     split_part(pg_temp.try($s$delete from ehr.consultation_drafts where id = 'f141d000-0000-4000-8000-000000000001'$s$), ' ', 1))));
 select pg_temp.check_case('2 another member''s list is empty', '(null)/hidden 0',
   (select format('%s/hidden %s', coalesce(draft_id::text, '(null)'), hidden_count) from ehr.list_my_consultation_drafts()));
+-- E's own draft, past its 7 days, under a legal hold on E's account (below).
+select pg_temp.check_case('2 E''s draft', 'ok 1', pg_temp.try($s$
+  insert into ehr.consultation_drafts (id, patient_id, facility_id, account_id, membership_id, form_version, content, size_bytes, expires_at)
+  values ('f141d000-0000-4000-8000-000000000005', 'f1417000-0000-4000-8000-000000000001', 'f1411000-0000-4000-8000-0000000000f1',
+    'f1412000-0000-4000-8000-00000000000e', 'f1415000-0000-4000-8000-0000000000e1', 1, '{"plan": "Synthetic"}', 2, now())$s$));
 reset role;
 select pg_temp.as_member('synthetic:drafts-0141:d', 'f1415000-0000-4000-8000-0000000000d2', 'f1411000-0000-4000-8000-0000000000f2');
 set local role hid_ehr_api_runtime;
@@ -207,16 +246,93 @@ select pg_temp.check_case('2 the same doctor at another facility sees nothing', 
   (select count(*)::text from ehr.consultation_drafts));
 reset role;
 select pg_temp.as_member('synthetic:drafts-0141:d', 'f1415000-0000-4000-8000-0000000000d1', 'f1411000-0000-4000-8000-0000000000f1');
+set local session_replication_role = replica;
+update ehr.consultation_drafts set created_at = now() - interval '9 days', saved_at = now() - interval '8 days',
+       expires_at = now() - interval '1 day' where id = 'f141d000-0000-4000-8000-000000000005';
+set local session_replication_role = origin;
+insert into platform.legal_holds (id, subject_type, subject_id, reason)
+values ('f141c000-0000-4000-8000-000000000001', 'account', 'f1412000-0000-4000-8000-00000000000e', 'Synthetic hold on author E');
 set local role hid_ehr_api_runtime;
-select pg_temp.check_case('2 the sweeper removes the expired draft', '1', (select ehr.sweep_consultation_drafts(100)::text));
-select pg_temp.check_case('2 a batch out of range', '22023', (select split_part(pg_temp.try('select ehr.sweep_consultation_drafts(0)'), ' ', 1)));
-select pg_temp.check_case('2 the author discards, and again', 'ok 1/ok 0',
-  (select format('%s/%s', pg_temp.try($s$delete from ehr.consultation_drafts where id = 'f141d000-0000-4000-8000-000000000001'$s$),
-     pg_temp.try($s$delete from ehr.consultation_drafts where id = 'f141d000-0000-4000-8000-000000000001'$s$))));
+select pg_temp.check_case('2 the sweeper removes the expired draft, not the held one', '1',
+  (select ehr.sweep_consultation_drafts(100)::text));
 reset role;
-select pg_temp.check_case('2 the sweep is audited, never the content', 'ehr.consultation-draft.expire/f141d000-0000-4000-8000-000000000002/f',
-  (select format('%s/%s/%s', action, resource_id, details ? 'content') from audit.events
-    where correlation_id = 'consultation-draft-sweep' and resource_id = 'f141d000-0000-4000-8000-000000000002'));
+select pg_temp.check_case('2 the held draft is still there', 'f141d000-0000-4000-8000-000000000005',
+  (select string_agg(id::text, ',' order by id) from ehr.consultation_drafts where expires_at <= now()));
+update platform.legal_holds set released_at = clock_timestamp(), release_reason = 'Synthetic release'
+ where id = 'f141c000-0000-4000-8000-000000000001';
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('2 once released, the sweeper removes it', '1', (select ehr.sweep_consultation_drafts(100)::text));
+select pg_temp.check_case('2 a batch out of range', '22023', (select split_part(pg_temp.try('select ehr.sweep_consultation_drafts(0)'), ' ', 1)));
+select pg_temp.check_case('2 the author discards, and again', 't/f',
+  (select format('%s/%s', ehr.discard_consultation_draft('f141d000-0000-4000-8000-000000000001', 'f1417000-0000-4000-8000-000000000001'),
+     ehr.discard_consultation_draft('f141d000-0000-4000-8000-000000000001', 'f1417000-0000-4000-8000-000000000001'))));
+select pg_temp.check_case('2 a discard naming no patient', 'false',
+  (select ehr.discard_consultation_draft('f141d000-0000-4000-8000-0000000000ff', 'f1417000-0000-4000-8000-0000000000ff')::text));
+reset role;
+select pg_temp.check_case('2 the sweeps are audited with the run''s correlation id, never the content',
+  'ehr.consultation-draft.expire/drafts-0141-suite/f141d000-0000-4000-8000-000000000002/f|ehr.consultation-draft.expire/drafts-0141-suite/f141d000-0000-4000-8000-000000000005/f',
+  (select string_agg(format('%s/%s/%s/%s', action, correlation_id, resource_id, details ? 'content'), '|' order by resource_id)
+     from audit.events where action = 'ehr.consultation-draft.expire'
+      and resource_id in ('f141d000-0000-4000-8000-000000000002', 'f141d000-0000-4000-8000-000000000005')));
+select pg_temp.check_case('2 discard audits another member''s try and a repeat as failures, the discard as a success; a patient that does not exist is in details',
+  'failure/f1417000-0000-4000-8000-000000000001/not_found|success/f1417000-0000-4000-8000-000000000001/true|failure/f1417000-0000-4000-8000-000000000001/not_found|failure/(none)/f1417000-0000-4000-8000-0000000000ff',
+  (select string_agg(format('%s/%s/%s', outcome, coalesce(patient_id::text, '(none)'),
+       coalesce(details->>'requestedPatientId', details->>'reason', details->>'discarded')), '|' order by sequence_id)
+     from audit.events where action = 'ehr.consultation-draft.discard'
+      and resource_id in ('f141d000-0000-4000-8000-000000000001', 'f141d000-0000-4000-8000-0000000000ff')));
+
+-- 3. A create that meets the author's own expired draft for the same visit,
+-- not yet swept: the runtime cannot see it; under a hold on the patient it
+-- stays; otherwise expire_my_consultation_draft clears it and the insert
+-- goes through.
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('3 a draft for the visit again', 'ok 1', pg_temp.try($s$
+  insert into ehr.consultation_drafts (id, patient_id, facility_id, account_id, membership_id, encounter_id, form_version,
+    content, size_bytes, expires_at)
+  values ('f141d000-0000-4000-8000-000000000006', 'f1417000-0000-4000-8000-000000000001', 'f1411000-0000-4000-8000-0000000000f1',
+    'f1412000-0000-4000-8000-00000000000d', 'f1415000-0000-4000-8000-0000000000d1', 'f1418000-0000-4000-8000-000000000001', 1,
+    '{"history": "Synthetic"}', 2, now())$s$));
+reset role;
+set local session_replication_role = replica;
+update ehr.consultation_drafts set created_at = now() - interval '9 days', saved_at = now() - interval '8 days',
+       expires_at = now() - interval '1 day' where id = 'f141d000-0000-4000-8000-000000000006';
+set local session_replication_role = origin;
+insert into platform.legal_holds (id, subject_type, subject_id, reason)
+values ('f141c000-0000-4000-8000-000000000002', 'patient', 'f1417000-0000-4000-8000-000000000001', 'Synthetic hold on patient P1');
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('3 the expired draft is invisible and still holds the visit', '0/23505',
+  (select format('%s/%s', (select count(*) from ehr.consultation_drafts where id = 'f141d000-0000-4000-8000-000000000006'),
+     split_part(pg_temp.try($s$
+  insert into ehr.consultation_drafts (patient_id, facility_id, account_id, membership_id, encounter_id, form_version, content,
+    size_bytes, expires_at)
+  values ('f1417000-0000-4000-8000-000000000001', 'f1411000-0000-4000-8000-0000000000f1', 'f1412000-0000-4000-8000-00000000000d',
+    'f1415000-0000-4000-8000-0000000000d1', 'f1418000-0000-4000-8000-000000000001', 1, '{}', 2, now())$s$), ' ', 1))));
+select pg_temp.check_case('3 under a hold on the patient it is kept', 'false',
+  (select ehr.expire_my_consultation_draft('f1417000-0000-4000-8000-000000000001', 'f1418000-0000-4000-8000-000000000001')::text));
+reset role;
+update platform.legal_holds set released_at = clock_timestamp(), release_reason = 'Synthetic release'
+ where id = 'f141c000-0000-4000-8000-000000000002';
+select pg_temp.as_member('synthetic:drafts-0141:e', 'f1415000-0000-4000-8000-0000000000e1', 'f1411000-0000-4000-8000-0000000000f1');
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('3 another member cannot clear it', 'false',
+  (select ehr.expire_my_consultation_draft('f1417000-0000-4000-8000-000000000001', 'f1418000-0000-4000-8000-000000000001')::text));
+reset role;
+select pg_temp.as_member('synthetic:drafts-0141:d', 'f1415000-0000-4000-8000-0000000000d1', 'f1411000-0000-4000-8000-0000000000f1');
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('3 the author clears it, and the create goes through', 't/ok 1',
+  (select format('%s/%s',
+     ehr.expire_my_consultation_draft('f1417000-0000-4000-8000-000000000001', 'f1418000-0000-4000-8000-000000000001'),
+     pg_temp.try($s$
+  insert into ehr.consultation_drafts (patient_id, facility_id, account_id, membership_id, encounter_id, form_version, content,
+    size_bytes, expires_at)
+  values ('f1417000-0000-4000-8000-000000000001', 'f1411000-0000-4000-8000-0000000000f1', 'f1412000-0000-4000-8000-00000000000d',
+    'f1415000-0000-4000-8000-0000000000d1', 'f1418000-0000-4000-8000-000000000001', 1, '{}', 2, now())$s$))));
+select pg_temp.check_case('3 a live draft is never cleared', 'false',
+  (select ehr.expire_my_consultation_draft('f1417000-0000-4000-8000-000000000001', 'f1418000-0000-4000-8000-000000000001')::text));
+reset role;
+select pg_temp.check_case('3 the clearing is audited as an expiry by the author', 'staff/f1412000-0000-4000-8000-00000000000d/create/f',
+  (select format('%s/%s/%s/%s', actor_type, actor_account_id, details->>'trigger', details ? 'content') from audit.events
+    where action = 'ehr.consultation-draft.expire' and resource_id = 'f141d000-0000-4000-8000-000000000006'));
 
 do $$
 declare

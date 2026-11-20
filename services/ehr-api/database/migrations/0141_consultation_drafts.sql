@@ -12,11 +12,12 @@
 -- D1 ehr.consultation_drafts: the patient, the facility, the author (account
 --    and membership, keyed to the membership by id, facility and account),
 --    an optional visit of this patient here, form_version (1-1000), content
---    (a JSON object of at most 262,144 bytes, stored as given, as note
---    bodies are: protected by row-level security and the database's
---    encryption at rest), size_bytes, row_version, created_at, saved_at and
---    expires_at (saved_at + 7 days). One draft per author per visit, and one
---    per author per patient with no visit.
+--    (a JSON object, stored as jsonb: key order is not kept; at most 262,144
+--    bytes measured as stored, the JSON text PostgreSQL keeps; protected, as
+--    note bodies are, by row-level security and the database's encryption at
+--    rest), size_bytes, row_version, created_at, saved_at and expires_at
+--    (saved_at + 7 days). One draft per author per visit, and one per author
+--    per patient with no visit.
 -- D2 ehr.guard_consultation_draft(), BEFORE INSERT OR UPDATE: the server
 --    sets created_at, saved_at, expires_at, size_bytes and row_version (a
 --    save is row_version + 1); an update cannot move a draft to another
@@ -24,13 +25,15 @@
 --    CONSULTATION_DRAFT_IMMUTABLE); content over the limit is 22023
 --    CONSULTATION_DRAFT_TOO_LARGE.
 -- D3 Row-level security, forced. The author's policies (select, insert,
---    update, delete) call ehr.is_consultation_draft_author (SECURITY
---    DEFINER): the session's own account, membership and facility, an
---    active membership with ehr.note.write; select and update also need a
---    draft not yet expired. The table's owner may read and delete (the two functions
---    below, as 0131's encounters_owner_read). The patient's consent is the
---    service's check (read_records to list or read, write_records to create
---    or save; discard needs only authorship).
+--    update) call ehr.is_consultation_draft_author (SECURITY DEFINER): the
+--    session's own account, membership and facility, an active membership
+--    with ehr.note.write; select and update also need a draft not yet
+--    expired. They also check the patient's consent, as the clinical tables
+--    do (ehr.context_allows): select needs read_records, insert and update
+--    write_records, so a grant that ends hides the draft at once. The
+--    runtime has no DELETE: discard is D7's function, which needs authorship
+--    only. The table's owner may read and delete (the functions below, as
+--    0131's encounters_owner_read); no other function reads the table.
 -- D4 ehr.list_my_consultation_drafts() (SECURITY DEFINER, EHR runtime): the
 --    session author's live drafts at this facility, newest save first, at
 --    most 50; listed only while the session may read the patient's records
@@ -41,14 +44,36 @@
 -- D5 ehr.sweep_consultation_drafts(batch integer) (SECURITY DEFINER, EHR
 --    runtime): deletes up to `batch` (1-1000) drafts past expires_at, oldest
 --    first, with one ehr.consultation-draft.expire audit row each (system
---    actor, never the content), and answers how many.
--- D6 Grants, here and in runtime-grants.sql: SELECT, INSERT, UPDATE and
---    DELETE on the table and EXECUTE on the three functions to
---    hid_ehr_runtime where it exists; nothing to any other role.
+--    actor, the run's correlation id, never the content), and answers how
+--    many. A draft whose patient or author is under an unreleased legal hold
+--    (platform.legal_holds, 0096) is kept: a hold overrides lifecycle
+--    deletion (DATABASE.md). The expiry is tested again on the row deleted,
+--    so a save that renewed the draft meanwhile keeps it.
+-- D6 ehr.consultation_draft_held(patient, account): whether an unreleased
+--    legal hold names the patient or the account. platform.legal_holds is
+--    readable only by its owner (0096's policy), so this one function is
+--    that owner's, executable only by this file's functions' owner.
+-- D7 ehr.discard_consultation_draft(draft, patient) (SECURITY DEFINER, EHR
+--    runtime): the session author deletes their own draft, expired or not,
+--    with no consent check (Q126 A: discard needs authorship only), and one
+--    ehr.consultation-draft.discard audit row: success naming the patient,
+--    or failure (not_found) when nothing was deleted, naming the patient
+--    only if it exists (the requested id is in details otherwise). Answers
+--    whether a draft was deleted; safe to repeat.
+-- D8 ehr.expire_my_consultation_draft(patient, visit) (SECURITY DEFINER, EHR
+--    runtime): deletes the session author's own draft for that patient and
+--    visit (or no visit) only if it has expired and no legal hold covers
+--    it, with the sweeper's .expire audit row (the author as actor). A create
+--    that meets an expired draft not yet swept clears it and tries once more.
+-- D9 Grants, here and in runtime-grants.sql: SELECT, INSERT and UPDATE on
+--    the table and EXECUTE on the five runtime functions to hid_ehr_runtime
+--    where it exists; nothing to any other role.
 --
 -- Locks: SHARE ROW EXCLUSIVE on identity.patients, identity.facilities,
 -- auth.accounts, identity.staff_facility_memberships and ehr.encounters (the
--- foreign keys of a new, empty table), held to commit. Taken first, NOWAIT:
+-- foreign keys of a new, empty table), and ACCESS SHARE on
+-- platform.legal_holds (D6's SQL body is parsed when it is created), held to
+-- commit. Taken first, NOWAIT:
 -- a busy table fails the attempt at once and its subtransaction releases
 -- what it took; the attempt is made again every 100 ms for at most 5
 -- seconds, then 55P03 (nothing applied). When this transaction already holds
@@ -61,8 +86,8 @@
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied).
 -- 0b. Locks, NOWAIT (55P03 and nothing applied).
 -- 1. The table (D1), its guard (D2) and row-level security (D3).
--- 2. The functions (D4, D5).
--- 3. Grants (D6).
+-- 2. The functions (D4-D8).
+-- 3. Grants (D9).
 -- 4. Post-checks.
 
 -- 0. Preconditions.
@@ -78,8 +103,17 @@ begin
      or to_regprocedure('ehr.guard_consultation_draft()') is not null
      or to_regprocedure('ehr.list_my_consultation_drafts()') is not null
      or to_regprocedure('ehr.is_consultation_draft_author(uuid,uuid,uuid)') is not null
-     or to_regprocedure('ehr.sweep_consultation_drafts(integer)') is not null then
+     or to_regprocedure('ehr.sweep_consultation_drafts(integer)') is not null
+     or to_regprocedure('ehr.consultation_draft_held(uuid,uuid)') is not null
+     or to_regprocedure('ehr.discard_consultation_draft(uuid,uuid)') is not null
+     or to_regprocedure('ehr.expire_my_consultation_draft(uuid,uuid)') is not null then
     raise exception using errcode = '55000', message = '0141: already applied';
+  end if;
+  -- D6 reads 0096's legal holds, which only their owner may read.
+  if to_regclass('platform.legal_holds') is null
+     or not exists (select 1 from pg_policy policy
+                     where policy.polrelid = 'platform.legal_holds'::regclass and policy.polname = 'legal_holds_owner') then
+    raise exception using errcode = '55000', message = '0141: platform.legal_holds (0096) is not as this file reads it';
   end if;
   select string_agg(expected.signature, ', ') into mismatch
     from (values
@@ -135,16 +169,17 @@ begin
     begin
       lock table identity.patients, identity.facilities, auth.accounts, identity.staff_facility_memberships,
         ehr.encounters in share row exclusive mode nowait;
+      lock table platform.legal_holds in access share mode nowait;
       exit;
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
-          message = '0141: identity.patients, identity.facilities, auth.accounts, the staff memberships or ehr.encounters is busy, and this transaction already holds an earlier migration''s '
+          message = '0141: identity.patients, identity.facilities, auth.accounts, the staff memberships, ehr.encounters or platform.legal_holds is busy, and this transaction already holds an earlier migration''s '
             || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0141: identity.patients, identity.facilities, auth.accounts, the staff memberships or ehr.encounters stayed busy for 5 seconds; nothing applied; run the release again at a '
+          message = '0141: identity.patients, identity.facilities, auth.accounts, the staff memberships, ehr.encounters or platform.legal_holds stayed busy for 5 seconds; nothing applied; run the release again at a '
             || 'quieter time';
       end if;
       perform pg_sleep(0.1);
@@ -238,15 +273,19 @@ comment on function ehr.is_consultation_draft_author(uuid, uuid, uuid) is
 revoke all on function ehr.is_consultation_draft_author(uuid, uuid, uuid) from public;
 alter table ehr.consultation_drafts enable row level security;
 alter table ehr.consultation_drafts force row level security;
+-- The patient's consent is checked here too (ehr.context_allows), as on the
+-- clinical tables: reading needs read_records, writing write_records.
 create policy consultation_drafts_author_read on ehr.consultation_drafts for select
-  using (ehr.is_consultation_draft_author(account_id, membership_id, facility_id) and expires_at > clock_timestamp());
+  using (ehr.is_consultation_draft_author(account_id, membership_id, facility_id) and expires_at > clock_timestamp()
+         and ehr.context_allows(patient_id, facility_id, 'read_records'));
 create policy consultation_drafts_author_insert on ehr.consultation_drafts for insert
-  with check (ehr.is_consultation_draft_author(account_id, membership_id, facility_id));
+  with check (ehr.is_consultation_draft_author(account_id, membership_id, facility_id)
+              and ehr.context_allows(patient_id, facility_id, 'write_records'));
 create policy consultation_drafts_author_update on ehr.consultation_drafts for update
-  using (ehr.is_consultation_draft_author(account_id, membership_id, facility_id) and expires_at > clock_timestamp())
-  with check (ehr.is_consultation_draft_author(account_id, membership_id, facility_id));
-create policy consultation_drafts_author_delete on ehr.consultation_drafts for delete
-  using (ehr.is_consultation_draft_author(account_id, membership_id, facility_id));
+  using (ehr.is_consultation_draft_author(account_id, membership_id, facility_id) and expires_at > clock_timestamp()
+         and ehr.context_allows(patient_id, facility_id, 'write_records'))
+  with check (ehr.is_consultation_draft_author(account_id, membership_id, facility_id)
+              and ehr.context_allows(patient_id, facility_id, 'write_records'));
 create policy consultation_drafts_owner_read on ehr.consultation_drafts for select
   using (pg_has_role((select relation.relowner from pg_class relation
                        where relation.oid = 'ehr.consultation_drafts'::regclass), 'USAGE'));
@@ -254,7 +293,7 @@ create policy consultation_drafts_owner_delete on ehr.consultation_drafts for de
   using (pg_has_role((select relation.relowner from pg_class relation
                        where relation.oid = 'ehr.consultation_drafts'::regclass), 'USAGE'));
 
--- 2. The functions (D4, D5).
+-- 2. The functions (D4-D8).
 create function ehr.list_my_consultation_drafts()
 returns table (draft_id uuid, encounter_id uuid, saved_at timestamptz, expires_at timestamptz, patient_id uuid,
   full_name text, sex text, date_of_birth date, health_id_last4 text, hidden_count bigint)
@@ -358,6 +397,36 @@ comment on function ehr.list_my_consultation_drafts() is
   '0141 (EHR-C6): the session author''s live consultation drafts at the session facility, newest save first, at most 50; listed only while the session may read the patient''s records now for direct care (ehr.context_allows), the rest counted in hidden_count; the waiting-list card''s patient fields, never a full Health ID. Needs ehr.note.write. Audited: one ehr.consultation-draft.list row and one .shown row per patient shown. Never the content.';
 revoke all on function ehr.list_my_consultation_drafts() from public;
 
+-- 2b. Legal holds (D6). platform.legal_holds is readable only by its owner
+-- (0096's legal_holds_owner policy), so this function becomes that owner's,
+-- and only this file's functions' owner may run it.
+create function ehr.consultation_draft_held(draft_patient uuid, draft_account uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+  select exists (select 1 from platform.legal_holds hold
+                  where hold.released_at is null
+                    and ((hold.subject_type = 'patient' and hold.subject_id = draft_patient)
+                      or (hold.subject_type = 'account' and hold.subject_id = draft_account)))
+$$;
+comment on function ehr.consultation_draft_held(uuid, uuid) is
+  '0141 (EHR-C6): whether an unreleased legal hold (0096) names this patient or this account. A held draft is never deleted by expiry. Owned by platform.legal_holds'' owner, whose policy alone reads the holds.';
+revoke all on function ehr.consultation_draft_held(uuid, uuid) from public;
+do $$
+declare
+  holds_owner name := (select pg_get_userbyid(relation.relowner) from pg_class relation
+                        where relation.oid = 'platform.legal_holds'::regclass);
+begin
+  if holds_owner <> current_user then
+    execute format('alter function ehr.consultation_draft_held(uuid, uuid) owner to %I', holds_owner);
+    execute format('grant execute on function ehr.consultation_draft_held(uuid, uuid) to %I', current_user);
+  end if;
+end
+$$;
+
 create function ehr.sweep_consultation_drafts(batch integer)
 returns integer
 language plpgsql
@@ -370,16 +439,20 @@ begin
   if batch is null or batch not between 1 and 1000 then
     raise exception using errcode = '22023', message = 'CONSULTATION_DRAFT_SWEEP_BATCH_INVALID';
   end if;
+  -- A held draft is skipped before the batch is cut, so held drafts never
+  -- stop the sweep; the expiry is tested again on the row deleted, so a save
+  -- that renewed the draft while this waited for its lock keeps it.
   with expired as (
     select draft.id
       from ehr.consultation_drafts draft
      where draft.expires_at <= clock_timestamp()
+       and not ehr.consultation_draft_held(draft.patient_id, draft.account_id)
      order by draft.expires_at, draft.id
      limit batch
   ), removed as (
     delete from ehr.consultation_drafts draft
      using expired
-     where draft.id = expired.id
+     where draft.id = expired.id and draft.expires_at <= clock_timestamp()
     returning draft.id, draft.patient_id, draft.facility_id, draft.account_id, draft.membership_id, draft.size_bytes
   ), audited as (
     insert into audit.events (
@@ -387,7 +460,7 @@ begin
       organization_id, facility_id, patient_id, action, outcome, resource_type, resource_id,
       purpose_of_use, provenance, source_system, details
     )
-    select 'consultation-draft-sweep', 'system', null, null, null,
+    select coalesce(platform.current_correlation_id(), 'consultation-draft-sweep'), 'system', null, null, null,
            null, removed.facility_id, removed.patient_id, 'ehr.consultation-draft.expire', 'success',
            'consultation-draft', removed.id::text, null, 'system', 'ehr-api',
            jsonb_build_object('sizeBytes', removed.size_bytes, 'authorMembershipId', removed.membership_id)
@@ -399,43 +472,204 @@ begin
 end
 $$;
 comment on function ehr.sweep_consultation_drafts(integer) is
-  '0141 (EHR-C6, Q126 A): deletes up to `batch` (1-1000) consultation drafts past expires_at (7 days after the last save), oldest first, with one ehr.consultation-draft.expire audit row for each draft this call deleted (never the content); answers how many.';
+  '0141 (EHR-C6, Q126 A): deletes up to `batch` (1-1000) consultation drafts past expires_at (7 days after the last save), oldest first, except drafts whose patient or author is under an unreleased legal hold, with one ehr.consultation-draft.expire audit row (the run''s correlation id) for each draft this call deleted (never the content); answers how many.';
 revoke all on function ehr.sweep_consultation_drafts(integer) from public;
 
--- 3. Grants (D6; here and in runtime-grants.sql).
+-- 2c. The session author, for D7 and D8: an active, unheld membership here
+-- with ehr.note.write, for direct care (as D4 checks).
+create function ehr.consultation_draft_session()
+returns table (actor_subject text, actor_account uuid, actor_membership uuid, actor_facility uuid,
+  actor_organization uuid, actor_correlation text, actor_purpose text)
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  subject_value text := platform.current_actor_subject();
+  account_value uuid := auth.account_id_for_subject(subject_value);
+  membership_value uuid := platform.current_membership_id();
+  facility_value uuid := platform.current_facility_id();
+  correlation_value text := platform.current_correlation_id();
+  purpose_value text := platform.current_purpose_of_use();
+  organization_value uuid;
+begin
+  if account_value is null or membership_value is null or facility_value is null or correlation_value is null
+     or not auth.membership_has_permission(subject_value, membership_value, facility_value, 'ehr.note.write') then
+    raise exception using errcode = '42501', message = 'CONSULTATION_DRAFTS_NOT_PERMITTED';
+  end if;
+  select membership.organization_id into organization_value
+    from identity.staff_facility_memberships membership
+   where membership.id = membership_value and membership.account_id = account_value
+     and membership.facility_id = facility_value and membership.active
+     and membership.migration_hold_reason is null;
+  if not found then
+    raise exception using errcode = '42501', message = 'CONSULTATION_DRAFTS_NOT_PERMITTED';
+  end if;
+  if purpose_value is distinct from 'direct-care' then
+    raise exception using errcode = '22023', message = 'CONSULTATION_DRAFTS_DIRECT_CARE_ONLY';
+  end if;
+  return query select subject_value, account_value, membership_value, facility_value, organization_value,
+    correlation_value, purpose_value;
+end
+$$;
+comment on function ehr.consultation_draft_session() is
+  '0141 (EHR-C6): the session author for discard and on-demand expiry (an active, unheld membership here with ehr.note.write, for direct care), or 42501 CONSULTATION_DRAFTS_NOT_PERMITTED / 22023 CONSULTATION_DRAFTS_DIRECT_CARE_ONLY.';
+revoke all on function ehr.consultation_draft_session() from public;
+
+-- 2d. Discard (D7): authorship only, no consent check (Q126 A).
+create function ehr.discard_consultation_draft(requested_draft uuid, requested_patient uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  actor record;
+  removed_id uuid;
+  removed_patient uuid;
+  removed_size integer;
+  named_patient uuid;
+begin
+  select * into actor from ehr.consultation_draft_session();
+  delete from ehr.consultation_drafts draft
+   where draft.id = requested_draft and draft.patient_id = requested_patient
+     and draft.facility_id = actor.actor_facility and draft.account_id = actor.actor_account
+     and draft.membership_id = actor.actor_membership
+  returning draft.id, draft.patient_id, draft.size_bytes into removed_id, removed_patient, removed_size;
+  -- The audit row names the patient only if one exists (its foreign key).
+  named_patient := coalesce(removed_patient,
+    (select patient.id from identity.patients patient where patient.id = requested_patient));
+  insert into audit.events (
+    correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
+    organization_id, facility_id, patient_id, action, outcome, resource_type, resource_id,
+    purpose_of_use, provenance, source_system, details
+  ) values (
+    actor.actor_correlation, 'staff', actor.actor_subject, actor.actor_account, actor.actor_membership,
+    actor.actor_organization, actor.actor_facility, named_patient, 'ehr.consultation-draft.discard',
+    case when removed_id is null then 'failure' else 'success' end,
+    'consultation-draft', requested_draft::text, actor.actor_purpose, 'application', 'ehr-api',
+    case when removed_id is not null then jsonb_build_object('sizeBytes', removed_size, 'discarded', true)
+         when named_patient is null then jsonb_build_object('discarded', false, 'reason', 'not_found',
+           'requestedPatientId', requested_patient)
+         else jsonb_build_object('discarded', false, 'reason', 'not_found') end
+  );
+  return removed_id is not null;
+end
+$$;
+comment on function ehr.discard_consultation_draft(uuid, uuid) is
+  '0141 (EHR-C6, Q126 A): the session author deletes their own draft (expired or not) with no consent check, and one ehr.consultation-draft.discard audit row (success, or failure with reason not_found; the patient named only if it exists). Answers whether a draft was deleted; safe to repeat. Never the content.';
+revoke all on function ehr.discard_consultation_draft(uuid, uuid) from public;
+
+-- 2e. On-demand expiry (D8): a create that meets the author's own expired
+-- draft for the same patient and visit, before the sweeper has removed it.
+create function ehr.expire_my_consultation_draft(requested_patient uuid, requested_encounter uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  actor record;
+  removed_id uuid;
+  removed_patient uuid;
+  removed_size integer;
+begin
+  select * into actor from ehr.consultation_draft_session();
+  delete from ehr.consultation_drafts draft
+   where draft.membership_id = actor.actor_membership and draft.account_id = actor.actor_account
+     and draft.facility_id = actor.actor_facility and draft.patient_id = requested_patient
+     and draft.encounter_id is not distinct from requested_encounter
+     and draft.expires_at <= clock_timestamp()
+     and not ehr.consultation_draft_held(draft.patient_id, draft.account_id)
+  returning draft.id, draft.patient_id, draft.size_bytes into removed_id, removed_patient, removed_size;
+  if removed_id is null then
+    return false;
+  end if;
+  insert into audit.events (
+    correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
+    organization_id, facility_id, patient_id, action, outcome, resource_type, resource_id,
+    purpose_of_use, provenance, source_system, details
+  ) values (
+    actor.actor_correlation, 'staff', actor.actor_subject, actor.actor_account, actor.actor_membership,
+    actor.actor_organization, actor.actor_facility, removed_patient, 'ehr.consultation-draft.expire', 'success',
+    'consultation-draft', removed_id::text, actor.actor_purpose, 'application', 'ehr-api',
+    jsonb_build_object('sizeBytes', removed_size, 'authorMembershipId', actor.actor_membership, 'trigger', 'create')
+  );
+  return true;
+end
+$$;
+comment on function ehr.expire_my_consultation_draft(uuid, uuid) is
+  '0141 (EHR-C6): deletes the session author''s own draft for this patient and visit (or no visit) only if it has expired and no legal hold covers it, with one ehr.consultation-draft.expire audit row; answers whether one was deleted. A create calls it on a conflict it cannot see, then tries once more.';
+revoke all on function ehr.expire_my_consultation_draft(uuid, uuid) from public;
+
+-- 3. Grants (D9; here and in runtime-grants.sql). The runtime has no DELETE:
+-- discard is D7's function.
 revoke all on ehr.consultation_drafts from public;
 do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'hid_ehr_runtime') then
-    grant select, insert, update, delete on ehr.consultation_drafts to hid_ehr_runtime;
+    grant select, insert, update on ehr.consultation_drafts to hid_ehr_runtime;
     grant execute on function ehr.list_my_consultation_drafts(), ehr.sweep_consultation_drafts(integer),
-      ehr.is_consultation_draft_author(uuid, uuid, uuid) to hid_ehr_runtime;
+      ehr.is_consultation_draft_author(uuid, uuid, uuid), ehr.discard_consultation_draft(uuid, uuid),
+      ehr.expire_my_consultation_draft(uuid, uuid) to hid_ehr_runtime;
   end if;
 end
 $$;
 
 -- 4. Post-checks.
 do $$
+declare
+  owner_oid oid := (select relation.relowner from pg_class relation
+                     where relation.oid = 'ehr.consultation_drafts'::regclass);
+  held_owner oid := (select proc.proowner from pg_proc proc
+                      where proc.oid = 'ehr.consultation_draft_held(uuid,uuid)'::regprocedure);
+  members text;
 begin
   if not (select relrowsecurity and relforcerowsecurity from pg_class where oid = 'ehr.consultation_drafts'::regclass) then
     raise exception using errcode = '55000', message = '0141: ehr.consultation_drafts is not under forced row-level security';
   end if;
-  if (select count(*) from pg_policy where polrelid = 'ehr.consultation_drafts'::regclass) <> 6 then
-    raise exception using errcode = '55000', message = '0141: ehr.consultation_drafts does not have its six policies';
+  if (select string_agg(policy.polname::text, ',' order by policy.polname) from pg_policy policy
+       where policy.polrelid = 'ehr.consultation_drafts'::regclass)
+     is distinct from 'consultation_drafts_author_insert,consultation_drafts_author_read,consultation_drafts_author_update,'
+                      || 'consultation_drafts_owner_delete,consultation_drafts_owner_read' then
+    raise exception using errcode = '55000', message = '0141: ehr.consultation_drafts does not have exactly its five policies';
   end if;
-  if exists (select 1 from pg_roles role_row
-              where role_row.rolname in ('hid_ehr_runtime', 'hid_ehr_api_runtime', 'hid_identity_runtime',
-                                         'hid_lab_runtime', 'hid_pharmacy_runtime', 'hid_ocr_runtime',
-                                         'hid_outreach_runtime', 'hid_schema_test_runtime')
-                and pg_has_role(role_row.oid, (select relation.relowner from pg_class relation
-                                                where relation.oid = 'ehr.consultation_drafts'::regclass), 'USAGE')) then
-    raise exception using errcode = '55000', message = '0141: a runtime role is a member of the drafts table''s owner';
+  -- The owner's policies admit every function the owner runs: no hid_ role
+  -- other than the owner may be a member of it (0133's form).
+  select string_agg(role_row.rolname::text, ', ' order by role_row.rolname) into members
+    from pg_roles role_row
+   where role_row.rolname like 'hid\_%' and role_row.oid <> owner_oid
+     and pg_has_role(role_row.oid, owner_oid, 'MEMBER');
+  if members is not null then
+    raise exception using errcode = '55000',
+      message = format('0141: these roles are members of the drafts table''s owner %s: %s', pg_get_userbyid(owner_oid), members);
   end if;
   if exists (select 1 from pg_proc proc
               where proc.oid in ('ehr.list_my_consultation_drafts()'::regprocedure, 'ehr.sweep_consultation_drafts(integer)'::regprocedure,
-                                 'ehr.is_consultation_draft_author(uuid,uuid,uuid)'::regprocedure)
+                                 'ehr.is_consultation_draft_author(uuid,uuid,uuid)'::regprocedure,
+                                 'ehr.consultation_draft_held(uuid,uuid)'::regprocedure,
+                                 'ehr.consultation_draft_session()'::regprocedure,
+                                 'ehr.discard_consultation_draft(uuid,uuid)'::regprocedure,
+                                 'ehr.expire_my_consultation_draft(uuid,uuid)'::regprocedure)
                 and not (proc.prosecdef and proc.proconfig = array['search_path=pg_catalog, pg_temp'])) then
     raise exception using errcode = '55000', message = '0141: a drafts function is not as created';
+  end if;
+  -- D6 reads the holds only if 0096's policy admits its owner (or its owner
+  -- bypasses row-level security); the sweeper and D8 must be able to run it.
+  if not ((select role_row.rolsuper or role_row.rolbypassrls from pg_roles role_row where role_row.oid = held_owner)
+          or exists (select 1 from pg_policy policy
+                      where policy.polrelid = 'platform.legal_holds'::regclass and policy.polname = 'legal_holds_owner'
+                        and policy.polcmd = '*' and policy.polroles = array[0::oid]
+                        and pg_get_expr(policy.polqual, policy.polrelid)
+                            = format('(CURRENT_USER = %L::name)', pg_get_userbyid(held_owner))))
+     or not has_function_privilege(current_user, 'ehr.consultation_draft_held(uuid,uuid)', 'EXECUTE')
+     or exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                 where proc.oid = 'ehr.consultation_draft_held(uuid,uuid)'::regprocedure
+                   and acl.grantee not in (proc.proowner, (select role_row.oid from pg_roles role_row
+                                                            where role_row.rolname = current_user))) then
+    raise exception using errcode = '55000',
+      message = '0141: ehr.consultation_draft_held cannot read platform.legal_holds, or others may run it';
   end if;
 end
 $$;
