@@ -9034,3 +9034,92 @@ primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
 
+
+## EHR-C8b. Vitals marked entered in error (Release B, migration 0142; not live until signed)
+
+Akos P1-14 and the QA question "mark the QA test vitals record entered in
+error". The planned contract's "EHR-C8b" is the spec; this section is what is
+built. One vitals reading can be withdrawn for good, without entering the
+whole visit in error (EHR-C8a). It cannot be undone: to fix a mistake, record
+the vitals again.
+
+### `PATCH /api/v1/ehr/patients/:patientId/encounters/:encounterId/vitals/:vitalId`
+
+`X-Facility-Id`, `X-Purpose-Of-Use: direct-care`, permission `ehr.vital.write`
+and the patient's `write_records` consent, as a correction. UUIDs only. No
+Idempotency-Key: the row version protects it. Body, exactly these fields:
+
+```json
+{ "expectedRowVersion": 2, "status": "entered_in_error", "changeReason": "Recorded on the wrong patient" }
+```
+
+- `expectedRowVersion`: whole number, 1 or more (the reading's `rowVersion`).
+- `status`: only `entered_in_error`.
+- `changeReason`: required, trimmed, 3 to 500 characters.
+
+The reading is locked (`FOR UPDATE`) before the checks. `200`: the reading as
+`GET .../vitals/:vitalId` answers it, with `status: "entered_in_error"`,
+`statusChangedAt` and the new `rowVersion`.
+
+Audit: `ehr.vital.update`, naming the patient and the reading, with
+`enteredInError: true`; never the typed reason or the values. The reason, who
+and when, and the prior row are kept in `ehr.record_versions` (0004's version
+trigger). A refusal is audited as today.
+
+### `status` on every vitals answer
+
+Every answer that returns a reading (the list, the read, a create and its
+replay, the one-call consultation's vitals, this PATCH) carries `status`
+(`recorded` or `entered_in_error`) and `statusChangedAt` (null while
+recorded). A correction answers the correction, as today: it can only be made
+on a recorded reading.
+
+| Read | Readings entered in error |
+|---|---|
+| `GET .../encounters/:encounterId/vitals` | Left out by default. `?includeEnteredInError=true` lists them with their status (`true` or `false` only; a cursor is valid only for the choice it was issued with). |
+| `GET .../vitals/:vitalId` and `.../corrections` | Still answered, with `status`. |
+| `GET /ehr/patients/:patientId/vitals/latest` (EHR-C3) and the chart summary (EHR-C4) | Left out: the next newest reading is used. |
+| The patient's own record and patient chat; staff record evidence and staff chat | Left out (and their search chunks drop out at the next refresh). The patient's own read policy leaves them out in the database too. |
+| `POST .../vitals/:vitalId/corrections` | Refused: 409 `VITAL_ENTERED_IN_ERROR`. |
+
+On a database without 0142 every reading reads as `recorded`, and the PATCH
+answers 503 `VITALS_STATUS_UNAVAILABLE`.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (another status, a reason under 3 or over 500 characters, an unknown field) |
+| 400 | `CHANGE_REASON_REQUIRED` | Please say why you are changing this. (no reason, or only spaces) |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | as today |
+| 403 | `CONSENT_REQUIRED`, `PERMISSION_DENIED` | as today |
+| 404 | `VITAL_NOT_FOUND` | These vitals were not found. |
+| 409 | `VITAL_ALREADY_ENTERED_IN_ERROR` | These vitals are already marked as entered in error. |
+| 409 | `VITAL_ENTERED_IN_ERROR` | These vitals were marked as entered in error. Record new vitals instead. (on a correction) |
+| 412 | `VERSION_CONFLICT` | Someone else changed these vitals. Reload them and try again. (also on a correction) |
+| 503 | `VITALS_STATUS_UNAVAILABLE` | This cannot be done right now. Please try again. |
+
+### Database (0142)
+
+- `ehr.vitals.status` (`recorded`, the default and every existing row, or
+  `entered_in_error`) and `status_changed_at` (null exactly while recorded).
+- `vitals_latest_recorded_idx`: the latest recorded reading per patient and
+  facility.
+- `ehr.guard_vital_status()`, before `vitals_versioned`: a new reading is
+  recorded (else 23514 `VITAL_STATUS_INVALID`); the one change is recorded to
+  entered in error, changing nothing else, with the time set by the guard;
+  after it the row never changes again (55000 `VITAL_ENTERED_IN_ERROR`), so it
+  cannot be undone or corrected. Rows still cannot be deleted.
+- `vitals_patient_self_read` (0067) gains `status = 'recorded'`.
+- No grant change. Old ehr-api images keep working: they never name the
+  columns and write only recorded readings.
+
+### Screen notes
+
+- Offer "Entered in error" on each vitals row of a visit. Ask for the reason
+  (required), send `expectedRowVersion`, then read the list and "Latest
+  vitals" again.
+- History may show withdrawn readings struck through, labelled "Entered in
+  error", with `includeEnteredInError=true`.
+- On `VITAL_ALREADY_ENTERED_IN_ERROR`, treat it as done. On
+  `VERSION_CONFLICT`, reload and ask again.
