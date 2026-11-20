@@ -13,6 +13,8 @@ import {
 import { requireChangeReason } from '../shared/change-reason';
 import { ClinicalRepository, type OperationResult } from '../shared/clinical.repository';
 import type { MarkVitalEnteredInErrorDto, VitalsListQueryDto } from './vitals.dto';
+import { measureWarning, moreSerious, USUAL_RANGES_VERSION, vitalWarnings, type VitalWarning,
+  type WarnedMeasure } from './usual-ranges';
 
 /** EHR-C8b (0142): a reading is recorded, or withdrawn for good. */
 export type VitalStatus = 'recorded' | 'entered_in_error';
@@ -199,8 +201,8 @@ export class VitalsService {
    * patient's consent and audited (`ehr.vital.latest`, with the count of
    * measures, never the values); a refusal is audited by the repository.
    */
-  latest(context: DataAccessContext, patientId: string): Promise<LatestVitals> {
-    return this.repository.run(
+  async latest(context: DataAccessContext, patientId: string): Promise<LatestVitalsWithWarnings> {
+    const latest = await this.repository.run(
       context, patientId, 'read_records',
       { action: 'ehr.vital.latest', resourceType: 'vital' },
       async (client) => {
@@ -208,6 +210,7 @@ export class VitalsService {
         return { value, details: { measureCount: Object.keys(value.measures).length } };
       },
     );
+    return latestWithWarnings(latest);
   }
 
   list(context: DataAccessContext, patientId: string, encounterId: string, query: VitalsListQueryDto | TimelineQueryDto) {
@@ -266,13 +269,15 @@ export class VitalsService {
     );
   }
 
-  create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateVitalDto, key: string) {
+  /** VIT-1: the answer (and its replay) carries the reading's warnings; they never block the save. */
+  async create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateVitalDto, key: string) {
     this.assertMeasurements(input);
-    return this.repository.run(
+    const row = await this.repository.run(
       context, patientId, 'write_records', { action: 'ehr.vital.create', resourceType: 'vital' },
       (client) => this.createInTransaction(client, context, patientId, encounterId, input, key),
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+    return { ...row, ...warningsOf(vitalValues(row)) };
   }
 
   /** The checks a vitals create runs before the database is touched (also EHR-C5's one-call consultation). */
@@ -366,9 +371,14 @@ export class VitalsService {
           const storedCorrection = result.rows[0];
           if (!storedCorrection) throw new DomainProblem(500, 'CORRECTION_CREATE_FAILED', 'Vital correction could not be created');
           const correction = vitalCorrectionFromStorage(storedCorrection);
-          return { value: correction, id: correction.id };
+          return { value: correctionWithWarnings(vital, correction), id: correction.id };
         },
-        (id) => this.findCorrection(client, context, patientId, vitalId, id),
+        async (id) => {
+          // A replay: the warnings again, for the values after the correction.
+          const correction = await this.findCorrection(client, context, patientId, vitalId, id);
+          const vital = correction ? await this.findVitalById(client, context, patientId, vitalId) : undefined;
+          return correction && vital ? correctionWithWarnings(vital, correction) : correction;
+        },
       ),
       (client) => this.repository.exists(client, 'vitals', vitalId, patientId, context.facilityId, encounterId),
     );
@@ -458,6 +468,11 @@ export class VitalsService {
     if ((value.systolicMmhg === undefined) !== (value.diastolicMmhg === undefined)) {
       throw new DomainProblem(400, 'BLOOD_PRESSURE_INCOMPLETE', 'Systolic and diastolic pressure must be supplied together');
     }
+    // VIT-1's one hard rule (code only; rows already stored are not touched).
+    if (value.systolicMmhg !== undefined && value.diastolicMmhg !== undefined && value.diastolicMmhg >= value.systolicMmhg) {
+      throw new DomainProblem(400, 'BLOOD_PRESSURE_ORDER_INVALID', 'The lower blood pressure number (diastolic) must be '
+        + 'less than the upper one (systolic). Check the reading.');
+    }
   }
 }
 
@@ -473,6 +488,53 @@ function vitalStatusProblem(error: unknown): DomainProblem {
     return new DomainProblem(409, 'VITAL_ALREADY_ENTERED_IN_ERROR', VITAL_MESSAGES.alreadyEnteredInError);
   }
   return new DomainProblem(503, 'VITALS_STATUS_UNAVAILABLE', VITAL_MESSAGES.statusUnavailable);
+}
+
+/** VIT-1: a measure's newest value in `vitals/latest`, with its warning (or null). */
+export type LatestVitalValueWithWarning = LatestVitalValue & { warning: VitalWarning | null };
+export interface LatestVitalsWithWarnings {
+  facilityId: string;
+  measures: Partial<Record<LatestVitalMeasure, LatestVitalValueWithWarning>>;
+  usualRangesVersion: string;
+}
+
+/** A reading's values as numbers (numeric columns arrive as strings). */
+function vitalValues(row: Pick<VitalRow, WarnedMeasure>): Partial<Record<WarnedMeasure, number | null>> {
+  const values: Partial<Record<WarnedMeasure, number | null>> = {};
+  for (const measure of ['pulseBpm', 'respiratoryRate', 'oxygenSaturationPercent', 'systolicMmhg', 'diastolicMmhg',
+    'temperatureC'] as const) {
+    const raw = row[measure];
+    values[measure] = raw === null || raw === undefined ? null : Number(raw);
+  }
+  return values;
+}
+
+function warningsOf(values: Partial<Record<WarnedMeasure, number | null>>) {
+  return { warnings: vitalWarnings(values), usualRangesVersion: USUAL_RANGES_VERSION };
+}
+
+/** A correction's warnings are for the values after it: its values over the reading's own. */
+function correctionWithWarnings(vital: VitalRow, correction: VitalCorrectionRow) {
+  const after = { ...vitalValues(vital) };
+  for (const [key, value] of Object.entries(correction.replacementValues)) {
+    if (key in after) after[key as WarnedMeasure] = value === null ? null : Number(value);
+  }
+  return { ...correction, ...warningsOf(after) };
+}
+
+function latestWithWarnings(latest: LatestVitals): LatestVitalsWithWarnings {
+  const measures: Partial<Record<LatestVitalMeasure, LatestVitalValueWithWarning>> = {};
+  for (const [measure, entry] of Object.entries(latest.measures) as [LatestVitalMeasure, LatestVitalValue][]) {
+    let warning: VitalWarning | null = null;
+    if (measure === 'bloodPressure' && typeof entry.value === 'object') {
+      warning = moreSerious(measureWarning('systolicMmhg', entry.value.systolicMmhg),
+        measureWarning('diastolicMmhg', entry.value.diastolicMmhg));
+    } else if (measure !== 'heightCm' && measure !== 'weightKg' && typeof entry.value === 'number') {
+      warning = measureWarning(measure as WarnedMeasure, entry.value);
+    }
+    measures[measure] = { ...entry, warning };
+  }
+  return { ...latest, measures, usualRangesVersion: USUAL_RANGES_VERSION };
 }
 
 const VITAL_STORAGE_KEYS = {
