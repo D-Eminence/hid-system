@@ -13,8 +13,9 @@
 --      INVOKER, search_path pg_catalog, pg_temp, and fires before every row
 --      insert and update (not delete);
 --   2. privileges: the Identity runtime and its API login select, insert,
---      update and delete; PUBLIC, the EHR runtime and the schema test
---      runtime hold nothing;
+--      update and delete, and execute D6's patient existence check (a
+--      SECURITY DEFINER owned by identity.patients' owner); PUBLIC, the EHR
+--      runtime and the schema test runtime hold nothing;
 --   3. as the Identity API runtime: a set (the upsert keyed by family) is
 --      kept and replaced; a clear deletes it; a set for a patient sign-in,
 --      a signed-out sign-in, a session that is not the family's first, an
@@ -30,8 +31,11 @@
 --      of the sign-in only; a stale version is not cleared; a move clears
 --      only another facility's row; the user's clear and its repeat; an
 --      expired row reads expired; a refreshed sign-in stores and reads
---      through its new session; and the card, which row-level security
---      gives only under the grant the access check allows.
+--      through its new session; D6's existence check (true for a patient,
+--      false for a UUID that is no patient); and the card, given only under
+--      the grant the access check allows: also to a doctor whose
+--      identity.registration.write lets 0011's registration read show every
+--      unsealed patient, and under 0131's own-facility grant.
 set plpgsql.variable_conflict = error;
 begin;
 
@@ -58,7 +62,16 @@ insert into identity.staff_facility_memberships (id, staff_id, account_id, organ
    'f1400000-0000-4000-8000-0000000000a1', 'f1401000-0000-4000-8000-0000000000f2', 'doctor', 'doctor', true, true);
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, status, account_id) values
   ('f1407000-0000-4000-8000-000000000001', 'HID-QPA2B3', 'Amaka', 'Open', 'Amaka Open', '1990-05-01', 'active', 'f1402000-0000-4000-8000-0000000000e0'),
-  ('f1407000-0000-4000-8000-000000000002', 'HID-QPC4D5', 'Bayo', 'Open', 'Bayo Open', '1985-02-02', 'active', null);
+  ('f1407000-0000-4000-8000-000000000002', 'HID-QPC4D5', 'Bayo', 'Open', 'Bayo Open', '1985-02-02', 'active', null),
+  ('f1407000-0000-4000-8000-000000000003', 'HID-QPE6F7', 'Chidi', 'Open', 'Chidi Open', '1979-09-09', 'active', null);
+-- A opened Chidi at F1 through 0131's own-facility opening (its grant's shape).
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id,
+  scope, purpose_of_use, status, reason, starts_at, expires_at, break_glass, correlation_id, authorization_method) values
+  ('f140b000-0000-4000-8000-000000000003', 'f1407000-0000-4000-8000-000000000003',
+   'f1404000-0000-4000-8000-00000000000a', 'f1402000-0000-4000-8000-00000000000a',
+   'f1405000-0000-4000-8000-0000000000a1', 'f1401000-0000-4000-8000-0000000000f1',
+   'write_records', 'direct-care', 'active', 'Synthetic own-facility opening', now() - interval '1 minute',
+   now() + interval '1 hour', false, 'open-patient-0140-own', 'own_facility');
 -- A may read Bayo's records at F1 for direct care (section 4's card); nobody may read Amaka's.
 insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id,
   scope, purpose_of_use, status, reason, starts_at, expires_at, break_glass, correlation_id) values
@@ -140,6 +153,17 @@ select pg_temp.check_case('1 the guard', 'plpgsql/f/{"search_path=pg_catalog, pg
 select pg_temp.check_case('2 the Identity API runtime', 'DELETE,INSERT,SELECT,UPDATE',
   (select string_agg(privilege, ',' order by privilege) from unnest(array['SELECT','INSERT','UPDATE','DELETE','TRUNCATE']) privilege
     where has_table_privilege('hid_identity_api_runtime', 'auth.session_open_patient', privilege)));
+select pg_temp.check_case('2 D6: only the Identity runtime may run the existence check, a definer of the patients'' owner',
+  't/f/f/f/t/t',
+  format('%s/%s/%s/%s/%s/%s',
+    has_function_privilege('hid_identity_api_runtime', 'auth.session_open_patient_target_exists(uuid)', 'EXECUTE'),
+    has_function_privilege('hid_ehr_api_runtime', 'auth.session_open_patient_target_exists(uuid)', 'EXECUTE'),
+    has_function_privilege('hid_schema_test_runtime', 'auth.session_open_patient_target_exists(uuid)', 'EXECUTE'),
+    exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+             where proc.oid = 'auth.session_open_patient_target_exists(uuid)'::regprocedure and acl.grantee = 0),
+    (select proc.prosecdef from pg_proc proc where proc.oid = 'auth.session_open_patient_target_exists(uuid)'::regprocedure),
+    (select proc.proowner = (select relowner from pg_class where oid = 'identity.patients'::regclass)
+       from pg_proc proc where proc.oid = 'auth.session_open_patient_target_exists(uuid)'::regprocedure)));
 select pg_temp.check_case('2 the EHR runtime and the schema test runtime', '(null)',
   (select string_agg(role_name || ' ' || privilege, ',')
      from unnest(array['hid_ehr_api_runtime', 'hid_schema_test_runtime']) role_name
@@ -328,7 +352,10 @@ begin
        and nin_identifier.revoked_at is null) as nin_verified
   from identity.patients patient_row
  where patient_row.id = $1
-   and patient_row.status = 'active'$sql$ into card using patient;
+   and patient_row.status = 'active'
+   and identity.has_active_consent_grant(patient_row.id, platform.current_actor_subject(),
+         platform.current_membership_id(), platform.current_facility_id(), 'read_records',
+         platform.current_purpose_of_use(), clock_timestamp())$sql$ into card using patient;
   get diagnostics rows_read = row_count;
   if rows_read = 0 then return 'none'; end if;
   return format('%s/%s/%s/%s/%s', card.full_name, coalesce(card.sex, '-'), card.date_of_birth, card.health_id_last4,
@@ -440,8 +467,32 @@ select pg_temp.check_case('4 the access check allows Bayo, not Amaka', 't/f',
 select pg_temp.check_case('4 the card under the grant (last 4 only)', 'Bayo Open/-/1985-02-02/C4D5/f',
   pg_temp.op_card('f1407000-0000-4000-8000-000000000002'));
 select pg_temp.check_case('4 no card without one', 'none', pg_temp.op_card('f1407000-0000-4000-8000-000000000001'));
+select pg_temp.check_case('4 the card under 0131''s own-facility grant', 'Chidi Open/-/1979-09-09/E6F7/f',
+  pg_temp.op_card('f1407000-0000-4000-8000-000000000003'));
+-- D6, as Identity asks it before the access check.
+select pg_temp.check_case('4 D6: a patient exists, a UUID that is no patient does not', 't/f',
+  format('%s/%s', auth.session_open_patient_target_exists('f1407000-0000-4000-8000-000000000001'),
+    auth.session_open_patient_target_exists('f1407fff-0000-4000-8000-000000000999')));
 select set_config('app.purpose_of_use', 'emergency', true);
 select pg_temp.check_case('4 no card under another purpose', 'none', pg_temp.op_card('f1407000-0000-4000-8000-000000000002'));
+-- A doctor holding identity.registration.write (a real account_roles row):
+-- 0011's registration read now shows A every unsealed patient, Amaka
+-- included, yet the card follows the grant, not that read (Ola's review of
+-- #295, item 2).
+reset role;
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
+  ('f140c000-0000-4000-8000-0000000000a1', 'f1402000-0000-4000-8000-00000000000a', 'doctor', 'facility',
+   'f1405000-0000-4000-8000-0000000000a1', 'f1401000-0000-4000-8000-0000000000f1', 'Synthetic doctor role');
+set local role hid_identity_api_runtime;
+select set_config('app.purpose_of_use', 'direct-care', true);
+select pg_temp.check_case('4 a registration writer sees Amaka through 0011''s read', 't/1',
+  format('%s/%s', auth.membership_has_permission('synthetic:open-patient-0140:a', 'f1405000-0000-4000-8000-0000000000a1',
+      'f1401000-0000-4000-8000-0000000000f1', 'identity.registration.write'),
+    (select count(*) from identity.patients where id = 'f1407000-0000-4000-8000-000000000001')));
+select pg_temp.check_case('4 a registration writer gets no card without the grant', 'none',
+  pg_temp.op_card('f1407000-0000-4000-8000-000000000001'));
+select pg_temp.check_case('4 a registration writer still gets the card under the grant', 'Bayo Open/-/1985-02-02/C4D5/f',
+  pg_temp.op_card('f1407000-0000-4000-8000-000000000002'));
 reset role;
 
 do $$

@@ -1896,3 +1896,5 @@ revoke all on function identity.sealed_qa_hospital_work_staff_install() from pub
 -- exactly as 0140 grants: the Identity runtime only.
 grant select, insert, update, delete on auth.session_open_patient to hid_identity_runtime;
 revoke all on function auth.guard_session_open_patient_change() from public;
+revoke all on function auth.session_open_patient_target_exists(uuid) from public;
+grant execute on function auth.session_open_patient_target_exists(uuid) to hid_identity_runtime;

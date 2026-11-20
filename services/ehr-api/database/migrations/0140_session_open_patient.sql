@@ -33,13 +33,23 @@
 --    (0129's admission, unchanged). The patient is the access check's (D2):
 --    the guard runs as the Identity runtime, which reads a patient only
 --    through row-level security; the foreign key keeps it a real patient.
---    Unlike 0129's row, this one is deleted: by the user's clear, a move to another
---    facility, an ended or expired read, or sign-out.
+--    Unlike 0129's row, this one is deleted: by the user's clear, a move to
+--    another facility, or an ended or expired read. Sign-out, sign-out
+--    everywhere and the sign-in's end delete nothing: the row stays, unread
+--    (only a live session of the sign-in reads it), until a sweep.
 -- D4 The guard is SECURITY INVOKER with search_path pg_catalog, pg_temp and
 --    every name qualified (the Identity runtime reads every table it reads).
 -- D5 Grants: SELECT, INSERT, UPDATE and DELETE to hid_identity_runtime where
 --    it exists (the runtime roles' bootstrap may come after the
 --    migrations), here and in runtime-grants.sql; nothing to any other role.
+-- D6 auth.session_open_patient_target_exists(patient uuid): whether a patient
+--    row with that id exists, whatever its status, for the Identity runtime
+--    only. Identity asks it before the access check, so that a UUID that is
+--    no patient gets the same 403 and stores nothing (the check's audit row
+--    names the patient, and audit.events' foreign key would refuse it). It
+--    answers only true or false and is never sent to the caller. SQL,
+--    STABLE, SECURITY DEFINER owned by identity.patients' owner (that table's
+--    row-level security is not forced), search_path pg_catalog, pg_temp.
 --
 -- Locks: SHARE ROW EXCLUSIVE on auth.sessions, auth.accounts,
 -- identity.facilities, identity.staff_facility_memberships and
@@ -63,6 +73,7 @@
 -- 1. The table (D1).
 -- 2. The guard and its trigger (D3, D4).
 -- 3. Grants (D5).
+-- 3b. The patient existence check (D6).
 -- 4. Post-checks.
 
 -- 0. Preconditions.
@@ -164,7 +175,7 @@ create table auth.session_open_patient (
 );
 create index session_open_patient_patient_idx on auth.session_open_patient (patient_id);
 comment on table auth.session_open_patient is
-  'The patient a staff sign-in (session family, keyed by its first session) had open at one facility, for at most 8 hours (0140, SX-8). Only what GET /auth/session reports, after the access check is run again; never an authorization. Written by the Identity runtime only; deleted by the user''s clear, a move to another facility, an ended or expired read and sign-out.';
+  'The patient a staff sign-in (session family, keyed by its first session) had open at one facility, for at most 8 hours (0140, SX-8). Only what GET /auth/session reports, after the access check is run again; never an authorization. Written by the Identity runtime only; deleted by the user''s clear, a move to another facility and an ended or expired read. Sign-out deletes nothing: the row stays, unread, until a sweep.';
 
 -- 2. The guard (D3, D4) and its trigger.
 create function auth.guard_session_open_patient_change()
@@ -234,6 +245,32 @@ begin
 end
 $$;
 
+-- 3b. The patient existence check (D6).
+create function auth.session_open_patient_target_exists(requested_patient_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+  select exists (select 1 from identity.patients patient_row where patient_row.id = requested_patient_id)
+$$;
+comment on function auth.session_open_patient_target_exists(uuid) is
+  'Whether a patient row with this id exists, whatever its status (0140, SX-8, D6). For the Identity runtime only: asked before POST /auth/open-patient''s access check, so that a UUID that is no patient gets the same 403 as a refused patient. Never sent to the caller.';
+revoke all on function auth.session_open_patient_target_exists(uuid) from public;
+do $$
+declare
+  patients_owner name := (select pg_get_userbyid(relowner) from pg_class where oid = 'identity.patients'::regclass);
+begin
+  if patients_owner <> current_user then
+    execute format('alter function auth.session_open_patient_target_exists(uuid) owner to %I', patients_owner);
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'hid_identity_runtime') then
+    grant execute on function auth.session_open_patient_target_exists(uuid) to hid_identity_runtime;
+  end if;
+end
+$$;
+
 -- 4. Post-checks.
 do $$
 declare
@@ -265,6 +302,22 @@ begin
               and privilege.privilege_type in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'));
   if offender is not null then
     raise exception using errcode = '55000', message = format('0140: a role holds a privilege on the table it must not: %s', offender);
+  end if;
+  if (select count(*) from pg_proc proc
+        where proc.oid = 'auth.session_open_patient_target_exists(uuid)'::regprocedure
+          and proc.prosecdef and proc.provolatile = 's' and proc.prolang = (select oid from pg_language where lanname = 'sql')
+          and proc.proowner = (select relowner from pg_class where oid = 'identity.patients'::regclass)
+          and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 1 then
+    raise exception using errcode = '55000', message = '0140: the patient existence check is not as created';
+  end if;
+  select string_agg(coalesce(pg_get_userbyid(acl.grantee), 'PUBLIC'), ', ') into offender
+    from pg_proc proc
+    cross join lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+   where proc.oid = 'auth.session_open_patient_target_exists(uuid)'::regprocedure
+     and acl.grantee <> proc.proowner
+     and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) <> 'hid_identity_runtime');
+  if offender is not null then
+    raise exception using errcode = '55000', message = format('0140: a role may run the patient existence check it must not: %s', offender);
   end if;
 end
 $$;
