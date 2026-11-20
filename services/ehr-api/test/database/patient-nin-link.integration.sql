@@ -101,7 +101,8 @@ create function pg_temp.precheck(n integer, patient uuid, hmac text, idempotency
   purpose text default 'healthcare-operations') returns text language plpgsql as $f$
 begin
   perform pg_temp.as_member(n, purpose);
-  return identity.patient_nin_link_precheck(patient, hmac, idempotency_key, request_sha);
+  return (select format('%s%s', decision, coalesce('/' || first_name || '/' || last_name || '/' || date_of_birth, ''))
+            from identity.patient_nin_link_precheck(patient, hmac, idempotency_key, request_sha));
 exception when others then
   return sqlstate || ' ' || sqlerrm;
 end
@@ -158,7 +159,8 @@ select 4, pg_temp.register(3, 'e1380500-0000-4000-8000-000000000004', 'Efe', 'Li
 select pg_temp.check_case('0 fixtures registered', '4', (select count(patient)::text from pg_temp.link_patients));
 
 -- 1. The precheck.
-select pg_temp.check_case('1 own patient is eligible', 'eligible',
+select pg_temp.check_case('1 own patient is eligible, with the record''s name and date of birth',
+  'eligible/Ngozi/Linkone/' || ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '5 years')::date,
   pg_temp.precheck(1, (select patient from pg_temp.link_patients where n = 1), repeat('a', 64), 'nin-link-key-0001', repeat('c', 64)));
 select pg_temp.check_case('1 another facility''s patient', 'not_permitted',
   pg_temp.precheck(1, (select patient from pg_temp.link_patients where n = 4), repeat('a', 64), 'nin-link-key-0001', repeat('c', 64)));
@@ -234,7 +236,8 @@ select pg_temp.check_case('3 link replay', 'replay',
 select pg_temp.check_case('3 link key reused', 'key_reused',
   pg_temp.link(1, (select patient from pg_temp.link_patients where n = 2), 'e1380600-0000-4000-8000-000000000034',
     repeat('b', 64), 'nin-link-key-0001', repeat('9', 64)));
-select pg_temp.check_case('3 another member may use the same key', 'eligible',
+select pg_temp.check_case('3 another member may use the same key', 'eligible/Efe/Linkfour/'
+    || ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '8 years')::date,
   pg_temp.precheck(3, (select patient from pg_temp.link_patients where n = 4), repeat('b', 64), 'nin-link-key-0001', repeat('c', 64)));
 
 -- 4. A NIN on another record.
@@ -272,7 +275,7 @@ begin
     set_config('app.correlation_id', 'nin-link-suite-foreign-membership', true),
     set_config('app.purpose_of_use', 'healthcare-operations', true);
   begin
-    perform identity.patient_nin_link_precheck((select patient from pg_temp.link_patients where n = 3),
+    perform * from identity.patient_nin_link_precheck((select patient from pg_temp.link_patients where n = 3),
       repeat('c', 64), 'nin-link-key-0053', repeat('6', 64));
     perform pg_temp.check_case('5 another account''s membership', '42501', 'answered');
   exception when others then

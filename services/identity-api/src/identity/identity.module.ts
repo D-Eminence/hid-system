@@ -7,6 +7,7 @@ import { IntegrationModule } from '../integrations/integration.module';
 import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
 import { RegistrationWithoutNinService } from './registration-without-nin.service';
+import { PatientNinLinkService } from './patient-nin-link.service';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
 import { IdentityService } from './identity.service';
 import { RecordAccessNoticeService } from './record-access-notice.service';
@@ -86,6 +87,7 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
     NinRegistrationService,
     // ID-2 (0130): registration at the desk without a NIN.
     RegistrationWithoutNinService,
+    PatientNinLinkService,
     // ID-0: one NIN service breaker per process, shared by resolve and registration-capabilities.
     NinProviderBreaker,
     FacilityProfileService,

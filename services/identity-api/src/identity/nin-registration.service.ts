@@ -12,7 +12,7 @@ import { NinIdentifierProtector, type ProtectedNin } from './nin-identifier-prot
 import { assertSafeNinVerificationResult, implausibleClaimedDemographics, isNinCheckNotStarted,
   isNinCheckOwnFault, isNinCheckRefusedUnsent, isNinCheckStillRunning, isNinNotConfigured, isStoredNinAnswer,
   ninCheckNotStarted, ninCouldNotBeVerified, ninNotConfigured } from './nin-verification.provider';
-import { NIN_VERIFICATION_PROVIDER, type NinCheckSettlement, type NinClaimedDemographics,
+import { NIN_VERIFICATION_PROVIDER, type NinCheckOutcome, type NinCheckSettlement, type NinClaimedDemographics,
   type NinVerificationProvider, type NinVerificationResult } from './nin.types';
 import { NinProviderBreaker } from './nin-provider-breaker';
 import { ninStatusOf, patientHasVerifiedNinSql, type NinStatus } from './nin-status';
@@ -160,6 +160,21 @@ export interface RegistrationCaseListItem extends RegistrationCaseResult {
   updatedAt: string;
   /** This member started the case. */
   createdByMe: boolean;
+}
+
+/** ID-6 (0138): what the desk's check of a NIN for a registered patient found. */
+export interface NinLinkCheck {
+  verified: boolean;
+  outcome: NinCheckOutcome;
+  /** False when nothing was sent: a stored answer, Q110's record, or details no one can have. */
+  providerCalled: boolean;
+  stored: boolean;
+  /** Q110: answered by the Health ID record that holds the NIN. */
+  healthIdRecord: boolean;
+  /** That record, for the caller's audit only. */
+  holderPatientId?: string;
+  /** The NIN service's reference for a match it made. */
+  reference?: string;
 }
 
 export interface RegistrationCaseList {
@@ -881,6 +896,42 @@ export class NinRegistrationService {
    */
   private async verifyWithProvider(input: ResolveNinDto, claimedDemographics: NinClaimedDemographics,
     context: DataAccessContext): Promise<NinVerificationResult> {
+    const verification = await this.checkWithProvider(input.nin, claimedDemographics, context);
+    if (!verification.verified) {
+      const ninCheck = verification.outcome === 'name_mismatch' ? 'name_mismatch' : 'no_match';
+      throw await this.ninNotVerified(context, verification.provider, ninCheck,
+        verification.stored ? { storedAnswer: true } : {});
+    }
+    // Q108: every NIN check is audited on its own, before the case is
+    // written, so a charged check that matched is on record even when the
+    // case then cannot be created (for example, already in a workflow).
+    await this.audit.record({
+      correlationId: context.correlationId,
+      actorType: 'staff',
+      actorSubject: context.actor.subject,
+      actorAccountId: context.actor.accountId,
+      actorMembershipId: context.membershipId,
+      organizationId: context.actor.facility?.organizationId,
+      facilityId: context.facilityId,
+      action: 'identity.nin.verify',
+      resourceType: 'registration-case',
+      outcome: 'success',
+      purposeOfUse: context.purposeOfUse,
+      details: { provider: verification.provider, ninCheck: 'match',
+        ...(verification.stored ? { storedAnswer: true } : {}) },
+    });
+    return verification;
+  }
+
+  /**
+   * Q108: the NIN service's check of a NIN (QoreID through 0137's guard, or
+   * the test provider) with the given name and date of birth, behind the
+   * breaker. Answers the result, matched or not; the NIN service's failures
+   * and the guard's refusals are thrown, each counted (or not) by the
+   * breaker as D4 says. resolve's and ID-6's (checkNinForLink) checks.
+   */
+  private async checkWithProvider(nin: string, claimedDemographics: NinClaimedDemographics,
+    context: DataAccessContext): Promise<NinVerificationResult> {
     let verification: NinVerificationResult;
     try {
       // ID-0: while the NIN service breaker is tripped, no check is sent.
@@ -914,12 +965,12 @@ export class NinRegistrationService {
     };
     try {
       verification = await this.provider.verify({
-        nin: input.nin,
+        nin,
         claimedDemographics,
         correlationId: context.correlationId,
         onSettled,
       });
-      assertSafeNinVerificationResult(verification, this.provider.name, input.nin);
+      assertSafeNinVerificationResult(verification, this.provider.name, nin);
     } catch (error) {
       if (isNinNotConfigured(error) || isNinCheckNotStarted(error) || isNinCheckRefusedUnsent(error)) {
         // Q108: switched off, or the switch could not be read, between the
@@ -977,30 +1028,71 @@ export class NinRegistrationService {
     // through; it only frees that place.
     if (verification.stored) this.ninBreaker.release();
     else this.ninBreaker.recordSuccess();
-    if (!verification.verified) {
-      const ninCheck = verification.outcome === 'name_mismatch' ? 'name_mismatch' : 'no_match';
-      throw await this.ninNotVerified(context, verification.provider, ninCheck,
-        verification.stored ? { storedAnswer: true } : {});
-    }
-    // Q108: every NIN check is audited on its own, before the case is
-    // written, so a charged check that matched is on record even when the
-    // case then cannot be created (for example, already in a workflow).
-    await this.audit.record({
-      correlationId: context.correlationId,
-      actorType: 'staff',
-      actorSubject: context.actor.subject,
-      actorAccountId: context.actor.accountId,
-      actorMembershipId: context.membershipId,
-      organizationId: context.actor.facility?.organizationId,
-      facilityId: context.facilityId,
-      action: 'identity.nin.verify',
-      resourceType: 'registration-case',
-      outcome: 'success',
-      purposeOfUse: context.purposeOfUse,
-      details: { provider: verification.provider, ninCheck: 'match',
-        ...(verification.stored ? { storedAnswer: true } : {}) },
-    });
     return verification;
+  }
+
+  /**
+   * ID-6 (0138): the desk's check of a NIN for a patient already registered
+   * at this facility, with the name and date of birth on the patient's own
+   * record, through every gate resolve's check passes: NIN checks deferred
+   * or switched off (Q108), a desk of the sealed demo or QA tenant (0098 G6,
+   * 0123 G6q: nothing is sent), Q110 (a NIN a Health ID holds is answered
+   * by that record, never sent), then the NIN service behind the breaker and
+   * 0137's guard (checkWithProvider). Answers whether the details matched;
+   * the NIN service's failures and the guard's refusals are thrown as for
+   * resolve. Details that cannot be anyone's are answered "not matched"
+   * without a (charged) check. `holderPatientId` is the record that holds
+   * the NIN under Q110, for the caller's audit only.
+   */
+  async checkNinForLink(nin: string, ninLookupHmac: string, claimed: NinClaimedDemographics,
+    context: DataAccessContext): Promise<NinLinkCheck> {
+    if (this.provider.name === 'deferred') {
+      const error = new DomainProblem(503, 'NIN_PROVIDER_DEFERRED', 'NIN verification is deferred for this staging environment');
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw error;
+    }
+    if (implausibleClaimedDemographics(claimed)) {
+      return { verified: false, outcome: 'no_match', providerCalled: false, stored: false, healthIdRecord: false };
+    }
+    let switchedOn = this.provider.name !== 'unavailable';
+    if (switchedOn && this.provider.isEnabled) {
+      try {
+        switchedOn = await this.provider.isEnabled();
+      } catch (error) {
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw ninCheckNotStarted();
+      }
+    }
+    if (!switchedOn) {
+      const error = ninNotConfigured();
+      await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+      throw error;
+    }
+    if (this.provider.name === QOREID_PROVIDER) {
+      let sealed: boolean;
+      try {
+        sealed = await this.sealedTenant(context.facilityId, context.actor.accountId);
+      } catch (error) {
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false });
+        throw ninCheckNotStarted();
+      }
+      if (sealed) {
+        const error = ninNotConfigured();
+        await this.auditFailure(context, 'identity.nin.verify', error, { providerCalled: false, sealedTenant: true });
+        throw error;
+      }
+    }
+    const onHealthId = await this.ninOnHealthId(context, ninLookupHmac, claimed);
+    if (onHealthId) {
+      return { verified: onHealthId.verification !== undefined,
+        outcome: onHealthId.verification ? 'match' : 'name_mismatch', providerCalled: false, stored: false,
+        healthIdRecord: true, holderPatientId: onHealthId.patientId };
+    }
+    const verification = await this.checkWithProvider(nin, claimed, context);
+    return { verified: verification.verified,
+      outcome: verification.outcome ?? (verification.verified ? 'match' : 'no_match'),
+      providerCalled: !verification.stored, stored: verification.stored === true, healthIdRecord: false,
+      ...(verification.verified ? { reference: verification.reference } : {}) };
   }
 
   /**

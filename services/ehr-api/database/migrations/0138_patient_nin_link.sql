@@ -39,7 +39,8 @@
 --    'not_permitted' (not this facility's own patient), 'already_linked' (the
 --    same NIN, by lookup HMAC), 'has_nin' (another verified NIN), 'replay'
 --    or 'key_reused' (the account's Idempotency-Key, with the same or
---    another digest), or 'eligible'.
+--    another digest), or 'eligible' with the record's first and last name
+--    and date of birth, which identity-api compares with the NIN record.
 -- 4. identity.link_patient_nin(...): the link, in one transaction. 0058's
 --    advisory lock on the NIN (so a desk link and the patient's own binding
 --    of the same NIN wait for each other), then the patient row FOR UPDATE;
@@ -259,12 +260,13 @@ comment on column identity.patient_identifiers.nin_link_id is
 create function identity.patient_nin_link_precheck(
   requested_patient_id uuid, requested_lookup_hmac char(64),
   requested_idempotency_key text, requested_request_sha256 char(64)
-) returns text
+) returns table (decision text, first_name text, last_name text, date_of_birth date)
 language plpgsql
 stable
 security definer
 set search_path = pg_catalog, pg_temp
 as $$
+#variable_conflict use_column
 declare
   actor_subject text := platform.current_actor_subject();
   actor_account uuid := auth.account_id_for_subject(actor_subject);
@@ -296,8 +298,9 @@ begin
     from identity.patient_nin_links link
    where link.actor_account_id = actor_account and link.idempotency_key = requested_idempotency_key;
   if found then
-    return case when stored_sha256 = requested_request_sha256 and stored_patient = requested_patient_id
-                then 'replay' else 'key_reused' end;
+    return query select case when stored_sha256 = requested_request_sha256 and stored_patient = requested_patient_id
+                             then 'replay' else 'key_reused' end, null::text, null::text, null::date;
+    return;
   end if;
   select patient.id into patient_value
     from identity.patients patient
@@ -305,10 +308,12 @@ begin
      and identity.sealed_demo_facility(actor_facility) = identity.sealed_demo_patient(patient.id)
      and identity.sealed_qa_facility(actor_facility) = identity.sealed_qa_patient(patient.id);
   if patient_value is null then
-    return 'not_found';
+    return query select 'not_found'::text, null::text, null::text, null::date;
+    return;
   end if;
   if identity.own_facility_basis(patient_value, actor_facility) is null then
-    return 'not_permitted';
+    return query select 'not_permitted'::text, null::text, null::text, null::date;
+    return;
   end if;
   select identifier.lookup_hmac into existing_hmac
     from identity.patient_identifiers identifier
@@ -317,16 +322,21 @@ begin
    order by identifier.lookup_hmac = requested_lookup_hmac desc
    limit 1;
   if existing_hmac is not null then
-    return case when existing_hmac = requested_lookup_hmac then 'already_linked' else 'has_nin' end;
+    return query select case when existing_hmac = requested_lookup_hmac then 'already_linked' else 'has_nin' end,
+                        null::text, null::text, null::date;
+    return;
   end if;
-  return 'eligible';
+  -- Eligible: the record's name and date of birth, which identity-api
+  -- compares with the NIN record (either order, as the patient's own check).
+  return query select 'eligible'::text, patient.first_name, patient.last_name, patient.dob
+    from identity.patients patient where patient.id = patient_value;
 end;
 $$;
 revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char) from public;
 grant execute on function identity.patient_nin_link_precheck(uuid, char, text, char)
   to hid_identity_runtime, hid_schema_test_runtime;
 comment on function identity.patient_nin_link_precheck(uuid, char, text, char) is
-  '0138 (ID-6): what POST identity/patients/:id/nin may do before QoreID is asked: not_found, not_permitted, already_linked, has_nin, replay, key_reused or eligible.';
+  '0138 (ID-6): what POST identity/patients/:id/nin may do before QoreID is asked: not_found, not_permitted, already_linked, has_nin, replay, key_reused, or eligible with the record''s name and date of birth (compared with the NIN record by identity-api).';
 
 -- 4. The link.
 create function identity.link_patient_nin(

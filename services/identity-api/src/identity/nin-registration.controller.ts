@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Headers, Inject, Optional, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Header, Headers, HttpCode, Inject, Optional, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { AuditAction, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
@@ -14,6 +14,8 @@ import { RegisterWithoutNinDto, NO_NIN_REASONS } from './dto/register-without-ni
 import { RegistrationWithoutNinService } from './registration-without-nin.service';
 import { DomainProblem } from '../common/problem';
 import { NIN_VERIFICATION_PROVIDER, type NinVerificationProvider } from './nin.types';
+import { LinkPatientNinDto } from './dto/link-patient-nin.dto';
+import { PatientNinLinkService } from './patient-nin-link.service';
 
 @Controller('identity')
 export class NinRegistrationController {
@@ -22,6 +24,7 @@ export class NinRegistrationController {
     @Optional() private readonly ninBreaker: NinProviderBreaker = new NinProviderBreaker(),
     @Optional() private readonly withoutNin?: RegistrationWithoutNinService,
     @Optional() @Inject(NIN_VERIFICATION_PROVIDER) private readonly provider?: NinVerificationProvider,
+    @Optional() private readonly ninLink?: PatientNinLinkService,
   ) {}
 
   @Get('registration-capabilities')
@@ -178,6 +181,30 @@ export class NinRegistrationController {
       return this.withoutNin.review(caseId, 'link_existing', input, idempotencyKey, context);
     }
     return this.registrations.linkExisting(caseId, input, idempotencyKey, context);
+  }
+
+  /**
+   * ID-6 (0138, Akos P0-1): verify a NIN later and link it, for this
+   * facility's own patient (0131's basis; a consent grant does not allow it).
+   * The patient by UUID; the NIN only in the body. 200 with nin_linked or
+   * already_linked; the refusals are the planned contract's (ID-6).
+   */
+  @Post('patients/:patientId/nin')
+  @HttpCode(200)
+  @RequirePermissions('identity.registration.write')
+  @AuditAction('identity.patient.nin-link.request')
+  linkNin(
+    @Param('patientId', new ParseUUIDPipe()) patientId: string,
+    @Body() input: LinkPatientNinDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: HidRequest,
+  ) {
+    requireIdempotencyKey(idempotencyKey);
+    const context = requireRequestContext(request, input.purpose);
+    if (!this.ninLink) {
+      throw new DomainProblem(503, 'NIN_LINK_UNAVAILABLE', 'Adding a NIN is not available right now.');
+    }
+    return this.ninLink.link(patientId, input, idempotencyKey, context);
   }
 
   private requireWithoutNin(): RegistrationWithoutNinService {
