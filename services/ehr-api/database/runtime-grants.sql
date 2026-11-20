@@ -1897,9 +1897,8 @@ revoke all on function identity.sealed_qa_hospital_work_staff_install() from pub
 -- is ehr.discard_consultation_draft), the author check the policies call,
 -- the author's list, the sweeper, discard and the on-demand expiry, to the
 -- EHR runtime alone. The table's owner policies are the owner's; no runtime
--- role is a member of the owner. The session helper and the legal-hold check
--- are run only by 0141's own functions (the hold check is platform.legal_holds'
--- owner's, with EXECUTE for 0141's owner alone).
+-- role is a member of the owner. The session helper is run only by 0141's own
+-- functions. Drafts fall outside legal hold, so none reads platform.legal_holds.
 grant select, insert, update on ehr.consultation_drafts to hid_ehr_runtime;
 revoke delete on ehr.consultation_drafts from hid_ehr_runtime;
 grant execute on function ehr.list_my_consultation_drafts(), ehr.sweep_consultation_drafts(integer),
@@ -1909,4 +1908,4 @@ revoke all on ehr.consultation_drafts from public;
 revoke all on function ehr.list_my_consultation_drafts(), ehr.sweep_consultation_drafts(integer),
   ehr.is_consultation_draft_author(uuid, uuid, uuid), ehr.guard_consultation_draft(),
   ehr.discard_consultation_draft(uuid, uuid), ehr.expire_my_consultation_draft(uuid, uuid),
-  ehr.consultation_draft_session(), ehr.consultation_draft_held(uuid, uuid) from public;
+  ehr.consultation_draft_session() from public;

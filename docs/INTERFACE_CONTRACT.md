@@ -9059,8 +9059,10 @@ All routes: `X-Facility-Id`, `X-Purpose-Of-Use: direct-care`, permission
 | `GET /api/v1/ehr/my-consultation-drafts` | per patient (below) |
 
 Consent is checked by ehr-api and again by the database (row-level security),
-as for notes: once the patient's grant ends, the draft is hidden from list,
-read and save at once (404 below). Discard still works.
+as for notes. Once the patient's grant has ended, list, read and save answer
+403 `CONSENT_REQUIRED` (audited as denied), as other clinical routes do: ehr-api
+asks before the database is reached. 404 `CONSULTATION_DRAFT_NOT_FOUND`
+happens only if the grant ends during the request. Discard still works.
 
 **Create** body: `{ "encounterId"?: uuid, "formVersion": 1-1000, "content": { … } }`.
 `encounterId` is optional: any visit of this patient here that was not
@@ -9083,8 +9085,7 @@ replay):
 author per patient with no visit: a second is 409
 `CONSULTATION_DRAFT_EXISTS`, and the problem carries the existing `draftId`.
 The author's own draft for that visit that has expired but is not yet removed
-is cleared first (audited as `.expire`) and the create goes through, unless a
-legal hold keeps it (then 409 with no `draftId`).
+is cleared first (audited as `.expire`) and the create goes through.
 
 **Save** (`PATCH`): `{ "expectedRowVersion", "formVersion", "content" }`,
 replacing the whole content; `200` with the create answer's shape and the new
@@ -9112,15 +9113,16 @@ A draft for a patient the author can no longer read for direct care is not
 listed; it is counted in `hiddenCount` (and still deleted on time). At most
 50, newest save first.
 
-Drafts are deleted 7 days after the last save, except while a legal hold
-(0096) names the patient or the author: a hold overrides lifecycle deletion
-(DATABASE.md), so the draft is kept, unreadable once expired, until the hold
-is released.
+Drafts are deleted 7 days after the last save. **Drafts fall outside legal
+hold** (owner's ruling on #258, OWNER_RULING): a draft is unsigned working text
+that its author may discard at any time, and the saved note is what enters the
+record, so DATABASE.md's "a hold overrides lifecycle deletion" does not cover
+drafts.
 
-Another member's draft, an expired one, a discarded one and one whose
-patient's grant has ended all answer 404 `CONSULTATION_DRAFT_NOT_FOUND`: the
-database shows the author only their own unexpired drafts of patients they
-may read now. A read or save refused so is audited as other clinical reads
+Another member's draft, an expired one and a discarded one answer 404
+`CONSULTATION_DRAFT_NOT_FOUND`: the database shows the author only their own
+unexpired drafts of patients they may read now (a patient whose grant has
+ended is 403 `CONSENT_REQUIRED` first, above). A read or save refused so is audited as other clinical reads
 are (`failure`, reason `not_found`).
 
 Audit (never the content): `ehr.consultation-draft.create`, `.update`,
@@ -9168,8 +9170,5 @@ expired draft (the author as actor).
 - SECURITY DEFINER, EHR runtime: `ehr.list_my_consultation_drafts()`,
   `ehr.sweep_consultation_drafts(batch)` (ehr-api runs it every 10 minutes),
   `ehr.discard_consultation_draft(draft, patient)` and
-  `ehr.expire_my_consultation_draft(patient, visit)`. The sweeper and the
-  on-demand expiry skip drafts under a legal hold through
-  `ehr.consultation_draft_held(patient, account)`, which is
-  `platform.legal_holds`' owner's (its policy alone reads the holds) and run
-  only by 0141's own functions.
+  `ehr.expire_my_consultation_draft(patient, visit)`. Neither reads
+  `platform.legal_holds`: drafts fall outside legal hold.

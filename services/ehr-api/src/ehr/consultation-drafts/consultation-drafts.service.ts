@@ -340,8 +340,8 @@ export class ConsultationDraftsService {
   /**
    * Inserts the draft. On a conflict the author cannot see (their own draft
    * for this visit, expired but not yet swept), 0141's
-   * ehr.expire_my_consultation_draft clears it (never under a legal hold),
-   * and the insert is tried once more. A visible conflict, or a second one,
+   * ehr.expire_my_consultation_draft clears it (drafts fall outside legal
+   * hold), and the insert is tried once more. A visible conflict, or a second one,
    * is 409 CONSULTATION_DRAFT_EXISTS, naming the draft when it is visible.
    */
   private async insertDraft(client: PoolClient, context: DataAccessContext, patientId: string,

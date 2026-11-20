@@ -45,14 +45,14 @@
 --    runtime): deletes up to `batch` (1-1000) drafts past expires_at, oldest
 --    first, with one ehr.consultation-draft.expire audit row each (system
 --    actor, the run's correlation id, never the content), and answers how
---    many. A draft whose patient or author is under an unreleased legal hold
---    (platform.legal_holds, 0096) is kept: a hold overrides lifecycle
---    deletion (DATABASE.md). The expiry is tested again on the row deleted,
---    so a save that renewed the draft meanwhile keeps it.
--- D6 ehr.consultation_draft_held(patient, account): whether an unreleased
---    legal hold names the patient or the account. platform.legal_holds is
---    readable only by its owner (0096's policy), so this one function is
---    that owner's, executable only by this file's functions' owner.
+--    many. The expiry is tested again on the row deleted, so a save that
+--    renewed the draft meanwhile keeps it.
+-- D6 Drafts fall outside legal hold (owner's ruling on #258, OWNER_RULING):
+--    a draft is unsigned working text that its author may discard at any
+--    time, and the saved note is what enters the record, so DATABASE.md's
+--    "a hold overrides lifecycle deletion" does not cover drafts. Expiry,
+--    the sweep and discard ignore platform.legal_holds, and a held patient's
+--    expired draft never blocks its author's next draft.
 -- D7 ehr.discard_consultation_draft(draft, patient) (SECURITY DEFINER, EHR
 --    runtime): the session author deletes their own draft, expired or not,
 --    with no consent check (Q126 A: discard needs authorship only), and one
@@ -62,8 +62,8 @@
 --    whether a draft was deleted; safe to repeat.
 -- D8 ehr.expire_my_consultation_draft(patient, visit) (SECURITY DEFINER, EHR
 --    runtime): deletes the session author's own draft for that patient and
---    visit (or no visit) only if it has expired and no legal hold covers
---    it, with the sweeper's .expire audit row (the author as actor). A create
+--    visit (or no visit) only if it has expired, with the sweeper's .expire
+--    audit row (the author as actor). A create
 --    that meets an expired draft not yet swept clears it and tries once more.
 -- D9 Grants, here and in runtime-grants.sql: SELECT, INSERT and UPDATE on
 --    the table and EXECUTE on the five runtime functions to hid_ehr_runtime
@@ -71,9 +71,7 @@
 --
 -- Locks: SHARE ROW EXCLUSIVE on identity.patients, identity.facilities,
 -- auth.accounts, identity.staff_facility_memberships and ehr.encounters (the
--- foreign keys of a new, empty table), and ACCESS SHARE on
--- platform.legal_holds (D6's SQL body is parsed when it is created), held to
--- commit. Taken first, NOWAIT:
+-- foreign keys of a new, empty table), held to commit. Taken first, NOWAIT:
 -- a busy table fails the attempt at once and its subtransaction releases
 -- what it took; the attempt is made again every 100 ms for at most 5
 -- seconds, then 55P03 (nothing applied). When this transaction already holds
@@ -104,16 +102,9 @@ begin
      or to_regprocedure('ehr.list_my_consultation_drafts()') is not null
      or to_regprocedure('ehr.is_consultation_draft_author(uuid,uuid,uuid)') is not null
      or to_regprocedure('ehr.sweep_consultation_drafts(integer)') is not null
-     or to_regprocedure('ehr.consultation_draft_held(uuid,uuid)') is not null
      or to_regprocedure('ehr.discard_consultation_draft(uuid,uuid)') is not null
      or to_regprocedure('ehr.expire_my_consultation_draft(uuid,uuid)') is not null then
     raise exception using errcode = '55000', message = '0141: already applied';
-  end if;
-  -- D6 reads 0096's legal holds, which only their owner may read.
-  if to_regclass('platform.legal_holds') is null
-     or not exists (select 1 from pg_policy policy
-                     where policy.polrelid = 'platform.legal_holds'::regclass and policy.polname = 'legal_holds_owner') then
-    raise exception using errcode = '55000', message = '0141: platform.legal_holds (0096) is not as this file reads it';
   end if;
   select string_agg(expected.signature, ', ') into mismatch
     from (values
@@ -169,17 +160,16 @@ begin
     begin
       lock table identity.patients, identity.facilities, auth.accounts, identity.staff_facility_memberships,
         ehr.encounters in share row exclusive mode nowait;
-      lock table platform.legal_holds in access share mode nowait;
       exit;
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
-          message = '0141: identity.patients, identity.facilities, auth.accounts, the staff memberships, ehr.encounters or platform.legal_holds is busy, and this transaction already holds an earlier migration''s '
+          message = '0141: identity.patients, identity.facilities, auth.accounts, the staff memberships, or ehr.encounters is busy, and this transaction already holds an earlier migration''s '
             || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0141: identity.patients, identity.facilities, auth.accounts, the staff memberships, ehr.encounters or platform.legal_holds stayed busy for 5 seconds; nothing applied; run the release again at a '
+          message = '0141: identity.patients, identity.facilities, auth.accounts, the staff memberships, or ehr.encounters stayed busy for 5 seconds; nothing applied; run the release again at a '
             || 'quieter time';
       end if;
       perform pg_sleep(0.1);
@@ -397,36 +387,6 @@ comment on function ehr.list_my_consultation_drafts() is
   '0141 (EHR-C6): the session author''s live consultation drafts at the session facility, newest save first, at most 50; listed only while the session may read the patient''s records now for direct care (ehr.context_allows), the rest counted in hidden_count; the waiting-list card''s patient fields, never a full Health ID. Needs ehr.note.write. Audited: one ehr.consultation-draft.list row and one .shown row per patient shown. Never the content.';
 revoke all on function ehr.list_my_consultation_drafts() from public;
 
--- 2b. Legal holds (D6). platform.legal_holds is readable only by its owner
--- (0096's legal_holds_owner policy), so this function becomes that owner's,
--- and only this file's functions' owner may run it.
-create function ehr.consultation_draft_held(draft_patient uuid, draft_account uuid)
-returns boolean
-language sql
-stable
-security definer
-set search_path = pg_catalog, pg_temp
-as $$
-  select exists (select 1 from platform.legal_holds hold
-                  where hold.released_at is null
-                    and ((hold.subject_type = 'patient' and hold.subject_id = draft_patient)
-                      or (hold.subject_type = 'account' and hold.subject_id = draft_account)))
-$$;
-comment on function ehr.consultation_draft_held(uuid, uuid) is
-  '0141 (EHR-C6): whether an unreleased legal hold (0096) names this patient or this account. A held draft is never deleted by expiry. Owned by platform.legal_holds'' owner, whose policy alone reads the holds.';
-revoke all on function ehr.consultation_draft_held(uuid, uuid) from public;
-do $$
-declare
-  holds_owner name := (select pg_get_userbyid(relation.relowner) from pg_class relation
-                        where relation.oid = 'platform.legal_holds'::regclass);
-begin
-  if holds_owner <> current_user then
-    execute format('alter function ehr.consultation_draft_held(uuid, uuid) owner to %I', holds_owner);
-    execute format('grant execute on function ehr.consultation_draft_held(uuid, uuid) to %I', current_user);
-  end if;
-end
-$$;
-
 create function ehr.sweep_consultation_drafts(batch integer)
 returns integer
 language plpgsql
@@ -439,14 +399,13 @@ begin
   if batch is null or batch not between 1 and 1000 then
     raise exception using errcode = '22023', message = 'CONSULTATION_DRAFT_SWEEP_BATCH_INVALID';
   end if;
-  -- A held draft is skipped before the batch is cut, so held drafts never
-  -- stop the sweep; the expiry is tested again on the row deleted, so a save
-  -- that renewed the draft while this waited for its lock keeps it.
+  -- The expiry is tested again on the row deleted, so a save that renewed
+  -- the draft while this waited for its lock keeps it. Legal holds do not
+  -- apply to drafts (D6).
   with expired as (
     select draft.id
       from ehr.consultation_drafts draft
      where draft.expires_at <= clock_timestamp()
-       and not ehr.consultation_draft_held(draft.patient_id, draft.account_id)
      order by draft.expires_at, draft.id
      limit batch
   ), removed as (
@@ -472,7 +431,7 @@ begin
 end
 $$;
 comment on function ehr.sweep_consultation_drafts(integer) is
-  '0141 (EHR-C6, Q126 A): deletes up to `batch` (1-1000) consultation drafts past expires_at (7 days after the last save), oldest first, except drafts whose patient or author is under an unreleased legal hold, with one ehr.consultation-draft.expire audit row (the run''s correlation id) for each draft this call deleted (never the content); answers how many.';
+  '0141 (EHR-C6, Q126 A): deletes up to `batch` (1-1000) consultation drafts past expires_at (7 days after the last save), oldest first (legal holds do not apply to drafts), with one ehr.consultation-draft.expire audit row (the run''s correlation id) for each draft this call deleted (never the content); answers how many.';
 revoke all on function ehr.sweep_consultation_drafts(integer) from public;
 
 -- 2c. The session author, for D7 and D8: an active, unheld membership here
@@ -581,7 +540,6 @@ begin
      and draft.facility_id = actor.actor_facility and draft.patient_id = requested_patient
      and draft.encounter_id is not distinct from requested_encounter
      and draft.expires_at <= clock_timestamp()
-     and not ehr.consultation_draft_held(draft.patient_id, draft.account_id)
   returning draft.id, draft.patient_id, draft.size_bytes into removed_id, removed_patient, removed_size;
   if removed_id is null then
     return false;
@@ -600,7 +558,7 @@ begin
 end
 $$;
 comment on function ehr.expire_my_consultation_draft(uuid, uuid) is
-  '0141 (EHR-C6): deletes the session author''s own draft for this patient and visit (or no visit) only if it has expired and no legal hold covers it, with one ehr.consultation-draft.expire audit row; answers whether one was deleted. A create calls it on a conflict it cannot see, then tries once more.';
+  '0141 (EHR-C6): deletes the session author''s own draft for this patient and visit (or no visit) only if it has expired (legal holds do not apply to drafts), with one ehr.consultation-draft.expire audit row; answers whether one was deleted. A create calls it on a conflict it cannot see, then tries once more.';
 revoke all on function ehr.expire_my_consultation_draft(uuid, uuid) from public;
 
 -- 3. Grants (D9; here and in runtime-grants.sql). The runtime has no DELETE:
@@ -622,8 +580,6 @@ do $$
 declare
   owner_oid oid := (select relation.relowner from pg_class relation
                      where relation.oid = 'ehr.consultation_drafts'::regclass);
-  held_owner oid := (select proc.proowner from pg_proc proc
-                      where proc.oid = 'ehr.consultation_draft_held(uuid,uuid)'::regprocedure);
   members text;
 begin
   if not (select relrowsecurity and relforcerowsecurity from pg_class where oid = 'ehr.consultation_drafts'::regclass) then
@@ -648,28 +604,11 @@ begin
   if exists (select 1 from pg_proc proc
               where proc.oid in ('ehr.list_my_consultation_drafts()'::regprocedure, 'ehr.sweep_consultation_drafts(integer)'::regprocedure,
                                  'ehr.is_consultation_draft_author(uuid,uuid,uuid)'::regprocedure,
-                                 'ehr.consultation_draft_held(uuid,uuid)'::regprocedure,
                                  'ehr.consultation_draft_session()'::regprocedure,
                                  'ehr.discard_consultation_draft(uuid,uuid)'::regprocedure,
                                  'ehr.expire_my_consultation_draft(uuid,uuid)'::regprocedure)
                 and not (proc.prosecdef and proc.proconfig = array['search_path=pg_catalog, pg_temp'])) then
     raise exception using errcode = '55000', message = '0141: a drafts function is not as created';
-  end if;
-  -- D6 reads the holds only if 0096's policy admits its owner (or its owner
-  -- bypasses row-level security); the sweeper and D8 must be able to run it.
-  if not ((select role_row.rolsuper or role_row.rolbypassrls from pg_roles role_row where role_row.oid = held_owner)
-          or exists (select 1 from pg_policy policy
-                      where policy.polrelid = 'platform.legal_holds'::regclass and policy.polname = 'legal_holds_owner'
-                        and policy.polcmd = '*' and policy.polroles = array[0::oid]
-                        and pg_get_expr(policy.polqual, policy.polrelid)
-                            = format('(CURRENT_USER = %L::name)', pg_get_userbyid(held_owner))))
-     or not has_function_privilege(current_user, 'ehr.consultation_draft_held(uuid,uuid)', 'EXECUTE')
-     or exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
-                 where proc.oid = 'ehr.consultation_draft_held(uuid,uuid)'::regprocedure
-                   and acl.grantee not in (proc.proowner, (select role_row.oid from pg_roles role_row
-                                                            where role_row.rolname = current_user))) then
-    raise exception using errcode = '55000',
-      message = '0141: ehr.consultation_draft_held cannot read platform.legal_holds, or others may run it';
   end if;
 end
 $$;

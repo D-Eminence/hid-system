@@ -3,9 +3,10 @@ import { IsOptionalButNotNull } from '../../common/validation';
 
 /**
  * EHR-C6: a draft's body. Exactly these fields; `null` is refused for each.
- * The content is a JSON object the server stores as given and never reads;
- * its size (262,144 bytes as UTF-8 JSON) and depth (20 levels) are checked by
- * the service.
+ * The content is a JSON object the server never reads, stored as jsonb (key
+ * order is not kept): at most 262,144 bytes measured as stored (the service
+ * refuses early anything whose JSON.stringify size is already over the
+ * limit; the database's guard decides) and 20 levels deep.
  */
 export class CreateConsultationDraftDto {
   @IsOptionalButNotNull()
