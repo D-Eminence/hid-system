@@ -15,7 +15,7 @@ export class RemoteIdentityProvider implements IdentityProvider {
   return this.client.authorizePatient(request.patientId,request.scope,request.purpose,
    {authorization:context.authorization,cookie:context.userCookie,csrfToken:context.csrfToken,
     origin:context.origin,requestMethod:context.requestMethod,correlationId:context.correlationId,
-    facilityId:context.facilityId,purposeOfUse:request.purpose})
+    facilityId:context.facilityId,purposeOfUse:request.purpose,...(request.signal?{signal:request.signal}:{})})
    .catch(error=>{if(error instanceof IdentityApiProblem)throw new DomainProblem(error.status,error.code??'IDENTITY_AUTHORIZATION_DENIED',error.message);throw new DomainProblem(503,'IDENTITY_SERVICE_UNAVAILABLE','Identity authorization service is unavailable');}) as Promise<AuthorizationDecision>;
  }
  lookupExactHid(_hid:string,_context:DataAccessContext):Promise<IdentityPatient|null>{throw new DomainProblem(501,'IDENTITY_OPERATION_UNAVAILABLE','Lab does not perform identity lookup');}
