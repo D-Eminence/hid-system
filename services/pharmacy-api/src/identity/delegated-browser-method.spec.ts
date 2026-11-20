@@ -91,4 +91,68 @@ describe('ORD-3 progress: the clinician\'s read reaches Identity as a GET', () =
     expect(headers).not.toHaveProperty('x-csrf-token');
     expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toMatchObject({ patientId, scope: 'read_records' });
   });
+
+  // The batch form (decision 4) checks each patient the same way: one check per patient, each a GET read.
+  it('reports GET for each patient of the batch form, with the cookie and no Origin or CSRF token', async () => {
+    const { PharmacyWorkItemProgressService } = await import('../pharmacy/work-item-progress.service');
+    const secondPatientId = '50000000-0000-4000-8000-000000000002';
+    // Identity answers each check for the patient it was asked about.
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => new Response(JSON.stringify({ ...decision,
+      patientId: (JSON.parse(String(init.body)) as { patientId: string }).patientId }),
+    { status: 200, headers: { 'content-type': 'application/json' } }));
+    const query = jest.fn(async () => ({ rows: [] }));
+    const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown) =>
+      operation({ query })) };
+    const audit = { recordWithClient: jest.fn() };
+    const identity = new IdentityService(workloadIdentity as unknown as PharmacyWorkloadIdentityService);
+    const service = new PharmacyWorkItemProgressService(database as never, identity, audit as never);
+    const request = browserRequest('POST', { 'x-hid-internal-caller': 'ehr-api' });
+    const context = requireRequestContext(request as unknown as HidRequest);
+    const answer = await service.readBatch(context, { patients: [
+      { patientId, sourceEhrPrescriptionIds: ['60000000-0000-4000-8000-000000000001'] },
+      { patientId: secondPatientId, sourceEhrPrescriptionIds: ['60000000-0000-4000-8000-000000000002'] }] }, true, true);
+    expect(answer.patients.map((entry) => entry.outcome)).toEqual(['answered', 'answered']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [url, init] of fetchMock.mock.calls as [string, RequestInit][]) {
+      expect(url).toBe('https://identity.example/api/v1/identity/service/authorization/check');
+      const headers = init.headers as Record<string, string>;
+      expect(headers).toMatchObject({ 'x-hid-original-method': 'GET', cookie: 'hid_access=opaque; hid_access_csrf=csrf' });
+      expect(headers).not.toHaveProperty('origin');
+      expect(headers).not.toHaveProperty('x-csrf-token');
+    }
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)))).toEqual([
+      expect.objectContaining({ patientId, scope: 'read_records' }),
+      expect.objectContaining({ patientId: secondPatientId, scope: 'read_records' })]);
+  });
+
+  // The batch's budget must abort the fetch to Identity itself, not only stop waiting for it; otherwise each hung
+  // check keeps its connection to Identity open until the Identity client's own 5 second limit.
+  it('aborts each batch check\'s fetch to Identity when the batch\'s budget is up', async () => {
+    const { PharmacyWorkItemProgressService } = await import('../pharmacy/work-item-progress.service');
+    const secondPatientId = '50000000-0000-4000-8000-000000000002';
+    // Identity never answers; each fetch rejects only once its own signal aborts, as fetch does.
+    fetchMock.mockImplementation((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('This operation was aborted', 'AbortError')),
+        { once: true });
+    }));
+    const database = { withTransaction: jest.fn() };
+    const audit = { recordWithClient: jest.fn() };
+    const identity = new IdentityService(workloadIdentity as unknown as PharmacyWorkloadIdentityService);
+    const service = new PharmacyWorkItemProgressService(database as never, identity, audit as never);
+    service.batchCheckBudgetMs = 20;
+    const request = browserRequest('POST', { 'x-hid-internal-caller': 'ehr-api' });
+    const context = requireRequestContext(request as unknown as HidRequest);
+    const started = Date.now();
+    const answer = await service.readBatch(context, { patients: [
+      { patientId, sourceEhrPrescriptionIds: ['60000000-0000-4000-8000-000000000001'] },
+      { patientId: secondPatientId, sourceEhrPrescriptionIds: ['60000000-0000-4000-8000-000000000002'] },
+    ] }, true, true);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(answer.patients).toEqual([
+      { patientId, outcome: 'unavailable', code: 'PROGRESS_CHECK_TIME_LIMIT' },
+      { patientId: secondPatientId, outcome: 'unavailable', code: 'PROGRESS_CHECK_TIME_LIMIT' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetchMock.mock.calls as [string, RequestInit][]) expect(init.signal?.aborted).toBe(true);
+    expect(database.withTransaction).not.toHaveBeenCalled();
+  });
 });

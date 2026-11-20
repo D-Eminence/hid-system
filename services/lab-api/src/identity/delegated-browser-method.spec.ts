@@ -93,4 +93,85 @@ describe('ORD-3 progress: the clinician\'s read reaches Identity as a GET', () =
     expect(headers).not.toHaveProperty('x-csrf-token');
     expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toMatchObject({ patientId, scope: 'read_records' });
   });
+
+  it('reports GET for each patient of the batch form (decision 4), with the cookie and no Origin or CSRF token',
+    async () => {
+      const { LabWorkItemProgressService } = await import('../lab/work-item-progress.service');
+      const { IdentityService } = await import('./identity.service');
+      // Identity answers each check for the patient it was asked about.
+      fetchMock.mockImplementation(async (_url: string, init: RequestInit) => new Response(JSON.stringify({
+        ...decision, patientId: JSON.parse(String(init.body)).patientId }),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+      const query = jest.fn(async () => ({ rows: [] }));
+      const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown) =>
+        operation({ query })) };
+      const audit = { record: jest.fn(), recordWithClient: jest.fn() };
+      const provider = new RemoteIdentityProvider(workloadIdentity as unknown as LabWorkloadIdentityService);
+      const service = new LabWorkItemProgressService(database as never, new IdentityService(provider, audit as never),
+        audit as never);
+      const request = browserRequest('POST', { 'x-hid-internal-caller': 'ehr-api' });
+      const context = requireRequestContext(request as unknown as HidRequest);
+      const otherPatientId = '50000000-0000-4000-8000-000000000002';
+      const answer = await service.readBatch(context, { patients: [
+        { patientId, sourceEhrOrderIds: ['60000000-0000-4000-8000-000000000001'] },
+        { patientId: otherPatientId, sourceEhrOrderIds: ['60000000-0000-4000-8000-000000000002'] }] });
+      expect(answer.patients.map((entry) => entry.outcome)).toEqual(['answered', 'answered']);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const asked: string[] = [];
+      for (const [url, init] of fetchMock.mock.calls as Array<[string, RequestInit]>) {
+        expect(url).toBe('https://identity.example/api/v1/identity/service/authorization/check');
+        const headers = init.headers as Record<string, string>;
+        expect(headers).toMatchObject({ 'x-hid-original-method': 'GET',
+          cookie: 'hid_access=opaque; hid_access_csrf=csrf' });
+        expect(headers).not.toHaveProperty('origin');
+        expect(headers).not.toHaveProperty('x-csrf-token');
+        const body = JSON.parse(String(init.body)) as { patientId: string; scope: string };
+        expect(body.scope).toBe('read_records');
+        asked.push(body.patientId);
+      }
+      expect(asked).toEqual([patientId, otherPatientId]);
+    });
+
+  // The batch's budget must abort the fetch to Identity itself, not only stop waiting for it; otherwise each hung
+  // check keeps its connection to Identity open, and its audit row waits, until the Identity client's 5 second limit.
+  it('aborts each batch check\'s fetch to Identity when the batch\'s budget is up, and audits each as failed',
+    async () => {
+      const { LabWorkItemProgressService } = await import('../lab/work-item-progress.service');
+      const { IdentityService } = await import('./identity.service');
+      // Identity never answers; each fetch rejects only once its own signal aborts, as fetch does.
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('This operation was aborted',
+          'AbortError')), { once: true });
+      }));
+      const database = { withTransaction: jest.fn() };
+      const audit = { record: jest.fn(), recordWithClient: jest.fn() };
+      const provider = new RemoteIdentityProvider(workloadIdentity as unknown as LabWorkloadIdentityService);
+      const service = new LabWorkItemProgressService(database as never, new IdentityService(provider, audit as never),
+        audit as never);
+      service.batchCheckBudgetMs = 20;
+      const request = browserRequest('POST', { 'x-hid-internal-caller': 'ehr-api' });
+      const context = requireRequestContext(request as unknown as HidRequest);
+      const otherPatientId = '50000000-0000-4000-8000-000000000002';
+      const started = Date.now();
+      const answer = await service.readBatch(context, { patients: [
+        { patientId, sourceEhrOrderIds: ['60000000-0000-4000-8000-000000000001'] },
+        { patientId: otherPatientId, sourceEhrOrderIds: ['60000000-0000-4000-8000-000000000002'] }] });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(answer.patients).toEqual([
+        { patientId, outcome: 'unavailable', code: 'PROGRESS_CHECK_TIME_LIMIT' },
+        { patientId: otherPatientId, outcome: 'unavailable', code: 'PROGRESS_CHECK_TIME_LIMIT' }]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      for (const [, init] of fetchMock.mock.calls as Array<[string, RequestInit]>) {
+        expect(init.signal?.aborted).toBe(true);
+      }
+      // The answer does not wait for the aborted checks; each writes its row as its aborted fetch ends.
+      for (let turn = 0; turn < 20 && audit.record.mock.calls.length < 2; turn += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect((audit.record.mock.calls as Array<[{ action: string; patientId: string; outcome: string }]>)
+        .map(([event]) => [event.action, event.patientId, event.outcome])).toEqual([
+        ['identity.authorization.check', patientId, 'failure'],
+        ['identity.authorization.check', otherPatientId, 'failure']]);
+      expect(database.withTransaction).not.toHaveBeenCalled();
+    });
 });
