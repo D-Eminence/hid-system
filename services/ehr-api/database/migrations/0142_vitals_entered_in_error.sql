@@ -40,8 +40,10 @@
 --    still cannot be deleted (vitals_no_delete).
 -- D4 The patient's own read (0067's vitals_patient_self_read) leaves out
 --    entered-in-error readings; its corrections' policy reads the reading
---    through it, so their corrections drop out with them. Staff reads keep
---    every row (ehr-api filters, per the contract).
+--    through it, so their corrections drop out with them. This release's
+--    staff sessions (app.vitals_status = 0142, D2) read every row and
+--    ehr-api filters, per the contract; every other session never sees a
+--    withdrawn reading.
 -- D5 The guard is SECURITY INVOKER, search_path pg_catalog, pg_temp, and
 --    reads no table. No grant changes: hid_ehr_runtime already holds SELECT,
 --    INSERT and UPDATE on ehr.vitals (table level), and nothing is granted
@@ -234,7 +236,12 @@ begin
                     and pg_get_expr(policy_row.polqual, policy_row.polrelid) like '%status = ''recorded''::text%') then
     raise exception using errcode = '55000', message = '0142: vitals_patient_self_read does not leave out entered-in-error readings';
   end if;
-  if (select count(*) from pg_policy policy_row where policy_row.polrelid = 'ehr.vitals'::regclass) <> 5
+  -- 0142's own five policies, by name: a later file may add its own (0146's
+  -- vitals_cancel_check_read), so the table's total is not counted.
+  if (select count(*) from pg_policy policy_row
+       where policy_row.polrelid = 'ehr.vitals'::regclass
+         and policy_row.polname in ('vitals_entered_in_error_hidden', 'vitals_insert', 'vitals_patient_self_read',
+                                    'vitals_read', 'vitals_update')) <> 5
      or not exists (select 1 from pg_policy policy_row
                      where policy_row.polrelid = 'ehr.vitals'::regclass
                        and policy_row.polname = 'vitals_entered_in_error_hidden'
@@ -242,7 +249,7 @@ begin
                        and policy_row.polroles = array[0::oid]
                        and pg_get_expr(policy_row.polqual, policy_row.polrelid) =
                          '((status = ''recorded''::text) OR (current_setting(''app.vitals_status''::text, true) = ''0142''::text))') then
-    raise exception using errcode = '55000', message = '0142: ehr.vitals does not have its four policies and the restrictive read';
+    raise exception using errcode = '55000', message = '0142: ehr.vitals does not have its five policies (four and the restrictive read)';
   end if;
   if exists (select 1 from pg_proc proc where proc.oid = 'ehr.guard_vital_status()'::regprocedure
               and (proc.prosecdef or proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp'])) then

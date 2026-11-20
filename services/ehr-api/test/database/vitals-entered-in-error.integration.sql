@@ -132,10 +132,15 @@ select pg_temp.check_case('1 the guard fires before the version trigger', 'vital
 select pg_temp.check_case('1 nobody may run the guard directly', '(null)',
   (select string_agg(grantee::regrole::text, ',') from pg_proc, aclexplode(proacl)
     where oid = 'ehr.guard_vital_status()'::regprocedure and privilege_type = 'EXECUTE' and grantee <> proowner));
-select pg_temp.check_case('1 five policies; the patient''s own read needs recorded', '5/t',
-  (select format('%s/%s', count(*), bool_or(polname = 'vitals_patient_self_read'
+-- 0142's own five policies, by name: a later file may add its own (0146's
+-- vitals_cancel_check_read).
+select pg_temp.check_case('1 0142''s five policies; the patient''s own read needs recorded',
+  'vitals_entered_in_error_hidden,vitals_insert,vitals_patient_self_read,vitals_read,vitals_update/t',
+  (select format('%s/%s', string_agg(polname, ',' order by polname), bool_or(polname = 'vitals_patient_self_read'
        and pg_get_expr(polqual, polrelid) like '%(status = ''recorded''::text)%'))
-     from pg_policy where polrelid = 'ehr.vitals'::regclass));
+     from pg_policy where polrelid = 'ehr.vitals'::regclass
+      and polname in ('vitals_entered_in_error_hidden', 'vitals_insert', 'vitals_patient_self_read', 'vitals_read',
+                      'vitals_update')));
 select pg_temp.check_case('1 the restrictive read for older images, on every role',
   'f/r/{0}/((status = ''recorded''::text) OR (current_setting(''app.vitals_status''::text, true) = ''0142''::text))',
   (select format('%s/%s/%s/%s', polpermissive, polcmd, polroles, pg_get_expr(polqual, polrelid))
