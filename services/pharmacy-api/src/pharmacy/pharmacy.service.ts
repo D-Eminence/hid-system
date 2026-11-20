@@ -334,6 +334,30 @@ function acceptanceSchemaMissing(error: unknown): boolean {
 }
 
 /**
+ * 0147's unique (facility_id, accepted_by, idempotency_key) on
+ * pharmacy.work_item_acceptances, by the name PostgreSQL gave it (0147's
+ * post-check pins the index, and its suite the 23505 that names it).
+ */
+const ACCEPTANCE_KEY_CONSTRAINT = 'work_item_acceptances_facility_id_accepted_by_idempotency_k_key';
+
+/**
+ * ORD-4: the acceptance insert met a row already stored under this member's
+ * key at this facility (23505 on that key; not on the work item's own unique
+ * key, which is the race of two accepts of one item).
+ */
+function acceptanceKeyTaken(error: unknown): boolean {
+  const { code, constraint } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown;
+    constraint?: unknown };
+  return code === '23505' && constraint === ACCEPTANCE_KEY_CONSTRAINT;
+}
+
+/** ORD-4: this member's key at this facility recorded another request (the hand-off's message, reused). */
+function acceptanceKeyConflict(): DomainProblem {
+  return new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
+    'Prescription acceptance conflicts with existing Pharmacy work');
+}
+
+/**
  * The same-facility acceptance refusals pharmacy.validate_work_item raises
  * with 23514, by message, each answered with that message as its code:
  * - PRESCRIPTION_ROUTED (P4c, SPEC-FINAL §7.5): the prescription has a live
@@ -597,7 +621,8 @@ export class PharmacyService {
    *   0147's trigger refuses any other purpose;
    * - 412 when the version differs from the one the pharmacist saw;
    * - 409 IDEMPOTENCY_CONFLICT when this member's key recorded an acceptance
-   *   for another request;
+   *   for another request (also when row-level security now hides that
+   *   acceptance from the member, so only the insert finds it: see there);
    * - an item already accepted answers 200 with that acceptance and
    *   `alreadyAccepted: true`, writing nothing but its audit row: a stored
    *   acceptance (by this route or a dispensing), a route-backed item
@@ -618,6 +643,9 @@ export class PharmacyService {
   async acceptWorkItem(context: DataAccessContext, workItemId: string, input: AcceptWorkItemDto, key: string):
   Promise<WorkItemAcceptanceAnswer> {
     const digest = requestDigest('pharmacy.work-item.pharmacist-accept', { workItemId, ...input });
+    // The inserts that met this member's key although the key lookup found no
+    // row for it, counted over every run of this request (see the insert).
+    let unreadableKeys = 0;
     return this.database.withTransaction(context, async (client) => {
       const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`, [workItemId])).rows[0];
       if (!work) return this.routeAccess.hiddenWorkItem(client, workItemId, 'write_records', workItemNotFound);
@@ -630,8 +658,7 @@ export class PharmacyService {
         [context.facilityId, context.actor.accountId, key]).catch((error: unknown) => {
         throw acceptanceSchemaMissing(error) ? acceptanceUnavailable() : error;
       })).rows[0];
-      if (keyed && keyed.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
-        'Prescription acceptance conflicts with existing Pharmacy work');
+      if (keyed && keyed.request_sha256 !== digest) throw acceptanceKeyConflict();
       const answered = async (pharmacistAcceptance: PharmacistAcceptance, created: boolean) => {
         await this.audit.recordWithClient(client, context, 'pharmacy.work-item.pharmacist-accept', {
           patientId: work.patient_id, resourceType: 'pharmacy-work-item', resourceId: work.id,
@@ -654,6 +681,21 @@ export class PharmacyService {
       if (withdrawn.withdrawn) throw notDispensable(withdrawn.withdrawnReason ?? 'changed');
       const accepted = await this.insertAcceptance(client, context, work, 'accept', key, digest)
         .catch((error: unknown) => {
+          // The key lookup reads under row-level security, the unique key
+          // sees every row. So an insert can meet this member's key that the
+          // lookup did not find, for one of two reasons. A request with this
+          // key committed while this one ran: the first time, the 23505 goes
+          // on to DatabaseService's retry, whose run reads that row and
+          // answers it (409 above, or 200 from the steps reader for this
+          // same request). Or the row is hidden from this member (the
+          // patient's consent grant ended, or the patient set a deny
+          // directive): the retry still cannot read it. That row is another
+          // request's: an acceptance of this item would already have been
+          // answered above from the steps reader, since 0147 gives an
+          // acceptance its item's read rules (the dispensing's policies) and
+          // this member reads the item. So it is the contract's 409
+          // IDEMPOTENCY_CONFLICT, not the 500 a second 23505 would become.
+          if (acceptanceKeyTaken(error) && (unreadableKeys += 1) > 1) throw acceptanceKeyConflict();
           throw (acceptanceSchemaMissing(error) ? acceptanceUnavailable() : acceptanceRefusedByTrigger(error)) ?? error;
         });
       return answered(accepted, true);

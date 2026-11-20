@@ -66,9 +66,11 @@
 // then 200 alreadyAccepted for the same call and for a new key, each audited
 // with the patient, its outcome, acceptedWith and basis own-work), and the
 // list then shows pharmacyStep accepted while status and acceptedAt keep
-// their Release A meaning; the doctor's ownProgress reads accepted with
-// acceptedAt, then dispensed (acceptedAt kept) once it is dispensed, which
-// records no second acceptance; pharmacy-api, asked as ehr-api with only
+// their Release A meaning, and still lists the item as open work (before a
+// newer item that is still received); the doctor's ownProgress reads
+// accepted with acceptedAt, then dispensed (acceptedAt kept) once it is
+// dispensed, which records no second acceptance; pharmacy-api, asked as
+// ehr-api with only
 // X-HID-Own-Progress: 0133 (a Release A ehr-api), answers received for the
 // accepted item with no acceptedAt, and the same with only ORD-4's header,
 // accepted only with both; an accepted item put on hold reads withdrawn,
@@ -648,6 +650,11 @@ try {
   // 201 with the acceptance; the same call again, and a call with a new key, answer 200 with the stored one. Each
   // call writes its audit row naming the patient; nothing else is written after the first.
   assert.equal(await grantsOf(ownPharmacist), 0, 'the pharmacist still holds no grant for the patient');
+  // A fifth prescription, sent by itself and left received for now (it is accepted and held further down). It is
+  // made here, before rx4's item is accepted, so that the list after the accept can tell open work from done work:
+  // see the order check there.
+  const rx5 = await newPrescription('active', 'Synthetic omeprazole 20 mg tablet');
+  assert.deepEqual(rx5.pharmacyHandoff, SENT, `rx5's hand-off: ${JSON.stringify(rx5.pharmacyHandoff)}`);
   const accept = (item, key = freshKey('accept')) => pharmacyCall(ownPharmacist, 'POST', `/work-items/${item.id}/accept`,
     { expectedWorkItemVersion: Number(item.version) }, { key });
   const acceptKey4 = freshKey('accept');
@@ -684,8 +691,19 @@ try {
   assert.deepEqual([listed4?.status, listed4?.acceptedAt, listed4?.version, listed4?.withdrawn, listed4?.pharmacyStep,
     listed4?.pharmacistAcceptance], ['accepted', item4.acceptedAt, item4.version, undefined, 'accepted', acceptance4],
   `rx4's item on the list after the accept: ${JSON.stringify(listed4)}`);
-  assert.equal(afterAccept.items.filter(item => item.orderRoute === undefined)[0]?.id, item4.id,
-    'the accepted item is still open work, listed first');
+  const item5 = afterAccept.items.find(item => item.sourceEhrPrescriptionId === rx5.id);
+  assert.deepEqual([item5?.pharmacyStep, item5?.pharmacistAcceptance], ['received', null],
+    `rx5's item before its accept: ${JSON.stringify(item5)}`);
+  // Open work lists oldest first and done work newest first, both by when the pharmacy received the item
+  // (acceptedAt). rx4's item arrived before rx5's, so it lists before the received (open) rx5 item only while it is
+  // still open work itself: were an accepted item done work, rx5's item would list first and rx4's would lead the
+  // done work after it. Without rx5's item, rx4's (the newest) would list first either way, which proved nothing.
+  assert(Date.parse(item4.acceptedAt) < Date.parse(item5.acceptedAt),
+    `rx4's item must arrive before rx5's for the order check: ${item4.acceptedAt}, ${item5.acceptedAt}`);
+  assert.deepEqual(afterAccept.items.filter(item => item.orderRoute === undefined).map(item => item.id),
+    [item4.id, item5.id, item3.id, item2.id, item1.id],
+  `the accepted item is still open work, listed first (before the newer received one): ${JSON.stringify(
+    afterAccept.items.map(item => [item.id, item.pharmacyStep ?? null, item.withdrawnReason ?? null]))}`);
 
   // The doctor's ownProgress (ORD-3 through ehr-api, the doctor's cookie only): accepted, with acceptedAt.
   const ownProgressOf = async rx => expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions/${rx.id}`), 200,
@@ -735,15 +753,9 @@ try {
     row.details.acceptedWithDispensing ?? null]), [[item1.id, true], [item4.id, null]],
   'only the dispensing that accepted its item says so');
 
-  // A hold after an acceptance: a fifth prescription, sent by itself, accepted, then held. ownProgress reads
-  // withdrawn (acceptedAt kept); the list marks it withdrawn (changed) and keeps its acceptance; Accept answers that
-  // acceptance again (200); Dispense is refused (409).
-  const rx5 = await newPrescription('active', 'Synthetic omeprazole 20 mg tablet');
-  assert.deepEqual(rx5.pharmacyHandoff, SENT, `rx5's hand-off: ${JSON.stringify(rx5.pharmacyHandoff)}`);
-  const item5 = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the list with rx5')
-    .items.find(item => item.sourceEhrPrescriptionId === rx5.id);
-  assert.deepEqual([item5?.pharmacyStep, item5?.pharmacistAcceptance], ['received', null],
-    `rx5's item before the accept: ${JSON.stringify(item5)}`);
+  // A hold after an acceptance: the fifth prescription (sent by itself before rx4's item was accepted, still
+  // received), accepted, then held. ownProgress reads withdrawn (acceptedAt kept); the list marks it withdrawn
+  // (changed) and keeps its acceptance; Accept answers that acceptance again (200); Dispense is refused (409).
   const acceptance5 = expectStatus(await accept(item5), 201, 'accept rx5\'s item').pharmacistAcceptance;
   assert.equal((await ownProgressOf(rx5))?.status, 'accepted', 'rx5 reads accepted before the hold');
   expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx5.id}`,
@@ -779,7 +791,7 @@ try {
   evidence.ord4 = { ...evidence.ord4, pharmacistGrants: 0,
     accept: { first: 201, sameCallAgain: '200 alreadyAccepted', newKey: '200 alreadyAccepted', basis: 'own-work',
       event: 'pharmacist_accepted v2', audit: 'one row per call: accepted, then already_accepted' },
-    list: 'pharmacyStep accepted; status, acceptedAt and version unchanged; still open work',
+    list: 'pharmacyStep accepted; status, acceptedAt and version unchanged; still open work (before a newer received item)',
     ownProgress: { accepted: 'accepted with acceptedAt', afterDispensing: 'dispensed, acceptedAt kept',
       heldAfterAcceptance: 'withdrawn, acceptedAt kept' },
     progressHeaders: { only0133: 'received, no acceptedAt', onlyOrd4: 'received, no acceptedAt',

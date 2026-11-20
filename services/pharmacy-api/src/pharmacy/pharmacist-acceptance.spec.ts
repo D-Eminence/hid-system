@@ -92,6 +92,9 @@ const ITEMS: Item[] = [
     membership: otherPharmacistMembership, minute: 39, key: 'ord4-other-accept-0009', digest: 'd'.repeat(64) } },
   { n: 10, dispensed: true, reversed: true, acceptance: { with: 'accept', account: pharmacistAccount,
     membership: pharmacistMembership, minute: 40, key: 'ord4-other-accept-0010', digest: 'e'.repeat(64) } },
+  // Accepted from the moment each was made, and then dispensed, as most are: no acceptance row, no un-accept.
+  { n: 11, handOff: true, dispensed: true },
+  { n: 12, routed: true, dispensed: true },
 ];
 
 const workRow = (item: Item) => ({ id: id(item.n), patient_id: ada, facility_id: facilityId,
@@ -113,6 +116,18 @@ const workRow = (item: Item) => ({ id: id(item.n), patient_id: ada, facility_id:
 
 const sqlError = (code: string, message = `synthetic ${code}`, detail?: string) =>
   Object.assign(new Error(message), { code, ...(detail === undefined ? {} : { detail }) });
+
+/**
+ * 0147's two unique keys on pharmacy.work_item_acceptances, by the names PostgreSQL gives them, and their 23505 as
+ * node-postgres passes it on: the constraint named. The names are pinned on the database side: 0147's post-check
+ * refuses any other index names, and its suite expects the 23505 messages that name them. This spec does not read
+ * those files, because a pharmacy-api test that reads a file outside pharmacy-api must also be listed in
+ * scripts/production-backend-build.mjs (outsideTestInputs), or a change to that file would not run these tests.
+ */
+const ITEM_KEY = 'work_item_acceptances_work_item_id_key';
+const MEMBER_KEY = 'work_item_acceptances_facility_id_accepted_by_idempotency_k_key';
+const uniqueViolation = (constraint: string) => Object.assign(
+  new Error(`duplicate key value violates unique constraint "${constraint}"`), { code: '23505', constraint });
 
 interface AcceptanceRecord { work_item_id: string; facility_id: string; accepted_by: string;
   accepted_by_membership_id: string; accepted_at: Date; accepted_with: string; idempotency_key: string;
@@ -136,6 +151,12 @@ interface Options {
   stepsError?: Error;
   /** Ids ORD-4's reader leaves out (not readable by this session). */
   stepsHide?: string[];
+  /**
+   * Acceptances stored for items not in ITEMS that row-level security now hides from this session (their patient's
+   * consent grant ended, or the patient set a deny directive): the key lookup reads none of them, while 0147's
+   * unique keys see every row.
+   */
+  hiddenAcceptances?: { n: number; account: string; key: string }[];
   /** Raised by the next acceptance insert(s), in order; `then` runs first (e.g. a racing pharmacist commits). */
   insertErrors?: { error: Error; then?: (committed: State) => void }[];
   eventError?: Error;
@@ -155,8 +176,16 @@ function harness(options: Options = {}) {
     id: `67000000-0000-4000-8000-${String(item.n).padStart(12, '0')}`, work_item_id: id(item.n), facility_id: facilityId,
     patient_id: ada, accepted_by: item.acceptance!.account, accepted_by_membership_id: item.acceptance!.membership,
     accepted_at: at(item.acceptance!.minute), accepted_with: item.acceptance!.with,
-    idempotency_key: item.acceptance!.key, request_sha256: item.acceptance!.digest, correlation_id: 'earlier-correlation' })),
+    idempotency_key: item.acceptance!.key, request_sha256: item.acceptance!.digest, correlation_id: 'earlier-correlation' }))
+    .concat((options.hiddenAcceptances ?? []).map((hidden) => ({
+      id: `67000000-0000-4000-8000-${String(hidden.n).padStart(12, '0')}`, work_item_id: id(hidden.n),
+      facility_id: facilityId, patient_id: '50000000-0000-4000-8000-0000000000e2', accepted_by: hidden.account,
+      accepted_by_membership_id: hidden.account === pharmacistAccount ? pharmacistMembership
+        : otherPharmacistMembership,
+      accepted_at: at(30), accepted_with: 'accept', idempotency_key: hidden.key, request_sha256: 'a'.repeat(64),
+      correlation_id: 'earlier-correlation' }))),
   events: [], dispensings: [], audits: [], outbox: [] };
+  const hidden = new Set((options.hiddenAcceptances ?? []).map((row) => id(row.n)));
   const copy = (state: State): State => ({ acceptances: [...state.acceptances], events: [...state.events],
     dispensings: [...state.dispensings], audits: [...state.audits], outbox: [...state.outbox] });
   const transactions: { statements: { sql: string; values: unknown[] }[]; committed: boolean }[] = [];
@@ -189,9 +218,9 @@ function harness(options: Options = {}) {
     if (sql === ACCEPTANCE_BY_KEY_QUERY) {
       if (schema === 'release-a') throw sqlError('42P01', 'relation "pharmacy.work_item_acceptances" does not exist');
       if (options.keyLookupError) throw options.keyLookupError;
-      return working.acceptances.filter((row) => row.facility_id === values[0] && row.accepted_by === values[1]
-        && row.idempotency_key === values[2]).map((row) => ({ work_item_id: row.work_item_id,
-        request_sha256: row.request_sha256 }));
+      return working.acceptances.filter((row) => !hidden.has(row.work_item_id) && row.facility_id === values[0]
+        && row.accepted_by === values[1] && row.idempotency_key === values[2]).map((row) => ({
+        work_item_id: row.work_item_id, request_sha256: row.request_sha256 }));
     }
     if (sql === OWN_WORK_STEPS_QUERY || sql === OWN_WORK_STATES_QUERY) {
       const steps = sql === OWN_WORK_STEPS_QUERY;
@@ -227,10 +256,11 @@ function harness(options: Options = {}) {
       if (working.dispensings.some((row) => row.work_item_id === workItemId) || item.dispensed) {
         throw sqlError('23514', 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE', 'not_claimed');
       }
-      if (working.acceptances.some((row) => row.work_item_id === workItemId
-        || (row.facility_id === facility && row.accepted_by === account && row.idempotency_key === key))) {
-        throw sqlError('23505', 'duplicate key value violates unique constraint');
-      }
+      // The unique keys see every row, whatever row-level security hides; the item's own key is checked first
+      // (its index is the older of the two).
+      if (working.acceptances.some((row) => row.work_item_id === workItemId)) throw uniqueViolation(ITEM_KEY);
+      if (working.acceptances.some((row) => row.facility_id === facility && row.accepted_by === account
+        && row.idempotency_key === key)) throw uniqueViolation(MEMBER_KEY);
       const stored: AcceptanceRecord = { id: rowId!, work_item_id: workItemId!, patient_id: patientId!, facility_id: facility!,
         accepted_by: account!, accepted_by_membership_id: membership!, accepted_at: at(50), accepted_with: acceptedWith!,
         idempotency_key: key!, request_sha256: digest!, correlation_id: correlation! };
@@ -491,6 +521,23 @@ describe('POST pharmacy/work-items/:workItemId/accept (ORD-4): accepting', () =>
     expect(h.committed.acceptances.some((row) => row.work_item_id === id(5))).toBe(false);
   });
 
+  it.each([
+    [11, 'hand_off', pharmacistMembership, 'own-work', {}],
+    [12, 'order_route', routeMemberMembership, 'order-route', { orderRouteId: routeId }],
+  ] as const)('answers dispensed item %i with the acceptance it was made with (%s), 200, not 409 already dispensed',
+    async (n, acceptedWith, membership, basis, route) => {
+      // Contract steps 6 and 7 come before step 8: an item accepted when it was made stays accepted once dispensed.
+      const h = harness();
+      await expect(run(h, accept(n))).resolves.toEqual({ workItemId: id(n), pharmacyStep: 'dispensed',
+        pharmacistAcceptance: { acceptedAt: at(n), acceptedByMembershipId: membership, acceptedWith },
+        alreadyAccepted: true });
+      expect(h.last()).not.toContain(INSERT_ACCEPTANCE.trim());
+      expect(h.committed.acceptances.some((row) => row.work_item_id === id(n))).toBe(false);
+      expect(h.committed.events).toEqual([]);
+      expect(h.audited().map((row) => row.details)).toEqual([{ outcome: 'already_accepted', acceptedWith, basis,
+        ...route }]);
+    });
+
   it('answers an item handed in by hand with its own acceptance (hand_off), from its row', async () => {
     const h = harness();
     await expect(run(h, accept(4))).resolves.toEqual({ workItemId: id(4), pharmacyStep: 'accepted',
@@ -525,6 +572,11 @@ describe('POST pharmacy/work-items/:workItemId/accept (ORD-4): refusals', () => 
     const conflict = await refusal(run(h, accept(4)));
     expect(conflict).toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT',
       message: 'Prescription acceptance conflicts with existing Pharmacy work' });
+    // Step 5 comes before step 6: the key is looked up for a route-backed item too, so reusing it there is the same
+    // 409, not its route's 200, and no audit row is written for that item.
+    await expect(run(h, accept(5))).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT',
+      message: 'Prescription acceptance conflicts with existing Pharmacy work' });
+    expect(h.audited().filter((row) => row.resourceId === id(5))).toEqual([]);
     // A key a dispensing used for its acceptance is this member's key as well.
     const dispensed = harness();
     await dispensed.service.dispense(pharmacist, id(1), dispenseInput, dispenseKey);
@@ -534,6 +586,47 @@ describe('POST pharmacy/work-items/:workItemId/accept (ORD-4): refusals', () => 
     await expect(run(dispensed, accept(1, secondPharmacist, dispenseKey))).resolves.toMatchObject({
       pharmacyStep: 'dispensed', pharmacistAcceptance: { acceptedWith: 'dispensing' }, alreadyAccepted: true });
   });
+
+  it('answers 409 IDEMPOTENCY_CONFLICT, not a 500, when row-level security hides the key\'s earlier acceptance',
+    async () => {
+      // This pharmacist accepted another patient's item (20) with acceptKey; since then that patient's consent grant
+      // ended, so the key lookup cannot read its row, while the unique key on the member's key still sees it.
+      const h = harness({ hiddenAcceptances: [{ n: 20, account: pharmacistAccount, key: acceptKey }] });
+      const problem = await refusal(run(h, accept(1)));
+      expect(problem).toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT',
+        message: 'Prescription acceptance conflicts with existing Pharmacy work' });
+      // The first 23505 went to DatabaseService's retry (a request with this key may have committed meanwhile); the
+      // retry still could not read the row, so the second is the conflict.
+      expect(h.transactions.map((transaction) => [transaction.committed, transaction.statements
+        .filter((statement) => statement.sql === INSERT_ACCEPTANCE.trim()).length])).toEqual([[false, 1], [false, 1]]);
+      nothingWritten(h, 5);
+      // Another member's key of the same text is not this member's: no conflict.
+      await expect(run(h, accept(1, secondPharmacist))).resolves.toMatchObject({ alreadyAccepted: false });
+    });
+
+  it.each([
+    ['another request', 7, 'a'.repeat(64)],
+    ['this same request', 1, requestDigest('pharmacy.work-item.pharmacist-accept', { workItemId: id(1),
+      expectedWorkItemVersion: 1 })],
+  ])('answers a key that %s committed while this one ran (23505 on the member\'s key) from the retry, which reads it',
+    async (_name, n, digest) => {
+      const twin = { id: '67000000-0000-4000-8000-0000000000ab', work_item_id: id(n), facility_id: facilityId,
+        patient_id: ada, accepted_by: pharmacistAccount, accepted_by_membership_id: pharmacistMembership,
+        accepted_at: at(48), accepted_with: 'accept', idempotency_key: acceptKey, request_sha256: digest,
+        correlation_id: 'twin-correlation' };
+      const h = harness({ insertErrors: [{ error: uniqueViolation(MEMBER_KEY),
+        then: (committed) => { committed.acceptances.push(twin); } }] });
+      const answer = run(h, accept(1));
+      if (n === 1) {
+        await expect(answer).resolves.toEqual({ workItemId: id(1), pharmacyStep: 'accepted', pharmacistAcceptance: {
+          acceptedAt: at(48), acceptedByMembershipId: pharmacistMembership, acceptedWith: 'accept' },
+        alreadyAccepted: true });
+      } else {
+        await expect(answer).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT' });
+      }
+      expect(h.transactions.map((transaction) => transaction.committed)).toEqual([false, n === 1]);
+      expect(h.transactions[1]!.statements.map((statement) => statement.sql)).not.toContain(INSERT_ACCEPTANCE.trim());
+    });
 
   it('answers 412 when the version differs, before reading or writing any acceptance', async () => {
     const h = harness();
@@ -566,6 +659,46 @@ describe('POST pharmacy/work-items/:workItemId/accept (ORD-4): refusals', () => 
     expect(h.transactions.flatMap((transaction) => transaction.statements.map((statement) => statement.sql)))
       .not.toContain(ACCEPTANCE_BY_KEY_QUERY.trim());
     nothingWritten(h);
+  });
+
+  describe('in the contract\'s order when a request is refused for more than one reason', () => {
+    const lookedUpKey = (h: ReturnType<typeof harness>) => h.transactions.some((transaction) => transaction.statements
+      .some((statement) => statement.sql === ACCEPTANCE_BY_KEY_QUERY.trim()));
+
+    it('step 2 before step 3: an emergency session with no basis to write is refused as having no basis', async () => {
+      const h = harness({ ownBasis: null, identity: { allowed: false, breakGlass: false } });
+      await expect(run(h, accept(1, { ...pharmacist, purposeOfUse: 'emergency' }))).rejects.toMatchObject({
+        status: 403, code: 'PHARMACY_ACCESS_DENIED', message: 'Pharmacy access is not authorized' });
+      expect(lookedUpKey(h)).toBe(false);
+      nothingWritten(h);
+    });
+
+    it('step 2 before step 4: no basis to write and a stale version is 403, telling nothing of the version',
+      async () => {
+        const h = harness({ ownBasis: null, identity: { allowed: false, breakGlass: false } });
+        await expect(run(h, accept(1, pharmacist, acceptKey, 2))).rejects.toMatchObject({ status: 403,
+          code: 'PHARMACY_ACCESS_DENIED', message: 'Pharmacy access is not authorized' });
+        expect(lookedUpKey(h)).toBe(false);
+        nothingWritten(h);
+      });
+
+    it('step 3 before step 4: an emergency session with a stale version is 403 with the break-glass message',
+      async () => {
+        const h = harness({ ownBasis: null, identity: { allowed: true, breakGlass: false } });
+        await expect(run(h, accept(1, { ...pharmacist, purposeOfUse: 'emergency' }, acceptKey, 2))).rejects
+          .toMatchObject({ status: 403, code: 'PHARMACY_ACCESS_DENIED',
+            message: 'Break-glass authorization cannot mutate Pharmacy records' });
+        expect(lookedUpKey(h)).toBe(false);
+        nothingWritten(h);
+      });
+
+    it('step 4 before step 5: a stale version with a key that recorded another request is 412', async () => {
+      const h = harness();
+      await run(h, accept(1));
+      await expect(run(h, accept(4, pharmacist, acceptKey, 2))).rejects.toMatchObject({ status: 412,
+        code: 'PHARMACY_WORK_ITEM_VERSION_CONFLICT' });
+      expect(h.last()).not.toContain(ACCEPTANCE_BY_KEY_QUERY.trim());
+    });
   });
 
   it('answers 403 when the steps reader does not answer the item for this session', async () => {
@@ -689,7 +822,7 @@ describe('POST pharmacy/work-items/:workItemId/accept (ORD-4): two at once', () 
         patient_id: ada, accepted_by: otherPharmacistAccount, accepted_by_membership_id: otherPharmacistMembership,
         accepted_at: at(49), accepted_with: 'accept', idempotency_key: 'ord4-winner-key-0001', request_sha256: 'f'.repeat(64),
         correlation_id: 'winner-correlation' };
-      const h = harness({ insertErrors: [{ error: sqlError('23505', 'duplicate key value violates unique constraint'),
+      const h = harness({ insertErrors: [{ error: uniqueViolation(ITEM_KEY),
         then: (committed) => { committed.acceptances.push(winner); } }] });
       await expect(run(h, accept(1))).resolves.toEqual({ workItemId: id(1), pharmacyStep: 'accepted',
         pharmacistAcceptance: { acceptedAt: at(49), acceptedByMembershipId: otherPharmacistMembership,
@@ -884,8 +1017,14 @@ describe('ORD-4: pharmacyStep and pharmacistAcceptance on the work list and a si
       acceptedWith: 'accept' } },
     10: { pharmacyStep: 'dispensing_reversed', pharmacistAcceptance: { acceptedAt: at(40),
       acceptedByMembershipId: pharmacistMembership, acceptedWith: 'accept' } },
+    // Dispensed, each keeps the acceptance it was made with.
+    11: { pharmacyStep: 'dispensed', pharmacistAcceptance: { acceptedAt: at(11), acceptedByMembershipId: pharmacistMembership,
+      acceptedWith: 'hand_off' } },
+    12: { pharmacyStep: 'dispensed', pharmacistAcceptance: { acceptedAt: at(12), acceptedByMembershipId: routeMemberMembership,
+      acceptedWith: 'order_route' } },
   };
-  const listed = [1, 2, 3, 4, 5, 6, 7, 9, 10];
+  const listed = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12];
+  const routed = (n: number) => n === 5 || n === 12;
   const fields = (item: Record<string, unknown>) => ('pharmacyStep' in item || 'pharmacistAcceptance' in item
     ? { pharmacyStep: item.pharmacyStep, pharmacistAcceptance: item.pharmacistAcceptance } : undefined);
 
@@ -902,11 +1041,11 @@ describe('ORD-4: pharmacyStep and pharmacistAcceptance on the work list and a si
     const readers = h.last().filter((sql) => sql === OWN_WORK_STEPS_QUERY.trim() || sql === OWN_WORK_STATES_QUERY.trim());
     expect(readers).toEqual([OWN_WORK_STEPS_QUERY.trim()]);
     expect(h.transactions[0]!.statements.find((statement) => statement.sql === OWN_WORK_STEPS_QUERY.trim())!.values)
-      .toEqual([listed.filter((n) => n !== 5).map(id)]);
+      .toEqual([listed.filter((n) => !routed(n)).map(id)]);
     // The list's audit rows are as before: the collection, and the own patient with 0133's basis.
     expect(h.audited().map((row) => [row.action, row.patientId, row.details])).toEqual([
-      ['pharmacy.work-item.list', null, { returnedCount: 9 }],
-      ['pharmacy.work-item.list', ada, { basis: 'own-work', workItemIds: listed.filter((n) => n !== 5).map(id) }]]);
+      ['pharmacy.work-item.list', null, { returnedCount: listed.length }],
+      ['pharmacy.work-item.list', ada, { basis: 'own-work', workItemIds: listed.filter((n) => !routed(n)).map(id) }]]);
   });
 
   it('answers the same on a single read of each', async () => {
@@ -925,14 +1064,16 @@ describe('ORD-4: pharmacyStep and pharmacistAcceptance on the work list and a si
     const h = harness({ schema: 'release-a' });
     const page = await h.service.listWorkItems(pharmacist);
     expect((page.items as unknown as Record<string, unknown>[]).map((item) => [item.id, fields(item)])).toEqual(
-      listed.map((n) => [id(n), n === 5 ? expected[5] : undefined]));
+      listed.map((n) => [id(n), routed(n) ? expected[n] : undefined]));
     expect(page.items.filter((item) => 'withdrawn' in item).map((item) => item.id)).toEqual([id(7), id(9)]);
-    for (const n of [1, 4, 6]) {
+    for (const n of [1, 4, 6, 11]) {
       expect(fields(await h.service.getWorkItem(pharmacist, id(n)) as unknown as Record<string, unknown>)).toBeUndefined();
     }
     // A route-backed item's acceptance is its own row's, whatever the schema.
-    expect(fields(await h.service.getWorkItem(pharmacist, id(5)) as unknown as Record<string, unknown>))
-      .toEqual(expected[5]);
+    for (const n of [5, 12]) {
+      expect(fields(await h.service.getWorkItem(pharmacist, id(n)) as unknown as Record<string, unknown>))
+        .toEqual(expected[n]);
+    }
   });
 
   it('answers neither field (and no withdrawn flag) on a single read whose steps cannot be read', async () => {

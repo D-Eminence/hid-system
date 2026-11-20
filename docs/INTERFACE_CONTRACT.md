@@ -7432,6 +7432,14 @@ Answer `200`:
 }
 ```
 
+With ORD-4 (Release B, migration 0147, not live until signed), each
+medication's `ownProgress` also carries `acceptedAt`, always present, after
+`receivedAt`. The example's would read `{ "status": "dispensed",
+"receivedAt": "...", "acceptedAt": "...", "dispensedAt": "...",
+"reversedAt": null }`, with `"acceptedAt": null` when no pharmacist at this
+hospital's pharmacy accepted the prescription, or the pharmacy-api does not
+say. Its `status` may also be `accepted` (ORD-3's section).
+
 ### Sections left out
 
 A section that is not in `sections` is listed in `leftOut` with a reason and
@@ -9113,12 +9121,20 @@ on, and the prescriber sees "Accepted" between "Sent to pharmacy" and
 Work item answers gain `pharmacyStep` and `pharmacistAcceptance` (when they
 are absent: "Work item answers" below):
 
-| `pharmacyStep` | Meaning | The prescriber's `ownProgress.status` (ORD-3) |
+| `pharmacyStep` | Meaning | The prescriber's `ownProgress.status` (ORD-3), for an own item that is not withdrawn (below the table) |
 | --- | --- | --- |
 | `received` | an own item sent to this pharmacy automatically (0133), not accepted by a pharmacist, not dispensed | `received` |
-| `accepted` | accepted (below), not dispensed | `accepted` |
+| `accepted` | accepted (below), not dispensed | `accepted` (`received` to an ehr-api that does not send the second progress header) |
 | `dispensed` | dispensed | `dispensed` |
 | `dispensing_reversed` | dispensed, then the dispensing was reversed | `dispensing_reversed` |
+
+The third column holds only for this hospital's own items, while they are
+not withdrawn. An item withdrawn before it was dispensed reads `withdrawn`
+or `sent_elsewhere` there, whether its step is `received` or `accepted`
+(which status wins: "The prescriber's progress" below). A route-backed item
+is always `accepted` here, but it is another facility's prescription: its
+prescriber's `ownProgress` reads `not_received`, and its progress is on
+`orderRoute`.
 
 `pharmacistAcceptance` is `{ "acceptedAt", "acceptedByMembershipId",
 "acceptedWith" }` or `null`. `acceptedWith` says how the item came to be
@@ -9195,7 +9211,8 @@ whoever made it and however (`acceptedWith` any of the four), and
 new key, answers that `200` too. The screen shows the name through
 `GET /api/v1/identity/facility-staff-names?membershipIds=<id>` (SX-9).
 
-Errors, each message as pharmacy-api sends it:
+This route's own errors, each message as pharmacy-api sends it (the answers
+it shares with every Pharmacy browser write are listed after the table):
 
 | HTTP | `code` | Message | When |
 | --- | --- | --- | --- |
@@ -9204,11 +9221,11 @@ Errors, each message as pharmacy-api sends it:
 | 400 | `PURPOSE_OF_USE_REQUIRED` | X-Purpose-Of-Use must be direct-care or emergency | |
 | 400 | `IDEMPOTENCY_KEY_REQUIRED` | Idempotency-Key must contain 16 to 128 URL-safe characters | |
 | 403 | `PERMISSION_DENIED` | Required Pharmacy permission is missing | no `pharmacy.work-item.accept` here |
-| 403 | `PHARMACY_ACCESS_DENIED` | Pharmacy access is not authorized | no basis to write this item; or 0147's steps reader does not answer this own item for the session |
+| 403 | `PHARMACY_ACCESS_DENIED` | Pharmacy access is not authorized | no basis to write this item; or 0147's steps reader does not answer this own item for the session, or answers a row that does not read cleanly |
 | 403 | `PHARMACY_ACCESS_DENIED` | Break-glass authorization cannot mutate Pharmacy records | an emergency session, whatever the basis (the dispensing's message, reused) |
 | 404 | `PHARMACY_WORK_ITEM_NOT_FOUND` | Pharmacy work item was not found | no such item this session can see |
 | 409 | `ORDER_ROUTE_CLOSED` | This prescription from another facility is closed: stop work on it | a route-backed item whose route is closed |
-| 409 | `IDEMPOTENCY_CONFLICT` | Prescription acceptance conflicts with existing Pharmacy work | this member's key at this facility recorded another request (the hand-off's message, reused) |
+| 409 | `IDEMPOTENCY_CONFLICT` | Prescription acceptance conflicts with existing Pharmacy work | this member's key at this facility recorded another request, also one whose acceptance the member can no longer read (step 5 below); the hand-off's message, reused |
 | 409 | `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` | A full dispensing is already recorded for this work item; partial dispensing is not supported | dispensed, with no acceptance on record (the dispensing's message, reused) |
 | 409 | `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` | This prescription can no longer be dispensed here | withdrawn, with `"withdrawnReason": "changed"`; or refused by the database with no reason, with no `withdrawnReason` |
 | 409 | `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` | This prescription was sent to another pharmacy, so it can no longer be dispensed here | sent elsewhere, with `"withdrawnReason": "sent_elsewhere"` |
@@ -9220,10 +9237,36 @@ Errors, each message as pharmacy-api sends it:
 `withdrawnReason` is a problem member, as on the dispensing's 409 (ORD-2).
 The screens branch on the code and `withdrawnReason`, never on the text.
 
-The order of the checks. Before the transaction: the guard (401, 403
-`PERMISSION_DENIED`, the Origin and CSRF check), the path and the body (400),
-then the purpose and the key (400). Then, in one SERIALIZABLE transaction,
-in the order a dispensing uses:
+Besides the table, Accept gives the answers every Pharmacy browser write
+gives:
+- The guard, before the transaction: 401 `AUTHENTICATION_REQUIRED` "Valid
+  Identity authentication is required by the Pharmacy service" (no bearer
+  token and no cookie); Identity's refusal of the sign-in, the `Origin` or
+  the CSRF token, passed on with Identity's status and code; 503
+  `IDENTITY_SERVICE_UNAVAILABLE` when Identity cannot be reached; 403
+  `FACILITY_ACCESS_DENIED` "Identity did not authorize the actor at this
+  facility".
+- Identity's consent decision, asked at step 2 below only when neither the
+  order route nor 0133's own-work basis allows the write: Identity's refusal
+  passed on with its status and code, 503 `IDENTITY_SERVICE_UNAVAILABLE`
+  when Identity cannot be reached, or 502 `INVALID_IDENTITY_RESPONSE` when
+  its answer is not a well-formed decision for this patient, facility and
+  scope.
+- Any other failure: 500 `INTERNAL_ERROR`. That includes 0147's steps
+  reader failing at step 7 with anything but 42883, and any database
+  failure that is none of the answers above. A serialization failure or
+  deadlock (40001, 40P01), of the reader or of any other statement, is not
+  answered: the whole SERIALIZABLE accept runs again (DatabaseService).
+
+As for `ORDER_ROUTE_UNAVAILABLE`, each 5xx among these is sent with the
+detail "The service could not complete the request."; the code says what
+failed.
+
+The order of the checks. Before the transaction: the guard (401; Identity's
+check of the sign-in, the Origin and the CSRF token; 403
+`FACILITY_ACCESS_DENIED`; 403 `PERMISSION_DENIED`), the path and the body
+(400), then the purpose and the key (400). Then, in one SERIALIZABLE
+transaction, in the order a dispensing uses:
 1. The work item, read under row-level security. One this session cannot
    see answers as for a dispensing: 423 or 409 `ORDER_ROUTE_CLOSED` for a
    route-backed item its route hides, else 404.
@@ -9237,12 +9280,24 @@ in the order a dispensing uses:
    facility, account and key: stored for another request, 409
    `IDEMPOTENCY_CONFLICT`. That table also keeps the key of a dispensing
    that accepted an item, so that key sent to Accept answers this 409.
-   Because this step reads the table, every accept, a route-backed one
-   included, answers 503 on a database without 0147.
+   The lookup reads under row-level security, so it misses an acceptance
+   the member can no longer read (that patient's consent grant ended, or
+   the patient set a deny directive), which the table's unique key still
+   holds: the insert of step 10 meets it (23505). The first time,
+   DatabaseService runs the transaction again, because a request with the
+   same key may have committed meanwhile, and that run answers it here
+   (409) or, for this same request, at step 7 (`200`). When the insert
+   meets the key again, the earlier acceptance is another request's (an
+   acceptance of this item would already have answered at step 7), and
+   the answer is this 409 too, not a 500. Because this step reads the
+   table, every accept, a route-backed one included, answers 503 on a
+   database without 0147.
 6. A route-backed item: `200`, `acceptedWith: "order_route"`, from its work
    item.
 7. An own item, through 0147's steps reader (reader missing: 503; no row
-   for the session: 403): a stored acceptance answers `200` with it,
+   for the session, or one that does not read cleanly: 403; any other
+   failure of the reader: 500, except 40001 and 40P01, which run the accept
+   again): a stored acceptance answers `200` with it,
    whatever the item's state now (dispensed, reversed, withdrawn); an item
    not sent automatically answers `200`, `acceptedWith: "hand_off"`, from
    its work item.
@@ -9433,13 +9488,14 @@ know). This replaces the planned "deploy ehr-api first".
   then validated. `unique (work_item_id, event_version)` stays, so an item
   has at most one event of each. `pharmacy.validate_work_item_event()` is
   replaced: a version-1 `prescription_accepted` event runs 0077's text
-  unchanged; a version-2 `pharmacist_accepted` event needs a complete
-  session, its actor and membership the session's and the item's
-  acceptance's, its patient and facility the acceptance's, the reason
-  exactly "Accepted by the pharmacist", and an acceptance on record, else
-  23514 "Pharmacy work-item event does not match its pharmacist
-  acceptance"; any other pair of type and version is refused with 0077's
-  23514 "Pharmacy work-item event does not match its accepted
+  unchanged; a version-2 `pharmacist_accepted` event needs the session's
+  account and membership (0077's rule; not its facility or purpose, which
+  the acceptance's trigger already checked), its actor and membership those
+  two and the item's acceptance's, its patient and facility the
+  acceptance's, the reason exactly "Accepted by the pharmacist", and an
+  acceptance on record, else 23514 "Pharmacy work-item event does not match
+  its pharmacist acceptance"; any other pair of type and version is refused
+  with 0077's 23514 "Pharmacy work-item event does not match its accepted
   prescription". Its attributes, owner and ACL stay 0077's, as the
   `pharmacy-session-guards` suite pins them.
 - The reader `pharmacy.own_work_item_steps(requested_work_item_ids uuid[])`
@@ -9463,23 +9519,45 @@ know). This replaces the planned "deploy ehr-api first".
   `hid_schema_test_runtime` (as `pharmacy.dispensings`), the trigger
   function to nobody, all revoked from PUBLIC. The replaced event validator
   keeps its ACL.
-- Locks, measured with `pg_locks` before commit: ACCESS EXCLUSIVE on
-  `pharmacy.work_item_events`, and ACCESS SHARE on `pharmacy.work_items`,
-  `pharmacy.dispensings`, `pharmacy.own_prescription_sends`,
-  `pharmacy.prescription_item_claims` and those four's indexes; no other
-  application table. Taken NOWAIT and tried again every 100 ms for at most
-  5 seconds, else 55P03 with nothing applied (one attempt only when the
-  transaction already holds an earlier migration's locks, as in the
-  runner's dry run). The ACCESS EXCLUSIVE lasts to commit, the CHECKs'
-  validation included, because the runner applies each file in one
-  transaction, so every work item event write waits for it (pharmacy-api's
-  hand-off, 0133's automatic send and 0086's route acceptance each insert
-  one). On a copy with 20,000 work items and as many events the file took
-  about 50 ms, of which the hold was about 33 ms; only the validation grows
+- Locks, measured with `pg_locks` before commit and with blockers held by
+  another session: ACCESS SHARE on the seven tables the file opens without
+  changing them (`pharmacy.work_items`, `pharmacy.dispensings`,
+  `pharmacy.own_prescription_sends`, `pharmacy.prescription_item_claims`,
+  `ehr.prescriptions`, whose policies it prints, and
+  `identity.staff_facility_memberships` and `auth.accounts`, on which its
+  post-checks' probes of the trigger and the validator plan queries), the
+  indexes of all of them but `ehr.prescriptions`, and last ACCESS EXCLUSIVE
+  on `pharmacy.work_item_events`; no other application table. Section 0, the
+  catalog checks, takes no table lock. All are taken in one attempt, NOWAIT
+  (an index waits at most 10 ms), tried again every 100 ms for at most 50
+  attempts (5 to 5.5 seconds), else 55P03 with nothing applied (one attempt
+  only when the transaction already holds an earlier migration's locks, as
+  in the runner's dry run). The ACCESS EXCLUSIVE comes last, so an attempt
+  that waits never holds it, and nothing after that attempt waits for a
+  lock: with another session holding ACCESS EXCLUSIVE on every other
+  application table, or a REINDEX of each of their indexes, the file applied
+  without waiting; with one of the seven tables or their indexes held, it
+  stopped with 55P03 after 5 to 5.5 seconds, and reads of
+  `pharmacy.work_item_events` went on meanwhile. A post-check that still
+  meets a busy lock stops the file with 55P03 (busy, nothing applied). The
+  ACCESS EXCLUSIVE lasts to commit, the CHECKs' validation included, because
+  the runner applies each file in one transaction, so every work item event
+  read and write waits for it (pharmacy-api's hand-off, 0133's automatic
+  send and 0086's route acceptance each insert one; no service reads the
+  table). On a copy with 20,000 work items and as many events the file took
+  43 to 46 ms, of which the hold was 25 to 29 ms; only the validation grows
   with the data.
 - No backfill (above). Undo is by hand only, in the order 0147's header
   gives (0077's validator first, then the reader, then the trigger and its
-  function, then the table); the widened CHECKs stay.
+  function, then the table); the widened CHECKs stay. 0147 is undone in
+  full, its table included, before any step of 0133's undo: its two
+  own-work policies call 0133's D1 halves, so dropping those is refused
+  (2BP01) while the policies stand, and its reader and trigger function
+  read 0133's sends table, so with that table dropped first each fails
+  (42P01). After the undo the file cannot be applied again (it finds the
+  widened CHECKs and refuses, "0147: already applied"), so its row in
+  `migration.schema_migrations` stays and the runner counts it as applied;
+  a later migration brings the step back.
 
 ### Older and newer images
 
@@ -9516,22 +9594,33 @@ dispensing's key, one version-2 `pharmacist_accepted` event, and
 grant accepts on the own-work basis (`201`, then `200` `alreadyAccepted`
 for the same key and for a new one, each audited with `basis: own-work`);
 the list then shows `accepted`, with `status`, `acceptedAt` and `version`
-unchanged, still open work at the top; the doctor's `ownProgress` reads
-`accepted` with `acceptedAt`, then `dispensed` with `acceptedAt` kept, and
-that dispensing records no second acceptance; pharmacy-api asked with only
-one of the two headers answers `received` with no `acceptedAt`, and
-`accepted` with both; an accepted item put on hold reads `withdrawn`, Accept
-answers it again (`200`) and Dispense answers 409; an item held before
-anyone accepted it answers Accept with 409 and `withdrawnReason: "changed"`.
-`verify-order-routes-runtime.mjs` reads a routed prescription's
-`ownProgress` as `not_received` with `acceptedAt: null`. The database suite
-`pharmacy-work-item-acceptance` holds the rest, through the EHR and
-Pharmacy runtimes: the table, its policies against the dispensings', grants,
-triggers, owners and the widened CHECKs; an acceptance by a pharmacist with
-no grant; a second acceptance and a second event (23505); every refusal,
-UPDATE and DELETE included; the Release A event shapes; a dispensing that
-accepts first; and the reader for the own-work pharmacist and the consenting
-doctor, with nothing for another facility and more than 200 ids refused.
+unchanged, still open work at the top (it lists before a newer item that is
+still `received`; as done work it would list after it); the doctor's
+`ownProgress` reads `accepted` with `acceptedAt`, then `dispensed` with
+`acceptedAt` kept, and that dispensing records no second acceptance;
+pharmacy-api asked with only one of the two headers answers `received` with
+no `acceptedAt`, and `accepted` with both; an accepted item put on hold
+reads `withdrawn`, Accept answers it again (`200`) and Dispense answers
+409; an item held before anyone accepted it answers Accept with 409 and
+`withdrawnReason: "changed"`. `verify-order-routes-runtime.mjs` reads a
+routed prescription's `ownProgress` as `not_received` with `acceptedAt:
+null`, and the outside pharmacy's route-backed item for it as
+`pharmacyStep: "accepted"` with `acceptedWith: "order_route"`, by the
+member who accepted the route, at the item's own `acceptedAt`; Accept on
+that item answers `200` with exactly that acceptance and `alreadyAccepted:
+true`, audited with the patient, `already_accepted` and `basis:
+order-route` with the route's id; after its dispensing it reads `dispensed`
+with the same acceptance, and `pharmacy.work_item_acceptances` holds no row
+for it. The database suite `pharmacy-work-item-acceptance` holds the rest,
+through the EHR and Pharmacy runtimes: the table, its policies against the
+dispensings', grants, triggers, owners and the widened CHECKs; an
+acceptance by a pharmacist with no grant; a second acceptance and a second
+event (23505); every refusal, UPDATE and DELETE included, and the trigger's
+and the event validator's checks of the row's patient, facility, account
+and membership one at a time; the Release A event shapes; a dispensing that
+accepts first; and the reader for the own-work pharmacist and the
+consenting doctor, with nothing for another facility and more than 200 ids
+refused.
 
 Screen change (Akos frontend branch), as the planned contract's screen
 notes: on a `received` item that is not withdrawn, Accept is the main
@@ -9541,9 +9630,19 @@ button, then "Accepted by <name> 10:52"; Dispense stays enabled on a
 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE`, its message, then reload; the
 prescriber's row shows "Accepted 10:52" for `accepted`, with no name. With
 no `pharmacyStep` (an older pharmacy-api, or a database without 0147) show
-no step, as on Release A. `packages/api-client` keeps `pharmacyStep` and
-`pharmacistAcceptance` only for a step it knows and refuses a malformed
-acceptance (502).
+no step, as on Release A. `packages/api-client` (`PharmacyApiClient`'s work
+list and read, and the `PharmacyStep` and `PharmacistAcceptance` types
+exported from `@hid/api-client`) keeps `pharmacyStep` and
+`pharmacistAcceptance` together, only for a step and an `acceptedWith` it
+knows. It leaves both out, and the item reads as on Release A, when
+`pharmacyStep` is absent or either value is one it does not know (a newer
+pharmacy-api), so one such item never fails the whole list. It refuses with
+502 only a wrong type: `pharmacyStep` present but not a string (`null`
+included); next to a known step, `pharmacistAcceptance` missing or neither
+`null` nor an object; `acceptedWith` not a string; with a known
+`acceptedWith`, `acceptedAt` or `acceptedByMembershipId` not a non-empty
+string (pharmacy-api always sends both: they come from NOT NULL columns).
+pharmacy-api's `pharmacy-client-steps.contract.spec.ts` pins these rules.
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 

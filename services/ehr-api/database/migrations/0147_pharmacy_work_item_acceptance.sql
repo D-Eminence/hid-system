@@ -178,9 +178,11 @@
 -- until a dispensing, accepted or not); nothing for the laboratory.
 --
 -- 0. Preconditions (catalog reads only, from pg_class, pg_proc,
---    pg_namespace, pg_attribute, pg_constraint, pg_trigger and pg_policy, so
---    a login that may not use a schema reaches this file's own messages; each
---    is a presence check that raises when the thing is absent, never a
+--    pg_namespace, pg_attribute, pg_trigger and pg_roles, so a login that may
+--    not use a schema reaches this file's own messages, and no table is
+--    locked: the checks that print a CHECK or a policy are 1b's, because
+--    PostgreSQL's pg_get_constraintdef and pg_get_expr open the table they
+--    print for; each is a presence check that raises when the thing is absent, never a
 --    comparison that can be null; each failure raises 55000 or 42501 and
 --    nothing is applied):
 --    a. 0001-0137 applied (the markers: 0133's sends, claims and own-work
@@ -190,8 +192,8 @@
 --       identity.begin_qoreid_nin_check; 0136 changes rows of the role table
 --       only and leaves no catalog mark, and the runner applies it before
 --       0137);
---    b. 0147 not applied (no table, function or trigger of this file's names,
---       the event CHECKs as 0023 made them);
+--    b. 0147 not applied (no table, function or trigger of this file's names;
+--       1b finds the event CHECKs as 0023 made them);
 --    c. every column the new bodies, policies and checks read, by name and
 --       type;
 --    d. the bodies replaced and relied on are byte for byte the ones
@@ -210,15 +212,20 @@
 --    f. the applier is that owner, or a member that inherits it and may SET
 --       ROLE to it; that owner may create in and use pharmacy and use ehr,
 --       identity, auth and platform (else 42501);
---    g. 0133 D5's two ehr.prescriptions policies, naming only the
---       validator's owner, and no hid_ role is a member of that owner (D5's
---       premise; else 55000);
---    h. pharmacy.work_item_events has exactly 0023's two CHECKs (by
---       definition), its unique (work_item_id, event_version) and its
---       validator trigger;
+--    g. no hid_ role is a member of the validator's owner (0133 D5's
+--       premise; else 55000; 1b checks D5's two policies);
 --    and it records validate_work_item_event's owner and ACL for section 6.
 -- 1. Locks, NOWAIT, retried every 100 ms for at most 5 seconds, else 55P03
 --    with nothing applied (see Locks).
+-- 1b. Under those locks, the preconditions that print a CHECK or a policy
+--    (each failure raises 55000 and nothing is applied):
+--    b. (its last part) the event CHECKs not widened (else '0147: already
+--       applied');
+--    g. 0133 D5's two ehr.prescriptions policies, naming only the
+--       validator's owner;
+--    h. pharmacy.work_item_events has exactly 0023's two CHECKs (by
+--       definition), its unique (work_item_id, event_version) and its
+--       validator trigger.
 -- 2. The applier acts as that owner for the rest of this transaction, so
 --    every new object is the owner's (and A3's function the role D5 names).
 -- 3. A3's trigger function and A5's reader, then A1's table, its two
@@ -243,24 +250,51 @@
 --    version 2 with 0077's, and the reader answers no row without a session
 --    and for a session facility with no item (plpgsql plans a query only
 --    when it first runs, so this proves the columns it reads exist), and
---    22023 for 201 ids. Nothing is written.
+--    22023 for 201 ids; a probe that meets a busy lock stops the file with
+--    55P03 (busy, nothing applied), not with its own message. Nothing is
+--    written.
 --
--- Locks (measured with pg_locks before commit on a 0137 copy): section 1
--- takes, in one attempt, ACCESS EXCLUSIVE on pharmacy.work_item_events
--- (ALTER TABLE ... ADD CONSTRAINT and DROP CONSTRAINT need it) and ACCESS
--- SHARE on pharmacy.work_items (the own-work policies' expressions and the
--- replaced validator's %ROWTYPE open it), pharmacy.dispensings,
--- pharmacy.own_prescription_sends and pharmacy.prescription_item_claims (the
--- reader's probe plans its query on them), all NOWAIT, 5 tables in all, and
--- the indexes of the four read, by planning a query on each under a 10 ms
+-- Locks (measured on a 0137 copy with pg_locks before commit, and with
+-- blockers held by another session: pg_locks alone cannot show a lock that a
+-- probe took and its subtransaction released when the probe was refused).
+-- Section 0 takes no table lock. Section 1 takes, in one attempt and all
+-- NOWAIT, first ACCESS SHARE on the seven tables the rest of the file opens
+-- without changing them: pharmacy.work_items (the own-work policies'
+-- expressions and the replaced validator's %ROWTYPE open it),
+-- pharmacy.dispensings, pharmacy.own_prescription_sends and
+-- pharmacy.prescription_item_claims (the reader's probe plans its query on
+-- them), ehr.prescriptions (1b prints D5's two policies on it), and
+-- identity.staff_facility_memberships and auth.accounts (section 6's
+-- acceptance and event probes run A3 and the validator: their declarations
+-- call platform.current_account_id(), which plans a query on auth.accounts
+-- and its indexes even without a session, and A3's step a is parsed whole,
+-- its membership test included, before the planner drops that test for a
+-- probe without a session); then the indexes of the six it plans on (not
+-- ehr.prescriptions'), by planning a query on each under a 10 ms
 -- lock_timeout (a REINDEX holds them while it allows the table's ACCESS
--- SHARE): a busy table or index fails the attempt at once and its
--- subtransaction releases what it took. pg_locks before commit shows no other
--- application table of 0001-0137: the new table is created here; A3's and
--- A5's plpgsql bodies are not checked against tables when they are created,
--- and the probes refuse or answer before they read ehr.prescriptions, the
--- memberships or the consent tables (a probe without a session is refused by
--- a condition the planner folds before it plans any read). ACCESS SHARE stops
+-- SHARE); and last ACCESS EXCLUSIVE on pharmacy.work_item_events (ALTER
+-- TABLE ... ADD CONSTRAINT and DROP CONSTRAINT need it), 8 tables in all
+-- (pg_locks before commit shows these, the indexes of the six and the new
+-- table, nothing else, with a superuser applier and with one that has
+-- neither superuser nor BYPASSRLS, whose probes plan the tables' policies). A
+-- busy table or index fails the attempt and its subtransaction releases what
+-- it took; the ACCESS EXCLUSIVE comes last, so an attempt that waits (at
+-- most 10 ms, for an index) does not hold it. Nothing after section 1 waits
+-- for a lock: with another session holding ACCESS EXCLUSIVE on every other
+-- application table of 0001-0137, or a REINDEX of every index of those
+-- tables, the file applied and no lock request of its own was ever seen
+-- waiting. With one of section 1's held instead (ACCESS EXCLUSIVE on
+-- auth.accounts or on the memberships, or a REINDEX of auth.accounts_pkey or
+-- of the memberships' key), it stopped after its 50 attempts (5 to 5.5
+-- seconds: each attempt waits its 10 ms for a held index) with section 1's
+-- 55P03, nothing applied, while a third session read
+-- pharmacy.work_item_events every 50 ms, each read under a 200 ms
+-- lock_timeout, and none failed. (Before section 1 took those two
+-- tables and their indexes, the same blockers made a probe wait the runner's
+-- 5 s lock_timeout while holding that ACCESS EXCLUSIVE: 20 of the third
+-- session's 120 reads failed, and the file stopped with a probe's message.)
+-- Should a probe still meet a busy lock, it stops with 55P03 (busy, nothing
+-- applied), not with the probe's own message. ACCESS SHARE stops
 -- nothing but DDL. The ACCESS EXCLUSIVE lasts to commit: because the runner
 -- applies each file in one transaction, the validation that follows ADD
 -- CONSTRAINT ... NOT VALID scans pharmacy.work_item_events under it too (NOT
@@ -271,15 +305,18 @@
 -- 0133 D7's send and 0086's route acceptance insert one event each (no
 -- service reads the table).
 -- On a 0137 copy with 20,000 work items and as many events, the file's
--- statements took 50 ms in all (three runs, fsync off): section 0 about 16 ms
--- (no lock), section 1 to commit about 33 ms (the hold), of which section 4's
--- two CHECKs and their validation about 7 ms. The validation grows with the
--- events (one per item a pharmacy holds, one more per pharmacist acceptance);
--- the rest does not grow with the data.
+-- statements took 43 to 46 ms in all (three runs, fsync off): section 0 13 to
+-- 15 ms (no lock), section 1 3 to 4 ms (the ACCESS EXCLUSIVE taken at its
+-- end), and from there to commit 25 to 29 ms (the hold), of which section 4's
+-- two CHECKs and their validation about 6 ms and section 6's post-checks 10
+-- to 12 ms. The validation grows with the events (one per item a pharmacy
+-- holds, one more per pharmacist acceptance); the rest does not grow with
+-- the data.
 -- When 0147 is the first statement of its transaction (the runner applies
 -- each file in its own transaction), the loop tries again 100 ms later, so it
--- never waits while holding a lock and no request queues behind a waiting
--- lock; after 50 attempts (5 seconds) it stops the release (55P03, nothing
+-- never waits while holding the ACCESS EXCLUSIVE (only, for at most 10 ms, an
+-- index while holding the ACCESS SHARE locks) and no read or write queues
+-- behind it; after 50 attempts (5 seconds) it stops the release (55P03, nothing
 -- applied; the same release can run again). When its transaction already
 -- holds locks that stop other sessions' reads or writes (an earlier
 -- migration of the same transaction: the runner's dry run runs every pending
@@ -324,7 +361,24 @@
 -- pharmacist_accepted event, never for 0077's). The widened CHECKs stay:
 -- pharmacist_accepted events are append-only evidence (0023's immutability
 -- trigger), so 0023's narrower CHECKs cannot come back once one exists, and
--- with 0077's validator restored no new one is written.
+-- with 0077's validator restored no new one is written. 0147 is undone in
+-- full, its table included, before any step of 0133's undo (0133's header,
+-- applied and unchangeable, cannot say so): 0147's two own-work policies on
+-- pharmacy.work_item_acceptances call 0133's D1 halves
+-- (identity.facility_work_session_membership and
+-- identity.pharmacy_work_patient_allows), so 0133's order (its 44 own-work
+-- policies, then D1's halves) stops at 2BP01 while they stand; and its
+-- reader and its trigger function read 0133's sends table, which plpgsql
+-- records no dependency on, so with that table dropped first every call of
+-- the reader, and every acceptance of a work item the trigger finds, fail
+-- with 42P01 (0133's suite, case 9, undoes 0147 first). After the undo this
+-- file cannot be applied again: 1b finds the widened CHECKs and refuses
+-- ('0147: already applied'). So 0147's row in migration.schema_migrations
+-- stays: the runner then counts the file as applied, and the file stays in
+-- every later release unchanged, as each applied file must; without the row
+-- the next release would stop at that refusal. To bring the step back, a
+-- later migration makes again what the undo dropped, on event CHECKs that
+-- are already wide.
 
 -- 0. Preconditions.
 do $$
@@ -352,8 +406,8 @@ begin
                   ('identity', 'begin_qoreid_nin_check', 'character, character, boolean, text, uuid, integer'))) <> 5 then
     raise exception using errcode = '55000', message = '0147: 0001-0137 must be applied first';
   end if;
-  -- b. Not applied yet: no table, function or trigger of this file's names,
-  -- and the event CHECKs not widened.
+  -- b. Not applied yet: no table, function or trigger of this file's names
+  -- (1b checks the event CHECKs, which only printing them shows).
   if exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
               where namespace.nspname = 'pharmacy' and relation.relname = 'work_item_acceptances')
      or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
@@ -362,12 +416,7 @@ begin
      or exists (select 1 from pg_trigger trigger_row
                  where not trigger_row.tgisinternal
                    and trigger_row.tgname in ('pharmacy_work_item_acceptance_validate',
-                         'pharmacy_work_item_acceptances_immutable'))
-     or exists (select 1 from pg_constraint constraint_row
-                  join pg_class relation on relation.oid = constraint_row.conrelid
-                  join pg_namespace namespace on namespace.oid = relation.relnamespace
-                 where namespace.nspname = 'pharmacy' and relation.relname = 'work_item_events'
-                   and pg_get_constraintdef(constraint_row.oid) like '%pharmacist_accepted%') then
+                         'pharmacy_work_item_acceptances_immutable')) then
     raise exception using errcode = '55000', message = '0147: already applied';
   end if;
   -- c. Every column the new bodies, policies and checks read, by name and
@@ -532,10 +581,121 @@ begin
     raise exception using errcode = '42501',
       message = format('0147: %s lacks %s', pg_get_userbyid(owner_oid), missing);
   end if;
+  -- g. 0133 D5's premise: no hid_ role is a member of the validator's owner,
+  -- whom D5's two ehr.prescriptions policies name (1b checks the policies,
+  -- which only printing them shows).
+  select exists (select 1 from pg_roles role_row
+                  where role_row.rolname like 'hid\_%' and role_row.oid <> validator_owner
+                    and pg_has_role(role_row.oid, validator_owner, 'MEMBER')),
+         (select string_agg(role_row.rolname, ', ' order by role_row.rolname) from pg_roles role_row
+           where role_row.rolname like 'hid\_%' and role_row.oid <> validator_owner
+             and pg_has_role(role_row.oid, validator_owner, 'MEMBER'))
+    into found_absent, missing;
+  if found_absent then
+    raise exception using errcode = '55000',
+      message = format('0147: these roles are members of %s, which 0133 D5''s ehr.prescriptions policies name: %s',
+        pg_get_userbyid(validator_owner), missing);
+  end if;
+  -- The replaced validator's owner and ACL, for section 6.
+  perform set_config('hid_0147.validator_acl',
+    (select pg_get_userbyid(proc.proowner) || '=' || coalesce(proc.proacl::text, 'default') from pg_proc proc
+      where proc.oid = 'pharmacy.validate_work_item_event()'::regprocedure), true);
+  raise notice '0147: preconditions checked; applier %; owner %', current_user, pg_get_userbyid(owner_oid);
+end
+$$;
+
+-- 1. Locks (see Locks), NOWAIT, at most 5 s. A failed attempt's
+-- subtransaction releases what it took. The tables only read first, then
+-- their indexes (each may wait 10 ms), and the one ACCESS EXCLUSIVE last, so
+-- an attempt that waits never holds it. When this transaction already holds
+-- a lock that stops other sessions' reads or writes of a table (an earlier
+-- migration in the same transaction, as in the runner's dry run of every
+-- pending file; the runner's own ledger table aside), one attempt only and
+-- no sleep, so no request queues behind those locks while this file waits.
+do $$
+declare
+  attempt integer := 0;
+  runner_lock_timeout text := current_setting('lock_timeout');
+  holding boolean := exists (
+    select 1 from pg_locks held
+      join pg_class relation on relation.oid = held.relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where held.pid = pg_backend_pid() and held.locktype = 'relation' and held.granted
+       and held.database = (select database_row.oid from pg_database database_row
+                             where database_row.datname = current_database())
+       and held.mode in ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+       and namespace.nspname <> 'migration');
+begin
+  loop
+    attempt := attempt + 1;
+    begin
+      -- The tables the rest of the file opens without changing them: the
+      -- Pharmacy work items, dispensings and 0133's sends and claims (the
+      -- policies, the validator's %ROWTYPE, the reader's probe),
+      -- ehr.prescriptions (1b prints D5's policies on it), and the
+      -- memberships and auth.accounts (section 6's acceptance and event
+      -- probes: A3's step a names the memberships, and both functions'
+      -- declarations call platform.current_account_id(), which plans a query
+      -- on auth.accounts even without a session).
+      lock table pharmacy.work_items, pharmacy.dispensings, pharmacy.own_prescription_sends,
+        pharmacy.prescription_item_claims, ehr.prescriptions, identity.staff_facility_memberships, auth.accounts
+        in access share mode nowait;
+      -- The indexes of those the file plans a query on (all but
+      -- ehr.prescriptions, which it only prints for), which planning takes:
+      -- a REINDEX holds them while it allows the ACCESS SHARE above. A 10 ms
+      -- lock_timeout makes taking them a NOWAIT too (55P03, so this loop
+      -- tries again); the runner's own is restored.
+      perform set_config('lock_timeout', '10ms', true);
+      execute 'select 1 from pharmacy.work_items where false';
+      execute 'select 1 from pharmacy.dispensings where false';
+      execute 'select 1 from pharmacy.own_prescription_sends where false';
+      execute 'select 1 from pharmacy.prescription_item_claims where false';
+      execute 'select 1 from identity.staff_facility_memberships where false';
+      execute 'select 1 from auth.accounts where false';
+      perform set_config('lock_timeout', runner_lock_timeout, true);
+      -- Last, the table section 4 alters: nothing waits while it is held.
+      lock table pharmacy.work_item_events in access exclusive mode nowait;
+      exit;
+    exception when lock_not_available then
+      if holding then
+        raise exception using errcode = '55P03',
+          message = '0147: pharmacy.work_item_events or a table 0147 reads (the Pharmacy work items, the dispensings, '
+            || '0133''s sends and claims, ehr.prescriptions, the memberships, auth.accounts, or their indexes) is '
+            || 'busy, and this transaction already holds an earlier migration''s locks, so it does not wait; nothing '
+            || 'applied; run the release again at a quieter time';
+      end if;
+      if attempt >= 50 then
+        raise exception using errcode = '55P03',
+          message = '0147: pharmacy.work_item_events or a table 0147 reads (the Pharmacy work items, the dispensings, '
+            || '0133''s sends and claims, ehr.prescriptions, the memberships, auth.accounts, or their indexes) stayed '
+            || 'busy for 5 seconds; nothing applied; run the release again at a quieter time';
+      end if;
+      perform pg_sleep(0.1);
+    end;
+  end loop;
+end
+$$;
+
+-- 1b. Under section 1's locks, the preconditions that print a CHECK or a
+-- policy: PostgreSQL's pg_get_constraintdef and pg_get_expr open the table
+-- they print for (ACCESS SHARE), so in section 0 they could wait behind DDL
+-- on it, and after section 1 they cannot. Each failure raises 55000 and
+-- nothing is applied.
+do $$
+declare
+  validator_owner oid := (select proc.proowner from pg_proc proc
+                           where proc.oid = 'pharmacy.validate_dispensing()'::regprocedure);
+begin
+  -- b (its last part). Not applied yet: the event CHECKs not widened.
+  if exists (select 1 from pg_constraint constraint_row
+              where constraint_row.conrelid = 'pharmacy.work_item_events'::regclass and constraint_row.contype = 'c'
+                and pg_get_constraintdef(constraint_row.oid) like '%pharmacist_accepted%') then
+    raise exception using errcode = '55000', message = '0147: already applied';
+  end if;
   -- g. 0133 D5: its two ehr.prescriptions policies, naming only the
   -- validator's owner, through which A3 reads the source prescription of an
-  -- own item for a pharmacist without a consent grant; and no hid_ role is a
-  -- member of that owner (D5's premise).
+  -- own item for a pharmacist without a consent grant (section 0 checked that
+  -- no hid_ role is a member of that owner, D5's premise).
   if (select count(*) from pg_policy policy_row
        where policy_row.polrelid = 'ehr.prescriptions'::regclass
          and policy_row.polroles = array[validator_owner] and policy_row.polpermissive
@@ -548,18 +708,6 @@ begin
                and pg_get_expr(policy_row.polwithcheck, policy_row.polrelid) = 'false'))) <> 2 then
     raise exception using errcode = '55000',
       message = '0147: ehr.prescriptions does not have 0133 D5''s two policies for the dispensing validator''s owner';
-  end if;
-  select exists (select 1 from pg_roles role_row
-                  where role_row.rolname like 'hid\_%' and role_row.oid <> validator_owner
-                    and pg_has_role(role_row.oid, validator_owner, 'MEMBER')),
-         (select string_agg(role_row.rolname, ', ' order by role_row.rolname) from pg_roles role_row
-           where role_row.rolname like 'hid\_%' and role_row.oid <> validator_owner
-             and pg_has_role(role_row.oid, validator_owner, 'MEMBER'))
-    into found_absent, missing;
-  if found_absent then
-    raise exception using errcode = '55000',
-      message = format('0147: these roles are members of %s, which 0133 D5''s ehr.prescriptions policies name: %s',
-        pg_get_userbyid(validator_owner), missing);
   end if;
   -- h. pharmacy.work_item_events as 0023 made it: exactly one CHECK of each
   -- definition A4 widens, its unique key and its validator trigger.
@@ -585,75 +733,13 @@ begin
     raise exception using errcode = '55000',
       message = '0147: pharmacy.work_item_events does not have 0023''s two CHECKs, its key or its validator trigger';
   end if;
-  -- The replaced validator's owner and ACL, for section 6.
-  perform set_config('hid_0147.validator_acl',
-    (select pg_get_userbyid(proc.proowner) || '=' || coalesce(proc.proacl::text, 'default') from pg_proc proc
-      where proc.oid = 'pharmacy.validate_work_item_event()'::regprocedure), true);
-  raise notice '0147: preconditions checked; applier %; owner %', current_user, pg_get_userbyid(owner_oid);
-end
-$$;
-
--- 1. Locks (see Locks), NOWAIT, at most 5 s. A failed attempt's
--- subtransaction releases what it took. When this transaction already holds
--- a lock that stops other sessions' reads or writes of a table (an earlier
--- migration in the same transaction, as in the runner's dry run of every
--- pending file; the runner's own ledger table aside), one attempt only and
--- no sleep, so no request queues behind those locks while this file waits.
-do $$
-declare
-  attempt integer := 0;
-  runner_lock_timeout text := current_setting('lock_timeout');
-  holding boolean := exists (
-    select 1 from pg_locks held
-      join pg_class relation on relation.oid = held.relation
-      join pg_namespace namespace on namespace.oid = relation.relnamespace
-     where held.pid = pg_backend_pid() and held.locktype = 'relation' and held.granted
-       and held.database = (select database_row.oid from pg_database database_row
-                             where database_row.datname = current_database())
-       and held.mode in ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
-       and namespace.nspname <> 'migration');
-begin
-  loop
-    attempt := attempt + 1;
-    begin
-      lock table pharmacy.work_item_events in access exclusive mode nowait;
-      lock table pharmacy.work_items, pharmacy.dispensings, pharmacy.own_prescription_sends,
-        pharmacy.prescription_item_claims in access share mode nowait;
-      -- Their indexes, which planning a query on them takes (section 6's
-      -- probe of the reader plans one): a REINDEX holds them while it allows
-      -- the ACCESS SHARE above. A 10 ms lock_timeout makes taking them a
-      -- NOWAIT too (55P03, so this loop tries again); the runner's own is
-      -- restored.
-      perform set_config('lock_timeout', '10ms', true);
-      execute 'select 1 from pharmacy.work_items where false';
-      execute 'select 1 from pharmacy.dispensings where false';
-      execute 'select 1 from pharmacy.own_prescription_sends where false';
-      execute 'select 1 from pharmacy.prescription_item_claims where false';
-      perform set_config('lock_timeout', runner_lock_timeout, true);
-      exit;
-    exception when lock_not_available then
-      if holding then
-        raise exception using errcode = '55P03',
-          message = '0147: pharmacy.work_item_events or a Pharmacy table 0147 reads (the work items, the dispensings, '
-            || '0133''s sends and claims) is busy, and this transaction already holds an earlier migration''s locks, '
-            || 'so it does not wait; nothing applied; run the release again at a quieter time';
-      end if;
-      if attempt >= 50 then
-        raise exception using errcode = '55P03',
-          message = '0147: pharmacy.work_item_events or a Pharmacy table 0147 reads (the work items, the dispensings, '
-            || '0133''s sends and claims) stayed busy for 5 seconds; nothing applied; run the release again at a '
-            || 'quieter time';
-      end if;
-      perform pg_sleep(0.1);
-    end;
-  end loop;
 end
 $$;
 
 -- 2. Act as the owner for the rest of this transaction (a no-op when the
 -- applier is the owner, as on every database built by one migration login),
 -- so the new objects are the owner's: A3's trigger function the role 0133
--- D5's ehr.prescriptions policies name (section 0 e and g).
+-- D5's ehr.prescriptions policies name (section 0 e, and 1b g).
 do $$
 declare
   owner_name text := (select pg_get_userbyid(relation.relowner) from pg_class relation
@@ -879,7 +965,7 @@ create policy staff_own_work_insert on pharmacy.work_item_acceptances for insert
                  and item.facility_id = work_item_acceptances.facility_id));
 
 -- 4. A4. The event table's two CHECKs, widened under the same names: each
--- 0023 CHECK (found by its definition, as section 0 h checked it) is dropped
+-- 0023 CHECK (found by its definition, as section 1b h checked it) is dropped
 -- and the wider one added NOT VALID in the same statement, then validated.
 do $$
 declare
@@ -1233,17 +1319,25 @@ begin
       message = format('0147: a hid_ role is a member of %s, which 0133 D5''s ehr.prescriptions policies name',
         pg_get_userbyid(validator_owner));
   end if;
-  -- Probes, each undone. An acceptance without a session: A3 refuses it
-  -- before it reads a table (the trigger runs before the row-level security
-  -- check).
+  -- Probes, each undone. They open only what section 1 holds, so none waits
+  -- for a lock; should one still meet a busy lock (55P03), the file stops as
+  -- busy, nothing applied, not with the probe's own message. An acceptance
+  -- without a session: A3 refuses it at step a, before it reads the work
+  -- items (the trigger runs before the row-level security check); its
+  -- declarations and step a open auth.accounts and the memberships.
   begin
     insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id, accepted_by,
       accepted_by_membership_id, accepted_with, idempotency_key, request_sha256, correlation_id)
     values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'accept',
       'post-check-0147-probe', repeat('0', 64), 'post-check-0147');
     error_state := 'no error';
-  exception when others then
-    get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
+  exception
+    when lock_not_available then
+      raise exception using errcode = '55P03',
+        message = '0147: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
+          || 'release again at a quieter time';
+    when others then
+      get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
   end;
   if error_state is distinct from '23514'
      or error_message is distinct from 'Pharmacist acceptance does not match its work item and actor context' then
@@ -1261,8 +1355,13 @@ begin
     values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 2, 'pharmacist_accepted', gen_random_uuid(),
       gen_random_uuid(), 'Accepted by the pharmacist', 'post-check-0147');
     error_state := 'no error';
-  exception when others then
-    get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
+  exception
+    when lock_not_available then
+      raise exception using errcode = '55P03',
+        message = '0147: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
+          || 'release again at a quieter time';
+    when others then
+      get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
   end;
   if error_state is distinct from '23514'
      or error_message is distinct from 'Pharmacy work-item event does not match its pharmacist acceptance' then
@@ -1278,8 +1377,13 @@ begin
     values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 2, 'prescription_accepted', gen_random_uuid(),
       gen_random_uuid(), 'Accepted by the pharmacist', 'post-check-0147');
     error_state := 'no error';
-  exception when others then
-    get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
+  exception
+    when lock_not_available then
+      raise exception using errcode = '55P03',
+        message = '0147: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
+          || 'release again at a quieter time';
+    when others then
+      get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
   end;
   if error_state is distinct from '23514'
      or error_message is distinct from 'Pharmacy work-item event does not match its accepted prescription' then
@@ -1295,8 +1399,13 @@ begin
   begin
     perform pharmacy.own_work_item_steps(array(select gen_random_uuid() from generate_series(1, 201)));
     error_state := 'no error';
-  exception when others then
-    get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
+  exception
+    when lock_not_available then
+      raise exception using errcode = '55P03',
+        message = '0147: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
+          || 'release again at a quieter time';
+    when others then
+      get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
   end;
   if error_state is distinct from '22023' or error_message is distinct from 'OWN_WORK_ITEM_STEPS_INVALID' then
     raise exception using errcode = '55000',

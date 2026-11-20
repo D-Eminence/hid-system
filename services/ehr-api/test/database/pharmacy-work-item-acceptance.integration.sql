@@ -35,10 +35,18 @@
 --      route-backed item at F4 (PHARMACY_WORK_ITEM_NOT_SENT_AUTOMATICALLY /
 --      order_route), rx6 handed in by hand (hand_off), another facility's
 --      pharmacist (at F2, and claiming F1), an emergency session, a row naming
---      another member, an unknown work item, today's pharmacy-api (no switch);
---      the events: another actor than the acceptance's, no acceptance, another
---      reason, the wrong pair of type and version; UPDATE and DELETE (no
---      privilege; and 0023's immutability for the owner);
+--      another member, or only another member's account or membership,
+--      another patient than its item's (PG, whose grants cover both) or
+--      another facility than its item's, an unknown work item, today's
+--      pharmacy-api (no switch: the policies refuse rx11 under a superuser or
+--      BYPASSRLS owner, the trigger under any other, and the trigger answers
+--      a held item's step only under the former); the events: another actor
+--      than the acceptance's, no acceptance, another reason, the wrong pair of
+--      type and version, and, before PG's own event for rx12, PG's event
+--      written in PH's session, another patient or facility than the
+--      acceptance's, and sessions whose account and membership are two
+--      members' (each of the validator's binding clauses alone); UPDATE and
+--      DELETE (no privilege; and 0023's immutability for the owner);
 --   5. Release A's shapes still pass: 0133 D7's send (a prescription_accepted
 --      event of version 1), pharmacy-api's hand-in (its event of version 1),
 --      0086's route acceptance (its event of version 1), a dispensing with no
@@ -357,6 +365,22 @@ create function pg_temp.as_member(member integer, site integer default null, pur
          set_config('app.membership_id', 'e1470004-0000-4000-8000-0000000000' || lpad(member::text, 2, '0'), true),
          set_config('app.purpose_of_use', purpose, true);
 $f$;
+-- A session no service sets: member's account (its subject), another
+-- member's membership. It shows that the account and the membership are each
+-- checked against the row, not only together.
+create function pg_temp.as_member_with(member integer, other_membership integer) returns void language sql as $f$
+  select pg_temp.as_member(member);
+  select set_config('app.membership_id', 'e1470004-0000-4000-8000-0000000000' || lpad(other_membership::text, 2, '0'),
+    true);
+$f$;
+-- Whether A3's owner is a superuser or has BYPASSRLS (pgadmin on the
+-- container cluster), so that forced row-level security does not hide the
+-- work items and prescriptions from the trigger.
+create function pg_temp.owner_bypasses() returns boolean language sql as $f$
+  select role_row.rolsuper or role_row.rolbypassrls from pg_proc proc
+    join pg_roles role_row on role_row.oid = proc.proowner
+   where proc.oid = 'pharmacy.validate_work_item_acceptance()'::regprocedure
+$f$;
 create function pg_temp.rx(n integer) returns uuid language sql immutable as $f$
   select ('e1470007-0000-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid
 $f$;
@@ -394,27 +418,36 @@ create function pg_temp.member_of(membership uuid) returns text language sql sec
 $f$;
 -- pharmacy-api's acceptance INSERT (ORD-4's accept route, or a dispensing's
 -- first step) of a work item by the session's member, with the item's own
--- patient and facility; as_account names another member as the acceptor.
+-- patient and facility. The refusals change one value each: as_member names
+-- another member as the acceptor (account and membership), as_account only
+-- the account, as_membership only the membership; patient and facility
+-- replace the item's own.
 create function pg_temp.acceptance_sql(work_item uuid, member integer, accepted_with text default 'accept',
-  key text default null, as_member integer default null) returns text language sql security definer as $f$
+  key text default null, as_member integer default null, as_account integer default null,
+  as_membership integer default null, patient uuid default null, facility uuid default null)
+returns text language sql security definer as $f$
   select format($i$insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id, accepted_by,
         accepted_by_membership_id, accepted_with, idempotency_key, request_sha256, correlation_id)
       values (%L, %L, %L, %L, %L, %L, %L, %L, %L)$i$,
-    w.id, w.patient_id, w.facility_id, pg_temp.account(coalesce(as_member, member)),
-    pg_temp.membership(coalesce(as_member, member)), accepted_with,
+    w.id, coalesce(patient, w.patient_id), coalesce(facility, w.facility_id),
+    pg_temp.account(coalesce(as_account, as_member, member)),
+    pg_temp.membership(coalesce(as_membership, as_member, member)), accepted_with,
     coalesce(key, 'acceptance-accept-' || replace(gen_random_uuid()::text, '-', '')), repeat('c', 64),
     current_setting('app.correlation_id'))
   from pharmacy.work_items w where w.id = work_item
 $f$;
 -- pharmacy-api's event INSERT after the acceptance (a pharmacist_accepted
--- event of version 2 by default, with the fixed reason).
+-- event of version 2 by default, with the fixed reason) by member, with the
+-- item's own patient and facility; the refusals replace one value each
+-- (as_membership: another member's membership as the actor's).
 create function pg_temp.event_sql(work_item uuid, member integer, reason text default 'Accepted by the pharmacist',
-  version integer default 2, kind text default 'pharmacist_accepted') returns text language sql security definer as $f$
+  version integer default 2, kind text default 'pharmacist_accepted', as_membership integer default null,
+  patient uuid default null, facility uuid default null) returns text language sql security definer as $f$
   select format($i$insert into pharmacy.work_item_events (work_item_id, patient_id, facility_id, event_version,
         event_type, actor_id, actor_membership_id, reason, correlation_id)
       values (%L, %L, %L, %s, %L, %L, %L, %L, %L)$i$,
-    w.id, w.patient_id, w.facility_id, version, kind, pg_temp.account(member), pg_temp.membership(member), reason,
-    current_setting('app.correlation_id'))
+    w.id, coalesce(patient, w.patient_id), coalesce(facility, w.facility_id), version, kind, pg_temp.account(member),
+    pg_temp.membership(coalesce(as_membership, member)), reason, current_setting('app.correlation_id'))
   from pharmacy.work_items w where w.id = work_item
 $f$;
 -- pharmacy-api's dispensing INSERT (PharmacyService.dispense) by the
@@ -622,9 +655,54 @@ select pg_temp.expect('3 PG (a grant) accepting rx1 after PH: 23505',
   pg_temp.try(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(1)), 3)),
   '23505 duplicate key value violates unique constraint "work_item_acceptances_work_item_id_key"');
 -- 2. PG, with grants, accepts rx12 on the consent basis.
-select pg_temp.expect('2 PG accepts rx12 and writes its event (the consent policies)',
-  pg_temp.try(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3)) || ' '
-  || pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3)), 'ok ok');
+select pg_temp.expect('2 PG accepts rx12 (the consent policies)',
+  pg_temp.try(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3)), 'ok');
+-- 4. Before PG writes rx12's event: the event's binding to the session and
+-- to the acceptance, one value at a time. Each of these events passes every
+-- other clause of the validator, and without the clause it tests it would be
+-- written, or would meet only the row-level security policies: PG's grants
+-- cover Ada and Bisi, so another patient passes them; PH's own-work policy
+-- allows Bisi's rx12 at F1, so PG's event written in PH's session passes
+-- them too; pharmacy.work_item_events has no key that ties its patient to
+-- its work item.
+select pg_temp.as_member(2);
+select pg_temp.expect('4 PH writes PG''s pharmacist_accepted event for rx12 (PG''s acceptance): refused',
+  pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3)),
+  '23514 Pharmacy work-item event does not match its pharmacist acceptance');
+select pg_temp.as_member(3);
+select pg_temp.expect('4 PG''s event for Bisi''s rx12 naming Ada: refused',
+  pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3,
+    patient => 'e1470006-0000-4000-8000-000000000001')),
+  '23514 Pharmacy work-item event does not match its pharmacist acceptance');
+select pg_temp.expect('4 PG''s event for F1''s rx12 naming F2: refused',
+  pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3,
+    facility => 'e1470001-0000-4000-8000-000000000002')),
+  '23514 Pharmacy work-item event does not match its pharmacist acceptance');
+-- In sessions no service sets (one member's account, another's membership),
+-- the actor's account and membership are each checked against the
+-- acceptance's and against the session's. Under a superuser or BYPASSRLS
+-- owner (pgadmin on the container cluster) only the clause tested refuses
+-- each; under an owner with neither, forced row-level security also hides
+-- PG's acceptance from these sessions, so the validator finds none and gives
+-- the same answer for that reason too.
+select pg_temp.as_member_with(2, 3);
+select pg_temp.expect('4 PH''s account with PG''s membership, as session and actor: refused (the acceptance is PG''s)',
+  pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 2, as_membership => 3)),
+  '23514 Pharmacy work-item event does not match its pharmacist acceptance');
+select pg_temp.expect('4 PG''s event in that session: refused (PG is not the session''s account)',
+  pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3)),
+  '23514 Pharmacy work-item event does not match its pharmacist acceptance');
+select pg_temp.as_member_with(3, 2);
+select pg_temp.expect('4 PG''s account with PH''s membership, as session and actor: refused (the acceptance''s '
+    || 'membership is PG''s)',
+  pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3, as_membership => 2)),
+  '23514 Pharmacy work-item event does not match its pharmacist acceptance');
+select pg_temp.expect('4 PG''s event in that session: refused (PG''s membership is not the session''s)',
+  pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3)),
+  '23514 Pharmacy work-item event does not match its pharmacist acceptance');
+select pg_temp.as_member(3);
+select pg_temp.expect('2 PG writes rx12''s event',
+  pg_temp.try(pg_temp.event_sql(pg_temp.work_item_of(pg_temp.rx(12)), 3)), 'ok');
 select pg_temp.expect('7 PG: rx12 reads accepted on the consent basis', pg_temp.steps(array[12]),
   'rx12:consent/false/-/true/accept/pg/true');
 reset role;
@@ -719,6 +797,29 @@ select pg_temp.as_member(2);
 select pg_temp.expect('4 PH writing an acceptance in PG''s name: refused',
   pg_temp.try_detail(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(11)), 2, as_member => 3)),
   '23514 Pharmacist acceptance does not match its work item and actor context / -');
+-- One value of the row at a time: each of these passes every other check
+-- of the trigger and, without the one it tests, would be written (PH's
+-- own-work policy allows Bisi's rx11 whoever the row names; PG's grants
+-- cover Ada and Bisi), except the F4 item, which the trigger would then
+-- refuse as route-backed (under an owner with neither superuser nor
+-- BYPASSRLS, forced row-level security hides that item from the trigger, so
+-- it is refused as not found too).
+select pg_temp.expect('4 PH writing an acceptance with PG''s account and PH''s membership: refused',
+  pg_temp.try_detail(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(11)), 2, as_account => 3)),
+  '23514 Pharmacist acceptance does not match its work item and actor context / -');
+select pg_temp.expect('4 PH writing an acceptance with PH''s account and PG''s membership: refused',
+  pg_temp.try_detail(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(11)), 2, as_membership => 3)),
+  '23514 Pharmacist acceptance does not match its work item and actor context / -');
+select pg_temp.as_member(3);
+select pg_temp.expect('4 PG: Bisi''s rx11 naming Ada as its patient is refused',
+  pg_temp.try_detail(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(11)), 3,
+    patient => 'e1470006-0000-4000-8000-000000000001')),
+  '23514 Pharmacist acceptance does not match its work item and actor context / -');
+select pg_temp.expect('4 PG at F1: F4''s route-backed rx7 item naming F1 as its facility is refused',
+  pg_temp.try_detail(pg_temp.acceptance_sql(pg_temp.routed_item_of(pg_temp.rx(7)), 3,
+    facility => 'e1470001-0000-4000-8000-000000000001')),
+  '23514 Pharmacist acceptance does not match its work item and actor context / -');
+select pg_temp.as_member(2);
 select pg_temp.expect('4 PH: an unknown work item is refused',
   pg_temp.try_detail(format($s$insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id,
       accepted_by, accepted_by_membership_id, accepted_with, idempotency_key, request_sha256, correlation_id)
@@ -726,11 +827,29 @@ select pg_temp.expect('4 PH: an unknown work item is refused',
       %L, %L, 'accept', 'acceptance-unknown-item-0001', repeat('c', 64), 'acceptance-unknown-item')$s$,
     pg_temp.account(2), pg_temp.membership(2))),
   '23514 Pharmacist acceptance does not match its work item and actor context / -');
+-- Today's pharmacy-api (no switch) for PH, who holds no grant: nothing lets
+-- PH write, and the row is refused. Which check refuses it is the trigger
+-- owner's kind. A superuser or BYPASSRLS owner (pgadmin on the container
+-- cluster) reads every item as that owner: the trigger passes rx11 on to the
+-- policies (42501), and for a held item (rx2) it answers the item's step
+-- (changed) before the policies would refuse the row, as 0101's dispensing
+-- validator does. Under an owner with neither (production's, and the
+-- RDS-like rehearsal's), forced row-level security hides the items from the
+-- trigger too: both get the context answer, which says nothing about the
+-- item.
 select pg_temp.as_member(2, switched => false);
-select pg_temp.expect('4 PH as today''s pharmacy-api (no switch, no grant): refused',
-  (pg_temp.try(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(11)), 2)) in (
-    '42501 new row violates row-level security policy for table "work_item_acceptances"',
-    '23514 Pharmacist acceptance does not match its work item and actor context'))::text, 'true');
+select pg_temp.expect('4 PH as today''s pharmacy-api (no switch, no grant): rx11 is refused, by the policies under a '
+    || 'superuser or BYPASSRLS owner, by the trigger under any other',
+  pg_temp.try_detail(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(11)), 2)),
+  case when pg_temp.owner_bypasses()
+       then '42501 new row violates row-level security policy for table "work_item_acceptances" / -'
+       else '23514 Pharmacist acceptance does not match its work item and actor context / -' end);
+select pg_temp.expect('4 PH as today''s pharmacy-api: the held rx2 is refused, with its step only under a superuser or '
+    || 'BYPASSRLS owner',
+  pg_temp.try_detail(pg_temp.acceptance_sql(pg_temp.work_item_of(pg_temp.rx(2)), 2)),
+  case when pg_temp.owner_bypasses()
+       then '23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE / changed'
+       else '23514 Pharmacist acceptance does not match its work item and actor context / -' end);
 select pg_temp.as_member(2);
 -- UPDATE and DELETE: no runtime role holds either; 0023's immutability
 -- function refuses them for the owner too (below, as the suite runner).

@@ -61,6 +61,11 @@
 // holds two items and one dispensing; another, sent and then declined, keeps resendAllowed and never comes back
 // to the hospital's pharmacy ("Send to pharmacy" answers routed); after the hospital's own dispensing, a send
 // answers ORDER_ROUTE_ORDER_IN_WORK and releases nothing.
+// ORD-4 (owner's Q125 B, step 10): the outside pharmacy's item for that prescription, made by its route's Accept,
+// reads pharmacyStep accepted with pharmacistAcceptance acceptedWith order_route, by the member who accepted the
+// route and at the item's own time; the pharmacist's Accept on it answers that acceptance (200 alreadyAccepted),
+// audited with the route's basis; once dispensed it reads dispensed with the same acceptance, and no
+// pharmacy.work_item_acceptances row is ever written for it.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -1409,10 +1414,53 @@ try {
     'the outside pharmacy accepts rx9');
   const rx9Item = expectStatus(await pharmacyCall(pharmacist, 'GET', `/work-items/${rx9Accepted.workItemId}`), 200,
     'rx9 at the outside pharmacy');
+  // ORD-4: an item made by its route's Accept is accepted from that moment. pharmacy-api reads the acceptance from
+  // the work item itself (the accepted_by_membership_id and accepted_at the route's Accept wrote, 0086), not from
+  // pharmacy.work_item_acceptances, so the member is the one who accepted the route and the time is the item's own
+  // acceptedAt. Accept on it answers that acceptance (200 alreadyAccepted) and writes only its audit row, with the
+  // route's basis: this is the one place the accept route's key lookup on the forced-RLS acceptances table and its
+  // route authorization run in a route session.
+  const outsideMembership = (await one(`select id::text as id from identity.staff_facility_memberships
+    where account_id = $1 and facility_id = $2`, [pharmacist.accountId, pharmacyFacility.facilityId])).id;
+  const rx9Acceptor = await one(`select route.accepted_by_membership_id::text as route_membership,
+      item.accepted_by_membership_id::text as item_membership, item.accepted_at as item_accepted_at
+    from ehr.order_routes route join pharmacy.work_items item on item.id = route.pharmacy_work_item_id
+    where route.id = $1`, [rx9Route.id]);
+  assert.deepEqual([rx9Acceptor?.route_membership, rx9Acceptor?.item_membership], [outsideMembership, outsideMembership],
+    `the member who accepted rx9's route, on the route and on its item: ${JSON.stringify(rx9Acceptor)}`);
+  const rx9Acceptance = { acceptedAt: rx9Acceptor.item_accepted_at.toISOString(), acceptedByMembershipId: outsideMembership,
+    acceptedWith: 'order_route' };
+  assert.deepEqual([rx9Item.acceptedAt, rx9Item.pharmacyStep, rx9Item.pharmacistAcceptance],
+    [rx9Acceptance.acceptedAt, 'accepted', rx9Acceptance], `rx9's route-backed item's step: ${JSON.stringify(rx9Item)}`);
+  const rx9Accept = expectStatus(await pharmacyCall(pharmacist, 'POST', `/work-items/${rx9Item.id}/accept`,
+    { expectedWorkItemVersion: Number(rx9Item.version) }, { key: freshKey('pharmacist-accept') }), 200,
+  'Accept on rx9\'s route-backed item');
+  assert.deepEqual(rx9Accept, { workItemId: rx9Item.id, pharmacyStep: 'accepted', pharmacistAcceptance: rx9Acceptance,
+    alreadyAccepted: true }, `Accept on rx9's route-backed item: ${JSON.stringify(rx9Accept)}`);
+  const rx9AcceptAudit = (await all(`select patient_id::text as patient_id, details from audit.events
+    where action = 'pharmacy.work-item.pharmacist-accept' and resource_id = $1 and actor_account_id = $2
+    order by sequence_id`, [rx9Item.id, pharmacist.accountId]))
+    .map(row => [row.patient_id, row.details.outcome, row.details.acceptedWith, row.details.basis, row.details.orderRouteId]);
+  assert.deepEqual(rx9AcceptAudit, [[patient.id, 'already_accepted', 'order_route', 'order-route', rx9Route.id]],
+    `the Accept on rx9's route-backed item is audited with the patient and the route's basis: ${
+      JSON.stringify(rx9AcceptAudit)}`);
   expectStatus(await pharmacyCall(pharmacist, 'POST', `/work-items/${rx9Accepted.workItemId}/dispensings`,
     { expectedWorkItemVersion: Number(rx9Item.version), quantityDispensed: 60, quantityUnit: 'tablet',
       reason: 'Synthetic dispensing at the outside pharmacy' }, { key: freshKey('dispense') }), 201,
   'the outside pharmacy dispenses rx9');
+  // Dispensed, with the route's acceptance kept; no acceptance row for it, from the Accept or from the dispensing.
+  // The hospital's own rx7 item, sent by itself and dispensed above, holds the row its dispensing recorded, which
+  // shows that this read sees the table's rows (row-level security is forced on it).
+  const rx9Dispensed = expectStatus(await pharmacyCall(pharmacist, 'GET', `/work-items/${rx9Item.id}`), 200,
+    'rx9 at the outside pharmacy after its dispensing');
+  assert.deepEqual([rx9Dispensed.pharmacyStep, rx9Dispensed.pharmacistAcceptance], ['dispensed', rx9Acceptance],
+    `rx9's route-backed item after its dispensing: ${JSON.stringify(rx9Dispensed)}`);
+  const acceptanceRows = await all(`select item.source_ehr_prescription_id::text as rx, item.order_route_id is not null
+      as routed, acceptance.accepted_with from pharmacy.work_item_acceptances acceptance
+      join pharmacy.work_items item on item.id = acceptance.work_item_id
+    where item.source_ehr_prescription_id = any($1::uuid[]) order by acceptance.accepted_at`, [[rx7.id, rx9.id]]);
+  assert.deepEqual(acceptanceRows, [{ rx: rx7.id, routed: false, accepted_with: 'dispensing' }],
+    `acceptance rows for rx7 and rx9: ${JSON.stringify(acceptanceRows)}`);
   const rx9Held = await one(`select count(*)::int as items, count(*) filter (where item.order_route_id is null)::int as own,
       (select count(*)::int from pharmacy.dispensings dispensing join pharmacy.work_items dispensed
          on dispensed.id = dispensing.work_item_id where dispensed.source_ehr_prescription_id = $1) as dispensings
@@ -1445,7 +1493,9 @@ try {
       and order_route_id is null`, [rx10.id])).n, 1, 'rx10 has one own item, withdrawn');
   const sentElsewhere = { rx9: { route: 201, hospitalList: 'left out', readById: 'withdrawn, sent_elsewhere',
     dispense: `409 ${rx9OwnDispense.code} (sent_elsewhere)`, sendToPharmacyWhileRouted: 'PRESCRIPTION_ROUTED',
-    outsidePharmacy: { accept: 201, dispense: 201 }, database: rx9Held, ownProgress: rx9Progress.ownProgress.status },
+    outsidePharmacy: { accept: 201, dispense: 201 }, database: rx9Held, ownProgress: rx9Progress.ownProgress.status,
+    ord4: { pharmacyStep: 'accepted, then dispensed', acceptedWith: 'order_route (the route\'s member, the item\'s time)',
+      pharmacistAccept: '200 alreadyAccepted, audited with basis order-route', acceptanceRows: 0 } },
   rx10: { declined: true, resendAllowed: true, sendToPharmacy: 'not_sent routed', hospitalList: 'left out' } };
   const rx2Now = expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions/${rx2.id}`), 200, 'rx2');
   expectProblem(await call(ehr, hospitalPharmacist, 'POST', `/ehr/patients/${patient.id}${enc}/prescriptions/${rx2.id}/pharmacy-work-item`,

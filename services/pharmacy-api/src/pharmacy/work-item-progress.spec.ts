@@ -326,18 +326,19 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
   // 1 received (sent automatically, no acceptance); 2 accepted (09:21); 3 handed in by hand (accepted when it was
   // made, 09:03); 4 accepted, then held (withdrawn, changed); 5 accepted, then sent to another
   // facility's pharmacy; 6 accepted, then dispensed; 7 accepted by its dispensing, dispensed and reversed;
-  // 8 dispensed before ORD-4 (sent automatically, no acceptance); 9 received, then held; 10 not here.
+  // 8 dispensed before ORD-4 (sent automatically, no acceptance); 9 received, then held; 10 not here; 11 handed in by
+  // hand (09:11), then dispensed, as a hand-off usually is: its acceptedAt is still the time it was handed in.
   const rows = [progressRow(1), progressRow(2), progressRow(3), progressRow(4), progressRow(5),
     progressRow(6, { dispensed: 40 }), progressRow(7, { dispensed: 41, reversed: 50 }), progressRow(8, { dispensed: 42 }),
-    progressRow(9)];
+    progressRow(9), progressRow(11, { dispensed: 43 })];
   const own = { withdrawn: [work(4), work(5), work(9)], reasons: { [work(4)]: 'changed', [work(5)]: 'sent_elsewhere',
     [work(9)]: 'changed' }, steps: {
     [work(1)]: { sent: true }, [work(2)]: { sent: true, acceptedAt: at(21) }, [work(3)]: { sent: false },
     [work(4)]: { sent: true, acceptedAt: at(24) }, [work(5)]: { sent: true, acceptedAt: at(25) },
     [work(6)]: { sent: true, acceptedAt: at(26) },
     [work(7)]: { sent: true, acceptedAt: at(41), acceptedWith: 'dispensing' as const },
-    [work(8)]: { sent: true }, [work(9)]: { sent: true } } };
-  const asked = { patientId: ids.patient, sourceEhrPrescriptionIds: Array.from({ length: 10 }, (_, i) => rx(i + 1)) };
+    [work(8)]: { sent: true }, [work(9)]: { sent: true }, [work(11)]: { sent: false } } };
+  const asked = { patientId: ids.patient, sourceEhrPrescriptionIds: Array.from({ length: 11 }, (_, i) => rx(i + 1)) };
   const item = (n: number, status: string, times: { dispensed?: number; reversed?: number; accepted?: number | null } = {}) =>
     ({ sourceEhrPrescriptionId: rx(n), status, receivedAt: status === 'not_received' ? null : iso(n),
       dispensedAt: times.dispensed === undefined ? null : iso(times.dispensed),
@@ -360,7 +361,9 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
       item(8, 'dispensed', { dispensed: 42, accepted: null }),
       item(9, 'withdrawn', { accepted: null }),
       { sourceEhrPrescriptionId: rx(10), status: 'not_received', receivedAt: null, dispensedAt: null, reversedAt: null,
-        acceptedAt: null }]);
+        acceptedAt: null },
+      // Dispensed, the hand-off keeps the acceptance it was made with (no un-accept).
+      item(11, 'dispensed', { dispensed: 43, accepted: 11 })]);
     // One reader statement (ORD-4's), and today's progress query, unchanged.
     expect(query.mock.calls.filter(([sql]) => STEPS.test(sql) || STATES.test(sql)).map(([sql]) => STEPS.test(sql)))
       .toEqual([true]);
@@ -374,7 +377,7 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
     expect(answer.items).toEqual([item(1, 'received'), item(2, 'received'), item(3, 'received'), item(4, 'withdrawn'),
       item(5, 'sent_elsewhere'), item(6, 'dispensed', { dispensed: 40 }),
       item(7, 'dispensing_reversed', { dispensed: 41, reversed: 50 }), item(8, 'dispensed', { dispensed: 42 }),
-      item(9, 'withdrawn'), item(10, 'not_received')]);
+      item(9, 'withdrawn'), item(10, 'not_received'), item(11, 'dispensed', { dispensed: 43 })]);
     expect(answer.items.some((entry) => 'acceptedAt' in entry)).toBe(false);
     expect((await harness(rows, allowed, own).service.read(context, asked, true, false)).items).toEqual(answer.items);
   });
@@ -383,7 +386,7 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
     const expected = [item(1, 'received'), item(2, 'received'), item(3, 'received'), item(4, 'received'),
       item(5, 'not_received'), item(6, 'dispensed', { dispensed: 40 }),
       item(7, 'dispensing_reversed', { dispensed: 41, reversed: 50 }), item(8, 'dispensed', { dispensed: 42 }),
-      item(9, 'received'), item(10, 'not_received')];
+      item(9, 'received'), item(10, 'not_received'), item(11, 'dispensed', { dispensed: 43 })];
     expect((await harness(rows, allowed, own).service.read(context, asked)).items).toEqual(expected);
     // The ORD-4 header alone is not enough: it is taken only with 0133's.
     expect((await harness(rows, allowed, own).service.read(context, asked, false, true)).items).toEqual(expected);
@@ -398,7 +401,7 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
       item(5, 'sent_elsewhere', { accepted: null }), item(6, 'dispensed', { dispensed: 40, accepted: null }),
       item(7, 'dispensing_reversed', { dispensed: 41, reversed: 50, accepted: null }),
       item(8, 'dispensed', { dispensed: 42, accepted: null }), item(9, 'withdrawn', { accepted: null }),
-      item(10, 'not_received', { accepted: null })]);
+      item(10, 'not_received', { accepted: null }), item(11, 'dispensed', { dispensed: 43, accepted: null })]);
     expect(query.mock.calls.map(([sql]) => sql).filter((sql) => STEPS.test(sql) || STATES.test(sql) || /savepoint/.test(sql)))
       .toEqual(['savepoint pharmacy_own_work_states', expect.stringMatching(STEPS),
         'rollback to savepoint pharmacy_own_work_states', expect.stringMatching(STATES),
@@ -427,6 +430,6 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
     expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
     expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context, 'pharmacy.work-item.progress.read',
       { patientId: ids.patient, resourceType: 'pharmacy-work-item-collection', resourceId: ids.facility },
-      { requestedCount: 10, foundCount: 9, workItemIds: rows.map((row) => row.work_item_id), breakGlass: false });
+      { requestedCount: 11, foundCount: 10, workItemIds: rows.map((row) => row.work_item_id), breakGlass: false });
   });
 });
