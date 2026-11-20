@@ -1,0 +1,7 @@
+# Generated documents and run results are never committed: regenerate them from the seed.
+# The answer keys and manifest in keys/ ARE committed.
+generated/
+results/
+__pycache__/
+*.pyc
+node_modules/
