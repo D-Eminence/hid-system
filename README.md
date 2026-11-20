@@ -95,6 +95,13 @@ registry, reads your npm settings (`~/.npmrc`) and writes to your npm cache
 and npm log folder (usually `~/.npm`). `--prepare` cannot be combined with
 `--check-only`.
 
+The rehearsal migrates a fresh database and runs every database suite on it:
+`services/ehr-api/database/tests/*.integration.sql` and
+`services/ehr-api/test/database/*.integration.sql`. Each suite is one
+transaction that ends in `ROLLBACK`, judged by psql's exit status; a failure
+names every failed suite and its first error. CI's "Synthetic migration
+rehearsal" job runs the same rehearsal, so the suites run in CI too.
+
 The rehearsal makes its own throwaway PostgreSQL in `/tmp`, reachable only
 through a private socket, fills it with fictional data and deletes it at the
 end. It never connects to any other database. At the end you get a short
