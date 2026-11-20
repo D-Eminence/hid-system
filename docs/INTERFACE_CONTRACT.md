@@ -9061,7 +9061,9 @@ in the path or query. `Cache-Control: no-store`.
 The reach: open orders of any age, plus ended ones (completed or cancelled)
 created on or after `since` (Q123 A). Orders entered in error are never
 listed. Newest first. A cursor is valid only for the member, facility and
-filters it was issued with.
+filters it was issued with. It carries the first page's `since`: a later page
+sent without `since` uses it (so "Load more" after Lagos midnight still
+works), and one sent with a different `since` is 400 `INVALID_CURSOR`.
 
 ```json
 { "items": [
@@ -9072,29 +9074,40 @@ filters it was issued with.
       "createdAt": "…", "updatedAt": "…",
       "ownProgress": { "status": "results_ready", "receivedAt": "…", "collectedAt": "…", "lastResultAt": "…" },
       "orderRoute": null } ],
-  "hiddenCount": 2, "since": "2026-08-22", "nextCursor": null }
+  "hiddenCount": 2, "hiddenCountComplete": true, "since": "2026-08-22", "nextCursor": null }
 ```
 
 - `display`: the stored test or medicine name. `priority`: the lab request's;
   a prescription's 0125 priority when set, else `null`.
 - `ownProgress`: ORD-3's shapes and statuses, asked once per patient and kind
-  on the page (audited by ORD-3 as today).
-- `orderRoute`: the order's route summary (sections 21-24), or `null`.
+  on the page (audited by ORD-3 as today), at most 6 calls at once and all
+  within 4 seconds; whatever has not answered by then is `unknown`.
+- `orderRoute`: the order's route summary (sections 21-24), `null` when it
+  was read and there is none, and left out when it could not be read.
 - `patient`: the waiting-list card (EHR-C7); never a full Health ID.
 - **Access ended:** a row is listed only while the member may read that
   patient's records now for direct care (a consent grant, 0131's own-facility
   opening included; never break-glass). Other matching orders are counted in
   `hiddenCount` and never shown. An empty page still carries `hiddenCount`.
+- **The count:** worked out on the first page and carried by the cursor to
+  later pages. It asks about at most 1,000 more patients (newest order first);
+  past that, `hiddenCountComplete` is `false` and `hiddenCount` is a lower
+  bound ("at least N").
+- **Bounded pages:** a page stops after 1,000 patients asked or 5,000 orders
+  read, whichever comes first, so a page may hold fewer rows than `limit`, or
+  none, while `nextCursor` is set. Keep loading while `nextCursor` is not
+  null; never treat a short page as the end.
 
 Audit (by the database): one `ehr.my-orders.list` row (kinds, open only,
-since, count, `hiddenCount`, patient ids shown) and one
+since, count, `hiddenCount` and `hiddenCountComplete` on the first page,
+`hasMore`, patients asked, patient ids shown) and one
 `ehr.my-orders.list.shown` row per patient shown, on every read.
 
 ### Errors
 
 | HTTP | Code | Message |
 |---|---|---|
-| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (bad `kind`, `state`, `since`, `limit`, or a day after today) |
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (bad `kind`, `state`, `since`, `limit`, or a day after today, by the service's clock or the database's) |
 | 400 | `MY_ORDERS_SINCE_TOO_OLD` | You can look back up to 2 years. Choose a later date. |
 | 400 | `INVALID_CURSOR` | Pagination cursor is invalid |
 | 400 | `PURPOSE_OF_USE_REQUIRED` | as today |
@@ -9106,20 +9119,24 @@ since, count, `hiddenCount`, patient ids shown) and one
 - `ehr.list_my_orders(kinds, open_only, since, cursor…, limit)`, SECURITY
   DEFINER, EXECUTE for the EHR runtime only. It checks the session (an
   active, unheld membership here, direct care, the per-kind read permission),
-  applies the session's own rule per patient (`ehr.context_allows(patient,
-  facility, 'read_records')`), counts the rest, pages, returns the cards and
-  writes the audit rows.
+  walks the member's orders newest first, asking the session's own rule once
+  per patient (`ehr.context_allows(patient, facility, 'read_records')`), until
+  the page is full or its bounds are reached, and says where the next page
+  resumes; on the first page it counts the rest (bounded); it returns the
+  cards and writes the audit rows.
 - Indexes on `(facility_id, created_by_membership_id, created_at desc, id
   desc)` for `ehr.prescriptions` and `ehr.lab_requests`.
 - `prescriptions_my_orders_read` and `lab_requests_my_orders_read`: the
-  tables' owner may read them only during the function's one counting
-  statement, so it can count orders of patients the member can no longer
-  read. The function writes an owner-only marker for its own transaction
-  (`ehr.my_orders_scans`) just before that statement and deletes it just
-  after (0130's marker pattern). Every other owner-run function and trigger
-  that reads these tables sees exactly what it saw before, and the owner
-  without a session sees nothing. No runtime role is a member of the owner;
-  the runtime's own reads are unchanged.
+  tables' owner may read them only during the function's walk and count, so
+  it can count orders of patients the member can no longer read. The
+  function writes an owner-only marker for its own transaction
+  (`ehr.my_orders_scans`) just before them and deletes it just after (0130's
+  marker pattern). Every other owner-run function and trigger that reads
+  these tables sees exactly what it saw before 0143 (0133's own-pharmacy send
+  and withdrawal included, in the suite), and the owner without a session
+  sees nothing. No `hid_` role but the owner is a member of either table's
+  owner (a post-check). The runtime roles' own reads of these tables are
+  unchanged.
 
 ### Screen notes
 
@@ -9129,6 +9146,7 @@ since, count, `hiddenCount`, patient ids shown) and one
 - "Showing the last 90 days and everything still open", with "Look further
   back" (sets `since`).
 - When `hiddenCount` is above 0: "N more orders are for patients whose records
-  you can no longer open."
+  you can no longer open." When `hiddenCountComplete` is `false`: "At least N
+  more orders …".
 - A row opens the visit's order by `patientId`, `encounterId` and `orderId`,
   through the usual consent check.

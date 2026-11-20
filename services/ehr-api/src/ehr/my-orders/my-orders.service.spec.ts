@@ -10,7 +10,7 @@ import type { WorkItemProgressService } from '../../integrations/work-item-progr
 import type { OrderRouteReader } from '../order-routes/order-route-reader';
 import { MyOrdersController } from './my-orders.controller';
 import { MyOrdersQueryDto } from './my-orders.dto';
-import { lagosDay, MY_ORDERS_SQL, MyOrdersService } from './my-orders.service';
+import { addYears, lagosDay, MY_ORDERS_SQL, MyOrdersService, OWN_PROGRESS_CONCURRENCY } from './my-orders.service';
 
 // MY-1 (0143): "Ordered by me". What the member may see, and the audit rows,
 // are the database's (services/ehr-api/test/database/my-orders.integration.sql);
@@ -29,7 +29,9 @@ const row = (overrides: Record<string, unknown>) => ({ kind: 'prescription', ord
   encounter_id: encounterId, patient_id: patientA, full_name: 'Ada Orders', sex: 'female', date_of_birth: '1984-04-04',
   health_id_last4: 'A2B3', display: 'Synthetic amoxicillin', status: 'active', priority: null,
   created_at: new Date('2026-11-20T09:00:00Z'), updated_at: new Date('2026-11-20T09:05:00Z'), hidden_count: '2',
-  has_more: false, cursor_at: '2026-11-20T09:00:00.123456Z', ...overrides });
+  hidden_count_complete: true, has_more: false, resume_at: null, resume_kind: null, resume_id: null, ...overrides });
+const more = { has_more: true, resume_at: '2026-11-20T09:00:00.123456Z', resume_kind: 'prescription',
+  resume_id: '123e4567-e89b-42d3-a456-426614174101' };
 
 function harness(rows: Record<string, unknown>[] | Error = [row({})]) {
   const calls: unknown[][] = [];
@@ -121,7 +123,7 @@ describe('MY-1: GET /ehr/my-orders', () => {
         status: 'completed', priority: 'urgent' }),
     ]);
     const page = await service.list(context(BOTH), query({ state: 'open' }), now);
-    expect(page).toEqual({ hiddenCount: 2, since: '2026-08-22', nextCursor: null, items: [
+    expect(page).toEqual({ hiddenCount: 2, hiddenCountComplete: true, since: '2026-08-22', nextCursor: null, items: [
       { kind: 'prescription', orderId: '123e4567-e89b-42d3-a456-426614174101', encounterId,
         patient: { patientId: patientA, fullName: 'Ada Orders', sex: 'female', dateOfBirth: '1984-04-04', healthIdLast4: 'A2B3' },
         display: 'Synthetic amoxicillin', status: 'active', priority: null, createdAt: '2026-11-20T09:00:00.000Z',
@@ -150,14 +152,44 @@ describe('MY-1: GET /ehr/my-orders', () => {
 
   it('an empty page still answers hiddenCount (the database\'s row with no order)', async () => {
     const { service, progress } = harness([row({ kind: null, order_id: null, encounter_id: null, patient_id: null,
-      hidden_count: '3', created_at: null, updated_at: null, cursor_at: null })]);
+      hidden_count: '3', created_at: null, updated_at: null })]);
     await expect(service.list(context(BOTH), query(), now)).resolves.toEqual({ items: [], hiddenCount: 3,
-      since: '2026-08-22', nextCursor: null });
+      hiddenCountComplete: true, since: '2026-08-22', nextCursor: null });
     expect(progress.pharmacy).not.toHaveBeenCalled();
   });
 
+  it('a page the database stopped early (none listed) still has more, resuming where the database says', async () => {
+    const first = harness([row({ kind: null, order_id: null, encounter_id: null, patient_id: null, hidden_count: '2000',
+      hidden_count_complete: false, created_at: null, updated_at: null, ...more,
+      resume_id: '123e4567-e89b-42d3-a456-426614174999' })]);
+    const page = await first.service.list(context(BOTH), query(), now);
+    expect(page).toMatchObject({ items: [], hiddenCount: 2000, hiddenCountComplete: false, nextCursor: expect.any(String) });
+    const next = harness([row({ hidden_count: null, hidden_count_complete: null })]);
+    const second = await next.service.list(context(BOTH), query({ cursor: page.nextCursor }), now);
+    expect(next.calls[0]!.slice(3)).toEqual(['2026-11-20T09:00:00.123456Z', 'prescription',
+      '123e4567-e89b-42d3-a456-426614174999', 25]);
+    // Later pages carry the first page's count; the database does not recount it.
+    expect(second).toMatchObject({ hiddenCount: 2000, hiddenCountComplete: false });
+  });
+
+  it('a later page keeps the first page\'s day across Lagos midnight; an explicit other day is refused', async () => {
+    const lateEvening = new Date('2026-11-20T22:59:00Z');
+    const afterMidnight = new Date('2026-11-20T23:01:00Z');
+    const first = harness([row(more)]);
+    const page = await first.service.list(context(BOTH), query({ limit: 1 }), lateEvening);
+    expect(first.calls[0]![2]).toBe('2026-08-22');
+    const next = harness();
+    await expect(next.service.list(context(BOTH), query({ limit: 1, cursor: page.nextCursor }), afterMidnight))
+      .resolves.toMatchObject({ since: '2026-08-22' });
+    expect(next.calls[0]![2]).toBe('2026-08-22');
+    await expect(next.service.list(context(BOTH), query({ limit: 1, since: '2026-08-22', cursor: page.nextCursor }),
+      afterMidnight)).resolves.toBeDefined();
+    await expect(next.service.list(context(BOTH), query({ limit: 1, since: '2026-08-23', cursor: page.nextCursor }),
+      afterMidnight)).rejects.toMatchObject({ status: 400, code: 'INVALID_CURSOR' });
+  });
+
   it('pages with an exact cursor bound to the member and the filters', async () => {
-    const first = harness([row({ has_more: true })]);
+    const first = harness([row(more)]);
     const page = await first.service.list(context(BOTH), query({ limit: 1 }), now);
     expect(page.nextCursor).toEqual(expect.any(String));
     const next = harness();
@@ -177,13 +209,72 @@ describe('MY-1: GET /ehr/my-orders', () => {
     ['any other failure', new Error('Connection terminated unexpectedly'), 503, 'MY_ORDERS_UNAVAILABLE'],
     ['the database\'s refusal', Object.assign(new Error('MY_ORDERS_NOT_PERMITTED'), { code: '42501' }), 403, 'PERMISSION_DENIED'],
     ['another purpose', Object.assign(new Error('MY_ORDERS_DIRECT_CARE_ONLY'), { code: '22023' }), 400, 'PURPOSE_OF_USE_REQUIRED'],
+    ['a day after the database\'s today', Object.assign(new Error('MY_ORDERS_SINCE_INVALID'), { code: '22023' }), 400,
+      'VALIDATION_FAILED'],
   ] as const)('%s answers %s %s', async (_label, error, status, code) => {
     const { service } = harness(error);
     await expect(service.list(context(BOTH), query(), now)).rejects.toMatchObject({ status, code });
   });
 
-  it('reads through the definer with its row\'s exact cursor time', () => {
+  it('reads through the definer with the exact time of where the next page resumes', () => {
     expect(MY_ORDERS_SQL).toContain('from ehr.list_my_orders($1::text[], $2, $3::date, $4::timestamptz, $5, $6::uuid, $7)');
-    expect(MY_ORDERS_SQL).toContain(`to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_at`);
+    expect(MY_ORDERS_SQL).toContain(`to_char(resume_created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as resume_at`);
+  });
+
+  it('the 2-year bound is PostgreSQL\'s: 29 February goes to the 28th', async () => {
+    expect(addYears('2028-02-29', -2)).toBe('2026-02-28');
+    expect(addYears('2026-11-20', -2)).toBe('2024-11-20');
+    const { service } = harness();
+    await expect(service.list(context(BOTH), query({ since: '2026-02-28' }), new Date('2028-02-29T10:00:00Z')))
+      .resolves.toBeDefined();
+    await expect(service.list(context(BOTH), query({ since: '2026-02-27' }), new Date('2028-02-29T10:00:00Z')))
+      .rejects.toMatchObject({ status: 400, code: 'MY_ORDERS_SINCE_TOO_OLD' });
+  });
+
+  it('a route that could not be read is left out; one read with no route is null', async () => {
+    const { service, routes } = harness([
+      row({}),
+      row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB }),
+      row({ kind: 'lab_request', order_id: '123e4567-e89b-42d3-a456-426614174201' }),
+    ]);
+    routes.summaries.mockImplementation(async (_client: unknown, _context: unknown, kind: string, patient: string) =>
+      (kind === 'prescription' && patient === patientA ? undefined : new Map()) as never);
+    const page = await service.list(context(BOTH), query(), now);
+    expect(page.items[0]).not.toHaveProperty('orderRoute');
+    expect(page.items[1]).toHaveProperty('orderRoute', null);
+    expect(page.items[2]).toHaveProperty('orderRoute', null);
+  });
+
+  it('asks progress in parallel, at most 6 at once, and answers unknown for what misses the page\'s deadline', async () => {
+    const rows = Array.from({ length: 10 }, (_unused, index) => row({
+      order_id: `123e4567-e89b-42d3-a456-4266141742${String(index).padStart(2, '0')}`,
+      patient_id: `123e4567-e89b-42d3-a456-4266141743${String(index).padStart(2, '0')}` }));
+    const { service, progress } = harness(rows);
+    service.progressDeadlineMs = 50;
+    let running = 0;
+    let most = 0;
+    progress.pharmacy.mockImplementation(async (_context: unknown, patient: string, items: { id: string }[]) => {
+      running += 1;
+      most = Math.max(most, running);
+      // The patient ending 03 hangs (the service neither refuses nor answers).
+      if (patient.endsWith('4303')) await new Promise(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      running -= 1;
+      return new Map(items.map((item) => [item.id, { status: 'received', receivedAt: null, dispensedAt: null, reversedAt: null }]));
+    });
+    const started = Date.now();
+    const page = await service.list(context(BOTH), query(), now);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(most).toBe(OWN_PROGRESS_CONCURRENCY);
+    expect(progress.pharmacy).toHaveBeenCalledTimes(10);
+    expect(page.items.map((item) => item.ownProgress.status)).toEqual(
+      ['received', 'received', 'received', 'unknown', 'received', 'received', 'received', 'received', 'received', 'received']);
+  });
+
+  it('a progress call that throws makes only its own orders unknown', async () => {
+    const { service, progress } = harness([row({}), row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB })]);
+    progress.pharmacy.mockImplementationOnce(async () => { throw new Error('unexpected'); });
+    const page = await service.list(context(BOTH), query(), now);
+    expect(page.items.map((item) => item.ownProgress.status)).toEqual(['unknown', 'received']);
   });
 });
