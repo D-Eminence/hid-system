@@ -103,6 +103,40 @@ export interface PharmacyWorkItem {
    *   pharmacy by the prescribing team".
    */
   withdrawnReason?: 'changed' | 'sent_elsewhere';
+  /**
+   * Where the item is in the pharmacy's own steps (ORD-4), present only when
+   * pharmacy-api sent it (left out on an older pharmacy-api, and on this
+   * facility's own items when the database cannot say), and left out with
+   * `pharmacistAcceptance` when pharmacy-api sends a step or an
+   * `acceptedWith` this client does not know (see parseWorkItemStep):
+   * - `received`: sent to this hospital's pharmacy by itself; no pharmacist
+   *   has accepted it yet. Show "Accept" first, then "Dispense" (dispensing
+   *   accepts it too).
+   * - `accepted`: a pharmacist here took it on (see `pharmacistAcceptance`).
+   * - `dispensed`, `dispensing_reversed`: as `dispensing` says.
+   * `withdrawn` stays a separate flag: a received or accepted item can be
+   * withdrawn. `status` and `acceptedAt` keep their meaning ("the pharmacy
+   * has it", "when it arrived").
+   */
+  pharmacyStep?: PharmacyStep;
+  /**
+   * Who accepted it and when, present with `pharmacyStep` (null while
+   * received). `acceptedWith`: `accept` (the Accept command), `dispensing`
+   * (recorded by the first dispensing), `order_route` (another facility's
+   * order, accepted with its route) or `hand_off` (brought in by a
+   * pharmacist by hand). Show the name through the facility staff names
+   * read; the id is never shown.
+   */
+  pharmacistAcceptance?: PharmacistAcceptance | null;
+}
+
+export type PharmacyStep = 'received' | 'accepted' | 'dispensed' | 'dispensing_reversed';
+
+export interface PharmacistAcceptance {
+  acceptedAt: string;
+  /** Never null: pharmacy-api reads it from columns that are NOT NULL (0023's work item, 0147's acceptance). */
+  acceptedByMembershipId: string;
+  acceptedWith: 'accept' | 'dispensing' | 'order_route' | 'hand_off';
 }
 
 export interface PharmacyDispensing {
@@ -455,6 +489,51 @@ function parseWorkItemPatient(value: unknown): { patient?: PharmacyWorkItemPatie
     dateOfBirth: nullableText(patient, 'dateOfBirth'), healthIdLast4: nullableText(patient, 'healthIdLast4') } };
 }
 
+const PHARMACY_STEPS: readonly PharmacyStep[] = ['received', 'accepted', 'dispensed', 'dispensing_reversed'];
+const ACCEPTED_WITH: readonly PharmacistAcceptance['acceptedWith'][] = ['accept', 'dispensing', 'order_route', 'hand_off'];
+
+function malformedField(key: string): PharmacyApiProblem {
+  return new PharmacyApiProblem(502, { detail: `Pharmacy field ${key} is malformed.` });
+}
+
+/**
+ * ORD-4's step and acceptance, kept together or left out together.
+ *
+ * Lenient for a value. Both are left out, and the item reads as on Release
+ * A, when `pharmacyStep` is absent (an older pharmacy-api, or a database
+ * without 0147), and when `pharmacyStep` or `acceptedWith` is a string this
+ * client does not know (a newer pharmacy-api). listWorkItems parses every
+ * item, so refusing one newer value would leave the pharmacist with no work
+ * list at all. An unknown step is not looked at further, and neither is the
+ * rest of an acceptance with an unknown `acceptedWith`: a newer value may
+ * come with another shape (no member, say).
+ *
+ * Strict for a type only, refused with 502 like any other field:
+ * - `pharmacyStep` present but not a string (null included);
+ * - next to a known step, `pharmacistAcceptance` missing, or neither null
+ *   nor an object (pharmacy-api always sends the two together);
+ * - `acceptedWith` not a string;
+ * - with a known `acceptedWith`, `acceptedAt` or `acceptedByMembershipId`
+ *   not a non-empty string (both are NOT NULL wherever pharmacy-api reads
+ *   them: 0023's work item and 0147's acceptance).
+ * None of these is a newer value, only a broken answer.
+ */
+function parseWorkItemStep(value: Record<string, unknown>): Pick<PharmacyWorkItem, 'pharmacyStep' | 'pharmacistAcceptance'> {
+  const step = value.pharmacyStep;
+  if (step === undefined) return {};
+  if (typeof step !== 'string') throw malformedField('pharmacyStep');
+  if (!(PHARMACY_STEPS as readonly string[]).includes(step)) return {};
+  const raw = value.pharmacistAcceptance;
+  if (raw === null) return { pharmacyStep: step as PharmacyStep, pharmacistAcceptance: null };
+  if (!isRecord(raw)) throw malformedField('pharmacistAcceptance');
+  const acceptedWith = raw.acceptedWith;
+  if (typeof acceptedWith !== 'string') throw malformedField('acceptedWith');
+  if (!(ACCEPTED_WITH as readonly string[]).includes(acceptedWith)) return {};
+  return { pharmacyStep: step as PharmacyStep, pharmacistAcceptance: { acceptedAt: text(raw, 'acceptedAt'),
+    acceptedByMembershipId: text(raw, 'acceptedByMembershipId'),
+    acceptedWith: acceptedWith as PharmacistAcceptance['acceptedWith'] } };
+}
+
 function parseWorkItem(payload: unknown): PharmacyWorkItem {
   const value = record(payload, 'Pharmacy work item');
   const dispensing = value.dispensing === null ? null : record(value.dispensing, 'Pharmacy dispensing summary');
@@ -476,6 +555,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
     ...(value.withdrawn === true ? { withdrawn: true as const,
       ...(value.withdrawnReason === 'changed' || value.withdrawnReason === 'sent_elsewhere'
         ? { withdrawnReason: value.withdrawnReason } : {}) } : {}),
+    ...parseWorkItemStep(value),
   };
 }
 

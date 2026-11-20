@@ -3,8 +3,9 @@ import { resetEnvironmentForTests } from '../config/environment';
 import { LabRequestsController } from '../ehr/lab-requests/lab-requests.controller';
 import { PrescriptionsController } from '../ehr/prescriptions/prescriptions.controller';
 import type { HidRequest } from '../common/request-context';
-import { LAB_PROGRESS_NOT_RECEIVED, LAB_PROGRESS_UNKNOWN, OWN_PROGRESS_BATCH, OWN_PROGRESS_HEADER, OWN_PROGRESS_TIMEOUT_MS,
-  PHARMACY_PROGRESS_NOT_RECEIVED, PHARMACY_PROGRESS_UNKNOWN, WorkItemProgressService } from './work-item-progress.service';
+import { LAB_PROGRESS_NOT_RECEIVED, LAB_PROGRESS_UNKNOWN, OWN_PROGRESS_ACCEPTED_HEADER, OWN_PROGRESS_BATCH,
+  OWN_PROGRESS_HEADER, OWN_PROGRESS_TIMEOUT_MS, PHARMACY_PROGRESS_NOT_RECEIVED, PHARMACY_PROGRESS_UNKNOWN,
+  WorkItemProgressService } from './work-item-progress.service';
 
 // Fictional ids only.
 const patientId = '9c3e2f40-0000-4000-8000-000000000001';
@@ -63,11 +64,36 @@ describe('own pharmacy progress on prescriptions (ORD-3)', () => {
     expect(headers.get('x-facility-id')).toBe(facilityId);
     expect(headers.get('x-purpose-of-use')).toBe('direct-care');
     expect(progress.get(rx(1))).toEqual(PHARMACY_PROGRESS_NOT_RECEIVED);
-    expect(progress.get(rx(2))).toEqual({ status: 'dispensed', receivedAt: '2026-11-18T10:40:00.000Z',
+    // A Release A pharmacy-api answers no acceptedAt: it parses as null, never unknown (ORD-4).
+    expect(progress.get(rx(2))).toEqual({ status: 'dispensed', receivedAt: '2026-11-18T10:40:00.000Z', acceptedAt: null,
       dispensedAt: '2026-11-18T11:05:00.000Z', reversedAt: null });
-    expect(progress.get(rx(3))).toEqual({ status: 'received', receivedAt: '2026-11-18T10:41:00.000Z',
+    expect(progress.get(rx(3))).toEqual({ status: 'received', receivedAt: '2026-11-18T10:41:00.000Z', acceptedAt: null,
       dispensedAt: null, reversedAt: null });
   });
+
+  it('passes accepted and acceptedAt (ORD-4: a pharmacist here accepted it) on, and keeps acceptedAt with a later status',
+    async () => {
+      jest.spyOn(globalThis, 'fetch').mockResolvedValue(json({ items: [
+        { sourceEhrPrescriptionId: rx(2), status: 'accepted', receivedAt: '2026-11-19T10:40:00.000Z',
+          dispensedAt: null, reversedAt: null, acceptedAt: '2026-11-19T10:52:00.000Z' },
+        { sourceEhrPrescriptionId: rx(3), status: 'dispensed', receivedAt: '2026-11-19T10:41:00.000Z',
+          dispensedAt: '2026-11-19T11:05:00.000Z', reversedAt: null, acceptedAt: '2026-11-19T10:53:00.000Z' },
+        { sourceEhrPrescriptionId: rx(4), status: 'withdrawn', receivedAt: '2026-11-19T10:42:00.000Z',
+          dispensedAt: null, reversedAt: null, acceptedAt: '2026-11-19T10:54:00.000Z' },
+        { sourceEhrPrescriptionId: rx(5), status: 'received', receivedAt: '2026-11-19T10:43:00.000Z',
+          dispensedAt: null, reversedAt: null, acceptedAt: null },
+      ] }));
+      const progress = await service().pharmacy(context, patientId, [{ id: rx(2), status: 'active' },
+        { id: rx(3), status: 'active' }, { id: rx(4), status: 'on_hold' }, { id: rx(5), status: 'active' }]);
+      expect(progress.get(rx(2))).toEqual({ status: 'accepted', receivedAt: '2026-11-19T10:40:00.000Z',
+        acceptedAt: '2026-11-19T10:52:00.000Z', dispensedAt: null, reversedAt: null });
+      expect(progress.get(rx(3))).toEqual({ status: 'dispensed', receivedAt: '2026-11-19T10:41:00.000Z',
+        acceptedAt: '2026-11-19T10:53:00.000Z', dispensedAt: '2026-11-19T11:05:00.000Z', reversedAt: null });
+      expect(progress.get(rx(4))).toEqual({ status: 'withdrawn', receivedAt: '2026-11-19T10:42:00.000Z',
+        acceptedAt: '2026-11-19T10:54:00.000Z', dispensedAt: null, reversedAt: null });
+      expect(progress.get(rx(5))).toEqual({ status: 'received', receivedAt: '2026-11-19T10:43:00.000Z',
+        acceptedAt: null, dispensedAt: null, reversedAt: null });
+    });
 
   it('passes withdrawn (0133: the pharmacy holds an earlier version, or the prescription was stopped) on', async () => {
     jest.spyOn(globalThis, 'fetch').mockResolvedValue(json({ items: [
@@ -75,7 +101,7 @@ describe('own pharmacy progress on prescriptions (ORD-3)', () => {
         dispensedAt: null, reversedAt: null },
     ] }));
     const progress = await service().pharmacy(context, patientId, [{ id: rx(2), status: 'active' }]);
-    expect(progress.get(rx(2))).toEqual({ status: 'withdrawn', receivedAt: '2026-11-18T10:40:00.000Z',
+    expect(progress.get(rx(2))).toEqual({ status: 'withdrawn', receivedAt: '2026-11-18T10:40:00.000Z', acceptedAt: null,
       dispensedAt: null, reversedAt: null });
   });
 
@@ -90,26 +116,32 @@ describe('own pharmacy progress on prescriptions (ORD-3)', () => {
       const progress = await service().pharmacy(context, patientId, [{ id: rx(2), status: 'active' },
         { id: rx(3), status: 'on_hold' }]);
       expect(progress.get(rx(2))).toEqual({ status: 'sent_elsewhere', receivedAt: '2026-11-19T09:10:00.000Z',
-        dispensedAt: null, reversedAt: null });
+        acceptedAt: null, dispensedAt: null, reversedAt: null });
       expect(progress.get(rx(3))?.status).toBe('withdrawn');
     });
 
-  it('tells pharmacy-api it reads the 0133 statuses (X-HID-Own-Progress: 0133); the lab call carries no such header',
-    async () => {
-      const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url) => (String(url).includes('/pharmacy/')
-        ? json({ items: [{ sourceEhrPrescriptionId: rx(2), status: 'received', receivedAt: null, dispensedAt: null,
-          reversedAt: null }] })
-        : json({ items: [{ sourceEhrOrderId: rx(2), status: 'received', receivedAt: null, collectedAt: null,
-          lastResultAt: null }] })));
-      await service().pharmacy(context, patientId, [{ id: rx(2), status: 'active' }]);
-      await service().lab(context, patientId, [{ id: rx(2), status: 'active' }]);
-      expect(OWN_PROGRESS_HEADER).toEqual({ 'x-hid-own-progress': '0133' });
-      const [pharmacyCall, labCall] = fetch.mock.calls;
-      expect(String(pharmacyCall![0])).toContain('/api/v1/pharmacy/work-items/progress');
-      expect(new Headers(pharmacyCall![1]?.headers).get('x-hid-own-progress')).toBe('0133');
-      expect(String(labCall![0])).toContain('/api/v1/lab/work-items/progress');
-      expect(new Headers(labCall![1]?.headers).has('x-hid-own-progress')).toBe(false);
-    });
+  it('tells pharmacy-api it reads the 0133 statuses (X-HID-Own-Progress: 0133, unchanged) and ORD-4\'s '
+    + '(X-HID-Own-Progress-Accepted: ord4); the lab call carries neither', async () => {
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url) => (String(url).includes('/pharmacy/')
+      ? json({ items: [{ sourceEhrPrescriptionId: rx(2), status: 'received', receivedAt: null, dispensedAt: null,
+        reversedAt: null, acceptedAt: null }] })
+      : json({ items: [{ sourceEhrOrderId: rx(2), status: 'received', receivedAt: null, collectedAt: null,
+        lastResultAt: null }] })));
+    await service().pharmacy(context, patientId, [{ id: rx(2), status: 'active' }]);
+    await service().lab(context, patientId, [{ id: rx(2), status: 'active' }]);
+    // A Release A pharmacy-api matches the 0133 value exactly, so it must not change; ORD-4's is a header of its own.
+    expect(OWN_PROGRESS_HEADER).toEqual({ 'x-hid-own-progress': '0133' });
+    expect(OWN_PROGRESS_ACCEPTED_HEADER).toEqual({ 'x-hid-own-progress-accepted': 'ord4' });
+    const [pharmacyCall, labCall] = fetch.mock.calls;
+    expect(String(pharmacyCall![0])).toContain('/api/v1/pharmacy/work-items/progress');
+    const pharmacyHeaders = new Headers(pharmacyCall![1]?.headers);
+    expect(pharmacyHeaders.get('x-hid-own-progress')).toBe('0133');
+    expect(pharmacyHeaders.get('x-hid-own-progress-accepted')).toBe('ord4');
+    expect(String(labCall![0])).toContain('/api/v1/lab/work-items/progress');
+    const labHeaders = new Headers(labCall![1]?.headers);
+    expect(labHeaders.has('x-hid-own-progress')).toBe(false);
+    expect(labHeaders.has('x-hid-own-progress-accepted')).toBe(false);
+  });
 
   it('does not call at all when every item is a draft', async () => {
     const fetch = jest.spyOn(globalThis, 'fetch');
@@ -124,7 +156,9 @@ describe('own pharmacy progress on prescriptions (ORD-3)', () => {
     ['the answer has the wrong ids', () => Promise.resolve(json({ items: [{ sourceEhrPrescriptionId: rx(9),
       status: 'received', receivedAt: null, dispensedAt: null, reversedAt: null }] }))],
     ['the answer has an unknown status', () => Promise.resolve(json({ items: [{ sourceEhrPrescriptionId: rx(2),
-      status: 'accepted', receivedAt: null, dispensedAt: null, reversedAt: null }] }))],
+      status: 'ready_for_collection', receivedAt: null, dispensedAt: null, reversedAt: null }] }))],
+    ['acceptedAt is not a time', () => Promise.resolve(json({ items: [{ sourceEhrPrescriptionId: rx(2),
+      status: 'accepted', receivedAt: null, acceptedAt: 'soon', dispensedAt: null, reversedAt: null }] }))],
     ['the answer is not a list', () => Promise.resolve(json({ ok: true }))],
   ])('answers unknown, without failing, when %s', async (_case, answer) => {
     jest.spyOn(globalThis, 'fetch').mockImplementation(answer as never);

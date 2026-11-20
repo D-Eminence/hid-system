@@ -8,12 +8,20 @@ const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance
 export class DomainProblem extends HttpException {
   /** Extension members sent with the problem (RFC 9457), e.g. `attemptsLeft`: numbers, strings, booleans, null. */
   public readonly extensions?: Readonly<Record<string, string | number | boolean | null>>;
+  /**
+   * Keep this problem's plain-words detail on a 5xx, which is otherwise
+   * replaced by a generic one (as outreach-api does). Only for a detail
+   * written for the person, naming no internal cause, e.g. ORD-4's 503
+   * "Accepting is not available right now. Please try again.".
+   */
+  public readonly exposeDetail?: true;
 
   constructor(status: number, public readonly code: string, detail: string,
     public readonly errors?: readonly { field: string; messages: readonly string[] }[],
-    options?: { extensions?: Readonly<Record<string, string | number | boolean | null>> }) {
+    options?: { extensions?: Readonly<Record<string, string | number | boolean | null>>; exposeDetail?: boolean }) {
     super(detail, status);
     if (options?.extensions) this.extensions = options.extensions;
+    if (options?.exposeDetail === true) this.exposeDetail = true;
   }
 }
 
@@ -34,7 +42,8 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     const response = context.getResponse<Response>();
     const status = exception instanceof HttpException ? exception.getStatus() : this.parserStatus(exception) ?? 500;
     const domain = exception instanceof DomainProblem ? exception : undefined;
-    const detail = status >= 500 ? 'The service could not complete the request.' : this.safeMessage(exception);
+    const detail = status >= 500 && !domain?.exposeDetail
+      ? 'The service could not complete the request.' : this.safeMessage(exception);
     const code = domain?.code ?? this.defaultCode(status);
     if (status >= 500) this.logger.error({ message: 'Pharmacy request failed', correlationId: request.correlationId,
       status, code, exceptionType: exception instanceof Error ? exception.constructor.name : 'UnknownException' });

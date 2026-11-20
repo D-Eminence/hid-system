@@ -12,6 +12,7 @@ import { PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
 import { PharmacyModule } from './pharmacy.module';
 import { PharmacyService, WORK_LIST_QUERY, WORK_LIST_QUERY_0133 } from './pharmacy.service';
 import { PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
+import { workListSince } from './work-list-window';
 
 /*
  * This facility's own work for its pharmacy staff (0133; owner, 18 November
@@ -24,6 +25,11 @@ import { PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
  * own item whose automatic send was withdrawn carries `withdrawn: true` with
  * `withdrawnReason: 'changed'`; one sent to another facility's pharmacy (D14,
  * owner's Q121 A) carries `withdrawnReason: 'sent_elsewhere'`.
+ *
+ * ORD-4 asks pharmacy.own_work_item_steps first, in the same savepoint; these
+ * tests run on a Release A schema, where it is not there (42883), so 0133's
+ * reader answers exactly as before (pharmacist-acceptance.spec.ts covers the
+ * schema with ORD-4).
  */
 
 const facilityId = '10000000-0000-4000-8000-000000000001';
@@ -49,6 +55,10 @@ const row = (n: number, patient: string) => ({ id: id(n), patient_id: patient, f
 
 const ACCESS = /from pharmacy\.own_work_access_for\(\$1, \$2::uuid, \$3\)/;
 const STATES = /from pharmacy\.own_work_item_states\(\$1::uuid\[\]\)/;
+const STEPS = /from pharmacy\.own_work_item_steps\(\$1::uuid\[\]\)/;
+/** ORD-4's reader on a Release A schema. */
+const noStepsReader = () => Object.assign(new Error('function pharmacy.own_work_item_steps(uuid[]) does not exist'),
+  { code: '42883' });
 const CARDS = /from pharmacy\.work_item_patient_cards\(\$1::uuid\[\]\)/;
 
 interface Options {
@@ -78,8 +88,11 @@ const dispensingRow = (workItemId: string) => ({ id: DISPENSING_ID, work_item_id
 const harness = (options: Options = {}) => {
   const rows = [row(1, ada), row(2, bisi), row(3, ada)];
   const statements: string[] = [];
+  /** The parameters each list query was sent, in order (Q123 A: the window's first day). */
+  const listValues: unknown[][] = [];
   const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
     statements.push(sql);
+    if (sql === WORK_LIST_QUERY || sql === WORK_LIST_QUERY_0133) listValues.push(values);
     if (sql === WORK_LIST_QUERY) return { rows };
     if (sql === WORK_LIST_QUERY_0133) {
       if (options.listError) throw options.listError;
@@ -93,6 +106,7 @@ const harness = (options: Options = {}) => {
       if (options.accessError) throw options.accessError;
       return { rows: options.accessRows ?? [{ work_item_id: values[1], basis: 'own-work' }] };
     }
+    if (STEPS.test(sql)) throw noStepsReader();
     if (STATES.test(sql)) {
       if (options.statesError) throw options.statesError;
       const asked = values[0] as string[];
@@ -141,7 +155,7 @@ const harness = (options: Options = {}) => {
       { patientId?: string; resourceType: string; resourceId: string }, Record<string, unknown> | undefined];
     return { action, patientId: resource.patientId ?? null, resourceType: resource.resourceType, details };
   });
-  return { service, statements, identity, audited };
+  return { service, statements, identity, audited, listValues };
 };
 
 describe('own pharmacy work (0133)', () => {
@@ -275,7 +289,11 @@ describe('own pharmacy work (0133)', () => {
     const conflict = Object.assign(new Error('could not serialize access'), { code: '40001' });
     const { service, statements } = harness({ statesError: conflict });
     await expect(service.listWorkItems(pharmacist)).rejects.toBe(conflict);
-    expect(statements).not.toContain('rollback to savepoint pharmacy_own_work_states');
+    // The only rollback is ORD-4's fallback to 0133's reader (42883), before the conflict: none after it.
+    const reader = statements.findIndex((sql) => STATES.test(sql));
+    expect(statements.slice(reader - 2, reader)).toEqual([expect.stringMatching(STEPS),
+      'rollback to savepoint pharmacy_own_work_states']);
+    expect(statements.slice(reader + 1)).not.toContain('rollback to savepoint pharmacy_own_work_states');
   });
 
   it('reads one withdrawn own item with the flag, and without it (still answering) when the states fail', async () => {
@@ -347,11 +365,22 @@ describe('own pharmacy work (0133)', () => {
   it('falls back to today\'s list on a schema without 0133\'s reader (42883), after rolling back its savepoint', async () => {
     const noReader = Object.assign(new Error('function pharmacy.own_withdrawn_work_items does not exist'),
       { code: '42883' });
-    const { service, statements } = harness({ listError: noReader });
+    const { service, statements, listValues } = harness({ listError: noReader });
     const page = await service.listWorkItems(pharmacist);
     expect(page.items.map((item) => item.id)).toEqual([id(1), id(2), id(3)]);
     expect(statements.filter((sql) => /from pharmacy\.work_items w|savepoint pharmacy_work_list/.test(sql))).toEqual([
       'savepoint pharmacy_work_list', WORK_LIST_QUERY_0133, 'rollback to savepoint pharmacy_work_list', WORK_LIST_QUERY]);
+    // Both queries reach back to the same day (Q123 A), and the answer says which.
+    expect(listValues).toEqual([[page.since], [page.since]]);
+    expect(page.since).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('sends 0133\'s list query the window\'s first day, and answers it (Q123 A)', async () => {
+    const { service, listValues } = harness();
+    const before = workListSince();
+    const page = await service.listWorkItems(pharmacist);
+    expect([before, workListSince()]).toContain(page.since);
+    expect(listValues).toEqual([[page.since]]);
   });
 
   it.each(['40001', '40P01', '42501', '57014'])('passes a %s of 0133\'s list query on: no fallback, no list', async (code) => {
@@ -364,10 +393,11 @@ describe('own pharmacy work (0133)', () => {
   });
 
   it('off, lists with today\'s query and no savepoint', async () => {
-    const { service, statements } = harness({ ownWork: false });
-    await service.listWorkItems(pharmacist);
+    const { service, statements, listValues } = harness({ ownWork: false });
+    const page = await service.listWorkItems(pharmacist);
     expect(statements.filter((sql) => /from pharmacy\.work_items w|savepoint pharmacy_work_list/.test(sql)))
       .toEqual([WORK_LIST_QUERY]);
+    expect(listValues).toEqual([[page.since]]);
   });
 
   it('reads and reverses an own dispensing on the own-work basis, asking about the dispensing', async () => {
@@ -421,7 +451,7 @@ describe('own pharmacy work (0133)', () => {
       medicationDisplay: 'Amoxicillin 500 mg capsule', frequency: 'Every 8 hours', instructions: 'After food',
       prescribedBy: accountId, prescribedAt: '2026-11-18T09:00:00Z', acceptanceReason: 'Accepted' } as never, 'own-key-0004'))
       .rejects.toMatchObject({ status: 403, code: 'PHARMACY_ACCESS_DENIED' });
-    expect(statements.some((sql) => ACCESS.test(sql) || STATES.test(sql))).toBe(false);
+    expect(statements.some((sql) => ACCESS.test(sql) || STATES.test(sql) || STEPS.test(sql))).toBe(false);
     expect(identity.authorize).toHaveBeenCalledTimes(3);
     expect(audited()).toEqual([]);
   });
@@ -460,13 +490,13 @@ describe('own pharmacy work (0133)', () => {
     const routed = await replay({ [id(3)]: 'sent_elsewhere' },
       { ...stored, order_route_id: '80000000-0000-4000-8000-000000000001' } as never);
     expect(routed.answer).not.toHaveProperty('withdrawn');
-    expect(routed.statements.some((sql) => STATES.test(sql))).toBe(false);
+    expect(routed.statements.some((sql) => STATES.test(sql) || STEPS.test(sql))).toBe(false);
   });
 
   it('off, asks nothing new and keeps Identity\'s consent', async () => {
     const { service, statements, identity } = harness({ ownWork: false });
     await service.getWorkItem(pharmacist, id(1));
-    expect(statements.some((sql) => ACCESS.test(sql) || STATES.test(sql))).toBe(false);
+    expect(statements.some((sql) => ACCESS.test(sql) || STATES.test(sql) || STEPS.test(sql))).toBe(false);
     expect(identity.authorize).toHaveBeenCalledTimes(1);
   });
 
@@ -483,10 +513,14 @@ describe('own pharmacy work (0133)', () => {
     const asked: string[] = [];
     const client = { query: jest.fn(async (sql: string) => {
       asked.push(sql);
+      if (STEPS.test(sql)) throw noStepsReader();
       return { rows: STATES.test(sql) ? rows : [] };
     }) } as unknown as PoolClient;
     const states = await new PharmacyOwnWork(true).states(client, rows.map((row) => row.work_item_id), 'correlation', 'flag');
     expect(asked.find((sql) => STATES.test(sql))).toMatch(/select work_item_id::text as work_item_id, basis, withdrawn, withdrawn_reason/);
+    // ORD-4's reader first, then 0133's in the same savepoint.
+    expect(asked).toEqual(['savepoint pharmacy_own_work_states', expect.stringMatching(STEPS),
+      'rollback to savepoint pharmacy_own_work_states', expect.stringMatching(STATES), 'release savepoint pharmacy_own_work_states']);
     expect([...states.entries()]).toEqual([
       [id(1), { basis: 'own-work', withdrawn: true, withdrawnReason: 'sent_elsewhere' }],
       [id(2), { basis: 'consent', withdrawn: true, withdrawnReason: 'changed' }],
