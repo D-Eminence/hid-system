@@ -86,8 +86,9 @@
 --    owner's only; ehr.unknown_patient_cancel_scan_open() is executable by
 --    PUBLIC (PostgreSQL checks EXECUTE on every function of a plan) and
 --    answers only whether this backend's own transaction holds a marker. The
---    visits keep 0131's encounters_owner_read. No runtime role is a member
---    of the owner (post-check).
+--    visits keep 0131's encounters_owner_read. No hid_ role other than the
+--    owner is a member of any of the seven tables' owners (post-check, in
+--    0133's form: MEMBER, so a NOINHERIT membership counts too).
 -- D12 ehr.visit_queue_record_kinds(entry ids): the record kind and the
 --    estimated date of birth of this facility's waiting-list entries, for
 --    the EHR runtime, so ehr-api adds recordKind to EHR-C7's cards without
@@ -98,10 +99,12 @@
 -- and on the seven clinical tables of D11 (CREATE POLICY); SHARE ROW
 -- EXCLUSIVE on identity.patient_identifiers (CREATE TRIGGER), auth.accounts,
 -- identity.facilities and identity.staff_facility_memberships (the foreign
--- keys of the new table). That is every existing table this file locks
--- (pg_locks before commit), at the strongest mode it takes, besides ROW
--- EXCLUSIVE on audit.events, which validating the audit helper's INSERT
--- takes and which blocks only SHARE and stronger. A busy table
+-- keys of the new table); ACCESS SHARE on ehr.encounters,
+-- identity.consent_grants and identity.registration_cases (named by the SQL
+-- functions' bodies, which are parsed when created). That is every existing
+-- table this file locks (pg_locks before commit), at the strongest mode it
+-- takes, besides ROW EXCLUSIVE on audit.events, which validating the audit
+-- helper's INSERT takes and which blocks only SHARE and stronger. A busy table
 -- fails the attempt at once and its subtransaction releases what it took;
 -- the attempt is made again every 100 ms for at most 5 seconds, then 55P03
 -- (nothing applied). When this transaction already holds an earlier
@@ -209,6 +212,7 @@ begin
         ehr.prescriptions, ehr.recorded_allergies, ehr.vitals in access exclusive mode nowait;
       lock table identity.patient_identifiers, auth.accounts, identity.facilities,
         identity.staff_facility_memberships in share row exclusive mode nowait;
+      lock table ehr.encounters, identity.consent_grants, identity.registration_cases in access share mode nowait;
       exit;
     exception when lock_not_available then
       if holding then
@@ -1470,12 +1474,17 @@ begin
               where relation.oid = 'ehr.unknown_patient_cancel_scans'::regclass and acl.grantee <> relation.relowner) then
     raise exception using errcode = '55000', message = '0146 post-check: the cancel-check marker table is granted to a role';
   end if;
-  if exists (select 1 from pg_roles runtime_role
-              join pg_class relation on relation.oid = 'ehr.vitals'::regclass
-             where runtime_role.rolname in ('hid_identity_runtime', 'hid_ehr_runtime', 'hid_lab_runtime',
-                                            'hid_pharmacy_runtime', 'hid_identity_api_runtime', 'hid_ehr_api_runtime')
-               and pg_has_role(runtime_role.oid, relation.relowner, 'USAGE')) then
-    raise exception using errcode = '55000', message = '0146 post-check: a runtime role is a member of the clinical tables'' owner';
+  -- D11's premise, in 0133's form: no hid_ role but the owner is a member of
+  -- any of the seven tables' owners (MEMBER, so NOINHERIT counts too).
+  if exists (select 1 from pg_roles role_row,
+                    (select distinct relation.relowner from pg_class relation
+                      where relation.oid in ('ehr.clinical_notes'::regclass, 'ehr.diagnoses'::regclass,
+                                             'ehr.documents'::regclass, 'ehr.lab_requests'::regclass,
+                                             'ehr.prescriptions'::regclass, 'ehr.recorded_allergies'::regclass,
+                                             'ehr.vitals'::regclass)) table_owner
+              where role_row.rolname like 'hid\_%' and role_row.oid <> table_owner.relowner
+                and pg_has_role(role_row.oid, table_owner.relowner, 'MEMBER')) then
+    raise exception using errcode = '55000', message = '0146 post-check: a hid_ role is a member of a clinical table''s owner';
   end if;
   foreach function_name in array array[
     'identity.create_unknown_patient(uuid,text,text,integer,text,bytea,text,text,text)',
