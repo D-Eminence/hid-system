@@ -97,6 +97,8 @@ export const WITHOUT_NIN_MESSAGES = {
   versionConflict: 'This registration has changed. Reload it and try again.',
   notCandidate: 'Choose one of the people listed for this registration.',
   notWithoutNin: 'This registration has a NIN. Use the approve or link action instead.',
+  statedUnknownRecord: 'This Health ID belongs to an unknown patient record at this facility. Identify that record instead.',
+  linkUnknownRecord: 'This record is not identified yet, so it cannot be linked. Identify it first.',
 } as const;
 
 @Injectable()
@@ -258,6 +260,8 @@ export class RegistrationWithoutNinService {
         return new DomainProblem(400, 'REGISTRATION_WITHOUT_NIN_INVALID', WITHOUT_NIN_MESSAGES.invalid);
       case 'IDEMPOTENCY_KEY_REUSED':
         return new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED', WITHOUT_NIN_MESSAGES.keyReused);
+      case 'PATIENT_RECORD_UNKNOWN':
+        return new DomainProblem(409, 'PATIENT_RECORD_UNKNOWN', WITHOUT_NIN_MESSAGES.statedUnknownRecord);
       default:
         return error;
     }
@@ -282,6 +286,8 @@ export class RegistrationWithoutNinService {
         return new DomainProblem(412, 'VERSION_CONFLICT', WITHOUT_NIN_MESSAGES.versionConflict);
       case 'PATIENT_NOT_A_REVIEW_CANDIDATE':
         return new DomainProblem(409, 'PATIENT_NOT_A_REVIEW_CANDIDATE', WITHOUT_NIN_MESSAGES.notCandidate);
+      case 'PATIENT_RECORD_UNKNOWN':
+        return new DomainProblem(409, 'PATIENT_RECORD_UNKNOWN', WITHOUT_NIN_MESSAGES.linkUnknownRecord);
       case 'IDEMPOTENCY_KEY_REUSED':
         return new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED', WITHOUT_NIN_MESSAGES.keyReused);
       default:

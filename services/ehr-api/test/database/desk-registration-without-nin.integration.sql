@@ -212,8 +212,9 @@ begin
          where lookup.registration_case_id = registration.id),
        (select count(*) from identity.outbox_events event where event.aggregate_id = registration.id
           and event.event_type = 'PatientRegistered'),
+       -- One row for the registration; 0146 audits a replay as its own row (replayed: true).
        (select count(*) from audit.events event where event.resource_id = registration.id::text
-          and event.action = 'identity.registration.without-nin'))
+          and event.action = 'identity.registration.without-nin' and not (event.details ? 'replayed')))
        from identity.registration_cases registration
        join identity.patients patient on patient.id = registration.resolved_patient_id
       where registration.id = 'e1300500-0000-4000-8000-000000000001'));
@@ -222,7 +223,7 @@ begin
              and review_reason = 'No possible duplicates: created at the desk without a NIN')::text
        from identity.registration_cases where id = 'e1300500-0000-4000-8000-000000000001'));
   perform pg_temp.check_case('1 audit carries no name, date of birth or phone', 'false',
-    (select (details::text ~* 'freshface|ngozi|1990-03-04|cccccccc')::text from audit.events
+    (select bool_or(details::text ~* 'freshface|ngozi|1990-03-04|cccccccc')::text from audit.events
       where resource_id = 'e1300500-0000-4000-8000-000000000001' and action = 'identity.registration.without-nin'));
 end $$;
 

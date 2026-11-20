@@ -42,8 +42,10 @@ export class IdentityService {
     const patient=await this.provider.lookupPatientId(patientId,context);
     if(!patient||patient.id!==patientId)throw new NotFoundException('Patient was not found or is not available');
     await this.record(context,'identity.staff.chat.profile.read','success',patientId,'direct-care');
+    // recordKind (0146, ID-7): while it is 'unknown', the names are placeholders, never shown as a name.
     return {patientId:patient.id,version:patient.rowVersion,firstName:patient.firstName,lastName:patient.lastName,
-      fullName:patient.fullName,dateOfBirth:patient.dateOfBirth,gender:patient.gender};
+      fullName:patient.fullName,dateOfBirth:patient.dateOfBirth,gender:patient.gender,
+      recordKind:patient.recordKind??'standard'};
   }
 
   async lookupPatient(hid: string, purpose: PurposeOfUse, context: DataAccessContext) {

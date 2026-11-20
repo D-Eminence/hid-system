@@ -8,7 +8,7 @@
 --      replay and a reused key, the request rules, the sealed demo refusal,
 --      the sealed QA facility's record, a role without the permission;
 --   2. no login and no NIN while unknown; 0138's pre-check answers
---      unknown_record;
+--      unknown_record here and not_permitted at another facility;
 --   3. the basis (created_here at its facility only) and the own-facility
 --      opening; search: a Health ID alone at its facility finds it, nothing
 --      else does, and another facility's Health ID search does not;
@@ -23,7 +23,14 @@
 --      allergy attached (the allergy through the marker-gated policy, which
 --      the tables' owner does not pass without the marker) or once
 --      identified; the replay;
---   8. the waiting list's record kinds, and the grants.
+--   8. the waiting list's record kinds, and the grants;
+--   9. Ola's review of #302: identify or confirm without a sex keeps it; the
+--      approver's review (held details and candidate cards, its refusals and
+--      audit rows); seals in both directions; ID-2's rule reads held phones
+--      and records in review, refuses a stated Health ID of this facility's
+--      unknown record and never links a case to one; replays audited; cancel
+--      closes the waiting-list entry and nulls the held details; an erasure
+--      erases the held contact. The record kind is derived (no column).
 begin;
 
 insert into identity.organizations (id, name, slug) values
@@ -195,13 +202,24 @@ begin
   select * into patient_row from identity.patients where id = pg_temp.patient(1);
   if patient_row.first_name <> 'Unknown' or patient_row.last_name <> 'U-0001'
      or patient_row.full_name <> 'Unknown patient U-0001' or patient_row.source_system <> 'hid-unknown-patient'
-     or patient_row.record_kind <> 'unknown' or patient_row.account_id is not null or patient_row.status <> 'active' then
+     or identity.patient_record_kind(patient_row.id) <> 'unknown' or patient_row.account_id is not null
+     or patient_row.status <> 'active' then
     raise exception '1i: the patient row is %', row_to_json(patient_row);
+  end if;
+  -- D1: identity.patients gains no column; the kind is derived.
+  if exists (select 1 from pg_attribute where attrelid = 'identity.patients'::regclass
+              and attname in ('record_kind', 'dob_estimated'))
+     or identity.patient_record_kind('f1466000-0000-4000-8000-000000000001') <> 'standard' then
+    raise exception '1m: identity.patients has a kind column, or a standard patient is not standard';
   end if;
   if not identity.sealed_qa_patient(pg_temp.patient(7)) or identity.sealed_qa_patient(pg_temp.patient(1)) then
     raise exception '1j: the QA record is not a sealed QA patient';
   end if;
-  if (select count(*) from audit.events where action = 'identity.unknown-patient.create') <> 7
+  -- Seven records made, and the one replay audited too (Ola's #302 item 8).
+  if (select count(*) from audit.events where action = 'identity.unknown-patient.create'
+       and not (details ? 'replayed')) <> 7
+     or (select count(*) from audit.events where action = 'identity.unknown-patient.create'
+          and details @> '{"replayed": true}' and patient_id = pg_temp.patient(1) and outcome = 'success') <> 1
      or exists (select 1 from audit.events where action like 'identity.unknown-patient%'
                  and (details::text like '%HID-%' or details::text like '%Unknown patient%'
                       or details::text like '%abab%')) then
@@ -218,7 +236,8 @@ begin
   begin
     update identity.patients set account_id = 'f1462000-0000-4000-8000-000000000001' where id = pg_temp.patient(1);
     raise exception '2a: an unknown record got a login';
-  exception when check_violation then null;
+  exception when raise_exception then
+    if sqlerrm <> 'PATIENT_RECORD_UNKNOWN' then raise; end if;
   end;
   begin
     insert into identity.patient_identifiers (id, patient_id, identifier_type, lookup_hmac, verified)
@@ -236,6 +255,15 @@ begin
   select decision into decision_value from identity.patient_nin_link_precheck(pg_temp.patient(1), repeat('c', 64)::char(64),
     pg_temp.key('nin-1'), pg_temp.sha('nin-1')::char(64));
   if decision_value <> 'unknown_record' then raise exception '2c: the NIN pre-check answered %', decision_value; end if;
+end $$;
+-- Another facility's desk gets not_permitted, as for any patient not its own (Ola's #302 item 9).
+select pg_temp.as_member(5, 'unknown-nin-precheck-other');
+do $$
+declare decision_value text;
+begin
+  select decision into decision_value from identity.patient_nin_link_precheck(pg_temp.patient(1), repeat('c', 64)::char(64),
+    pg_temp.key('nin-o'), pg_temp.sha('nin-o')::char(64));
+  if decision_value <> 'not_permitted' then raise exception '2d: another facility''s pre-check answered %', decision_value; end if;
 end $$;
 reset role;
 
@@ -393,13 +421,16 @@ end $$;
 reset role;
 do $$
 begin
-  if (select array[first_name, last_name, record_kind] from identity.patients where id = pg_temp.patient(1))
+  if (select array[first_name, last_name, identity.patient_record_kind(id)] from identity.patients where id = pg_temp.patient(1))
        <> array['Unknown', 'U-0001', 'unknown']
-     or (select array[first_name, last_name, record_kind] from identity.patients where id = pg_temp.patient(2))
+     or (select array[first_name, last_name, identity.patient_record_kind(id)] from identity.patients where id = pg_temp.patient(2))
        <> array['Zara', 'Bello', 'standard']
      or identity.own_facility_basis(pg_temp.patient(2), 'f1461000-0000-4000-8000-000000000001') <> 'created_here'
-     or (select candidate_patient_ids from identity.unknown_patients where patient_id = pg_temp.patient(1))
-       <> array['f1466000-0000-4000-8000-000000000001'::uuid]
+     or (select candidates from identity.unknown_patients where patient_id = pg_temp.patient(1))
+       <> '[{"score": 90, "reasons": ["date_of_birth", "first_name", "last_name"],
+             "patientId": "f1466000-0000-4000-8000-000000000001"}]'::jsonb
+     or (select count(*) from audit.events where action = 'identity.unknown-patient.identify'
+          and patient_id = pg_temp.patient(2) and details @> '{"replayed": true}') <> 1
      or exists (select 1 from audit.events where action = 'identity.unknown-patient.identify'
                  and (details::text like '%Ada%' or details::text like '%1990%' or details::text like '%Zara%')) then
     raise exception '5i: the identified and held records are wrong';
@@ -440,7 +471,7 @@ end $$;
 reset role;
 do $$
 begin
-  if (select array[first_name, last_name, record_kind] from identity.patients where id = pg_temp.patient(3))
+  if (select array[first_name, last_name, identity.patient_record_kind(id)] from identity.patients where id = pg_temp.patient(3))
        <> array['Ada', 'Obi', 'standard']
      or (select decision from identity.unknown_patients where patient_id = pg_temp.patient(3)) <> 'confirmed_separate' then
     raise exception '6e: the second approver''s decision was not applied';
@@ -597,6 +628,322 @@ begin
      or has_function_privilege('hid_identity_api_runtime', 'identity.unknown_patient_cards(uuid[])', 'EXECUTE')
      or has_table_privilege('hid_identity_api_runtime', 'identity.unknown_patients', 'SELECT') then
     raise exception '8b: the grants are wrong';
+  end if;
+end $$;
+
+-- 9. Ola's review of #302 (each case names its item).
+-- Fixtures: a second real standard patient, and a sealed QA patient.
+select set_config('app.purpose_of_use', '', true), set_config('app.actor_subject', '', true),
+  set_config('app.membership_id', '', true), set_config('app.facility_id', '', true);
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, gender, status) values
+  ('f1466000-0000-4000-8000-000000000002', 'HID-UNKSTD3', 'Bayo', 'Ade', 'Bayo Ade', date '1970-03-03', 'male', 'active'),
+  ('f1466000-0000-4000-8000-000000000003', 'HID-UNKSTD4', 'Chidi', 'Eze', 'Chidi Eze', date '1975-04-04', 'male', 'active');
+insert into identity.sealed_qa_members (member_kind, member_id) values ('patient', 'f1466000-0000-4000-8000-000000000003');
+create function pg_temp.hmac(label text) returns text language sql as $f$ select repeat(label, 32); $f$;
+grant execute on function pg_temp.hmac(text) to hid_identity_api_runtime;
+
+-- 9a (items 5 and 8). Records 10 (male) and 11 (female) at H; identify
+-- without a sex keeps the one recorded at creation; an identify replay is
+-- audited.
+set local role hid_identity_api_runtime;
+select pg_temp.as_member(1, 'unknown-ola-9a');
+do $$
+declare answer record;
+begin
+  perform identity.create_unknown_patient(pg_temp.patient(10), 'HID-UNKACA', 'male', 60, 'unconscious', null, null,
+    pg_temp.key('create-10'), pg_temp.sha('create-10'));
+  perform identity.create_unknown_patient(pg_temp.patient(11), 'HID-UNKACB', 'female', 30, 'confused', null, null,
+    pg_temp.key('create-11'), pg_temp.sha('create-11'));
+  perform identity.create_unknown_patient(pg_temp.patient(12), 'HID-UNKACC', 'female', 30, 'confused', null, null,
+    pg_temp.key('create-12'), pg_temp.sha('create-12'));
+  select * into answer from identity.identify_unknown_patient(pg_temp.patient(10), pg_temp.version(10), 'Musa', 'Bala',
+    date '1960-06-06', null, pg_temp.hmac('a2'), pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-10'),
+    pg_temp.sha('identify-10'));
+  if answer.outcome <> 'identified' or answer.sex is distinct from 'male' then raise exception '9a: identify without a sex answered %', row_to_json(answer); end if;
+  -- Ada Obi's details (the standard patient and records 1 and 3 now hold them): in review.
+  select * into answer from identity.identify_unknown_patient(pg_temp.patient(11), pg_temp.version(11), 'Ada', 'Obi',
+    date '1990-05-01', null, pg_temp.hmac('a3'), pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-11'),
+    pg_temp.sha('identify-11'));
+  if answer.outcome <> 'sent_for_review' or answer.candidate_count <> 3 then
+    raise exception '9a: identify of record 11 answered %', row_to_json(answer);
+  end if;
+end $$;
+-- Record 12 is identified by approver 3, who then may not review it.
+select pg_temp.as_member(3, 'unknown-ola-9a-3');
+select identity.identify_unknown_patient(pg_temp.patient(12), pg_temp.version(12), 'Ada', 'Obi', date '1990-05-01',
+  'female', pg_temp.hmac('b1'), pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-12'), pg_temp.sha('identify-12'));
+
+-- 9b (item 1). The approver's review: the held details and each candidate's
+-- card, one audit row per candidate; refused to the desk, to the member who
+-- identified, and for a record not in review.
+select pg_temp.as_member(1, 'unknown-ola-9b-desk');
+do $$
+begin
+  if pg_temp.refusal(format('select identity.review_unknown_patient(%L)', pg_temp.patient(11)))
+     <> '42501 UNKNOWN_PATIENT_DENIED' then
+    raise exception '9b: the desk read a review';
+  end if;
+end $$;
+select pg_temp.as_member(3, 'unknown-ola-9b');
+do $$
+declare answer record;
+begin
+  select * into answer from identity.review_unknown_patient(pg_temp.patient(11));
+  if answer.outcome <> 'found' or answer.proposed_first_name <> 'Ada' or answer.proposed_last_name <> 'Obi'
+     or answer.proposed_date_of_birth <> date '1990-05-01' or answer.proposed_sex is not null
+     or answer.status <> 'sent_for_review' or answer.label <> 'U-0008' or jsonb_array_length(answer.candidates) <> 3
+     or answer.candidates -> 0 <> '{"position": 1, "fullName": "Ada Obi", "dateOfBirth": "1990-05-01", "sex": "female",
+          "healthIdLast4": "STD2", "matchReasons": ["date_of_birth", "first_name", "last_name"], "active": true}'::jsonb
+     or answer.candidates::text like '%f146%' or answer.candidates::text like '%HID-%' then
+    raise exception '9b: the review answered %', row_to_json(answer);
+  end if;
+  select * into answer from identity.review_unknown_patient(pg_temp.patient(12));
+  if answer.outcome <> 'second_person_required' or answer.candidates is not null then
+    raise exception '9b: the identifier''s review answered %', row_to_json(answer);
+  end if;
+  select * into answer from identity.review_unknown_patient(pg_temp.patient(10));
+  if answer.outcome <> 'not_in_review' then raise exception '9b: an identified record''s review answered %', row_to_json(answer); end if;
+  select * into answer from identity.review_unknown_patient(pg_temp.patient(6));
+  if answer.outcome <> 'not_found' then raise exception '9b: another facility''s review answered %', row_to_json(answer); end if;
+end $$;
+reset role;
+do $$
+begin
+  if (select count(*) from audit.events where action = 'identity.unknown-patient.review' and outcome = 'success'
+       and patient_id = pg_temp.patient(11) and details ->> 'candidateCount' = '3') <> 1
+     or (select array_agg(patient_id order by patient_id) from audit.events
+          where action = 'identity.unknown-patient.review.shown' and details ->> 'unknownPatientId' = pg_temp.patient(11)::text)
+        <> array['f1466000-0000-4000-8000-000000000001', pg_temp.patient(1), pg_temp.patient(3)]::uuid[]
+     or (select count(*) from audit.events where action = 'identity.unknown-patient.review' and outcome = 'denied') <> 3
+     or exists (select 1 from audit.events where action like 'identity.unknown-patient.review%'
+                 and (details::text like '%Ada%' or details::text like '%1990%')) then
+    raise exception '9b: the review audit rows are wrong';
+  end if;
+end $$;
+
+-- 9c (item 5). Confirm-separate with no held sex keeps the recorded one.
+set local role hid_identity_api_runtime;
+select pg_temp.as_member(4, 'unknown-ola-9c');
+select identity.decide_unknown_patient(pg_temp.patient(11), 'confirm_separate', pg_temp.version(11),
+  'A different person: checked with the family', pg_temp.key('confirm-11'), pg_temp.sha('confirm-11'));
+reset role;
+do $$
+begin
+  if (select array[gender, full_name] from identity.patients where id = pg_temp.patient(11)) is distinct from array['female', 'Ada Obi']
+     or (select gender from identity.patients where id = pg_temp.patient(10)) is distinct from 'male' then
+    raise exception '9c: a sex not given erased the recorded one';
+  end if;
+end $$;
+
+-- 9d (item 3). Seals: a QA identify never counts a real review queue, and a
+-- real identify never counts a QA record in review. Record 12 (real, held as
+-- Ada Obi) is in review; a real desk registration of Bayo Ade waits for review.
+set local role hid_identity_api_runtime;
+select pg_temp.as_member(1, 'unknown-ola-9d-desk');
+do $$
+declare answer record;
+begin
+  select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000001', 'Bayo', 'Ade',
+    date '1970-03-03', 'male', 'not_carried', pg_temp.hmac('a5'), pg_temp.note(), pg_temp.note(), 'v1', null,
+    pg_temp.key('register-bayo'), pg_temp.sha('register-bayo'), 'HID-UNKACD');
+  if answer.case_status <> 'review_required' then raise exception '9d: the real registration answered %', row_to_json(answer); end if;
+end $$;
+select pg_temp.as_member(6, 'unknown-ola-9d-qa');
+do $$
+declare answer record;
+begin
+  perform identity.create_unknown_patient(pg_temp.patient(13), 'HID-UNKACE', 'female', 30, 'confused', null, null,
+    pg_temp.key('create-13'), pg_temp.sha('create-13'));
+  perform identity.create_unknown_patient(pg_temp.patient(14), 'HID-UNKACF', 'male', 50, 'confused', null, null,
+    pg_temp.key('create-14'), pg_temp.sha('create-14'));
+  perform identity.create_unknown_patient(pg_temp.patient(15), 'HID-UNKACG', 'male', 50, 'confused', null, null,
+    pg_temp.key('create-15'), pg_temp.sha('create-15'));
+  select * into answer from identity.identify_unknown_patient(pg_temp.patient(13), pg_temp.version(13), 'Ada', 'Obi',
+    date '1990-05-01', 'female', pg_temp.hmac('a4'), pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-13'),
+    pg_temp.sha('identify-13'));
+  if answer.outcome <> 'identified' then raise exception '9d: a QA identify counted a real record in review: %', row_to_json(answer); end if;
+  select * into answer from identity.identify_unknown_patient(pg_temp.patient(14), pg_temp.version(14), 'Bayo', 'Ade',
+    date '1970-03-03', 'male', pg_temp.hmac('a8'), pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-14'),
+    pg_temp.sha('identify-14'));
+  if answer.outcome <> 'identified' then raise exception '9d: a QA identify counted a real registration: %', row_to_json(answer); end if;
+  -- A QA record in review (the QA patient Chidi Eze is its candidate).
+  select * into answer from identity.identify_unknown_patient(pg_temp.patient(15), pg_temp.version(15), 'Chidi', 'Eze',
+    date '1975-04-04', 'male', pg_temp.hmac('a6'), pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-15'),
+    pg_temp.sha('identify-15'));
+  if answer.outcome <> 'sent_for_review' then raise exception '9d: the QA record in review answered %', row_to_json(answer); end if;
+end $$;
+select pg_temp.as_member(1, 'unknown-ola-9d-real');
+do $$
+declare answer record;
+begin
+  perform identity.create_unknown_patient(pg_temp.patient(16), 'HID-UNKACH', 'male', 50, 'confused', null, null,
+    pg_temp.key('create-16'), pg_temp.sha('create-16'));
+  select * into answer from identity.identify_unknown_patient(pg_temp.patient(16), pg_temp.version(16), 'Chidi', 'Eze',
+    date '1975-04-04', 'male', pg_temp.hmac('a7'), pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-16'),
+    pg_temp.sha('identify-16'));
+  if answer.outcome <> 'identified' then raise exception '9d: a real identify counted a QA record: %', row_to_json(answer); end if;
+end $$;
+
+-- 9e (items 2 and 7, and 8 for 0130). ID-2's rule reads an identified
+-- record's held phone and a record in review's held details, never a QA
+-- record's; a stated Health ID of this facility's unknown record is refused,
+-- and at another facility it is not a candidate; a replay is audited.
+do $$
+declare answer record;
+begin
+  -- Record 10's held phone, with another name and date of birth.
+  select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000002', 'Musa', 'Belo',
+    date '1961-01-01', 'male', 'not_carried', pg_temp.hmac('a2'), pg_temp.note(), pg_temp.note(), 'v1', null,
+    pg_temp.key('register-musa'), pg_temp.sha('register-musa'), 'HID-UNKADA');
+  if answer.case_status <> 'review_required' or answer.candidate_count <> 1 then
+    raise exception '9e: the held phone was not a candidate: %', row_to_json(answer);
+  end if;
+  select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000002', 'Musa', 'Belo',
+    date '1961-01-01', 'male', 'not_carried', pg_temp.hmac('a2'), pg_temp.note(), pg_temp.note(), 'v1', null,
+    pg_temp.key('register-musa'), pg_temp.sha('register-musa'), 'HID-UNKADA');
+  if not answer.replayed then raise exception '9e: the replay answered %', row_to_json(answer); end if;
+  -- Record 12's held phone (in review): an open registration, no candidate.
+  select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000003', 'Ngozi', 'Uche',
+    date '1955-05-05', 'female', 'not_carried', pg_temp.hmac('b1'), pg_temp.note(), pg_temp.note(), 'v1', null,
+    pg_temp.key('register-ngozi'), pg_temp.sha('register-ngozi'), 'HID-UNKADB');
+  if answer.case_status <> 'review_required' or answer.candidate_count <> 0 then
+    raise exception '9e: the record in review was not counted: %', row_to_json(answer);
+  end if;
+  -- The QA record in review's held phone: not counted here.
+  select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000004', 'Femi', 'Ola',
+    date '1966-06-06', 'male', 'not_carried', pg_temp.hmac('a6'), pg_temp.note(), pg_temp.note(), 'v1', null,
+    pg_temp.key('register-femi'), pg_temp.sha('register-femi'), 'HID-UNKADC');
+  if answer.case_status <> 'approved_new_identity' then
+    raise exception '9e: a QA record in review was counted: %', row_to_json(answer);
+  end if;
+  -- Record 8 is still unknown, at H.
+  if pg_temp.refusal(format('select identity.register_patient_without_nin(%L, %L, %L, %L, %L, %L, %L, %L::bytea, %L::bytea, %L, %L, %L, %L, %L)',
+       'f146c000-0000-4000-8000-000000000005', 'Joy', 'Eke', '1999-09-09', 'female', 'not_carried', pg_temp.hmac('b2'),
+       pg_temp.note(), pg_temp.note(), 'v1', 'HID-UNKAAB2', pg_temp.key('register-joy'), pg_temp.sha('register-joy'),
+       'HID-UNKADD')) <> 'P0001 PATIENT_RECORD_UNKNOWN' then
+    raise exception '9e: a stated Health ID of this facility''s unknown record was registered';
+  end if;
+end $$;
+select pg_temp.as_member(5, 'unknown-ola-9e-other');
+do $$
+declare answer record;
+begin
+  select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000006', 'Sade', 'Lawal',
+    date '1977-07-07', 'female', 'not_carried', pg_temp.hmac('b4'), pg_temp.note(), pg_temp.note(), 'v1', 'HID-UNKAAB2',
+    pg_temp.key('register-sade'), pg_temp.sha('register-sade'), 'HID-UNKADE');
+  if answer.case_status <> 'approved_new_identity' or answer.candidate_count <> 0 then
+    raise exception '9e: another facility''s stated Health ID of an unknown record answered %', row_to_json(answer);
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  if not exists (select 1 from identity.registration_case_candidates
+                  where case_id = 'f146c000-0000-4000-8000-000000000002' and patient_id = pg_temp.patient(10)
+                    and match_reasons = '["phone"]'::jsonb)
+     or (select count(*) from audit.events where action = 'identity.registration.without-nin'
+          and resource_id = 'f146c000-0000-4000-8000-000000000002' and details @> '{"replayed": true}') <> 1
+     or not exists (select 1 from audit.events where action = 'identity.registration.without-nin'
+                     and resource_id = 'f146c000-0000-4000-8000-000000000003'
+                     and details -> 'duplicateKinds' = '["open_registration"]'::jsonb) then
+    raise exception '9e: the registrations are wrong';
+  end if;
+end $$;
+
+-- 9f (item 7). A registration case never resolves to a record that is still
+-- unknown, whichever path writes it: here an approver's link to record 8,
+-- made a candidate by hand.
+insert into identity.registration_case_candidates (case_id, patient_id, match_score, match_reasons)
+values ('f146c000-0000-4000-8000-000000000002', pg_temp.patient(8), 80, '["phone"]');
+set local role hid_identity_api_runtime;
+select pg_temp.as_member(3, 'unknown-ola-9f');
+do $$
+begin
+  if pg_temp.refusal(format('select identity.review_patient_without_nin(%L, 1, %L, %L, %L, %L, %L, null)',
+       'f146c000-0000-4000-8000-000000000002', 'link_existing', pg_temp.patient(8), 'The same person, by phone',
+       pg_temp.key('link-8'), pg_temp.sha('link-8'))) <> 'P0001 PATIENT_RECORD_UNKNOWN' then
+    raise exception '9f: a registration was linked to an unknown record';
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  begin
+    update identity.patients set account_id = 'f1462000-0000-4000-8000-000000000008' where id = pg_temp.patient(10);
+  exception when others then
+    raise exception '9f: an identified record could not get a login: %', sqlerrm;
+  end;
+end $$;
+
+-- 9g (items 2 and 6). Cancel closes the waiting-list entry and nulls the
+-- held details and contact; an erasure erases an identified record's held
+-- contact.
+set local role hid_identity_api_runtime;
+select pg_temp.as_member(1, 'unknown-ola-9g');
+select identity.create_unknown_patient(pg_temp.patient(17), 'HID-UNKAEA', 'female', 30, 'confused', null, null,
+  pg_temp.key('create-17'), pg_temp.sha('create-17'));
+select identity.identify_unknown_patient(pg_temp.patient(17), pg_temp.version(17), 'Ada', 'Obi', date '1990-05-01',
+  'female', pg_temp.hmac('b3'), pg_temp.note(), pg_temp.note(), 'v1', pg_temp.key('identify-17'), pg_temp.sha('identify-17'));
+reset role;
+select set_config('app.purpose_of_use', '', true), set_config('app.actor_subject', '', true),
+  set_config('app.membership_id', '', true), set_config('app.facility_id', '', true);
+insert into ehr.visit_queue (id, facility_id, patient_id, queue_day, check_in_basis, checked_in_by_account_id,
+  checked_in_by_membership_id, updated_by_membership_id, checked_in_at)
+values ('f1469000-0000-4000-8000-000000000017', 'f1461000-0000-4000-8000-000000000001', pg_temp.patient(17),
+  (clock_timestamp() at time zone 'Africa/Lagos')::date, 'own_facility', 'f1462000-0000-4000-8000-000000000002',
+  'f1464000-0000-4000-8000-000000000002', 'f1464000-0000-4000-8000-000000000002', clock_timestamp());
+set local role hid_identity_api_runtime;
+select pg_temp.as_member(3, 'unknown-ola-9g-cancel');
+select identity.decide_unknown_patient(pg_temp.patient(17), 'cancel', pg_temp.version(17), 'Made in error today',
+  pg_temp.key('cancel-17'), pg_temp.sha('cancel-17'));
+reset role;
+do $$
+declare erased record;
+begin
+  if (select array[stage, (closed_at is not null)::text] from ehr.visit_queue
+       where id = 'f1469000-0000-4000-8000-000000000017') <> array['cancelled', 'true']
+     or not exists (select 1 from audit.events where action = 'ehr.visit-queue.update'
+                     and resource_id = 'f1469000-0000-4000-8000-000000000017'
+                     and details @> '{"stage": "cancelled", "closedBy": "identity.unknown-patient.cancel"}')
+     or not exists (select 1 from audit.events where action = 'identity.unknown-patient.cancel'
+                     and patient_id = pg_temp.patient(17) and details @> '{"waitingListEntriesClosed": 1}')
+     or exists (select 1 from identity.unknown_patients where patient_id = pg_temp.patient(17)
+                 and (proposed_first_name is not null or proposed_last_name is not null or proposed_dob is not null
+                      or proposed_gender is not null or contact_phone_ciphertext is not null
+                      or contact_phone_lookup_hmac is not null))
+     or (select count(*) from audit.events where action = 'identity.unknown-patient.cancel'
+          and patient_id = pg_temp.patient(4) and details @> '{"replayed": true}') <> 1 then
+    raise exception '9g: the cancel did not close the entry or null the held details';
+  end if;
+  select * into erased from identity.erase_patient_facility_contacts(pg_temp.patient(10), 'erasure_request');
+  if exists (select 1 from identity.unknown_patients where patient_id = pg_temp.patient(10)
+              and (contact_phone_ciphertext is not null or contact_address_ciphertext is not null
+                   or contact_key_version is not null or contact_phone_lookup_hmac is not null))
+     or not exists (select 1 from audit.events where action = 'identity.patient-facility-contact.erase'
+                     and patient_id = pg_temp.patient(10) and details @> '{"unknownRecordContacts": 1}') then
+    raise exception '9g: the erasure left the held contact';
+  end if;
+end $$;
+-- After the erasure, the same phone is no longer a candidate.
+set local role hid_identity_api_runtime;
+select pg_temp.as_member(1, 'unknown-ola-9g-after');
+do $$
+declare answer record;
+begin
+  select * into answer from identity.register_patient_without_nin('f146c000-0000-4000-8000-000000000007', 'Musa', 'Belo',
+    date '1961-01-01', 'male', 'not_carried', pg_temp.hmac('a2'), pg_temp.note(), pg_temp.note(), 'v1', null,
+    pg_temp.key('register-musa-2'), pg_temp.sha('register-musa-2'), 'HID-UNKADF');
+  -- The first Musa Belo registration, still in review, is an open registration; record 10 is no candidate.
+  if answer.case_status <> 'review_required' or answer.candidate_count <> 0 then
+    raise exception '9g: after the erasure the registration answered %', row_to_json(answer);
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  if exists (select 1 from identity.registration_case_candidates
+              where case_id = 'f146c000-0000-4000-8000-000000000007' and patient_id = pg_temp.patient(10)) then
+    raise exception '9g: an erased held phone was still a candidate';
   end if;
 end $$;
 

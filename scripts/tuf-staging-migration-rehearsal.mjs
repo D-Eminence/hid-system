@@ -110,8 +110,6 @@ const addedColumns = {
   'ocr.publications': ['publication_basis'], // 0113, default NULL (read as direct care)
   // 0130, default 'nin_verified' and NULL: every historical case was registered with a checked NIN.
   'identity.registration_cases': ['identity_evidence', 'no_nin_reason'],
-  // 0146 (ID-7), default 'standard' and false: every historical patient is a standard record.
-  'identity.patients': ['record_kind', 'dob_estimated'],
 };
 
 async function snapshot(db) {
@@ -399,7 +397,6 @@ try {
       ['ehr.encounters', 'imported_paper_records is distinct from false'],
       ['ocr.publications', 'publication_basis is not null'],
       ['identity.registration_cases', "identity_evidence is distinct from 'nin_verified' or no_nin_reason is not null"],
-      ['identity.patients', "record_kind is distinct from 'standard' or dob_estimated is distinct from false"],
     ];
     for (const [table, offending] of historicalDefaults) {
       const { rows } = await client.query(`select count(*)::int as n from ${table} where ${offending}`);

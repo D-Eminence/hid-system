@@ -16,7 +16,7 @@ import { HidCodeGenerator } from './hid-code-generator.service';
  * 0146 (ID-7): unknown patient records, for a person who cannot say who they
  * are. The database decides (identity.create_unknown_patient,
  * list_unknown_patients, read_unknown_patient, identify_unknown_patient,
- * decide_unknown_patient) and writes the audit rows of each success and each
+ * review_unknown_patient, decide_unknown_patient) and writes the audit rows of each success and each
  * not-found; this service reserves the Health ID, encrypts the arrival note
  * and the contact, computes the phone's lookup hashes, writes a refusal row
  * for every other refusal, and maps the answers. Nothing here logs or audits
@@ -49,6 +49,10 @@ export const READ_UNKNOWN_PATIENT_SQL = `select outcome, patient_id::text, recor
 export const IDENTIFY_UNKNOWN_PATIENT_SQL = `select outcome, patient_id::text, record_kind, label, display_name, sex,
        date_of_birth::text as date_of_birth, dob_estimated, status, row_version, candidate_count, replayed
   from identity.identify_unknown_patient($1::uuid, $2, $3, $4, $5::date, $6, $7, $8, $9, $10, $11, $12)`;
+export const REVIEW_UNKNOWN_PATIENT_SQL = `select outcome, patient_id::text, label, status, row_version,
+       proposed_first_name, proposed_last_name, proposed_date_of_birth::text as proposed_date_of_birth, proposed_sex,
+       identified_at, open_registration_count, candidates
+  from identity.review_unknown_patient($1::uuid)`;
 export const DECIDE_UNKNOWN_PATIENT_SQL = `select outcome, patient_id::text, record_kind, label, display_name, sex,
        date_of_birth::text as date_of_birth, dob_estimated, status, row_version, replayed
   from identity.decide_unknown_patient($1::uuid, $2, $3, $4, $5, $6)`;
@@ -77,6 +81,14 @@ interface ListRow extends CardRow { has_more: boolean }
 interface ReadRow extends CardRow { outcome: string; arrival_note_ciphertext: Buffer | null; arrival_note_key_version: string | null }
 interface IdentifyRow extends CardRow { outcome: string; candidate_count: number | null; replayed: boolean }
 interface DecideRow extends CardRow { outcome: string; replayed: boolean }
+interface ReviewCandidate { position: number; fullName: string; dateOfBirth: string | null; sex: string | null;
+  healthIdLast4: string; matchReasons: string[]; active: boolean }
+interface ReviewRow extends QueryResultRow {
+  outcome: string; patient_id: string | null; label: string | null; status: string | null; row_version: Count;
+  proposed_first_name: string | null; proposed_last_name: string | null; proposed_date_of_birth: string | null;
+  proposed_sex: string | null; identified_at: Timestamp; open_registration_count: number | null;
+  candidates: ReviewCandidate[] | null;
+}
 
 function iso(value: Timestamp | undefined): string | null {
   if (value === null || value === undefined) return null;
@@ -261,6 +273,41 @@ export class UnknownPatientsService {
     return { ...card(row), outcome: identified ? 'identified' : 'sent_for_review',
       message: identified ? UNKNOWN_PATIENT_MESSAGES.identified : UNKNOWN_PATIENT_MESSAGES.sentForReview,
       replayed: row.replayed === true };
+  }
+
+  /**
+   * The approver's review of a record in review: the details held at
+   * identify and each possible duplicate's card, so confirm-separate is not a
+   * blind decision. The database audits the read and each candidate shown,
+   * and the refusals it answers (not in review; the member who identified).
+   */
+  async review(patientId: string, context: DataAccessContext) {
+    let row: ReviewRow | undefined;
+    try {
+      row = await this.database.withTransaction(context, async (client) => (await client.query<ReviewRow>(
+        REVIEW_UNKNOWN_PATIENT_SQL, [patientId])).rows[0]);
+    } catch (error) {
+      throw await this.refusal(context, 'identity.unknown-patient.review', patientId, error);
+    }
+    if (!row) throw unavailable();
+    if (row.outcome === 'not_found') throw patientNotFound();
+    if (row.outcome === 'not_in_review') {
+      throw new DomainProblem(409, 'UNKNOWN_PATIENT_NOT_IN_REVIEW', 'This record is not waiting for review.');
+    }
+    if (row.outcome === 'second_person_required') {
+      throw new DomainProblem(403, 'UNKNOWN_PATIENT_SECOND_PERSON_REQUIRED',
+        'Another approver must review this. You identified this patient.');
+    }
+    return {
+      patientId: row.patient_id, label: row.label, status: row.status, version: Number(row.row_version),
+      identifiedAt: iso(row.identified_at),
+      heldDetails: { firstName: row.proposed_first_name, lastName: row.proposed_last_name,
+        dateOfBirth: row.proposed_date_of_birth, sex: row.proposed_sex },
+      openRegistrationCount: row.open_registration_count ?? 0,
+      candidates: (row.candidates ?? []).map((candidate) => ({ position: candidate.position, fullName: candidate.fullName,
+        dateOfBirth: candidate.dateOfBirth, sex: candidate.sex, healthIdLast4: candidate.healthIdLast4,
+        matchReasons: candidate.matchReasons, active: candidate.active })),
+    };
   }
 
   async decide(patientId: string, decision: 'confirm_separate' | 'cancel', input: DecideUnknownPatientDto,

@@ -9757,14 +9757,20 @@ no phone, and is found only at the facility that made it.
 
 ### What 0146 changes
 
-- `identity.patients` gains `record_kind` (`standard`, the default and every
-  existing row, or `unknown`) and `dob_estimated`. An unknown record never has
-  a login (a CHECK).
-- **Differs from the plan:** everything else (the facility that made it, the
-  label `U-0001` and up per facility, the reason, the status, the encrypted
-  arrival note, who identified it, the held details, the approver's decision)
-  is on a new owner-only table, `identity.unknown_patients`, not on
-  `identity.patients`. Only this migration's functions read or write it.
+- **Differs from the plan:** `identity.patients` gains no column. The record
+  (the facility that made it, the label `U-0001` and up per facility, the
+  reason, the status, the encrypted arrival note, who identified it, the held
+  details and candidates, the approver's decision) is on a new owner-only
+  table, `identity.unknown_patients`. Only this migration's functions read or
+  write it.
+- The record kind is derived: `unknown` while the record is open, in review or
+  cancelled (or merged, ID-8), `standard` once identified or confirmed
+  separate. `dateOfBirthEstimated` is true while it is unknown and has a date
+  of birth. `identity.patient_record_kind(patientId)` answers the kind for the
+  Identity runtime. So no identity table is locked against its readers when
+  0146 is applied.
+- An unknown record never has a login: a trigger on `identity.patients`
+  refuses an account on it (`PATIENT_RECORD_UNKNOWN`).
 - 0131's `identity.own_facility_basis` gains `created_here`: made as unknown
   at this facility, not cancelled or merged. It lasts after identify and
   confirm-separate, so doctors keep the PIN-free opening and ID-6 can add the
@@ -9797,6 +9803,7 @@ records: another facility's record, or a missing one, answers 404
 | `GET /?status=open\|all&limit=1..100&cursor=` | `identity.registration.write` |
 | `GET /:patientId` | `identity.registration.write` |
 | `POST /:patientId/identify` | `identity.registration.write` |
+| `GET /:patientId/review` | `identity.registration.approve`, not the member who identified it |
 | `POST /:patientId/confirm-separate` | `identity.registration.approve`, not the member who identified it |
 | `POST /:patientId/cancel` | `identity.registration.approve` |
 
@@ -9834,10 +9841,13 @@ Never the arrival note.
 **Identify.** ID-2's fields (`firstName`, `lastName`, `dateOfBirth`,
 optional `gender`, and `phone`, `addressLine`, `city`, `stateCode`, `lga`
 together, required unless the person is under 18 on today's Lagos date) plus
-`expectedVersion`. ID-2's possible-duplicate rule runs (the same date of birth
-and last name or swapped names, the same phone; among active standard patients
-the facility's seal allows, open registrations without a NIN, and other
-unknown records' held phones). Answer `200`, the card plus:
+`expectedVersion`. A `gender` left out keeps the sex recorded when the record
+was made. ID-2's possible-duplicate rule runs (the same date of birth and last
+name or swapped names, the same phone; among active standard patients the
+facility's seal allows, identified unknown records' held phones, and open
+registrations without a NIN and other unknown records in review, at
+facilities of the same seal only: a QA record never counts a real one, or the
+reverse). Answer `200`, the card plus:
 
 - `outcome: "identified"`, "Patient identified. Their NIN is not verified
   yet.": no candidate; the record is now `standard`, with the given names and
@@ -9846,20 +9856,56 @@ unknown records' held phones). Answer `200`, the card plus:
   registered. An approver will review it.": the details are held and the
   record stays unknown and hidden. The caller never sees a candidate.
 
-**Differs from the plan:** the phone and address are kept, encrypted, on the
-unknown record's row (with the phone's lookup hash), not copied to the
-patient's own contact. So an identified patient is not found by phone search
-until someone records the phone through the usual patient routes.
+**Differs from the plan (the clinical owner's recommendation, Ola on #302):**
+the phone and address are kept, encrypted, on the unknown record's row (with
+the phone's lookup hash), facility-held and unverified as ID-2 keeps a desk's
+contact, never copied to the patient's own contact (the sign-in and
+enrolment match key). So an identified patient is not found by phone search
+until someone records the phone through the usual patient routes. That
+contact is covered:
+
+- an NDPA erasure or account deletion erases it (0114's eraser, replaced in
+  0146);
+- a cancel nulls it, with the held details;
+- ID-2's registration counts an identified record's held phone as a phone
+  match, and a record in review whose held details match as an open
+  registration.
+
+Moving it into ID-2's contact tables comes with ID-8.
+
+**Review (the approver).** `GET /:patientId/review`, for a record in review,
+by an approver who did not identify it. Answer `200`:
+
+```json
+{ "patientId": "uuid", "label": "U-0007", "status": "sent_for_review", "version": 3,
+  "identifiedAt": "2026-11-20T08:00:00.000Z",
+  "heldDetails": { "firstName": "Ada", "lastName": "Obi", "dateOfBirth": "1990-05-01", "sex": "female" },
+  "openRegistrationCount": 1,
+  "candidates": [ { "position": 1, "fullName": "Ada Obi", "dateOfBirth": "1990-05-01", "sex": "female",
+    "healthIdLast4": "4K2M", "matchReasons": ["date_of_birth", "first_name", "last_name"], "active": true } ] }
+```
+
+Each candidate is shown as it is now, never with its patient id or full
+Health ID, and only if the facility's seal allows it. The database writes
+`identity.unknown-patient.review` and one `identity.unknown-patient.review.shown`
+per candidate, naming that candidate. Not in review: 409
+`UNKNOWN_PATIENT_NOT_IN_REVIEW`; the member who identified it: 403
+`UNKNOWN_PATIENT_SECOND_PERSON_REQUIRED` ("Another approver must review this.
+You identified this patient.").
 
 **Confirm separate.** `{ "expectedVersion": 3, "reason": "8-500 characters",
-"purpose": "healthcare-operations" }`. Only for a record in review; the held
-details are applied and the record becomes `standard` (status `identified`).
+"purpose": "healthcare-operations" }`. Only for a record in review; read the
+review first. The held details are applied (a sex not held keeps the one
+recorded at creation) and the record becomes `standard` (status
+`identified`).
 `outcome: "identified"`, "Confirmed as a separate patient."
 
 **Cancel.** The same body. Only while open or in review and nothing clinical
 is attached (no visit that is not cancelled or entered in error; no note,
 vitals, prescription, lab request, diagnosis, allergy or document). The
-patient becomes `inactive`. `outcome: "cancelled"`, "Unknown patient record
+patient becomes `inactive`; an open waiting-list entry for it is closed as
+`cancelled` (its own `ehr.visit-queue.update` audit row); the held details and
+contact are nulled. `outcome: "cancelled"`, "Unknown patient record
 cancelled."
 
 | HTTP | Code | Message |
@@ -9881,10 +9927,12 @@ cancelled."
 
 Audit: the database writes one row per success and per not-found
 (`identity.unknown-patient.create`, `.list` plus one `.list.shown` per card,
-`.read`, `.identify` with candidate counts and ids, `.confirm-separate`,
-`.cancel`); Identity writes a `denied` row with the refusal's code for every
-other refusal. No row holds a name, date of birth, phone, Health ID or the
-arrival note.
+`.read`, `.identify` with candidate counts and ids, `.review` plus one
+`.review.shown` per candidate, `.confirm-separate`, `.cancel`), and one per
+replay of create, identify and the decisions (`replayed: true`, since a
+replay answers the card again); Identity writes a `denied` row with the
+refusal's code for every other refusal. No row holds a name, date of birth,
+phone, Health ID or the arrival note.
 
 ### Elsewhere
 
@@ -9892,22 +9940,43 @@ arrival note.
   clinicians open the record with `POST /api/v1/identity/own-facility-access`
   and no PIN, before and after it is identified. Another facility has no
   basis and uses break-glass.
-- **Search, `patient-lookup` and the waiting list** gain `recordKind`
-  (`standard` or `unknown`). The waiting-list cards (EHR-C7) also gain
+- **Search, `patient-lookup`, the staff patient profile (staff chat) and the
+  waiting list** gain `recordKind` (`standard` or `unknown`); Identity reads it
+  through `identity.patient_record_kind` where 0146 is applied. The
+  waiting-list cards (EHR-C7) also gain
   `dateOfBirthEstimated`; ehr-api reads both from
   `ehr.visit_queue_record_kinds` where 0146 is applied, and leaves them out
   where it is not.
+- **ID-2 (0130's registration, replaced in 0146):** a record that is still
+  unknown is never a candidate. A stated Health ID that is this facility's
+  unknown record answers 409 `PATIENT_RECORD_UNKNOWN` ("This Health ID belongs
+  to an unknown patient record at this facility. Identify that record
+  instead."); at another facility it is simply not a candidate. No
+  registration case can resolve to a record that is still unknown (a trigger);
+  the approver's link answers 409 `PATIENT_RECORD_UNKNOWN` ("This record is not
+  identified yet, so it cannot be linked. Identify it first."). A replay of a
+  registration is audited (`replayed: true`). Accepted exception: a replay of
+  the approver's ID-2 decision answers the case again without an audit row;
+  only the same approver with the same key and body can make it.
+- **ID-6's NIN link:** another facility asking about this facility's unknown
+  record gets the usual 403 `NIN_LINK_NOT_PERMITTED` first, as for any patient
+  that is not its own.
 - **Cancel's check** reads the clinical tables as their owner, through
   policies that open only while `identity.decide_unknown_patient` holds its
   marker (0130's pattern), so no other owner-run function reads more than
   before.
 
-### Not built (planned)
+### Decided (the clinical owner's recommendations, Ola on #302)
 
-- The daily `identity.unknown_patient.overdue` log line. `overdue` is on every
-  card; nothing is closed automatically.
-- A `PatientRegistered` outbox event for an unknown record or its
-  identification.
+- **The daily `identity.unknown_patient.overdue` log line:** built in the next
+  migration after Release B (a small owner definer and a sweeper, like
+  `outreach-retention.sweeper.ts`), live within 30 days of go-live, before it
+  could first fire. Until then `overdue` is on every card; nothing is closed
+  automatically.
+- **`PatientRegistered`: decided, not emitted**, at creation or at
+  identification. Its only consumer addresses the patient, and an unknown or
+  just-identified record has no one to notify. Revisit only if a real
+  consumer appears (for example ID-8's merge).
 
 Screen notes: as the plan. Show `displayName` and the label, "Estimated age"
 when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`

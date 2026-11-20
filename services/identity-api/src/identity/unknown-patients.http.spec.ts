@@ -54,6 +54,7 @@ describe('ID-7 routes: metadata', () => {
       list: ['identity.registration.write', 'identity.unknown-patient.list.request'],
       read: ['identity.registration.write', 'identity.unknown-patient.read.request'],
       identify: ['identity.registration.write', 'identity.unknown-patient.identify.request'],
+      review: ['identity.registration.approve', 'identity.unknown-patient.review.request'],
       confirmSeparate: ['identity.registration.approve', 'identity.unknown-patient.confirm-separate.request'],
       cancel: ['identity.registration.approve', 'identity.unknown-patient.cancel.request'],
     };
@@ -295,6 +296,51 @@ describe('ID-7 routes over HTTP', () => {
         expect([answer.status, answer.body.code]).toEqual([status, code]);
       }
       expect(rows('identity.unknown-patient.identify')).toHaveLength(4);
+    });
+  });
+
+  describe('review', () => {
+    const reviewRow = (overrides: Record<string, unknown> = {}) => ({ outcome: 'found', patient_id: patientId,
+      label: 'U-0007', status: 'sent_for_review', row_version: '3', proposed_first_name: 'Ada', proposed_last_name: 'Obi',
+      proposed_date_of_birth: '1990-05-01', proposed_sex: 'female', identified_at: new Date('2026-11-20T08:00:00Z'),
+      open_registration_count: 1, candidates: [{ position: 1, fullName: 'Ada Obi', dateOfBirth: '1990-05-01', sex: 'female',
+        healthIdLast4: 'STD2', matchReasons: ['date_of_birth', 'first_name', 'last_name'], active: true }], ...overrides });
+
+    it('needs identity.registration.approve and healthcare operations', async () => {
+      const denied = await get(`/${patientId}/review`);
+      expect([denied.status, denied.body.code]).toEqual([403, 'PERMISSION_DENIED']);
+      tokens.verify.mockResolvedValue({ actor: staff(['identity.registration.approve']), claims: {} });
+      const noPurpose = await get(`/${patientId}/review`, null);
+      expect(noPurpose.status).toBe(400);
+      expect(sqlCalls('review_unknown_patient')).toEqual([]);
+    });
+
+    it('shows the approver the held details and each candidate\'s card, never a candidate\'s id', async () => {
+      tokens.verify.mockResolvedValue({ actor: staff(['identity.registration.approve']), claims: {} });
+      handlers['identity.review_unknown_patient'] = () => ({ rows: [reviewRow()] });
+      const answer = await get(`/${patientId}/review`);
+      expect(answer.status).toBe(200);
+      expect(answer.headers['cache-control']).toBe('no-store');
+      expect(answer.body).toEqual({ patientId, label: 'U-0007', status: 'sent_for_review', version: 3,
+        identifiedAt: '2026-11-20T08:00:00.000Z',
+        heldDetails: { firstName: 'Ada', lastName: 'Obi', dateOfBirth: '1990-05-01', sex: 'female' },
+        openRegistrationCount: 1, candidates: [{ position: 1, fullName: 'Ada Obi', dateOfBirth: '1990-05-01', sex: 'female',
+          healthIdLast4: 'STD2', matchReasons: ['date_of_birth', 'first_name', 'last_name'], active: true }] });
+      expect(sqlCalls('identity.review_unknown_patient')[0]?.values).toEqual([patientId]);
+    });
+
+    it('answers a record not in review 409, the member who identified it 403, another facility\'s 404', async () => {
+      tokens.verify.mockResolvedValue({ actor: staff(['identity.registration.approve']), claims: {} });
+      for (const [outcome, status, code] of [['not_in_review', 409, 'UNKNOWN_PATIENT_NOT_IN_REVIEW'],
+        ['second_person_required', 403, 'UNKNOWN_PATIENT_SECOND_PERSON_REQUIRED'], ['not_found', 404, 'PATIENT_NOT_FOUND'],
+      ] as [string, number, string][]) {
+        handlers['identity.review_unknown_patient'] = () => ({ rows: [reviewRow({ outcome, candidates: null })] });
+        const answer = await get(`/${patientId}/review`);
+        expect([answer.status, answer.body.code]).toEqual([status, code]);
+        expect(JSON.stringify(answer.body)).not.toContain('Ada');
+      }
+      // The database audited those itself; the service writes no second refusal row.
+      expect(rows('identity.unknown-patient.review')).toEqual([]);
     });
   });
 

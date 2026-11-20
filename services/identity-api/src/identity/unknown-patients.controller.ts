@@ -46,6 +46,14 @@ export class UnknownPatientsController {
     return this.unknownPatients.read(patientId, operations(request));
   }
 
+  @Get(':patientId/review')
+  @Header('Cache-Control', 'no-store')
+  @RequirePermissions('identity.registration.approve')
+  @AuditAction('identity.unknown-patient.review.request')
+  review(@Param('patientId', new ParseUUIDPipe({ version: '4' })) patientId: string, @Req() request: HidRequest) {
+    return this.unknownPatients.review(patientId, operations(request));
+  }
+
   @Post(':patientId/identify')
   @HttpCode(200)
   @RequirePermissions('identity.registration.write')
