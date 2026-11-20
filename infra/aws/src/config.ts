@@ -69,6 +69,12 @@ export interface HidEnvironmentConfig {
   // refuses to start while its table or grants are missing, and the deploy
   // rolls back. To roll back the feature, synthesize off again.
   readonly staffFacilitySelectionMode: StaffFacilitySelectionMode;
+  // Off unless HID_STAFF_OPEN_PATIENT_ENABLED=true at synth time: identity-api
+  // then keeps the patient a staff sign-in has open across a reload (SX-8,
+  // 0140). Synthesize true only once 0140 is applied: identity-api refuses to
+  // start while its table or grants are missing, and the deploy rolls back. To
+  // roll back the feature, synthesize false again.
+  readonly staffOpenPatientEnabled: boolean;
 }
 
 interface ProfileValues {
@@ -179,6 +185,7 @@ export function environmentConfig(
   ownWorkPatientCardEnabledValue?: string,
   prescriptionDispensingDetailsEnabledValue?: string,
   staffFacilitySelectionModeValue?: string,
+  staffOpenPatientEnabledValue?: string,
 ): HidEnvironmentConfig {
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -212,6 +219,10 @@ export function environmentConfig(
   if (!(staffFacilitySelectionModes as readonly string[]).includes(staffFacilitySelectionMode)) {
     throw new Error('HID_STAFF_FACILITY_SELECTION_MODE must be off, keep or ask when supplied');
   }
+  const staffOpenPatientEnabledInput = staffOpenPatientEnabledValue ?? 'false';
+  if (!['true', 'false'].includes(staffOpenPatientEnabledInput)) {
+    throw new Error('HID_STAFF_OPEN_PATIENT_ENABLED must be true or false when supplied');
+  }
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
@@ -219,6 +230,7 @@ export function environmentConfig(
     ownWorkPatientCardEnabled: ownWorkPatientCardEnabledInput === 'true',
     prescriptionDispensingDetailsEnabled: prescriptionDispensingDetailsEnabledInput === 'true',
     staffFacilitySelectionMode: staffFacilitySelectionMode as StaffFacilitySelectionMode,
+    staffOpenPatientEnabled: staffOpenPatientEnabledInput === 'true',
   };
 }
 

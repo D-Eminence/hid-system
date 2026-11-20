@@ -1891,3 +1891,10 @@ revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims
 -- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):
 -- its install is the owner's alone.
 revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;
+
+-- The open patient a staff sign-in keeps across a reload (0140, SX-8),
+-- exactly as 0140 grants: the Identity runtime only.
+grant select, insert, update, delete on auth.session_open_patient to hid_identity_runtime;
+revoke all on function auth.guard_session_open_patient_change() from public;
+revoke all on function auth.session_open_patient_target_exists(uuid) from public;
+grant execute on function auth.session_open_patient_target_exists(uuid) to hid_identity_runtime;

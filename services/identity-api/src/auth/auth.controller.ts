@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Body, Controller, Get, HttpCode, Logger, Optional, Post, Req, Res, ServiceUnavailableException,
   UnauthorizedException, UseFilters, UseGuards } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import type { Request, Response } from 'express';
 import { AuditService, type AuditEventInput } from '../audit/audit.service';
 import { AccountOnlyAllowed, AuditFailuresOnly, FacilityOptional, PatientAllowed, Public,
@@ -17,6 +18,8 @@ import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import type { FacilitySelectionState, LoginResult } from './auth.types';
 import { actorAtFacility, FACILITY_SELECTION_UNAVAILABLE_EVENT, keepsFacilityChoice } from './facility-selection';
+import { OPEN_PATIENT_UNAVAILABLE_EVENT, openPatientEnabled } from './open-patient';
+import { OpenPatientService, type OpenPatientRestore } from '../open-patient/open-patient.service';
 import { clearSessionCookies, setSessionCookies } from './session-cookies';
 import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-success-audit';
 import { AccountSuspendedProblem } from './account-suspended';
@@ -77,6 +80,11 @@ export class AuthController {
     // Single sign-on (ADR-070, 0127): optional so a controller built without
     // it (older test harnesses) is today's controller; its only route is dark.
     @Optional() private readonly sso?: SsoService,
+    // SX-8 (0140): OpenPatientService lives in OpenPatientModule, which needs
+    // IdentityModule (which imports this module), so it is resolved here when
+    // a session read needs it. Optional: a controller built without it
+    // reports no open patient.
+    @Optional() private readonly moduleRef?: ModuleRef,
   ) {}
 
   @Post('login')
@@ -351,7 +359,10 @@ export class AuthController {
     // facilities as verify() resolved them under the session's own product; a
     // valid X-Facility-ID still decides. A failed read answers 'unavailable'.
     const reported = await this.withFacilitySelection(actor, request.facilityId);
-    return this.answerSession(request, response, reported.actor, reported.facilitySelection);
+    // SX-8 (0140): the patient this sign-in had open at the facility reported,
+    // checked again; POST /auth/refresh never carries it.
+    const openPatient = await this.openPatientFor(reported.actor, request);
+    return this.answerSession(request, response, reported.actor, reported.facilitySelection, openPatient);
   }
 
   @Get('service-session')
@@ -538,7 +549,13 @@ export class AuthController {
     if (this.facilitySelectionMode === 'off' || !keepsFacilityChoice(actor)) {
       // Today's answer, nothing stored: the setting is off, or there is no
       // Identity sign-in to keep the choice for (an OIDC bearer caller).
-      await this.audit.record(selectionAudit);
+      // SX-8 (0140): the move still clears an open patient kept at another
+      // facility, with the audit row, in one transaction.
+      if (openPatientEnabled() && keepsFacilityChoice(actor)) {
+        await this.clearOpenPatientElsewhere(actor, facility, selectionAudit, request);
+      } else {
+        await this.audit.record(selectionAudit);
+      }
       if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
       return this.sessionResponse(selectedActor);
     }
@@ -562,11 +579,13 @@ export class AuthController {
    * account-only session has no facility, so its answer is unchanged.
    * `facilitySelection` (0129) is added only when given.
    */
-  private sessionResponse(actor: ActorContext, expiresAt?: Date, facilitySelection?: FacilitySelectionState) {
+  private sessionResponse(actor: ActorContext, expiresAt?: Date, facilitySelection?: FacilitySelectionState,
+    openPatient?: OpenPatientRestore) {
     return {
       actor: sessionActorWithModules(actor),
       ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
       ...(facilitySelection ? { facilitySelection } : {}),
+      ...(openPatient ? { openPatient } : {}),
     };
   }
 
@@ -576,7 +595,7 @@ export class AuthController {
    * echoed, and the actor (with `facilitySelection` only when given).
    */
   private async answerSession(request: HidRequest, response: Response, actor: ActorContext | undefined,
-    facilitySelection?: FacilitySelectionState) {
+    facilitySelection?: FacilitySelectionState, openPatient?: OpenPatientRestore) {
     if (!actor) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
     await this.audit.record({
       correlationId: request.correlationId,
@@ -595,7 +614,45 @@ export class AuthController {
     });
     const csrfToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
     if (csrfToken) response.setHeader('x-csrf-token', csrfToken);
-    return this.sessionResponse(actor, undefined, facilitySelection);
+    return this.sessionResponse(actor, undefined, facilitySelection, openPatient);
+  }
+
+  /**
+   * SX-8 (0140): GET /auth/session's `openPatient`, only for a staff
+   * sign-in reported at a facility while STAFF_OPEN_PATIENT_ENABLED is on.
+   * Never throws: anything that fails answers 'unavailable', so the session
+   * read still answers 200.
+   */
+  private async openPatientFor(actor: ActorContext, request: HidRequest): Promise<OpenPatientRestore | undefined> {
+    if (!openPatientEnabled() || !this.moduleRef) return undefined;
+    try {
+      const openPatients = this.moduleRef.get(OpenPatientService, { strict: false });
+      if (!openPatients.reportsFor(actor)) return undefined;
+      return await openPatients.restore(actor, {
+        correlationId: request.correlationId, sourceIp: request.ip, userAgent: request.header('user-agent'),
+      });
+    } catch {
+      this.logger.warn({ event: OPEN_PATIENT_UNAVAILABLE_EVENT, operation: 'read' });
+      return keepsFacilityChoice(actor) && actor.facility ? { state: 'unavailable' } : undefined;
+    }
+  }
+
+  /**
+   * SX-8 (0140), with 0129's setting off: the move's audit row and the clear
+   * of an open patient kept at another facility, in one transaction
+   * (TokenService). A failure is 503 DEPENDENCY_UNAVAILABLE with nothing
+   * cleared or audited, logged once with no identifiers.
+   */
+  private async clearOpenPatientElsewhere(actor: ActorContext & { sessionId: string }, facility: FacilityAssignment,
+    selectionAudit: AuditEventInput, request: HidRequest): Promise<void> {
+    try {
+      await this.tokens.clearOpenPatientElsewhere({
+        sessionId: actor.sessionId, accountId: actor.accountId, facilityId: facility.id,
+      }, this.event(request), (client) => this.audit.recordWithClient(client, selectionAudit));
+    } catch {
+      this.logger.warn({ event: OPEN_PATIENT_UNAVAILABLE_EVENT, operation: 'clear' });
+      throw new DomainProblem(503, 'DEPENDENCY_UNAVAILABLE', 'The facility choice could not be saved; try again');
+    }
   }
 
   /**
