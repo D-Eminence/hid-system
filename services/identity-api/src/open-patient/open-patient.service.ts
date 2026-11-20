@@ -115,17 +115,33 @@ export const OPEN_PATIENT_CLEAR_READ_SQL = `delete from auth.session_open_patien
    and open_patient.row_version = $3::bigint`;
 
 /**
+ * Whether a patient row with this id exists (0140 D6), asked before the
+ * access check: a UUID that is no patient then gets the same 403 as a refused
+ * patient, and its audit row names the requested id in details (audit.events'
+ * patient key admits only a real patient). Never sent to the caller.
+ */
+export const OPEN_PATIENT_TARGET_SQL = 'select auth.session_open_patient_target_exists($1::uuid) as known';
+
+/**
  * The card, read as the member at the reported facility with the stored
- * purpose, so identity.patients' row-level security admits the patient only
- * under the same consent rule as the access check that has just allowed it.
- * An inactive patient has no card (the read is `ended`).
+ * purpose, and only while identity.has_active_consent_grant allows it: the
+ * very test the access check (precheck) has just made. Row-level security
+ * alone is not enough: 0011's registration read shows every unsealed patient
+ * to a member with identity.registration.write or .approve (doctors,
+ * clinicians and nurses among them), so the card and the decision would not
+ * otherwise agree. A patient opened through 0131's own-facility opening holds
+ * a consent grant and passes. An inactive patient has no card (the read is
+ * `ended`).
  */
 export const OPEN_PATIENT_CARD_SQL = `select patient_row.full_name, patient_row.gender as sex,
        patient_row.dob::text as date_of_birth, right(patient_row.hid_code, 4) as health_id_last4,
        ${patientHasVerifiedNinSql('patient_row.id')} as nin_verified
   from identity.patients patient_row
  where patient_row.id = $1
-   and patient_row.status = 'active'`;
+   and patient_row.status = 'active'
+   and identity.has_active_consent_grant(patient_row.id, platform.current_actor_subject(),
+         platform.current_membership_id(), platform.current_facility_id(), 'read_records',
+         platform.current_purpose_of_use(), clock_timestamp())`;
 
 interface StoredRow {
   patient_id: string;
@@ -172,23 +188,29 @@ export class OpenPatientService {
    * POST /auth/open-patient. The caller is a staff session of an Identity
    * sign-in at its X-Facility-ID facility (SecurityGuard). A refused and an
    * unknown patient get the same 403, so the route cannot test whether a UUID
-   * exists; nothing is stored for either.
+   * exists; nothing is stored for either. An unknown one is found first (0140
+   * D6), so no access check is made for it, and its denied row names the
+   * requested id in details instead of as the patient.
    */
   async set(actor: StaffSignIn, patientId: string, purpose: OpenPatientPurpose, request: OpenPatientRequest) {
     const facility = actor.facility!;
     const context = this.context(actor, purpose, request.correlationId);
+    let known: boolean | undefined;
     let allowed: boolean;
     try {
-      allowed = (await this.identity.precheck(patientId, 'read_records', purpose, context)).allowed;
+      known = (await this.database.query<{ known: boolean }>(OPEN_PATIENT_TARGET_SQL, [patientId])).rows[0]?.known === true;
+      allowed = known && (await this.identity.precheck(patientId, 'read_records', purpose, context)).allowed;
     } catch {
       this.logger.warn({ event: OPEN_PATIENT_UNAVAILABLE_EVENT, operation: 'check' });
-      await this.auditQuietly(this.event(actor, request, 'auth.open-patient.set', 'failure', patientId, purpose,
-        { reason: 'unavailable' }));
+      await this.auditQuietly(this.event(actor, request, 'auth.open-patient.set', 'failure',
+        known ? patientId : undefined, purpose,
+        known ? { reason: 'unavailable' } : { reason: 'unavailable', requestedPatientId: patientId }));
       throw new DomainProblem(503, 'DEPENDENCY_UNAVAILABLE', OPEN_PATIENT_MESSAGES.unavailable);
     }
     if (!allowed) {
-      await this.audit.record(this.event(actor, request, 'auth.open-patient.set', 'denied', patientId, purpose,
-        { reason: 'not_allowed' }));
+      await this.audit.record(this.event(actor, request, 'auth.open-patient.set', 'denied',
+        known ? patientId : undefined, purpose,
+        known ? { reason: 'not_allowed' } : { reason: 'not_allowed', requestedPatientId: patientId, patientFound: false }));
       throw new DomainProblem(403, 'OPEN_PATIENT_NOT_ALLOWED', OPEN_PATIENT_MESSAGES.notAllowed);
     }
     let outcome: { state: 'kept'; expiresAt: Date } | 'session_ended' | 'refused';

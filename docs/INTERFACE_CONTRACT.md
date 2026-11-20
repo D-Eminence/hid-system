@@ -9060,9 +9060,13 @@ at synth time (identity-api only). While it is `false`:
 - `GET /auth/session` never carries `openPatient`;
 - a move to another facility clears nothing.
 
-With it `true`, Identity refuses to start while `auth.session_open_patient` or
-the runtime's SELECT, INSERT, UPDATE or DELETE on it is missing (as 0129's
-start-up check), so a deploy made before 0140 rolls back.
+With it `true`, Identity starts only on a definite answer that
+`auth.session_open_patient`, the runtime's SELECT, INSERT, UPDATE and DELETE on
+it, and its EXECUTE on `auth.session_open_patient_target_exists(uuid)` are all
+there, so a deploy made before 0140 rolls back. A start-up read that fails is
+tried 5 times, 2 seconds apart; with still no answer Identity refuses to start
+as well (unlike 0129's check, which leaves an unreachable database to
+`GET /health/ready`).
 
 ### `POST /api/v1/auth/open-patient`
 
@@ -9090,7 +9094,11 @@ membership. Body, exactly these fields:
   second "Your records were opened" notice, no access-history entry; an
   `identity.authorization.precheck` audit row).
 - A refused and an unknown patient get the same 403 and store nothing, so the
-  route cannot test whether a UUID exists.
+  route cannot test whether a UUID exists. Identity first asks 0140's
+  `auth.session_open_patient_target_exists`: a UUID that is no patient gets no
+  access check (so no `identity.authorization.precheck` row, whose patient key
+  admits only a real patient), and its denied `auth.open-patient.set` row
+  names the id in `details.requestedPatientId`, not as the row's patient.
 - A new set replaces the old one (one row per sign-in).
 - `expiresAt` is the earlier of the set time plus 8 hours and the sign-in's
   own end.
@@ -9112,9 +9120,14 @@ Safe to repeat.
 ```
 
 The card has a 0132 search card's fields, with no full Health ID and no
-`matchRef`. It is read as the member at the reported facility with the stored
-purpose, so `identity.patients`' row-level security admits it only under the
-grant the access check has just allowed.
+`matchRef`. It is shown only after the access check allows the patient, and it
+is read as the member at the reported facility with the stored purpose, only
+while `identity.has_active_consent_grant` allows it for `read_records`: the
+access check's own test, so the card and the decision agree (0131's
+own-facility opening holds such a grant). Row-level security alone would not
+be enough: 0011's registration read shows every unsealed patient to a member
+with `identity.registration.write` or `.approve`, doctors, clinicians and
+nurses among them.
 
 | `state` | When |
 |---|---|
@@ -9135,7 +9148,11 @@ the patient opened last in any tab is the one restored.
   facility is deleted in the transaction that stores 0129's choice (`keep`,
   `ask`), or, with 0129 `off`, in one transaction with the move's
   `auth.facility.select` audit row (a failure answers 503
-  `DEPENDENCY_UNAVAILABLE` and the move is not recorded).
+  `DEPENDENCY_UNAVAILABLE` and the move is not recorded). The delete runs
+  under a savepoint: a missing 0140 table or grant (42P01, 42501) clears
+  nothing, logs `auth.open_patient.unavailable` with operation
+  `clear_elsewhere`, and never rolls back the move (nothing could have been
+  stored without the table).
 - An `ended` or `expired` read.
 - Sign-out, sign-out everywhere or the sign-in ending: the row is read only
   through a live staff session of the sign-in, so it is never read again. It
@@ -9159,14 +9176,18 @@ the patient opened last in any tab is the one restored.
 
 - `auth.open-patient.set`: the patient and purpose, outcome `success` (in the
   store's transaction, with `expiresAt`), `denied` (`not_allowed`,
-  `facility_access_denied`) or `failure`.
+  `facility_access_denied`) or `failure`. For a UUID that is no patient the
+  row has no patient and carries `requestedPatientId` and `patientFound: false`
+  in its details.
 - `auth.open-patient.clear`: the patient when a row was cleared, and
   `cleared` true or false.
 - `auth.open-patient.restore`: each session read that checks a stored patient,
   naming the patient, with the state. A card is never sent without its row.
 - The patient's access history is unchanged: restoring is not an opening.
 - The service logs one event, `auth.open_patient.unavailable`, with only the
-  operation that failed (`read`, `check`, `store`, `clear`, `audit`).
+  operation that failed (`read`, `check`, `store`, `clear`, `clear_elsewhere`,
+  `audit`), and `auth.open_patient.startup_check_unavailable` with the
+  attempt number for each failed start-up read.
 
 ### Database (0140)
 
@@ -9184,6 +9205,11 @@ unheld membership of that account at that facility (0129's admission), else
 23514 `SESSION_OPEN_PATIENT_INVALID`; an update cannot move a row to another
 sign-in or account (55000 `SESSION_OPEN_PATIENT_IMMUTABLE`). The patient is the
 access check's: the guard reads patients only through row-level security.
+Sign-out deletes nothing: the row stays, unread, until a sweep (see Open
+points). `auth.session_open_patient_target_exists(uuid)` (SQL, STABLE,
+SECURITY DEFINER owned by `identity.patients`' owner, EXECUTE to the Identity
+runtime only) answers whether a patient row with that id exists, whatever its
+status; it is never sent to the caller.
 
 Old services on this schema never read or write the table.
 
@@ -9195,6 +9221,11 @@ Old services on this schema never read or write the table.
   with the card as its header while the chart loads; `ended` shows "Your
   access to this patient has ended", then Find patient; `expired` or no field
   opens Home; `unavailable` opens Home and says nothing.
+- On `restored`, use the returned `purpose` for every chart read.
+  `direct-care` reopens the normal chart. `emergency` reopens the read-only
+  break-glass view, with no write controls, never the direct-care chart (its
+  reads would be refused). An emergency restore lasts only as long as the
+  break-glass grant: once it ends, the next session read answers `ended`.
 - A 404 from either route means "not served": keep today's behaviour (a reload
   opens Home) and show no "restore" control.
 - Never put the patient id in the address.

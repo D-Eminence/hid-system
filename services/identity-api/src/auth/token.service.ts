@@ -9,7 +9,7 @@ import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types
 import { CurrentStaffContextService } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
 import { isProductGateRefusal, isStaffProduct, productForOrigin, type StaffProduct } from './product-gate';
-import { OPEN_PATIENT_CLEAR_ELSEWHERE_SQL, openPatientEnabled } from './open-patient';
+import { clearOpenPatientElsewhere, openPatientEnabled } from './open-patient';
 
 interface SessionRow {
   session_kind?: 'staff' | 'patient';
@@ -490,9 +490,10 @@ export class TokenService {
         );
         if (stored.rowCount !== 1) throw new Error('Facility selection was not stored');
         // SX-8 (0140): a move to another facility ends the open patient kept
-        // at any other one, in this transaction.
+        // at any other one, in this transaction (under a savepoint: a missing
+        // 0140 table never rolls back the move).
         if (openPatientEnabled()) {
-          await client.query(OPEN_PATIENT_CLEAR_ELSEWHERE_SQL, [input.sessionId, input.accountId, input.facilityId]);
+          await clearOpenPatientElsewhere(client, input.sessionId, input.accountId, input.facilityId);
         }
         await withinTransaction(client);
         return 'selected' as const;
@@ -511,13 +512,14 @@ export class TokenService {
    * `facilityId`, through the presented session of the account, and runs
    * `withinTransaction` (the caller's audit row) on the same transaction. A
    * session that has ended clears nothing here (its row is no longer read),
-   * and the audit row is still written. Every failure is rethrown, and the
-   * transaction is rolled back.
+   * and the audit row is still written. A missing 0140 table or grant clears
+   * nothing and keeps the move (clearOpenPatientElsewhere's savepoint); every
+   * other failure is rethrown, and the transaction is rolled back.
    */
   async clearOpenPatientElsewhere(input: { sessionId: string; accountId: string; facilityId: string },
     event: SessionEventMetadata, withinTransaction: (client: PoolClient) => Promise<void>): Promise<void> {
     await this.database.withSystemTransaction(event.correlationId, async (client) => {
-      await client.query(OPEN_PATIENT_CLEAR_ELSEWHERE_SQL, [input.sessionId, input.accountId, input.facilityId]);
+      await clearOpenPatientElsewhere(client, input.sessionId, input.accountId, input.facilityId);
       await withinTransaction(client);
     });
   }

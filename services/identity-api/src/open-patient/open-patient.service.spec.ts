@@ -6,7 +6,7 @@ import type { ActorContext, DataAccessContext, FacilityAssignment } from '../com
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
-import { OPEN_PATIENT_CARD_SQL, OPEN_PATIENT_READ_SQL, OpenPatientService } from './open-patient.service';
+import { OPEN_PATIENT_CARD_SQL, OPEN_PATIENT_READ_SQL, OPEN_PATIENT_TARGET_SQL, OpenPatientService } from './open-patient.service';
 
 // SX-8 (0140): how Identity sets, clears and restores the open patient. The
 // database's own rules (0140's guard, the CHECK of at most 8 hours, the
@@ -42,6 +42,7 @@ interface Stored { patient_id: string; purpose: string; facility_id: string; exp
   expired: boolean }
 
 function harness(options: {
+  known?: boolean | Error;
   allowed?: boolean | Error;
   locked?: { family_id: string; absolute_expires_at: Date }[];
   stored?: { expires_at: Date }[] | Error;
@@ -78,8 +79,14 @@ function harness(options: {
     }),
   };
   const contexts: DataAccessContext[] = [];
+  const lookups: unknown[][] = [];
   const database = {
     query: jest.fn(async (sql: string, values: unknown[] = []) => {
+      if (/session_open_patient_target_exists/.test(sql)) {
+        lookups.push(values);
+        if (options.known instanceof Error) throw options.known;
+        return { rows: [{ known: options.known ?? true }], rowCount: 1 };
+      }
       statements.push({ sql: normalized(sql), values });
       if (options.read instanceof Error) throw options.read;
       const read = options.read ?? [];
@@ -108,7 +115,7 @@ function harness(options: {
   };
   const service = new OpenPatientService(database as unknown as DatabaseService, identity as unknown as IdentityService,
     audit as unknown as AuditService);
-  return { service, client, database, identity, audit, statements, contexts };
+  return { service, client, database, identity, audit, statements, contexts, lookups };
 }
 
 describe('OpenPatientService (SX-8, 0140)', () => {
@@ -201,6 +208,44 @@ describe('OpenPatientService (SX-8, 0140)', () => {
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.open-patient.set',
         outcome: 'denied', patientId, details: { reason: 'not_allowed' } }));
     });
+
+    it('a UUID that is no patient gets the same 403, with no access check, nothing stored, and the id in details', async () => {
+      const { service, identity, statements, audit, lookups } = harness({ known: false });
+      await expect(service.set(actor(), patientId, 'direct-care', request)).rejects.toMatchObject({
+        status: 403, code: 'OPEN_PATIENT_NOT_ALLOWED',
+        message: "You don't have access to this patient's records now. Ask for their Access PIN or send an access request." });
+      expect(lookups).toEqual([[patientId]]);
+      expect(identity.precheck).not.toHaveBeenCalled();
+      expect(statements).toHaveLength(0);
+      expect(audit.recordWithClient).not.toHaveBeenCalled();
+      expect(audit.record).toHaveBeenCalledTimes(1);
+      const row = (audit.record.mock.calls as unknown as Record<string, unknown>[][])[0]![0]!;
+      expect(row).toMatchObject({ action: 'auth.open-patient.set', outcome: 'denied',
+        details: { reason: 'not_allowed', requestedPatientId: patientId, patientFound: false } });
+      // audit.events' patient key admits only a real patient, so the id is never the row's patient.
+      expect(row).not.toHaveProperty('patientId');
+    });
+
+    it('asks whether the patient exists before the access check, with 0140 D6', async () => {
+      const { service, database, identity } = harness();
+      await service.set(actor(), patientId, 'direct-care', request);
+      expect(normalized(OPEN_PATIENT_TARGET_SQL)).toBe('select auth.session_open_patient_target_exists($1::uuid) as known');
+      expect(database.query).toHaveBeenCalledWith(OPEN_PATIENT_TARGET_SQL, [patientId]);
+      expect(database.query.mock.invocationCallOrder[0]).toBeLessThan(identity.precheck.mock.invocationCallOrder[0]!);
+    });
+
+    it('a failed existence check is 503 with nothing stored, and its failure row names the id in details only',
+      async () => {
+        const { service, identity, statements, audit } = harness({ known: new Error('down') });
+        await expect(service.set(actor(), patientId, 'direct-care', request)).rejects.toMatchObject({
+          status: 503, code: 'DEPENDENCY_UNAVAILABLE' });
+        expect(identity.precheck).not.toHaveBeenCalled();
+        expect(statements).toHaveLength(0);
+        const row = (audit.record.mock.calls as unknown as Record<string, unknown>[][])[0]![0]!;
+        expect(row).toMatchObject({ outcome: 'failure', details: { reason: 'unavailable', requestedPatientId: patientId } });
+        expect(row).not.toHaveProperty('patientId');
+        expect(logs()).toEqual([{ event: 'auth.open_patient.unavailable', operation: 'check' }]);
+      });
 
     it('a failed access check is 503 with nothing stored, logged with no identifier', async () => {
       const { service, statements, audit } = harness({ allowed: new Error('provider down') });
@@ -326,6 +371,10 @@ describe('OpenPatientService (SX-8, 0140)', () => {
         expect(statements[1]).toEqual({ sql: normalized(OPEN_PATIENT_CARD_SQL), values: [patientId] });
         expect(statements[1]!.sql).toContain("right(patient_row.hid_code, 4) as health_id_last4");
         expect(statements[1]!.sql).toContain("patient_row.status = 'active'");
+        // The card only under the grant the access check allows, not 0011's registration read alone.
+        expect(statements[1]!.sql).toContain('and identity.has_active_consent_grant(patient_row.id, '
+          + 'platform.current_actor_subject(), platform.current_membership_id(), platform.current_facility_id(), '
+          + "'read_records', platform.current_purpose_of_use(), clock_timestamp())");
         expect(statements[1]!.sql).not.toMatch(/hid_code(?!, 4)/);
         expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.open-patient.restore',
           outcome: 'success', patientId, purposeOfUse: 'emergency', details: { state: 'restored' } }));
