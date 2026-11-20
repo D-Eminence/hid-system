@@ -9034,3 +9034,125 @@ primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
 
+
+## MY-1. "Ordered by me" (Release B, migration 0143; not live until signed)
+
+Akos P1-4. The planned contract's "MY-1" is the spec; this section is what is
+built. One list of the lab requests and prescriptions this member ordered at
+this facility (`created_by_membership_id` is the session's membership), so
+doctors stop using the lab and pharmacy work queues.
+
+### `GET /api/v1/ehr/my-orders`
+
+`X-Facility-Id`, `X-Purpose-Of-Use: direct-care`. No single permission: lab
+rows need `ehr.lab-request.read` and prescription rows
+`ehr.prescription.read`; `kind=all` lists what the member may read; neither,
+or a kind asked without its permission, is 403 `PERMISSION_DENIED`. No patient
+in the path or query. `Cache-Control: no-store`.
+
+| Parameter | Values | Default |
+|---|---|---|
+| `kind` | `all`, `lab`, `prescription` | `all` |
+| `state` | `open` (draft, active, on hold) or `all` | `all` |
+| `since` | `YYYY-MM-DD` (a Lagos day), today or earlier, at most 2 years back | 90 days ago |
+| `limit` | 1-50 | 25 |
+| `cursor` | from the last answer | none |
+
+The reach: open orders of any age, plus ended ones (completed or cancelled)
+created on or after `since` (Q123 A). Orders entered in error are never
+listed. Newest first. A cursor is valid only for the member, facility and
+filters it was issued with. It carries the first page's `since`: a later page
+sent without `since` uses it (so "Load more" after Lagos midnight still
+works), and one sent with a different `since` is 400 `INVALID_CURSOR`.
+
+```json
+{ "items": [
+    { "kind": "lab_request", "orderId": "uuid", "encounterId": "uuid",
+      "patient": { "patientId": "uuid", "fullName": "Amaka Okafor", "sex": "female",
+                   "dateOfBirth": "1990-05-01", "healthIdLast4": "AA22" },
+      "display": "Full blood count", "status": "active", "priority": "urgent",
+      "createdAt": "…", "updatedAt": "…",
+      "ownProgress": { "status": "results_ready", "receivedAt": "…", "collectedAt": "…", "lastResultAt": "…" },
+      "orderRoute": null } ],
+  "hiddenCount": 2, "hiddenCountComplete": true, "since": "2026-08-22", "nextCursor": null }
+```
+
+- `display`: the stored test or medicine name. `priority`: the lab request's;
+  a prescription's 0125 priority when set, else `null`.
+- `ownProgress`: ORD-3's shapes and statuses, asked once per patient and kind
+  on the page (audited by ORD-3 as today), at most 6 calls at once and all
+  within 4 seconds; whatever has not answered by then is `unknown`.
+- `orderRoute`: the order's route summary (sections 21-24), `null` when it
+  was read and there is none, and left out when it could not be read.
+- `patient`: the waiting-list card (EHR-C7); never a full Health ID.
+- **Access ended:** a row is listed only while the member may read that
+  patient's records now for direct care (a consent grant, 0131's own-facility
+  opening included; never break-glass). Other matching orders are counted in
+  `hiddenCount` and never shown. An empty page still carries `hiddenCount`.
+- **The count:** worked out on the first page and carried by the cursor to
+  later pages. It counts over at most the newest 20,000 matching orders and
+  asks about at most 1,000 more patients (newest order first); past either,
+  `hiddenCountComplete` is `false` and `hiddenCount` is a lower bound ("at
+  least N").
+- **Bounded pages:** a page stops after 1,000 patients asked or 5,000 orders
+  read, whichever comes first, so a page may hold fewer rows than `limit`, or
+  none, while `nextCursor` is set. Keep loading while `nextCursor` is not
+  null; never treat a short page as the end.
+
+Audit (by the database): one `ehr.my-orders.list` row (kinds, open only,
+since, count, `hiddenCount` and `hiddenCountComplete` on the first page,
+`hasMore`, patients asked, patient ids shown) and one
+`ehr.my-orders.list.shown` row per patient shown, on every read.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (bad `kind`, `state`, `since`, `limit`, or a day after today, by the service's clock or the database's) |
+| 400 | `MY_ORDERS_SINCE_TOO_OLD` | You can look back up to 2 years. Choose a later date. |
+| 400 | `INVALID_CURSOR` | Pagination cursor is invalid |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | as today |
+| 403 | `PERMISSION_DENIED` | as today |
+| 503 | `MY_ORDERS_UNAVAILABLE` | Your orders cannot be listed right now. Please try again. (also on a database without 0143) |
+
+### Database (0143)
+
+- `ehr.list_my_orders(kinds, open_only, since, cursor…, limit)`, SECURITY
+  DEFINER, EXECUTE for the EHR runtime only. It checks the session (an
+  active, unheld membership here, direct care, the per-kind read permission),
+  walks the member's orders newest first, asking the session's own rule once
+  per patient (`ehr.context_allows(patient, facility, 'read_records')`), until
+  the page is full or its bounds are reached, and says where the next page
+  resumes; on the first page it counts the rest (bounded); it returns the
+  cards and writes the audit rows.
+- Indexes on `(facility_id, created_by_membership_id, created_at desc, id
+  desc)` for `ehr.prescriptions` and `ehr.lab_requests`.
+- `prescriptions_scan_my_orders` and `lab_requests_scan_my_orders`: the
+  tables' owner may read them only while the function runs (its walk, count,
+  audit rows and cards), so it can count orders of patients the member can
+  no longer read. The function writes an owner-only marker for its own
+  transaction (`ehr.my_orders_scans`) just before its walk and deletes it
+  just before it returns (0130's marker pattern); the cards are read under
+  it, so a consent that ends during the call never drops a row the audit
+  names as shown. Every other owner-run function and trigger that reads
+  these tables sees exactly what it saw before 0143 (0133's own-pharmacy send
+  and withdrawal included, in the suite), and the owner without a session
+  sees nothing. Each policy asks the marker once per statement, and is named
+  to sort after the tables' other read policies, which PostgreSQL asks in
+  reverse name order: inside the function, 0005's consent test is never
+  asked per row (a post-check holds the order). No `hid_` role but the owner
+  is a member of either table's owner (a post-check). The runtime roles' own
+  reads of these tables are unchanged.
+
+### Screen notes
+
+- Tabs All, Lab, Prescriptions, and "Open only" (`state=open`). Show the
+  name, sex, date of birth, `•••• healthIdLast4`, the test or medicine,
+  status, priority and ORD-3's progress words.
+- "Showing the last 90 days and everything still open", with "Look further
+  back" (sets `since`).
+- When `hiddenCount` is above 0: "N more orders are for patients whose records
+  you can no longer open." When `hiddenCountComplete` is `false`: "At least N
+  more orders …".
+- A row opens the visit's order by `patientId`, `encounterId` and `orderId`,
+  through the usual consent check.

@@ -1891,3 +1891,13 @@ revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims
 -- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):
 -- its install is the owner's alone.
 revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;
+
+-- "Ordered by me" (0143, MY-1), exactly as 0143 grants it: the list to the EHR
+-- runtime alone. The order tables' counting policies are the owner's; no
+-- runtime role is a member of the owner.
+grant execute on function ehr.list_my_orders(text[], boolean, date, timestamptz, text, uuid, integer) to hid_ehr_runtime;
+revoke all on function ehr.list_my_orders(text[], boolean, date, timestamptz, text, uuid, integer) from public;
+-- Its counting marker: the table is the owner's only; the marker check is run
+-- by every role that reads the order tables (their policies call it).
+revoke all on ehr.my_orders_scans from public;
+grant execute on function ehr.my_orders_scan_open() to public;
