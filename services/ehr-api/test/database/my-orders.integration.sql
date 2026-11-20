@@ -203,6 +203,9 @@ select pg_temp.check_case('2 the list row says what was hidden, never naming it'
   (select format('%s/%s', details->>'hiddenCount', details->'patientIds') from audit.events
     where correlation_id = 'my-orders-0143-list' and action = 'ehr.my-orders.list' and details->>'openOnly' = 'true'));
 set local role hid_ehr_api_runtime;
+select pg_temp.check_case('2 an empty page still says what is hidden', '-|hidden 1|more false',
+  pg_temp.mine(array['lab_request', 'prescription'], false, ((now() at time zone 'Africa/Lagos')::date - 90),
+    timestamptz '2000-01-01 00:00:00+00', 'lab_request', 'f1439000-0000-4000-8000-000000000000'));
 select pg_temp.check_case('2 more than 2 years back', '22023 MY_ORDERS_SINCE_TOO_OLD',
   pg_temp.mine(array['lab_request', 'prescription'], false, ((now() at time zone 'Africa/Lagos')::date - 731)));
 select pg_temp.check_case('2 a date in the future', '22023 MY_ORDERS_SINCE_TOO_OLD',
@@ -219,7 +222,7 @@ select pg_temp.as_member('synthetic:my-orders-0143:h', 'f1435000-0000-4000-8000-
 set local role hid_ehr_api_runtime;
 select pg_temp.check_case('2 a pharmacist without lab-request read', '42501 MY_ORDERS_NOT_PERMITTED',
   pg_temp.mine(array['lab_request', 'prescription'], false, ((now() at time zone 'Africa/Lagos')::date - 90)));
-select pg_temp.check_case('2 a pharmacist''s own prescriptions (none)', '-|hidden -|more -',
+select pg_temp.check_case('2 a pharmacist''s own prescriptions (none)', '-|hidden 0|more false',
   pg_temp.mine(array['prescription'], false, ((now() at time zone 'Africa/Lagos')::date - 90)));
 select set_config('app.membership_id', '', true);
 select pg_temp.check_case('2 no session membership', '42501 MY_ORDERS_NOT_PERMITTED',

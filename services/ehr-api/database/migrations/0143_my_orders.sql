@@ -36,7 +36,8 @@
 --      included; never break-glass, which is emergency only). Every other
 --      matching order is counted in hidden_count, never shown;
 --    - newest first (created_at, kind, id descending), keyset paging after
---      the cursor, 1-50 rows, has_more;
+--      the cursor, 1-50 rows, has_more; an empty page is one row with no
+--      order (kind null) that still carries hidden_count;
 --    - each row: the order (kind, id, visit, display, status, priority,
 --      times) and the waiting-list card's patient fields (0135: name, sex,
 --      date of birth, last 4 of the Health ID); never a full Health ID;
@@ -299,6 +300,13 @@ begin
     from unnest(shown_patients) with ordinality shown(patient_id, position)
    order by shown.position;
 
+  if cardinality(page_ids) = 0 then
+    -- An empty page still says how many matching orders are hidden: one row
+    -- with no order in it (kind null).
+    return query select null::text, null::uuid, null::uuid, null::uuid, null::text, null::text, null::date,
+      null::text, null::text, null::text, null::text, null::timestamptz, null::timestamptz, hidden, false;
+    return;
+  end if;
   return query
     select listed.kind, listed_order.id, listed_order.encounter_id, listed_order.patient_id, patient.full_name,
            patient.gender, patient.dob, right(patient.hid_code, 4), listed_order.display, listed_order.status,
