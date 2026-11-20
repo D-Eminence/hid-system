@@ -855,8 +855,12 @@ Answer `200`, `Cache-Control: no-store`:
 
 Audit: one `ehr.my-orders.list` row (filters, count, `hiddenCount`, patient
 ids shown) plus one `ehr.my-orders.list.shown` row per patient shown, on
-every read, as the waiting list does (EHR-C7). The progress lookups are
-audited by ORD-3 as today.
+every read, as the waiting list does (EHR-C7). The progress lookups use
+ORD-3's several-patient form (one call per kind for the page) and are
+audited per patient as ORD-3's one-patient lookup is, except where that
+form's 2-second limit applies: a patient not checked within it, or whose
+refusal completes after it, is `unknown` with no `denied` row (Identity
+keeps its own row of a refusal).
 
 ### Errors
 
@@ -889,10 +893,13 @@ audited by ORD-3 as today.
 
 ### Depends on
 
-- ORD-3 (wave 1, on staging). Its internal progress call takes one `patientId`
-  per call (ORD-3 section). Needed from lane D: a form that takes several
-  patients in one call (at most 100 ids in all), or MY-1 makes one call per
-  patient on the page (hence the page limit of 50).
+- ORD-3 (wave 1, on staging). Its internal progress call takes one
+  `patientId` per call (ORD-3 section). Lane D adds ORD-3's several-patient
+  form (decision 4: `.../progress/batch`, at most 50 patients and 100 ids in
+  all, both progress headers); MY-1 makes one call per kind for its page,
+  and against an image without that form one call per patient and kind,
+  at most 6 at once for the page across both kinds with one
+  `OwnProgressSlots` for the page (hence still the page limit of 50).
 - EHR-C7 card shape and 0131 own-facility access (Release A).
 - Q123 A (decided) for the default reach.
 - ORD-11 (Release C) later adds "new result" and "Seen" marks; not in this
