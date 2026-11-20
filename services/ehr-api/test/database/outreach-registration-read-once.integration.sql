@@ -221,7 +221,8 @@ insert into ro_named values
 -- 3. No runtime role can start a retention run (so outreach-api's list never runs inside one).
 do $$
 begin
-  if exists (select 1 from pg_roles role_row where role_row.rolname ~ '^hid_'
+  -- A superuser (CI's rehearsal superuser is named hid_rehearsal_admin) holds every privilege; no runtime role is one.
+  if exists (select 1 from pg_roles role_row where role_row.rolname ~ '^hid_' and not role_row.rolsuper
               and (has_table_privilege(role_row.oid, 'outreach.privileged_runs', 'INSERT')
                    or has_function_privilege(role_row.oid, 'outreach.begin_privileged_run(text)', 'EXECUTE'))) then
     raise exception '0121: a runtime role can start a privileged run';

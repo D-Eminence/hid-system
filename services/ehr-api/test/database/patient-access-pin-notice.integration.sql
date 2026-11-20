@@ -31,7 +31,8 @@ begin
   end if;
   select string_agg(role_row.rolname, ', ' order by role_row.rolname) into mismatch
     from pg_roles role_row
-   where role_row.rolname like 'hid\_%'
+   -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin; no runtime role is one)
+   where role_row.rolname like 'hid\_%' and not role_row.rolsuper
      and (has_function_privilege(role_row.oid, 'notification.on_identity_pin_outbox_created()', 'EXECUTE')
           or (has_function_privilege(role_row.oid, 'identity.list_my_access_requests()', 'EXECUTE')
               and role_row.rolname not in ('hid_identity_runtime', 'hid_identity_api_runtime')));
