@@ -9,23 +9,32 @@
 --
 -- D1 Two indexes, prescriptions_my_orders_idx and lab_requests_my_orders_idx,
 --    on (facility_id, created_by_membership_id, created_at desc, id desc);
---    and prescriptions_my_orders_read and lab_requests_my_orders_read:
+--    and prescriptions_scan_my_orders and lab_requests_scan_my_orders:
 --    row-level security on both tables is forced, and the function below
 --    must see this member's orders for patients the member can no longer
 --    read, to count them (never to show them). The tables' owner may read
 --    them only while ehr.my_orders_scans holds this transaction's marker,
---    which ehr.list_my_orders writes just before its walk and count (D2) and
---    deletes just after (0130's marker pattern); ehr.context_allows, which
---    it calls meanwhile, and everything that calls reads neither table. So
---    every other owner-run definer and trigger that reads these tables sees
---    exactly what it saw before, and the owner without a session still sees
---    nothing (pharmacy-session-guards' fail-closed cases). Each policy tests
---    the owner's membership first (CASE), so a runtime role's read never
---    depends on the marker. ehr.my_orders_scans is the owner's only;
---    ehr.my_orders_scan_open() may be executed by PUBLIC (PostgreSQL checks
---    EXECUTE on every function of a plan) and answers only whether this
---    backend's own transaction holds a marker. No hid_ role other than the
---    owner is a member of either table's owner (post-check, 0133's form).
+--    which ehr.list_my_orders writes just before its walk (D2) and deletes
+--    just before it returns (0130's marker pattern), after reading the
+--    listed orders' cards. Meanwhile it also calls ehr.context_allows and
+--    writes its audit rows; neither, nor anything they call, reads either
+--    table. So every other owner-run definer and trigger that reads
+--    these tables sees exactly what it saw before, and the owner without a
+--    session still sees nothing (pharmacy-session-guards' fail-closed
+--    cases). Each policy tests the owner's membership first (CASE), so a
+--    runtime role's read never depends on the marker, and asks it once per
+--    statement (a scalar subquery, which PostgreSQL runs once as an
+--    InitPlan), never per row. PostgreSQL joins a table's permissive
+--    policies with OR in reverse order of their names and stops at the
+--    first that holds (0133, THE COST), so the two are named *_scan_*,
+--    after every other read policy of their tables: inside the walk and the
+--    count, 0005's consent test (prescriptions_read, lab_requests_read;
+--    about 0.6 ms a row) is never asked. Post-checks hold that order.
+--    ehr.my_orders_scans is the owner's only; ehr.my_orders_scan_open() may
+--    be executed by PUBLIC (PostgreSQL checks EXECUTE on every function of
+--    a plan) and answers only whether this backend's own transaction holds
+--    a marker. No hid_ role other than the owner is a member of either
+--    table's owner (post-check, 0133's form).
 -- D2 ehr.list_my_orders(requested_kinds text[], requested_open_only boolean,
 --    requested_since date, cursor_created_at timestamptz, cursor_kind text,
 --    cursor_id uuid, requested_limit integer), SECURITY DEFINER, for the EHR
@@ -56,10 +65,11 @@
 --      a call is bounded however long the member's history grows;
 --    - hidden_count: on the first page only (no cursor), the matching
 --      orders of every patient the session may not read now, never shown,
---      asking at most 1,000 more patients (newest order first); past that
---      the count is a lower bound and hidden_count_complete is false. Later
---      pages answer null for both, and the service carries the first page's
---      in its cursor;
+--      over at most the reach's newest 20,000 orders, and asking at most
+--      1,000 more patients (newest order first); past either the count is a
+--      lower bound and hidden_count_complete is false. Later pages answer
+--      null for both, and the service carries the first page's in its
+--      cursor;
 --    - an empty page is one row with no order (kind null) that still
 --      carries hidden_count, has_more and the resume position;
 --    - each row: the order (kind, id, visit, display, status, priority,
@@ -101,7 +111,7 @@ begin
   end if;
   if to_regprocedure('ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer)') is not null
      or exists (select 1 from pg_policy policy_row
-                 where policy_row.polname in ('prescriptions_my_orders_read', 'lab_requests_my_orders_read'))
+                 where policy_row.polname in ('prescriptions_scan_my_orders', 'lab_requests_scan_my_orders'))
      or to_regclass('ehr.my_orders_scans') is not null
      or to_regclass('ehr.prescriptions_my_orders_idx') is not null
      or to_regclass('ehr.lab_requests_my_orders_idx') is not null then
@@ -210,16 +220,18 @@ $$;
 -- transaction holds a marker, which only ehr.list_my_orders can write.
 revoke all on function ehr.my_orders_scan_open() from public;
 grant execute on function ehr.my_orders_scan_open() to public;
-create policy prescriptions_my_orders_read on ehr.prescriptions
+-- Named after every other read policy of the table, so asked first (D1);
+-- one scalar subquery, so asked once per statement.
+create policy prescriptions_scan_my_orders on ehr.prescriptions
   for select
-  using (case when pg_has_role((select relation.relowner from pg_class relation
-                                 where relation.oid = 'ehr.prescriptions'::regclass), 'USAGE')
-              then ehr.my_orders_scan_open() else false end);
-create policy lab_requests_my_orders_read on ehr.lab_requests
+  using ((select case when pg_has_role((select relation.relowner from pg_class relation
+                                         where relation.oid = 'ehr.prescriptions'::regclass), 'USAGE')
+                      then ehr.my_orders_scan_open() else false end));
+create policy lab_requests_scan_my_orders on ehr.lab_requests
   for select
-  using (case when pg_has_role((select relation.relowner from pg_class relation
-                                 where relation.oid = 'ehr.lab_requests'::regclass), 'USAGE')
-              then ehr.my_orders_scan_open() else false end);
+  using ((select case when pg_has_role((select relation.relowner from pg_class relation
+                                         where relation.oid = 'ehr.lab_requests'::regclass), 'USAGE')
+                      then ehr.my_orders_scan_open() else false end));
 
 -- 2. The function (D2).
 create function ehr.list_my_orders(requested_kinds text[], requested_open_only boolean, requested_since date,
@@ -237,6 +249,7 @@ declare
   -- D2's bounds on the work one call does.
   walk_patient_checks constant integer := 1000;
   walk_rows constant integer := 5000;
+  hidden_rows constant integer := 20000;
   hidden_patient_checks constant integer := 1000;
   actor_subject text := platform.current_actor_subject();
   actor_account uuid := auth.account_id_for_subject(actor_subject);
@@ -308,8 +321,11 @@ begin
   page_limit := least(greatest(coalesce(requested_limit, 25), 1), 50);
   since_start := requested_since::timestamp at time zone 'Africa/Lagos';
 
-  -- Only the walk and the count below run with the marker (D1). Neither
-  -- ehr.context_allows nor anything it calls reads these two tables.
+  -- From here until the function returns, the marker is up (D1): the walk,
+  -- the count, the audit rows and the cards. Nothing else run meanwhile
+  -- (ehr.context_allows, the audit trigger, the card read's join) reads
+  -- these two tables. The cards are read under it too, so a consent that
+  -- ends during the call never drops a row the audit names as shown.
   insert into ehr.my_orders_scans (backend_pid, transaction_started_at)
   values (pg_backend_pid(), transaction_timestamp()) on conflict do nothing;
 
@@ -375,33 +391,47 @@ begin
   end if;
 
   -- b. The first page only: how many matching orders the session may not
-  -- read, over the whole reach, asking at most 1,000 more patients (newest
-  -- first); past that the count is a lower bound (hidden_count_complete
-  -- false). Later pages carry the first page's count in their cursor.
+  -- read, over the reach's newest 20,000 orders, asking at most 1,000 more
+  -- patients (newest order first); past either the count is a lower bound
+  -- (hidden_count_complete false). Later pages carry the first page's count
+  -- in their cursor. Each row read costs no function call (D1): 120,000
+  -- orders of one member took 69 ms.
   if first_page then
     hidden := 0;
     complete := true;
     for reach_patient in
-      select reach.patient_id, count(*) as orders, max(reach.created_at) as newest
-        from (select prescription.patient_id, prescription.created_at
-                from ehr.prescriptions prescription
-               where 'prescription' = any (requested_kinds)
-                 and prescription.facility_id = actor_facility
-                 and prescription.created_by_membership_id = actor_membership
-                 and prescription.status <> 'entered_in_error'
-                 and (prescription.status in ('draft', 'active', 'on_hold')
-                      or (not coalesce(requested_open_only, false) and prescription.created_at >= since_start))
-              union all
-              select lab.patient_id, lab.created_at
-                from ehr.lab_requests lab
-               where 'lab_request' = any (requested_kinds)
-                 and lab.facility_id = actor_facility and lab.created_by_membership_id = actor_membership
-                 and lab.status <> 'entered_in_error'
-                 and (lab.status in ('draft', 'active', 'on_hold')
-                      or (not coalesce(requested_open_only, false) and lab.created_at >= since_start))) reach
-       group by reach.patient_id
-       order by 3 desc, 1
+      with newest_first as (
+        select reach.patient_id, reach.created_at,
+               row_number() over (order by reach.created_at desc) as position
+          from (select prescription.patient_id, prescription.created_at
+                  from ehr.prescriptions prescription
+                 where 'prescription' = any (requested_kinds)
+                   and prescription.facility_id = actor_facility
+                   and prescription.created_by_membership_id = actor_membership
+                   and prescription.status <> 'entered_in_error'
+                   and (prescription.status in ('draft', 'active', 'on_hold')
+                        or (not coalesce(requested_open_only, false) and prescription.created_at >= since_start))
+                union all
+                select lab.patient_id, lab.created_at
+                  from ehr.lab_requests lab
+                 where 'lab_request' = any (requested_kinds)
+                   and lab.facility_id = actor_facility and lab.created_by_membership_id = actor_membership
+                   and lab.status <> 'entered_in_error'
+                   and (lab.status in ('draft', 'active', 'on_hold')
+                        or (not coalesce(requested_open_only, false) and lab.created_at >= since_start))
+                 order by 2 desc
+                 limit hidden_rows + 1) reach)
+      select counted.patient_id, counted.orders,
+             exists (select 1 from newest_first past where past.position > hidden_rows) as past_bound
+        from (select newest_first.patient_id, count(*) as orders, max(newest_first.created_at) as newest
+                from newest_first
+               where newest_first.position <= hidden_rows
+               group by newest_first.patient_id) counted
+       order by counted.newest desc, counted.patient_id
     loop
+      if reach_patient.past_bound then
+        complete := false;
+      end if;
       patient_key := reach_patient.patient_id::text;
       if not (checked ? patient_key) then
         if hidden_checks >= hidden_patient_checks then
@@ -417,8 +447,6 @@ begin
       end if;
     end loop;
   end if;
-  delete from ehr.my_orders_scans scan
-   where scan.backend_pid = pg_backend_pid() and scan.transaction_started_at = transaction_timestamp();
 
   select coalesce(array_agg(first_seen.patient_id order by first_seen.first_position), array[]::uuid[]) into shown_patients
     from (select listed.patient_id, min(listed.position) as first_position
@@ -456,32 +484,37 @@ begin
     return query select null::text, null::uuid, null::uuid, null::uuid, null::text, null::text, null::date,
       null::text, null::text, null::text, null::text, null::timestamptz, null::timestamptz, hidden, complete, more,
       resume_at, resume_k, resume_i;
-    return;
+  else
+    -- The cards, still under the marker: exactly the rows the walk decided
+    -- and the audit rows name, even if a consent ended meanwhile.
+    return query
+      select listed.kind, listed_order.id, listed_order.encounter_id, listed_order.patient_id, patient.full_name,
+             patient.gender, patient.dob, right(patient.hid_code, 4), listed_order.display, listed_order.status,
+             listed_order.priority, listed_order.created_at, listed_order.updated_at, hidden, complete, more,
+             resume_at, resume_k, resume_i
+        from unnest(page_kinds, page_ids) with ordinality listed(kind, id, position)
+        cross join lateral (
+          select prescription.id, prescription.encounter_id, prescription.patient_id,
+                 prescription.medication_display as display, prescription.status, prescription.priority,
+                 prescription.created_at, prescription.updated_at
+            from ehr.prescriptions prescription
+           where listed.kind = 'prescription' and prescription.id = listed.id
+          union all
+          select lab.id, lab.encounter_id, lab.patient_id, lab.test_display, lab.status, lab.priority,
+                 lab.created_at, lab.updated_at
+            from ehr.lab_requests lab
+           where listed.kind = 'lab_request' and lab.id = listed.id
+        ) listed_order
+        join identity.patients patient on patient.id = listed_order.patient_id
+       order by listed.position;
   end if;
-  return query
-    select listed.kind, listed_order.id, listed_order.encounter_id, listed_order.patient_id, patient.full_name,
-           patient.gender, patient.dob, right(patient.hid_code, 4), listed_order.display, listed_order.status,
-           listed_order.priority, listed_order.created_at, listed_order.updated_at, hidden, complete, more,
-           resume_at, resume_k, resume_i
-      from unnest(page_kinds, page_ids) with ordinality listed(kind, id, position)
-      cross join lateral (
-        select prescription.id, prescription.encounter_id, prescription.patient_id,
-               prescription.medication_display as display, prescription.status, prescription.priority,
-               prescription.created_at, prescription.updated_at
-          from ehr.prescriptions prescription
-         where listed.kind = 'prescription' and prescription.id = listed.id
-        union all
-        select lab.id, lab.encounter_id, lab.patient_id, lab.test_display, lab.status, lab.priority,
-               lab.created_at, lab.updated_at
-          from ehr.lab_requests lab
-         where listed.kind = 'lab_request' and lab.id = listed.id
-      ) listed_order
-      join identity.patients patient on patient.id = listed_order.patient_id
-     order by listed.position;
+  -- RETURN QUERY does not leave the function: the marker goes now.
+  delete from ehr.my_orders_scans scan
+   where scan.backend_pid = pg_backend_pid() and scan.transaction_started_at = transaction_timestamp();
 end
 $$;
 comment on function ehr.list_my_orders(text[], boolean, date, timestamptz, text, uuid, integer) is
-  '0143 (MY-1): the lab requests and prescriptions this membership created at the session facility, never entered in error; open ones of any age and ended ones created on or after the Lagos day given (at most 2 years back); listed only while the session may read the patient''s records now for direct care (ehr.context_allows, asked once per patient), newest first, keyset paged, 1-50 rows; a page stops after 1,000 patients asked or 5,000 rows read and says where to resume; the first page counts the rest in hidden_count (at most 1,000 more patients asked; hidden_count_complete false past that), later pages answer null; the waiting-list card''s patient fields, never a full Health ID. Needs ehr.lab-request.read for lab rows and ehr.prescription.read for prescriptions. Audited: one ehr.my-orders.list row and one ehr.my-orders.list.shown row per patient shown.';
+  '0143 (MY-1): the lab requests and prescriptions this membership created at the session facility, never entered in error; open ones of any age and ended ones created on or after the Lagos day given (at most 2 years back); listed only while the session may read the patient''s records now for direct care (ehr.context_allows, asked once per patient), newest first, keyset paged, 1-50 rows; a page stops after 1,000 patients asked or 5,000 rows read and says where to resume; the first page counts the rest in hidden_count (over at most the newest 20,000 orders, at most 1,000 more patients asked; hidden_count_complete false past either), later pages answer null; the waiting-list card''s patient fields, never a full Health ID. Needs ehr.lab-request.read for lab rows and ehr.prescription.read for prescriptions. Audited: one ehr.my-orders.list row and one ehr.my-orders.list.shown row per patient shown.';
 revoke all on function ehr.list_my_orders(text[], boolean, date, timestamptz, text, uuid, integer) from public;
 
 -- 3. Grants (D3; here and in runtime-grants.sql).
@@ -495,6 +528,8 @@ $$;
 
 -- 4. Post-checks.
 do $$
+declare
+  mismatch text;
 begin
   if not exists (select 1 from pg_proc proc
                   where proc.oid = 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer)'::regprocedure
@@ -522,15 +557,33 @@ begin
     raise exception using errcode = '55000', message = '0143: a hid_ role is a member of the order tables'' owner';
   end if;
   if (select count(*) from pg_policy policy_row
-       where (policy_row.polrelid, policy_row.polname) in (('ehr.prescriptions'::regclass, 'prescriptions_my_orders_read'),
-                                                           ('ehr.lab_requests'::regclass, 'lab_requests_my_orders_read'))
-         and policy_row.polcmd = 'r') <> 2
+       where (policy_row.polrelid, policy_row.polname) in (('ehr.prescriptions'::regclass, 'prescriptions_scan_my_orders'),
+                                                           ('ehr.lab_requests'::regclass, 'lab_requests_scan_my_orders'))
+         and policy_row.polcmd = 'r' and policy_row.polpermissive) <> 2
      or exists (select 1 from pg_class relation, aclexplode(relation.relacl) acl
                  where relation.oid = 'ehr.my_orders_scans'::regclass and acl.grantee <> relation.relowner)
      or exists (select 1 from pg_proc proc, aclexplode(proc.proacl) acl
                  where proc.oid = 'ehr.my_orders_scan_open()'::regprocedure and acl.grantee <> proc.proowner
                    and acl.grantee <> 0) then
     raise exception using errcode = '55000', message = '0143: the counting marker or its policies are not as created';
+  end if;
+  -- D1's order, in 0133's form: each marker policy is the first permissive
+  -- read policy asked on its table, so every other permissive policy for
+  -- SELECT or ALL there sorts before it by name (C collation, as PostgreSQL
+  -- orders them).
+  select string_agg(format('%s %s', other_policy.polrelid::regclass, other_policy.polname), '; '
+           order by other_policy.polrelid::regclass::text collate "C", other_policy.polname::text collate "C")
+    into mismatch
+    from pg_policy scan_policy
+    join pg_policy other_policy on other_policy.polrelid = scan_policy.polrelid
+   where (scan_policy.polrelid, scan_policy.polname) in (('ehr.prescriptions'::regclass, 'prescriptions_scan_my_orders'),
+                                                         ('ehr.lab_requests'::regclass, 'lab_requests_scan_my_orders'))
+     and other_policy.oid <> scan_policy.oid and other_policy.polpermissive
+     and other_policy.polcmd in ('r', '*')
+     and other_policy.polname::text collate "C" > scan_policy.polname::text collate "C";
+  if mismatch is not null then
+    raise exception using errcode = '55000',
+      message = format('0143: these policies would be asked before the marker policies: %s', mismatch);
   end if;
 end
 $$;

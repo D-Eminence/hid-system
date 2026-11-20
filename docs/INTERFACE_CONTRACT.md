@@ -9090,9 +9090,10 @@ works), and one sent with a different `since` is 400 `INVALID_CURSOR`.
   opening included; never break-glass). Other matching orders are counted in
   `hiddenCount` and never shown. An empty page still carries `hiddenCount`.
 - **The count:** worked out on the first page and carried by the cursor to
-  later pages. It asks about at most 1,000 more patients (newest order first);
-  past that, `hiddenCountComplete` is `false` and `hiddenCount` is a lower
-  bound ("at least N").
+  later pages. It counts over at most the newest 20,000 matching orders and
+  asks about at most 1,000 more patients (newest order first); past either,
+  `hiddenCountComplete` is `false` and `hiddenCount` is a lower bound ("at
+  least N").
 - **Bounded pages:** a page stops after 1,000 patients asked or 5,000 orders
   read, whichever comes first, so a page may hold fewer rows than `limit`, or
   none, while `nextCursor` is set. Keep loading while `nextCursor` is not
@@ -9126,17 +9127,22 @@ since, count, `hiddenCount` and `hiddenCountComplete` on the first page,
   cards and writes the audit rows.
 - Indexes on `(facility_id, created_by_membership_id, created_at desc, id
   desc)` for `ehr.prescriptions` and `ehr.lab_requests`.
-- `prescriptions_my_orders_read` and `lab_requests_my_orders_read`: the
-  tables' owner may read them only during the function's walk and count, so
-  it can count orders of patients the member can no longer read. The
-  function writes an owner-only marker for its own transaction
-  (`ehr.my_orders_scans`) just before them and deletes it just after (0130's
-  marker pattern). Every other owner-run function and trigger that reads
+- `prescriptions_scan_my_orders` and `lab_requests_scan_my_orders`: the
+  tables' owner may read them only while the function runs (its walk, count,
+  audit rows and cards), so it can count orders of patients the member can
+  no longer read. The function writes an owner-only marker for its own
+  transaction (`ehr.my_orders_scans`) just before its walk and deletes it
+  just before it returns (0130's marker pattern); the cards are read under
+  it, so a consent that ends during the call never drops a row the audit
+  names as shown. Every other owner-run function and trigger that reads
   these tables sees exactly what it saw before 0143 (0133's own-pharmacy send
   and withdrawal included, in the suite), and the owner without a session
-  sees nothing. No `hid_` role but the owner is a member of either table's
-  owner (a post-check). The runtime roles' own reads of these tables are
-  unchanged.
+  sees nothing. Each policy asks the marker once per statement, and is named
+  to sort after the tables' other read policies, which PostgreSQL asks in
+  reverse name order: inside the function, 0005's consent test is never
+  asked per row (a post-check holds the order). No `hid_` role but the owner
+  is a member of either table's owner (a post-check). The runtime roles' own
+  reads of these tables are unchanged.
 
 ### Screen notes
 

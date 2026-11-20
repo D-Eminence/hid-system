@@ -10,12 +10,15 @@
 --      keyset paging, the card, the audit rows; and the refusals (no
 --      session, another purpose, a date over 2 years back, a half cursor, a
 --      kind without its read permission); an empty first page still counts;
+--      a consent that ends during the call never drops a row the audit names;
 --   3. the access rule's edges: a break-glass-only patient is counted, never
 --      listed; 0131's own-facility opening lists;
 --   4. outside the list, owner-run reads are as before 0143 (0133's D7 and
 --      D8, and a read by id as the tables' owner);
 --   5. the bounds: 1,000 patients asked per page, the resume position, the
---      first page's count capped and marked not complete.
+--      first page's count capped and marked not complete;
+--   6. the cost of page 1 with four orders per hidden patient (3,000
+--      patients), within a time budget.
 set plpgsql.variable_conflict = error;
 begin;
 
@@ -223,6 +226,33 @@ select pg_temp.mine(array['lab_request', 'prescription'], false, ((now() at time
 reset role;
 rollback to savepoint empty_first_page;
 select pg_temp.check_case('2 an empty first page still counts what is hidden', '-|hidden 4|more false', :'empty_first_page');
+-- A consent that ends during the call, after the walk decided (here, when
+-- the list's audit row is written): the cards are still read under the
+-- marker, so the page shows exactly the orders the audit names as shown.
+savepoint consent_ends_during_call;
+create function pg_temp.end_p1_grant() returns trigger language plpgsql security definer
+  set search_path = pg_catalog, pg_temp as $f$
+begin
+  update identity.consent_grants set status = 'revoked', revoked_at = now(), revoked_reason = 'Synthetic end during the call'
+   where id = 'f143b000-0000-4000-8000-000000000001';
+  return null;
+end
+$f$;
+create trigger my_orders_0143_grant_ends after insert on audit.events for each row
+  when (new.action = 'ehr.my-orders.list' and new.correlation_id = 'my-orders-0143-ends')
+  execute function pg_temp.end_p1_grant();
+select set_config('app.correlation_id', 'my-orders-0143-ends', true);
+set local role hid_ehr_api_runtime;
+select pg_temp.mine(array['lab_request', 'prescription'], false, ((now() at time zone 'Africa/Lagos')::date - 90))
+  as consent_ends \gset
+reset role;
+select format('%s/%s', (select status from identity.consent_grants where id = 'f143b000-0000-4000-8000-000000000001'),
+    (select string_agg(patient_id::text, ',') from audit.events
+      where correlation_id = 'my-orders-0143-ends' and action = 'ehr.my-orders.list.shown')) as consent_ends_audit \gset
+rollback to savepoint consent_ends_during_call;
+select pg_temp.check_case('2 a consent that ends during the call: the page shows what the audit names',
+  'a1,b1,b3|hidden 1|more false|revoked/f1437000-0000-4000-8000-000000000001',
+  :'consent_ends' || '|' || :'consent_ends_audit');
 select set_config('app.correlation_id', 'my-orders-0143-list', true);
 set local role hid_ehr_api_runtime;
 select pg_temp.check_case('2 more than 2 years back', '22023 MY_ORDERS_SINCE_TOO_OLD',
@@ -318,11 +348,18 @@ exception when others then
   return sqlstate || ' ' || sqlerrm;
 end
 $f$;
+-- D8 would answer true for a3 if it could read it: a3's send stands
+-- withdrawn, and its work item was neither dispensed nor claimed.
+insert into pharmacy.own_prescription_sends (prescription_id, prescription_version, patient_id, facility_id, encounter_id,
+  sent_by_account_id, sent_by_membership_id, state, work_item_id, sent_at, withdrawn_at) values
+  ('f1439000-0000-4000-8000-0000000000a3', 1, 'f1437000-0000-4000-8000-000000000002', 'f1431000-0000-4000-8000-0000000000f1',
+   'f1438000-0000-4000-8000-000000000002', 'f1432000-0000-4000-8000-00000000000d', 'f1435000-0000-4000-8000-0000000000d1',
+   'sent', 'f143c000-0000-4000-8000-0000000000a3', now() - interval '1 hour', now() - interval '30 minutes');
 select set_config('app.correlation_id', 'my-orders-0143-owner-reads', true);
 set local role hid_ehr_api_runtime;
 select pg_temp.check_case('4 0133 D7 still answers not_found for a prescription the session cannot read', '(not_found,)',
   pg_temp.answer($q$select send::text from ehr.send_prescription_to_own_pharmacy('f1439000-0000-4000-8000-0000000000a3', 1) send$q$));
-select pg_temp.check_case('4 0133 D8 still finds nothing to withdraw', 'false',
+select pg_temp.check_case('4 0133 D8 still cannot read the prescription, so tells nothing of its withdrawn send', 'false',
   pg_temp.answer($q$select ehr.withdraw_own_pharmacy_send('f1439000-0000-4000-8000-0000000000a3')::text$q$));
 select pg_temp.check_case('4 an owner-run read by id: the hidden prescription unseen, the readable one seen', '0/1',
   (select format('%s/%s', pg_temp.owner_reads('f1439000-0000-4000-8000-0000000000a3'),
@@ -403,6 +440,89 @@ select pg_temp.check_case('5 page 3: the last 100 hidden read, the two readable 
 select pg_temp.check_case('5 each call says how many patients it asked', '2000/1000/104',
   (select string_agg(details->>'patientsChecked', '/' order by sequence_id) from audit.events
     where correlation_id = 'my-orders-0143-bounds' and action = 'ehr.my-orders.list'));
+
+-- 6. The cost of page 1 with several orders per hidden patient: 3,000
+-- patients E may no longer read, each with two prescriptions and two lab
+-- requests by E (12,000 orders). 0005's consent test (about 0.6 ms a row) is
+-- never asked inside the walk or the count (D1), so page 1's cost is the
+-- 2,000 patients it asks, not the orders it reads, and it stays well inside
+-- the service's 15-second limit (with 0005's test asked on every row read,
+-- page 1 took 30 to 50 seconds here). The orders and visits are written with triggers off
+-- (session_replication_role replica, this transaction only): the version
+-- and route triggers are not under test here, and writing 15,000 rows
+-- through them would add half a minute to the suite.
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, gender, status)
+select ('f1437000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid,
+       'HID-QMY' || substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', (n / 1024) % 32 + 1, 1)
+                 || substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', (n / 32) % 32 + 1, 1)
+                 || substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', n % 32 + 1, 1),
+       'Busy', 'Orders', 'Busy Orders', '1980-01-01', 'unknown', 'active'
+  from generate_series(1, 3000) n;
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id,
+  scope, purpose_of_use, status, reason, starts_at, expires_at, break_glass, correlation_id)
+select ('f143b000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid, ('f1437000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid,
+       'f1434000-0000-4000-8000-00000000000e', 'f1432000-0000-4000-8000-00000000000e',
+       'f1435000-0000-4000-8000-0000000000e1', 'f1431000-0000-4000-8000-0000000000f1',
+       'write_records', 'direct-care', 'active', 'Synthetic busy grant', now() - interval '1 minute',
+       now() + interval '1 hour', false, 'my-orders-0143-grant-busy'
+  from generate_series(1, 3000) n;
+set local session_replication_role = replica;
+insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_membership_id, encounter_type, status, started_at)
+select ('f1438000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid, ('f1437000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid,
+       'f1431000-0000-4000-8000-0000000000f1', 'f1432000-0000-4000-8000-00000000000e', 'f1435000-0000-4000-8000-0000000000e1',
+       'ambulatory', 'in_progress', now() - interval '1 day'
+  from generate_series(1, 3000) n;
+-- Patient n's four orders are its own run of milliseconds: two
+-- prescriptions, then two lab requests.
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_display, frequency, instructions, status, created_at)
+select ('f1439000-0000-4000-8002-' || lpad((n * 10 + k)::text, 12, '0'))::uuid,
+       ('f1438000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid, ('f1437000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid,
+       'f1431000-0000-4000-8000-0000000000f1', 'f1432000-0000-4000-8000-00000000000e', 'f1435000-0000-4000-8000-0000000000e1',
+       'Synthetic busy', 'Daily', 'Synthetic instructions', 'active',
+       now() - interval '1 minute' - (n * 4 + k) * interval '1 millisecond'
+  from generate_series(1, 3000) n, generate_series(0, 1) k;
+insert into ehr.lab_requests (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  test_code_system, test_code, test_display, priority, status, created_at)
+select ('f1439000-0000-4000-8002-' || lpad((n * 10 + k)::text, 12, '0'))::uuid,
+       ('f1438000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid, ('f1437000-0000-4000-8002-' || lpad(n::text, 12, '0'))::uuid,
+       'f1431000-0000-4000-8000-0000000000f1', 'f1432000-0000-4000-8000-00000000000e', 'f1435000-0000-4000-8000-0000000000e1',
+       'http://loinc.org', '58410-2', 'Synthetic busy count', 'routine', 'active',
+       now() - interval '1 minute' - (n * 4 + k) * interval '1 millisecond'
+  from generate_series(1, 3000) n, generate_series(2, 3) k;
+set local session_replication_role = origin;
+update identity.consent_grants set status = 'revoked', revoked_at = now(), revoked_reason = 'Synthetic end'
+ where correlation_id = 'my-orders-0143-grant-busy';
+select pg_temp.as_member('synthetic:my-orders-0143:e', 'f1435000-0000-4000-8000-0000000000e1', 'f1431000-0000-4000-8000-0000000000f1');
+select set_config('app.correlation_id', 'my-orders-0143-busy', true);
+create temporary table busy_page (listed text, hidden bigint, complete boolean, more boolean, resume_id uuid,
+  elapsed_ms numeric) on commit drop;
+grant select, insert, update on pg_temp.busy_page to hid_ehr_api_runtime;
+set local role hid_ehr_api_runtime;
+do $$
+declare
+  started timestamptz := clock_timestamp();
+begin
+  insert into pg_temp.busy_page
+  select coalesce(string_agg(right(listed.order_id::text, 2), ',' order by listed.ordinality), '-'),
+         max(listed.hidden_count), bool_and(listed.hidden_count_complete), bool_or(listed.has_more),
+         max(listed.resume_id::text)::uuid, null
+    from ehr.list_my_orders(array['lab_request', 'prescription'], false, ((now() at time zone 'Africa/Lagos')::date - 90),
+      null, null, null, 25) with ordinality listed;
+  update pg_temp.busy_page set elapsed_ms = extract(epoch from clock_timestamp() - started) * 1000;
+end $$;
+reset role;
+\echo 6 page 1 of the busy list:
+select round(elapsed_ms) as elapsed_ms from pg_temp.busy_page;
+select pg_temp.check_case('6 page 1: E''s readable order listed; the walk stops at 1,000 patients, after patient 999''s orders; '
+  || '1,999 hidden patients counted (7,996 orders), not complete',
+  'e1|7996|f|t|f1439000-0000-4000-8002-000000009993',
+  (select format('%s|%s|%s|%s|%s', listed, hidden, complete, more, resume_id) from pg_temp.busy_page));
+select pg_temp.check_case('6 page 1 asks 2,000 patients (1,000 in the walk, 1,000 more in the count)', '2000',
+  (select details->>'patientsChecked' from audit.events
+    where correlation_id = 'my-orders-0143-busy' and action = 'ehr.my-orders.list'));
+select pg_temp.check_case('6 page 1 takes less than 10 seconds', 'true',
+  (select (elapsed_ms < 10000)::text from pg_temp.busy_page));
 
 do $$
 declare
