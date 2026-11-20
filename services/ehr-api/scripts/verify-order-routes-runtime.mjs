@@ -1504,7 +1504,8 @@ try {
   const rx2Progress = expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions/${rx2.id}`, undefined, progressRead),
     200, 'rx2 with progress')
     .ownProgress;
-  assert.deepEqual(rx2Progress, { status: 'not_received', receivedAt: null, dispensedAt: null, reversedAt: null },
+  assert.deepEqual(rx2Progress, { status: 'not_received', receivedAt: null, acceptedAt: null, dispensedAt: null,
+    reversedAt: null },
     'a routed prescription in the hospital\'s own pharmacy');
   const lr7Progress = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests/${lr7.id}`, undefined, progressRead),
     200, 'lr7 with progress')

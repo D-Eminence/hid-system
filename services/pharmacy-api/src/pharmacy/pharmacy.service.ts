@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
@@ -8,10 +8,11 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
+import type { AcceptWorkItemDto } from './dto/accept-work-item.dto';
 import type { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
 import { IMPORT_PAGE_DEFAULT, type ListImportedMedicationsQueryDto, type OcrMedicationImportBatchDto,
   type OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
-import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
+import { PharmacyOrderRouteAccess, basisDetails, type ResourceBasis } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
 import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState, type OwnWorkWithdrawnReason } from './own-work-access';
@@ -26,7 +27,7 @@ interface WorkItemRow extends QueryResultRow {
   medication_code_system: string | null; medication_code: string | null; medication_display: string;
   dose_quantity: string | null; dose_unit: string | null; route_code: string | null;
   frequency: string; instructions: string; starts_on: string | null; ends_on: string | null;
-  prescribed_by: string; prescribed_at: Date; accepted_by: string; accepted_at: Date;
+  prescribed_by: string; prescribed_at: Date; accepted_by: string; accepted_by_membership_id: string; accepted_at: Date;
   row_version: string; created_at: Date; request_sha256?: string;
   dispensing_id?: string | null; dispensing_status?: 'dispensed' | null;
   reversal_id?: string | null;
@@ -149,6 +150,90 @@ export const PATIENT_IMPORTS_QUERY = `select e.* from pharmacy.imported_medicati
 const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
   from pharmacy.dispensings d left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
 
+/**
+ * ORD-4: where a work item is in this pharmacy's own steps, as the list, a
+ * single read and the accept route answer it (`pharmacyStep`):
+ * - received: this facility's own item, sent automatically when its
+ *   prescription was activated (0133), that no pharmacist has accepted yet;
+ * - accepted: a pharmacist here accepted it, and it is not dispensed;
+ * - dispensed, dispensing_reversed: as `dispensing` says.
+ * `status: 'accepted'` and `acceptedAt` keep their meaning ("the pharmacy has
+ * it", "when it arrived"); `withdrawn` stays a separate flag.
+ */
+export type PharmacyStep = 'received' | 'accepted' | 'dispensed' | 'dispensing_reversed';
+
+/**
+ * How an item came to be accepted: 'accept' (POST .../accept), 'dispensing'
+ * (its first dispensing accepted a received item), 'order_route' (another
+ * facility's prescription, accepted with its route: the work item's own
+ * accepted_by and accepted_at, 0086) or 'hand_off' (an own item a pharmacist
+ * brought in by hand, accept-ehr-prescription: the same, from the work item).
+ */
+export type PharmacistAcceptedWith = 'accept' | 'dispensing' | 'order_route' | 'hand_off';
+
+export interface PharmacistAcceptance {
+  acceptedAt: Date;
+  acceptedByMembershipId: string;
+  acceptedWith: PharmacistAcceptedWith;
+}
+
+/** The answer of POST .../accept: 201 when this call recorded the acceptance (`alreadyAccepted: false`), else 200. */
+export interface WorkItemAcceptanceAnswer {
+  workItemId: string;
+  pharmacyStep: PharmacyStep;
+  pharmacistAcceptance: PharmacistAcceptance;
+  alreadyAccepted: boolean;
+}
+
+/**
+ * The reason pharmacy.work_item_events carries on ORD-4's `pharmacist_accepted`
+ * event (event_version 2). The acceptance takes no typed reason (FR-1, Q105),
+ * so the text is fixed, the same for the accept route and for a dispensing
+ * (`accepted_with` on the acceptance row tells the two apart), and 0147's
+ * pharmacy.validate_work_item_event() refuses any other (23514). Change both
+ * together, or neither. Exported for the tests.
+ */
+export const PHARMACIST_ACCEPTED_REASON = 'Accepted by the pharmacist';
+
+/**
+ * ORD-4: the acceptance this member's Idempotency-Key already recorded here,
+ * if any (0023's key rule, one row per facility, account and key, unique on
+ * the table): its work item and request digest only. The stored acceptance
+ * itself is read through pharmacy.own_work_item_steps. Exported for the tests.
+ */
+export const ACCEPTANCE_BY_KEY_QUERY = `select work_item_id::text as work_item_id, request_sha256
+  from pharmacy.work_item_acceptances where facility_id=$1 and accepted_by=$2 and idempotency_key=$3`;
+
+/**
+ * ORD-4: one acceptance per work item (work_item_id unique), insert-only;
+ * pharmacy.validate_work_item_acceptance() checks it against the session, the
+ * item (own, sent automatically, its claim live and undispensed, the send not
+ * withdrawn) and 0101's source check, read FOR SHARE. $7 is 'accept' or
+ * 'dispensing'. Exported for the tests.
+ */
+export const INSERT_ACCEPTANCE = `insert into pharmacy.work_item_acceptances (
+    id,work_item_id,patient_id,facility_id,accepted_by,accepted_by_membership_id,accepted_with,
+    idempotency_key,request_sha256,correlation_id
+  ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+  returning accepted_at,accepted_by_membership_id::text as accepted_by_membership_id,accepted_with`;
+
+/**
+ * ORD-4: the work item's history gains one `pharmacist_accepted` event
+ * (event_version 2, so unique(work_item_id, event_version) keeps it to one),
+ * in the acceptance's transaction, written as `prescription_accepted` (version
+ * 1) is: the session's account and membership as the actor, the fixed reason.
+ * Exported for the tests.
+ */
+export const INSERT_PHARMACIST_ACCEPTED_EVENT = `insert into pharmacy.work_item_events (
+    work_item_id,patient_id,facility_id,event_version,event_type,actor_id,actor_membership_id,reason,correlation_id
+  ) values ($1,$2,$3,2,'pharmacist_accepted',$4,$5,$6,$7)`;
+
+interface AcceptanceKeyRow extends QueryResultRow { work_item_id: string; request_sha256: string }
+
+interface AcceptanceRow extends QueryResultRow {
+  accepted_at: Date; accepted_by_membership_id: string; accepted_with: 'accept' | 'dispensing';
+}
+
 // Work items, dispensings, reversals and imports are insert-only: a trigger
 // refuses every UPDATE and DELETE (0023), and the runtime role has no UPDATE
 // on them, so it cannot lock them (42501). The commands take no row locks of
@@ -199,13 +284,53 @@ function sameFacilityDispensingRefusal(error: unknown): DomainProblem | undefine
   return notDispensable(detail === 'sent_elsewhere' ? 'sent_elsewhere' : undefined);
 }
 
-function notDispensable(reason?: Extract<OwnWorkWithdrawnReason, 'sent_elsewhere'>): DomainProblem {
+/**
+ * ORD-4: an own item that can no longer be dispensed here is not accepted
+ * either. The accept route answers it as a dispensing is answered: before
+ * the insert from the steps reader's withdrawn flag, with the reason; at the
+ * insert from the acceptance trigger's 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE
+ * (0101's source check, read FOR SHARE), whose DETAIL 'sent_elsewhere' or
+ * 'changed' (a withdrawn automatic send) answers that reason, as the reader
+ * would have, and any other DETAIL ('not_claimed': dispensed meanwhile) or
+ * none answers without one. The trigger's other 23514 refusals ('Pharmacist
+ * acceptance does not match its work item and actor context';
+ * PHARMACY_WORK_ITEM_NOT_SENT_AUTOMATICALLY, DETAIL 'order_route' or
+ * 'hand_off') are passed on: the route's own checks before the insert rule
+ * them out (the session is the row's; a route-backed or handed-in item is
+ * answered from its row and never inserted).
+ */
+function acceptanceRefusedByTrigger(error: unknown): DomainProblem | undefined {
+  const { code, message, detail } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown;
+    message?: unknown; detail?: unknown };
+  if (code !== '23514' || message !== 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE') return undefined;
+  return notDispensable(detail === 'sent_elsewhere' || detail === 'changed' ? detail : undefined);
+}
+
+function notDispensable(reason?: OwnWorkWithdrawnReason): DomainProblem {
   if (reason === 'sent_elsewhere') {
     return new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
       'This prescription was sent to another pharmacy, so it can no longer be dispensed here', undefined,
       { extensions: { withdrawnReason: 'sent_elsewhere' } });
   }
+  if (reason === 'changed') {
+    return new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE', 'This prescription can no longer be dispensed here',
+      undefined, { extensions: { withdrawnReason: 'changed' } });
+  }
   return new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE', 'This prescription can no longer be dispensed here');
+}
+
+/**
+ * ORD-4 on a schema without its table or reader (42P01, 42883): the accept
+ * route answers 503 with words for the person, kept on the 5xx answer.
+ */
+function acceptanceUnavailable(): DomainProblem {
+  return new DomainProblem(503, 'PHARMACY_ACCEPTANCE_UNAVAILABLE',
+    'Accepting is not available right now. Please try again.', undefined, { exposeDetail: true });
+}
+
+function acceptanceSchemaMissing(error: unknown): boolean {
+  const code = sqlState(error);
+  return code === '42P01' || code === '42883';
 }
 
 /**
@@ -242,6 +367,8 @@ function acceptanceRefusal(error: unknown): DomainProblem | undefined {
 
 @Injectable()
 export class PharmacyService {
+  private readonly logger = new Logger(PharmacyService.name);
+
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
     private readonly audit: AuditService, private readonly routeAccess: PharmacyOrderRouteAccess,
     private readonly routeCards: PharmacyOrderRouteCards,
@@ -457,6 +584,139 @@ export class PharmacyService {
     });
   }
 
+  /**
+   * ORD-4: a pharmacist accepts a work item before dispensing it
+   * (POST pharmacy/work-items/:workItemId/accept), in one SERIALIZABLE
+   * transaction, with the checks in dispense()'s order:
+   * - the item: one this session cannot see answers as a dispensing does (a
+   *   route-backed item hidden by its route: 423 paused or 409 closed; else
+   *   404);
+   * - the write: own-work, the member's own consent, or the order route, as
+   *   for a dispensing; an emergency session is refused (403), break-glass by
+   *   Identity's decision or not: an acceptance is direct care only, and
+   *   0147's trigger refuses any other purpose;
+   * - 412 when the version differs from the one the pharmacist saw;
+   * - 409 IDEMPOTENCY_CONFLICT when this member's key recorded an acceptance
+   *   for another request;
+   * - an item already accepted answers 200 with that acceptance and
+   *   `alreadyAccepted: true`, writing nothing but its audit row: a stored
+   *   acceptance (by this route or a dispensing), a route-backed item
+   *   (accepted with its route) or an own item handed in by hand;
+   * - an own item sent automatically and dispensed before ORD-4, with no
+   *   acceptance, is 409 PHARMACY_WORK_ITEM_ALREADY_DISPENSED;
+   * - one withdrawn before it was dispensed is 409
+   *   PHARMACY_PRESCRIPTION_NOT_DISPENSABLE with its withdrawnReason;
+   * - else the acceptance and its event are written (the database checks the
+   *   item again, read FOR SHARE) and the answer is 201.
+   * Every answer has its audit row in the transaction, naming the patient,
+   * with the outcome, the way it was accepted and the basis. A racing second
+   * accept is cancelled by the database (23505 or 40001) and DatabaseService
+   * runs it again, when it answers 200 with the winner's acceptance. On a
+   * schema without the table or the reader (42P01, 42883) the answer is 503
+   * PHARMACY_ACCEPTANCE_UNAVAILABLE.
+   */
+  async acceptWorkItem(context: DataAccessContext, workItemId: string, input: AcceptWorkItemDto, key: string):
+  Promise<WorkItemAcceptanceAnswer> {
+    const digest = requestDigest('pharmacy.work-item.pharmacist-accept', { workItemId, ...input });
+    return this.database.withTransaction(context, async (client) => {
+      const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`, [workItemId])).rows[0];
+      if (!work) return this.routeAccess.hiddenWorkItem(client, workItemId, 'write_records', workItemNotFound);
+      const basis = await this.routeAccess.authorize(client, context, 'work_item', work.id, work.patient_id, 'write_records');
+      if (context.purposeOfUse !== 'direct-care') throw new DomainProblem(403, 'PHARMACY_ACCESS_DENIED',
+        'Break-glass authorization cannot mutate Pharmacy records');
+      if (Number(work.row_version) !== input.expectedWorkItemVersion) throw new DomainProblem(412,
+        'PHARMACY_WORK_ITEM_VERSION_CONFLICT', 'Dispensing must bind to the exact accepted work-item version');
+      const keyed = (await client.query<AcceptanceKeyRow>(ACCEPTANCE_BY_KEY_QUERY,
+        [context.facilityId, context.actor.accountId, key]).catch((error: unknown) => {
+        throw acceptanceSchemaMissing(error) ? acceptanceUnavailable() : error;
+      })).rows[0];
+      if (keyed && keyed.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
+        'Prescription acceptance conflicts with existing Pharmacy work');
+      const answered = async (pharmacistAcceptance: PharmacistAcceptance, created: boolean) => {
+        await this.audit.recordWithClient(client, context, 'pharmacy.work-item.pharmacist-accept', {
+          patientId: work.patient_id, resourceType: 'pharmacy-work-item', resourceId: work.id,
+        }, { outcome: created ? 'accepted' : 'already_accepted', acceptedWith: pharmacistAcceptance.acceptedWith,
+          ...acceptanceBasis(basis) });
+        return { workItemId: work.id, pharmacyStep: created ? 'accepted' as const : stepOf(work, pharmacistAcceptance),
+          pharmacistAcceptance, alreadyAccepted: !created };
+      };
+      // Another facility's prescription was accepted with its route: nothing to record.
+      if (work.order_route_id) return answered(fromWorkItem(work, 'order_route'), false);
+      const state = await this.ownWork.steps(client, [work.id], context.correlationId);
+      if (!state) throw acceptanceUnavailable();
+      const steps = state.get(work.id)?.steps;
+      if (!steps) throw new DomainProblem(403, 'PHARMACY_ACCESS_DENIED', 'Pharmacy access is not authorized');
+      if (steps.acceptance) return answered({ ...steps.acceptance }, false);
+      if (!steps.sentAutomatically) return answered(fromWorkItem(work, 'hand_off'), false);
+      if (work.dispensing_id) throw new DomainProblem(409, 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED',
+        'A full dispensing is already recorded for this work item; partial dispensing is not supported');
+      const withdrawn = state.get(work.id)!;
+      if (withdrawn.withdrawn) throw notDispensable(withdrawn.withdrawnReason ?? 'changed');
+      const accepted = await this.insertAcceptance(client, context, work, 'accept', key, digest)
+        .catch((error: unknown) => {
+          throw (acceptanceSchemaMissing(error) ? acceptanceUnavailable() : acceptanceRefusedByTrigger(error)) ?? error;
+        });
+      return answered(accepted, true);
+    }, { isolationLevel: 'SERIALIZABLE' });
+  }
+
+  /**
+   * ORD-4: the acceptance row and its `pharmacist_accepted` event, by the
+   * session's account and membership, in the caller's transaction.
+   */
+  private async insertAcceptance(client: PoolClient, context: DataAccessContext, work: WorkItemRow,
+    acceptedWith: 'accept' | 'dispensing', key: string, digest: string): Promise<PharmacistAcceptance> {
+    const inserted = (await client.query<AcceptanceRow>(INSERT_ACCEPTANCE, [randomUUID(), work.id, work.patient_id,
+      work.facility_id, context.actor.accountId, context.membershipId, acceptedWith, key, digest,
+      context.correlationId])).rows[0];
+    if (!inserted) throw acceptanceUnavailable();
+    await client.query(INSERT_PHARMACIST_ACCEPTED_EVENT, [work.id, work.patient_id, work.facility_id,
+      context.actor.accountId, context.membershipId, PHARMACIST_ACCEPTED_REASON, context.correlationId]);
+    return { acceptedAt: inserted.accepted_at, acceptedByMembershipId: inserted.accepted_by_membership_id,
+      acceptedWith: inserted.accepted_with };
+  }
+
+  /**
+   * ORD-4: a dispensing of a `received` item accepts it first, in the
+   * dispensing's transaction, before the dispensing's insert (the claim is
+   * still undispensed, as the acceptance trigger requires), by the
+   * dispensing pharmacist, with the dispensing's key and digest. Only an own
+   * item that the steps reader says was sent automatically, has no
+   * acceptance and is not withdrawn, and only in direct care (the trigger
+   * refuses any other purpose). Nothing here ever refuses a dispensing:
+   * a schema without ORD-4 (42P01, 42883), a reader or insert that fails, or
+   * an acceptance recorded meanwhile (23505) rolls its savepoint back and the
+   * dispensing goes on, decided by its own checks as before. A serialization
+   * failure or deadlock is passed on, so DatabaseService runs the whole
+   * dispensing again (whose replay then answers before reaching here, so a
+   * retried dispensing records no second acceptance). True when it was
+   * recorded.
+   */
+  private async acceptWithDispensing(client: PoolClient, context: DataAccessContext, work: WorkItemRow, key: string,
+    digest: string): Promise<boolean> {
+    if (work.order_route_id || !this.ownWork.enabled || context.purposeOfUse !== 'direct-care') return false;
+    let state: OwnWorkState | undefined;
+    try {
+      state = (await this.ownWork.steps(client, [work.id], context.correlationId))?.get(work.id);
+    } catch (error) {
+      if (mustRetry(error)) throw error;
+      return false;
+    }
+    if (!state?.steps?.sentAutomatically || state.steps.acceptance || state.withdrawn) return false;
+    await client.query('savepoint pharmacy_dispensing_acceptance');
+    try {
+      await this.insertAcceptance(client, context, work, 'dispensing', key, digest);
+      await client.query('release savepoint pharmacy_dispensing_acceptance');
+      return true;
+    } catch (error) {
+      if (mustRetry(error)) throw error;
+      await client.query('rollback to savepoint pharmacy_dispensing_acceptance');
+      if (!acceptanceSchemaMissing(error)) this.logger.warn({ message: 'The acceptance was not recorded with the dispensing',
+        sqlState: sqlState(error), correlationId: context.correlationId });
+      return false;
+    }
+  }
+
   async dispense(context: DataAccessContext, workItemId: string, input: CreateDispensingDto, key: string) {
     return this.database.withTransaction(context, async (client) => {
       const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`,
@@ -474,6 +734,8 @@ export class PharmacyService {
         throw new DomainProblem(409, 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED',
           'A full dispensing is already recorded for this work item; partial dispensing is not supported');
       }
+      // ORD-4: a received item is accepted by its first dispensing; never a reason to refuse it.
+      const acceptedWithDispensing = await this.acceptWithDispensing(client, context, work, key, digest);
       const inserted = await client.query<DispensingRow>(`insert into pharmacy.dispensings (
         id,work_item_id,work_item_version,patient_id,facility_id,medication_code_system,medication_code,
         medication_display,quantity_dispensed,quantity_unit,dispensed_by,dispensed_by_membership_id,
@@ -495,7 +757,7 @@ export class PharmacyService {
       await this.audit.recordWithClient(client, context, 'pharmacy.dispensing.create', {
         patientId: row.patient_id, resourceType: 'medication-dispensing', resourceId: row.id,
       }, { workItemId: row.work_item_id, workItemVersion: Number(row.work_item_version), status: 'dispensed',
-        ...basisDetails(basis) });
+        ...basisDetails(basis), ...(acceptedWithDispensing ? { acceptedWithDispensing: true } : {}) });
       return this.projectDispensing(row);
     }, { isolationLevel: 'SERIALIZABLE' });
   }
@@ -732,6 +994,12 @@ export class PharmacyService {
    * sent to another facility's pharmacy (D14, owner's Q121 A). Dispensing it
    * is refused (409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE). `withdrawnReason`
    * never comes without `withdrawn`.
+   *
+   * ORD-4: `pharmacyStep` and `pharmacistAcceptance` follow `dispensing`. A
+   * route-backed item carries them always, from its own row (accepted with
+   * its route). An own item carries them only when ORD-4's steps reader
+   * answered it (`ownState.steps`): on a schema without it, or when the
+   * reader could not be read, neither is answered, never a guessed step.
    */
   private projectWorkItem(row: WorkItemRow, card?: OrderRouteCard, ownPatient?: WorkItemRoutePatient,
     details?: WorkItemDispensingDetails, ownState?: OwnWorkState) {
@@ -751,6 +1019,7 @@ export class PharmacyService {
       instructions: row.instructions, acceptedAt: row.accepted_at, version: Number(row.row_version),
       dispensing: row.dispensing_id ? { id: row.dispensing_id, status: row.dispensing_status,
         reversed: Boolean(row.reversal_id) } : null,
+      ...pharmacySteps(row, ownState),
       ...(details?.priority ? { priority: details.priority } : {}),
       ...(details?.duration ? { duration: details.duration } : {}),
       ...(details?.quantityToDispense === undefined ? {}
@@ -818,4 +1087,46 @@ function sqlState(error: unknown): unknown {
 
 function workItemNotFound(): DomainProblem {
   return new DomainProblem(404, 'PHARMACY_WORK_ITEM_NOT_FOUND', 'Pharmacy work item was not found');
+}
+
+function mustRetry(error: unknown): boolean {
+  const code = sqlState(error);
+  return code === '40001' || code === '40P01';
+}
+
+/** The acceptance read from the work item itself: a route-backed item, or an own item handed in by hand. */
+function fromWorkItem(row: WorkItemRow, acceptedWith: 'order_route' | 'hand_off'): PharmacistAcceptance {
+  return { acceptedAt: row.accepted_at, acceptedByMembershipId: row.accepted_by_membership_id, acceptedWith };
+}
+
+/** The step of an item with this acceptance (or none): its dispensing first. */
+function stepOf(row: WorkItemRow, acceptance: PharmacistAcceptance | null): PharmacyStep {
+  if (row.reversal_id) return 'dispensing_reversed';
+  if (row.dispensing_id) return 'dispensed';
+  return acceptance ? 'accepted' : 'received';
+}
+
+/**
+ * ORD-4's two fields for a work item, or none: a route-backed item from its
+ * row; an own item from the steps reader (a stored acceptance; else, not sent
+ * automatically, handed in by hand, from its row; else none yet), and
+ * nothing when the reader did not answer it.
+ */
+function pharmacySteps(row: WorkItemRow, ownState: OwnWorkState | undefined):
+{ pharmacyStep?: PharmacyStep; pharmacistAcceptance?: PharmacistAcceptance | null } {
+  let acceptance: PharmacistAcceptance | null;
+  if (row.order_route_id) acceptance = fromWorkItem(row, 'order_route');
+  else if (!ownState?.steps) return {};
+  else if (ownState.steps.acceptance) acceptance = { ...ownState.steps.acceptance };
+  else acceptance = ownState.steps.sentAutomatically ? null : fromWorkItem(row, 'hand_off');
+  return { pharmacyStep: stepOf(row, acceptance), pharmacistAcceptance: acceptance };
+}
+
+/**
+ * The basis on the pharmacist-accept audit row, as 0133 records bases on
+ * the work list: always named ('consent', 'own-work', or 'order-route' with
+ * its route).
+ */
+function acceptanceBasis(basis: ResourceBasis): Record<string, string> {
+  return { basis: 'consent', ...basisDetails(basis) };
 }

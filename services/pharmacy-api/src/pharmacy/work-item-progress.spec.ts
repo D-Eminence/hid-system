@@ -6,8 +6,8 @@ import type { DataAccessContext } from '../common/request-context';
 import { WORK_ITEM_PROGRESS_MAX_IDS, WorkItemProgressDto } from './dto/work-item-progress.dto';
 import { PharmacyWorkItemProgressController } from './work-item-progress.controller';
 import { PharmacyOwnWork } from './own-work-access';
-import { OWN_PROGRESS_HEADER, OWN_PROGRESS_VERSION, PharmacyWorkItemProgressService,
-  WORK_ITEM_PROGRESS_QUERY } from './work-item-progress.service';
+import { OWN_PROGRESS_ACCEPTED_HEADER, OWN_PROGRESS_ACCEPTED_VERSION, OWN_PROGRESS_HEADER, OWN_PROGRESS_VERSION,
+  PharmacyWorkItemProgressService, WORK_ITEM_PROGRESS_QUERY } from './work-item-progress.service';
 
 // Fictional ids only.
 const ids = {
@@ -30,11 +30,39 @@ const context: DataAccessContext = {
 const allowed = { allowed: true, patientId: ids.patient, facilityId: ids.facility, membershipId: ids.membership,
   scope: 'read_records', purpose: 'direct-care', breakGlass: false };
 
+const STATES = /from pharmacy\.own_work_item_states\(\$1::uuid\[\]\)/;
+const STEPS = /from pharmacy\.own_work_item_steps\(\$1::uuid\[\]\)/;
+/** The pharmacist who accepted (ORD-4); the progress never names them. */
+const acceptor = '7a1c0d2e-0000-4000-8000-000000000005';
+
+/** ORD-4's reader per work item: sent automatically or handed in, and the acceptance, if any. */
+type Steps = Record<string, { sent: boolean; acceptedAt?: Date; acceptedWith?: 'accept' | 'dispensing' }>;
+
+/**
+ * The read's database. `own` turns 0133's (and ORD-4's) reader on. Without
+ * `own.steps`, ORD-4's reader is not there (42883: a Release A schema) and
+ * 0133's answers; with it, ORD-4's answers 0133's columns and the steps.
+ */
 function harness(rows: unknown[], decision: unknown = allowed,
-  own?: { withdrawn?: string[]; reasons?: Record<string, string>; error?: Error & { code?: string } }) {
+  own?: { withdrawn?: string[]; reasons?: Record<string, string>; error?: Error & { code?: string }; steps?: Steps;
+    stepsError?: Error & { code?: string } }) {
   const query = jest.fn(async (sql: string, values: unknown[] = []) => {
     if (sql === WORK_ITEM_PROGRESS_QUERY) return { rows };
-    if (/from pharmacy\.own_work_item_states\(\$1::uuid\[\]\)/.test(sql)) {
+    if (STEPS.test(sql)) {
+      if (own?.stepsError) throw own.stepsError;
+      if (!own?.steps) throw Object.assign(new Error('function pharmacy.own_work_item_steps(uuid[]) does not exist'),
+        { code: '42883' });
+      const steps = own.steps;
+      return { rows: (values[0] as string[]).map((item) => {
+        const withdrawn = own.withdrawn?.includes(item) ?? false;
+        const step = steps[item] ?? { sent: true };
+        return { work_item_id: item, basis: 'consent', withdrawn,
+          withdrawn_reason: withdrawn ? own.reasons?.[item] ?? 'changed' : null, sent_automatically: step.sent,
+          accepted_at: step.acceptedAt ?? null, accepted_by_membership_id: step.acceptedAt ? acceptor : null,
+          accepted_with: step.acceptedAt ? step.acceptedWith ?? 'accept' : null };
+      }) };
+    }
+    if (STATES.test(sql)) {
       if (own?.error) throw own.error;
       return { rows: (values[0] as string[]).map((item) => {
         const withdrawn = own?.withdrawn?.includes(item) ?? false;
@@ -174,8 +202,10 @@ describe('POST pharmacy/work-items/progress (ORD-3)', () => {
       .toEqual(answer.items);
   });
 
-  it('passes X-HID-Own-Progress: 0133 from the request to the read, and nothing else', async () => {
+  it('passes X-HID-Own-Progress: 0133 and (ORD-4) X-HID-Own-Progress-Accepted: ord4 from the request, each matched '
+    + 'exactly, the second only with the first', async () => {
     expect([OWN_PROGRESS_HEADER, OWN_PROGRESS_VERSION]).toEqual(['x-hid-own-progress', '0133']);
+    expect([OWN_PROGRESS_ACCEPTED_HEADER, OWN_PROGRESS_ACCEPTED_VERSION]).toEqual(['x-hid-own-progress-accepted', 'ord4']);
     const read = jest.fn(async () => ({ items: [] }));
     const controller = new PharmacyWorkItemProgressController({ read } as never);
     const request = (own: Record<string, string>) => {
@@ -184,11 +214,24 @@ describe('POST pharmacy/work-items/progress (ORD-3)', () => {
         headers, header: (name: string) => headers[name.toLowerCase()] } as never;
     };
     const body = { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA] };
-    for (const [headers, current] of [[{ 'x-hid-own-progress': '0133' }, true], [{}, false],
-      [{ 'x-hid-own-progress': '0134' }, false], [{ 'x-hid-own-progress': '0133 ' }, false]] as const) {
+    const both = { 'x-hid-own-progress': '0133', 'x-hid-own-progress-accepted': 'ord4' };
+    for (const [headers, current, accepted] of [
+      [{ 'x-hid-own-progress': '0133' }, true, false], [{}, false, false],
+      [{ 'x-hid-own-progress': '0134' }, false, false], [{ 'x-hid-own-progress': '0133 ' }, false, false],
+      // ORD-4: both headers, each exactly.
+      [both, true, true],
+      [{ 'x-hid-own-progress-accepted': 'ord4' }, false, false],
+      [{ 'x-hid-own-progress': '0134', 'x-hid-own-progress-accepted': 'ord4' }, false, false],
+      [{ ...both, 'x-hid-own-progress-accepted': 'ORD4' }, true, false],
+      [{ ...both, 'x-hid-own-progress-accepted': 'ord4 ' }, true, false],
+      [{ ...both, 'x-hid-own-progress-accepted': 'ord5' }, true, false],
+      [{ ...both, 'x-hid-own-progress-accepted': '0133' }, true, false],
+      [{ ...both, 'x-hid-own-progress-accepted': 'ord4, ord4' }, true, false],
+      [{ 'x-hid-own-progress': 'ord4', 'x-hid-own-progress-accepted': '0133' }, false, false],
+    ] as const) {
       read.mockClear();
       await controller.read(body as never, request(headers));
-      expect(read).toHaveBeenCalledWith(expect.objectContaining({ facilityId: ids.facility }), body, current);
+      expect(read).toHaveBeenCalledWith(expect.objectContaining({ facilityId: ids.facility }), body, current, accepted);
     }
   });
 
@@ -261,5 +304,129 @@ describe('POST pharmacy/work-items/progress (ORD-3)', () => {
     expect(WORK_ITEM_PROGRESS_QUERY).toMatch(/w\.facility_id=\$2::uuid/);
     expect(WORK_ITEM_PROGRESS_QUERY).toMatch(/w\.patient_id=\$1::uuid/);
     expect(WORK_ITEM_PROGRESS_QUERY).not.toMatch(/\b(insert|update|delete|for update|for share)\b/i);
+  });
+});
+
+/*
+ * ORD-4: the pharmacy item may read 'accepted' (a pharmacist here accepted it, by the accept route or its first
+ * dispensing, or handed it in by hand) with `acceptedAt`, from ORD-4's steps reader in the same single reader
+ * statement as 0133's withdrawn flag; WORK_ITEM_PROGRESS_QUERY is unchanged. Which status wins: a reversal, a
+ * dispensing, sent elsewhere, withdrawn, accepted, received. Answered only to a caller sending both headers;
+ * otherwise 'accepted' reads 'received' and `acceptedAt` is left out, so an ehr-api from before ORD-4 (which treats a
+ * whole answer with an unknown status as unknown) reads every answer as before, whichever image goes first.
+ */
+describe('ORD-4: accepted in the prescriber\'s progress', () => {
+  const rx = (n: number) => `7a1c0d2e-0000-4000-8000-1000000000${String(n).padStart(2, '0')}`;
+  const work = (n: number) => `7a1c0d2e-0000-4000-8000-2000000000${String(n).padStart(2, '0')}`;
+  const at = (minute: number) => new Date(Date.UTC(2026, 10, 20, 9, minute));
+  const iso = (minute: number) => at(minute).toISOString();
+  const progressRow = (n: number, times: { dispensed?: number; reversed?: number } = {}) => ({ work_item_id: work(n),
+    source_ehr_prescription_id: rx(n), accepted_at: at(n), dispensed_at: times.dispensed === undefined ? null
+      : at(times.dispensed), reversed_at: times.reversed === undefined ? null : at(times.reversed) });
+  // 1 received (sent automatically, no acceptance); 2 accepted (09:21); 3 handed in by hand (accepted when it was
+  // made, 09:03); 4 accepted, then held (withdrawn, changed); 5 accepted, then sent to another
+  // facility's pharmacy; 6 accepted, then dispensed; 7 accepted by its dispensing, dispensed and reversed;
+  // 8 dispensed before ORD-4 (sent automatically, no acceptance); 9 received, then held; 10 not here.
+  const rows = [progressRow(1), progressRow(2), progressRow(3), progressRow(4), progressRow(5),
+    progressRow(6, { dispensed: 40 }), progressRow(7, { dispensed: 41, reversed: 50 }), progressRow(8, { dispensed: 42 }),
+    progressRow(9)];
+  const own = { withdrawn: [work(4), work(5), work(9)], reasons: { [work(4)]: 'changed', [work(5)]: 'sent_elsewhere',
+    [work(9)]: 'changed' }, steps: {
+    [work(1)]: { sent: true }, [work(2)]: { sent: true, acceptedAt: at(21) }, [work(3)]: { sent: false },
+    [work(4)]: { sent: true, acceptedAt: at(24) }, [work(5)]: { sent: true, acceptedAt: at(25) },
+    [work(6)]: { sent: true, acceptedAt: at(26) },
+    [work(7)]: { sent: true, acceptedAt: at(41), acceptedWith: 'dispensing' as const },
+    [work(8)]: { sent: true }, [work(9)]: { sent: true } } };
+  const asked = { patientId: ids.patient, sourceEhrPrescriptionIds: Array.from({ length: 10 }, (_, i) => rx(i + 1)) };
+  const item = (n: number, status: string, times: { dispensed?: number; reversed?: number; accepted?: number | null } = {}) =>
+    ({ sourceEhrPrescriptionId: rx(n), status, receivedAt: status === 'not_received' ? null : iso(n),
+      dispensedAt: times.dispensed === undefined ? null : iso(times.dispensed),
+      reversedAt: times.reversed === undefined ? null : iso(times.reversed),
+      ...(times.accepted === undefined ? {} : { acceptedAt: times.accepted === null ? null : iso(times.accepted) }) });
+
+  it('with both headers answers accepted and acceptedAt, in the order reversal, dispensing, sent elsewhere, '
+    + 'withdrawn, accepted, received', async () => {
+    const { service, query } = harness(rows, allowed, own);
+    const answer = await service.read(context, asked, true, true);
+    expect(answer.items).toEqual([
+      item(1, 'received', { accepted: null }),
+      item(2, 'accepted', { accepted: 21 }),
+      // Handed in by hand: accepted by that pharmacist when it was made.
+      item(3, 'accepted', { accepted: 3 }),
+      item(4, 'withdrawn', { accepted: 24 }),
+      item(5, 'sent_elsewhere', { accepted: 25 }),
+      item(6, 'dispensed', { dispensed: 40, accepted: 26 }),
+      item(7, 'dispensing_reversed', { dispensed: 41, reversed: 50, accepted: 41 }),
+      item(8, 'dispensed', { dispensed: 42, accepted: null }),
+      item(9, 'withdrawn', { accepted: null }),
+      { sourceEhrPrescriptionId: rx(10), status: 'not_received', receivedAt: null, dispensedAt: null, reversedAt: null,
+        acceptedAt: null }]);
+    // One reader statement (ORD-4's), and today's progress query, unchanged.
+    expect(query.mock.calls.filter(([sql]) => STEPS.test(sql) || STATES.test(sql)).map(([sql]) => STEPS.test(sql)))
+      .toEqual([true]);
+    expect(WORK_ITEM_PROGRESS_QUERY).not.toMatch(/acceptance|own_work_item_steps|own_prescription_sends/);
+    // The progress never names the pharmacist.
+    expect(JSON.stringify(answer)).not.toContain(acceptor);
+  });
+
+  it('with X-HID-Own-Progress: 0133 only (a Release A ehr-api), answers accepted as received, with no acceptedAt', async () => {
+    const answer = await harness(rows, allowed, own).service.read(context, asked, true);
+    expect(answer.items).toEqual([item(1, 'received'), item(2, 'received'), item(3, 'received'), item(4, 'withdrawn'),
+      item(5, 'sent_elsewhere'), item(6, 'dispensed', { dispensed: 40 }),
+      item(7, 'dispensing_reversed', { dispensed: 41, reversed: 50 }), item(8, 'dispensed', { dispensed: 42 }),
+      item(9, 'withdrawn'), item(10, 'not_received')]);
+    expect(answer.items.some((entry) => 'acceptedAt' in entry)).toBe(false);
+    expect((await harness(rows, allowed, own).service.read(context, asked, true, false)).items).toEqual(answer.items);
+  });
+
+  it('with no header (an ehr-api from before 0133), answers only the four statuses that image knows', async () => {
+    const expected = [item(1, 'received'), item(2, 'received'), item(3, 'received'), item(4, 'received'),
+      item(5, 'not_received'), item(6, 'dispensed', { dispensed: 40 }),
+      item(7, 'dispensing_reversed', { dispensed: 41, reversed: 50 }), item(8, 'dispensed', { dispensed: 42 }),
+      item(9, 'received'), item(10, 'not_received')];
+    expect((await harness(rows, allowed, own).service.read(context, asked)).items).toEqual(expected);
+    // The ORD-4 header alone is not enough: it is taken only with 0133's.
+    expect((await harness(rows, allowed, own).service.read(context, asked, false, true)).items).toEqual(expected);
+  });
+
+  it('on a schema without ORD-4\'s reader (42883) never answers accepted: 0133\'s reader answers the withdrawn flag, '
+    + 'and acceptedAt is null', async () => {
+    const { service, query } = harness(rows, allowed, { withdrawn: own.withdrawn, reasons: own.reasons });
+    const answer = await service.read(context, asked, true, true);
+    expect(answer.items).toEqual([item(1, 'received', { accepted: null }), item(2, 'received', { accepted: null }),
+      item(3, 'received', { accepted: null }), item(4, 'withdrawn', { accepted: null }),
+      item(5, 'sent_elsewhere', { accepted: null }), item(6, 'dispensed', { dispensed: 40, accepted: null }),
+      item(7, 'dispensing_reversed', { dispensed: 41, reversed: 50, accepted: null }),
+      item(8, 'dispensed', { dispensed: 42, accepted: null }), item(9, 'withdrawn', { accepted: null }),
+      item(10, 'not_received', { accepted: null })]);
+    expect(query.mock.calls.map(([sql]) => sql).filter((sql) => STEPS.test(sql) || STATES.test(sql) || /savepoint/.test(sql)))
+      .toEqual(['savepoint pharmacy_own_work_states', expect.stringMatching(STEPS),
+        'rollback to savepoint pharmacy_own_work_states', expect.stringMatching(STATES),
+        'release savepoint pharmacy_own_work_states']);
+  });
+
+  it('answers received with acceptedAt null when the steps cannot be read, and never fails because of them',
+    async () => {
+      const { service } = harness(rows.slice(0, 3), allowed, { ...own,
+        stepsError: Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }) });
+      const answer = await service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [rx(1), rx(2), rx(3)] },
+        true, true);
+      expect(answer.items).toEqual([item(1, 'received', { accepted: null }), item(2, 'received', { accepted: null }),
+        item(3, 'received', { accepted: null })]);
+    });
+
+  it('passes a serialization failure of the steps on, so the read is run again', async () => {
+    const conflict = Object.assign(new Error('could not serialize access'), { code: '40001' });
+    const { service } = harness(rows, allowed, { ...own, stepsError: conflict });
+    await expect(service.read(context, asked, true, true)).rejects.toBe(conflict);
+  });
+
+  it('keeps the audit row as it was: the prescriptions asked about and the work items found', async () => {
+    const { service, audit } = harness(rows, allowed, own);
+    await service.read(context, asked, true, true);
+    expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context, 'pharmacy.work-item.progress.read',
+      { patientId: ids.patient, resourceType: 'pharmacy-work-item-collection', resourceId: ids.facility },
+      { requestedCount: 10, foundCount: 9, workItemIds: rows.map((row) => row.work_item_id), breakGlass: false });
   });
 });

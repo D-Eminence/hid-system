@@ -11,13 +11,16 @@
 --      SECURITY DEFINER, volatility, search_path; who may execute each (each
 --      kind's row's half its own runtime's only; D14's reader the Pharmacy
 --      runtime's; the trigger functions nobody's); 0086's context_allows and
---      work_item_allows bodies unchanged; the 44 own-work policies (a read
---      policy on each work item table, 42 on the chain) and none on the
+--      work_item_allows bodies unchanged; the 46 own-work policies (a read
+--      policy on each work item table, 42 on the chain, and 0147's two on the
+--      pharmacist acceptances, pharmacy.work_item_acceptances) and none on the
 --      imported evidence tables; the sends table, D14's claims and D15's list
 --      have no grant, row-level security on and not forced, no policy; the
 --      two ehr.prescriptions policies name only the dispensing validator's
 --      owner, no runtime role is its member, and the owner-run definer
---      functions that read ehr.prescriptions are the seven known ones; D14's
+--      functions that read ehr.prescriptions are the eight known ones (0147's
+--      acceptance trigger function, pharmacy.validate_work_item_acceptance,
+--      the eighth); D14's
 --      replaced order-route send and resend flag are 0123's and 0086's text
 --      with each D14 hunk once (without them, md5 0c2def2b and cd18f1a4),
 --      their attributes and EXECUTE kept; pharmacy.work_items' only unique
@@ -128,7 +131,14 @@
 --      pharmacist nothing more through the EHR runtime, in a session with the
 --      switch set (as the new ehr-api sets it, 0133 D13): the order-route
 --      send, the own-pharmacy send and the withdrawal refuse the pharmacist
---      first.
+--      first; 0147's acceptance trigger function runs only on an insert into
+--      pharmacy.work_item_acceptances, which the EHR runtime may not make
+--      (42501), and through the Pharmacy runtime it reads a prescription only
+--      as the source of an own item sent automatically that the acceptance
+--      names and the session may read (the prescription D5 already lets the
+--      dispensing validator read for that item), refusing before any read an
+--      acceptance that names no such item (its own suite,
+--      pharmacy-work-item-acceptance, shows each refusal);
 --  10. D15, the own-work list (owner's Q122 A): the patients with own work
 --      listed per kind and facility, one row per own item, replica inserts
 --      included, route-backed items never, nothing undone;
@@ -187,7 +197,9 @@
 --      trigger and its function dropped first do not; in the header's full
 --      order 0123's send and 0086's resend flag come back first (md5
 --      0c2def2b and cd18f1a4, ACLs kept), no function left reads the sends
---      table when it is dropped, the pharmacy list's states and withdrawn
+--      table when it is dropped (0147's steps reader and acceptance trigger
+--      function, which read it too, are dropped first, as 0147's undo says),
+--      the pharmacy list's states and withdrawn
 --      readers are gone (42883), not failing; D14's claims and their
 --      triggers stay, so a released own item still cannot be dispensed and
 --      an outside acceptance while an own claim is live still ends in R10's
@@ -413,10 +425,18 @@ begin
      is distinct from '57e689661a6227e34d3bde9562468951,958a6e5cd2a534d158c82fe399b8f381' then
     raise exception 'own facility work: 0086''s context_allows bodies changed';
   end if;
-  -- The own-work policies: 44, a read policy on each work item table and 42
-  -- on the work chain, never on the imported evidence, the Lab outbox or the
+  -- The own-work policies: 46, a read policy on each work item table, 42 on
+  -- the work chain and 0147's read and insert policies on the pharmacist
+  -- acceptances (pharmacy.work_item_acceptances, anchored on its work item as
+  -- the chain's are), never on the imported evidence, the Lab outbox or the
   -- route reports.
-  if (select count(*) from pg_policy policy_row where policy_row.polname like 'staff\_own\_work\_%') <> 44
+  if (select count(*) from pg_policy policy_row where policy_row.polname like 'staff\_own\_work\_%') <> 46
+     or (select string_agg(policy_row.polname::text || ':' || policy_row.polcmd::text, ' '
+                  order by policy_row.polname::text collate "C")
+           from pg_policy policy_row
+          where policy_row.polname like 'staff\_own\_work\_%'
+            and policy_row.polrelid = 'pharmacy.work_item_acceptances'::regclass)
+        is distinct from 'staff_own_work_insert:a staff_own_work_read:r'
      or (select array_agg(policy_row.polname::text || ':' || policy_row.polcmd::text order by policy_row.polrelid)
            from pg_policy policy_row
           where policy_row.polname like 'staff\_own\_work\_%'
@@ -432,11 +452,14 @@ begin
                          'pharmacy.imported_medication_evidence'::regclass)
                    and coalesce(pg_get_expr(policy_row.polqual, policy_row.polrelid), '')
                        || coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '') ~ 'own_work') then
-    raise exception 'own facility work: the own-work policies are not 0133''s 44 on the work items and their chain';
+    raise exception 'own facility work: the own-work policies are not 0133''s 44 on the work items and their chain and 0147''s two on the pharmacist acceptances';
   end if;
   -- S7: the owner-run SECURITY DEFINER functions that read ehr.prescriptions
-  -- (each sees D5's rows in a pharmacist's session) are exactly these seven;
-  -- case 8 shows each gives the pharmacist nothing more. A new one must be
+  -- (each sees D5's rows in a pharmacist's session) are exactly these eight
+  -- (0147 added pharmacy.validate_work_item_acceptance, the acceptance's
+  -- trigger function); case 8 shows each gives the pharmacist nothing more
+  -- (the two validators in cases 3 and 5, and 0147's in its own suite,
+  -- pharmacy-work-item-acceptance, too). A new one must be
   -- added here, and to case 8, by whoever writes it. The check matches a
   -- definer's own text only: an invoker helper that such a definer calls
   -- reads as the owner too (today ehr.order_belongs_to, called by
@@ -448,7 +471,8 @@ begin
          and proc.proowner = (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure))
      is distinct from 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
        || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
-       || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item()' then
+       || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item() '
+       || 'pharmacy.validate_work_item_acceptance()' then
     raise exception 'own facility work: the owner-run definer functions that read ehr.prescriptions changed: %',
       (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
         where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions');
@@ -2167,6 +2191,33 @@ select pg_temp.expect('PH: the withdrawal refuses', pg_temp.try(format(
 -- (The list is the patient's own: a staff session is refused.)
 select pg_temp.expect('PH: the patient''s own route list answers nothing for a staff session',
   pg_temp.rows_of('select * from ehr.patient_list_order_routes()'), '42501 PATIENT_SESSION_REQUIRED');
+-- 0147's acceptance trigger function (the eighth) runs only on an insert
+-- into pharmacy.work_item_acceptances, which the EHR runtime may not make.
+select pg_temp.expect('PH: the EHR runtime may not write a pharmacist acceptance',
+  left(pg_temp.try(format($s$insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id,
+      accepted_by, accepted_by_membership_id, accepted_with, idempotency_key, request_sha256, correlation_id)
+    values (%L, 'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001',
+      'e1330002-0000-4000-8000-000000000002', 'e1330004-0000-4000-8000-000000000002', 'accept',
+      'own-work-acceptance-probe-1', repeat('c', 64), 'own-work-acceptance-probe')$s$,
+    pg_temp.work_item_of(pg_temp.rx(7)))), 5), '42501');
+reset role;
+-- Through the Pharmacy runtime it reads a prescription only as the source of
+-- the own item sent automatically that the acceptance names (and the session
+-- may read): an acceptance naming a prescription (rx5, active, never sent, no
+-- work item) or nothing is refused before any read, with the same answer.
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select pg_temp.expect('PH: an acceptance naming rx5''s prescription instead of a work item, and one naming nothing, '
+    || 'are refused before any read',
+  (select string_agg(pg_temp.try(format($s$insert into pharmacy.work_item_acceptances (work_item_id, patient_id,
+      facility_id, accepted_by, accepted_by_membership_id, accepted_with, idempotency_key, request_sha256,
+      correlation_id)
+    values (%L, 'e1330006-0000-4000-8000-000000000001', 'e1330001-0000-4000-8000-000000000001',
+      'e1330002-0000-4000-8000-000000000002', 'e1330004-0000-4000-8000-000000000002', 'accept',
+      'own-work-acceptance-probe-2', repeat('c', 64), 'own-work-acceptance-probe')$s$, named)), ' / ')
+     from unnest(array[pg_temp.rx(5), gen_random_uuid()]) named),
+  '23514 Pharmacist acceptance does not match its work item and actor context / '
+  || '23514 Pharmacist acceptance does not match its work item and actor context');
 reset role;
 
 -- Fixtures of cases 10 and 11 (0133 D14 and D15), as replica: patient 4 Dayo
@@ -2888,6 +2939,11 @@ select pg_temp.expect('the undo restores 0123''s send and 0086''s resend flag, A
       'ehr.order_route_resend_allowed(text,uuid)'::regprocedure)),
   'cd18f1a4942694d04288ab5d54679dbd:{owner=X/owner} '
   || '0c2def2b530bcb3d68537ade52787b6b:{owner=X/owner,hid_ehr_runtime=X/owner,hid_schema_test_runtime=X/owner}');
+-- 0147's steps reader and acceptance trigger function read the sends table
+-- too; 0147's undo drops them before its table, and before 0133's.
+drop function pharmacy.own_work_item_steps(uuid[]);
+drop trigger pharmacy_work_item_acceptance_validate on pharmacy.work_item_acceptances;
+drop function pharmacy.validate_work_item_acceptance();
 drop function pharmacy.own_withdrawn_work_items();
 drop trigger prescriptions_own_pharmacy_send_withdrawn on ehr.prescriptions;
 drop function ehr.own_pharmacy_send_withdrawn_on_change();

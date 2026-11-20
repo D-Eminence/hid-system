@@ -55,6 +55,27 @@
 // platform administrator's and the patient's accounts (as the other runtime
 // verifiers seed them), QoreID switched on, and reading what the database
 // holds.
+//
+// ORD-4 (a pharmacist accepts a prescription before dispensing it, owner's
+// Q125 B): every item sent by itself lists as pharmacyStep received, with no
+// pharmacist's acceptance; the first dispensing of a received item accepts
+// it first (acceptedWith dispensing, by the dispensing pharmacist with the
+// dispensing's key, one pharmacist_accepted event of version 2, and
+// acceptedWithDispensing on the dispensing's audit row); the pharmacist,
+// still without a grant, accepts the open item on the own-work basis (201,
+// then 200 alreadyAccepted for the same call and for a new key, each audited
+// with the patient, its outcome, acceptedWith and basis own-work), and the
+// list then shows pharmacyStep accepted while status and acceptedAt keep
+// their Release A meaning; the doctor's ownProgress reads accepted with
+// acceptedAt, then dispensed (acceptedAt kept) once it is dispensed, which
+// records no second acceptance; pharmacy-api, asked as ehr-api with only
+// X-HID-Own-Progress: 0133 (a Release A ehr-api), answers received for the
+// accepted item with no acceptedAt, and the same with only ORD-4's header,
+// accepted only with both; an accepted item put on hold reads withdrawn,
+// keeps its acceptance (Accept answers it again, 200) and cannot be
+// dispensed (409); an item held before anyone accepted it cannot be accepted
+// (409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE, withdrawnReason changed); and
+// Accept on the item a dispensing accepted answers that acceptance (200).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -265,6 +286,15 @@ try {
     'lab.own_work_access_for(text,uuid,text)', 'pharmacy.own_withdrawn_work_items()',
     'pharmacy.own_work_access_for(text,uuid,text)'].sort(), 'a database with 0133');
   evidence.database = { functions: functions.map(row => row.name) };
+  // ORD-4: the acceptance table, its insert check and the steps reader the work list, a read, Accept and the
+  // progress read ask (an image on a database without them answers no pharmacyStep and never 'accepted').
+  const ord4 = await one(`select to_regclass('pharmacy.work_item_acceptances')::text as acceptances,
+      to_regprocedure('pharmacy.validate_work_item_acceptance()')::text as acceptance_check,
+      to_regprocedure('pharmacy.own_work_item_steps(uuid[])')::text as steps`);
+  assert.deepEqual(ord4, { acceptances: 'pharmacy.work_item_acceptances',
+    acceptance_check: 'pharmacy.validate_work_item_acceptance()', steps: 'pharmacy.own_work_item_steps(uuid[])' },
+  `a database with ORD-4: ${JSON.stringify(ord4)}`);
+  evidence.database.ord4 = Object.values(ord4);
   await new Promise(done => stub.listen(0, '127.0.0.1', done));
   const stubUrl = `http://127.0.0.1:${stub.address().port}`;
   const preload = join(temporary, 'loopback-only.cjs');
@@ -483,22 +513,65 @@ try {
     `the pharmacist's list: ${JSON.stringify(rxList.items.map(item => item.sourceEhrPrescriptionId))}`);
   assert.deepEqual([item1, item2, item3, item4].map(item => [item.orderRoute, item.withdrawn, item.withdrawnReason,
     item.patientId]), [item1, item2, item3, item4].map(() => [undefined, undefined, undefined, patient.id]));
+  // ORD-4: each was sent by itself and no pharmacist has accepted it yet (received, no acceptance); `status`
+  // stays 'accepted' (the pharmacy has it), as on Release A.
+  assert.deepEqual([item1, item2, item3, item4].map(item => [item.status, item.pharmacyStep, item.pharmacistAcceptance]),
+    [item1, item2, item3, item4].map(() => ['accepted', 'received', null]),
+    `the steps on the list: ${JSON.stringify([item1, item2, item3, item4].map(item => [item.id, item.pharmacyStep,
+      item.pharmacistAcceptance]))}`);
+  const pharmacistMembership = (await one(`select id::text as id from identity.staff_facility_memberships
+    where account_id = $1 and facility_id = $2`, [ownPharmacist.accountId, hospital.facilityId])).id;
   const rxListAudit = await auditRows(ownPharmacist, 'pharmacy.work-item.list');
   const ownRows = rxList.items.filter(item => item.orderRoute === undefined).map(item => item.id);
   assert.deepEqual(rxListAudit.filter(row => row.patient_id).map(row => [row.patient_id, row.details]),
     [[patient.id, { basis: 'own-work', workItemIds: ownRows }]], `the list's audit: ${JSON.stringify(rxListAudit)}`);
   const read1 = expectStatus(await pharmacyCall(ownPharmacist, 'GET', `/work-items/${item1.id}`), 200, 'read rx1\'s item');
   assert.equal(read1.id, item1.id);
+  const dispenseKey1 = freshKey('dispense');
   expectStatus(await pharmacyCall(ownPharmacist, 'POST', `/work-items/${item1.id}/dispensings`,
     { expectedWorkItemVersion: Number(item1.version), quantityDispensed: 60, quantityUnit: 'tablet',
-      reason: 'Synthetic own-work dispensing' }, { key: freshKey('dispense') }), 201, 'dispense rx1 without a grant');
+      reason: 'Synthetic own-work dispensing' }, { key: dispenseKey1 }), 201, 'dispense rx1 without a grant');
   assert.deepEqual((await auditRows(ownPharmacist, 'pharmacy.work-item.read')).map(row => [row.patient_id, row.details.basis]),
     [[patient.id, 'own-work']], 'the read is recorded with its basis');
+  // ORD-4: rx1's item was received, so its dispensing accepted it first and says so on its audit row.
   assert.deepEqual((await auditRows(ownPharmacist, 'pharmacy.dispensing.create')).map(row => [row.patient_id,
-    row.details.basis]), [[patient.id, 'own-work']], 'the dispensing is recorded with its basis');
+    row.details.basis, row.details.acceptedWithDispensing]), [[patient.id, 'own-work', true]],
+  'the dispensing is recorded with its basis, and that it accepted the item');
   evidence.pharmacist = { grants: 0, listed: ownRows.length, listAudit: 'one row, the patient, own-work, ids only',
     read: 200, dispensed: 201, rowsBasis: 'own-work' };
   step('the pharmacist without a grant lists, reads and dispenses the hospital\'s own work, each audited with basis own-work');
+
+  // ── ORD-4: dispensing a received item accepted it first ──
+  // In the dispensing's transaction, by the dispensing pharmacist, with the dispensing's key; the item's history
+  // gained one pharmacist_accepted event (version 2) beside the send's prescription_accepted (version 1).
+  const acceptancesOf = async () => (await all(`select work_item_id::text as work_item_id, accepted_by::text as accepted_by,
+      accepted_by_membership_id::text as membership_id, accepted_with, idempotency_key, accepted_at
+    from pharmacy.work_item_acceptances where patient_id = $1 order by accepted_at, id`, [patient.id]))
+    .map(row => ({ ...row, accepted_at: row.accepted_at.toISOString() }));
+  const workItemEvents = item => all(`select event_version, event_type, actor_id::text as actor_id,
+      actor_membership_id::text as membership_id from pharmacy.work_item_events where work_item_id = $1
+    order by event_version`, [item.id]);
+  const byDispensing = await acceptancesOf();
+  assert.deepEqual(byDispensing.map(row => [row.work_item_id, row.accepted_by, row.membership_id, row.accepted_with,
+    row.idempotency_key]), [[item1.id, ownPharmacist.accountId, pharmacistMembership, 'dispensing', dispenseKey1]],
+  `the acceptance the dispensing recorded: ${JSON.stringify(byDispensing)}`);
+  const acceptance1 = { acceptedAt: byDispensing[0].accepted_at, acceptedByMembershipId: pharmacistMembership,
+    acceptedWith: 'dispensing' };
+  const events1 = await workItemEvents(item1);
+  assert.deepEqual(events1.map(row => [row.event_version, row.event_type]),
+    [[1, 'prescription_accepted'], [2, 'pharmacist_accepted']], `rx1's item's history: ${JSON.stringify(events1)}`);
+  assert.deepEqual([events1[1].actor_id, events1[1].membership_id], [ownPharmacist.accountId, pharmacistMembership],
+    'the pharmacist_accepted event names the dispensing pharmacist');
+  const read1Dispensed = expectStatus(await pharmacyCall(ownPharmacist, 'GET', `/work-items/${item1.id}`), 200,
+    'read rx1\'s item after its dispensing');
+  assert.deepEqual([read1Dispensed.status, read1Dispensed.acceptedAt, read1Dispensed.pharmacyStep,
+    read1Dispensed.pharmacistAcceptance], ['accepted', item1.acceptedAt, 'dispensed', acceptance1],
+  `rx1's item after its dispensing: ${JSON.stringify(read1Dispensed)}`);
+  evidence.ord4 = { listedSentBySelf: 'received, no acceptance',
+    dispensingOfAReceivedItem: { acceptedWith: 'dispensing', key: 'the dispensing\'s', event: 'pharmacist_accepted v2',
+      audit: 'acceptedWithDispensing: true', read: 'pharmacyStep dispensed' } };
+  step('ORD-4: items sent by themselves list as received; dispensing a received item accepted it first '
+    + '(acceptedWith dispensing, one pharmacist_accepted event, acceptedWithDispensing on the audit row)');
 
   // ── Stopping and changing after the send ──
   const held = expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx2.id}`,
@@ -569,6 +642,155 @@ try {
     ownPharmacyStaffed: true };
   step('a hold withdraws the send (Dispense refused); an edit answers the earlier-version hand-off; ownProgress reads '
     + 'withdrawn; withdrawn items list with the done work, after the open one; an edit after the dispensing reports nothing');
+
+  // ── ORD-4: the pharmacist accepts before dispensing ──
+  // The pharmacist, still without a grant, accepts rx4's item (sent by itself, still open) on the own-work basis:
+  // 201 with the acceptance; the same call again, and a call with a new key, answer 200 with the stored one. Each
+  // call writes its audit row naming the patient; nothing else is written after the first.
+  assert.equal(await grantsOf(ownPharmacist), 0, 'the pharmacist still holds no grant for the patient');
+  const accept = (item, key = freshKey('accept')) => pharmacyCall(ownPharmacist, 'POST', `/work-items/${item.id}/accept`,
+    { expectedWorkItemVersion: Number(item.version) }, { key });
+  const acceptKey4 = freshKey('accept');
+  const accepted4 = expectStatus(await accept(item4, acceptKey4), 201, 'accept rx4\'s item without a grant');
+  const acceptance4 = accepted4.pharmacistAcceptance;
+  assert(Number.isFinite(Date.parse(acceptance4?.acceptedAt)), `the acceptance's time: ${JSON.stringify(accepted4)}`);
+  assert.deepEqual(accepted4, { workItemId: item4.id, pharmacyStep: 'accepted', pharmacistAcceptance: {
+    acceptedAt: acceptance4.acceptedAt, acceptedByMembershipId: pharmacistMembership, acceptedWith: 'accept' },
+  alreadyAccepted: false }, `the accept's answer: ${JSON.stringify(accepted4)}`);
+  const acceptedAgain = { workItemId: item4.id, pharmacyStep: 'accepted', pharmacistAcceptance: acceptance4,
+    alreadyAccepted: true };
+  assert.deepEqual(expectStatus(await accept(item4, acceptKey4), 200, 'the same accept again'), acceptedAgain);
+  assert.deepEqual(expectStatus(await accept(item4), 200, 'accept again with a new key'), acceptedAgain);
+  const acceptances4 = (await acceptancesOf()).filter(row => row.work_item_id === item4.id);
+  assert.deepEqual(acceptances4.map(row => [row.accepted_by, row.membership_id, row.accepted_with, row.idempotency_key,
+    row.accepted_at]), [[ownPharmacist.accountId, pharmacistMembership, 'accept', acceptKey4, acceptance4.acceptedAt]],
+  `one acceptance for rx4's item: ${JSON.stringify(acceptances4)}`);
+  const doctorMembership = (await one(`select id::text as id from identity.staff_facility_memberships
+    where account_id = $1 and facility_id = $2`, [doctor.accountId, hospital.facilityId])).id;
+  assert.deepEqual((await workItemEvents(item4)).map(row => [row.event_version, row.event_type, row.actor_id,
+    row.membership_id]), [[1, 'prescription_accepted', doctor.accountId, doctorMembership],
+    [2, 'pharmacist_accepted', ownPharmacist.accountId, pharmacistMembership]],
+  'rx4\'s item\'s history: the send by the doctor, then the pharmacist\'s acceptance');
+  const acceptAuditOf = async item => (await auditRows(ownPharmacist, 'pharmacy.work-item.pharmacist-accept'))
+    .filter(row => row.resource_id === item.id)
+    .map(row => [row.patient_id, row.details.outcome, row.details.acceptedWith, row.details.basis]);
+  assert.deepEqual(await acceptAuditOf(item4), [[patient.id, 'accepted', 'accept', 'own-work'],
+    [patient.id, 'already_accepted', 'accept', 'own-work'], [patient.id, 'already_accepted', 'accept', 'own-work']],
+  'each accept is audited with the patient, its outcome, how it was accepted and basis own-work');
+  // The list: pharmacyStep accepted with the acceptance; status, acceptedAt and the version keep their Release A
+  // meaning (the pharmacy has it, when it arrived; dispensing still binds to version 1); still open work, first.
+  const afterAccept = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the list after the accept');
+  const listed4 = afterAccept.items.find(entry => entry.id === item4.id);
+  assert.deepEqual([listed4?.status, listed4?.acceptedAt, listed4?.version, listed4?.withdrawn, listed4?.pharmacyStep,
+    listed4?.pharmacistAcceptance], ['accepted', item4.acceptedAt, item4.version, undefined, 'accepted', acceptance4],
+  `rx4's item on the list after the accept: ${JSON.stringify(listed4)}`);
+  assert.equal(afterAccept.items.filter(item => item.orderRoute === undefined)[0]?.id, item4.id,
+    'the accepted item is still open work, listed first');
+
+  // The doctor's ownProgress (ORD-3 through ehr-api, the doctor's cookie only): accepted, with acceptedAt.
+  const ownProgressOf = async rx => expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions/${rx.id}`), 200,
+    `the doctor's prescription ${rx.id}`).ownProgress;
+  const accepted4Progress = await ownProgressOf(rx4);
+  assert.deepEqual(accepted4Progress, { status: 'accepted', receivedAt: item4.acceptedAt, acceptedAt: acceptance4.acceptedAt,
+    dispensedAt: null, reversedAt: null }, `rx4's ownProgress after the accept: ${JSON.stringify(accepted4Progress)}`);
+  // rx1's, accepted by its dispensing: dispensed, with that acceptance's time.
+  const dispensed1Progress = await ownProgressOf(rx1);
+  assert.deepEqual([dispensed1Progress?.status, dispensed1Progress?.acceptedAt], ['dispensed', acceptance1.acceptedAt],
+    `rx1's ownProgress: ${JSON.stringify(dispensed1Progress)}`);
+
+  // pharmacy-api asked as ehr-api with the doctor's cookie, by the headers it sends: only X-HID-Own-Progress: 0133
+  // (a Release A ehr-api, which would read 'accepted' as unknown) is answered received with no acceptedAt; only
+  // ORD-4's header the same; both, accepted with acceptedAt.
+  const progressAsEhr = async (label, versionHeaders) => expectStatus(await http(pharmacy, 'POST',
+    '/pharmacy/work-items/progress', { cookie: doctor.cookie, facility: hospital.facilityId, purpose: 'direct-care',
+    body: { patientId: patient.id, sourceEhrPrescriptionIds: [rx4.id] },
+    headers: { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': tokens.pharmacy, ...versionHeaders } }), 200,
+  `pharmacy progress ${label}`).items;
+  const asReceived = [{ sourceEhrPrescriptionId: rx4.id, status: 'received', receivedAt: item4.acceptedAt,
+    dispensedAt: null, reversedAt: null }];
+  const headerMatrix = {
+    releaseA: await progressAsEhr('with only the 0133 header', { 'x-hid-own-progress': '0133' }),
+    ord4Only: await progressAsEhr('with only the ORD-4 header', { 'x-hid-own-progress-accepted': 'ord4' }),
+    both: await progressAsEhr('with both headers', { 'x-hid-own-progress': '0133',
+      'x-hid-own-progress-accepted': 'ord4' }),
+  };
+  assert.deepEqual(headerMatrix, { releaseA: asReceived, ord4Only: asReceived,
+    both: [{ ...asReceived[0], status: 'accepted', acceptedAt: acceptance4.acceptedAt }] },
+  `the progress answers by header: ${JSON.stringify(headerMatrix)}`);
+
+  // Dispensing the accepted item: dispensed, acceptedAt kept, and no second acceptance (its audit row says none).
+  expectStatus(await pharmacyCall(ownPharmacist, 'POST', `/work-items/${item4.id}/dispensings`,
+    { expectedWorkItemVersion: Number(item4.version), quantityDispensed: 30, quantityUnit: 'tablet',
+      reason: 'Synthetic own-work dispensing after the acceptance' }, { key: freshKey('dispense') }), 201,
+  'dispense rx4 after its acceptance');
+  const dispensedAt4 = (await one('select dispensed_at from pharmacy.dispensings where work_item_id = $1',
+    [item4.id])).dispensed_at.toISOString();
+  const dispensed4Progress = await ownProgressOf(rx4);
+  assert.deepEqual(dispensed4Progress, { status: 'dispensed', receivedAt: item4.acceptedAt,
+    acceptedAt: acceptance4.acceptedAt, dispensedAt: dispensedAt4, reversedAt: null },
+  `rx4's ownProgress after its dispensing: ${JSON.stringify(dispensed4Progress)}`);
+  assert.deepEqual((await acceptancesOf()).map(row => [row.work_item_id, row.accepted_with]),
+    [[item1.id, 'dispensing'], [item4.id, 'accept']], 'the dispensing of an accepted item records no second acceptance');
+  assert.deepEqual((await auditRows(ownPharmacist, 'pharmacy.dispensing.create')).map(row => [row.details.workItemId,
+    row.details.acceptedWithDispensing ?? null]), [[item1.id, true], [item4.id, null]],
+  'only the dispensing that accepted its item says so');
+
+  // A hold after an acceptance: a fifth prescription, sent by itself, accepted, then held. ownProgress reads
+  // withdrawn (acceptedAt kept); the list marks it withdrawn (changed) and keeps its acceptance; Accept answers that
+  // acceptance again (200); Dispense is refused (409).
+  const rx5 = await newPrescription('active', 'Synthetic omeprazole 20 mg tablet');
+  assert.deepEqual(rx5.pharmacyHandoff, SENT, `rx5's hand-off: ${JSON.stringify(rx5.pharmacyHandoff)}`);
+  const item5 = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the list with rx5')
+    .items.find(item => item.sourceEhrPrescriptionId === rx5.id);
+  assert.deepEqual([item5?.pharmacyStep, item5?.pharmacistAcceptance], ['received', null],
+    `rx5's item before the accept: ${JSON.stringify(item5)}`);
+  const acceptance5 = expectStatus(await accept(item5), 201, 'accept rx5\'s item').pharmacistAcceptance;
+  assert.equal((await ownProgressOf(rx5))?.status, 'accepted', 'rx5 reads accepted before the hold');
+  expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx5.id}`,
+    { expectedRowVersion: Number(rx5.rowVersion), status: 'on_hold', changeReason: 'Synthetic hold after the acceptance' }),
+  200, 'hold rx5 after its acceptance');
+  const held5Progress = await ownProgressOf(rx5);
+  assert.deepEqual(held5Progress, { status: 'withdrawn', receivedAt: item5.acceptedAt, acceptedAt: acceptance5.acceptedAt,
+    dispensedAt: null, reversedAt: null }, `rx5's ownProgress after the hold: ${JSON.stringify(held5Progress)}`);
+  const held5 = expectStatus(await pharmacyCall(ownPharmacist, 'GET', `/work-items/${item5.id}`), 200,
+    'read rx5\'s item after the hold');
+  assert.deepEqual([held5.withdrawn, held5.withdrawnReason, held5.pharmacyStep, held5.pharmacistAcceptance],
+    [true, 'changed', 'accepted', acceptance5], `rx5's item after the hold: ${JSON.stringify(held5)}`);
+  assert.deepEqual(expectStatus(await accept(item5), 200, 'accept rx5\'s item after the hold'),
+    { workItemId: item5.id, pharmacyStep: 'accepted', pharmacistAcceptance: acceptance5, alreadyAccepted: true });
+  const refused5 = await pharmacyCall(ownPharmacist, 'POST', `/work-items/${item5.id}/dispensings`,
+    { expectedWorkItemVersion: Number(item5.version), quantityDispensed: 14, quantityUnit: 'tablet',
+      reason: 'Synthetic dispensing after a hold' }, { key: freshKey('dispense') });
+  assert.deepEqual([refused5.status, refused5.body?.code], [409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE'],
+    `dispensing an accepted item after a hold: ${JSON.stringify(refused5.body)}`);
+
+  // An item held before anyone accepted it (rx2's) cannot be accepted, and nothing is written for it; the item a
+  // dispensing accepted (rx1's) answers that acceptance.
+  const refused2 = await accept(item2);
+  assert.deepEqual([refused2.status, refused2.body?.code, refused2.body?.withdrawnReason],
+    [409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE', 'changed'], `accepting a held item: ${JSON.stringify(refused2.body)}`);
+  assert.deepEqual(expectStatus(await accept(item1), 200, 'accept rx1\'s item, accepted by its dispensing'),
+    { workItemId: item1.id, pharmacyStep: 'dispensed', pharmacistAcceptance: acceptance1, alreadyAccepted: true });
+  assert.deepEqual((await acceptancesOf()).map(row => [row.work_item_id, row.accepted_with]),
+    [[item1.id, 'dispensing'], [item4.id, 'accept'], [item5.id, 'accept']],
+  'one acceptance per accepted item, none for the item held before an acceptance');
+  assert.deepEqual(await acceptAuditOf(item1), [[patient.id, 'already_accepted', 'dispensing', 'own-work']],
+    'the accept on the item its dispensing accepted is audited as already accepted');
+  evidence.ord4 = { ...evidence.ord4, pharmacistGrants: 0,
+    accept: { first: 201, sameCallAgain: '200 alreadyAccepted', newKey: '200 alreadyAccepted', basis: 'own-work',
+      event: 'pharmacist_accepted v2', audit: 'one row per call: accepted, then already_accepted' },
+    list: 'pharmacyStep accepted; status, acceptedAt and version unchanged; still open work',
+    ownProgress: { accepted: 'accepted with acceptedAt', afterDispensing: 'dispensed, acceptedAt kept',
+      heldAfterAcceptance: 'withdrawn, acceptedAt kept' },
+    progressHeaders: { only0133: 'received, no acceptedAt', onlyOrd4: 'received, no acceptedAt',
+      both: 'accepted with acceptedAt' },
+    heldAfterAcceptance: { list: 'withdrawn (changed), acceptance kept', accept: '200 alreadyAccepted',
+      dispense: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
+    heldBeforeAcceptance: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE (changed), nothing written',
+    acceptOnDispensingAccepted: '200 alreadyAccepted, acceptedWith dispensing' };
+  step('ORD-4: the pharmacist without a grant accepts on the own-work basis (201, then 200 alreadyAccepted); the doctor\'s '
+    + 'ownProgress reads accepted, then dispensed; a Release A ehr-api is answered received; a hold after the acceptance '
+    + 'reads withdrawn');
 
   // ── The row's half, asked directly by the lab runtime (0133 D1 with D15, owner's Q122 A) ──
   // In the lab scientist's own session, as lab-api's role. The patient has own pharmacy work here and no own lab

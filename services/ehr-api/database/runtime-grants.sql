@@ -503,7 +503,8 @@ grant execute on function platform.current_actor_subject(),platform.current_acco
 grant usage on schema platform, identity, pharmacy to hid_pharmacy_runtime;
 grant select, insert on pharmacy.work_items, pharmacy.work_item_events,
   pharmacy.dispensings, pharmacy.dispensing_reversals,
-  pharmacy.imported_medication_evidence, pharmacy.outbox_events to hid_pharmacy_runtime;
+  pharmacy.imported_medication_evidence, pharmacy.outbox_events,
+  pharmacy.work_item_acceptances to hid_pharmacy_runtime;
 grant usage, select on all sequences in schema pharmacy to hid_pharmacy_runtime;
 grant execute on function platform.current_actor_subject(), platform.current_account_id(),
   platform.current_facility_id(), platform.current_membership_id(), platform.current_correlation_id(),
@@ -681,7 +682,8 @@ grant select,insert,update on lab.specimens to hid_schema_test_runtime;
 grant select, insert on ehr.prescriptions to hid_schema_test_runtime;
 grant select, insert on pharmacy.work_items, pharmacy.work_item_events,
   pharmacy.dispensings, pharmacy.dispensing_reversals,
-  pharmacy.imported_medication_evidence, pharmacy.outbox_events to hid_schema_test_runtime;
+  pharmacy.imported_medication_evidence, pharmacy.outbox_events,
+  pharmacy.work_item_acceptances to hid_schema_test_runtime;
 grant select, insert, update on outreach.registration_cases to hid_schema_test_runtime;
 grant select, insert, update on outreach.campaigns to hid_schema_test_runtime;
 grant select, insert, delete on outreach.campaign_members to hid_schema_test_runtime;
@@ -1891,3 +1893,18 @@ revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims
 -- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):
 -- its install is the owner's alone.
 revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;
+
+-- A pharmacist accepts a prescription before dispensing (0147, ORD-4, owner
+-- decision Q125 B of 19 November 2026), exactly as 0147 grants it: SELECT and
+-- INSERT on pharmacy.work_item_acceptances to the Pharmacy runtime and the
+-- schema test runtime, with the other Pharmacy tables above (as
+-- pharmacy.dispensings; no UPDATE or DELETE: its rows are never changed);
+-- the steps reader (0133 D10's states, whether the item was sent
+-- automatically, and its pharmacist's acceptance) to the same two. The
+-- acceptance's insert trigger function, pharmacy.validate_work_item_acceptance,
+-- is executed by no role: its trigger runs it as its owner (the owner of
+-- pharmacy.validate_dispensing, the role 0133 D5's ehr.prescriptions policies
+-- name). The replaced pharmacy.validate_work_item_event keeps its ACL.
+grant execute on function pharmacy.own_work_item_steps(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function pharmacy.own_work_item_steps(uuid[]), pharmacy.validate_work_item_acceptance() from public;
+revoke all on pharmacy.work_item_acceptances from public;

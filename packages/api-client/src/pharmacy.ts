@@ -103,6 +103,37 @@ export interface PharmacyWorkItem {
    *   pharmacy by the prescribing team".
    */
   withdrawnReason?: 'changed' | 'sent_elsewhere';
+  /**
+   * Where the item is in the pharmacy's own steps (ORD-4), present only when
+   * pharmacy-api sent it (left out on an older pharmacy-api, and on this
+   * facility's own items when the database cannot say):
+   * - `received`: sent to this hospital's pharmacy by itself; no pharmacist
+   *   has accepted it yet. Show "Accept" first, then "Dispense" (dispensing
+   *   accepts it too).
+   * - `accepted`: a pharmacist here took it on (see `pharmacistAcceptance`).
+   * - `dispensed`, `dispensing_reversed`: as `dispensing` says.
+   * `withdrawn` stays a separate flag: a received or accepted item can be
+   * withdrawn. `status` and `acceptedAt` keep their meaning ("the pharmacy
+   * has it", "when it arrived").
+   */
+  pharmacyStep?: PharmacyStep;
+  /**
+   * Who accepted it and when, present with `pharmacyStep` (null while
+   * received). `acceptedWith`: `accept` (the Accept command), `dispensing`
+   * (recorded by the first dispensing), `order_route` (another facility's
+   * order, accepted with its route) or `hand_off` (brought in by a
+   * pharmacist by hand). Show the name through the facility staff names
+   * read; the id is never shown.
+   */
+  pharmacistAcceptance?: PharmacistAcceptance | null;
+}
+
+export type PharmacyStep = 'received' | 'accepted' | 'dispensed' | 'dispensing_reversed';
+
+export interface PharmacistAcceptance {
+  acceptedAt: string;
+  acceptedByMembershipId: string | null;
+  acceptedWith: 'accept' | 'dispensing' | 'order_route' | 'hand_off';
 }
 
 export interface PharmacyDispensing {
@@ -455,6 +486,30 @@ function parseWorkItemPatient(value: unknown): { patient?: PharmacyWorkItemPatie
     dateOfBirth: nullableText(patient, 'dateOfBirth'), healthIdLast4: nullableText(patient, 'healthIdLast4') } };
 }
 
+const PHARMACY_STEPS: readonly PharmacyStep[] = ['received', 'accepted', 'dispensed', 'dispensing_reversed'];
+const ACCEPTED_WITH: readonly PharmacistAcceptance['acceptedWith'][] = ['accept', 'dispensing', 'order_route', 'hand_off'];
+
+/**
+ * ORD-4's step and acceptance: both left out unless pharmacy-api sent a step
+ * this client knows, so an older pharmacy-api (no fields) and a newer value
+ * (an unknown step) both read as "no step" rather than failing the list. A
+ * malformed acceptance next to a known step is refused like any other field.
+ */
+function parseWorkItemStep(value: Record<string, unknown>): Pick<PharmacyWorkItem, 'pharmacyStep' | 'pharmacistAcceptance'> {
+  const step = value.pharmacyStep;
+  if (typeof step !== 'string' || !(PHARMACY_STEPS as readonly string[]).includes(step)) return {};
+  const raw = value.pharmacistAcceptance;
+  if (raw === null || raw === undefined) return { pharmacyStep: step as PharmacyStep, pharmacistAcceptance: null };
+  const acceptance = record(raw, 'Pharmacy work item acceptance');
+  const acceptedWith = acceptance.acceptedWith;
+  if (typeof acceptedWith !== 'string' || !(ACCEPTED_WITH as readonly string[]).includes(acceptedWith)) {
+    throw new PharmacyApiProblem(502, { detail: 'Pharmacy field acceptedWith is malformed.' });
+  }
+  return { pharmacyStep: step as PharmacyStep, pharmacistAcceptance: { acceptedAt: text(acceptance, 'acceptedAt'),
+    acceptedByMembershipId: nullableText(acceptance, 'acceptedByMembershipId'),
+    acceptedWith: acceptedWith as PharmacistAcceptance['acceptedWith'] } };
+}
+
 function parseWorkItem(payload: unknown): PharmacyWorkItem {
   const value = record(payload, 'Pharmacy work item');
   const dispensing = value.dispensing === null ? null : record(value.dispensing, 'Pharmacy dispensing summary');
@@ -476,6 +531,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
     ...(value.withdrawn === true ? { withdrawn: true as const,
       ...(value.withdrawnReason === 'changed' || value.withdrawnReason === 'sent_elsewhere'
         ? { withdrawnReason: value.withdrawnReason } : {}) } : {}),
+    ...parseWorkItemStep(value),
   };
 }
 
