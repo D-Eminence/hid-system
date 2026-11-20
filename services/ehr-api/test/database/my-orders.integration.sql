@@ -524,6 +524,76 @@ select pg_temp.check_case('6 page 1 asks 2,000 patients (1,000 in the walk, 1,00
 select pg_temp.check_case('6 page 1 takes less than 10 seconds', 'true',
   (select (elapsed_ms < 10000)::text from pg_temp.busy_page));
 
+-- 7. The count's row bound and the walk's row stop (Ola, round 3 on #299).
+-- G, another doctor at F1, has five patients G may not read, each with
+-- 4,000 open prescriptions by G, and one lab request for the first of them
+-- (20,001 orders), written with triggers off as in section 6. Prescriptions
+-- only is exactly 20,000 rows: counted in full. Both kinds is 20,001: the
+-- newest 20,000 are counted and the count says it is not complete. Either
+-- way the walk stops after 5,000 rows with nothing it may list: an empty
+-- page with has_more.
+insert into auth.accounts (id, subject, email, status, password_hash, password_algorithm, token_version) values
+  ('f1432000-0000-4000-8000-0000000000a7', 'synthetic:my-orders-0143:g', 'g@my-orders-0143.invalid', 'active',
+   'synthetic-hash', 'argon2id', 1);
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role, active) values
+  ('f1434000-0000-4000-8000-0000000000a7', 'f1432000-0000-4000-8000-0000000000a7', 'Doctor G', 'g@my-orders-0143.invalid',
+   'verified', 'doctor', true);
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+    membership_role, app_role, is_primary, active) values
+  ('f1435000-0000-4000-8000-0000000000a7', 'f1434000-0000-4000-8000-0000000000a7', 'f1432000-0000-4000-8000-0000000000a7',
+   'f1430000-0000-4000-8000-0000000000a1', 'f1431000-0000-4000-8000-0000000000f1', 'doctor', 'doctor', true, true);
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
+  (gen_random_uuid(), 'f1432000-0000-4000-8000-0000000000a7', 'doctor', 'facility', 'f1435000-0000-4000-8000-0000000000a7',
+   'f1431000-0000-4000-8000-0000000000f1', 'Synthetic 0143 role');
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, gender, status)
+select ('f1437000-0000-4000-8003-' || lpad(n::text, 12, '0'))::uuid, 'HID-QMGZZ' || substr('23456', n, 1),
+       'Bound', 'Orders', 'Bound Orders', '1981-01-01', 'unknown', 'active'
+  from generate_series(1, 5) n;
+set local session_replication_role = replica;
+insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_membership_id, encounter_type, status, started_at)
+select ('f1438000-0000-4000-8003-' || lpad(n::text, 12, '0'))::uuid, ('f1437000-0000-4000-8003-' || lpad(n::text, 12, '0'))::uuid,
+       'f1431000-0000-4000-8000-0000000000f1', 'f1432000-0000-4000-8000-0000000000a7', 'f1435000-0000-4000-8000-0000000000a7',
+       'ambulatory', 'in_progress', now() - interval '1 day'
+  from generate_series(1, 5) n;
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_display, frequency, instructions, status, created_at)
+select ('f1439000-0000-4000-8003-' || lpad((n * 10000 + k)::text, 12, '0'))::uuid,
+       ('f1438000-0000-4000-8003-' || lpad(n::text, 12, '0'))::uuid, ('f1437000-0000-4000-8003-' || lpad(n::text, 12, '0'))::uuid,
+       'f1431000-0000-4000-8000-0000000000f1', 'f1432000-0000-4000-8000-0000000000a7', 'f1435000-0000-4000-8000-0000000000a7',
+       'Synthetic bound', 'Daily', 'Synthetic instructions', 'active',
+       now() - interval '1 minute' - (n * 4000 + k) * interval '1 millisecond'
+  from generate_series(1, 5) n, generate_series(0, 3999) k;
+-- The lab request is G's oldest order: the 20,001st, newest first.
+insert into ehr.lab_requests (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  test_code_system, test_code, test_display, priority, status, created_at)
+values ('f143d000-0000-4000-8003-000000000001', 'f1438000-0000-4000-8003-000000000001',
+        'f1437000-0000-4000-8003-000000000001', 'f1431000-0000-4000-8000-0000000000f1',
+        'f1432000-0000-4000-8000-0000000000a7', 'f1435000-0000-4000-8000-0000000000a7',
+        'http://loinc.org', '58410-2', 'Synthetic bound count', 'routine', 'active', now() - interval '1 hour');
+set local session_replication_role = origin;
+select pg_temp.as_member('synthetic:my-orders-0143:g', 'f1435000-0000-4000-8000-0000000000a7', 'f1431000-0000-4000-8000-0000000000f1');
+select set_config('app.correlation_id', 'my-orders-0143-bound', true);
+create temporary table bound_page (kinds text, listed text, hidden bigint, complete boolean, more boolean) on commit drop;
+grant select, insert on pg_temp.bound_page to hid_ehr_api_runtime;
+set local role hid_ehr_api_runtime;
+insert into pg_temp.bound_page
+select 'prescription', coalesce(string_agg(listed.kind || ':' || right(listed.order_id::text, 2), ',' order by listed.ordinality), '-'),
+       max(listed.hidden_count), bool_and(listed.hidden_count_complete), bool_or(listed.has_more)
+  from ehr.list_my_orders(array['prescription'], false, ((now() at time zone 'Africa/Lagos')::date - 90),
+    null, null, null, 25) with ordinality listed;
+insert into pg_temp.bound_page
+select 'both', coalesce(string_agg(listed.kind || ':' || right(listed.order_id::text, 2), ',' order by listed.ordinality), '-'),
+       max(listed.hidden_count), bool_and(listed.hidden_count_complete), bool_or(listed.has_more)
+  from ehr.list_my_orders(array['lab_request', 'prescription'], false, ((now() at time zone 'Africa/Lagos')::date - 90),
+    null, null, null, 25) with ordinality listed;
+reset role;
+select pg_temp.check_case('7 prescriptions only, exactly 20,000 rows: all counted, complete; the walk stops at 5,000 rows '
+  || 'with an empty page and has_more', '-|20000|t|t',
+  (select format('%s|%s|%s|%s', listed, hidden, complete, more) from pg_temp.bound_page where kinds = 'prescription'));
+select pg_temp.check_case('7 both kinds, 20,001 rows: the newest 20,000 counted, not complete; an empty page and has_more',
+  '-|20000|f|t',
+  (select format('%s|%s|%s|%s', listed, hidden, complete, more) from pg_temp.bound_page where kinds = 'both'));
+
 do $$
 declare
   mismatch text;
