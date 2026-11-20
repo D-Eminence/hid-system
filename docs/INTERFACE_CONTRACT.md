@@ -9121,8 +9121,10 @@ platform administrator works).
   `POST /api/v1/admin/self-service-facilities/:applicationId/administrator-role`
   (which keeps the facility's record of it and signs the administrator out),
   so these routes answer 409 `FACILITY_STAFF_ADMINISTRATOR` for that
-  membership; a self-signed-up facility still under review has no other
-  member. Its own account and platform accounts are refused.
+  membership. Before review that route answers 404 (support's review sets the
+  administrator's role), so the detail says which applies. A self-signed-up
+  facility still under review has no other member. Its own account and
+  platform accounts are refused.
 - QA Hospital's seal (0123) holds: a membership of the QA facility belongs
   to one of the QA tenant's fictional accounts.
 - Add answers `201`, or `200` with `replayed: true`; remove answers `200`,
@@ -9158,6 +9160,13 @@ and break-glass grants it revoked (see below), usually `0`.
   reason, and one `identity.consent-grant.close` audit row each with the
   patient (the patient's access log shows "access ended" for the
   administrator's). Grants the patient approved, or gave with the PIN, stay.
+  Such a revocation is not the patient's, so it does not set off ID-4's
+  24-hour refusal: the facility's other clinicians still open the patient as
+  before (0139 replaces 0131's opener so that only the patient's own
+  revocation refuses; this also covers 0086's end of a membership).
+- An open or a break-glass activation by the member waits for a remove in
+  flight on their membership and is then answered under the roles left, so no
+  grant is made after the remove has read the member's grants.
 - Other permissions are read on every request, so the rest of the change
   applies from the member's next request; nobody is signed out. Sign-in sites
   follow section 53's gate (adding `lab` to a hospital doctor also admits
@@ -9230,7 +9239,7 @@ each member gains `licences`, one per active licensed role:
 | 404 | `ADMIN_FACILITY_NOT_FOUND` | Facility was not found (support) |
 | 409 | `FACILITY_REVIEW_PENDING` | (today's) |
 | 409 | `FACILITY_STAFF_SELF` | You cannot change your own membership |
-| 409 | `FACILITY_STAFF_ADMINISTRATOR` | (today's) on the administrator's routes; on support's, a self-signed-up facility's administrator: This is a self-signed-up facility's administrator. Change their role with the facility's administrator role |
+| 409 | `FACILITY_STAFF_ADMINISTRATOR` | (today's) on the administrator's routes; on support's, a self-signed-up facility's administrator: This is a self-signed-up facility's administrator. Before review, set their role in the facility's review; after review, change it with the facility's administrator role |
 | 409 | `FACILITY_STAFF_ALREADY_ENDED` | This person no longer works at the facility |
 | 409 | `FACILITY_STAFF_PLATFORM_ACCOUNT` | This account's access is managed by Health ID |
 | 409 | `FACILITY_STAFF_ROLE_ALREADY_HELD` | This person already has that role |

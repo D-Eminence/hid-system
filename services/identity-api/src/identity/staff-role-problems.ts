@@ -49,7 +49,8 @@ export function staffRoleProblem(error: unknown, caller: StaffRoleCaller): Domai
     // A self-signed-up facility's administrator: 0086 S12's administrator-role command (0139).
     if (code === 'P0001' && message === 'FACILITY_STAFF_ADMINISTRATOR') {
       return new DomainProblem(409, 'FACILITY_STAFF_ADMINISTRATOR',
-        'This is a self-signed-up facility\'s administrator. Change their role with the facility\'s administrator role');
+        'This is a self-signed-up facility\'s administrator. Before review, set their role in the facility\'s review; '
+          + 'after review, change it with the facility\'s administrator role');
     }
     if (code === 'P0002' && message === 'ADMIN_FACILITY_NOT_FOUND') {
       return new DomainProblem(404, 'ADMIN_FACILITY_NOT_FOUND', 'Facility was not found');

@@ -44,6 +44,23 @@
 --    and two reads, SECURITY DEFINER, the same grant:
 --      identity.list_facility_staff_licences()      the Staff page
 --      identity.admin_list_facility_staff_licences(uuid) support's staff view
+-- D6 The two commands that make a grant from a staff role are replaced
+--    (md5-pinned; CREATE OR REPLACE keeps each one's owner, grants and
+--    comment; only the lines marked 0139 (D6) are added, which the
+--    post-check proves):
+--      identity.open_own_facility_patient (0131): its 24-hour refusal after
+--        a revoked own-facility grant now needs the patient's own
+--        revocation (revoked_by is the patient's account, which only
+--        identity.revoke_my_consent_grant records). A remove's revocation
+--        below, and 0086's end of a membership, no longer refuse every
+--        clinician at the facility for 24 hours.
+--      both it and identity.activate_break_glass (0123; 0132's break-glass
+--        by match reference calls it) first take FOR SHARE on the caller's
+--        membership. That conflicts with a remove's FOR NO KEY UPDATE, so
+--        an open waits for a remove in flight and then reads the
+--        permission after it, and a remove waits for an open in flight and
+--        then revokes the grant it made. Opens by the same member do not
+--        wait for each other.
 --
 -- What a command does (identity.staff_role_change_apply)
 --   Add inserts one auth.account_roles row for the membership; for a
@@ -87,6 +104,8 @@
 --   end_facility_staff_membership writes it: the administrator as a staff
 --   actor; support as the system actor, since a platform row may not name a
 --   patient). Patient-approved and PIN grants are the patient's and stay.
+--   Such a revocation does not stop the facility's other clinicians from
+--   opening the patient (D6).
 --   Other permissions are read on every request, so the rest of a change
 --   applies from the member's next request; nobody is signed out.
 --
@@ -167,6 +186,7 @@
 -- 2. The attestation constraints (D3).
 -- 3. The helpers (D4).
 -- 4. The commands and the reads (D5).
+-- 4b. The two openers, replaced (D6).
 -- 5. Grants (here and in runtime-grants.sql).
 -- 6. Post-checks.
 
@@ -184,7 +204,7 @@ begin
      or exists (select 1 from auth.permissions where code = 'platform.facility-staff.manage') then
     raise exception using errcode = '55000', message = '0139: already applied';
   end if;
-  -- The bodies this file calls or mirrors, as 0086, 0115, 0126 and 0027 left them.
+  -- The bodies this file calls, mirrors or replaces, as 0086, 0115, 0126, 0027, 0131 and 0123 left them.
   select string_agg(expected.signature, ', ') into mismatch
     from (values
       ('identity.staff_management_actor(boolean)', '677d7d0d0d5e5ebaef13940b1d1ce395'),
@@ -198,7 +218,10 @@ begin
       ('identity.enforce_outreach_tenant_roles()', '2dbe44af75ad22dbb737a1f57f3849e8'),
       ('auth.membership_has_permission(text,uuid,uuid,text)', '65e3eaff93fe729fd5c5b986b80c9dd6'),
       ('auth.account_has_platform_permission(uuid,text)', '2145c72b864abf1b69d23d96265e5ba7'),
-      ('platform.require_control_enabled(text)', '90887489d15eab24f8f71b145bb02320')
+      ('platform.require_control_enabled(text)', '90887489d15eab24f8f71b145bb02320'),
+      -- Replaced in 4b (D6), as 0131 and 0123 left them.
+      ('identity.open_own_facility_patient(text,uuid)', '7e5d49ff292a03fb92f0395681be365d'),
+      ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c')
     ) expected(signature, body_md5)
    where to_regprocedure(expected.signature) is null
       or (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(expected.signature))
@@ -1055,6 +1078,349 @@ begin
 end
 $$;
 
+-- 4b. The two openers, replaced (D6): 0131's identity.open_own_facility_patient
+-- and 0123's identity.activate_break_glass, as signed, with only the lines
+-- marked 0139 (D6) added. CREATE OR REPLACE keeps each one's owner, grants
+-- and comment; the post-check proves that removing the marked lines gives
+-- back the signed body.
+create or replace function identity.open_own_facility_patient(requested_hid text, requested_patient_id uuid)
+returns table (outcome text, consent_grant_id uuid, subject_patient_id uuid, grant_status text,
+  expires_at timestamptz, existing_grant boolean, basis text)
+language plpgsql
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+#variable_conflict use_column
+declare
+  actor_subject text := platform.current_actor_subject();
+  actor_account uuid := auth.account_id_for_subject(actor_subject);
+  actor_membership uuid := platform.current_membership_id();
+  actor_facility uuid := platform.current_facility_id();
+  actor_correlation text := platform.current_correlation_id();
+  actor_staff uuid;
+  actor_organization uuid;
+  patient_value uuid;
+  basis_value text;
+  refusal text;
+  grant_value uuid;
+  grant_expires timestamptz;
+  reused boolean := false;
+  grant_minutes constant integer := 1440;
+  grant_reason constant text := 'Opened as this facility''s patient';
+begin
+  -- 0139 (D6): wait for a role removal in flight on this membership, so the
+  -- permission below is read once it has committed, and its revocation sees
+  -- any grant this call makes.
+  perform 1 from identity.staff_facility_memberships membership where membership.id = actor_membership for share;
+  if actor_account is null or actor_membership is null or actor_facility is null or actor_correlation is null
+     or not auth.membership_has_permission(actor_subject, actor_membership, actor_facility,
+                                           'identity.patient.open-own-facility') then
+    raise exception using errcode = '42501', message = 'OWN_FACILITY_ACCESS_NOT_PERMITTED';
+  end if;
+  if platform.current_purpose_of_use() is distinct from 'direct-care'
+     or not exists (select 1 from identity.purpose_of_use_codes where code = 'direct-care' and active) then
+    raise exception using errcode = '22023', message = 'OWN_FACILITY_ACCESS_DIRECT_CARE_ONLY';
+  end if;
+  if (requested_hid is null) = (requested_patient_id is null)
+     or (requested_hid is not null and upper(btrim(requested_hid)) !~ '^HID-[A-HJ-NP-Z2-9]{6,32}$') then
+    raise exception using errcode = '22023', message = 'OWN_FACILITY_ACCESS_INVALID';
+  end if;
+  select membership.staff_id, membership.organization_id into actor_staff, actor_organization
+    from identity.staff_facility_memberships membership
+   where membership.id = actor_membership and membership.account_id = actor_account
+     and membership.facility_id = actor_facility and membership.active
+     and membership.migration_hold_reason is null;
+  if actor_staff is null then
+    raise exception using errcode = '42501', message = 'OWN_FACILITY_ACCESS_NOT_PERMITTED';
+  end if;
+
+  select patient.id into patient_value
+    from identity.patients patient
+   where patient.status = 'active'
+     and ((requested_hid is not null and upper(patient.hid_code) = upper(btrim(requested_hid)))
+          or (requested_patient_id is not null and patient.id = requested_patient_id))
+     and identity.sealed_demo_facility(actor_facility) = identity.sealed_demo_patient(patient.id)
+     and identity.sealed_qa_facility(actor_facility) = identity.sealed_qa_patient(patient.id)
+   limit 1;
+
+  if patient_value is null then
+    refusal := 'not_found';
+  else
+    perform pg_advisory_xact_lock(hashtextextended(
+      'own-facility-open:' || actor_membership::text || ':' || patient_value::text, 0));
+    if exists (
+      select 1
+        from identity.consent_directives directive
+        join identity.consent_directive_versions directive_version
+          on directive_version.directive_id = directive.id
+         and directive_version.version_no = directive.current_version
+       where directive.patient_id = patient_value
+         and directive_version.status = 'active'
+         and directive_version.provision_type = 'deny'
+         and directive_version.starts_at <= clock_timestamp()
+         and (directive_version.expires_at is null or directive_version.expires_at > clock_timestamp())
+         and (directive_version.facility_id is null or directive_version.facility_id = actor_facility)
+         and (cardinality(directive_version.actions) = 0
+              or directive_version.actions && array['read_records', 'write_records']::text[])
+         and (cardinality(directive_version.purposes) = 0 or 'direct-care' = any (directive_version.purposes))
+         and (directive_version.grantee_type = 'all'
+              or (directive_version.grantee_type = 'facility' and directive_version.grantee_id = actor_facility)
+              or (directive_version.grantee_type = 'organization' and directive_version.grantee_id = actor_organization)
+              or (directive_version.grantee_type = 'staff' and directive_version.grantee_id = actor_staff))) then
+      refusal := 'deny_directive';
+    elsif exists (
+      select 1 from identity.consent_grants revoked
+       where revoked.patient_id = patient_value and revoked.facility_id = actor_facility
+         and revoked.authorization_method = 'own_facility' and revoked.status = 'revoked'
+         and revoked.revoked_at > clock_timestamp() - interval '24 hours'
+         -- 0139 (D6): the patient's own revocation only (revoke_my_consent_grant
+         -- records the patient's account), not a role removal's or a membership end's.
+         and revoked.revoked_by = (select patient.account_id from identity.patients patient
+                                    where patient.id = patient_value)) then
+      refusal := 'revoked_by_patient';
+    else
+      basis_value := identity.own_facility_basis(patient_value, actor_facility);
+      if basis_value is null then
+        refusal := 'not_own_facility';
+      end if;
+    end if;
+  end if;
+
+  if refusal is not null then
+    insert into audit.events (
+      correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
+      organization_id, facility_id, patient_id, action, outcome, resource_type, resource_id,
+      purpose_of_use, provenance, source_system, details
+    ) values (
+      actor_correlation, 'staff', actor_subject, actor_account, actor_membership,
+      actor_organization, actor_facility, patient_value, 'identity.patient.open-own-facility', 'denied',
+      'patient', patient_value::text, 'direct-care', 'application', 'identity-api',
+      jsonb_build_object('refusal', refusal,
+        'identifiedBy', case when requested_hid is not null then 'health_id' else 'patient_id' end)
+    );
+    return query select case when refusal = 'not_found' then 'not_found' else 'refused' end,
+      null::uuid, null::uuid, null::text, null::timestamptz, false, null::text;
+    return;
+  end if;
+
+  select grant_row.id, grant_row.expires_at into grant_value, grant_expires
+    from identity.consent_grants grant_row
+   where grant_row.patient_id = patient_value and grant_row.account_id = actor_account
+     and grant_row.membership_id = actor_membership and grant_row.facility_id = actor_facility
+     and grant_row.authorization_method = 'own_facility' and grant_row.status = 'active'
+     and grant_row.expires_at > clock_timestamp() and grant_row.migration_hold_reason is null
+   order by grant_row.expires_at desc
+   limit 1;
+  if grant_value is null then
+    grant_value := pg_catalog.gen_random_uuid();
+    grant_expires := current_timestamp + make_interval(mins => grant_minutes);
+    insert into identity.consent_grants (
+      id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
+      scope, purpose_of_use, status, reason, starts_at, expires_at, break_glass,
+      correlation_id, authorization_method
+    ) values (
+      grant_value, null, patient_value, actor_staff, actor_account, actor_membership, actor_facility,
+      'write_records', 'direct-care', 'active', grant_reason, current_timestamp, grant_expires, false,
+      actor_correlation, 'own_facility'
+    );
+  else
+    reused := true;
+  end if;
+  insert into audit.events (
+    correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
+    organization_id, facility_id, patient_id, action, outcome, resource_type, resource_id,
+    purpose_of_use, provenance, source_system, details
+  ) values (
+    actor_correlation, 'staff', actor_subject, actor_account, actor_membership,
+    actor_organization, actor_facility, patient_value, 'identity.patient.open-own-facility', 'success',
+    'consent-grant', grant_value::text, 'direct-care', 'application', 'identity-api',
+    jsonb_build_object('basis', basis_value, 'existing_grant', reused, 'expires_at', grant_expires,
+      'scope', 'write_records', 'duration_minutes', grant_minutes,
+      'identifiedBy', case when requested_hid is not null then 'health_id' else 'patient_id' end)
+  );
+  return query select 'opened'::text, grant_value, patient_value, 'active'::text, grant_expires, reused,
+    'own-facility'::text;
+end
+$$;
+
+create or replace function identity.activate_break_glass(
+  requested_hid text,
+  requested_reason text,
+  requested_duration_minutes integer
+)
+returns table (
+  access_request_id uuid,
+  consent_grant_id uuid,
+  subject_patient_id uuid,
+  grant_status text,
+  expires_at timestamptz,
+  existing_grant boolean
+)
+language plpgsql
+security definer
+set search_path = identity, auth, audit, platform, pg_temp
+as $$
+declare
+  actor_subject text := platform.current_actor_subject();
+  actor_account_id uuid := auth.account_id_for_subject(actor_subject);
+  actor_membership_id uuid := platform.current_membership_id();
+  actor_facility_id uuid := platform.current_facility_id();
+  actor_correlation_id text := platform.current_correlation_id();
+  actor_purpose text := platform.current_purpose_of_use();
+  actor_staff_id uuid;
+  actor_organization_id uuid;
+  patient_id_value uuid;
+  request_id_value uuid;
+  grant_id_value uuid;
+  grant_expires_at timestamptz;
+  replayed boolean := false;
+begin
+  -- 0139 (D6): wait for a role removal in flight on this membership, so the
+  -- permission below is read once it has committed, and its revocation sees
+  -- any grant this call makes.
+  perform 1 from identity.staff_facility_memberships membership where membership.id = actor_membership_id for share;
+  if actor_account_id is null
+     or actor_membership_id is null
+     or actor_facility_id is null
+     or actor_correlation_id is null
+     or not auth.membership_has_permission(
+       actor_subject, actor_membership_id, actor_facility_id, 'identity.break-glass.write'
+     ) then
+    raise exception using errcode = '42501', message = 'Authorized break-glass context is required';
+  end if;
+  if actor_purpose is distinct from 'emergency'
+     or not exists (
+       select 1 from identity.purpose_of_use_codes purpose
+       where purpose.code = 'emergency' and purpose.active
+     ) then
+    raise exception using errcode = '22023', message = 'Break-glass requires the emergency purpose of use';
+  end if;
+  if requested_duration_minutes is null or requested_duration_minutes not between 5 and 240 then
+    raise exception using errcode = '22023', message = 'Invalid break-glass duration';
+  end if;
+  if length(coalesce(btrim(requested_reason), '')) not between 8 and 500 then
+    raise exception using errcode = '22023', message = 'An explicit break-glass reason is required';
+  end if;
+
+  select membership.staff_id, membership.organization_id
+    into actor_staff_id, actor_organization_id
+  from identity.staff_facility_memberships membership
+  where membership.id = actor_membership_id
+    and membership.account_id = actor_account_id
+    and membership.facility_id = actor_facility_id;
+  if actor_staff_id is null then
+    raise exception using errcode = '42501', message = 'Exact staff membership is required';
+  end if;
+
+  select patient_row.id
+    into patient_id_value
+  from identity.patients patient_row
+  where upper(patient_row.hid_code) = upper(btrim(requested_hid))
+    and patient_row.status = 'active'
+    and identity.sealed_demo_facility(actor_facility_id) = identity.sealed_demo_patient(patient_row.id)
+    and identity.sealed_qa_facility(actor_facility_id) = identity.sealed_qa_patient(patient_row.id)
+  limit 1;
+  if patient_id_value is null then
+    raise exception using errcode = 'P0002', message = 'Patient is not available';
+  end if;
+
+  -- Serialize this actor's activation window across patients and facilities.
+  perform pg_advisory_xact_lock(hashtextextended(actor_account_id::text || ':emergency-rate', 0));
+
+  perform pg_advisory_xact_lock(hashtextextended(
+    patient_id_value::text || ':' || actor_membership_id::text || ':break-glass', 0
+  ));
+
+  select grant_row.request_id, grant_row.id, grant_row.expires_at
+    into request_id_value, grant_id_value, grant_expires_at
+  from identity.consent_grants grant_row
+  where grant_row.patient_id = patient_id_value
+    and grant_row.account_id = actor_account_id
+    and grant_row.membership_id = actor_membership_id
+    and grant_row.facility_id = actor_facility_id
+    and grant_row.scope = 'break_glass'
+    and grant_row.purpose_of_use = 'emergency'
+    and grant_row.status = 'active'
+    and grant_row.expires_at > clock_timestamp()
+    and grant_row.migration_hold_reason is null
+  order by grant_row.expires_at desc
+  limit 1;
+
+  if grant_id_value is null then
+    -- Replays preserve access without consuming another activation. New grants
+    -- are bounded to ten per account per rolling hour, including closed grants.
+    if (select count(*) from identity.consent_grants recent
+        where recent.account_id = actor_account_id and recent.break_glass
+          and recent.starts_at > clock_timestamp() - interval '1 hour') >= 10 then
+      raise exception using errcode = 'P0001', message = 'Emergency activation rate limit reached';
+    end if;
+    request_id_value := gen_random_uuid();
+    grant_id_value := gen_random_uuid();
+    grant_expires_at := clock_timestamp() + make_interval(mins => requested_duration_minutes);
+
+    insert into identity.access_requests (
+      id, patient_id, staff_id, membership_id, facility_id, scope,
+      purpose_of_use, reason, status, requested_duration_minutes,
+      break_glass, approved_at, correlation_id
+    ) values (
+      request_id_value, patient_id_value, actor_staff_id, actor_membership_id,
+      actor_facility_id, 'break_glass', 'emergency', btrim(requested_reason),
+      'approved', requested_duration_minutes, true, clock_timestamp(), actor_correlation_id
+    );
+
+    insert into identity.consent_grants (
+      id, request_id, patient_id, staff_id, account_id, membership_id,
+      facility_id, scope, purpose_of_use, status, reason, starts_at,
+      expires_at, break_glass, correlation_id
+    ) values (
+      grant_id_value, request_id_value, patient_id_value, actor_staff_id,
+      actor_account_id, actor_membership_id, actor_facility_id, 'break_glass',
+      'emergency', 'active', btrim(requested_reason), clock_timestamp(),
+      grant_expires_at, true, actor_correlation_id
+    );
+  else
+    replayed := true;
+  end if;
+
+  insert into audit.events (
+    correlation_id, actor_type, actor_subject, actor_account_id,
+    actor_membership_id, organization_id, facility_id, patient_id,
+    action, outcome, resource_type, resource_id, purpose_of_use,
+    reason, provenance, source_system, details
+  ) values (
+    actor_correlation_id, 'staff', actor_subject, actor_account_id,
+    actor_membership_id, actor_organization_id, actor_facility_id, patient_id_value,
+    case when replayed then 'identity.break-glass.replay' else 'identity.break-glass.activate' end,
+    'success', 'consent-grant', grant_id_value::text, 'emergency',
+    btrim(requested_reason), 'application', 'identity-api',
+    jsonb_build_object(
+      'access_request_id', request_id_value,
+      'duration_minutes', requested_duration_minutes,
+      'expires_at', grant_expires_at,
+      'existing_grant', replayed,
+      'review_required', true
+    )
+  );
+
+  if not replayed then
+    -- Audit, grant and patient-notification intent commit atomically. No
+    -- emergency reason, HID, demographics or record content enters delivery.
+    insert into identity.outbox_events (
+      event_type, aggregate_id, aggregate_version, facility_id, patient_id,
+      correlation_id, payload
+    ) values (
+      'EmergencyAccessActivated', grant_id_value, 1, actor_facility_id,
+      patient_id_value, actor_correlation_id,
+      jsonb_build_object('consentGrantId', grant_id_value, 'reviewRequired', true)
+    );
+  end if;
+
+  return query select
+    request_id_value, grant_id_value, patient_id_value, 'active'::text,
+    grant_expires_at, replayed;
+end;
+$$;
+
 -- 5. Grants (here and in runtime-grants.sql).
 revoke all on function
   identity.add_facility_staff_role(uuid,bigint,text,text,text,text,text,text,character),
@@ -1134,5 +1500,33 @@ begin
       raise exception using errcode = '55000', message = '0139 post-check: ' || function_name || ' is not as intended';
     end if;
   end loop;
+  -- D6: each replaced opener is its signed body plus only the marked lines,
+  -- with its settings, owner and grants as before.
+  if md5(replace(replace((select prosrc from pg_proc where oid = 'identity.open_own_facility_patient(text,uuid)'::regprocedure),
+           $d6$  -- 0139 (D6): wait for a role removal in flight on this membership, so the
+  -- permission below is read once it has committed, and its revocation sees
+  -- any grant this call makes.
+  perform 1 from identity.staff_facility_memberships membership where membership.id = actor_membership for share;
+$d6$, ''), $d6$
+         -- 0139 (D6): the patient's own revocation only (revoke_my_consent_grant
+         -- records the patient's account), not a role removal's or a membership end's.
+         and revoked.revoked_by = (select patient.account_id from identity.patients patient
+                                    where patient.id = patient_value)$d6$, '')) <> '7e5d49ff292a03fb92f0395681be365d'
+     or md5(replace((select prosrc from pg_proc where oid = 'identity.activate_break_glass(text,text,integer)'::regprocedure),
+           $d6$  -- 0139 (D6): wait for a role removal in flight on this membership, so the
+  -- permission below is read once it has committed, and its revocation sees
+  -- any grant this call makes.
+  perform 1 from identity.staff_facility_memberships membership where membership.id = actor_membership_id for share;
+$d6$, '')) <> '585d55fe4f7b5773cea96ae8729cc99c'
+     or (select array[prosecdef::text, array_to_string(proconfig, ';')] from pg_proc
+          where oid = 'identity.open_own_facility_patient(text,uuid)'::regprocedure)
+        is distinct from array['true', 'search_path=pg_catalog, pg_temp']
+     or (select array[prosecdef::text, array_to_string(proconfig, ';')] from pg_proc
+          where oid = 'identity.activate_break_glass(text,text,integer)'::regprocedure)
+        is distinct from array['true', 'search_path=identity, auth, audit, platform, pg_temp']
+     or has_function_privilege('public', 'identity.open_own_facility_patient(text,uuid)', 'EXECUTE')
+     or has_function_privilege('public', 'identity.activate_break_glass(text,text,integer)', 'EXECUTE') then
+    raise exception using errcode = '55000', message = '0139 post-check: a replaced opener is not its signed body plus 0139''s lines';
+  end if;
 end
 $$;

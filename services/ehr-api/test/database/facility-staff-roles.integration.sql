@@ -605,6 +605,75 @@ begin
   end if;
 end $$;
 
+-- 2s-2t (0139 D6; Ola's round 3 on #301). m8's own-facility grant on patient
+-- 1 was revoked by the remove (2o), not by the patient, so another
+-- clinician there may still open patient 1: m6 (doctor) opens it and is
+-- answered with its own grant g5. A patient's own revocation still refuses
+-- for 24 hours. The basis: patient 1 was registered at facility 1 at the desk.
+update identity.patients set source_system = 'hid-desk-registration' where id = 'e1396000-0000-4000-8000-000000000001';
+-- Fixture rows without their commands' triggers, as own-facility-access.integration.sql writes its cases.
+set local session_replication_role = replica;
+insert into identity.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, status,
+  first_name, last_name, full_name, dob, identity_evidence, no_nin_reason, idempotency_key, request_sha256,
+  resolved_patient_id, review_idempotency_key, review_request_sha256, reviewed_by_account_id, reviewed_by_membership_id,
+  review_reason)
+select 'e139a000-0000-4000-8000-000000000001', membership.facility_id, membership.account_id, membership.id,
+  'approved_new_identity', 'Roles', 'Patient', 'Roles Patient', date '1980-01-01', 'none', 'no_nin',
+  'roles-suite-case-0001', repeat('0', 64), 'e1396000-0000-4000-8000-000000000001', 'roles-suite-case-0001',
+  repeat('0', 64), membership.account_id, membership.id, 'No possible duplicates: created at the desk without a NIN'
+  from identity.staff_facility_memberships membership where membership.id = pg_temp.member(3);
+set local session_replication_role = origin;
+create function pg_temp.open_as(member_n integer, patient_n integer, correlation text) returns record
+language plpgsql as $f$
+declare answer record;
+begin
+  perform pg_temp.as_staff('synthetic:roles:member-' || member_n, pg_temp.member(member_n)::text,
+    current_setting('hid.test.r_facility_1'), correlation);
+  perform set_config('app.purpose_of_use', 'direct-care', true);
+  select opened.outcome, opened.consent_grant_id, opened.existing_grant into answer
+    from identity.open_own_facility_patient(null, ('e1396000-0000-4000-8000-00000000000' || patient_n)::uuid) opened;
+  return answer;
+end
+$f$;
+set local role hid_identity_api_runtime;
+do $$
+declare answer record;
+begin
+  select * into answer from pg_temp.open_as(6, 1, 'roles-open-0001') as (outcome text, grant_id uuid, existing boolean);
+  if answer.outcome <> 'opened' or answer.grant_id <> pg_temp.grant_id(5) or not answer.existing then
+    raise exception '2s: after a role removal''s revocation, another clinician''s open answered %', row_to_json(answer);
+  end if;
+end $$;
+reset role;
+-- 2t: the patient's own revocation (revoke_my_consent_grant records the
+-- patient's account as revoked_by) still refuses; undone afterwards.
+do $$
+declare answer record;
+begin
+  begin
+    insert into auth.accounts (id, subject, email, display_name, status) values
+      ('e1390000-0000-4000-8000-000000000031', 'synthetic:roles:patient-1', 'patient1@roles-people.invalid',
+       'Roles Patient 1', 'active');
+    update identity.patients set account_id = 'e1390000-0000-4000-8000-000000000031'
+     where id = 'e1396000-0000-4000-8000-000000000001';
+    update identity.consent_grants set status = 'revoked', revoked_at = clock_timestamp(),
+      revoked_by = 'e1390000-0000-4000-8000-000000000031', revoked_reason = 'Revoked by the patient'
+     where id = pg_temp.grant_id(5);
+    set local role hid_identity_api_runtime;
+    select * into answer from pg_temp.open_as(6, 1, 'roles-open-0002') as (outcome text, grant_id uuid, existing boolean);
+    reset role;
+    if answer.outcome <> 'refused'
+       or not exists (select 1 from audit.events where correlation_id = 'roles-open-0002'
+                       and action = 'identity.patient.open-own-facility' and outcome = 'denied'
+                       and details ->> 'refusal' = 'revoked_by_patient') then
+      raise exception '2t: after the patient''s own revocation, an open answered %', row_to_json(answer);
+    end if;
+    raise exception using errcode = 'HR139', message = 'undo 2t';
+  exception when sqlstate 'HR139' then
+    null;
+  end;
+end $$;
+
 -- 3. The reads.
 set local role hid_identity_api_runtime;
 select pg_temp.as_admin(1, 'roles-read-0001');

@@ -446,8 +446,8 @@ describe('SX-4 routes over HTTP', () => {
         expect([answer.status, answer.body.code]).toEqual([status, code]);
         if (code === 'FACILITY_STAFF_ADMINISTRATOR') {
           // Support is pointed to 0086 S12's command, not told that support changes it.
-          expect(answer.body.detail).toBe('This is a self-signed-up facility\'s administrator. Change their role with the '
-            + 'facility\'s administrator role');
+          expect(answer.body.detail).toBe('This is a self-signed-up facility\'s administrator. Before review, set their '
+            + 'role in the facility\'s review; after review, change it with the facility\'s administrator role');
         }
       }
       expect(audit.recordWithClient).not.toHaveBeenCalled();
