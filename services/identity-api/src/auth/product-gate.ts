@@ -61,9 +61,10 @@ export function isStaffProduct(value: unknown): value is StaffProduct {
  * Each staff site is for its own job (owner decision Q97): lab., pharmacy.
  * and outreach. admit their own roles' codes and a hospital administrator
  * (organization.manage), not the hospital roles' ehr.encounter.write. The
- * seeds also grant doctor, clinician, nurse and receptionist the lab,
- * pharmacy and outreach reading codes for their own hospital work (0018,
- * 0023, 0024, 0038), so a membership that holds ehr.encounter.write without
+ * seeds also grant clinician and nurse the lab, pharmacy and outreach
+ * reading codes, and the receptionist the outreach codes, for their own
+ * hospital work (0018, 0023, 0024, 0038; doctors lost theirs in 0136, owner
+ * decision Q103 A), so a membership that holds ehr.encounter.write without
  * organization.manage is a hospital clinical membership and is admitted on
  * ehr. and migrate. only (see facilityAdmittedOnProduct).
  */
@@ -94,7 +95,7 @@ const PRODUCT_PERMISSIONS: Readonly<Record<StaffProduct, readonly string[]>> = O
   ehr: HOSPITAL_PERMISSIONS,
   lab: [...LAB_PERMISSIONS, ...ADMINISTRATOR_PERMISSIONS],
   pharmacy: [...PHARMACY_PERMISSIONS, ...ADMINISTRATOR_PERMISSIONS],
-  // Hospital roles only: lab staff hold ocr.job.* by design but are not admitted on migrate.
+  // Hospital roles only (since 0136 lab staff hold no ocr.job.* code either; the front desk does).
   migrate: HOSPITAL_PERMISSIONS,
   outreach: [...OUTREACH_PERMISSIONS, ...ADMINISTRATOR_PERMISSIONS],
 });

@@ -6,12 +6,14 @@ import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { IntegrationModule } from '../integrations/integration.module';
 import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
+import { RegistrationWithoutNinService } from './registration-without-nin.service';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
 import { IdentityService } from './identity.service';
 import { RecordAccessNoticeService } from './record-access-notice.service';
 import { IDENTITY_PROVIDER } from './identity.types';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
+import { NinCheckOnceModule } from './nin-check-once.module';
 import { NinRegistrationService } from './nin-registration.service';
 import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider, UnavailableNinVerificationProvider } from './nin-verification.provider';
 import { NIN_VERIFICATION_PROVIDER } from './nin.types';
@@ -54,7 +56,8 @@ import { OutreachHealthIdController } from './outreach-health-id.controller';
 import { OutreachHealthIdService } from './outreach-health-id.service';
 
 @Module({
-  imports: [AuthModule, TurnstileModule, IntegrationModule],
+  // NinCheckOnceModule: every patient NIN check through QoreID, once per NIN (0137).
+  imports: [AuthModule, TurnstileModule, IntegrationModule, NinCheckOnceModule],
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
     AdminOrganizationApplicationsController,
@@ -80,6 +83,8 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
     OutreachHealthIdService,
     RecordAccessNoticeService,
     NinRegistrationService,
+    // ID-2 (0130): registration at the desk without a NIN.
+    RegistrationWithoutNinService,
     // ID-0: one NIN service breaker per process, shared by resolve and registration-capabilities.
     NinProviderBreaker,
     FacilityProfileService,
@@ -130,7 +135,7 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
     // Q100 B: "No such patient" on the staff Health ID lookup, and its limit.
     PatientLookupMissService,
   ],
-  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter,
+  exports: [IdentityService, IDENTITY_PROVIDER, HidCodeGenerator, QoreIdVerificationAdapter, NinCheckOnceModule,
     // The public application quota digest, shared with open sign-up on outreach.
     OrganizationProfileCompletionService],
 })

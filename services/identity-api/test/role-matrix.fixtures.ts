@@ -44,23 +44,33 @@ export function readRoleMatrix(): RoleMatrixFixture {
 }
 
 /**
- * auth.role_permissions as the migrations seed it: every (role, permission)
+ * auth.role_permissions as the migrations leave it: every (role, permission)
  * pair they insert, read the same way as product-gate.spec.ts and
- * product-gate-own-job.spec.ts. No migration removes a row (there is no
- * delete from auth.role_permissions); 0084's one insert by select gives
- * platform.emergency-contact.manage to platform roles only, which no column
- * of Akos's table names.
+ * product-gate-own-job.spec.ts, less every pair a later
+ * `delete from auth.role_permissions where (role_code, permission_code) in
+ * (...)` removes (0136, the role-table changes of Q103 A, Q111 A and Q112 A),
+ * in migration order and, within a file, statement order. 0084's one insert
+ * by select gives platform.emergency-contact.manage to platform roles only,
+ * which no column of Akos's table names.
  */
 export function seededRolePermissions(): Map<string, string[]> {
   const directory = join(__dirname, '../../ehr-api/database/migrations');
   const grants = new Map<string, Set<string>>();
+  const pairs = (text: string) => [...text.matchAll(/\(\s*'([a-z_]+)'\s*,\s*'([a-z0-9.-]+)'\s*\)/g)]
+    .map((pair) => [pair[1], pair[2]] as [string, string]);
   for (const file of readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()) {
     const text = readFileSync(join(directory, file), 'utf8');
-    for (const statement of text.matchAll(/insert into auth\.role_permissions\s*\([^)]*\)([\s\S]*?);/gi)) {
-      for (const pair of (statement[1] ?? '').matchAll(/\(\s*'([a-z_]+)'\s*,\s*'([a-z0-9.-]+)'\s*\)/g)) {
-        const [, role, permission] = pair as unknown as [string, string, string];
+    const statements = [
+      ...[...text.matchAll(/insert into auth\.role_permissions\s*\([^)]*\)([\s\S]*?);/gi)]
+        .map((statement) => ({ at: statement.index ?? 0, kind: 'insert' as const, body: statement[1] ?? '' })),
+      ...[...text.matchAll(/delete from auth\.role_permissions\s+where\s*\(\s*role_code\s*,\s*permission_code\s*\)\s+in\s*\(([\s\S]*?)\);/gi)]
+        .map((statement) => ({ at: statement.index ?? 0, kind: 'delete' as const, body: statement[1] ?? '' })),
+    ].sort((left, right) => left.at - right.at);
+    for (const statement of statements) {
+      for (const [role, permission] of pairs(statement.body)) {
         const set = grants.get(role) ?? new Set<string>();
-        set.add(permission);
+        if (statement.kind === 'insert') set.add(permission);
+        else set.delete(permission);
         grants.set(role, set);
       }
     }

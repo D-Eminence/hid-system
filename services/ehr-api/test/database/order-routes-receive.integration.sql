@@ -305,6 +305,8 @@ returns void language sql as $f$
     set_config('app.facility_id', facility::text, true),
     set_config('app.correlation_id', 'p4c-suite-' || member || '-' || substr(md5(random()::text), 1, 8), true),
     set_config('app.purpose_of_use', purpose, true),
+    -- 0133 D13: the switch the new lab-api and pharmacy-api images set (own work only).
+    set_config('app.own_facility_work', '0133', true),
     set_config('app.patient_id', '', true);
 $f$;
 create function pg_temp.as_signup_admin(n integer, purpose text default 'direct-care')
@@ -929,8 +931,11 @@ values ('e4c90000-0000-4000-8000-000000000001', 'e4c30000-0000-4000-8000-0000000
 set local session_replication_role = origin;
 set local role hid_lab_api_runtime;
 select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
-select pg_temp.assert('a non-route row of the same patient stays hidden',
-  not exists (select 1 from lab.work_items item where item.id = 'e4c90000-0000-4000-8000-000000000001'));
+-- 0133 (finding F2): L1's lab staff (LB2 holds lab.work-item.read and
+-- lab.order-route.receive at L1) now see L1's own work without a grant;
+-- before 0133 this row stayed hidden.
+select pg_temp.assert('a non-route row of the same patient is L1''s own work, which its lab staff see (0133)',
+  exists (select 1 from lab.work_items item where item.id = 'e4c90000-0000-4000-8000-000000000001'));
 select pg_temp.assert('route-backed items visible without consent', (select count(*) from lab.work_items item
   where item.order_route_id is not null) = 3);
 select pg_temp.assert('the second member may write the route-backed item', lab.work_item_allows(
@@ -1068,6 +1073,9 @@ select pg_temp.assert('the review gate keeps a receiving role out of the pending
 -- resource-based.
 set local role hid_lab_api_runtime;
 select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+-- 0133 (D2) lets L1's lab staff read L1's own work item through a policy of
+-- its own, lab.work_items' staff_own_work_read (the read above); 0086's
+-- lab.work_item_allows stays strict.
 select pg_temp.assert('residual: the chain branch is per patient', lab.context_allows(
   'e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid, 'read_records')
   and not lab.work_item_allows('e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid,

@@ -24,8 +24,8 @@ begin
 end $$;
 
 -- 2. Fixtures. Clinic K (ca00...02) and another clinic L (...03). Staff A, B, E,
--- N and X at K, and Y at L; each with a facility-scoped doctor role, which
--- carries outreach.campaign.read and .write. X's membership is inactive.
+-- N and X at K, and Y at L; each with a facility-scoped receptionist role, which
+-- carries outreach.campaign.read and .write (doctors lost them in 0136). X's membership is inactive.
 -- C1 (ca07...01): planned, created by A; A admin, B enumerator.
 -- C2 (...02): planned, created by E; E admin.
 -- C4 (...04): planned, created by A; B admin, A not a member.
@@ -53,17 +53,17 @@ select ('ca010000-0000-4000-8000-00000000000' || n)::uuid, 'synthetic:campaign-a
   from campaign_people;
 insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
 select ('ca020000-0000-4000-8000-00000000000' || n)::uuid, ('ca010000-0000-4000-8000-00000000000' || n)::uuid,
-       'Campaign Person ' || upper(letter), 'campaign-admin-' || letter || '@example.invalid', 'verified', 'doctor'
+       'Campaign Person ' || upper(letter), 'campaign-admin-' || letter || '@example.invalid', 'verified', 'receptionist'
   from campaign_people;
 insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
   membership_role, app_role, active)
 select ('ca030000-0000-4000-8000-00000000000' || n)::uuid, ('ca020000-0000-4000-8000-00000000000' || n)::uuid,
        ('ca010000-0000-4000-8000-00000000000' || n)::uuid, 'ca000000-0000-4000-8000-000000000001', facility,
-       'doctor', 'doctor', active
+       'receptionist', 'receptionist', active
   from campaign_people;
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
 select ('ca040000-0000-4000-8000-00000000000' || n)::uuid, ('ca010000-0000-4000-8000-00000000000' || n)::uuid,
-       'doctor', 'facility', ('ca030000-0000-4000-8000-00000000000' || n)::uuid, facility, 'Synthetic campaign admin role'
+       'receptionist', 'facility', ('ca030000-0000-4000-8000-00000000000' || n)::uuid, facility, 'Synthetic campaign admin role'
   from campaign_people;
 insert into outreach.campaigns (id, facility_id, created_by_account_id, created_by_membership_id, name, services,
   starts_at) values

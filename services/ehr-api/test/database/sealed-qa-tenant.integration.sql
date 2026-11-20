@@ -328,10 +328,11 @@ begin
       and runtime.oid <> (select relation.relowner from pg_class relation where relation.oid = 'identity.sealed_qa_members'::regclass)
       and (has_table_privilege(runtime.oid, 'identity.sealed_qa_members', 'SELECT')
         or has_table_privilege(runtime.oid, 'identity.sealed_qa_members', 'INSERT'))));
+  -- 0134 adds an 18th, identity.sealed_qa_hospital_work_staff_install(), the owner's alone.
   perform pg_temp.assert('helper ACLs: sealed_qa_ids and sealed_qa_facility to the Identity and schema test runtimes only',
     (select count(*) from pg_proc proc
       where proc.pronamespace = 'identity'::regnamespace
-        and (proc.proname like 'sealed\_qa\_%' or proc.proname like '%\_sealed\_qa' or proc.proname = 'demo_members_never_qa')) = 17
+        and (proc.proname like 'sealed\_qa\_%' or proc.proname like '%\_sealed\_qa' or proc.proname = 'demo_members_never_qa')) = 18
     and (select array_agg(proc.oid::regprocedure::text order by proc.oid::regprocedure::text)
            from pg_proc proc
           where proc.pronamespace = 'identity'::regnamespace
@@ -416,12 +417,15 @@ begin
               'identity.admin_platform_overview()'::regprocedure,
               'identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure)
         and position('sealed_qa_' in proc.prosrc) > 0 and position('sealed_demo_' in proc.prosrc) > 0) = 9);
-  perform pg_temp.assert('the nine replaced bodies are 0123''s, byte for byte',
+  perform pg_temp.assert('the nine replaced bodies are 0123''s, byte for byte (the order-route send 0123''s or 0133''s)',
     (select count(*) from (values
       ('identity.create_access_request(text,text,text,integer)', '2745e91d666f16a6ad79019d31f0380a'),
       ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c'),
       ('identity.access_patient_with_pin(text,text,integer)', '6f44fc5433a8e2ddf1febbb711c88037'),
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '0c2def2b530bcb3d68537ade52787b6b'),
+      -- or 0133's (D14: 0123's text with the hunks marked "0133 D14"; its suite
+      -- rebuilds 0123's text from it); both sealed clauses are checked above.
+      ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', 'fef3bfda1239e5cd72a149f8db30ff64'),
       ('identity.search_order_destinations(text,text)', 'da222fe1b63db757a1ddb93fdc9eabf0'),
       ('identity.search_share_providers(text,uuid,text)', '26ca190255ddc1ff30adb2fb5f0ee347'),
       ('identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)',

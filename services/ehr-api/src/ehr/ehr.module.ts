@@ -28,6 +28,8 @@ import { HealthProfileController } from './health-profile/health-profile.control
 import { HealthProfileService } from './health-profile/health-profile.service';
 // EHR-C5: one-call consultation.
 import { ConsultationsModule } from './consultation/consultations.module';
+// EHR-C7 (0135): the waiting list.
+import { VisitQueueModule } from './worklist/visit-queue.module';
 
 @Module({
   imports: [
@@ -43,6 +45,8 @@ import { ConsultationsModule } from './consultation/consultations.module';
     LabRequestsModule,
     OrderRoutesModule,
     ConsultationsModule,
+    // EHR-C7 (0135): the waiting list.
+    VisitQueueModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,

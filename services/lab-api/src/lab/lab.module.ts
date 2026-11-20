@@ -16,6 +16,7 @@ import { LabOrderRoutesService } from './lab-order-routes.service';
 import { LabOrderRouteAccess } from './order-route-access';
 import { LabOrderRouteCards } from './order-route-cards';
 import { LabOwnWorkPatientCards } from './own-work-patient-cards';
+import { LabOwnWork } from './own-work-access';
 import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 // ORD-3: read-only progress of this facility's own work items, for ehr-api.
 import { LabWorkItemProgressController } from './work-item-progress.controller';
@@ -33,6 +34,8 @@ import { LabWorkItemProgressService } from './work-item-progress.service';
     LabOrderRoutesService, LabOrderRouteAccess, LabOrderRouteCards, LabWorkItemProgressService,
     // The patient on own work (0124), on only while OWN_WORK_PATIENT_CARD_ENABLED is true.
     { provide: LabOwnWorkPatientCards,
-      useFactory: () => new LabOwnWorkPatientCards(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED) }],
+      useFactory: () => new LabOwnWorkPatientCards(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED) },
+    // This facility's own work for its lab staff (0133): always on; a schema without 0133 answers as before.
+    { provide: LabOwnWork, useFactory: () => new LabOwnWork(true) }],
   exports: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService] })
 export class LabModule {}

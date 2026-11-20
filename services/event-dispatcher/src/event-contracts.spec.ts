@@ -14,6 +14,18 @@ const event: ClaimedEvent = { producer: 'identity',
   claimExpiresAt: new Date('2026-08-11T10:01:00.000Z') };
 
 describe('HID event envelope v1', () => {
+  it('admits the PharmacyWorkItemCreated event of a prescription sent automatically to its own pharmacy (database 0133)', () => {
+    // 0133's ehr.send_prescription_to_own_pharmacy writes pharmacy-api's own
+    // acceptance payload, so the delivery contract is unchanged.
+    const sent = { ...event, producer: 'pharmacy' as const, eventType: 'PharmacyWorkItemCreated',
+      aggregateType: 'pharmacy-work-item', aggregateVersion: 1,
+      payload: { workItemId: event.aggregateId, sourceEhrPrescriptionId: '60000000-0000-4000-8000-000000000001',
+        sourceEhrPrescriptionVersion: 2, status: 'accepted' } };
+    expect(eventEnvelope(sent)).toMatchObject({ type: 'PharmacyWorkItemCreated', producer: 'pharmacy',
+      payload: sent.payload });
+    expect(() => eventEnvelope({ ...sent, payload: { ...sent.payload, acceptedVia: 'auto_send' } }))
+      .toThrow(/outside its producer contract/);
+  });
   it('constructs the stable PHI-minimal versioned envelope', () => {
     expect(eventEnvelope(event)).toEqual({ schema: 'ng.hid.event-envelope', schemaVersion: 1,
       id: event.eventId, type: 'PatientRegistered', version: 1,

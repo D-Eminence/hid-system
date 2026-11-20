@@ -5,7 +5,9 @@ import { INTERNAL_CALLER, READ_ONLY_POST, REQUIRED_PERMISSIONS } from '../common
 import type { DataAccessContext } from '../common/request-context';
 import { WORK_ITEM_PROGRESS_MAX_IDS, WorkItemProgressDto } from './dto/work-item-progress.dto';
 import { PharmacyWorkItemProgressController } from './work-item-progress.controller';
-import { PharmacyWorkItemProgressService, WORK_ITEM_PROGRESS_QUERY } from './work-item-progress.service';
+import { PharmacyOwnWork } from './own-work-access';
+import { OWN_PROGRESS_HEADER, OWN_PROGRESS_VERSION, PharmacyWorkItemProgressService,
+  WORK_ITEM_PROGRESS_QUERY } from './work-item-progress.service';
 
 // Fictional ids only.
 const ids = {
@@ -14,7 +16,7 @@ const ids = {
   rxA: '7a1c0d2e-0000-4000-8000-00000000000a', rxB: '7a1c0d2e-0000-4000-8000-00000000000b',
   rxC: '7a1c0d2e-0000-4000-8000-00000000000c', rxD: '7a1c0d2e-0000-4000-8000-00000000000d',
   workA: '7a1c0d2e-0000-4000-8000-0000000000a1', workB: '7a1c0d2e-0000-4000-8000-0000000000b1',
-  workC: '7a1c0d2e-0000-4000-8000-0000000000c1',
+  workC: '7a1c0d2e-0000-4000-8000-0000000000c1', workD: '7a1c0d2e-0000-4000-8000-0000000000d1',
 };
 const doctorPermissions = ['ehr.prescription.read', 'ehr.prescription.write'];
 const context: DataAccessContext = {
@@ -28,13 +30,26 @@ const context: DataAccessContext = {
 const allowed = { allowed: true, patientId: ids.patient, facilityId: ids.facility, membershipId: ids.membership,
   scope: 'read_records', purpose: 'direct-care', breakGlass: false };
 
-function harness(rows: unknown[], decision: unknown = allowed) {
-  const query = jest.fn(async (sql: string) => (sql === WORK_ITEM_PROGRESS_QUERY ? { rows } : { rows: [] }));
+function harness(rows: unknown[], decision: unknown = allowed,
+  own?: { withdrawn?: string[]; reasons?: Record<string, string>; error?: Error & { code?: string } }) {
+  const query = jest.fn(async (sql: string, values: unknown[] = []) => {
+    if (sql === WORK_ITEM_PROGRESS_QUERY) return { rows };
+    if (/from pharmacy\.own_work_item_states\(\$1::uuid\[\]\)/.test(sql)) {
+      if (own?.error) throw own.error;
+      return { rows: (values[0] as string[]).map((item) => {
+        const withdrawn = own?.withdrawn?.includes(item) ?? false;
+        return { work_item_id: item, basis: 'consent', withdrawn,
+          withdrawn_reason: withdrawn ? own?.reasons?.[item] ?? 'changed' : null };
+      }) };
+    }
+    return { rows: [] };
+  });
   const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => unknown) =>
     operation({ query })) };
   const identity = { authorize: jest.fn().mockResolvedValue(decision) };
   const audit = { recordWithClient: jest.fn() };
-  const service = new PharmacyWorkItemProgressService(database as never, identity as never, audit as never);
+  const service = new PharmacyWorkItemProgressService(database as never, identity as never, audit as never,
+    own ? new PharmacyOwnWork(true) : undefined);
   return { service, query, database, identity, audit };
 }
 
@@ -90,6 +105,104 @@ describe('POST pharmacy/work-items/progress (ORD-3)', () => {
       { patientId: ids.patient, resourceType: 'pharmacy-work-item-collection', resourceId: ids.facility },
       { requestedCount: 4, foundCount: 3, workItemIds: [ids.workA, ids.workB, ids.workC], breakGlass: false });
     expect(JSON.stringify(answer)).not.toMatch(/unverified/i);
+  });
+
+  it('answers withdrawn (0133) for an item whose automatic send was withdrawn before it was dispensed', async () => {
+    const { service } = harness([
+      { work_item_id: ids.workA, source_ehr_prescription_id: ids.rxA, accepted_at: new Date('2026-11-18T10:40:00Z'),
+        dispensed_at: null, reversed_at: null },
+      { work_item_id: ids.workB, source_ehr_prescription_id: ids.rxB, accepted_at: new Date('2026-11-18T10:41:00Z'),
+        dispensed_at: new Date('2026-11-18T11:05:00Z'), reversed_at: null },
+    ], allowed, { withdrawn: [ids.workA, ids.workB] });
+    const answer = await service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA, ids.rxB] },
+      true);
+    expect(answer.items).toEqual([
+      { sourceEhrPrescriptionId: ids.rxA, status: 'withdrawn', receivedAt: '2026-11-18T10:40:00.000Z',
+        dispensedAt: null, reversedAt: null },
+      { sourceEhrPrescriptionId: ids.rxB, status: 'dispensed', receivedAt: '2026-11-18T10:41:00.000Z',
+        dispensedAt: '2026-11-18T11:05:00.000Z', reversedAt: null },
+    ]);
+  });
+
+  // 0133 D14 (owner's Q121 A): sent to another facility's pharmacy before it was dispensed. The status order is a
+  // reversal, a dispensing, sent elsewhere, withdrawn, else received.
+  const progressRows = [
+    { work_item_id: ids.workA, source_ehr_prescription_id: ids.rxA, accepted_at: new Date('2026-11-19T09:00:00Z'),
+      dispensed_at: null, reversed_at: null },
+    { work_item_id: ids.workB, source_ehr_prescription_id: ids.rxB, accepted_at: new Date('2026-11-19T09:01:00Z'),
+      dispensed_at: null, reversed_at: null },
+    { work_item_id: ids.workC, source_ehr_prescription_id: ids.rxC, accepted_at: new Date('2026-11-19T09:02:00Z'),
+      dispensed_at: new Date('2026-11-19T10:00:00Z'), reversed_at: null },
+    { work_item_id: ids.workD, source_ehr_prescription_id: ids.rxD, accepted_at: new Date('2026-11-19T09:03:00Z'),
+      dispensed_at: new Date('2026-11-19T10:01:00Z'), reversed_at: new Date('2026-11-19T10:30:00Z') },
+  ];
+  const progressOwn = { withdrawn: [ids.workA, ids.workB, ids.workC, ids.workD],
+    reasons: { [ids.workA]: 'sent_elsewhere', [ids.workB]: 'changed', [ids.workC]: 'sent_elsewhere',
+      [ids.workD]: 'sent_elsewhere' } };
+  const asked = { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA, ids.rxB, ids.rxC, ids.rxD] };
+
+  it('with X-HID-Own-Progress: 0133, answers sent_elsewhere and withdrawn, after a reversal and a dispensing', async () => {
+    const { service } = harness(progressRows, allowed, progressOwn);
+    const answer = await service.read(context, asked, true);
+    expect(answer.items).toEqual([
+      { sourceEhrPrescriptionId: ids.rxA, status: 'sent_elsewhere', receivedAt: '2026-11-19T09:00:00.000Z',
+        dispensedAt: null, reversedAt: null },
+      { sourceEhrPrescriptionId: ids.rxB, status: 'withdrawn', receivedAt: '2026-11-19T09:01:00.000Z',
+        dispensedAt: null, reversedAt: null },
+      { sourceEhrPrescriptionId: ids.rxC, status: 'dispensed', receivedAt: '2026-11-19T09:02:00.000Z',
+        dispensedAt: '2026-11-19T10:00:00.000Z', reversedAt: null },
+      { sourceEhrPrescriptionId: ids.rxD, status: 'dispensing_reversed', receivedAt: '2026-11-19T09:03:00.000Z',
+        dispensedAt: '2026-11-19T10:01:00.000Z', reversedAt: '2026-11-19T10:30:00.000Z' },
+    ]);
+  });
+
+  it('without the header (an ehr-api from before 0133), answers only the four statuses that image knows', async () => {
+    const { service } = harness(progressRows, allowed, progressOwn);
+    const answer = await service.read(context, asked);
+    expect(answer.items).toEqual([
+      { sourceEhrPrescriptionId: ids.rxA, status: 'not_received', receivedAt: null, dispensedAt: null, reversedAt: null },
+      { sourceEhrPrescriptionId: ids.rxB, status: 'received', receivedAt: '2026-11-19T09:01:00.000Z',
+        dispensedAt: null, reversedAt: null },
+      { sourceEhrPrescriptionId: ids.rxC, status: 'dispensed', receivedAt: '2026-11-19T09:02:00.000Z',
+        dispensedAt: '2026-11-19T10:00:00.000Z', reversedAt: null },
+      { sourceEhrPrescriptionId: ids.rxD, status: 'dispensing_reversed', receivedAt: '2026-11-19T09:03:00.000Z',
+        dispensedAt: '2026-11-19T10:01:00.000Z', reversedAt: '2026-11-19T10:30:00.000Z' },
+    ]);
+    expect(answer.items.every((item) => ['not_received', 'received', 'dispensed', 'dispensing_reversed']
+      .includes(item.status))).toBe(true);
+    expect((await harness(progressRows, allowed, progressOwn).service.read(context, asked, false)).items)
+      .toEqual(answer.items);
+  });
+
+  it('passes X-HID-Own-Progress: 0133 from the request to the read, and nothing else', async () => {
+    expect([OWN_PROGRESS_HEADER, OWN_PROGRESS_VERSION]).toEqual(['x-hid-own-progress', '0133']);
+    const read = jest.fn(async () => ({ items: [] }));
+    const controller = new PharmacyWorkItemProgressController({ read } as never);
+    const request = (own: Record<string, string>) => {
+      const headers: Record<string, string> = { authorization: 'Bearer doctor', 'x-purpose-of-use': 'direct-care', ...own };
+      return { correlationId: 'progress-correlation-1', actor: context.actor, facilityId: ids.facility, method: 'POST',
+        headers, header: (name: string) => headers[name.toLowerCase()] } as never;
+    };
+    const body = { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA] };
+    for (const [headers, current] of [[{ 'x-hid-own-progress': '0133' }, true], [{}, false],
+      [{ 'x-hid-own-progress': '0134' }, false], [{ 'x-hid-own-progress': '0133 ' }, false]] as const) {
+      read.mockClear();
+      await controller.read(body as never, request(headers));
+      expect(read).toHaveBeenCalledWith(expect.objectContaining({ facilityId: ids.facility }), body, current);
+    }
+  });
+
+  it('gets 0133\'s own-work reader injected by the Pharmacy module', () => {
+    expect((Reflect.getMetadata('design:paramtypes', PharmacyWorkItemProgressService) as unknown[])[3]).toBe(PharmacyOwnWork);
+  });
+
+  it('answers received when the withdrawal cannot be read (the answer never fails because of it)', async () => {
+    const { service } = harness([
+      { work_item_id: ids.workA, source_ehr_prescription_id: ids.rxA, accepted_at: new Date('2026-11-18T10:40:00Z'),
+        dispensed_at: null, reversed_at: null },
+    ], allowed, { error: Object.assign(new Error('function does not exist'), { code: '42883' }) });
+    const answer = await service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA] });
+    expect(answer.items[0]!.status).toBe('received');
   });
 
   it('audits the lookup even when nothing is found', async () => {

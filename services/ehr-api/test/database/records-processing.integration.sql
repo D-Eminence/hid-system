@@ -79,8 +79,11 @@ select pg_temp.expect('1d the request list', 't/{"search_path=pg_catalog, pg_tem
             (select string_agg(coalesce(nullif(acl.grantee::regrole::text, '-'), 'public') || ' ' || acl.privilege_type, ', ')
                from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl where acl.grantee <> p.proowner))
      from pg_proc p where p.oid = 'identity.list_my_access_requests()'::regprocedure));
+-- 0128 appends the requester's name and role; 0104's twelve columns are unchanged.
 select pg_temp.expect('1e the list''s columns', 'access_request_id facility_id facility_name scope reason status '
-  || 'requested_duration_minutes requested_at approved_at denied_at denied_reason purpose_of_use',
+  || 'requested_duration_minutes requested_at approved_at denied_at denied_reason purpose_of_use'
+  || case when to_regprocedure('notification.on_identity_pin_outbox_created()') is not null
+          then ' requester_name requester_role' else '' end,
   (select array_to_string(p.proargnames[1:], ' ') from pg_proc p
     where p.oid = 'identity.list_my_access_requests()'::regprocedure));
 select pg_temp.expect('1f who may list', 'identity=t ehr=f lab=f pharmacy=f ocr=f',
@@ -113,6 +116,28 @@ select pg_temp.expect('1h the cover and the gate', 'cover: t/s/{"search_path=pg_
      from (values (1, 'cover', 'identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)'),
                   (2, 'gate', 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)')) wanted(ord, label, signature)
      join pg_proc p on p.oid = wanted.signature::regprocedure));
+
+-- The role table as these cases were written for it (before 0136). 0136
+-- (owner decisions Q103 A, Q111 A) took ocr.job.write from laboratory staff
+-- and gave it to the front desk (doctors keep it), so a lab member can no
+-- longer ask for or hold records processing. This suite pins records
+-- processing's own rules (0104, 0108, 0113), not who holds ocr.job.write:
+-- for its own transaction, which is rolled back, it puts back the rows 0136
+-- removed and takes away the front-desk rows 0136 added. What 0136 changes,
+-- including who may ask for records processing now, is proven by
+-- role-permission-changes.integration.sql.
+insert into auth.role_permissions (role_code, permission_code)
+select role_code, permission_code
+  from (values ('doctor', 'outreach.campaign.read'), ('doctor', 'outreach.campaign.write'),
+               ('doctor', 'outreach.registration.read'), ('doctor', 'outreach.registration.write'),
+               ('doctor', 'lab.work-item.read'), ('doctor', 'pharmacy.work-item.read'), ('lab', 'ehr.encounter.read'),
+               ('lab', 'ocr.job.read'), ('lab', 'ocr.job.write'), ('lab', 'ocr.validation.write'),
+               ('admin', 'lab.work-item.read'), ('admin', 'pharmacy.work-item.read')) removed(role_code, permission_code)
+on conflict do nothing;
+delete from auth.role_permissions
+ where role_code = 'receptionist'
+   and permission_code in ('ehr.document.write', 'ehr.document.read-own', 'ocr.job.write', 'ocr.job.start',
+                           'ocr.job.read-own', 'ehr.vital.read');
 
 -- 2. Fixtures: one facility; a doctor, clinician, nurse, lab member,
 -- pharmacist and receptionist there; patients aged 40 (P1, with a login and a

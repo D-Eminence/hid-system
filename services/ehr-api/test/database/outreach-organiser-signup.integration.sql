@@ -76,15 +76,16 @@ insert into auth.account_roles (id, account_id, role_code, scope_type, membershi
    '0e030000-0000-4000-8000-000000000002', '0e000000-0000-4000-8000-000000000002', 'Synthetic signup suite role'),
   ('0e040000-0000-4000-8000-000000000003', '0e010000-0000-4000-8000-000000000003', 'platform_admin', 'platform',
    null, null, 'Synthetic signup suite support role');
--- A hospital campaign, to show hospital outreach is unchanged.
+-- A hospital campaign, to show hospital outreach is unchanged. The nurse runs
+-- it: doctors hold no Outreach permission since 0136.
 insert into outreach.campaigns (id, facility_id, created_by_account_id, created_by_membership_id, name, services, starts_at)
 values ('0e070000-0000-4000-8000-000000000001', '0e000000-0000-4000-8000-000000000002',
-  '0e010000-0000-4000-8000-000000000001', '0e030000-0000-4000-8000-000000000001', 'Hospital Campaign',
+  '0e010000-0000-4000-8000-000000000002', '0e030000-0000-4000-8000-000000000002', 'Hospital Campaign',
   array['registration']::text[], clock_timestamp() - interval '1 day');
 insert into outreach.campaign_members (campaign_id, facility_id, membership_id, role, added_by_account_id, added_by_membership_id)
 values ('0e070000-0000-4000-8000-000000000001', '0e000000-0000-4000-8000-000000000002',
-  '0e030000-0000-4000-8000-000000000001', 'admin', '0e010000-0000-4000-8000-000000000001',
-  '0e030000-0000-4000-8000-000000000001');
+  '0e030000-0000-4000-8000-000000000002', 'admin', '0e010000-0000-4000-8000-000000000002',
+  '0e030000-0000-4000-8000-000000000002');
 set local session_replication_role = origin;
 
 create temporary table os_cases (seq serial, name text primary key, expected text not null, actual text) on commit drop;
@@ -287,8 +288,10 @@ select pg_temp.outreach_case('2c a new group may create a campaign already Activ
   format($s$insert into outreach.campaigns (facility_id, created_by_account_id, created_by_membership_id, name, services,
       status, starts_at) values (%L, %L, %L, 'Straight To Active', array['registration']::text[], 'active', clock_timestamp())$s$,
     pg_temp.id('fac1'), pg_temp.id('acct1'), pg_temp.id('mem1')));
+-- 2d, 3i and 4a act as the hospital nurse: doctors hold no Outreach permission
+-- since 0136 (owner decision Q103 A); nurses and the front desk still do.
 select pg_temp.outreach_case('2d a hospital campaign still opens as before', 'rows 1',
-  'synthetic:os-doctor', '0e000000-0000-4000-8000-000000000002', '0e030000-0000-4000-8000-000000000001',
+  'synthetic:os-nurse', '0e000000-0000-4000-8000-000000000002', '0e030000-0000-4000-8000-000000000002',
   $s$update outreach.campaigns set status = 'active', row_version = row_version + 1
       where id = '0e070000-0000-4000-8000-000000000001'$s$, true, 'count');
 select pg_temp.os_case('2e there is no review: no review command, no review column', '0 0', session_user::text,
@@ -353,16 +356,16 @@ select pg_temp.outreach_case('3h nor write a patient mapping', '42501: OUTREACH_
     select id, facility_id, temporary_patient_id, gen_random_uuid(), 'linked_existing', %L, %L, 'Synthetic link attempt'
       from outreach.registration_cases where id = %L$s$, pg_temp.id('acct1'), pg_temp.id('mem1'), pg_temp.id('case1')));
 select pg_temp.outreach_case('3i a hospital registration needs no campaign and no consent (unchanged)', 'ok',
-  'synthetic:os-doctor', '0e000000-0000-4000-8000-000000000002', '0e030000-0000-4000-8000-000000000001',
+  'synthetic:os-nurse', '0e000000-0000-4000-8000-000000000002', '0e030000-0000-4000-8000-000000000002',
   $s$insert into outreach.registration_cases (facility_id, created_by_account_id, created_by_membership_id,
       local_command_id, temporary_patient_id, full_name, sex, age_years)
-    values ('0e000000-0000-4000-8000-000000000002', '0e010000-0000-4000-8000-000000000001',
-      '0e030000-0000-4000-8000-000000000001', gen_random_uuid(), 'tmp_' || gen_random_uuid(), 'Gbenga Example', 'male', 40);
+    values ('0e000000-0000-4000-8000-000000000002', '0e010000-0000-4000-8000-000000000002',
+      '0e030000-0000-4000-8000-000000000002', gen_random_uuid(), 'tmp_' || gen_random_uuid(), 'Gbenga Example', 'male', 40);
     set constraints outreach.outreach_registration_consent_required immediate; set constraints outreach.outreach_registration_consent_required deferred$s$);
 
 -- 7. Isolation, both ways.
-select pg_temp.outreach_case('4a the hospital doctor sees none of the group''s registrations', 'none',
-  'synthetic:os-doctor', '0e000000-0000-4000-8000-000000000002', '0e030000-0000-4000-8000-000000000001',
+select pg_temp.outreach_case('4a the hospital nurse sees none of the group''s registrations', 'none',
+  'synthetic:os-nurse', '0e000000-0000-4000-8000-000000000002', '0e030000-0000-4000-8000-000000000002',
   format('select full_name from outreach.registration_cases where facility_id = %L', pg_temp.id('fac1')), false, 'query');
 select pg_temp.outreach_case('4b the organiser sees none of the hospital''s campaigns', 'none',
   pg_temp.subject_of('acct1'), pg_temp.id('fac1'), pg_temp.id('mem1'),

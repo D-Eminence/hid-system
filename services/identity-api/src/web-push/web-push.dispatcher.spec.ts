@@ -1,3 +1,4 @@
+import type { NinCheckOnce } from '../identity/nin-check-once';
 import { fakeDatabase, usePatientSafetyTestEnvironment } from '../../test/patient-safety.fixtures';
 import { syntheticVapidPublicKey } from '../../test/web-push.fixtures';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
@@ -182,6 +183,12 @@ describe('PatientLifecycleSweeper web push steps (B6)', () => {
     const notices = { dispatch: step('notices'), stop: jest.fn() };
     const deletion = { finalizeDue: jest.fn(async () => { order.push('finalize'); return []; }) };
     const webPush = { prune: step('prune'), dispatch: step('push'), stop: jest.fn() };
+    // 0137: the stored QoreID NIN answers past their end, or of a deleted login, are erased last.
+    const ninChecks = { prune: jest.fn(async (_correlation: string, limit: number) => {
+      order.push(`nin-prune:${limit}`);
+      if (fail.includes('nin-prune')) throw Object.assign(new Error('70000000001'), { code: '57P01' });
+      return 0;
+    }) };
     const fake = fakeDatabase();
     fake.query.mockImplementation(async (sql: string) => {
       if (sql.includes('expire_share_invitations')) order.push('expire');
@@ -190,7 +197,7 @@ describe('PatientLifecycleSweeper web push steps (B6)', () => {
     const sweeper = new PatientLifecycleSweeper(emergency as unknown as EmergencyContactNotificationDispatcher,
       fake.database as DatabaseService, alerts as unknown as RecordAccessAlertDispatcher,
       deletion as unknown as PatientAccountDeletionService, notices as unknown as AccountDeletionNoticeDispatcher,
-      webPush as unknown as WebPushDispatcher);
+      webPush as unknown as WebPushDispatcher, ninChecks as unknown as NinCheckOnce);
     const error = jest.spyOn((sweeper as unknown as { logger: { error: (m: string) => void } }).logger, 'error')
       .mockImplementation(() => undefined);
     return { sweeper, order, error, webPush };
@@ -202,9 +209,17 @@ describe('PatientLifecycleSweeper web push steps (B6)', () => {
     it('prunes and then dispatches after the 0096 steps, each on its own', async () => {
       const { sweeper, order, error } = sweeperWith(['prune']);
       await sweeper.runOnce();
-      expect(order).toEqual(['emergency', 'expire', 'alerts', 'finalize', 'notices', 'prune', 'push']);
+      expect(order).toEqual(['emergency', 'expire', 'alerts', 'finalize', 'notices', 'prune', 'push', 'nin-prune:500']);
       expect(error.mock.calls.map(([message]) => message)).toEqual([expect.stringMatching(/step=web_push_prune, code=XX000/)]);
       expect(error.mock.calls.join(' ')).not.toMatch(/Ada|fcm/);
+    });
+
+    it('erases expired QoreID NIN answers every tick, logging only the code when that fails', async () => {
+      const { sweeper, order, error } = sweeperWith(['nin-prune']);
+      await sweeper.runOnce();
+      expect(order.at(-1)).toBe('nin-prune:500');
+      expect(error.mock.calls.map(([message]) => message)).toEqual([expect.stringMatching(/step=nin_check_prune, code=57P01/)]);
+      expect(error.mock.calls.join(' ')).not.toContain('70000000001');
     });
 
     it('stops the web push dispatcher at shutdown and waits for the longest send', async () => {
@@ -243,7 +258,7 @@ describe('PatientLifecycleSweeper web push steps (B6)', () => {
     it('still prunes (ended sign-ins are erased) and dispatches nothing', async () => {
       const { sweeper, order } = sweeperWith();
       await sweeper.runOnce();
-      expect(order).toEqual(['expire', 'finalize', 'notices', 'prune']);
+      expect(order).toEqual(['expire', 'finalize', 'notices', 'prune', 'nin-prune:500']);
     });
   });
 });

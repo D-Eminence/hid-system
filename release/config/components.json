@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0127",
-    "count": 128,
+    "last": "0137",
+    "count": 138,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -609,6 +609,46 @@
       {
         "name": "0127_sso_relying_party.sql",
         "sha256": "9f55a5a18e7f66ad945da200594072d34f7c3b325b852569fbc39a19e8c2687d"
+      },
+      {
+        "name": "0128_patient_access_pin_notice_and_named_requester.sql",
+        "sha256": "a6680a546ba38a0df70fb6b3244672875a5d5defe6aad2af5de63f4e803805df"
+      },
+      {
+        "name": "0129_session_facility_selection.sql",
+        "sha256": "65705c33e1e55fd76bb06f8c19205391534c1b94b43ce890f17b82fec30ef360"
+      },
+      {
+        "name": "0130_desk_registration_without_nin.sql",
+        "sha256": "685a939427b1120d57a61a9c61714cda31cba9998f462253cd17801bb62220c1"
+      },
+      {
+        "name": "0131_own_facility_patient_access.sql",
+        "sha256": "d57f52528357df4e647a5dc9ba69840f8f2670c46b2a1086d0be1c6dfd031021"
+      },
+      {
+        "name": "0132_staff_patient_search.sql",
+        "sha256": "31ff0b7bf428125950f8a3830338970b8f2dc8f0b4d23cb95509c0ae2e9fa03b"
+      },
+      {
+        "name": "0133_own_facility_pharmacy_and_lab_work.sql",
+        "sha256": "16e16ba7c37744e01dc8733544a6b60b03b683335568d3f5635b42b4ee37405b"
+      },
+      {
+        "name": "0134_sealed_qa_hospital_pharmacy_lab_staff.sql",
+        "sha256": "13a58405e179befac7eb3e1854862b33787e040177a48fa98f55557b2cedb5b7"
+      },
+      {
+        "name": "0135_visit_queue.sql",
+        "sha256": "8880d71e8d03ae9dea7614eb88316788d3ad16dca8974218755c8a922a6ce891"
+      },
+      {
+        "name": "0136_role_permission_changes.sql",
+        "sha256": "66e17d50e8ce377d42fedab127c8a99dd8b132611ea2766aba2f84ef650c2ea2"
+      },
+      {
+        "name": "0137_qoreid_nin_check_once.sql",
+        "sha256": "d77983a0d82bc3c2e016f9fda0990666aecc218ac9bed6f7e9901bc90bff3543"
       }
     ]
   },

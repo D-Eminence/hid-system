@@ -265,13 +265,19 @@
   ],
   "todayRolePermissions": {
     "receptionist": [
+      "ehr.document.read-own",
+      "ehr.document.write",
       "ehr.encounter.read",
       "ehr.encounter.write",
+      "ehr.vital.read",
       "identity.authorization.check",
       "identity.consent.read",
       "identity.consent.write",
       "identity.patient.read",
       "identity.registration.write",
+      "ocr.job.read-own",
+      "ocr.job.start",
+      "ocr.job.write",
       "outreach.campaign.read",
       "outreach.campaign.write",
       "outreach.registration.read",
@@ -302,6 +308,7 @@
       "lab.work-item.accept",
       "lab.work-item.read",
       "ocr.job.read",
+      "ocr.job.start",
       "ocr.job.write",
       "ocr.patient.confirm",
       "ocr.publication.write",
@@ -342,20 +349,14 @@
       "lab.import.write",
       "lab.result.released.read",
       "lab.work-item.accept",
-      "lab.work-item.read",
       "ocr.job.read",
       "ocr.job.write",
       "ocr.patient.confirm",
       "ocr.publication.write",
       "ocr.validation.write",
-      "outreach.campaign.read",
-      "outreach.campaign.write",
-      "outreach.registration.read",
-      "outreach.registration.write",
       "pharmacy.dispensing.read",
       "pharmacy.import.read",
-      "pharmacy.import.write",
-      "pharmacy.work-item.read"
+      "pharmacy.import.write"
     ],
     "clinician": [
       "ehr.diagnosis.read",
@@ -386,6 +387,7 @@
       "lab.work-item.accept",
       "lab.work-item.read",
       "ocr.job.read",
+      "ocr.job.start",
       "ocr.job.write",
       "ocr.patient.confirm",
       "ocr.publication.write",
@@ -402,7 +404,6 @@
     "lab": [
       "ehr.document.read",
       "ehr.document.write",
-      "ehr.encounter.read",
       "ehr.lab-request.read",
       "ehr.lab-request.write",
       "identity.authorization.check",
@@ -428,10 +429,7 @@
       "lab.specimen.receive",
       "lab.specimen.reject",
       "lab.work-item.accept",
-      "lab.work-item.read",
-      "ocr.job.read",
-      "ocr.job.write",
-      "ocr.validation.write"
+      "lab.work-item.read"
     ],
     "pharmacist": [
       "ehr.encounter.read",
@@ -457,7 +455,6 @@
       "lab.execution.read",
       "lab.import.read",
       "lab.result.released.read",
-      "lab.work-item.read",
       "ocr.job.read",
       "organization.manage",
       "outreach.campaign.read",
@@ -466,7 +463,6 @@
       "outreach.registration.write",
       "pharmacy.dispensing.read",
       "pharmacy.import.read",
-      "pharmacy.work-item.read",
       "workforce.manage"
     ],
     "org_admin": [
@@ -483,7 +479,6 @@
   },
   "todayDifferences": [
     "receptionist (Front desk), Access requests and PIN: narrower. Today shown, without identity.patient-access-pin.verify; Akos's table full.",
-    "receptionist (Front desk), Triage and vitals: narrower. Today hidden; Akos's table view only.",
     "receptionist (Front desk), Scan paper records: narrower. Today hidden; Akos's table full.",
     "receptionist (Front desk), Outreach: wider. Today full; Akos's table hidden.",
     "nurse (Nurse), Register and check in: wider. Today full; Akos's table hidden.",
@@ -491,7 +486,6 @@
     "nurse (Nurse), Outreach: wider. Today full; Akos's table hidden.",
     "doctor (Doctor), Register and check in: wider. Today full; Akos's table hidden.",
     "doctor (Doctor), Scan paper records: wider. Today full; Akos's table view only.",
-    "doctor (Doctor), Outreach: wider. Today full; Akos's table hidden.",
     "clinician (Doctor), Register and check in: wider. Today full; Akos's table hidden.",
     "clinician (Doctor), Scan paper records: wider. Today full; Akos's table view only.",
     "clinician (Doctor), Outreach: wider. Today full; Akos's table hidden.",

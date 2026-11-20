@@ -338,12 +338,18 @@ begin
       -- 0122's 24-hour read and write PIN body (e17925c5...), plus 0123's QA line.
       ('identity.access_patient_with_pin(text,text,integer)', '6f44fc5433a8e2ddf1febbb711c88037'),
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '0c2def2b530bcb3d68537ade52787b6b'),
+      -- or 0133's (D14: 0123's text with the hunks marked "0133 D14"), with
+      -- both sealed clauses.
+      ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', 'fef3bfda1239e5cd72a149f8db30ff64'),
       ('identity.search_order_destinations(text,text)', 'da222fe1b63db757a1ddb93fdc9eabf0'),
       ('identity.search_share_providers(text,uuid,text)', '26ca190255ddc1ff30adb2fb5f0ee347'),
       ('identity.start_my_email_change(text,uuid,uuid,text,character,bytea,text,character,text,integer,integer,integer)',
        'f7659b71a9240050c36d67f41ddf0890'),
       ('identity.admin_platform_overview()', 'c38a354bb38bd4e60f293dd69165506c')) pinned(signature, digest)
       join pg_proc proc on proc.oid = pinned.signature::regprocedure and md5(proc.prosrc) = pinned.digest) = 8);
+  perform pg_temp.assert('the order-route send keeps the demo clause (and 0123''s QA clause beside it)',
+    (select position('sealed_demo_' in proc.prosrc) > 0 and position('sealed_qa_' in proc.prosrc) > 0 from pg_proc proc
+      where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure));
   perform pg_temp.assert('the registration read is sealed and identity.patients keeps six policies',
     (select count(*) from pg_policy policy_row where policy_row.polrelid = 'identity.patients'::regclass) = 6
     and (select pg_get_expr(policy_row.polqual, policy_row.polrelid) from pg_policy policy_row
@@ -1423,6 +1429,14 @@ begin
                     (2, 'lab.result.enter'), (2, 'lab.result.release'), (3, 'pharmacy.order-route.receive'),
                     (3, 'pharmacy.dispensing.create'), (4, 'outreach.registration.write'), (4, 'outreach.campaign.write'),
                     (4, 'identity.break-glass.write'), (4, 'audit.read')) wanted(site, permission)));
+  -- 0136 (owner decisions Q103 A, Q111 A): doctors no longer start
+  -- paper-record readings (that needs ocr.job.start, which doctors and
+  -- org_admin lack), so the staff login (doctor and org_admin at Demo
+  -- Hospital) cannot start one there; it keeps ocr.job.write (above), so it
+  -- still checks readings and confirms their patient under records processing.
+  perform pg_temp.assert('0136: the staff login at Demo Hospital cannot start a reading',
+    not auth.membership_has_permission('sealed-demo:98d00003-0000-4000-8000-000000000001',
+      '98d00005-0000-4000-8000-000000000001', '98d00002-0000-4000-8000-000000000001', 'ocr.job.start'));
   perform pg_temp.assert('the patient logins resolve',
     (select count(*) from identity.current_patient_account('patient:98d00008-0000-4000-8000-000000000001')) = 1
     and (select count(*) from identity.current_patient_account('patient:98d00008-0000-4000-8000-000000000002')) = 1);

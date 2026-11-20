@@ -83,6 +83,26 @@ export interface PharmacyWorkItem {
   duration?: { value: number; unit: string };
   quantityToDispense?: number;
   quantityUnit?: string;
+  /**
+   * Present (always true) only on this facility's own item withdrawn before
+   * it was dispensed (database 0133); `withdrawnReason` says why. Dispensing
+   * it answers 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE; Dispense is
+   * disabled.
+   */
+  withdrawn?: true;
+  /**
+   * Why the item was withdrawn, present only with `withdrawn` (and left out
+   * when pharmacy-api sends another value):
+   * - `changed`: its automatic send was withdrawn: the prescription was put
+   *   on hold, cancelled, entered in error, edited or resumed after it was
+   *   sent, by the prescriber or a colleague. Show "Changed or stopped by the
+   *   prescribing team". The work list shows it with the done work.
+   * - `sent_elsewhere`: the prescription was sent to another facility's
+   *   pharmacy before it was dispensed (owner's Q121 A). The work list no
+   *   longer shows it; read by id it is still answered. Show "Sent to another
+   *   pharmacy by the prescribing team".
+   */
+  withdrawnReason?: 'changed' | 'sent_elsewhere';
 }
 
 export interface PharmacyDispensing {
@@ -453,6 +473,9 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
     } : null,
     ...parseWorkItemPatient(value.patient),
     ...parseWorkItemDetails(value),
+    ...(value.withdrawn === true ? { withdrawn: true as const,
+      ...(value.withdrawnReason === 'changed' || value.withdrawnReason === 'sent_elsewhere'
+        ? { withdrawnReason: value.withdrawnReason } : {}) } : {}),
   };
 }
 

@@ -23,7 +23,8 @@ export const OWN_PROGRESS_BATCH = 100;
 /** A slow pharmacy or laboratory must not hold the clinician's list for long. */
 export const OWN_PROGRESS_TIMEOUT_MS = 3_000;
 
-export type PharmacyOwnProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed' | 'unknown';
+export type PharmacyOwnProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed' | 'withdrawn'
+  | 'sent_elsewhere' | 'unknown';
 export interface PharmacyOwnProgress {
   status: PharmacyOwnProgressStatus;
   receivedAt: string | null;
@@ -49,7 +50,20 @@ export const LAB_PROGRESS_UNKNOWN: LabOwnProgress = Object.freeze({ status: 'unk
 export const LAB_PROGRESS_NOT_RECEIVED: LabOwnProgress = Object.freeze({ status: 'not_received', receivedAt: null,
   collectedAt: null, lastResultAt: null });
 
-const PHARMACY_STATUSES = new Set(['not_received', 'received', 'dispensed', 'dispensing_reversed']);
+// 'withdrawn' (0133): sent by itself, then held, cancelled, entered in error, edited or resumed before dispensing.
+// 'sent_elsewhere' (0133 D14, owner's Q121 A): this hospital's pharmacy had it, and it was sent to another facility's
+// pharmacy before it was dispensed; where it went is the prescription's orderRoute.
+const PHARMACY_STATUSES = new Set(['not_received', 'received', 'dispensed', 'dispensing_reversed', 'withdrawn',
+  'sent_elsewhere']);
+
+/**
+ * Sent on the pharmacy call only (ORD-3): this ehr-api reads 'withdrawn' and
+ * 'sent_elsewhere'. pharmacy-api answers them only to a call that carries
+ * it; to an older ehr-api it answers 'received' and 'not_received', the
+ * statuses that image knows, so its page never turns unknown because of
+ * them. Always sent; not a setting.
+ */
+export const OWN_PROGRESS_HEADER = Object.freeze({ 'x-hid-own-progress': '0133' });
 const LAB_STATUSES = new Set(['not_received', 'received', 'sample_collected', 'some_results_ready', 'results_ready']);
 
 /** A draft was never sent, so it is not asked about; every other status may have been. */
@@ -149,6 +163,7 @@ export class WorkItemProgressService {
           ...(context.origin ? { origin: context.origin } : {}),
           'x-hid-internal-caller': 'ehr-api',
           ...caller,
+          ...(service === 'pharmacy' ? OWN_PROGRESS_HEADER : {}),
         },
       });
       if (!response.ok) {

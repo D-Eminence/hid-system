@@ -659,6 +659,21 @@ of 2026-10-27) and needs QoreID enabled; it does not expose provider
 credentials or tokens. `GET /api/v1/identity/me` answers `ninVerified`
 (a verified, unrevoked NIN identifier is bound).
 
+QoreID is asked once per NIN (0137, Q109; docs/QOREID_VERIFICATION_CONTRACT.md,
+"One QoreID check per NIN"): this route, `POST
+/api/v1/identity/patient-enrollments` and the registration desk reuse a stored
+answer. A check of a NIN another request is checking answers 409
+`NIN_CHECK_IN_PROGRESS` ("We are still checking this NIN. Please wait a minute,
+then try again."); a NIN held after a check QoreID may have charged without an
+answer HID could keep answers 409 `NIN_CHECK_HELD` ("We could not finish
+checking this NIN. Please try again in 5 minutes." or "... in 6 hours.");
+both carry `retryAfterSeconds` and make no QoreID call and no evidence row. A
+caller whose wait ends before QoreID answers gets 504 `QOREID_TIMEOUT` ("The NIN
+check is taking longer than usual. Please wait a minute, then try again."): the
+check goes on and its answer is kept for the retry. 503 `NIN_CHECK_UNAVAILABLE`
+means nothing was sent. A client shows the message and offers to try again
+after `retryAfterSeconds`; it never retries on its own.
+
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
 the `read_records` action for the exact facility and patient. With 0117 it also answers `allergies` (recorded and
@@ -667,7 +682,8 @@ within the configured 5–240 minute bounds, permits at most ten new activations
 per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
 notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
-Identity's activation (`POST /api/v1/identity/break-glass`) also requires the
+Identity's activation (`POST /api/v1/identity/break-glass`, the patient named by
+`hid` or, since 0132, by an emergency search card's `matchRef`) also requires the
 platform `break_glass_enabled` control, checked inside the activation
 transaction before the command: while it is off, activation answers
 `423 BREAK_GLASS_DISABLED` ("Emergency access is currently disabled by the
@@ -2349,6 +2365,10 @@ stay in its own records only. §21's report then answers
 ending of this kind never closes the way to a wrong-patient report. Support's
 Close answers `ORDER_ROUTE_ALREADY_CLOSED`. The same order can never be sent
 again (`ORDER_ROUTE_ORDER_IN_WORK`, D18-9); the clinician writes a new order.
+A prescription does not go back to the ordering hospital's own pharmacy
+either: "Send to pharmacy" answers the `routed` row, and an item that
+pharmacy held was withdrawn when the prescription was sent (ORD-2, owner's
+Q121 A).
 
 **What the other services answer (fields only; no new route).** Each is sent
 only by a backend with 0091; a client reads it only when it is present and of
@@ -2970,11 +2990,15 @@ dispensed here"), the code it already answers for a route-backed work item
 whose prescription changed; the website already handles it (it marks the work
 "Not dispensable"). Only that message is mapped for same-facility work: the
 validator's other 23514 refusals (0077's) pass on unchanged, and a
-serialization failure goes to pharmacy-api's retry.
+serialization failure goes to pharmacy-api's retry. Since 0133 the database
+also raises that message, with DETAIL `sent_elsewhere`, for an own item
+whose prescription was sent to another pharmacy; the new pharmacy-api then
+answers its own detail and `withdrawnReason` (ORD-2).
 
 Owner decision this carries (as on `main`): once its prescription has changed
 or stopped, a same-facility work item can be neither dispensed nor accepted
-again (one work item per prescription; a second acceptance is answered 409),
+again (one work item of this facility's own per prescription, and since 0133
+also one route-backed item; a second acceptance is answered 409),
 so the prescriber writes a new prescription. A prescription put on hold and
 resumed is a new version, and its work item stays undispensable too. A
 dispensing recorded while the prescription was active can still be reversed
@@ -6690,6 +6714,14 @@ method as `GET` (`X-HID-Original-Method`), not the POST of the internal
 call: the website sends no CSRF token on a read, so a reported POST would be
 refused. Answer `200`, `Cache-Control: no-store`.
 
+ehr-api also sends `X-HID-Own-Progress: 0133` on the pharmacy call (always;
+not a setting): it reads the 0133 statuses `withdrawn` and `sent_elsewhere`.
+pharmacy-api answers them only to a call that carries it. To a call without
+it, from an ehr-api older than 0133, it answers `withdrawn` as `received`
+(times kept) and `sent_elsewhere` as `not_received` (times null). That
+ehr-api knows four statuses, and one it does not know would turn its whole
+page `unknown`. The lab call carries no such header.
+
 Request (ids only, in the body; never a Health ID, never in the URL):
 
 | Field | Pharmacy | Lab |
@@ -6710,6 +6742,8 @@ Pharmacy item: `sourceEhrPrescriptionId`, `status`, `receivedAt`,
 | `received` | the pharmacy has it and has not dispensed it |
 | `dispensed` | dispensed at `dispensedAt` |
 | `dispensing_reversed` | dispensed, then the dispensing was reversed at `reversedAt` |
+| `withdrawn` | (0133) sent to this hospital's pharmacy by itself, then held, cancelled, entered in error, edited or resumed before it was dispensed: the pharmacy holds the version sent, which it can no longer dispense |
+| `sent_elsewhere` | (0133, owner's Q121 A) this hospital's pharmacy had it (`receivedAt`), and it was sent to another facility's pharmacy before it was dispensed: the item here is withdrawn and off the pharmacy's list. Where it went is the prescription's `orderRoute` |
 
 Lab item: `sourceEhrOrderId`, `status`, `receivedAt`, `collectedAt`
 (the first sample taken), `lastResultAt` (the latest released result).
@@ -6738,7 +6772,9 @@ step 10b signs a doctor in with the cookie, reads through ehr-api a
 prescription dispensed by the hospital's own pharmacist (`dispensed`, with
 the dispensing's time) and a lab request with results released by its own
 laboratory (`results_ready`), each under the doctor's own grant only; a
-routed prescription and lab request stay `not_received`; a doctor without a
+routed prescription and lab request stay `not_received`; a prescription the
+hospital's pharmacy received and that was then sent to another pharmacy
+reads `sent_elsewhere`; a doctor without a
 grant gets `403` from ehr-api, pharmacy-api and lab-api, and the denials are
 audited with the patient.
 
@@ -6774,7 +6810,11 @@ answers changes.
 Screen change (Akos frontend branch): show `ownProgress` on each order row,
 for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
 "Results ready 11:05"; show "Progress not available right now" for
-`unknown`, and nothing for `not_received` on a draft.
+`unknown`, and nothing for `not_received` on a draft. For `withdrawn` (0133)
+show "The pharmacy can no longer dispense this prescription" (whatever
+stopped or changed it). For `sent_elsewhere` (0133) show "Sent to
+<orderRoute.receivingFacility.name> instead of this hospital's pharmacy", or
+"Sent to another pharmacy instead" when there is no `orderRoute`.
 
 ## ORD-10 phase 1. Same-medicine warning when prescribing (wave 1, no migration)
 
@@ -7394,6 +7434,585 @@ purpose `emergency`.
 section would be. Re-read after a drawer closes, as the per-section lists
 are.
 
+
+
+
+
+## 55. The PIN-use notice and the named requester (0128, provisional)
+
+Port of `main` 0091 sections 4 and 5 (NOTIF-PIN-NOTICE, CONSENT-GRANTEE),
+written on this branch's bodies; coordinator's tasks of 17 November 2026 on
+hid-system#258, where the number is booked. It releases after 0124-0127.
+
+### The PIN-use notice
+
+Every time a health worker opens a patient's records with the patient's
+Access PIN (`POST /api/v1/identity/standard-access/pin`, a first use, not a
+replay of the active grant), the patient's in-app inbox (`GET
+/api/v1/identity/me/notifications`, as for every 0037 item) gains one item:
+
+```text
+notification_code: PATIENT_ACCESS_PIN_USED
+resource_type:     consent-grant
+resource_id:       <the grant the PIN created>
+metadata:          { consentGrantId, reviewRequired: true, scope,
+                     clinicianName, clinicianRole, facilityName }
+```
+
+`scope` is the grant's (`write_records` since 0122, which also reads).
+`clinicianName` is the verified staff record's full name, as the access
+history's `clinicianName` for a share; `clinicianRole` is the clinician's
+membership role at that facility (`doctor`, `nurse`, `clinician`, ...);
+`facilityName` is the facility's name. The values are a snapshot at the moment
+of use; one that cannot be read is left out, never invented. A wrong PIN, a
+lock-out and a replay write no outbox event, so no item; a patient without an
+active account gets none. The `PatientAccessPinVerified` outbox event, its
+payload and the EventBridge rule are unchanged. The website shows an unknown
+code as a general account update until it has its own words.
+
+### The named requester
+
+`GET /api/v1/identity/me/access-requests` items gain `requesterName` and
+`requesterRole`: the requesting clinician's staff name and their membership
+role at the request's facility (each `null` when it cannot be read), from the
+thirteenth and fourteenth columns `requester_name` and `requester_role` of
+`identity.list_my_access_requests()`. The function was dropped and recreated
+with the same owner and EXECUTE for `hid_identity_runtime` only. On a
+database before 0128 both fields are left out and the list still answers; an
+earlier Identity image ignores the two columns.
+
+## 56. A staff member's chosen facility, kept per sign-in (0129, provisional)
+
+A port of `main` 0089 (hid-system#73), written on this branch's Identity code
+and tables. The coordinator's tasks of 17 November 2026 on hid-system#258
+booked the number. The design note and the decisions on it are on #258. 0129
+is unsigned until the owner signs its declaration. It needs 0001-0127, the
+base it is proved on, and checks that in its section 0 as 0125-0127 check the
+migrations before them; it uses nothing 0124-0128 add, and releases after 0128
+because the ledger needs every number. The section number is provisional: §54
+went to #262 (single sign-on, 0127) and #264 (0128) has not merged yet, so
+this section takes the next free number when it merges.
+
+What changes for staff, once the setting is on: a staff member with two or
+more facilities on one site who chooses one with "Working at" or "Switch
+facility" keeps that choice for the sign-in. A reload, a new tab, a restored
+browser, or a refresh after the 15-minute access token, opens at the chosen
+facility instead of silently moving back to the primary one. If that facility
+is no longer theirs (the membership ended or is held, the facility closed, or
+it is no longer admitted on the site, for example a doctor's or nurse's
+membership on lab. since Q97, §53), the website asks "Where are you working?".
+
+### The setting
+
+`STAFF_FACILITY_SELECTION_MODE` in identity-api:
+
+| Value | Effect |
+| --- | --- |
+| `off` (the default; empty is `off`) | Every answer is exactly as before. Nothing is read or stored. |
+| `keep` | The choice is stored and reported. A sign-in that has made no choice gets no field, which is today's answer. |
+| `ask` | As `keep`, and a staff sign-in that has made no choice is answered `default`, so the website asks every multi-facility staff member at every sign-in. This is `main`'s behaviour and a product change. |
+
+Any other value refuses to boot. `infra/aws` passes it to identity-api only,
+from `HID_STAFF_FACILITY_SELECTION_MODE` at synth: `off` unless that is
+`keep` or `ask`; any other value (an empty one, another case, `true`)
+refuses to synthesize. The launch mode is #258's question 1.
+
+Switch it on only once 0129 is applied. With `keep` or `ask`, Identity
+refuses to start while `auth.session_facility_selection` is missing, or while
+its runtime lacks any one of SELECT, INSERT and UPDATE on it (each asked with
+its own `has_table_privilege` call). It refuses only on a definite answer: a
+database it cannot reach at boot is left to `GET /health/ready`. The ECS
+deploy then fails its health checks and rolls back. To withdraw the feature,
+set it to `off`. 0129 has no down migration: the table stays and nothing reads
+it. Do not drop it: 0129 stays recorded, so the runner does not re-create it,
+and runtime-grants.sql's 0129 block would then stop `db:bootstrap`.
+
+### Who keeps a choice
+
+A staff session of an Identity sign-in (it has a session id) with at least one
+facility on its site. That includes a sign-in a product site issued after
+single sign-on (§54, 0127): it is the same staff sign-in, so it keeps, reads
+and loses its choice exactly as a password sign-in on that site does. Its
+callback answers with a redirect, so in `ask` the website first sees
+`default` on its next `GET /api/v1/auth/session`. A back-channel logout of its
+provider session, or product sign-out everywhere (both end sign-ins with
+`sso_logout`), ends its reads as today's sign-out does, and
+`GET /api/v1/auth/session` on that host then also clears the cookies (§54).
+These get no read and no `facilitySelection` field in any mode:
+
+- patients;
+- account-only outreach sessions (§53, Q88-2);
+- staff with no facility on the site, such as a platform administrator;
+- OIDC bearer callers (`AUTH_MODE=oidc`), which have no session;
+- `GET` and `POST /api/v1/auth/service-session`, which answer exactly as
+  before. EHR, Lab, Pharmacy, OCR and Outreach act on the `X-Facility-ID` the
+  website sends, so they never see the choice.
+
+The provider-enrollment activation, the staff invitation acceptance and the
+outreach organiser sign-ins answer as before.
+
+### `facilitySelection`
+
+A top-level member of the session answer, beside `actor`:
+
+| Value | `actor.facility` | When |
+| --- | --- | --- |
+| `selected` | the chosen facility, with that facility's roles and permissions | the stored facility is still one of the actor's facilities on this site |
+| `default` | the default (the primary facility, else the first by name) | `ask` only: no choice yet |
+| `reselect` | the default | the stored facility is no longer one of the actor's facilities on this site; the row is kept until a new choice replaces it |
+| `unavailable` | the default | the choice could not be read; never treated as "no choice" |
+| (absent) | the default | `off`; `keep` with no choice yet; every sign-in in the list above |
+
+A valid `X-Facility-ID` on `GET /api/v1/auth/session` still decides the
+facility reported, whatever the state.
+
+The stored facility is matched by facility id only, against `actor.facilities`
+as Identity resolved them for this request under the session's own product
+(the access token's product claim; the refresh token's product for a refresh),
+never the request's `Origin`. Those are the memberships §53's gate admits on
+that site: Q88's permission rule, Q97's own-job rule and, for an
+administrator, its organisation's recorded kinds (Q90, Q91; 0126) together
+(`facilityAdmittedOnProduct`). So when Q97 or an organisation's kinds narrow
+what a login holds on a site, a stored facility that is no longer admitted
+there is reported as `reselect` at the default and never used; if no facility
+is left on the site, the session ends with `401`, as §53 says, before any
+read. It takes the first match, the rule `SecurityGuard` uses to bind
+`X-Facility-ID`, so the roles reported are the roles every later request at
+that facility gets. The stored membership is used only by the database guard
+and its foreign key. Every answer keeps §53's `actor.products` as Identity
+resolved it.
+
+### Routes
+
+`POST /api/v1/auth/facility` `{ facilityId }` (no new route). §53's filter by
+the product of the request's `Origin` (Q88-1 with Q97's own-job rule) is
+unchanged and runs before anything is stored. With `off`, or for an
+OIDC bearer caller, it answers `200 { actor }` and stores nothing, as before.
+With `keep` or `ask`, it stores the choice for the sign-in and writes its
+`auth.facility.select` audit row in the same transaction, and answers
+`200 { actor, facilitySelection: "selected" }` with the actor at that
+facility. A new choice replaces the old.
+
+| Answer | When | Stored |
+| --- | --- | --- |
+| `400 VALIDATION_FAILED` | `facilityId` is not a UUID (unchanged) | nothing |
+| `403 PATIENT_SCOPE_DENIED` | a patient session (unchanged) | nothing |
+| `403 FACILITY_ACCESS_DENIED` | not one of the actor's facilities for the `Origin`'s site (unchanged); or the database guard refused the row because the membership, facility, account or sign-in ended after the request was authorized | nothing |
+| `401 AUTHENTICATION_REQUIRED` | the sign-in ended (signed out, rotated or revoked) while the choice waited at its session row | nothing |
+| `503 DEPENDENCY_UNAVAILABLE` | the store or its audit row failed | nothing |
+
+Known gap, outside 0129 (#258 question 3): today every refusal of this route
+reaches the browser as `503 DEPENDENCY_UNAVAILABLE` when the request carries
+no `X-Facility-ID`, and the website sends none. The audit interceptor's
+failure row then has no facility, and `AuditService` refuses a staff row
+without one, so its error replaces the handler's answer. This already holds
+on staging before 0129, for the `403`, and for a malformed id's `400`. With a
+valid `X-Facility-ID`, the handler's own answer comes through. The fix is a
+separate change; until it lands, the website sees `503` where this table says
+`400`, `401` or `403`.
+
+`GET /api/v1/auth/session` answers `200 { actor, facilitySelection? }`. It
+writes `auth.session.read` at the facility it reports and echoes the CSRF
+token, as before. A failed read answers `200` with `unavailable` at the
+default, never a 5xx (#258 question 2; `main` answers `503`).
+
+`POST /api/v1/auth/refresh` answers `200 { actor, expiresAt,
+facilitySelection? }` with the same states. The choice is read after the
+rotation commits, through the new session of the same sign-in, and
+`auth.refresh` is written at the facility reported. A failed read still
+answers `200` with the rotated cookies and `unavailable`. A refresh from
+another site is `401` with the cookies cleared, as §53 says, before any read.
+
+`POST /api/v1/auth/login` and the staff Google sign-in answer `default` in
+`ask` only, for a staff sign-in with a facility; in `keep` they answer as
+before.
+
+One log event, `auth.facility_selection.unavailable`, is written per failed
+read or store. It carries only the operation (`read` or `store`): no
+session, account, facility or correlation id, and no SQL diagnostic.
+
+### What the choice does not do
+
+It grants nothing. Every facility-scoped request still carries
+`X-Facility-ID`, which Identity checks against the actor's active
+memberships; the access token has no facility claim; nothing new is stored in
+the browser. Because every read re-checks the stored facility against the
+facilities resolved for that request, an ended or held membership, a closed
+facility or a disabled account is never reported.
+
+### Database (0129)
+
+`auth.session_facility_selection`, one row per sign-in:
+
+| Column | |
+| --- | --- |
+| `family_id` | primary key: the sign-in's session family (the id of its first session; a refresh keeps the family) |
+| `account_id` | the account |
+| `facility_id` | the chosen facility |
+| `membership_id` | the membership it was chosen under |
+| `selected_at` | when |
+| `row_version` | `1`, then one more per change |
+
+Four foreign keys, all `ON DELETE RESTRICT`: `auth.sessions`, `auth.accounts`,
+`identity.facilities`, and the membership by `(id, facility_id, account_id)`,
+so the demo and QA seals (0098, 0123) hold through it. No row-level security,
+like `auth.sessions`: access is by grant only. SELECT, INSERT and UPDATE go to
+`hid_identity_runtime` (its API login inherits them), in the migration and in
+runtime-grants.sql; no DELETE or TRUNCATE, nothing to anyone else. Nothing
+deletes rows.
+
+The guard `auth.guard_session_facility_selection_change()` (SECURITY INVOKER,
+`search_path pg_catalog, pg_temp`, revoked from PUBLIC) fires before every row
+insert, update and delete. It refuses a delete, or a move to another sign-in
+or account, with `55000 SESSION_FACILITY_SELECTION_IMMUTABLE`. It admits a row
+only for the first session of a staff sign-in of that account with a live
+session at the account's current token version, an active account that is not
+disabled, and an active, unheld membership of the account at that facility
+with an active, verified staff record, an active organisation and an active
+facility; anything else is `23514 SESSION_FACILITY_SELECTION_INVALID`.
+
+Identity writes with the presented session locked `FOR SHARE` while it is a
+live staff session of the account (this branch has no account lock), so a
+sign-out, rotation or reuse revocation either waits for the write or ends the
+sign-in first; then nothing is written and the answer is `401`. It reads the
+facility id through a live staff session joined on the family and the account,
+so a signed-out sign-in never reads its choice again. The guard is a
+write-time check: account-level ends and workforce changes are not serialised
+with it, so a row can outlive its sign-in or membership; every read re-checks.
+
+### Websites
+
+health already reads `facilitySelection`
+(`apps/patient-web/src/staff/facilitySelection.ts`): absent or `selected` asks
+nothing; `default` asks when there are two or more facilities; `reselect`
+asks; any other value, including `unavailable`, asks as unconfirmed. No
+website change is needed.
+hid-system's own frontends ignore the field and adopt `actor.facility`, as
+today: with the setting on they open at the chosen facility, and on
+`reselect` or `unavailable` they fall back to the default, as now.
+
+### Checks
+
+- The suite `services/ehr-api/test/database/session-facility-selection.integration.sql`
+  runs as the Identity runtimes.
+- The jest specs are `services/identity-api/src/auth/facility-selection*.spec.ts`.
+  `facility-selection-sso.spec.ts` runs with single sign-on (0127) on, through
+  the real single sign-on controller, service and session-end filter: a
+  single sign-on staff sign-in answers every step as a password sign-in on
+  the same site does (Q97 and 0126 narrowing included); a back-channel logout
+  or product sign-out ends the reads as sign-out does; service-session
+  answers byte for byte as with the setting off. The suite's section 9 proves
+  the same on the database.
+- Runtime check: `services/identity-api/scripts/verify-facility-selection-runtime.mjs`.
+  It runs in the TUF migration rehearsal (`scripts/tuf-staging-migration-rehearsal.mjs`,
+  `checks.facility_selection_runtime`, after the prescription-details check,
+  the last of the others).
+  It calls the real table, grants and guard through Identity's full request
+  pipeline as `hid_identity_api_runtime`, with the setting `off`, `keep` and
+  `ask`.
+  - It fails when a choice is not stored as exactly one row with its audit
+    row, or is not kept across a reload and a refresh.
+  - It fails when another sign-in or another site sees it, or when a refusal
+    stores anything.
+  - It fails when a membership ended through the facility's own staff route
+    does not give `reselect`, when service-session changes, or when a failed
+    read is not `200 unavailable`.
+  - It fails when Q97 narrows the lab. site after a choice (the chosen
+    laboratory membership becomes a nurse's, which fits lab. by the
+    permission rule alone) and the stored facility is still reported, or a
+    new choice of it is stored.
+  - It fails when the start-up check misses a grant, or when the server log
+    shows an unexpected error.
+  - It asserts the `503` of the known gap above and lists each case with
+    the answer it gets after the fix.
+
+## ID-2. Registration at the front desk without a NIN (0130, owner Q106 of 18 November 2026)
+
+Owner, 18 November 2026 (Q106, recommended answer accepted): "Phone required except for children. The same desk
+person creates the record when there are no possible duplicates. An approver decides when there are possible
+duplicates, and always for link-existing." Screens say "NIN Verified" or "NIN Not Verified"; no answer uses the word
+the owner ruled out. The NIN route and outreach and patient self sign-up are unchanged.
+
+`GET identity/registration-capabilities` now answers
+`withoutNin: { enabled: true, phoneRequiredUnlessChild: true, reasons: [...] }` and
+`newPatientRegistrationRequiresNin: false`. No new setting or platform control.
+
+`POST identity/registration-cases/without-nin` (permission `identity.registration.write`, `Idempotency-Key` required)
+
+| Field | Rule |
+|---|---|
+| `firstName`, `lastName` | 1-100 characters |
+| `dateOfBirth` | `YYYY-MM-DD`, not after today (Lagos) |
+| `gender` | optional: female, male, intersex, other, unknown |
+| `noNinReason` | `nin_service_unavailable`, `no_nin`, `not_carried`, `child`, `foreign_national` |
+| `phone`, `addressLine`, `city`, `stateCode`, `lga` | required together, unless `noNinReason` is `child` (then all or none); `child` needs a date of birth under 18 |
+| `hasExistingHealthId`, `existingHealthId` | the Health ID the patient says they have, only when `hasExistingHealthId` is true |
+| `purpose` | `healthcare-operations` |
+
+Answer 201, the outcome only, never who might be the same person:
+
+```json
+{ "caseId": "...", "status": "approved_new_identity", "version": 1, "outcome": "registered",
+  "message": "Patient registered. Their NIN is not verified yet.", "identityEvidence": "none",
+  "ninStatus": "not_verified", "replayed": false, "patient": { "patientId": "...", "hid": "HID-..." } }
+```
+
+or `"status": "review_required", "outcome": "sent_for_review"` with the message "This may be someone who is already
+registered. An approver will review it before a record is made." and no `patient`.
+
+Possible duplicates (any one sends the case for review): an active patient with the same date of birth and the same
+last name (or the first and last names swapped); the same phone (a patient's sign-in phone, or a phone a desk recorded
+for a registration without a NIN, compared by the contact lookup HMAC); the stated Health ID; an open registration
+without a NIN with the same date of birth and last name or the same phone. Sealed demo and QA patients are never
+candidates, and registration without a NIN is refused at a sealed facility.
+
+Refusals (problem details, plain words): 400 `PHONE_REQUIRED`, `NOT_A_CHILD`, `REGISTRATION_WITHOUT_NIN_INVALID`,
+`VALIDATION_FAILED`; 403 `REGISTRATION_WITHOUT_NIN_DENIED`, `REGISTRATION_WITHOUT_NIN_NOT_AVAILABLE` (sealed facility);
+409 `IDEMPOTENCY_KEY_REUSED`. There is no daily limit for a member or a facility (owner Q109), so a busy day, or a day
+QoreID is down, is never refused; every registration is audited and waits as a case until a NIN check or an approver
+decides it. At 50 in a day at one facility Identity logs `identity.registration.without_nin.facility_daily_high` (facility id and count
+only). Each answer and refusal is audited (`identity.registration.without-nin`): criteria kinds, counts and candidate
+patient ids, never a name, date of birth or phone.
+
+The approver's decision, for a case sent for review, by an approver (`identity.registration.approve`) who did not start
+it:
+
+- `POST identity/registration-cases/:caseId/approve-new` creates a new patient (no NIN identifier);
+- `POST identity/registration-cases/:caseId/link-existing` `{ patientId, expectedVersion, reason, purpose }` links to
+  one of the case's candidates;
+- `POST identity/registration-cases/:caseId/reject` `{ expectedVersion, reason, purpose }` (cases without a NIN only;
+  a NIN case answers 409 `REGISTRATION_CASE_HAS_NIN`).
+
+Refusals: 403 `REGISTRATION_REVIEW_SECOND_PERSON_REQUIRED` (the approver started the case), 403
+`REGISTRATION_REVIEW_DENIED`, 404 `REGISTRATION_CASE_NOT_FOUND`, 409 `PATIENT_NOT_A_REVIEW_CANDIDATE`,
+`REGISTRATION_CASE_ALREADY_DECIDED`, 412 `VERSION_CONFLICT`.
+
+`GET identity/registration-cases/:caseId` and the list answer `identityEvidence` (`nin` or `none`); for a case without a
+NIN, `candidates` is empty unless the reader is an approver who did not start it (minimal cards: patient id, full name,
+date of birth). `GET identity/registration-cases?evidence=none` lists only registrations without a NIN: every one of
+them is a possible duplicate for the later merge review (ID-8a).
+
+Screen change (Akos's frontend branch): "Register without a NIN" from an empty search, with the reason list; show
+"NIN Not Verified"; show "Sent for review" without any other person's details; approvers' review screen gains Reject.
+
+Suites: `services/ehr-api/test/database/desk-registration-without-nin.integration.sql`;
+`collect-signup-fields.integration.sql` (a resolved case's patient holds its NIN) and
+`registration-case-list.integration.sql` (the evidence filter) changed. Runtime:
+`services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs`.
+
+## ID-4. Opening this facility's own patient without a PIN (0131, owner Q101 of 18 November 2026)
+
+Owner, 18 November 2026 (Q101, recommended answer accepted): a patient is this facility's when registered at its desk,
+or after a consented visit there in the last 24 months; doctors, nurses and clinicians only; 24 hours; every opening in
+the patient's access history; check-in-only and emergency-only visits do not count. Lab and pharmacy staff and the front
+desk never get it.
+
+`POST identity/own-facility-access` (permission `identity.patient.open-own-facility`, held by doctor, clinician and
+nurse only; `X-Purpose-Of-Use: direct-care`). Body: exactly one of `{ "hid": "HID-..." }` or `{ "patientId": "<uuid>" }`.
+No Health ID in a URL.
+
+Answer 200:
+
+```json
+{ "consentGrantId": "...", "patientId": "...", "status": "active", "expiresAt": "...", "existingGrant": false,
+  "authorization": { "basis": "own-facility", "scope": "write_records", "purpose": "direct-care" } }
+```
+
+The grant is 24 hours of read and write for direct care (`authorization_method` `own_facility`, no access request, so
+it never gives OCR or Migrate records-processing cover); a second opening by the same member while it lasts answers
+the same grant with `existingGrant: true`. After it the usual record reads (`identity/authorization/check`) allow the
+member and write the "Your records were opened" notice (access kind `own_facility`).
+
+"Registered here": a registration case at this facility that created the patient (with its checked NIN, or without a
+NIN), that resolved to the patient's own checked NIN, or that attached its checked NIN to the patient; or a
+registration without a NIN linked to the patient and then confirmed by the patient (their approval or Access PIN to
+this facility after the link). "Visit here": a visit at this facility started in the last 24 months, not cancelled,
+entered in error or imported paper records, started under a grant the patient gave (approval or Access PIN) to the
+member who started it. A visit started under an own-facility grant, records processing or nothing the patient gave (a
+check-in, EHR-C7) does not count.
+
+Refusals: 404 `PATIENT_NOT_FOUND` "No such patient. Check the Health ID and try again." for a Health ID or id with no
+active patient this facility may see (owner Q100 B); 403 `OWN_FACILITY_ACCESS_REFUSED` "You cannot open this
+patient's records without their consent. Ask for their Access PIN or send an access request." for no basis, a deny
+directive, or a patient's revocation of an own-facility opening here in the last 24 hours (one answer for all three);
+403 `PERMISSION_DENIED` (no permission); 400 `PURPOSE_OF_USE_REQUIRED`, `PATIENT_IDENTIFIER_REQUIRED`. Every answer
+and refusal writes an audit row (`identity.patient.open-own-facility`, with the basis or the refusal kind).
+
+The patient's side: `GET identity/me/access-history` items gain `basis` (`own-facility`, `pin`, `share`, `approval`,
+`emergency`, `other`); an own-facility opening has `patientRevocable: true` and the patient may revoke it
+(`POST identity/me/consent-grants/:grantId/revoke`). Screen change: label `basis: 'own-facility'` "Opened as this
+facility's patient"; the staff frontend handles `basis: 'own-facility'` and offers the PIN or an access request on 403.
+
+Suites: `services/ehr-api/test/database/own-facility-access.integration.sql`;
+`patient-grant-revocation.integration.sql` (the history's keys) changed.
+
+## 0132. Staff patient search and emergency search (ID-3a, ID-3b; Akos Release A, migration 0132)
+
+Owner decisions of 18 November 2026: YES to search by name, phone, date of
+birth and Health ID with the strong and weak key rule; YES to emergency
+search by name and date of birth; Q104 YES (an emergency search shows in the
+patient's own access history); Q100 B (a Health ID nobody has answers "No
+such patient" distinctly). Needs 0001-0127, 0130 and 0131 (it uses 0131's
+own-facility basis for "this facility's patients").
+
+Keys go in the body, never in the URL. Answers never carry a Health ID or a
+patient id: each card carries a `matchRef` instead.
+
+### `POST /api/v1/identity/patient-search`
+
+Permission `identity.registration.write` (front desk, approvers, doctors,
+nurses, clinicians), `X-Facility-Id`, `X-Purpose-Of-Use: direct-care`.
+
+```json
+{ "firstName": "Amaka", "lastName": "Okafor", "dateOfBirth": "1990-05-01",
+  "healthId": "HID-QSAA22", "phone": "0803 000 0001" }
+```
+
+Every field is optional; every key given must match. Names match ignoring
+case and extra spaces; the date of birth exactly (`YYYY-MM-DD`); the Health
+ID exactly (any case); the phone in any form it may be stored in (E.164, or a
+Nigerian number starting with 0).
+
+| Keys | Finds |
+|---|---|
+| first name + last name + date of birth | any active patient |
+| Health ID + (last name or date of birth) | any active patient |
+| phone + last name | any active patient |
+| last name + date of birth | only this facility's patients |
+| phone | only this facility's patients |
+| Health ID | only this facility's patients |
+| anything else | 400 `PATIENT_SEARCH_TOO_BROAD` |
+
+"This facility's patients" are 0131's: registered at this desk, or a
+consented visit here in the last 24 months. Inactive, merged and sealed
+(demo or QA tenant) patients are never found; a sealed facility finds only
+its own sealed patients.
+
+Answer `200`:
+
+```json
+{ "mode": "standard", "outcome": "found", "reach": "everywhere", "message": null,
+  "patients": [ { "matchRef": "psr_...", "matchRefExpiresAt": "2026-11-18T10:10:00.000Z",
+    "fullName": "Amaka Okafor", "sex": "female", "dateOfBirth": "1990-05-01",
+    "healthIdLast4": "AA22", "ninStatus": "not_verified" } ] }
+```
+
+- `outcome`: `found` (1-10 cards), `no_match`, `no_such_patient` (a Health ID
+  was given and no patient record of any status has it: "No patient has this
+  Health ID."), `too_many` (more than 10: "Too many matches. Add the date of
+  birth or phone.", no card).
+- `reach`: `everywhere` or `here`. A `no_match` that reached only here says
+  "No patient of this facility matches. To search every facility, add the
+  full name and date of birth."
+- `ninStatus` is ID-0's: `verified` or `not_verified` ("NIN Verified" /
+  "NIN Not Verified" on screen).
+- Registration roles can tell whether a Health ID exists from
+  `no_such_patient`; this is the owner's Q100 B.
+
+Refusals: 400 `PATIENT_SEARCH_TOO_BROAD`, `PATIENT_SEARCH_PHONE_INVALID`,
+`PATIENT_SEARCH_DATE_INVALID`, `VALIDATION_FAILED` (unknown field, malformed
+Health ID, a name over 100 characters), `PURPOSE_OF_USE_REQUIRED`; 403
+(permission); 429 `PATIENT_SEARCH_LIMITED` ("Too many searches. Please wait a
+few minutes and try again."); 503 `PATIENT_SEARCH_UNAVAILABLE`.
+
+### `POST /api/v1/identity/patient-search/emergency`
+
+Permission `identity.break-glass.write` (doctors, nurses, clinicians),
+`X-Purpose-Of-Use: emergency`, the platform's emergency access
+(`break_glass_enabled`) on.
+
+```json
+{ "firstName": "Amaka", "lastName": "Okafor", "dateOfBirth": "1990-05-01",
+  "reason": "Unconscious patient brought in by ambulance" }
+```
+
+Exactly these four fields; the reason (8-500 characters) is required before
+any result. Exact first name, last name and date of birth, any active
+patient, at most 5 cards (`too_many` above 5: "More than 5 people match. Ask
+for a phone number or the Health ID."). The answer has the same shape with
+`mode: "emergency"`. The cards give no access: break-glass still needs its
+own reason. Refusals as above, plus 400 `EMERGENCY_SEARCH_REASON_REQUIRED`
+and 423 `BREAK_GLASS_DISABLED`.
+
+### matchRef
+
+`psr_` and 43 characters, random, made by the database; only its SHA-256 is
+stored (`identity.patient_search_refs`), bound to the patient, the member's
+account, membership and facility and the purpose (`direct-care`, or
+`emergency` for an emergency search), for 10 minutes. No key or setting is
+involved. Identity code resolves it with
+`services/identity-api/src/patient-search/match-ref.ts`
+(`resolvePatientMatchRef`, over `identity.resolve_patient_search_ref`): the
+patient id only for the same member, facility and purpose, unexpired, while
+the patient is active and the seal allows it; null otherwise. Break-glass by
+matchRef (ID-5) and check-in (EHR-C7) use it; they do not change it.
+
+### Break-glass by matchRef (ID-5)
+
+`POST /api/v1/identity/break-glass` takes the patient as exactly one of
+`hid` (a Health ID) or `matchRef` (a card's matchRef from this member's own
+emergency search in the last 10 minutes):
+`{ "matchRef": "psr_...", "reason": "...", "durationMinutes": 60 }`. Both at
+once, or neither, is `400 VALIDATION_FAILED`. The database resolves the ref
+(`identity.activate_break_glass_by_match_ref`, 0132) and runs the same
+activation as for a Health ID: every check, the hourly limit, the replay, the
+grant, the event and the audit are unchanged, and so is the answer. A ref that
+does not resolve (another member's, another facility's, a direct-care
+search's, expired, malformed, or a patient no longer active) answers as an
+unknown Health ID does: `404 CONSENT_RESOURCE_NOT_FOUND`, the same for every
+reason. The emergency card never carries a Health ID, so the screen sends the
+card's `matchRef`.
+
+### Limits and alert
+
+Counted before each search (`auth.otp_rate_limits`, HMAC buckets with the
+existing OTP key): 30 searches per member in 10 minutes and 300 per facility
+in an hour; 5 emergency searches per member in an hour. A limit answers 429
+and writes one warning log line `event: "identity.patient_search.limited"`
+with the mode, which limit, the facility id and the correlation id; never
+what was searched for.
+
+### Audit
+
+- Each search that runs: one `identity.patient.search` or
+  `identity.patient.emergency-search` row (success; denied when too broad)
+  with `details.criteria` (the kinds of keys given), `details.criteriaHash`
+  (HMAC-SHA-256 of the values with the OTP key, so a repeated search can be
+  recognised), `reach`, `outcome`, `resultCount` and `patientIds` shown. Never
+  a name, date of birth, Health ID or phone. The emergency reason is kept in
+  the row's `reason`.
+- Each patient shown: one `identity.patient.search.shown` or
+  `identity.patient.emergency-search.shown` row naming the patient.
+- Each refusal (too broad, invalid phone or date, limited, a database
+  refusal, unavailable): one denied (or failure) search row with
+  `details.refusal` and the key kinds. The request interceptor's
+  `api.identity.patient.search.request` rows are written as for every route.
+
+### The patient's access log (owner Q104)
+
+`GET /api/v1/identity/me/access-log` gains the action
+`found_in_emergency_search`, with `facilityName` and `actorName`, for each
+emergency search that showed the patient. The screen says "Found in an
+emergency search at <facility>". A standard search is not listed there (it
+is audited).
+
+### Screen change (Akos's frontend branch)
+
+Desk search form with the five keys; show `message` when there is no card;
+offer "Register new patient" from an empty search (`no_match` or
+`no_such_patient`), not from an error. Emergency search behind the
+break-glass flow, reason first. Keep the `matchRef` (never a Health ID) for
+the next step: break-glass sends it as `matchRef` (ID-5, above). Patient's access history: the new action's words above.
+
+### Tests
+
+`services/ehr-api/test/database/staff-patient-search.integration.sql`
+(strong and weak keys, here against everywhere, Health ID outcomes,
+exclusions and seals, the 10 and 5 limits, cards, matchRefs, refusals,
+emergency gate and reason, audit rows without values, the patient's access
+log, structure); `services/identity-api/src/patient-search/patient-search.http.spec.ts`
+and `services/identity-api/src/auth/patient-access-log.spec.ts`.
+
 ## EHR-C5: one-call consultation
 
 Akos N-5 ("Start consultation" saves only the complaint; "Save the rest" is
@@ -7679,3 +8298,739 @@ Read `actor.facility.modules` (or the chosen facility's entry in
 `actor.facilities`) and hide each menu item and home tile whose key is
 `false`; P1-5 hides Facility settings when `admin` is `false`. Treat a
 missing `modules` (an older backend) as today: show what is shown now.
+
+## EHR-C7. The waiting list: check-in, stage and assignee (0135, owner decisions of 18 November 2026)
+
+Owner, 18 November 2026: YES to patient names on the waiting list before consent. A check-in is never a basis for
+opening the chart without a PIN (Q101: check-in-only visits do not count). Defaults the owner did not object to: five
+triage levels; a patient with a deny directive stays on the list, marked "Chart cannot be opened".
+
+Who: members holding both `ehr.encounter.read` and `ehr.encounter.write` at the session facility (front desk, nurse,
+clinician, doctor). Lab and pharmacy staff hold read only and are refused (403 `VISIT_QUEUE_NOT_PERMITTED`, "Only the
+front desk, nurses, clinicians and doctors of this facility can use the waiting list."). `X-Purpose-Of-Use:
+direct-care` on every route. No Health ID in any path, query, body or answer. No new setting or platform control.
+
+The card (every answer):
+
+```json
+{ "entryId": "uuid", "patientId": "uuid", "fullName": "Amaka Queueone", "sex": "female", "dateOfBirth": "1990-01-02",
+  "healthIdLast4": "AA22", "stage": "waiting", "triageLevel": null, "assignedMembershipId": null,
+  "checkInBasis": "search", "checkedInAt": "2026-11-18T09:00:00.000Z", "checkInDay": "2026-11-18",
+  "stageChangedAt": "2026-11-18T09:00:00.000Z", "closedAt": null, "rowVersion": 1, "chartBlocked": false }
+```
+
+- `stage`: `waiting`, `triage`, `ready`, `with_clinician` (open); `finished`, `left`, `cancelled` (closed).
+- `triageLevel`: 1 (most urgent) to 5, or null. `checkInBasis`: `search` or `own-facility`.
+- `checkInDay`: the Lagos calendar day of the check-in. `chartBlocked`: an active deny directive covers this facility.
+- No clinical content. `patientId` opens the chart only through the usual consent check (PIN, approval or 0131's
+  own-facility rule); the card itself gives no access.
+
+`POST ehr/visit-queue/check-in`, body exactly one of:
+
+| Field | Rule |
+|---|---|
+| `matchRef` | a match reference from this member's own staff patient search (`POST identity/patient-search`, direct care, 0132) made in the last 10 minutes at this facility |
+| `patientId` | the UUID of a patient who is already this facility's own (0131: registered at this desk, or a consented visit here in the last 24 months) |
+
+Never a bare patient id: an unknown, inactive, merged or sealed patient, a patient who is not this facility's own, and
+a matchRef that is another member's, another facility's, expired, from an emergency search or made up all get the one
+answer 403 `CHECK_IN_NEEDS_SEARCH`, "Search for the patient first, then check them in. A search result can be used for
+10 minutes." Both or neither: 400 `CHECK_IN_NEEDS_ONE_PATIENT`. Answer 200
+`{ "outcome": "checked_in" | "already_on_list", "entry": card }` (a patient already on this facility's open list gets
+that row back). No visit is written.
+
+`GET ehr/visit-queue[?includeClosedToday=true]`: this facility's open rows, most urgent first (triage level 1-5, then
+no level; then the earliest check-in), and with the flag also the rows closed today (after the open ones). Answer
+`{ "items": [card], "hasMore": false, "limit": 200 }`; at most 200 cards, `hasMore` when there are more.
+
+`PATCH ehr/visit-queue/:entryId`, body `{ "expectedRowVersion": 1, "stage"?, "triageLevel"? (null clears),
+"assignedMembershipId"? (null clears) }`, at least one change. The assignee is a nurse, clinician or doctor of this
+facility (`ehr.encounter.write` and `ehr.note.write`). Answer 200 with the card. Refusals: 400
+`VISIT_QUEUE_NOTHING_TO_CHANGE`, `VISIT_QUEUE_UPDATE_INVALID`, `VISIT_QUEUE_ASSIGNEE_INVALID` ("Choose a nurse,
+clinician or doctor who works at this facility."); 404 `VISIT_QUEUE_ENTRY_NOT_FOUND` (also another facility's row);
+409 `VISIT_QUEUE_ENTRY_CHANGED` ("Someone else changed this patient's place on the waiting list. Reload the list and
+try again."), `VISIT_QUEUE_ENTRY_CLOSED` ("This patient is no longer on the waiting list. Check them in again if they
+are back."). 503 `VISIT_QUEUE_UNAVAILABLE` on a database without 0135.
+
+Audit, written by the database functions in the request's transaction (refusals included): `ehr.visit-queue.check-in`
+(success with the patient; denied with the internal refusal kind, naming the patient only when one was found and is
+not this facility's own), `ehr.visit-queue.list` (one collection row: count, `hasMore`, the patient ids shown) plus
+`ehr.visit-queue.list.shown` (one row per patient shown, on every read), `ehr.visit-queue.update` (success, denied
+with the outcome, or failure for not found). No name, date of birth or Health ID in any audit row.
+
+Shared function contract with 0132 (lane B owns it; 0135 only calls it, as its owner):
+`identity.resolve_patient_search_ref(requested_ref text, requested_purpose text) returns uuid` (SECURITY DEFINER,
+STABLE): the patient id of an unexpired matchRef made by a search of the session's account, membership and facility
+for that purpose (which must be the session's), while the patient is active and the facility's seal allows them;
+null otherwise; writes nothing. 0135 checks its signature and return type before applying and calls it with
+`'direct-care'`. 0131's `identity.own_facility_basis(patient uuid, facility uuid) returns text` (null when not this
+facility's own) is used the same way.
+
+Screen change (Akos frontend branch): "Check in" on a search card sends that card's `matchRef`; on a patient of this
+facility (from the registration-case list, a just-registered patient, or this facility's own patient) it may send
+`patientId`. The waiting list polls `GET ehr/visit-queue`, shows name, sex, date of birth, `•••• healthIdLast4`, stage
+and triage level, marks `chartBlocked` as "Chart cannot be opened", and sends `expectedRowVersion` with every change.
+On 403 `CHECK_IN_NEEDS_SEARCH` show the message and the search box.
+
+## 0136. Who can do what: role-table changes (Release A, owner decisions Q103 A, Q111 A, Q112 A, Q113 A)
+
+Owner decisions, verbatim: "Q103 A" (the five changes; the admin's "approve
+new patient" and the nurse's note writing unchanged), then "Q111 A, Q112 A,
+Q113 A":
+
+- **Q111 A**: doctors keep checking a scanned paper record and confirming its
+  patient; only starting a new scan (a reading) moves from doctors to the
+  front desk.
+- **Q112 A**: the front desk uploads scans and sees its own uploads, but does
+  not open other stored documents or read the text taken from them (and still
+  reads no note, diagnosis, prescription or lab request).
+- **Q113 A**: no real (non-sealed) staff are active yet, so 0136 may touch
+  none. Its maximums are 0 at real facilities on every line, written in the
+  file; nothing is filled in at signing. At apply the release prints the
+  counts and stops, changing nothing, if any real staff would be affected.
+
+Migration `0136_role_permission_changes.sql` adds three permission codes,
+changes rows of `auth.role_permissions` and closes the open records-processing
+requests that the change makes useless (see "Open records-processing requests"
+below). ehr-api and ocr-api change with it (see "What the services check"); no
+function, policy, grant or table changes, so `runtime-grants.sql` is
+unchanged. Permissions are read on every request, so each change applies from
+a staff member's next request; nobody is signed out. Pharmacists and
+`org_admin` are not changed; nurses and clinicians only gain the new
+`ocr.job.start`, which keeps them starting readings as today.
+
+### The three new permission codes
+
+| Code | Gives | Held by |
+| --- | --- | --- |
+| `ocr.job.start` | starting or retrying a reading (`POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`), together with `ocr.job.write` | receptionist, nurse, clinician |
+| `ocr.job.read-own` | following the readings of documents this login uploaded at the facility (`GET /ocr/jobs/:jobId`, `GET /ocr/jobs?documentId=`, `GET /ocr/job-list`, which then lists only the readings it started), and letting ocr-api read such a document to start its reading. Never the text: extractions, validations and publications still need `ocr.job.read` | receptionist |
+| `ehr.document.read-own` | listing and opening only the documents this login uploaded at the facility (`GET /ehr/documents`, `GET /ehr/documents/:id/download`) | receptionist |
+
+A login that holds the full code (`ehr.document.read`, `ocr.job.read`)
+through any role keeps the full read; the "-own" codes narrow nobody.
+
+**Why a new code for Q111 A.** Checking a reading and confirming its patient
+run under records processing, and records processing needs `ocr.job.write` at
+each use (0104 D8, 0108, 0113), so the doctor's `ocr.job.write` row has to
+stay. Starting a reading therefore needs a second code that doctors do not
+hold. A permission row (rather than a check on the role's name in ocr-api) is
+read the same way by every service and screen, shows in the role table the
+owner reviews, applies to a doctor who is also a nurse exactly as to anyone
+else (the nurse role gives `ocr.job.start`), and is undone by a row.
+
+### Permission keys before and after, per role (only the codes 0136 touches)
+
+| Role | Before 0136 | After 0136 |
+| --- | --- | --- |
+| `receptionist` (front desk) | none of these | `ehr.document.write`, `ehr.document.read-own`, `ocr.job.write`, `ocr.job.start`, `ocr.job.read-own`, `ehr.vital.read`. Not `ehr.document.read`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` |
+| `doctor` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write`; `outreach.campaign.read`, `outreach.campaign.write`, `outreach.registration.read`, `outreach.registration.write`; `lab.work-item.read`, `pharmacy.work-item.read` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` (all kept, Q111 A); no `ocr.job.start`; no Outreach code; neither work list |
+| `nurse` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` | the same, plus `ocr.job.start` |
+| `clinician` | the same as the nurse | the same, plus `ocr.job.start` |
+| `lab` | `ehr.encounter.read`, `ocr.job.read`, `ocr.job.write`, `ocr.validation.write` | none of these |
+| `admin` (hospital administrator) | `lab.work-item.read`, `pharmacy.work-item.read`, `ocr.job.read` | `ocr.job.read` only |
+
+Rows: twelve removed (doctor's four Outreach codes and two work lists; lab's
+`ehr.encounter.read`, `ocr.job.read`, `ocr.job.write`,
+`ocr.validation.write`; admin's two work lists), eight added (the six
+front-desk rows, nurse and clinician `ocr.job.start`). Kept on purpose and
+asserted: `admin` `identity.registration.approve`, `workforce.manage`,
+`organization.manage`, `audit.read`; `nurse` `ehr.note.write`; `doctor`
+`ocr.job.write`, `ocr.validation.write`, `ocr.patient.confirm`.
+
+### What the services check (same release)
+
+- ocr-api: `POST /ocr/jobs` and `POST /ocr/jobs/:jobId/retry` need
+  `ocr.job.write` and `ocr.job.start`. `GET /ocr/jobs/:jobId`, `GET
+  /ocr/jobs?documentId=` and `GET /ocr/job-list` need `ocr.job.read` or
+  `ocr.job.read-own` (a new any-of check in ocr-api's guard, as ehr-api
+  already has). With `ocr.job.read-own` only, the job list shows only the
+  readings this member started (as `mine=true`), and a job whose document
+  this login did not upload answers 404 `OCR_JOB_NOT_FOUND`.
+  `GET /ocr/jobs/:jobId/extractions`, `GET /ocr/jobs/:jobId/validations` and
+  `GET /ocr/validations/:validationId/publications` still need
+  `ocr.job.read`.
+- ehr-api: `GET /ehr/documents` and `GET /ehr/documents/:id/download` need
+  `ehr.document.read` or `ehr.document.read-own`; with the "-own" code only,
+  the list holds only the documents this login uploaded here (bound in the
+  query), and any other document answers 404 "Document not found", as an
+  unknown one does, before Identity is asked about its patient. ocr-api's
+  source read (`GET /ehr/internal/ocr/documents/:id/source`) needs
+  `ocr.job.read` or `ocr.job.read-own`, with the same "own uploads only"
+  rule for the "-own" code. Uploading (`ehr.document.write`) is unchanged:
+  only the uploader completes an upload.
+- Every refusal is audited as today (`security.authorization.denied` for a
+  403, the request row with outcome failure for a 404). The release applies
+  migrations before it starts the new service images, so the new checks
+  never run against the old role table. If a release stopped after the
+  migration and before the new images, the old images would be narrower for
+  the desk (no full read) and doctors could still start readings until the
+  new images run.
+
+### What answers 403 PERMISSION_DENIED from now on
+
+| Who | Routes (under `/api/v1`) |
+| --- | --- |
+| Doctor | `POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry` (no `ocr.job.start`); every Outreach route of outreach-api (campaigns, registrations, screening, exports, Health ID steps) and `GET`/`POST /identity/outreach-invitations` and its revoke; `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
+| Laboratory staff | `GET /ehr/patients/:patientId/encounters`, `.../encounters/open-today`, `.../encounters/:encounterId`; every `ocr/*` route (`ocr/jobs`, `ocr/job-list`, validations, extractions) |
+| Hospital administrator | `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
+| Front desk | `GET /ocr/jobs/:jobId/extractions`, `GET /ocr/jobs/:jobId/validations`, `GET /ocr/validations/:validationId/publications`, `POST /ocr/jobs/:jobId/validation(s)`, `POST /ocr/jobs/:jobId/patient-confirmation`, `POST /ocr/validations/:validationId/publications`, and every note, diagnosis, prescription and lab-request read |
+
+The front desk now passes the permission check on `POST
+/ehr/documents/upload-intents`, `POST /ehr/documents/:id/complete`, `GET
+/ehr/documents` and `GET /ehr/documents/:id/download` (its own uploads only),
+`POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`, `GET /ocr/jobs`, `GET
+/ocr/jobs/:jobId` (readings of its own uploads), `GET /ocr/job-list` (SX-9:
+its "Who" is now doctor, clinician, nurse, admin and, for its own readings,
+receptionist; no longer lab), and the vitals reads (`GET
+/ehr/patients/:patientId/vitals/latest`, `GET
+.../encounters/:encounterId/vitals`, `/:vitalId`, `/:vitalId/corrections`).
+Every one of these still needs the patient's access exactly as for anyone
+else (a consent grant, or the records-processing cover of 0104/0108/0113),
+and is audited as today, refusals included.
+
+### What still works (checked route by route)
+
+- Doctors check readings (`POST /ocr/jobs/:jobId/validation`), confirm their
+  patient and ask a patient for records processing (`POST
+  /identity/access-requests`, purpose `healthcare-operations`), as before
+  (Q111 A); they read jobs and publish a checked reading into the chart.
+- A doctor's own orders' progress (ORD-3): `POST /lab/work-items/progress`
+  and `POST /pharmacy/work-items/progress` need `ehr.lab-request.read` /
+  `ehr.prescription.read`, which doctors keep.
+- Activating a lab request still sends it to the hospital's own laboratory:
+  that hand-off needs `lab.work-item.accept`, which doctors keep. 0133's
+  automatic send to the own pharmacy uses its definer function and adds no
+  doctor row, as planned.
+- Released results: `lab.result.released.read`, kept by doctors.
+- Laboratory staff keep their whole own job: work list, accept, accessions,
+  specimens, runs, results, verification, release, receiving from other
+  facilities, and `ehr.lab-request.read`/`write`.
+- Nurses and clinicians start, check, confirm and publish readings as today.
+  Pharmacists are unchanged. Administrators keep staff, settings, audit,
+  approving new patients and reading jobs (`ocr.job.read`, unchanged by
+  Q112 A). Sign-in sites (Q97's product gate) are unchanged: the lab site
+  admits lab staff by `lab.work-item.read`/`accept`, which they keep, and
+  administrators by `organization.manage`.
+
+**Facilities left with nobody who can check a reading.** Doctors keep
+checking, so a clinic with doctors still checks its readings. A laboratory
+loses checking for readings its staff already started, and a facility whose
+only staff with paper readings are the front desk can start a reading (it
+uses the facility's paid OCR pages, 0107) that nobody there can check or
+confirm, so it is never put into the chart and its scan is deleted after 7
+days (0112). The counts' lines 22 to 26 show how many facilities and
+readings this touches.
+
+**Open records-processing requests.** 0104's trigger checks `ocr.job.write`
+only when a request is made, and 0104 D8, 0108 and 0113 check it again at
+each use. A request a laboratory member made before 0136 that the patient has
+not answered would, if approved, show in the patient's access history but
+never work. 0136 closes those requests (status `expired`, as 0086 and 0096
+do), writing one audit row each (`identity.access-request.close`, system
+actor, reason "This staff member can no longer process records", ids only).
+Doctors keep `ocr.job.write`, so their requests stay open. A request whose
+staff member keeps `ocr.job.write` through another role, a direct-care
+request and an answered request are left as they are. The undo does not
+reopen them. Locks: 0136 takes SHARE ROW EXCLUSIVE on `auth.permissions`,
+`auth.role_permissions` and `identity.access_requests`, so a new access
+request or a patient's answer waits for the few seconds 0136 runs.
+
+### Staff counts and the stop (Q113 A: no real staff affected)
+
+In plain words: the owner says no real (non-sealed) staff are active yet,
+so 0136 may touch none of them. When the release applies 0136 it counts how
+many staff each change would touch; if any real staff member (or, for lines
+22-24, any real facility) would be affected, 0136 stops and changes nothing,
+and the owner decides again with the printed counts. The sealed QA and demo
+tenants' fictional staff are counted apart and never stop it.
+
+`docs/rollback/0136_affected_staff_counts.sql` is the counts file. It is read
+only (its first statement makes the session read only, and it holds no write
+statement), prints numbers only (no name, email or id), takes a few seconds
+and stops nobody's work. It prints a short header saying what each line
+means, then:
+
+- **Table 1**, 26 lines, each with a number at real facilities, the distinct
+  staff logins behind it (lines 1-21) and the same number at the sealed QA
+  and demo tenants (fictional staff, printed only):
+  1-8 what the front desk, nurses and clinicians gain; 9-20 what doctors,
+  laboratory staff and administrators lose (a membership that keeps the code
+  through another role is not counted); 21 doctors who can start a reading
+  today and cannot after 0136; 22 facilities where someone can check a
+  reading today and nobody can after; 23 facilities where after 0136 someone
+  can start a reading and nobody can check it; 24 the same for confirming its
+  patient; 25 open records-processing requests 0136 closes; 26 readings not
+  yet checked at the facilities of line 22.
+- **Table 2**, lines 1-24 in the exact form the owner writes into 0136:
+  `(line, at real facilities, staff logins)`, with `null` for staff logins on
+  lines 22-24 (they count facilities).
+
+DevOps runs it once, with the database owner's login (the one the migrations
+use) in a read-only session (row security hides rows from any other login;
+the file then stops with a plain message instead of printing numbers that are
+too low):
+
+    psql "<production, database owner's login, read-only session>" -v ON_ERROR_STOP=1 \
+      -f docs/rollback/0136_affected_staff_counts.sql
+
+and sends both tables to the owner. If 0136 has already run on that
+database, the file says so and counts nothing.
+
+**Nothing is filled in at signing.** In 0136, section "1. THE OWNER'S
+MAXIMUMS" holds the 24 rows `( 1, 0, 0),` to `(21, 0, 0),` and `(22, 0, null),`
+to `(24, 0, null)` (lines 22-24 count facilities). DevOps may run the counts
+file against production before signing to see that lines 1-24 are 0 at real
+facilities; if any is not, 0136 would stop, and the owner decides first. A
+changed number changes the file and needs a new signature. An ehr-api test
+checks the 24 rows' shape and that 0136's count block is the counts file's
+block, character for character.
+
+**What happens at apply.** Before changing anything, 0136 runs the same count
+block (the same text as the counts file) and prints each line as a NOTICE
+`0136 count n: ...: N at real facilities (M staff logins), S at the sealed QA
+and demo tenants; the owner's maximum: ...`, in the release's dry-run and apply
+logs. Then, for lines 1-24, if a number at real facilities (or its staff
+logins) is above the owner's 0, 0136 stops with error 55000 "0136 stopped,
+nothing was changed: real staff would be affected, and the owner approved
+0136 only while none are active (Q113 A): line N (...) is now ..., more than
+the owner's 0 (0)". The release's dry run runs
+first, so the stop shows there and the apply never starts; the release stops
+before starting new service images. The sealed tenants and lines 25-26
+(requests and readings, which change by the hour) are printed, not compared.
+A fresh database (tests, rehearsals) has only the sealed tenants' fictional
+staff, so 0136 applies there; in production it applies while no real staff
+would be affected.
+
+### Undo
+
+`docs/rollback/0136_rollback.sql` (not in the ledger) gives doctors,
+laboratory staff and administrators back exactly what they could do before
+0136: it puts back the twelve removed rows and adds `ocr.job.start` for
+doctors and laboratory staff (from this release on, starting a reading needs
+it). It leaves the three codes, the nurse's and clinician's `ocr.job.start`
+and the six front-desk rows (the desk keeps scanning with its own uploads
+only; the file shows the delete that would take those back too). It can run
+twice safely. It becomes a migration (next free number, ledger entry, owner
+signature) only if needed.
+
+Screen change (Akos frontend branch): show the scan steps (upload, "Extract
+with OCR", the job list) and vitals to the front desk, with the document and
+reading lists showing its own uploads only (`ehr.document.read-own`,
+`ocr.job.read-own`) and no extracted text, checking or publishing; show "start
+reading" only to staff holding `ocr.job.start` (front desk, nurses,
+clinicians), and keep doctors' "check reading" and "confirm patient" (they
+hold `ocr.job.write` and `ocr.validation.write`); hide the Laboratory and
+Pharmacy department pages (work list, results, prescriptions) from doctors
+and administrators; hide Outreach from doctors; hide visits and the Migrate
+desk from laboratory staff. Screens already follow the permissions list in the
+session, so most of this happens by itself.
+
+## ORD-2. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (Akos Release A, migration 0133)
+
+Owner decisions of 18 November 2026: activated prescriptions go
+automatically to the hospital's own pharmacy (YES); pharmacy and lab staff
+get their own facility's work items only, never the chart. Needs 0001-0127;
+in Release A, 0128-0132 run before it and none of them creates, replaces or
+alters a function it replaces or relies on, a table it locks or gives a
+policy, or a column it reads (0133's header). It fixes finding F2 of the plan:
+before 0133 a pharmacist or lab scientist without a personal consent grant
+saw "To dispense 0" and a card with no name for their own facility's work.
+
+### Who works on this facility's own work
+
+A member works on this facility's own pharmacy (or lab) work items, those
+with no order route from another facility, when all hold: direct care (an
+emergency session keeps break-glass and does not use this rule); the item is
+at the session's facility; the member holds there `pharmacy.work-item.read`
+and `pharmacy.order-route.receive` (or `lab.work-item.read` and
+`lab.order-route.receive`), which today means the pharmacist and lab roles
+only, so doctors, nurses, clinicians, receptionists and admins gain nothing;
+the patient is active; and no deny directive of the patient covers the
+member. It gives the work item, its patient card (name, sex, date of birth,
+last 4 of the Health ID), its events, accessions, specimens, executions,
+results, dispensings and reversals at that facility, never the chart: no
+EHR table, no version snapshot, none of the patient's imported Lab or
+Pharmacy evidence (OCR-imported outside records, which keep needing the
+member's consent), and the 0125 prescription details still need the
+member's consent. It is decided item by item: a row of the work chain is
+given only when it belongs to an own work item (no order route) of that
+patient at that facility, so the rows of another facility's order (a
+route-backed item) stay as that route allows, even for the same patient.
+It gives reads of the work item and reads and writes of its chain; accepting
+a new item into the pharmacy or the lab still needs the member's consent
+(own prescriptions arrive by the automatic send below). Every read and write
+is audited as before, with `basis: 'own-work'` unless the member holds its
+own consent grant for that action (then the row is a consent row, as
+before).
+
+The database keeps an owner-only list of the patients with own work at each
+facility, one list for pharmacy work and one for lab work (owner's Q122 A,
+19 November). A patient is listed with each own item of that kind there (one
+row per item) and stays listed. The rule answers only for a listed patient,
+and the lab and pharmacy runtimes can each ask only about their own kind, so
+outside the list a runtime's own SQL learns nothing about a patient through
+the own-work test.
+
+### Only the new images (owner's Q120 B, 19 November)
+
+The rule above answers only a staff session whose transaction sets
+`app.own_facility_work` to `'0133'`. The new lab-api, pharmacy-api and
+ehr-api images set it in every staff transaction (always; it is not a
+setting anyone configures). In ehr-api it is used only by the order-route
+send and the route's `resendAllowed`, which then follow the rule for
+sending to an outside pharmacy below (owner's Q121 A). ehr-api's runtime
+holds no grant on a pharmacy or lab table, so in a pharmacist's or lab
+scientist's ehr-api session the value reaches only reads the database
+owner runs: the readers of prescriptions in 0133's header (D5), among them
+`ehr.order_belongs_to`, which the route readers
+`ehr.list_order_routes_for_order` and `ehr.order_route_summaries` call; and
+the reads of the lab and pharmacy work items inside `ehr.send_order_route`
+and `ehr.order_route_resend_allowed`. Nothing new is exposed. Each of those
+reads comes after the session's own consent test (read consent in the route
+readers, write consent and `ehr.order-route.send` in the send) or the own
+pharmacy send's prescription write permission and prescriber test, and the
+session reads what passes them without the value too. A membership that
+holds both a doctor's and a pharmacist's role learns at most that a source
+prescription exists whose own pharmacy item it already reads in
+pharmacy-api (0133 D5). Today's images never set it, so
+on a database with 0133 they list, read, write and record exactly what they
+do without 0133: their pharmacy and lab staff still need a consent grant,
+and the patient cards and audit rows stay as 0124 gives them. Each image can
+be rolled back alone after 0133. It then works as it did before 0133 until
+it is deployed again, with the exceptions below. A session that sets the
+value still needs everything the rule asks; the value only narrows. The
+withdrawal below is the database's and does not depend on it. Nor does the
+refusal to dispense an item sent elsewhere.
+
+The automatic send below is the new ehr-api's and does not wait for the new
+pharmacy-api. While today's pharmacy-api serves (a rollback of it alone, or
+a rollout in which the new ehr-api serves first), a prescription sent that
+way is answered as sent. It reaches the pharmacists only through a consent
+grant, as any prescription did before 0133.
+
+Sending to an outside pharmacy (below) is the new ehr-api's too. While
+today's pharmacy-api serves, an own item the new ehr-api sent to an outside
+pharmacy, however the pharmacy got it (the automatic send, or a
+pharmacist's acceptance, including items accepted before 0133):
+- stays on today's list as open work, unmarked, at the top for good;
+- is answered by today's `GET /pharmacy/work-items/:id` without `withdrawn`
+  or `withdrawnReason`, so the screen still offers Dispense;
+- answers Dispense with 409 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` ("This
+  prescription can no longer be dispensed here"): the database refuses it
+  for every image;
+- is answered `received` by its progress (ORD-3), so the prescriber sees
+  "received" next to the route to the outside pharmacy.
+
+pharmacy-api therefore goes out with or before ehr-api.
+
+After a rollback of ehr-api alone, today's ehr-api does not set the value.
+Its order-route send answers `ORDER_ROUTE_ORDER_IN_WORK`, and the route's
+`resendAllowed` is `false`, for any prescription with a pharmacy work item
+here, sent elsewhere or not, as without 0133. So a prescription whose item
+here was sent elsewhere, and whose route was then declined, lapsed or
+withdrawn, can be sent nowhere until the new ehr-api is back. Today's
+ehr-api sends no `X-HID-Own-Progress` header, so the new pharmacy-api
+answers it only the progress statuses it knows (ORD-3).
+
+For every image: the patient list above holds one row per own item, so two
+own items of one patient written at the same moment never wait for each
+other on it.
+
+### Pharmacy API and Lab API changes (no new route)
+
+- `GET /pharmacy/work-items`, `GET /lab/work-items`: the facility's own items
+  appear for its pharmacy or lab staff. Every own item listed is recorded in
+  one audit row per patient (`pharmacy.work-item.list` or
+  `lab.work-item.list`, the work item ids only, as 0124's rows), whether or
+  not 0124's patient card is shown, with `basis: 'consent'` or
+  `basis: 'own-work'` as the database gives it for that member. If the basis
+  cannot be read the list fails (no answer without its audit) rather than
+  record one it could not read. Without 0133 the list records as 0124 did.
+- Every command on an own work item or its chain (pharmacy: read, dispense,
+  reverse; lab: read, accession, specimen, execution, result) is allowed on
+  the own-work basis without asking Identity; else Identity's consent decides
+  as before (403 as before). Audit details gain `basis: 'own-work'`, except
+  for a member who holds its own consent grant for that action: the database
+  answers the basis with the access (as the list's reader does), and that
+  member's rows stay consent rows (no `basis`, as before), so the list and
+  the commands record the same basis for the same member and action. A
+  grant for reads only covers the list and the reads: that member's list
+  and read rows are consent rows, and its dispensings, reversals and other
+  writes carry `basis: 'own-work'` (a write grant covers reads too, not the
+  other way round).
+- `GET /lab/executions/:executionId` and
+  `GET /lab/specimens/:specimenId/executions`, which answer result values
+  and every revision, now write one audit row naming the patient in the
+  read's transaction (`lab.execution.read`, resource `lab-execution`, with
+  the accession, specimen, result id and versions returned;
+  `lab.execution.list`, resource `lab-specimen`, with the executions, result
+  ids and versions returned), with the basis as above (`own-work`, or the
+  order route's `order-route` and `orderRouteId`), whatever the basis. Before
+  0133 these reads were recorded only by the request row, which names no
+  patient; the patient's access log already lists both actions as views.
+- An own pharmacy item that was withdrawn before it was dispensed carries
+  `"withdrawn": true` and `"withdrawnReason"`:
+  - `"changed"`: its automatic send was withdrawn. The prescription was put
+    on hold, cancelled, entered in error, edited or resumed after it was
+    sent, by the prescriber or anyone else who may change it. Dispensing it
+    answers 409 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` "This prescription
+    can no longer be dispensed here" (0101, unchanged).
+  - `"sent_elsewhere"`: the prescription was sent to another facility's
+    pharmacy before it was dispensed (owner's Q121 A, below). Dispensing it
+    answers 409 `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` "This prescription
+    was sent to another pharmacy, so it can no longer be dispensed here",
+    with the problem member `"withdrawnReason": "sent_elsewhere"`.
+
+  An item already dispensed never carries either. `GET /pharmacy/work-items`
+  leaves out an item sent elsewhere: it is the outside pharmacy's work now.
+  It lists a `changed` item, marked, with the done work (newest first),
+  never in the open work at the top, because it can never be dispensed.
+  `GET /pharmacy/work-items/:id` answers both, marked. Without 0133's reader
+  (42883) the list answers as before.
+
+### EHR API: `pharmacyHandoff`
+
+Activating a draft prescription (`PATCH .../prescriptions/:prescriptionId`
+with `status: "active"`), or creating one as active, sends it to this
+hospital's own pharmacy in the same transaction and the answer gains:
+
+```json
+{ "pharmacyHandoff": { "status": "sent", "message": "Sent to this hospital's pharmacy." } }
+```
+
+| status | reason | message |
+|---|---|---|
+| `sent` | | Sent to this hospital's pharmacy. / This hospital's pharmacy already has this prescription. |
+| `pending` | | Not sent to the pharmacy yet. Use Send to pharmacy to try again. |
+| `not_sent` | `no_pharmacy` | Not sent: nobody at this facility works on pharmacy orders on Health ID. |
+| `not_sent` | `routed` | Not sent: this prescription has been sent to another pharmacy. |
+| `not_sent` | `not_prescriber` | Not sent: only the person who wrote this prescription can send it to the pharmacy. |
+| `not_sent` | `changed` | Not sent: this prescription changed. Reload it and try again. (It is not at the version sent, no longer active, or not found.) |
+| `not_sent` | `superseded` | Not sent: this hospital's pharmacy has an earlier version of this prescription, which it can no longer dispense. (It was edited or resumed after it was sent, before it was dispensed; reloading cannot change this.) |
+| `not_sent` | `not_allowed` | Not sent: your role at this facility does not allow sending prescriptions to the pharmacy. |
+| `not_sent` | `unavailable` | Not sent: the pharmacy could not be reached. Use Send to pharmacy to try again. |
+
+Only the prescriber's own activation sends. The pharmacy work item is
+accepted by the prescriber (never recorded as a pharmacist's acceptance) with
+the fixed reason "Sent automatically when the prescription was activated", and
+Pharmacy's `PharmacyWorkItemCreated` event carries the same payload as
+pharmacy-api's own acceptance (`workItemId`, `sourceEhrPrescriptionId`,
+`sourceEhrPrescriptionVersion`, `status: "accepted"`). A
+failed send never undoes the activation. Once sent, the prescription is in
+this hospital's pharmacy. Until that pharmacy dispenses it, it can still be
+sent to another facility's pharmacy, which withdraws it here (below). After
+a dispensing, reversed or not, the order-route send answers
+`ORDER_ROUTE_ORDER_IN_WORK`. After a send elsewhere, "Send to pharmacy"
+answers the `routed` row, also once that route has ended. Without 0133 in the database the
+answer has no `pharmacyHandoff`. `not_allowed` is the database refusing the
+session (every prescription route is direct care, so it is the membership:
+it no longer holds `ehr.prescription.write` here); trying again cannot help.
+A replay of a create as active (the same Idempotency-Key) answers the
+prescription as it is now with its `pharmacyHandoff` as the send stands now
+(it asks the send again, which sends once: a pending send is tried again); a
+create as a draft answers none. Resuming after a hold does not send again (the
+pharmacy keeps one own item per prescription). Putting a sent prescription on
+hold, cancelling it or entering it in error marks the send withdrawn, and so
+does editing it while it stays active (frequency, instructions, end date) or
+resuming it: the pharmacy item keeps the version that was sent, which 0101 no
+longer dispenses, and "Send to pharmacy" then answers the "earlier version"
+row above (reason `superseded`), never "already has"; the edit's or the
+resume's own answer (the `PATCH`, still active) carries that row as its
+`pharmacyHandoff`, and the prescription's `ownProgress` (ORD-3) answers
+`withdrawn` (what follows is S3 below); a hold, a cancellation or an entry
+in error answers no `pharmacyHandoff`. Completing a prescription marks
+nothing. Once the pharmacy has dispensed the item, a later change is
+recorded on the send but reported nowhere: what was sent was dispensed and
+nothing is left to dispense, so the `PATCH` answers no `pharmacyHandoff` and
+records no `pharmacySendWithdrawn`, "Send to pharmacy" and a replay of the
+create as active answer "already has" (`sent`), never the "earlier version"
+row, `ownProgress` stays `dispensed` (or `dispensing_reversed`), and the
+pharmacy's list does not mark the item withdrawn. The database marks it on
+the change itself (a trigger on the prescription), so a change made by any
+ehr-api image (an older one during a rolling deploy or after a rollback
+included) marks it too; undoing 0133 by hand must drop that trigger, and the
+functions that read the sends table, before the table (the order is in
+0133's header), or every later change of a prescription's status or version
+fails, and so does the pharmacy's list.
+Whether the pharmacy item should follow the new version instead is open for
+the owner (review S3 of 18 November). The audit row of the create, the
+update and the send records `pharmacyHandoff` (the status) and
+`pharmacyHandoffReason` (the reason code), never the message, and the
+update's `pharmacySendWithdrawn: true` when the prescription's send stands
+withdrawn after the change and its item has not been dispensed. An item sent
+elsewhere is not this pharmacy's any more, so a later change records no
+`pharmacySendWithdrawn` and answers no `superseded` row.
+
+`GET .../encounters/:encounterId/prescriptions` and
+`GET .../prescriptions/:prescriptionId`: each prescription also carries
+`ownPharmacyStaffed` (0133): `true` when somebody at this facility works on
+pharmacy items on Health ID (an active member holding
+`pharmacy.work-item.read` and `pharmacy.order-route.receive` here, the
+send's `no_pharmacy` test), `false` when nobody does. It is absent on a
+database without 0133 and when it cannot be read (the read never fails
+because of it). It names no patient and writes nothing. The test asks the
+full permission check only of the members holding a role here that grants
+those permissions, so its cost follows the facility's pharmacy staff, not
+the number of its members.
+
+### Sending to an outside pharmacy before dispensing (owner's Q121 A, 19 November)
+
+Until this hospital's own pharmacy has dispensed a prescription it holds,
+the prescription can still be sent to an outside pharmacy. It does not
+matter how the pharmacy got it: by the automatic send or by a pharmacist's
+acceptance. The send is the order-route send
+(`POST .../prescriptions/:prescriptionId/order-routes`), and who may send is
+today's order-route rule: `ehr.order-route.send`, the prescription write
+permission and write consent at the facility. The send withdraws this
+hospital's item in the same transaction ("sent elsewhere"):
+- `GET /pharmacy/work-items` no longer lists the item.
+  `GET /pharmacy/work-items/:id` still answers it, with `"withdrawn": true`
+  and `"withdrawnReason": "sent_elsewhere"`. Dispensing it answers 409
+  `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` (above).
+- A prescription has one item of this hospital's own and at most one
+  route-backed item. Once it is sent elsewhere, only the route-backed item
+  can be dispensed.
+- The database allows at most one dispensing across the two pharmacies,
+  whichever image asks. It refuses to dispense an item sent elsewhere with
+  23514 `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `sent_elsewhere`.
+- The item stays withdrawn whatever happens to the route. If the outside
+  pharmacy declines it, the route lapses, or the clinician or the patient
+  withdraws it, the prescription does not come back to this hospital's
+  pharmacy: "Send to pharmacy" answers the `routed` row. It can be sent to
+  another outside pharmacy under the usual resend rule (`resendAllowed`),
+  or the prescriber writes a new prescription.
+- The prescriber sees where it went in the prescription's `orderRoute`, and
+  its `ownProgress.status` reads `sent_elsewhere` (ORD-3). The send's answer
+  and its audit row are unchanged.
+- After a dispensing here, reversed or not, the send answers 409
+  `ORDER_ROUTE_ORDER_IN_WORK` ("This order is already being worked on"), as
+  before. So does a send after a route an outside pharmacy accepted has
+  ended without being completed; while that route stands, or once it is
+  completed, the send answers 409 `ORDER_ROUTE_ALREADY_SENT`, as before.
+- A "Send to pharmacy" and a send to an outside pharmacy for the same
+  prescription that overlap (the outside send's snapshot predates the
+  other's commit, for example while it waits for the patient's allergy lock)
+  can leave the route sent next to a live item here. "Send to pharmacy", a
+  create as active and Activate run READ COMMITTED, so that the allergy
+  check (0117) reads the allergies after its lock: a SERIALIZABLE
+  transaction would read from the snapshot of its first statement and miss
+  an allergy recorded after it. In that race the database refuses the
+  outside pharmacy's acceptance: the route is withdrawn with
+  `order_in_work`. The prescription is never dispensed twice and stays with
+  this hospital's pharmacy.
+- The two take the prescription's lock and the patient's allergy lock in
+  opposite orders, so they can also deadlock. PostgreSQL then cancels one
+  (40P01): a cancelled send to an outside pharmacy is run again, and a
+  cancelled "Send to pharmacy" answers an error and can be sent again.
+- Only the new ehr-api sends this way (above). Today's ehr-api answers
+  `ORDER_ROUTE_ORDER_IN_WORK` for any prescription with a pharmacy work item
+  here.
+- Lab requests are unchanged: a lab request this hospital's laboratory holds
+  still answers `ORDER_ROUTE_ORDER_IN_WORK`. Splitting one prescription
+  across several pharmacies is not built.
+
+Screen change (Akos frontend branch): on the pharmacy item's own page, show
+`withdrawnReason` `sent_elsewhere` as "Sent to another pharmacy by the
+prescribing team", with Dispense disabled.
+
+### `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/own-pharmacy-send`
+
+"Send to pharmacy" for the prescriber: sends their active prescription, or
+tries a pending send again. Permission `ehr.prescription.write`. No
+Idempotency-Key (sending twice sends once).
+
+```json
+{ "expectedRowVersion": 2, "allergyAcknowledgement": { "warningToken": "...", "reason": "..." } }
+```
+
+`allergyAcknowledgement` only after the allergy warning, as on the pharmacy
+hand-off (0117). Answer `200 { "pharmacyHandoff": { ... } }` as above.
+Errors: 412 `PRESCRIPTION_VERSION_CONFLICT`, 409 `PRESCRIPTION_NOT_ELIGIBLE`
+(not active), 409 `PRESCRIPTION_ROUTED`, 409 `ALLERGY_ACKNOWLEDGEMENT_REQUIRED`,
+503 `OWN_PHARMACY_SEND_UNAVAILABLE` (no 0133 yet), 403 `CONSENT_REQUIRED`, and
+as every prescription command 404 `CLINICAL_RESOURCE_NOT_FOUND` and 409
+`VISIT_ENTERED_IN_ERROR`. Audit action `ehr.prescription.own-pharmacy-send`
+(details: `expectedPrescriptionVersion`, `prescriptionVersion`, the allergy
+acknowledgement's flags and counts when one was stored for the `handoff`
+stage, `pharmacyHandoff`, `pharmacyHandoffReason`).
+
+Screen change (Akos frontend branch): after Activate, an edit or a resume,
+show `pharmacyHandoff.message`; show "Send to pharmacy" when it is `pending`
+or `not_sent` with reason `unavailable`, never for any other reason
+(`changed`: reload first; `superseded`, `no_pharmacy`, `routed`,
+`not_prescriber`, `not_allowed`: trying again cannot help). The send state is
+not kept on the prescription and nothing retries a pending send by itself,
+so the prescription list and page also show "Send to pharmacy" on a
+prescription when all hold: it is active; the signed-in member wrote it
+(`createdBy` and `createdByMembershipId` are theirs) and holds
+`ehr.prescription.write` here (the session's permissions); no order route is
+in force (`orderRoute`); its `ownProgress.status` is `not_received`; and
+`ownPharmacyStaffed` is `true` (absent or `false`: never, so a facility with
+nobody on pharmacy work is never offered a send that answers `no_pharmacy`).
+That covers a send that failed or is pending, the prescriber's own
+prescription a colleague activated (that colleague's answer was
+`not_prescriber`), and one written before the hospital had pharmacy staff;
+the answer then says which. After any answer but `pending` or `unavailable`
+(`sent`: the pharmacy has it now, and the reloaded prescription's
+`ownProgress` says so; `not_allowed`, when the member's role changed since
+sign-in; and the others above), the page does not offer it again for that
+prescription until it is reloaded, as after Activate. On the pharmacy list,
+show a withdrawn item (`withdrawnReason` `changed`) as "Changed or stopped by
+the prescribing team" (the prescriber or a colleague put it on hold,
+cancelled, corrected, edited or resumed it) with Dispense disabled.
+
+Runtime proof: `services/ehr-api/scripts/verify-own-facility-work-runtime.mjs`
+(run by the TUF staging rehearsal, as `own_facility_work_runtime`) boots
+Identity, EHR, Lab and Pharmacy from their own code as their exact runtime
+roles: a doctor's active prescription and an activated draft are sent by
+themselves; a pharmacist and a lab scientist the patient never approved list,
+read, dispense and accession the hospital's own work, each row naming the
+patient with `basis: own-work` (the execution reads included); a hold marks
+the item withdrawn (`withdrawnReason: changed`) and Dispense answers 409; an
+edit answers the "earlier version" row (`superseded`) and `ownProgress`
+reads `withdrawn`; the withdrawn items are listed with the done work, after
+a new open item; an edit
+after the dispensing answers no `pharmacyHandoff`, "Send to pharmacy" then
+answers "already has", and the item stays unmarked (`ownProgress` stays
+`dispensed`); the list carries `ownPharmacyStaffed: true`; the lab runtime,
+asking the database directly, gets `false` for a patient with no own lab
+work there and is refused (42501) the pharmacy question; neither member
+reads the chart, each probed with a chart read its role permits (the
+encounter for both, prescriptions for the pharmacist, the lab request for
+the lab scientist), so the answer, 403 `CONSENT_REQUIRED`, is the patient's
+consent and not a missing permission; the patient's access log shows both.
+`verify-own-work-patient-cards-runtime.mjs` checks the other side of "their
+own facility only": the pharmacy's pharmacist and the laboratory's lab
+member, who hold the same two permissions at their own facility, list none
+of the hospital's own work, cannot read it by id, and are refused when they
+name the hospital as their session's facility; once the doctor sends the
+hospital's undispensed prescription to the pharmacy, the hospital's
+pharmacist no longer lists it, reads it by id as `sent_elsewhere` (audited
+with `basis: own-work`), and Dispense answers 409.
+`verify-order-routes-runtime.mjs` sends a prescription the hospital's
+pharmacy holds to the outside pharmacy (201): the hospital's list no longer
+shows it, its item reads `withdrawnReason: sent_elsewhere`, Dispense answers
+409, the outside pharmacy accepts and dispenses it (two items, one
+dispensing), and `ownProgress` reads `sent_elsewhere`; a second one, sent
+and then declined, keeps `resendAllowed` and "Send to pharmacy" answers
+`routed`; after the hospital's dispensing, a send answers
+`ORDER_ROUTE_ORDER_IN_WORK`. The prescription details verifier follows
+0133's rules where it meets them (the automatic send, own work listed on
+the own-work basis) and adds no negative case of its own; the database suite
+(`own-facility-pharmacy-lab-work`) holds the full set (another facility's
+staff, at their facility and claiming this one, through every reader: the
+items, cards, events, dispensings, reversals and the Lab chain, the list's
+states and bases and the access checks; other roles, deny directives,
+emergency sessions, inactive patients, route-backed items, the imported
+evidence).
+
+## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
+
+Owner decision Q102 of 18 November 2026. No new login, address or password:
+0123's fictional "QA Pharmacist" (pharmacy@) and "QA Lab Scientist" (lab@)
+gain a second membership, at QA Hospital (pharmacist and lab roles; not
+primary). Pick QA Hospital when signing in. Written only where 0123 installed
+the sealed QA tenant (Amazon RDS: production and staging); on every other
+database (CI, acceptance, rehearsals) nothing is written. No API change.
+

@@ -196,14 +196,26 @@ export class LabExecutionsService {
   return {workItemId:item.id,sourceEhrOrderId:item.source_ehr_order_id,sourceEhrOrderVersion:Number(item.source_ehr_order_version),patientId:item.patient_id,
    acceptedAt:item.accepted_at,test:{codeSystem:item.test_code_system,code:item.test_code,name:item.test_name},results};});}
 
- async get(context:DataAccessContext,id:string) {this.permission(context,'lab.execution.read');return this.database.withTransaction(context,async client=>{const row=await this.find(client,id);await this.authorize(client,context,'execution',row.id,row.patient_id,'read_records');return this.aggregate(client,row,context.actor.accountId);});}
+  /**
+  * An execution with its result and every revision (values, units, flags, ranges, correction reasons), and a
+  * specimen's executions. Each read writes one audit row naming the patient, in the read's transaction (no answer
+  * without its audit row), with the basis it was read on (an order route, or 0133's own-work for this facility's lab
+  * staff without a personal grant) and the ids returned only: `lab.execution.read` and `lab.execution.list`, which
+  * the patient's access log shows as views.
+  */
+ async get(context:DataAccessContext,id:string) {this.permission(context,'lab.execution.read');return this.database.withTransaction(context,async client=>{const row=await this.find(client,id);const basis=await this.authorize(client,context,'execution',row.id,row.patient_id,'read_records');
+  const execution=await this.aggregate(client,row,context.actor.accountId);
+  await this.audit.recordWithClient(client,this.auditEvent(context,row,'lab.execution.read',{accessionId:row.accession_id,specimenId:row.specimen_id,resultId:execution.result?.id??null,versionsReturned:execution.result?execution.result.revisions.map(r=>r.version):[],...basisDetails(basis)}));
+  return execution;});}
  async listForSpecimen(context:DataAccessContext,specimenId:string) {this.permission(context,'lab.execution.read');return this.database.withTransaction(context,async client=>{
   // Authorize the specimen's patient, as get() does, before any execution or result value is read.
   const specimen=await client.query<{patient_id:string}>(`select patient_id::text from lab.specimens where id=$1`,[specimenId]);
   const source=specimen.rows[0];if(!source)throw new DomainProblem(404,'LAB_SPECIMEN_NOT_FOUND','Lab specimen was not found');
-  await this.authorize(client,context,'specimen',specimenId,source.patient_id,'read_records');
+  const basis=await this.authorize(client,context,'specimen',specimenId,source.patient_id,'read_records');
   const rows=await client.query<ExecutionRow>(`select ${EXEC} from lab.test_executions e join lab.work_item_requested_tests t on t.id=e.requested_test_id where e.specimen_id=$1 and e.patient_id=$2 order by e.started_at`,[specimenId,source.patient_id]);
-  return {items:await Promise.all(rows.rows.map(row=>this.aggregate(client,row,context.actor.accountId)))};});}
+  const items=await Promise.all(rows.rows.map(row=>this.aggregate(client,row,context.actor.accountId)));
+  await this.audit.recordWithClient(client,this.readAudit(context,source.patient_id,'lab.execution.list','lab-specimen',specimenId,{executions:items.map(item=>({executionId:item.id,resultId:item.result?.id??null,versionsReturned:item.result?item.result.revisions.map(r=>r.version):[]})),...basisDetails(basis)}));
+  return {items};});}
  private async find(client:PoolClient,id:string,lock=false) {const result=await client.query<ExecutionRow>(`select ${EXEC} from lab.test_executions e join lab.work_item_requested_tests t on t.id=e.requested_test_id where e.id=$1${lock?' for update of e':''}`,[id]);const row=result.rows[0];if(!row)throw new DomainProblem(404,'LAB_EXECUTION_NOT_FOUND','Lab execution was not found');return row;}
  private async aggregate(client:PoolClient,row:ExecutionRow,accountId:string) {const results=await client.query<{id:string}>(`select id::text from lab.results where execution_id=$1`,[row.id]);return {id:row.id,accessionId:row.accession_id,specimenId:row.specimen_id,requestedTestId:row.requested_test_id,
   test:{codeSystem:row.test_code_system,code:row.test_code,name:row.test_name},patientId:row.patient_id,facilityId:row.facility_id,status:row.status,
@@ -242,6 +254,6 @@ export class LabExecutionsService {
  }
  private event(client:PoolClient,row:ExecutionRow,v:number,t:string,reason:string,c:DataAccessContext){return client.query(`insert into lab.execution_events(execution_id,patient_id,facility_id,event_version,event_type,actor_id,actor_membership_id,reason,correlation_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[row.id,row.patient_id,row.facility_id,v,t,c.actor.accountId,c.membershipId,reason,c.correlationId]);}
  private outbox(client:PoolClient,type:string,id:string,v:number,row:{patient_id:string;facility_id:string},c:DataAccessContext,payload:Record<string,unknown>){return client.query(`insert into lab.outbox_events(event_type,aggregate_id,aggregate_version,facility_id,patient_id,correlation_id,payload) values($1,$2,$3,$4,$5,$6,$7::jsonb)`,[type,id,v,row.facility_id,row.patient_id,c.correlationId,JSON.stringify(payload)]);}
- private readAudit(c:DataAccessContext,patientId:string,action:string,resourceType:'lab-result'|'lab-work-item',resourceId:string,details:Record<string,unknown>){return {correlationId:c.correlationId,actorType:'staff' as const,actorSubject:c.actor.subject,actorAccountId:c.actor.accountId,actorMembershipId:c.membershipId,organizationId:c.actor.facility?.organizationId,facilityId:c.facilityId,patientId,action,resourceType,resourceId,outcome:'success' as const,purposeOfUse:c.purposeOfUse,details,sourceSystem:'lab-api'};}
+ private readAudit(c:DataAccessContext,patientId:string,action:string,resourceType:'lab-result'|'lab-work-item'|'lab-specimen',resourceId:string,details:Record<string,unknown>){return {correlationId:c.correlationId,actorType:'staff' as const,actorSubject:c.actor.subject,actorAccountId:c.actor.accountId,actorMembershipId:c.membershipId,organizationId:c.actor.facility?.organizationId,facilityId:c.facilityId,patientId,action,resourceType,resourceId,outcome:'success' as const,purposeOfUse:c.purposeOfUse,details,sourceSystem:'lab-api'};}
  private auditEvent(c:DataAccessContext,row:ExecutionRow,action:string,details:Record<string,unknown>){return {correlationId:c.correlationId,actorType:'staff' as const,actorSubject:c.actor.subject,actorAccountId:c.actor.accountId,actorMembershipId:c.membershipId,organizationId:c.actor.facility?.organizationId,facilityId:row.facility_id,patientId:row.patient_id,action,resourceType:action.includes('result')?'lab-result':'lab-execution',resourceId:row.id,outcome:'success' as const,purposeOfUse:c.purposeOfUse,details,sourceSystem:'lab-api'};}
 }

@@ -10,7 +10,7 @@ import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../../audit/audit.service';
-import { AUDIT_ACTION, FACILITY_OPTIONAL, PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../../common/decorators';
+import { ANY_PERMISSIONS, AUDIT_ACTION, FACILITY_OPTIONAL, PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../../common/decorators';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import { DatabaseService } from '../../database/database.service';
@@ -68,12 +68,13 @@ function validate(query: Record<string, unknown>) {
 }
 
 describe('GET ocr/job-list (SX-9)', () => {
-  it('is its own path under ocr, needs ocr.job.read and a facility, and is audited as a request', () => {
+  it('is its own path under ocr, needs ocr.job.read or ocr.job.read-own and a facility, and is audited as a request', () => {
     const handler = OcrJobListController.prototype.list;
     expect(Reflect.getMetadata(PATH_METADATA, OcrJobListController)).toBe('ocr');
     expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe('job-list');
     expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(RequestMethod.GET);
-    expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['ocr.job.read']);
+    expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toBeUndefined();
+    expect(Reflect.getMetadata(ANY_PERMISSIONS, handler)).toEqual(['ocr.job.read', 'ocr.job.read-own']);
     expect(Reflect.getMetadata(AUDIT_ACTION, handler)).toBe('ocr.job.list.request');
     expect(Reflect.getMetadata(FACILITY_OPTIONAL, handler)).toBeUndefined();
     expect(Reflect.getMetadata(PUBLIC_ROUTE, handler)).toBeUndefined();
@@ -87,6 +88,20 @@ describe('GET ocr/job-list (SX-9)', () => {
     await controller.list({}, request);
     expect(list).toHaveBeenCalledWith({}, expect.objectContaining({ facilityId: FACILITY, membershipId: MEMBERSHIP,
       purposeOfUse: 'healthcare-operations' }));
+  });
+
+  // Owner decision Q112 A (migration 0136): the front desk holds
+  // ocr.job.read-own, not ocr.job.read, and sees only the readings it started.
+  it('lists only the member\'s own readings for a member without ocr.job.read, whatever the query asks', async () => {
+    const desk = { ...context, actor: { ...context.actor, roles: ['receptionist'], permissions: ['ocr.job.read-own'],
+      facility: { ...context.actor.facility, roles: ['receptionist'], permissions: ['ocr.job.read-own'] } } };
+    const s = setup([jobRow(2)]);
+    await s.service.list({}, desk);
+    expect(s.queries[0]!.values).toEqual([FACILITY, null, MEMBERSHIP, null, null, 26]);
+    expect(s.recordWithClient.mock.calls[0]![1]).toMatchObject({ details: expect.objectContaining({ mine: true }) });
+    const full = setup([jobRow(2)]);
+    await full.service.list({}, context);
+    expect(full.queries[0]!.values).toEqual([FACILITY, null, null, null, null, 26]);
   });
 
   it('accepts only its own keys: no Health ID, patient or facility in the URL', () => {

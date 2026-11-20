@@ -6,15 +6,35 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { WorkItemProgressDto } from './dto/work-item-progress.dto';
+import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-access';
 
 /**
  * Where a prescription is in this facility's own pharmacy (ORD-3):
  * - not_received: no work item here that the clinician may read;
  * - received: the pharmacy has it and has not dispensed it;
  * - dispensed: it was dispensed (dispensedAt);
- * - dispensing_reversed: it was dispensed and the dispensing was reversed.
+ * - dispensing_reversed: it was dispensed and the dispensing was reversed;
+ * - withdrawn (0133): sent by itself to the pharmacy, then held, cancelled,
+ *   entered in error, edited or resumed before it was dispensed; the pharmacy
+ *   holds the version sent, which it can no longer dispense;
+ * - sent_elsewhere (0133 D14, owner's Q121 A): the pharmacy had it
+ *   (receivedAt), and it was sent to another facility's pharmacy before it
+ *   was dispensed; the item here is withdrawn and off the pharmacy's list.
+ * The last two are answered only to an ehr-api that reads them (header
+ * X-HID-Own-Progress: 0133); see OWN_PROGRESS_HEADER.
  */
-export type PharmacyProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed';
+export type PharmacyProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed' | 'withdrawn'
+  | 'sent_elsewhere';
+
+/**
+ * ehr-api sends this header, with OWN_PROGRESS_VERSION, when it reads
+ * 'withdrawn' and 'sent_elsewhere' (0133). An ehr-api from before 0133 knows
+ * four statuses and treats a whole answer with any other as unknown, so
+ * without the header 'withdrawn' is answered 'received' (times kept) and
+ * 'sent_elsewhere' 'not_received' (times null).
+ */
+export const OWN_PROGRESS_HEADER = 'x-hid-own-progress';
+export const OWN_PROGRESS_VERSION = '0133';
 
 export interface PharmacyProgressItem {
   sourceEhrPrescriptionId: string;
@@ -59,9 +79,11 @@ export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
 @Injectable()
 export class PharmacyWorkItemProgressService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
-    private readonly audit: AuditService) {}
+    private readonly audit: AuditService, private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
 
-  async read(context: DataAccessContext, input: WorkItemProgressDto): Promise<{ items: PharmacyProgressItem[] }> {
+  /** `current`: the caller sent OWN_PROGRESS_HEADER (it reads 'withdrawn' and 'sent_elsewhere'). */
+  async read(context: DataAccessContext, input: WorkItemProgressDto, current = false):
+  Promise<{ items: PharmacyProgressItem[] }> {
     // The clinician's browser request to ehr-api was a read (GET), and this
     // route only reads, so Identity is told GET: its delegated path then
     // checks a forwarded cookie without the browser-write Origin and CSRF
@@ -92,19 +114,35 @@ export class PharmacyWorkItemProgressService {
         patientId: input.patientId, resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { requestedCount: input.sourceEhrPrescriptionIds.length, foundCount: rows.length,
         workItemIds: rows.map((row) => row.work_item_id), breakGlass: decision.breakGlass });
+      // 0133: whether each item was withdrawn before it was dispensed, and why (no flag when it cannot be read).
+      const states = await this.ownWork.states(client, rows.map((row) => row.work_item_id), context.correlationId, 'flag');
       const found = new Map(rows.map((row) => [row.source_ehr_prescription_id.toLowerCase(), row]));
-      return { items: input.sourceEhrPrescriptionIds.map((id) => project(id, found.get(id.toLowerCase()))) };
+      return { items: input.sourceEhrPrescriptionIds.map((id) => {
+        const row = found.get(id.toLowerCase());
+        return project(id, row, row ? states.get(row.work_item_id) : undefined, current);
+      }) };
     });
   }
 }
 
-function project(id: string, row: ProgressRow | undefined): PharmacyProgressItem {
-  if (!row) return { sourceEhrPrescriptionId: id, status: 'not_received', receivedAt: null, dispensedAt: null,
-    reversedAt: null };
+/**
+ * The status, in this order: a reversal, a dispensing, sent elsewhere,
+ * withdrawn, else received. To a caller without OWN_PROGRESS_HEADER,
+ * 'withdrawn' is 'received' (times kept) and 'sent_elsewhere' 'not_received'
+ * (times null), the statuses an ehr-api from before 0133 knows.
+ */
+function project(id: string, row: ProgressRow | undefined, state: OwnWorkState | undefined,
+  current: boolean): PharmacyProgressItem {
+  const notReceived: PharmacyProgressItem = { sourceEhrPrescriptionId: id, status: 'not_received', receivedAt: null,
+    dispensedAt: null, reversedAt: null };
+  if (!row) return notReceived;
   const status: PharmacyProgressStatus = row.reversed_at ? 'dispensing_reversed'
-    : row.dispensed_at ? 'dispensed' : 'received';
-  return { sourceEhrPrescriptionId: id, status, receivedAt: iso(row.accepted_at),
-    dispensedAt: iso(row.dispensed_at), reversedAt: iso(row.reversed_at) };
+    : row.dispensed_at ? 'dispensed'
+      : state?.withdrawn === true && state.withdrawnReason === 'sent_elsewhere' ? 'sent_elsewhere'
+        : state?.withdrawn === true ? 'withdrawn' : 'received';
+  if (!current && status === 'sent_elsewhere') return notReceived;
+  return { sourceEhrPrescriptionId: id, status: !current && status === 'withdrawn' ? 'received' : status,
+    receivedAt: iso(row.accepted_at), dispensedAt: iso(row.dispensed_at), reversedAt: iso(row.reversed_at) };
 }
 
 function iso(value: Date | string | null): string | null {

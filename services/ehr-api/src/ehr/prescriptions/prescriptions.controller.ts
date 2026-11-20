@@ -11,6 +11,7 @@ import { CreatePrescriptionBodyPipe, type CreatePrescriptionInput } from './pres
 import { PrescriptionsService } from './prescriptions.service';
 import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
 import { DuplicateMedicineChecker } from './duplicate-medicines';
+import { SendPrescriptionToOwnPharmacyDto } from './own-pharmacy-send.dto';
 
 @Controller('ehr/patients/:patientId/encounters/:encounterId/prescriptions')
 export class PrescriptionsController {
@@ -65,6 +66,21 @@ export class PrescriptionsController {
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
     @Param('prescriptionId', new ParseUUIDPipe()) prescriptionId: string, @Body() input: UpdatePrescriptionDto) {
     return this.prescriptions.update(clinicalContext(request), patientId, encounterId, prescriptionId, input);
+  }
+
+  /**
+   * "Send to pharmacy" for the prescriber (0133): sends their active
+   * prescription to this hospital's own pharmacy, or tries a pending send
+   * again, and answers its `pharmacyHandoff`. Sending twice sends once (the
+   * database keeps one work item per prescription), so no Idempotency-Key.
+   */
+  @Post(':prescriptionId/own-pharmacy-send')
+  @HttpCode(200)
+  @RequirePermissions('ehr.prescription.write')
+  sendToOwnPharmacy(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
+    @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
+    @Param('prescriptionId', new ParseUUIDPipe()) prescriptionId: string, @Body() input: SendPrescriptionToOwnPharmacyDto) {
+    return this.prescriptions.sendToOwnPharmacy(clinicalContext(request), patientId, encounterId, prescriptionId, input);
   }
 
   @Post(':prescriptionId/pharmacy-work-item')

@@ -156,6 +156,33 @@ describe('ConsentService', () => {
       ['HID-ABCDEFGH', 'Emergency care required', 30]);
   });
 
+  it('ID-5: activates break-glass for the patient behind an emergency card\'s matchRef, never by a Health ID', async () => {
+    const matchRef = `psr_${'A'.repeat(43)}`;
+    query.mockResolvedValueOnce({ rows: [{}] }).mockResolvedValueOnce({
+      rows: [{ accessRequestId: '40000000-0000-4000-8000-000000000012', consentGrantId: '60000000-0000-4000-8000-000000000012',
+        patientId: '50000000-0000-4000-8000-000000000012', status: 'active',
+        expiresAt: new Date('2026-10-24T01:00:00.000Z'), existingGrant: false }],
+    });
+    await expect(service.activateBreakGlass(emergency, { matchRef, reason: 'Emergency care required', durationMinutes: 30 }))
+      .resolves.toMatchObject({ patientId: '50000000-0000-4000-8000-000000000012', status: 'active' });
+    expect(query).toHaveBeenNthCalledWith(1, 'select platform.require_control_enabled($1)', ['break_glass_enabled']);
+    expect(query).toHaveBeenNthCalledWith(2, expect.stringContaining('identity.activate_break_glass_by_match_ref($1, $2, $3)'),
+      [matchRef, 'Emergency care required', 30]);
+  });
+
+  it('ID-5: an unresolved matchRef is refused as an unknown Health ID is (404, the same for every reason)', async () => {
+    query.mockResolvedValueOnce({ rows: [{}] })
+      .mockRejectedValueOnce({ code: 'P0002', message: 'Patient is not available' });
+    const refFailure = await service.activateBreakGlass(emergency,
+      { matchRef: `psr_${'B'.repeat(43)}`, reason: 'Emergency care required', durationMinutes: 30 })
+      .catch((error: unknown) => error);
+    query.mockResolvedValueOnce({ rows: [{}] })
+      .mockRejectedValueOnce({ code: 'P0002', message: 'Patient is not available' });
+    const hidFailure = await service.activateBreakGlass(emergency, activation).catch((error: unknown) => error);
+    expect(refFailure).toMatchObject({ status: 404 });
+    expect((refFailure as { code?: string }).code).toBe((hidFailure as { code?: string }).code);
+  });
+
   it('answers 423 BREAK_GLASS_DISABLED when the control is off, without running the activation', async () => {
     query.mockRejectedValueOnce({ code: '55000', message: 'PLATFORM_CONTROL_DISABLED:break_glass_enabled' });
     const refusal = service.activateBreakGlass(emergency, activation);
@@ -287,6 +314,17 @@ describe('ConsentService', () => {
   it.each(['healthcare-operations', 'direct-care'])('answers each request\'s purpose %s once 0104 lists it', async (purpose) => {
     query.mockResolvedValueOnce({ rows: [{ ...listedRequest, purpose_of_use: purpose }] });
     await expect(service.listMyAccessRequests(context)).resolves.toStrictEqual([{ ...listedAnswer, purpose }]);
+  });
+
+  it('names the requesting clinician and their role once 0128 lists them, and null when unknown', async () => {
+    query.mockResolvedValueOnce({ rows: [
+      { ...listedRequest, purpose_of_use: 'direct-care', requester_name: 'Dr Ada Example', requester_role: 'doctor' },
+      { ...listedRequest, purpose_of_use: 'direct-care', requester_name: 'Dr Ada Example', requester_role: null },
+    ] });
+    await expect(service.listMyAccessRequests(context)).resolves.toStrictEqual([
+      { ...listedAnswer, purpose: 'direct-care', requesterName: 'Dr Ada Example', requesterRole: 'doctor' },
+      { ...listedAnswer, purpose: 'direct-care', requesterName: 'Dr Ada Example', requesterRole: null },
+    ]);
   });
 
   // Records processing (0104): the trigger on identity.access_requests refuses

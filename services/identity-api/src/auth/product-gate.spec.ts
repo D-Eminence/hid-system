@@ -57,19 +57,36 @@ import type { WorkloadAuthService } from './workload-auth.service';
 // keeps every site; lab, pharmacy and outreach staff are unchanged. The
 // session's actor.products lists the sites the login can open.
 
-/** auth.role_permissions as the migrations seed it: every (role, permission) pair they insert. */
+/**
+ * auth.role_permissions as the migrations leave it: every (role, permission)
+ * pair they insert, less every pair they delete (0136, owner decision Q103 A),
+ * applied statement by statement in file order. A delete or update of the
+ * table in any other form fails the test, so a later migration cannot change
+ * the table without this model following it.
+ */
 function seededRolePermissions(): Map<string, Set<string>> {
   const directory = join(__dirname, '../../../ehr-api/database/migrations');
   const grants = new Map<string, Set<string>>();
+  const statements = new RegExp(String.raw`insert into auth\.role_permissions\s*\([^)]*\)([\s\S]*?);`
+    + String.raw`|delete from auth\.role_permissions\s+where\s*\(\s*role_code\s*,\s*permission_code\s*\)\s*in\s*\(([\s\S]*?)\)\s*;`,
+  'gi');
   for (const file of readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()) {
     const text = readFileSync(join(directory, file), 'utf8');
-    for (const statement of text.matchAll(/insert into auth\.role_permissions\s*\([^)]*\)([\s\S]*?);/gi)) {
-      for (const pair of (statement[1] ?? '').matchAll(/\(\s*'([a-z_]+)'\s*,\s*'([a-z0-9.-]+)'\s*\)/g)) {
+    const deletes = text.match(/delete from auth\.role_permissions/gi)?.length ?? 0;
+    const updates = text.match(/update auth\.role_permissions/gi)?.length ?? 0;
+    let deletesRead = 0;
+    for (const statement of text.matchAll(statements)) {
+      const removing = statement[2] !== undefined;
+      if (removing) deletesRead += 1;
+      for (const pair of (statement[1] ?? statement[2] ?? '').matchAll(/\(\s*'([a-z_]+)'\s*,\s*'([a-z0-9.-]+)'\s*\)/g)) {
         const [, role, permission] = pair as unknown as [string, string, string];
         const set = grants.get(role) ?? new Set<string>();
-        set.add(permission);
+        if (removing) set.delete(permission); else set.add(permission);
         grants.set(role, set);
       }
+    }
+    if (deletesRead !== deletes || updates > 0) {
+      throw new Error(`${file} changes auth.role_permissions in a form this model does not read`);
     }
   }
   return grants;
@@ -292,18 +309,30 @@ describe('the product of a request (Origin host, exactly as turnstile.service.ts
 });
 
 describe('the permission codes the gate reads are the database seeds\' (auth.role_permissions)', () => {
+  // After 0136 (Q103 A): doctors and administrators hold neither work list,
+  // and doctors hold no Outreach code.
   it('every code is granted by the seeds, to the roles the owner named', () => {
     const holders = (code: string) => [...SEEDS.entries()].filter(([, set]) => set.has(code)).map(([role]) => role).sort();
     expect(holders('ehr.encounter.write')).toEqual(['clinician', 'doctor', 'nurse', 'receptionist']);
     expect(holders('organization.manage')).toEqual(['admin', 'org_admin']);
-    expect(holders('lab.work-item.read')).toEqual(['admin', 'clinician', 'doctor', 'lab', 'nurse']);
+    expect(holders('lab.work-item.read')).toEqual(['clinician', 'lab', 'nurse']);
     expect(holders('lab.work-item.accept')).toEqual(['clinician', 'doctor', 'lab', 'nurse']);
-    expect(holders('pharmacy.work-item.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse', 'pharmacist']);
+    expect(holders('pharmacy.work-item.read')).toEqual(['clinician', 'nurse', 'pharmacist']);
     expect(holders('pharmacy.dispensing.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse', 'pharmacist']);
-    expect(holders('outreach.registration.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse', 'org_admin',
+    expect(holders('outreach.registration.read')).toEqual(['admin', 'clinician', 'nurse', 'org_admin',
       'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
-    expect(holders('outreach.campaign.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse', 'org_admin',
+    expect(holders('outreach.campaign.read')).toEqual(['admin', 'clinician', 'nurse', 'org_admin',
       'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
+    // Q111 A: doctors keep ocr.job.write (checking readings, confirming their
+    // patient); starting a reading also needs ocr.job.start, which they lack.
+    expect(holders('ocr.job.write')).toEqual(['clinician', 'doctor', 'nurse', 'receptionist']);
+    expect(holders('ocr.job.start')).toEqual(['clinician', 'nurse', 'receptionist']);
+    // Q112 A: only the front desk holds the "own uploads" reads, and it holds
+    // neither full read.
+    expect(holders('ehr.document.read-own')).toEqual(['receptionist']);
+    expect(holders('ocr.job.read-own')).toEqual(['receptionist']);
+    expect(holders('ehr.document.read')).toEqual(['clinician', 'doctor', 'lab', 'nurse']);
+    expect(holders('ocr.job.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse']);
   });
 
   it('admits by exactly these codes on each site (Q97: lab., pharmacy. and outreach. take organization.manage, not ehr.encounter.write)', () => {
@@ -326,13 +355,17 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
 
   // The seeds also grant the hospital clinical roles the lab, pharmacy and
   // outreach reading codes (0018, 0023, 0024, 0038) for their own hospital
-  // work; Q97 refuses them on those sites all the same.
-  it.each(['doctor', 'clinician', 'nurse', 'receptionist'])(
-    'a %s membership holds a reading code another site names, and fits ehr. and migrate. only', (role) => {
+  // work; Q97 refuses them on those sites all the same. Since 0136 (Q103 A)
+  // doctors hold no Outreach code and no work list, but still hold
+  // lab.work-item.accept and pharmacy.dispensing.read.
+  it.each([
+    ['doctor', 'lab.work-item.accept'], ['clinician', 'outreach.registration.read'],
+    ['nurse', 'outreach.registration.read'], ['receptionist', 'outreach.registration.read'],
+  ])('a %s membership holds a reading code another site names (%s), and fits ehr. and migrate. only', (role, code) => {
       const permissions = permissionsOf(role);
       expect(permissions).toContain('ehr.encounter.write');
       expect(permissions).not.toContain('organization.manage');
-      expect(permissions).toEqual(expect.arrayContaining(['outreach.registration.read']));
+      expect(permissions).toContain(code);
       const facility = assignment([role], permissions);
       expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(['ehr', 'migrate']);
     });
@@ -362,11 +395,52 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
       assignment(['lab'], permissionsOf('lab'))])).toEqual(['lab', 'pharmacy']);
   });
 
-  it('lab staff hold ocr.job.* (0013) but are still not admitted on migrate', () => {
-    expect(permissionsOf('lab')).toEqual(expect.arrayContaining(['ocr.job.read', 'ocr.job.write']));
+  it('lab staff hold no ocr.job.* code since 0136 (Q103 A) and are still not admitted on migrate', () => {
+    expect(permissionsOf('lab').filter((code) => code.startsWith('ocr.'))).toEqual([]);
+    expect(permissionsOf('lab')).not.toContain('ehr.encounter.read');
+    expect(permissionsOf('lab')).toEqual(expect.arrayContaining(['lab.work-item.read', 'lab.work-item.accept']));
     const facility = { id: LABORATORY.facility, membershipId: 'm', organizationId: LABORATORY.organization,
       name: LABORATORY.name, roles: ['lab'], permissions: permissionsOf('lab'), isPrimary: true };
     expect(facilityFitsProduct(facility, 'migrate')).toBe(false);
+    expect(PRODUCTS.filter((product) => facilityFitsProduct(facility, product))).toEqual(['lab']);
+  });
+
+  // 0136 (owner decision Q103 A): the model reads 0136's DELETE as well as
+  // every INSERT, so these are the sets the roles hold in production after it.
+  it('the front desk holds the six 0136 codes and still fits ehr. and migrate. only', () => {
+    const permissions = permissionsOf('receptionist');
+    expect(permissions).toEqual(expect.arrayContaining(['ehr.document.write', 'ehr.document.read-own', 'ocr.job.write',
+      'ocr.job.start', 'ocr.job.read-own', 'ehr.vital.read']));
+    for (const code of ['ehr.document.read', 'ocr.job.read', 'ocr.validation.write', 'ocr.patient.confirm',
+      'ocr.publication.write', 'ehr.note.read', 'ehr.diagnosis.read', 'ehr.prescription.read', 'ehr.lab-request.read']) {
+      expect(permissions).not.toContain(code);
+    }
+    const facility = assignment(['receptionist'], permissions);
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(['ehr', 'migrate']);
+  });
+
+  it('doctors and administrators lose the 0136 rows; the kept rows stay (doctors keep checking, Q111 A)', () => {
+    const doctor = permissionsOf('doctor');
+    for (const code of ['ocr.job.start', 'outreach.campaign.read', 'outreach.campaign.write', 'outreach.registration.read',
+      'outreach.registration.write', 'lab.work-item.read', 'pharmacy.work-item.read']) {
+      expect(doctor).not.toContain(code);
+    }
+    expect(doctor).toEqual(expect.arrayContaining(['ocr.job.write', 'ocr.job.read', 'ocr.validation.write',
+      'ocr.patient.confirm', 'ocr.publication.write', 'lab.work-item.accept', 'ehr.lab-request.read',
+      'ehr.prescription.read', 'lab.result.released.read']));
+    const admin = permissionsOf('admin');
+    expect(admin).not.toContain('lab.work-item.read');
+    expect(admin).not.toContain('pharmacy.work-item.read');
+    expect(admin).toEqual(expect.arrayContaining(['identity.registration.approve', 'organization.manage',
+      'workforce.manage', 'audit.read']));
+    expect(permissionsOf('nurse')).toEqual(expect.arrayContaining(['ehr.note.write', 'ocr.job.write', 'ocr.job.start',
+      'ocr.validation.write', 'lab.work-item.read', 'pharmacy.work-item.read']));
+    // A doctor membership is still a hospital clinical membership: ehr. and migrate. only.
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(assignment(['doctor'], doctor), product)))
+      .toEqual(['ehr', 'migrate']);
+    // A hospital administrator still opens every site through organization.manage.
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(assignment(['admin'], admin), product)))
+      .toEqual(PRODUCTS);
   });
 });
 

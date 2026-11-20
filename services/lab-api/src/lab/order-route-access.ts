@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { IdentityService } from '../identity/identity.service';
+import { LabOwnWork, OWN_WORK_OFF } from './own-work-access';
 
 /** The resources a Lab command acts on, as C11 derives their work item (SPEC-FINAL §8.7 C11, PRIV P12). */
 export type LabRouteResource = 'work_item' | 'accession' | 'specimen' | 'execution' | 'result';
@@ -11,10 +12,12 @@ export type RecordAction = 'read_records' | 'write_records';
 
 /**
  * Why the command may act on the resource: the member's consent grant
- * (Identity, as before P4c), or the cross-facility order route that the
- * resource's work item is bound to.
+ * (Identity, as before P4c), the cross-facility order route that the
+ * resource's work item is bound to, or (0133) this facility's own work item,
+ * on which the facility's lab staff work without a personal grant.
  */
-export type ResourceBasis = { basis: 'consent' } | { basis: 'order-route'; orderRouteId: string };
+export type ResourceBasis = { basis: 'consent' } | { basis: 'order-route'; orderRouteId: string }
+  | { basis: 'own-work' };
 
 interface AccessRow {
   outcome: string;
@@ -30,10 +33,13 @@ export const crossFacilityWorkPaused = () => new DomainProblem(423, 'CROSS_FACIL
 
 /**
  * The audit details a route-backed command adds to its row (SPEC-FINAL §12):
- * `basis: 'order-route'` and the route's id. A consent-based row is unchanged.
+ * `basis: 'order-route'` and the route's id; (0133) `basis: 'own-work'` for
+ * this facility's own work done by its lab staff without a personal grant. A
+ * consent-based row is unchanged.
  */
 export function basisDetails(basis: ResourceBasis): Record<string, string> {
-  return basis.basis === 'order-route' ? { basis: 'order-route', orderRouteId: basis.orderRouteId } : {};
+  if (basis.basis === 'order-route') return { basis: 'order-route', orderRouteId: basis.orderRouteId };
+  return basis.basis === 'own-work' ? { basis: 'own-work' } : {};
 }
 
 /**
@@ -49,8 +55,11 @@ export function basisDetails(basis: ResourceBasis): Record<string, string> {
  * - `paused`: work on routes is switched off (`cross_facility_route_access_enabled`):
  *   423 CROSS_FACILITY_ORDERS_UNAVAILABLE.
  * - `none`: no route applies (a same-facility row, a read the route does not
- *   allow, or a resource not visible): Identity's consent decision as before,
- *   refused with the command's own problem.
+ *   allow, or a resource not visible): first (0133) this facility's own work
+ *   item for its lab staff (`lab.own_work_access_for`, no Identity call;
+ *   basis 'own-work', or 'consent' when the member holds its own consent for
+ *   the action, as the work list records it), else Identity's consent
+ *   decision as before, refused with the command's own problem.
  *
  * A database error from C11 is not mapped: a serialization failure must reach
  * DatabaseService's retry, and any other one answers 500 as every other Lab
@@ -58,7 +67,8 @@ export function basisDetails(basis: ResourceBasis): Record<string, string> {
  */
 @Injectable()
 export class LabOrderRouteAccess {
-  constructor(private readonly identity: IdentityService) {}
+  constructor(private readonly identity: IdentityService,
+    private readonly ownWork: LabOwnWork = OWN_WORK_OFF) {}
 
   async authorize(client: PoolClient, context: DataAccessContext, resource: LabRouteResource, resourceId: string,
     patientId: string, action: RecordAction, denied: () => DomainProblem): Promise<ResourceBasis> {
@@ -72,6 +82,10 @@ export class LabOrderRouteAccess {
       case 'paused':
         throw crossFacilityWorkPaused();
       case 'none': {
+        // 0133: this facility's own work item, for its own staff, without asking Identity; the basis is
+        // 'consent' when the member holds its own consent for the action, else 'own-work'.
+        const own = await this.ownWork.basis(client, resource, resourceId, action, context.correlationId);
+        if (own) return { basis: own };
         const decision = await this.identity.authorize(patientId, action, context.purposeOfUse, context);
         if (!decision.allowed || (action === 'write_records' && decision.breakGlass)) throw denied();
         return { basis: 'consent' };

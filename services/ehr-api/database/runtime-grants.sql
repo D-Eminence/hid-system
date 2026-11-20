@@ -355,6 +355,16 @@ grant usage on schema platform, auth, identity, audit to hid_identity_runtime;
 grant select on auth.accounts, auth.roles, auth.permissions,
   auth.role_permissions, auth.account_roles to hid_identity_runtime;
 grant select, insert, update on auth.sessions to hid_identity_runtime;
+-- A staff member's chosen facility per sign-in (0129, port of main 0089),
+-- exactly as 0129 grants it. The Identity runtime records the choice with the
+-- presented session locked FOR SHARE (its UPDATE on auth.sessions, above) and
+-- reads it for GET /auth/session and POST /auth/refresh; the 0129 guard
+-- refuses deletes, so neither DELETE nor TRUNCATE is granted. No other
+-- service reads the table. The guard runs as the invoker and reads only
+-- auth.sessions, auth.accounts and the workforce tables, which this runtime
+-- already reads.
+grant select, insert, update on auth.session_facility_selection to hid_identity_runtime;
+revoke all on function auth.guard_session_facility_selection_change() from public;
 grant select, insert, update, delete on auth.login_attempts to hid_identity_runtime;
 grant select, insert, update on auth.otp_challenges, auth.otp_rate_limits to hid_identity_runtime;
 -- Recovery start cooldowns (0076): no DELETE; each row is overwritten by the
@@ -1760,3 +1770,124 @@ revoke all on function identity.organization_staff_kinds(uuid) from public;
 grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
 grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
 revoke all on function auth.guard_session_single_sign_on_change() from public;
+
+-- Registration at the front desk without a NIN (0130, ID-2, owner Q106 of
+-- 18 November 2026), exactly as 0130 grants it: the desk command and the
+-- approver command to the Identity runtime alone. No runtime role has any
+-- privilege on identity.no_nin_case_writes or
+-- identity.desk_registration_phone_lookups (both are written and read only by
+-- the two commands as their owner), and no new table privilege is granted.
+grant execute on function identity.register_patient_without_nin(uuid, text, text, date, text, text, text, bytea, bytea, text, text, text, text, text),
+  identity.review_patient_without_nin(uuid, bigint, text, uuid, text, text, text, text) to hid_identity_runtime;
+revoke all on function identity.register_patient_without_nin(uuid, text, text, date, text, text, text, bytea, bytea, text, text, text, text, text),
+  identity.review_patient_without_nin(uuid, bigint, text, uuid, text, text, text, text),
+  identity.forget_desk_registration_phone_lookup() from public;
+revoke all on identity.no_nin_case_writes, identity.desk_registration_phone_lookups from public;
+
+-- Opening this facility's own patient without a PIN (0131, ID-4, owner Q101
+-- of 18 November 2026), exactly as 0131 grants it: the command to the
+-- Identity runtime alone. identity.own_facility_basis is the command's (and
+-- a later search's) helper and is granted to no runtime role.
+grant execute on function identity.open_own_facility_patient(text, uuid) to hid_identity_runtime;
+revoke all on function identity.open_own_facility_patient(text, uuid), identity.own_facility_basis(uuid, uuid) from public;
+
+-- Staff patient search (0132, ID-3a and ID-3b, owner decisions of 18
+-- November 2026), exactly as 0132 grants it: the search and the matchRef
+-- resolver to the Identity runtime alone. No runtime role has any privilege
+-- on identity.patient_search_refs (only the two functions read and write it,
+-- as its owner).
+grant execute on function identity.staff_patient_search(text, text, text, date, text, text[], text, text),
+  identity.resolve_patient_search_ref(text, text),
+  identity.activate_break_glass_by_match_ref(text, text, integer) to hid_identity_runtime;
+revoke all on function identity.staff_patient_search(text, text, text, date, text, text[], text, text),
+  identity.resolve_patient_search_ref(text, text),
+  identity.activate_break_glass_by_match_ref(text, text, integer) from public;
+revoke all on identity.patient_search_refs from public;
+
+-- The waiting list (0135, EHR-C7, owner decisions of 18 November 2026),
+-- exactly as 0135 grants it: check-in, the list and the stage and assignee
+-- change to the EHR runtime alone. No runtime role has any privilege on
+-- ehr.visit_queue (only these functions read and write it, as its owner),
+-- and the card helper is executed by no role.
+grant execute on function ehr.visit_queue_check_in(text, uuid),
+  ehr.visit_queue_list(boolean),
+  ehr.visit_queue_update(uuid, bigint, text, smallint, boolean, uuid, boolean) to hid_ehr_runtime;
+revoke all on function ehr.visit_queue_check_in(text, uuid),
+  ehr.visit_queue_list(boolean),
+  ehr.visit_queue_update(uuid, bigint, text, smallint, boolean, uuid, boolean),
+  ehr.visit_queue_cards(uuid[], uuid, uuid, uuid) from public;
+revoke all on ehr.visit_queue from public;
+
+-- QoreID NIN checks asked once per NIN (0137, Q109), exactly as 0137 grants
+-- them: the Identity runtime begins a check (the stored answer, a wait, a hold
+-- or the lease to ask QoreID), records its outcome as the lease holder, keeps a
+-- stored record it used at least 30 days from that use (Q115), and its
+-- patient lifecycle sweeper erases expired rows and the answers for a NIN whose
+-- patient's login was deleted; also the schema test runtime. Nothing to any
+-- other runtime; no grant on identity.qoreid_nin_checks or on the erasure test,
+-- which the commands call as their owner.
+grant execute on function identity.begin_qoreid_nin_check(char, char, boolean, text, uuid, integer),
+  identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer),
+  identity.keep_qoreid_nin_record(char, text),
+  identity.prune_qoreid_nin_checks(integer) to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.begin_qoreid_nin_check(char, char, boolean, text, uuid, integer),
+  identity.finish_qoreid_nin_check(char, uuid, text, char, boolean, bytea, text, integer),
+  identity.keep_qoreid_nin_record(char, text),
+  identity.prune_qoreid_nin_checks(integer), identity.qoreid_nin_check_erased(char),
+  identity.qoreid_nin_record_used(char, text) from public;
+revoke all on identity.qoreid_nin_checks from public;
+
+-- This facility's own pharmacy and lab work (0133, ORD-2, owner decisions of
+-- 18 and 19 November 2026), exactly as 0133 grants it: the send, its staffed
+-- test and the withdrawal to the EHR runtime; the session's half of the
+-- own-work test to the Lab and Pharmacy runtimes, and each kind's row's half
+-- to that kind's runtime only (the own-work policies of the work items and
+-- their chain call them, with the querying role's privileges, as 0086's
+-- context_allows): identity.pharmacy_work_patient_allows to the Pharmacy
+-- runtime, identity.lab_work_patient_allows to the Lab runtime; the own-work
+-- access check and the list's states to their runtimes, and the withdrawn
+-- items reader (D14) to the Pharmacy runtime; each also to the schema test
+-- runtime. The helpers identity.facility_work_member_allows and
+-- pharmacy.own_work_source_prescription, and the trigger functions
+-- ehr.own_pharmacy_send_withdrawn_on_change (the withdrawal),
+-- pharmacy.claim_prescription_work_item,
+-- pharmacy.claim_prescription_dispensing and pharmacy.refuse_claim_key_change
+-- (D14's claims and their key) and identity.list_own_work_patient (D15's
+-- list), are executed by no role: the
+-- functions and the triggers that call them run them as their owner. No role
+-- has any privilege on pharmacy.own_prescription_sends,
+-- pharmacy.prescription_item_claims or identity.own_work_patients.
+grant execute on function ehr.send_prescription_to_own_pharmacy(uuid, bigint),
+  ehr.withdraw_own_pharmacy_send(uuid), ehr.own_pharmacy_staffed() to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function identity.facility_work_session_membership(text),
+  identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text),
+  pharmacy.own_work_access_for(text, uuid, text),
+  pharmacy.own_work_item_states(uuid[]),
+  pharmacy.own_withdrawn_work_items() to hid_pharmacy_runtime, hid_schema_test_runtime;
+grant execute on function identity.facility_work_session_membership(text),
+  identity.lab_work_patient_allows(uuid, uuid, uuid, text),
+  lab.own_work_access_for(text, uuid, text),
+  lab.own_work_item_bases(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
+revoke all on function identity.facility_work_member_allows(text, uuid, uuid, text),
+  identity.facility_work_session_membership(text),
+  identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text),
+  identity.lab_work_patient_allows(uuid, uuid, uuid, text),
+  pharmacy.own_work_source_prescription(uuid, uuid, uuid),
+  ehr.send_prescription_to_own_pharmacy(uuid, bigint),
+  ehr.withdraw_own_pharmacy_send(uuid),
+  pharmacy.own_work_access_for(text, uuid, text),
+  pharmacy.own_work_item_states(uuid[]),
+  pharmacy.own_withdrawn_work_items(),
+  lab.own_work_access_for(text, uuid, text),
+  lab.own_work_item_bases(uuid[]),
+  ehr.own_pharmacy_send_withdrawn_on_change(),
+  ehr.own_pharmacy_staffed(),
+  pharmacy.claim_prescription_work_item(),
+  pharmacy.claim_prescription_dispensing(),
+  pharmacy.refuse_claim_key_change(),
+  identity.list_own_work_patient() from public;
+revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims, identity.own_work_patients from public;
+
+-- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):
+-- its install is the owner's alone.
+revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;

@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
-import { AuditAction, Public, RequirePermissions } from '../common/decorators';
+import { AuditAction, Public, RequireAnyPermission, RequirePermissions } from '../common/decorators';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { DocumentService } from './document.service';
 import { CreateDocumentUploadDto } from './dto/create-document-upload.dto';
@@ -28,8 +28,10 @@ export class DocumentController {
     return this.documents.createUploadIntent(input, idempotencyKey ?? '', context);
   }
 
+  // ehr.document.read, or the front desk's ehr.document.read-own: then only
+  // its own uploads (owner decision Q112 A, migration 0136).
   @Get()
-  @RequirePermissions('ehr.document.read')
+  @RequireAnyPermission('ehr.document.read', 'ehr.document.read-own')
   @AuditAction('ehr.document.list.request')
   list(@Query() query: ListDocumentsDto, @Req() request: HidRequest) {
     return this.documents.list(query.patientId, query.encounterId, requireRequestContext(request));
@@ -46,7 +48,7 @@ export class DocumentController {
   }
 
   @Get(':id/download')
-  @RequirePermissions('ehr.document.read')
+  @RequireAnyPermission('ehr.document.read', 'ehr.document.read-own')
   @AuditAction('ehr.document.download.request')
   download(
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,

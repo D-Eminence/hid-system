@@ -9,7 +9,8 @@
 --   4. two sends of one order: the second refused while the first is live, a
 --      replay answers the first; after a decline the order may go again;
 --   5. a same-facility hand-off that won the order (R10): the accept
---      withdraws the route (order_in_work) and creates nothing;
+--      withdraws the route (order_in_work) and creates nothing; 5b the same
+--      for a prescription, through 0133's claims (D14);
 --   6. the wrong-patient report (0088, item 3) against a return, in both
 --      serial orders: a release then the report (the report with the
 --      version it read answers ORDER_ROUTE_VERSION_CONFLICT; with the new one
@@ -758,6 +759,50 @@ select pg_temp.assert('R10: the route withdrawn (order_in_work), nothing at L1, 
     and event.facility_id = 'e4c21000-0000-4000-8000-000000000001')
   and exists (select 1 from notification.inbox_items item where item.resource_id = current_setting('hid.test.route_5')::uuid
     and item.notification_code = 'ORDER_ROUTE_WITHDRAWN'));
+
+-- 5b. R10 for a prescription (0133 D14): GH's own pharmacy took a
+-- prescription while its route to PH1 was sent (owner SQL writes the
+-- same-facility item, triggers off but for 0133's ALWAYS claims trigger, so
+-- it holds the prescription's live claim, as the hand-off that won the race
+-- would have); then PB1 accepts. Since 0133 a prescription may have one own
+-- and one route-backed item, so the unique violation R10's handler withdraws
+-- the route on comes from the claims (prescription_item_claims_live_uq).
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.rx_r10', pg_temp.prescription(1, 'active')::text, true);
+select set_config('hid.test.rxroute_r10', pg_temp.send(11, 'prescription', current_setting('hid.test.rx_r10')::uuid,
+  current_setting('hid.test.facility_2')::uuid, 'p4c-race-send-rx-r10')::text, true);
+reset role;
+set local session_replication_role = replica;
+insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
+  source_ehr_prescription_version, source_encounter_id, source_status, medication_code_system, medication_code,
+  medication_display, dose_quantity, dose_unit, route_code, frequency, instructions, starts_on, ends_on, prescribed_by,
+  prescribed_at, accepted_by, accepted_by_membership_id, acceptance_reason, idempotency_key, request_sha256,
+  correlation_id)
+select gen_random_uuid(), source_order.patient_id, source_order.facility_id, source_order.facility_id, source_order.id,
+  source_order.row_version, source_order.encounter_id, 'active', source_order.medication_code_system,
+  source_order.medication_code, source_order.medication_display, source_order.dose_quantity, source_order.dose_unit,
+  source_order.route_code, source_order.frequency, source_order.instructions, source_order.starts_on,
+  source_order.ends_on, source_order.created_by, source_order.created_at, 'e4c10000-0000-4000-8000-000000000015',
+  'e4c13000-0000-4000-8000-000000000015', 'Accepted at the counter', 'p4c-race-same-facility-rx-r10', repeat('4', 64),
+  'p4c-race-same-facility'
+  from ehr.prescriptions source_order where source_order.id = current_setting('hid.test.rx_r10')::uuid;
+set local session_replication_role = origin;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_signup_admin(2);
+select pg_temp.assert('5b: the accept answers order_in_work', (select accepted.result = 'order_in_work'
+    and accepted.work_item_id is null
+  from pharmacy.accept_order_route(current_setting('hid.test.rxroute_r10')::uuid, 1, 'health_id', 'HID-P4CPATP',
+    'Patient collected the prescription', 'p4c-race-rx-accept-r10', repeat('a', 64)) accepted));
+reset role;
+select pg_temp.assert('5b R10: the route withdrawn (order_in_work), nothing at PH1, GH''s own item the one live claim',
+  (select route.state = 'withdrawn' and route.ended_kind = 'order_in_work' and route.accepted_at is null
+     from ehr.order_routes route where route.id = current_setting('hid.test.rxroute_r10')::uuid)
+  and not exists (select 1 from pharmacy.work_items item where item.facility_id = current_setting('hid.test.facility_2')::uuid
+    and item.source_ehr_prescription_id = current_setting('hid.test.rx_r10')::uuid)
+  and (select array_agg(claim.facility_id::text || ':' || (claim.order_route_id is null) || ':' || (claim.released_at is null))
+         from pharmacy.prescription_item_claims claim
+        where claim.prescription_id = current_setting('hid.test.rx_r10')::uuid)
+      = array['e4c21000-0000-4000-8000-000000000001:true:true']);
 
 -- 6. The wrong-patient report against a return (0088). Lab routes 6-7 and
 -- prescription routes 1-2, accepted by LB1 and PB1; a verified result

@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
 import type { QueryResultRow } from 'pg';
 import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication, type PatientSessionActor }
   from '../auth/recent-authentication';
@@ -9,6 +10,7 @@ import type { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import type { CreateBreakGlassDto } from './dto/create-break-glass.dto';
 import type { ListStaffAccessRequestsDto } from './dto/list-staff-access-requests.dto';
 import type { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
+import type { OpenOwnFacilityDto } from './dto/open-own-facility.dto';
 
 export interface AccessRequestRow extends QueryResultRow {
   accessRequestId: string;
@@ -20,7 +22,11 @@ export interface AccessRequestRow extends QueryResultRow {
   existingRequest: boolean;
 }
 
-/** A row of identity.list_my_access_requests (0072); purpose_of_use from 0104. */
+/**
+ * A row of identity.list_my_access_requests (0072); purpose_of_use from 0104;
+ * requester_name and requester_role from 0128 (the requesting clinician's
+ * staff name and their role at the request's facility, null when unknown).
+ */
 interface PatientAccessRequestRow extends QueryResultRow {
   access_request_id: string;
   facility_id: string;
@@ -34,6 +40,8 @@ interface PatientAccessRequestRow extends QueryResultRow {
   denied_at: Date | null;
   denied_reason: string | null;
   purpose_of_use?: string;
+  requester_name?: string | null;
+  requester_role?: string | null;
 }
 
 export interface BreakGlassRow extends QueryResultRow {
@@ -113,9 +121,117 @@ export const PATIENT_PIN_ACCESS_MINUTES = 1440;
 /** main's answer to an approval from a session not freshly signed in (eb9b1ca consent.service.ts). */
 export const RECENT_APPROVAL_AUTH_DETAIL = 'For your security, sign out, sign in again, and approve within 10 minutes.';
 
+/** A row of identity.open_own_facility_patient (0131). */
+interface OwnFacilityRow extends QueryResultRow {
+  outcome: 'opened' | 'refused' | 'not_found';
+  consentGrantId: string | null;
+  patientId: string | null;
+  status: 'active' | null;
+  expiresAt: Date | null;
+  existingGrant: boolean;
+}
+
+export interface OwnFacilityAccess {
+  consentGrantId: string;
+  patientId: string;
+  status: 'active';
+  expiresAt: Date;
+  existingGrant: boolean;
+  authorization: {
+    basis: 'own-facility';
+    scope: 'write_records';
+    purpose: 'direct-care';
+  };
+}
+
+/** 0131: the answers' words (plain English; owner Q100 B for an unknown Health ID). */
+export const OWN_FACILITY_DETAIL = {
+  notFound: 'No such patient. Check the Health ID and try again.',
+  refused: 'You cannot open this patient\'s records without their consent. Ask for their Access PIN or send an access request.',
+  notPermitted: 'Only doctors, nurses and clinicians can open a patient of this facility without a PIN.',
+  directCareOnly: 'Opening a patient of this facility is for direct care only.',
+  invalid: 'Give the patient\'s Health ID or the patient id, not both.',
+} as const;
+
 @Injectable()
 export class ConsentService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(
+    private readonly database: DatabaseService,
+    @Optional() private readonly audit?: AuditService,
+  ) {}
+
+  /**
+   * 0131 (ID-4, owner Q101 of 18 November 2026): open this facility's own
+   * patient without a PIN. The database command decides (registered at this
+   * desk, or a consented visit here in the last 24 months; doctors, nurses
+   * and clinicians; never lab, pharmacy or the front desk), writes the
+   * 24-hour own_facility grant and its own audit row for every answer it
+   * gives. A refusal raised before it answers (no permission, another
+   * purpose) is audited here, since the database's row rolls back with it.
+   */
+  async openOwnFacilityPatient(context: DataAccessContext, input: OpenOwnFacilityDto): Promise<OwnFacilityAccess> {
+    let row: OwnFacilityRow;
+    try {
+      row = await this.database.withTransaction(context, async (client) => this.requireRow((await client.query<OwnFacilityRow>(
+        `select outcome, consent_grant_id as "consentGrantId", subject_patient_id as "patientId",
+           grant_status as status, expires_at as "expiresAt", existing_grant as "existingGrant"
+         from identity.open_own_facility_patient($1, $2::uuid)`,
+        [input.hid ?? null, input.patientId ?? null],
+      )).rows[0]));
+    } catch (error) {
+      const problem = this.translateOwnFacility(error);
+      if (problem instanceof DomainProblem) await this.auditOwnFacilityRefusal(context, problem.code, input);
+      throw problem;
+    }
+    if (row.outcome === 'not_found') throw new DomainProblem(404, 'PATIENT_NOT_FOUND', OWN_FACILITY_DETAIL.notFound);
+    if (row.outcome !== 'opened' || !row.consentGrantId || !row.patientId || row.status !== 'active' || !row.expiresAt) {
+      throw new DomainProblem(403, 'OWN_FACILITY_ACCESS_REFUSED', OWN_FACILITY_DETAIL.refused);
+    }
+    return {
+      consentGrantId: row.consentGrantId,
+      patientId: row.patientId,
+      status: row.status,
+      expiresAt: row.expiresAt,
+      existingGrant: row.existingGrant === true,
+      authorization: { basis: 'own-facility', scope: 'write_records', purpose: 'direct-care' },
+    };
+  }
+
+  private translateOwnFacility(error: unknown): unknown {
+    if (error instanceof DomainProblem || !isDatabaseError(error)) return error;
+    const message = (error as unknown as { message?: unknown }).message;
+    if (error.code === '42501' && message === 'OWN_FACILITY_ACCESS_NOT_PERMITTED') {
+      return new DomainProblem(403, 'OWN_FACILITY_ACCESS_NOT_PERMITTED', OWN_FACILITY_DETAIL.notPermitted);
+    }
+    if (error.code === '22023' && message === 'OWN_FACILITY_ACCESS_DIRECT_CARE_ONLY') {
+      return new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED', OWN_FACILITY_DETAIL.directCareOnly);
+    }
+    if (error.code === '22023' && message === 'OWN_FACILITY_ACCESS_INVALID') {
+      return new DomainProblem(400, 'PATIENT_IDENTIFIER_REQUIRED', OWN_FACILITY_DETAIL.invalid);
+    }
+    if (error.code === '42883') {
+      // An Identity build ahead of migration 0131 (a rehearsal order only).
+      return new DomainProblem(503, 'OWN_FACILITY_ACCESS_UNAVAILABLE', 'Opening a patient of this facility is not available yet.');
+    }
+    return this.translate(error);
+  }
+
+  private async auditOwnFacilityRefusal(context: DataAccessContext, code: string, input: OpenOwnFacilityDto): Promise<void> {
+    await this.audit?.record({
+      correlationId: context.correlationId,
+      actorType: 'staff',
+      actorSubject: context.actor.subject,
+      actorAccountId: context.actor.accountId,
+      actorMembershipId: context.membershipId,
+      organizationId: context.actor.facility?.organizationId,
+      facilityId: context.facilityId,
+      action: 'identity.patient.open-own-facility',
+      resourceType: 'patient',
+      outcome: 'denied',
+      purposeOfUse: context.purposeOfUse,
+      details: { code, identifiedBy: input.hid ? 'health_id' : 'patient_id' },
+    });
+  }
 
   // The clinician learns the request, not the patient: the answer carries no
   // patient id before the patient consents (main D-Eminence/hid-system#69).
@@ -209,6 +325,9 @@ export class ConsentService {
         requestedDurationMinutes: row.requested_duration_minutes, requestedAt: row.requested_at,
         approvedAt: row.approved_at, deniedAt: row.denied_at, deniedReason: row.denied_reason,
         ...('purpose_of_use' in row ? { purpose: row.purpose_of_use } : {}),
+        // 0128: who asked. Left out on a schema before 0128, null when unknown.
+        ...('requester_name' in row
+          ? { requesterName: row.requester_name ?? null, requesterRole: row.requester_role ?? null } : {}),
       }));
     }, { readOnly: true });
   }
@@ -299,6 +418,10 @@ export class ConsentService {
         // SECURITY DEFINER and granted to PUBLIC, so a staff session reads it
         // without platform.control.read.
         await client.query('select platform.require_control_enabled($1)', ['break_glass_enabled']);
+        // ID-5 (0132): a card from this member's own emergency search names
+        // the patient by its matchRef; the database resolves it and runs the
+        // same activation, refusing an unresolved ref as an unknown Health ID.
+        const byMatchRef = input.matchRef !== undefined;
         const result = await client.query<BreakGlassRow>(
           `select
              access_request_id as "accessRequestId",
@@ -307,8 +430,8 @@ export class ConsentService {
              grant_status as status,
              expires_at as "expiresAt",
              existing_grant as "existingGrant"
-           from identity.activate_break_glass($1, $2, $3)`,
-          [input.hid, input.reason, input.durationMinutes],
+           from ${byMatchRef ? 'identity.activate_break_glass_by_match_ref' : 'identity.activate_break_glass'}($1, $2, $3)`,
+          [byMatchRef ? input.matchRef : input.hid, input.reason, input.durationMinutes],
         );
         return this.requireRow(result.rows[0]);
       });

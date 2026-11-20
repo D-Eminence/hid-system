@@ -5,7 +5,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, join, resolve } from 'node:path';
 import { baselineSql, ids, syntheticFixture } from '../release/migration/synthetic-fixture.mjs';
@@ -43,6 +44,7 @@ const evidence = {
 };
 let pgBindir;
 let started = false;
+const liveFailures = [];
 
 function command(label, executable, commandArgs, extraEnvironment = {}, expected = 0) {
   const result = spawnSync(executable, commandArgs, {
@@ -65,7 +67,8 @@ function url(db) {
 }
 
 function migration(label, script, db = database, extra = {}, expected = 0, flags = []) {
-  return command(label, process.execPath, [join(service, 'scripts', script), ...flags], {
+  // A bare name is this branch's script; an absolute path another tree's (the live images', below).
+  return command(label, process.execPath, [script.startsWith('/') ? script : join(service, 'scripts', script), ...flags], {
     DATABASE_URL: url(db), DATABASE_ADMIN_URL: url(db),
     MIGRATION_RUN_ID: runId, MIGRATION_SNAPSHOT_ID: 'synthetic-fixture-v1',
     MIGRATION_OPERATOR: 'local-synthetic-rehearsal',
@@ -105,6 +108,8 @@ function quote(identifier) {
 const addedColumns = {
   'ehr.encounters': ['imported_paper_records'], // 0113, default false
   'ocr.publications': ['publication_basis'], // 0113, default NULL (read as direct care)
+  // 0130, default 'nin_verified' and NULL: every historical case was registered with a checked NIN.
+  'identity.registration_cases': ['identity_evidence', 'no_nin_reason'],
 };
 
 async function snapshot(db) {
@@ -253,6 +258,25 @@ try {
   const upgradePurposesBefore = await withClient('hid_upgrade', async client =>
     (await client.query('select to_jsonb(p) as value from identity.purpose_of_use_codes p order by code')).rows);
   assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency', 'healthcare-operations'].includes(row.value.code)));
+  // Owner Q113 A (18 November 2026): 0136 changes the role table only while no
+  // real (non-sealed) staff are active, and stops, changing nothing, otherwise.
+  // This historical baseline keeps one synthetic admin membership at a real
+  // facility, so the release's dry run must stop at 0136 here, and leave every
+  // row as it was. Production has no real staff active (the owner's answer), so
+  // the rehearsal then ends that synthetic membership, as production stands,
+  // and goes on with the upgrade.
+  migration('existing baseline stops at 0136 while real staff are active', 'apply-migrations.mjs', 'hid_upgrade',
+    {}, 'failure', ['--dry-run']);
+  const q113Stop = logs.at(-1);
+  assert.match(`${q113Stop.stdout}\n${q113Stop.stderr}`,
+    /0136 stopped, nothing was changed: real staff would be affected[^\n]*line 19 \(admin loses lab\.work-item\.read\) is now 1 \(1 staff logins\)/);
+  assert.deepEqual((await withClient('hid_upgrade', client => client.query(`select count(*)::integer as count
+    from migration.schema_migrations where version like '0136_%'`))).rows[0], { count: 0 });
+  await withClient('hid_upgrade', client => client.query(`begin;
+    set local session_replication_role = replica;
+    update identity.staff_facility_memberships set active = false
+     where id = 'b6000000-0000-4000-8000-000000000001';
+    commit;`));
   const upgradeBefore = await snapshot('hid_upgrade');
   const upgradeBackup = join(evidenceDirectory, 'pre-schema-upgrade.dump');
   command('backup synthetic schema 0028 before upgrade', join(pgBindir, 'pg_dump'),
@@ -372,6 +396,7 @@ try {
     const historicalDefaults = [
       ['ehr.encounters', 'imported_paper_records is distinct from false'],
       ['ocr.publications', 'publication_basis is not null'],
+      ['identity.registration_cases', "identity_evidence is distinct from 'nin_verified' or no_nin_reason is not null"],
     ];
     for (const [table, offending] of historicalDefaults) {
       const { rows } = await client.query(`select count(*)::int as n from ${table} where ${offending}`);
@@ -419,6 +444,10 @@ try {
   // 0127: single sign-on hand-off, product gate, back-channel logout and product sign-out, with the in-process fake provider.
   evidence.checks.sso_runtime = JSON.parse(command('exact-role single sign-on hand-off, product gate and sign-out',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-sso-runtime.mjs')], workflowEnvironment));
+  // 0130/0131: registration at the desk without a NIN, and opening this facility's own patient without a PIN.
+  evidence.checks.desk_registration_own_facility_runtime = JSON.parse(command(
+    'exact-role registration without a NIN and own-facility opening', process.execPath,
+    [join(repository, 'services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs')], workflowEnvironment));
   // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
   evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));
@@ -434,8 +463,136 @@ try {
   // whatever its reader does, so only this proves the reader answers).
   evidence.checks.prescription_details_runtime = JSON.parse(command('exact-role prescription details on own pharmacy work',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-prescription-details-runtime.mjs')], workflowEnvironment));
+  // 0129: a staff member's chosen facility, kept per sign-in, through Identity's full pipeline with
+  // STAFF_FACILITY_SELECTION_MODE off, keep and ask (a failed read answers 200 'unavailable' and keep answers no field
+  // when nothing is stored, so only this proves the choice is stored and read).
+  evidence.checks.facility_selection_runtime = JSON.parse(command('exact-role facility choice kept per sign-in',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-facility-selection-runtime.mjs')], workflowEnvironment));
+  // 0133: this facility's own pharmacy and lab work and the automatic send to the hospital's own pharmacy, through
+  // ehr-api, pharmacy-api and lab-api: the doctor's activation sends, the pharmacist and the lab scientist without a
+  // grant work on it (every row, execution reads included, names the patient with basis own-work), a hold or an edit
+  // withdraws the send and the prescriber is told, and neither reads the chart (the services fall back to Identity's
+  // consent whatever 0133's check does, so only this proves the check answers).
+  evidence.checks.own_facility_work_runtime = JSON.parse(command('exact-role own facility pharmacy and lab work',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-own-facility-work-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
+  // Release A (coordinator, 19 November 2026, on #280): the runner applies the pending files one by one, each in
+  // its own transaction, so a release can stop between two of them. That is acceptable only if today's live images
+  // still pass their runtime verifiers on the schema left after 0132 and after 0135. (Not after 0136: it changes the
+  // role table on purpose, Q103 A, which the live verifiers' flows encode; this branch's verifiers prove it.) HID_REHEARSAL_LIVE_TREE is a copy of the live images' commit (git archive of it;
+  // HID_REHEARSAL_LIVE_COMMIT names it in the evidence). Its own runner and role bootstrap build the live schema
+  // with its runtime grants, as production has them; this branch's runner then applies this branch's files up to
+  // each point, on a copy of that database, and the live tree's own runtime verifiers (those its rehearsal runs)
+  // boot the live code as its exact runtime roles. Dependencies the live tree lacks are this checkout's.
+  const liveTree = process.env.HID_REHEARSAL_LIVE_TREE;
+  // Each live verifier's result is recorded and the rehearsal goes on; any live failure fails it at the end.
+  liveFailures.length = 0;
+  if (!liveTree) {
+    evidence.checks.live_images_mid_release = { skipped: 'HID_REHEARSAL_LIVE_TREE not set' };
+  } else {
+    const live = resolve(liveTree);
+    const liveService = join(live, 'services/ehr-api');
+    const linked = [];
+    for (const directory of ['.', ...(await readdir(join(live, 'services'))).map((name) => `services/${name}`)]) {
+      const own = join(repository, directory, 'node_modules');
+      const target = join(live, directory, 'node_modules');
+      // A link an earlier rehearsal left to a checkout that is gone is replaced.
+      if (!existsSync(target) && (await lstat(target).catch(() => null))?.isSymbolicLink()) await rm(target);
+      if (!existsSync(target) && existsSync(own)) {
+        await symlink(own, target);
+        linked.push(directory);
+      }
+    }
+    const liveRehearsal = await readFile(join(live, 'scripts/tuf-staging-migration-rehearsal.mjs'), 'utf8');
+    const liveVerifiers = [...new Set(liveRehearsal.match(/services\/[a-z-]+\/scripts\/verify-[a-z-]+-runtime\.mjs/g))];
+    assert(liveVerifiers.length > 0, 'The live tree runs no runtime verifier');
+    // A live verifier's guard that checks the database's shape, not the live code: a Release A file changes that
+    // shape on purpose (0128 adds two columns to identity.list_my_access_requests, which the live consent service
+    // reads by name with select *). Such a verifier runs from a copy beside it with that one line set to the shape
+    // this branch leaves; the line, before and after, is in the evidence, and the code it boots is the live code.
+    const liveGuards = {
+      'services/ehr-api/scripts/verify-records-processing-runtime.mjs': [
+        "assert.deepEqual([code?.active, listColumns], [true, 12], 'a database with 0104');",
+        "assert.deepEqual([code?.active, listColumns], [true, 14], 'a database with 0104 and 0128');"],
+    };
+    const guardsChanged = [];
+    const liveScript = async (verifier) => {
+      const guard = liveGuards[verifier];
+      if (!guard) return join(live, verifier);
+      const original = await readFile(join(live, verifier), 'utf8');
+      assert.equal(original.split(guard[0]).length, 2, `the live ${basename(verifier)} guard is not as expected`);
+      const copy = join(live, verifier.replace(/[^/]+$/, (name) => `rehearsal-copy-${name}`));
+      await writeFile(copy, original.replace(guard[0], guard[1]));
+      if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
+        guardsChanged.push({ verifier, live_sha256: sha256(original), line_before: guard[0], line_after: guard[1] });
+      }
+      return copy;
+    };
+    const liveFiles = (await readdir(join(liveService, 'database/migrations'))).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
+    const liveLast = liveFiles.at(-1).slice(0, 4);
+    assert.deepEqual(files.slice(0, liveFiles.length), liveFiles, 'The live migrations are not a prefix of this branch\'s');
+    command('create the live images\' database', join(pgBindir, 'createdb'), ['hid_live_base']);
+    migration(`live schema 0001-${liveLast} by the live runner`, join(liveService, 'scripts/apply-migrations.mjs'),
+      'hid_live_base');
+    migration('live runtime roles and grants by the live bootstrap',
+      join(liveService, 'scripts/bootstrap-database-roles.mjs'), 'hid_live_base');
+    const points = ['0132', '0135'];
+    const results = [];
+    for (const [index, last] of points.entries()) {
+      const db = `hid_live_${'abcdefgh'[index]}`;
+      command(`copy the live database for ${last}`, join(pgBindir, 'createdb'), ['-T', 'hid_live_base', db]);
+      const subset = join(temporary, `migrations-through-${last}`);
+      await mkdir(subset);
+      const through = files.filter((name) => name.slice(0, 4) <= last);
+      for (const name of through) await copyFile(join(service, 'database/migrations', name), join(subset, name));
+      const applied = migration(`this branch's files ${files[liveFiles.length].slice(0, 4)}-${last} on the live schema`,
+        'apply-migrations.mjs', db, { HID_TEST_MIGRATION_DIRECTORY: subset });
+      assert.match(migration(`nothing pending through ${last}`, 'apply-migrations.mjs', db,
+        { HID_TEST_MIGRATION_DIRECTORY: subset }), /^0 pending migration\(s\)/);
+      // The live verifiers run only against a database named hid_rehearsal (their own guard), so this copy takes
+      // that name while they run and the rehearsal's own database waits under another; both names are put back.
+      const liveEnvironment = {
+        PGDATABASE: database, DATABASE_URL: url(database), CORS_ORIGINS: 'http://127.0.0.1', AUTH_MODE: 'local',
+        AUTH_SIGNING_SECRET: randomBytes(32).toString('base64url'),
+        AUTH_LOGIN_PEPPER: randomBytes(32).toString('base64url'),
+        OTP_HMAC_KEY_B64: Buffer.alloc(32, 0x33).toString('base64'),
+      };
+      const rename = (from, to) => withClient('postgres', async (client) => {
+        await client.query('select pg_terminate_backend(pid) from pg_stat_activity where datname = $1', [from]);
+        await client.query(`alter database ${quote(from)} rename to ${quote(to)}`);
+      });
+      const verified = {};
+      await rename(database, 'hid_rehearsal_main');
+      try {
+        await rename(db, database);
+        try {
+          for (const verifier of liveVerifiers) {
+            const name = basename(verifier, '.mjs');
+            try {
+              verified[name] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
+                process.execPath, [await liveScript(verifier)], liveEnvironment)).status ?? 'passed';
+            } catch (error) {
+              const message = String(error?.message ?? error).split('\n').find((line) => /Assertion|Error/.test(line))
+                ?? String(error?.message ?? error).slice(0, 300);
+              verified[name] = `failed: ${message.slice(0, 400)}`;
+              liveFailures.push(`${name} after ${last}: ${message.slice(0, 400)}`);
+            }
+          }
+        } finally {
+          await rename(database, db);
+        }
+      } finally {
+        await rename('hid_rehearsal_main', database);
+      }
+      results.push({ through: last, applied: through.length - liveFiles.length,
+        runner_output_sha256: sha256(applied), live_verifiers: verified });
+    }
+    evidence.checks.live_images_mid_release = {
+      live_commit: process.env.HID_REHEARSAL_LIVE_COMMIT ?? 'not named', live_schema: liveLast,
+      live_verifiers: liveVerifiers, live_verifier_guards_changed: guardsChanged,
+      dependencies_from_this_checkout: linked, points: results };
+  }
   const before = await snapshot(database);
   const beforeIntegrity = await integrity(database);
   const backupPath = join(evidenceDirectory, 'pre-migration.dump');
@@ -772,6 +929,8 @@ try {
       clinician_exact_facility_doctor_role: true, clinical_grants_and_sessions_absent: true,
       pending_patient_runtime_access_denied: true, live_staging_import: false };
   });
+  assert.equal(liveFailures.length, 0,
+    `Today's live images failed a runtime verifier on the schema left mid-release:\n${liveFailures.join('\n')}`);
   evidence.status = 'passed';
 } catch (error) {
   evidence.failure = error instanceof Error ? error.message : String(error);

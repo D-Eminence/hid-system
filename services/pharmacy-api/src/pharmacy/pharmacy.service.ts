@@ -14,6 +14,7 @@ import { IMPORT_PAGE_DEFAULT, type ListImportedMedicationsQueryDto, type OcrMedi
 import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
+import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState, type OwnWorkWithdrawnReason } from './own-work-access';
 import { PRESCRIPTION_DETAILS_OFF, PharmacyPrescriptionDetails,
   type WorkItemDispensingDetails } from './prescription-dispensing-details';
 
@@ -60,6 +61,10 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
   left join pharmacy.dispensings d on d.work_item_id=w.id
   left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
 
+/** Open work first, oldest first, then done work, newest first; 200 rows. The same for both list queries. */
+const WORK_LIST_ORDER = `order by o.open_work desc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
+  case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
+
 /**
  * The work list (200 rows, as before). A work item is open while it has no
  * dispensing. A reversed dispensing counts as done: a work item takes one
@@ -89,8 +94,30 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null as open_work) o
-  order by o.open_work desc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
-  case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
+  ${WORK_LIST_ORDER}`;
+
+/**
+ * The work list on a schema with 0133 (D14, owner's Q121 A): WORK_LIST_QUERY,
+ * except for this facility's own items that can no longer be dispensed here,
+ * which pharmacy.own_withdrawn_work_items() names (called once, as a
+ * materialized CTE; ids and reasons only, for a member holding
+ * pharmacy.work-item.read here). An own item sent to another facility's
+ * pharmacy before it was dispensed (`sent_elsewhere`) is left out before the
+ * 200-row limit: it is that pharmacy's work now. An own item whose automatic
+ * send was withdrawn (`changed`) stays listed, marked, but counts as done
+ * work, newest first, never as open work at the top: it can never be
+ * dispensed, and would otherwise fill the oldest open slots for good. A
+ * route-backed item is never matched (the reader names own items only, and
+ * the join asks for no order route). The projection, the order and the limit
+ * are WORK_LIST_QUERY's. Exported for the tests.
+ */
+export const WORK_LIST_QUERY_0133 = `with withdrawn as materialized (select x.work_item_id, x.withdrawn_reason
+    from pharmacy.own_withdrawn_work_items() x)
+  ${WORK_ITEM_SELECT}
+  left join withdrawn x on x.work_item_id=w.id and w.order_route_id is null
+  cross join lateral (select d.id is null and x.work_item_id is null as open_work) o
+  where x.withdrawn_reason is distinct from 'sent_elsewhere'
+  ${WORK_LIST_ORDER}`;
 
 /**
  * One patient's imported medication records at this facility, newest first:
@@ -115,7 +142,8 @@ const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
 // their own; since 0100 an acceptance's validator, and since 0101 a
 // same-facility dispensing's, holds its EHR prescription FOR SHARE until
 // commit, so the EHR cannot change it under the acceptance or the dispensing.
-// Unique constraints allow one work item per prescription, one dispensing per
+// Unique constraints allow one own work item and at most one route-backed item
+// per prescription (0133), one dispensing per
 // work item, one reversal per dispensing, one import per publication and one
 // row per idempotency key; the SERIALIZABLE transaction cancels the loser of a
 // race (40001 or 23505), and DatabaseService runs it again, when it replays
@@ -144,13 +172,26 @@ function routedDispensingRefusal(error: unknown): DomainProblem | undefined {
  * that message: the validator's other 23514 refusals (the dispensing does not
  * match its work item or the session, 0077) pass on unchanged, and a
  * serialization failure goes to DatabaseService's retry.
+ *
+ * Since 0133 (D14, owner's Q121 A) the database raises the same message, with
+ * DETAIL 'sent_elsewhere', for an own item whose prescription was sent to
+ * another facility's pharmacy before it was dispensed, whichever image asks.
+ * That one answers its own detail and the problem member `withdrawnReason`.
+ * There is no check before the insert: the database decides, free of races.
  */
 function sameFacilityDispensingRefusal(error: unknown): DomainProblem | undefined {
-  const { code, message } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown; message?: unknown };
-  return code === '23514' && message === 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE' ? notDispensable() : undefined;
+  const { code, message, detail } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown;
+    message?: unknown; detail?: unknown };
+  if (code !== '23514' || message !== 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE') return undefined;
+  return notDispensable(detail === 'sent_elsewhere' ? 'sent_elsewhere' : undefined);
 }
 
-function notDispensable(): DomainProblem {
+function notDispensable(reason?: Extract<OwnWorkWithdrawnReason, 'sent_elsewhere'>): DomainProblem {
+  if (reason === 'sent_elsewhere') {
+    return new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
+      'This prescription was sent to another pharmacy, so it can no longer be dispensed here', undefined,
+      { extensions: { withdrawnReason: 'sent_elsewhere' } });
+  }
   return new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE', 'This prescription can no longer be dispensed here');
 }
 
@@ -192,7 +233,8 @@ export class PharmacyService {
     private readonly audit: AuditService, private readonly routeAccess: PharmacyOrderRouteAccess,
     private readonly routeCards: PharmacyOrderRouteCards,
     private readonly ownPatients: PharmacyOwnWorkPatientCards = OWN_WORK_PATIENT_CARDS_OFF,
-    private readonly prescriptionDetails: PharmacyPrescriptionDetails = PRESCRIPTION_DETAILS_OFF) {}
+    private readonly prescriptionDetails: PharmacyPrescriptionDetails = PRESCRIPTION_DETAILS_OFF,
+    private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
 
   async acceptPrescription(context: DataAccessContext, input: AcceptEhrPrescriptionDto, key: string) {
     if (input.orderingFacilityId !== context.facilityId) throw new DomainProblem(403,
@@ -213,7 +255,11 @@ export class PharmacyService {
       if (existing) {
         if (existing.request_sha256 !== digest) throw new DomainProblem(409, 'IDEMPOTENCY_CONFLICT',
           'Prescription acceptance conflicts with existing Pharmacy work');
-        return this.projectWorkItem(existing);
+        // 0133: a replay answers an own item as the single-item read does, withdrawn (changed, or
+        // sent elsewhere: D14) when it was (no flag when it cannot be read).
+        const states = existing.order_route_id ? undefined
+          : await this.ownWork.states(client, [existing.id], context.correlationId, 'flag');
+        return this.projectWorkItem(existing, undefined, undefined, undefined, states?.get(existing.id));
       }
       const inserted = await client.query<WorkItemRow>(`insert into pharmacy.work_items (
         id,patient_id,facility_id,ordering_facility_id,source_ehr_prescription_id,
@@ -254,7 +300,11 @@ export class PharmacyService {
    * may read: under consent, or bound to an order route that allows a read
    * now (P4c, strict policy). Open work comes first, oldest first, then done
    * work, newest first, 200 rows in all (WORK_LIST_QUERY); the answer's shape
-   * is unchanged. A route-backed row carries its route card and,
+   * is unchanged. With 0133 (WORK_LIST_QUERY_0133, in a savepoint) an own
+   * item sent to another facility's pharmacy is left out and an own item
+   * withdrawn on a change counts as done work; on a schema without 0133's
+   * reader (42883) the savepoint is rolled back and WORK_LIST_QUERY answers.
+   * A route-backed row carries its route card and,
    * while the route allows a read, its patient (C18). This facility's own row
    * carries its patient while OWN_WORK_PATIENT_CARD_ENABLED is on and the
    * member may read it (0124); off, it carries none. While
@@ -271,7 +321,7 @@ export class PharmacyService {
    */
   async listWorkItems(context: DataAccessContext) {
     const page = await this.database.withTransaction(context, async (client) => {
-      const result = await client.query<WorkItemRow>(WORK_LIST_QUERY);
+      const result = await this.workList(client);
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
         resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { returnedCount: result.rows.length });
@@ -279,14 +329,39 @@ export class PharmacyService {
         context.correlationId);
       const ownIds = result.rows.filter((row) => !row.order_route_id).map((row) => row.id);
       const own = await this.ownPatients.patients(client, ownIds, context.correlationId);
-      await this.auditShownPatients(client, context, result.rows, cards, own);
+      // 0133: why each own row is seen (consent or own-work) and whether its automatic send was
+      // withdrawn; undefined without 0133. A failure fails the list: its audit rows need the basis.
+      const states = await this.ownWork.states(client, ownIds, context.correlationId, 'audit');
+      await this.auditShownPatients(client, context, result.rows, cards, own, states);
       const details = await this.prescriptionDetails.details(client, ownIds, context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
-        this.prescriptionDetails.forRow(row, details.get(row.id)))), ...receiving,
+        this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id))), ...receiving,
         ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
+  }
+
+  /**
+   * The list's rows. With the own-work reader on, 0133's query, in a
+   * savepoint: a schema without 0133's reader (42883) rolls back to it and
+   * answers today's query. Any other failure, a serialization failure or
+   * deadlock among them, is passed on (DatabaseService runs a cancelled
+   * SERIALIZABLE transaction again): the list never answers an item that can
+   * no longer be dispensed here as open work because the reader failed.
+   */
+  private async workList(client: PoolClient) {
+    if (!this.ownWork.enabled) return client.query<WorkItemRow>(WORK_LIST_QUERY);
+    await client.query('savepoint pharmacy_work_list');
+    try {
+      const result = await client.query<WorkItemRow>(WORK_LIST_QUERY_0133);
+      await client.query('release savepoint pharmacy_work_list');
+      return result;
+    } catch (error) {
+      if (sqlState(error) !== '42883') throw error;
+      await client.query('rollback to savepoint pharmacy_work_list');
+      return client.query<WorkItemRow>(WORK_LIST_QUERY);
+    }
   }
 
   /**
@@ -295,13 +370,22 @@ export class PharmacyService {
    * row per patient shown, naming the patient, with the work items and routes
    * (ids only, §12) and basis 'order-route', in the list's transaction (no
    * answer without its audit). Rows without a patient on the card name no
-   * one; the collection row above stays as it was. Own work whose patient is
-   * shown (0124) gets the same: one row per patient, with the work items (ids
-   * only) and basis 'consent', which the patient's access log shows as a view;
-   * none while OWN_WORK_PATIENT_CARD_ENABLED is off.
+   * one; the collection row above stays as it was.
+   *
+   * This facility's own work: with 0133 (`states` read), every own row is
+   * recorded, whether or not its patient card is shown (0124's
+   * OWN_WORK_PATIENT_CARD_ENABLED): one row per patient and basis, with the
+   * work items (ids only) and the basis 0133 gives ('consent', or 'own-work'
+   * for the facility's pharmacy staff without a personal grant), which the
+   * patient's access log shows as a view. A row 0133 no longer returns (a
+   * grant that ended between the two statements) keeps 'consent', the basis
+   * the list's read had. Without 0133 (`states` undefined) only a row whose
+   * patient is shown is recorded, with basis 'consent', as 0124 did; a
+   * member then sees own rows under consent only.
    */
   private async auditShownPatients(client: PoolClient, context: DataAccessContext, rows: readonly WorkItemRow[],
-    cards: ReadonlyMap<string, OrderRouteCard>, own: ReadonlyMap<string, WorkItemRoutePatient>) {
+    cards: ReadonlyMap<string, OrderRouteCard>, own: ReadonlyMap<string, WorkItemRoutePatient>,
+    states: ReadonlyMap<string, OwnWorkState> | undefined) {
     const shown = new Map<string, { first: WorkItemRow; workItemIds: string[]; orderRouteIds: string[] }>();
     for (const row of rows) {
       const card = cards.get(row.id);
@@ -316,17 +400,21 @@ export class PharmacyService {
         patientId, resourceType: 'pharmacy-work-item', resourceId: entry.first.id,
       }, { basis: 'order-route', workItemIds: entry.workItemIds, orderRouteIds: entry.orderRouteIds });
     }
-    const ownShown = new Map<string, { first: WorkItemRow; workItemIds: string[] }>();
+    const ownShown = new Map<string, { patientId: string; basis: 'consent' | 'own-work'; first: WorkItemRow;
+      workItemIds: string[] }>();
     for (const row of rows) {
-      if (row.order_route_id || !own.has(row.id)) continue;
-      const entry = ownShown.get(row.patient_id) ?? { first: row, workItemIds: [] };
+      if (row.order_route_id) continue;
+      const basis = states ? states.get(row.id)?.basis ?? 'consent' : own.has(row.id) ? 'consent' : undefined;
+      if (!basis) continue;
+      const key = `${row.patient_id}:${basis}`;
+      const entry = ownShown.get(key) ?? { patientId: row.patient_id, basis, first: row, workItemIds: [] };
       entry.workItemIds.push(row.id);
-      ownShown.set(row.patient_id, entry);
+      ownShown.set(key, entry);
     }
-    for (const [patientId, entry] of ownShown) {
+    for (const entry of ownShown.values()) {
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
-        patientId, resourceType: 'pharmacy-work-item', resourceId: entry.first.id,
-      }, { basis: 'consent', workItemIds: entry.workItemIds });
+        patientId: entry.patientId, resourceType: 'pharmacy-work-item', resourceId: entry.first.id,
+      }, { basis: entry.basis, workItemIds: entry.workItemIds });
     }
   }
 
@@ -346,8 +434,11 @@ export class PharmacyService {
       // Its prescription details (0125, PRESCRIPTION_DISPENSING_DETAILS_ENABLED).
       const details = row.order_route_id ? undefined
         : await this.prescriptionDetails.details(client, [row.id], context.correlationId);
+      // 0133: whether its automatic send was withdrawn (no flag when it cannot be read).
+      const states = row.order_route_id ? undefined
+        : await this.ownWork.states(client, [row.id], context.correlationId, 'flag');
       return this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
-        this.prescriptionDetails.forRow(row, details?.get(row.id)));
+        this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id));
     });
   }
 
@@ -618,10 +709,17 @@ export class PharmacyService {
    * an own row's prescription details (0125, PRESCRIPTION_DISPENSING_DETAILS_ENABLED
    * on): its medication gains `strength` and `doseForm`, and the item
    * `priority`, `duration`, `quantityToDispense` and `quantityUnit`, each only
-   * when there is a value, after today's fields.
+   * when there is a value, after today's fields. An own item withdrawn before
+   * it was dispensed carries `withdrawn: true` and its `withdrawnReason`:
+   * 'changed' when its automatic send was withdrawn (0133: the prescription
+   * was held, cancelled, entered in error, edited or resumed after it was
+   * sent, by whoever changed it), 'sent_elsewhere' when the prescription was
+   * sent to another facility's pharmacy (D14, owner's Q121 A). Dispensing it
+   * is refused (409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE). `withdrawnReason`
+   * never comes without `withdrawn`.
    */
   private projectWorkItem(row: WorkItemRow, card?: OrderRouteCard, ownPatient?: WorkItemRoutePatient,
-    details?: WorkItemDispensingDetails) {
+    details?: WorkItemDispensingDetails, ownState?: OwnWorkState) {
     const source = row.order_route_id ? {} : { sourceEhrPrescriptionId: row.source_ehr_prescription_id,
       sourceEncounterId: row.source_encounter_id };
     const route = row.order_route_id
@@ -641,7 +739,9 @@ export class PharmacyService {
       ...(details?.priority ? { priority: details.priority } : {}),
       ...(details?.duration ? { duration: details.duration } : {}),
       ...(details?.quantityToDispense === undefined ? {}
-        : { quantityToDispense: details.quantityToDispense, quantityUnit: details.quantityUnit }) };
+        : { quantityToDispense: details.quantityToDispense, quantityUnit: details.quantityUnit }),
+      ...(ownState?.withdrawn ? { withdrawn: true,
+        ...(ownState.withdrawnReason ? { withdrawnReason: ownState.withdrawnReason } : {}) } : {}) };
   }
 
   private projectDispensing(row: DispensingRow) {
@@ -695,6 +795,10 @@ export function batchPublicationId(publicationId: string, index: number): string
   bytes.writeUInt8((bytes.readUInt8(8) & 0x3f) | 0x80, 8);
   const hex = bytes.toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function sqlState(error: unknown): unknown {
+  return typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
 }
 
 function workItemNotFound(): DomainProblem {

@@ -215,7 +215,18 @@ const environmentSchema = z.object({
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,
+  // How long Identity waits for one QoreID request (#271): 12 s by default,
+  // at most 20 s so a start (Turnstile, the check, the database) stays inside
+  // the gateway's 30 s read timeout. QoreID charges a check whether or not
+  // HID waits for its answer (owner, 18 November 2026).
   QOREID_TIMEOUT_MS: z.coerce.number().int().min(250).max(20_000).default(12_000),
+  // How long a patient NIN check keeps reading QoreID's answer after the
+  // caller stopped waiting (QOREID_TIMEOUT_MS) (0137, Q109): QoreID charges the
+  // check whether or not HID reads the answer, so the answer is read and kept
+  // for the resubmit instead of being thrown away. Never less than
+  // QOREID_TIMEOUT_MS. Not set in production's infrastructure configuration:
+  // the default applies.
+  QOREID_NIN_ANSWER_CEILING_MS: z.coerce.number().int().min(1_000).max(120_000).default(90_000),
   // QoreID's POST endpoints do not publish an idempotency contract. Keep
   // retries explicitly disabled rather than risking duplicate verification.
   QOREID_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),
@@ -258,6 +269,17 @@ const environmentSchema = z.object({
   ADMIN_OUTREACH_STATUS_URL: optionalUrl,
   ADMIN_EVENT_DISPATCHER_STATUS_URL: optionalUrl,
   ADMIN_OPERATIONS_TIMEOUT_MS: z.coerce.number().int().min(250).max(5000).default(1500),
+  // A staff member's chosen facility, kept per sign-in (0129): 'off' (the
+  // default) is today's behaviour, and reads and stores nothing, so an image
+  // can ship before 0129. 'keep' stores the choice made with POST
+  // /auth/facility and reports it on GET /auth/session and POST /auth/refresh;
+  // 'ask' does the same and also answers 'default' while a staff sign-in has
+  // made no choice, so the website asks where the user is working. Set it in
+  // AWS with HID_STAFF_FACILITY_SELECTION_MODE at synth time, only once 0129
+  // is applied: with it on, Identity refuses to start while the table or one
+  // of its grants is missing (FacilitySelectionStartupCheck). Empty means off;
+  // any other value refuses to boot.
+  STAFF_FACILITY_SELECTION_MODE: z.preprocess(emptyToUndefined, z.enum(['off', 'keep', 'ask']).default('off')),
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {
@@ -382,6 +404,7 @@ function isBase64Key(value: string, requiredBytes: number): boolean {
 }
 
 export type Environment = z.infer<typeof environmentSchema>;
+export type StaffFacilitySelectionMode = Environment['STAFF_FACILITY_SELECTION_MODE'];
 let cachedEnvironment: Environment | undefined;
 
 export function getEnvironment(): Environment {

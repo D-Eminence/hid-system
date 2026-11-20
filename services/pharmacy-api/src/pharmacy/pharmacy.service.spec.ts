@@ -1,6 +1,6 @@
 import { requestDigest } from '../common/idempotency';
 import type { DataAccessContext } from '../common/request-context';
-import { PharmacyService, WORK_LIST_QUERY } from './pharmacy.service';
+import { PharmacyService, WORK_LIST_QUERY, WORK_LIST_QUERY_0133 } from './pharmacy.service';
 import { PharmacyOrderRouteAccess } from './order-route-access';
 import { PharmacyOrderRouteCards } from './order-route-cards';
 
@@ -225,5 +225,43 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     // The audit rows are as before: the collection row with the count returned, and no patient row for own work.
     expect(audits).toEqual([{ action: 'pharmacy.work-item.list', resourceType: 'pharmacy-work-item-collection',
       resourceId: ids.facility, details: { returnedCount: 200 } }]);
+  });
+});
+
+/*
+ * 0133 D14 (owner's Q121 A): an own item sent to another facility's pharmacy before it was dispensed leaves the
+ * hospital pharmacy's list, and an own item withdrawn on a change (it can never be dispensed) counts as done work.
+ * Both are named by pharmacy.own_withdrawn_work_items(), called once per list; the item is left out before the
+ * 200-row limit, so it never takes an open slot. Projection, order and limit stay WORK_LIST_QUERY's.
+ */
+describe('WORK_LIST_QUERY_0133 (0133 D14)', () => {
+  const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+  const orderOf = (sql: string) => flat(sql.slice(sql.lastIndexOf('order by')));
+
+  it('calls the reader once, as a materialized CTE of ids and reasons', () => {
+    expect(WORK_LIST_QUERY_0133.match(/pharmacy\.own_withdrawn_work_items\(/g)).toHaveLength(1);
+    expect(flat(WORK_LIST_QUERY_0133).startsWith('with withdrawn as materialized (select x.work_item_id, '
+      + 'x.withdrawn_reason from pharmacy.own_withdrawn_work_items() x)')).toBe(true);
+  });
+
+  it('matches own items only, and projects exactly what WORK_LIST_QUERY projects', () => {
+    expect(flat(WORK_LIST_QUERY_0133)).toContain('left join withdrawn x on x.work_item_id=w.id and w.order_route_id is null');
+    const select = flat(WORK_LIST_QUERY.slice(0, WORK_LIST_QUERY.indexOf('cross join lateral')));
+    expect(flat(WORK_LIST_QUERY_0133)).toContain(`) ${select} left join withdrawn x`);
+    expect(select.startsWith('select w.*,d.id::text as dispensing_id,d.status as dispensing_status,')).toBe(true);
+    expect(select).not.toMatch(/\bx\./);
+  });
+
+  it('leaves out an item sent elsewhere before the limit, and counts a withdrawn item as done work', () => {
+    const query = flat(WORK_LIST_QUERY_0133);
+    expect(query).toContain('cross join lateral (select d.id is null and x.work_item_id is null as open_work) o');
+    expect(query).toContain("where x.withdrawn_reason is distinct from 'sent_elsewhere' order by");
+    expect(query.indexOf("is distinct from 'sent_elsewhere'")).toBeLessThan(query.indexOf('limit 200'));
+  });
+
+  it('keeps WORK_LIST_QUERY\'s order and limit, byte for byte', () => {
+    expect(orderOf(WORK_LIST_QUERY_0133)).toBe(orderOf(WORK_LIST_QUERY));
+    expect(WORK_LIST_QUERY_0133.endsWith('limit 200')).toBe(true);
+    expect(WORK_LIST_QUERY_0133).not.toMatch(/\b(insert|update|delete|for update|for share)\b/i);
   });
 });

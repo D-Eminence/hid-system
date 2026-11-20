@@ -39,8 +39,9 @@
 --      without a purpose of use; a revoked or an expired grant; an active
 --      deny directive; a disabled account; a held membership; a malformed
 --      facility setting is refused 22023; the EHR and Lab runtimes may not
---      call it (42501); a doctor with consent and the read permission gets
---      its row;
+--      call it (42501); a doctor with consent gets nothing, since doctors
+--      hold no pharmacy.work-item.read after 0136 (owner decision Q103 A;
+--      before 0136 the doctor got its row);
 --   6. emergency (D8): a break-glass grant under purpose 'emergency' gets the
 --      rows it can read (also under a deny directive), nothing under direct
 --      care;
@@ -103,9 +104,10 @@ create function pg_temp.untouched_bodies() returns text language sql as $f$
     from (values
       ('pharmacy.validate_work_item()', array['e2411539ee8c95a02dad46c03e24db05']),
       ('pharmacy.validate_dispensing()', array['17f7e8897bd2ab240332e4d2c9f757b7']),
-      -- 0098's body, or 0123's (the sealed QA tenant: 0098's plus one clause).
+      -- 0098's body, or 0123's (the sealed QA tenant: 0098's plus one clause),
+      -- or 0133's (D14: 0123's with the hunks marked "0133 D14").
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)',
-       array['4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b']),
+       array['4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b', 'fef3bfda1239e5cd72a149f8db30ff64']),
       ('ehr.sync_order_routes_on_order_change()', array['8ce6b42450cc06fc02fec8d1cf63af41']),
       -- 0004's body, or 0112's (OCR source deletion replaces the snapshot writer).
       ('ehr.capture_record_version()', array['70daa16f05bb3ec28f05292e6358a702', 'cae99883d00e70ab1d20ed6fbc97ad7b']))
@@ -259,7 +261,10 @@ language sql as $f$
          set_config('app.facility_id', 'e1140001-0000-4000-8000-00000000000' || site, true),
          set_config('app.correlation_id', 'details-suite-' || substr(md5(random()::text), 1, 12), true),
          set_config('app.membership_id', 'e1140004-0000-4000-8000-00000000000' || member, true),
-         set_config('app.purpose_of_use', purpose, true);
+         set_config('app.purpose_of_use', purpose, true),
+         -- 0133 D13: the switch the new pharmacy-api image sets (the EHR API does not; for its
+         -- prescriber it changes nothing, the session's half asking for the pharmacy permissions).
+         set_config('app.own_facility_work', '0133', true);
 $f$;
 -- The EHR API's INSERT with the seven new columns (prescriptions.service.ts
 -- create, PRESCRIPTION_DISPENSING_DETAILS_ENABLED on), for prescriber n at
@@ -617,8 +622,8 @@ select pg_temp.as_member(2, 1);
 select pg_temp.expect('PH reads its own rows'' details', pg_temp.details(pg_temp.items()),
   '01:urgent/500 mg/capsule/7 day/21.0000 capsule 02:-/-/-/-/- 03:stat/120 mg/5 mL/liquid/2 week/100.5000 mL '
   || '10:-/-/-/-/-');
-select pg_temp.expect('PH: row-level security shows its own rows 01-03 and 07-10', pg_temp.visible_own(),
-  '01 02 03 07 08 09 10');
+select pg_temp.expect('PH: row-level security shows its own rows 01-04 and 07-10 (0133: Kemi''s 04 as the facility''s pharmacy staff; its details still need consent)', pg_temp.visible_own(),
+  '01 02 03 04 07 08 09 10');
 select pg_temp.expect('PH: one routed row alone', pg_temp.details(array['e114000b-0000-4000-8000-000000000006'::uuid]), '');
 select pg_temp.expect('PH: row-level security shows the route-backed row naming e4',
   (select count(*)::text from pharmacy.work_items where id = 'e114000b-0000-4000-8000-000000000012'), '1');
@@ -662,14 +667,14 @@ select pg_temp.as_member(2, 1), set_config('app.membership_id', 'e1140004-0000-4
 select pg_temp.expect('PH''s subject with PE''s membership', pg_temp.details(pg_temp.items()), '');
 select pg_temp.as_member(2, 1), set_config('app.facility_id', 'not-a-uuid', true);
 select pg_temp.expect('a malformed facility setting', left(pg_temp.refusal(pg_temp.items()), 5), '22023');
--- Consent without pharmacy.work-item.read (a laboratory scientist), and a
--- doctor with both.
+-- Consent without pharmacy.work-item.read: a laboratory scientist, and a
+-- doctor (doctors lost the pharmacy work list in 0136, owner decision Q103 A).
 select pg_temp.as_member(3, 1);
 select pg_temp.expect('LS: row-level security shows Ngozi''s own rows', pg_temp.visible_own(), '01 02 08 09 10');
 select pg_temp.expect('LS holds no pharmacy.work-item.read', pg_temp.details(pg_temp.items()), '');
 select pg_temp.as_member(1, 1);
-select pg_temp.expect('DR with consent and the read permission',
-  pg_temp.details(array['e114000b-0000-4000-8000-000000000004'::uuid]), '04:asap/10 mg/tablet/1 month/30.0000 tablet');
+select pg_temp.expect('DR with consent holds no pharmacy.work-item.read since 0136',
+  pg_temp.details(array['e114000b-0000-4000-8000-000000000004'::uuid]), '');
 -- Another facility's pharmacist.
 select pg_temp.as_member(4, 2);
 select pg_temp.expect('P2 at F2', pg_temp.details(pg_temp.items()), '05:routine/400 mg/tablet/5 day/10.0000 tablet');
@@ -776,7 +781,7 @@ set local role hid_pharmacy_api_runtime;
 select pg_temp.as_member(2, 1);
 select pg_temp.expect('PH with a deny directive on Ngozi', pg_temp.details(pg_temp.items()),
   '03:stat/120 mg/5 mL/liquid/2 week/100.5000 mL');
-select pg_temp.expect('PH deny: row-level security shows only Femi''s', pg_temp.visible_own(), '03 07');
+select pg_temp.expect('PH deny: row-level security shows Femi''s and (0133) Kemi''s 04', pg_temp.visible_own(), '03 04 07');
 select pg_temp.as_member(5, 1, 'emergency');
 select pg_temp.expect('PE under emergency with a deny directive', pg_temp.details(pg_temp.items()),
   '01:urgent/500 mg/capsule/7 day/21.0000 capsule 02:-/-/-/-/- 10:-/-/-/-/-');
@@ -824,9 +829,14 @@ rollback to savepoint later_column;
 -- passes the version and state checks and is
 -- ORDER_ROUTE_DESTINATION_INELIGIBLE. Both are refusals, so nothing is sent.
 -- A third body (0123's with one more comment line) is refused by the same
--- check. Orders between facilities are switched on for this case as the
--- suite runner (session_replication_role = replica; the route suites use
--- support's command). Undone.
+-- check. 0133 runs after 0125 and replaces the send with 0123's text plus
+-- its D14 hunks, so 0123's body is the live one with those hunks taken out
+-- (the live one itself where 0133 is not applied). Orders between facilities
+-- are switched on for this case as the suite runner (session_replication_role
+-- = replica; the route suites use support's command). Undone: the live body
+-- is back afterwards.
+select set_config('details.live_send_body', (select md5(proc.prosrc) from pg_proc proc
+  where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure), true);
 savepoint send_bodies;
 set local session_replication_role = replica;
 update platform.control_settings set enabled = true where control_key = 'cross_facility_orders_enabled';
@@ -841,9 +851,43 @@ select body.name, body.definition
                E'\n     or identity.sealed_qa_facility(receiving_facility.id) <> '
                  || 'identity.sealed_qa_facility(actor.actor_facility_id) then' as qa_clause,
                E'begin\n  select * into actor' as first_statement) source,
-       lateral (values ('0123', source.live),
-                       ('0098', replace(source.live, source.qa_clause, ' then')),
-                       ('third', replace(source.live, source.first_statement,
+       -- 0123's text: the live body without 0133's D14 hunks.
+       lateral (select replace(replace(replace(replace(source.live, $h$  -- 0133 D14: the new rule only in a session of the new ehr-api (D13's switch).
+  sends_elsewhere boolean := coalesce(current_setting('app.own_facility_work', true) = '0133', false);
+  own_claim pharmacy.prescription_item_claims%rowtype;
+$h$, ''), $h$  -- 0133 D14: this pharmacy's own item's claim, locked after the order and its
+  -- routes (a dispensing locks the order or its route, then the claim).
+  if requested_kind = 'prescription' and sends_elsewhere then
+    select claim.* into own_claim from pharmacy.prescription_item_claims claim
+     where claim.prescription_id = requested_order_id and claim.order_route_id is null
+     for update;
+  end if;
+$h$, ''),
+                 $h$     or (requested_kind = 'prescription' and not sends_elsewhere
+       and exists (select 1 from pharmacy.work_items item where item.source_ehr_prescription_id = requested_order_id))
+     -- 0133 D14: with the switch, in work once dispensed here or accepted elsewhere.
+     or (requested_kind = 'prescription' and sends_elsewhere
+       and (own_claim.dispensed_at is not null
+         or exists (select 1 from pharmacy.prescription_item_claims claim
+                     where claim.prescription_id = requested_order_id and claim.order_route_id is not null))) then
+$h$,
+                 $h$     or (requested_kind = 'prescription'
+       and exists (select 1 from pharmacy.work_items item where item.source_ehr_prescription_id = requested_order_id)) then
+$h$),
+                 $h$  -- 0133 D14: this pharmacy's own item, live and not dispensed, is withdrawn
+  -- (sent elsewhere) in this transaction.
+  if own_claim.work_item_id is not null and own_claim.released_at is null then
+    update pharmacy.prescription_item_claims claim
+       set released_at = sent_at, released_by_route_id = requested_route_id
+     where claim.work_item_id = own_claim.work_item_id and claim.released_at is null and claim.dispensed_at is null;
+    if not found then
+      raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ORDER_IN_WORK';
+    end if;
+  end if;
+$h$, '') as definition) rebuilt,
+       lateral (values ('0123', rebuilt.definition),
+                       ('0098', replace(rebuilt.definition, source.qa_clause, ' then')),
+                       ('third', replace(rebuilt.definition, source.first_statement,
                           E'begin\n  -- a third body\n  select * into actor'))) body(name, definition);
 select pg_temp.expect('the three send_order_route definitions differ', (select count(distinct definition)::text
   from send_bodies), '3');
@@ -886,8 +930,9 @@ select pg_temp.expect('0123''s send_order_route: a1 to DR''s own facility', pg_t
   'P0001 ORDER_ROUTE_DESTINATION_INELIGIBLE');
 reset role;
 select set_config('details.third_body', pg_temp.install_send_body('third'), true);
-select pg_temp.expect('a third send_order_route body is neither accepted one',
-  (current_setting('details.third_body') not in ('4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b'))::text,
+select pg_temp.expect('a third send_order_route body is none of the accepted ones',
+  (current_setting('details.third_body') not in ('4202ba3bbf02abd7db34606d42adca9c', '0c2def2b530bcb3d68537ade52787b6b',
+    'fef3bfda1239e5cd72a149f8db30ff64'))::text,
   'true');
 select pg_temp.expect('a third send_order_route body refused', pg_temp.untouched_bodies(),
   'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) md5 '
@@ -897,9 +942,11 @@ select pg_temp.expect('a1 unchanged by the refused sends', (select format('%s/%s
     quantity_unit) from ehr.prescriptions where id = 'e1140007-0000-4000-8000-0000000000a1'),
   '1/active/urgent/500 mg/capsule/7/day/21.0000/capsule');
 rollback to savepoint send_bodies;
-select pg_temp.expect('0123''s send_order_route back after case 10', (select md5(proc.prosrc) from pg_proc proc
-   where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure),
-  '0c2def2b530bcb3d68537ade52787b6b');
+select pg_temp.expect('the live send_order_route (0123''s, or 0133''s) back after case 10', (select md5(proc.prosrc)
+   from pg_proc proc where proc.oid = 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure),
+  current_setting('details.live_send_body'));
+select pg_temp.expect('the live send_order_route is an accepted one', coalesce(pg_temp.untouched_bodies(), 'accepted'),
+  'accepted');
 
 -- 11. A missing object is a mismatch by itself. 0125's section 0 joins each
 -- pinned body by to_regprocedure, so a function missing at its signature
@@ -952,7 +999,7 @@ begin
 end $$;
 select pg_temp.expect('ehr.send_order_route re-signatured, its body kept',
   (select count(*) from pg_proc proc where proc.proname = 'send_order_route'
-      and proc.pronamespace = 'ehr'::regnamespace and md5(proc.prosrc) = '0c2def2b530bcb3d68537ade52787b6b'
+      and proc.pronamespace = 'ehr'::regnamespace and md5(proc.prosrc) = current_setting('details.live_send_body')
       and proc.pronargs = 11)::text, '1');
 select pg_temp.expect('ehr.send_order_route re-signatured', pg_temp.untouched_bodies(),
   'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character) md5 none (missing)');
