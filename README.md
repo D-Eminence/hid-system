@@ -41,6 +41,76 @@ governed manifest. Authorized AWS/Cloudflare accounts, DNS/certificates,
 secrets, provider credentials, database roles, migration, and workload-token
 delivery remain external prerequisites.
 
+## Before you push: the full database check
+
+CI runs a full database rehearsal on every push. You can now run the same
+check on your own machine with one command, so you find problems before CI
+does.
+
+**Ways of working**
+
+- Start every backend branch from `staging-novu-ci-20261005`, which is what
+  production runs: `git fetch origin && git switch -c <your-branch> origin/staging-novu-ci-20261005`.
+- Before you add a migration file (`services/ehr-api/database/migrations/NNNN_*.sql`),
+  book its number on issue #258 first, so two branches never pick the
+  same number.
+- Run `npm run check:db` before you push any change that touches a
+  migration, a database test, a runtime verifier or a backend service.
+
+**Running it**
+
+```bash
+npm run check:db                 # check prerequisites, then run the rehearsal (about 3 minutes)
+npm run check:db -- --prepare    # first install and build anything missing, then run
+npm run check:db:all             # also identity-api and ehr-api jest and the release tests (about 4 minutes)
+npm run check:db -- --check-only # only check prerequisites; installs and runs nothing
+```
+
+It first checks what the rehearsal needs and, for anything missing, prints
+what is wrong and the command that fixes it:
+
+- **PostgreSQL 16 with pgvector.** The check finds it on your PATH or in the
+  usual install folders. If it picks the wrong one, set
+  `PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config` (Ubuntu) or
+  `PG_CONFIG="$(brew --prefix postgresql@16)/bin/pg_config"` (macOS).
+- **A normal user account.** PostgreSQL will not start as root, so do not use
+  `sudo`.
+- **Dependencies for every service** (`services/*`) and for `release/` (the
+  rehearsal loads release modules too). Every installed package must match
+  that folder's `package-lock.json`; if not, the check says "dependencies out
+  of date, run with --prepare". It also checks that every npm package the
+  rehearsal itself imports can be found, so it never starts a rehearsal that
+  cannot load.
+- **Built packages** that the services use (`packages/api-client`,
+  `packages/server-telemetry`).
+- **git can read the checkout.** Use a clone your own account created. The
+  rehearsal runs git without your home folder, so a `--global safe.directory`
+  setting does not help.
+
+`--prepare` fixes only the npm items. It runs `npm ci` in each folder of this
+checkout that needs it and builds missing packages. It never replaces a
+`node_modules` folder that is a link and never changes your git or npm
+settings. Like any `npm ci`, it downloads packages from your configured
+registry, reads your npm settings (`~/.npmrc`) and writes to your npm cache
+and npm log folder (usually `~/.npm`). `--prepare` cannot be combined with
+`--check-only`.
+
+The rehearsal migrates a fresh database and runs every database suite on it:
+`services/ehr-api/database/tests/*.integration.sql` and
+`services/ehr-api/test/database/*.integration.sql`. Each suite is one
+transaction that ends in `ROLLBACK`, judged by psql's exit status; a failure
+names every failed suite and its first error. CI's "Synthetic migration
+rehearsal" job runs the same rehearsal, so the suites run in CI too.
+
+The rehearsal makes its own throwaway PostgreSQL in `/tmp`, reachable only
+through a private socket, fills it with fictional data and deletes it at the
+end. It never connects to any other database. At the end you get a short
+pass/fail summary. On a failure it names the failing step (for the rehearsal,
+the rehearsal step inside it), the first error line, the file it points to
+and the full log of that step. Logs go to a new `hid-db-check-*` folder in
+your system temp folder (the summary prints the path), or to the folder you
+give with `--log-dir DIR`. Delete it when you are done.
+
 ## Local development
 
 From the repository root:

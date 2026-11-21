@@ -22,7 +22,8 @@ begin
      or has_table_privilege('hid_ehr_api_runtime', 'outreach.registration_screenings', 'SELECT')
      or not exists (select 1 from pg_class where oid = 'outreach.registration_screenings'::regclass
                      and relrowsecurity and relforcerowsecurity)
-     or exists (select 1 from pg_roles role_row where role_row.rolname like 'hid\_%'
+     -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin; no runtime role is one)
+     or exists (select 1 from pg_roles role_row where role_row.rolname like 'hid\_%' and not role_row.rolsuper
                  and (has_function_privilege(role_row.oid, 'outreach.validate_registration_screening()', 'EXECUTE')
                       or has_function_privilege(role_row.oid, 'outreach.registration_case_screening_redact()', 'EXECUTE')
                       or has_function_privilege(role_row.oid, 'outreach.registration_case_area_guard()', 'EXECUTE')))

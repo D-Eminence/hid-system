@@ -427,6 +427,23 @@ try {
       ['-X', '-d', database, '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'database/tests', name)]);
   }
   evidence.checks.additional_schema_suites = additionalSuites;
+  // The services' database suites (services/ehr-api/test/database), on the same freshly migrated database: each is
+  // one transaction that ends in ROLLBACK, judged by psql's exit status, so CI and npm run check:db run them all
+  // (coordinator, hid-system #258, 20 November 2026).
+  const serviceSuites = (await readdir(join(service, 'test/database')))
+    .filter((name) => name.endsWith('.integration.sql')).sort();
+  // Every suite runs, and the step then fails once, naming each failed suite and its first error.
+  const suiteFailures = [];
+  for (const name of serviceSuites) {
+    try {
+      command(`service database suite ${name}`, join(pgBindir, 'psql'),
+        ['-X', '-q', '-d', database, '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'test/database', name)]);
+    } catch (error) {
+      suiteFailures.push(`${name}: ${(/ERROR:\s+([^\n]*)/.exec(error.message)?.[1] ?? error.message).slice(0, 300)}`);
+    }
+  }
+  evidence.checks.service_database_suites = { suites: serviceSuites, failed: suiteFailures };
+  assert.deepEqual(suiteFailures, [], `service database suites failed:\n${suiteFailures.join('\n')}`);
   const workflowEnvironment = {
     PGDATABASE: database, DATABASE_URL: url(database), CORS_ORIGINS: 'http://127.0.0.1', AUTH_MODE: 'local',
     AUTH_SIGNING_SECRET: randomBytes(32).toString('base64url'),
