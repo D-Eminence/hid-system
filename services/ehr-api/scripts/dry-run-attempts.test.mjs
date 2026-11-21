@@ -57,6 +57,8 @@ test('busy on the first attempt and free on the second: the dry run passes, with
   const result = await withDryRunAttempts(async (number) => {
     calls += 1;
     assert.equal(number, calls);
+    // The first attempt runs for 1,840 ms, holding the earlier files' locks, before the refusal.
+    if (number === 1) time.advance(1840);
     const answer = answers.shift();
     if (answer instanceof Error) throw answer;
     return answer;
@@ -65,8 +67,8 @@ test('busy on the first attempt and free on the second: the dry run passes, with
   assert.equal(calls, 2);
   assert.equal(pauses.length, 1);
   assert.ok(pauses[0] >= DRY_RUN_PAUSE_MS.min && pauses[0] <= DRY_RUN_PAUSE_MS.max);
-  assert.deepEqual(lines, [`Dry run attempt 1 of ${DRY_RUN_ATTEMPTS}: 0131_own_facility_patient_access.sql was busy; `
-    + `rolled back, trying again in ${pauses[0]} ms\n`]);
+  assert.deepEqual(lines, [`Dry run attempt 1 of ${DRY_RUN_ATTEMPTS}: 0131_own_facility_patient_access.sql was busy after `
+    + `1840 ms; rolled back, trying again in ${pauses[0]} ms\n`]);
 });
 
 test('never free: it stops after the bound with the file\'s own refusal, unchanged', async () => {
@@ -83,7 +85,7 @@ test('never free: it stops after the bound with the file\'s own refusal, unchang
   assert.equal(failure.message, `Migration 0131_own_facility_patient_access.sql: ${last.cause.message}`);
   assert.equal(calls, DRY_RUN_ATTEMPTS);
   assert.equal(lines.length, DRY_RUN_ATTEMPTS);
-  assert.match(lines.at(-1), new RegExp(`^Dry run attempt ${DRY_RUN_ATTEMPTS} of ${DRY_RUN_ATTEMPTS}: 0131_own_facility_patient_access\\.sql was busy; no attempt left\\n$`));
+  assert.match(lines.at(-1), new RegExp(`^Dry run attempt ${DRY_RUN_ATTEMPTS} of ${DRY_RUN_ATTEMPTS}: 0131_own_facility_patient_access\\.sql was busy after 0 ms; no attempt left\\n$`));
 });
 
 test('never past the window: a slow attempt ends the retries before the attempt bound', async () => {
