@@ -57,10 +57,11 @@ class ProductionAssessmentTests(unittest.TestCase):
         for value in ((now+datetime.timedelta(days=8)).isoformat(),'2026-12-01T00:00:00','not-a-date',None):
             with self.subTest(value=value), self.assertRaises(RuntimeError):a.validate_inputs(*with_expiry(value))
 
-    def test_committed_policy_expires_only_the_two_20261117_findings_on_2026_12_01(self):
+    def test_committed_policy_expires_only_the_20261117_and_dane_findings_on_2026_12_01(self):
         import json
         policy=json.loads(a.POLICY.read_text())
         expiring={f['id']:f['expires_at'] for f in policy['findings'] if 'expires_at' in f}
-        self.assertEqual(expiring,{'CVE-2026-107493':'2026-12-01T00:00:00+00:00','CVE-2026-124709':'2026-12-01T00:00:00+00:00'})
+        self.assertEqual(expiring,{'CVE-2026-107493':'2026-12-01T00:00:00+00:00','CVE-2026-124709':'2026-12-01T00:00:00+00:00',
+                                  'CVE-2026-84786':'2026-12-01T00:00:00+00:00'})
 
 if __name__=='__main__':unittest.main()
