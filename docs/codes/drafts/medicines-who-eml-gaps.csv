@@ -1,0 +1,254 @@
+generic_name,strength,dose_form,dose_form_text,route,atc_code,source,source_section,source_list,notes
+ephedrine,30 mg/mL (hydrochloride),injection,Injection (1 mL ampoule),injection,C01CA26,who-eml-24,1.2,complementary,spinal anaesthesia in delivery
+codeine,30 mg (phosphate),tablet,Tablet,oral,R05DA04,who-eml-24,2.2,core,
+penicillamine,250 mg,tablet,Solid oral dosage form,oral,M01CC01,who-eml-24,4.2,core,
+potassium ferric hexacyanoferrate(II) 2H2O,,other,Powder for oral administration,oral,,who-eml-24,4.2,core,Prussian blue
+sodium nitrite,30 mg/mL,injection,Injection (10 mL ampoule),injection,V03AB08,who-eml-24,4.2,core,
+sodium thiosulfate,250 mg/mL,injection,Injection (50 mL ampoule),injection,V03AB06,who-eml-24,4.2,core,
+lamotrigine,25 mg,tablet,Tablet,oral,N03AX09,who-eml-24,5.1.1,core,adjunctive therapy for treatment-resistant seizures
+lamotrigine,50 mg,tablet,Tablet,oral,N03AX09,who-eml-24,5.1.1,core,adjunctive therapy for treatment-resistant seizures
+lamotrigine,100 mg,tablet,Tablet,oral,N03AX09,who-eml-24,5.1.1,core,adjunctive therapy for treatment-resistant seizures
+lamotrigine,200 mg,tablet,Tablet,oral,N03AX09,who-eml-24,5.1.1,core,adjunctive therapy for treatment-resistant seizures
+lamotrigine,2 mg,tablet,"Tablet (chewable, dispersible)",oral,N03AX09,who-eml-24,5.1.1,core,adjunctive therapy for treatment-resistant seizures
+lamotrigine,5 mg,tablet,"Tablet (chewable, dispersible)",oral,N03AX09,who-eml-24,5.1.1,core,adjunctive therapy for treatment-resistant seizures
+cladribine,10 mg,tablet,Tablet,oral,,who-eml-24,5.1.2,complementary,
+glatiramer acetate,20 mg/mL,injection,"Injection, pre-filled syringe",subcutaneous,L03AX13,who-eml-24,5.1.2,complementary,
+glatiramer acetate,40 mg/mL,injection,"Injection, pre-filled syringe",subcutaneous,L03AX13,who-eml-24,5.1.2,complementary,
+cefotaxime,250 mg (as sodium),injection,"Powder for injection, vial",injection,J01DD01,who-eml-24,5.1.6.1,core,preferred for hospitalized neonates
+cefotaxime,500 mg (as sodium),injection,"Powder for injection, vial",injection,J01DD01,who-eml-24,5.1.6.1,core,preferred for hospitalized neonates
+cefotaxime,1 g (as sodium),injection,"Powder for injection, vial",injection,J01DD01,who-eml-24,5.1.6.1,core,preferred for hospitalized neonates
+cefotaxime,2 g (as sodium),injection,"Powder for injection, vial",injection,J01DD01,who-eml-24,5.1.6.1,core,preferred for hospitalized neonates
+levamisole,50 mg (as hydrochloride),tablet,Tablet,oral,P02CE01,who-eml-24,6.1.1,core,
+levamisole,150 mg (as hydrochloride),tablet,Tablet,oral,P02CE01,who-eml-24,6.1.1,core,
+niclosamide,500 mg,tablet,Tablet (chewable),oral,P02DA01,who-eml-24,6.1.1,core,
+triclabendazole,250 mg,tablet,Tablet (scored),oral,P02BX04,who-eml-24,6.1.3,core,
+procaine benzylpenicillin,1 g (1 million IU),injection,Powder for injection,injection,J01CE09,who-eml-24,6.2.1,core,not first-line for neonatal sepsis
+procaine benzylpenicillin,3 g (3 million IU),injection,Powder for injection,injection,J01CE09,who-eml-24,6.2.1,core,not first-line for neonatal sepsis
+spectinomycin,2 g (as hydrochloride),injection,Powder for injection,injection,J01XX04,who-eml-24,6.2.1,core,
+cefiderocol,1 g (as sulfate toxylate),injection,Powder for injection,injection,J01DI04,who-eml-24,6.2.3,complementary,
+ceftolozane + tazobactam,1 g + 0.5 g,injection,Powder for injection,injection,J01DI54,who-eml-24,6.2.3,complementary,
+fosfomycin,2 g (as sodium),injection,Powder for injection,injection,J01XX01,who-eml-24,6.2.3,complementary,
+fosfomycin,4 g (as sodium),injection,Powder for injection,injection,J01XX01,who-eml-24,6.2.3,complementary,
+meropenem + vaborbactam,1 g (as trihydrate) + 1 g,injection,Powder for injection,injection,J01DH52,who-eml-24,6.2.3,complementary,
+plazomicin,500 mg/10 mL,injection,Injection,injection,J01GB14,who-eml-24,6.2.3,complementary,
+ethambutol + isoniazid + rifampicin,275 mg + 75 mg + 150 mg,tablet,Tablet,oral,J04AM07,who-eml-24,6.2.5,core,
+ethionamide,250 mg,tablet,Tablet,oral,J04AD03,who-eml-24,6.2.5,core,
+ethionamide,125 mg,tablet,Tablet (dispersible),oral,J04AD03,who-eml-24,6.2.5,core,for children
+p-aminosalicylate sodium,5.52 g (equivalent to 4 g p-aminosalicylic acid),liquid,"Powder for oral solution, sachet",oral,J04AA02,who-eml-24,6.2.5,core,
+flucytosine,250 mg,capsule,Capsule,oral,J02AX01,who-eml-24,6.3,core,
+flucytosine,2.5 g in 250 mL,injection,Infusion,intravenous,J02AX01,who-eml-24,6.3,core,
+griseofulvin,125 mg/5 mL,liquid,Oral liquid,oral,D01BA01,who-eml-24,6.3,core,for children
+griseofulvin,125 mg,other,Solid oral dosage form,oral,D01BA01,who-eml-24,6.3,core,
+griseofulvin,250 mg,other,Solid oral dosage form,oral,D01BA01,who-eml-24,6.3,core,
+itraconazole,100 mg,capsule,Capsule,oral,J02AC02,who-eml-24,6.3,core,for specific chronic and invasive mycoses
+itraconazole,10 mg/mL,liquid,Oral liquid,oral,J02AC02,who-eml-24,6.3,core,for specific chronic and invasive mycoses
+micafungin,50 mg (as sodium),injection,"Powder for injection, vial",injection,J02AX05,who-eml-24,6.3,complementary,"alternatives: anidulafungin, caspofungin"
+micafungin,100 mg (as sodium),injection,"Powder for injection, vial",injection,J02AX05,who-eml-24,6.3,complementary,"alternatives: anidulafungin, caspofungin"
+raltegravir,100 mg,liquid,"Granules for oral suspension, sachet",oral,J05AJ01,who-eml-24,6.4.2.4,core,pregnancy and second-line use
+raltegravir,25 mg,tablet,Tablet (chewable),oral,J05AJ01,who-eml-24,6.4.2.4,core,pregnancy and second-line use
+raltegravir,400 mg,tablet,Tablet,oral,J05AJ01,who-eml-24,6.4.2.4,core,pregnancy and second-line use
+abacavir + dolutegravir + lamivudine,60 mg (as sulfate) + 5 mg + 30 mg,tablet,Tablet (dispersible),oral,,who-eml-24,6.4.2.5,core,for children
+dolutegravir + lamivudine + tenofovir,50 mg + 300 mg + 300 mg (tenofovir disoproxil fumarate),tablet,Tablet,oral,,who-eml-24,6.4.2.5,core,
+efavirenz + emtricitabine + tenofovir,600 mg + 200 mg + 300 mg (tenofovir disoproxil fumarate),tablet,Tablet,oral,J05AR06,who-eml-24,6.4.2.5,core,lamivudine may replace emtricitabine
+efavirenz + lamivudine + tenofovir,400 mg + 300 mg + 300 mg (tenofovir disoproxil fumarate),tablet,Tablet,oral,,who-eml-24,6.4.2.5,core,
+emtricitabine + tenofovir,200 mg + 300 mg (tenofovir disoproxil fumarate),tablet,Tablet,oral,J05AR03,who-eml-24,6.4.2.5,core,also for HIV pre-exposure prophylaxis; lamivudine may replace emtricitabine
+valganciclovir,450 mg (as hydrochloride),tablet,Tablet,oral,J05AB14,who-eml-24,6.4.3,core,for CMV retinitis
+oseltamivir,30 mg (as phosphate),capsule,Capsule,oral,J05AH02,who-eml-24,6.4.3,complementary,severe influenza in critically ill
+oseltamivir,45 mg (as phosphate),capsule,Capsule,oral,J05AH02,who-eml-24,6.4.3,complementary,severe influenza in critically ill
+oseltamivir,75 mg (as phosphate),capsule,Capsule,oral,J05AH02,who-eml-24,6.4.3,complementary,severe influenza in critically ill
+oseltamivir,6 mg/mL (as phosphate),liquid,Powder for oral liquid,oral,J05AH02,who-eml-24,6.4.3,complementary,for children; severe influenza in critically ill
+valganciclovir,50 mg/mL (as hydrochloride),liquid,Powder for oral solution,oral,J05AB14,who-eml-24,6.4.3,complementary,for children; CMV retinitis
+glecaprevir + pibrentasvir,50 mg + 20 mg,other,Granules in sachet,oral,J05AP57,who-eml-24,6.4.4.2.1,core,for children
+glecaprevir + pibrentasvir,100 mg + 40 mg,tablet,Tablet,oral,J05AP57,who-eml-24,6.4.4.2.1,core,
+ravidasvir,200 mg,tablet,Tablet,oral,,who-eml-24,6.4.4.2.1,core,with sofosbuvir
+ledipasvir + sofosbuvir,90 mg + 400 mg,tablet,Tablet,oral,J05AP51,who-eml-24,6.4.4.2.2,core,
+miltefosine,10 mg,other,Solid oral dosage form,oral,P01CX04,who-eml-24,6.5.2,core,
+miltefosine,50 mg,other,Solid oral dosage form,oral,P01CX04,who-eml-24,6.5.2,core,
+paromomycin,750 mg (as sulfate),injection,Solution for intramuscular injection,intramuscular,,who-eml-24,6.5.2,core,
+artesunate + mefloquine,25 mg + 50 mg (as hydrochloride),tablet,Tablet,oral,P01BF02,who-eml-24,6.5.3.1,core,
+artesunate + mefloquine,100 mg + 200 mg (as hydrochloride),tablet,Tablet,oral,P01BF02,who-eml-24,6.5.3.1,core,
+artesunate + sulfadoxine + pyrimethamine,50 mg + 500 mg + 25 mg,other,Co-packaged scored tablets,oral,,who-eml-24,6.5.3.1,core,3 artesunate tablets + 1 sulfadoxine-pyrimethamine tablet
+chloroquine,50 mg/5 mL (base),liquid,Oral liquid,oral,P01BA01,who-eml-24,6.5.3.1,core,P. vivax only
+chloroquine,150 mg (base),tablet,Tablet,oral,P01BA01,who-eml-24,6.5.3.1,core,P. vivax only
+primaquine,7.5 mg (as phosphate),tablet,Tablet,oral,P01BA03,who-eml-24,6.5.3.1,core,
+primaquine,15 mg (as phosphate),tablet,Tablet,oral,P01BA03,who-eml-24,6.5.3.1,core,
+amodiaquine + sulfadoxine + pyrimethamine,75 mg + 250 mg + 12.5 mg,tablet,Co-packaged dispersible tablets,oral,,who-eml-24,6.5.3.2,core,for children; 3 amodiaquine + 1 SP tablet
+amodiaquine + sulfadoxine + pyrimethamine,76.5 mg + 250 mg + 12.5 mg,tablet,Co-packaged dispersible tablets,oral,,who-eml-24,6.5.3.2,core,for children; 3 amodiaquine + 1 SP tablet
+amodiaquine + sulfadoxine + pyrimethamine,150 mg + 500 mg + 25 mg,tablet,Co-packaged dispersible tablets,oral,,who-eml-24,6.5.3.2,core,for children; 3 amodiaquine + 1 SP tablet
+amodiaquine + sulfadoxine + pyrimethamine,153 mg + 500 mg + 25 mg,tablet,Co-packaged dispersible tablets,oral,,who-eml-24,6.5.3.2,core,for children; 3 amodiaquine + 1 SP tablet
+sulfadiazine,500 mg,tablet,Tablet,oral,J01EC02,who-eml-24,6.5.4,core,
+fexinidazole,600 mg,tablet,Tablet,oral,P01CA03,who-eml-24,6.5.5.1,core,1st and 2nd stage HAT
+benznidazole,12.5 mg,tablet,Tablet,oral,P01CA02,who-eml-24,6.5.5.2,core,for children
+benznidazole,50 mg,tablet,Tablet (scored),oral,P01CA02,who-eml-24,6.5.5.2,core,
+benznidazole,100 mg,tablet,Tablet (scored),oral,P01CA02,who-eml-24,6.5.5.2,core,
+ansuvimab,400 mg,injection,Powder for injection,injection,,who-eml-24,6.7,core,
+atoltivimab + maftivimab + odesivimab,241.7 mg + 241.7 mg + 241.7 mg in 14.5 mL,injection,Injection in vial,injection,,who-eml-24,6.7,core,
+elexacaftor + tezacaftor + ivacaftor,80 mg + 40 mg + 60 mg,other,Granules in sachet,oral,,who-eml-24,7,core,
+elexacaftor + tezacaftor + ivacaftor,100 mg + 50 mg + 75 mg,other,Granules in sachet,oral,,who-eml-24,7,core,
+elexacaftor + tezacaftor + ivacaftor,50 mg + 25 mg + 37.5 mg,tablet,Tablet,oral,,who-eml-24,7,core,
+elexacaftor + tezacaftor + ivacaftor,100 mg + 50 mg + 75 mg,tablet,Tablet,oral,,who-eml-24,7,core,
+ivacaftor,59.5 mg,other,Granules in sachet,oral,R07AX02,who-eml-24,7,core,
+ivacaftor,75 mg,other,Granules in sachet,oral,R07AX02,who-eml-24,7,core,
+ivacaftor,75 mg,tablet,Tablet,oral,R07AX02,who-eml-24,7,core,
+ivacaftor,150 mg,tablet,Tablet,oral,R07AX02,who-eml-24,7,core,
+pancreatic enzymes,10000 lipase units + 8000 amylase units + 600 protease units,capsule,Capsule (modified release),oral,,who-eml-24,7,complementary,for children; Ph.Eur units
+pancreatic enzymes,25000 lipase units + 18000 amylase units + 1000 protease units,capsule,Capsule (modified release),oral,,who-eml-24,7,complementary,for children; Ph.Eur units
+pegaspargase,3750 units/5 mL,injection,Injection (vial),injection,L01XX24,who-eml-24,8.2.1,complementary,biosimilars included
+pegaspargase,3750 units,injection,Powder for injection (vial),injection,L01XX24,who-eml-24,8.2.1,complementary,biosimilars included
+realgar-indigo naturalis formulation,270 mg (tetra-arsenic tetra-sulfide 30 mg),tablet,Tablet,oral,,who-eml-24,8.2.1,complementary,acute promyelocytic leukaemia
+everolimus,2.5 mg,tablet,Tablet,oral,L01EG02,who-eml-24,8.2.2,complementary,
+everolimus,5 mg,tablet,Tablet,oral,L01EG02,who-eml-24,8.2.2,complementary,
+everolimus,7.5 mg,tablet,Tablet,oral,L01EG02,who-eml-24,8.2.2,complementary,
+everolimus,10 mg,tablet,Tablet,oral,L01EG02,who-eml-24,8.2.2,complementary,
+everolimus,2 mg,tablet,Tablet (dispersible),oral,L01EG02,who-eml-24,8.2.2,complementary,
+everolimus,3 mg,tablet,Tablet (dispersible),oral,L01EG02,who-eml-24,8.2.2,complementary,
+ibrutinib,140 mg,capsule,Capsule,oral,L01EL01,who-eml-24,8.2.2,complementary,therapeutic alternatives listed
+blinatumomab,35 micrograms,injection,Powder for concentrate for infusion,intravenous,L01FX07,who-eml-24,8.2.3,complementary,includes biosimilars
+blinatumomab,38.5 micrograms,injection,Powder for concentrate for infusion,intravenous,L01FX07,who-eml-24,8.2.3,complementary,includes biosimilars
+filgrastim,120 micrograms/0.2 mL,injection,Injection in pre-filled syringe,injection,L03AA02,who-eml-24,8.2.3,complementary,includes biosimilars
+filgrastim,300 micrograms/0.5 mL,injection,Injection in pre-filled syringe,injection,L03AA02,who-eml-24,8.2.3,complementary,includes biosimilars
+filgrastim,480 micrograms/0.8 mL,injection,Injection in pre-filled syringe,injection,L03AA02,who-eml-24,8.2.3,complementary,includes biosimilars
+filgrastim,300 micrograms/mL,injection,Injection in 1 mL vial,injection,L03AA02,who-eml-24,8.2.3,complementary,includes biosimilars
+filgrastim,480 micrograms/1.6 mL,injection,Injection in 1.6 mL vial,injection,L03AA02,who-eml-24,8.2.3,complementary,includes biosimilars
+lenalidomide,25 mg,capsule,Capsule,oral,L04AX04,who-eml-24,8.2.3,complementary,
+pegfilgrastim,6 mg/0.6 mL,injection,Injection in pre-filled syringe,injection,L03AA13,who-eml-24,8.2.3,complementary,includes biosimilars
+pembrolizumab,25 mg/mL,injection,"Concentrate for infusion, 4 mL vial",intravenous,L01FF02,who-eml-24,8.2.3,complementary,includes biosimilars; therapeutic alternatives listed
+thalidomide,50 mg,capsule,Capsule,oral,L04AX02,who-eml-24,8.2.3,complementary,
+rasburicase,1.5 mg,injection,Powder and solvent for infusion in vial,intravenous,V03AF07,who-eml-24,8.2.5,complementary,
+rasburicase,7.5 mg,injection,Powder and solvent for infusion in vial,intravenous,V03AF07,who-eml-24,8.2.5,complementary,
+ready-to-use therapeutic food,,other,Biscuit or paste,oral,,who-eml-24,9,core,for children
+ferrous salt + folic acid,60 mg elemental iron + 400 micrograms,tablet,Tablet,oral,,who-eml-24,10.1,core,supplement in pregnancy
+ferrous salt + folic acid,60 mg elemental iron + 2.8 mg,tablet,Tablet,oral,,who-eml-24,10.1,core,weekly supplementation
+erythropoiesis-stimulating agents,1000 IU/0.5 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,2000 IU/0.5 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,3000 IU/0.3 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,4000 IU/0.4 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,5000 IU/0.5 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,6000 IU/0.6 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,8000 IU/0.8 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,10 000 IU/1 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,20 000 IU/0.5 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+erythropoiesis-stimulating agents,40 000 IU/1 mL,injection,"Injection, pre-filled syringe",injection,,who-eml-24,10.1,complementary,"epoetins, darbepoetin; biosimilars included"
+emicizumab,12 mg/0.4 mL,injection,"Injection, vial",injection,B02BX06,who-eml-24,10.2,core,for children
+emicizumab,30 mg/mL,injection,"Injection, vial",injection,B02BX06,who-eml-24,10.2,core,for children
+emicizumab,60 mg/0.4 mL,injection,"Injection, vial",injection,B02BX06,who-eml-24,10.2,core,
+emicizumab,105 mg/0.7 mL,injection,"Injection, vial",injection,B02BX06,who-eml-24,10.2,core,
+emicizumab,150 mg/mL,injection,"Injection, vial",injection,B02BX06,who-eml-24,10.2,core,
+emicizumab,300 mg/2 mL,injection,"Injection, vial",injection,B02BX06,who-eml-24,10.2,core,
+deferasirox,100 mg,tablet,Tablet (dispersible),oral,V03AC03,who-eml-24,10.3.1,core,alternative deferiprone
+deferasirox,125 mg,tablet,Tablet (dispersible),oral,V03AC03,who-eml-24,10.3.1,core,alternative deferiprone
+deferasirox,250 mg,tablet,Tablet (dispersible),oral,V03AC03,who-eml-24,10.3.1,core,alternative deferiprone
+deferasirox,400 mg,tablet,Tablet (dispersible),oral,V03AC03,who-eml-24,10.3.1,core,alternative deferiprone
+deferasirox,500 mg,tablet,Tablet (dispersible),oral,V03AC03,who-eml-24,10.3.1,core,alternative deferiprone
+deferasirox,90 mg,tablet,Tablet (film-coated),oral,V03AC03,who-eml-24,10.3.1,core,alternative deferiprone
+deferasirox,180 mg,tablet,Tablet (film-coated),oral,V03AC03,who-eml-24,10.3.1,core,alternative deferiprone
+deferasirox,360 mg,tablet,Tablet (film-coated),oral,V03AC03,who-eml-24,10.3.1,core,alternative deferiprone
+anti-d immunoglobulin,250 micrograms,injection,"Injection, single-dose vial",injection,J06BB01,who-eml-24,11.2,core,
+lisinopril + amlodipine,10 mg + 5 mg,tablet,Tablet,oral,C09BB03,who-eml-24,12.3,core,
+lisinopril + amlodipine,20 mg + 5 mg,tablet,Tablet,oral,C09BB03,who-eml-24,12.3,core,
+lisinopril + amlodipine,20 mg + 10 mg,tablet,Tablet,oral,C09BB03,who-eml-24,12.3,core,
+lisinopril + hydrochlorothiazide,10 mg + 12.5 mg,tablet,Tablet,oral,C09BA03,who-eml-24,12.3,core,
+lisinopril + hydrochlorothiazide,20 mg + 12.5 mg,tablet,Tablet,oral,C09BA03,who-eml-24,12.3,core,
+lisinopril + hydrochlorothiazide,20 mg + 25 mg,tablet,Tablet,oral,C09BA03,who-eml-24,12.3,core,
+perindopril + amlodipine + indapamide,5 mg (arginine) + 5 mg + 1.25 mg,tablet,Solid oral dosage form,oral,C09BX01,who-eml-24,12.3,core,
+perindopril + amlodipine + indapamide,5 mg (arginine) + 10 mg + 1.25 mg,tablet,Solid oral dosage form,oral,C09BX01,who-eml-24,12.3,core,
+perindopril + amlodipine + indapamide,10 mg (arginine) + 5 mg + 2.5 mg,tablet,Solid oral dosage form,oral,C09BX01,who-eml-24,12.3,core,
+perindopril + amlodipine + indapamide,10 mg (arginine) + 10 mg + 2.5 mg,tablet,Solid oral dosage form,oral,C09BX01,who-eml-24,12.3,core,
+telmisartan + amlodipine,40 mg + 5 mg,tablet,Tablet,oral,C09DB04,who-eml-24,12.3,core,
+telmisartan + amlodipine,80 mg + 5 mg,tablet,Tablet,oral,C09DB04,who-eml-24,12.3,core,
+telmisartan + amlodipine,80 mg + 10 mg,tablet,Tablet,oral,C09DB04,who-eml-24,12.3,core,
+telmisartan + hydrochlorothiazide,40 mg + 12.5 mg,tablet,Tablet,oral,C09DA07,who-eml-24,12.3,core,
+telmisartan + hydrochlorothiazide,80 mg + 12.5 mg,tablet,Tablet,oral,C09DA07,who-eml-24,12.3,core,
+telmisartan + hydrochlorothiazide,80 mg + 25 mg,tablet,Tablet,oral,C09DA07,who-eml-24,12.3,core,
+valsartan + amlodipine + hydrochlorothiazide,160 mg + 5 mg + 12.5 mg,tablet,Solid oral dosage form,oral,C09DX01,who-eml-24,12.3,core,
+valsartan + amlodipine + hydrochlorothiazide,160 mg + 5 mg + 25 mg,tablet,Solid oral dosage form,oral,C09DX01,who-eml-24,12.3,core,
+valsartan + amlodipine + hydrochlorothiazide,160 mg + 10 mg + 12.5 mg,tablet,Solid oral dosage form,oral,C09DX01,who-eml-24,12.3,core,
+valsartan + amlodipine + hydrochlorothiazide,160 mg + 10 mg + 25 mg,tablet,Solid oral dosage form,oral,C09DX01,who-eml-24,12.3,core,
+valsartan + amlodipine + hydrochlorothiazide,320 mg + 10 mg + 25 mg,tablet,Solid oral dosage form,oral,C09DX01,who-eml-24,12.3,core,
+sodium nitroprusside,50 mg,injection,"Powder for infusion, ampoule",intravenous,C02DD01,who-eml-24,12.3,complementary,
+acetylsalicylic acid + atorvastatin + ramipril,100 mg + 20 mg + 2.5 mg,tablet,Tablet,oral,C10BX06,who-eml-24,12.7,core,
+acetylsalicylic acid + atorvastatin + ramipril,100 mg + 20 mg + 5 mg,tablet,Tablet,oral,C10BX06,who-eml-24,12.7,core,
+acetylsalicylic acid + atorvastatin + ramipril,100 mg + 20 mg + 10 mg,tablet,Tablet,oral,C10BX06,who-eml-24,12.7,core,
+acetylsalicylic acid + atorvastatin + ramipril,100 mg + 40 mg + 2.5 mg,tablet,Tablet,oral,C10BX06,who-eml-24,12.7,core,
+acetylsalicylic acid + atorvastatin + ramipril,100 mg + 40 mg + 5 mg,tablet,Tablet,oral,C10BX06,who-eml-24,12.7,core,
+acetylsalicylic acid + atorvastatin + ramipril,100 mg + 40 mg + 10 mg,tablet,Tablet,oral,C10BX06,who-eml-24,12.7,core,
+acetylsalicylic acid + simvastatin + ramipril + atenolol + hydrochlorothiazide,100 mg + 20 mg + 5 mg + 50 mg + 12.5 mg,tablet,Tablet,oral,,who-eml-24,12.7,core,"ATC left blank: no ATC code found for this five-component combination; C10BX04 covers only simvastatin, acetylsalicylic acid and ramipril"
+atorvastatin + perindopril + amlodipine,20 mg + 5 mg + 5 mg,tablet,Tablet,oral,C10BX11,who-eml-24,12.7,core,
+atorvastatin + perindopril + amlodipine,20 mg + 10 mg + 10 mg,tablet,Tablet,oral,C10BX11,who-eml-24,12.7,core,
+atorvastatin + perindopril + amlodipine,40 mg + 5 mg + 5 mg,tablet,Tablet,oral,C10BX11,who-eml-24,12.7,core,
+atorvastatin + perindopril + amlodipine,40 mg + 10 mg + 10 mg,tablet,Tablet,oral,C10BX11,who-eml-24,12.7,core,
+selenium sulfide,2%,other,Detergent-based suspension,topical,,who-eml-24,13.1,core,
+sodium thiosulfate,15%,other,Solution,topical,,who-eml-24,13.1,core,
+calcipotriol,50 micrograms/mL (0.005%),cream,Cream or ointment,topical,D05AX02,who-eml-24,13.4,core,
+ustekinumab,45 mg/0.5 mL,injection,"Injection (vial, pre-filled syringe or pen)",injection,L04AC05,who-eml-24,13.4,complementary,biosimilars included
+ustekinumab,90 mg/mL,injection,Injection (pre-filled syringe or pen),injection,L04AC05,who-eml-24,13.4,complementary,biosimilars included
+glycerol,15% to 20%,cream,Cream,topical,,who-eml-24,13.6,core,moisturizer
+"sunscreen, broad-spectrum",,other,Topical,topical,,who-eml-24,13.7,core,"high SPF, UVA and UVB"
+amidotrizoate,140 mg to 420 mg iodine/mL (as sodium or meglumine salt),injection,Injection (20 mL ampoule),injection,V08AA01,who-eml-24,14.2,core,
+iohexol,140 mg to 350 mg iodine/mL,injection,"Injection (5 mL, 10 mL, 20 mL ampoule)",injection,V08AB02,who-eml-24,14.2,core,
+meglumine iotroxate,5 g to 8 g iodine in 100 mL to 250 mL,other,Solution,intravenous,,who-eml-24,14.2,complementary,
+aprepitant,80 mg,capsule,Capsule,oral,A04AD12,who-eml-24,17.2,complementary,
+aprepitant,125 mg,capsule,Capsule,oral,A04AD12,who-eml-24,17.2,complementary,
+aprepitant,165 mg,capsule,Capsule,oral,A04AD12,who-eml-24,17.2,complementary,
+aprepitant,125 mg,liquid,"Powder for oral suspension, sachet",oral,A04AD12,who-eml-24,17.2,complementary,
+oral rehydration salts + zinc sulfate,zinc sulfate 20 mg,other,Co-package: ORS powder + dispersible scored tablet,oral,,who-eml-24,17.5,core,for children
+empagliflozin,10 mg,tablet,Tablet,oral,A10BK03,who-eml-24,18.5.2,core,
+empagliflozin,25 mg,tablet,Tablet,oral,A10BK03,who-eml-24,18.5.2,core,
+semaglutide,0.68 mg/mL,injection,Injection solution,injection,A10BJ06,who-eml-24,18.5.2,core,includes biosimilars
+semaglutide,1.34 mg/mL,injection,Injection solution,injection,A10BJ06,who-eml-24,18.5.2,core,includes biosimilars
+semaglutide,2.68 mg/mL,injection,Injection solution,injection,A10BJ06,who-eml-24,18.5.2,core,includes biosimilars
+diazoxide,50 mg/mL,liquid,Oral liquid,oral,,who-eml-24,18.6,complementary,for children
+diazoxide,50 mg,tablet,Tablet,oral,,who-eml-24,18.6,complementary,for children
+methimazole,5 mg,tablet,Tablet,oral,H03BB02,who-eml-24,18.7,core,ATC index lists as thiamazole
+methimazole,10 mg,tablet,Tablet,oral,H03BB02,who-eml-24,18.7,core,ATC index lists as thiamazole
+anti-rabies virus monoclonal antibodies,40 IU/mL,injection,"Injection (1.25 mL, 2.5 mL vial)",injection,,who-eml-24,19.2,core,human; includes biosimilars
+anti-rabies virus monoclonal antibodies,100 IU/mL,injection,Injection (2.5 mL vial),injection,,who-eml-24,19.2,core,human; includes biosimilars
+anti-rabies virus monoclonal antibodies,300 IU/mL,injection,Injection (10 mL vial),injection,,who-eml-24,19.2,core,murine; includes biosimilars
+anti-rabies virus monoclonal antibodies,600 IU/mL,injection,"Injection (1 mL, 2.5 mL, 5 mL vial)",injection,,who-eml-24,19.2,core,murine; includes biosimilars
+equine rabies immunoglobulin,150 IU/mL,injection,Injection (vial),injection,,who-eml-24,19.2,core,
+equine rabies immunoglobulin,200 IU/mL,injection,Injection (vial),injection,,who-eml-24,19.2,core,
+equine rabies immunoglobulin,300 IU/mL,injection,Injection (vial),injection,,who-eml-24,19.2,core,
+equine rabies immunoglobulin,400 IU/mL,injection,Injection (vial),injection,,who-eml-24,19.2,core,
+ulipristal,30 mg (as acetate),tablet,Tablet,oral,G03AD02,who-eml-24,22.1.1,core,
+multiple micronutrient supplement,,tablet,Tablet,oral,,who-eml-24,22.6,core,vitamins and minerals; specific contexts
+caffeine citrate,20 mg/mL,injection,Injection,injection,N06BC01,who-eml-24,22.7,core,for neonates
+caffeine citrate,20 mg/mL,liquid,Oral liquid,oral,N06BC01,who-eml-24,22.7,core,for neonates
+alprostadil,0.5 mg/mL,injection,Solution for injection (in alcohol),injection,C01EA01,who-eml-24,22.7,complementary,for neonates
+beractant,25 mg/mL,other,Suspension for intratracheal instillation,intratracheal,,who-eml-24,22.7,complementary,for neonates
+poractant alfa,80 mg/mL,other,Suspension for intratracheal instillation,intratracheal,,who-eml-24,22.7,complementary,for neonates
+paliperidone,25 mg (as palmitate),injection,"Injection (prolonged-release), pre-filled syringe",injection,N05AX13,who-eml-24,24.1,core,
+paliperidone,50 mg (as palmitate),injection,"Injection (prolonged-release), pre-filled syringe",injection,N05AX13,who-eml-24,24.1,core,
+paliperidone,75 mg (as palmitate),injection,"Injection (prolonged-release), pre-filled syringe",injection,N05AX13,who-eml-24,24.1,core,
+paliperidone,100 mg (as palmitate),injection,"Injection (prolonged-release), pre-filled syringe",injection,N05AX13,who-eml-24,24.1,core,
+paliperidone,150 mg (as palmitate),injection,"Injection (prolonged-release), pre-filled syringe",injection,N05AX13,who-eml-24,24.1,core,
+quetiapine,25 mg,tablet,Tablet (immediate-release),oral,N05AH04,who-eml-24,24.2.2,core,
+quetiapine,100 mg,tablet,Tablet (immediate-release),oral,N05AH04,who-eml-24,24.2.2,core,
+quetiapine,150 mg,tablet,Tablet (immediate-release),oral,N05AH04,who-eml-24,24.2.2,core,
+quetiapine,200 mg,tablet,Tablet (immediate-release),oral,N05AH04,who-eml-24,24.2.2,core,
+quetiapine,300 mg,tablet,Tablet (immediate-release),oral,N05AH04,who-eml-24,24.2.2,core,
+quetiapine,50 mg,tablet,Tablet (modified-release),oral,N05AH04,who-eml-24,24.2.2,core,
+quetiapine,400 mg,tablet,Tablet (modified-release),oral,N05AH04,who-eml-24,24.2.2,core,
+acamprosate calcium,333 mg,tablet,Tablet,oral,N07BB03,who-eml-24,24.5.1,core,
+bupropion,150 mg (hydrochloride),tablet,Tablet (sustained-release),oral,N06AX12,who-eml-24,24.5.2,core,
+cytisine (cytisinicline),1.5 mg,tablet,Tablet,oral,N07BA04,who-eml-24,24.5.2,core,
+nicotine replacement therapy,2 mg (as polacrilex),other,Chewing gum,oral,N07BA01,who-eml-24,24.5.2,core,
+nicotine replacement therapy,4 mg (as polacrilex),other,Chewing gum,oral,N07BA01,who-eml-24,24.5.2,core,
+nicotine replacement therapy,2 mg,other,Lozenge,oral,N07BA01,who-eml-24,24.5.2,core,
+nicotine replacement therapy,4 mg,other,Lozenge,oral,N07BA01,who-eml-24,24.5.2,core,
+nicotine replacement therapy,1 mg per actuation,other,Oral spray,oral,N07BA01,who-eml-24,24.5.2,core,
+nicotine replacement therapy,5 mg to 30 mg/16 hrs,other,Transdermal patch,transdermal,N07BA01,who-eml-24,24.5.2,core,
+nicotine replacement therapy,7 mg to 21 mg/24 hrs,other,Transdermal patch,transdermal,N07BA01,who-eml-24,24.5.2,core,
+varenicline,0.5 mg,tablet,Tablet,oral,N07BA03,who-eml-24,24.5.2,core,
+varenicline,1 mg,tablet,Tablet,oral,N07BA03,who-eml-24,24.5.2,core,
+budesonide + formoterol,100 micrograms + 6 micrograms per actuation,inhaler,"Powder for inhalation, dry powder inhaler",inhalation,R03AK07,who-eml-24,25.1,core,
+budesonide + formoterol,200 micrograms + 6 micrograms per actuation,inhaler,"Powder for inhalation, dry powder inhaler",inhalation,R03AK07,who-eml-24,25.1,core,
+tiotropium,18 micrograms,inhaler,Powder for inhalation in capsule,inhalation,R03BB04,who-eml-24,25.1,core,
+tiotropium,1.25 micrograms per actuation,inhaler,"Solution for inhalation, soft mist inhaler",inhalation,R03BB04,who-eml-24,25.1,core,
+tiotropium,2.5 micrograms per actuation,inhaler,"Solution for inhalation, soft mist inhaler",inhalation,R03BB04,who-eml-24,25.1,core,
+"sodium lactate, compound solution",,injection,Injectable solution,injection,,who-eml-24,26.2,core,
+calcium,500 mg (elemental),tablet,Tablet,oral,,who-eml-24,27,core,
+multiple micronutrient powder,12.5 mg iron + 5 mg zinc + 300 micrograms vitamin A,other,Powder in sachet,oral,,who-eml-24,27,core,for children
+nicotinamide,50 mg,tablet,Tablet,oral,A11HA01,who-eml-24,27,core,
+chloroquine,100 mg (as phosphate or sulfate),tablet,Tablet,oral,P01BA01,who-eml-24,29.2,core,
+chloroquine,150 mg (as phosphate or sulfate),tablet,Tablet,oral,P01BA01,who-eml-24,29.2,core,
+silver diamine fluoride,38% w/v,other,Solution,topical,,who-eml-24,30,core,dental
