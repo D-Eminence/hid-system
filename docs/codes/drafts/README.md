@@ -8,9 +8,28 @@ The files hold facts only: medicine names, strengths, dose forms and routes, tes
 
 | File | Rows | What it holds |
 |---|---|---|
-| `medicines-nigeria-eml-8.csv` | 1,371 | One row per product (generic name + strength + dose form) on the Nigeria Essential Medicines List, 8th edition: 1,248 from the main list and 123 from Appendix 2, the restricted medicines list. |
-| `medicines-who-eml-gaps.csv` | 253 | Products of 116 medicines on the WHO Model List of Essential Medicines (24th list, 2025) that the Nigeria list does not have at all, under any name or salt: 188 rows from WHO's core list and 65 from its complementary list. Same columns; `source` is `who-eml-24`, and `source_list` is `core` or `complementary`. **Kept apart because of WHO's licence (see Sources): the owner can drop this file on its own.** |
-| `lab-tests.csv` | 158 | Tests Nigerian hospitals and clinics order most, with specimen, category and a code where one is certain. |
+| `hid-medicines-and-lab-tests.csv` | 1,782 | Every list in one file, with the same columns for every row: 1,371 medicines from the Nigeria Essential Medicines List, 8th edition (`MED-00001` to `MED-01371`); 253 medicines on the WHO Model List of Essential Medicines (24th list, 2025) that the Nigeria list does not have (`MED-01372` to `MED-01624`); and 158 lab tests (`LAB-0001` to `LAB-0158`). |
+
+This one file replaces the three separate files of the first draft (`medicines-nigeria-eml-8.csv`, `medicines-who-eml-gaps.csv`, `lab-tests.csv`), on the owner's instruction of 22 November 2026, so that the EHR, Pharmacy and Lab products read one list.
+
+### Columns of the combined file
+
+| Column | Meaning |
+|---|---|
+| `id` | A fixed id for the row: `MED-nnnnn` or `LAB-nnnn`. It never changes or gets reused. |
+| `list` | `medicine` or `lab-test`. |
+| `name` | Medicines: the generic name (INN) in lower case. Lab tests: the usual name. |
+| `other_names` | Other names, separated by `; `. |
+| `strength`, `dose_form`, `dose_form_text`, `route` | Medicines only, as described under "Medicine columns" below. |
+| `specimen`, `category` | Lab tests only. |
+| `code_system`, `code`, `code_name` | `ATC` for medicines, `LOINC` or `HID-LAB` for lab tests; the code; and LOINC's long name. A code appears only where it was checked. |
+| `source`, `source_section`, `source_list` | `nigeria-eml-8`, `who-eml-24` or `hid-common-tests`; the list's section; `main`, `restricted` or `specialist`. |
+| `use_status` | Where the row stands. Every row is a draft awaiting the clinician's sign-off (Q124 A). |
+| `notes` | Short factual notes, for example "for children" or "strength to confirm at review". |
+
+**The WHO rows, cleaned (owner, 22 November 2026: "use it as we need it"):** WHO's labels `core` and `complementary` read `main` and `specialist`; notes in WHO's wording were removed, so only facts remain ("for children" stays); `potassium ferric hexacyanoferrate(II) 2H2O` reads `prussian blue`, with the chemical name under `other_names`; and five rows with no strength say "strength to confirm at review". The WHO rows keep `source` = `who-eml-24` for traceability. The WHO list's licence (CC BY-NC-SA 3.0 IGO) is recorded under Sources; the owner chose to use these facts.
+
+The sections below describe how the first draft's lists were built. Their columns map to the combined file as `generic_name` to `name` and `atc_code` to `code`, and `loinc_long_name` to `code_name`.
 
 What is left out of the medicine files:
 - **From the Nigeria list:** the primary health care lists, the list for patent and proprietary medicine vendors and the vitamin appendix, since nearly all their medicines are on the main list. A few appear only there, for example levamisole oral liquid and nicotinamide. The reviewer decides whether to add them.
