@@ -260,16 +260,27 @@ try {
   assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency', 'healthcare-operations'].includes(row.value.code)));
   // Owner Q113 A (18 November 2026): 0136 changes the role table only while no
   // real (non-sealed) staff are active, and stops, changing nothing, otherwise.
-  // This historical baseline keeps one synthetic admin membership at a real
-  // facility, so the release's dry run must stop at 0136 here, and leave every
-  // row as it was. Production has no real staff active (the owner's answer), so
-  // the rehearsal then ends that synthetic membership, as production stands,
-  // and goes on with the upgrade.
+  // Owner Q134 B (22 November 2026) raised lines 13, 14, 19, 20 and 21 to the
+  // counts production printed (admins: 9), so this baseline's one synthetic
+  // admin at a real facility is within them. The same membership also gets a
+  // receptionist role here, which line 1 (maximum 0) counts, so the release's
+  // dry run must still stop at 0136, name line 1 but not line 19, and leave
+  // every row as it was. The rehearsal then ends that synthetic membership and
+  // goes on with the upgrade.
+  await withClient('hid_upgrade', client => client.query(`begin;
+    set local session_replication_role = replica;
+    insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason)
+    values ('c4000000-0000-4000-8000-000000000136','b0000000-0000-4000-8000-000000000001','receptionist','facility',
+      'b6000000-0000-4000-8000-000000000001','b2000000-0000-4000-8000-000000000001','Synthetic 0136 guard role');
+    commit;`));
   migration('existing baseline stops at 0136 while real staff are active', 'apply-migrations.mjs', 'hid_upgrade',
     {}, 'failure', ['--dry-run']);
   const q113Stop = logs.at(-1);
-  assert.match(`${q113Stop.stdout}\n${q113Stop.stderr}`,
-    /0136 stopped, nothing was changed: real staff would be affected[^\n]*line 19 \(admin loses lab\.work-item\.read\) is now 1 \(1 staff logins\)/);
+  const q113Output = `${q113Stop.stdout}\n${q113Stop.stderr}`;
+  assert.match(q113Output,
+    /0136 stopped, nothing was changed: real staff would be affected[^\n]*line 1 \(receptionist gains ehr\.document\.write\) is now 1 \(1 staff logins\)/);
+  assert.doesNotMatch(q113Output.split('\n').find(line => line.includes('0136 stopped')) ?? '', /line 19 \(/,
+    'one admin is within the owner\'s Q134 B maximum for line 19');
   assert.deepEqual((await withClient('hid_upgrade', client => client.query(`select count(*)::integer as count
     from migration.schema_migrations where version like '0136_%'`))).rows[0], { count: 0 });
   await withClient('hid_upgrade', client => client.query(`begin;
